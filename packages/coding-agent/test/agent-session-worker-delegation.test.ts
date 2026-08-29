@@ -76,6 +76,20 @@ function verifiedWorkerProfiles(): {
 	};
 }
 
+function lastMessageText(context: { messages?: readonly unknown[] }): string {
+	const last = (context.messages ?? []).at(-1) as { role?: string; content?: unknown } | undefined;
+	if (!last) return "";
+	if (typeof last.content === "string") return last.content;
+	if (!Array.isArray(last.content)) return "";
+	return last.content
+		.map((part) =>
+			part && typeof part === "object" && "text" in part && typeof (part as { text?: unknown }).text === "string"
+				? (part as { text: string }).text
+				: "",
+		)
+		.join("\n");
+}
+
 describe("AgentSession worker delegation", () => {
 	it("constructs only the model and tool surface owned by the active orchestration profile", async () => {
 		const now = new Date().toISOString();
@@ -2099,7 +2113,7 @@ describe("AgentSession worker delegation", () => {
 			let recoveredSystemPrompt = "";
 			harness.setResponses([
 				(context) => {
-					recoveredSystemPrompt = context.systemPrompt ?? "";
+					recoveredSystemPrompt = [context.systemPrompt ?? "", lastMessageText(context)].join("\n");
 					recoveredToolCalls = context.messages.flatMap((message) =>
 						message.role === "assistant"
 							? message.content.filter((content) => content.type === "toolCall").map((content) => content.id)

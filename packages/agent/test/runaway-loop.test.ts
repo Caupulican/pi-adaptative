@@ -122,6 +122,32 @@ function resultContainsFailureCode(result: AgentToolResult<unknown>, failureCode
 	);
 }
 
+/**
+ * What the model actually reads: the system prompt plus the failure ledger, which rides as the
+ * LAST message rather than in the system prompt (ledger text in the cached prefix re-prefills the
+ * whole conversation whenever a failure appears, its counts change, or a success clears it).
+ */
+function promptWithLedger(context: { systemPrompt?: string; messages?: readonly unknown[] }): string {
+	const last = (context.messages ?? []).at(-1) as { role?: string; content?: unknown } | undefined;
+	let ledger = "";
+	if (last?.role === "user") {
+		const text =
+			typeof last.content === "string"
+				? last.content
+				: Array.isArray(last.content)
+					? last.content
+							.map((part) =>
+								part && typeof part === "object" && "text" in part && typeof part.text === "string"
+									? part.text
+									: "",
+							)
+							.join("\n")
+					: "";
+		if (text.startsWith("MANDATORY TOOL FAILURE RECOVERY")) ledger = text;
+	}
+	return [context.systemPrompt ?? "", ledger].filter(Boolean).join("\n\n");
+}
+
 describe("runaway-loop backstop", () => {
 	it("does not impose an implicit provider-turn budget on varied work", async () => {
 		const stalls: Array<{ reason?: string; signature: string; repeats: number }> = [];
@@ -1750,7 +1776,7 @@ describe("runaway-loop backstop", () => {
 				{ model: createModel(), convertToLlm: identityConverter },
 				undefined,
 				(_model, providerContext) => {
-					providerPrompts.push(providerContext.systemPrompt ?? "");
+					providerPrompts.push(promptWithLedger(providerContext));
 					const stream = new MockAssistantStream();
 					queueMicrotask(() => {
 						turn++;
@@ -1846,7 +1872,7 @@ describe("runaway-loop backstop", () => {
 				{ model: createModel(), convertToLlm: identityConverter },
 				undefined,
 				(_model, providerContext) => {
-					providerPrompts.push(providerContext.systemPrompt ?? "");
+					providerPrompts.push(promptWithLedger(providerContext));
 					const stream = new MockAssistantStream();
 					queueMicrotask(() => {
 						turn++;
@@ -2417,7 +2443,7 @@ describe("runaway-loop backstop", () => {
 		const providerPrompts: string[] = [];
 		let turn = 0;
 		const streamFn = (_model: unknown, providerContext: { systemPrompt?: string }) => {
-			providerPrompts.push(providerContext.systemPrompt ?? "");
+			providerPrompts.push(promptWithLedger(providerContext));
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				turn++;

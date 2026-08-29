@@ -261,12 +261,10 @@ describe("tool failure memory", () => {
 			"base",
 		);
 
-		expect(sanitized.systemPrompt).toContain("ACTIVE TOOL FAILURES mistakes=bash:1");
-		expect(sanitized.systemPrompt).toContain('"kind_mistakes":1');
-		expect(sanitized.systemPrompt).toContain(
-			"Retry unchanged only after any other tool succeeds or a new user turn.",
-		);
-		expect(sanitized.systemPrompt).not.toContain("<harness_tool_failures");
+		expect(sanitized.ledger).toContain("ACTIVE TOOL FAILURES mistakes=bash:1");
+		expect(sanitized.ledger).toContain('"kind_mistakes":1');
+		expect(sanitized.ledger).toContain("Retry unchanged only after any other tool succeeds or a new user turn.");
+		expect(sanitized.ledger).not.toContain("<harness_tool_failures");
 	});
 
 	it("bounds tool-owned evidence per record and keeps it in the transcript instead of the ledger", () => {
@@ -327,7 +325,7 @@ describe("tool failure memory", () => {
 		}
 
 		const nextRequest = sanitizeToolFailureContext(messages, "base");
-		const projectedRecords = nextRequest.systemPrompt
+		const projectedRecords = (nextRequest.ledger ?? "")
 			.split("\n")
 			.filter((line) => line.startsWith("{") && line.includes('"failure_key"'))
 			.map((line) => JSON.parse(line) as { evidence?: string });
@@ -336,7 +334,7 @@ describe("tool failure memory", () => {
 		expect(projectedRecords).toHaveLength(3);
 		// The ledger names what is unresolved; it never re-sends evidence already sitting in the transcript.
 		expect(projectedRecords.every((record) => record.evidence === undefined)).toBe(true);
-		expect(nextRequest.systemPrompt).not.toContain("CURRENT_SOURCE_");
+		expect(nextRequest.ledger).not.toContain("CURRENT_SOURCE_");
 		const transcriptEvidence = messages.flatMap((message) =>
 			message.role === "toolResult" && message.content[0]?.type === "text" ? [message.content[0].text] : [],
 		);
@@ -706,8 +704,8 @@ describe("tool failure memory", () => {
 			"base",
 		);
 
-		expect(nextRequest.systemPrompt).toContain(retained.correction);
-		expect(nextRequest.systemPrompt).toContain("error[E0433]: cannot find `windows` in `os`");
+		expect(nextRequest.ledger).toContain(retained.correction);
+		expect(nextRequest.ledger).toContain("error[E0433]: cannot find `windows` in `os`");
 	});
 
 	it("refuses an unchanged replay without terminating, and without paying for the same evidence twice", () => {
@@ -798,6 +796,7 @@ describe("tool failure memory", () => {
 
 		const sanitized = sanitizeToolFailureContext(messages, "base");
 		expect(sanitized.systemPrompt).toBe("base");
+		expect(sanitized.ledger).toBeUndefined();
 		expect(sanitized.systemPrompt).not.toContain("ACTIVE TOOL FAILURES");
 		expect(sanitized.systemPrompt).not.toContain("command_not_found");
 		expect(sanitized.messages).toEqual(messages);
@@ -873,9 +872,9 @@ describe("tool failure memory", () => {
 		];
 		const nextRequest = sanitizeToolFailureContext(failedTurn, "base");
 		expect(nextRequest.messages).toEqual([]);
-		expect(nextRequest.systemPrompt).toContain("Change approach");
-		expect(nextRequest.systemPrompt).not.toContain("payload");
-		expect(nextRequest.systemPrompt).not.toContain("corrupt.dat");
+		expect(nextRequest.ledger).toContain("Change approach");
+		expect(nextRequest.ledger).not.toContain("payload");
+		expect(nextRequest.ledger).not.toContain("corrupt.dat");
 
 		const afterAgentChangedApproach = sanitizeToolFailureContext(
 			[
@@ -901,6 +900,7 @@ describe("tool failure memory", () => {
 			"base",
 		);
 		expect(afterAgentChangedApproach.systemPrompt).toBe("base");
+		expect(afterAgentChangedApproach.ledger).toBeUndefined();
 	});
 
 	it("teaches a retained mutation retarget without preserving generated content", () => {
@@ -973,8 +973,8 @@ describe("tool failure memory", () => {
 		);
 		// A discard-attempt directive hands the agent a payloadRef, so the original call comes out.
 		expect(nextRequest.messages).toEqual([]);
-		expect(nextRequest.systemPrompt).toContain(payloadRef);
-		expect(nextRequest.systemPrompt).not.toContain("GENERATED_CONTENT_MUST_NOT_SURVIVE");
+		expect(nextRequest.ledger).toContain(payloadRef);
+		expect(nextRequest.ledger).not.toContain("GENERATED_CONTENT_MUST_NOT_SURVIVE");
 	});
 
 	it("labels rejected-argument guidance as repair and execution guidance as next_action", () => {
@@ -1046,9 +1046,9 @@ describe("tool failure memory", () => {
 		const sanitized = sanitizeToolFailureContext(messages, "base");
 
 		expect(sanitized.messages).toEqual(messages);
-		expect(sanitized.systemPrompt).toContain('"next_action":');
-		expect(sanitized.systemPrompt).toContain("No diagnostic output");
-		expect(sanitized.systemPrompt).not.toContain("Change the arguments or approach");
-		expect(sanitized.systemPrompt).not.toContain('"repair":');
+		expect(sanitized.ledger).toContain('"next_action":');
+		expect(sanitized.ledger).toContain("No diagnostic output");
+		expect(sanitized.ledger).not.toContain("Change the arguments or approach");
+		expect(sanitized.ledger).not.toContain('"repair":');
 	});
 });

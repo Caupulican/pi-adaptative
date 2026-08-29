@@ -27,6 +27,20 @@ function withUsage(message: AssistantMessage, value: Usage): AssistantMessage {
 	return { ...message, usage: value };
 }
 
+function lastMessageText(context: { messages?: readonly unknown[] }): string {
+	const last = (context.messages ?? []).at(-1) as { role?: string; content?: unknown } | undefined;
+	if (!last) return "";
+	if (typeof last.content === "string") return last.content;
+	if (!Array.isArray(last.content)) return "";
+	return last.content
+		.map((part) =>
+			part && typeof part === "object" && "text" in part && typeof (part as { text?: unknown }).text === "string"
+				? (part as { text: string }).text
+				: "",
+		)
+		.join("\n");
+}
+
 describe("isolated child tool loop", () => {
 	it("resumes persisted child history and records only new messages in execution order", async () => {
 		const harness = await createHarness();
@@ -600,7 +614,13 @@ describe("isolated child tool loop", () => {
 				"assistant",
 				"toolResult",
 				"user",
+				// The probe errored, so the failure ledger rides as the last message. It is never put in
+				// the system prompt: that is the provider's cached prefix, and ledger text there re-prefills
+				// the whole conversation every time a failure appears, its counts change, or it clears.
+				"user",
 			]);
+			expect(contexts[1]?.systemPrompt).not.toContain("ACTIVE TOOL FAILURES");
+			expect(JSON.stringify(contexts[1]?.messages.at(-1))).toContain("MANDATORY TOOL FAILURE RECOVERY");
 			expect(contexts[1]?.messages.find((message) => message.role === "assistant")).toMatchObject({
 				role: "assistant",
 				content: [{ type: "toolCall", name: "probe" }],
@@ -613,7 +633,9 @@ describe("isolated child tool loop", () => {
 					text: expect.stringContaining("[harness]"),
 				});
 			}
-			expect(contexts[1]?.systemPrompt).toContain("ACTIVE TOOL FAILURES");
+			// The ledger reaches the model as the last message, never in the cached system prompt.
+			expect(contexts[1]?.systemPrompt).not.toContain("ACTIVE TOOL FAILURES");
+			expect(lastMessageText(contexts[1] ?? {})).toContain("ACTIVE TOOL FAILURES");
 			expect(JSON.stringify(contexts[1]?.messages)).toContain("bounded failed diagnostic survives");
 		} finally {
 			harness.cleanup();

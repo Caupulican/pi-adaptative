@@ -91,6 +91,32 @@ async function createPhoneWorkflowSession(cwd: string, agentDir: string, respons
 	};
 }
 
+/**
+ * What the model actually reads. The failure ledger rides as the LAST message rather than in the
+ * system prompt (ledger text in the cached prefix re-prefills the whole conversation whenever a
+ * failure appears, its counts change, or a success clears it), and its records must be read as raw
+ * text: JSON.stringify would escape the very quotes these assertions match on.
+ */
+function readableContext(context: { systemPrompt?: string; messages?: readonly unknown[] }): string {
+	const last = (context.messages ?? []).at(-1) as { content?: unknown } | undefined;
+	const ledger =
+		typeof last?.content === "string"
+			? last.content
+			: Array.isArray(last?.content)
+				? last.content
+						.map((part) =>
+							part &&
+							typeof part === "object" &&
+							"text" in part &&
+							typeof (part as { text?: unknown }).text === "string"
+								? (part as { text: string }).text
+								: "",
+						)
+						.join("\n")
+				: "";
+	return `${context.systemPrompt ?? ""}\n${ledger}\n${JSON.stringify(context.messages ?? [])}`;
+}
+
 describe("non-native phone filesystem workflow", () => {
 	let root: string;
 
@@ -364,7 +390,7 @@ describe("non-native phone filesystem workflow", () => {
 			phoneCall("write", { path: occupiedPath, content: generatedContent }),
 			(context) => {
 				repairContextChecked = true;
-				repairSystemPrompt = context.systemPrompt ?? "";
+				repairSystemPrompt = readableContext(context);
 				repairMessages = JSON.stringify(context.messages);
 				const payloadRef = repairSystemPrompt.match(/\bfile-mutation:[0-9a-f-]+\b/i)?.[0];
 				if (!payloadRef) throw new Error("Expected retained payload reference in phone repair guidance.");
@@ -454,7 +480,7 @@ describe("non-native phone filesystem workflow", () => {
 			phoneCall("edit", { path: missingPath, edits: [{ oldText, newText }] }),
 			(context) => {
 				repairContextChecked = true;
-				repairSystemPrompt = context.systemPrompt ?? "";
+				repairSystemPrompt = readableContext(context);
 				repairMessages = JSON.stringify(context.messages);
 				const payloadRef = repairSystemPrompt.match(/\bfile-mutation:[0-9a-f-]+\b/i)?.[0];
 				if (!payloadRef) throw new Error("Expected retained edit payload reference in phone repair guidance.");
@@ -540,7 +566,7 @@ describe("non-native phone filesystem workflow", () => {
 		const responses: PhoneResponseStep[] = [
 			phoneCall("read", { path: missingPath }),
 			(context) => {
-				const prompt = `${context.systemPrompt ?? ""}\n${JSON.stringify(context.messages)}`;
+				const prompt = readableContext(context);
 				expect(prompt).toContain('"failure_code":"file_not_found"');
 				expect(prompt).toContain("If the goal requires this exact missing file and its content is known");
 				recoveryTeachingObserved = true;
@@ -588,7 +614,7 @@ describe("non-native phone filesystem workflow", () => {
 			phoneCall("write", { path: unrelatedPath, content: "unrelated" }),
 			phoneCall("read", { path: missingPath }),
 			(context) => {
-				blockedContext = `${context.systemPrompt ?? ""}\n${JSON.stringify(context.messages)}`;
+				blockedContext = readableContext(context);
 				return "the requested file remains unavailable";
 			},
 		];

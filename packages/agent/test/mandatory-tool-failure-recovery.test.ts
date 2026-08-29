@@ -18,6 +18,21 @@ import { MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT } from "../src/tool-fai
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "../src/types.ts";
 import { createAgentToolFailureRecoveryAuthority } from "../src/types.ts";
 
+/**
+ * The failure ledger reaches the model as the LAST message of the request, never in the system
+ * prompt (see sanitizeToolFailureContext). Reading it back out is how a provider-context assertion
+ * checks what the ledger actually projected.
+ */
+function ledgerOf(context: Context | undefined): string {
+	const last = context?.messages.at(-1);
+	if (!last || last.role !== "user") return "";
+	const text =
+		typeof last.content === "string"
+			? last.content
+			: last.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+	return text.startsWith("MANDATORY TOOL FAILURE RECOVERY") ? text : "";
+}
+
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
 		super(
@@ -180,19 +195,21 @@ describe("mandatory tool failure recovery protocol", () => {
 
 		const sanitized = sanitizeToolFailureContext(messages, "base");
 
-		expect(sanitized.systemPrompt).toContain("MANDATORY TOOL FAILURE RECOVERY v1");
-		expect(sanitized.systemPrompt).toContain("MANDATORY AND NON-NEGOTIABLE");
-		expect(sanitized.systemPrompt).toContain("MANDATORY: blocked/rejected means not executed");
-		expect(sanitized.systemPrompt).toContain("Irrelevant argument changes do not recover it");
-		expect(sanitized.systemPrompt).toContain("refusal keeps tool-result pairing and runs no hooks/tools");
-		expect(sanitized.systemPrompt).toContain('"MUST":true');
-		expect(sanitized.systemPrompt).not.toContain("<mandatory_tool_failure");
+		// The protocol travels in the ledger, and the system prompt is handed back untouched: it is
+		// the provider's cached prefix, and ledger text there re-prefills the whole conversation
+		// every time a failure appears, its counts change, or a success clears it.
+		expect(sanitized.systemPrompt).toBe("base");
+		expect(sanitized.ledger).toContain("MANDATORY TOOL FAILURE RECOVERY v1");
+		expect(sanitized.ledger).toContain("MANDATORY AND NON-NEGOTIABLE");
+		expect(sanitized.ledger).toContain("MANDATORY: blocked/rejected means not executed");
+		expect(sanitized.ledger).toContain("Irrelevant argument changes do not recover it");
+		expect(sanitized.ledger).toContain("refusal keeps tool-result pairing and runs no hooks/tools");
+		expect(sanitized.ledger).toContain('"MUST":true');
+		expect(sanitized.ledger).not.toContain("<mandatory_tool_failure");
 
-		// The standing prompt must teach the world-cursor rule and nothing that outlived it.
-		expect(sanitized.systemPrompt).toContain(
-			"Retry unchanged only after any other tool succeeds or a new user turn.",
-		);
-		expect(sanitized.systemPrompt).toContain("Only that operation is refused; tools and run continue");
+		// The standing protocol must teach the world-cursor rule and nothing that outlived it.
+		expect(sanitized.ledger).toContain("Retry unchanged only after any other tool succeeds or a new user turn.");
+		expect(sanitized.ledger).toContain("Only that operation is refused; tools and run continue");
 		for (const removed of [
 			"never repeat the same call",
 			"before another tool call",
@@ -394,10 +411,11 @@ describe("mandatory tool failure recovery protocol", () => {
 		expect(readExecutions).toBe(1);
 		expect(providerTurns).toBe(5);
 		expect(providerContexts[3]?.tools?.map((tool) => tool.name)).toEqual(["trello", "read_repo"]);
-		expect(providerContexts[3]?.systemPrompt).not.toContain("MANDATORY TOOL FAILURE DELIVERY");
-		expect(providerContexts[3]?.systemPrompt).toContain("Trello credentials not found.");
-		expect(providerContexts[3]?.systemPrompt).not.toContain("Stop retrying tools in this run");
-		expect(providerContexts[3]?.systemPrompt).not.toContain("will not run again this session");
+		expect(providerContexts[3]?.systemPrompt).not.toContain("ACTIVE TOOL FAILURES");
+		expect(ledgerOf(providerContexts[3])).not.toContain("MANDATORY TOOL FAILURE DELIVERY");
+		expect(ledgerOf(providerContexts[3])).toContain("Trello credentials not found.");
+		expect(ledgerOf(providerContexts[3])).not.toContain("Stop retrying tools in this run");
+		expect(ledgerOf(providerContexts[3])).not.toContain("will not run again this session");
 		expect(
 			events.some(
 				(event) =>
@@ -814,5 +832,115 @@ describe("mandatory tool failure recovery protocol", () => {
 				? (failedResults[1].content.find((block) => block.type === "text")?.text ?? "")
 				: "";
 		expect(secondText).toContain('"failure_code":"repeated_failed_operation"');
+	});
+	// PREFIX STABILITY: the provider prefills each request against the longest byte-identical prefix
+	// it has already seen, so ledger churn inside the cached prefix costs a full re-prefill of the
+	// conversation. These pin the ledger to the tail. See also
+	// packages/coding-agent/test/provider-prefix-stability.test.ts.
+	it("hands back the system prompt byte-identical while a failure ledger is active", () => {
+		const record = {
+			failureKey: "bash:prefix-stability",
+			tool: "bash",
+			mistakeKind: "bash",
+			occurrence: 1,
+			kindMistakes: 1,
+			state: "failed" as const,
+			phase: "execution" as const,
+			failureCode: "exit_1",
+			diagnostic: "boom",
+			nextAction: "Fix the command before retrying.",
+		};
+		const messages: AgentMessage[] = [
+			{ role: "user", content: "run it", timestamp: 1 },
+			{
+				role: "toolResult",
+				toolCallId: "bash-1",
+				toolName: "bash",
+				content: [{ type: "text", text: "[harness] failed" }],
+				details: { piToolFailureMemory: record },
+				isError: true,
+				timestamp: 2,
+			},
+		];
+
+		const sanitized = sanitizeToolFailureContext(messages, "base prompt");
+
+		expect(sanitized.systemPrompt).toBe("base prompt");
+		expect(sanitized.ledger).toContain("ACTIVE TOOL FAILURES mistakes=bash:1");
+	});
+
+	it("keeps the cached prefix byte-identical when the failure counts mutate between requests", async () => {
+		const schema = Type.Object({ command: Type.String() });
+		const failing: AgentTool<typeof schema> = {
+			name: "bash",
+			label: "Bash",
+			description: "Run a command",
+			parameters: schema,
+			async execute() {
+				throw new Error("command failed");
+			},
+		};
+		const providerContexts: Context[] = [];
+		let providerTurns = 0;
+		const streamFn = (_model: unknown, context: Context) => {
+			providerContexts.push(context);
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				providerTurns++;
+				if (providerTurns <= 3) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `bash-${providerTurns}`,
+									name: "bash",
+									arguments: { command: `attempt-${providerTurns}` },
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "done" }], "stop"),
+				});
+			});
+			return stream;
+		};
+
+		await drain(
+			agentLoop(
+				[{ role: "user", content: "run three commands", timestamp: 1 }],
+				{ systemPrompt: "base", messages: [], tools: [failing] },
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				streamFn,
+			),
+		);
+
+		// The ledger genuinely churned across these requests (that is the mutation being priced).
+		const ledgers = providerContexts.map((context) => ledgerOf(context));
+		expect(ledgers.filter((ledger) => ledger !== "").length).toBeGreaterThanOrEqual(2);
+		expect(new Set(ledgers.filter((ledger) => ledger !== "")).size).toBeGreaterThan(1);
+
+		for (let index = 1; index < providerContexts.length; index++) {
+			const previous = providerContexts[index - 1];
+			const current = providerContexts[index];
+			// The system prompt never moves...
+			expect(current?.systemPrompt).toBe(previous?.systemPrompt);
+			// ...and neither does any message the previous request already sent, except the ledger
+			// itself, which is the LAST message and therefore the cheapest possible thing to change.
+			const previousBody = (previous?.messages ?? []).filter(
+				(_, i) => i < (previous?.messages.length ?? 0) - (ledgerOf(previous) ? 1 : 0),
+			);
+			const currentPrefix = (current?.messages ?? []).slice(0, previousBody.length);
+			expect(JSON.stringify(currentPrefix)).toBe(JSON.stringify(previousBody));
+		}
 	});
 });

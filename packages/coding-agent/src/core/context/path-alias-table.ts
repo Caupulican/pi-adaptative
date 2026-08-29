@@ -428,6 +428,40 @@ export function expandText(table: PathAliasTable, text: string): string {
 	return text.replace(STANDALONE_TOKEN_RE, (token) => byId.get(token) ?? token);
 }
 
+/**
+ * Alias-shaped tokens in `params` that name nothing: not a minted id, not a reserved token. The
+ * model extrapolates ids from the legend's pattern (`p/module01.ts` is listed, so `p/module02.ts`
+ * "must" exist); expansion leaves such a token alone, and it then fails as a literal path with an
+ * ENOENT that names a `p/` directory nobody has — a diagnostic that hides the actual mistake.
+ * Walks the same shapes as {@link expandParams}. Deduplicated, in first-seen order.
+ */
+export function collectUnknownAliasTokens(table: PathAliasTable, params: unknown): string[] {
+	const known = new Set<string>(table.entries.map((entry) => entry.id));
+	for (const reserved of table.reservedIds ?? []) known.add(reserved);
+	const unknown: string[] = [];
+	const seen = new Set<string>();
+	const walk = (value: unknown): void => {
+		if (typeof value === "string") {
+			for (const match of value.matchAll(STANDALONE_TOKEN_RE)) {
+				const token = match[0];
+				if (known.has(token) || seen.has(token)) continue;
+				seen.add(token);
+				unknown.push(token);
+			}
+			return;
+		}
+		if (Array.isArray(value)) {
+			for (const entry of value) walk(entry);
+			return;
+		}
+		if (value && typeof value === "object") {
+			for (const entry of Object.values(value)) walk(entry);
+		}
+	};
+	walk(params);
+	return unknown;
+}
+
 export function expandParams(table: PathAliasTable, params: unknown): unknown {
 	if (typeof params === "string") return expandText(table, params);
 	if (Array.isArray(params)) return params.map((entry) => expandParams(table, entry));

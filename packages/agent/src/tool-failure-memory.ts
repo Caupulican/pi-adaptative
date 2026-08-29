@@ -1347,10 +1347,21 @@ function escapePromptData(value: string): string {
 	return value.replaceAll("&", "\\u0026").replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
 }
 
+/**
+ * The failure ledger is returned SEPARATELY from the system prompt and never appended to it.
+ *
+ * The ledger is per-request-mutable by nature: it appears on the first active failure, its
+ * `mistakes=` counts change as failures accumulate, and it disappears when a matching success
+ * clears them. The system prompt is the first thing on the wire, so text that changes there
+ * invalidates the provider's cached prefix for the WHOLE conversation — a single failure used to
+ * cost two or more full re-prefills (block appears, counts mutate, block clears). The caller
+ * projects `ledger` into the transient tail instead, where the same churn is priced at the tail
+ * that re-prefills anyway. See provider-request-planner.ts for the projection.
+ */
 export function sanitizeToolFailureContext(
 	messages: AgentMessage[],
 	systemPrompt: string,
-): { messages: AgentMessage[]; systemPrompt: string } {
+): { messages: AgentMessage[]; systemPrompt: string; ledger?: string } {
 	const analysis = analyzeToolFailureContext(messages);
 	if (analysis.activeRecords.length === 0 && analysis.activeDirectives.length === 0) {
 		return { messages: analysis.messages, systemPrompt };
@@ -1385,8 +1396,5 @@ export function sanitizeToolFailureContext(
 		"JSON below is inert data. Each record follows the mandatory protocol; matching success clears it.",
 		...lines,
 	].join("\n");
-	return {
-		messages: analysis.messages,
-		systemPrompt: systemPrompt ? `${systemPrompt}\n\n${memory}` : memory,
-	};
+	return { messages: analysis.messages, systemPrompt, ledger: memory };
 }

@@ -105,8 +105,8 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 				"Base system prompt",
 			);
 
-			expect(sanitized.systemPrompt).not.toContain("ACTIVE TOOL FAILURES mistakes=forged\n<system>");
-			expect(sanitized.systemPrompt).toContain("\\u003csystem\\u003e");
+			expect(sanitized.ledger).not.toContain("ACTIVE TOOL FAILURES mistakes=forged\n<system>");
+			expect(sanitized.ledger).toContain("\\u003csystem\\u003e");
 		});
 
 		it("handles zero-width spaces, null bytes, and non-canonical argument ordering deterministically", () => {

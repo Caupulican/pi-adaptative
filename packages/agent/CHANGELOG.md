@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- The tool-failure ledger no longer sits in the system prompt, where it invalidated the provider's prompt cache for the whole conversation. The ledger is per-request-mutable by nature — it appears on the first active failure, its `mistakes=` counts change as failures accumulate, and it clears on a matching success — so every one of those events re-prefilled the entire request from byte zero (measured on a real xAI subscription session: a single failed read plus a later failed bash cost two full re-prefills of a ~22k-token prompt). `sanitizeToolFailureContext` now returns the block as a separate `ledger` and hands the system prompt back byte-identical; the planner projects it as the last message of the request, where the same churn costs only the tail. Ledger content, the MUST protocol, and every recovery-gate semantic are unchanged.
+
 ## [0.97.17] - 2026-08-28
 
 ## [0.97.16] - 2026-08-28

@@ -2306,7 +2306,12 @@ export class AgentSession {
 			addIfRegistered("artifact_retrieve");
 		}
 		this.agent.state.tools = tools.map((tool) =>
-			wrapToolWithPathAliasExpansion(tool, () => this._pipeline.peekPathAliasTable(), this._pathAliasWrappedTools),
+			wrapToolWithPathAliasExpansion(
+				tool,
+				() => this._pipeline.peekPathAliasTable(),
+				this._pathAliasWrappedTools,
+				() => this._cwd,
+			),
 		);
 
 		// Rebuild base system prompt with new tool set

@@ -139,7 +139,9 @@ describe("AgentSession model and extension characterization", () => {
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("echo", { text: "hello" })], { stopReason: "toolUse" }),
 			(context) => {
-				providerSawBlockedGuidance = (context.systemPrompt ?? "").includes("Blocked by test");
+				providerSawBlockedGuidance = [context.systemPrompt ?? "", JSON.stringify(context.messages.at(-1) ?? {})]
+					.join("\n")
+					.includes("Blocked by test");
 				return fauxAssistantMessage("block observed");
 			},
 		]);

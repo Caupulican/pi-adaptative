@@ -171,7 +171,18 @@ export async function startPlannedAgentProviderRequestWithId(
 			const transientMessages = plan.transientMessages ?? [];
 			const compactableMessages = await config.convertToLlm(plan.messages);
 			const providerTransients = transientMessages.length > 0 ? await config.convertToLlm(transientMessages) : [];
+			// The failure ledger rides last, never in the system prompt: its content changes as
+			// failures appear, accumulate, and clear, and in the system prompt each of those events
+			// re-prefills the entire conversation (see sanitizeToolFailureContext). Last position also
+			// gives a MUST protocol end-of-context salience.
 			const llmMessages: Message[] = [...compactableMessages, ...providerTransients];
+			if (sanitized.ledger) {
+				llmMessages.push({
+					role: "user",
+					content: [{ type: "text", text: sanitized.ledger }],
+					timestamp: Date.now(),
+				});
+			}
 			signal?.throwIfAborted();
 
 			const sourceProviderContext: Context = {
