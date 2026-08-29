@@ -24,7 +24,11 @@ import {
 import { APP_NAME, APP_TITLE, getAgentDir, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
-import { expandArgumentsForDisplay, expandMessageForDisplay } from "../../core/context/path-alias-display.ts";
+import {
+	expandArgumentsForDisplay,
+	expandMessageForDisplay,
+	expandMessageTextForDisplay,
+} from "../../core/context/path-alias-display.ts";
 import type { AutocompleteProviderFactory, ExtensionCommandContext } from "../../core/extensions/index.ts";
 import { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import {
@@ -1835,8 +1839,14 @@ export class InteractiveMode {
 		const argumentsComplete = options.force === true;
 		const update = () => {
 			if (!this.streamingComponent || !this.streamingMessage) return;
-			this.streamingComponent.updateContent(this.streamingMessage);
-			this.attachStreamingToolActions(this.streamingMessage, argumentsComplete);
+			// Recomputed from the raw accumulated message on every call, never cached or expanded
+			// incrementally: an alias split across chunk boundaries renders literally for one update
+			// and self-heals on the next. `this.streamingMessage` is never reassigned here — at
+			// message_end it is the live history object (session state must keep raw aliases
+			// forever), so only this local, freshly-built copy is ever handed to rendering.
+			const displayMessage = expandMessageTextForDisplay(this.session.peekPathAliasTable(), this.streamingMessage);
+			this.streamingComponent.updateContent(displayMessage);
+			this.attachStreamingToolActions(displayMessage, argumentsComplete);
 			this.lastStreamingUiUpdateAt = performance.now();
 			this.ui.requestRender();
 		};

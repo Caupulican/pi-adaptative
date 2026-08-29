@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as pathResolve } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { afterEach, describe, expect, it } from "vitest";
-import { PathAliasRuntime } from "../src/core/context/path-alias-session.ts";
+import { loadPathAliasTableReadOnly, PathAliasRuntime } from "../src/core/context/path-alias-session.ts";
 import { createSqlitePathAliasStore } from "../src/core/context/sqlite-runtime-index.ts";
 
 function toolResult(text: string, timestamp: number): AgentMessage {
@@ -177,5 +177,61 @@ describe("PathAliasRuntime", () => {
 		expect(new Set(ids).size).toBe(ids.length);
 		expect(ids).toContain("p/2/coding-agent/src/foo.ts");
 		runtime.close();
+	});
+});
+
+describe("loadPathAliasTableReadOnly", () => {
+	const tempDirs: string[] = [];
+
+	afterEach(() => {
+		for (const dir of tempDirs.splice(0))
+			rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	});
+
+	it("returns undefined and creates nothing when the database file does not exist", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-readonly-"));
+		tempDirs.push(dir);
+		const databasePath = join(dir, "missing", "runtime.sqlite");
+
+		expect(loadPathAliasTableReadOnly("/repo", databasePath)).toBeUndefined();
+
+		// The whole point of the ENOENT-class degradation: never create the file or its directory.
+		expect(existsSync(databasePath)).toBe(false);
+		expect(existsSync(join(dir, "missing"))).toBe(false);
+	});
+
+	it("reads rows already on disk without minting, extending, or writing back the table_cwd backfill", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-readonly-"));
+		tempDirs.push(dir);
+		const databasePath = join(dir, "runtime.sqlite");
+		// A legacy row with no table_cwd meta set — ensureLoaded() would normally backfill that key
+		// on load; the read-only path must not.
+		const store = createSqlitePathAliasStore({ databasePath });
+		store.upsert({ fullPath: "/repo/packages/app/src/foo.ts", aliasId: "p/foo.ts", createdAtTurn: 1 });
+		store.close();
+		const before = readFileSync(databasePath);
+
+		const table = loadPathAliasTableReadOnly("/repo", databasePath);
+
+		expect(table?.entries).toEqual([{ id: "p/foo.ts", path: "packages/app/src/foo.ts" }]);
+		const after = readFileSync(databasePath);
+		expect(after.equals(before)).toBe(true);
+
+		// Confirm directly: a live runtime opening the same file afterward still sees no table_cwd
+		// (i.e. this read never performed the backfill ensureLoaded() would have done).
+		const verify = createSqlitePathAliasStore({ databasePath });
+		expect(verify.getMeta("table_cwd")).toBeUndefined();
+		verify.close();
+	});
+
+	it("propagates a non-ENOENT read failure instead of silently degrading", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-readonly-"));
+		tempDirs.push(dir);
+		const databasePath = join(dir, "runtime.sqlite");
+		// A file that exists but is not a valid sqlite database at all: this must not be confused
+		// with the documented ENOENT-class degradation.
+		writeFileSync(databasePath, "not a sqlite database");
+
+		expect(() => loadPathAliasTableReadOnly("/repo", databasePath)).toThrow();
 	});
 });

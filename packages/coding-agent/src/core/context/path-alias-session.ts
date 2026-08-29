@@ -17,6 +17,7 @@ import {
 } from "./path-alias-table.ts";
 import {
 	createSqlitePathAliasStore,
+	openPathAliasStoreReadOnly,
 	type SqlitePathAliasRow,
 	type SqlitePathAliasStore,
 } from "./sqlite-runtime-index.ts";
@@ -196,6 +197,34 @@ export class PathAliasRuntime {
 	private textsToScan(messages: readonly AgentMessage[]): string[] {
 		if (this.table.entries.length === 0) return collectMessageTexts(messages);
 		return collectMessageTexts(messages.filter((message) => (message.timestamp ?? 0) > this.lastScannedTs));
+	}
+}
+
+/**
+ * Read-only counterpart to `ensureLoaded()`: loads the table for a session that is not (and must
+ * not become) the live one — HTML export, primarily. Skips both of `ensureLoaded`'s write side
+ * effects (the `table_cwd` meta backfill for legacy rows, and `createSqlitePathAliasStore`'s
+ * schema-creating open) and never mints or extends — that is `sync()`'s job, and calling it here
+ * would write new alias rows to a closed session's store. Returns `undefined` when the database
+ * file does not exist (an old/foreign session with no alias table); any other failure to open or
+ * read it propagates uncaught.
+ */
+export function loadPathAliasTableReadOnly(cwd: string, databasePath: string): PathAliasTable | undefined {
+	const store = openPathAliasStoreReadOnly({ databasePath });
+	if (!store) return undefined;
+	try {
+		const storedCwd = store.getMeta(TABLE_CWD_KEY);
+		const records: PathAliasRecord[] = store.list().map((row) => ({
+			absolute: toStoredAbsolute(row.fullPath, storedCwd ?? cwd),
+			id: row.aliasId,
+		}));
+		return {
+			cwd,
+			entries: records.map((record) => ({ id: record.id, path: displayPath(record.absolute, cwd) })),
+			reservedIds: readReservedTokens(store.getMeta(RESERVED_TOKENS_KEY)),
+		};
+	} finally {
+		store.close();
 	}
 }
 

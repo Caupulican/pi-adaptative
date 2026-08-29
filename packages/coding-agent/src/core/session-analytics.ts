@@ -82,6 +82,9 @@ export interface SessionAnalyticsDeps {
 	getToolDefinition(name: string): ToolDefinition | undefined;
 	/** Sidecar recovery telemetry log; read on demand so turn handling never writes session custom entries. */
 	getToolRecoveryEventLogPath(): string;
+	/** This session's real agent dir (may differ from the process-global default — see
+	 * `AgentSessionConfig.agentDir`); HTML export's path-alias table lives under it. */
+	getAgentDir(): string;
 }
 
 export class SessionAnalytics {
@@ -538,6 +541,7 @@ export class SessionAnalytics {
 			outputPath,
 			themeName,
 			toolRenderer,
+			agentDir: this.deps.getAgentDir(),
 		});
 	}
 

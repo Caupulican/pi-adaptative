@@ -134,6 +134,7 @@ describe("session usage ownership", () => {
 			getSettingsManager: () => settings,
 			getToolDefinition: (_name: string): ToolDefinition | undefined => undefined,
 			getToolRecoveryEventLogPath: () => join(session.getCwd(), "missing-tool-recovery.jsonl"),
+			getAgentDir: () => session.getCwd(),
 		});
 
 		const stats = analytics.getSessionStats();

@@ -1081,6 +1081,7 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getToolDefinition: (name) => this.getToolDefinition(name),
 			getToolRecoveryEventLogPath: () => this._toolRecoveryEventLogPath,
+			getAgentDir: () => this._agentDir,
 		});
 		const previousToolArgumentValidation = this.agent.onToolArgumentValidation;
 		this.agent.onToolArgumentValidation = (event) => {

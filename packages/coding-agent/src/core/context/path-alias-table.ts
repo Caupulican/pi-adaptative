@@ -530,6 +530,17 @@ function rewriteContentWith(content: unknown, hooks: MessageRewriteHooks): unkno
 			}
 			return part;
 		}
+		if (hooks.thinkingText && part.type === "thinking" && "thinking" in part) {
+			const thinking = (part as { thinking?: unknown }).thinking;
+			if (typeof thinking === "string") {
+				const rewritten = hooks.thinkingText(thinking);
+				if (rewritten !== thinking) {
+					changed = true;
+					return { ...part, thinking: rewritten };
+				}
+			}
+			return part;
+		}
 		if (hooks.toolCallArguments && part.type === "toolCall" && "arguments" in part) {
 			const args = (part as { arguments?: unknown }).arguments;
 			const rewritten = hooks.toolCallArguments(args);
@@ -555,6 +566,15 @@ export interface MessageRewriteHooks {
 	 * name real files. Must return the SAME reference when nothing changed.
 	 */
 	toolCallArguments?: (args: unknown) => unknown;
+	/**
+	 * Applied to a `thinking` block's text. Deliberately separate from `text` and omitted by the
+	 * provider-projection caller ({@link PathAliasRuntime.renderFrozen}): a provider that returns a
+	 * `thinkingSignature` (Anthropic extended thinking) requires the thinking text to be replayed
+	 * byte-for-byte on the next request, and rewriting it here would desync the text from a
+	 * signature computed over the original bytes. Display expansion supplies this hook because the
+	 * operator reading a rendered thinking block must see the same real paths as everywhere else.
+	 */
+	thinkingText?: TextRewriter;
 }
 
 /**

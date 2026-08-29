@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { isRecordObject } from "../util/value-guards.ts";
 import type { ContextItem } from "./context-item.ts";
@@ -537,4 +537,58 @@ export function createSqlitePathAliasStore(options: SqliteRuntimeIndexOptions): 
 			database[Symbol.dispose]();
 		},
 	};
+}
+
+export interface SqlitePathAliasReadOnlyStore {
+	list(): SqlitePathAliasRow[];
+	getMeta(key: string): string | undefined;
+	close(): void;
+}
+
+/**
+ * Read-only open for a path-alias store that may belong to a session other than the live one
+ * (HTML export). Returns `undefined` when `databasePath` does not exist — the caller's signal to
+ * degrade to unexpanded output, and the reason this never delegates to `openDatabase`/
+ * `createSqlitePathAliasStore`: those always run `migrateSqliteRuntimeIndex` (a
+ * `CREATE TABLE IF NOT EXISTS` + `PRAGMA user_version` transaction on every open) and `mkdirSync`
+ * the parent directory, either of which would create a database — and schema — where none exists.
+ * `close()` likewise skips the writer-side `wal_checkpoint(TRUNCATE)`: reading a closed session's
+ * store must perform zero writes to it, full stop.
+ */
+export function openPathAliasStoreReadOnly(
+	options: SqliteRuntimeIndexOptions,
+): SqlitePathAliasReadOnlyStore | undefined {
+	if (!existsSync(options.databasePath)) return undefined;
+	const database = openSqliteDatabase(options);
+	try {
+		// Connection-scoped only — never persisted to the database file — so this cannot
+		// regress the zero-write guarantee above.
+		database.exec(`PRAGMA busy_timeout = ${options.busyTimeoutMs ?? 5_000};`);
+		const listAll = database.prepare(
+			"SELECT full_path, alias_id, created_at_turn FROM path_aliases ORDER BY created_at_turn, alias_id",
+		);
+		const getMetaStmt = database.prepare("SELECT value FROM path_alias_meta WHERE key = ?");
+		return {
+			list(): SqlitePathAliasRow[] {
+				return listAll.all().map((row) => {
+					const record = row as Record<string, unknown>;
+					return {
+						fullPath: String(record.full_path),
+						aliasId: String(record.alias_id),
+						createdAtTurn: Number(record.created_at_turn),
+					};
+				});
+			},
+			getMeta(key: string): string | undefined {
+				const record = getMetaStmt.get(key) as { value?: unknown } | undefined;
+				return typeof record?.value === "string" ? record.value : undefined;
+			},
+			close(): void {
+				database[Symbol.dispose]();
+			},
+		};
+	} catch (error) {
+		database[Symbol.dispose]();
+		throw error;
+	}
 }

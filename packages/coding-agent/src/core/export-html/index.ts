@@ -2,9 +2,13 @@ import type { AgentState } from "@caupulican/pi-agent-core";
 import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
-import { APP_NAME, getExportTemplateDir } from "../../config.ts";
+import { APP_NAME, getAgentDir, getExportTemplateDir } from "../../config.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
+import { getContextStoreDir } from "../context/context-store-retention.ts";
+import { expandMessageForDisplay } from "../context/path-alias-display.ts";
+import { loadPathAliasTableReadOnly } from "../context/path-alias-session.ts";
+import { emptyPathAliasTable, expandText, type PathAliasTable } from "../context/path-alias-table.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { openSession } from "../session-manager-factory.ts";
 
@@ -37,6 +41,14 @@ export interface ExportOptions {
 	themeName?: string;
 	/** Optional tool renderer for custom tools */
 	toolRenderer?: ToolHtmlRenderer;
+	/**
+	 * Agent dir the session's path-alias store lives under. Defaults to the global `getAgentDir()`,
+	 * which is wrong for a session constructed with a custom `AgentSessionConfig.agentDir`
+	 * (`agent-session.ts`'s `config.agentDir ?? getAgentDir()`) — that session's alias database
+	 * lives under ITS agent dir, not the process-global one, so the caller that knows the real
+	 * value (`SessionAnalytics`, via `exportToHtml`) must pass it through here.
+	 */
+	agentDir?: string;
 }
 
 /** Parse a color string to RGB values. Supports hex (#RRGGBB) and rgb(r,g,b) formats. */
@@ -182,6 +194,45 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 const TEMPLATE_RENDERED_TOOLS = new Set(["bash", "read", "write", "edit", "ls"]);
 
 /**
+ * Load the path-alias table for the session behind `sm`, read-only. Never calls `sync()` (which
+ * mints new alias rows and would write to a session that export does not own) and never imports
+ * from `modes/interactive/`. A missing database — an old or foreign session that predates the
+ * alias table, or one from a build with aliasing disabled — degrades to unexpanded output rather
+ * than failing the export; any other error (corrupt file, unreadable schema) propagates.
+ */
+function loadExportPathAliasTable(sm: SessionManager, agentDir: string): PathAliasTable {
+	const cwd = sm.getCwd();
+	const databasePath = join(getContextStoreDir(agentDir, "index", sm.getSessionId()), "runtime.sqlite");
+	const table = loadPathAliasTableReadOnly(cwd, databasePath);
+	if (table) return table;
+	process.stderr.write(`path-alias table not found for session ${sm.getSessionId()}; aliased paths shown raw\n`);
+	return emptyPathAliasTable(cwd);
+}
+
+/**
+ * Map session entries through the display boundary before any HTML rendering touches them, so the
+ * template only ever sees real paths. `type: "message"` entries wrap an `AgentMessage` and go
+ * through the same `expandMessageForDisplay` boundary as every other human-facing surface;
+ * `compaction`/`branch_summary` entries carry their own free-text `summary` outside any message
+ * (the template renders both directly — `template.js`'s `.compaction`/`.branch_summary` cases) and
+ * are expanded the same way tool output text is. Other entry kinds carry no model-authored prose.
+ */
+function expandEntriesForExport(entries: SessionEntry[], table: PathAliasTable): SessionEntry[] {
+	if (table.entries.length === 0) return entries;
+	return entries.map((entry) => {
+		if (entry.type === "message") {
+			const message = expandMessageForDisplay(table, entry.message);
+			return message === entry.message ? entry : { ...entry, message };
+		}
+		if (entry.type === "compaction" || entry.type === "branch_summary") {
+			const summary = expandText(table, entry.summary);
+			return summary === entry.summary ? entry : { ...entry, summary };
+		}
+		return entry;
+	});
+}
+
+/**
  * Pre-render custom tools to HTML using their TUI renderers.
  */
 function preRenderCustomTools(
@@ -252,7 +303,10 @@ export async function exportSessionToHtml(
 		throw new Error("Nothing to export yet - start a conversation first");
 	}
 
-	const entries = sm.getEntries();
+	const entries = expandEntriesForExport(
+		sm.getEntries(),
+		loadExportPathAliasTable(sm, opts.agentDir ?? getAgentDir()),
+	);
 
 	// Pre-render custom tools if a tool renderer is provided
 	let renderedTools: Record<string, RenderedToolHtml> | undefined;
@@ -301,7 +355,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 
 	const sessionData: SessionData = {
 		header: sm.getHeader(),
-		entries: sm.getEntries(),
+		entries: expandEntriesForExport(sm.getEntries(), loadExportPathAliasTable(sm, opts.agentDir ?? getAgentDir())),
 		leafId: sm.getLeafId(),
 		systemPrompt: undefined,
 		tools: undefined,

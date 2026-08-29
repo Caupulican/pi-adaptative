@@ -23,15 +23,38 @@ export function expandMessageForDisplay<TMessage extends AgentMessage>(
 ): TMessage {
 	if (table.entries.length === 0) return message;
 	// One shared structure walk (path-alias-table.ts) handles message shape; this only supplies what
-	// to do with a text span and with a tool call's arguments.
+	// to do with a text span, a thinking span, and a tool call's arguments.
 	const [expanded] = rewriteAgentMessagesWith([message], {
 		text: (text) => expandText(table, text),
+		thinkingText: (text) => expandText(table, text),
 		toolCallArguments: (args) => {
 			const next = expandParams(table, args);
 			// The walk treats an unchanged reference as "nothing happened"; expandParams rebuilds
 			// objects, so collapse a no-op back to the original to keep messages identity-stable.
 			return JSON.stringify(next) === JSON.stringify(args) ? args : next;
 		},
+	});
+	return (expanded as TMessage | undefined) ?? message;
+}
+
+/**
+ * Expand aliases in an assistant message's prose and thinking text only — never its tool-call
+ * arguments. For the streaming display path, which recomputes this on every chunk: a still-
+ * streaming tool call's arguments are a large, partial, mid-token payload, and walking them per
+ * chunk is the exact O(chunks x payload) cost `attachStreamingToolActions` already avoids by
+ * expanding arguments once, only once they are complete (see its doc comment in
+ * interactive-mode.ts). Text and thinking spans are cheap to re-expand every chunk and must
+ * self-heal as a split alias completes, so they are unconditional here; a toolCall part comes
+ * back untouched, by identity, leaving argument-expansion timing exactly as it is today.
+ */
+export function expandMessageTextForDisplay<TMessage extends AgentMessage>(
+	table: PathAliasTable,
+	message: TMessage,
+): TMessage {
+	if (table.entries.length === 0) return message;
+	const [expanded] = rewriteAgentMessagesWith([message], {
+		text: (text) => expandText(table, text),
+		thinkingText: (text) => expandText(table, text),
 	});
 	return (expanded as TMessage | undefined) ?? message;
 }

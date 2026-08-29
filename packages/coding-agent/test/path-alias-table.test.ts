@@ -11,6 +11,7 @@ import {
 	extendPathAliasTable,
 	extractPathCandidates,
 	type PathAliasTable,
+	rewriteAgentMessagesWith,
 	rewriteText,
 } from "../src/core/context/path-alias-table.ts";
 
@@ -388,5 +389,35 @@ describe("path alias table", () => {
 			String.raw`C:\Users\Dev\Downloads\notes-archive.txt then c:\users\dev\downloads\NOTES-ARCHIVE.TXT`,
 		]);
 		expect(windows.entries).toHaveLength(1);
+	});
+});
+
+describe("rewriteAgentMessagesWith thinking-block scope", () => {
+	function thinkingMessage(text: string): AgentMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: text }],
+			timestamp: 1,
+		} as unknown as AgentMessage;
+	}
+
+	it("leaves a thinking block untouched when the caller supplies no thinkingText hook", () => {
+		// This is the shape PathAliasRuntime.renderFrozen (the wire-projection path sent to the
+		// provider) uses: a plain text rewriter, no thinkingText hook. Anthropic requires thinking
+		// text to be replayed byte-for-byte alongside its signature, so the shared walker must never
+		// touch a thinking block unless a caller opts in — display expansion does; wire projection
+		// must not, or it would desync already-signed thinking text from its signature.
+		const [rewritten] = rewriteAgentMessagesWith([thinkingMessage("check p/module02.ts")], (text) =>
+			text.replace("p/module02.ts", "src/core/module02.ts"),
+		);
+		expect(rewritten).toEqual(thinkingMessage("check p/module02.ts"));
+	});
+
+	it("rewrites a thinking block only when the caller supplies a thinkingText hook", () => {
+		const [rewritten] = rewriteAgentMessagesWith([thinkingMessage("check p/module02.ts")], {
+			text: (text) => text,
+			thinkingText: (text) => text.replace("p/module02.ts", "src/core/module02.ts"),
+		});
+		expect(rewritten).toEqual(thinkingMessage("check src/core/module02.ts"));
 	});
 });

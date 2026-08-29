@@ -185,6 +185,13 @@ describe("InteractiveMode TUI reload history cap", () => {
 			ctx.ui = { requestRender: vi.fn() };
 			ctx.activeToolCalls = { hasActive: () => false, activeEntries: () => [] };
 			ctx.updateRuntimeStatus = vi.fn();
+			// applyStreamingMessageUpdate now expands display text from the alias table on every
+			// update (not just when a tool call is present); `session` is a getter-only accessor on
+			// the prototype (backed by `runtimeHost`), so it must be shadowed with an own property
+			// rather than assigned. Matches createRenderContext's stub below.
+			Object.defineProperty(ctx, "session", {
+				value: { peekPathAliasTable: () => ({ cwd: process.cwd(), entries: [] }) },
+			});
 
 			const first = makeAssistantMessage("first");
 			const second = makeAssistantMessage("second");

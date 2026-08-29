@@ -78,6 +78,7 @@ function createAnalytics(
 		getSettingsManager: () => ({}) as SettingsManager,
 		getToolDefinition: (_name: string): ToolDefinition | undefined => undefined,
 		getToolRecoveryEventLogPath: () => join(sessionDir, "tool-recovery-events.jsonl"),
+		getAgentDir: () => sessionDir,
 	});
 }
 
