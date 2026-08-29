@@ -5,6 +5,7 @@ import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { normalizePath } from "../utils/paths.ts";
+import { quantizeRecentBoundary, resolveRecentBoundaryStride } from "./context/prefix-stability.ts";
 import { boundedTextPreview } from "./text-preview.ts";
 import { withFileLockSync, writeFileAtomicSync } from "./util/atomic-file.ts";
 
@@ -22,6 +23,14 @@ export interface ContextGcSettings {
 	enabled?: boolean;
 	/** Number of most recent AgentMessage rows to preserve verbatim. */
 	preserveRecentMessages?: number;
+	/**
+	 * Grid the preserve-recent boundary advances on, in messages. Packing rewrites history in
+	 * place, so a boundary that moves every turn re-prefills the conversation tail on every
+	 * provider request; quantizing batches those rewrites onto a grid and leaves the prefix
+	 * byte-identical in between (see context/prefix-stability.ts). Defaults to half the window;
+	 * 1 restores continuous, pack-as-soon-as-it-ages behavior.
+	 */
+	packStrideMessages?: number;
 	/** Minimum provider-visible text chars before a stale tool result is packed. */
 	minToolResultChars?: number;
 	/** Tool names eligible for stale result packing. */
@@ -117,6 +126,7 @@ const DEFAULT_SEMANTIC_MEMORY_GC_SETTINGS: Required<SemanticMemoryGcSettings> = 
 export const DEFAULT_CONTEXT_GC_SETTINGS: NormalizedContextGcSettings = {
 	enabled: true,
 	preserveRecentMessages: 24,
+	packStrideMessages: resolveRecentBoundaryStride(24),
 	minToolResultChars: 1200,
 	tools: [
 		"read",
@@ -172,12 +182,14 @@ function normalizeSemanticMemoryGcSettings(settings?: SemanticMemoryGcSettings):
 }
 
 function normalizeContextGcSettings(settings?: ContextGcSettings): NormalizedContextGcSettings {
+	const preserveRecentMessages = Math.max(
+		0,
+		Math.floor(settings?.preserveRecentMessages ?? DEFAULT_CONTEXT_GC_SETTINGS.preserveRecentMessages),
+	);
 	return {
 		enabled: settings?.enabled ?? DEFAULT_CONTEXT_GC_SETTINGS.enabled,
-		preserveRecentMessages: Math.max(
-			0,
-			Math.floor(settings?.preserveRecentMessages ?? DEFAULT_CONTEXT_GC_SETTINGS.preserveRecentMessages),
-		),
+		preserveRecentMessages,
+		packStrideMessages: resolveRecentBoundaryStride(preserveRecentMessages, settings?.packStrideMessages),
 		minToolResultChars: Math.max(
 			0,
 			Math.floor(settings?.minToolResultChars ?? DEFAULT_CONTEXT_GC_SETTINGS.minToolResultChars),
@@ -479,7 +491,13 @@ export function applyContextGc(
 	};
 	const eligibleTools = new Set(options.tools);
 	const plan = collectContextGcPlan(messages, options.cwd, options.semanticMemory);
-	const recentStart = Math.max(0, messages.length - options.preserveRecentMessages);
+	// Quantized so the boundary advances in strides, not one position per appended message:
+	// packing rewrites history in place, and a boundary that moves every turn re-prefills the
+	// conversation tail on every provider request (see context/prefix-stability.ts).
+	const recentStart = quantizeRecentBoundary(
+		Math.max(0, messages.length - options.preserveRecentMessages),
+		options.packStrideMessages,
+	);
 	const semanticIndexSet = new Set(plan.semanticIndexes);
 	const preservedSemanticIndexes = new Set(
 		options.semanticMemory.preserveRecentPages > 0

@@ -1,6 +1,9 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { describe, expect, it } from "vitest";
-import { ProviderRequestContextController } from "../src/core/provider-request-context-controller.ts";
+import {
+	PATH_ALIAS_LEGEND_CUSTOM_TYPE,
+	ProviderRequestContextController,
+} from "../src/core/provider-request-context-controller.ts";
 import type { SkillVaultController } from "../src/core/skill-vault.ts";
 
 describe("ProviderRequestContextController", () => {
@@ -45,8 +48,15 @@ describe("ProviderRequestContextController", () => {
 		// 1. Generate the plan (Preview phase)
 		const plan = await controller.plan(mockMessages);
 
-		// 2. The transientSystemPrompt should exactly match the dynamically scoped legend.
-		expect(plan.transientSystemPrompt).toBe("PATH ALIASES\np/src/foo.ts=/full/src/foo.ts");
+		// 2. The legend rides at the TAIL as a transient message, never in the system prompt: a new
+		// alias must not invalidate the provider's cached prefix from byte zero (prefix-stability.ts).
+		expect(plan.transientSystemPrompt).toBeUndefined();
+		const legendMessage = plan.transientMessages?.at(-1);
+		expect(legendMessage).toMatchObject({
+			role: "custom",
+			customType: PATH_ALIAS_LEGEND_CUSTOM_TYPE,
+			content: "PATH ALIASES\np/src/foo.ts=/full/src/foo.ts",
+		});
 
 		// 3. Prepare commit should pass
 		expect(plan.prepareCommit?.()).toBe(true);

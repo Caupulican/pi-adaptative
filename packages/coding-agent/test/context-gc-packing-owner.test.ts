@@ -179,11 +179,13 @@ describe("context GC out-of-window packing (ledger #144)", () => {
 		expect(result.messages[1]).toBe(messages[1]);
 	});
 
-	it("packs a cited bulky result once it ages out of preserveRecentMessages", () => {
+	it("packs a cited bulky result once it ages past the quantized preserve boundary", () => {
+		// The boundary advances on a 12-message grid at this window (context/prefix-stability.ts), so
+		// a result ages out at 24 + 12 messages rather than the moment it leaves the raw window.
 		const messages: AgentMessage[] = [
 			assistantToolCall("bash-cited", "bash", { command: "git log --oneline -30" }),
 			toolResult("bash-cited", "bash", bulky("CITED BASH")),
-			...Array.from({ length: 24 }, (_, index) => assistantText(`The git log still matters; note ${index}`)),
+			...Array.from({ length: 34 }, (_, index) => assistantText(`The git log still matters; note ${index}`)),
 		];
 
 		const result = applyContextGc(messages, {
@@ -200,7 +202,7 @@ describe("context GC out-of-window packing (ledger #144)", () => {
 		const firstMessages: AgentMessage[] = [
 			assistantToolCall("bash-first", "bash", { command: "git log --oneline -30" }),
 			toolResult("bash-first", "bash", bulky("FIRST WAVE")),
-			...Array.from({ length: 24 }, (_, index) => assistantText(`first-wave note ${index}`)),
+			...Array.from({ length: 34 }, (_, index) => assistantText(`first-wave note ${index}`)),
 		];
 		const first = applyContextGc(firstMessages, {
 			cwd: "/repo",
@@ -214,7 +216,7 @@ describe("context GC out-of-window packing (ledger #144)", () => {
 			...first.messages,
 			assistantToolCall("bash-second", "bash", { command: "npm run typecheck" }),
 			toolResult("bash-second", "bash", bulky("SECOND WAVE")),
-			...Array.from({ length: 24 }, (_, index) => assistantText(`second-wave note ${index}`)),
+			...Array.from({ length: 34 }, (_, index) => assistantText(`second-wave note ${index}`)),
 		];
 		const second = applyContextGc(secondMessages, {
 			cwd: "/repo",

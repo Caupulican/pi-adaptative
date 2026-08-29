@@ -172,7 +172,7 @@ describe("AgentSession live context audit (observe-only, Phase 1)", () => {
 		]);
 		await harness.session.prompt("search for needle occurrences");
 
-		const plainResponses = Array.from({ length: 14 }, (_, i) => fauxAssistantMessage(`ok ${i}`));
+		const plainResponses = Array.from({ length: 26 }, (_, i) => fauxAssistantMessage(`ok ${i}`));
 		harness.setResponses(plainResponses);
 		for (let i = 0; i < plainResponses.length; i++) {
 			await harness.session.prompt(`continue ${i}`);

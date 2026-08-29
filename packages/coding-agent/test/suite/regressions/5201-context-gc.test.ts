@@ -334,7 +334,7 @@ describe("Context GC", () => {
 				}) as AgentMessage;
 			const messages: AgentMessage[] = [
 				recallPage("old"),
-				...Array.from({ length: 28 }, (_, index) => user(`noise ${index}`)),
+				...Array.from({ length: 34 }, (_, index) => user(`noise ${index}`)),
 				recallPage("recent"),
 			];
 			const session = harness.session as unknown as {
@@ -377,7 +377,7 @@ describe("Context GC", () => {
 				}) as AgentMessage;
 			const messages: AgentMessage[] = [
 				page("old"),
-				...Array.from({ length: 28 }, (_, index) => user(`noise ${index}`)),
+				...Array.from({ length: 34 }, (_, index) => user(`noise ${index}`)),
 				page("recent"),
 			];
 			const session = harness.session as unknown as {

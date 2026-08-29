@@ -308,23 +308,36 @@ export function buildPathAliasTable(
 	};
 }
 
-export function formatPathAliasLegend(table: PathAliasTable, activeTexts?: string[]): string | undefined {
-	if (table.entries.length === 0) return undefined;
-
-	let activeEntries = table.entries;
-	if (activeTexts) {
-		const activeIds = new Set<string>();
-		for (const text of activeTexts) {
-			for (const match of text.matchAll(STANDALONE_TOKEN_RE)) {
-				activeIds.add(match[0]);
-			}
+/** The alias ids standing alone at a shared boundary in `texts` — the ones a reader can hit. */
+export function collectActiveAliasIds(texts: readonly string[]): Set<string> {
+	const ids = new Set<string>();
+	for (const text of texts) {
+		for (const match of text.matchAll(STANDALONE_TOKEN_RE)) {
+			ids.add(match[0]);
 		}
-		activeEntries = table.entries.filter((entry) => activeIds.has(entry.id));
 	}
+	return ids;
+}
 
+/**
+ * Render the legend for an explicit id set, in table (mint) order. Entries only ever append
+ * to a table, so a caller that passes a MONOTONE id set gets a legend that can only grow by
+ * appended lines — which is what keeps it cheap to re-send (see {@link PathAliasRuntime}).
+ */
+export function formatPathAliasLegendForIds(table: PathAliasTable, ids: ReadonlySet<string>): string | undefined {
+	if (table.entries.length === 0) return undefined;
+	const activeEntries = table.entries.filter((entry) => ids.has(entry.id));
 	if (activeEntries.length === 0) return undefined;
 	const lines = ["PATH ALIASES", ...activeEntries.map((entry) => `${entry.id}=${entry.path}`)];
 	return lines.join("\n");
+}
+
+export function formatPathAliasLegend(table: PathAliasTable, activeTexts?: string[]): string | undefined {
+	if (table.entries.length === 0) return undefined;
+	if (!activeTexts) {
+		return ["PATH ALIASES", ...table.entries.map((entry) => `${entry.id}=${entry.path}`)].join("\n");
+	}
+	return formatPathAliasLegendForIds(table, collectActiveAliasIds(activeTexts));
 }
 
 function escapeRegExp(string: string) {
@@ -452,36 +465,58 @@ export function collectMessageTexts(messages: readonly AgentMessage[]): string[]
 	return messages.flatMap(textsFromMessage);
 }
 
-function rewriteContent(table: PathAliasTable, content: unknown): unknown {
-	if (typeof content === "string") return rewriteText(table, content);
+function rewriteContentWith(content: unknown, rewrite: TextRewriter): unknown {
+	if (typeof content === "string") return rewrite(content);
 	if (!Array.isArray(content)) return content;
-	return content.map((part) => {
+	let changed = false;
+	const next = content.map((part) => {
 		if (part && typeof part === "object" && "type" in part && part.type === "text" && "text" in part) {
 			const text = (part as { text?: unknown }).text;
-			if (typeof text === "string") return { ...part, text: rewriteText(table, text) };
+			if (typeof text === "string") {
+				const rewritten = rewrite(text);
+				if (rewritten !== text) {
+					changed = true;
+					return { ...part, text: rewritten };
+				}
+			}
 		}
 		return part;
+	});
+	return changed ? next : content;
+}
+
+/** Rewrites one provider-visible text span. */
+export type TextRewriter = (text: string) => string;
+
+/**
+ * Structure-preserving message rewrite through a caller-supplied text rewriter. The runtime
+ * uses this to render each text span through a FROZEN spelling (see {@link PathAliasRuntime});
+ * `rewriteAgentMessages` is the pure whole-table form. A message whose spans all come back
+ * unchanged is returned by identity, so an unchanged history costs no allocation.
+ */
+export function rewriteAgentMessagesWith(messages: readonly AgentMessage[], rewrite: TextRewriter): AgentMessage[] {
+	return messages.map((message) => {
+		if (message.role === "bashExecution") {
+			const command = rewrite(message.command);
+			const output = rewrite(message.output);
+			if (command === message.command && output === message.output) return message;
+			return { ...message, command, output };
+		}
+		if (message.role === "compactionSummary" || message.role === "branchSummary") {
+			const summary = rewrite(message.summary);
+			return summary === message.summary ? message : { ...message, summary };
+		}
+		if ("content" in message) {
+			const content = rewriteContentWith(message.content, rewrite);
+			return content === message.content ? message : ({ ...message, content } as AgentMessage);
+		}
+		return message;
 	});
 }
 
 export function rewriteAgentMessages(messages: readonly AgentMessage[], table: PathAliasTable): AgentMessage[] {
 	if (table.entries.length === 0) return [...messages];
-	return messages.map((message) => {
-		if (message.role === "bashExecution") {
-			return {
-				...message,
-				command: rewriteText(table, message.command),
-				output: rewriteText(table, message.output),
-			};
-		}
-		if (message.role === "compactionSummary" || message.role === "branchSummary") {
-			return { ...message, summary: rewriteText(table, message.summary) };
-		}
-		if ("content" in message) {
-			return { ...message, content: rewriteContent(table, message.content) } as AgentMessage;
-		}
-		return message;
-	});
+	return rewriteAgentMessagesWith(messages, (text) => rewriteText(table, text));
 }
 
 export function applyPathAliases(

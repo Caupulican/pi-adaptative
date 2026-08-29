@@ -161,9 +161,12 @@ describe("task_steps_context GC eligibility", () => {
 					{ revision },
 					new Date().toISOString(),
 				);
+			// Long enough to clear the QUANTIZED preserve boundary, not merely the raw one: under
+			// default settings the boundary advances on a 12-message grid (context/prefix-stability.ts),
+			// so the first packing happens at 24 + 12 messages, not at 24 + 1.
 			const messages: AgentMessage[] = [
 				page("old", 1),
-				...Array.from({ length: 28 }, (_, index) => user(`noise ${index}`)),
+				...Array.from({ length: 34 }, (_, index) => user(`noise ${index}`)),
 				page("recent", 2),
 			];
 			const session = harness.session as unknown as {

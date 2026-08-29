@@ -63,6 +63,9 @@ export interface SemanticMemoryGcSettings {
 export interface ContextGcSettings {
 	enabled?: boolean; // default: true
 	preserveRecentMessages?: number; // default: 24 -- see context-gc.ts DEFAULT_CONTEXT_GC_SETTINGS (canonical)
+	// Grid the preserve-recent boundary advances on, so packing batches instead of rewriting history
+	// every turn and busting the provider prefix cache -- see context/prefix-stability.ts.
+	packStrideMessages?: number; // default: half preserveRecentMessages; 1 restores continuous packing
 	minToolResultChars?: number; // default: 1200
 	tools?: string[]; // default: read,bash,rg,grep,context_headroom_retrieve,headroom_retrieve
 	semanticMemory?: SemanticMemoryGcSettings;
@@ -2925,6 +2928,7 @@ export class SettingsManager {
 	getContextGcSettings(): {
 		enabled: boolean;
 		preserveRecentMessages: number;
+		packStrideMessages: number;
 		minToolResultChars: number;
 		tools: string[];
 		semanticMemory: {
@@ -2948,6 +2952,8 @@ export class SettingsManager {
 			enabled: this.settings.contextGc?.enabled ?? DEFAULT_CONTEXT_GC_SETTINGS.enabled,
 			preserveRecentMessages:
 				this.settings.contextGc?.preserveRecentMessages ?? DEFAULT_CONTEXT_GC_SETTINGS.preserveRecentMessages,
+			packStrideMessages:
+				this.settings.contextGc?.packStrideMessages ?? DEFAULT_CONTEXT_GC_SETTINGS.packStrideMessages,
 			minToolResultChars:
 				this.settings.contextGc?.minToolResultChars ?? DEFAULT_CONTEXT_GC_SETTINGS.minToolResultChars,
 			tools: this.settings.contextGc?.tools ?? DEFAULT_CONTEXT_GC_SETTINGS.tools,

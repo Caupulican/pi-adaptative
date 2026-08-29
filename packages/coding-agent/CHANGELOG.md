@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Fixed
+
+- Provider prompt caching no longer misses on nearly every request. Each request re-sends the whole conversation and providers prefill it against the longest byte-identical prefix, but three send-time passes were rewriting that prefix every turn: the path-alias legend was rendered into the system prompt (the first thing on the wire) and scoped to the aliases visible in the current window, so it flapped at byte zero as the window slid; alias rewriting retro-applied newly minted aliases to already-sent history, moving bytes deep inside the cached prefix; and context-GC packing advanced its boundary one position per appended message, restubbing the conversation tail on every request. Measured on real sessions: the composed system prompt differed on 17 of 17 consecutive requests, cache hit rates ran 6-37%, and cold requests took ~24s against ~16s warm. The legend now rides as the last transient message and never retracts a line, each text span keeps the spelling it was first sent with, and the packing boundary advances on a stride grid (`contextGc.packStrideMessages`, default half the preserve window) shared with prompt-policy enforcement.
+
+### Changed
+
+- Context-GC packing and prompt-policy enforcement now begin at `preserveRecentMessages + packStrideMessages` messages (36 under defaults) instead of the message after the preserve window, and land batched at each grid crossing. Nothing that was packed before stops being packed; the boundary lags by at most one extra window. Set `contextGc.packStrideMessages: 1` to restore continuous packing.
+
 ## [0.97.17] - 2026-08-28
 
 ### Fixed

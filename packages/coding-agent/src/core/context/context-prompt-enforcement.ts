@@ -35,6 +35,7 @@ import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { CURATION_RELEVANCE_MIN_CONFIDENCE } from "./brain-curator.ts";
 import type { PromptPolicyShadowReport } from "./context-prompt-policy.ts";
 import { getToolResultArtifactId, getToolResultText } from "./context-tool-result.ts";
+import { quantizeRecentBoundary, resolveRecentBoundaryStride } from "./prefix-stability.ts";
 
 export interface ContextPromptEnforcementSettings {
 	enabled: boolean;
@@ -134,7 +135,13 @@ export function enforcePromptPolicy(
 		return { messages, report: { turnIndex: shadowReport.turnIndex, items: [] } };
 	}
 
-	const recentCutoffIndex = Math.max(0, messages.length - settings.preserveRecentMessages);
+	// Quantized like context GC's packing boundary: stubbing rewrites history in place, so a
+	// cutoff that advances one position per appended message re-prefills the conversation tail on
+	// every provider request (see prefix-stability.ts).
+	const recentCutoffIndex = quantizeRecentBoundary(
+		Math.max(0, messages.length - settings.preserveRecentMessages),
+		resolveRecentBoundaryStride(settings.preserveRecentMessages),
+	);
 	// Advisory evictions may reach inside the recent window but NEVER past this absolute floor:
 	// the last few messages are what the model is actively reasoning over.
 	const absoluteFloorIndex = Math.max(0, messages.length - ENFORCEMENT_ABSOLUTE_RECENT_FLOOR);

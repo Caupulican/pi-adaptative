@@ -1,16 +1,19 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { resolvePath } from "../../utils/paths.ts";
 import {
+	collectActiveAliasIds,
 	collectMessageTexts,
 	displayPath,
 	emptyPathAliasTable,
 	extendPathAliasTable,
-	formatPathAliasLegend,
+	formatPathAliasLegendForIds,
 	MAX_RESERVED_TOKENS,
 	type PathAliasTable,
-	rewriteAgentMessages,
+	rewriteAgentMessagesWith,
+	rewriteText,
 } from "./path-alias-table.ts";
 import {
 	createSqlitePathAliasStore,
@@ -28,12 +31,38 @@ interface PathAliasRecord {
 	id: string;
 }
 
+/**
+ * PREFIX-STABILITY INVARIANT: every provider request re-sends the whole conversation, and the
+ * provider serves it from a cache keyed by the longest byte-identical prefix. So the projection
+ * this runtime produces must be APPEND-ONLY across requests — request N+1 reproduces request N's
+ * bytes for everything already sent, and only appends. Two rules enforce that here:
+ *
+ * - a text span keeps the spelling it was FIRST sent with ({@link PathAliasRuntime.renderFrozen}),
+ *   even after a later turn mints an alias that would also match it. Retro-rewriting already-sent
+ *   history moves bytes deep inside the cached prefix and forces a full re-prefill of the
+ *   conversation;
+ * - the legend never retracts a line ({@link PathAliasRuntime.legendIds}). Scoping it to the ids
+ *   visible in the current window makes it flap as the window slides, and the legend is re-sent
+ *   verbatim on every request.
+ */
 export class PathAliasRuntime {
 	private table: PathAliasTable;
 	private records: PathAliasRecord[] = [];
 	private store: SqlitePathAliasStore | undefined;
 	private loaded = false;
 	private lastScannedTs = 0;
+	/**
+	 * Ids ever rendered into the legend. Monotone: an id whose last mention scrolls out of the
+	 * window keeps its line instead of retracting it, so the rendered legend only ever grows by
+	 * lines appended in table (mint) order.
+	 */
+	private readonly legendIds = new Set<string>();
+	/**
+	 * Frozen provider spelling per already-rendered text span, keyed by a hash of the span BEFORE
+	 * rewriting. Rebuilt each sync from the spans actually present, so it holds exactly the live
+	 * context and a span that leaves the window (compaction, GC repacking) drops out.
+	 */
+	private frozenSpellings = new Map<string, string>();
 	private readonly getCwd: () => string;
 	private readonly getDatabasePath: () => string;
 	private readonly getTurnIndex: () => number;
@@ -91,11 +120,34 @@ export class PathAliasRuntime {
 			this.lastScannedTs = maxTs;
 			this.store?.setMeta(LAST_SCANNED_TS_KEY, String(maxTs));
 		}
-		const rewritten = rewriteAgentMessages(messages, this.table);
+		const rewritten = this.renderFrozen(messages);
+		for (const id of collectActiveAliasIds(collectMessageTexts(rewritten))) this.legendIds.add(id);
 		return {
 			messages: rewritten,
-			legend: formatPathAliasLegend(this.table, collectMessageTexts(rewritten)),
+			legend: formatPathAliasLegendForIds(this.table, this.legendIds),
 		};
+	}
+
+	/**
+	 * Render every text span through its frozen spelling, minting one only for spans not yet sent.
+	 * Called several times per provider request (preview, projection, commit) and must return the
+	 * same bytes each time; it does, because the freeze is resolved before the fresh rewrite.
+	 */
+	private renderFrozen(messages: readonly AgentMessage[]): AgentMessage[] {
+		const live = new Map<string, string>();
+		const rendered = rewriteAgentMessagesWith(messages, (text) => {
+			const key = createHash("sha256").update(text).digest("hex");
+			const frozen = live.get(key) ?? this.frozenSpellings.get(key);
+			if (frozen !== undefined) {
+				live.set(key, frozen);
+				return frozen;
+			}
+			const fresh = rewriteText(this.table, text);
+			live.set(key, fresh);
+			return fresh;
+		});
+		this.frozenSpellings = live;
+		return rendered;
 	}
 
 	close(): void {

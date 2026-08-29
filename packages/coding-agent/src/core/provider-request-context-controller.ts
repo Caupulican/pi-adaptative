@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
 import type { AgentContextPlan, AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { ContextAuditReport } from "./context/context-audit.ts";
 import type { PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
@@ -36,6 +37,27 @@ export interface ProviderRequestContextControllerDeps {
 	getGoalState(): GoalState | undefined;
 	skillVault: SkillVaultController;
 	applyPathAliases(messages: AgentMessage[]): { messages: AgentMessage[]; legend?: string };
+}
+
+export const PATH_ALIAS_LEGEND_CUSTOM_TYPE = "path_alias_legend";
+
+/**
+ * Carry the path-alias legend as the last transient message rather than in the system prompt.
+ *
+ * The legend names every alias the model can currently hit, so it necessarily changes as new
+ * aliases mint. In the system prompt that change is maximally expensive: the system prompt is the
+ * FIRST thing on the wire (`input[0]` for the Responses transports the xAI subscription path uses),
+ * so a single new alias on turn 40 makes the whole conversation a cache miss and re-prefills every
+ * token of it. Appended at the tail instead, the same change costs only the few hundred tokens
+ * after it. The legend is a lookup table, not an instruction, so the tail is also where it reads
+ * most naturally — right next to the ids it explains.
+ */
+function appendPathAliasLegend(transientMessages: AgentMessage[], legend: string | undefined): AgentMessage[] {
+	if (!legend) return transientMessages;
+	return [
+		...transientMessages,
+		createCustomMessage(PATH_ALIAS_LEGEND_CUSTOM_TYPE, legend, false, undefined, new Date().toISOString()),
+	];
 }
 
 /** Coordinates replay-safe request context planning and accepted-plan lifecycle commit. */
@@ -78,9 +100,9 @@ export class ProviderRequestContextController {
 		if (!isDeepStrictEqual(beforeSkill.slice(0, compactableMessages.length), compactableMessages)) {
 			throw new Error("Provider request transient contributors changed compactable history");
 		}
-		const transientMessages = beforeSkill.slice(compactableMessages.length);
-		const skillSection = this.deps.skillVault.previewSystemPromptSection();
-		const transientSystemPrompt = [skillSection, pathAliasPlan.legend].filter(Boolean).join("\n\n") || undefined;
+		const legend = pathAliasPlan.legend;
+		const transientMessages = appendPathAliasLegend(beforeSkill.slice(compactableMessages.length), legend);
+		const transientSystemPrompt = this.deps.skillVault.previewSystemPromptSection();
 		const skillRevision = this.deps.skillVault.getContextRevision();
 		const dependenciesCurrent = () =>
 			extensionPlan.isCurrent?.() !== false &&
@@ -103,13 +125,10 @@ export class ProviderRequestContextController {
 			prepareCommit: () => {
 				if (!dependenciesCurrent()) return false;
 				const projected = projectCommit(false);
-				const projectedTransient =
-					[this.deps.skillVault.previewSystemPromptSection(), projected.aliased.legend]
-						.filter(Boolean)
-						.join("\n\n") || undefined;
 				return (
 					isDeepStrictEqual(projected.enforcement.messages, previewEnforcement.messages) &&
-					projectedTransient === transientSystemPrompt
+					this.deps.skillVault.previewSystemPromptSection() === transientSystemPrompt &&
+					projected.aliased.legend === legend
 				);
 			},
 			commit: () => {
@@ -120,10 +139,10 @@ export class ProviderRequestContextController {
 				this.deps.correlatePromptPolicyWithContextGc(committed.gc.report);
 				this.deps.enqueueRelevanceCuration(committed.providerMessages, shadowReport);
 				this.deps.maybeDrainBrainCuration();
-				const committedSkill = this.deps.skillVault.commitSystemPromptSection();
-				const committedTransient =
-					[committedSkill, committed.aliased.legend].filter(Boolean).join("\n\n") || undefined;
-				if (committedTransient !== transientSystemPrompt) {
+				if (committed.aliased.legend !== legend) {
+					throw new Error("Committed path alias legend diverged from its accepted plan");
+				}
+				if (this.deps.skillVault.commitSystemPromptSection() !== transientSystemPrompt) {
 					throw new Error("Committed active skill context diverged from its accepted plan");
 				}
 				reflectionCuePlan?.commit();
