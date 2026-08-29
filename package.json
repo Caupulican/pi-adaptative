@@ -40,6 +40,7 @@
 		"accept:local-cold-start": "node scripts/accept-local-cold-start-live.mjs",
 		"accept:text-protocol": "node scripts/accept-text-protocol-live.mjs",
 		"accept:core-workflows": "node scripts/accept-core-workflows.mjs",
+		"accept:parallel-emission": "node scripts/accept-parallel-emission-live.mjs",
 		"release:patch": "node scripts/release.mjs patch",
 		"release:minor": "node scripts/release.mjs minor",
 		"release:major": "node scripts/release.mjs major",
