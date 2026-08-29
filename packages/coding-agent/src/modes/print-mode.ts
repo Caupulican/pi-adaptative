@@ -8,6 +8,7 @@
 
 import type { AssistantMessage, ImageContent } from "@caupulican/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
+import { expandMessageForDisplay } from "../core/context/path-alias-display.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
 import { projectSessionEventForJson } from "./json-event-projection.ts";
 import { registerTerminationSignalHandlers } from "./termination-signals.ts";
@@ -136,7 +137,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 					console.error(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
 					exitCode = 1;
 				} else {
-					for (const content of assistantMsg.content) {
+					// Aliases are a wire-format token optimization; the operator reads real paths.
+					const shown = expandMessageForDisplay(session.peekPathAliasTable(), assistantMsg) as AssistantMessage;
+					for (const content of shown.content) {
 						if (content.type === "text") {
 							writeRawStdout(`${content.text}\n`);
 						}

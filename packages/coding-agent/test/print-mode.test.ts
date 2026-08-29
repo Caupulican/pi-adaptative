@@ -11,6 +11,7 @@ type FakeExtensionRunner = {
 };
 
 type FakeSession = {
+	peekPathAliasTable(): { cwd: string; entries: never[] };
 	sessionManager: { getHeader: () => object | undefined };
 	agent: { waitForIdle: () => Promise<void> };
 	state: { messages: AssistantMessage[] };
@@ -65,6 +66,7 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 	const state = { messages: [assistantMessage] };
 
 	const session: FakeSession = {
+		peekPathAliasTable: () => ({ cwd: process.cwd(), entries: [] }),
 		sessionManager: { getHeader: () => undefined },
 		agent: { waitForIdle: async () => {} },
 		state,
