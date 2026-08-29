@@ -72,6 +72,7 @@ import type { PromptPolicyGcCorrelationReport, PromptPolicyShadowReport } from "
 import type { MemoryPromptInclusionReport } from "./context/memory-diagnostics.ts";
 import type { MemoryProvider as ContextMemoryProvider } from "./context/memory-provider-contract.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
+import type { PathAliasTable } from "./context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "./context/path-alias-tool-wrap.ts";
 import type { ContextGcReport } from "./context-gc.ts";
 import { ContextPipeline } from "./context-pipeline.ts";
@@ -1505,6 +1506,15 @@ export class AgentSession {
 	 * plus background spend, so users can see exactly what their integrations cost per request.
 	 * Read-only: uses the GC report path (writePayloads=false), never mutates anything.
 	 */
+	/**
+	 * The live path-alias table, for expanding aliases back to real paths on any surface a person
+	 * reads (see context/path-alias-display.ts). Aliases are a wire-format token optimization; the
+	 * operator always sees their own paths.
+	 */
+	peekPathAliasTable(): PathAliasTable {
+		return this._pipeline.peekPathAliasTable();
+	}
+
 	getContextCompositionReport(): ContextCompositionReport {
 		const rawMessages = this.agent.state.messages.slice();
 		const gcResult = this._applyContextGc(rawMessages, false);

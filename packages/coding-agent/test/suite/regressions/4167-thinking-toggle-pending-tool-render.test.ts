@@ -39,7 +39,7 @@ type RenderSessionContextThis = {
 		getImageWidthCells(): number;
 	};
 	sessionManager: { getCwd(): string };
-	session: { retryAttempt: number };
+	session: { retryAttempt: number; peekPathAliasTable(): { cwd: string; entries: never[] } };
 	toolOutputExpanded: boolean;
 	transcriptActionsExpanded: boolean;
 	isInitialized: boolean;
@@ -73,7 +73,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 			getImageWidthCells: () => 60,
 		},
 		sessionManager: { getCwd: () => process.cwd() },
-		session: { retryAttempt: 0 },
+		session: { retryAttempt: 0, peekPathAliasTable: () => ({ cwd: process.cwd(), entries: [] }) },
 		toolOutputExpanded: false,
 		transcriptActionsExpanded: false,
 		isInitialized: true,

@@ -24,6 +24,7 @@ import {
 import { APP_NAME, APP_TITLE, getAgentDir, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import { expandArgumentsForDisplay, expandMessageForDisplay } from "../../core/context/path-alias-display.ts";
 import type { AutocompleteProviderFactory, ExtensionCommandContext } from "../../core/extensions/index.ts";
 import { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import {
@@ -1798,12 +1799,13 @@ export class InteractiveMode {
 		for (const content of message.content) {
 			if (content.type !== "toolCall") continue;
 			const repair = getToolCallRepairInfo(content);
+			const args = expandArgumentsForDisplay(this.session.peekPathAliasTable(), content.arguments);
 			if (!this.activeToolCalls.hasActive(content.id)) {
-				this.attachToolExecutionComponent(content.name, content.id, content.arguments, repair);
+				this.attachToolExecutionComponent(content.name, content.id, args, repair);
 			} else {
 				const component = this.activeToolCalls.getActive(content.id);
 				if (component) {
-					component.updateArgs(content.arguments, repair);
+					component.updateArgs(args, repair);
 				}
 			}
 		}
@@ -1920,7 +1922,9 @@ export class InteractiveMode {
 		this.appendStatusToChat(message);
 	}
 
-	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
+	private addMessageToChat(rawMessage: AgentMessage, options?: { populateHistory?: boolean }): void {
+		// Aliases are a wire-format token optimization; the operator reads their own paths.
+		const message = expandMessageForDisplay(this.session.peekPathAliasTable(), rawMessage);
 		switch (message.role) {
 			case "bashExecution": {
 				const component = new BashExecutionComponent(message.command, this.ui, message.excludeFromContext);
@@ -2087,7 +2091,7 @@ export class InteractiveMode {
 								const component = this.attachToolExecutionComponent(
 									content.name,
 									content.id,
-									content.arguments,
+									expandArgumentsForDisplay(this.session.peekPathAliasTable(), content.arguments),
 									undefined,
 									true,
 								);
@@ -2114,7 +2118,7 @@ export class InteractiveMode {
 						// Match tool results to pending tool components
 						const component = renderedPendingTools.get(message.toolCallId);
 						if (component) {
-							component.updateResult(message);
+							component.updateResult(expandMessageForDisplay(this.session.peekPathAliasTable(), message));
 							renderedPendingTools.delete(message.toolCallId);
 							this.activeToolCalls.finish(message.toolCallId);
 						}

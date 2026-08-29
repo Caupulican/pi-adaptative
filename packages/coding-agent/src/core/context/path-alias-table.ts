@@ -422,9 +422,23 @@ export function rewriteText(table: PathAliasTable, text: string): string {
 	return text.replace(regex, (match) => map.get(match) ?? match);
 }
 
+// Memoized on the entries array identity, exactly like `rewriterCache`. Expansion runs on every
+// tool argument AND on every message rendered to the operator, while the table grows all session;
+// rebuilding the lookup per call made the cost O(calls x entries), i.e. quadratic in session size.
+// Entries are append-only under one identity, so the cached map is always complete for that array.
+const expanderCache = new WeakMap<readonly PathAliasEntry[], Map<string, string>>();
+
+function compileExpander(table: PathAliasTable): Map<string, string> {
+	const cached = expanderCache.get(table.entries);
+	if (cached) return cached;
+	const byId = new Map(table.entries.map((entry) => [entry.id, entry.path]));
+	expanderCache.set(table.entries, byId);
+	return byId;
+}
+
 export function expandText(table: PathAliasTable, text: string): string {
 	if (table.entries.length === 0) return text;
-	const byId = new Map(table.entries.map((entry) => [entry.id, entry.path]));
+	const byId = compileExpander(table);
 	return text.replace(STANDALONE_TOKEN_RE, (token) => byId.get(token) ?? token);
 }
 
@@ -499,19 +513,29 @@ export function collectMessageTexts(messages: readonly AgentMessage[]): string[]
 	return messages.flatMap(textsFromMessage);
 }
 
-function rewriteContentWith(content: unknown, rewrite: TextRewriter): unknown {
-	if (typeof content === "string") return rewrite(content);
+function rewriteContentWith(content: unknown, hooks: MessageRewriteHooks): unknown {
+	if (typeof content === "string") return hooks.text(content);
 	if (!Array.isArray(content)) return content;
 	let changed = false;
 	const next = content.map((part) => {
-		if (part && typeof part === "object" && "type" in part && part.type === "text" && "text" in part) {
+		if (!part || typeof part !== "object" || !("type" in part)) return part;
+		if (part.type === "text" && "text" in part) {
 			const text = (part as { text?: unknown }).text;
 			if (typeof text === "string") {
-				const rewritten = rewrite(text);
+				const rewritten = hooks.text(text);
 				if (rewritten !== text) {
 					changed = true;
 					return { ...part, text: rewritten };
 				}
+			}
+			return part;
+		}
+		if (hooks.toolCallArguments && part.type === "toolCall" && "arguments" in part) {
+			const args = (part as { arguments?: unknown }).arguments;
+			const rewritten = hooks.toolCallArguments(args);
+			if (rewritten !== args) {
+				changed = true;
+				return { ...part, arguments: rewritten };
 			}
 		}
 		return part;
@@ -522,13 +546,30 @@ function rewriteContentWith(content: unknown, rewrite: TextRewriter): unknown {
 /** Rewrites one provider-visible text span. */
 export type TextRewriter = (text: string) => string;
 
+export interface MessageRewriteHooks {
+	/** Applied to every text span: prose, tool output, bash command/output, summaries. */
+	text: TextRewriter;
+	/**
+	 * Applied to a tool call's arguments. Omitted by the provider-projection callers, whose job is
+	 * text compression only; supplied by display expansion, where the arguments a person reads must
+	 * name real files. Must return the SAME reference when nothing changed.
+	 */
+	toolCallArguments?: (args: unknown) => unknown;
+}
+
 /**
- * Structure-preserving message rewrite through a caller-supplied text rewriter. The runtime
- * uses this to render each text span through a FROZEN spelling (see {@link PathAliasRuntime});
- * `rewriteAgentMessages` is the pure whole-table form. A message whose spans all come back
+ * Structure-preserving message rewrite through caller-supplied hooks. The runtime uses it to render
+ * each text span through a FROZEN spelling (see {@link PathAliasRuntime}), and display expansion
+ * uses it to turn aliases back into real paths; `rewriteAgentMessages` is the pure whole-table form.
+ * One walk, so message shape is handled in exactly one place. A message whose spans all come back
  * unchanged is returned by identity, so an unchanged history costs no allocation.
  */
-export function rewriteAgentMessagesWith(messages: readonly AgentMessage[], rewrite: TextRewriter): AgentMessage[] {
+export function rewriteAgentMessagesWith(
+	messages: readonly AgentMessage[],
+	rewriter: TextRewriter | MessageRewriteHooks,
+): AgentMessage[] {
+	const hooks: MessageRewriteHooks = typeof rewriter === "function" ? { text: rewriter } : rewriter;
+	const rewrite = hooks.text;
 	return messages.map((message) => {
 		if (message.role === "bashExecution") {
 			const command = rewrite(message.command);
@@ -541,7 +582,7 @@ export function rewriteAgentMessagesWith(messages: readonly AgentMessage[], rewr
 			return summary === message.summary ? message : { ...message, summary };
 		}
 		if ("content" in message) {
-			const content = rewriteContentWith(message.content, rewrite);
+			const content = rewriteContentWith(message.content, hooks);
 			return content === message.content ? message : ({ ...message, content } as AgentMessage);
 		}
 		return message;

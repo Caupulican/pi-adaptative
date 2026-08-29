@@ -212,7 +212,9 @@ describe("InteractiveMode TUI reload history cap", () => {
 		ctx.footer = { invalidate: vi.fn() };
 		ctx.updateEditorBorderColor = vi.fn();
 		ctx.activeToolCalls = { activeEntries: () => [], hasActive: () => false };
-		Object.defineProperty(ctx, "session", { value: { retryAttempt: 0 } });
+		Object.defineProperty(ctx, "session", {
+			value: { retryAttempt: 0, peekPathAliasTable: () => ({ cwd: process.cwd(), entries: [] }) },
+		});
 		ctx.defaultEditor = { addToHistory: vi.fn() };
 		ctx.clearActiveToolCallState = vi.fn();
 		ctx.getMarkdownThemeWithSettings = vi.fn(() => undefined);
