@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+### Added
+
+- `PI_TOOL_CONCURRENCY=<1..16>` sets how many of a turn's tool calls execute at once (default 4), and a `toolConcurrency` agent option does the same programmatically; the environment variable wins. `PI_TOOL_PARALLELISM_DISABLED=1` is an escape hatch that routes every batch back through the untouched sequential path. Width 1 is not the same thing — it still runs the new scheduler, which makes it useful for isolating a suspected concurrency problem from the scheduler itself.
+
+### Changed
+
+- A turn's tool calls are no longer serialised beyond what correctness requires. Two things did that. A batch containing a single tool that declares sequential execution was pushed wholesale onto the sequential branch, so one `ask-question` sitting among six reads serialised all of them. And the parallel branch ran in fixed chunks of four joined together, so a fifth call could not start until every one of the first four had settled, however long the slowest ran. Batches are now partitioned in emission order — a sequential tool becomes its own barrier and adjacent parallel calls group together — and within a group, slots refill as they free rather than at a chunk boundary. Concurrency still requires adjacency: calls separated by a barrier stay ordered, because the barrier has to run between them. Session reflection, which configures sequential execution directly, is unchanged, as are the persistent shell's one-command-at-a-time contract and the file mutation barrier.
+- Tool reservation keeps its batch shape. It is not telemetry — it is the crash-recovery record of which tools started under which provider request, and its consumer validates a whole wave against one request identity and persists every identity in a single prevalidated write. Slots therefore refill in batches: the calls being started together are prepared, reserved as one array, then dispatched, which also leaves the first refill identical to the old first wave. Preparation stays incremental rather than hoisted for the whole group, so policy hooks and the repeat-failure gate keep observing state that earlier completions changed.
+
+### Fixed
+
+- Recovery-gate effects are applied in the order the model emitted the calls, not the order they happen to finish. The gate stamps a failure against a world cursor that a sibling's success in the same batch increments, and admission compares the two — so applying effects as each call completed let a fast sibling's success bump the cursor before a slow sibling's failure was stamped, leaving that failure permanently unable to retry. Effects now retire through an in-order pointer that walks results from the front and stops at the first one still missing, reproducing the previous batch's apply order exactly while dispatch stays immediate. Execution-end events continue to fire at actual completion, which was already the observable contract.
+
 ## [0.97.19] - 2026-08-29
 
 ## [0.97.18] - 2026-08-29
