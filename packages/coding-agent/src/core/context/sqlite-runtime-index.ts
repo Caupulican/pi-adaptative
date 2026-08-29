@@ -481,18 +481,28 @@ export interface SqlitePathAliasStore {
 	close(): void;
 }
 
-export function createSqlitePathAliasStore(options: SqliteRuntimeIndexOptions): SqlitePathAliasStore {
-	const database = openDatabase(options);
-	const listAll = database.prepare(
-		"SELECT full_path, alias_id, created_at_turn FROM path_aliases ORDER BY created_at_turn, alias_id",
-	);
-	const upsert = database.prepare(
-		"INSERT INTO path_aliases(full_path, alias_id, created_at_turn) VALUES(?, ?, ?) ON CONFLICT(full_path) DO NOTHING",
-	);
-	const getMeta = database.prepare("SELECT value FROM path_alias_meta WHERE key = ?");
-	const setMeta = database.prepare(
-		"INSERT INTO path_alias_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-	);
+interface PathAliasReads {
+	list(): SqlitePathAliasRow[];
+	getMeta(key: string): string | undefined;
+}
+
+// The two read statements, named once so the writer and the read-only opener always prepare
+// the exact same SQL text rather than two copies that could drift apart.
+const PATH_ALIAS_LIST_SQL =
+	"SELECT full_path, alias_id, created_at_turn FROM path_aliases ORDER BY created_at_turn, alias_id";
+const PATH_ALIAS_GET_META_SQL = "SELECT value FROM path_alias_meta WHERE key = ?";
+
+/**
+ * The SELECT-only side of the path-alias table: row mapping and the two read statements,
+ * prepared against whatever already-open `database` handle the caller supplies. This never opens
+ * a connection, runs a migration, or writes — it only wraps `database.prepare` calls — so
+ * {@link createSqlitePathAliasStore} (which opens through the writer's `openDatabase`) and
+ * {@link openPathAliasStoreReadOnly} (which never may) can share the row-mapping and read-SQL
+ * logic without the read-only path inheriting any writer side effect.
+ */
+function preparePathAliasReads(database: SqliteDatabase): PathAliasReads {
+	const listAll = database.prepare(PATH_ALIAS_LIST_SQL);
+	const getMetaStmt = database.prepare(PATH_ALIAS_GET_META_SQL);
 	return {
 		list(): SqlitePathAliasRow[] {
 			return listAll.all().map((row) => {
@@ -504,6 +514,24 @@ export function createSqlitePathAliasStore(options: SqliteRuntimeIndexOptions): 
 				};
 			});
 		},
+		getMeta(key: string): string | undefined {
+			const record = getMetaStmt.get(key) as { value?: unknown } | undefined;
+			return typeof record?.value === "string" ? record.value : undefined;
+		},
+	};
+}
+
+export function createSqlitePathAliasStore(options: SqliteRuntimeIndexOptions): SqlitePathAliasStore {
+	const database = openDatabase(options);
+	const { list, getMeta } = preparePathAliasReads(database);
+	const upsert = database.prepare(
+		"INSERT INTO path_aliases(full_path, alias_id, created_at_turn) VALUES(?, ?, ?) ON CONFLICT(full_path) DO NOTHING",
+	);
+	const setMeta = database.prepare(
+		"INSERT INTO path_alias_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+	);
+	return {
+		list,
 		upsert(row: SqlitePathAliasRow): void {
 			upsert.run(row.fullPath, row.aliasId, row.createdAtTurn);
 		},
@@ -523,10 +551,7 @@ export function createSqlitePathAliasStore(options: SqliteRuntimeIndexOptions): 
 				throw error;
 			}
 		},
-		getMeta(key: string): string | undefined {
-			const record = getMeta.get(key) as { value?: unknown } | undefined;
-			return typeof record?.value === "string" ? record.value : undefined;
-		},
+		getMeta,
 		setMeta(key: string, value: string): void {
 			setMeta.run(key, value);
 		},
@@ -564,25 +589,10 @@ export function openPathAliasStoreReadOnly(
 		// Connection-scoped only — never persisted to the database file — so this cannot
 		// regress the zero-write guarantee above.
 		database.exec(`PRAGMA busy_timeout = ${options.busyTimeoutMs ?? 5_000};`);
-		const listAll = database.prepare(
-			"SELECT full_path, alias_id, created_at_turn FROM path_aliases ORDER BY created_at_turn, alias_id",
-		);
-		const getMetaStmt = database.prepare("SELECT value FROM path_alias_meta WHERE key = ?");
+		const { list, getMeta } = preparePathAliasReads(database);
 		return {
-			list(): SqlitePathAliasRow[] {
-				return listAll.all().map((row) => {
-					const record = row as Record<string, unknown>;
-					return {
-						fullPath: String(record.full_path),
-						aliasId: String(record.alias_id),
-						createdAtTurn: Number(record.created_at_turn),
-					};
-				});
-			},
-			getMeta(key: string): string | undefined {
-				const record = getMetaStmt.get(key) as { value?: unknown } | undefined;
-				return typeof record?.value === "string" ? record.value : undefined;
-			},
+			list,
+			getMeta,
 			close(): void {
 				database[Symbol.dispose]();
 			},
