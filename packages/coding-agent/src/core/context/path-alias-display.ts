@@ -16,25 +16,36 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { expandParams, expandText, type PathAliasTable, rewriteAgentMessagesWith } from "./path-alias-table.ts";
 
+/**
+ * Shared walk behind {@link expandMessageForDisplay} and {@link expandMessageTextForDisplay}. One
+ * shared structure walk (path-alias-table.ts) handles message shape; this only supplies what to do
+ * with a text span, a thinking span, and — when the caller supplies one — a tool call's arguments.
+ */
+function expandMessageWith<TMessage extends AgentMessage>(
+	table: PathAliasTable,
+	message: TMessage,
+	toolCallArguments?: (args: unknown) => unknown,
+): TMessage {
+	if (table.entries.length === 0) return message;
+	const [expanded] = rewriteAgentMessagesWith([message], {
+		text: (text) => expandText(table, text),
+		thinkingText: (text) => expandText(table, text),
+		toolCallArguments,
+	});
+	return (expanded as TMessage | undefined) ?? message;
+}
+
 /** Expand every alias a person would see in one message. Returns the message unchanged if none. */
 export function expandMessageForDisplay<TMessage extends AgentMessage>(
 	table: PathAliasTable,
 	message: TMessage,
 ): TMessage {
-	if (table.entries.length === 0) return message;
-	// One shared structure walk (path-alias-table.ts) handles message shape; this only supplies what
-	// to do with a text span, a thinking span, and a tool call's arguments.
-	const [expanded] = rewriteAgentMessagesWith([message], {
-		text: (text) => expandText(table, text),
-		thinkingText: (text) => expandText(table, text),
-		toolCallArguments: (args) => {
-			const next = expandParams(table, args);
-			// The walk treats an unchanged reference as "nothing happened"; expandParams rebuilds
-			// objects, so collapse a no-op back to the original to keep messages identity-stable.
-			return JSON.stringify(next) === JSON.stringify(args) ? args : next;
-		},
+	return expandMessageWith(table, message, (args) => {
+		const next = expandParams(table, args);
+		// The walk treats an unchanged reference as "nothing happened"; expandParams rebuilds
+		// objects, so collapse a no-op back to the original to keep messages identity-stable.
+		return JSON.stringify(next) === JSON.stringify(args) ? args : next;
 	});
-	return (expanded as TMessage | undefined) ?? message;
 }
 
 /**
@@ -51,12 +62,7 @@ export function expandMessageTextForDisplay<TMessage extends AgentMessage>(
 	table: PathAliasTable,
 	message: TMessage,
 ): TMessage {
-	if (table.entries.length === 0) return message;
-	const [expanded] = rewriteAgentMessagesWith([message], {
-		text: (text) => expandText(table, text),
-		thinkingText: (text) => expandText(table, text),
-	});
-	return (expanded as TMessage | undefined) ?? message;
+	return expandMessageWith(table, message);
 }
 
 /** Expand aliases in streamed tool-call arguments, which arrive outside any message. */

@@ -313,7 +313,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	// File exploration guidelines
 	if (!fullPrompt && !leanPrompt) {
 		if (hasBash) addGuideline("Use bash for bounded shell commands");
-		if (hasReadOnlyTools) addGuideline("Emit independent reads in one message; keep mutations and dependent calls ordered");
+		if (hasReadOnlyTools)
+			addGuideline("Emit independent reads in one message; keep mutations and dependent calls ordered");
 	} else if (hasBash && !hasGrep && !hasFind && !hasLs) {
 		addGuideline("Bash: ls, rg, find");
 	}

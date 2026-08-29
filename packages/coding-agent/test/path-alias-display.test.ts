@@ -7,6 +7,7 @@
  */
 
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
+import type { AssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
 	expandArgumentsForDisplay,
@@ -104,11 +105,11 @@ describe("expandMessageForDisplay", () => {
 	});
 
 	it("expands aliases inside a thinking block, the same as prose", () => {
-		const message: AgentMessage = {
+		const message: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "thinking", thinking: "I should check p/module02.ts first" }],
 			timestamp: 1,
-		} as unknown as AgentMessage;
+		} as unknown as AssistantMessage;
 
 		const shown = expandMessageForDisplay(table, message) as unknown as { content: { thinking: string }[] };
 
@@ -154,7 +155,7 @@ describe("expandMessageForDisplay", () => {
 
 describe("expandMessageTextForDisplay", () => {
 	it("expands text and thinking spans but leaves tool-call arguments untouched, by identity", () => {
-		const message: AgentMessage = {
+		const message: AssistantMessage = {
 			role: "assistant",
 			content: [
 				{ type: "text", text: "Reading p/module02.ts" },
@@ -162,7 +163,7 @@ describe("expandMessageTextForDisplay", () => {
 				{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "p/module02.ts" } },
 			],
 			timestamp: 1,
-		} as unknown as AgentMessage;
+		} as unknown as AssistantMessage;
 
 		const shown = expandMessageTextForDisplay(table, message) as unknown as {
 			content: [{ text: string }, { thinking: string }, { arguments: { path: string } }];

@@ -91,11 +91,10 @@ describe("OpenAI-Codex parallel tool-call wire guard", () => {
 			}),
 		);
 
-		await streamOpenAICodexResponses(
-			makeModel(false),
-			context([{ role: "user", content: "hello", timestamp: 1 }]),
-			{ apiKey: mockToken(), transport: "sse" },
-		).result();
+		await streamOpenAICodexResponses(makeModel(false), context([{ role: "user", content: "hello", timestamp: 1 }]), {
+			apiKey: mockToken(),
+			transport: "sse",
+		}).result();
 
 		expect(body?.parallel_tool_calls).toBe(true);
 	});
@@ -110,11 +109,10 @@ describe("OpenAI-Codex parallel tool-call wire guard", () => {
 			}),
 		);
 
-		await streamOpenAICodexResponses(
-			makeModel(true),
-			context([{ role: "user", content: "hello", timestamp: 1 }]),
-			{ apiKey: mockToken(), transport: "sse" },
-		).result();
+		await streamOpenAICodexResponses(makeModel(true), context([{ role: "user", content: "hello", timestamp: 1 }]), {
+			apiKey: mockToken(),
+			transport: "sse",
+		}).result();
 
 		expect(body?.parallel_tool_calls).toBe(false);
 	});
