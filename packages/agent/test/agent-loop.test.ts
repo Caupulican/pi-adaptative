@@ -4666,3 +4666,771 @@ describe("agentLoopContinue with AgentMessage", () => {
 		expect(messages[0].role).toBe("assistant");
 	});
 });
+
+/**
+ * Phase 3 S0 — characterization tests (parity oracle).
+ *
+ * These pin EXACTLY how `executeToolCalls`'s sequential/parallel branches behave today, at
+ * `packages/agent/src/agent-loop.ts`, before the S1-S5 refactor (waves -> sliding pool,
+ * whole-batch-sequential -> partition scheduling). See
+ * `packages/coding-agent/docs/parallelism-and-alias-display-roadmap-2026-08-29.md` section 6.
+ * Every assertion here is a fact about current code, not a spec for the new code: two are
+ * documented as INTENDED to change (the mixed-batch poisoning in S0.4, updated by S2; the wave
+ * barrier in S0.wave, replaced by S3's pool). Everything else is a guarantee the refactor must
+ * preserve byte-for-byte.
+ */
+describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
+	describe("S0.1 - sequential branch (today)", () => {
+		it("an erroring call does not stop later calls; reservePreparedToolCalls receives singleton arrays in emission order", async () => {
+			const schema = Type.Object({ value: Type.String() });
+			const executed: string[] = [];
+			const reservations: string[][] = [];
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					executed.push(params.value);
+					if (params.value === "b") throw new Error("boom");
+					return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "sequential",
+				onToolCallStart: (calls) => {
+					reservations.push(calls.map((call) => call.callId));
+				},
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run three")], context, config, undefined, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{ type: "toolCall", id: "call-a", name: "step", arguments: { value: "a" } },
+									{ type: "toolCall", id: "call-b", name: "step", arguments: { value: "b" } },
+									{ type: "toolCall", id: "call-c", name: "step", arguments: { value: "c" } },
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+
+			for await (const _event of stream) {
+				// consume
+			}
+
+			// b's runtime error does not stop c from running.
+			expect(executed).toEqual(["a", "b", "c"]);
+			const results = (await stream.result()).filter(
+				(message): message is ToolResultMessage => message.role === "toolResult",
+			);
+			expect(results.map((r) => r.toolCallId)).toEqual(["call-a", "call-b", "call-c"]);
+			expect(results.map((r) => r.isError ?? false)).toEqual([false, true, false]);
+			// One singleton reservation per call, in emission order (E5).
+			expect(reservations).toEqual([["call-a"], ["call-b"], ["call-c"]]);
+		});
+	});
+
+	describe("S0.2 - parallel branch (today)", () => {
+		it("reserves the whole wave once, returns results in emission order despite reverse completion, and a sibling error never cancels others", async () => {
+			const schema = Type.Object({ value: Type.String() });
+			const executed: string[] = [];
+			const reservations: string[][] = [];
+			const completionOrder: string[] = [];
+			const releases = new Map<string, () => void>();
+			const gates = new Map<string, Promise<void>>();
+			for (const value of ["a", "b", "c"]) {
+				gates.set(value, new Promise<void>((resolve) => releases.set(value, resolve)));
+			}
+			let startedCount = 0;
+			let resolveAllStarted: () => void;
+			const allStarted = new Promise<void>((resolve) => {
+				resolveAllStarted = resolve;
+			});
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					executed.push(params.value);
+					startedCount++;
+					if (startedCount === 3) resolveAllStarted();
+					await gates.get(params.value);
+					completionOrder.push(params.value);
+					if (params.value === "b") throw new Error("boom");
+					return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "parallel",
+				onToolCallStart: (calls) => {
+					reservations.push(calls.map((call) => call.callId));
+				},
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run three")], context, config, undefined, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{ type: "toolCall", id: "call-a", name: "step", arguments: { value: "a" } },
+									{ type: "toolCall", id: "call-b", name: "step", arguments: { value: "b" } },
+									{ type: "toolCall", id: "call-c", name: "step", arguments: { value: "c" } },
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+
+			const events: AgentEvent[] = [];
+			const consuming = (async () => {
+				for await (const event of stream) events.push(event);
+			})();
+
+			// Wait for all three bodies to actually start before releasing them out of emission
+			// order - proves the whole wave was dispatched together, not one-at-a-time.
+			await allStarted;
+			expect(executed.sort()).toEqual(["a", "b", "c"]);
+			releases.get("c")?.();
+			releases.get("b")?.();
+			releases.get("a")?.();
+			await consuming;
+
+			const results = (await stream.result()).filter(
+				(message): message is ToolResultMessage => message.role === "toolResult",
+			);
+			expect(completionOrder).toEqual(["c", "b", "a"]);
+			// Results are still in ORIGINAL emission order, not completion order (E6).
+			expect(results.map((r) => r.toolCallId)).toEqual(["call-a", "call-b", "call-c"]);
+			// b's error does not affect a or c (E6).
+			expect(results.map((r) => r.isError ?? false)).toEqual([false, true, false]);
+			// One reservation call for the WHOLE wave, arity 3 (E5).
+			expect(reservations).toEqual([["call-a", "call-b", "call-c"]]);
+		});
+	});
+
+	describe("S0.3 - abort mid-batch (both branches)", () => {
+		it("sequential: a call whose OWN preparation observes an already-aborted signal is finalized as an explicit error result; later calls are simply absent (never prepared) - no throw", async () => {
+			const schema = Type.Object({ value: Type.String() });
+			const executed: string[] = [];
+			const controller = new AbortController();
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					executed.push(params.value);
+					return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "sequential",
+				// This batch never sets terminate:true, so without a cap the outer loop would request
+				// a second provider turn on the now-aborted signal - that unrelated request throws at
+				// its own preflight (provider-request-planner.ts throwIfAborted) and collapses the
+				// WHOLE run's result (see the dedicated pin below). Capping isolates the fact this test
+				// actually characterizes: executeToolCalls's OWN behavior within the first turn.
+				maxProviderTurns: 1,
+				beforeToolCall: async ({ toolCall }) => {
+					if (toolCall.id === "call-a") controller.abort();
+					return undefined;
+				},
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run three")], context, config, controller.signal, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{ type: "toolCall", id: "call-a", name: "step", arguments: { value: "a" } },
+									{ type: "toolCall", id: "call-b", name: "step", arguments: { value: "b" } },
+									{ type: "toolCall", id: "call-c", name: "step", arguments: { value: "c" } },
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+
+			for await (const _event of stream) {
+				// consume
+			}
+
+			// call-a's own preparation absorbed the abort before its body ever ran; b and c were
+			// never even prepared.
+			expect(executed).toEqual([]);
+			const finalMessages = await stream.result();
+			const results = finalMessages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+			// b and c are completely ABSENT - not error placeholders, just missing.
+			expect(results.map((r) => r.toolCallId)).toEqual(["call-a"]);
+			expect(results[0]?.isError).toBe(true);
+			// No throw: the assistant message carrying the batch is still in the final result.
+			expect(finalMessages.some((m) => m.role === "assistant" && m.content.some((c) => c.type === "toolCall"))).toBe(
+				true,
+			);
+		});
+
+		it("parallel: the same already-aborted-at-prepare-time shape reached via the wave-building loop's own early break", async () => {
+			const schema = Type.Object({ value: Type.String() });
+			const executed: string[] = [];
+			const controller = new AbortController();
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					executed.push(params.value);
+					return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "parallel",
+				// See the sequential variant of this test for why this cap is needed to isolate
+				// executeToolCallsParallel's own behavior from the unrelated second-turn throw.
+				maxProviderTurns: 1,
+				beforeToolCall: async ({ toolCall }) => {
+					if (toolCall.id === "call-a") controller.abort();
+					return undefined;
+				},
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run three")], context, config, controller.signal, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{ type: "toolCall", id: "call-a", name: "step", arguments: { value: "a" } },
+									{ type: "toolCall", id: "call-b", name: "step", arguments: { value: "b" } },
+									{ type: "toolCall", id: "call-c", name: "step", arguments: { value: "c" } },
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+
+			for await (const _event of stream) {
+				// consume
+			}
+
+			expect(executed).toEqual([]);
+			const results = (await stream.result()).filter(
+				(message): message is ToolResultMessage => message.role === "toolResult",
+			);
+			expect(results.map((r) => r.toolCallId)).toEqual(["call-a"]);
+			expect(results[0]?.isError).toBe(true);
+		});
+
+		it("sequential: an abort raised from inside an already-started call's own execute() does not corrupt that call's real result; the loop awaits it, then stops - no throw", async () => {
+			const schema = Type.Object({ value: Type.String() });
+			const executed: string[] = [];
+			const controller = new AbortController();
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					executed.push(params.value);
+					if (params.value === "a") controller.abort();
+					return { content: [{ type: "text", text: `real:${params.value}` }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "sequential",
+				// Isolates executeToolCallsSequential's own behavior from the unrelated second-turn
+				// throw (see the dedicated pin further below).
+				maxProviderTurns: 1,
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run three")], context, config, controller.signal, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{ type: "toolCall", id: "call-a", name: "step", arguments: { value: "a" } },
+									{ type: "toolCall", id: "call-b", name: "step", arguments: { value: "b" } },
+									{ type: "toolCall", id: "call-c", name: "step", arguments: { value: "c" } },
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+
+			for await (const _event of stream) {
+				// consume
+			}
+
+			// b and c never even started.
+			expect(executed).toEqual(["a"]);
+			const finalMessages = await stream.result();
+			const results = finalMessages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+			expect(results.map((r) => r.toolCallId)).toEqual(["call-a"]);
+			// The REAL result is preserved, not overwritten with a synthesized aborted error.
+			expect(results[0]?.isError ?? false).toBe(false);
+			expect(results[0]?.content).toEqual([{ type: "text", text: "real:a" }]);
+			expect(finalMessages.some((m) => m.role === "assistant" && m.content.some((c) => c.type === "toolCall"))).toBe(
+				true,
+			);
+		});
+
+		it("parallel: an abort raised inside one wave's tool body still lets the WHOLE wave finish (every already-started call is awaited); the next wave never starts", async () => {
+			const schema = Type.Object({ value: Type.String() });
+			const executed: string[] = [];
+			const controller = new AbortController();
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					executed.push(params.value);
+					if (params.value === "1") controller.abort();
+					return { content: [{ type: "text", text: `real:${params.value}` }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "parallel",
+				// Isolates executeToolCallsParallel's own behavior from the unrelated second-turn throw.
+				maxProviderTurns: 1,
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run six")], context, config, controller.signal, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								["1", "2", "3", "4", "5", "6"].map((value) => ({
+									type: "toolCall" as const,
+									id: `call-${value}`,
+									name: "step",
+									arguments: { value },
+								})),
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+
+			for await (const _event of stream) {
+				// consume
+			}
+
+			// Wave 1 (calls 1-4) always fully executes and settles, regardless of the abort raised
+			// partway through it (TOOL_EXECUTION_WAVE_SIZE = 4).
+			expect(executed.sort()).toEqual(["1", "2", "3", "4"]);
+			const finalMessages = await stream.result();
+			const results = finalMessages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+			// Original emission order is preserved even in an aborted batch (positional, not timing-based).
+			expect(results.map((r) => r.toolCallId)).toEqual(["call-1", "call-2", "call-3", "call-4"]);
+			expect(results.every((r) => !r.isError)).toBe(true);
+			// Wave 2 (calls 5, 6) never even started.
+			expect(executed).not.toContain("5");
+			expect(executed).not.toContain("6");
+		});
+
+		it("sequential: an abort observed between reservePreparedToolCalls's two throwIfAborted checks throws, collapsing the WHOLE turn's result to one synthetic aborted message", async () => {
+			const schema = Type.Object({ value: Type.String() });
+			const executed: string[] = [];
+			const controller = new AbortController();
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					executed.push(params.value);
+					return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "sequential",
+				onToolCallStart: (calls) => {
+					// Fires for call-b's reservation, AFTER call-a already succeeded - simulates the
+					// signal flipping in the narrow window this hook straddles inside
+					// reservePreparedToolCalls (agent-loop.ts, between its two throwIfAborted checks).
+					if (calls[0]?.callId === "call-b") controller.abort();
+				},
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run two")], context, config, controller.signal, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{ type: "toolCall", id: "call-a", name: "step", arguments: { value: "a" } },
+									{ type: "toolCall", id: "call-b", name: "step", arguments: { value: "b" } },
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+
+			const events: AgentEvent[] = [];
+			for await (const event of stream) events.push(event);
+
+			// The event STREAM shows call-a's real progress...
+			expect(executed).toEqual(["a"]);
+			expect(events.some((e) => e.type === "tool_execution_end" && e.toolCallId === "call-a")).toBe(true);
+
+			// ...but the final RESULT collapses to exactly one synthetic message. call-a's success is
+			// gone from the returned array even though it already happened and was already emitted.
+			const finalMessages = await stream.result();
+			expect(finalMessages).toHaveLength(1);
+			expect(finalMessages[0]).toMatchObject({ role: "assistant", stopReason: "aborted" });
+			expect(finalMessages.some((m) => m.role === "toolResult")).toBe(false);
+		});
+
+		it("parallel: the same reservePreparedToolCalls throw collapses the whole turn even after an entire prior WAVE already succeeded", async () => {
+			const schema = Type.Object({ value: Type.String() });
+			const executed: string[] = [];
+			const controller = new AbortController();
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					executed.push(params.value);
+					return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "parallel",
+				onToolCallStart: (calls) => {
+					// Wave 2 (the 5th call alone, since TOOL_EXECUTION_WAVE_SIZE = 4) triggers the
+					// abort during its reservation.
+					if (calls.some((call) => call.callId === "call-5")) controller.abort();
+				},
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run five")], context, config, controller.signal, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								["1", "2", "3", "4", "5"].map((value) => ({
+									type: "toolCall" as const,
+									id: `call-${value}`,
+									name: "step",
+									arguments: { value },
+								})),
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+
+			for await (const _event of stream) {
+				// consume
+			}
+
+			// Wave 1 (calls 1-4) fully ran and succeeded.
+			expect(executed.sort()).toEqual(["1", "2", "3", "4"]);
+			// But the final result still collapses to exactly one synthetic aborted message.
+			const finalMessages = await stream.result();
+			expect(finalMessages).toHaveLength(1);
+			expect(finalMessages[0]).toMatchObject({ role: "assistant", stopReason: "aborted" });
+			expect(finalMessages.some((m) => m.role === "toolResult")).toBe(false);
+		});
+	});
+
+	describe("S0.4 - mixed batch (today: one sequential call poisons the WHOLE batch)", () => {
+		it("[read, sequential-tool, read] runs all three fully serialized, including the two default-parallel reads", async () => {
+			// EXPECTED TO CHANGE under Phase 3 S2 (partition scheduling, roadmap section 6): the two
+			// default-parallel reads should become concurrent with each other while the sequential
+			// call keeps its own barrier. This test pins TODAY's whole-batch poisoning
+			// (hasSequentialToolCall) so S2's parity review can see exactly what changed.
+			const readSchema = Type.Object({ id: Type.String() });
+			let inFlight = 0;
+			let overlapped = false;
+			const order: string[] = [];
+			const makeTool = (
+				name: string,
+				executionMode?: "sequential",
+			): AgentTool<typeof readSchema, { id: string }> => ({
+				name,
+				label: name,
+				description: name,
+				parameters: readSchema,
+				...(executionMode ? { executionMode } : {}),
+				async execute(_toolCallId, params) {
+					inFlight++;
+					if (inFlight > 1) overlapped = true;
+					order.push(`start:${params.id}`);
+					await Promise.resolve();
+					await Promise.resolve();
+					order.push(`end:${params.id}`);
+					inFlight--;
+					return { content: [{ type: "text", text: params.id }], details: { id: params.id } };
+				},
+			});
+			const read = makeTool("read");
+			const ask = makeTool("ask-question", "sequential");
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [read, ask] };
+			const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("do three")], context, config, undefined, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{ type: "toolCall", id: "read-1", name: "read", arguments: { id: "read-1" } },
+									{ type: "toolCall", id: "ask-1", name: "ask-question", arguments: { id: "ask-1" } },
+									{ type: "toolCall", id: "read-2", name: "read", arguments: { id: "read-2" } },
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+
+			for await (const _event of stream) {
+				// consume
+			}
+
+			expect(overlapped).toBe(false);
+			expect(order).toEqual([
+				"start:read-1",
+				"end:read-1",
+				"start:ask-1",
+				"end:ask-1",
+				"start:read-2",
+				"end:read-2",
+			]);
+		});
+	});
+
+	describe("S0.wave - TOOL_EXECUTION_WAVE_SIZE chunking is a hard barrier today", () => {
+		it("does not start the 5th of 5 independent parallel calls until the first 4 have all settled", async () => {
+			// S3 deliberately replaces this barrier with a sliding pool - this test is EXPECTED to
+			// need updating/deletion once that lands.
+			const schema = Type.Object({ value: Type.String() });
+			const started: string[] = [];
+			const firstFourValues = new Set(["1", "2", "3", "4"]);
+			let firstFourStartedCount = 0;
+			let resolveFirstFourStarted: () => void;
+			const firstFourStarted = new Promise<void>((resolve) => {
+				resolveFirstFourStarted = resolve;
+			});
+			let releaseFirstFour: () => void;
+			const waveGate = new Promise<void>((resolve) => {
+				releaseFirstFour = resolve;
+			});
+
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					started.push(params.value);
+					if (firstFourValues.has(params.value)) {
+						firstFourStartedCount++;
+						if (firstFourStartedCount === 4) resolveFirstFourStarted();
+						await waveGate;
+					}
+					return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "parallel",
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run five")], context, config, undefined, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								["1", "2", "3", "4", "5"].map((value) => ({
+									type: "toolCall" as const,
+									id: `call-${value}`,
+									name: "step",
+									arguments: { value },
+								})),
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+
+			const consuming = (async () => {
+				for await (const _event of stream) {
+					// consume
+				}
+			})();
+
+			await firstFourStarted;
+			// The 5th has NOT started: the wave is a barrier, not a sliding pool.
+			expect(started.sort()).toEqual(["1", "2", "3", "4"]);
+			releaseFirstFour();
+			await consuming;
+
+			expect(started).toHaveLength(5);
+			expect(started).toContain("5");
+		});
+	});
+});
