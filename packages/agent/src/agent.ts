@@ -138,6 +138,7 @@ export interface AgentOptions {
 	maxProviderTurns?: number;
 	onRunawayStop?: AgentLoopConfig["onRunawayStop"];
 	toolExecution?: ToolExecutionMode;
+	toolConcurrency?: AgentLoopConfig["toolConcurrency"];
 }
 
 class PendingMessageQueue {
@@ -258,6 +259,8 @@ export class Agent {
 	public onRunawayStop?: AgentLoopConfig["onRunawayStop"];
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
+	/** Pool width for "parallel" mode's parallel groups. Validated/defaulted in the agent loop. */
+	public toolConcurrency?: AgentLoopConfig["toolConcurrency"];
 
 	constructor(options: AgentOptions = {}) {
 		this._state = createMutableAgentState(options.initialState);
@@ -296,6 +299,7 @@ export class Agent {
 		this.maxProviderTurns = options.maxProviderTurns;
 		this.onRunawayStop = options.onRunawayStop;
 		this.toolExecution = options.toolExecution ?? "parallel";
+		this.toolConcurrency = options.toolConcurrency;
 	}
 
 	/**
@@ -524,6 +528,7 @@ export class Agent {
 			maxProviderTurns: this.maxProviderTurns,
 			onRunawayStop: this.onRunawayStop,
 			toolExecution: this.toolExecution,
+			toolConcurrency: this.toolConcurrency,
 			toolArgumentTeachEnabled: this.toolArgumentTeachEnabled,
 			onToolArgumentValidation: this.onToolArgumentValidation,
 			toolValidationEscalationThreshold: this.toolValidationEscalationThreshold,

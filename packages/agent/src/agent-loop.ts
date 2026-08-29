@@ -70,7 +70,9 @@ export {
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
 /** Bound simultaneous tool starts without imposing a failure-count or operation-count stop. */
-const TOOL_EXECUTION_WAVE_SIZE = 4;
+const DEFAULT_TOOL_CONCURRENCY = 4;
+const MIN_TOOL_CONCURRENCY = 1;
+const MAX_TOOL_CONCURRENCY = 16;
 
 /** Bounded no-progress state retained across host-owned continuations of one logical prompt. */
 export interface AgentLoopContinuationState {
@@ -836,9 +838,6 @@ async function executeToolCalls(
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
-	const hasSequentialToolCall = toolCalls.some(
-		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
-	);
 	const execCtx: ToolExecutionContext = {
 		context: currentContext,
 		assistantMessage,
@@ -854,9 +853,9 @@ async function executeToolCalls(
 		emit,
 	};
 	const batch =
-		config.toolExecution === "sequential" || hasSequentialToolCall
+		config.toolExecution === "sequential" || isToolParallelismDisabled()
 			? await executeToolCallsSequential(execCtx, toolCalls)
-			: await executeToolCallsParallel(execCtx, toolCalls);
+			: await executeToolCallsPartitioned(execCtx, toolCalls);
 	if (!execCtx.validationBounced) resetValidationFailureTracker(validationFailureTracker);
 	return batch;
 }
@@ -954,6 +953,37 @@ async function reservePreparedToolCalls(
 	}
 }
 
+/**
+ * Run exactly one call the way the legacy sequential branch runs each of its calls: prepare,
+ * reserve as a singleton array, execute, finalize, apply the recovery-gate effect, emit
+ * `tool_execution_end`, then the result-message artifact. Shared by the legacy sequential branch
+ * (`executeToolCallsSequential`) and by S2's partition scheduling, where a lone
+ * `executionMode: "sequential"` call becomes its own barrier group and runs through this exact
+ * same path - this is a structural extraction, not a behavior change: every await happens at the
+ * same point in the timeline it did when this was inlined in the sequential loop.
+ */
+async function executeBarrierToolCall(
+	execCtx: ToolExecutionContext,
+	toolCall: AgentToolCall,
+	index: number,
+): Promise<{ finalized: FinalizedToolCallOutcome; toolResultMessage: ToolResultMessage }> {
+	const started = await prepareAndStartToolCall(execCtx, toolCall, index);
+	if (started.kind === "prepared") {
+		await reservePreparedToolCalls(execCtx, [started.preparation]);
+	}
+	const finalized = await finalizeStartedToolCall(execCtx, started);
+	execCtx.toolFailureRecoveryGate.apply(finalized.executionGateEffect);
+
+	await emitToolExecutionEnd(finalized, execCtx.emit);
+	const toolResultMessage = createToolResultMessage(finalized);
+	await emitToolResultMessage(toolResultMessage, execCtx.emit);
+	// A handoff may publish a foreground placeholder, but a barrier call still owns the execution
+	// ordering contract. Do not let the caller continue until the detached execution has reached
+	// its normal policy-finalized terminal state.
+	if (finalized.backgroundCompletion) await finalized.backgroundCompletion.catch(() => undefined);
+	return { finalized, toolResultMessage };
+}
+
 async function executeToolCallsSequential(
 	execCtx: ToolExecutionContext,
 	toolCalls: AgentToolCall[],
@@ -962,22 +992,9 @@ async function executeToolCallsSequential(
 	const messages: ToolResultMessage[] = [];
 
 	for (const [index, toolCall] of toolCalls.entries()) {
-		const started = await prepareAndStartToolCall(execCtx, toolCall, index);
-		if (started.kind === "prepared") {
-			await reservePreparedToolCalls(execCtx, [started.preparation]);
-		}
-		const finalized = await finalizeStartedToolCall(execCtx, started);
-		execCtx.toolFailureRecoveryGate.apply(finalized.executionGateEffect);
-
-		await emitToolExecutionEnd(finalized, execCtx.emit);
-		const toolResultMessage = createToolResultMessage(finalized);
-		await emitToolResultMessage(toolResultMessage, execCtx.emit);
+		const { finalized, toolResultMessage } = await executeBarrierToolCall(execCtx, toolCall, index);
 		finalizedCalls.push(finalized);
 		messages.push(toolResultMessage);
-		// A handoff may publish a foreground placeholder, but a sequential batch still owns the
-		// execution ordering contract. Do not begin the next body until the detached execution has
-		// reached its normal policy-finalized terminal state.
-		if (finalized.backgroundCompletion) await finalized.backgroundCompletion.catch(() => undefined);
 
 		if (execCtx.signal?.aborted) {
 			break;
@@ -987,54 +1004,151 @@ async function executeToolCallsSequential(
 	return { messages, terminate: shouldTerminateToolBatch(finalizedCalls) };
 }
 
-async function executeToolCallsParallel(
+type ToolExecutionGroup =
+	| { kind: "barrier"; call: AgentToolCall; index: number }
+	| { kind: "parallel"; entries: { call: AgentToolCall; index: number }[] };
+
+/**
+ * S2 - order-preserving partition (replaces whole-batch `hasSequentialToolCall` poisoning). Walk
+ * `toolCalls` in emission order; a tool whose `executionMode === "sequential"` closes the
+ * currently open parallel group (if any) and becomes its own barrier group; every other call
+ * (including an unknown tool - preflight still rejects it during preparation) accumulates into
+ * the open parallel group, opening a fresh one if none is open. Every call appears in exactly one
+ * group, in original relative order; concatenating the groups' outputs back together (as
+ * `executeToolCallsPartitioned` does) reproduces the original emission order.
+ */
+function partitionToolCalls(
+	toolCalls: readonly AgentToolCall[],
+	tools: readonly AgentTool<any>[] | undefined,
+): ToolExecutionGroup[] {
+	const groups: ToolExecutionGroup[] = [];
+	let openGroup: { kind: "parallel"; entries: { call: AgentToolCall; index: number }[] } | undefined;
+	for (const [index, call] of toolCalls.entries()) {
+		const mode = tools?.find((tool) => tool.name === call.name)?.executionMode;
+		if (mode === "sequential") {
+			openGroup = undefined;
+			groups.push({ kind: "barrier", call, index });
+			continue;
+		}
+		if (!openGroup) {
+			openGroup = { kind: "parallel", entries: [] };
+			groups.push(openGroup);
+		}
+		openGroup.entries.push({ call, index });
+	}
+	return groups;
+}
+
+/**
+ * S3 - refill-batch pool (replaces the fixed-size wave barrier). Slots are refilled in batches:
+ * whenever k slots are free, prepare those k calls serially (preflight stays serial - never
+ * parallelized), reserve them as ONE array through the unchanged `reservePreparedToolCalls` (a
+ * host can still atomically persist the whole refill's reservation before any of its bodies
+ * start), then dispatch them. A slot frees and is immediately eligible for refill as soon as ITS
+ * call finishes, instead of waiting for the rest of a fixed-size wave to settle - that removes the
+ * wave barrier while keeping preparation incremental, so `beforeToolCall` policy and
+ * `toolFailureRecoveryGate.admit()` keep observing in-turn state that earlier completions changed.
+ * `tool_execution_end` fires at each call's actual completion (S4), not replayed once a whole wave
+ * settles - that reordering is audited safe (agent-loop.test.ts:3108) because nothing downstream
+ * is order-sensitive. The recovery gate is a DIFFERENT story: `apply()` stamps a failure with the
+ * gate's shared world-cursor, and a sibling's success bumps that same cursor, so which one lands
+ * first changes whether a later retry is admitted. The old code applied one whole wave's effects
+ * together, synchronously, in emission order after `Promise.all`; gate effects here therefore
+ * still apply in strict emission order via `nextToApply`, catching up as soon as the next slot in
+ * line is ready, decoupled from actual completion order (which only governs telemetry and pool
+ * width accounting).
+ */
+async function pooledExecuteToolCalls(
+	execCtx: ToolExecutionContext,
+	entries: readonly { call: AgentToolCall; index: number }[],
+	width: number,
+): Promise<FinalizedToolCallOutcome[]> {
+	const results: (FinalizedToolCallOutcome | undefined)[] = new Array(entries.length);
+	const inFlight = new Map<number, Promise<void>>();
+	let nextToApply = 0;
+	const drainGateApply = (): void => {
+		while (nextToApply < results.length) {
+			const finalized = results[nextToApply];
+			if (!finalized) break;
+			execCtx.toolFailureRecoveryGate.apply(finalized.executionGateEffect);
+			nextToApply++;
+		}
+	};
+	const settle = async (slot: number, finalized: FinalizedToolCallOutcome): Promise<void> => {
+		results[slot] = finalized;
+		drainGateApply();
+		await emitToolExecutionEnd(finalized, execCtx.emit);
+	};
+
+	let next = 0;
+	while (next < entries.length && !execCtx.signal?.aborted) {
+		const free = width - inFlight.size;
+		if (free <= 0) {
+			await Promise.race(inFlight.values());
+			continue;
+		}
+		const refillWave: PreparedToolCall[] = [];
+		const refillSlots: { slot: number; started: StartedToolCall }[] = [];
+		while (refillWave.length < free && next < entries.length && !execCtx.signal?.aborted) {
+			const entry = entries[next];
+			const slot = next;
+			next++;
+			const started = await prepareAndStartToolCall(execCtx, entry.call, entry.index);
+			if (started.kind === "finalized") {
+				// Immediate validation/policy/replay outcomes are never reserved (test :3622).
+				await settle(slot, started.finalized);
+				continue;
+			}
+			refillWave.push(started.preparation);
+			refillSlots.push({ slot, started });
+		}
+		if (refillSlots.length === 0) continue;
+		await reservePreparedToolCalls(execCtx, refillWave);
+		for (const { slot, started } of refillSlots) {
+			const running = finalizeStartedToolCall(execCtx, started).then((finalized) => {
+				inFlight.delete(slot);
+				return settle(slot, finalized);
+			});
+			inFlight.set(slot, running);
+		}
+	}
+	// In-flight work is always awaited, including on the abort path - an already-dispatched call
+	// keeps its real result.
+	await Promise.allSettled(inFlight.values());
+	// A call that never reached preparation (the abort path stopped refill-batch formation before
+	// reaching it) is simply absent from the result, not a placeholder.
+	return results.filter((entry): entry is FinalizedToolCallOutcome => entry !== undefined);
+}
+
+async function executeToolCallsPartitioned(
 	execCtx: ToolExecutionContext,
 	toolCalls: AgentToolCall[],
 ): Promise<ExecutedToolCallBatch> {
+	const groups = partitionToolCalls(toolCalls, execCtx.context.tools);
+	const width = resolveToolConcurrency(execCtx.config);
 	const orderedFinalizedCalls: FinalizedToolCallOutcome[] = [];
-	let nextIndex = 0;
-	// Account each bounded concurrent wave before launching more calls. This controls concurrency;
-	// admission remains operation-specific and does not stop unrelated work after failures.
-	while (nextIndex < toolCalls.length && !execCtx.signal?.aborted) {
-		const waveEnd = Math.min(nextIndex + TOOL_EXECUTION_WAVE_SIZE, toolCalls.length);
-		const wave: FinalizedToolCallEntry[] = [];
-		const preparedWave: PreparedToolCall[] = [];
-		const completionOrder: FinalizedToolCallOutcome[] = [];
-		for (; nextIndex < waveEnd; nextIndex++) {
-			const toolCall = toolCalls[nextIndex];
-			const started = await prepareAndStartToolCall(execCtx, toolCall, nextIndex);
-			if (started.kind === "finalized") {
-				await emitToolExecutionEnd(started.finalized, execCtx.emit);
-				wave.push(started.finalized);
-			} else {
-				preparedWave.push(started.preparation);
-				wave.push(async () => {
-					const finalized = await finalizeStartedToolCall(execCtx, started);
-					completionOrder.push(finalized);
-					return finalized;
-				});
-			}
-			if (execCtx.signal?.aborted) {
-				nextIndex++;
-				break;
-			}
-		}
-		await reservePreparedToolCalls(execCtx, preparedWave);
-
-		const finalizedWave = await Promise.all(
-			wave.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))),
-		);
-		for (const finalized of finalizedWave) execCtx.toolFailureRecoveryGate.apply(finalized.executionGateEffect);
-		for (const finalized of completionOrder) {
-			await emitToolExecutionEnd(finalized, execCtx.emit);
-		}
-		orderedFinalizedCalls.push(...finalizedWave);
-	}
 	const messages: ToolResultMessage[] = [];
-	for (const finalized of orderedFinalizedCalls) {
-		const toolResultMessage = createToolResultMessage(finalized);
-		await emitToolResultMessage(toolResultMessage, execCtx.emit);
-		messages.push(toolResultMessage);
+
+	for (const group of groups) {
+		if (execCtx.signal?.aborted) break;
+		if (group.kind === "barrier") {
+			const { finalized, toolResultMessage } = await executeBarrierToolCall(execCtx, group.call, group.index);
+			orderedFinalizedCalls.push(finalized);
+			messages.push(toolResultMessage);
+			continue;
+		}
+		// Result-message artifacts for this group are only emitted once the whole group settles, in
+		// original emission order - matching the pinned "ends in completion order, results persist
+		// in source order" contract (agent-loop.test.ts:3108). Groups themselves already run
+		// strictly in order (never overlapping), so deferring per-group instead of to the very end
+		// of the whole batch produces an identical observable event stream.
+		const finalizedEntries = await pooledExecuteToolCalls(execCtx, group.entries, width);
+		for (const finalized of finalizedEntries) {
+			const toolResultMessage = createToolResultMessage(finalized);
+			await emitToolResultMessage(toolResultMessage, execCtx.emit);
+			orderedFinalizedCalls.push(finalized);
+			messages.push(toolResultMessage);
+		}
 	}
 
 	return { messages, terminate: shouldTerminateToolBatch(orderedFinalizedCalls) };
@@ -1081,8 +1195,6 @@ type FinalizedToolCallOutcome = {
 	/** Present only for an accepted handoff; sequential batches await it before their next body. */
 	backgroundCompletion?: Promise<FinalizedToolCallOutcome>;
 };
-
-type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
 
 type ToolValidationFailureEpisode = {
 	repeats: number;
@@ -1222,6 +1334,45 @@ function isToolArgumentRepairEmergencyDisabled(): boolean {
 	const value = env?.PI_TOOL_REPAIR_DISABLED;
 	if (!value) return false;
 	return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+/**
+ * S1 emergency switch. Bypasses partition scheduling and the pool entirely: every batch runs
+ * through the legacy `executeToolCallsSequential` branch, same as `config.toolExecution ===
+ * "sequential"`. Parsed exactly like `isToolArgumentRepairEmergencyDisabled` above (house pattern).
+ * Takes precedence over `PI_TOOL_CONCURRENCY` and `AgentOptions.toolConcurrency`.
+ */
+function isToolParallelismDisabled(): boolean {
+	const env = typeof process === "object" && process ? process.env : undefined;
+	const value = env?.PI_TOOL_PARALLELISM_DISABLED;
+	if (!value) return false;
+	return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+function isValidToolConcurrency(value: number): boolean {
+	return Number.isInteger(value) && value >= MIN_TOOL_CONCURRENCY && value <= MAX_TOOL_CONCURRENCY;
+}
+
+/** Trimmed `parseInt`, accepted range 1-16, anything else ignored (including non-integer input). */
+function parseToolConcurrencyEnv(value: string | undefined): number | undefined {
+	if (!value) return undefined;
+	const parsed = Number.parseInt(value.trim(), 10);
+	return isValidToolConcurrency(parsed) ? parsed : undefined;
+}
+
+/**
+ * S1 pool-width resolution. Precedence: `PI_TOOL_CONCURRENCY` env > `config.toolConcurrency` >
+ * `DEFAULT_TOOL_CONCURRENCY`. Callers must check `isToolParallelismDisabled()` first - that switch
+ * bypasses this function entirely, it is not folded in here.
+ */
+function resolveToolConcurrency(config: AgentLoopConfig): number {
+	const env = typeof process === "object" && process ? process.env : undefined;
+	const envConcurrency = parseToolConcurrencyEnv(env?.PI_TOOL_CONCURRENCY);
+	if (envConcurrency !== undefined) return envConcurrency;
+	if (config.toolConcurrency !== undefined && isValidToolConcurrency(config.toolConcurrency)) {
+		return config.toolConcurrency;
+	}
+	return DEFAULT_TOOL_CONCURRENCY;
 }
 
 function isToolArgumentValidationError(error: unknown): error is ToolArgumentValidationError {

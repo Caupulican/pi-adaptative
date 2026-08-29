@@ -9,7 +9,7 @@ import {
 	type UserMessage,
 } from "@caupulican/pi-ai";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { agentLoop, agentLoopContinue } from "../src/agent-loop.ts";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
 import { createAgentToolFailureRecoveryAuthority } from "../src/types.ts";
@@ -5270,12 +5270,22 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 		});
 	});
 
-	describe("S0.4 - mixed batch (today: one sequential call poisons the WHOLE batch)", () => {
-		it("[read, sequential-tool, read] runs all three fully serialized, including the two default-parallel reads", async () => {
-			// EXPECTED TO CHANGE under Phase 3 S2 (partition scheduling, roadmap section 6): the two
-			// default-parallel reads should become concurrent with each other while the sequential
-			// call keeps its own barrier. This test pins TODAY's whole-batch poisoning
-			// (hasSequentialToolCall) so S2's parity review can see exactly what changed.
+	describe("S0.4 - mixed batch (updated for S2: order-preserving partition, not whole-batch poisoning)", () => {
+		it("[read, sequential-tool, read] still runs all three fully serialized: the two reads are NOT adjacent, so S2's partition puts them in separate singleton groups", async () => {
+			// UPDATED for Phase 3 S2 (partition scheduling, roadmap section 6). Before S2,
+			// `hasSequentialToolCall` poisoned the WHOLE batch to the sequential branch, so this
+			// exact order was incidental to that poisoning. Read section 6's FIXED partition
+			// algorithm literally: a "sequential" call closes the current parallel group and becomes
+			// its own barrier group; the NEXT non-sequential call opens a FRESH parallel group. For
+			// `[read-1, ask-1, read-2]` that yields three groups - Parallel[read-1], Barrier[ask-1],
+			// Parallel[read-2] - run strictly in order, each a singleton, so read-1 and read-2 do NOT
+			// overlap with each other (there is nothing else in their own group to overlap with).
+			// The observable order below is therefore UNCHANGED from before S2 - this test now pins
+			// that specific fact (non-adjacent same-type calls split by a barrier stay serialized),
+			// which matters as a regression guard against a naive partition that groups same-tool
+			// calls wherever they sit in the batch instead of preserving emission order. Contrast
+			// with S5.6's adjacent-reads cases, where the two reads DO end up in the same group and
+			// DO run concurrently.
 			const readSchema = Type.Object({ id: Type.String() });
 			let inFlight = 0;
 			let overlapped = false;
@@ -5349,21 +5359,33 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 		});
 	});
 
-	describe("S0.wave - TOOL_EXECUTION_WAVE_SIZE chunking is a hard barrier today", () => {
-		it("does not start the 5th of 5 independent parallel calls until the first 4 have all settled", async () => {
-			// S3 deliberately replaces this barrier with a sliding pool - this test is EXPECTED to
-			// need updating/deletion once that lands.
+	describe("S0.wave -> updated for S3: a freed pool slot refills immediately, it is not a fixed wave barrier", () => {
+		it("starts the 5th of 5 independent parallel calls as soon as ONE of the first four's slots frees, without waiting for the other three to settle", async () => {
+			// UPDATED for Phase 3 S3 (pooled execution, roadmap section 6). This test used to prove
+			// TOOL_EXECUTION_WAVE_SIZE=4 was a hard barrier: the 5th call could not even be prepared
+			// until ALL of the first four had settled, because "wave 2" only began after
+			// `Promise.all(wave1)` resolved. The refill-batch pool replaces that: a slot is eligible
+			// for refill the instant ITS call finishes, independent of its three siblings. To prove
+			// that (rather than just re-confirm the old shared-gate setup, which happens to block all
+			// four on the very same promise and therefore can't tell a pool apart from a wave), each
+			// of the first four calls now has its OWN release gate, and only ONE of them - not all
+			// four - is released before asserting the 5th has started.
 			const schema = Type.Object({ value: Type.String() });
 			const started: string[] = [];
-			const firstFourValues = new Set(["1", "2", "3", "4"]);
+			const finished: string[] = [];
+			const releases = new Map<string, () => void>();
+			const gates = new Map<string, Promise<void>>();
+			for (const value of ["1", "2", "3", "4"]) {
+				gates.set(value, new Promise<void>((resolve) => releases.set(value, resolve)));
+			}
 			let firstFourStartedCount = 0;
 			let resolveFirstFourStarted: () => void;
 			const firstFourStarted = new Promise<void>((resolve) => {
 				resolveFirstFourStarted = resolve;
 			});
-			let releaseFirstFour: () => void;
-			const waveGate = new Promise<void>((resolve) => {
-				releaseFirstFour = resolve;
+			let resolveFifthStarted: () => void;
+			const fifthStarted = new Promise<void>((resolve) => {
+				resolveFifthStarted = resolve;
 			});
 
 			const tool: AgentTool<typeof schema, { value: string }> = {
@@ -5373,11 +5395,14 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 				parameters: schema,
 				async execute(_toolCallId, params) {
 					started.push(params.value);
-					if (firstFourValues.has(params.value)) {
-						firstFourStartedCount++;
-						if (firstFourStartedCount === 4) resolveFirstFourStarted();
-						await waveGate;
+					if (params.value === "5") {
+						resolveFifthStarted();
+						return { content: [{ type: "text", text: "5" }], details: { value: "5" } };
 					}
+					firstFourStartedCount++;
+					if (firstFourStartedCount === 4) resolveFirstFourStarted();
+					await gates.get(params.value);
+					finished.push(params.value);
 					return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
 				},
 			};
@@ -5424,13 +5449,814 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 			})();
 
 			await firstFourStarted;
-			// The 5th has NOT started: the wave is a barrier, not a sliding pool.
+			// All 4 pool slots (default width) are occupied by 1-4; the 5th cannot have started yet.
 			expect(started.sort()).toEqual(["1", "2", "3", "4"]);
-			releaseFirstFour();
+
+			// Free exactly ONE slot - not the whole wave.
+			releases.get("2")?.();
+			await fifthStarted;
+			// The 5th started once ONE slot freed, while the other three of the first batch are
+			// still blocked on their own never-released gates: proof this is a per-slot pool, not a
+			// fixed-size wave that waits for everything before refilling.
+			expect(finished).toEqual(["2"]);
+			expect(started).toContain("5");
+
+			releases.get("1")?.();
+			releases.get("3")?.();
+			releases.get("4")?.();
 			await consuming;
 
 			expect(started).toHaveLength(5);
-			expect(started).toContain("5");
+			expect(finished.sort()).toEqual(["1", "2", "3", "4"]);
+		});
+	});
+});
+
+/**
+ * Phase 3 S5 - invariant pin-tests under the new partition + pool scheduler (roadmap section 6).
+ * Unlike S0 (which characterizes pre-refactor behavior), these assert the INTENDED post-refactor
+ * behavior and are new tests, not updates to S0's parity oracle.
+ */
+describe("Phase 3 S5 - pool invariants, partition semantics, env matrix, full-loop abort", () => {
+	/**
+	 * S5.1-4 mock the SAME reader/writer locking invariant as
+	 * `packages/coding-agent/src/core/tools/file-mutation-queue.ts` (edit/write = readers, per-file
+	 * FIFO, parallel across files; bash/python = exclusive writers, FIFO among themselves, wait for
+	 * readers to drain and block new readers/writers while active) rather than importing that real
+	 * module or the real edit/bash/python tools. `packages/agent` cannot depend on
+	 * `packages/coding-agent` (the real tools and the real queue live there, one layer up, and
+	 * depending downward would invert the package graph), so this mirrors the file's documented
+	 * contract at the unit-lock level. What these tests actually prove is scheduler-side: the new
+	 * pool must dispatch calls concurrently enough for a real per-file/exclusive-writer lock to ever
+	 * see contention at all - a scheduler that accidentally serialized everything would make S5.2-4
+	 * pass trivially for the wrong reason, which is why S5.1 (independent files - MUST overlap) is
+	 * included as the positive control.
+	 */
+	describe("S5.1-4 - reader/writer mutation locking (file-mutation-queue equivalent) survives the pool", () => {
+		function createMutationLock() {
+			const fileQueues = new Map<string, Promise<void>>();
+			let activeReaders = 0;
+			let readersDrained: (() => void) | undefined;
+			let writerQueue: Promise<void> = Promise.resolve();
+			let writerActive: Promise<void> | undefined;
+
+			function acquireReader(): Promise<void> {
+				if (!writerActive) {
+					activeReaders++;
+					return Promise.resolve();
+				}
+				return writerActive.then(() => {
+					activeReaders++;
+				});
+			}
+			function releaseReader(): void {
+				activeReaders--;
+				if (activeReaders === 0 && readersDrained) {
+					const drained = readersDrained;
+					readersDrained = undefined;
+					drained();
+				}
+			}
+			async function withReader<T>(file: string, fn: () => Promise<T>): Promise<T> {
+				const previous = fileQueues.get(file) ?? Promise.resolve();
+				let releaseNext!: () => void;
+				const next = new Promise<void>((resolve) => {
+					releaseNext = resolve;
+				});
+				fileQueues.set(
+					file,
+					previous.then(() => next),
+				);
+				await acquireReader();
+				await previous;
+				try {
+					return await fn();
+				} finally {
+					releaseReader();
+					releaseNext();
+				}
+			}
+			async function withWriter<T>(fn: () => Promise<T>): Promise<T> {
+				const run = writerQueue.then(async () => {
+					let release!: () => void;
+					writerActive = new Promise<void>((resolve) => {
+						release = resolve;
+					});
+					try {
+						if (activeReaders > 0) {
+							await new Promise<void>((resolve) => {
+								readersDrained = resolve;
+							});
+						}
+						return await fn();
+					} finally {
+						writerActive = undefined;
+						release();
+					}
+				});
+				writerQueue = run.then(
+					() => undefined,
+					() => undefined,
+				);
+				return run;
+			}
+			return { withReader, withWriter };
+		}
+
+		function createLockedTool(
+			name: string,
+			lock: ReturnType<typeof createMutationLock>,
+			kind: "reader" | "writer",
+			order: string[],
+		): AgentTool<ReturnType<typeof Type.Object>, { path: string }> {
+			const schema = Type.Object({ path: Type.String() });
+			const tool: AgentTool<typeof schema, { path: string }> = {
+				name,
+				label: name,
+				description: name,
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					const label = `${name}:${params.path}`;
+					const body = async () => {
+						order.push(`start:${label}`);
+						await Promise.resolve();
+						await Promise.resolve();
+						order.push(`end:${label}`);
+						return { content: [{ type: "text" as const, text: label }], details: { path: params.path } };
+					};
+					return kind === "reader" ? lock.withReader(params.path, body) : lock.withWriter(body);
+				},
+			};
+			return tool;
+		}
+
+		async function runBatch(
+			tools: AgentTool<any>[],
+			calls: { id: string; name: string; path: string }[],
+		): Promise<void> {
+			const context: AgentContext = { systemPrompt: "", messages: [], tools };
+			const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run batch")], context, config, undefined, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								calls.map((call) => ({
+									type: "toolCall" as const,
+									id: call.id,
+									name: call.name,
+									arguments: { path: call.path },
+								})),
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+			for await (const _event of stream) {
+				// consume
+			}
+		}
+
+		it("S5.1 [edit A, edit B] on different files run concurrently (per-file reader lock, parallel across files)", async () => {
+			const lock = createMutationLock();
+			const order: string[] = [];
+			const edit = createLockedTool("edit", lock, "reader", order);
+			await runBatch(
+				[edit],
+				[
+					{ id: "edit-a", name: "edit", path: "/a" },
+					{ id: "edit-b", name: "edit", path: "/b" },
+				],
+			);
+			// edit-b starts before edit-a ends: a real overlap, not just adjacent scheduling.
+			expect(order.indexOf("start:edit:/b")).toBeLessThan(order.indexOf("end:edit:/a"));
+		});
+
+		it("S5.2 [edit A, bash] do not overlap (reader vs exclusive writer)", async () => {
+			const lock = createMutationLock();
+			const order: string[] = [];
+			const edit = createLockedTool("edit", lock, "reader", order);
+			const bash = createLockedTool("bash", lock, "writer", order);
+			await runBatch(
+				[edit, bash],
+				[
+					{ id: "edit-a", name: "edit", path: "/a" },
+					{ id: "bash-1", name: "bash", path: "ignored" },
+				],
+			);
+			const editRange = [order.indexOf("start:edit:/a"), order.indexOf("end:edit:/a")];
+			const bashRange = [order.indexOf("start:bash:ignored"), order.indexOf("end:bash:ignored")];
+			const noOverlap = editRange[1] < bashRange[0] || bashRange[1] < editRange[0];
+			expect(noOverlap).toBe(true);
+		});
+
+		it("S5.3 [bash, bash] do not overlap (exclusive writer FIFO)", async () => {
+			const lock = createMutationLock();
+			const order: string[] = [];
+			const bash = createLockedTool("bash", lock, "writer", order);
+			await runBatch(
+				[bash],
+				[
+					{ id: "bash-1", name: "bash", path: "one" },
+					{ id: "bash-2", name: "bash", path: "two" },
+				],
+			);
+			const firstRange = [order.indexOf("start:bash:one"), order.indexOf("end:bash:one")];
+			const secondRange = [order.indexOf("start:bash:two"), order.indexOf("end:bash:two")];
+			const noOverlap = firstRange[1] < secondRange[0] || secondRange[1] < firstRange[0];
+			expect(noOverlap).toBe(true);
+		});
+
+		it("S5.4 [python, bash] do not overlap (both are exclusive writers)", async () => {
+			const lock = createMutationLock();
+			const order: string[] = [];
+			const python = createLockedTool("python", lock, "writer", order);
+			const bash = createLockedTool("bash", lock, "writer", order);
+			await runBatch(
+				[python, bash],
+				[
+					{ id: "python-1", name: "python", path: "one" },
+					{ id: "bash-1", name: "bash", path: "two" },
+				],
+			);
+			const pythonRange = [order.indexOf("start:python:one"), order.indexOf("end:python:one")];
+			const bashRange = [order.indexOf("start:bash:two"), order.indexOf("end:bash:two")];
+			const noOverlap = pythonRange[1] < bashRange[0] || bashRange[1] < pythonRange[0];
+			expect(noOverlap).toBe(true);
+		});
+	});
+
+	describe("S5.5 - six reads at width 4: sliding pool refill, results still in emission order", () => {
+		it("starts the 5th (and cascades to the 6th) as slots free, without waiting for the whole first batch of four; results stay in emission order", async () => {
+			const schema = Type.Object({ value: Type.String() });
+			const started: string[] = [];
+			const finished: string[] = [];
+			const releases = new Map<string, () => void>();
+			const gates = new Map<string, Promise<void>>();
+			for (const value of ["1", "2", "3", "4"]) {
+				gates.set(value, new Promise<void>((resolve) => releases.set(value, resolve)));
+			}
+			let firstFourStartedCount = 0;
+			let resolveFirstFourStarted: () => void;
+			const firstFourStarted = new Promise<void>((resolve) => {
+				resolveFirstFourStarted = resolve;
+			});
+			let resolveSixthStarted: () => void;
+			const sixthStarted = new Promise<void>((resolve) => {
+				resolveSixthStarted = resolve;
+			});
+
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "read",
+				label: "Read",
+				description: "Read",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					started.push(params.value);
+					if (params.value === "5" || params.value === "6") {
+						if (params.value === "6") resolveSixthStarted();
+						finished.push(params.value);
+						return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+					}
+					firstFourStartedCount++;
+					if (firstFourStartedCount === 4) resolveFirstFourStarted();
+					await gates.get(params.value);
+					finished.push(params.value);
+					return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "parallel",
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run six")], context, config, undefined, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								["1", "2", "3", "4", "5", "6"].map((value) => ({
+									type: "toolCall" as const,
+									id: `call-${value}`,
+									name: "read",
+									arguments: { value },
+								})),
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+
+			await firstFourStarted;
+			expect(started.sort()).toEqual(["1", "2", "3", "4"]);
+
+			// Free exactly ONE of the first four's slots. That alone must be enough to cascade
+			// through both remaining queued calls (5 then 6, neither of which blocks), proving the
+			// pool refills per-slot rather than waiting for the other three to settle.
+			releases.get("2")?.();
+			await sixthStarted;
+			expect(finished).toEqual(expect.arrayContaining(["2", "5", "6"]));
+			expect(finished).not.toEqual(expect.arrayContaining(["1", "3", "4"]));
+
+			releases.get("1")?.();
+			releases.get("3")?.();
+			releases.get("4")?.();
+
+			const finalMessages = await stream.result();
+			const results = finalMessages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+			expect(results.map((result) => result.toolCallId)).toEqual([
+				"call-1",
+				"call-2",
+				"call-3",
+				"call-4",
+				"call-5",
+				"call-6",
+			]);
+		});
+	});
+
+	describe("S5.6 - partition semantics: adjacent same-type calls share one group and run concurrently", () => {
+		function makeTrackedTool(
+			name: string,
+			executionMode: "sequential" | undefined,
+			order: string[],
+		): AgentTool<ReturnType<typeof Type.Object>, { id: string }> {
+			const schema = Type.Object({ id: Type.String() });
+			const tool: AgentTool<typeof schema, { id: string }> = {
+				name,
+				label: name,
+				description: name,
+				parameters: schema,
+				...(executionMode ? { executionMode } : {}),
+				async execute(_toolCallId, params) {
+					order.push(`start:${params.id}`);
+					await Promise.resolve();
+					await Promise.resolve();
+					order.push(`end:${params.id}`);
+					return { content: [{ type: "text", text: params.id }], details: { id: params.id } };
+				},
+			};
+			return tool;
+		}
+
+		it("[read, read, ask-question]: the two adjacent reads run concurrently, then the barrier runs alone", async () => {
+			const order: string[] = [];
+			const read = makeTrackedTool("read", undefined, order);
+			const ask = makeTrackedTool("ask-question", "sequential", order);
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [read, ask] };
+			const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("do three")], context, config, undefined, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{ type: "toolCall", id: "read-1", name: "read", arguments: { id: "read-1" } },
+									{ type: "toolCall", id: "read-2", name: "read", arguments: { id: "read-2" } },
+									{ type: "toolCall", id: "ask-1", name: "ask-question", arguments: { id: "ask-1" } },
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+			for await (const _event of stream) {
+				// consume
+			}
+			// The two reads overlap: read-2 starts before read-1 ends.
+			expect(order.indexOf("start:read-2")).toBeLessThan(order.indexOf("end:read-1"));
+			// The barrier call starts only after BOTH reads have fully ended.
+			const askStart = order.indexOf("start:ask-1");
+			expect(askStart).toBeGreaterThan(order.indexOf("end:read-1"));
+			expect(askStart).toBeGreaterThan(order.indexOf("end:read-2"));
+		});
+
+		it("[ask-question, read, read]: the barrier runs alone first, then the two adjacent reads run concurrently", async () => {
+			const order: string[] = [];
+			const read = makeTrackedTool("read", undefined, order);
+			const ask = makeTrackedTool("ask-question", "sequential", order);
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [read, ask] };
+			const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("do three")], context, config, undefined, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{ type: "toolCall", id: "ask-1", name: "ask-question", arguments: { id: "ask-1" } },
+									{ type: "toolCall", id: "read-1", name: "read", arguments: { id: "read-1" } },
+									{ type: "toolCall", id: "read-2", name: "read", arguments: { id: "read-2" } },
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+			for await (const _event of stream) {
+				// consume
+			}
+			// The two reads overlap: read-2 starts before read-1 ends.
+			expect(order.indexOf("start:read-2")).toBeLessThan(order.indexOf("end:read-1"));
+			// Both reads start only after the barrier call has fully ended.
+			const askEnd = order.indexOf("end:ask-1");
+			expect(order.indexOf("start:read-1")).toBeGreaterThan(askEnd);
+			expect(order.indexOf("start:read-2")).toBeGreaterThan(askEnd);
+		});
+	});
+
+	describe("S5.7 - env matrix: PI_TOOL_PARALLELISM_DISABLED and PI_TOOL_CONCURRENCY", () => {
+		const originalDisabled = process.env.PI_TOOL_PARALLELISM_DISABLED;
+		const originalConcurrency = process.env.PI_TOOL_CONCURRENCY;
+		afterEach(() => {
+			if (originalDisabled === undefined) delete process.env.PI_TOOL_PARALLELISM_DISABLED;
+			else process.env.PI_TOOL_PARALLELISM_DISABLED = originalDisabled;
+			if (originalConcurrency === undefined) delete process.env.PI_TOOL_CONCURRENCY;
+			else process.env.PI_TOOL_CONCURRENCY = originalConcurrency;
+		});
+
+		it("PI_TOOL_PARALLELISM_DISABLED=1 reproduces the legacy sequential characterization exactly, even though config.toolExecution is left at its parallel default", async () => {
+			process.env.PI_TOOL_PARALLELISM_DISABLED = "1";
+			const schema = Type.Object({ value: Type.String() });
+			const executed: string[] = [];
+			const reservations: string[][] = [];
+			let inFlight = 0;
+			let overlapped = false;
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					inFlight++;
+					if (inFlight > 1) overlapped = true;
+					executed.push(params.value);
+					await Promise.resolve();
+					await Promise.resolve();
+					inFlight--;
+					if (params.value === "b") throw new Error("boom");
+					return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				// Deliberately NOT "sequential" - absent the env var this would run through the new
+				// partitioned pool at the default width and these three calls WOULD overlap.
+				toolExecution: "parallel",
+				onToolCallStart: (calls) => {
+					reservations.push(calls.map((call) => call.callId));
+				},
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run three")], context, config, undefined, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{ type: "toolCall", id: "call-a", name: "step", arguments: { value: "a" } },
+									{ type: "toolCall", id: "call-b", name: "step", arguments: { value: "b" } },
+									{ type: "toolCall", id: "call-c", name: "step", arguments: { value: "c" } },
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+			for await (const _event of stream) {
+				// consume
+			}
+			// Matches S0.1's sequential characterization exactly: singleton reservations in emission
+			// order, no overlap, an error in the middle never stops the sibling after it.
+			expect(reservations).toEqual([["call-a"], ["call-b"], ["call-c"]]);
+			expect(overlapped).toBe(false);
+			expect(executed).toEqual(["a", "b", "c"]);
+			const results = (await stream.result()).filter(
+				(message): message is ToolResultMessage => message.role === "toolResult",
+			);
+			expect(results.map((r) => r.toolCallId)).toEqual(["call-a", "call-b", "call-c"]);
+			expect(results.map((r) => r.isError ?? false)).toEqual([false, true, false]);
+		});
+
+		it("PI_TOOL_CONCURRENCY=1 serializes a default-parallel batch through the NEW partitioned/pooled path", async () => {
+			process.env.PI_TOOL_CONCURRENCY = "1";
+			const schema = Type.Object({ value: Type.String() });
+			let inFlight = 0;
+			let overlapped = false;
+			const order: string[] = [];
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					inFlight++;
+					if (inFlight > 1) overlapped = true;
+					order.push(`start:${params.value}`);
+					await Promise.resolve();
+					await Promise.resolve();
+					order.push(`end:${params.value}`);
+					inFlight--;
+					return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+				},
+			};
+			// config.toolExecution is left at its "parallel" default and PI_TOOL_PARALLELISM_DISABLED
+			// is unset, so `executeToolCalls`'s dispatcher (agent-loop.ts) sends this batch through
+			// `executeToolCallsPartitioned`/`pooledExecuteToolCalls` by construction - PI_TOOL_CONCURRENCY
+			// is a pool-width knob, not a second kill-switch. What this test actually verifies is that
+			// the knob is not a silent no-op: at the default width 4 this batch WOULD overlap (three
+			// calls, no gating), so observing zero overlap here proves the env var reached
+			// `resolveToolConcurrency` and constrained the pool to one in-flight call at a time.
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "parallel",
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run three")], context, config, undefined, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{ type: "toolCall", id: "call-a", name: "step", arguments: { value: "a" } },
+									{ type: "toolCall", id: "call-b", name: "step", arguments: { value: "b" } },
+									{ type: "toolCall", id: "call-c", name: "step", arguments: { value: "c" } },
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+			for await (const _event of stream) {
+				// consume
+			}
+			expect(overlapped).toBe(false);
+			expect(order).toEqual(["start:a", "end:a", "start:b", "end:b", "start:c", "end:c"]);
+			const results = (await stream.result()).filter(
+				(message): message is ToolResultMessage => message.role === "toolResult",
+			);
+			expect(results.map((r) => r.toolCallId)).toEqual(["call-a", "call-b", "call-c"]);
+		});
+
+		it("PI_TOOL_CONCURRENCY=8 widens the pool past the default width 4, so six calls all fit in ONE refill", async () => {
+			process.env.PI_TOOL_CONCURRENCY = "8";
+			const schema = Type.Object({ value: Type.String() });
+			const started: string[] = [];
+			let startedCount = 0;
+			let resolveAllStarted: () => void;
+			const allStarted = new Promise<void>((resolve) => {
+				resolveAllStarted = resolve;
+			});
+			const releases: Array<() => void> = [];
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					started.push(params.value);
+					startedCount++;
+					if (startedCount === 6) resolveAllStarted();
+					await new Promise<void>((resolve) => releases.push(resolve));
+					return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "parallel",
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run six")], context, config, undefined, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								["1", "2", "3", "4", "5", "6"].map((value) => ({
+									type: "toolCall" as const,
+									id: `call-${value}`,
+									name: "step",
+									arguments: { value },
+								})),
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+			const consuming = (async () => {
+				for await (const _event of stream) {
+					// consume
+				}
+			})();
+			// At the default width 4 this would need two refills before all six could be in flight.
+			// At width 8, all six fit in the FIRST refill: every one of them starts before any is
+			// released, proving the env var actually widened the pool rather than being a no-op.
+			await allStarted;
+			expect(started.sort()).toEqual(["1", "2", "3", "4", "5", "6"]);
+			for (const release of releases) release();
+			await consuming;
+		});
+	});
+
+	describe("S5.8 - MANDATORY full-loop abort regression (no maxProviderTurns escape hatch)", () => {
+		it("a graceful mid-batch abort (all three shapes) still collapses the WHOLE run to one synthetic aborted message, because the batch never sets terminate:true and runLoop attempts another (doomed) provider turn", async () => {
+			// This is the bug S0 discovered and the roadmap requires pinning (section 6, S5 item 8):
+			// `executeToolCallsPartitioned`/`pooledExecuteToolCalls` themselves behave gracefully on
+			// abort (verified below via the EVENT STREAM), but `runLoop` (agent-loop.ts) only skips
+			// the next provider turn when a batch sets `terminate: true`. An aborted-but-not-terminated
+			// batch therefore falls through to `hasMoreToolCalls = true`, `runLoop` starts another
+			// provider request, that request's own preflight throws on the already-aborted signal
+			// (provider-request-planner.ts), and the throw is never caught inside `runLoop` - it
+			// unwinds all the way to `streamAgentLoop`'s outer catch, which discards every message
+			// accumulated so far and replaces the ENTIRE result with one synthetic
+			// `{role:"assistant", stopReason:"aborted"}` message. Fixing that outer-loop gap is out of
+			// scope for Phase 3 S1-S6 (it lives in `runLoop`, not the scheduler); this test's job is
+			// only to make the current, actual behavior visible and pinned so a future change to
+			// `terminate` semantics or to the pool's abort timing cannot silently flip it unnoticed.
+			//
+			// Batch of 6, width 4 (default): calls 1-4 are the first refill and complete for REAL
+			// before any abort (shape c - already-dispatched work is always awaited and keeps its
+			// real result). `beforeToolCall` aborts precisely when call 5 - the next entry the pool
+			// prepares - is itself being prepared, so call 5 becomes an explicit finalized error
+			// result (shape a) with nothing else sitting unreserved alongside it (avoiding the
+			// UNRELATED reservation-throw path that S0.3's last two tests characterize). Call 6 is
+			// never even attempted (shape b - absent, not a placeholder).
+			const schema = Type.Object({ value: Type.String() });
+			const executed: string[] = [];
+			const controller = new AbortController();
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					executed.push(params.value);
+					return { content: [{ type: "text", text: `real:${params.value}` }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "parallel",
+				// No maxProviderTurns cap - this is the whole point of S5.8 versus S0.3's isolated
+				// scheduler-level abort tests.
+				beforeToolCall: async ({ toolCall }) => {
+					if (toolCall.id === "call-5") controller.abort();
+					return undefined;
+				},
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run six")], context, config, controller.signal, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								["1", "2", "3", "4", "5", "6"].map((value) => ({
+									type: "toolCall" as const,
+									id: `call-${value}`,
+									name: "step",
+									arguments: { value },
+								})),
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+
+			const events: AgentEvent[] = [];
+			for await (const event of stream) events.push(event);
+
+			// The SCHEDULER behaved gracefully: calls 1-4 really executed (shape c), call 5 never
+			// executed a body (its own preparation absorbed the abort - shape a), call 6 never even
+			// started (shape b).
+			expect(executed.sort()).toEqual(["1", "2", "3", "4"]);
+			const endEvents = events.filter((event) => event.type === "tool_execution_end");
+			expect(endEvents.map((event) => event.toolCallId).sort()).toEqual([
+				"call-1",
+				"call-2",
+				"call-3",
+				"call-4",
+				"call-5",
+			]);
+			const call5End = endEvents.find((event) => event.toolCallId === "call-5");
+			expect(call5End && "isError" in call5End ? call5End.isError : undefined).toBe(true);
+			expect(events.some((event) => event.type === "tool_execution_start" && event.toolCallId === "call-6")).toBe(
+				false,
+			);
+
+			// ...but the FINAL RESULT still collapses to exactly one synthetic message: the documented
+			// bug. Every real result the event stream just showed (including calls 1-4's successes)
+			// is gone from the returned array.
+			const finalMessages = await stream.result();
+			expect(finalMessages).toHaveLength(1);
+			expect(finalMessages[0]).toMatchObject({ role: "assistant", stopReason: "aborted" });
+			expect(finalMessages.some((message) => message.role === "toolResult")).toBe(false);
 		});
 	});
 });

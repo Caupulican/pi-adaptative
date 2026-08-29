@@ -475,13 +475,34 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Tool execution mode.
 	 * - "sequential": execute tool calls one by one
-	 * - "parallel": preflight and execute tool calls in bounded concurrent accounting waves;
-	 *   update recovery state between waves, emit `tool_execution_end` in completion order within
-	 *   each wave, then emit tool-result message artifacts in assistant source order
+	 * - "parallel": partition an assistant message's tool calls into an order-preserving sequence
+	 *   of groups - a lone `executionMode: "sequential"` call closes the current group and becomes
+	 *   its own barrier group (reserved and run alone, exactly like the sequential mode above);
+	 *   every other call accumulates into a parallel group run through a width-bounded pool (see
+	 *   `toolConcurrency`). Groups run in original emission order, so a sequential call no longer
+	 *   poisons unrelated calls into serial execution. Within a pooled group, `tool_execution_end`
+	 *   fires at each call's actual completion (not replayed at a wave boundary); the recovery gate
+	 *   still applies effects in original emission order (a fast sibling's success and a slow
+	 *   sibling's failure must not race), catching up as soon as the next call in line is ready.
+	 *   Tool-result message artifacts are likewise emitted in assistant source order once their
+	 *   group settles.
 	 *
 	 * Default: "parallel"
 	 */
 	toolExecution?: ToolExecutionMode;
+
+	/**
+	 * Pool width for "parallel" mode's parallel groups (see `toolExecution`): the maximum number
+	 * of prepared calls dispatched at once within one group. Slots are refilled as they free, so a
+	 * new call can start as soon as any one finishes rather than waiting for a fixed-size wave to
+	 * fully settle. Overridden by the `PI_TOOL_CONCURRENCY` env var when it parses to an integer in
+	 * 1-16; `PI_TOOL_PARALLELISM_DISABLED` bypasses partitioning and pooling entirely (every batch
+	 * runs through the legacy sequential branch) and takes precedence over both. This field is
+	 * validated to an integer in 1-16; an out-of-range or non-integer value is ignored.
+	 *
+	 * Default: 4
+	 */
+	toolConcurrency?: number;
 
 	/** Disable in-band tool repair teaching notes. Default: enabled. */
 	toolArgumentTeachEnabled?: boolean;
