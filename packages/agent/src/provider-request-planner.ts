@@ -15,6 +15,17 @@ import type {
 } from "./types.ts";
 import { uuidv7 } from "./uuid.ts";
 
+/**
+ * How many leading messages of a run have already gone out on a provider request, keyed by the loop
+ * config that owns the run. Duplicate-erasure in `sanitizeToolFailureContext` shifts every byte
+ * after the call it removes, and providers prefill against the longest byte-identical prefix, so
+ * erasing something already sent invalidates the whole conversation from that point. Recording the
+ * high-water mark here confines dedup to history the provider has never seen. A WeakMap so a
+ * finished run's entry disappears with its config; an absent entry means nothing has been sent yet,
+ * which is exactly the right default.
+ */
+const sentPrefixCounts = new WeakMap<AgentLoopConfig, number>();
+
 const MAX_STALE_PROVIDER_REQUEST_PLANS = 3;
 const MAX_PROVIDER_REQUEST_REPLANS = 2;
 
@@ -158,7 +169,13 @@ export async function startPlannedAgentProviderRequestWithId(
 	let stalePlanCount = 0;
 	while (true) {
 		signal?.throwIfAborted();
-		const sanitized = sanitizeToolFailureContext(sourceContext.messages, sourceContext.systemPrompt);
+		const sanitized = sanitizeToolFailureContext(
+			sourceContext.messages,
+			sourceContext.systemPrompt,
+			// Clamped: compaction can shorten the transcript, and the mark indexes into
+			// `sourceContext.messages`, whose entries are otherwise only ever appended.
+			Math.min(sentPrefixCounts.get(config) ?? 0, sourceContext.messages.length),
+		);
 		const plan = await buildContextPlan(sanitized.messages, admissionAttempt, config, signal);
 		let keepPlan = false;
 		try {
@@ -259,6 +276,9 @@ export async function startPlannedAgentProviderRequestWithId(
 				continue;
 			}
 			const requestId = uuidv7() as AgentRequestId;
+			// Everything in this accepted request is now bytes the provider has seen; later turns may
+			// no longer rewrite them. Monotone, so a shorter replanned history never lowers the mark.
+			sentPrefixCounts.set(config, Math.max(sentPrefixCounts.get(config) ?? 0, sourceContext.messages.length));
 			plan.commit?.();
 			adoptReplannedMessages(initialContext, sourceContext);
 			keepPlan = true;

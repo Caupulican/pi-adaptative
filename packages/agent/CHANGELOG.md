@@ -2,6 +2,8 @@
 
 ### Fixed
 
+- Duplicate-call deduplication no longer rewrites conversation history the provider has already seen. Erasing a superseded successful call shifts every byte after it, and providers prefill each request against the longest byte-identical prefix, so removing an early duplicate invalidated the whole conversation from that point — measured live, one repeated `ls` erased at message 5 of 15 cost a full re-prefill. Dedup is unchanged for history that has not been sent yet (the common case of a model repeating itself within a turn); it simply stops reaching back into bytes the provider is caching. The planner tracks the sent high-water mark per run and passes it to `sanitizeToolFailureContext`, whose new third parameter defaults to 0, so every direct caller keeps today's behavior.
+
 - The tool-failure ledger no longer sits in the system prompt, where it invalidated the provider's prompt cache for the whole conversation. The ledger is per-request-mutable by nature — it appears on the first active failure, its `mistakes=` counts change as failures accumulate, and it clears on a matching success — so every one of those events re-prefilled the entire request from byte zero (measured on a real xAI subscription session: a single failed read plus a later failed bash cost two full re-prefills of a ~22k-token prompt). `sanitizeToolFailureContext` now returns the block as a separate `ledger` and hands the system prompt back byte-identical; the planner projects it as the last message of the request, where the same churn costs only the tail. Ledger content, the MUST protocol, and every recovery-gate semantic are unchanged.
 
 ## [0.97.17] - 2026-08-28

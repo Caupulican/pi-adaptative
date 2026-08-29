@@ -943,4 +943,33 @@ describe("mandatory tool failure recovery protocol", () => {
 			expect(JSON.stringify(currentPrefix)).toBe(JSON.stringify(previousBody));
 		}
 	});
+	it("never erases a duplicate the provider has already seen, but still dedups fresh history", () => {
+		const call = (id: string): AgentMessage =>
+			assistantMessage([{ type: "toolCall", id, name: "bash", arguments: { command: "ls src" } }], "toolUse");
+		const result = (id: string): AgentMessage => ({
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "bash",
+			content: [{ type: "text", text: "src/a.ts\nsrc/b.ts" }],
+			isError: false,
+			timestamp: 2,
+		});
+		const messages: AgentMessage[] = [
+			{ role: "user", content: "list twice", timestamp: 1 },
+			call("bash-1"),
+			result("bash-1"),
+			call("bash-2"),
+			result("bash-2"),
+		];
+
+		// Nothing sent yet: the earlier identical call is deduped exactly as before.
+		const fresh = sanitizeToolFailureContext(messages, "base");
+		expect(JSON.stringify(fresh.messages)).not.toContain("bash-1");
+
+		// The provider has already seen the whole history through the first call and its result.
+		// Erasing it now would shift every byte after it and cost a full re-prefill, so it stands.
+		const sent = sanitizeToolFailureContext(messages, "base", 3);
+		expect(JSON.stringify(sent.messages)).toContain("bash-1");
+		expect(JSON.stringify(sent.messages)).toContain("bash-2");
+	});
 });

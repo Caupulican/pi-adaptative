@@ -942,8 +942,21 @@ function fastTextSignature(text: string): string {
 	return `${text.length}:${text.slice(0, 48)}:${text.slice(-48)}`;
 }
 
-function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnalysis {
+function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0): FailureContextAnalysis {
 	const callById = new Map<string, AgentToolCall>();
+	const callMessageIndexById = new Map<string, number>();
+	/**
+	 * Deduplicating a superseded success ERASES the earlier call, which shifts every byte after it.
+	 * Providers prefill each request against the longest byte-identical prefix, so erasing a message
+	 * the provider has already seen invalidates the whole conversation from that point — measured
+	 * live, one repeated `ls` erased at message 5 of 15 cost a full re-prefill. `sentPrefixCount` is
+	 * how many leading messages have already gone out on a previous request; everything from there on
+	 * is still unsent and free to rewrite. Dedup therefore keeps working in full on fresh history (the
+	 * common case: a model repeating itself within the turn) and never reaches back into cached bytes.
+	 * The default of 0 means "nothing sent yet", i.e. dedup everything — the behavior every direct
+	 * caller and every unit test sees.
+	 */
+	const erasable = (callIndex: number): boolean => callIndex >= sentPrefixCount;
 	/**
 	 * A call the agent made is erased only in two cases: a superseded success, whose newer identical
 	 * call is still present, and a discard-attempt directive, where the harness has taken ownership of
@@ -961,8 +974,10 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 	let sequence = 0;
 	const kindMistakesMap = new Map<string, number>();
 
-	const latestSuccessfulByOpKey = new Map<string, string>();
-	const latestSuccessfulByPayloadKey = new Map<string, string>();
+	// Call id plus the index of the assistant message that made it: erasing a call shifts every byte
+	// after it, so the index decides whether the erasure is affordable (see `sentPrefixCount`).
+	const latestSuccessfulByOpKey = new Map<string, { callId: string; index: number }>();
+	const latestSuccessfulByPayloadKey = new Map<string, { callId: string; index: number }>();
 
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
@@ -973,6 +988,7 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 				const block = content[blockIdx];
 				if (block.type !== "toolCall") continue;
 				callById.set(block.id, block);
+				callMessageIndexById.set(block.id, index);
 			}
 			continue;
 		}
@@ -1069,18 +1085,19 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 		}
 
 		if (call) {
+			const callIndex = callMessageIndexById.get(call.id) ?? index;
 			const opKey = getToolFailureKey(call.name, call.arguments);
 			active.delete(opKey);
-			const previousOperationCallId = latestSuccessfulByOpKey.get(opKey);
-			if (previousOperationCallId) omittedCallIds.add(previousOperationCallId);
-			latestSuccessfulByOpKey.set(opKey, call.id);
+			const previousOperation = latestSuccessfulByOpKey.get(opKey);
+			if (previousOperation && erasable(previousOperation.index)) omittedCallIds.add(previousOperation.callId);
+			latestSuccessfulByOpKey.set(opKey, { callId: call.id, index: callIndex });
 
 			const textPayload = firstText(message);
 			if (textPayload.length >= 64) {
 				const payloadKey = `payload:${fastTextSignature(textPayload)}`;
-				const previousPayloadCallId = latestSuccessfulByPayloadKey.get(payloadKey);
-				if (previousPayloadCallId) omittedCallIds.add(previousPayloadCallId);
-				latestSuccessfulByPayloadKey.set(payloadKey, call.id);
+				const previousPayload = latestSuccessfulByPayloadKey.get(payloadKey);
+				if (previousPayload && erasable(previousPayload.index)) omittedCallIds.add(previousPayload.callId);
+				latestSuccessfulByPayloadKey.set(payloadKey, { callId: call.id, index: callIndex });
 			}
 		}
 	}
@@ -1361,8 +1378,15 @@ function escapePromptData(value: string): string {
 export function sanitizeToolFailureContext(
 	messages: AgentMessage[],
 	systemPrompt: string,
+	/**
+	 * Leading messages already sent on a previous provider request. Duplicate-erasure is confined to
+	 * everything after this point, so it never rewrites bytes the provider has cached (see
+	 * `analyzeToolFailureContext`). Omit it — as every direct caller and test does — to dedup the
+	 * whole history.
+	 */
+	sentPrefixCount = 0,
 ): { messages: AgentMessage[]; systemPrompt: string; ledger?: string } {
-	const analysis = analyzeToolFailureContext(messages);
+	const analysis = analyzeToolFailureContext(messages, sentPrefixCount);
 	if (analysis.activeRecords.length === 0 && analysis.activeDirectives.length === 0) {
 		return { messages: analysis.messages, systemPrompt };
 	}
