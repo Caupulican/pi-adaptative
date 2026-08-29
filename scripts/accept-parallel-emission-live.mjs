@@ -26,13 +26,18 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-	handleAcceptanceHelpFlag,
+	parseModelRef,
+	parseSingleModelFlag,
 	readJsonIfExists,
 	startPiAcceptanceRpc,
 } from "./lib/live-acceptance-rpc.mjs";
 import { successfulToolResults } from "./lib/live-tool-results.mjs";
 import { acquireScriptWorkRun, removeScriptWorkRun } from "./lib/work-directory.mjs";
-import { startLowImpactAcceptanceOllama } from "./lib/ollama-acceptance-runtime.mjs";
+import {
+	buildSingleOllamaModelsConfig,
+	startLowImpactAcceptanceOllama,
+	writeScratchAgentConfig,
+} from "./lib/ollama-acceptance-runtime.mjs";
 
 const DEFAULT_MODEL = "ollama/qwen3:1.7b";
 const TIMEOUT_MS = Number(process.env.PI_ACCEPT_PARALLEL_TIMEOUT_MS ?? 300_000);
@@ -59,25 +64,8 @@ store/pulled model is available for the default/ollama path.`);
 }
 
 function parseArgs(argv) {
-	let modelRef = DEFAULT_MODEL;
-	for (let index = 0; index < argv.length; index++) {
-		const arg = argv[index];
-		if (handleAcceptanceHelpFlag(arg, usage)) continue;
-		if (arg === "--model" && argv[index + 1]) {
-			modelRef = argv[++index];
-			continue;
-		}
-		throw new Error(`Unknown argument: ${arg}`);
-	}
+	const modelRef = parseSingleModelFlag(argv, usage, DEFAULT_MODEL);
 	return { modelRef };
-}
-
-function parseModelRef(input) {
-	if (input.includes("/")) {
-		const [provider, ...modelParts] = input.split("/");
-		return { provider, model: modelParts.join("/"), ref: input };
-	}
-	return { provider: "ollama", model: input, ref: `ollama/${input}` };
 }
 
 async function waitForOllamaModel(baseUrl, model, { attempts = 20, intervalMs = 500 } = {}) {
@@ -104,46 +92,23 @@ async function prepareOllamaTarget(model) {
 	return managed;
 }
 
+// contextWindow is pi's OWN capability-classification metadata, not Ollama's real serving context
+// — neither this script nor Ollama's default serve is asked to actually handle 8192 tokens. It
+// must stay >= MODEL_CAPABILITY_MINIMAL_MIN_CONTEXT (8192, core/model-capability.ts) or the
+// harness classifies the model as "chat" class and restricts it to goal-lifecycle tools only (no
+// read/write/edit/bash at all) — a registered 4096 (below the threshold) was verified to
+// reproduce exactly that, including against the pre-existing accept-local-cold-start-live.mjs.
+const PARALLEL_PROBE_CONTEXT_WINDOW = 8_192;
+
 async function hydrateOllamaAgentDir(agentDir, baseUrl, model) {
-	const modelsConfig = await readJsonIfExists(path.join(homedir(), ".pi", "agent", "models.json"));
-	modelsConfig.providers ??= {};
-	modelsConfig.providers.ollama = {
-		baseUrl: `${baseUrl}/v1`,
-		api: "openai-completions",
-		apiKey: "ollama",
-		models: [
-			{
-				id: model,
-				name: model,
-				// This is pi's OWN capability-classification metadata, not Ollama's real serving
-				// context — neither this script nor Ollama's default serve is asked to actually
-				// handle 8192 tokens. It must stay >= MODEL_CAPABILITY_MINIMAL_MIN_CONTEXT (8192,
-				// core/model-capability.ts) or the harness classifies the model as "chat" class and
-				// restricts it to goal-lifecycle tools only (no read/write/edit/bash at all) — a
-				// registered 4096 (below the threshold) was verified to reproduce exactly that,
-				// including against the pre-existing accept-local-cold-start-live.mjs.
-				contextWindow: 8_192,
-				maxTokens: 2048,
-				reasoning: false,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			},
-		],
-	};
-	await writeFile(path.join(agentDir, "models.json"), JSON.stringify(modelsConfig, null, 2), "utf8");
-	const auth = await readJsonIfExists(path.join(homedir(), ".pi", "agent", "auth.json"));
-	auth.ollama ??= { type: "api_key", key: "ollama" };
-	await writeFile(path.join(agentDir, "auth.json"), JSON.stringify(auth, null, 2), "utf8");
-	await writeFile(path.join(agentDir, "settings.json"), JSON.stringify({}, null, 2), "utf8");
+	const modelsConfig = await buildSingleOllamaModelsConfig(baseUrl, model, PARALLEL_PROBE_CONTEXT_WINDOW);
+	await writeScratchAgentConfig(agentDir, modelsConfig, { ensureOllamaAuth: true });
 }
 
 /** Non-ollama models: reuse whatever this machine already has configured; add no new plumbing. */
 async function hydratePassthroughAgentDir(agentDir) {
 	const modelsConfig = await readJsonIfExists(path.join(homedir(), ".pi", "agent", "models.json"));
-	await writeFile(path.join(agentDir, "models.json"), JSON.stringify(modelsConfig, null, 2), "utf8");
-	const auth = await readJsonIfExists(path.join(homedir(), ".pi", "agent", "auth.json"));
-	await writeFile(path.join(agentDir, "auth.json"), JSON.stringify(auth, null, 2), "utf8");
-	await writeFile(path.join(agentDir, "settings.json"), JSON.stringify({}, null, 2), "utf8");
+	await writeScratchAgentConfig(agentDir, modelsConfig, { ensureOllamaAuth: false });
 }
 
 async function writeFixtures(scratch) {

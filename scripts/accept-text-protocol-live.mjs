@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { planManagedOllamaModel } from "../packages/coding-agent/src/core/models/managed-ollama-model.ts";
 import {
 	handleAcceptanceHelpFlag,
+	parseModelRef,
 	readJsonIfExists,
 	startPiAcceptanceRpc,
 } from "./lib/live-acceptance-rpc.mjs";
@@ -65,14 +66,6 @@ function parseArgs(argv) {
 		throw new Error(`Unknown argument: ${arg}`);
 	}
 	return { models: models.length ? models : DEFAULT_MODELS, keepSessions };
-}
-
-function parseModelRef(input) {
-	if (input.includes("/")) {
-		const [provider, ...modelParts] = input.split("/");
-		return { provider, model: modelParts.join("/"), ref: input };
-	}
-	return { provider: "ollama", model: input, ref: `ollama/${input}` };
 }
 
 function miniCpmBaseUrl() {

@@ -1,18 +1,15 @@
 #!/usr/bin/env node
 import { mkdir, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-	handleAcceptanceHelpFlag,
-	readJsonIfExists,
-	startPiAcceptanceRpc,
-} from "./lib/live-acceptance-rpc.mjs";
+import { parseSingleModelFlag, startPiAcceptanceRpc } from "./lib/live-acceptance-rpc.mjs";
 import { acquireScriptWorkRun, removeScriptWorkRun } from "./lib/work-directory.mjs";
 import {
 	acceptanceAgentDir,
+	buildSingleOllamaModelsConfig,
 	defaultAcceptanceOllamaStore,
 	startLowImpactAcceptanceOllama,
+	writeScratchAgentConfig,
 } from "./lib/ollama-acceptance-runtime.mjs";
 
 const DEFAULT_MODEL = "ollama/qwen3:1.7b";
@@ -24,26 +21,19 @@ function usage() {
 }
 
 function parseArgs(argv) {
-	let modelRef = DEFAULT_MODEL;
 	let explicitStoreDir;
 	let keepSession = false;
-	for (let index = 0; index < argv.length; index++) {
-		const arg = argv[index];
-		if (handleAcceptanceHelpFlag(arg, usage)) continue;
-		if (arg === "--model" && argv[index + 1]) {
-			modelRef = argv[++index];
-			continue;
-		}
-		if (arg === "--store" && argv[index + 1]) {
-			explicitStoreDir = argv[++index];
-			continue;
+	const modelRef = parseSingleModelFlag(argv, usage, DEFAULT_MODEL, (arg, index, args) => {
+		if (arg === "--store" && args[index + 1]) {
+			explicitStoreDir = args[++index];
+			return index;
 		}
 		if (arg === "--keep-session") {
 			keepSession = true;
-			continue;
+			return index;
 		}
-		throw new Error(`Unknown argument: ${arg}`);
-	}
+		return undefined;
+	});
 	if (!modelRef.startsWith("ollama/")) throw new Error("Cold-start acceptance currently requires an ollama/<model> ref");
 	const model = modelRef.slice("ollama/".length);
 	return { modelRef, model, storeDir: explicitStoreDir ?? defaultAcceptanceOllamaStore(model), keepSession };
@@ -76,29 +66,8 @@ async function unloadModel(baseUrl, model) {
 }
 
 async function hydrateAgentDir(agentDir, baseUrl, model) {
-	const modelsConfig = await readJsonIfExists(path.join(homedir(), ".pi", "agent", "models.json"));
-	modelsConfig.providers ??= {};
-	modelsConfig.providers.ollama = {
-		baseUrl: `${baseUrl}/v1`,
-		api: "openai-completions",
-		apiKey: "ollama",
-		models: [
-			{
-				id: model,
-				name: model,
-				contextWindow: 4096,
-				maxTokens: 2048,
-				reasoning: false,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			},
-		],
-	};
-	await writeFile(path.join(agentDir, "models.json"), JSON.stringify(modelsConfig, null, 2), "utf8");
-	const auth = await readJsonIfExists(path.join(homedir(), ".pi", "agent", "auth.json"));
-	auth.ollama ??= { type: "api_key", key: "ollama" };
-	await writeFile(path.join(agentDir, "auth.json"), JSON.stringify(auth, null, 2), "utf8");
-	await writeFile(path.join(agentDir, "settings.json"), JSON.stringify({}, null, 2), "utf8");
+	const modelsConfig = await buildSingleOllamaModelsConfig(baseUrl, model, 4096);
+	await writeScratchAgentConfig(agentDir, modelsConfig, { ensureOllamaAuth: true });
 }
 
 function eventText(event) {

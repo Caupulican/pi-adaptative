@@ -75,6 +75,40 @@ export function handleAcceptanceHelpFlag(arg, usage, exit = process.exit) {
 	return true;
 }
 
+export function parseModelRef(input) {
+	if (input.includes("/")) {
+		const [provider, ...modelParts] = input.split("/");
+		return { provider, model: modelParts.join("/"), ref: input };
+	}
+	return { provider: "ollama", model: input, ref: `ollama/${input}` };
+}
+
+/**
+ * Parses argv for the common single-model acceptance-script flags: --help/-h (via `usage`) and a
+ * single --model <ref> flag (last one wins, defaulting to `defaultModelRef`). Any other argument
+ * is offered to `handleExtra(arg, index, argv)`, which must return the index to resume from when
+ * it consumes the argument (`index` itself, or `index + 1`/beyond for a flag with a value), or
+ * `undefined` for an argument it does not recognize either, which throws "Unknown argument".
+ */
+export function parseSingleModelFlag(argv, usage, defaultModelRef, handleExtra) {
+	let modelRef = defaultModelRef;
+	for (let index = 0; index < argv.length; index++) {
+		const arg = argv[index];
+		if (handleAcceptanceHelpFlag(arg, usage)) continue;
+		if (arg === "--model" && argv[index + 1]) {
+			modelRef = argv[++index];
+			continue;
+		}
+		const resumeIndex = handleExtra?.(arg, index, argv);
+		if (resumeIndex !== undefined) {
+			index = resumeIndex;
+			continue;
+		}
+		throw new Error(`Unknown argument: ${arg}`);
+	}
+	return modelRef;
+}
+
 export function startPiAcceptanceRpc({
 	root,
 	provider,
