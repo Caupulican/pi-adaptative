@@ -129,6 +129,13 @@ const OpenAICompletionsCompatSchema = Type.Object({
 			Type.Literal("qwen-chat-template"),
 		]),
 	),
+	thinkingTokenBudgetField: Type.Optional(
+		Type.Union([
+			Type.Literal("thinking_token_budget"),
+			Type.Literal("thinking_budget"),
+			Type.Literal("thinking_budget_tokens"),
+		]),
+	),
 	cacheControlFormat: Type.Optional(Type.Literal("anthropic")),
 	openRouterRouting: Type.Optional(OpenRouterRoutingSchema),
 	vercelGatewayRouting: Type.Optional(VercelGatewayRoutingSchema),
@@ -157,11 +164,19 @@ const ProviderCompatSchema = Type.Union([
 // Schema for custom model definition
 const DEFAULT_MODEL_CONTEXT_WINDOW = 128000;
 const DEFAULT_MODEL_MAX_TOKENS = 16384;
+const ModelCostTierSchema = Type.Object({
+	inputTokensAbove: Type.Number(),
+	input: Type.Optional(Type.Number()),
+	output: Type.Optional(Type.Number()),
+	cacheRead: Type.Optional(Type.Number()),
+	cacheWrite: Type.Optional(Type.Number()),
+});
 const ModelCostSchema = Type.Object({
 	input: Type.Number(),
 	output: Type.Number(),
 	cacheRead: Type.Number(),
 	cacheWrite: Type.Number(),
+	tiers: Type.Optional(Type.Array(ModelCostTierSchema)),
 });
 const SharedModelConfigurationFields = {
 	name: Type.Optional(Type.String({ minLength: 1 })),
@@ -172,6 +187,7 @@ const SharedModelConfigurationFields = {
 	contextWindow: Type.Optional(Type.Number()),
 	textToolCallProtocol: Type.Optional(Type.Boolean()),
 	maxTokens: Type.Optional(Type.Number()),
+	samplingParams: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	compat: Type.Optional(ProviderCompatSchema),
 };
@@ -370,6 +386,9 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	if (override.contextWindow !== undefined) result.contextWindow = override.contextWindow;
 	if (override.textToolCallProtocol !== undefined) result.textToolCallProtocol = override.textToolCallProtocol;
 	if (override.maxTokens !== undefined) result.maxTokens = override.maxTokens;
+	if (override.samplingParams !== undefined) {
+		result.samplingParams = { ...model.samplingParams, ...override.samplingParams };
+	}
 
 	// Merge cost (partial override)
 	if (override.cost) {
@@ -378,6 +397,7 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 			output: override.cost.output ?? model.cost.output,
 			cacheRead: override.cost.cacheRead ?? model.cost.cacheRead,
 			cacheWrite: override.cost.cacheWrite ?? model.cost.cacheWrite,
+			tiers: override.cost.tiers ?? model.cost.tiers,
 		};
 	}
 
@@ -669,6 +689,7 @@ export class ModelRegistry {
 					contextWindow: modelDef.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW,
 					textToolCallProtocol: modelDef.textToolCallProtocol,
 					maxTokens: modelDef.maxTokens ?? DEFAULT_MODEL_MAX_TOKENS,
+					samplingParams: modelDef.samplingParams,
 					headers: undefined,
 					compat,
 				} as Model<Api>);

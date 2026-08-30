@@ -1574,7 +1574,10 @@ async function prepareToolCall(
 				const reason = beforeResult.reason || "Tool execution was blocked";
 				return {
 					kind: "immediate",
-					result: createErrorToolResult(reason),
+					result: {
+						...createErrorToolResult(reason),
+						...(beforeResult.terminate !== undefined ? { terminate: beforeResult.terminate } : {}),
+					},
 					isError: true,
 					phase: "policy",
 					failureCode: "blocked",

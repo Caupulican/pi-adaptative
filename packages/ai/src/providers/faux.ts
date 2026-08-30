@@ -472,6 +472,9 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 
 		queueMicrotask(async () => {
 			try {
+				if (streamOptions?.onPayload) {
+					await streamOptions.onPayload(context, requestModel);
+				}
 				await streamOptions?.onResponse?.({ status: 200, headers: {} }, requestModel);
 				if (!step) {
 					let message = createErrorMessage(

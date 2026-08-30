@@ -254,4 +254,43 @@ describe("classifyFailure", () => {
 			retryable: false,
 		});
 	});
+
+	// The watchdog (`watchdogs.ts` pushFailure) wraps ANY caught cause in one generic transport
+	// phrase. Classifying on that wrapper instead of the cause labelled a PERMANENT failure as a
+	// retryable stream stall, and the retry then slept on a timer that never advanced — a real hang
+	// (observed on Windows, where a mis-scoped compaction summarization blocked past 240s).
+	describe("watchdog wrapper unwrapping", () => {
+		it("classifies a wrapped permanent failure on its cause, not the wrapper", () => {
+			const wrapped =
+				"Summarization failed: stream ended without terminal event: No API provider registered for api: messages";
+			expect(classifyFailure({ message: wrapped })).toMatchObject({ reason: "unknown", retryable: false });
+			// Logging fidelity: the reported message stays the full original, only the matching basis changes.
+			expect(classifyFailure({ message: wrapped }).message).toBe(wrapped);
+		});
+
+		it("still classifies a bare wrapper as a genuine stream stall", () => {
+			// No appended cause: nothing to unwrap, so this keeps reaching STREAM_STALL as before.
+			expect(classifyFailure({ message: "stream ended without terminal event" })).toMatchObject({
+				reason: "stream_stall",
+				retryable: true,
+			});
+		});
+
+		it("does not make a bare abort wrapper retryable", () => {
+			// The abort phrasing is unwrapped too, but it never matched STREAM_STALL and must not
+			// start doing so: an abort is a deliberate stop, not a stall worth retrying.
+			expect(classifyFailure({ message: "stream aborted before terminal event" })).toMatchObject({
+				retryable: false,
+			});
+		});
+
+		it("keeps a wrapped retryable cause retryable, labelled by the cause", () => {
+			expect(
+				classifyFailure({ message: "stream ended without terminal event: getaddrinfo ENOTFOUND example.test" }),
+			).toMatchObject({ reason: "network", retryable: true });
+			expect(
+				classifyFailure({ message: "stream ended without terminal event: 503 Service Unavailable" }),
+			).toMatchObject({ reason: "server_error", retryable: true });
+		});
+	});
 });

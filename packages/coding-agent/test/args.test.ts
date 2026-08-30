@@ -511,4 +511,38 @@ describe("parseArgs", () => {
 			expect(result.messages).toEqual(["Do the task"]);
 		});
 	});
+
+	describe("-- end-of-options sentinel (F20/P1a)", () => {
+		test("treats flags after -- as positional messages", () => {
+			const result = parseArgs(["--", "-foo"]);
+			expect(result.messages).toEqual(["-foo"]);
+			expect(result.fileArgs).toEqual([]);
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("preserves options before -- and treats options after -- as messages", () => {
+			const result = parseArgs(["--model", "gpt-4o", "--", "--weird", "-x"]);
+			expect(result.model).toBe("gpt-4o");
+			expect(result.messages).toEqual(["--weird", "-x"]);
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("parses @file arguments after --", () => {
+			const result = parseArgs(["--", "@notes.md", "hello"]);
+			expect(result.fileArgs).toEqual(["notes.md"]);
+			expect(result.messages).toEqual(["hello"]);
+		});
+
+		test("handles -- alone without prompt or error", () => {
+			const result = parseArgs(["--"]);
+			expect(result.messages).toEqual([]);
+			expect(result.fileArgs).toEqual([]);
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("reports unknown options before -- (negative control)", () => {
+			const result = parseArgs(["-unknown", "--", "message"]);
+			expect(result.diagnostics).toEqual([{ type: "error", message: "Unknown option: -unknown" }]);
+		});
+	});
 });

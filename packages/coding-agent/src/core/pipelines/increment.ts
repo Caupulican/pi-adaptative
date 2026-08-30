@@ -1,6 +1,6 @@
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import type { OpenTaskStepRef } from "../goals/goal-tool-core.ts";
-import { type TaskStep, type TaskStepsState, updateTaskStep } from "../tasks/task-state.ts";
+import { findNextPendingStep, type TaskStep, type TaskStepsState, updateTaskStep } from "../tasks/task-state.ts";
 import { currentPipelineStage } from "./context.ts";
 import { persistPipelineRun, scanStageOutput, stageOutputDir } from "./run-state.ts";
 import {
@@ -135,7 +135,7 @@ export function advanceTaskSteps(
 	if (current.status !== "completed") {
 		nextState = updateTaskStep(nextState, current.id, { status: "completed" }, now);
 	}
-	const following = nextState.steps.find((step) => step.id !== current.id && step.status === "pending");
+	const following = findNextPendingStep(nextState.steps, current.id);
 	if (following) {
 		nextState = updateTaskStep(nextState, following.id, { status: "in_progress" }, now);
 		return {

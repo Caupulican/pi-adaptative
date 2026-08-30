@@ -12,6 +12,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { EditorComponent } from "@caupulican/pi-tui";
@@ -64,6 +65,7 @@ import { keyText } from "./components/keybinding-hints.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
+import { ThinkingSelectorComponent } from "./components/thinking-selector.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
@@ -151,6 +153,20 @@ export async function showModelSelector(host: SessionFlowHost, initialSearchInpu
 				finishSelectorCancellation(host, done);
 			},
 			initialSearchInput,
+			async (model) => {
+				try {
+					host.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+					await host.session.setModel(model);
+					host.footer.invalidate();
+					host.updateEditorBorderColor();
+					done();
+					host.showStatus(`Default model: ${model.id}`);
+					void host.maybeWarnAboutAnthropicSubscriptionAuth(model);
+					host.checkDaxnutsEasterEgg(model);
+				} catch (error) {
+					finishSelectorError(host, done, error);
+				}
+			},
 		);
 		return { component: selector, focus: selector };
 	});
@@ -586,6 +602,64 @@ export async function handleModelCommand(host: SessionFlowHost, searchTerm?: str
 export async function findExactModelMatch(host: SessionFlowHost, searchTerm: string): Promise<Model<Api> | undefined> {
 	const models = await host.getModelCandidates();
 	return findExactModelReferenceMatch(searchTerm, models);
+}
+
+export async function showThinkingSelector(host: SessionFlowHost): Promise<void> {
+	const currentLevel = host.session.thinkingLevel;
+	const availableLevels = host.session.getAvailableThinkingLevels();
+	if (availableLevels.length === 0) {
+		host.showStatus("Current model does not support thinking");
+		return;
+	}
+
+	host.showSelector((done) => {
+		const selector = new ThinkingSelectorComponent(
+			currentLevel,
+			availableLevels,
+			(level) => {
+				host.session.setThinkingLevel(level);
+				host.footer.invalidate();
+				host.updateEditorBorderColor();
+				done();
+				host.showStatus(`Thinking level set to ${level}`);
+			},
+			() => {
+				finishSelectorCancellation(host, done);
+			},
+			(level) => {
+				host.settingsManager.setDefaultThinkingLevel(level);
+				host.session.setThinkingLevel(level);
+				host.footer.invalidate();
+				host.updateEditorBorderColor();
+				done();
+				host.showStatus(`Default thinking level set to ${level}`);
+			},
+		);
+		return { component: selector, focus: selector };
+	});
+}
+
+export async function handleThinkingCommand(host: SessionFlowHost, arg?: string): Promise<void> {
+	if (!arg) {
+		await showThinkingSelector(host);
+		return;
+	}
+
+	const normalized = arg.trim().toLowerCase();
+	const availableLevels = host.session.getAvailableThinkingLevels();
+	if (availableLevels.length === 0) {
+		host.showStatus("Current model does not support thinking");
+		return;
+	}
+
+	if (availableLevels.includes(normalized as ThinkingLevel)) {
+		host.session.setThinkingLevel(normalized as ThinkingLevel);
+		host.footer.invalidate();
+		host.updateEditorBorderColor();
+		host.showStatus(`Thinking level set to ${normalized}`);
+	} else {
+		host.showError(`Invalid thinking level "${arg}". Valid levels: ${availableLevels.join(", ")}`);
+	}
 }
 
 // ===========================================================================

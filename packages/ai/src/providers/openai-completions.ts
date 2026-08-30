@@ -24,6 +24,7 @@ import type {
 	StreamFunction,
 	StreamOptions,
 	TextContent,
+	ThinkingBudgets,
 	ThinkingContent,
 	Tool,
 	ToolCall,
@@ -142,8 +143,12 @@ interface OpenAICompatCacheControl {
 	ttl?: string;
 }
 
-type ResolvedOpenAICompletionsCompat = Omit<Required<OpenAICompletionsCompat>, "cacheControlFormat"> & {
+type ResolvedOpenAICompletionsCompat = Omit<
+	Required<OpenAICompletionsCompat>,
+	"cacheControlFormat" | "thinkingTokenBudgetField"
+> & {
 	cacheControlFormat?: OpenAICompletionsCompat["cacheControlFormat"];
+	thinkingTokenBudgetField?: OpenAICompletionsCompat["thinkingTokenBudgetField"];
 };
 
 type ChatCompletionInstructionMessageParam = ChatCompletionDeveloperMessageParam | ChatCompletionSystemMessageParam;
@@ -660,6 +665,27 @@ function buildParams(
 			if (routing.order) gatewayOptions.order = routing.order;
 			(params as any).providerOptions = { gateway: gatewayOptions };
 		}
+	}
+
+	const budgetField = compat.thinkingTokenBudgetField;
+	if (budgetField) {
+		const reasoningLevel = options?.reasoningEffort;
+		const requestedBudget = reasoningLevel
+			? model.thinkingBudgets?.[reasoningLevel as keyof ThinkingBudgets]
+			: undefined;
+		// No configured budget for the active level => the field is omitted entirely, never defaulted.
+		if (requestedBudget !== undefined) {
+			const maxAllowed = Math.max(0, model.maxTokens - 1024);
+			const clampedBudget = Math.min(requestedBudget, maxAllowed);
+			if (clampedBudget > 0) {
+				(params as any)[budgetField] = clampedBudget;
+			}
+		}
+	}
+
+	// Custom sampling parameters (top_p, top_k, min_p, repetition_penalty, etc.)
+	if (model.samplingParams) {
+		Object.assign(params, model.samplingParams);
 	}
 
 	return params;
@@ -1254,6 +1280,7 @@ function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletion
 		zaiToolStream: model.compat.zaiToolStream ?? detected.zaiToolStream,
 		supportsStrictMode: model.compat.supportsStrictMode ?? detected.supportsStrictMode,
 		cacheControlFormat: model.compat.cacheControlFormat ?? detected.cacheControlFormat,
+		thinkingTokenBudgetField: model.compat.thinkingTokenBudgetField ?? detected.thinkingTokenBudgetField,
 		sendSessionAffinityHeaders: model.compat.sendSessionAffinityHeaders ?? detected.sendSessionAffinityHeaders,
 		sessionAffinityFormat: model.compat.sessionAffinityFormat ?? detected.sessionAffinityFormat,
 		supportsLongCacheRetention: model.compat.supportsLongCacheRetention ?? detected.supportsLongCacheRetention,

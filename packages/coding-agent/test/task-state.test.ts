@@ -72,6 +72,26 @@ describe("task step state", () => {
 		expect(() => resolveTaskStepSelector(state.steps, "missing")).toThrow(/not found/i);
 	});
 
+	it("names the open steps when 'current' has no in_progress step, instead of silently picking one", () => {
+		const state = setTaskSteps(
+			createTaskStepsState("T0"),
+			[{ content: "Verify unit tests" }, { content: "Verify integration tests", status: "blocked" }],
+			"T1",
+		);
+
+		expect(() => resolveTaskStepSelector(state.steps, "current")).toThrow(
+			/No in_progress task step was found\. Open steps: step-1 \(pending\), step-2 \(blocked\)\./,
+		);
+	});
+
+	it("reports no open steps at all when 'current' is selected on an empty or fully-terminal checklist", () => {
+		const empty = createTaskStepsState("T0");
+		expect(() => resolveTaskStepSelector(empty.steps, "current")).toThrow(/no open steps to select/i);
+
+		const allDone = setTaskSteps(empty, [{ content: "Done", status: "completed" }], "T1");
+		expect(() => resolveTaskStepSelector(allDone.steps, "current")).toThrow(/no open steps to select/i);
+	});
+
 	it("advances by completing the current step and starting the next pending step", () => {
 		const state = setTaskSteps(
 			createTaskStepsState("T0"),
@@ -140,11 +160,30 @@ describe("task step state", () => {
 		);
 		const context = formatTaskStepsContext(state);
 		expect(context).toContain("TASK STEPS");
-		expect(context).toContain("[in_progress] Inspecting context");
-		expect(context).toContain("[pending] Implement context injection");
+		// Every open step's line carries its resolvable id (the fix under test): the model can
+		// target any listed step directly, active or not, with no separate lookup.
+		expect(context).toContain("[in_progress] step-2 Inspecting context");
+		expect(context).toContain("[pending] step-3 Implement context injection");
 		expect(context).not.toContain("Completed history");
-		expect(context).not.toContain("step-2");
 		expect(context).toContain("continue in_progress step");
+	});
+
+	it("resolves an id read straight from the injected context back through resolveTaskStepSelector (round-trip)", () => {
+		const state = setTaskSteps(
+			createTaskStepsState("T0"),
+			[
+				{ content: "Inspect context", activeForm: "Inspecting context", status: "in_progress" },
+				{ content: "Implement context injection" },
+			],
+			"T1",
+		);
+		const context = formatTaskStepsContext(state)!;
+		const pendingLine = context.split("\n").find((line) => line.includes("Implement context injection"));
+		const [, extractedId] = pendingLine?.match(/^- \[\w+\] (\S+) /) ?? [];
+		expect(extractedId).toBe("step-2");
+
+		// The exact id the model just read off the context page resolves without any lookup.
+		expect(resolveTaskStepSelector(state.steps, extractedId!).content).toBe("Implement context injection");
 	});
 
 	it("surfaces goal requirement and tool_task evidence links on the injected checklist", () => {

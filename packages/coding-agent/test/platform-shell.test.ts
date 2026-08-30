@@ -68,6 +68,18 @@ describe("automatic platform shell contract", () => {
 		expect(() => getShellConfig(missingPath, "bash")).toThrow(
 			`Custom shell path not found: ${join(homedir(), missingPath.slice(2))}`,
 		);
+
+		// Verifies existing tilde path resolves to absolute path under homedir
+		const testDir = mkdtempSync(join(homedir(), ".pi-test-shell-"));
+		const testShell = join(testDir, "custom-sh");
+		writeFileSync(testShell, "#!/bin/sh\n");
+		try {
+			const relativeTilde = `~/${testDir.slice(homedir().length + 1)}/custom-sh`;
+			const config = getShellConfig(relativeTilde, "bash");
+			expect(config.shell).toBe(testShell);
+		} finally {
+			rmSync(testDir, { recursive: true, force: true });
+		}
 	});
 
 	it("rejects a legacy Windows PowerShell path and accepts only pwsh as a custom PowerShell host", () => {

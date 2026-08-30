@@ -132,6 +132,7 @@ import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
 import { runReflexInterpreterCompletion } from "./toolkit/reflex-interpreter.ts";
 import { executeToolkitScript } from "./toolkit/script-runner.ts";
 import { createAskQuestionToolDefinition } from "./tools/ask-question.ts";
+import { buildShellSessionContext } from "./tools/bash.ts";
 import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
 import { FileMutationIntentController } from "./tools/file-mutation-intent.ts";
@@ -927,6 +928,12 @@ export class RuntimeBuilder {
 				shellPath,
 				sessionKey: this.deps.getShellSessionKey(),
 				platform: process.platform,
+				getShellSessionContext: () =>
+					buildShellSessionContext({
+						getAgent: () => this.deps.getAgent(),
+						getSessionManager: () => this.deps.getSessionManager(),
+						getSettingsManager: () => this.deps.getSettingsManager(),
+					}),
 				spawnHook: (context) => {
 					const env = { ...context.env, ...this._credentialManager.getEnvironmentForCwd(context.cwd) };
 					delete env.BW_SESSION;

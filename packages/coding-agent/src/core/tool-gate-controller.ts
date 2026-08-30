@@ -97,6 +97,7 @@ export class ToolGateController {
 		let content = result.content;
 		let details = result.details;
 		let usage = result.usage;
+		let terminate = result.terminate;
 		let resolvedIsError = isError;
 
 		if (runner.hasHandlers("tool_result")) {
@@ -115,6 +116,7 @@ export class ToolGateController {
 				details = hookResult.details;
 				resolvedIsError = hookResult.isError ?? isError;
 				usage = hookResult.usage ?? usage;
+				if (hookResult.terminate !== undefined) terminate = hookResult.terminate;
 			}
 		}
 
@@ -134,10 +136,11 @@ export class ToolGateController {
 			content === result.content &&
 			details === result.details &&
 			resolvedIsError === isError &&
-			usage === result.usage
+			usage === result.usage &&
+			terminate === result.terminate
 		) {
 			return undefined;
 		}
-		return { content, details, isError: resolvedIsError, usage };
+		return { content, details, isError: resolvedIsError, usage, terminate };
 	};
 }

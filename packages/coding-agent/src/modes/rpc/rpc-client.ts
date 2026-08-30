@@ -209,6 +209,16 @@ export class RpcClient {
 	}
 
 	/**
+	 * Clear all queued steering, follow-up, and command messages, returning what was dropped so a
+	 * client can restore them into an editor if desired. Unlike `abort()`, this does not interrupt
+	 * an in-flight run -- see docs/rpc.md for the clear-then-abort pattern.
+	 */
+	async clearQueue(): Promise<{ steering: string[]; followUp: string[]; commands: string[] }> {
+		const response = await this.send({ type: "clear_queue" });
+		return this.getData<{ steering: string[]; followUp: string[]; commands: string[] }>(response);
+	}
+
+	/**
 	 * Abort current operation.
 	 */
 	async abort(): Promise<void> {
@@ -273,6 +283,14 @@ export class RpcClient {
 	 */
 	async cycleThinkingLevel(): Promise<{ level: ThinkingLevel } | null> {
 		const response = await this.send({ type: "cycle_thinking_level" });
+		return this.getData(response);
+	}
+
+	/**
+	 * Get available thinking levels for the current model.
+	 */
+	async getAvailableThinkingLevels(): Promise<{ levels: ThinkingLevel[] }> {
+		const response = await this.send({ type: "get_available_thinking_levels" });
 		return this.getData(response);
 	}
 

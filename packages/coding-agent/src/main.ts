@@ -8,9 +8,10 @@
 import { createInterface } from "node:readline";
 import { assertValidSessionId, SessionManager } from "@caupulican/pi-agent-core/session";
 import { type ImageContent, modelsAreEqual } from "@caupulican/pi-ai";
-import { ProcessTerminal, setKeybindings, TUI } from "@caupulican/pi-tui";
+import { applyTerminalSettings, ProcessTerminal, setKeybindings, TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";
 import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
+import { handleAuthCommand } from "./cli/auth-check.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
@@ -80,6 +81,7 @@ import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
 import { getBoundWorktreeLaneKey, PI_WORKTREE_LANE_ENV } from "./core/worktree-sync/runtime.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
+import { terminalCapabilityOverridesFromSettings } from "./modes/interactive/terminal-capability-settings.ts";
 
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
@@ -556,6 +558,9 @@ async function showStartupSelector<T>(
 	setKeybindings(KeybindingsManager.create());
 
 	return new Promise((resolve) => {
+		// Must run before TUI/ProcessTerminal construction can call getCapabilities() and cache a
+		// settings-less result (P1g), same as interactive-mode.ts's main TUI startup.
+		applyTerminalSettings(terminalCapabilityOverridesFromSettings(settingsManager));
 		const ui = new TUI(new ProcessTerminal(), settingsManager.getShowHardwareCursor());
 		ui.setClearOnShrink(settingsManager.getClearOnShrink());
 
@@ -684,6 +689,10 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	if (await handleConfigCommand(args)) {
+		return;
+	}
+
+	if (await handleAuthCommand(args)) {
 		return;
 	}
 

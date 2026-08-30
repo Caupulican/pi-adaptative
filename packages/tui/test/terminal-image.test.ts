@@ -30,6 +30,9 @@ const ENV_KEYS = [
 	"ITERM_SESSION_ID",
 	"WT_SESSION",
 	"CMUX_WORKSPACE_ID",
+	"PI_HYPERLINKS",
+	"PI_IMAGE_PROTOCOL",
+	"PI_TRUE_COLOR",
 ] as const;
 
 function withEnv(overrides: Record<string, string | undefined>, fn: () => void): void {
@@ -317,6 +320,62 @@ describe("detectCapabilities", () => {
 			const caps = detectCapabilities(() => false);
 			assert.strictEqual(caps.trueColor, true);
 			assert.strictEqual(caps.hyperlinks, false);
+			assert.strictEqual(caps.images, null);
+		});
+	});
+
+	it("applies settings overrides over detection (P1g)", () => {
+		withEnv({}, () => {
+			const caps = detectCapabilities(undefined, {
+				hyperlinks: true,
+				images: "kitty",
+				trueColor: true,
+			});
+			assert.strictEqual(caps.hyperlinks, true);
+			assert.strictEqual(caps.images, "kitty");
+			assert.strictEqual(caps.trueColor, true);
+		});
+	});
+
+	it("applies environment variable overrides over detection when no settings are configured (P1g)", () => {
+		withEnv(
+			{
+				PI_HYPERLINKS: "false",
+				PI_IMAGE_PROTOCOL: "iterm2",
+				PI_TRUE_COLOR: "false",
+			},
+			() => {
+				const caps = detectCapabilities();
+				assert.strictEqual(caps.hyperlinks, false);
+				assert.strictEqual(caps.images, "iterm2");
+				assert.strictEqual(caps.trueColor, false);
+			},
+		);
+	});
+
+	it("settings win over a conflicting environment variable (P1g precedence: settings > env > detection)", () => {
+		withEnv(
+			{
+				PI_HYPERLINKS: "false",
+				PI_IMAGE_PROTOCOL: "iterm2",
+				PI_TRUE_COLOR: "false",
+			},
+			() => {
+				const caps = detectCapabilities(undefined, {
+					hyperlinks: true,
+					images: "kitty",
+					trueColor: true,
+				});
+				assert.strictEqual(caps.hyperlinks, true);
+				assert.strictEqual(caps.images, "kitty");
+				assert.strictEqual(caps.trueColor, true);
+			},
+		);
+	});
+
+	it("supports PI_IMAGE_PROTOCOL=none to disable images (P1g)", () => {
+		withEnv({ PI_IMAGE_PROTOCOL: "none", TERM_PROGRAM: "ghostty" }, () => {
+			const caps = detectCapabilities();
 			assert.strictEqual(caps.images, null);
 		});
 	});

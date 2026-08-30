@@ -121,9 +121,31 @@ Response:
 
 See [set_follow_up_mode](#set_follow_up_mode) for controlling how follow-up messages are processed.
 
+#### clear_queue
+
+Clear all queued steering, follow-up, and extension-command messages without interrupting an
+in-flight run, returning the dropped messages so a client can restore them into an editor.
+
+```json
+{"type": "clear_queue"}
+```
+
+Response:
+```json
+{"type": "response", "command": "clear_queue", "success": true, "data": {"steering": ["Stop and do this instead"], "followUp": ["After you're done, also do this"], "commands": []}}
+```
+
+`commands` holds queued extension commands (invoked while the agent was busy); it is part of this
+protocol's queue and is always present in the response, even when empty.
+
+**clear-then-abort pattern:** `abort` alone does not clear the queue -- an aborted run still
+processes any steering/follow-up/extension-command messages queued before the abort, starting a new
+run for them. To stop the agent AND discard everything queued, send `clear_queue` before `abort`.
+
 #### abort
 
-Abort the current agent operation.
+Abort the current agent operation. Does not clear the queue -- see the clear-then-abort pattern
+under [clear_queue](#clear_queue) above.
 
 ```json
 {"type": "abort"}
@@ -910,7 +932,7 @@ The `assistantMessageEvent` field contains one of these delta types. RPC project
 | `thinking_start` | Thinking block started |
 | `thinking_delta` | Thinking content chunk |
 | `thinking_end` | Thinking block ended |
-| `toolcall_start` | Tool call started |
+| `toolcall_start` | Tool call started -- additionally carries `id` and `toolName` (not `name` or `toolCallId`) identifying the call beginning at that content index |
 | `toolcall_delta` | Tool call arguments chunk |
 | `toolcall_end` | Tool call ended (includes full `toolCall` object) |
 | `done` | Message complete (reason: `"stop"`, `"length"`, `"toolUse"`) |
@@ -922,6 +944,13 @@ Example streaming a text response:
 {"type":"message_update","message":{"content":[],"role":"assistant",...},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello"},"accumulatedContentOmitted":true}
 {"type":"message_update","message":{"content":[],"role":"assistant",...},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world"},"accumulatedContentOmitted":true}
 {"type":"message_update","message":{"content":[],"role":"assistant",...},"assistantMessageEvent":{"type":"text_end","contentIndex":0},"accumulatedContentOmitted":true}
+```
+
+Example streaming a tool call, showing `toolcall_start`'s `id`/`toolName` fields:
+```json
+{"type":"message_update","message":{"content":[],"role":"assistant",...},"assistantMessageEvent":{"type":"toolcall_start","contentIndex":1,"id":"call_abc123","toolName":"bash"},"accumulatedContentOmitted":true}
+{"type":"message_update","message":{"content":[],"role":"assistant",...},"assistantMessageEvent":{"type":"toolcall_delta","contentIndex":1,"delta":"{\"command\":"},"accumulatedContentOmitted":true}
+{"type":"message_update","message":{"content":[],"role":"assistant",...},"assistantMessageEvent":{"type":"toolcall_end","contentIndex":1},"accumulatedContentOmitted":true}
 ```
 
 ### tool_execution_start / tool_execution_update / tool_execution_end

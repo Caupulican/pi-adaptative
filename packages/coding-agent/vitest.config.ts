@@ -60,6 +60,7 @@ const defaultTestExcludes = [
 const viteMockCompatibilityTests = [
 	"test/clipboard-image-bmp-conversion.test.ts",
 	"test/clipboard-image.test.ts",
+	"test/copy-command.test.ts",
 	"test/output-accumulator-io-errors.test.ts",
 	"test/restore-sandbox-env.test.ts",
 	"test/theme-builtin-resilience.test.ts",

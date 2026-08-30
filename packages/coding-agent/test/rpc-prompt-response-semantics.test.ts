@@ -368,4 +368,58 @@ describe("RPC prompt response semantics", () => {
 			await cleanup();
 		}
 	});
+
+	it("clears queue and returns dropped steering, followUp, and commands messages (P1e/D8)", async () => {
+		const { lineHandler, runtimeHost, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 250 });
+		try {
+			await runtimeHost.session.steer("steering 1");
+			await runtimeHost.session.followUp("followup 1");
+
+			lineHandler(JSON.stringify({ id: "cq-1", type: "clear_queue" }));
+
+			await vi.waitFor(() => {
+				const responses = getResponses(rpcIo.outputLines, "clear_queue");
+				expect(responses).toHaveLength(1);
+				expect(responses[0]).toMatchObject({
+					id: "cq-1",
+					type: "response",
+					command: "clear_queue",
+					success: true,
+					data: {
+						steering: ["steering 1"],
+						followUp: ["followup 1"],
+						// D8: the local queue is richer than upstream's (it also tracks queued extension
+						// commands) -- the RPC response must never silently drop that field.
+						commands: [],
+					},
+				});
+			});
+			expect(runtimeHost.session.pendingMessageCount).toBe(0);
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("returns available thinking levels for the current model (P2r)", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		try {
+			lineHandler(JSON.stringify({ id: "tl-1", type: "get_available_thinking_levels" }));
+
+			await vi.waitFor(() => {
+				const responses = getResponses(rpcIo.outputLines, "get_available_thinking_levels");
+				expect(responses).toHaveLength(1);
+				expect(responses[0]).toMatchObject({
+					id: "tl-1",
+					type: "response",
+					command: "get_available_thinking_levels",
+					success: true,
+					data: {
+						levels: expect.arrayContaining(["off"]),
+					},
+				});
+			});
+		} finally {
+			await cleanup();
+		}
+	});
 });

@@ -20,7 +20,6 @@ import type {
 	SettingsScope,
 } from "../../core/settings-manager.ts";
 import { ActionTranscriptComponent } from "./components/action-transcript.ts";
-import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
@@ -43,6 +42,7 @@ export interface SettingsSelectorHost {
 	setupAutocompleteProvider(): void;
 	updateEditorBorderColor(): void;
 	rebuildChatFromMessages(): Promise<void>;
+	updateThinkingBlockVisibility(): void;
 	validateSelfModificationSource(settings: SelfModificationSettings): string | undefined;
 	applyAutonomyMode(mode: AutonomyMode, scope?: SettingsScope): void;
 	validateAutoLearnModelValue(value: string | undefined): string | undefined;
@@ -232,12 +232,7 @@ export function showSettingsSelector(host: SettingsSelectorHost): void {
 				onHideThinkingBlockChange: (hidden) => {
 					host.hideThinkingBlock = hidden;
 					host.settingsManager.setHideThinkingBlock(hidden);
-					for (const child of host.chatContainer.children) {
-						if (child instanceof AssistantMessageComponent) {
-							child.setHideThinkingBlock(hidden);
-						}
-					}
-					void host.rebuildChatFromMessages();
+					host.updateThinkingBlockVisibility();
 				},
 				onCollapseChangelogChange: (collapsed) => {
 					host.settingsManager.setCollapseChangelog(collapsed);

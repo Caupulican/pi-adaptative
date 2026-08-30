@@ -143,6 +143,12 @@ export interface ChildProcessTerminationOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	killGraceMs?: number;
+	/**
+	 * Diagnostics sink for a non-fatal kill-tree failure (e.g. a missing or failing Windows
+	 * taskkill, F8). Defaults to `console.error` so a failure is never silently reported as a
+	 * false "killed" -- callers that already have a session/UI diagnostic surface can override it.
+	 */
+	onDiagnostic?: (message: string) => void;
 }
 
 export interface ChildProcessTerminationResult {
@@ -164,10 +170,11 @@ export async function waitForChildProcessWithTermination(
 	});
 	let reason: ChildProcessTerminationResult["reason"] | undefined;
 	let timeout: NodeJS.Timeout | undefined;
+	const onDiagnostic = options.onDiagnostic ?? ((message: string) => console.error(message));
 	const requestTermination = (nextReason: "aborted" | "timeout") => {
 		if (reason !== undefined || child.exitCode !== null || child.signalCode !== null) return;
 		reason = nextReason;
-		void killTree(child, { graceMs: options.killGraceMs }).then(
+		void killTree(child, { graceMs: options.killGraceMs, onDiagnostic }).then(
 			() => forceSettle(),
 			() => forceSettle(),
 		);

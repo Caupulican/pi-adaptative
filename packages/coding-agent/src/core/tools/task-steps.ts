@@ -7,6 +7,7 @@ import {
 	clearTaskSteps,
 	compactTaskSteps,
 	createTaskStepsState,
+	findNextPendingStep,
 	findOpenDuplicateStep,
 	formatTaskSteps,
 	hasUnverifiedCompletedStep,
@@ -105,11 +106,14 @@ const taskStepsSchema = Type.Union([
 	Type.Object(
 		{
 			action: Type.Literal("update"),
-			id: Type.String({
-				minLength: 1,
-				pattern: "\\S",
-				description: "Current/active, exact step id, unique id prefix, or unique content selector.",
-			}),
+			id: Type.Optional(
+				Type.String({
+					minLength: 1,
+					pattern: "\\S",
+					description:
+						"Exact step id, unique id prefix, unique content selector, or 'current'/'active'. Omit to target the active (in_progress) step -- the harness resolves it, no lookup needed.",
+				}),
+			),
 			content: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
 			activeForm: Type.Optional(Type.String({ maxLength: 2_000 })),
 			...optionalTaskStepFields("Goal requirement ids this foreground step advances; [] clears existing links."),
@@ -161,6 +165,8 @@ export interface TaskStepsToolDetails {
 	duplicateOfStepId?: string;
 	/** Step ids silently demoted to pending because another step became active in this call. */
 	demotedStepIds?: readonly string[];
+	/** Set when completing the active step auto-started this pending step (no `advance` call needed). */
+	autoPromotedStepId?: string;
 }
 
 export interface TaskStepsToolDependencies {
@@ -305,6 +311,9 @@ function taskStepsPanelModel(details: TaskStepsToolDetails, expanded: boolean): 
 	if (details.duplicateOfStepId) {
 		notices.push({ status: "info" as const, text: "Duplicate open step ignored." });
 	}
+	if (details.autoPromotedStepId) {
+		notices.push({ status: "info" as const, text: `Auto-started next step: ${details.autoPromotedStepId}.` });
+	}
 	if (details.demotedStepIds?.length) {
 		notices.push({
 			status: "info" as const,
@@ -348,6 +357,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			"For project changes, establish Plan/Route before first mutation and link steps to the goal contract; task_steps owns execution detail, never a second outcome state.",
 			"Batch transitions; work the first open step; record evidence/blockers; skip unchanged narration.",
 			"intake keeps every item; link goal requirementIds.",
+			"update's id is optional: omit it to target the active step. Completing the active step auto-starts the next pending one.",
 			"advance completes current, then starts next pending.",
 			"Attach completed tool_task IDs as evidence; goal completion rejects every open step.",
 			"Before final, resolve or defer open work. goal owns outcomes; delegate owns workers.",
@@ -378,6 +388,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			let state = before;
 			let duplicateStepId: string | undefined;
 			let demotedStepIds: readonly string[] = [];
+			let autoPromotedStepId: string | undefined;
 			try {
 				switch (input.action) {
 					case "set":
@@ -403,9 +414,11 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 						}
 						break;
 					case "update": {
-						if (!input.id?.trim())
-							return errorResult(input.action, "update requires id or a unique selector.", current);
-						const selected = resolveTaskStepSelector(before.steps, input.id);
+						// Omitted id targets the active step. Reuses resolveTaskStepSelector's own
+						// "current"/"active" resolution (including its "no in_progress step" error naming
+						// the open steps) instead of duplicating that logic here.
+						const selector = input.id?.trim() || "current";
+						const selected = resolveTaskStepSelector(before.steps, selector);
 						if (
 							input.pipelineRunId !== undefined ||
 							input.pipelineStageId !== undefined ||
@@ -421,7 +434,18 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 								clearingPipelineLink,
 							);
 						}
-						state = updateTaskStep(state, input.id, toTaskStepUpdate(input), timestamp);
+						state = updateTaskStep(state, selector, toTaskStepUpdate(input), timestamp);
+						// Completing the step that WAS active advances the cursor automatically -- the
+						// harness manages the step, so the model does not need a separate `advance` call
+						// for the common case. Guarded to the step that was in_progress before this call,
+						// so completing an unrelated pending/blocked step never disturbs the real cursor.
+						if (selected.status === "in_progress" && input.status === "completed") {
+							const promoted = findNextPendingStep(state.steps, selected.id);
+							if (promoted) {
+								state = updateTaskStep(state, promoted.id, { status: "in_progress" }, timestamp);
+								autoPromotedStepId = promoted.id;
+							}
+						}
 						// Exclude the explicitly targeted step: its own status change was requested by
 						// the caller, so it is never a "silent" demotion even if it moved to pending.
 						demotedStepIds = computeDemotedStepIds(before, state, new Set([selected.id]));
@@ -457,6 +481,9 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 				if (demotedStepIds.length > 0) {
 					noticeLines.push(`Demoted to pending because another step became active: ${demotedStepIds.join(", ")}.`);
 				}
+				if (autoPromotedStepId) {
+					noticeLines.push(`Auto-started next pending step: ${autoPromotedStepId}.`);
+				}
 				if (stateCounts.verificationNudgeNeeded) {
 					noticeLines.push(
 						"Reminder: a completed step has no evidence attached; attach evidence via update before treating it as verified.",
@@ -486,6 +513,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 						showCompleted: input.showCompleted,
 						duplicateOfStepId: duplicateStepId,
 						demotedStepIds: demotedStepIds.length > 0 ? demotedStepIds : undefined,
+						autoPromotedStepId,
 					} satisfies TaskStepsToolDetails,
 				};
 			} catch (error) {

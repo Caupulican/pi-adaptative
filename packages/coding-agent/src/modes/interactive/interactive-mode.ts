@@ -11,6 +11,7 @@ import type { AgentMessage, ToolCallRepairInfo } from "@caupulican/pi-agent-core
 import type { AssistantMessage, ImageContent, Message, Model } from "@caupulican/pi-ai";
 import type { AutocompleteProvider, EditorComponent, Keybinding, MarkdownTheme, SelectItem } from "@caupulican/pi-tui";
 import {
+	applyTerminalSettings,
 	type Component,
 	Container,
 	type Loader,
@@ -24,6 +25,11 @@ import {
 import { APP_NAME, APP_TITLE, getAgentDir, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import {
+	type CacheMissObservation,
+	detectCacheMissNotice,
+	observeCacheStateFromMessages,
+} from "../../core/cache-miss-notice.ts";
 import {
 	expandArgumentsForDisplay,
 	expandMessageForDisplay,
@@ -78,9 +84,11 @@ import { ExpandableText, isExpandable } from "./components/expandable-text.ts";
 import type { FitnessRole } from "./components/fitness-role-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
+import type { MarkdownTransformFn } from "./components/markdown-transform.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { openTranscriptOverlay } from "./components/transcript-overlay.ts";
+import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import * as configBackup from "./config-backup.ts";
 import { EditorOverlayHost } from "./editor-overlay-host.ts";
@@ -103,6 +111,7 @@ import { handleNonFatalSessionReplacementError } from "./session-replacement-err
 import * as settingsSelectorFlow from "./settings-selector-flow.ts";
 import * as signalLifecycle from "./signal-lifecycle.ts";
 import * as startupChecks from "./startup-checks.ts";
+import { terminalCapabilityOverridesFromSettings } from "./terminal-capability-settings.ts";
 import {
 	getEditorTheme,
 	getMarkdownTheme,
@@ -216,6 +225,8 @@ export class InteractiveMode {
 	private changelogMarkdown: string | undefined = undefined;
 	private startupNoticesShown = false;
 	private anthropicSubscriptionWarningShown = false;
+	/** Evidence for the P1m cache-miss notice: the previous turn's actual usage, not a guess. */
+	private lastCacheObservation: CacheMissObservation | undefined = undefined;
 
 	// Status line tracking (for mutating immediately-sequential status updates)
 	private lastStatusSpacer: Spacer | undefined = undefined;
@@ -336,6 +347,9 @@ export class InteractiveMode {
 			await this.rebindCurrentSession();
 		});
 		this.version = VERSION;
+		// Must run before anything (including TUI/ProcessTerminal construction) can call
+		// getCapabilities() and cache a settings-less result (P1g).
+		applyTerminalSettings(terminalCapabilityOverridesFromSettings(this.settingsManager));
 		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
@@ -803,6 +817,7 @@ export class InteractiveMode {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
 			} finally {
+				this.reportCacheMissNoticeIfEvidenced();
 				this.refreshAutonomyFooterStatus();
 			}
 		}
@@ -811,6 +826,21 @@ export class InteractiveMode {
 	private refreshAutonomyFooterStatus(): void {
 		this.footerDataProvider.setAutonomyStatusSnapshot(this.session.getAutonomyStatusSnapshot());
 		this.footer.invalidate();
+	}
+
+	/**
+	 * P1m: after a turn completes, compare its actual usage against the previous turn's for
+	 * EVIDENCE of a cache miss (never guesses ahead of the request). Reuses the per-message usage
+	 * already recorded on assistant messages -- no new metering.
+	 */
+	private reportCacheMissNoticeIfEvidenced(): void {
+		const current = observeCacheStateFromMessages(this.session.messages);
+		if (!current) return;
+		if (this.session.settingsManager.getShowCacheMissNotices()) {
+			const notice = detectCacheMissNotice(current, this.lastCacheObservation);
+			if (notice) this.showWarning(notice.message);
+		}
+		this.lastCacheObservation = current;
 	}
 
 	private activityLaneSnapshot() {
@@ -874,6 +904,15 @@ export class InteractiveMode {
 			codeBlockIndent: this.settingsManager.getCodeBlockIndent(),
 		};
 	}
+
+	/**
+	 * Bound reference to the extension runner's markdown transformer chain (P2g), handed to
+	 * message components so they can re-run it per render width. A bound arrow class field so it
+	 * stays a stable, safely-passable callback (ExtensionRunner#transformMarkdown is a plain
+	 * method, not auto-bound).
+	 */
+	private readonly transformMarkdownForDisplay: MarkdownTransformFn = (markdown, context) =>
+		this.session.extensionRunner.transformMarkdown(markdown, context);
 
 	// =========================================================================
 	// Extension System
@@ -1263,6 +1302,7 @@ export class InteractiveMode {
 			handleClearCommand: (name) => this.handleClearCommand(name),
 			showSessionSelector: () => this.showSessionSelector(),
 			handleClipboardImagePaste: () => this.handleClipboardImagePaste(),
+			handleCopyCommand: () => this.handleCopyCommand(),
 		};
 	}
 
@@ -1446,6 +1486,12 @@ export class InteractiveMode {
 				const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
 				this.editor.setText("");
 				await this.handleModelCommand(searchTerm);
+				return;
+			}
+			if (text === "/thinking" || text.startsWith("/thinking ")) {
+				const levelArg = text.startsWith("/thinking ") ? text.slice(10).trim() : undefined;
+				this.editor.setText("");
+				await this.handleThinkingCommand(levelArg);
 				return;
 			}
 			if (text === "/profiles" || text.startsWith("/profiles ")) {
@@ -1965,7 +2011,10 @@ export class InteractiveMode {
 			case "custom": {
 				if (message.display) {
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
-					const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings());
+					// 1 matches the paddingX every other top-level transcript component uses (assistant
+					// text, bash output, ...), so a custom renderer that honors MessageRenderOptions.outputPad
+					// aligns with its neighbors instead of silently seeing the unplumbed default of 0.
+					const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings(), 1);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
 				}
@@ -2005,11 +2054,16 @@ export class InteractiveMode {
 							const userComponent = new UserMessageComponent(
 								skillBlock.userMessage,
 								this.getMarkdownThemeWithSettings(),
+								this.transformMarkdownForDisplay,
 							);
 							this.chatContainer.addChild(userComponent);
 						}
 					} else {
-						const userComponent = new UserMessageComponent(textContent, this.getMarkdownThemeWithSettings());
+						const userComponent = new UserMessageComponent(
+							textContent,
+							this.getMarkdownThemeWithSettings(),
+							this.transformMarkdownForDisplay,
+						);
 						this.chatContainer.addChild(userComponent);
 					}
 					if (options?.populateHistory) {
@@ -2023,6 +2077,7 @@ export class InteractiveMode {
 					message,
 					this.hideThinkingBlock,
 					this.getMarkdownThemeWithSettings(),
+					{ isStreaming: false, transformMarkdown: this.transformMarkdownForDisplay },
 				);
 				this.chatContainer.addChild(assistantComponent);
 				break;
@@ -2434,24 +2489,20 @@ export class InteractiveMode {
 	private async toggleThinkingBlockVisibility(): Promise<void> {
 		this.hideThinkingBlock = !this.hideThinkingBlock;
 		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
-
-		// Rebuild chat from session messages
-		await this.rebuildChatFromMessages();
-
-		// If streaming, re-add the streaming component with updated visibility and re-render
-		if (this.streamingComponent && this.streamingMessage) {
-			this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
-			this.streamingComponent.updateContent(this.streamingMessage);
-			this.updateRuntimeStatus(this.streamingMessage);
-			this.chatContainer.addChild(this.streamingComponent);
-			// Rebuilding the chat clears active call identity. Reattach
-			// any tool calls that are still arriving so toggling thinking visibility
-			// cannot make an in-flight tool disappear from the TUI.
-			// A rebuild after the arguments already arrived: safe to expand, and it happens once.
-			this.attachStreamingToolActions(this.streamingMessage, true);
-		}
-
+		this.updateThinkingBlockVisibility();
 		this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
+	}
+
+	private updateThinkingBlockVisibility(): void {
+		for (const child of this.chatContainer.children) {
+			if (child instanceof AssistantMessageComponent) {
+				child.setHideThinkingBlock(this.hideThinkingBlock);
+			}
+		}
+		if (this.streamingComponent && !this.chatContainer.children.includes(this.streamingComponent)) {
+			this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
+		}
+		this.ui.requestRender();
 	}
 
 	private openExternalEditor(): Promise<void> {
@@ -2938,6 +2989,7 @@ export class InteractiveMode {
 			setupAutocompleteProvider: () => this.setupAutocompleteProvider(),
 			updateEditorBorderColor: () => this.updateEditorBorderColor(),
 			rebuildChatFromMessages: () => this.rebuildChatFromMessages(),
+			updateThinkingBlockVisibility: () => this.updateThinkingBlockVisibility(),
 			validateSelfModificationSource: (settings) => this.validateSelfModificationSource(settings),
 			applyAutonomyMode: (mode, scope) => this.applyAutonomyMode(mode, scope),
 			validateAutoLearnModelValue: (value) => this.validateAutoLearnModelValue(value),
@@ -2976,6 +3028,10 @@ export class InteractiveMode {
 
 	private async handleModelCommand(searchTerm?: string): Promise<void> {
 		await sessionFlows.handleModelCommand(this.sessionFlowHost(), searchTerm);
+	}
+
+	private async handleThinkingCommand(arg?: string): Promise<void> {
+		await sessionFlows.handleThinkingCommand(this.sessionFlowHost(), arg);
 	}
 
 	private async getModelCandidates(): Promise<Model<any>[]> {
@@ -3262,6 +3318,10 @@ export class InteractiveMode {
 			session: this.session,
 			showError: (message) => this.showError(message),
 			showStatus: (message) => this.showStatus(message),
+			getSelectionText: () => {
+				const activeOverlay = this.editorContainer.children[0];
+				return activeOverlay instanceof TreeSelectorComponent ? activeOverlay.getSelectedCopyText() : undefined;
+			},
 		});
 	}
 

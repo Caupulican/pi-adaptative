@@ -9,6 +9,7 @@
  * detached: true). Both functions fall back to single-pid signaling otherwise.
  */
 import { type ChildProcess, spawnSync } from "node:child_process";
+import { join } from "node:path";
 
 const KILL_ACKNOWLEDGEMENT_MS = 1000;
 
@@ -43,9 +44,16 @@ function isChildTerminal(child: ChildProcess): boolean {
 export interface KillTreeOptions {
 	/** How long to wait for the child's exit event after SIGTERM before SIGKILL. Default 5000ms. */
 	graceMs?: number;
+	/** Optional callback for diagnostic warnings during process termination. */
+	onDiagnostic?: (diagnostic: string) => void;
 }
 
-export type KillTreeOutcome = "already_dead" | "terminated" | "killed";
+export type KillTreeOutcome = "already_dead" | "terminated" | "killed" | "failed";
+
+export interface KillTreeNowResult {
+	success: boolean;
+	error?: string;
+}
 
 /** Graceful tree kill: SIGTERM → child exit event or one-shot deadline → SIGKILL. */
 export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<KillTreeOutcome> {
@@ -82,10 +90,19 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 
 		if (process.platform === "win32") {
 			escalated = true;
-			killTreeNow(pid);
+			const outcome = killTreeNow(pid);
+			if (!outcome.success && outcome.error) {
+				opts?.onDiagnostic?.(`Windows taskkill failed: ${outcome.error}`);
+			}
 			acknowledgementTimer = setTimeout(() => {
 				child.unref();
-				settle("killed");
+				if (isChildTerminal(child)) {
+					settle("killed");
+				} else if (isProcessAlive(pid)) {
+					settle(outcome.success ? "killed" : "failed");
+				} else {
+					settle("killed");
+				}
 			}, KILL_ACKNOWLEDGEMENT_MS);
 			acknowledgementTimer.unref();
 			return;
@@ -118,14 +135,22 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 }
 
 /** Immediate tree kill (SIGKILL / synchronous taskkill). */
-export function killTreeNow(pid: number): void {
+export function killTreeNow(pid: number): KillTreeNowResult {
 	if (process.platform === "win32") {
-		spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], {
+		const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+		const result = spawnSync(taskkill, ["/F", "/T", "/PID", String(pid)], {
 			stdio: "ignore",
 			timeout: 10_000,
 			windowsHide: true,
 		});
-	} else {
-		signalTree(pid, "SIGKILL");
+		if (result.error) {
+			return { success: false, error: result.error.message };
+		}
+		if (result.status !== 0) {
+			return { success: false, error: `taskkill exited with code ${result.status}` };
+		}
+		return { success: true };
 	}
+	const success = signalTree(pid, "SIGKILL");
+	return { success, ...(success ? {} : { error: "Failed to send SIGKILL" }) };
 }

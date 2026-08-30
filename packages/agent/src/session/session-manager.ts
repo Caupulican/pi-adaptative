@@ -625,7 +625,7 @@ function loadEntriesFromFileInternal(
 	filePath: string,
 	options?: { maxLineChars?: number },
 	onEntry?: (entry: FileEntry, offset: number | undefined, length: number | undefined) => void,
-): { entries: FileEntry[]; indexedBytes: number } {
+): { entries: FileEntry[]; indexedBytes: number; unterminatedTail?: boolean } {
 	const resolvedFilePath = normalizePath(filePath);
 	if (!existsSync(resolvedFilePath)) return { entries: [], indexedBytes: 0 };
 
@@ -645,6 +645,7 @@ function loadEntriesFromFileInternal(
 	let indexedBytes = 0;
 	let lineOffset = 0;
 	let lineLength = 0;
+	let unterminatedTail = false;
 	try {
 		const decoder = new StringDecoder("utf8");
 		const lines = new StreamingLineDecoder(maxLineChars, { overflow: "skip", lineEndings: "lf" });
@@ -653,6 +654,7 @@ function loadEntriesFromFileInternal(
 		while (true) {
 			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
 			if (bytesRead === 0) break;
+			unterminatedTail = buffer[bytesRead - 1] !== 0x0a;
 			const chunkOffset = indexedBytes;
 			indexedBytes += bytesRead;
 			const offsets: number[] = [];
@@ -688,13 +690,13 @@ function loadEntriesFromFileInternal(
 	}
 
 	// Validate session header
-	if (entries.length === 0) return { entries, indexedBytes };
+	if (entries.length === 0) return { entries, indexedBytes, unterminatedTail };
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
-		return { entries: [], indexedBytes };
+		return { entries: [], indexedBytes, unterminatedTail };
 	}
 
-	return { entries, indexedBytes };
+	return { entries, indexedBytes, unterminatedTail };
 }
 
 /** Exported for testing */
@@ -1229,6 +1231,13 @@ export class SessionManager {
 				this._rewriteFile();
 				this.flushed = true;
 				return;
+			}
+
+			if (loaded.unterminatedTail) {
+				appendFileSync(this.sessionFile, "\n");
+				if (this.indexedSessionFileBytes > 0) {
+					this.indexedSessionFileBytes += 1;
+				}
 			}
 
 			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;

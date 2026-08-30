@@ -353,4 +353,92 @@ describe("skills", () => {
 			expect(collisionWarnings[0].message).toContain("name collision");
 		});
 	});
+
+	describe("BOM handling and undeclared skill ignore (F15 & F17)", () => {
+		it("loads a skill with UTF-8 BOM frontmatter (F15)", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-skill-bom-"));
+			try {
+				const skillDir = join(root, "bom-skill");
+				mkdirSync(skillDir);
+				const filePath = join(skillDir, "SKILL.md");
+				writeFileSync(
+					filePath,
+					"\uFEFF---\nname: bom-skill\ndescription: Skill with UTF-8 BOM.\n---\nBody here.",
+					"utf8",
+				);
+
+				const { skills, diagnostics } = loadSkillsFromDir({
+					dir: root,
+					source: "test",
+				});
+
+				expect(skills).toHaveLength(1);
+				expect(skills[0].name).toBe("bom-skill");
+				expect(skills[0].description).toBe("Skill with UTF-8 BOM.");
+				expect(diagnostics).toHaveLength(0);
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
+
+		it("silently ignores root README.md and AGENTS.md without frontmatter (F17)", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-skill-undeclared-"));
+			try {
+				writeFileSync(join(root, "README.md"), "# Project Readme\nNo frontmatter here.", "utf8");
+				writeFileSync(join(root, "AGENTS.md"), "# Project Agents\nJust documentation.", "utf8");
+
+				const { skills, diagnostics } = loadSkillsFromDir({
+					dir: root,
+					source: "test",
+				});
+
+				expect(skills).toHaveLength(0);
+				expect(diagnostics).toHaveLength(0);
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
+
+		it("loads single-file root skill with valid frontmatter (F17 feature protection)", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-skill-single-file-"));
+			try {
+				writeFileSync(
+					join(root, "my-skill.md"),
+					"---\nname: my-skill\ndescription: A valid single-file skill.\n---\nInstructions.",
+					"utf8",
+				);
+
+				const { skills, diagnostics } = loadSkillsFromDir({
+					dir: root,
+					source: "test",
+				});
+
+				expect(skills).toHaveLength(1);
+				expect(skills[0].name).toBe("my-skill");
+				expect(skills[0].description).toBe("A valid single-file skill.");
+				expect(diagnostics).toHaveLength(0);
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
+
+		it("emits diagnostic on malformed SKILL.md (F17 regression)", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-skill-malformed-"));
+			try {
+				const skillDir = join(root, "bad-skill");
+				mkdirSync(skillDir);
+				writeFileSync(join(skillDir, "SKILL.md"), "---\n: invalid yaml: [\n---\n", "utf8");
+
+				const { skills, diagnostics } = loadSkillsFromDir({
+					dir: root,
+					source: "test",
+				});
+
+				expect(skills).toHaveLength(0);
+				expect(diagnostics.length).toBeGreaterThan(0);
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
+	});
 });

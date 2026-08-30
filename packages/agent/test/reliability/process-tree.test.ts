@@ -1,9 +1,17 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { isProcessAlive, killTree, killTreeNow } from "../../src/reliability/process-tree.ts";
+
+// killTree's win32 branch calls spawnSync internally to run taskkill. Mocking it here lets the
+// "failing taskkill" test force a deterministic failure on any platform/CI leg, instead of relying
+// on taskkill.exe being genuinely absent (true on Linux/macOS dev boxes, false on real Windows CI).
+vi.mock("node:child_process", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:child_process")>();
+	return { ...actual, spawnSync: vi.fn(actual.spawnSync) };
+});
 
 const posixOnly = it.skipIf(process.platform === "win32");
 
@@ -118,8 +126,52 @@ describe("process-tree", () => {
 	posixOnly("killTreeNow kills immediately", async () => {
 		const child = spawnDetached("sleep 30");
 		const exited = waitForExit(child);
-		killTreeNow(child.pid!);
+		const result = killTreeNow(child.pid!);
+		expect(result.success).toBe(true);
 		await exited;
 		expect(isProcessAlive(child.pid!)).toBe(false);
+	});
+
+	it("killTreeNow returns handled failure when taskkill fails on Windows (F8)", () => {
+		const originalPlatform = process.platform;
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			// Taskkill on a bogus/inaccessible process
+			const result = killTreeNow(99999999);
+			expect(result.success).toBe(false);
+			expect(result.error).toBeDefined();
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+	});
+
+	it('killTree settles "failed" and emits a diagnostic when taskkill definitively fails (F8)', async () => {
+		const originalPlatform = process.platform;
+		const child = spawnDetached("sleep 30");
+		const diagnostics: string[] = [];
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			// Force a definitive taskkill failure regardless of whether this host (or a real Windows
+			// CI leg, where taskkill.exe genuinely exists and could succeed against the live child)
+			// would otherwise resolve it differently.
+			vi.mocked(spawnSync).mockReturnValueOnce({
+				error: new Error("spawnSync taskkill.exe ENOENT"),
+			} as unknown as ReturnType<typeof spawnSync>);
+
+			const outcome = await killTree(child, {
+				graceMs: 100,
+				onDiagnostic: (diag) => diagnostics.push(diag),
+			});
+
+			expect(outcome).toBe("failed");
+			expect(diagnostics).toHaveLength(1);
+			expect(diagnostics[0]).toContain("taskkill.exe ENOENT");
+			// The mocked spawnSync never touched the real process; it must still be alive.
+			expect(isProcessAlive(child.pid!)).toBe(true);
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+			// Cleanup the real child on posix
+			process.kill(child.pid!, "SIGKILL");
+		}
 	});
 });

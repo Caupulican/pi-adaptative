@@ -481,4 +481,21 @@ describe("footer metric layout", () => {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(60);
 		}
 	});
+
+	it("renders cache-hit rate CH: X% when latest assistant message has cache data (P1p)", () => {
+		const session = createSession({
+			sessionName: "",
+			usage: {
+				input: 200,
+				output: 100,
+				cacheRead: 800,
+				cacheWrite: 0,
+				cost: { total: 0.01 },
+			},
+		});
+		const footer = new FooterComponent(session, createFooterData(1));
+		const statsLine = stripAnsi(footer.render(160)[1] ?? "");
+
+		expect(statsLine).toContain("CH:80%");
+	});
 });

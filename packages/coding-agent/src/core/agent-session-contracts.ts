@@ -13,6 +13,7 @@ import type { CompactionResult, SessionManager } from "@caupulican/pi-agent-core
 import type { Api, CacheRetention, ImageContent, Message, Model, StopReason, Usage } from "@caupulican/pi-ai";
 import type { LaneRecord, LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskLiveView } from "./background-tool-task-controller.ts";
+import type { AutoCompactionReason } from "./compaction-controller.ts";
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
 import type {
 	ContextUsage,
@@ -49,14 +50,14 @@ export type AgentSessionEvent =
 			followUp: readonly string[];
 			commands: readonly string[];
 	  }
-	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" | "provider_recovery" }
+	| { type: "compaction_start"; reason: "manual" | AutoCompactionReason }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| { type: "warning"; message: string }
 	| { type: "background_tools"; tasks: readonly BackgroundToolTaskLiveView[] }
 	| {
 			type: "compaction_end";
-			reason: "manual" | "threshold" | "overflow" | "provider_recovery";
+			reason: "manual" | AutoCompactionReason;
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;
@@ -69,6 +70,14 @@ export type AgentSessionEvent =
 	/** UI-only bracket around foreground routing/preparation. Always paired with `routing_end`. */
 	| { type: "routing_start" }
 	| { type: "routing_end" }
+	| {
+			type: "session_compact_failed";
+			reason: "manual" | AutoCompactionReason;
+			errorMessage?: string;
+			aborted: boolean;
+			willRetry: boolean;
+			fromExtension: boolean;
+	  }
 	| {
 			type: "delegate_workers";
 			active: number;

@@ -241,7 +241,7 @@ function buildChatPayload(
 	return payload;
 }
 
-async function consumeChatStream(
+export async function consumeChatStream(
 	model: Model<"mistral-conversations">,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
@@ -251,7 +251,7 @@ async function consumeChatStream(
 	let currentBlock: TextContent | ThinkingContent | null = null;
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
-	const toolBlocksByKey = new Map<string, number>();
+	const toolBlocksByKey = new Map<string | number, number>();
 
 	const finishCurrentBlock = (block?: typeof currentBlock) => {
 		finishTextOrThinkingBlock(stream, output, block, blockIndex());
@@ -342,7 +342,7 @@ async function consumeChatStream(
 				toolCall.id && toolCall.id !== "null"
 					? toolCall.id
 					: deriveMistralToolCallId(`toolcall:${toolCall.index ?? 0}`, 0);
-			const key = `${callId}:${toolCall.index || 0}`;
+			const key = toolCall.index ?? callId;
 			const existingIndex = toolBlocksByKey.get(key);
 			let block: (ToolCall & { partialArgs?: string }) | undefined;
 
@@ -357,7 +357,7 @@ async function consumeChatStream(
 				block = {
 					type: "toolCall",
 					id: callId,
-					name: toolNameMap.toOriginalName(toolCall.function.name),
+					name: toolNameMap.toOriginalName(toolCall.function?.name ?? ""),
 					arguments: {},
 					partialArgs: "",
 				};
@@ -367,9 +367,11 @@ async function consumeChatStream(
 			}
 
 			const argsDelta =
-				typeof toolCall.function.arguments === "string"
+				typeof toolCall.function?.arguments === "string"
 					? toolCall.function.arguments
-					: JSON.stringify(toolCall.function.arguments || {});
+					: typeof toolCall.function?.arguments === "object" && toolCall.function?.arguments !== null
+						? JSON.stringify(toolCall.function.arguments)
+						: "";
 			block.partialArgs = (block.partialArgs || "") + argsDelta;
 			block.arguments = parseStreamingJson<Record<string, unknown>>(block.partialArgs);
 			stream.push({

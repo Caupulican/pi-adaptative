@@ -78,4 +78,77 @@ describe("JSON session-event projection", () => {
 		const event: AgentSessionEvent = { type: "message_end", message };
 		expect(projectSessionEventForJson(event)).toBe(event);
 	});
+
+	describe("toolcall_start projection (F19)", () => {
+		it("projects toolcall_start carrying id and toolName", () => {
+			const partial: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "call_123",
+						name: "read_file",
+						arguments: { path: "foo.txt" },
+					},
+				],
+				api: "openai-responses",
+				provider: "openai",
+				model: "gpt-4o",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			};
+			const event: AgentSessionEvent = {
+				type: "message_update",
+				message: partial,
+				assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, partial },
+			};
+
+			const projected = projectSessionEventForJson(event) as {
+				assistantMessageEvent: { type: string; contentIndex: number; id: string; toolName: string };
+			};
+			expect(projected.assistantMessageEvent).toEqual({
+				type: "toolcall_start",
+				contentIndex: 0,
+				id: "call_123",
+				toolName: "read_file",
+			});
+		});
+
+		it("throws when toolcall_start target block is not a tool call", () => {
+			const partial: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "hello" }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "gpt-4o",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			};
+			const event: AgentSessionEvent = {
+				type: "message_update",
+				message: partial,
+				assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, partial },
+			};
+
+			expect(() => projectSessionEventForJson(event)).toThrow(
+				"toolcall_start content at index 0 is not a tool call",
+			);
+		});
+	});
 });

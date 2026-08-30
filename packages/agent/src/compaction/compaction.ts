@@ -293,7 +293,12 @@ export function calculateContextTokens(usage: Usage): number {
 function getAssistantUsage(msg: AgentMessage): Usage | undefined {
 	if (msg.role === "assistant" && "usage" in msg) {
 		const assistantMsg = msg as AssistantMessage;
-		if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
+		if (
+			assistantMsg.stopReason !== "aborted" &&
+			assistantMsg.stopReason !== "error" &&
+			assistantMsg.usage &&
+			calculateContextTokens(assistantMsg.usage) > 0
+		) {
 			return assistantMsg.usage;
 		}
 	}
@@ -801,6 +806,9 @@ function finalizeSummaryResponse(
 	// guarantees a verification failure. Fail loudly so the compaction ladder escalates instead.
 	if (response.stopReason === "length") {
 		throw new Error("summary-length-stop: summarizer hit its output cap before completing the checkpoint");
+	}
+	if (response.content.some((c) => c.type === "toolCall")) {
+		throw new Error("summary-tool-call: summarizer generated a tool call instead of text");
 	}
 	return { text: truncateSummaryToBudget(extractTextContent(response), summaryBudget), usage };
 }

@@ -65,6 +65,7 @@ export type AgentToolCall = Extract<AssistantMessage["content"][number], { type:
 export interface BeforeToolCallResult {
 	block?: boolean;
 	reason?: string;
+	terminate?: boolean;
 }
 
 /**

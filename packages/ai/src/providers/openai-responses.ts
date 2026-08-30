@@ -254,5 +254,10 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		}
 	}
 
+	// Custom sampling parameters (top_p, top_k, min_p, repetition_penalty, etc.)
+	if (model.samplingParams) {
+		Object.assign(params, model.samplingParams);
+	}
+
 	return params;
 }

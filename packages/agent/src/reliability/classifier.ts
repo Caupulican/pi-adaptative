@@ -60,6 +60,19 @@ const NETWORK =
 	/network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|getaddrinfo|ENOTFOUND|EAI_AGAIN|socket hang up|socket connection was closed|timed? out|timeout|terminated/i;
 const PROVIDER_NO_RETRY = /Provider retry directive:\s*do not retry\./i;
 
+/**
+ * watchdogs.ts (`pushFailure`) wraps ANY caught cause -- including a permanent, non-retryable
+ * failure such as a caller misconfiguration -- in one generic transport-status phrase: "stream
+ * ended without terminal event: <cause>" (or the aborted variant). Classifying on that OUTER
+ * phrase would match STREAM_STALL's broad "ended without" pattern regardless of what is wrapped
+ * inside it, mislabeling a permanent failure as a retryable stall -- and under a caller that
+ * never advances its own retry-delay timer (e.g. a test using fake timers with nothing to drive
+ * them), retrying it waits on a timer that never fires, forever, with no recovery path. Callers
+ * above the watchdog (e.g. compaction's "Summarization failed: ...") may prefix further text
+ * before this phrase, so this intentionally has no leading anchor.
+ */
+const WATCHDOG_WRAPPER = /stream (?:ended without terminal event|aborted before terminal event): ([\s\S]+)$/;
+
 const RETRY_DELAY_TEXT =
 	/(?:retry(?:\s+your\s+request)?|try(?:\s+your\s+request)?\s+again)\s+(?:after|in)\s+((?:\d+(?:\.\d+)?\s*(?:milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\s*)+)/gi;
 const RETRY_DELAY_JSON = /"retryDelay"\s*:\s*"([^"]+)"/gi;
@@ -99,7 +112,11 @@ function parseRetryAfterMs(message: string): number | undefined {
 }
 
 export function classifyFailure(input: ClassifyFailureInput): ClassifiedError {
-	const message = input.message;
+	// Classify on the wrapped cause when the watchdog wrapper is present; a bare wrapper (no
+	// appended detail -- a genuine silent stall with no specific cause) has nothing to unwrap and
+	// still reaches the stream_stall classification below via its own pattern match.
+	const wrapped = WATCHDOG_WRAPPER.exec(input.message);
+	const message = wrapped ? wrapped[1] : input.message;
 	const retryAfterMs = parseRetryAfterMs(message);
 	const providerForbidsRetry = PROVIDER_NO_RETRY.test(message);
 
@@ -108,7 +125,7 @@ export function classifyFailure(input: ClassifyFailureInput): ClassifiedError {
 		shouldCompact: false,
 		shouldRotateCredential: false,
 		shouldFallback: false,
-		message,
+		message: input.message,
 	};
 
 	const withRetry = (result: ClassifiedError): ClassifiedError => {

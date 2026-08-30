@@ -396,6 +396,9 @@ export class Agent {
 
 	/** Clear transcript state, runtime state, and queued messages. */
 	reset(): void {
+		if (this.activeRun) {
+			throw new AgentBusyError("Agent cannot reset while a run is active. Abort and await waitForIdle() first.");
+		}
 		this._state.messages = [];
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;

@@ -330,6 +330,134 @@ describe("AgentSession queue characterization", () => {
 		).toBe(true);
 	});
 
+	it("orders triggerTurn: false custom messages after tool results without interleaving (F3)", async () => {
+		const waiting = await createWaitingHarness();
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("follow-up completed"),
+		]);
+
+		await waitForToolStart;
+		await harness.session.sendCustomMessage(
+			{ customType: "mid-tool-custom", content: "queued message", display: true, details: { value: 42 } },
+			{ triggerTurn: false },
+		);
+		releaseToolExecution();
+		await promptPromise;
+
+		const messageRoles = harness.session.messages.map((m) => m.role);
+		const toolResultIndex = messageRoles.indexOf("toolResult");
+		const customIndex = harness.session.messages.findIndex(
+			(m) => m.role === "custom" && m.customType === "mid-tool-custom",
+		);
+
+		expect(toolResultIndex).toBeGreaterThan(-1);
+		expect(customIndex).toBeGreaterThan(toolResultIndex);
+
+		// Also verify session entries ordering in SessionManager
+		const entries = harness.session.sessionManager.getEntries();
+		const entryTypes = entries.map((e) => e.type);
+		const messageEntryIndex = entryTypes.indexOf("message");
+		const customEntryIndex = entryTypes.indexOf("custom_message");
+		expect(customEntryIndex).toBeGreaterThan(messageEntryIndex);
+	});
+
+	it("does not let a triggerTurn:false custom message race ahead of a BACKGROUNDED tool call's late-arriving completion (F3, the one real risk)", async () => {
+		// Deliberately NOT createWaitingHarness(): its "wait" tool only signals readiness via the
+		// tool_execution_start EVENT, which is emitted from reservePreparedToolCalls() -- a step
+		// that runs and fully resolves BEFORE the handoff-subscription registration inside
+		// executeAndFinalizePreparedToolCall() (a later, separate step in the same pipeline).
+		// backgroundRunningToolCalls() needs that subscription to already exist, so this signals
+		// readiness from inside the tool's own execute(), matching the proven pattern in
+		// test/agent-session-background-tool-task.test.ts.
+		let releaseToolExecution: (() => void) | undefined;
+		const toolRelease = new Promise<void>((resolve) => {
+			releaseToolExecution = resolve;
+		});
+		let markStarted: (() => void) | undefined;
+		const toolStarted = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		const waitTool: AgentTool = {
+			name: "wait",
+			label: "Wait",
+			description: "Wait for release",
+			parameters: Type.Object({}),
+			execute: async () => {
+				markStarted?.();
+				await toolRelease;
+				return { content: [{ type: "text", text: "released" }], details: {} };
+			},
+		};
+		const harness = await createHarness({
+			settings: { autoLearn: { reflectionReview: false } },
+			tools: [waitTool],
+		});
+		harnesses.push(harness);
+		// "wait" arrives through createHarness's baseToolsOverride, which replaces the default
+		// active tool set entirely. tool_task is always registered (agent-session.ts wires
+		// getToolTaskDependencies unconditionally) but still needs explicit activation to use the
+		// manual handoff API below.
+		harness.session.setActiveToolsByName(["wait", "tool_task"]);
+
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("foreground continued"),
+			fauxAssistantMessage("background completion acknowledged"),
+		]);
+
+		const promptPromise = harness.session.prompt("start");
+		await toolStarted;
+		const handoffCount = harness.session.backgroundRunningToolCalls();
+		expect(handoffCount).toBe(1);
+
+		// The foreground prompt resolves once the model is told its call was handed off and
+		// replies -- the "wait" tool itself is still blocked on releaseToolExecution() below, i.e.
+		// still "running" in _backgroundToolTasks even though prompt() (and _foregroundRecovery's
+		// busy state with it) has already settled.
+		await promptPromise;
+
+		await harness.session.sendCustomMessage(
+			{ customType: "mid-background-custom", content: "queued during background", display: true, details: {} },
+			{ triggerTurn: false },
+		);
+
+		let resolveAcknowledged!: () => void;
+		const acknowledged = new Promise<void>((resolve) => {
+			resolveAcknowledged = resolve;
+		});
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				getMessageText(event.message).includes("background completion acknowledged")
+			) {
+				resolveAcknowledged();
+			}
+		});
+		releaseToolExecution?.();
+		await acknowledged;
+		unsubscribe();
+
+		// The backgrounded call's own placeholder toolResult lands immediately (turn 1, protocol
+		// correctness), so it precedes everything below regardless of the fix -- it is not a useful
+		// discriminator here. The real risk this test pins is ordering relative to the tool's late
+		// -arriving completion delivery (background-tool-completion): a triggerTurn:false message
+		// sent while the task is still "running" must never be spliced in BEFORE that delivery.
+		const messages = harness.session.messages;
+		const backgroundCompletionIndex = messages.findIndex(
+			(m) => m.role === "custom" && m.customType === "background-tool-completion",
+		);
+		const customIndex = messages.findIndex((m) => m.role === "custom" && m.customType === "mid-background-custom");
+
+		expect(backgroundCompletionIndex).toBeGreaterThan(-1);
+		expect(customIndex).toBeGreaterThan(-1);
+		expect(customIndex).toBeGreaterThan(backgroundCompletionIndex);
+	});
+
 	it("injects nextTurn custom messages into the next prompt", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

@@ -5,12 +5,19 @@ import {
 	type Model,
 } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type {
+	ProviderRequestCompactionDecision,
+	ProviderRequestCompactionInput,
+} from "../../src/core/compaction-controller.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 type SessionWithCompactionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
 	_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
 	_resolveCompactionModel: (sessionModel: Model<string>) => Model<string>;
+	_compaction: {
+		admitProviderRequest(input: ProviderRequestCompactionInput): Promise<ProviderRequestCompactionDecision>;
+	};
 };
 
 function createUsage(totalTokens: number) {
@@ -591,5 +598,186 @@ describe("AgentSession compaction characterization", () => {
 
 		expect(belowThresholdSpy).not.toHaveBeenCalled();
 		expect(disabledSpy).not.toHaveBeenCalled();
+	});
+
+	it("triggers threshold compaction for usage-less provider when estimated tokens exceed threshold (F13)", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { enabled: true, reserveTokens: 1000 } },
+			models: [{ id: "faux-1", contextWindow: 2000 }],
+		});
+		harnesses.push(harness);
+
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+
+		// Large text message that exceeds the threshold (contextWindow 2000 - reserveTokens 1000 = 1000 tokens ≈ 4000 chars)
+		const longText = "a".repeat(6000);
+		const usageLessAssistant = createAssistant(harness, {
+			stopReason: "stop",
+			totalTokens: 0,
+			timestamp: Date.now(),
+		});
+		// usage is completely 0 / omitted
+		usageLessAssistant.usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+
+		harness.session.agent.state.messages = [
+			{ role: "user", content: [{ type: "text", text: longText }], timestamp: Date.now() - 100 },
+			usageLessAssistant,
+		];
+
+		await sessionInternals._checkCompaction(usageLessAssistant);
+
+		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+	});
+
+	it("triggers threshold compaction on error for usage-less provider when estimated tokens exceed threshold (F13)", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { enabled: true, reserveTokens: 1000 } },
+			models: [{ id: "faux-1", contextWindow: 2000 }],
+		});
+		harnesses.push(harness);
+
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+
+		const longText = "a".repeat(6000);
+		const usageLessErrorAssistant = createAssistant(harness, {
+			stopReason: "error",
+			errorMessage: "generic error",
+			totalTokens: 0,
+			timestamp: Date.now(),
+		});
+		usageLessErrorAssistant.usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+
+		harness.session.agent.state.messages = [
+			{ role: "user", content: [{ type: "text", text: longText }], timestamp: Date.now() - 100 },
+			usageLessErrorAssistant,
+		];
+
+		await sessionInternals._checkCompaction(usageLessErrorAssistant);
+
+		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+	});
+
+	it("does not re-trigger threshold compaction from a stale usage-bearing message predating the last compaction (F13 staleness-guard regression)", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { enabled: true, reserveTokens: 1000 } },
+			models: [{ id: "faux-1", contextWindow: 2000 }],
+		});
+		harnesses.push(harness);
+
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+
+		const now = Date.now();
+		// A large, usage-bearing assistant message from BEFORE the compaction boundary below.
+		const staleAssistant = createAssistant(harness, {
+			stopReason: "stop",
+			totalTokens: 1_800,
+			timestamp: now - 10_000,
+		});
+		const staleUserEntryId = harness.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "old request" }],
+			timestamp: now - 10_100,
+		});
+		harness.sessionManager.appendMessage(staleAssistant);
+		// Records a compaction boundary AFTER staleAssistant in the branch.
+		harness.sessionManager.appendCompaction("old summary", staleUserEntryId, 1_800);
+
+		// The current (post-compaction) turn errors with no usable usage of its own. F13 makes
+		// check() fall back to a size ESTIMATE in that case, but the only usage info the estimator
+		// can find anywhere in agent.state.messages is the STALE pre-compaction usage above — the
+		// staleness guard must still refuse to trust it rather than re-triggering compaction from it.
+		const currentErrorAssistant = createAssistant(harness, {
+			stopReason: "error",
+			errorMessage: "generic error",
+			totalTokens: 0,
+			timestamp: now + 5_000,
+		});
+		currentErrorAssistant.usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+
+		harness.session.agent.state.messages = [
+			{ role: "user", content: [{ type: "text", text: "old request" }], timestamp: now - 10_100 },
+			staleAssistant,
+			currentErrorAssistant,
+		];
+
+		await sessionInternals._checkCompaction(currentErrorAssistant);
+
+		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+	});
+
+	it("compacts via the admission gate before the next send when the provider never reports usage (F13 systemic negative control)", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { enabled: true, reserveTokens: 1000 } },
+			models: [{ id: "faux-1", contextWindow: 2000 }],
+		});
+		harnesses.push(harness);
+
+		// Seed enough usage-less history that the very first request's materialized size alone
+		// crosses the admission gate's threshold — before check()'s between-turns path could ever
+		// have run (there is no prior assistant response yet).
+		harness.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "a".repeat(6000) }],
+			timestamp: Date.now() - 1000,
+		});
+		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+
+		const model = harness.getModel();
+		harness.session.agent.streamFn = () => {
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					...fauxAssistantMessage("ok"),
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				};
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		// vi.spyOn without a replacement implementation still calls through to the real method —
+		// this only observes admission decisions, it never substitutes them.
+		const admitSpy = vi.spyOn(sessionInternals._compaction, "admitProviderRequest");
+
+		await harness.session.prompt("continue");
+
+		expect(admitSpy).toHaveBeenCalled();
+		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
+		expect(compactionEntries.length).toBeGreaterThan(0);
 	});
 });

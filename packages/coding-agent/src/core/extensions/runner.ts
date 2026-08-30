@@ -36,6 +36,7 @@ import type {
 	InputEvent,
 	InputEventResult,
 	InputSource,
+	MarkdownTransformerContext,
 	MessageEndEvent,
 	MessageEndEventResult,
 	MessageRenderer,
@@ -55,6 +56,7 @@ import type {
 	ToolCallEventResult,
 	ToolResultEvent,
 	ToolResultEventResult,
+	UiPromptKind,
 	UserBashEvent,
 	UserBashEventResult,
 } from "./types.ts";
@@ -274,6 +276,8 @@ export class ExtensionRunner {
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
+	/** Depth of nested ctx.ui.* prompt calls (P1f); only the outermost emits start/end. */
+	private uiPromptDepth = 0;
 
 	constructor(
 		extensions: Extension[],
@@ -315,7 +319,7 @@ export class ExtensionRunner {
 		this.runtime.getActiveTools = actions.getActiveTools;
 		this.runtime.getAllTools = actions.getAllTools;
 		this.runtime.setActiveTools = actions.setActiveTools;
-		this.runtime.refreshTools = actions.refreshTools;
+		this.runtime.refreshTools = actions.refreshTools ?? (() => {});
 		this.runtime.getCommands = actions.getCommands;
 		this.runtime.setModel = actions.setModel;
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
@@ -580,6 +584,38 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
+	async emitBeforeProviderHeaders(event: {
+		provider: string;
+		model: string;
+		headers: Record<string, string>;
+	}): Promise<void> {
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("before_provider_headers");
+			if (!handlers || handlers.length === 0) continue;
+			for (const handler of handlers) {
+				try {
+					await handler(event, this.createContext());
+				} catch (err) {
+					this.reportHandlerError(ext.path, "before_provider_headers", err);
+				}
+			}
+		}
+	}
+
+	transformMarkdown(markdown: string, context: MarkdownTransformerContext): string {
+		let current = markdown;
+		for (const ext of this.extensions) {
+			for (const transformer of ext.markdownTransformers) {
+				try {
+					current = transformer(current, context);
+				} catch {
+					// A throwing transformer is skipped
+				}
+			}
+		}
+		return current;
+	}
+
 	private resolveRegisteredCommands(): ResolvedCommand[] {
 		const commands: RegisteredCommand[] = [];
 		const counts = new Map<string, number>();
@@ -638,6 +674,52 @@ export class ExtensionRunner {
 	}
 
 	/**
+	 * Bracket a ctx.ui.* prompt call with ui_prompt_start/ui_prompt_end (P1f). A prompt whose own
+	 * handling triggers another prompt (e.g. a custom() factory that itself calls confirm()) nests:
+	 * only the outermost call emits, so extensions see one span per user-visible prompt sequence.
+	 * Handlers are fire-and-forget (emit() is never awaited here) so a slow handler can never delay
+	 * the prompt itself.
+	 */
+	private async withUiPromptSpan<T>(
+		kind: UiPromptKind,
+		title: string | undefined,
+		action: () => Promise<T>,
+	): Promise<T> {
+		const isOutermost = this.uiPromptDepth === 0;
+		this.uiPromptDepth++;
+		if (isOutermost) {
+			void this.emit({ type: "ui_prompt_start", reason: "ui_prompt", kind, title }).catch(() => {});
+		}
+		try {
+			return await action();
+		} finally {
+			this.uiPromptDepth--;
+			if (this.uiPromptDepth === 0) {
+				void this.emit({ type: "ui_prompt_end", reason: "ui_prompt", kind, title }).catch(() => {});
+			}
+		}
+	}
+
+	/**
+	 * Wrap the select/confirm/input/editor/custom prompt methods with ui_prompt_start/end spans.
+	 * Uses property descriptors (not a spread) so `base`'s own getters (e.g. `theme`) stay lazy
+	 * instead of being read once and frozen in, matching createCommandContext()'s same discipline.
+	 */
+	private wrapUiContextForPromptEvents(base: ExtensionUIContext): ExtensionUIContext {
+		const wrapped = Object.defineProperties({}, Object.getOwnPropertyDescriptors(base)) as ExtensionUIContext;
+		wrapped.select = (title, options, opts) =>
+			this.withUiPromptSpan("select", title, () => base.select(title, options, opts));
+		wrapped.confirm = (title, message, opts) =>
+			this.withUiPromptSpan("confirm", title, () => base.confirm(title, message, opts));
+		wrapped.input = (title, placeholder, opts) =>
+			this.withUiPromptSpan("input", title, () => base.input(title, placeholder, opts));
+		wrapped.editor = (title, prefill) => this.withUiPromptSpan("editor", title, () => base.editor(title, prefill));
+		wrapped.custom = (factory, options) =>
+			this.withUiPromptSpan("custom", undefined, () => base.custom(factory, options));
+		return wrapped;
+	}
+
+	/**
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
 	 */
@@ -647,7 +729,7 @@ export class ExtensionRunner {
 		return {
 			get ui() {
 				runner.assertActive();
-				return runner.uiContext;
+				return runner.wrapUiContextForPromptEvents(runner.uiContext);
 			},
 			get hasUI() {
 				runner.assertActive();
@@ -867,6 +949,10 @@ export class ExtensionRunner {
 						currentEvent.usage = handlerResult.usage;
 						modified = true;
 					}
+					if (handlerResult.terminate !== undefined) {
+						(currentEvent as any).terminate = handlerResult.terminate;
+						modified = true;
+					}
 				} catch (err) {
 					this.reportHandlerError(ext.path, "tool_result", err);
 				}
@@ -882,6 +968,7 @@ export class ExtensionRunner {
 			details: currentEvent.details,
 			isError: currentEvent.isError,
 			usage: currentEvent.usage,
+			terminate: (currentEvent as any).terminate,
 		};
 	}
 

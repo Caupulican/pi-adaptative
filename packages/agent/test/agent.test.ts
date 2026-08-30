@@ -631,4 +631,41 @@ describe("Agent", () => {
 			expect.objectContaining({ role: "user", content: "terminal handoff" }),
 		);
 	});
+
+	it("rejects reset() during an active run with AgentBusyError (F7)", async () => {
+		let abortSignal: AbortSignal | undefined;
+		const agent = new Agent({
+			streamFn: (_model, _context, options) => {
+				abortSignal = options?.signal;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					const checkAbort = () => {
+						if (abortSignal?.aborted) {
+							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
+						} else {
+							setTimeout(checkAbort, 5);
+						}
+					};
+					checkAbort();
+				});
+				return stream;
+			},
+		});
+
+		const promptPromise = agent.prompt("in-flight prompt");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(agent.state.isStreaming).toBe(true);
+
+		expect(() => agent.reset()).toThrow(AgentBusyError);
+		expect(agent.state.messages.length).toBeGreaterThan(0);
+
+		agent.abort();
+		await promptPromise.catch(() => {});
+		await agent.waitForIdle();
+
+		// After idle, reset succeeds
+		expect(() => agent.reset()).not.toThrow();
+		expect(agent.state.messages).toEqual([]);
+	});
 });

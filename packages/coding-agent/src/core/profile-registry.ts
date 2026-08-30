@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { isValidThinkingLevel } from "../cli/args.ts";
 import { resolvePath } from "../utils/paths.ts";
+import { stripBom } from "../utils/text.ts";
 import { mergeResourceProfileSettings } from "./resource-profile-blocks.ts";
 import type {
 	ModelRouterSettings,
@@ -271,7 +272,7 @@ function loadSettingsFileProfiles(sourcePath: string, source: ProfileSource): No
 	try {
 		const stats = statSync(sourcePath);
 		if (!stats.isFile()) return [];
-		const parsed = JSON.parse(readFileSync(sourcePath, "utf-8")) as Settings;
+		const parsed = JSON.parse(stripBom(readFileSync(sourcePath, "utf-8"))) as Settings;
 		return normalizeSettingsProfiles(parsed, source, dirname(resolve(sourcePath)), resolve(sourcePath)).map(
 			(profile) => ({
 				...profile,
@@ -435,7 +436,7 @@ export class ProfileRegistry {
 		try {
 			const stats = statSync(sourcePath);
 			if (!stats.isFile()) return undefined;
-			const parsed = JSON.parse(readFileSync(sourcePath, "utf-8"));
+			const parsed = JSON.parse(stripBom(readFileSync(sourcePath, "utf-8")));
 			const fallbackName = basename(sourcePath, ".json");
 			return {
 				profile: normalizeWrapperProfile({

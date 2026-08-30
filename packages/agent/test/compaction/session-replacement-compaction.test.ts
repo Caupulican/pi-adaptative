@@ -334,4 +334,90 @@ describe("session-replacement compaction", () => {
 		expect(context.messages.map((message) => message.role)).toEqual(["compactionSummary"]);
 		expect(JSON.stringify(context.messages)).not.toContain("must stay discarded");
 	});
+
+	it("rejects summarizer responses that hallucinate tool calls (F5 guard)", async () => {
+		const historicalAssistant = assistant("history", "I will inspect it.", 2);
+		const sourceMessages: Message[] = [
+			{ role: "user", content: "Keep the original task exact.", timestamp: 1 },
+			historicalAssistant,
+		];
+		const sourceContext: Context = {
+			systemPrompt: "live system instructions",
+			messages: sourceMessages,
+			tools: [{ name: "inspect", description: "Inspect an item", parameters: { type: "object" } }],
+		};
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "user-1",
+			messagesToSummarize: sourceMessages,
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 400_000,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: {
+				...DEFAULT_COMPACTION_SETTINGS,
+				strategy: "session-replacement",
+			},
+		};
+		const completion = vi.fn(async () => {
+			return {
+				...acceptedSummary(),
+				content: [{ type: "toolCall", id: "hallucinated-call", name: "inspect", arguments: {} } as any],
+			};
+		});
+		const executionOptions = {
+			chunked: false,
+			completion,
+			structuredRequest: {
+				context: sourceContext,
+				sessionId: "live-session-affinity",
+				cacheRetention: "short",
+			},
+		} satisfies CompactionExecutionOptions;
+
+		await expect(
+			compact(
+				preparation,
+				model(),
+				"oauth-token",
+				undefined,
+				undefined,
+				undefined,
+				"low",
+				undefined,
+				undefined,
+				executionOptions,
+			),
+		).rejects.toThrow("summary-tool-call");
+	});
+
+	it("standalone compaction requests do not expose tools or force toolChoice (F5 negative control)", async () => {
+		const sourceMessages: Message[] = [{ role: "user", content: "Standalone summarization message", timestamp: 1 }];
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "user-1",
+			messagesToSummarize: sourceMessages,
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 400_000,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: {
+				...DEFAULT_COMPACTION_SETTINGS,
+				strategy: "session-replacement",
+			},
+		};
+		let capturedContext: Context | undefined;
+		let capturedOptions: SimpleStreamOptions | undefined;
+		const completion = vi.fn(async (_model: Model<Api>, context: Context, options: SimpleStreamOptions) => {
+			capturedContext = context;
+			capturedOptions = options;
+			return acceptedSummary();
+		});
+
+		await compact(preparation, model(), "oauth-token", undefined, undefined, undefined, "low", undefined, undefined, {
+			chunked: false,
+			completion,
+		});
+
+		expect(capturedContext?.tools).toBeUndefined();
+		expect((capturedOptions as any)?.toolChoice).toBeUndefined();
+	});
 });

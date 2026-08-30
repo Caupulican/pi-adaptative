@@ -99,6 +99,49 @@ describe("edit tool prepareArguments", () => {
 		expect(resultText.text).toContain(`contentRef ${result.details?.contentRef}`);
 		expect(await readFile(filePath, "utf8")).toBe("after\n");
 	});
+
+	it("wraps single-object edits into an array (F18)", () => {
+		const definition = createEditToolDefinition(process.cwd());
+		const prepared = definition.prepareArguments!({
+			path: "file.txt",
+			edits: { oldText: "singleOld", newText: "singleNew" },
+		});
+		expect(prepared).toEqual({
+			path: "file.txt",
+			edits: [{ oldText: "singleOld", newText: "singleNew" }],
+		});
+	});
+
+	it("executes single-object edits correctly (F18)", async () => {
+		const dir = await createTempDir();
+		const filePath = join(dir, "single.txt");
+		await writeFile(filePath, "hello world\n", "utf8");
+
+		const definition = createEditToolDefinition(dir);
+		const prepared = definition.prepareArguments!({
+			path: "single.txt",
+			edits: { oldText: "world", newText: "friend" },
+		});
+
+		await definition.execute("tool-2", prepared, undefined, undefined, {} as ExtensionContext);
+		expect(await readFile(filePath, "utf8")).toBe("hello friend\n");
+	});
+
+	it("rejects malformed edit object during execution (negative control)", async () => {
+		const dir = await createTempDir();
+		const filePath = join(dir, "malformed.txt");
+		await writeFile(filePath, "initial\n", "utf8");
+
+		const definition = createEditToolDefinition(dir);
+		const prepared = definition.prepareArguments!({
+			path: "malformed.txt",
+			edits: { invalid: true },
+		});
+
+		await expect(
+			definition.execute("tool-3", prepared, undefined, undefined, {} as ExtensionContext),
+		).rejects.toThrow("Edit tool input is invalid");
+	});
 });
 
 describe("edit tool stringified edits", () => {

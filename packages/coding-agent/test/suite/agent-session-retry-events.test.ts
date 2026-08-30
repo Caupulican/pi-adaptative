@@ -338,6 +338,32 @@ describe("AgentSession retry and event characterization", () => {
 		]);
 	});
 
+	it("emits agent_settled to extensions once a run truly settles, and NEVER on the public channel (D9c)", async () => {
+		const extensionEvents: string[] = [];
+		const publicEvents: string[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("agent_settled", async () => {
+						extensionEvents.push("agent_settled");
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.session.subscribe((event) => publicEvents.push(event.type));
+		harness.setResponses([fauxAssistantMessage("done")]);
+
+		await harness.session.prompt("hi");
+
+		// agent_end remains the public channel's terminal event for this run -- agent_settled must
+		// never appear there (that break is exactly what caused 4 pinned event-order tests to fail).
+		expect(publicEvents).not.toContain("agent_settled");
+		expect(publicEvents[publicEvents.length - 1]).toBe("agent_end");
+		// Extensions still get a real, gated agent_settled once the run has nothing left pending.
+		expect(extensionEvents).toEqual(["agent_settled"]);
+	});
+
 	it("emits the expected event order for a single prompt", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

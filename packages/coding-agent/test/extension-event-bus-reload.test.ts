@@ -267,4 +267,87 @@ describe("extension event bus subscriptions across reloads", () => {
 
 		disposeExtensionEventSubscriptions([generation]);
 	});
+
+	it("rolls back registered tools and commands when a factory throws and poisons captured API (F9)", async () => {
+		const bus = createEventBus();
+		const runtime = createExtensionRuntime();
+		let capturedApi: any;
+		let capturedError:
+			| (Error & { extension?: { tools: Map<string, unknown>; commands: Map<string, unknown> } })
+			| undefined;
+
+		try {
+			await loadExtensionFromFactory(
+				(pi) => {
+					capturedApi = pi;
+					pi.registerTool({
+						name: "doomed_tool",
+						label: "Doomed Tool",
+						description: "will be rolled back",
+						parameters: { type: "object", properties: {} },
+						execute: async () => ({ content: [{ type: "text", text: "fail" }], details: {} }),
+					});
+					pi.registerCommand("doomed_command", {
+						description: "will be rolled back",
+						handler: async () => {},
+					});
+					throw new Error("factory failed");
+				},
+				process.cwd(),
+				bus,
+				runtime,
+				"failing-tool-extension",
+			);
+			expect.unreachable("loadExtensionFromFactory must reject when the factory throws");
+		} catch (err) {
+			capturedError = err as typeof capturedError;
+		}
+
+		expect(capturedError?.message).toBe("factory failed");
+		// The doomed tool and command must not be visible to the next turn -- not just poisoned.
+		expect(capturedError?.extension?.tools.has("doomed_tool")).toBe(false);
+		expect(capturedError?.extension?.commands.has("doomed_command")).toBe(false);
+
+		// Captured API should throw on any subsequent registration/action attempt
+		expect(() =>
+			capturedApi.registerTool({
+				name: "late_tool",
+				label: "Late Tool",
+				description: "too late",
+				parameters: { type: "object", properties: {} },
+				execute: async () => ({ content: [{ type: "text", text: "fail" }], details: {} }),
+			}),
+		).toThrow("Extension generation is no longer active");
+
+		expect(() =>
+			capturedApi.registerCommand("late_command", {
+				description: "too late",
+				handler: async () => {},
+			}),
+		).toThrow("Extension generation is no longer active");
+
+		// Successful factory keeps everything
+		const successfulGen = await loadExtensionFromFactory(
+			(pi) => {
+				pi.registerTool({
+					name: "good_tool",
+					label: "Good Tool",
+					description: "kept",
+					parameters: { type: "object", properties: {} },
+					execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+				});
+				pi.registerCommand("good_command", {
+					description: "kept",
+					handler: async () => {},
+				});
+			},
+			process.cwd(),
+			bus,
+			runtime,
+			"good-extension",
+		);
+
+		expect(successfulGen.tools.has("good_tool")).toBe(true);
+		expect(successfulGen.commands.has("good_command")).toBe(true);
+	});
 });

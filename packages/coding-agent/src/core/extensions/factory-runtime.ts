@@ -102,6 +102,7 @@ export function createExtension(extensionPath: string, resolvedPath: string): Ex
 		handlers: new Map(),
 		tools: new Map(),
 		messageRenderers: new Map(),
+		markdownTransformers: [],
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),
@@ -201,6 +202,10 @@ export function createExtensionAPI(
 		registerMessageRenderer<T>(customType: string, renderer: MessageRenderer<T>): void {
 			runtime.assertActive();
 			extension.messageRenderers.set(customType, renderer as MessageRenderer);
+		},
+		registerMarkdownTransformer(transformer): void {
+			runtime.assertActive();
+			extension.markdownTransformers.push(transformer);
 		},
 		getFlag(name: string) {
 			runtime.assertActive();
@@ -345,17 +350,36 @@ export interface ExtensionLoadRuntimeSnapshot {
 	pendingProviderRegistrations: ExtensionRuntime["pendingProviderRegistrations"];
 	flagValues: Map<string, boolean | string>;
 	providerRegistrations: ExtensionRuntime["providerRegistrations"];
+	tools: Extension["tools"];
+	commands: Extension["commands"];
+	markdownTransformers: Extension["markdownTransformers"];
 }
 
-export function snapshotExtensionLoadRuntime(runtime: ExtensionRuntime): ExtensionLoadRuntimeSnapshot {
+/**
+ * Snapshot both the shared runtime state and the loading extension's own registries, so a
+ * mid-factory failure can be rolled back to exactly this point (F9). Tools/commands/markdown
+ * transformers live on the `Extension` object itself, not the shared runtime, hence the extra
+ * parameter.
+ */
+export function snapshotExtensionLoadRuntime(
+	runtime: ExtensionRuntime,
+	extension: Extension,
+): ExtensionLoadRuntimeSnapshot {
 	return {
 		pendingProviderRegistrations: [...runtime.pendingProviderRegistrations],
 		flagValues: new Map(runtime.flagValues),
 		providerRegistrations: new Map(runtime.providerRegistrations),
+		tools: new Map(extension.tools),
+		commands: new Map(extension.commands),
+		markdownTransformers: [...extension.markdownTransformers],
 	};
 }
 
-export function restoreExtensionLoadRuntime(runtime: ExtensionRuntime, snapshot: ExtensionLoadRuntimeSnapshot): void {
+export function restoreExtensionLoadRuntime(
+	runtime: ExtensionRuntime,
+	extension: Extension,
+	snapshot: ExtensionLoadRuntimeSnapshot,
+): void {
 	for (const [name, current] of runtime.providerRegistrations) {
 		const previous = snapshot.providerRegistrations.get(name);
 		if (!previous || previous.config !== current.config || previous.extensionPath !== current.extensionPath) {
@@ -374,6 +398,12 @@ export function restoreExtensionLoadRuntime(runtime: ExtensionRuntime, snapshot:
 	runtime.pendingProviderRegistrations = snapshot.pendingProviderRegistrations;
 	runtime.flagValues.clear();
 	for (const [name, value] of snapshot.flagValues) runtime.flagValues.set(name, value);
+	extension.tools.clear();
+	for (const [name, tool] of snapshot.tools) extension.tools.set(name, tool);
+	extension.commands.clear();
+	for (const [name, command] of snapshot.commands) extension.commands.set(name, command);
+	extension.markdownTransformers.length = 0;
+	extension.markdownTransformers.push(...snapshot.markdownTransformers);
 }
 
 export async function loadExtensionFromFactory(
@@ -388,12 +418,16 @@ export async function loadExtensionFromFactory(
 	const resolvedCwd = resolvePath(cwd);
 	const resolvedAgentDir = resolvePath(options.agentDir ?? getAgentDir());
 	const api = createExtensionAPI(extension, runtime, resolvedCwd, eventBus, resolvedAgentDir);
-	const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime);
+	const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime, extension);
 	try {
 		await runExtensionFactory(factory, api, options.factoryTimeoutMs);
 	} catch (error) {
 		await disposeExtensionEventSubscriptions([extension]);
-		restoreExtensionLoadRuntime(runtime, runtimeSnapshot);
+		restoreExtensionLoadRuntime(runtime, extension, runtimeSnapshot);
+		runtime.refreshTools?.();
+		// Attach the rolled-back extension so callers (and tests) can confirm the doomed
+		// registrations are gone, without loosening the throw-on-failure contract.
+		if (error instanceof Error) (error as Error & { extension?: Extension }).extension = extension;
 		throw error;
 	}
 	return extension;

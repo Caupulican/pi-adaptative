@@ -24,6 +24,11 @@ type AgentSessionEvent =
 
 On the JSON wire, `message_update` is delta-only: `message.content` is `[]`, accumulated `partial`/block-end payloads are omitted, and `accumulatedContentOmitted` is `true`. Reconstruct streaming content from `text_delta`, `thinking_delta`, and `toolcall_delta`; the later `message_end` is the authoritative complete message. An unusually large single delta is capped so the JSONL record remains below 50 KiB and includes `deltaTruncated: true` plus its original `deltaBytes`; the complete value remains available in `message_end`.
 
+The `assistantMessageEvent` variant with `"type": "toolcall_start"` additionally carries `id` and `toolName` (not `name` or `toolCallId`) identifying the tool call beginning at that content index, so a client can start correlating a call before its arguments finish streaming in via `toolcall_delta`:
+```json
+{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"toolcall_start","contentIndex":1,"id":"call_abc123","toolName":"bash"}}
+```
+
 Base events from [`AgentEvent`](https://github.com/earendil-works/pi-mono/blob/main/packages/agent/src/types.ts#L179):
 
 ```typescript

@@ -312,6 +312,30 @@ class TreeList implements Component {
 		return this.filteredNodes[this.selectedIndex]?.node;
 	}
 
+	/** Full (untruncated) copyable text for the highlighted entry, or undefined when it has none. */
+	getSelectedCopyText(): string | undefined {
+		const entry = this.getSelectedNode()?.entry;
+		if (!entry) return undefined;
+
+		let text: string | undefined;
+		switch (entry.type) {
+			case "message": {
+				const msg = entry.message;
+				if ("content" in msg && msg.content) text = extractTextContent(msg.content);
+				break;
+			}
+			case "custom_message":
+				text = typeof entry.content === "string" ? entry.content : extractTextContent(entry.content);
+				break;
+			case "branch_summary":
+				text = entry.summary;
+				break;
+		}
+
+		text = text?.trim();
+		return text ? text : undefined;
+	}
+
 	updateNodeLabel(entryId: string, label: string | undefined, labelTimestamp?: string): void {
 		for (const flatNode of this.flatNodes) {
 			if (flatNode.node.entry.id === entryId) {
@@ -884,5 +908,10 @@ export class TreeSelectorComponent extends Container implements Focusable {
 
 	getTreeList(): TreeList {
 		return this.treeList;
+	}
+
+	/** Full (untruncated) copyable text for the highlighted entry (P1h: ctrl+x while /tree is open). */
+	getSelectedCopyText(): string | undefined {
+		return this.treeList.getSelectedCopyText();
 	}
 }

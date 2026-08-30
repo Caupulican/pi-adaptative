@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from "path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
+import { stripBom } from "../utils/text.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
 import { isResourcePathWithin } from "./resource-traversal.ts";
 import { discoverSkillFiles } from "./skill-discovery.ts";
@@ -158,7 +159,8 @@ export function readSkillFrontmatterFile(filePath: string): string {
 				chunks.push(chunk.subarray(0, bytesRead));
 				totalBytes += bytesRead;
 			}
-			const prefix = Buffer.concat(chunks, totalBytes).toString("utf8").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+			const rawText = Buffer.concat(chunks, totalBytes).toString("utf8");
+			const prefix = stripBom(rawText).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 			const hasOpeningDelimiter = prefix.length >= 3 && prefix.startsWith("---");
 			const closingDelimiter = hasOpeningDelimiter ? prefix.indexOf("\n---", 3) : -1;
 			if (!hasOpeningDelimiter || closingDelimiter !== -1 || bytesRead === 0) {
@@ -209,11 +211,17 @@ function loadSkillFromFile(
 	source: string,
 ): { skill: Skill | null; diagnostics: ResourceDiagnostic[] } {
 	const diagnostics: ResourceDiagnostic[] = [];
+	const isDeclaredSkill = basename(filePath) === "SKILL.md";
 
 	try {
 		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(readSkillFrontmatterFile(filePath));
 		const skillDir = dirname(filePath);
 		const parentDirName = basename(skillDir);
+
+		// If not a declared skill (e.g. bare markdown file) and has no description, ignore silently
+		if (!isDeclaredSkill && (!frontmatter.description || frontmatter.description.trim() === "")) {
+			return { skill: null, diagnostics: [] };
+		}
 
 		// Validate description
 		const descErrors = validateDescription(frontmatter.description);
@@ -221,8 +229,9 @@ function loadSkillFromFile(
 			diagnostics.push({ type: "warning", message: error, path: filePath });
 		}
 
-		// Use name from frontmatter, or fall back to parent directory name
-		const name = frontmatter.name || parentDirName;
+		// Use name from frontmatter, or fall back to parent directory name (or file basename for bare md)
+		const fallbackName = isDeclaredSkill ? parentDirName : basename(filePath, ".md");
+		const name = frontmatter.name || fallbackName;
 
 		// Validate name
 		const nameErrors = validateSkillName(name);
@@ -249,8 +258,10 @@ function loadSkillFromFile(
 			diagnostics,
 		};
 	} catch (error) {
-		const message = error instanceof Error ? error.message : "failed to parse skill file";
-		diagnostics.push({ type: "warning", message, path: filePath });
+		if (isDeclaredSkill) {
+			const message = error instanceof Error ? error.message : "failed to parse skill file";
+			diagnostics.push({ type: "warning", message, path: filePath });
+		}
 		return { skill: null, diagnostics };
 	}
 }

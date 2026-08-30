@@ -673,6 +673,8 @@ export interface AgentStartEvent {
 export interface AgentEndEvent {
 	type: "agent_end";
 	messages: AgentMessage[];
+	/** True when local recovery (retry/failover/compaction) will immediately schedule another run. */
+	willRetry: boolean;
 }
 
 /** Fired at the start of each turn */
@@ -1029,7 +1031,43 @@ export type ExtensionEvent =
 	| UserBashEvent
 	| InputEvent
 	| ToolCallEvent
-	| ToolResultEvent;
+	| ToolResultEvent
+	| BeforeProviderHeadersEvent
+	| AgentSettledEvent
+	| UiPromptStartEvent
+	| UiPromptEndEvent;
+
+export interface BeforeProviderHeadersEvent {
+	type: "before_provider_headers";
+	provider: string;
+	model: string;
+	headers: Record<string, string>;
+}
+
+export interface AgentSettledEvent {
+	type: "agent_settled";
+}
+
+/** Kind of ctx.ui.* prompt this span brackets (P1f). */
+export type UiPromptKind = "select" | "confirm" | "input" | "editor" | "custom";
+
+/**
+ * Emitted around a ctx.ui.* prompt call in the runner (P1f). Nested prompts (a prompt whose own
+ * handling triggers another prompt) coalesce into a single start/end span at the outermost call.
+ */
+export interface UiPromptStartEvent {
+	type: "ui_prompt_start";
+	reason: "ui_prompt";
+	kind: UiPromptKind;
+	title?: string;
+}
+
+export interface UiPromptEndEvent {
+	type: "ui_prompt_end";
+	reason: "ui_prompt";
+	kind: UiPromptKind;
+	title?: string;
+}
 
 // ============================================================================
 // Event Results
@@ -1048,6 +1086,8 @@ export interface ToolCallEventResult {
 	/** Block tool execution. To modify arguments, mutate `event.input` in place instead. */
 	block?: boolean;
 	reason?: string;
+	/** Abort the turn gracefully after this tool call completes or blocks. */
+	terminate?: boolean;
 }
 
 /** Result from user_bash event handler */
@@ -1064,6 +1104,8 @@ export interface ToolResultEventResult {
 	isError?: boolean;
 	/** Replace the usage attributed to this tool result. */
 	usage?: Usage;
+	/** Abort the turn gracefully after this tool result is processed. */
+	terminate?: boolean;
 }
 
 export interface MessageEndEventResult {
@@ -1113,6 +1155,7 @@ export interface SessionBeforeTreeResult {
 
 export interface MessageRenderOptions {
 	expanded: boolean;
+	outputPad?: number;
 }
 
 export type MessageRenderer<T = unknown> = (
@@ -1120,6 +1163,14 @@ export type MessageRenderer<T = unknown> = (
 	options: MessageRenderOptions,
 	theme: Theme,
 ) => Component | undefined;
+
+export interface MarkdownTransformerContext {
+	messageType: "user" | "assistant" | "assistant-thinking";
+	isStreaming: boolean;
+	availableWidth: number;
+}
+
+export type MarkdownTransformer = (markdown: string, context: MarkdownTransformerContext) => string;
 
 // ============================================================================
 // Command Registration
@@ -1280,6 +1331,10 @@ export interface ExtensionAPI {
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
+	on(event: "before_provider_headers", handler: ExtensionHandler<BeforeProviderHeadersEvent>): void;
+	on(event: "agent_settled", handler: ExtensionHandler<AgentSettledEvent>): void;
+	on(event: "ui_prompt_start", handler: ExtensionHandler<UiPromptStartEvent>): void;
+	on(event: "ui_prompt_end", handler: ExtensionHandler<UiPromptEndEvent>): void;
 
 	// =========================================================================
 	// Tool Registration
@@ -1325,6 +1380,13 @@ export interface ExtensionAPI {
 
 	/** Register a custom renderer for CustomMessageEntry. */
 	registerMessageRenderer<T = unknown>(customType: string, renderer: MessageRenderer<T>): void;
+
+	/**
+	 * Register a synchronous markdown transformer for UI display.
+	 * Transformers chain in load order and must be synchronous and cheap.
+	 * Display-only: session history and model context retain the original text.
+	 */
+	registerMarkdownTransformer(transformer: MarkdownTransformer): void;
 
 	// =========================================================================
 	// Actions
@@ -1763,6 +1825,7 @@ export interface Extension {
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;
+	markdownTransformers: MarkdownTransformer[];
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;

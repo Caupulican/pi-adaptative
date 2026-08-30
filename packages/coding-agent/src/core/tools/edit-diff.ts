@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import * as Diff from "diff";
 import { constants } from "fs";
 import { access, readFile } from "fs/promises";
+import { stripBom } from "../../utils/text.ts";
 import { resolveToCwd } from "./path-utils.ts";
 
 export function detectLineEnding(content: string): "\r\n" | "\n" {
@@ -147,10 +148,7 @@ export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResul
 	};
 }
 
-/** Strip UTF-8 BOM if present, return both the BOM (if any) and the text without it */
-export function stripBom(content: string): { bom: string; text: string } {
-	return content.startsWith("\uFEFF") ? { bom: "\uFEFF", text: content.slice(1) } : { bom: "", text: content };
-}
+export { splitBom, stripBom } from "../../utils/text.ts";
 
 function countExactOccurrences(content: string, oldText: string): number {
 	if (oldText.length === 0) return 0;
@@ -646,7 +644,7 @@ export async function computeEditsPlannedDiff(
 		const rawContent = await readFile(absolutePath, "utf-8");
 
 		// Strip BOM before matching (LLM won't include invisible BOM in oldText)
-		const { text: content } = stripBom(rawContent);
+		const content = stripBom(rawContent);
 		const normalizedContent = normalizeToLF(content);
 		const plan = planEditsToNormalizedContent(normalizedContent, edits, path);
 		const { baseContent, newContent } = applyEditMatchPlan(normalizedContent, plan, path);

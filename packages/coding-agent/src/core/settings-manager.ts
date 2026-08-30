@@ -6,6 +6,7 @@ import { homedir } from "os";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { stripBom } from "../utils/text.ts";
 import { configFile, directoryProfilesDir } from "./agent-paths.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
 import { type CostGuardSettings, DEFAULT_COST_GUARD_SETTINGS } from "./cost-guard.ts";
@@ -151,6 +152,9 @@ export interface TerminalSettings {
 	imageWidthCells?: number; // default: 60 (preferred inline image width in terminal cells)
 	clearOnShrink?: boolean; // default: false (clear empty rows when content shrinks)
 	showTerminalProgress?: boolean; // default: false (OSC 9;4 terminal progress indicators)
+	hyperlinks?: boolean;
+	images?: "kitty" | "iterm2" | "none" | null;
+	trueColor?: boolean;
 }
 
 export interface ImageSettings {
@@ -510,6 +514,7 @@ export interface Settings {
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
+	exposeSessionEnvironment?: boolean; // Default true: inject session identity env vars (PI_SESSION_ID, etc.) into shell processes
 	quietStartup?: boolean;
 	/**
 	 * How to treat repository AGENTS.md/CLAUDE.md/GEMINI.md files.
@@ -537,9 +542,11 @@ export interface Settings {
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
+	defaultTools?: string[]; // Default tool allowlist for main sessions (global-only)
 	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
+	showCacheMissNotices?: boolean; // Show notices for cache misses from idle gaps or model switches (default: false)
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
@@ -976,7 +983,7 @@ function normalizeModelRouterSettings(value: unknown): ModelRouterSettings | und
 }
 
 function parseProfileFileDefinition(content: string, fallbackName?: string): ProfileDefinitionInput {
-	const parsed = JSON.parse(content) as Record<string, unknown>;
+	const parsed = JSON.parse(stripBom(content)) as Record<string, unknown>;
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
 		throw new Error("profile file must contain a JSON object");
 	}
@@ -1292,7 +1299,7 @@ export class SettingsManager {
 			try {
 				const settingsPath = join(root, "settings.json");
 				if (!existsSync(settingsPath)) continue;
-				const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as Settings;
+				const parsed = JSON.parse(stripBom(readFileSync(settingsPath, "utf-8"))) as Settings;
 				names.push(...normalizeActiveResourceProfiles(parsed));
 			} catch {
 				// External-root settings are optional; ignore malformed files for active-profile fallback.
@@ -1425,7 +1432,7 @@ export class SettingsManager {
 		if (!content) {
 			return {};
 		}
-		const settings = JSON.parse(content);
+		const settings = JSON.parse(stripBom(content));
 		return SettingsManager.migrateSettings(settings);
 	}
 
@@ -1458,7 +1465,7 @@ export class SettingsManager {
 				});
 			}
 			if (!content) return { settings: {}, error: null, info };
-			const settings = JSON.parse(content);
+			const settings = JSON.parse(stripBom(content));
 			return { settings: SettingsManager.migrateSettings(settings), error: null, info };
 		} catch (error) {
 			return { settings: {}, error: error as Error, info };
@@ -2067,7 +2074,7 @@ export class SettingsManager {
 		this.enqueueWrite("directoryProfile", () => {
 			this.storage.withLock("directoryProfile", (current) => {
 				const currentSettings = current
-					? SettingsManager.migrateSettings(JSON.parse(current) as Record<string, unknown>)
+					? SettingsManager.migrateSettings(JSON.parse(stripBom(current)) as Record<string, unknown>)
 					: {};
 				const merged: Settings = {
 					...currentSettings,
@@ -2487,7 +2494,7 @@ export class SettingsManager {
 	): void {
 		this.storage.withLock(scope, (current) => {
 			const currentFileSettings = current
-				? SettingsManager.migrateSettings(JSON.parse(current) as Record<string, unknown>)
+				? SettingsManager.migrateSettings(JSON.parse(stripBom(current)) as Record<string, unknown>)
 				: {};
 			const mergedSettings: Settings = { ...currentFileSettings };
 			for (const field of modifiedFields) {
@@ -3151,6 +3158,16 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getExposeSessionEnvironment(): boolean {
+		return this.settings.exposeSessionEnvironment ?? true;
+	}
+
+	setExposeSessionEnvironment(enabled: boolean | undefined): void {
+		this.globalSettings.exposeSessionEnvironment = enabled;
+		this.markModified("exposeSessionEnvironment");
+		this.save();
+	}
+
 	getQuietStartup(): boolean {
 		return this.settings.quietStartup ?? false;
 	}
@@ -3378,6 +3395,65 @@ export class SettingsManager {
 		}
 		this.globalSettings.terminal.showTerminalProgress = enabled;
 		this.markModified("terminal", "showTerminalProgress");
+		this.save();
+	}
+
+	getTerminalHyperlinks(): boolean | undefined {
+		return this.settings.terminal?.hyperlinks;
+	}
+
+	setTerminalHyperlinks(enabled: boolean | undefined): void {
+		if (!this.globalSettings.terminal) {
+			this.globalSettings.terminal = {};
+		}
+		this.globalSettings.terminal.hyperlinks = enabled;
+		this.markModified("terminal", "hyperlinks");
+		this.save();
+	}
+
+	getTerminalImages(): "kitty" | "iterm2" | "none" | null | undefined {
+		return this.settings.terminal?.images;
+	}
+
+	setTerminalImages(protocol: "kitty" | "iterm2" | "none" | null | undefined): void {
+		if (!this.globalSettings.terminal) {
+			this.globalSettings.terminal = {};
+		}
+		this.globalSettings.terminal.images = protocol;
+		this.markModified("terminal", "images");
+		this.save();
+	}
+
+	getTerminalTrueColor(): boolean | undefined {
+		return this.settings.terminal?.trueColor;
+	}
+
+	setTerminalTrueColor(enabled: boolean | undefined): void {
+		if (!this.globalSettings.terminal) {
+			this.globalSettings.terminal = {};
+		}
+		this.globalSettings.terminal.trueColor = enabled;
+		this.markModified("terminal", "trueColor");
+		this.save();
+	}
+
+	getShowCacheMissNotices(): boolean {
+		return this.settings.showCacheMissNotices ?? false;
+	}
+
+	setShowCacheMissNotices(enabled: boolean): void {
+		this.globalSettings.showCacheMissNotices = enabled;
+		this.markModified("showCacheMissNotices");
+		this.save();
+	}
+
+	getDefaultTools(): string[] | undefined {
+		return this.globalSettings.defaultTools ? [...this.globalSettings.defaultTools] : undefined;
+	}
+
+	setDefaultTools(tools: string[] | undefined): void {
+		this.globalSettings.defaultTools = tools ? [...tools] : undefined;
+		this.markModified("defaultTools");
 		this.save();
 	}
 

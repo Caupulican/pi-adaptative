@@ -394,16 +394,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		) as ThinkingLevel;
 	}
 
-	const defaultActiveToolNames = [
-		...DEFAULT_ACTIVE_TOOL_NAMES,
-		...(settingsManager.getScoutSettings().enabled ? ["context_scout"] : []),
-	];
+	const configuredDefaultTools =
+		!isWorkerSession() && !orchestrationProfile ? settingsManager.getDefaultTools() : undefined;
+	const defaultActiveToolNames = configuredDefaultTools
+		? [...configuredDefaultTools]
+		: [...DEFAULT_ACTIVE_TOOL_NAMES, ...(settingsManager.getScoutSettings().enabled ? ["context_scout"] : [])];
 	const toolProfileFilter = orchestrationProfile
 		? settingsManager.getResourceProfileFilter("tools")
 		: (options.toolProfileFilter ?? settingsManager.getResourceProfileFilter("tools"));
 	const allowedToolNames = orchestrationProfile
 		? [...orchestrationProfile.toolNames]
-		: (options.tools ?? (options.noTools === "all" ? [] : undefined));
+		: (options.tools ??
+			(options.noTools === "all" ? [] : configuredDefaultTools ? [...configuredDefaultTools] : undefined));
 	const excludedToolNames = orchestrationProfile ? undefined : options.excludeTools;
 	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
 	const initialActiveToolNames: string[] = (

@@ -108,6 +108,30 @@ describe("generateBranchSummary reliability", () => {
 		expect(result.summary).toContain("used injected stream");
 	});
 
+	it("does not expose tools or force toolChoice on branch-summary requests (F5 negative control)", async () => {
+		let capturedContext: Parameters<StreamFn>[1] | undefined;
+		let capturedOptions: Parameters<StreamFn>[2] | undefined;
+		const streamFn: StreamFn = (_model, context, options) => {
+			capturedContext = context;
+			capturedOptions = options;
+			return streamWith({
+				type: "done",
+				reason: "stop",
+				message: fauxAssistantMessage("## Goal\nno tools here"),
+			});
+		};
+
+		await generateBranchSummary([entry("summarize me")], {
+			model: createModel(),
+			apiKey: "key",
+			signal: new AbortController().signal,
+			streamFn,
+		});
+
+		expect(capturedContext?.tools).toBeUndefined();
+		expect((capturedOptions as { toolChoice?: unknown } | undefined)?.toolChoice).toBeUndefined();
+	});
+
 	it("classifies and retries stalled stream errors instead of hanging", async () => {
 		vi.useFakeTimers();
 		let calls = 0;
@@ -173,5 +197,27 @@ describe("generateBranchSummary reliability", () => {
 
 		await expect(resultPromise).resolves.toMatchObject({ summary: expect.stringContaining("retry succeeded") });
 		expect(calls).toBe(2);
+	});
+
+	it("fails closed when branch summary stops due to length limit (F6)", async () => {
+		const streamFn: StreamFn = () => {
+			return streamWith({
+				type: "done",
+				reason: "length",
+				message: fauxAssistantMessage("## Incomplete clipped summary...", {
+					stopReason: "length",
+				}),
+			});
+		};
+
+		const result = await generateBranchSummary([entry("summarize me")], {
+			model: createModel(),
+			apiKey: "key",
+			signal: new AbortController().signal,
+			streamFn,
+		});
+
+		expect(result.error).toBe("branch summary hit its output cap before completing");
+		expect(result.summary).toBeUndefined();
 	});
 });

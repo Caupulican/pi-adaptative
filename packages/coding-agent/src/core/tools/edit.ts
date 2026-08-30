@@ -20,7 +20,7 @@ import {
 	generateUnifiedPatch,
 	normalizeToLF,
 	restoreLineEndings,
-	stripBom,
+	splitBom,
 } from "./edit-diff.ts";
 import { isValidUTF8 } from "./file-encoding-policy.ts";
 import {
@@ -139,6 +139,16 @@ export interface EditToolOptions {
 	intentController?: FileMutationIntentController;
 }
 
+function isSingleEditInput(value: unknown): value is Edit {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		typeof (value as Record<string, unknown>).oldText === "string" &&
+		typeof (value as Record<string, unknown>).newText === "string"
+	);
+}
+
 function prepareEditArguments(input: unknown): EditToolInput {
 	if (!input || typeof input !== "object" || Array.isArray(input)) {
 		return input as EditToolInput;
@@ -152,6 +162,8 @@ function prepareEditArguments(input: unknown): EditToolInput {
 		edits.push({ oldText: legacy.oldText, newText: legacy.newText });
 		const { oldText: _oldText, newText: _newText, ...rest } = legacy;
 		args = { ...rest, edits };
+	} else if (isSingleEditInput(args.edits)) {
+		args = { ...args, edits: [args.edits] };
 	}
 
 	return args as EditToolInput;
@@ -184,7 +196,7 @@ function validateEditInput(
 type RenderableEditArgs = {
 	path?: string;
 	file_path?: string;
-	edits?: Edit[];
+	edits?: Edit[] | Edit;
 	payloadRef?: string;
 	oldText?: string;
 	newText?: string;
@@ -241,6 +253,10 @@ function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path
 		args.edits.every((edit) => typeof edit?.oldText === "string" && typeof edit?.newText === "string")
 	) {
 		return { path, edits: args.edits };
+	}
+
+	if (isSingleEditInput(args.edits)) {
+		return { path, edits: [args.edits] };
 	}
 
 	if (typeof args.oldText === "string" && typeof args.newText === "string") {
@@ -596,7 +612,7 @@ export function createEditToolDefinition(
 					throwIfAborted();
 
 					// Strip BOM before matching. The model will not include an invisible BOM in oldText.
-					const { bom, text: content } = stripBom(rawContent);
+					const { bom, text: content } = splitBom(rawContent);
 					const originalEnding = detectLineEnding(content);
 					const normalizedContent = normalizeToLF(content);
 					const cachedForInput =

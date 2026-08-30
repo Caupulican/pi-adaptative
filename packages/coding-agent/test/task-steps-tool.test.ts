@@ -95,7 +95,9 @@ describe("task_steps tool", () => {
 		expect(Value.Check(parameters, { action: "intake" })).toBe(false);
 		expect(Value.Check(parameters, { action: "intake", steps: [{ content: "Incoming" }] })).toBe(true);
 
-		expect(Value.Check(parameters, { action: "update", content: "Missing selector" })).toBe(false);
+		// id is optional (omitting it now targets the active step; see the dedicated no-id tests below).
+		expect(Value.Check(parameters, { action: "update", content: "Targets the active step" })).toBe(true);
+		expect(Value.Check(parameters, { action: "update", id: "", content: "Empty id still rejected" })).toBe(false);
 		expect(Value.Check(parameters, { action: "update", id: "step-1", steps: [] })).toBe(false);
 		expect(Value.Check(parameters, { action: "update", id: "step-1", content: "Updated" })).toBe(true);
 		// Negative controls: all of the non-mutating and lifecycle actions retain their existing legal shape.
@@ -116,6 +118,89 @@ describe("task_steps tool", () => {
 		if (content?.type !== "text") throw new Error("Expected text task_steps result");
 		expect(content.text).toMatch(/not found/i);
 		expect(harness.getState()).toBeUndefined();
+	});
+
+	it("targets the active step when update omits id -- the harness resolves it, no lookup round-trip needed", async () => {
+		const harness = createHarness();
+		await execute(harness.tool, {
+			action: "set",
+			steps: [{ content: "First", status: "in_progress" }, { content: "Second" }],
+		});
+
+		const result = await execute(harness.tool, { action: "update", note: "progress noted", evidence: ["ran it"] });
+
+		expect(result.details).toMatchObject({ action: "update", applied: true });
+		expect(harness.getState()?.steps[0]).toMatchObject({
+			status: "in_progress",
+			notes: ["progress noted"],
+			evidence: ["ran it"],
+		});
+		expect(harness.getState()?.steps[1].status).toBe("pending");
+	});
+
+	it("errors informatively -- naming the open steps -- when update omits id and no step is active", async () => {
+		const harness = createHarness();
+		await execute(harness.tool, {
+			action: "set",
+			steps: [{ content: "First" }, { content: "Second" }],
+		});
+
+		const result = await execute(harness.tool, { action: "update", note: "which one?" });
+
+		expect(result.details).toMatchObject({ action: "update", applied: false });
+		const content = result.content[0];
+		if (content?.type !== "text") throw new Error("Expected text task_steps result");
+		// Names both open steps rather than silently picking the first pending one.
+		expect(content.text).toMatch(
+			/No in_progress task step was found\. Open steps: step-1 \(pending\), step-2 \(pending\)/,
+		);
+		// The failed lookup did not mutate anything.
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["pending", "pending"]);
+	});
+
+	it("auto-advances the cursor when completing the active step, without a separate advance call", async () => {
+		const harness = createHarness();
+		await execute(harness.tool, {
+			action: "set",
+			steps: [{ content: "First", status: "in_progress" }, { content: "Second" }, { content: "Third" }],
+		});
+
+		// No id: omitted id resolves to the active step (step-1).
+		const result = await execute(harness.tool, {
+			action: "update",
+			status: "completed",
+			evidence: ["done"],
+		});
+
+		expect(result.details).toMatchObject({ action: "update", applied: true, autoPromotedStepId: "step-2" });
+		const content = result.content[0];
+		if (content?.type !== "text") throw new Error("Expected text task_steps result");
+		expect(content.text).toMatch(/Auto-started next pending step: step-2/);
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["completed", "in_progress", "pending"]);
+	});
+
+	it("does not auto-advance when completing a step that was not the active one", async () => {
+		const harness = createHarness();
+		await execute(harness.tool, {
+			action: "set",
+			steps: [{ content: "First", status: "in_progress" }, { content: "Second" }, { content: "Third" }],
+		});
+
+		// step-2 ("Second") was pending, not active: completing it explicitly must not disturb step-1's cursor.
+		const result = await execute(harness.tool, { action: "update", id: "step-2", status: "completed" });
+
+		expect(result.details).toMatchObject({ action: "update", applied: true, autoPromotedStepId: undefined });
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["in_progress", "completed", "pending"]);
+	});
+
+	it("does not auto-advance a completed active step when there is no pending step left", async () => {
+		const harness = createHarness();
+		await execute(harness.tool, { action: "add", content: "Only step", status: "in_progress" });
+
+		const result = await execute(harness.tool, { action: "update", status: "completed" });
+
+		expect(result.details).toMatchObject({ action: "update", applied: true, autoPromotedStepId: undefined });
+		expect(harness.getState()?.steps[0].status).toBe("completed");
 	});
 
 	it("dedupes a duplicate open add, names the existing step, and skips persistence", async () => {

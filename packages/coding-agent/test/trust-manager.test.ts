@@ -68,6 +68,17 @@ describe("ProjectTrustStore", () => {
 		expect(readFileSync(trustPath, "utf-8")).toBe("{not json");
 	});
 
+	it("loads a UTF-8 BOM'd trust store (F15)", () => {
+		const trustPath = join(agentDir, "state", "trust.json");
+		const writer = new ProjectTrustStore(agentDir);
+		writer.set(cwd, true);
+		const contents = readFileSync(trustPath, "utf-8");
+		writeFileSync(trustPath, `﻿${contents}`, "utf-8");
+
+		const reader = new ProjectTrustStore(agentDir);
+		expect(reader.get(cwd)).toBe(true);
+	});
+
 	it("detects local project trust inputs without ignoring inherited trust inputs", () => {
 		// Windows temp directories live below the user profile. A real ~/.agents/skills directory is
 		// therefore an intentional inherited trust input, not test pollution.

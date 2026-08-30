@@ -27,9 +27,21 @@ function resolvePython(): string | null {
 
 function makeController(): BashExecutionController {
 	return new BashExecutionController({
-		getAgent: () => ({ state: { messages: [] } }) as never,
-		getSessionManager: () => ({ getCwd: () => process.cwd(), appendMessage: () => undefined }) as never,
-		getSettingsManager: () => ({ getShellCommandPrefix: () => undefined, getShellPath: () => undefined }) as never,
+		getAgent: () =>
+			({ state: { messages: [], model: { provider: "test", id: "test-model" }, thinkingLevel: "off" } }) as never,
+		getSessionManager: () =>
+			({
+				getCwd: () => process.cwd(),
+				appendMessage: () => undefined,
+				getSessionId: () => "test-session-id",
+				getSessionFile: () => undefined,
+			}) as never,
+		getSettingsManager: () =>
+			({
+				getShellCommandPrefix: () => undefined,
+				getShellPath: () => undefined,
+				getExposeSessionEnvironment: () => true,
+			}) as never,
 		isStreaming: () => false,
 	});
 }
@@ -38,9 +50,21 @@ describe("BashExecutionController", () => {
 	it("shares active project credentials with owner shell commands but withholds BW_SESSION", async () => {
 		process.env.BW_SESSION = "owner-control-plane-key";
 		const controller = new BashExecutionController({
-			getAgent: () => ({ state: { messages: [] } }) as never,
-			getSessionManager: () => ({ getCwd: () => process.cwd(), appendMessage: () => undefined }) as never,
-			getSettingsManager: () => ({ getShellCommandPrefix: () => undefined, getShellPath: () => undefined }) as never,
+			getAgent: () =>
+				({ state: { messages: [], model: { provider: "test", id: "test-model" }, thinkingLevel: "off" } }) as never,
+			getSessionManager: () =>
+				({
+					getCwd: () => process.cwd(),
+					appendMessage: () => undefined,
+					getSessionId: () => "test-session-id",
+					getSessionFile: () => undefined,
+				}) as never,
+			getSettingsManager: () =>
+				({
+					getShellCommandPrefix: () => undefined,
+					getShellPath: () => undefined,
+					getExposeSessionEnvironment: () => true,
+				}) as never,
 			isStreaming: () => false,
 			getEnvironment: () => ({ API_TOKEN: "active-project-token", BW_SESSION: "must-not-win" }),
 		});
@@ -62,10 +86,21 @@ describe("BashExecutionController", () => {
 		const messages: Array<{ command: string; output: string; fullOutputPath?: string }> = [];
 		const persisted: Array<{ command: string; output: string; fullOutputPath?: string }> = [];
 		const controller = new BashExecutionController({
-			getAgent: () => ({ state: { messages } }) as never,
+			getAgent: () =>
+				({ state: { messages, model: { provider: "test", id: "test-model" }, thinkingLevel: "off" } }) as never,
 			getSessionManager: () =>
-				({ getCwd: () => process.cwd(), appendMessage: (message: never) => persisted.push(message) }) as never,
-			getSettingsManager: () => ({ getShellCommandPrefix: () => undefined, getShellPath: () => undefined }) as never,
+				({
+					getCwd: () => process.cwd(),
+					appendMessage: (message: never) => persisted.push(message),
+					getSessionId: () => "test-session-id",
+					getSessionFile: () => undefined,
+				}) as never,
+			getSettingsManager: () =>
+				({
+					getShellCommandPrefix: () => undefined,
+					getShellPath: () => undefined,
+					getExposeSessionEnvironment: () => true,
+				}) as never,
 			isStreaming: () => false,
 			redactSensitiveText: (text) => text.replaceAll("active-project-token", "[REDACTED_SECRET]"),
 		});
@@ -162,10 +197,23 @@ describe("BashExecutionController", () => {
 		async () => {
 			const sessionKey = `controller-cwd-${Math.random().toString(36).slice(2)}`;
 			const controller = new BashExecutionController({
-				getAgent: () => ({ state: { messages: [] } }) as never,
-				getSessionManager: () => ({ getCwd: () => process.cwd(), appendMessage: () => undefined }) as never,
+				getAgent: () =>
+					({
+						state: { messages: [], model: { provider: "test", id: "test-model" }, thinkingLevel: "off" },
+					}) as never,
+				getSessionManager: () =>
+					({
+						getCwd: () => process.cwd(),
+						appendMessage: () => undefined,
+						getSessionId: () => "test-session-id",
+						getSessionFile: () => undefined,
+					}) as never,
 				getSettingsManager: () =>
-					({ getShellCommandPrefix: () => undefined, getShellPath: () => undefined }) as never,
+					({
+						getShellCommandPrefix: () => undefined,
+						getShellPath: () => undefined,
+						getExposeSessionEnvironment: () => true,
+					}) as never,
 				isStreaming: () => false,
 				getShellSessionKey: () => sessionKey,
 			});
@@ -209,10 +257,23 @@ describe("BashExecutionController", () => {
 			process.env.PI_ADAPTATIVE_CODING_AGENT_DIR = agentDir;
 			try {
 				const controller = new BashExecutionController({
-					getAgent: () => ({ state: { messages: [] } }) as never,
-					getSessionManager: () => ({ getCwd: () => agentDir, appendMessage: () => undefined }) as never,
+					getAgent: () =>
+						({
+							state: { messages: [], model: { provider: "test", id: "test-model" }, thinkingLevel: "off" },
+						}) as never,
+					getSessionManager: () =>
+						({
+							getCwd: () => agentDir,
+							appendMessage: () => undefined,
+							getSessionId: () => "test-session-id",
+							getSessionFile: () => undefined,
+						}) as never,
 					getSettingsManager: () =>
-						({ getShellCommandPrefix: () => undefined, getShellPath: () => undefined }) as never,
+						({
+							getShellCommandPrefix: () => undefined,
+							getShellPath: () => undefined,
+							getExposeSessionEnvironment: () => true,
+						}) as never,
 					isStreaming: () => false,
 					getShellSessionKey: () => sessionKey,
 					getEnvironment: () => ({
@@ -287,4 +348,47 @@ describe("BashExecutionController", () => {
 		expect(aborted.sort()).toEqual(["first", "second"]);
 		expect(controller.isBashRunning).toBe(false);
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"injects the live session identity into owner (!command) shell processes too (C4/P2k)",
+		async () => {
+			// bash-execution-controller only builds its own session-aware env when no `operations`
+			// override is supplied (an explicit override is assumed to own its own environment), so
+			// this must exercise the real default shell backend rather than a capturing fake.
+			const sessionKey = `test-owner-identity-${Date.now()}`;
+			const controller = new BashExecutionController({
+				getAgent: () =>
+					({
+						state: { messages: [], model: { provider: "test", id: "test-model" }, thinkingLevel: "off" },
+					}) as never,
+				getSessionManager: () =>
+					({
+						getCwd: () => process.cwd(),
+						appendMessage: () => undefined,
+						getSessionId: () => "test-session-id",
+						getSessionFile: () => undefined,
+					}) as never,
+				getSettingsManager: () =>
+					({
+						getShellCommandPrefix: () => undefined,
+						getShellPath: () => undefined,
+						getExposeSessionEnvironment: () => true,
+					}) as never,
+				isStreaming: () => false,
+				getShellSessionKey: () => sessionKey,
+			});
+			try {
+				const result = await controller.executeBash(
+					'printf \'ID=%s|PROVIDER=%s|MODEL=%s|LEVEL=%s\' "$PI_SESSION_ID" "$PI_PROVIDER" "$PI_MODEL" "$PI_REASONING_LEVEL"',
+				);
+
+				expect(result.output).toContain("ID=test-session-id");
+				expect(result.output).toContain("PROVIDER=test");
+				expect(result.output).toContain("MODEL=test-model");
+				expect(result.output).toContain("LEVEL=off");
+			} finally {
+				await disposeShellExecutionSessionAndWait(sessionKey);
+			}
+		},
+	);
 });

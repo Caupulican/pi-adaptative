@@ -405,8 +405,16 @@ export function resolveTaskStepSelector(steps: readonly TaskStep[], selector: st
 	if (!normalized) throw new TaskStepsError("Task step selector is required.");
 	if (normalized === "current" || normalized === "active") {
 		const active = steps.find((step) => step.status === "in_progress");
-		if (!active) throw new TaskStepsError("No in_progress task step was found.");
-		return active;
+		if (active) return active;
+		// Do not silently fall back to the first pending step: name every open step so the caller
+		// (an omitted `id` on `update` resolves to "current") can pick one explicitly instead.
+		const open = steps.filter((step) => step.status !== "completed" && step.status !== "cancelled");
+		if (open.length === 0) {
+			throw new TaskStepsError("No in_progress task step was found and there are no open steps to select.");
+		}
+		throw new TaskStepsError(
+			`No in_progress task step was found. Open steps: ${open.map((step) => `${step.id} (${step.status})`).join(", ")}. Specify id explicitly.`,
+		);
 	}
 
 	const exactId = steps.find((step) => step.id.toLocaleLowerCase() === normalized);
@@ -426,6 +434,16 @@ export function resolveTaskStepSelector(steps: readonly TaskStep[], selector: st
 		throw new TaskStepsError(`Task step selector is ambiguous: ${matches.map((step) => step.id).join(", ")}.`);
 	}
 	throw new TaskStepsError(`Task step not found for selector: ${selector}.`);
+}
+
+/**
+ * First pending step other than `excludeId`, in step-array order. The one owner of "which step
+ * starts next" — shared by `advanceTaskSteps` (explicit `advance` action, core/pipelines/increment.ts)
+ * and the `update` action's auto-advance-on-completion path, so both "the harness manages the step"
+ * mechanisms pick the identical next step instead of two independently-drifting implementations.
+ */
+export function findNextPendingStep(steps: readonly TaskStep[], excludeId?: string): TaskStep | undefined {
+	return steps.find((step) => step.id !== excludeId && step.status === "pending");
 }
 
 export function updateTaskStep(
@@ -563,7 +581,9 @@ export function formatTaskStepsContext(state: TaskStepsState, maxItems = 12): st
 			const pipeline =
 				step.pipelineRunId && step.pipelineStageId ? ` pipeline=${step.pipelineRunId}/${step.pipelineStageId}` : "";
 			const evidence = step.evidence?.length ? ` evidence=${step.evidence.join(",")}` : "";
-			return `- [${step.status}] ${label}${requirementIds}${pipeline}${evidence}`;
+			// The id (mirrors formatTaskSteps' convention) lets update() target ANY listed step
+			// directly -- no separate `list` lookup needed just to learn an id.
+			return `- [${step.status}] ${step.id} ${label}${requirementIds}${pipeline}${evidence}`;
 		}),
 	];
 	if (open.length > limit) lines.push(`- omitted=${open.length - limit}`);

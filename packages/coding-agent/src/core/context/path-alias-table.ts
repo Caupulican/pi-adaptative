@@ -21,10 +21,39 @@ const STANDALONE_TOKEN_RE = new RegExp(`(?<=^|${LEFT_BOUNDARY_CLASS})${PATH_ALIA
 const FULL_TOKEN_RE = new RegExp(`^${PATH_ALIAS_TOKEN_SRC}$`);
 const ALIAS_SEGMENT_RE = /^[\w.+@~%-]+$/;
 // Segment whitelist matches the posix classes so `path.ts:125` / `path.ts(12,5)` grep and
-// compiler suffixes never leak into a candidate.
-const WINDOWS_PATH_RE = /\b[A-Za-z]:[\\/](?:[\w.+@~%-]+[\\/])*[\w.+@~%-]+/g;
-const POSIX_ABS_PATH_RE = new RegExp(String.raw`(?:^|${LEFT_BOUNDARY_CLASS})(\/(?:[\w.+@~%-]+\/)+[\w.+@~%-]+)`, "g");
-const RELATIVE_PATH_RE = new RegExp(String.raw`(?:^|${LEFT_BOUNDARY_CLASS})((?:[\w.+@~%-]+\/){1,}[\w.+@~%-]+)`, "g");
+// compiler suffixes never leak into a candidate. Parentheses are in: real names carry them
+// (`Program Files (x86)`, `report (1).pdf`) and they are not sentence structure inside a token —
+// a trailing `)` is handled by `stripTrailingPunctuation`'s balance check.
+const SEGMENT_CHAR = String.raw`[\w.+@~%()-]`;
+// A space may extend a segment only when what precedes it is not already a complete filename.
+// Without this, one spaced segment swallows the gap between two separate paths
+// (`.../Types.ts and packages/app/...` would read as a single segment) and merges them into one
+// bogus candidate. It also stops a path from absorbing following prose (`...\c.ts now`).
+const SPACE_CONTINUES_SEGMENT = String.raw`(?<!\.[A-Za-z0-9]{1,8}) +`;
+// A segment may therefore contain interior spaces. For a directory segment the following
+// separator proves the space is inside the path rather than the end of it; for the final segment
+// the proof is a file extension, which `shouldAlias` requires of every spaced candidate.
+const SEGMENT = `${SEGMENT_CHAR}+(?:${SPACE_CONTINUES_SEGMENT}${SEGMENT_CHAR}+)*`;
+// Prefer the spaced-then-extension reading (`report (1).pdf`) and fall back to the space-free one,
+// so a path followed by prose (`...\c.ts now`) still ends at the path.
+const FINAL_SEGMENT = String.raw`(?:${SEGMENT_CHAR}+(?:${SPACE_CONTINUES_SEGMENT}${SEGMENT_CHAR}+)*\.\w+|${SEGMENT_CHAR}+)`;
+const WINDOWS_PATH_RE = new RegExp(String.raw`\b[A-Za-z]:[\\/](?:${SEGMENT}[\\/])*${FINAL_SEGMENT}`, "g");
+const POSIX_ABS_PATH_RE = new RegExp(
+	String.raw`(?:^|${LEFT_BOUNDARY_CLASS})(\/(?:${SEGMENT}\/)+${FINAL_SEGMENT})`,
+	"g",
+);
+// A relative path has no anchor of its own, so its FIRST segment must be space-free: otherwise a
+// leading prose word is absorbed into it (`... and packages/app/src/types.ts` would start the
+// candidate at "and"). Later segments are already fenced by the separators around them, and an
+// absolute path is anchored by its `/` or drive prefix, so both may contain spaces.
+const RELATIVE_PATH_RE = new RegExp(
+	String.raw`(?:^|${LEFT_BOUNDARY_CLASS})(${SEGMENT_CHAR}+\/(?:${SEGMENT}\/)*${FINAL_SEGMENT})`,
+	"g",
+);
+// A candidate that contains a space needs positive evidence that it is a path and not a run of
+// prose that happens to straddle a separator ("see the src/lib and docs/api"). A trailing file
+// extension is that evidence; the length gate alone is not, because prose clears it trivially.
+const SPACED_CANDIDATE_EVIDENCE_RE = /\.\w+$/;
 
 export interface PathAliasEntry {
 	id: string;
@@ -58,11 +87,36 @@ function shouldAlias(path: string): boolean {
 	if (path.startsWith("http://") || path.startsWith("https://") || path.startsWith("git@")) return false;
 	if (/^P#?\d+$/i.test(path) || path.startsWith("p/")) return false;
 	if (MIME_TYPE_RE.test(path)) return false;
+	if (path.includes(" ") && !SPACED_CANDIDATE_EVIDENCE_RE.test(path)) return false;
 	return path.length >= MIN_ALIAS_CHARS || separatorCount(path) >= MIN_SEPARATORS;
 }
 
+// Trailing `)` is only punctuation when it does not close a `(` inside the path: `(see C:\a\b.ts)`
+// ends a parenthetical, while `C:\Program Files (x86)` ends a real directory name.
 function stripTrailingPunctuation(path: string): string {
-	return path.replace(/[),.;:]+$/g, "");
+	let end = path.length;
+	while (end > 0) {
+		const char = path[end - 1] ?? "";
+		if (char === "," || char === "." || char === ";" || char === ":") {
+			end -= 1;
+			continue;
+		}
+		if (char === ")") {
+			const head = path.slice(0, end);
+			let depth = 0;
+			for (const candidate of head) {
+				if (candidate === "(") depth += 1;
+				else if (candidate === ")") depth -= 1;
+			}
+			// depth < 0 means this `)` closes nothing inside the path — it is punctuation.
+			if (depth < 0) {
+				end -= 1;
+				continue;
+			}
+		}
+		break;
+	}
+	return path.slice(0, end);
 }
 
 function toPosix(path: string): string {
@@ -73,12 +127,44 @@ export function displayPath(path: string, cwd: string): string {
 	return toPosix(formatPathRelativeToCwdOrAbsolute(path, cwd));
 }
 
-// Windows drive-letter paths — and every path on a Windows host — are case-insensitive;
-// posix paths on posix hosts are not, and two case-differing posix paths are distinct
-// files that both deserve aliases.
+/**
+ * Filesystem naming rules: one interface, one implementation per platform family. Every place that
+ * has to decide "are these two spellings the same file" goes through this, so identity folding and
+ * matcher construction can never drift apart the way two inline `process.platform` checks would.
+ */
+interface PathSemantics {
+	/** Whether two spellings differing only in case name the same file. */
+	readonly caseInsensitive: boolean;
+	/** The display folded to the key that every spelling of one file must share. */
+	identityKey(display: string): string;
+}
+
+const windowsPathSemantics: PathSemantics = {
+	caseInsensitive: true,
+	identityKey: (display) => display.toLowerCase(),
+};
+
+const posixPathSemantics: PathSemantics = {
+	caseInsensitive: false,
+	identityKey: (display) => display,
+};
+
+const DRIVE_LETTER_DISPLAY_RE = /^[A-Za-z]:\//;
+
+/**
+ * Chosen per path, not once per process: a drive-letter display names a Windows filesystem even
+ * when the host is posix (a WSL session reading Windows tool output), and on a win32 host every
+ * path follows Windows rules. Two case-differing posix paths on a posix host stay distinct files
+ * that each deserve their own alias.
+ */
+function pathSemantics(display: string): PathSemantics {
+	return process.platform === "win32" || DRIVE_LETTER_DISPLAY_RE.test(display)
+		? windowsPathSemantics
+		: posixPathSemantics;
+}
+
 function dedupeKey(path: string): string {
-	if (process.platform === "win32" || /^[A-Za-z]:\//.test(path)) return path.toLowerCase();
-	return path;
+	return pathSemantics(path).identityKey(path);
 }
 
 // An alias only saves space when the display path is longer than its own shortest
@@ -133,9 +219,46 @@ export function emptyPathAliasTable(cwd: string): PathAliasTable {
 // windows drive segment (`C:`) can head a display path but must never enter an id,
 // or expansion could not match the id it produced.
 function aliasableTail(segs: readonly string[]): string[] {
+	const folded = segs.map(toAliasSegment);
 	let start = segs.length;
-	while (start > 0 && ALIAS_SEGMENT_RE.test(segs[start - 1] ?? "")) start -= 1;
-	return segs.slice(start);
+	while (start > 0 && folded[start - 1] !== undefined) start -= 1;
+	return folded.slice(start) as string[];
+}
+
+/**
+ * A display segment folded into the alias-token alphabet. Displays may now contain spaces and
+ * parentheses (`My Project`, `report (1).pdf`), but an id is parsed back out of free text by
+ * `PATH_ALIAS_TOKEN_SRC`, which cannot represent either — an id carrying a space would be
+ * unmatchable and would surface as an "unminted alias" on the tool boundary. Folding keeps ids
+ * inside the token alphabet while `entries[].path` retains the real, spaced display that
+ * expansion hands back. Deterministic, so the uniqueness pass below still sees id collisions.
+ */
+/**
+ * Successive suffixes of an aliasable tail, shortest first (`file.ts`, `src/file.ts`, ...) — the
+ * candidate ids for a path, in preference order. One owner: the uniqueness pass counts these and
+ * then walks the identical sequence to assign, so the two must never drift apart.
+ */
+function tailSuffixes(tail: readonly string[]): string[] {
+	const suffixes: string[] = [];
+	let suffix = "";
+	for (let depth = 1; depth <= tail.length; depth += 1) {
+		const segment = tail[tail.length - depth] ?? "";
+		suffix = depth === 1 ? segment : `${segment}/${suffix}`;
+		suffixes.push(suffix);
+	}
+	return suffixes;
+}
+
+function toAliasSegment(segment: string): string | undefined {
+	// A windows drive segment can head a display path but must never enter an id, or expansion
+	// could not match the id it produced. Folding `C:` would hide that, so reject it outright.
+	if (/^[A-Za-z]:$/.test(segment)) return undefined;
+	const folded = segment
+		.replace(/[^\w.+@~%-]+/g, "-")
+		.replace(/-{2,}/g, "-")
+		.replace(/-+\./g, ".")
+		.replace(/^[-.]+|[-.]+$/g, "");
+	return ALIAS_SEGMENT_RE.test(folded) ? folded : undefined;
 }
 
 function shortestUniqueSuffixes(
@@ -152,13 +275,12 @@ function shortestUniqueSuffixes(
 	const suffixCounts = new Map<string, number>();
 	for (const path of paths) {
 		const segs = path.split("/").filter((segment) => segment.length > 0);
-		tails.set(path, aliasableTail(segs));
-		let suffix = "";
-		for (let depth = 1; depth <= segs.length; depth += 1) {
-			const segment = segs[segs.length - depth] ?? "";
-			suffix = depth === 1 ? segment : `${segment}/${suffix}`;
-			suffixCounts.set(suffix, (suffixCounts.get(suffix) ?? 0) + 1);
-		}
+		const suffixes = tailSuffixes(aliasableTail(segs));
+		tails.set(path, suffixes);
+		// Counted in ID space (folded segments), which is where a collision actually matters:
+		// two displays whose ids would coincide must not both claim the same suffix. Segments
+		// above the aliasable tail can never appear in an id, so they need no count.
+		for (const suffix of suffixes) suffixCounts.set(suffix, (suffixCounts.get(suffix) ?? 0) + 1);
 	}
 	const ids = new Map<string, string>();
 	const assigned = new Set<string>();
@@ -172,11 +294,8 @@ function shortestUniqueSuffixes(
 		(suffixCounts.get(suffix) ?? 0) > othersThreshold ||
 		(isIdTaken?.(aliasId) ?? false);
 	for (const path of paths) {
-		const tail = tails.get(path) ?? [];
-		let suffix = "";
-		for (let depth = 1; depth <= tail.length; depth += 1) {
-			const segment = tail[tail.length - depth] ?? "";
-			suffix = depth === 1 ? segment : `${segment}/${suffix}`;
+		const suffixes = tails.get(path) ?? [];
+		for (const suffix of suffixes) {
 			const aliasId = `p/${suffix}`;
 			// This path's own suffix always contributes 1 to the count.
 			if (!clashes(aliasId, suffix, 1)) {
@@ -186,7 +305,8 @@ function shortestUniqueSuffixes(
 			}
 		}
 		if (!ids.has(path)) {
-			const tailJoined = tail.join("/");
+			// The longest suffix IS the whole aliasable tail.
+			const tailJoined = suffixes[suffixes.length - 1] ?? "";
 			let counter = 2;
 			while (true) {
 				const counterSuffix = `${counter}/${tailJoined}`;
@@ -348,6 +468,24 @@ interface CompiledRewriter {
 	cwd: string;
 	regex: RegExp | undefined;
 	map: Map<string, string>;
+	/** `formKey`-normalized fallback: what a separator- or case-variant match resolves through. */
+	normalized: Map<string, string>;
+}
+
+// A mention spells the same path with `/`, `\`, or a mix of both (routine in Windows tool
+// output), and on a case-insensitive filesystem it may differ in case too. Extraction already
+// folds all of those onto ONE display before an entry is minted, so matching has to accept the
+// same space — otherwise extraction registers a path the rewriter cannot match, and the text pays
+// for both the legend line and the raw path forever. Both sides ask `pathSemantics`, so the
+// matcher's notion of "same file" is the same one that minted the entry.
+function formKey(form: string): string {
+	const posix = toPosix(form);
+	return pathSemantics(posix).identityKey(posix);
+}
+
+function formPattern(form: string): string {
+	const separatorAgnostic = escapeRegExp(form).replace(/\\\\|\//g, "[/\\\\]");
+	return pathSemantics(toPosix(form)).caseInsensitive ? `(?i:${separatorAgnostic})` : separatorAgnostic;
 }
 
 const rewriterCache = new WeakMap<readonly PathAliasEntry[], CompiledRewriter>();
@@ -388,11 +526,19 @@ function compileRewriter(table: PathAliasTable): CompiledRewriter {
 	}
 	forms.sort((left, right) => right.form.length - left.form.length);
 	const map = new Map<string, string>();
+	const normalized = new Map<string, string>();
 	const patterns: string[] = [];
+	const seenPatterns = new Set<string>();
 	for (const { form, id } of forms) {
-		if (map.has(form)) continue;
-		map.set(form, id);
-		patterns.push(escapeRegExp(form));
+		if (!map.has(form)) map.set(form, id);
+		const key = formKey(form);
+		if (!normalized.has(key)) normalized.set(key, id);
+		// Separator tolerance collapses each form and its backslash twin onto one pattern, so
+		// the compiled alternation is no larger than before despite matching a wider space.
+		const pattern = formPattern(form);
+		if (seenPatterns.has(pattern)) continue;
+		seenPatterns.add(pattern);
+		patterns.push(pattern);
 	}
 	// The alias-token alternative comes first so text that already carries `p/...` ids
 	// (a model echo stored durably, or a second rewrite pass) is consumed atomically and
@@ -410,16 +556,19 @@ function compileRewriter(table: PathAliasTable): CompiledRewriter {
 					String.raw`\b${PATH_ALIAS_TOKEN_SRC}|(?<=^|${LEFT_BOUNDARY_CLASS})(?:${patterns.join("|")})(?![\w+@~%-])(?!\.\w)(?![/\\][\w.+@~%-])`,
 					"g",
 				);
-	const compiled = { cwd: table.cwd, regex, map };
+	const compiled = { cwd: table.cwd, regex, map, normalized };
 	rewriterCache.set(table.entries, compiled);
 	return compiled;
 }
 
 export function rewriteText(table: PathAliasTable, text: string): string {
 	if (table.entries.length === 0) return text;
-	const { regex, map } = compileRewriter(table);
+	const { regex, map, normalized } = compileRewriter(table);
 	if (!regex) return text;
-	return text.replace(regex, (match) => map.get(match) ?? match);
+	// Exact form first (the common case and the cheapest); a separator- or case-variant spelling
+	// resolves through the normalized key. A match that is an alias token already — the leading
+	// alternative — is in neither map and falls through unchanged, keeping rewriting idempotent.
+	return text.replace(regex, (match) => map.get(match) ?? normalized.get(formKey(match)) ?? match);
 }
 
 // Memoized on the entries array identity, exactly like `rewriterCache`. Expansion runs on every

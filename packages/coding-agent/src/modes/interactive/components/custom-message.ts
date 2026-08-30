@@ -32,16 +32,19 @@ export class CustomMessageComponent extends Container {
 	private customComponent?: Component;
 	private markdownTheme: MarkdownTheme;
 	private _expanded = false;
+	private outputPad: number;
 
 	constructor(
 		message: CustomMessage<unknown>,
 		customRenderer?: MessageRenderer,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
+		outputPad = 0,
 	) {
 		super();
 		this.message = message;
 		this.customRenderer = customRenderer;
 		this.markdownTheme = markdownTheme;
+		this.outputPad = outputPad;
 
 		this.addChild(new Spacer(1));
 
@@ -81,7 +84,11 @@ export class CustomMessageComponent extends Container {
 		// Try custom renderer first - it handles its own styling
 		if (this.customRenderer) {
 			try {
-				const component = this.customRenderer(this.message, { expanded: this._expanded }, theme);
+				const component = this.customRenderer(
+					this.message,
+					{ expanded: this._expanded, outputPad: this.outputPad },
+					theme,
+				);
 				if (component) {
 					// Custom renderer provides its own styled component
 					this.customComponent = component;

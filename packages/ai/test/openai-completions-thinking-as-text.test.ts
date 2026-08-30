@@ -37,6 +37,7 @@ const compat = {
 	zaiToolStream: false,
 	supportsStrictMode: true,
 	cacheControlFormat: undefined,
+	thinkingTokenBudgetField: "thinking_token_budget",
 	sendSessionAffinityHeaders: false,
 	sessionAffinityFormat: "openai",
 	supportsLongCacheRetention: true,

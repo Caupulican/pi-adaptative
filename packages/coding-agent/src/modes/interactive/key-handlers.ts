@@ -40,6 +40,7 @@ export interface KeyHandlersHost {
 	openExternalEditor(): Promise<void>;
 	handleFollowUp(): Promise<void>;
 	handleDequeue(): void;
+	handleCopyCommand(): Promise<void>;
 	handleClearCommand(newSessionName?: string): Promise<void>;
 	showSessionSelector(): void;
 	handleClipboardImagePaste(): Promise<void>;
@@ -96,6 +97,7 @@ export function setupKeyHandlers(host: KeyHandlersHost): void {
 	host.defaultEditor.onAction("app.editor.external", () => host.openExternalEditor());
 	host.defaultEditor.onAction("app.message.followUp", () => host.handleFollowUp());
 	host.defaultEditor.onAction("app.message.dequeue", () => host.handleDequeue());
+	host.defaultEditor.onAction("app.message.copy", () => void host.handleCopyCommand());
 	// Plain Up arrow on an empty editor recalls queued messages for editing
 	// before history navigation. Many terminals (e.g. Windows Terminal) swallow
 	// the alt-chord bindings, so the queue must be reachable without them.

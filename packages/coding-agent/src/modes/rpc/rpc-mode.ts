@@ -55,6 +55,8 @@ export type {
  */
 export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<never> {
 	takeOverStdout();
+	process.env.PI_CODING_AGENT = "true";
+	process.env.AI_AGENT = "pi";
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
@@ -451,6 +453,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				return success(id, "follow_up");
 			}
 
+			case "clear_queue": {
+				const { steering, followUp, commands } = session.clearQueue();
+				return success(id, "clear_queue", { steering, followUp, commands });
+			}
+
 			case "abort": {
 				await session.abort();
 				return success(id, "abort");
@@ -529,6 +536,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					return success(id, "cycle_thinking_level", null);
 				}
 				return success(id, "cycle_thinking_level", { level });
+			}
+
+			case "get_available_thinking_levels": {
+				const levels = session.getAvailableThinkingLevels();
+				return success(id, "get_available_thinking_levels", { levels });
 			}
 
 			// =================================================================

@@ -100,6 +100,24 @@ export function createBaseAutocompleteProvider(host: AutocompleteProviderHost): 
 		};
 	}
 
+	const thinkingCommand = slashCommands.find((command) => command.name === "thinking");
+	if (thinkingCommand) {
+		thinkingCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
+			const levels = host.session.getAvailableThinkingLevels();
+			if (levels.length === 0) return null;
+			const items = levels.map((lvl) => ({
+				value: lvl,
+				label: lvl,
+			}));
+			const filtered = fuzzyFilter(items, prefix, (item) => item.label);
+			if (filtered.length === 0) return null;
+			return filtered.map((item) => ({
+				value: item.value,
+				label: item.label,
+			}));
+		};
+	}
+
 	// Convert prompt templates to SlashCommand format for autocomplete
 	const templateCommands: SlashCommand[] = host.session.promptTemplates.map((cmd) => ({
 		name: cmd.name,

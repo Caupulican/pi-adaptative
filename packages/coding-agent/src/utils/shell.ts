@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { basename, delimiter } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
 import { ensureManagedJscpd } from "./bundled-jscpd.ts";
@@ -145,9 +145,19 @@ export function getShellConfig(
 	return { shell: resolved.shell, args: [...resolved.args] };
 }
 
+export interface ShellSessionContext {
+	sessionId?: string;
+	sessionFile?: string;
+	provider?: string;
+	model?: string;
+	thinkingLevel?: string;
+	exposeSessionEnvironment?: boolean;
+}
+
 export function getShellEnv(
 	environment: NodeJS.ProcessEnv = process.env,
 	targetPlatform: NodeJS.Platform = process.platform,
+	sessionContext?: ShellSessionContext,
 ): NodeJS.ProcessEnv {
 	if (!managedJscpdProvisionAttempted) {
 		managedJscpdProvisionAttempted = true;
@@ -172,6 +182,27 @@ export function getShellEnv(
 			if (duplicateKey !== pathKey) delete normalizedEnvironment[duplicateKey];
 		}
 	}
+
+	// Always delete inherited session identity variables first to avoid leaking parent identities
+	delete normalizedEnvironment.PI_SESSION_ID;
+	delete normalizedEnvironment.PI_SESSION_FILE;
+	delete normalizedEnvironment.PI_PROVIDER;
+	delete normalizedEnvironment.PI_MODEL;
+	delete normalizedEnvironment.PI_REASONING_LEVEL;
+	delete normalizedEnvironment.PI_THINKING_LEVEL;
+
+	// Populate from active session context if requested
+	if (sessionContext && sessionContext.exposeSessionEnvironment !== false) {
+		if (sessionContext.sessionId) normalizedEnvironment.PI_SESSION_ID = sessionContext.sessionId;
+		if (sessionContext.sessionFile) normalizedEnvironment.PI_SESSION_FILE = sessionContext.sessionFile;
+		if (sessionContext.provider) normalizedEnvironment.PI_PROVIDER = sessionContext.provider;
+		if (sessionContext.model) normalizedEnvironment.PI_MODEL = sessionContext.model;
+		if (sessionContext.thinkingLevel) {
+			normalizedEnvironment.PI_REASONING_LEVEL = sessionContext.thinkingLevel;
+			normalizedEnvironment.PI_THINKING_LEVEL = sessionContext.thinkingLevel;
+		}
+	}
+
 	return {
 		...normalizedEnvironment,
 		[pathKey]: updatedPath,
@@ -210,7 +241,8 @@ export function killProcessTree(pid: number): void {
 	if (process.platform === "win32") {
 		// Use taskkill on Windows to kill process tree synchronously.
 		try {
-			spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], {
+			const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+			spawnSync(taskkill, ["/F", "/T", "/PID", String(pid)], {
 				stdio: "ignore",
 				windowsHide: true,
 			});

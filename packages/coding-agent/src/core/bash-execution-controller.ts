@@ -14,7 +14,12 @@ import { getShellEnv } from "../utils/shell.ts";
 import type { ManagedToolResolver } from "../utils/tools-manager.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import type { SettingsManager } from "./settings-manager.ts";
-import { type BashOperations, createLocalPlatformShellOperations, resolveCommandTimeoutSeconds } from "./tools/bash.ts";
+import {
+	type BashOperations,
+	buildShellSessionContext,
+	createLocalPlatformShellOperations,
+	resolveCommandTimeoutSeconds,
+} from "./tools/bash.ts";
 import { prepareManagedShellEnvironment } from "./tools/managed-shell-preparation.ts";
 
 export interface BashExecutionControllerDeps {
@@ -71,7 +76,9 @@ export class BashExecutionController {
 		const cwd = this.deps.getSessionManager().getCwd();
 		const inheritedEnvironment: NodeJS.ProcessEnv = { ...process.env, ...this.deps.getEnvironment?.(cwd) };
 		const environment: NodeJS.ProcessEnv =
-			options?.operations === undefined ? getShellEnv(inheritedEnvironment, platform) : inheritedEnvironment;
+			options?.operations === undefined
+				? getShellEnv(inheritedEnvironment, platform, buildShellSessionContext(this.deps))
+				: inheritedEnvironment;
 		delete environment.BW_SESSION;
 		const operations = createLocalPlatformShellOperations(
 			{

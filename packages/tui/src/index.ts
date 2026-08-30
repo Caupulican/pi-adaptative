@@ -27,6 +27,7 @@ export { type SettingItem, SettingsList, type SettingsListTheme } from "./compon
 export { Spacer } from "./components/spacer.ts";
 export { Text } from "./components/text.ts";
 export { TruncatedText } from "./components/truncated-text.ts";
+export { VisibilityContainer } from "./components/visibility-container.ts";
 // Editor component interface (for custom editors)
 export {
 	type EditorChangeSummary,
@@ -68,6 +69,7 @@ export { ProcessTerminal, type Terminal } from "./terminal.ts";
 // Terminal image support
 export {
 	allocateImageId,
+	applyTerminalSettings,
 	type CellDimensions,
 	calculateImageRows,
 	deleteAllKittyImages,
@@ -92,6 +94,7 @@ export {
 	setCapabilities,
 	setCellDimensions,
 	type TerminalCapabilities,
+	type TerminalCapabilityOverrides,
 } from "./terminal-image.ts";
 export {
 	type Component,

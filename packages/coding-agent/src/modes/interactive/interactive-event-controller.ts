@@ -27,6 +27,7 @@ import { CountdownTimer } from "./components/countdown-timer.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
 import { keyText } from "./components/keybinding-hints.ts";
+import type { MarkdownTransformFn } from "./components/markdown-transform.ts";
 import type { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { theme } from "./theme/theme.ts";
 
@@ -67,6 +68,7 @@ export interface InteractiveEventHost {
 	addMessageToChat(message: AgentMessage): void;
 	clearPendingStreamingUiUpdate(): void;
 	getMarkdownThemeWithSettings(): MarkdownTheme;
+	transformMarkdownForDisplay: MarkdownTransformFn;
 	applyStreamingMessageUpdate(message: AssistantMessage, options?: { force?: boolean }): void;
 	updateRuntimeStatus(message?: AssistantMessage): void;
 	trimLiveTuiHistory(): void;
@@ -205,6 +207,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 					undefined,
 					host.hideThinkingBlock,
 					host.getMarkdownThemeWithSettings(),
+					{ isStreaming: true, transformMarkdown: host.transformMarkdownForDisplay },
 				);
 				host.streamingMessage = event.message;
 				host.chatContainer.addChild(host.streamingComponent);
@@ -224,6 +227,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 		case "message_end":
 			if (event.message.role === "user") break;
 			if (host.streamingComponent && event.message.role === "assistant") {
+				const streamingComponent = host.streamingComponent;
 				host.streamingMessage = event.message;
 				updateCommentaryActivity(host, host.streamingMessage);
 				let errorMessage: string | undefined;
@@ -235,6 +239,9 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 							: "Operation aborted";
 					host.streamingMessage.errorMessage = errorMessage;
 				}
+				// Mark final before the last (force) render so this update's markdown transforms see
+				// isStreaming:false, matching the message's now-complete state.
+				streamingComponent.setStreaming(false);
 				host.applyStreamingMessageUpdate(host.streamingMessage, { force: true });
 				if (host.streamingMessage.stopReason === "aborted" || host.streamingMessage.stopReason === "error") {
 					errorMessage ??= host.streamingMessage.errorMessage || "Error";

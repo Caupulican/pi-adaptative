@@ -64,6 +64,12 @@ export interface CopyCommandHost {
 	readonly session: Pick<AgentSession, "getLastAssistantText">;
 	showError(message: string): void;
 	showStatus(message: string): void;
+	/**
+	 * Text for whatever selection currently takes precedence over "last assistant message" (P1h/P1k)
+	 * -- e.g. the highlighted entry while the /tree selector is open. Return undefined (not called,
+	 * or no selection has copyable text) to fall back to the last assistant message.
+	 */
+	getSelectionText?(): string | undefined;
 }
 
 export interface NameCommandHost {
@@ -264,7 +270,8 @@ export async function handleShareCommand(host: ShareCommandHost): Promise<void> 
 }
 
 export async function handleCopyCommand(host: CopyCommandHost): Promise<void> {
-	const text = host.session.getLastAssistantText();
+	const selectionText = host.getSelectionText?.();
+	const text = selectionText ?? host.session.getLastAssistantText();
 	if (!text) {
 		host.showError("No agent messages to copy yet.");
 		return;
@@ -272,7 +279,9 @@ export async function handleCopyCommand(host: CopyCommandHost): Promise<void> {
 
 	try {
 		await copyToClipboard(text);
-		host.showStatus("Copied last agent message to clipboard");
+		host.showStatus(
+			selectionText !== undefined ? "Copied selection to clipboard" : "Copied last agent message to clipboard",
+		);
 	} catch (error) {
 		host.showError(error instanceof Error ? error.message : String(error));
 	}

@@ -119,6 +119,14 @@ type CompactionControllerEvent =
 			errorMessage?: string;
 			skipReason?: string;
 	  }
+	| {
+			type: "session_compact_failed";
+			reason: "manual" | AutoCompactionReason;
+			errorMessage?: string;
+			aborted: boolean;
+			willRetry: boolean;
+			fromExtension: boolean;
+	  }
 	| { type: "warning"; message: string };
 
 export interface CompactionControllerDeps {
@@ -659,16 +667,22 @@ export class CompactionController {
 		if (assistantMessage.stopReason === "error") {
 			const messages = this.deps.agent.state.messages;
 			const estimate = estimateContextTokens(messages);
-			if (estimate.lastUsageIndex === null) return false;
-			const usageMessage = messages[estimate.lastUsageIndex];
-			if (usageMessage.role === "assistant" && this.isAssistantFromBeforeCompaction(usageMessage, compactionEntry)) {
-				return false;
+			if (estimate.lastUsageIndex !== null) {
+				const usageMessage = messages[estimate.lastUsageIndex];
+				if (
+					usageMessage.role === "assistant" &&
+					this.isAssistantFromBeforeCompaction(usageMessage, compactionEntry)
+				) {
+					return false;
+				}
 			}
 			contextTokens = estimate.tokens;
 		} else {
 			contextTokens = calculateContextTokens(assistantMessage.usage);
 			const estimate = estimateContextTokens(this.deps.agent.state.messages);
-			if (estimate.lastUsageIndex !== null) {
+			if (estimate.lastUsageIndex === null) {
+				contextTokens = Math.max(contextTokens, estimate.tokens);
+			} else {
 				const usageMessage = this.deps.agent.state.messages[estimate.lastUsageIndex];
 				const usageIsPostCompaction = !(
 					usageMessage.role === "assistant" && this.isAssistantFromBeforeCompaction(usageMessage, compactionEntry)
@@ -677,9 +691,23 @@ export class CompactionController {
 			}
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings, model?.autoCompactionTriggerTokens)) {
-			if (model && this.shouldDeferThresholdRetry(contextTokens, model, settings)) {
-				this.emitIneffectiveThresholdSkip();
-				return false;
+			if (model) {
+				// The ineffective-threshold-frontier guard must not compare against `contextTokens`
+				// above: that value can be dominated by the F13 usage-less/stale-usage whole-history
+				// estimate fallback, which is not the basis `recordThresholdFrontier` computed
+				// `tokensAfter`/`retryAtTokens` from and does not track real per-turn growth. When this
+				// turn reports real provider usage, that IS the precise live signal and matches
+				// `measureLiveContextTokens()`'s own basis. When it does not (a genuinely usage-less
+				// provider, or an errored response with no usage — measureLiveContextTokens() treats
+				// both the same way internally), fall back to measureLiveContextTokens() itself so the
+				// frontier still has a real recovery path as the conversation grows, instead of
+				// comparing against a frozen zero forever.
+				const rawUsageTokens = calculateContextTokens(assistantMessage.usage);
+				const liveTokens = rawUsageTokens > 0 ? rawUsageTokens : this.measureLiveContextTokens();
+				if (this.shouldDeferThresholdRetry(liveTokens, model, settings)) {
+					this.emitIneffectiveThresholdSkip();
+					return false;
+				}
 			}
 			return this.deps.runAutoCompaction("threshold", false);
 		}
@@ -918,6 +946,16 @@ export class CompactionController {
 			const errorMessage = boundedCompactionLifecycleError(error);
 			const aborted = extensionCancelled || signal.aborted || errorMessage === "Compaction cancelled";
 			this.finishCompactionLifecycle(aborted ? "cancelled" : "failure", aborted ? undefined : error);
+			if (!aborted) {
+				this.deps.emit({
+					type: "session_compact_failed",
+					reason,
+					errorMessage,
+					aborted: false,
+					willRetry: false,
+					fromExtension,
+				});
+			}
 			this.deps.emit({
 				type: "compaction_end",
 				reason,
@@ -936,7 +974,8 @@ export class CompactionController {
 		}
 	}
 
-	private shouldDeferThresholdRetry(contextTokens: number, model: Model<Api>, settings: CompactionSettings): boolean {
+	/** `liveTokens` must be on the same live, per-moment basis as `recordThresholdFrontier`'s `tokensAfter` — see the call site in `check()`. */
+	private shouldDeferThresholdRetry(liveTokens: number, model: Model<Api>, settings: CompactionSettings): boolean {
 		const frontier = this.ineffectiveThresholdFrontier;
 		if (!frontier) return false;
 		if (
@@ -947,7 +986,7 @@ export class CompactionController {
 			frontier.reserveTokens !== settings.reserveTokens ||
 			frontier.keepRecentTokens !== settings.keepRecentTokens ||
 			frontier.triggerPercent !== settings.triggerPercent ||
-			contextTokens >= frontier.retryAtTokens
+			liveTokens >= frontier.retryAtTokens
 		) {
 			this.ineffectiveThresholdFrontier = undefined;
 			return false;

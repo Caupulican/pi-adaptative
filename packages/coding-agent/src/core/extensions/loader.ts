@@ -221,12 +221,13 @@ export async function loadExtension(
 
 		const extension = createExtension(extensionPath, resolvedPath);
 		const api = createExtensionAPI(extension, runtime, cwd, eventBus, resolvedAgentDir);
-		const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime);
+		const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime, extension);
 		try {
 			await runExtensionFactory(factory, api, opts?.factoryTimeoutMs);
 		} catch (err) {
 			await disposeExtensionEventSubscriptions([extension]);
-			restoreExtensionLoadRuntime(runtime, runtimeSnapshot);
+			restoreExtensionLoadRuntime(runtime, extension, runtimeSnapshot);
+			runtime.refreshTools?.();
 			throw err;
 		}
 
@@ -296,12 +297,12 @@ function createLazyExtension(
 				throw new Error(`Extension does not export a valid factory function: ${extensionPath}`);
 			}
 			const api = createExtensionAPI(extension, runtime, cwd, eventBus, agentDir);
-			const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime);
+			const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime, extension);
 			try {
 				await runExtensionFactory(factory, api);
 			} catch (error) {
 				await disposeExtensionEventSubscriptions([extension], { deactivate: false });
-				restoreExtensionLoadRuntime(runtime, runtimeSnapshot);
+				restoreExtensionLoadRuntime(runtime, extension, runtimeSnapshot);
 				throw error;
 			}
 			if (extension.lazy) {

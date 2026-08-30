@@ -373,12 +373,15 @@ export async function generateBranchSummary(
 	}
 	if (!response) return { error: "Summarization failed" };
 
-	// Check if aborted or errored
+	// Check if aborted, errored, or truncated
 	if (response.stopReason === "aborted") {
 		return { aborted: true };
 	}
 	if (response.stopReason === "error") {
 		return { error: response.errorMessage || "Summarization failed" };
+	}
+	if (response.stopReason === "length") {
+		return { error: "branch summary hit its output cap before completing" };
 	}
 
 	let summary = response.content

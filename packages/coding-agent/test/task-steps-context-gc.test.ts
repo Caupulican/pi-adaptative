@@ -46,7 +46,7 @@ describe("task_steps_context GC eligibility", () => {
 		expect(context!.endsWith("\n</task_steps_context>")).toBe(true);
 		// Compact instruction content remains inside the executable GC marker.
 		expect(context).toContain("TASK STEPS");
-		expect(context).toContain("[in_progress] Investigate root cause");
+		expect(context).toContain("[in_progress] step-1 Investigate root cause");
 		expect(context).toContain("continue in_progress step");
 	});
 

@@ -9,6 +9,7 @@ import {
 import { existsSync, readFileSync } from "fs";
 import { getAgentDir } from "../config.ts";
 import { isWslEnvironment } from "../utils/platform.ts";
+import { stripBom } from "../utils/text.ts";
 import { configFile } from "./agent-paths.ts";
 import { isRecordObject } from "./util/value-guards.ts";
 
@@ -31,6 +32,7 @@ export interface AppKeybindings {
 	"app.editor.external": true;
 	"app.message.followUp": true;
 	"app.message.dequeue": true;
+	"app.message.copy": true;
 	"app.clipboard.pasteImage": true;
 	"app.transcript.open": true;
 	"app.transcript.scrollUp": true;
@@ -135,6 +137,10 @@ export const KEYBINDINGS = {
 	"app.message.dequeue": {
 		defaultKeys: "alt+up",
 		description: "Restore queued messages",
+	},
+	"app.message.copy": {
+		defaultKeys: "ctrl+x",
+		description: "Copy last message or selection",
 	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: defaultImagePasteKeys(),
@@ -312,6 +318,7 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	externalEditor: "app.editor.external",
 	followUp: "app.message.followUp",
 	dequeue: "app.message.dequeue",
+	copyMessage: "app.message.copy",
 	pasteImage: "app.clipboard.pasteImage",
 	newSession: "app.session.new",
 	tree: "app.session.tree",
@@ -391,7 +398,7 @@ function orderKeybindingsConfig(config: Record<string, unknown>): Record<string,
 function loadRawConfig(path: string): Record<string, unknown> | undefined {
 	if (!existsSync(path)) return undefined;
 	try {
-		const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+		const parsed = JSON.parse(stripBom(readFileSync(path, "utf-8"))) as unknown;
 		return isRecordObject(parsed) ? parsed : undefined;
 	} catch {
 		return undefined;

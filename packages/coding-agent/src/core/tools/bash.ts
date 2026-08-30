@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
+import type { Agent } from "@caupulican/pi-agent-core";
+import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { createSilenceWatchdog } from "@caupulican/pi-agent-core/reliability";
 import {
 	DEFAULT_MAX_BYTES,
@@ -23,11 +25,13 @@ import {
 	getShellConfig,
 	getShellEnv,
 	type PlatformShellToolName,
+	type ShellSessionContext,
 	trackDetachedChildPid,
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
 import type { ManagedToolResolver } from "../../utils/tools-manager.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import type { SettingsManager } from "../settings-manager.ts";
 import {
 	type FileFailureRecoveryAuthority,
 	selectFileFailureRecoveryAuthority,
@@ -313,8 +317,44 @@ export interface BashSpawnContext {
 
 export type BashSpawnHook = (context: BashSpawnContext) => BashSpawnContext;
 
-function resolveSpawnContext(command: string, cwd: string, spawnHook?: BashSpawnHook): BashSpawnContext {
-	const baseContext: BashSpawnContext = { command, cwd, env: { ...getShellEnv() } };
+export interface ShellSessionContextDeps {
+	getAgent(): Agent;
+	getSessionManager(): Pick<SessionManager, "getSessionId" | "getSessionFile">;
+	getSettingsManager(): Pick<SettingsManager, "getExposeSessionEnvironment">;
+}
+
+/**
+ * Build the live shell session identity (P2k) from the running session: sessionId/file, the
+ * CURRENT provider/model/thinkingLevel (read fresh, not snapshotted, so a mid-session /model or
+ * /thinking change is reflected on the very next command), and whether the setting allows exposing
+ * any of it at all.
+ */
+export function buildShellSessionContext(deps: ShellSessionContextDeps): ShellSessionContext {
+	const state = deps.getAgent().state;
+	return {
+		sessionId: deps.getSessionManager().getSessionId(),
+		sessionFile: deps.getSessionManager().getSessionFile(),
+		provider: state.model.provider,
+		model: state.model.id,
+		thinkingLevel: state.thinkingLevel,
+		exposeSessionEnvironment: deps.getSettingsManager().getExposeSessionEnvironment(),
+	};
+}
+
+function resolveSpawnContext(
+	command: string,
+	cwd: string,
+	spawnHook?: BashSpawnHook,
+	getShellSessionContext?: () => ShellSessionContext,
+): BashSpawnContext {
+	// Delete-first-then-repopulate (getShellEnv) must run BEFORE the spawn hook: a nested pi must
+	// never inherit its parent's identity, and a hook (e.g. credential injection) must only ever see
+	// an already-correct base environment, never patch around a missing one.
+	const baseContext: BashSpawnContext = {
+		command,
+		cwd,
+		env: { ...getShellEnv(undefined, undefined, getShellSessionContext?.()) },
+	};
 	return spawnHook ? spawnHook(baseContext) : baseContext;
 }
 
@@ -331,6 +371,12 @@ export interface BashToolOptions {
 	shellPath?: string;
 	/** Hook to adjust command, cwd, or env before execution */
 	spawnHook?: BashSpawnHook;
+	/**
+	 * Live shell session identity (P2k), read fresh on every command. Build with
+	 * `buildShellSessionContext`. Omit to keep PI_SESSION_ID/FILE/PROVIDER/MODEL/REASONING_LEVEL
+	 * absent entirely (the delete-first step in getShellEnv still applies either way).
+	 */
+	getShellSessionContext?: () => ShellSessionContext;
 	/**
 	 * Stable key for this agent's persistent shell session. The host passes its per-agent key so
 	 * the session survives runtime reloads and user `!` commands share it; separately created
@@ -569,7 +615,7 @@ function createShellToolDefinition(
 	) {
 		const session = acquirePersistentShellSession(sessionKey, backendShell);
 		setImmediate(() => {
-			const context = resolveSpawnContext("", cwd, spawnHook);
+			const context = resolveSpawnContext("", cwd, spawnHook, options?.getShellSessionContext);
 			context.env = mergeEffectiveEnv(getOrCreateWindowsShellState(sessionKey), context.env);
 			void session.prewarm(context.cwd, context.env).catch(() => {
 				// The first real command retries and surfaces the complete candidate failure.
@@ -915,7 +961,12 @@ function createShellToolDefinition(
 					: commandPrefix
 						? `${commandPrefix}\n${backendCommand}`
 						: backendCommand;
-				const spawnContext = resolveSpawnContext(resolvedCommand, effectiveCwd, spawnHook);
+				const spawnContext = resolveSpawnContext(
+					resolvedCommand,
+					effectiveCwd,
+					spawnHook,
+					options?.getShellSessionContext,
+				);
 				if (routesWindowsContract) {
 					spawnContext.env = mergeEffectiveEnv(getOrCreateWindowsShellState(sessionKey), spawnContext.env);
 				}

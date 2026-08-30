@@ -96,19 +96,11 @@ import type {
 	ExtensionErrorListener,
 	ExtensionRunner,
 	ExtensionUIContext,
-	MessageEndEvent,
-	MessageStartEvent,
-	MessageUpdateEvent,
 	ReplacedSessionContext,
 	SessionStartEvent,
 	ShutdownHandler,
 	ToolDefinition,
-	ToolExecutionEndEvent,
-	ToolExecutionStartEvent,
-	ToolExecutionUpdateEvent,
 	ToolInfo,
-	TurnEndEvent,
-	TurnStartEvent,
 } from "./extensions/index.ts";
 import { FailureCorpusRecorder } from "./failure-corpus.ts";
 import { ForegroundLifecycleAdapter } from "./foreground-lifecycle-adapter.ts";
@@ -180,6 +172,7 @@ import type { CredentialManager } from "./secrets/credential-manager.ts";
 import { SessionAnalytics } from "./session-analytics.ts";
 import { SessionImageStore } from "./session-image-store.ts";
 import { isWorkerSession } from "./session-role.ts";
+import { hasRunningBackgroundedToolCall, isSessionSettled } from "./session-settlement.ts";
 import { createSessionShutdownTracker } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
@@ -1230,7 +1223,13 @@ export class AgentSession {
 			throw new Error(result.error);
 		}
 		if (this._modelRegistry.canUseResolvedRequestAuth(model, result)) {
-			return { apiKey: result.apiKey, headers: result.headers };
+			const headers: Record<string, string> = { ...result.headers };
+			await this._extensionRunner.emitBeforeProviderHeaders({
+				provider: model.provider,
+				model: model.id,
+				headers,
+			});
+			return { apiKey: result.apiKey, headers };
 		}
 
 		const isOAuth = this._modelRegistry.isUsingOAuth(model);
@@ -1986,73 +1985,66 @@ export class AgentSession {
 			this._turnIndex = 0;
 			await this._extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
-			await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
+			await this._extensionRunner.emit({
+				type: "agent_end",
+				messages: event.messages,
+				willRetry: this._willRetryAfterAgentEnd(event),
+			});
 		} else if (event.type === "turn_start") {
 			this._toolSelection.startTurn();
 			this._refreshForegroundEnvelope();
-			const extensionEvent: TurnStartEvent = {
+			await this._extensionRunner.emit({
 				type: "turn_start",
 				turnIndex: this._turnIndex,
 				timestamp: Date.now(),
-			};
-			await this._extensionRunner.emit(extensionEvent);
+			});
 		} else if (event.type === "turn_end") {
-			const extensionEvent: TurnEndEvent = {
+			await this._extensionRunner.emit({
 				type: "turn_end",
 				turnIndex: this._turnIndex,
 				message: event.message,
 				toolResults: event.toolResults,
-			};
-			await this._extensionRunner.emit(extensionEvent);
+			});
 			this._turnIndex++;
 		} else if (event.type === "message_start") {
-			const extensionEvent: MessageStartEvent = {
-				type: "message_start",
-				message: event.message,
-			};
-			await this._extensionRunner.emit(extensionEvent);
+			await this._extensionRunner.emit({ type: "message_start", message: event.message });
 		} else if (event.type === "message_update") {
-			const extensionEvent: MessageUpdateEvent = {
+			await this._extensionRunner.emit({
 				type: "message_update",
 				message: event.message,
 				assistantMessageEvent: event.assistantMessageEvent,
-			};
-			await this._extensionRunner.emit(extensionEvent);
+			});
 		} else if (event.type === "message_end") {
-			const extensionEvent: MessageEndEvent = {
+			const replacement = await this._extensionRunner.emitMessageEnd({
 				type: "message_end",
 				message: event.message,
-			};
-			const replacement = await this._extensionRunner.emitMessageEnd(extensionEvent);
+			});
 			if (replacement) {
 				this._replaceMessageInPlace(event.message, replacement);
 			}
 		} else if (event.type === "tool_execution_start") {
-			const extensionEvent: ToolExecutionStartEvent = {
+			await this._extensionRunner.emit({
 				type: "tool_execution_start",
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
 				args: event.args,
-			};
-			await this._extensionRunner.emit(extensionEvent);
+			});
 		} else if (event.type === "tool_execution_update") {
-			const extensionEvent: ToolExecutionUpdateEvent = {
+			await this._extensionRunner.emit({
 				type: "tool_execution_update",
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
 				args: event.args,
 				partialResult: event.partialResult,
-			};
-			await this._extensionRunner.emit(extensionEvent);
+			});
 		} else if (event.type === "tool_execution_end") {
-			const extensionEvent: ToolExecutionEndEvent = {
+			await this._extensionRunner.emit({
 				type: "tool_execution_end",
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
 				result: event.result,
 				isError: event.isError,
-			};
-			await this._extensionRunner.emit(extensionEvent);
+			});
 		}
 	}
 
@@ -2890,6 +2882,11 @@ export class AgentSession {
 			this._backgroundLanes.scheduleGoalAutoContinueFromIdle(options);
 		}
 		this._backgroundLanes.scheduleResearchLaneFromIdle();
+
+		// Extension-only; see session-settlement.ts for why it must not reach the public channel.
+		if (isSessionSettled(this)) {
+			await this._extensionRunner.emit({ type: "agent_settled" });
+		}
 	}
 
 	/**
@@ -3098,6 +3095,15 @@ export class AgentSession {
 			}
 		} else if (options?.triggerTurn) {
 			await this._foregroundRecovery.runAgentPrompt(appMessage, submissionLease);
+		} else if (hasRunningBackgroundedToolCall(this._backgroundToolTasks.list())) {
+			// Queue rather than splice while a backgrounded call is outstanding, exactly like the
+			// isBusy branch above -- see hasRunningBackgroundedToolCall for why lease ownership is not
+			// sufficient here. Scoped to the no-trigger case; triggerTurn:true is handled above.
+			if (options?.deliverAs === "followUp") {
+				this.agent.followUp(appMessage);
+			} else {
+				this.agent.steer(appMessage);
+			}
 		} else {
 			this.agent.state.messages.push(appMessage);
 			this.sessionManager.appendCustomMessageEntry(

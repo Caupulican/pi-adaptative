@@ -62,61 +62,105 @@ function probeTmuxHyperlinks(): boolean {
 	}
 }
 
-export function detectCapabilities(tmuxForwardsHyperlink: () => boolean = probeTmuxHyperlinks): TerminalCapabilities {
+export interface TerminalCapabilityOverrides {
+	images?: ImageProtocol | "none";
+	trueColor?: boolean;
+	hyperlinks?: boolean;
+}
+
+function parseBooleanEnv(val: string | undefined): boolean | undefined {
+	if (val === undefined) return undefined;
+	const lower = val.trim().toLowerCase();
+	if (lower === "true" || lower === "1") return true;
+	if (lower === "false" || lower === "0") return false;
+	return undefined;
+}
+
+function parseImageProtocolEnv(val: string | undefined): ImageProtocol | undefined {
+	if (val === undefined) return undefined;
+	const lower = val.trim().toLowerCase();
+	if (lower === "kitty") return "kitty";
+	if (lower === "iterm2" || lower === "iterm") return "iterm2";
+	if (lower === "none" || lower === "false" || lower === "0" || lower === "null") return null;
+	return undefined;
+}
+
+export function detectCapabilities(
+	tmuxForwardsHyperlink: () => boolean = probeTmuxHyperlinks,
+	overrides?: TerminalCapabilityOverrides,
+): TerminalCapabilities {
 	const termProgram = process.env.TERM_PROGRAM?.toLowerCase() || "";
 	const terminalEmulator = process.env.TERMINAL_EMULATOR?.toLowerCase() || "";
 	const term = process.env.TERM?.toLowerCase() || "";
 	const colorTerm = process.env.COLORTERM?.toLowerCase() || "";
 	const hasTrueColorHint = colorTerm === "truecolor" || colorTerm === "24bit";
 
+	let detected: TerminalCapabilities;
+
 	// Emit OSC 8 hyperlinks only when tmux confirms it forwards.
 	// Image protocols are unreliable under tmux, so leave `images: null`.
 	if (process.env.TMUX || term.startsWith("tmux")) {
-		return { images: null, trueColor: hasTrueColorHint, hyperlinks: tmuxForwardsHyperlink() };
+		detected = { images: null, trueColor: hasTrueColorHint, hyperlinks: tmuxForwardsHyperlink() };
+	} else if (term.startsWith("screen")) {
+		// screen does not forward OSC 8 hyperlinks, so keep them off there.
+		detected = { images: null, trueColor: hasTrueColorHint, hyperlinks: false };
+	} else if (process.env.KITTY_WINDOW_ID || termProgram === "kitty") {
+		detected = { images: "kitty", trueColor: true, hyperlinks: true };
+	} else if (termProgram === "ghostty" || term.includes("ghostty") || process.env.GHOSTTY_RESOURCES_DIR) {
+		detected = { images: "kitty", trueColor: true, hyperlinks: true };
+	} else if (process.env.WEZTERM_PANE || termProgram === "wezterm") {
+		detected = { images: "kitty", trueColor: true, hyperlinks: true };
+	} else if (process.env.ITERM_SESSION_ID || termProgram === "iterm.app") {
+		detected = { images: "iterm2", trueColor: true, hyperlinks: true };
+	} else if (process.env.WT_SESSION) {
+		detected = { images: null, trueColor: true, hyperlinks: true };
+	} else if (termProgram === "vscode") {
+		detected = { images: null, trueColor: true, hyperlinks: true };
+	} else if (termProgram === "alacritty") {
+		detected = { images: null, trueColor: true, hyperlinks: true };
+	} else if (terminalEmulator === "jetbrains-jediterm") {
+		detected = { images: null, trueColor: true, hyperlinks: false };
+	} else {
+		// Unknown terminal: be conservative. OSC 8 is rendered invisibly as "just
+		// text" on terminals that swallow it, which means the URL disappears from
+		// the rendered output. Default to the legacy `text (url)` behavior unless we
+		// have positively identified a hyperlink-capable terminal above.
+		detected = { images: null, trueColor: hasTrueColorHint, hyperlinks: false };
 	}
 
-	// screen does not forward OSC 8 hyperlinks, so keep them off there.
-	if (term.startsWith("screen")) {
-		return { images: null, trueColor: hasTrueColorHint, hyperlinks: false };
-	}
+	// Settings overrides (highest precedence -- terminal.hyperlinks/images/trueColor, P1g)
+	const settingsHyperlinks = overrides?.hyperlinks;
+	const settingsImages = overrides?.images === "none" ? null : overrides?.images;
+	const settingsTrueColor = overrides?.trueColor;
 
-	if (process.env.KITTY_WINDOW_ID || termProgram === "kitty") {
-		return { images: "kitty", trueColor: true, hyperlinks: true };
-	}
+	// Environment overrides (second precedence: PI_HYPERLINKS, PI_IMAGE_PROTOCOL, PI_TRUE_COLOR).
+	// Below settings so a persisted user choice cannot be silently shadowed by an inherited/ambient
+	// env var, e.g. one set by a wrapper script or a parent pi process.
+	const envHyperlinks = parseBooleanEnv(process.env.PI_HYPERLINKS);
+	const envImages = parseImageProtocolEnv(process.env.PI_IMAGE_PROTOCOL);
+	const envTrueColor = parseBooleanEnv(process.env.PI_TRUE_COLOR);
 
-	if (termProgram === "ghostty" || term.includes("ghostty") || process.env.GHOSTTY_RESOURCES_DIR) {
-		return { images: "kitty", trueColor: true, hyperlinks: true };
-	}
+	return {
+		images: settingsImages !== undefined ? settingsImages : envImages !== undefined ? envImages : detected.images,
+		trueColor:
+			settingsTrueColor !== undefined
+				? settingsTrueColor
+				: envTrueColor !== undefined
+					? envTrueColor
+					: detected.trueColor,
+		hyperlinks:
+			settingsHyperlinks !== undefined
+				? settingsHyperlinks
+				: envHyperlinks !== undefined
+					? envHyperlinks
+					: detected.hyperlinks,
+	};
+}
 
-	if (process.env.WEZTERM_PANE || termProgram === "wezterm") {
-		return { images: "kitty", trueColor: true, hyperlinks: true };
-	}
-
-	if (process.env.ITERM_SESSION_ID || termProgram === "iterm.app") {
-		return { images: "iterm2", trueColor: true, hyperlinks: true };
-	}
-
-	if (process.env.WT_SESSION) {
-		return { images: null, trueColor: true, hyperlinks: true };
-	}
-
-	if (termProgram === "vscode") {
-		return { images: null, trueColor: true, hyperlinks: true };
-	}
-
-	if (termProgram === "alacritty") {
-		return { images: null, trueColor: true, hyperlinks: true };
-	}
-
-	if (terminalEmulator === "jetbrains-jediterm") {
-		return { images: null, trueColor: true, hyperlinks: false };
-	}
-
-	// Unknown terminal: be conservative. OSC 8 is rendered invisibly as "just
-	// text" on terminals that swallow it, which means the URL disappears from
-	// the rendered output. Default to the legacy `text (url)` behavior unless we
-	// have positively identified a hyperlink-capable terminal above.
-	return { images: null, trueColor: hasTrueColorHint, hyperlinks: false };
+export function applyTerminalSettings(settings?: TerminalCapabilityOverrides): TerminalCapabilities {
+	const caps = detectCapabilities(undefined, settings);
+	setCapabilities(caps);
+	return caps;
 }
 
 export function getCapabilities(): TerminalCapabilities {

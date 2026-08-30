@@ -43,9 +43,21 @@ function writeFakeRipgrep(directory: string): string {
 
 function makeController(cwd: string): BashExecutionController {
 	return new BashExecutionController({
-		getAgent: () => ({ state: { messages: [] } }) as never,
-		getSessionManager: () => ({ getCwd: () => cwd, appendMessage: () => undefined }) as never,
-		getSettingsManager: () => ({ getShellCommandPrefix: () => undefined, getShellPath: () => undefined }) as never,
+		getAgent: () =>
+			({ state: { messages: [], model: { provider: "test", id: "test-model" }, thinkingLevel: "off" } }) as never,
+		getSessionManager: () =>
+			({
+				getCwd: () => cwd,
+				appendMessage: () => undefined,
+				getSessionId: () => "test-session-id",
+				getSessionFile: () => undefined,
+			}) as never,
+		getSettingsManager: () =>
+			({
+				getShellCommandPrefix: () => undefined,
+				getShellPath: () => undefined,
+				getExposeSessionEnvironment: () => true,
+			}) as never,
 		isStreaming: () => false,
 		getEnvironment: () => ({ PATH: join(tmpdir(), "clean-shell-path") }),
 	});

@@ -105,6 +105,40 @@ function lifecycleEntry(id: string, parentId: string | null, type: string): Sess
 	} as SessionEntry;
 }
 
+// Helper to create a custom_message entry (P1h/P1k copy support)
+function customMessageEntry(
+	id: string,
+	parentId: string | null,
+	content: string,
+	display = true,
+): Extract<SessionEntry, { type: "custom_message" }> {
+	return {
+		type: "custom_message",
+		id,
+		parentId,
+		timestamp: new Date().toISOString(),
+		customType: "test-widget",
+		content,
+		display,
+	};
+}
+
+// Helper to create a branch_summary entry (P1h/P1k copy support)
+function branchSummaryEntry(
+	id: string,
+	parentId: string | null,
+	summary: string,
+): Extract<SessionEntry, { type: "branch_summary" }> {
+	return {
+		type: "branch_summary",
+		id,
+		parentId,
+		timestamp: new Date().toISOString(),
+		fromId: parentId ?? id,
+		summary,
+	};
+}
+
 // Helper to build a tree from entries using parentId relationships
 function buildTree(entries: Array<SessionEntry>): SessionTreeNode[] {
 	if (entries.length === 0) return [];
@@ -695,6 +729,102 @@ describe("TreeSelectorComponent", () => {
 
 			selector.handleInput(DOWN); // user-3a → asst-3a (not user-3b)
 			expect(list.getSelectedNode()?.entry.id).toBe("asst-3a");
+		});
+	});
+
+	describe("getSelectedCopyText (P1h/P1k)", () => {
+		test("returns the full untruncated text of a selected user or assistant message", () => {
+			const longText = "a".repeat(500);
+			const entries = [userMessage("user-1", null, longText), assistantMessage("asst-1", "user-1", "the answer")];
+			const tree = buildTree(entries);
+
+			const selector = new TreeSelectorComponent(
+				tree,
+				"asst-1",
+				24,
+				() => {},
+				() => {},
+				undefined,
+				"user-1",
+			);
+			expect(selector.getSelectedCopyText()).toBe(longText);
+
+			const onAssistant = new TreeSelectorComponent(
+				tree,
+				"asst-1",
+				24,
+				() => {},
+				() => {},
+				undefined,
+				"asst-1",
+			);
+			expect(onAssistant.getSelectedCopyText()).toBe("the answer");
+		});
+
+		test("returns custom_message content and branch_summary text", () => {
+			const entries = [
+				userMessage("user-1", null, "hi"),
+				customMessageEntry("widget-1", "user-1", "widget payload text"),
+				branchSummaryEntry("summary-1", "widget-1", "This branch did X and Y."),
+			];
+			const tree = buildTree(entries);
+
+			const widgetSelector = new TreeSelectorComponent(
+				tree,
+				"summary-1",
+				24,
+				() => {},
+				() => {},
+				undefined,
+				"widget-1",
+				"all",
+			);
+			expect(widgetSelector.getSelectedCopyText()).toBe("widget payload text");
+
+			const summarySelector = new TreeSelectorComponent(
+				tree,
+				"summary-1",
+				24,
+				() => {},
+				() => {},
+				undefined,
+				"summary-1",
+				"all",
+			);
+			expect(summarySelector.getSelectedCopyText()).toBe("This branch did X and Y.");
+		});
+
+		test("returns undefined for entry types with no copyable text (e.g. model_change)", () => {
+			const entries = [userMessage("user-1", null, "hi"), modelChange("model-1", "user-1")];
+			const tree = buildTree(entries);
+
+			const onModelChange = new TreeSelectorComponent(
+				tree,
+				"model-1",
+				24,
+				() => {},
+				() => {},
+				undefined,
+				"model-1",
+				"all",
+			);
+			expect(onModelChange.getSelectedCopyText()).toBeUndefined();
+		});
+
+		test("returns undefined when nothing is selected (empty filtered list)", () => {
+			const entries = [userMessage("user-1", null, "hi")];
+			const tree = buildTree(entries);
+			const selector = new TreeSelectorComponent(
+				tree,
+				"user-1",
+				24,
+				() => {},
+				() => {},
+				undefined,
+				undefined,
+				"labeled-only",
+			);
+			expect(selector.getSelectedCopyText()).toBeUndefined();
 		});
 	});
 });

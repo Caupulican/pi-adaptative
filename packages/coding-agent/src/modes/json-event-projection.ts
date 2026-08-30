@@ -23,9 +23,20 @@ function projectAssistantEvent(event: AssistantMessageEvent): object {
 		case "text_end":
 		case "thinking_start":
 		case "thinking_end":
-		case "toolcall_start":
 		case "toolcall_end":
 			return { type: event.type, contentIndex: event.contentIndex };
+		case "toolcall_start": {
+			const block = event.partial.content[event.contentIndex];
+			if (!block || block.type !== "toolCall") {
+				throw new Error(`toolcall_start content at index ${event.contentIndex} is not a tool call`);
+			}
+			return {
+				type: event.type,
+				contentIndex: event.contentIndex,
+				id: block.id,
+				toolName: block.name,
+			};
+		}
 		case "done":
 		case "error":
 			return { type: event.type, reason: event.reason };

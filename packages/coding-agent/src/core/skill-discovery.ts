@@ -30,7 +30,11 @@ export function discoverSkillFiles(
 		}
 
 		for (const entry of entries) {
-			if (mode === "pi" && currentDir === root && entry.isFile && entry.name.endsWith(".md")) {
+			if (
+				((mode === "pi" && currentDir === root) || (mode === "agents" && currentDir !== root)) &&
+				entry.isFile &&
+				entry.name.endsWith(".md")
+			) {
 				files.push(entry.path);
 			} else if (entry.isDirectory) {
 				visit(entry.path);

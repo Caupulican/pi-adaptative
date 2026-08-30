@@ -62,6 +62,20 @@ function assistantWithUsage(tokens: number, timestamp: number): AssistantMessage
 	};
 }
 
+function assistantWithoutUsage(timestamp: number): AssistantMessage {
+	return {
+		...assistantWithUsage(1, timestamp),
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+	};
+}
+
 function createFixture(options: {
 	measureLiveContextTokens: () => number;
 	createResult(attempt: number, entryIds: string[]): Promise<CompactionResult>;
@@ -856,5 +870,51 @@ describe("CompactionController auto-compaction re-entry", () => {
 		expect(records).toHaveLength(1);
 		expect(records[0]?.starts).toHaveLength(1);
 		expect(records[0]?.ends).toHaveLength(0);
+	});
+
+	// F13 gave usage-less providers (llama.cpp / ollama style, which report no usage at all) a
+	// between-turns threshold trigger. The ineffective-threshold frontier must not take that away
+	// again: comparing the frontier against this turn's raw reported usage would compare against a
+	// frozen 0 for such a provider, so `retryAtTokens` could never be reached and one ineffective
+	// compaction would suppress the trigger for the rest of the session with no recovery path.
+	it("lets a usage-less provider re-enter threshold compaction once measured context grows past the frontier", async () => {
+		const { controller, runAutoCompaction, sessionManager } = createFixture({
+			measureLiveContextTokens: scriptedMeasure([3_000, 2_500, 2_500, 2_500]),
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			estimatedContextTokens: 9_000,
+		});
+		await controller.runAuto("threshold", false);
+		runAutoCompaction.mockClear();
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: `${"grown context ".repeat(200)}` }],
+			timestamp: Date.now() + 100,
+		});
+
+		await controller.check(assistantWithoutUsage(Date.now() + 1_000));
+
+		expect(runAutoCompaction).toHaveBeenCalledWith("threshold", false);
+	});
+
+	it("still defers a usage-less provider whose measured context has not passed the frontier", async () => {
+		const { controller, runAutoCompaction, events, sessionManager } = createFixture({
+			measureLiveContextTokens: scriptedMeasure([3_000, 2_500, 2_500, 2_500]),
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			estimatedContextTokens: 2_499,
+		});
+		await controller.runAuto("threshold", false);
+		runAutoCompaction.mockClear();
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "tiny follow-up" }],
+			timestamp: Date.now() + 100,
+		});
+
+		await controller.check(assistantWithoutUsage(Date.now() + 1_000));
+
+		expect(runAutoCompaction).not.toHaveBeenCalled();
+		expect(events.at(-1)).toMatchObject({
+			skipReason: expect.stringContaining("waiting for materially new compactable history"),
+		});
 	});
 });

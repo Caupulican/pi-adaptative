@@ -491,6 +491,8 @@ export interface OpenAICompletionsCompat {
 		| "qwen"
 		| "qwen-chat-template"
 		| "string-thinking";
+	/** Field name to route thinking token budget to (e.g., vLLM, Qwen, llama.cpp). */
+	thinkingTokenBudgetField?: "thinking_token_budget" | "thinking_budget" | "thinking_budget_tokens";
 	/** OpenRouter-compatible routing preferences sent as the `provider` request field. */
 	openRouterRouting?: OpenRouterRouting;
 	/** Vercel AI Gateway routing preferences. Only used when baseUrl points to Vercel AI Gateway. */
@@ -658,6 +660,22 @@ export interface VercelGatewayRouting {
 	order?: string[];
 }
 
+export interface ModelCostTier {
+	inputTokensAbove: number;
+	input?: number;
+	output?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+}
+
+export interface ModelCost {
+	input: number; // $/million tokens
+	output: number; // $/million tokens
+	cacheRead: number; // $/million tokens
+	cacheWrite: number; // $/million tokens
+	tiers?: ModelCostTier[];
+}
+
 // Model interface for the unified model system
 export interface Model<TApi extends Api> {
 	id: string;
@@ -673,6 +691,10 @@ export interface Model<TApi extends Api> {
 	 * Missing keys use provider defaults. null marks a level as unsupported.
 	 */
 	thinkingLevelMap?: ThinkingLevelMap;
+	/** Custom token budgets for thinking levels (token-based providers only) */
+	thinkingBudgets?: ThinkingBudgets;
+	/** Custom sampling parameters (top_p, top_k, min_p, repetition_penalty) merged after named fields. */
+	samplingParams?: Record<string, unknown>;
 	/** Use the ChatGPT Codex Responses Lite request framing for this model. */
 	openaiResponsesLite?: boolean;
 	/** Optional full-request pricing tier activated by total input tokens above a threshold. */
@@ -687,12 +709,7 @@ export interface Model<TApi extends Api> {
 	 * that support images preserve all image blocks.
 	 */
 	supportedImageMimeTypes?: string[];
-	cost: {
-		input: number; // $/million tokens
-		output: number; // $/million tokens
-		cacheRead: number; // $/million tokens
-		cacheWrite: number; // $/million tokens
-	};
+	cost: ModelCost;
 	contextWindow: number;
 	/**
 	 * Optional usage threshold where auto-compaction should trigger for this model.

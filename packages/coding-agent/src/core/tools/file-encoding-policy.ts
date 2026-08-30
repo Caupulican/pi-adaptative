@@ -1,4 +1,4 @@
-import { stripBom } from "./edit-diff.ts";
+import { splitBom, stripBom } from "../../utils/text.ts";
 
 /**
  * Strict UTF-8 validation on a buffer.
@@ -30,11 +30,12 @@ export function isConsistentlyCRLF(text: string): boolean {
  * Preservation of BOM and line endings.
  */
 export function applyEncodingPreservation(existingContent: string, newContent: string): string {
-	const hasBOM = existingContent.startsWith("\uFEFF");
-	const isCRLF = isConsistentlyCRLF(existingContent);
+	const { bom, text: cleanExisting } = splitBom(existingContent);
+	const hasBOM = bom.length > 0;
+	const isCRLF = isConsistentlyCRLF(cleanExisting);
 
 	// Strip BOM from newContent if it starts with one to avoid duplicates
-	const { text: cleanNewContent } = stripBom(newContent);
+	const cleanNewContent = stripBom(newContent);
 
 	let finalContent = cleanNewContent;
 
@@ -47,7 +48,7 @@ export function applyEncodingPreservation(existingContent: string, newContent: s
 
 	// Preserve BOM
 	if (hasBOM) {
-		finalContent = `\uFEFF${finalContent}`;
+		finalContent = `${bom}${finalContent}`;
 	}
 
 	return finalContent;

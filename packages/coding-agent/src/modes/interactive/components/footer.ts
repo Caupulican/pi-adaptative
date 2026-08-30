@@ -241,6 +241,35 @@ export class FooterComponent implements Component {
 		if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
 		if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
 
+		let lastAssistantUsage: { input: number; output: number; cacheRead: number; cacheWrite: number } | undefined;
+		if (state.messages && state.messages.length > 0) {
+			for (let i = state.messages.length - 1; i >= 0; i--) {
+				const m = state.messages[i];
+				if (m.role === "assistant" && m.usage) {
+					lastAssistantUsage = m.usage;
+					break;
+				}
+			}
+		}
+		if (!lastAssistantUsage) {
+			const entries = this.session.sessionManager.getEntries();
+			for (let i = entries.length - 1; i >= 0; i--) {
+				const e = entries[i];
+				if (e.type === "message" && e.message.role === "assistant" && e.message.usage) {
+					lastAssistantUsage = e.message.usage;
+					break;
+				}
+			}
+		}
+		if (lastAssistantUsage) {
+			const u = lastAssistantUsage;
+			const totalInputWithCache = u.input + u.cacheRead + u.cacheWrite;
+			if (totalInputWithCache > 0 && (u.cacheRead > 0 || u.cacheWrite > 0)) {
+				const hitRate = Math.round((u.cacheRead / totalInputWithCache) * 100);
+				statsParts.push(`CH:${hitRate}%`);
+			}
+		}
+
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingSubscription(state.model) : false;
 		statsParts.push(...formatFooterCostParts(costSummary, 3, { subscription: usingSubscription }));
 

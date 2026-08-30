@@ -46,3 +46,12 @@ export function keyHint(keybinding: Keybinding, description: string): string {
 export function rawKeyHint(key: string, description: string): string {
 	return theme.fg("dim", formatKeyText(key)) + theme.fg("muted", ` ${description}`);
 }
+
+export function formatSelectorActionHints(hasDefault: boolean): string {
+	const parts = [keyHint("tui.select.confirm", "select")];
+	if (hasDefault) {
+		parts.push(keyHint("app.models.save", "set as default"));
+	}
+	parts.push(keyHint("tui.select.cancel", "cancel"));
+	return parts.join("  ");
+}
