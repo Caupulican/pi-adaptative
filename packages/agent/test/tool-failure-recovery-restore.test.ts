@@ -371,6 +371,58 @@ describe("tool-failure recovery restore", () => {
 		});
 	});
 
+	it("blocks the exact wrong-field delegate retry while admitting the corrected call", () => {
+		// The meltdown shape: `cancel {agentIds}` refused, then retried unchanged forty times. The
+		// correction the tool now names has to be admissible immediately — the world has not advanced,
+		// so only the operation's own identity may separate the repeat from the repair.
+		const schema = Type.Object({
+			action: Type.String(),
+			agentId: Type.Optional(Type.String()),
+			agentIds: Type.Optional(Type.Array(Type.String())),
+		});
+		const delegate: AgentTool<typeof schema> = {
+			name: "delegate",
+			label: "delegate",
+			description: "delegate",
+			parameters: schema,
+			async execute() {
+				throw new Error("must not execute during recovery-state testing");
+			},
+		};
+		const wrongField = { action: "cancel", agentIds: ["worker-10"] };
+		const corrected = { action: "cancel", agentId: "worker-10" };
+		const tracker = new Map();
+		const gate = new ToolFailureRecoveryGate();
+
+		gate.apply({
+			kind: "unproductive",
+			tool: delegate,
+			args: wrongField,
+			record: rememberToolFailure(
+				tracker,
+				"delegate",
+				wrongField,
+				"failed",
+				"tool_result_error",
+				"Use singular agentId — one call per worker.",
+				undefined,
+				"execution",
+				undefined,
+				{
+					output:
+						"delegate cancel does not accept field agentIds. Nothing was executed. Use singular agentId — one call per worker.",
+				},
+			),
+		});
+
+		expect(gate.admit(delegate, wrongField, undefined, [])).toMatchObject({ kind: "blocked" });
+		expect(gate.admit(delegate, corrected, undefined, [])).toEqual({ kind: "allowed" });
+		// A different worker's lifecycle call is a different operation and stays available too.
+		expect(gate.admit(delegate, { action: "cancel", agentId: "worker-2" }, undefined, [])).toEqual({
+			kind: "allowed",
+		});
+	});
+
 	it("restores a refused operation from the transcript and re-admits it after a later success", () => {
 		const args = { command: "run focused tests" };
 		const tracker = new Map();

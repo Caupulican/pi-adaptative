@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+// Imported by path so the pipeline proof always reads THIS checkout's kernel, matching the drift
+// pin in `untrusted-envelope-failure-memory.test.ts`.
+import { assessToolFailure } from "../../agent/src/tool-failure-memory.ts";
 import type { WorkerAgentControlPort } from "../src/core/delegation/worker-agent-control.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
+import { wrapUntrustedText } from "../src/core/security/untrusted-boundary.ts";
 import { createDelegateToolDefinition, type DelegateToolDetails } from "../src/core/tools/delegate.ts";
 
 const context = {
@@ -320,5 +324,32 @@ describe("delegate exact-action input corrections", () => {
 		expect(delegateText(ordered)).toBe(delegateText(plain));
 		expect(ordered.details).toMatchObject({ started: false, skipReason: "action_field_forbidden" });
 		expect(orderedSpies.cancelWorkerAgent).not.toHaveBeenCalled();
+	});
+
+	// The session meltdown was this exact pipeline with an unrepairable result: the correction the
+	// tool emitted was discarded and the model was handed `</untrusted_content>` to repair from.
+	// Everything here is a production owner — the real violation text, the real wrapper, the real
+	// kernel assessment — so the proof breaks if any of the three drifts.
+	it("delivers the real correction through the real untrusted wrapper and the real failure assessment", async () => {
+		const spies = controlSpies();
+		const tool = toolWithSpies(spies);
+
+		const rejected = await tool.execute(
+			"cancel-plural-pipeline",
+			{ action: "cancel", agentIds: ["worker-10"] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(rejected.isError).toBe(true);
+		expect(spies.cancelWorkerAgent).not.toHaveBeenCalled();
+
+		const wrapped = wrapUntrustedText(delegateText(rejected), "tool:delegate");
+		const assessment = assessToolFailure(wrapped, "failed", "tool_result_error");
+
+		expect(assessment.diagnostic).toContain("agentIds");
+		expect(assessment.diagnostic).toContain("agentId");
+		expect(assessment.diagnostic).not.toContain("untrusted_content");
 	});
 });
