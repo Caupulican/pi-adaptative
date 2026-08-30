@@ -37,6 +37,7 @@ export interface SignalLifecycleHost {
 	stop(): void;
 	formatResumeCommand(): string | undefined;
 	showStatus(message: string): void;
+	showError(message: string): void;
 	shutdown(options?: { fromSignal?: boolean }): Promise<void>;
 	unregisterSignalHandlers(): void;
 	emergencyTerminalExit(): never;
@@ -104,6 +105,30 @@ export function emergencyTerminalExit(host: SignalLifecycleHost): never {
  * call ui.stop() to restore cooked mode, the cursor, and disable bracketed
  * paste / Kitty / modifyOtherKeys sequences.
  */
+/** Longest rejection detail rendered into the transcript; enough for a stack, short of flooding it. */
+const MAX_REJECTION_DETAIL = 2_000;
+
+/**
+ * Report an unhandled promise rejection WITHOUT ending the session.
+ *
+ * Node's default (`--unhandled-rejections=throw`) turns one into an uncaughtException, which the
+ * handler below treats as fatal. That is right for a synchronous throw, where process state may be
+ * unsound — but wrong for an isolated async failure. An extension that leaves a single
+ * fire-and-forget promise rejected (`void report()` whose transport is down) would otherwise take
+ * the whole session with it, losing work the operator cannot recover, for a fault that is not
+ * pi's and not fatal.
+ *
+ * Reporting is deliberately loud rather than silent: swallowing these would hide real harness bugs,
+ * which is worse than the crash it replaces. The message and stack land in the transcript every
+ * time one occurs.
+ */
+export function reportUnhandledRejection(host: SignalLifecycleHost, reason: unknown): void {
+	if (host.isShuttingDown) return;
+	const error = reason instanceof Error ? reason : new Error(String(reason));
+	const detail = (error.stack ?? error.message).slice(0, MAX_REJECTION_DETAIL);
+	host.showError(`Unhandled promise rejection — session kept alive. ${detail}`);
+}
+
 export function uncaughtCrash(host: SignalLifecycleHost, error: Error): never {
 	if (host.isShuttingDown) {
 		process.exit(1);
@@ -169,6 +194,12 @@ export function registerSignalHandlers(host: SignalLifecycleHost): void {
 	const uncaughtExceptionHandler = (error: Error) => host.uncaughtCrash(error);
 	process.prependListener("uncaughtException", uncaughtExceptionHandler);
 	host.signalCleanupHandlers.push(() => process.off("uncaughtException", uncaughtExceptionHandler));
+
+	// Registering this listener also STOPS Node from escalating a rejection into an
+	// uncaughtException, which is the point: an async failure must not end the session.
+	const unhandledRejectionHandler = (reason: unknown) => reportUnhandledRejection(host, reason);
+	process.prependListener("unhandledRejection", unhandledRejectionHandler);
+	host.signalCleanupHandlers.push(() => process.off("unhandledRejection", unhandledRejectionHandler));
 }
 
 export function unregisterSignalHandlers(host: SignalLifecycleHost): void {

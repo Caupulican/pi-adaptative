@@ -2336,6 +2336,7 @@ export class InteractiveMode {
 				stop: () => this.stop(),
 				formatResumeCommand: () => formatResumeCommand(this.sessionManager),
 				showStatus: (message) => this.showStatus(message),
+				showError: (message) => this.showError(message),
 				shutdown: (opts) => this.shutdown(opts),
 				unregisterSignalHandlers: () => this.unregisterSignalHandlers(),
 				emergencyTerminalExit: () => this.emergencyTerminalExit(),
