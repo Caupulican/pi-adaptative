@@ -203,7 +203,13 @@ store.captureAndPrepare({
 			"utf-8",
 		);
 
-		const worker = spawn(process.execPath, [workerFile], { stdio: ["ignore", "pipe", "pipe"] });
+		// The worker imports `src/*.ts` directly, so it needs the source export condition. Without it
+		// Node resolves `@caupulican/pi-agent-core/paths` to `dist/utils/paths.js`, which only exists
+		// on a machine that has built the package — the test would pass there and fail on a clean
+		// checkout with ERR_MODULE_NOT_FOUND.
+		const worker = spawn(process.execPath, ["--conditions=pi-source", workerFile], {
+			stdio: ["ignore", "pipe", "pipe"],
+		});
 		let stderr = "";
 		worker.stderr.on("data", (chunk: Buffer) => {
 			stderr = `${stderr}${chunk.toString("utf-8")}`.slice(-4096);
@@ -272,7 +278,13 @@ store.captureAndPrepare({
 			"utf-8",
 		);
 
-		const worker = spawn(process.execPath, [workerFile], { stdio: ["ignore", "pipe", "pipe"] });
+		// The worker imports `src/*.ts` directly, so it needs the source export condition. Without it
+		// Node resolves `@caupulican/pi-agent-core/paths` to `dist/utils/paths.js`, which only exists
+		// on a machine that has built the package — the test would pass there and fail on a clean
+		// checkout with ERR_MODULE_NOT_FOUND.
+		const worker = spawn(process.execPath, ["--conditions=pi-source", workerFile], {
+			stdio: ["ignore", "pipe", "pipe"],
+		});
 		let stderr = "";
 		worker.stderr.on("data", (chunk: Buffer) => {
 			stderr = `${stderr}${chunk.toString("utf-8")}`.slice(-4096);
