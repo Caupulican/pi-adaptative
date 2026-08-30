@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- The untrusted-content boundary tags are no longer promoted as a failure diagnostic or kept in failure evidence. A tool result wrapped by the untrusted boundary always ends with `</untrusted_content>`, so whenever no line carried a classified error signal the unclassified fallback handed the model that closing tag as the entire diagnostic — a real session spent forty identical retries being told to repair from a framing tag. The tags are harness framing in the same class as the exit-status and `cwd:` lines that were already excluded, and are now stripped in both filters: the shared status-line filter feeding the generic diagnostic, the unclassified fallback and the evidence tail, and the independent `stderr:` branch whose no-strong-signal fallback joins the last stderr lines. The payload inside the envelope is unchanged, an unwrapped failure is byte-identical to before, and an envelope with an empty body now reports no diagnostic instead of a tag.
+
 ## [0.97.20] - 2026-08-29
 
 ### Added

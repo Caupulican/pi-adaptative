@@ -593,9 +593,20 @@ const EXIT_STATUS_LINE_PATTERN = /^(?:\S+\s+)?(?:exit(?:ed)?(?:\s+with)?(?:\s+co
  */
 const CWD_STATUS_LINE_PATTERN = /^cwd:\s/i;
 
+/**
+ * Boundary tags of the untrusted-content envelope, which always sit on their own lines (mirrors
+ * `UNTRUSTED_BOUNDARY_TAG` used by `wrapUntrustedText` in
+ * `packages/coding-agent/src/core/security/untrusted-boundary.ts`; it cannot be imported because the
+ * kernel must not depend on coding-agent — `untrusted-envelope-failure-memory.test.ts` pins the drift).
+ * The tags are harness framing, exactly like the exit-status and `cwd:` lines: promoting one as a
+ * diagnostic hands the model a closing tag to repair from instead of the real cause.
+ */
+const UNTRUSTED_ENVELOPE_LINE_PATTERN = /^<\/?untrusted_content\b[^>]*>$/i;
+
 /** Tool-owned status/marker lines that carry no cause and never belong in diagnostic or evidence. */
 function isFailureStatusLine(line: string): boolean {
 	return (
+		UNTRUSTED_ENVELOPE_LINE_PATTERN.test(line) ||
 		/^command (?:exited with code|timed out after|aborted|killed after)\b/i.test(line) ||
 		/^outcome:\s*(?:failed|aborted|timeout|output_limit)\b/i.test(line) ||
 		/^exitcode:\s*-?\d+\b/i.test(line) ||
@@ -700,7 +711,8 @@ function extractFailureDiagnostic(
 				(line) =>
 					line.length > 0 &&
 					!/^command (?:exited with code|timed out after|aborted|killed after)\b/i.test(line) &&
-					!CWD_STATUS_LINE_PATTERN.test(line),
+					!CWD_STATUS_LINE_PATTERN.test(line) &&
+					!UNTRUSTED_ENVELOPE_LINE_PATTERN.test(line),
 			);
 		if (stderrLines.length > 0) {
 			const classified = stderrLines.find((line) => strongDiagnosticPattern.test(line));

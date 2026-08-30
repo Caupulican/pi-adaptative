@@ -567,6 +567,82 @@ describe("tool failure memory", () => {
 		expect(assessment.policyGuidance).toBe("Path not found. List parent directory or re-read path before retry.");
 	});
 
+	it("promotes the wrapped payload instead of the untrusted-content envelope tag", () => {
+		const assessment = assessToolFailure(
+			[
+				'<untrusted_content id="4f2a" source="tool:delegate">',
+				"delegate cancel requires agentId; agentIds is not accepted",
+				"</untrusted_content>",
+			].join("\n"),
+			"failed",
+			"tool_result_error",
+		);
+
+		expect(assessment.diagnostic).toBe("delegate cancel requires agentId; agentIds is not accepted");
+		expect(assessment.diagnostic).not.toContain("untrusted_content");
+	});
+
+	it("keeps the wrapped payload in exit evidence and never the envelope tag", () => {
+		const assessment = assessToolFailure(
+			[
+				'<untrusted_content id="4f2a" source="tool:delegate">',
+				"error: worker worker-10 refused the cancel request",
+				"</untrusted_content>",
+				"Command exited with code 1",
+			].join("\n"),
+			"failed",
+			"Error",
+		);
+
+		expect(assessment.failureCode).toBe("exit_1");
+		expect(assessment.diagnostic).toBe("error: worker worker-10 refused the cancel request");
+		expect(assessment.evidence).toBe("error: worker worker-10 refused the cancel request");
+		expect(assessment.evidence).not.toContain("untrusted_content");
+	});
+
+	it("strips the envelope from the stderr last-lines fallback diagnostic", () => {
+		const assessment = assessToolFailure(
+			[
+				"stdout:",
+				"dispatching cancel",
+				"stderr:",
+				'<untrusted_content id="9c1b" source="tool:delegate">',
+				"delegate cancel requires agentId",
+				"</untrusted_content>",
+			].join("\n"),
+			"failed",
+			"tool_result_error",
+		);
+
+		expect(assessment.diagnostic).toBe("delegate cancel requires agentId");
+		expect(assessment.diagnostic).not.toContain("untrusted_content");
+	});
+
+	it("leaves an unwrapped failure diagnostic and evidence unchanged", () => {
+		const assessment = assessToolFailure(
+			["stdout:", "doing the thing", "stderr:", "error: invalid configuration", "Command exited with code 1"].join(
+				"\n",
+			),
+			"failed",
+			"Error",
+		);
+
+		expect(assessment.failureCode).toBe("exit_1");
+		expect(assessment.diagnostic).toBe("error: invalid configuration");
+		expect(assessment.evidence).toBe(["doing the thing", "error: invalid configuration"].join("\n"));
+	});
+
+	it("reports no diagnostic when the payload inside the envelope is empty", () => {
+		const assessment = assessToolFailure(
+			['<untrusted_content id="0d33" source="tool:delegate">', "", "</untrusted_content>"].join("\n"),
+			"failed",
+			"tool_result_error",
+		);
+
+		expect(assessment.diagnostic).toBeUndefined();
+		expect(assessment.guidance).toContain("No diagnostic output");
+	});
+
 	it("caps remembered corrections at 480 characters", () => {
 		const tracker = new Map();
 		const overlong = rememberToolFailure(tracker, "bash", { command: "long" }, "failed", "exit_1", "g".repeat(481));
