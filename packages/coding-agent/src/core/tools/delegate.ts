@@ -329,11 +329,70 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
 	profile_create: ["action", "task", "baseProfileId", "model", "thinkingLevel", "path", "toolNames"],
 } as const satisfies Record<DelegateAction, readonly DelegateInputField[]>;
 
+/**
+ * Wrong-field input that CARRIES A PAYLOAD is corrected by name instead of being deleted. Deleting
+ * these produced either a downstream error that never named the field the model actually sent
+ * (`agentIds` -> `delegate cancel requires agentId`) or, worse, a success path that silently dropped
+ * user text (`interrupt {agentId, message}` reported the worker interrupted and never delivered the
+ * message). A mapped field with a defined value ALWAYS rejects: adopting `agentIds: [one]` would
+ * make the plural spelling work sometimes, which is the ambiguity these singular lifecycle actions
+ * exist to avoid. Every other disallowed field keeps the sanitize-and-proceed contract below.
+ */
+const EXACT_ACTION_FIELD_CORRECTIONS: ReadonlyArray<{
+	readonly actions: readonly DelegateAction[];
+	readonly field: DelegateInputField;
+	readonly correction: (action: DelegateAction) => string;
+	readonly counterpart?: { readonly field: DelegateInputField; readonly conflict: string };
+}> = [
+	{
+		actions: ["cancel", "interrupt", "resume", "retire", "wait"],
+		field: "agentIds",
+		correction: (action) =>
+			`delegate ${action} does not accept field agentIds. Nothing was executed. Use singular agentId — one call per worker.`,
+		counterpart: { field: "agentId", conflict: "Both agentIds and agentId were sent; keep only agentId." },
+	},
+	{
+		actions: ["follow_up", "send"],
+		field: "task",
+		correction: (action) =>
+			`delegate ${action} does not accept field task. Nothing was queued. Put the message text in message.`,
+		counterpart: { field: "message", conflict: "Both task and message were sent; keep only message." },
+	},
+	{
+		actions: ["interrupt"],
+		field: "message",
+		correction: () =>
+			"delegate interrupt does not accept field message. The worker was NOT interrupted and the message was NOT delivered. interrupt only pauses the worker; send text with follow_up after resume.",
+	},
+];
+
+/**
+ * Runs against the ORIGINAL input before any deletion or adoption, so a mapped violation can never
+ * follow a partial sanitization and the verdict never depends on object-key order.
+ */
+function correctExactActionInput(
+	input: DelegateToolInput,
+	action: DelegateAction,
+): { message: string; skipReason: string } | undefined {
+	for (const entry of EXACT_ACTION_FIELD_CORRECTIONS) {
+		if (!entry.actions.includes(action)) continue;
+		if (Reflect.get(input, entry.field) === undefined) continue;
+		const conflict =
+			entry.counterpart && Reflect.get(input, entry.counterpart.field) !== undefined
+				? ` ${entry.counterpart.conflict}`
+				: "";
+		return { message: `${entry.correction(action)}${conflict}`, skipReason: "action_field_forbidden" };
+	}
+	return undefined;
+}
+
 function sanitizeExactActionInput(
 	input: DelegateToolInput,
 	action: DelegateAction,
 ): { input: DelegateToolInput; violation?: { message: string; skipReason: string } } {
 	const allowed = EXACT_ACTION_ALLOWED_FIELDS[action] as readonly string[];
+	const correction = correctExactActionInput(input, action);
+	if (correction) return { input: { ...input }, violation: correction };
 	const exactInput = { ...input };
 	for (const field of Object.keys(exactInput)) {
 		if (Reflect.get(exactInput, field) !== undefined && !allowed.includes(field)) {
