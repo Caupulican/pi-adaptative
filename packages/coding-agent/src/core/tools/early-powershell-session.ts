@@ -8,6 +8,7 @@ import {
 	POWERSHELL_SESSION_STDERR_READY_MARKER,
 	POWERSHELL_STARTUP_PROBE_TIMEOUT_MS,
 } from "../../utils/powershell-session-protocol.ts";
+import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
 
 const MAX_STARTUP_DIAGNOSTIC_BYTES = 16 * 1024;
 const READY_BYTES = Buffer.from(POWERSHELL_SESSION_READY_MARKER, "latin1");
@@ -118,10 +119,16 @@ async function startFirstUsableSession(
 			continue;
 		}
 		setChildProcessLoopRef(child, false);
+		// A warm start is spawned before anything owns it, and it is unreferenced so it cannot hold
+		// the loop open — which also means nothing would ever reap it. Track it so shutdown kills it
+		// like any other detached child; the claimer untracks it when it takes ownership.
+		if (child.pid) trackDetachedChildPid(child.pid);
 		try {
 			return await waitForReady(child, options.cwd, options.env, options.startupTimeoutMs);
 		} catch {
-			// Try the next host. The regular resolver retains the complete diagnostic fallback.
+			// This host is a dead end. Kill its process before trying the next one, or every failed
+			// candidate leaves a live shell behind for the lifetime of the CLI.
+			releaseWarmStartChild(child);
 		}
 	}
 	return null;
@@ -150,9 +157,37 @@ export async function claimCliPowerShellWarmStart(): Promise<ReadyCliPowerShellS
 	if (!ready) return null;
 	if (ready.child.exitCode !== null || ready.child.signalCode !== null || ready.child.killed) {
 		ready.releaseStartupListeners();
+		if (ready.child.pid) untrackDetachedChildPid(ready.child.pid);
 		return null;
 	}
+	// Ownership transfers to the caller, which tracks the child itself.
+	if (ready.child.pid) untrackDetachedChildPid(ready.child.pid);
 	return ready;
+}
+
+/** Kill an unowned warm-start child and stop tracking it. Safe to call more than once. */
+function releaseWarmStartChild(child: ChildProcess): void {
+	if (child.pid) untrackDetachedChildPid(child.pid);
+	try {
+		if (child.exitCode === null && child.signalCode === null && child.pid) killProcessTree(child.pid);
+	} catch {
+		// Best-effort reaping of a process nothing owns.
+	}
+}
+
+/**
+ * Kill a warm start nobody claimed. The CLI starts one before the runtime graph loads, and a
+ * session that never runs a shell command (a `/new` or `/quit` first) would otherwise leave the
+ * host process alive after pi exits.
+ */
+export async function disposeUnclaimedCliPowerShellWarmStart(): Promise<void> {
+	const pending = warmStart;
+	if (!pending || warmStartClaimed) return;
+	warmStart = null;
+	const ready = await pending;
+	if (!ready) return;
+	ready.releaseStartupListeners();
+	releaseWarmStartChild(ready.child);
 }
 
 export async function resetCliPowerShellWarmStartForTests(): Promise<void> {

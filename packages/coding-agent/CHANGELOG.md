@@ -32,6 +32,7 @@
 - Skills load from nested bare `.md` files in vendor directories under `.agents/skills`, and a `README.md` or `AGENTS.md` at a skills root is ignored silently rather than reported as a broken skill. A malformed `SKILL.md` still warns, and a root-level single-file skill with valid frontmatter still loads.
 - The edit tool accepts `edits` as a single object as well as an array.
 - Toggling thinking-block visibility no longer clears a running tool's partial output. Visibility is flipped in place instead of rebuilding the transcript.
+- A PowerShell host warm-started by the CLI on Windows is no longer left running. The CLI starts one before the runtime graph loads so the first shell command is fast, but a session that never runs one (quitting, or starting a new session first) never claimed it and nothing reaped it, so the process outlived pi. It is now tracked like any other detached child and killed on shutdown, and a candidate host that fails its readiness probe is killed before the next one is tried instead of being abandoned.
 - On Windows, the process-tree kill runs `taskkill` by absolute path, since some environments strip it from `PATH`, and a failed kill is reported instead of being reported as a successful one.
 
 ### Removed

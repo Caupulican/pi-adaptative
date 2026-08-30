@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	claimCliPowerShellWarmStart,
+	disposeUnclaimedCliPowerShellWarmStart,
 	resetCliPowerShellWarmStartForTests,
 	startCliPowerShellWarmStart,
 } from "../src/core/tools/early-powershell-session.ts";
@@ -123,6 +125,82 @@ process.stdin.on("data", (chunk) => {
 			);
 		} finally {
 			session.dispose();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("unclaimed CLI PowerShell warm start", () => {
+	/** A fake host that reports ready and then idles, like a real warm-started shell. */
+	function writeIdleFixture(directory: string): string {
+		const fixture = join(directory, "idle-host.mjs");
+		writeFileSync(
+			fixture,
+			`const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
+process.stderr.write(${JSON.stringify(POWERSHELL_SESSION_STDERR_READY_MARKER)});
+process.stdout.write(marker);
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`,
+		);
+		chmodSync(fixture, 0o755);
+		return fixture;
+	}
+
+	it("kills a warm start nobody claimed, so it cannot outlive the CLI", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-warm-unclaimed-"));
+		try {
+			const fixture = writeIdleFixture(directory);
+			let spawned: ReturnType<typeof spawn> | undefined;
+			startCliPowerShellWarmStart({
+				platform: "win32",
+				cwd: directory,
+				env: { ...process.env },
+				candidates: [process.execPath],
+				spawn: (command: string, _args: string[], options: SpawnOptions) => {
+					spawned = spawn(command, [fixture], options);
+					return spawned;
+				},
+			});
+
+			await disposeUnclaimedCliPowerShellWarmStart();
+
+			expect(spawned).toBeDefined();
+			// The host process must be gone: nothing else in production reaps an unclaimed warm start.
+			await expect
+				.poll(() => spawned?.exitCode !== null || spawned?.signalCode !== null, { timeout: 10_000 })
+				.toBe(true);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("leaves a claimed warm start alone, since ownership has transferred", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-warm-claimed-"));
+		try {
+			const fixture = writeIdleFixture(directory);
+			let spawned: ReturnType<typeof spawn> | undefined;
+			startCliPowerShellWarmStart({
+				platform: "win32",
+				cwd: directory,
+				env: { ...process.env },
+				candidates: [process.execPath],
+				spawn: (command: string, _args: string[], options: SpawnOptions) => {
+					spawned = spawn(command, [fixture], options);
+					return spawned;
+				},
+			});
+
+			const claimed = await claimCliPowerShellWarmStart();
+			expect(claimed).not.toBeNull();
+
+			await disposeUnclaimedCliPowerShellWarmStart();
+			expect(spawned?.exitCode).toBeNull();
+			expect(spawned?.signalCode).toBeNull();
+
+			claimed?.releaseStartupListeners();
+			claimed?.child.kill();
+		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}
 	});

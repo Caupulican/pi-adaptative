@@ -15,6 +15,7 @@
 import type { TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import { disposeUnclaimedCliPowerShellWarmStart } from "../../core/tools/early-powershell-session.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
@@ -46,6 +47,10 @@ export async function shutdown(host: SignalLifecycleHost, options?: { fromSignal
 	if (host.isShuttingDown) return;
 	host.isShuttingDown = true;
 	host.unregisterSignalHandlers();
+
+	// The CLI warm-starts a PowerShell host before the runtime graph loads. A session that never
+	// runs a shell command never claims it, and nothing else reaps it — without this it outlives pi.
+	await disposeUnclaimedCliPowerShellWarmStart();
 
 	if (options?.fromSignal) {
 		// Signal-triggered shutdown (SIGTERM/SIGHUP). Emit extension cleanup
