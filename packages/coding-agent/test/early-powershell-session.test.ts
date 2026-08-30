@@ -130,6 +130,14 @@ process.stdin.on("data", (chunk) => {
 	});
 });
 
+/** Kill a child and wait for the OS to actually reap it before touching its cwd. */
+async function killAndWait(child: ReturnType<typeof spawn>): Promise<void> {
+	if (child.exitCode !== null || child.signalCode !== null) return;
+	const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+	child.kill();
+	await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 5_000))]);
+}
+
 describe("unclaimed CLI PowerShell warm start", () => {
 	/** A fake host that reports ready and then idles, like a real warm-started shell. */
 	function writeIdleFixture(directory: string): string {
@@ -171,7 +179,7 @@ setInterval(() => {}, 1000);
 				.poll(() => spawned?.exitCode !== null || spawned?.signalCode !== null, { timeout: 10_000 })
 				.toBe(true);
 		} finally {
-			rmSync(directory, { recursive: true, force: true });
+			rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 		}
 	});
 
@@ -199,9 +207,11 @@ setInterval(() => {}, 1000);
 			expect(spawned?.signalCode).toBeNull();
 
 			claimed?.releaseStartupListeners();
-			claimed?.child.kill();
+			if (claimed) await killAndWait(claimed.child);
 		} finally {
-			rmSync(directory, { recursive: true, force: true });
+			// Windows refuses to remove a directory a live process still holds as its cwd, and kill()
+			// is asynchronous — hence the wait above plus bounded retries here.
+			rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 		}
 	});
 });
