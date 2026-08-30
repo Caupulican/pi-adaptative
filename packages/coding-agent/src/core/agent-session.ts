@@ -2883,8 +2883,8 @@ export class AgentSession {
 		}
 		this._backgroundLanes.scheduleResearchLaneFromIdle();
 
-		// Extension-only; see session-settlement.ts for why it must not reach the public channel.
-		if (isSessionSettled(this)) {
+		// Extension-only, and read after the lanes are scheduled so an armed continuation is visible.
+		if (isSessionSettled(this, this._backgroundLanes.hasPendingIdleContinuation())) {
 			await this._extensionRunner.emit({ type: "agent_settled" });
 		}
 	}

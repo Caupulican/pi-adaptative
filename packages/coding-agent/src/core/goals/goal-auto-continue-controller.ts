@@ -31,6 +31,15 @@ export class GoalAutoContinueController {
 		this.deps = deps;
 	}
 
+	/**
+	 * True while an idle continuation is armed or already running. A run is NOT settled in that
+	 * window: the debounce timer will drive another turn without any new input, so a settled
+	 * notification sent now would be contradicted moments later.
+	 */
+	hasPendingContinuation(): boolean {
+		return this._timer !== undefined || this._isContinuing;
+	}
+
 	clearTimer(): void {
 		if (this._timer !== undefined) {
 			clearTimeout(this._timer);

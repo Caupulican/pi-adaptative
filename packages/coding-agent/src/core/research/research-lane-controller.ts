@@ -51,6 +51,7 @@ export class ResearchLaneController {
 	private _lastSkipReason: string | undefined;
 	private _historySeeded = false;
 	private _persistedRunCount = 0;
+
 	private readonly abortController = new AbortController();
 	private readonly warnedUnboundToolGrants = new Set<string>();
 	private readonly deps: ResearchLaneControllerDeps;
@@ -85,6 +86,14 @@ export class ResearchLaneController {
 			clearTimeout(this._timer);
 			this._timer = undefined;
 		}
+	}
+
+	/**
+	 * True while an idle research run is armed or already running — the same "not settled yet"
+	 * window as the goal loop's, for the same reason.
+	 */
+	hasPendingContinuation(): boolean {
+		return this._timer !== undefined || this._isRunning;
 	}
 
 	scheduleFromIdle(): void {

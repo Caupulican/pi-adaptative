@@ -407,6 +407,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._research.clearTimer();
 	}
 
+	/**
+	 * True while EITHER idle lane has a continuation armed or running. The session's settled check
+	 * consults this so a debounce timer armed moments earlier suppresses the notification.
+	 */
+	hasPendingIdleContinuation(): boolean {
+		return this._goalAutoContinue.hasPendingContinuation() || this._research.hasPendingContinuation();
+	}
+
 	scheduleResearchLaneFromIdle(): void {
 		this._research.scheduleFromIdle();
 	}

@@ -41,11 +41,11 @@ export function hasRunningBackgroundedToolCall(records: readonly BackgroundToolT
  * queued-follow-up: by the time this is consulted the routed turn has resolved every retry it will
  * run this cycle, so none of those can be true without one of these flags reflecting it.
  *
- * KNOWN GAP, documented rather than silently dropped: goal-auto-continue and research-lane
- * scheduling are debounced-idle timers, and the background lane controller exposes no query for
- * "did this just arm a continuation". Until it does, a timer armed moments earlier does not
- * suppress the emission.
+ * The fourth condition is the idle lanes. Goal auto-continue and the research lane are scheduled
+ * from the same prompt tail that consults this, on debounce timers — so a run whose next turn is
+ * already armed would otherwise be reported as settled and then contradicted milliseconds later.
+ * Settled means nothing further will happen without new input, which an armed continuation breaks.
  */
-export function isSessionSettled(state: SessionSettlementState): boolean {
-	return !state.isStreaming && !state.isCompacting && state.pendingMessageCount === 0;
+export function isSessionSettled(state: SessionSettlementState, hasPendingIdleContinuation: boolean): boolean {
+	return !state.isStreaming && !state.isCompacting && state.pendingMessageCount === 0 && !hasPendingIdleContinuation;
 }
