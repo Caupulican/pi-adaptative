@@ -1014,7 +1014,19 @@ export async function ensureFffNodePackage(
 	forceManagedInstall: boolean = false,
 	/** Override the "is it already available" resolution candidates, for tests. See loadAvailableFffNodePackage's doc. */
 	requires?: readonly ModuleRequire[],
+	/** Override native binding staging for deterministic filesystem-failure tests. */
+	stageBindings: () => void = stageFfiRsNativeBindings,
 ): Promise<unknown | undefined> {
+	// A prior managed install can be complete while its package-native ffi-rs binding has not yet
+	// been staged (for example, after upgrading from a release that staged only post-install).
+	// Repair that local installation before the first load attempt and before offline/network gates.
+	// Staging is opportunistic: unreadable/corrupt managed trees must not block other load roots or
+	// turn an offline closed fallback into a bootstrap exception.
+	try {
+		stageBindings();
+	} catch {
+		// Continue to ordinary module resolution and provisioning gates.
+	}
 	const existing = forceManagedInstall ? undefined : loadAvailableFffNodePackage(requires);
 	if (existing) {
 		lastFffInstallOutcome = { status: "already-available" };

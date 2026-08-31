@@ -70,6 +70,80 @@ describe("tools-manager: ffi-rs native binding staging", () => {
 			);
 			// Only the native bindings move; the scoped package's own manifest stays where it is.
 			expect(existsSync(join(ffiRsDir, "package.json"))).toBe(false);
+
+			// Simulate an installation left by an older release: the package-native binding remains,
+			// but staging is absent. Offline recovery must stage before its initial load attempt.
+			const staged = join(ffiRsDir, "ffi-rs.linux-x64-gnu.node");
+			rmSync(staged);
+			const loaded = { FileFinder: class {} };
+			const requireFff = ((id: string) => {
+				if (id !== "@ff-labs/fff-node" || !existsSync(staged)) throw new Error("native binding is not staged");
+				return loaded;
+			}) as NodeJS.Require;
+			const previousOffline = process.env.PI_OFFLINE;
+			process.env.PI_OFFLINE = "1";
+			try {
+				const { ensureFffNodePackage } = await import("../src/utils/tools-manager.ts");
+
+				await expect(ensureFffNodePackage(true, false, [requireFff])).resolves.toBe(loaded);
+				expect(readFileSync(staged, "utf8")).toBe("binary:ffi-rs.linux-x64-gnu.node");
+			} finally {
+				if (previousOffline === undefined) delete process.env.PI_OFFLINE;
+				else process.env.PI_OFFLINE = previousOffline;
+			}
+		});
+	});
+
+	it("keeps a genuinely missing managed binding closed while offline", async () => {
+		await withFreshManagedDir(async () => {
+			const requireFff = (() => {
+				throw new Error("native binding is missing");
+			}) as unknown as NodeJS.Require;
+			const previousOffline = process.env.PI_OFFLINE;
+			process.env.PI_OFFLINE = "1";
+			try {
+				const { ensureFffNodePackage, getLastFffInstallOutcome } = await import("../src/utils/tools-manager.ts");
+
+				await expect(ensureFffNodePackage(true, false, [requireFff])).resolves.toBeUndefined();
+				expect(getLastFffInstallOutcome()).toEqual({ status: "offline" });
+			} finally {
+				if (previousOffline === undefined) delete process.env.PI_OFFLINE;
+				else process.env.PI_OFFLINE = previousOffline;
+			}
+		});
+	});
+
+	it("keeps staging filesystem failures fail-soft for alternate loads and offline fallback", async () => {
+		await withFreshManagedDir(async (managedDir) => {
+			seedManagedTree(managedDir, { "ffi-rs-linux-x64-gnu": "ffi-rs.linux-x64-gnu.node" });
+			const stagingError = new Error("deterministic staging stat failure");
+			const throwStagingFilesystemError = vi.fn(() => {
+				throw stagingError;
+			});
+			const previousOffline = process.env.PI_OFFLINE;
+			process.env.PI_OFFLINE = "1";
+			try {
+				vi.resetModules();
+				const { ensureFffNodePackage, getLastFffInstallOutcome } = await import("../src/utils/tools-manager.ts");
+				const loaded = { FileFinder: class {} };
+				const availableRequire = (() => loaded) as unknown as NodeJS.Require;
+				const missingRequire = (() => {
+					throw new Error("module unavailable");
+				}) as unknown as NodeJS.Require;
+
+				await expect(
+					ensureFffNodePackage(true, false, [availableRequire], throwStagingFilesystemError),
+				).resolves.toBe(loaded);
+				await expect(
+					ensureFffNodePackage(true, false, [missingRequire], throwStagingFilesystemError),
+				).resolves.toBeUndefined();
+				expect(throwStagingFilesystemError).toHaveBeenCalledTimes(2);
+				expect(getLastFffInstallOutcome()).toEqual({ status: "offline" });
+			} finally {
+				vi.resetModules();
+				if (previousOffline === undefined) delete process.env.PI_OFFLINE;
+				else process.env.PI_OFFLINE = previousOffline;
+			}
 		});
 	});
 
