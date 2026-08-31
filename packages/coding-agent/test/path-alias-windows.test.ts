@@ -121,18 +121,37 @@ describe("path alias windows-shape rewriting", () => {
 	});
 
 	it("does not alias prose that merely straddles separators", () => {
-		// A spaced candidate needs a trailing file extension as evidence; prose clears the raw
-		// length gate trivially, so length alone must not be enough.
+		// A spaced candidate needs evidence for the candidate as a whole; an extension in later
+		// prose ("Node.js") must not launder an ordinary phrase into a filename.
 		for (const prose of [
 			"see the src/lib and docs/api sections",
 			"we changed the config/settings today",
 			"compare packages/app and packages/core now",
+			"Use extensions/packages only. npm and Node.js are supported.",
 		]) {
 			const table = buildPathAliasTable("/repo", [prose]);
-			for (const entry of table.entries) expect(entry.path).not.toContain(" ");
-			expect(rewriteText(table, prose)).not.toContain("p/see");
-			expect(rewriteText(table, prose)).not.toContain("p/we");
+			expect(table.entries, prose).toEqual([]);
+			expect(rewriteText(table, prose), prose).toBe(prose);
 		}
+	});
+
+	it("keeps the punctuation-free prose/path ambiguity explicit", () => {
+		// This is lexically identical to a valid unquoted relative filename
+		// `extensions/packages only with Node.js`. Rejecting it would also reject that supported
+		// filename class, so the owning boundary deliberately fixes only the sentence-punctuation
+		// case above rather than adding prose-word heuristics.
+		const ambiguous = "Use extensions/packages only with Node.js";
+		expect(extractPathCandidates(ambiguous)).toEqual(["extensions/packages only with Node.js"]);
+	});
+
+	it("still aliases a legitimate relative path with spaced and parenthesized filename", () => {
+		const real = "artifacts/reports/release notes (final).md";
+		const text = `open ${real} now`;
+		const table = buildPathAliasTable("/repo", [text]);
+
+		expect(extractPathCandidates(text)).toEqual([real]);
+		expect(table.entries).toHaveLength(1);
+		expect(rewriteText(table, text)).toBe(`open ${table.entries[0].id} now`);
 	});
 
 	it("strips a closing paren that is punctuation but keeps one that is part of the name", () => {

@@ -53,7 +53,7 @@ const RELATIVE_PATH_RE = new RegExp(
 // A candidate that contains a space needs positive evidence that it is a path and not a run of
 // prose that happens to straddle a separator ("see the src/lib and docs/api"). A trailing file
 // extension is that evidence; the length gate alone is not, because prose clears it trivially.
-const SPACED_CANDIDATE_EVIDENCE_RE = /\.\w+$/;
+const SPACED_CANDIDATE_EVIDENCE_RE = /^(?!.*\.\s).*\.\w+$/;
 
 export interface PathAliasEntry {
 	id: string;
