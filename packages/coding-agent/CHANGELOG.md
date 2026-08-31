@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- FFF native search now loads in release binaries. The managed install succeeded, but every run reported `@ff-labs/fff-node could not be loaded` and reinstalled it on the next invocation. `ffi-rs` prefers `require("./ffi-rs.<triple>.node")` beside itself and only falls back to the scoped `@yuuang/ffi-rs-<triple>` package, and inside a `bun build --compile` executable that scoped fallback does not resolve from an external node_modules tree — the require failed with a missing-module error for the native binding, not for the package the message named. The installer now stages each installed binding next to `ffi-rs`, which is the local-file branch napi-rs publishes for exactly this case; copying is by exact filename, so no platform table is duplicated. Running from source on Node always took the scoped path, which is why only shipped binaries were affected.
+- The FFF install diagnostic reports why the load failed instead of only that it did. Both load attempts discarded their error, so a failure whose real cause was a missing native binding surfaced as an unactionable sentence naming a package that was present on disk.
+
 ## [0.97.21] - 2026-08-31
 
 ### Added

@@ -4,6 +4,7 @@ import { type SpawnSyncReturns, spawnSync } from "child_process";
 import {
 	accessSync,
 	chmodSync,
+	copyFileSync,
 	createReadStream,
 	createWriteStream,
 	existsSync,
@@ -758,22 +759,41 @@ function findFffNodeDistEntry(startPath: string): string | undefined {
 	return undefined;
 }
 
+/**
+ * Why a load attempt failed, kept for the diagnostic. Both paths below swallow their throw to try
+ * the next candidate, and reporting only "could not be loaded" leaves nothing to act on — the real
+ * cause is one or two levels down the require chain (a missing native binding, say), never the
+ * name of the package we asked for.
+ */
+let lastFffLoadError: string | undefined;
+
+function recordFffLoadError(error: unknown): undefined {
+	lastFffLoadError = error instanceof Error ? error.message.split("\n")[0] : String(error);
+	return undefined;
+}
+
 function loadFffNodeDistEntry(requireFff: ModuleRequire): unknown | undefined {
 	if (!requireFff.resolve) return undefined;
 	try {
 		const ffiPath = requireFff.resolve("ffi-rs");
 		const fffEntry = findFffNodeDistEntry(ffiPath);
 		return fffEntry ? requireFff(fffEntry) : undefined;
-	} catch {
-		return undefined;
+	} catch (error) {
+		return recordFffLoadError(error);
 	}
 }
 
 function loadFffNodeWith(requireFff: ModuleRequire): unknown | undefined {
 	try {
 		return requireFff("@ff-labs/fff-node");
-	} catch {
-		return loadFffNodeDistEntry(requireFff);
+	} catch (error) {
+		// The package publishes an exports map with no `require` condition, so a bare specifier
+		// always throws here and the dist entry below is the real path. Keep this error only if the
+		// fallback has nothing better to say.
+		const bareSpecifierError = error;
+		const loaded = loadFffNodeDistEntry(requireFff);
+		if (!loaded && lastFffLoadError === undefined) recordFffLoadError(bareSpecifierError);
+		return loaded;
 	}
 }
 
@@ -900,6 +920,36 @@ function recordFffInstallFailure(reason: string): void {
 	lastFffInstallFailureAt = Date.now();
 }
 
+/**
+ * Put ffi-rs's native bindings where a compiled binary can actually reach them.
+ *
+ * `ffi-rs/index.js` prefers `require("./ffi-rs.<triple>.node")` and only falls back to
+ * `require("@yuuang/ffi-rs-<triple>")` when that file is absent — the local-file branch napi-rs
+ * publishes precisely for bundled and compiled runtimes. Our releases are built with
+ * `bun build --compile`, and inside that executable the scoped fallback does not resolve from an
+ * external node_modules tree: the load fails with `Cannot find module '@yuuang/ffi-rs-<triple>'`
+ * even though npm installed it. Running from source on Node resolves it fine, which is why this
+ * only ever bites a shipped binary.
+ *
+ * Copying is by exact filename, so no platform table is duplicated here: npm installs only the
+ * optional packages whose os/cpu/libc match, and ffi-rs looks each one up by its own triple.
+ */
+export function stageFfiRsNativeBindings(): void {
+	const ffiRsDir = join(FFF_MANAGED_DIR, "node_modules", "ffi-rs");
+	const scopeDir = join(FFF_MANAGED_DIR, "node_modules", "@yuuang");
+	if (!existsSync(ffiRsDir) || !existsSync(scopeDir)) return;
+	for (const packageName of readdirSync(scopeDir)) {
+		const packageDir = join(scopeDir, packageName);
+		if (!statSync(packageDir).isDirectory()) continue;
+		for (const entry of readdirSync(packageDir)) {
+			if (!entry.endsWith(".node")) continue;
+			const target = join(ffiRsDir, entry);
+			if (existsSync(target)) continue;
+			copyFileSync(join(packageDir, entry), target);
+		}
+	}
+}
+
 async function installManagedFffNodePackage(platformPackage: string, silent: boolean): Promise<unknown | undefined> {
 	try {
 		mkdirSync(FFF_MANAGED_DIR, { recursive: true });
@@ -933,9 +983,11 @@ async function installManagedFffNodePackage(platformPackage: string, silent: boo
 			recordFffInstallFailure(reason);
 			return undefined;
 		}
+		stageFfiRsNativeBindings();
+		lastFffLoadError = undefined;
 		const loaded = loadFffNodeWith(createRequire(pathToFileURL(FFF_MANAGED_PACKAGE_JSON).href));
 		if (!loaded) {
-			const reason = "Managed FFF install completed but @ff-labs/fff-node could not be loaded.";
+			const reason = `Managed FFF install completed but @ff-labs/fff-node could not be loaded${lastFffLoadError ? `: ${lastFffLoadError}` : "."}`;
 			if (!silent) {
 				console.log(chalk.yellow(reason));
 			}
