@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,6 +23,12 @@ function spawnDetached(script: string, captureStdout = false, env?: NodeJS.Proce
 		stdio: ["ignore", captureStdout ? "pipe" : "ignore", "ignore"],
 	});
 	if (child.pid === undefined) throw new Error("spawn failed");
+	return child;
+}
+
+function mockChild(pid: number): ChildProcess {
+	const child = new EventEmitter() as ChildProcess;
+	Object.assign(child, { pid, exitCode: null, signalCode: null, unref: vi.fn() });
 	return child;
 }
 
@@ -141,6 +148,40 @@ describe("process-tree", () => {
 			expect(result.success).toBe(false);
 			expect(result.error).toBeDefined();
 		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+	});
+
+	it("does not report a kill when taskkill returns status 0 but the PID remains alive", async () => {
+		const originalPlatform = process.platform;
+		vi.useFakeTimers();
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			vi.mocked(spawnSync).mockReturnValueOnce({ status: 0 } as ReturnType<typeof spawnSync>);
+
+			const outcome = killTree(mockChild(process.pid));
+			await vi.advanceTimersByTimeAsync(1000);
+
+			expect(await outcome).toBe("failed");
+		} finally {
+			vi.useRealTimers();
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+	});
+
+	it("reports killed after taskkill status 0 when the PID is confirmed gone", async () => {
+		const originalPlatform = process.platform;
+		vi.useFakeTimers();
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			vi.mocked(spawnSync).mockReturnValueOnce({ status: 0 } as ReturnType<typeof spawnSync>);
+
+			const outcome = killTree(mockChild(2_147_483_647));
+			await vi.advanceTimersByTimeAsync(1000);
+
+			expect(await outcome).toBe("killed");
+		} finally {
+			vi.useRealTimers();
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 		}
 	});

@@ -99,7 +99,10 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 				if (isChildTerminal(child)) {
 					settle("killed");
 				} else if (isProcessAlive(pid)) {
-					settle(outcome.success ? "killed" : "failed");
+					if (outcome.success) {
+						opts?.onDiagnostic?.(`Windows taskkill reported success but PID ${pid} remains alive`);
+					}
+					settle("failed");
 				} else {
 					settle("killed");
 				}
