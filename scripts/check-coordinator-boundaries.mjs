@@ -7,16 +7,17 @@ const boundaries = [
 	{
 		path: "packages/coding-agent/src/core/agent-session.ts",
 		// Ratchet policy: this ceiling only ever moves DOWN, as a follow-on extraction shrinks the
-		// file — never raised to silence an overage. Last ratcheted after the extension-binding
-		// extraction (bindExtensions/bindExtensionCore/applyExtensionBindings/resource discovery
-		// moved to extension-binding-controller.ts) landed the file at 3,849 lines; 3,900 is that
-		// count plus ~50 lines of headroom, rounded up to a clean number.
-		maxLines: 3_900,
+		// file — never raised to silence an overage. Last ratcheted after the model & tool selection
+		// wiring (ModelSelection/BashExecution/ProfileFilter/ToolSelection/ToolGate construction
+		// moved to composition/model-tool-composition.ts) landed the file at 3,859 lines; 3,880 is
+		// that count plus ~20 lines of headroom.
+		maxLines: 3_880,
 		required: [
 			'from "./agent-session-contracts.ts"',
 			'from "./goals/goal-session-controller.ts"',
 			'from "./human-input-controller.ts"',
 			'from "./extension-binding-controller.ts"',
+			'from "./composition/model-tool-composition.ts"',
 		],
 		forbidden: [
 			"new GoalLoopController(",
@@ -27,6 +28,11 @@ const boundaries = [
 			"private _bindExtensionCore(",
 			"private _applyExtensionBindings(",
 			"runner.bindCore(",
+			"new ToolGateController(",
+			"new ToolSelectionController(",
+			"new ModelSelectionController(",
+			"new ProfileFilterController(",
+			"new BashExecutionController(",
 		],
 	},
 	{

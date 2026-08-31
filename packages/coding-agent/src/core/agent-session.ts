@@ -43,7 +43,6 @@ import type {
 	WorkerRequest,
 } from "./autonomy/contracts.ts";
 import { buildForegroundEnvelope, formatForegroundEnvelopeObservation } from "./autonomy/foreground-envelope.ts";
-import { evaluateToolGate } from "./autonomy/gates.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, GateOutcomeHistoryEntry } from "./autonomy/status.ts";
 import type { AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
@@ -55,10 +54,11 @@ import {
 	DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS,
 	loadBackgroundToolTaskRecordsNewestFirst,
 } from "./background-tool-task-controller.ts";
-import { BashExecutionController } from "./bash-execution-controller.ts";
+import type { BashExecutionController } from "./bash-execution-controller.ts";
 import type { BashResult } from "./bash-executor.ts";
 import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
 import { CompactionSupport } from "./compaction-support.ts";
+import { composeModelToolControllers } from "./composition/model-tool-composition.ts";
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";
@@ -134,7 +134,7 @@ import {
 import type { ModelRegistry } from "./model-registry.ts";
 import { isLocalOrManagedRouterModel } from "./model-router/tool-escalation.ts";
 import { formatModelRouterModel, ModelRouterController } from "./model-router-controller.ts";
-import { ModelSelectionController } from "./model-selection-controller.ts";
+import type { ModelSelectionController } from "./model-selection-controller.ts";
 import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
@@ -153,7 +153,7 @@ import {
 	getLatestPipelineRunSnapshot,
 	type PipelineRun,
 } from "./pipelines/index.ts";
-import { ProfileFilterController } from "./profile-filter-controller.ts";
+import type { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
@@ -181,12 +181,11 @@ import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-v
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
 import { formatTaskStepsContext, type TaskStepsState } from "./tasks/task-state.ts";
-import { ToolGateController } from "./tool-gate-controller.ts";
+import type { ToolGateController } from "./tool-gate-controller.ts";
 import { type ToolProbeReport, type ToolProbeResult, ToolProtocolController } from "./tool-protocol-controller.ts";
 import { TOOL_RECOVERY_EVENT_LOG_FILE } from "./tool-recovery-log-records.ts";
 import { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
-import { ToolPerformanceStore } from "./tool-selection/tool-performance-store.ts";
-import { formatToolSelectionReport, ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
+import { formatToolSelectionReport, type ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import type { BashOperations } from "./tools/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
 
@@ -1102,7 +1101,7 @@ export class AgentSession {
 				this._branchSummaryAbortController = controller;
 			},
 		});
-		this._modelSelection = new ModelSelectionController({
+		const modelToolControllers = composeModelToolControllers({
 			getAgent: () => this.agent,
 			getModel: () => this.model,
 			getThinkingLevel: () => this.thinkingLevel,
@@ -1115,73 +1114,33 @@ export class AgentSession {
 			getRequestedActiveToolNames: () => this._requestedActiveToolNames,
 			getActiveToolNames: () => this.getActiveToolNames(),
 			setActiveToolsByName: (names) => this.setActiveToolsByName(names),
+			getAllTools: () => this.getAllTools(),
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			refreshBaseSystemPrompt: () => this._refreshBaseSystemPrompt(),
 			emit: (event) => this._emit(event),
 			checkContextWindowUsageWarning: () => this._checkContextWindowUsageWarning(),
 			deriveOllamaServerUrl: (baseUrl) => this._deriveOllamaServerUrl(baseUrl),
 			getLocalRuntime: (serverUrl) => this.getLocalRuntime(serverUrl),
-		});
-		this._bash = new BashExecutionController({
-			getAgent: () => this.agent,
-			getSessionManager: () => this.sessionManager,
-			getSettingsManager: () => this.settingsManager,
 			isStreaming: () => this.isStreaming,
 			getShellSessionKey: () => this._shellSessionKey,
-			getEnvironment: (cwd) => this._runtimeBuilder.credentialManager.getEnvironmentForCwd(cwd) ?? {},
-			redactSensitiveText: (text) => this._runtimeBuilder.credentialManager.redactSensitiveText(text),
-		});
-		this._profileFilter = new ProfileFilterController({
-			getSettingsManager: () => this.settingsManager,
+			getCredentialManager: () => this._runtimeBuilder.credentialManager,
 			getResourceLoader: () => this._resourceLoader,
-			getModelRegistry: () => this._modelRegistry,
 			getCwd: () => this._cwd,
-			getAgent: () => this.agent,
-			getSessionManager: () => this.sessionManager,
 			getAllowedToolNames: () => this._allowedToolNames,
 			getExcludedToolNames: () => this._excludedToolNames,
 			getToolProfileFilter: () => this._toolProfileFilter,
 			isExplicitModel: () => this._isExplicitModel,
 			isExplicitThinking: () => this._isExplicitThinking,
-			setThinkingLevel: (level) => this.setThinkingLevel(level, { persistSettings: false }),
-		});
-		this._toolSelection = new ToolSelectionController({
-			store: ToolPerformanceStore.forAgentDir(this._agentDir),
-			getModelRef: () => {
-				const model = this.model;
-				return model ? formatModelRouterModel(model) : "unknown";
-			},
-			getActiveTools: () => {
-				const activeNames = new Set(this.getActiveToolNames());
-				return this.getAllTools()
-					.filter((tool) => activeNames.has(tool.name))
-					.map((tool) => ({
-						name: tool.name,
-						description: tool.description,
-						parameters: tool.parameters,
-					}));
-			},
-			isCandidateAllowed: (toolName) => {
-				const envelope = this.capabilityEnvelope;
-				if (!envelope) return true;
-				return (
-					evaluateToolGate({
-						toolName,
-						args: {},
-						cwd: this._cwd,
-						envelope,
-					}).outcome === "allow"
-				);
-			},
-		});
-		this._toolGate = new ToolGateController({
-			maybeEscalateToolCall: (toolName, args) => this._modelRouter.maybeEscalateToolCall(toolName, args),
-			getCwd: () => this._cwd,
+			setThinkingLevel: (level, options) => this.setThinkingLevel(level, options),
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
+			maybeEscalateToolCall: (toolName, args) => this._modelRouter.maybeEscalateToolCall(toolName, args),
 			recordGateOutcome: (outcome) => this._recordGateOutcome(outcome),
-			getExtensionRunner: () => this._extensionRunner,
-			getToolSelectionController: () => this._toolSelection,
 		});
+		this._modelSelection = modelToolControllers.modelSelection;
+		this._bash = modelToolControllers.bash;
+		this._profileFilter = modelToolControllers.profileFilter;
+		this._toolSelection = modelToolControllers.toolSelection;
+		this._toolGate = modelToolControllers.toolGate;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
