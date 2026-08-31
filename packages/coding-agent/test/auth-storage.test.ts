@@ -35,7 +35,14 @@ describe("AuthStorage", () => {
 		writeFileSync(authJsonPath, JSON.stringify(data));
 	}
 
-	describe("API key resolution", () => {
+	/**
+	 * `!`-prefixed values run a real command, so these tests each spawn a Node process. Windows
+	 * runners pay far more for process creation than the in-process work the 30s default in
+	 * vitest.config.ts is sized for, and under four-way sharding that default has timed out in
+	 * CI on a tree that passed minutes earlier. Same headroom the repo already gives its other
+	 * spawn-based suites; the timeout is hang detection here, not a performance assertion.
+	 */
+	describe("API key resolution", { timeout: 60_000 }, () => {
 		test("literal API key is returned directly", async () => {
 			writeAuthJson({
 				anthropic: { type: "api_key", key: "sk-ant-literal-key" },
@@ -582,7 +589,7 @@ describe("AuthStorage", () => {
 		});
 	});
 
-	describe("runtime overrides", () => {
+	describe("runtime overrides", { timeout: 60_000 }, () => {
 		test("runtime override takes priority over auth.json", async () => {
 			writeAuthJson({
 				anthropic: { type: "api_key", key: createOutputConfigCommand("stored-key") },

@@ -1425,7 +1425,14 @@ describe("ModelRegistry", () => {
 		});
 	});
 
-	describe("API key resolution", () => {
+	/**
+	 * `!`-prefixed values run a real command, so these tests each spawn a Node process. Windows
+	 * runners pay far more for process creation than the in-process work the 30s default in
+	 * vitest.config.ts is sized for, and under four-way sharding that default has timed out in
+	 * CI on a tree that passed minutes earlier. Same headroom the repo already gives its other
+	 * spawn-based suites; the timeout is hang detection here, not a performance assertion.
+	 */
+	describe("API key resolution", { timeout: 60_000 }, () => {
 		/** Create provider config with custom apiKey */
 		function providerWithApiKey(apiKey: string) {
 			return {
