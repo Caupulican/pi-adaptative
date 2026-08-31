@@ -37,15 +37,23 @@ describe("Fireworks models", () => {
 		});
 	});
 
-	it("registers the Fire Pass turbo router model", () => {
-		const model = getModels("fireworks").find(
-			(candidate) => candidate.id.startsWith("accounts/fireworks/routers/") && candidate.id.endsWith("-turbo"),
+	// The catalog is generated from upstream, which retires router tiers on its own schedule — the
+	// `-turbo` routers this once pinned by name are gone. Assert the wiring contract every router has
+	// to satisfy instead of the existence of one upstream SKU, with a floor so an empty router list
+	// cannot pass vacuously. Modality is deliberately not part of that contract: it belongs to the
+	// model behind the router (`glm-5p2-fast` is text-only, `kimi-k3-fast` takes images), and the
+	// multimodal case is already pinned on a concrete model above.
+	it("registers Fire Pass routers through the Anthropic-compatible Messages API", () => {
+		const routers = getModels("fireworks").filter((candidate) =>
+			candidate.id.startsWith("accounts/fireworks/routers/"),
 		);
 
-		expect(model).toBeDefined();
-		expect(model?.api).toBe("anthropic-messages");
-		expect(model?.baseUrl).toBe("https://api.fireworks.ai/inference");
-		expect(model?.input).toEqual(["text", "image"]);
+		expect(routers.length).toBeGreaterThan(0);
+		for (const router of routers) {
+			expect(router.api, router.id).toBe("anthropic-messages");
+			expect(router.baseUrl, router.id).toBe("https://api.fireworks.ai/inference");
+			expect(router.input, router.id).toContain("text");
+		}
 	});
 
 	it("resolves FIREWORKS_API_KEY from the environment", () => {
