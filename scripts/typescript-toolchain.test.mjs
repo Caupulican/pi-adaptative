@@ -26,7 +26,11 @@ test("ports import analysis to the TypeScript 7 API", () => {
 
 test("has one compiler execution path with no legacy fallback", () => {
 	const source = readFileSync(join("scripts", "run-tsc.mjs"), "utf8");
-	assert.match(source, /const compilerEntrypoint = join\(repoRoot, "node_modules", "typescript", "bin", "tsc"\)/);
+	assert.match(source, /createRequire\(import\.meta\.url\)/);
+	assert.match(
+		source,
+		/compilerEntrypoint = join\(dirname\(requireFromScript\.resolve\("typescript\/package\.json"\)\), "bin", "tsc"\)/,
+	);
 	assert.match(source, /run\(process\.execPath, \[compilerEntrypoint, \.\.\.args\]\)/);
 	assert.doesNotMatch(source, /\.cmd|shell:|run\("tsgo"|falling back|native-preview/);
 	assert.throws(() => readFileSync(join("scripts", "tsgo-or-tsc.mjs"), "utf8"), { code: "ENOENT" });
