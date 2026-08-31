@@ -1507,6 +1507,39 @@ async function generateModels() {
 		});
 	}
 
+	// Retain referenced public model ids when upstream catalogues delist them.
+	if (!allModels.some((m) => m.provider === "cloudflare-ai-gateway" && m.id === "workers-ai/@cf/moonshotai/kimi-k2.6")) {
+		allModels.push({
+			id: "workers-ai/@cf/moonshotai/kimi-k2.6",
+			name: "Kimi K2.6",
+			api: "openai-completions",
+			provider: "cloudflare-ai-gateway",
+			baseUrl: "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/compat",
+			compat: { sendSessionAffinityHeaders: true },
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 256000,
+		});
+	}
+	if (!allModels.some((m) => m.provider === "openrouter" && m.id === "stealth/ox-alpha")) {
+		allModels.push({
+			id: "stealth/ox-alpha",
+			name: "Ox Alpha",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			thinkingLevelMap: { off: null, max: "max" },
+			textToolCallProtocol: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 131072,
+		});
+	}
+
 	// Add missing EU Opus 4.6 profile
 	if (!allModels.some((m) => m.provider === "amazon-bedrock" && m.id === "eu.anthropic.claude-opus-4-6-v1")) {
 		allModels.push({
