@@ -38,7 +38,7 @@ export default mergeConfig(
 					"src/core/background-tool-task-controller.ts": { statements: 83, branches: 77, functions: 86, lines: 88 },
 					"src/core/foreground-terminal-handoff-controller.ts": { statements: 80, branches: 59, functions: 89, lines: 83 },
 					"src/core/tools/goal.ts": { statements: 78, branches: 64, functions: 72, lines: 78 },
-					"src/core/compaction-controller.ts": { statements: 82, branches: 70, functions: 96, lines: 85 },
+					"src/core/compaction-controller.ts": { statements: 90, branches: 82, functions: 96, lines: 93 },
 					"src/core/agent-session.ts": { statements: 48, branches: 43, functions: 37, lines: 48 },
 					"src/core/runtime-builder.ts": { statements: 54, branches: 47, functions: 37, lines: 54 },
 				},
