@@ -4,7 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	BackgroundToolTaskController,
 	type BackgroundToolTaskRecord,
+	collectCitedRunningToolTaskIds,
 	createBackgroundToolTerminalMessage,
+	findBackgroundToolTask,
+	isCompletedBackgroundToolEvidence,
 } from "../src/core/background-tool-task-controller.ts";
 import { createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
 
@@ -689,6 +692,418 @@ describe("BackgroundToolTaskController", () => {
 			sessionId: "forked-session",
 			taskId: "tool-task-5",
 		});
+		await controller.shutdown();
+	});
+	it("refuses to build a terminal handoff message with no records", () => {
+		expect(() => createBackgroundToolTerminalMessage([])).toThrow(TypeError);
+	});
+
+	it("names the spilled artifact and tells an unwoken parent to wait for the owner", () => {
+		const record: BackgroundToolTaskRecord = {
+			sessionId: "session-a",
+			taskId: "tool-task-1",
+			toolCallId: "call-1",
+			toolName: "slow",
+			status: "completed",
+			startedAt: "2026-08-01T12:00:00.000Z",
+			completedAt: "2026-08-01T12:00:01.000Z",
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "slow completed",
+			output: "done",
+			artifactId: "abc123",
+		};
+
+		const message = createBackgroundToolTerminalMessage([record], { wakeParent: false });
+
+		expect(message.content).toContain("Parent was not woken because the owning goal is no longer active");
+		expect(message.content).not.toContain("Parent woke");
+		expect(message.details.records).toEqual([
+			{ taskId: "tool-task-1", status: "completed", toolName: "slow", artifactId: "abc123" },
+		]);
+	});
+
+	it("refuses a wait watchdog that could never fire", () => {
+		expect(
+			() =>
+				new BackgroundToolTaskController({
+					getSessionId: () => "session-a",
+					getArtifactStore: () => undefined,
+					persist: vi.fn(),
+					notifyTerminal: vi.fn(),
+					waitTimeoutMs: 0,
+				}),
+		).toThrow(TypeError);
+	});
+
+	it("never hands off the control tool itself, and hands off nothing after shutdown", async () => {
+		const { controller } = createHarness("session-a");
+		const control = controlledContext("call-control");
+		control.context.toolCall.name = "tool_task";
+
+		expect(controller.handoff(control.context)).toBeUndefined();
+		expect(controller.list()).toEqual([]);
+
+		await controller.shutdown();
+		expect(controller.handoff(controlledContext("call-after").context)).toBeUndefined();
+		expect(controller.subscribeHandoffRequest("call-after", vi.fn())()).toBeUndefined();
+		expect(controller.requestHandoff("call-after")).toBe(0);
+	});
+
+	it("fails a background task whose tool call rejected instead of leaving it running", async () => {
+		const { controller } = createHarness("session-a");
+		const call = controlledContext();
+		(call.context as { completion: Promise<BackgroundToolCallCompletion> }).completion = Promise.reject(
+			new Error("spawn ENOENT"),
+		);
+		controller.handoff(call.context);
+
+		await expect(controller.wait("tool-task-1")).resolves.toMatchObject({
+			status: "failed",
+			output: expect.stringContaining("spawn ENOENT"),
+		});
+		await controller.shutdown();
+	});
+
+	it("keeps a non-Error tool-call rejection readable in the failed record", async () => {
+		const { controller } = createHarness("session-a");
+		const call = controlledContext();
+		(call.context as { completion: Promise<BackgroundToolCallCompletion> }).completion =
+			Promise.reject("worker vanished");
+		controller.handoff(call.context);
+
+		await expect(controller.wait("tool-task-1")).resolves.toMatchObject({
+			status: "failed",
+			output: expect.stringContaining("worker vanished"),
+		});
+		await controller.shutdown();
+	});
+
+	it("still records a requested cancellation when the canceller itself throws", async () => {
+		const errors: string[] = [];
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			persist: vi.fn(),
+			notifyTerminal: vi.fn(),
+			onError: (message) => errors.push(message),
+		});
+		const call = controlledContext();
+		call.context.cancel = vi.fn(() => {
+			throw new Error("child already reaped");
+		});
+		controller.handoff(call.context);
+
+		expect(controller.cancel("tool-task-1")).toBe(true);
+		expect(errors).toEqual(["Failed to cancel background tool task tool-task-1"]);
+		expect(controller.list()).toEqual([expect.objectContaining({ cancellationRequested: true })]);
+
+		call.resolveCompletion({
+			toolCall: call.context.toolCall,
+			result: { content: [{ type: "text", text: "aborted" }], details: {} },
+			isError: true,
+		});
+		await expect(controller.wait("tool-task-1")).resolves.toMatchObject({ status: "canceled" });
+		await controller.shutdown();
+	});
+
+	it("starts a usable session when the persisted task log cannot be read", async () => {
+		const errors: string[] = [];
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			loadPersistedRecordsNewestFirst: () => {
+				throw new Error("session file unreadable");
+			},
+			persist: vi.fn(),
+			notifyTerminal: vi.fn(),
+			onError: (message) => errors.push(message),
+		});
+
+		expect(errors).toEqual(["Failed to load persisted background tool tasks"]);
+		expect(controller.list()).toEqual([]);
+		expect(controller.handoff(controlledContext().context)).toMatchObject({
+			result: { details: { taskId: "tool-task-1" } },
+		});
+		await controller.shutdown();
+	});
+
+	it("restores accountable usage and drops a record whose usage is malformed", async () => {
+		const usage = {
+			input: 10,
+			output: 5,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 15,
+			cost: { input: 0.1, output: 0.2, cacheRead: 0, cacheWrite: 0, total: 0.3 },
+		};
+		const base: BackgroundToolTaskRecord = {
+			sessionId: "session-a",
+			taskId: "tool-task-1",
+			toolCallId: "call-1",
+			toolName: "slow",
+			status: "completed",
+			startedAt: "2026-08-01T12:00:00.000Z",
+			completedAt: "2026-08-01T12:00:02.000Z",
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "slow completed",
+			output: "done",
+			terminalDelivery: "delivered",
+			usage,
+		};
+		const malformedCost = { ...base, taskId: "tool-task-2", toolCallId: "call-2", usage: { ...usage, cost: null } };
+		const malformedField = {
+			...base,
+			taskId: "tool-task-3",
+			toolCallId: "call-3",
+			usage: { ...usage, totalTokens: Number.NaN },
+		};
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			loadPersistedRecordsNewestFirst: () => [malformedField, malformedCost, base],
+			persist: vi.fn(),
+			notifyTerminal: vi.fn(),
+		});
+
+		expect(controller.list()).toEqual([expect.objectContaining({ taskId: "tool-task-1", usage })]);
+		// The rejected ids are still consumed so a restored session cannot reissue them.
+		expect(controller.handoff(controlledContext("call-new").context)).toMatchObject({
+			result: { details: { taskId: "tool-task-4" } },
+		});
+		await controller.shutdown();
+	});
+
+	it("keeps running after a live-task subscriber throws", async () => {
+		const errors: string[] = [];
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			persist: vi.fn(),
+			notifyTerminal: vi.fn(),
+			onLiveTasksChanged: () => {
+				throw new Error("renderer detached");
+			},
+			onError: (message) => errors.push(message),
+		});
+
+		expect(controller.handoff(controlledContext().context)).toBeDefined();
+		expect(errors).toEqual(["Failed to emit background tool task level signal"]);
+		await controller.shutdown();
+	});
+
+	it("releases the artifact of a terminal task evicted by the retention bound", async () => {
+		const removeReference = vi.fn(() => true);
+		const cleanup = vi.fn(() => []);
+		const records = Array.from({ length: 65 }, (_, index) => ({
+			sessionId: "session-a",
+			taskId: `tool-task-${index + 1}`,
+			toolCallId: `call-${index + 1}`,
+			toolName: "slow",
+			status: "completed" as const,
+			startedAt: "2026-08-01T12:00:00.000Z",
+			completedAt: "2026-08-01T12:00:02.000Z",
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "slow completed",
+			output: "done",
+			artifactId: `${index + 1}`.padStart(4, "0"),
+			terminalDelivery: "delivered" as const,
+		}));
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => ({ addReference: vi.fn(() => true), removeReference, cleanup }) as never,
+			loadPersistedRecordsNewestFirst: () => records,
+			persist: vi.fn(),
+			notifyTerminal: vi.fn(),
+		});
+
+		expect(controller.list()).toHaveLength(64);
+		expect(controller.list()[0]).toMatchObject({ taskId: "tool-task-2" });
+		expect(removeReference).toHaveBeenCalledWith("0001", "background-tool-task:session-a:tool-task-1");
+		expect(cleanup).toHaveBeenCalledOnce();
+		await controller.shutdown();
+	});
+	it("matches evidence by task id or tool call id and reports no verdict for an unknown uri", () => {
+		const refs = [
+			{ taskId: "tool-task-1", toolCallId: "call-1", status: "running" as const },
+			{ taskId: "tool-task-2", toolCallId: "call-2", status: "completed" as const },
+			{ taskId: "tool-task-3", toolCallId: "call-3", status: "failed" as const },
+		];
+
+		expect(findBackgroundToolTask(refs, " call-2 ")).toMatchObject({ taskId: "tool-task-2" });
+		expect(findBackgroundToolTask(refs, "   ")).toBeUndefined();
+		expect(isCompletedBackgroundToolEvidence(refs, "tool-task-2")).toBe(true);
+		expect(isCompletedBackgroundToolEvidence(refs, "call-3")).toBe(false);
+		expect(isCompletedBackgroundToolEvidence(refs, "tool-task-missing")).toBeUndefined();
+		expect(
+			collectCitedRunningToolTaskIds({ records: refs, uris: ["call-1", "tool-task-1", "call-2", "nope"] }),
+		).toEqual(["tool-task-1"]);
+	});
+
+	it("keeps image output out of the transcript and names a silent completion", async () => {
+		const { controller } = createHarness("session-a");
+		const withImage = controlledContext("call-image");
+		const silent = controlledContext("call-silent");
+		controller.handoff(withImage.context);
+		controller.handoff(silent.context);
+
+		withImage.resolveCompletion({
+			toolCall: withImage.context.toolCall,
+			result: {
+				content: [
+					{ type: "text", text: "chart rendered" },
+					{ type: "image", data: "aGk=", mimeType: "image/png" },
+				],
+				details: {},
+			},
+			isError: false,
+		});
+		silent.resolveCompletion({
+			toolCall: silent.context.toolCall,
+			result: { content: [], details: {} },
+			isError: false,
+		});
+
+		await expect(controller.wait("tool-task-1")).resolves.toMatchObject({
+			output: "chart rendered\n[Image output retained outside the foreground transcript]",
+		});
+		await expect(controller.wait("tool-task-2")).resolves.toMatchObject({
+			output: "Tool completed without text output.",
+		});
+		await controller.shutdown();
+	});
+
+	it("rejects a wait for an unknown task and returns the live snapshot for an already-aborted one", async () => {
+		const { controller } = createHarness("session-a");
+		const call = controlledContext();
+		controller.handoff(call.context);
+		const aborted = new AbortController();
+		aborted.abort();
+
+		await expect(controller.wait("tool-task-missing")).rejects.toThrow(
+			"Unknown background tool task: tool-task-missing",
+		);
+		await expect(controller.wait("tool-task-1", aborted.signal)).resolves.toMatchObject({ status: "running" });
+		await controller.shutdown();
+	});
+
+	it("reports a rejected tool call as canceled once cancellation was requested", async () => {
+		let rejectCompletion!: (error: unknown) => void;
+		const { controller } = createHarness("session-a");
+		const call = controlledContext();
+		(call.context as { completion: Promise<BackgroundToolCallCompletion> }).completion = new Promise((_, reject) => {
+			rejectCompletion = reject;
+		});
+		controller.handoff(call.context);
+
+		expect(controller.cancel("tool-task-1")).toBe(true);
+		rejectCompletion(new Error("aborted by signal"));
+
+		await expect(controller.wait("tool-task-1")).resolves.toMatchObject({
+			status: "canceled",
+			cancellationRequested: true,
+		});
+		await controller.shutdown();
+	});
+
+	it("accounts a completed background tool's usage against its task", async () => {
+		const usage = {
+			input: 40,
+			output: 8,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 48,
+			cost: { input: 0.4, output: 0.8, cacheRead: 0, cacheWrite: 0, total: 1.2 },
+		};
+		const recordUsage = vi.fn();
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			persist: vi.fn(),
+			notifyTerminal: vi.fn(),
+			recordUsage,
+		});
+		const call = controlledContext();
+		controller.handoff(call.context);
+
+		call.resolveCompletion({
+			toolCall: call.context.toolCall,
+			result: { content: [{ type: "text", text: "done" }], details: {}, usage },
+			isError: false,
+		});
+
+		await expect(controller.wait("tool-task-1")).resolves.toMatchObject({ usage });
+		expect(recordUsage).toHaveBeenCalledWith("tool-task-1", usage);
+		await controller.shutdown();
+	});
+
+	it("restores the newest edge per task and refuses records that fail the durable record contract", async () => {
+		const base = {
+			sessionId: "session-a",
+			toolCallId: "call-1",
+			toolName: "slow",
+			startedAt: "2026-08-01T12:00:00.000Z",
+			completedAt: "2026-08-01T12:00:02.000Z",
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "slow completed",
+			output: "done",
+			terminalDelivery: "delivered" as const,
+		};
+		const newest = { ...base, taskId: "tool-task-2", status: "completed" as const, output: "newest edge" };
+		const stale = { ...base, taskId: "tool-task-2", status: "failed" as const, output: "stale edge" };
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			loadPersistedRecordsNewestFirst: () => [
+				newest,
+				stale,
+				{ ...base, taskId: "tool-task-nine", status: "completed" as const },
+				{ ...base, taskId: "tool-task-3", status: "completed" as const, usage: "not-a-record" },
+				{ ...base, taskId: "tool-task-4", status: "completed" as const, elapsedBeforeHandoffMs: -1 },
+				{ ...base, taskId: "tool-task-5", status: "completed" as const, completedAt: undefined },
+				{ ...base, taskId: "tool-task-6", status: "completed" as const, artifactId: "not-hex!" },
+				{ ...base, taskId: "tool-task-7", status: "completed" as const, piVerification: { version: 2 } },
+				{ ...base, taskId: "tool-task-8", status: "completed" as const, unexpectedKey: true },
+			],
+			persist: vi.fn(),
+			notifyTerminal: vi.fn(),
+		});
+
+		expect(controller.list()).toEqual([
+			expect.objectContaining({ taskId: "tool-task-2", status: "completed", output: "newest edge" }),
+		]);
+		// A malformed id is not a task number, so it must not advance the session's id allocator.
+		expect(controller.handoff(controlledContext("call-next").context)).toMatchObject({
+			result: { details: { taskId: "tool-task-9" } },
+		});
+		await controller.shutdown();
+	});
+
+	it("evicts an artifact-free terminal task without touching the artifact store", async () => {
+		const removeReference = vi.fn(() => true);
+		const records = Array.from({ length: 65 }, (_, index) => ({
+			sessionId: "session-a",
+			taskId: `tool-task-${index + 1}`,
+			toolCallId: `call-${index + 1}`,
+			toolName: "slow",
+			status: "completed" as const,
+			startedAt: "2026-08-01T12:00:00.000Z",
+			completedAt: "2026-08-01T12:00:02.000Z",
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "slow completed",
+			output: "done",
+			terminalDelivery: "delivered" as const,
+		}));
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () =>
+				({ addReference: vi.fn(() => true), removeReference, cleanup: vi.fn(() => []) }) as never,
+			loadPersistedRecordsNewestFirst: () => records,
+			persist: vi.fn(),
+			notifyTerminal: vi.fn(),
+		});
+
+		expect(controller.list()).toHaveLength(64);
+		expect(removeReference).not.toHaveBeenCalled();
 		await controller.shutdown();
 	});
 });

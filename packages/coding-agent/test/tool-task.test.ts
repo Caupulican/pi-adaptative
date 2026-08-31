@@ -305,4 +305,105 @@ describe("tool_task", () => {
 		expect(cancel).toHaveBeenCalledWith("tool-task-1");
 		expect(result.content[0]).toMatchObject({ text: "Cancellation requested for tool-task-1." });
 	});
+
+	it("reports an empty session snapshot without the polling guidance", async () => {
+		const observe = vi.fn();
+		const tool = createToolTaskToolDefinition({
+			list: () => [],
+			observe,
+			wait: vi.fn(),
+			cancel: vi.fn(),
+		});
+
+		const result = await tool.execute("call", { action: "list" }, undefined, undefined, extensionContext);
+
+		expect(result.content).toEqual([{ type: "text", text: "No background tool tasks in this session." }]);
+		expect(result.details).toMatchObject({ kind: "list", count: 0 });
+		expect(observe).toHaveBeenCalledWith([]);
+	});
+
+	it("names a cancellation that addressed nothing so the model does not assume it landed", async () => {
+		const cancel = vi.fn(() => false);
+		const tool = createToolTaskToolDefinition({
+			list: () => [terminal],
+			observe: () => [terminal],
+			wait: vi.fn(),
+			cancel,
+		});
+
+		const result = await tool.execute(
+			"call",
+			{ action: "cancel", taskId: "tool-task-gone" },
+			undefined,
+			undefined,
+			extensionContext,
+		);
+
+		expect(cancel).toHaveBeenCalledWith("tool-task-gone");
+		expect(result.content[0]).toMatchObject({ text: "No running background tool task named tool-task-gone." });
+		expect(result.details).toMatchObject({ kind: "cancel", taskId: "tool-task-gone", reason: "not_running" });
+	});
+
+	it("falls back to the summary when a terminal task produced no output", async () => {
+		const silent = { ...terminal, output: "" };
+		const tool = createToolTaskToolDefinition({
+			list: () => [silent],
+			observe: () => [silent],
+			wait: async () => silent,
+			cancel: vi.fn(),
+		});
+
+		const result = await tool.execute(
+			"call",
+			{ action: "wait", taskId: silent.taskId },
+			undefined,
+			undefined,
+			extensionContext,
+		);
+
+		expect(result.content).toEqual([{ type: "text", text: silent.summary }]);
+	});
+
+	it("surfaces the artifact id so a spilled result stays addressable", async () => {
+		const spilled = { ...terminal, artifactId: "artifact-7" };
+		const tool = createToolTaskToolDefinition({
+			list: () => [spilled],
+			observe: () => [spilled],
+			wait: async () => spilled,
+			cancel: vi.fn(),
+		});
+
+		const result = await tool.execute(
+			"call",
+			{ action: "wait", taskId: spilled.taskId },
+			undefined,
+			undefined,
+			extensionContext,
+		);
+
+		expect(result.details).toMatchObject({ kind: "wait", taskId: spilled.taskId, artifactId: "artifact-7" });
+	});
+
+	it("projects a non-Error wait rejection as readable text instead of losing it", async () => {
+		const tool = createToolTaskToolDefinition({
+			list: () => [running],
+			observe: () => [running],
+			wait: async () => {
+				throw "controller went away";
+			},
+			cancel: vi.fn(),
+		});
+
+		const result = await tool.execute(
+			"call",
+			{ action: "wait", taskId: running.taskId },
+			undefined,
+			undefined,
+			extensionContext,
+		);
+
+		expect(result.content).toEqual([{ type: "text", text: "controller went away" }]);
+		expect(result.details).toMatchObject({ kind: "error", taskId: running.taskId, reason: "controller went away" });
+		expect(result.isError).toBe(true);
+	});
 });
