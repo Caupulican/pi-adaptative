@@ -6078,6 +6078,65 @@ describe("Phase 3 S5 - pool invariants, partition semantics, env matrix, full-lo
 			expect(results.map((r) => r.toolCallId)).toEqual(["call-a", "call-b", "call-c"]);
 		});
 
+		it("ignores a malformed PI_TOOL_CONCURRENCY decimal prefix instead of overriding the default", async () => {
+			process.env.PI_TOOL_CONCURRENCY = "1junk";
+			const schema = Type.Object({ value: Type.String() });
+			let inFlight = 0;
+			let overlapped = false;
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, params) {
+					inFlight++;
+					if (inFlight > 1) overlapped = true;
+					await Promise.resolve();
+					await Promise.resolve();
+					inFlight--;
+					return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+				},
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				toolExecution: "parallel",
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("run two")], context, config, undefined, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{ type: "toolCall", id: "call-a", name: "step", arguments: { value: "a" } },
+									{ type: "toolCall", id: "call-b", name: "step", arguments: { value: "b" } },
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+			for await (const _event of stream) {
+				// consume
+			}
+
+			expect(overlapped).toBe(true);
+		});
+
 		it("PI_TOOL_CONCURRENCY=8 widens the pool past the default width 4, so six calls all fit in ONE refill", async () => {
 			process.env.PI_TOOL_CONCURRENCY = "8";
 			const schema = Type.Object({ value: Type.String() });

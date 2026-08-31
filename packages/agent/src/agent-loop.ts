@@ -1353,11 +1353,13 @@ function isValidToolConcurrency(value: number): boolean {
 	return Number.isInteger(value) && value >= MIN_TOOL_CONCURRENCY && value <= MAX_TOOL_CONCURRENCY;
 }
 
-/** Trimmed `parseInt`, accepted range 1-16, anything else ignored (including non-integer input). */
+/** Complete trimmed decimal integer in the supported range 1-16; anything else is ignored. */
 function parseToolConcurrencyEnv(value: string | undefined): number | undefined {
 	if (!value) return undefined;
-	const parsed = Number.parseInt(value.trim(), 10);
-	return isValidToolConcurrency(parsed) ? parsed : undefined;
+	const trimmed = value.trim();
+	if (!/^\d+$/.test(trimmed)) return undefined;
+	const parsed = Number(trimmed);
+	return Number.isSafeInteger(parsed) && isValidToolConcurrency(parsed) ? parsed : undefined;
 }
 
 /**

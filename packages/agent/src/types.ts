@@ -39,9 +39,10 @@ export type AgentRequestId = string & { readonly [AGENT_REQUEST_ID]: true };
  * Configuration for how tool calls from a single assistant message are executed.
  *
  * - "sequential": each tool call is prepared, executed, and finalized before the next one starts.
- * - "parallel": tool calls are prepared and executed in bounded concurrent accounting waves.
- *   Each wave updates failure-recovery state before later calls launch. `tool_execution_end` is
- *   emitted in completion order within each wave, while tool-result artifacts remain in source order.
+ * - "parallel": calls are partitioned in source order into parallel groups separated by
+ *   sequential barriers. Each parallel group runs through a width-bounded pool, where new calls
+ *   start as slots free up; `tool_execution_end` follows actual completion order while persisted
+ *   tool-result artifacts remain in source order.
  */
 export type ToolExecutionMode = "sequential" | "parallel";
 
@@ -496,9 +497,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Pool width for "parallel" mode's parallel groups (see `toolExecution`): the maximum number
 	 * of prepared calls dispatched at once within one group. Slots are refilled as they free, so a
 	 * new call can start as soon as any one finishes rather than waiting for a fixed-size wave to
-	 * fully settle. Overridden by the `PI_TOOL_CONCURRENCY` env var when it parses to an integer in
-	 * 1-16; `PI_TOOL_PARALLELISM_DISABLED` bypasses partitioning and pooling entirely (every batch
-	 * runs through the legacy sequential branch) and takes precedence over both. This field is
+	 * fully settle. Overridden by the `PI_TOOL_CONCURRENCY` env var only when its complete trimmed
+	 * value is a decimal safe integer in 1-16; `PI_TOOL_PARALLELISM_DISABLED` bypasses partitioning
+	 * and pooling entirely (every batch runs through the legacy sequential branch) and takes
+	 * precedence over both. This field is
 	 * validated to an integer in 1-16; an out-of-range or non-integer value is ignored.
 	 *
 	 * Default: 4

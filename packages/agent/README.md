@@ -102,12 +102,12 @@ prompt("Read config.json")
 
 Tool execution mode is configurable:
 
-- `parallel` (default): preflight tool calls sequentially, execute allowed tools concurrently, emit `tool_execution_end` as soon as each tool is finalized, then emit toolResult messages and `turn_end.toolResults` in assistant source order
-- `sequential`: execute tool calls one by one, matching the historical behavior
+- `parallel` (default): partition calls in assistant source order into parallel groups separated by sequential barriers. Parallel groups use a width-bounded pool; each `executionMode: "sequential"` call waits for the preceding group, runs alone, and must finish before the next group starts.
+- `sequential`: execute tool calls one by one, matching the historical behavior.
 
-In parallel mode, tool completion events follow tool completion order, but persisted toolResult messages still follow assistant source order.
+Within a parallel group, `tool_execution_end` follows completion order, while persisted toolResult messages remain in assistant source order. `PI_TOOL_CONCURRENCY` sets the parallel-group pool width when its complete trimmed value is a decimal integer from 1 through 16; malformed values such as `4junk` are ignored and leave the configured/default width in effect.
 
-The mode can be set globally via `toolExecution` in the agent config, or per-tool via `executionMode` on `AgentTool`. If any tool call in a batch targets a tool with `executionMode: "sequential"`, the entire batch executes sequentially regardless of the global setting.
+The mode can be set globally via `toolExecution` in the agent config, or per-tool via `executionMode` on `AgentTool`.
 
 The `beforeToolCall` hook runs after `tool_execution_start` and validated argument parsing. It can block execution. The `afterToolCall` hook runs after tool execution finishes and before `tool_execution_end` and final tool result message events are emitted.
 
