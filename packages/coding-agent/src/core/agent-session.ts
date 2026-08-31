@@ -694,7 +694,7 @@ export class AgentSession {
 		});
 		this._backgroundToolTasks = new BackgroundToolTaskController({
 			getSessionId: () => this.sessionManager.getSessionId(),
-			getGoalId: () => this._goals.getExecutionGoalId(),
+			getGoalId: () => this._goals.getOwnershipGoalId(),
 			getSessionLineageIds: () => this.sessionManager.getSessionLineageIds(),
 			getArtifactStore: () => this._getToolArtifactStore(),
 			loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(this.sessionManager),

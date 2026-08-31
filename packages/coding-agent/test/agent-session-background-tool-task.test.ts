@@ -16,6 +16,77 @@ import { createHarness, createHarnessWithExtensions } from "./test-harness.ts";
 const slowParameters = Type.Object({});
 
 describe("AgentSession background tool tasks", () => {
+	it("stamps the active goal on background work started outside a goal continuation turn", async () => {
+		let releaseSlow!: () => void;
+		const slowCompletion = new Promise<void>((resolve) => {
+			releaseSlow = resolve;
+		});
+		const slowTool: AgentTool<typeof slowParameters, Record<string, never>> = {
+			name: "slow",
+			label: "slow",
+			description: "Deterministic slow test tool",
+			parameters: slowParameters,
+			execute: async () => {
+				await slowCompletion;
+				return { content: [{ type: "text" as const, text: "slow result" }], details: {} };
+			},
+		};
+		const sessionManager = SessionManager.inMemory();
+		appendGoalStateSnapshot(
+			sessionManager,
+			createGoalState({ goalId: "goal-ambient", userGoal: "Finish ambient work", now: "T0" }),
+		);
+		const harness = createHarness({
+			sessionManager,
+			baseToolsOverride: { slow: slowTool },
+			responses: [{ toolCalls: [{ id: "slow-call", name: "slow", args: {} }] }, "foreground done"],
+		});
+		harness.session.setActiveToolsByName(["slow", "tool_task"]);
+		harness.agent.backgroundToolCallAfterMs = 5;
+		let sawRunningTask = false;
+		let markTaskRunning!: () => void;
+		const taskRunning = new Promise<void>((resolve) => {
+			markTaskRunning = resolve;
+		});
+		let markTaskTerminal!: () => void;
+		const taskTerminal = new Promise<void>((resolve) => {
+			markTaskTerminal = resolve;
+		});
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (event.type === "background_tools") {
+				if (event.tasks.length > 0 && !sawRunningTask) {
+					sawRunningTask = true;
+					markTaskRunning();
+				}
+				if (sawRunningTask && event.tasks.length === 0) markTaskTerminal();
+			}
+		});
+
+		try {
+			// No goalExecutionId: an ordinary foreground turn taken while the goal is active. The work it
+			// backgrounds is still the goal's, so completion must be able to see it and its terminal must
+			// not wake a session whose goal already finished.
+			const prompt = harness.session.prompt("do some ambient work", { autoContinueGoal: false });
+			await taskRunning;
+			releaseSlow();
+			await taskTerminal;
+			await prompt;
+
+			const taskEdges = sessionManager
+				.getEntries()
+				.flatMap((entry) =>
+					entry.type === "custom" && entry.customType === BACKGROUND_TOOL_TASK_CUSTOM_TYPE
+						? [entry.data as BackgroundToolTaskRecord]
+						: [],
+				);
+			expect(taskEdges).not.toHaveLength(0);
+			expect(taskEdges.every((record) => record.goalId === "goal-ambient")).toBe(true);
+		} finally {
+			unsubscribe();
+			releaseSlow();
+			harness.cleanup();
+		}
+	});
 	it("injects a terminal into the next provider boundary of the same multi-request run", async () => {
 		let releaseSlow!: () => void;
 		const slowCompletion = new Promise<void>((resolve) => {

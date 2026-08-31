@@ -349,6 +349,22 @@ export class GoalSessionController {
 		this.executionLease = undefined;
 	}
 
+	/**
+	 * Identity of the goal that OWNS work started right now, or undefined when no goal is executing.
+	 *
+	 * Distinct from {@link getExecutionGoalId}, which reports budget attribution and answers only
+	 * under an execution lease — held on continuation passes. Ownership is a property of the
+	 * session's goal, not of how the current turn was admitted, so work backgrounded during an
+	 * ordinary foreground turn belongs to the goal just the same. Tagging that work is what lets the
+	 * completion gate see it (`findBlockingToolTasks` matches on `goalId`) and stops its terminal
+	 * from waking a parent whose goal already finished (`resolveWake` treats a missing `goalId` as
+	 * goal-independent). A lease id is always the active goal's id, so this subsumes it.
+	 */
+	getOwnershipGoalId(): string | undefined {
+		const state = this.getState();
+		return state && isGoalExecutionActive(state.status) ? state.goalId : undefined;
+	}
+
 	/** Goal identity authoritatively owned by the current foreground execution, if one was adopted. */
 	getExecutionGoalId(): string | undefined {
 		const lease = this.executionLease;
