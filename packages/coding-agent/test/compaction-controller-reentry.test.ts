@@ -918,3 +918,67 @@ describe("CompactionController auto-compaction re-entry", () => {
 		});
 	});
 });
+
+describe("CompactionController auto-compaction failure reporting", () => {
+	async function runFailing(reason: AutoCompactionReason, failure: Error) {
+		const fixture = createFixture({
+			measureLiveContextTokens: scriptedMeasure([3_000, 2_500]),
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			refreshAfterCompaction: () => {
+				throw failure;
+			},
+		});
+		await fixture.controller.runAuto(reason, false);
+		return fixture.events;
+	}
+
+	it("names the threshold reason when auto-compaction fails", async () => {
+		const events = await runFailing("threshold", new Error("summarizer exploded"));
+
+		expect(events).toContainEqual(
+			expect.objectContaining({ type: "session_compact_failed", reason: "threshold", aborted: false }),
+		);
+		expect(events.at(-1)).toMatchObject({
+			type: "compaction_end",
+			reason: "threshold",
+			result: undefined,
+			aborted: false,
+			willRetry: false,
+			errorMessage: expect.stringContaining("Auto-compaction failed: summarizer exploded"),
+		});
+	});
+
+	it("names context overflow recovery when the overflow run fails", async () => {
+		const events = await runFailing("overflow", new Error("summarizer exploded"));
+
+		expect(events.at(-1)).toMatchObject({
+			type: "compaction_end",
+			reason: "overflow",
+			errorMessage: expect.stringContaining("Context overflow recovery failed: summarizer exploded"),
+		});
+	});
+
+	it("names provider failure recovery when the provider_recovery run fails", async () => {
+		const events = await runFailing("provider_recovery", new Error("summarizer exploded"));
+
+		expect(events.at(-1)).toMatchObject({
+			type: "compaction_end",
+			reason: "provider_recovery",
+			errorMessage: expect.stringContaining("Provider failure recovery failed: summarizer exploded"),
+		});
+	});
+
+	it("reports a cancelled compaction as aborted instead of a failure", async () => {
+		const events = await runFailing("threshold", new Error("Compaction cancelled"));
+
+		expect(events.some((event) => event.type === "session_compact_failed")).toBe(false);
+		expect(events.at(-1)).toMatchObject({
+			type: "compaction_end",
+			reason: "threshold",
+			result: undefined,
+			aborted: true,
+			willRetry: false,
+			errorMessage: undefined,
+		});
+	});
+});
