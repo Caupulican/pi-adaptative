@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Fixed
+
+- A schema rejection no longer blocks the corrected call it asked for. Operation identity deliberately omits resource-envelope fields (`timeout`, `timeoutMs`, `wait_ms` and siblings) so that growing a bound cannot mint a fresh identity and replay a failed command forever — but that rule was applied to validation failures too, where the rejected field *is* the operation. A tool that rejected `timeoutMs` as a forbidden property and printed "Fix timeoutMs: expected forbidden" then hashed the repaired call identically to the bad one and refused it as `repeated_failed_operation`; one real session spent eleven round trips resending the exact call the harness had demanded, escaping only when an unrelated call happened to advance the world cursor. Failure records now also carry an envelope-retaining identity, consulted only for validation-phase records, so a genuinely different argument object is admitted. Execution identity is untouched: a non-zero exit re-run with a larger timeout is still the same operation.
+- A timed-out operation can be repaired by raising its bound. Because `timeout` is excluded from identity, the one repair that addresses the cause counted as no repair, and the single unchanged retry the timeout class allows was spent whether or not the bound changed. A strict, material increase — at least double the bound that just failed — now earns an execution, capped at two escalations per episode, so 4x is reachable and an unbounded run of self-incremented timeouts is not.
+- A blocked replay no longer claims the arguments were unchanged when they were not. A model told its edit did not transmit will resend it, which is exactly the loop the notice exists to end; when only envelope fields differ, the refusal now says so and asks for a change to the operation itself.
+- A process killed at its timeout keeps a bounded tail of what it printed. Evidence extraction required a process exit code, which a killed process does not have, so the output a narrower retry has to be built from was discarded — the failure that destroys the most evidence was the one that surfaced none.
+
 ## [0.97.21] - 2026-08-31
 
 ### Fixed

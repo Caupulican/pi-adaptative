@@ -46,6 +46,19 @@ function validTaskId(value: string | undefined): string | undefined {
 	return taskId;
 }
 
+/**
+ * What is actually known about a task that is still running when the wait watchdog elapses.
+ *
+ * Telling the model to "continue independent work" is not an answer when the waited task is the only
+ * thing in flight — it has no independent work, so it spends a turn saying so. Elapsed time is real
+ * information: it distinguishes a task that is progressing from one worth cancelling.
+ */
+function runningProgress(record: BackgroundToolTaskRecord): string {
+	const startedAt = Date.parse(record.startedAt);
+	const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : record.elapsedBeforeHandoffMs;
+	return `Still running after ${Math.round(elapsedMs / 1000)}s.`;
+}
+
 function projectList(records: readonly BackgroundToolTaskRecord[]): {
 	included: readonly BackgroundToolTaskRecord[];
 	text: string;
@@ -128,7 +141,7 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 						: undefined;
 				const text =
 					record.status === "running"
-						? `${record.summary}\nWait watchdog elapsed; continue independent work. The terminal handoff will wake the session.`
+						? `${record.summary}\n${runningProgress(record)} The terminal handoff will wake the session; no further wait is needed.`
 						: record.output || record.summary;
 				return {
 					content: [{ type: "text" as const, text }],

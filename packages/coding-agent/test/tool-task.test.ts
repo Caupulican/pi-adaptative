@@ -406,4 +406,29 @@ describe("tool_task", () => {
 		expect(result.details).toMatchObject({ kind: "error", taskId: running.taskId, reason: "controller went away" });
 		expect(result.isError).toBe(true);
 	});
+
+	// Origin: session 01a058a5. The waited scan was the only work in flight, so "continue independent
+	// work" had no referent and the model spent turns restating that a search was still running.
+	it("reports elapsed progress when the wait watchdog elapses on a running task", async () => {
+		const startedAt = new Date(Date.now() - 90_000).toISOString();
+		const tool = createToolTaskToolDefinition({
+			list: () => [],
+			observe: vi.fn(),
+			wait: async () => ({ ...running, startedAt }),
+			cancel: vi.fn(),
+		});
+
+		const result = await tool.execute(
+			"call",
+			{ action: "wait", taskId: running.taskId },
+			undefined,
+			undefined,
+			extensionContext,
+		);
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(text).toContain("Still running after 90s.");
+		expect(text).not.toContain("continue independent work");
+		expect(result.details).toMatchObject({ kind: "wait", status: "running" });
+	});
 });

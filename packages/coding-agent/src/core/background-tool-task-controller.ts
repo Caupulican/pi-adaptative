@@ -16,7 +16,8 @@ export const BACKGROUND_TOOL_TASK_CUSTOM_TYPE = "background_tool_task";
 const MAX_RETAINED_TERMINAL_TASKS = 64;
 const MAX_INLINE_OUTPUT_BYTES = 32 * 1024;
 const MAX_INLINE_OUTPUT_LINES = 400;
-const MAX_SUMMARY_CHARS = 200;
+/** Budgeted so a projected failure summary keeps its diagnostic instead of cutting it off. */
+const MAX_SUMMARY_CHARS = 320;
 const MAX_TERMINAL_HANDOFF_RECORDS = 8;
 const MAX_VERIFICATION_ID_LENGTH = 128;
 const TASK_ID_PATTERN = /^tool-task-([1-9]\d*)$/;
@@ -235,9 +236,36 @@ function oneLine(value: string): string {
 		.trim();
 }
 
+/**
+ * The model-facing half of a `[harness]` failure record, in cause-first order.
+ *
+ * Head-truncating the serialized record instead spends the budget on harness bookkeeping — `MUST`,
+ * `occ`, `kind_mistakes`, `mistake_kind`, `failure_key` all precede `failure_code` — and cuts the
+ * remaining text mid-key, so the one field that says why the task failed is the field that is lost.
+ */
+function harnessFailureSummary(output: string): string | undefined {
+	const start = output.indexOf("[harness]");
+	if (start < 0) return undefined;
+	const braceStart = output.indexOf("{", start);
+	if (braceStart < 0) return undefined;
+	let record: unknown;
+	try {
+		record = JSON.parse(output.slice(braceStart));
+	} catch {
+		return undefined;
+	}
+	if (!isPlainRecord(record)) return undefined;
+	const parts: string[] = [];
+	for (const field of ["state", "phase", "failure_code", "diagnostic", "next_action"] as const) {
+		const value = record[field];
+		if (typeof value === "string" && value.trim()) parts.push(`${field}=${oneLine(value)}`);
+	}
+	return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
 function summaryFor(status: BackgroundToolTaskStatus, toolName: string, output: string): string {
 	const prefix = `${toolName} ${status}`;
-	const firstLine = oneLine(output);
+	const firstLine = harnessFailureSummary(output) ?? oneLine(output);
 	if (!firstLine) return prefix;
 	const remaining = Math.max(0, MAX_SUMMARY_CHARS - prefix.length - 2);
 	return `${prefix}: ${firstLine.slice(0, remaining)}`;

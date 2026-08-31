@@ -19,6 +19,7 @@ export const MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT = [
 	"MANDATORY: blocked/rejected means not executed.",
 	`- MUST:true: ${TOOL_FAILURE_RETRY_MODEL_RULE}`,
 	"- Apply repair/next_action first; other tools stay available.",
+	"- Blocked? Any other successful call readmits it, same tool included.",
 	"- Irrelevant argument changes do not recover it; refusal keeps tool-result pairing and runs no hooks/tools.",
 	"- Only that operation is refused; tools and run continue.",
 ].join("\n");

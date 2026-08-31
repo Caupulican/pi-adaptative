@@ -15,6 +15,15 @@ import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
 const TOOL_FAILURE_MEMORY_VERSION = 1;
 const TOOL_FAILURE_DIRECTIVE_VERSION = 1;
 const TOOL_FAILURE_EXECUTION_KEY = Symbol("ToolFailureExecutionKey");
+/**
+ * Identity over the arguments exactly as the model wrote them, resource-envelope fields included.
+ *
+ * Execution identity deliberately ignores those fields — a bound is not the work (see
+ * `OPERATION_ENVELOPE_KEYS`). A schema rejection judges the literal argument object, so for a
+ * validation failure the omitted field can be the whole of what the harness asked to change.
+ * Process-internal and never serialized, like its execution-key sibling.
+ */
+const TOOL_FAILURE_RAW_KEY = Symbol("ToolFailureRawKey");
 const MAX_OPERATION_CHARS = 240;
 const MAX_FAILURE_CODE_CHARS = 48;
 const MAX_DIAGNOSTIC_CHARS = 240;
@@ -39,6 +48,8 @@ export interface ToolFailureMemoryRecord {
 	failureKey: string;
 	/** Exact identity is process-internal and omitted from serialized failure memory. */
 	readonly [TOOL_FAILURE_EXECUTION_KEY]?: string;
+	/** Envelope-retaining identity; process-internal and omitted from serialized failure memory. */
+	readonly [TOOL_FAILURE_RAW_KEY]?: string;
 	tool: string;
 	operation: string;
 	occurrence: number;
@@ -87,6 +98,7 @@ export type ToolFailureMemoryTracker = Map<string, ToolFailureMemoryRecord>;
 interface ToolOperationIdentity {
 	failureKey: string;
 	executionKey: string;
+	rawKey: string;
 	tool: string;
 	operation: string;
 }
@@ -424,8 +436,8 @@ export function normalizeToolSignature(pairs: Array<[string, unknown]>): string 
 	);
 }
 
-function toolOperationKey(tool: string, args: unknown, normalizeVolatile: boolean): string {
-	const identityArgs = omitOperationEnvelopeFields(args);
+function toolOperationKey(tool: string, args: unknown, normalizeVolatile: boolean, retainEnvelope = false): string {
+	const identityArgs = retainEnvelope ? args : omitOperationEnvelopeFields(args);
 	const boundedTool = truncate(tool, MAX_TOOL_NAME_CHARS);
 	const hash = createSignatureHash();
 	const updateHashString = normalizeVolatile ? updateNormalizedHashString : updateExactHashString;
@@ -443,6 +455,7 @@ function operationIdentity(tool: string, args: unknown): ToolOperationIdentity {
 	return {
 		failureKey: toolOperationKey(tool, args, true),
 		executionKey: toolOperationKey(tool, args, false),
+		rawKey: getToolRawOperationKey(tool, args),
 		tool: truncate(tool, MAX_TOOL_NAME_CHARS),
 		operation: boundedJsonPreview(args, MAX_OPERATION_CHARS),
 	};
@@ -454,6 +467,16 @@ function getToolFailureKey(tool: string, args: unknown): string {
 
 export function getToolExecutionKey(tool: string, args: unknown): string {
 	return toolOperationKey(tool, args, false);
+}
+
+/**
+ * Identity that keeps resource-envelope fields. Volatile ids normalize exactly as they do for the
+ * failure key, so this differs from it in one respect only: an envelope field is part of the
+ * identity. Compared solely against another raw key to answer "did the model actually change the
+ * arguments it sent" — never used as a map key, and never a substitute for execution identity.
+ */
+export function getToolRawOperationKey(tool: string, args: unknown): string {
+	return toolOperationKey(tool, args, true, true);
 }
 
 /** Read the four hash words already encoded by this module's exact execution-key owner. */
@@ -473,6 +496,10 @@ export function getToolExecutionKeyHashParts(executionKey: string): readonly [nu
 
 export function getToolFailureRecordExecutionKey(record: ToolFailureMemoryRecord): string | undefined {
 	return record[TOOL_FAILURE_EXECUTION_KEY];
+}
+
+export function getToolFailureRecordRawKey(record: ToolFailureMemoryRecord): string | undefined {
+	return record[TOOL_FAILURE_RAW_KEY];
 }
 
 export function getUnresolvedToolFailure(
@@ -503,11 +530,13 @@ export function restoreToolFailureRecord(
 	args: unknown,
 ): ToolFailureMemoryRecord {
 	const executionKey = getToolExecutionKey(tool, args);
+	const rawKey = getToolRawOperationKey(tool, args);
 	const persisted = readFailureRecord(result.details);
 	if (persisted) {
 		return {
 			...persisted,
 			[TOOL_FAILURE_EXECUTION_KEY]: getToolFailureRecordExecutionKey(persisted) ?? executionKey,
+			[TOOL_FAILURE_RAW_KEY]: getToolFailureRecordRawKey(persisted) ?? rawKey,
 		};
 	}
 	const identity = operationIdentity(tool, args);
@@ -519,6 +548,7 @@ export function restoreToolFailureRecord(
 		version: TOOL_FAILURE_MEMORY_VERSION,
 		failureKey: identity.failureKey,
 		[TOOL_FAILURE_EXECUTION_KEY]: executionKey,
+		[TOOL_FAILURE_RAW_KEY]: rawKey,
 		tool: identity.tool,
 		operation: identity.operation,
 		occurrence: 1,
@@ -797,8 +827,13 @@ export function assessToolFailure(
 					exitFailureCode !== undefined && !retainPolicyDiagnostic,
 				)
 			: undefined;
+	// A killed process has no exit code, so exit-shaped detection alone would discard everything it
+	// printed before the bound cut it off. That output is exactly what a narrower retry must be built
+	// from, and a timeout is the failure that destroys the most of it.
 	const evidence =
-		state === "failed" && exitFailureCode !== undefined ? extractProcessExitEvidence(message) : undefined;
+		state === "failed" && (exitFailureCode !== undefined || policy?.phase === "timeout")
+			? extractProcessExitEvidence(message)
+			: undefined;
 	const failureCode = policy?.failureCode ?? classifyToolFailure(message, errorClass);
 	return {
 		failureCode,
@@ -1040,6 +1075,7 @@ function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0
 			const assessment = retained ? undefined : assessToolFailure(textPayload, state);
 			let failureKey: string;
 			let executionKey: string | undefined;
+			let rawKey: string | undefined;
 			let tool: string;
 			let operation: string;
 			if (retained) {
@@ -1047,6 +1083,7 @@ function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0
 				executionKey = call
 					? getToolExecutionKey(call.name, call.arguments)
 					: getToolFailureRecordExecutionKey(retained);
+				rawKey = call ? getToolRawOperationKey(call.name, call.arguments) : getToolFailureRecordRawKey(retained);
 				tool = retained.tool;
 				operation = retained.operation;
 			} else {
@@ -1056,6 +1093,7 @@ function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0
 				);
 				failureKey = identity.failureKey;
 				executionKey = identity.executionKey;
+				rawKey = identity.rawKey;
 				tool = identity.tool;
 				operation = identity.operation;
 			}
@@ -1065,6 +1103,7 @@ function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0
 				version: TOOL_FAILURE_MEMORY_VERSION,
 				failureKey,
 				...(executionKey ? { [TOOL_FAILURE_EXECUTION_KEY]: executionKey } : {}),
+				...(rawKey ? { [TOOL_FAILURE_RAW_KEY]: rawKey } : {}),
 				tool,
 				operation,
 				occurrence,
@@ -1210,6 +1249,7 @@ export function rememberToolFailure(
 		version: TOOL_FAILURE_MEMORY_VERSION,
 		failureKey: identity ? identity.failureKey : `directive:${boundedFailureCode(failureCode)}`,
 		[TOOL_FAILURE_EXECUTION_KEY]: identity ? identity.executionKey : getToolExecutionKey(tool, args),
+		[TOOL_FAILURE_RAW_KEY]: identity ? identity.rawKey : getToolRawOperationKey(tool, args),
 		tool: identity ? identity.tool : truncate(tool, MAX_TOOL_NAME_CHARS),
 		operation: identity ? identity.operation : "[discarded]",
 		occurrence: isDiscard ? 1 : (previous?.occurrence ?? 0) + 1,
@@ -1336,14 +1376,20 @@ export function createToolFailureResult(
 
 export function createRepeatedToolFailureResult(
 	record: ToolFailureMemoryRecord,
+	envelopeOnlyChange = false,
 ): AgentToolResult<ToolFailureMemoryDetails> {
 	const retainedRecord = retainBlockedToolFailure(record);
 	// The note states why this call did not run and what makes it runnable again; the retained
 	// root-cause correction stays the next_action, because that is the actionable half. Evidence is
 	// left out: nothing executed, so there is none — the prior run's evidence is still in the
 	// transcript, and repeating it here would only pay for the same bytes twice.
+	//
+	// Never claim the arguments were unchanged when they were not: a model that believes its edit was
+	// lost will resend it, which is the loop this notice exists to end.
 	const replayNotice = truncateMiddle(
-		`Not executed: unchanged. ${TOOL_FAILURE_READMISSION_RULE}`,
+		envelopeOnlyChange
+			? `Not executed: only resource-envelope fields (timeout/wait bounds) differ, so this is the same operation. Change the operation itself. ${TOOL_FAILURE_READMISSION_RULE}`
+			: `Not executed: unchanged. ${TOOL_FAILURE_READMISSION_RULE}`,
 		MAX_DIAGNOSTIC_CHARS,
 	);
 	const blockedResult = createToolFailureResult({

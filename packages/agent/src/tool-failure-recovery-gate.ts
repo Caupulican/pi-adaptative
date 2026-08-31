@@ -3,6 +3,8 @@ import {
 	getToolExecutionKey,
 	getToolExecutionKeyHashParts,
 	getToolFailureRecordExecutionKey,
+	getToolFailureRecordRawKey,
+	getToolRawOperationKey,
 	isPromptScopedFailureCode,
 	readVisibleToolFailureCode,
 	restoreToolFailureRecord,
@@ -28,6 +30,37 @@ const MAX_TARGET_SCOPE_CHARS = 32_768;
 const MAX_ACTION_INSTRUCTION_CHARS = 160;
 const MAX_RECOVERY_GUIDANCE_CHARS = 320;
 const TARGET_KIND_PATTERN = /^[a-z0-9][a-z0-9._:-]*$/;
+/** Two doublings is 4x the original bound; past that the operation needs narrowing, not more time. */
+const MAX_BOUND_ESCALATIONS_PER_EPISODE = 2;
+/** A bound must at least double to count as a repair; +1ms increments must buy nothing. */
+const MIN_BOUND_ESCALATION_FACTOR = 2;
+/**
+ * Resource-envelope field names, matched case-insensitively after removing separators. Mirrors the
+ * set that `tool-failure-memory` excludes from operation identity — these name the bound, not the work.
+ */
+const ENVELOPE_BOUND_KEYS = new Set([
+	"timeout",
+	"timeoutms",
+	"timeoutsec",
+	"timeoutseconds",
+	"maxwait",
+	"maxwaitms",
+	"waitms",
+	"waitsec",
+	"waitseconds",
+]);
+
+/** Largest positive finite bound named by any envelope field, or undefined when none is present. */
+function readEnvelopeBound(args: unknown): number | undefined {
+	if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+	let bound: number | undefined;
+	for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
+		if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) continue;
+		if (!ENVELOPE_BOUND_KEYS.has(key.toLowerCase().replaceAll(/[_-]/g, ""))) continue;
+		bound = bound === undefined ? value : Math.max(bound, value);
+	}
+	return bound;
+}
 
 export interface ToolFailureRecoveryPlan {
 	targets: readonly AgentToolFailureRecoveryTarget[];
@@ -44,7 +77,17 @@ export type ToolFailureRecoveryGateEffect =
 	  }
 	| { kind: "success"; tool: AgentTool<any>; args: unknown };
 
-export type ToolFailureRecoveryAdmission = { kind: "allowed" } | { kind: "blocked"; record: ToolFailureMemoryRecord };
+export type ToolFailureRecoveryAdmission =
+	| { kind: "allowed" }
+	| {
+			kind: "blocked";
+			record: ToolFailureMemoryRecord;
+			/**
+			 * The model did change the arguments, but only in resource-envelope fields, which are not
+			 * part of the operation. The refusal must say that rather than claim nothing changed.
+			 */
+			envelopeOnlyChange: boolean;
+	  };
 
 /**
  * What is known about one exact operation the last time it ran to completion.
@@ -62,6 +105,18 @@ interface OperationState {
 	 * call really can return something new. Spending these does not depend on the world moving.
 	 */
 	unchangedRetriesRemaining: number;
+	/**
+	 * Largest resource-envelope bound this operation carried when it last ran, in whatever unit the
+	 * tool uses. Units never need normalizing: this is only ever compared against a later value of
+	 * the same field on the same operation, so the unit cancels.
+	 */
+	envelopeBound?: number;
+	/**
+	 * Bound escalations this episode still allows. A timeout is the one failure whose canonical repair
+	 * is a bigger bound, so a strict, material increase buys an execution — but only a fixed few, or
+	 * the operation could be replayed forever by growing its own timeout.
+	 */
+	boundEscalationsRemaining: number;
 }
 
 interface AvailableRecoveryAction {
@@ -152,6 +207,8 @@ export class ToolFailureRecoveryGate {
 				record: event.record,
 				worldCursorAtLastExecution: event.worldCursor,
 				unchangedRetriesRemaining: 0,
+				envelopeBound: event.envelopeBound,
+				boundEscalationsRemaining: MAX_BOUND_ESCALATIONS_PER_EPISODE,
 			});
 		});
 	}
@@ -218,17 +275,49 @@ export class ToolFailureRecoveryGate {
 			// repetition state, so it must not become one through the caller's failure memory either.
 			!isPromptScopedFailureCode(record.failureCode)
 		) {
-			state = { record, worldCursorAtLastExecution: this.worldCursor, unchangedRetriesRemaining: 0 };
+			state = {
+				record,
+				worldCursorAtLastExecution: this.worldCursor,
+				unchangedRetriesRemaining: 0,
+				envelopeBound: readEnvelopeBound(args),
+				boundEscalationsRemaining: MAX_BOUND_ESCALATIONS_PER_EPISODE,
+			};
 			this.retainState(executionKey, state);
 		}
 		if (!state) return { kind: "allowed" };
 		if (record && getToolFailureRecordExecutionKey(record) === executionKey) state.record = record;
+
+		// A schema rejection judges the literal argument object, so the field it named is part of the
+		// operation for this purpose even though execution identity omits it. Refusing the corrected
+		// call here would refuse the exact repair the harness demanded.
+		const storedRawKey = getToolFailureRecordRawKey(state.record);
+		const incomingRawKey = getToolRawOperationKey(tool.name, args);
+		const rawArgumentsDiffer = storedRawKey !== undefined && storedRawKey !== incomingRawKey;
+		if (state.record.phase === "validation" && rawArgumentsDiffer) {
+			this.statesByExecutionKey.delete(executionKey);
+			return { kind: "allowed" };
+		}
+
 		if (this.worldCursor > state.worldCursorAtLastExecution) return { kind: "allowed" };
 		if (state.unchangedRetriesRemaining > 0) {
 			state.unchangedRetriesRemaining--;
 			return { kind: "allowed" };
 		}
-		return { kind: "blocked", record: state.record };
+		// Raising the bound is the canonical repair for a timeout. Admit a strict, material increase,
+		// a bounded number of times, so the one fix that addresses the cause is not classified as no fix.
+		if (state.record.phase === "timeout" && state.boundEscalationsRemaining > 0) {
+			const incomingBound = readEnvelopeBound(args);
+			if (
+				incomingBound !== undefined &&
+				state.envelopeBound !== undefined &&
+				incomingBound >= state.envelopeBound * MIN_BOUND_ESCALATION_FACTOR
+			) {
+				state.boundEscalationsRemaining--;
+				state.envelopeBound = incomingBound;
+				return { kind: "allowed" };
+			}
+		}
+		return { kind: "blocked", record: state.record, envelopeOnlyChange: rawArgumentsDiffer };
 	}
 
 	apply(effect: ToolFailureRecoveryGateEffect | undefined): void {
@@ -255,6 +344,11 @@ export class ToolFailureRecoveryGate {
 			unchangedRetriesRemaining: startsFreshEpisode
 				? getToolExecutionUnchangedRetryLimit(record.failureCode)
 				: previous.unchangedRetriesRemaining,
+			// The bound just executed becomes the baseline the next one must materially beat.
+			envelopeBound: readEnvelopeBound(args),
+			boundEscalationsRemaining: startsFreshEpisode
+				? MAX_BOUND_ESCALATIONS_PER_EPISODE
+				: previous.boundEscalationsRemaining,
 		});
 	}
 
@@ -309,7 +403,13 @@ export class ToolFailureRecoveryGate {
 			restored =
 				event.kind === "resolved"
 					? undefined
-					: { record: event.record, worldCursorAtLastExecution: event.worldCursor, unchangedRetriesRemaining: 0 };
+					: {
+							record: event.record,
+							worldCursorAtLastExecution: event.worldCursor,
+							unchangedRetriesRemaining: 0,
+							envelopeBound: event.envelopeBound,
+							boundEscalationsRemaining: MAX_BOUND_ESCALATIONS_PER_EPISODE,
+						};
 		});
 		if (restored) this.retainState(executionKey, restored);
 		return restored;
@@ -318,7 +418,13 @@ export class ToolFailureRecoveryGate {
 
 type TranscriptEvent =
 	| { kind: "resolved"; executionKey: string; worldCursor: number }
-	| { kind: "unproductive"; executionKey: string; worldCursor: number; record: ToolFailureMemoryRecord };
+	| {
+			kind: "unproductive";
+			executionKey: string;
+			worldCursor: number;
+			record: ToolFailureMemoryRecord;
+			envelopeBound?: number;
+	  };
 
 /**
  * Replay a transcript's world advances in order, reporting each completed operation with the cursor
@@ -359,7 +465,7 @@ function walkTranscript(messages: readonly AgentMessage[], visit: (event: Transc
 		) {
 			continue;
 		}
-		visit({ kind: "unproductive", executionKey, worldCursor, record });
+		visit({ kind: "unproductive", executionKey, worldCursor, record, envelopeBound: readEnvelopeBound(call.args) });
 	}
 	return worldCursor;
 }

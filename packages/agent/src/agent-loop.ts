@@ -1541,7 +1541,7 @@ async function prepareToolCall(
 		const unresolvedRecord = getUnresolvedToolFailure(toolFailureMemory, toolCall.name, validatedArgs);
 		const admission = toolFailureRecoveryGate.admit(tool, validatedArgs, unresolvedRecord, currentContext.messages);
 		if (admission.kind === "blocked") {
-			const result = createRepeatedToolFailureResult(admission.record);
+			const result = createRepeatedToolFailureResult(admission.record, admission.envelopeOnlyChange);
 			const memoryRecord = result.details.piToolFailureMemory;
 			toolFailureMemory.set(admission.record.failureKey, memoryRecord);
 			return {

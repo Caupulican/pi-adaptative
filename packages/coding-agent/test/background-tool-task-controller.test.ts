@@ -70,6 +70,49 @@ function createHarness(sessionId: string) {
 }
 
 describe("BackgroundToolTaskController", () => {
+	// Origin: session 01a058a5. `tool_task list` showed `…"tool":"bash","failure_code` — the record was
+	// head-truncated mid-key, so the only field that says why the task failed was the field it lost.
+	it("projects the cause out of a harness failure record instead of truncating its bookkeeping", async () => {
+		const { controller, persisted } = createHarness("session-a");
+		const call = controlledContext("call-1");
+		controller.handoff(call.context);
+
+		call.resolveCompletion({
+			toolCall: call.context.toolCall,
+			result: {
+				content: [
+					{
+						type: "text",
+						text: `[harness] ${JSON.stringify({
+							MUST: true,
+							failure_key: "bash:915721df0e58130b2c4b4d73f8df5071",
+							occ: 1,
+							kind_mistakes: 1,
+							mistake_kind: "bash",
+							state: "failed",
+							phase: "timeout",
+							tool: "bash",
+							failure_code: "timeout",
+							next_action: "Operation timed out. Narrow/split work.",
+						})}`,
+					},
+				],
+				details: {},
+			},
+			isError: true,
+		});
+		await controller.waitForNotifications();
+
+		const summary = persisted.at(-1)?.summary ?? "";
+		expect(summary).toContain("failure_code=timeout");
+		expect(summary).toContain("phase=timeout");
+		// Harness bookkeeping never gets to crowd out the cause.
+		expect(summary).not.toContain("MUST");
+		expect(summary).not.toContain("kind_mistakes");
+		expect(summary).not.toContain("failure_key");
+		await controller.shutdown();
+	});
+
 	it("bounds a batched terminal handoff while retaining exact task identities", () => {
 		const records = Array.from(
 			{ length: 12 },
