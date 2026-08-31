@@ -1200,6 +1200,12 @@ export class SessionManager {
 		this._resetEntryFileIndex(true);
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
+			// The physical first JSONL record is authoritative. A later valid header must not
+			// launder a malformed, blank, or oversized prefix that the streaming parser skips.
+			if (statSync(this.sessionFile).size > 0 && !readSessionHeader(this.sessionFile)) {
+				throw new Error(`Session file does not begin with a valid session header: ${this.sessionFile}`);
+			}
+
 			// The session file is the cold payload arena. Release each large payload as
 			// soon as its JSONL record is parsed so GC can reclaim it during this pass;
 			// waiting until the complete history is loaded makes peak heap proportional
@@ -1221,9 +1227,12 @@ export class SessionManager {
 			}
 			if (indexedEveryColdPayload) this.indexedSessionFileBytes = loaded.indexedBytes;
 
-			// If file was empty or corrupted (no valid header), truncate and start fresh
-			// to avoid appending messages without a session header (which breaks the session)
+			// Only a genuinely empty file may be initialized in place. Any non-empty file
+			// without a valid header is preserved for explicit recovery rather than destroyed.
 			if (this.fileEntries.length === 0) {
+				if (loaded.indexedBytes > 0) {
+					throw new Error(`Session file does not begin with a valid session header: ${this.sessionFile}`);
+				}
 				const explicitPath = this.sessionFile;
 				this._resetEntryFileIndex(true);
 				this.newSession();
