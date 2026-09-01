@@ -81,28 +81,41 @@ jobs:
         run: node scripts/profile-coding-agent-turn.mjs --turns ${{ inputs.loop_turns }} --profile-dir "$PROFILE_DIR/agent-core" --label turn-profile | tee "$PROFILE_DIR/agent-core/turn-profile.txt"
 
       - name: Startup profile
-        run: node scripts/profile-coding-agent-node.mjs --mode rpc --profile-dir "$PROFILE_DIR/startup" | tee "$PROFILE_DIR/startup/startup.txt" || echo "::warning title=Startup profile::the startup profiler reported a failure; read the artifact"
+        run: node scripts/profile-coding-agent-node.mjs --mode rpc --cpu-profile --profile-dir "$PROFILE_DIR/startup" | tee "$PROFILE_DIR/startup/startup.txt" || echo "::warning title=Startup profile::the startup profiler reported a failure; read the artifact"
 
       - name: Summarize
+        # Never fails: an instrument that produced nothing is reported as missing, not as an error,
+        # so the other instruments' tables still land in the summary.
         run: |
+          shopt -s nullglob
           {
+            echo "## ${{ matrix.os }}"
+            echo
             echo "## Long-session growth (host)"
-            node scripts/report-long-session-growth.mjs "$PROFILE_DIR/host/host-session-profile.txt"
+            if [ -f "$PROFILE_DIR/host/host-session-profile.txt" ]; then
+              node scripts/report-long-session-growth.mjs "$PROFILE_DIR/host/host-session-profile.txt"
+            else
+              echo "::warning title=Host profile::no host-session-profile.txt was produced"
+            fi
             echo
             echo "## Host long-session self time"
-            node scripts/analyze-cpuprofile.mjs "$PROFILE_DIR/host/host-session.cpuprofile" --top 40 --title "host long-session (${{ inputs.host_turns }} turns)"
+            if [ -f "$PROFILE_DIR/host/host-session.cpuprofile" ]; then
+              node scripts/analyze-cpuprofile.mjs "$PROFILE_DIR/host/host-session.cpuprofile" --top 40 --title "host long-session (${{ inputs.host_turns }} turns)"
+            else
+              echo "(no host .cpuprofile was produced)"
+            fi
             echo
             echo "## Agent-core per-turn self time"
             for f in "$PROFILE_DIR"/agent-core/*.cpuprofile; do node scripts/analyze-cpuprofile.mjs "$f" --top 30 --title "agent-core per-turn (${{ inputs.loop_turns }} turns)"; done
             echo
             echo "## Agent-core turn durations by decile"
             echo '```'
-            cat "$PROFILE_DIR/agent-core/turn-profile.txt"
+            cat "$PROFILE_DIR/agent-core/turn-profile.txt" 2>/dev/null || echo "(no turn-profile.txt was produced)"
             echo '```'
             echo
             echo "## Startup self time"
             for f in "$PROFILE_DIR"/startup/*.cpuprofile; do node scripts/analyze-cpuprofile.mjs "$f" --top 25 --title "startup $(basename "$f")"; done
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY" || true
 
       - name: Upload profiles
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
