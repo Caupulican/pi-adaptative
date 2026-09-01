@@ -163,6 +163,29 @@ function contentDescriptor(content: unknown): unknown {
 	});
 }
 
+/**
+ * Per-message metadata by message identity. The history fingerprint samples a bounded window of
+ * messages, but each sampled message is canonicalized and hashed field by field, and the window's
+ * head is the same objects request after request; memoizing the descriptor makes that cost
+ * proportional to messages not seen before. Messages are immutable once built.
+ */
+const providerMessageMetadata = new WeakMap<object, unknown>();
+
+function providerMessageDescriptor(message: object): unknown {
+	const cached = providerMessageMetadata.get(message);
+	if (cached !== undefined) return cached;
+	const candidate = message as Record<string, unknown>;
+	const entry: Record<string, unknown> = {
+		role: candidate.role,
+		content: contentDescriptor(candidate.content),
+	};
+	for (const key of ["id", "callId", "toolCallId", "toolName", "provider", "model"] as const) {
+		if (typeof candidate[key] === "string") entry[key] = candidate[key];
+	}
+	providerMessageMetadata.set(message, entry);
+	return entry;
+}
+
 function providerHistoryMetadata(messages: readonly unknown[]): unknown {
 	const metadata: unknown[] = [];
 	const firstCount = Math.min(messages.length, Math.floor(MAX_PROVIDER_HISTORY_MESSAGES / 4));
@@ -182,15 +205,7 @@ function providerHistoryMetadata(messages: readonly unknown[]): unknown {
 			metadata.push({ type: typeof message });
 			continue;
 		}
-		const candidate = message as Record<string, unknown>;
-		const entry: Record<string, unknown> = {
-			role: candidate.role,
-			content: contentDescriptor(candidate.content),
-		};
-		for (const key of ["id", "callId", "toolCallId", "toolName", "provider", "model"] as const) {
-			if (typeof candidate[key] === "string") entry[key] = candidate[key];
-		}
-		metadata.push(entry);
+		metadata.push(providerMessageDescriptor(message));
 	}
 	return {
 		messageCount: messages.length,

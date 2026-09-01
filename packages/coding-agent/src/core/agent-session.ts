@@ -73,7 +73,7 @@ import type { MemoryProvider as ContextMemoryProvider } from "./context/memory-p
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import type { PathAliasTable } from "./context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "./context/path-alias-tool-wrap.ts";
-import type { ContextGcReport } from "./context-gc.ts";
+import type { ContextGcReport, ContextGcResult } from "./context-gc.ts";
 import { ContextPipeline } from "./context-pipeline.ts";
 import type { SessionCostSummary } from "./cost/cost-summary.ts";
 import type { DailyUsageTotals } from "./cost/daily-usage.ts";
@@ -1697,7 +1697,7 @@ export class AgentSession {
 		writePayloads: boolean,
 		/** Already-sent boundary packing must not rewrite below. See {@link ContextPipeline.applyContextGc}. */
 		frozenBelow: number,
-	): { messages: AgentMessage[]; report: ContextGcReport } {
+	): ContextGcResult {
 		return this._pipeline.applyContextGc(messages, writePayloads, frozenBelow);
 	}
 

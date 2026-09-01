@@ -7,7 +7,7 @@ import type { PromptEnforcementReport } from "./context/context-prompt-enforceme
 import type { PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import { frozenPrefixLength } from "./context/prefix-stability.ts";
-import type { ContextGcReport } from "./context-gc.ts";
+import type { ContextGcReport, ContextGcResult } from "./context-gc.ts";
 import { captureGoalContextProjection, injectCompactGoalContext } from "./goals/compact-goal-context.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { CurrentTurnReflectionCuePlan } from "./reflection-controller.ts";
@@ -28,7 +28,7 @@ export interface ProviderRequestContextControllerDeps {
 		writePayloads: boolean,
 		/** Already-sent boundary packing must not rewrite below (see `frozenPrefixLength`). */
 		frozenBelow: number,
-	): { messages: AgentMessage[]; report: ContextGcReport };
+	): ContextGcResult;
 	correlatePromptPolicyWithContextGc(report: ContextGcReport): void;
 	runPromptEnforcement(
 		messages: AgentMessage[],
@@ -128,7 +128,7 @@ export class ProviderRequestContextController {
 			memoryReport,
 		);
 		const beforeSkill = injectCompactGoalContext(withMemory, goalState, goalContextProjection);
-		if (!isDeepStrictEqual(beforeSkill.slice(0, compactableMessages.length), compactableMessages)) {
+		if (!sameMessages(beforeSkill.slice(0, compactableMessages.length), compactableMessages)) {
 			throw new Error("Provider request transient contributors changed compactable history");
 		}
 		const legend = pathAliasPlan.legend;
@@ -140,39 +140,30 @@ export class ProviderRequestContextController {
 			reflectionCuePlan?.isCurrent() !== false &&
 			this.deps.skillVault.getContextRevision() === skillRevision &&
 			isDeepStrictEqual(this.deps.getGoalState(), goalState);
-		const projectCommit = (writePayloads: boolean) => {
-			const gc = this.deps.applyContextGc(durableMessages, writePayloads, frozenBelow);
-			const aliased = this.deps.applyPathAliases(gc.messages);
-			const providerMessages = [...aliased.messages, ...providerTransients];
-			const enforcement = this.deps.runPromptEnforcement(providerMessages, shadowReport);
-			return { enforcement, gc, providerMessages, aliased };
-		};
+		// One projection serves preview, currency check and commit. The plan is a pure function of the
+		// durable messages (same array, same objects), the dependencies `dependenciesCurrent` tracks,
+		// and the curator digests the GC pass looked up -- which `previewGc.isCurrent()` re-resolves.
+		// Re-projecting the whole request per stage, and deep-comparing every message to prove the
+		// re-projection matched, cost three full passes over the history on every request.
+		const planCurrent = () =>
+			dependenciesCurrent() &&
+			previewGc.isCurrent() &&
+			this.deps.skillVault.previewSystemPromptSection() === transientSystemPrompt;
 
 		return {
 			messages: compactableMessages,
 			transientMessages,
 			transientSystemPrompt,
 			isCurrent: dependenciesCurrent,
-			prepareCommit: () => {
-				if (!dependenciesCurrent()) return false;
-				const projected = projectCommit(false);
-				return (
-					isDeepStrictEqual(projected.enforcement.messages, previewEnforcement.messages) &&
-					this.deps.skillVault.previewSystemPromptSection() === transientSystemPrompt &&
-					projected.aliased.legend === legend
-				);
-			},
+			prepareCommit: () => planCurrent(),
 			commit: () => {
-				const committed = projectCommit(true);
-				if (!isDeepStrictEqual(committed.enforcement.messages, previewEnforcement.messages)) {
+				if (!planCurrent()) {
 					throw new Error("Committed provider request context diverged from its accepted plan");
 				}
-				this.deps.correlatePromptPolicyWithContextGc(committed.gc.report);
-				this.deps.enqueueRelevanceCuration(committed.providerMessages, shadowReport);
+				previewGc.commit();
+				this.deps.correlatePromptPolicyWithContextGc(previewGc.report);
+				this.deps.enqueueRelevanceCuration(previewProviderMessages, shadowReport);
 				this.deps.maybeDrainBrainCuration();
-				if (committed.aliased.legend !== legend) {
-					throw new Error("Committed path alias legend diverged from its accepted plan");
-				}
 				if (this.deps.skillVault.commitSystemPromptSection() !== transientSystemPrompt) {
 					throw new Error("Committed active skill context diverged from its accepted plan");
 				}
@@ -180,4 +171,18 @@ export class ProviderRequestContextController {
 			},
 		};
 	}
+}
+
+/**
+ * Same messages, cheaply: identity first, structural equality only for the elements that differ.
+ * Contributors that leave compactable history alone hand back the very same objects, so this is
+ * usually an O(n) reference walk; `isDeepStrictEqual` over the whole history was O(bytes) per
+ * request for the same answer.
+ */
+function sameMessages(left: readonly AgentMessage[], right: readonly AgentMessage[]): boolean {
+	if (left.length !== right.length) return false;
+	for (let index = 0; index < left.length; index++) {
+		if (left[index] !== right[index] && !isDeepStrictEqual(left[index], right[index])) return false;
+	}
+	return true;
 }

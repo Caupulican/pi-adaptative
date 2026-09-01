@@ -64,7 +64,7 @@ import {
 import { latestUserPromptText, textContentPrefix } from "./context/message-text.ts";
 import { PathAliasRuntime } from "./context/path-alias-session.ts";
 import type { PathAliasTable } from "./context/path-alias-table.ts";
-import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
+import { applyContextGc, type ContextGcReport, type ContextGcResult } from "./context-gc.ts";
 import { runIsolatedTextCompletion } from "./isolated-text-completion.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -751,7 +751,7 @@ export class ContextPipeline {
 		 * live mark to honor (a read-only report/dashboard view) must pass 0 explicitly.
 		 */
 		frozenBelow: number,
-	): { messages: AgentMessage[]; report: ContextGcReport } {
+	): ContextGcResult {
 		try {
 			const settings = this.deps.getSettingsManager().getContextGcSettings();
 			// Merge the ACTIVE memory providers' own page markers (e.g. transcript-recall's
@@ -761,6 +761,9 @@ export class ContextPipeline {
 			// accumulate raw for the life of the session — the exact growth Bug #7 GC exists to stop.
 			const providerMarkers = this.deps.getMemoryManager().getContextMarkers();
 			const curationSettings = this.deps.getSettingsManager().getContextCurationSettings();
+			// Curator work is collected during the pass and enqueued only from `commit()`, so the
+			// read-only report path stays side-effect free while ONE pass still serves every stage.
+			const pendingCuration: Array<{ key: string; content: string }> = [];
 			const result = applyContextGc(messages, {
 				...settings,
 				semanticMemory: {
@@ -770,38 +773,37 @@ export class ContextPipeline {
 				cwd: this.deps.getCwd(),
 				storageDir: this._contextGcStorageDir(),
 				acquireStorageDir: () => this._ensureContextStoreRetention().gcDir,
-				writePayloads,
+				// Side effects are deferred into `commit()` below and applied there (or immediately when
+				// `writePayloads`), so ONE pass serves preview, currency check and commit.
+				writePayloads: false,
 				frozenBelow,
 				curation: curationSettings.enabled
 					? {
-							resolveDigest: (digestKey) => {
-								const digest = this._brainCurator.getDigest(digestKey);
-								// Count serves on the REAL per-turn pass only, never the report path.
-								if (digest !== undefined && writePayloads) this._brainCurator.noteDigestServed();
-								return digest;
+							resolveDigest: (digestKey) => this._brainCurator.getDigest(digestKey),
+							onPacked: (record, originalText) => {
+								pendingCuration.push({ key: record.key ?? record.toolCallId, content: originalText });
 							},
-							// Only the real per-turn pass enqueues work; the read-only report path
-							// (writePayloads=false) stays side-effect free.
-							onPacked: writePayloads
-								? (record, originalText) => {
-										this._brainCurator.enqueue({
-											kind: "stub_digest",
-											key: record.key ?? record.toolCallId,
-											content: originalText,
-										});
-									}
-								: undefined,
 						}
 					: undefined,
 			});
-			if (writePayloads) this._latestContextGcReport = result.report;
-			// Only release/reclaim on the real per-turn pass (writePayloads=true), never on
-			// the read-only status-report path (getContextGcReport with writePayloads=false),
-			// so merely inspecting the report can't have side effects.
-			if (writePayloads && result.report.packedCount > 0) {
-				this._releaseGcPackedArtifactReferences(messages, result.report);
-			}
-			return result;
+			let committed = false;
+			const commit = () => {
+				if (committed) return;
+				committed = true;
+				result.commit();
+				for (const job of pendingCuration) this._brainCurator.enqueue({ kind: "stub_digest", ...job });
+				// Count digest serves on the REAL per-turn pass only, once per packed record that rendered one.
+				if (curationSettings.enabled) {
+					for (const record of result.report.records) {
+						if (record.digest !== undefined) this._brainCurator.noteDigestServed();
+					}
+				}
+				this._latestContextGcReport = result.report;
+				// Only release/reclaim on the real per-turn pass, never on a read-only report path.
+				if (result.report.packedCount > 0) this._releaseGcPackedArtifactReferences(messages, result.report);
+			};
+			if (writePayloads) commit();
+			return { messages: result.messages, report: result.report, isCurrent: result.isCurrent, commit };
 		} catch {
 			const report: ContextGcReport = {
 				enabled: false,
@@ -811,8 +813,14 @@ export class ContextPipeline {
 				savedTokens: 0,
 				records: [],
 			};
-			if (writePayloads) this._latestContextGcReport = report;
-			return { messages, report };
+			let committed = false;
+			const commit = () => {
+				if (committed) return;
+				committed = true;
+				this._latestContextGcReport = report;
+			};
+			if (writePayloads) commit();
+			return { messages, report, isCurrent: () => true, commit };
 		}
 	}
 

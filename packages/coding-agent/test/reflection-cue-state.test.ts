@@ -180,7 +180,12 @@ describe("durable current-turn reflection cue state", () => {
 			runContextAudit: (_messages: AgentMessage[]) => ({}),
 			runPromptPolicyPlanning: (_report: unknown) => ({}),
 			runMemoryRetrieval: async (_messages: AgentMessage[]) => ({}),
-			applyContextGc: (messages: AgentMessage[], _writePayloads: boolean) => ({ messages, report: {} }),
+			applyContextGc: (messages: AgentMessage[], _writePayloads: boolean) => ({
+				messages,
+				report: {},
+				isCurrent: () => true,
+				commit: () => {},
+			}),
 			correlatePromptPolicyWithContextGc: (_report: unknown) => undefined,
 			runPromptEnforcement: (messages: AgentMessage[], _report: unknown) => ({ messages, report: {} }),
 			enqueueRelevanceCuration: (_messages: AgentMessage[], _report: unknown) => undefined,

@@ -104,6 +104,19 @@ export interface ContextGcReport {
 export interface ContextGcResult {
 	messages: AgentMessage[];
 	report: ContextGcReport;
+	/**
+	 * Whether a pass over the same messages now would pack them identically. The only input that can
+	 * change underneath a plan between preview and commit is the curator digest a packed record
+	 * renders, so this re-resolves exactly the digests the pass looked up and nothing else.
+	 */
+	isCurrent(): boolean;
+	/**
+	 * Store each packed original. Already done when the pass ran with `writePayloads`; otherwise
+	 * deferred to here so a plan can be previewed, checked and committed from ONE pass instead of
+	 * being recomputed per stage. (`curation.onPacked` fires during the pass, as it always has; a
+	 * caller that wants it deferred collects in the hook and drains at its own commit.)
+	 */
+	commit(): void;
 }
 
 const DEFAULT_SEMANTIC_MEMORY_GC_SETTINGS: Required<SemanticMemoryGcSettings> = {
@@ -365,20 +378,52 @@ function storagePathFor(storageDir: string | undefined, key: string): string | u
 	return resolve(storageDir, `${key}.txt`);
 }
 
-function maybeStoreOriginal(options: ContextGcOptions, key: string, original: string): string | undefined {
-	const plannedPath = storagePathFor(options.storageDir, key);
-	if (!plannedPath || !options.writePayloads) return plannedPath;
+/**
+ * Originals this process has already stored, by path. A packed message is re-packed on every
+ * request it stays packed for, and re-storing it meant a lock and a stat per record per request;
+ * the file is content-addressed and never rewritten, so once written here it stays written.
+ */
+const storedOriginalPaths = new Set<string>();
+
+function storeOriginal(options: ContextGcOptions, key: string, original: string): void {
 	try {
 		const storageDir = options.acquireStorageDir?.() ?? options.storageDir;
 		const path = storagePathFor(storageDir, key);
-		if (!path || !storageDir) return undefined;
+		if (!path || !storageDir || storedOriginalPaths.has(path)) return;
 		withFileLockSync(path, () => {
 			if (!existsSync(path)) writeFileAtomicSync(path, original);
 		});
-		return path;
+		storedOriginalPaths.add(path);
 	} catch {
-		return undefined;
+		// Best-effort: the packed message still names the planned path; a missing original reads as
+		// unavailable rather than failing the request.
 	}
+}
+
+/**
+ * What a message packed into last time, keyed by message identity. A message stays packed for
+ * every request after it first qualifies, and each request used to re-read its text, re-hash it,
+ * re-estimate its tokens and rebuild the packed replacement -- the same work for the same answer,
+ * on every message between the frozen prefix and the recent window. The memo returns the SAME
+ * packed object while the inputs that shape it are unchanged, which also keeps the provider-facing
+ * message identity stable across requests.
+ */
+interface PackedMemo {
+	readonly originalText: string;
+	readonly originalTokens: number;
+	readonly key: string;
+	/** The message index the key was derived from; only the semantic-memory key includes it. */
+	readonly keyIndex: number | undefined;
+	/** Everything `makePacked` renders from, so a changed reason, digest or path repacks. */
+	readonly shape: string;
+	readonly packed: AgentMessage;
+	readonly packedTokens: number;
+}
+
+const packedMemos = new WeakMap<AgentMessage, PackedMemo>();
+
+function packedShape(record: ContextGcPackedRecord): string {
+	return `${record.reason}\0${record.storagePath ?? ""}\0${record.digest ?? ""}\0${record.path ?? ""}\0${record.command ?? ""}`;
 }
 
 function reasonText(record: ContextGcPackedRecord): string {
@@ -448,25 +493,56 @@ function makePackedSemanticMemoryMessage(message: AgentMessage, record: ContextG
 	} as AgentMessage;
 }
 
+interface PackingPass {
+	readonly options: ContextGcOptions;
+	readonly report: ContextGcReport;
+	readonly nextMessages: AgentMessage[];
+	readonly resolvedDigests: Map<string, string | undefined>;
+	readonly pending: Array<{ record: ContextGcPackedRecord; originalText: string }>;
+}
+
 function commitPackedMessage<TMessage extends AgentMessage>(
-	options: ContextGcOptions,
-	report: ContextGcReport,
-	nextMessages: AgentMessage[],
+	pass: PackingPass,
 	messageIndex: number,
 	message: TMessage,
+	memo: PackedMemo | undefined,
 	originalText: string,
 	key: string,
 	record: ContextGcPackedRecord,
 	makePacked: (message: TMessage, record: ContextGcPackedRecord) => AgentMessage,
 ): void {
-	record.digest = options.curation?.resolveDigest?.(key);
-	options.curation?.onPacked?.(record, originalText);
-	const packed = makePacked(message, record);
-	record.packedTokens = estimateTokens(packed);
-	nextMessages[messageIndex] = packed;
-	report.records.push(record);
-	report.originalTokens += record.originalTokens;
-	report.packedTokens += record.packedTokens;
+	record.digest = pass.options.curation?.resolveDigest?.(key);
+	pass.resolvedDigests.set(key, record.digest);
+	// Fires before the replacement is measured, as it always has: the hook sees the record with its
+	// digest resolved and `packedTokens` still zero.
+	pass.options.curation?.onPacked?.(record, originalText);
+	const shape = packedShape(record);
+	let packed: AgentMessage;
+	if (memo && memo.key === key && memo.shape === shape) {
+		packed = memo.packed;
+		record.packedTokens = memo.packedTokens;
+	} else {
+		packed = makePacked(message, record);
+		record.packedTokens = estimateTokens(packed);
+		packedMemos.set(message, {
+			originalText,
+			originalTokens: record.originalTokens,
+			key,
+			keyIndex: record.reason === "stale-semantic-memory" ? messageIndex : undefined,
+			shape,
+			packed,
+			packedTokens: record.packedTokens,
+		});
+	}
+	pass.nextMessages[messageIndex] = packed;
+	pass.report.records.push(record);
+	pass.report.originalTokens += record.originalTokens;
+	pass.report.packedTokens += record.packedTokens;
+	pass.pending.push({ record, originalText });
+}
+
+function noEffectResult(messages: AgentMessage[], report: ContextGcReport): ContextGcResult {
+	return { messages, report, isCurrent: () => true, commit: () => {} };
 }
 
 export function applyContextGc(
@@ -489,7 +565,7 @@ export function applyContextGc(
 		savedTokens: 0,
 		records: [],
 	};
-	if (!settings.enabled) return { messages, report: baseReport };
+	if (!settings.enabled) return noEffectResult(messages, baseReport);
 
 	const options: ContextGcOptions = {
 		...settings,
@@ -518,6 +594,7 @@ export function applyContextGc(
 	);
 	const nextMessages = messages.slice();
 	let changed = false;
+	const pass: PackingPass = { options, report: baseReport, nextMessages, resolvedDigests: new Map(), pending: [] };
 
 	for (let index = 0; index < messages.length; index++) {
 		// Already sent on an accepted provider request: frozen for packing purposes for as long as
@@ -526,17 +603,21 @@ export function applyContextGc(
 		if (index < options.frozenBelow) continue;
 		const message = messages[index];
 		if (semanticIndexSet.has(index) && !preservedSemanticIndexes.has(index) && index < recentStart) {
-			const originalText = agentMessageText(message);
+			const memo = packedMemos.get(message);
+			const originalText = memo?.originalText ?? agentMessageText(message);
 			if (originalText && originalText.length >= options.semanticMemory.minChars) {
-				const originalTokens = estimateTokens(message);
-				const key = createHash("sha256")
-					.update("semantic-memory\0")
-					.update(String(index))
-					.update("\0")
-					.update(originalText)
-					.digest("hex")
-					.slice(0, 24);
-				const storagePath = maybeStoreOriginal(options, key, originalText);
+				const originalTokens = memo?.originalTokens ?? estimateTokens(message);
+				const key =
+					memo && memo.keyIndex === index
+						? memo.key
+						: createHash("sha256")
+								.update("semantic-memory\0")
+								.update(String(index))
+								.update("\0")
+								.update(originalText)
+								.digest("hex")
+								.slice(0, 24);
+				const storagePath = storagePathFor(options.storageDir, key);
 				const record: ContextGcPackedRecord = {
 					toolName: "automata-mind",
 					toolCallId: `semantic-${index}`,
@@ -548,17 +629,7 @@ export function applyContextGc(
 					storagePath,
 					key,
 				};
-				commitPackedMessage(
-					options,
-					baseReport,
-					nextMessages,
-					index,
-					message,
-					originalText,
-					key,
-					record,
-					makePackedSemanticMemoryMessage,
-				);
+				commitPackedMessage(pass, index, message, memo, originalText, key, record, makePackedSemanticMemoryMessage);
 				changed = true;
 				continue;
 			}
@@ -568,7 +639,8 @@ export function applyContextGc(
 		if (!eligibleTools.has(message.toolName)) continue;
 		if (index >= recentStart) continue;
 
-		const originalText = toolResultText(message);
+		const memo = packedMemos.get(message);
+		const originalText = memo?.originalText ?? toolResultText(message);
 		if (originalText.length < options.minToolResultChars) continue;
 
 		const call = plan.calls.get(message.toolCallId);
@@ -580,16 +652,18 @@ export function applyContextGc(
 			reason = "superseded-read";
 		}
 
-		const originalTokens = estimateTokens(message);
-		const key = createHash("sha256")
-			.update(message.toolName)
-			.update("\0")
-			.update(message.toolCallId)
-			.update("\0")
-			.update(originalText)
-			.digest("hex")
-			.slice(0, 24);
-		const storagePath = maybeStoreOriginal(options, key, originalText);
+		const originalTokens = memo?.originalTokens ?? estimateTokens(message);
+		const key =
+			memo?.key ??
+			createHash("sha256")
+				.update(message.toolName)
+				.update("\0")
+				.update(message.toolCallId)
+				.update("\0")
+				.update(originalText)
+				.digest("hex")
+				.slice(0, 24);
+		const storagePath = storagePathFor(options.storageDir, key);
 		const record: ContextGcPackedRecord = {
 			toolName: message.toolName,
 			toolCallId: message.toolCallId,
@@ -603,21 +677,28 @@ export function applyContextGc(
 			command,
 			key,
 		};
-		commitPackedMessage(
-			options,
-			baseReport,
-			nextMessages,
-			index,
-			message,
-			originalText,
-			key,
-			record,
-			makePackedToolResult,
-		);
+		commitPackedMessage(pass, index, message, memo, originalText, key, record, makePackedToolResult);
 		changed = true;
 	}
 
 	baseReport.packedCount = baseReport.records.length;
 	baseReport.savedTokens = Math.max(0, baseReport.originalTokens - baseReport.packedTokens);
-	return { messages: changed ? nextMessages : messages, report: baseReport };
+	let committed = false;
+	const commit = () => {
+		if (committed) return;
+		committed = true;
+		for (const { record, originalText } of pass.pending) {
+			if (record.storagePath) storeOriginal(options, record.key ?? "", originalText);
+		}
+	};
+	const isCurrent = () => {
+		const resolveDigest = options.curation?.resolveDigest;
+		if (!resolveDigest) return true;
+		for (const [key, digest] of pass.resolvedDigests) {
+			if (resolveDigest(key) !== digest) return false;
+		}
+		return true;
+	};
+	if (options.writePayloads) commit();
+	return { messages: changed ? nextMessages : messages, report: baseReport, isCurrent, commit };
 }

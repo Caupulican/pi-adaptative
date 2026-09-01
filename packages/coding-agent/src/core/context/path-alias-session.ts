@@ -99,6 +99,31 @@ export class PathAliasRuntime {
 				readonly result: { messages: AgentMessage[]; legend?: string };
 		  }
 		| undefined;
+	/**
+	 * Each message's rendering, keyed by message identity, with the frozen spellings it contributed
+	 * and the alias ids its rendering references.
+	 *
+	 * A span keeps the spelling it was first sent with, so a message once rendered renders the same
+	 * bytes forever: re-rendering every message on every request -- hashing every text span to look
+	 * its frozen spelling up, then scanning every rendered text for the legend -- was 9% of host CPU
+	 * over a 1,500-turn session, growing with the transcript. Only messages this runtime has never
+	 * rendered are rendered now; the rest hand back the same object, which also keeps their identity
+	 * stable for the provider. Reset with the table when the working directory changes.
+	 */
+	private rendered = new WeakMap<
+		AgentMessage,
+		{
+			readonly message: AgentMessage;
+			readonly spellings: ReadonlyArray<readonly [string, string]>;
+			readonly aliasIds: readonly string[];
+		}
+	>();
+	/**
+	 * A store that predates reservation persistence (`reservedIds` undefined after load) must have its
+	 * whole history scanned for standalone tokens once, since none of its earlier scans were kept.
+	 * Once per runtime; afterwards the persisted set carries forward and only new texts are scanned.
+	 */
+	private reservationHistoryScanned = false;
 	private readonly getCwd: () => string;
 	private readonly getDatabasePath: () => string;
 	private readonly getTurnIndex: () => number;
@@ -127,8 +152,14 @@ export class PathAliasRuntime {
 		// (WSL /mnt drives). When `p` does exist, per-id results are memoized for the sync.
 		const pEntryExists = existsSync(join(this.table.cwd, "p"));
 		const idTakenMemo = new Map<string, boolean>();
-		const extended = extendPathAliasTable(this.table, this.textsToScan(messages), {
-			reservationTexts: collectMessageTexts(messages),
+		// Reservations persist with the table whenever they grow, so texts scanned on an earlier
+		// request have already reserved every standalone token they carry; only new texts need scanning.
+		const textsToScan = this.textsToScan(messages);
+		let scanWholeHistoryForReservations = !this.reservationHistoryScanned;
+		const reservationTexts = scanWholeHistoryForReservations ? collectMessageTexts(messages) : textsToScan;
+		this.reservationHistoryScanned = true;
+		const extended = extendPathAliasTable(this.table, textsToScan, {
+			reservationTexts,
 			isIdTaken: (aliasId) => {
 				if (!pEntryExists) return false;
 				let taken = idTakenMemo.get(aliasId);
@@ -152,7 +183,13 @@ export class PathAliasRuntime {
 			this.table = extended.table;
 			if (reservationsGrew) {
 				this.store?.setMeta(RESERVED_TOKENS_KEY, JSON.stringify(this.table.reservedIds ?? []));
+				scanWholeHistoryForReservations = false;
 			}
+		}
+		// The one-time whole-history scan is recorded even when it reserved nothing, so the next
+		// process starts from the persisted set instead of scanning the history again.
+		if (scanWholeHistoryForReservations) {
+			this.store?.setMeta(RESERVED_TOKENS_KEY, JSON.stringify(this.table.reservedIds ?? []));
 		}
 		const maxTs = maxMessageTimestamp(messages);
 		if (maxTs > this.lastScannedTs) {
@@ -160,7 +197,6 @@ export class PathAliasRuntime {
 			this.store?.setMeta(LAST_SCANNED_TS_KEY, String(maxTs));
 		}
 		const rewritten = this.renderFrozen(messages);
-		for (const id of collectActiveAliasIds(collectMessageTexts(rewritten))) this.legendIds.add(id);
 		const result = {
 			messages: rewritten,
 			legend: formatPathAliasLegendForIds(this.table, this.legendIds),
@@ -176,16 +212,26 @@ export class PathAliasRuntime {
 	 */
 	private renderFrozen(messages: readonly AgentMessage[]): AgentMessage[] {
 		const live = new Map<string, string>();
-		const rendered = rewriteAgentMessagesWith(messages, (text) => {
-			const key = createHash("sha256").update(text).digest("hex");
-			const frozen = live.get(key) ?? this.frozenSpellings.get(key);
-			if (frozen !== undefined) {
-				live.set(key, frozen);
-				return frozen;
+		const rendered = messages.map((message) => {
+			const memo = this.rendered.get(message);
+			if (memo) {
+				// Its spellings stay live for any later message that repeats one of its spans.
+				for (const [key, spelling] of memo.spellings) live.set(key, spelling);
+				return memo.message;
 			}
-			const fresh = rewriteText(this.table, text);
-			live.set(key, fresh);
-			return fresh;
+			const spellings: Array<readonly [string, string]> = [];
+			const [output] = rewriteAgentMessagesWith([message], (text) => {
+				const key = createHash("sha256").update(text).digest("hex");
+				const frozen = live.get(key) ?? this.frozenSpellings.get(key);
+				const spelling = frozen ?? rewriteText(this.table, text);
+				live.set(key, spelling);
+				spellings.push([key, spelling]);
+				return spelling;
+			});
+			const aliasIds = [...collectActiveAliasIds(collectMessageTexts([output!]))];
+			for (const id of aliasIds) this.legendIds.add(id);
+			this.rendered.set(message, { message: output!, spellings, aliasIds });
+			return output!;
 		});
 		this.frozenSpellings = live;
 		return rendered;
@@ -196,12 +242,17 @@ export class PathAliasRuntime {
 		this.store = undefined;
 		this.records = [];
 		this.loaded = false;
+		this.rendered = new WeakMap();
+		this.reservationHistoryScanned = false;
 	}
 
 	private ensureLoaded(): void {
 		const cwd = this.getCwd();
 		if (this.loaded) {
-			if (this.table.cwd !== cwd) this.table = this.buildTableForCwd(cwd);
+			if (this.table.cwd !== cwd) {
+				this.table = this.buildTableForCwd(cwd);
+				this.rendered = new WeakMap();
+			}
 			return;
 		}
 		const databasePath = this.getDatabasePath();
@@ -210,6 +261,9 @@ export class PathAliasRuntime {
 		// New rows store absolute paths; legacy rows stored cwd-relative displays and are
 		// anchored to the cwd recorded at their creation (falling back to the current one).
 		const storedCwd = this.store.getMeta(TABLE_CWD_KEY);
+		const reservedTokensMeta = this.store.getMeta(RESERVED_TOKENS_KEY);
+		// Reservations persisted at all means every earlier scan is already carried forward.
+		this.reservationHistoryScanned = reservedTokensMeta !== undefined;
 		this.records = this.store.list().map((row) => ({
 			absolute: toStoredAbsolute(row.fullPath, storedCwd ?? cwd),
 			id: row.aliasId,
@@ -217,7 +271,7 @@ export class PathAliasRuntime {
 		this.table = {
 			cwd,
 			entries: [],
-			reservedIds: readReservedTokens(this.store.getMeta(RESERVED_TOKENS_KEY)),
+			reservedIds: readReservedTokens(reservedTokensMeta),
 		};
 		this.table = this.buildTableForCwd(cwd);
 		if (!storedCwd) this.store.setMeta(TABLE_CWD_KEY, cwd);
