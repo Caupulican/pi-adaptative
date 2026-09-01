@@ -72,6 +72,10 @@ Or from the repo root: `npm run profile:long-session`, `npm run profile:analyze 
   over per event, and a poll for new events is one existence check. What remains per request is
   work over the context messages, which compaction bounds: the GC plan, the path-alias render, the
   history fingerprint window, the token estimate.
+- **Native frames need an owner.** `existsSync`, `writeFileUtf8` or `read` at the top of a Windows
+  profile say nothing by themselves; `--owner <frame>` charges each to the nearest project frame
+  above it, past Node's wrappers and the shared utilities. That is how the event store's per-poll
+  cursor and baseline reads and the lock around content-addressed GC originals were found.
 - **Tool spans on Windows are process creation.** In the tools mix, `grep` costs about 85ms per call
   on Windows against 10ms on Linux and `bash` 80ms against 50ms, flat by decile: that is spawning
   ripgrep or the shell, not harness bookkeeping. A rising row is the signal; a high flat row on one

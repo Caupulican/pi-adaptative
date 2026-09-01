@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, lstatSync, type Stats, statSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { orchestrationEventStoreDir } from "../agent-paths.ts";
@@ -158,8 +158,57 @@ export class OrchestrationSnapshotRequiredError extends OrchestrationEventStoreE
 	}
 }
 
+/** What one lstat tells about a small state file; a change in any of it means re-read and re-parse. */
+interface FileSignature {
+	size: number;
+	mtimeMs: number;
+	ctimeMs: number;
+	ino: number;
+}
+
+interface SignedRead<T> {
+	signature: FileSignature;
+	value: T;
+}
+
+function fileSignature(stats: Stats): FileSignature {
+	return { size: stats.size, mtimeMs: stats.mtimeMs, ctimeMs: stats.ctimeMs, ino: stats.ino };
+}
+
+function sameFileSignature(left: FileSignature, right: FileSignature): boolean {
+	return (
+		left.size === right.size &&
+		left.mtimeMs === right.mtimeMs &&
+		left.ctimeMs === right.ctimeMs &&
+		left.ino === right.ino
+	);
+}
+
+/**
+ * Re-read a small state file only when its signature changed. The bounded, version-stable read
+ * behind `parse` costs five system calls; one lstat answers the common case that nothing changed,
+ * which on Windows was the difference between a poll and a stall. The store invalidates the cached
+ * read after its own writes, so a rewrite that lands inside one timestamp tick is only ever missed
+ * for a foreign writer, and only until the next tick. A missing file yields undefined.
+ */
+function readIfChanged<T>(
+	filePath: string,
+	cached: SignedRead<T> | undefined,
+	parse: () => T,
+): SignedRead<T> | undefined {
+	let stats: Stats;
+	try {
+		stats = lstatSync(filePath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+	const signature = fileSignature(stats);
+	if (cached && sameFileSignature(cached.signature, signature)) return cached;
+	return { signature, value: parse() };
+}
+
 function parseCursor(filePath: string): EventCursor | undefined {
-	if (!existsSync(filePath)) return undefined;
 	let content: string;
 	try {
 		content = readBoundedTextFileSync(filePath, MAX_CURSOR_BYTES, "Orchestration cursor");
@@ -407,6 +456,8 @@ export class OrchestrationEventStore {
 	private readonly listeners = new Set<(event: OrchestrationEvent) => void>();
 	private verifiedSnapshotBaseline: VerifiedSnapshotBaseline | undefined;
 	private synchronizedIndexes: SynchronizedIndexes | undefined;
+	private cursorRead: SignedRead<EventCursor | undefined> | undefined;
+	private baselineRead: SignedRead<SnapshotBaseline> | undefined;
 
 	constructor(options: OrchestrationEventStoreOptions) {
 		this.rootDir = orchestrationEventStoreDir(options.agentDir, options.sessionId);
@@ -498,6 +549,7 @@ export class OrchestrationEventStore {
 			// so a lock-protected direct overwrite avoids another tmp-file creation and rename on the
 			// Windows scanner-sensitive path; a torn cursor is safely rebuilt from the event tail.
 			this.fs.writeFileSync(this.cursorPath, serializedCursor, "utf-8");
+			this.cursorRead = undefined;
 			return { event: next, appended: true };
 		});
 
@@ -527,7 +579,7 @@ export class OrchestrationEventStore {
 		// and validating the whole tail, unless the cursor proves a commit past `ordinal` whose file
 		// is gone: that is lost data, and the validating path below reports it.
 		if (!this.hasEventFileUnlocked(ordinal + 1)) {
-			const cursor = parseCursor(this.cursorPath);
+			const cursor = this.readCursorUnlocked();
 			if (!cursor || cursor.lastOrdinal <= Math.max(ordinal, baseline?.throughOrdinal ?? 0)) return [];
 		}
 		const events: OrchestrationEvent[] = [];
@@ -570,7 +622,7 @@ export class OrchestrationEventStore {
 		) {
 			return false;
 		}
-		const cursorBeforeLock = parseCursor(this.cursorPath);
+		const cursorBeforeLock = this.readCursorUnlocked();
 		if (
 			!cachedIndexes &&
 			cursorBeforeLock?.lastOrdinal === throughOrdinal &&
@@ -628,6 +680,7 @@ export class OrchestrationEventStore {
 			);
 			writeFileAtomicSync(join(this.snapshotsDir, snapshotFile), serializedSnapshot, { fs: this.fs });
 			writeFileAtomicSync(this.baselinePath, serializedBaseline, { fs: this.fs });
+			this.baselineRead = undefined;
 
 			for (const name of this.idempotencyFileNamesUnlocked()) {
 				this.unlinkManagedFile(join(this.idempotencyDir, name));
@@ -640,6 +693,7 @@ export class OrchestrationEventStore {
 				if (name !== snapshotFile) this.unlinkManagedFile(join(this.snapshotsDir, name));
 			}
 			writeFileAtomicSync(this.cursorPath, serializedCursor, { fs: this.fs });
+			this.cursorRead = undefined;
 			this.verifiedSnapshotBaseline = undefined;
 			this.synchronizedIndexes = {
 				baselineOrdinal: throughOrdinal,
@@ -744,7 +798,7 @@ export class OrchestrationEventStore {
 		this.assertContiguousTailOrdinalsUnlocked(names, baselineOrdinal);
 		const highestEventOrdinal = names.length > 0 ? Number(EVENT_FILE_PATTERN.exec(names.at(-1)!)?.[1] ?? 0) : 0;
 		const highestCommittedOrdinal = Math.max(baselineOrdinal, highestEventOrdinal);
-		const cursor = parseCursor(this.cursorPath);
+		const cursor = this.readCursorUnlocked();
 		if (cursor && cursor.lastOrdinal > highestCommittedOrdinal) {
 			throw new OrchestrationEventStoreError(
 				`Orchestration cursor ${cursor.lastOrdinal} is ahead of the last committed event ${highestCommittedOrdinal}.`,
@@ -752,8 +806,17 @@ export class OrchestrationEventStore {
 		}
 	}
 
+	private readCursorUnlocked(): EventCursor | undefined {
+		this.cursorRead = readIfChanged(this.cursorPath, this.cursorRead, () => parseCursor(this.cursorPath));
+		return this.cursorRead?.value;
+	}
+
 	private readBaselineUnlocked(): SnapshotBaseline | undefined {
-		if (!existsSync(this.baselinePath)) return undefined;
+		this.baselineRead = readIfChanged(this.baselinePath, this.baselineRead, () => this.parseBaselineUnlocked());
+		return this.baselineRead?.value;
+	}
+
+	private parseBaselineUnlocked(): SnapshotBaseline {
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(

@@ -7,7 +7,7 @@ import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { normalizePath } from "../utils/paths.ts";
 import { quantizeRecentBoundary, resolveRecentBoundaryStride } from "./context/prefix-stability.ts";
 import { boundedTextPreview } from "./text-preview.ts";
-import { withFileLockSync, writeFileAtomicSync } from "./util/atomic-file.ts";
+import { writeFileAtomicSync } from "./util/atomic-file.ts";
 
 export interface SemanticMemoryGcSettings {
 	enabled?: boolean;
@@ -403,9 +403,9 @@ function storeOriginal(options: ContextGcOptions, key: string, original: string)
 		const storageDir = options.acquireStorageDir?.() ?? options.storageDir;
 		const path = storagePathFor(storageDir, key);
 		if (!path || !storageDir || storedOriginalPaths.has(path)) return;
-		withFileLockSync(path, () => {
-			if (!existsSync(path)) writeFileAtomicSync(path, original);
-		});
+		// Content-addressed and immutable: a concurrent writer produces the same bytes and the atomic
+		// rename leaves whichever lands last, identical, so the write needs no lock around it.
+		if (!existsSync(path)) writeFileAtomicSync(path, original);
 		storedOriginalPaths.add(path);
 	} catch {
 		// Best-effort: the packed message still names the planned path; a missing original reads as

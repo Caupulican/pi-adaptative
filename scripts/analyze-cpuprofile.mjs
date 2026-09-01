@@ -6,18 +6,19 @@
  * coding-agent long-session profile (packages/coding-agent/test/profiling/), all of which write
  * the format Node's own --cpu-prof writes.
  *
- * Usage: node scripts/analyze-cpuprofile.mjs <file.cpuprofile> [--top <n>] [--title <text>] [--callers <functionName>] [--inclusive <functionName>]
+ * Usage: node scripts/analyze-cpuprofile.mjs <file.cpuprofile> [--top <n>] [--title <text>] [--callers <functionName>] [--inclusive <functionName>] [--owner <functionName>]
  */
 import { readFileSync } from "node:fs";
 
 function parseArgs(argv) {
-	const args = { top: 30, title: undefined, file: undefined, callers: undefined, inclusive: undefined };
+	const args = { top: 30, title: undefined, file: undefined, callers: undefined, inclusive: undefined, owner: undefined };
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--top") args.top = Number(argv[++i]);
 		else if (arg === "--title") args.title = argv[++i];
 		else if (arg === "--callers") args.callers = argv[++i];
 		else if (arg === "--inclusive") args.inclusive = argv[++i];
+		else if (arg === "--owner") args.owner = argv[++i];
 		else if (arg === "--help" || arg === "-h") {
 			console.log("Usage: node scripts/analyze-cpuprofile.mjs <file.cpuprofile> [--top <n>] [--title <text>]");
 			process.exit(0);
@@ -39,7 +40,7 @@ function shortUrl(url) {
 	return url.startsWith("node:") ? url : url.split("/").pop() ?? url;
 }
 
-const { file, top, title, callers, inclusive } = parseArgs(process.argv.slice(2));
+const { file, top, title, callers, inclusive, owner } = parseArgs(process.argv.slice(2));
 const profile = JSON.parse(readFileSync(file, "utf-8"));
 const nodes = new Map(profile.nodes.map((node) => [node.id, node]));
 const selfMicros = new Map();
@@ -59,12 +60,19 @@ for (const [id, micros] of selfMicros) {
 	byFunction.set(fnKey, (byFunction.get(fnKey) ?? 0) + micros);
 	byFile.set(location, (byFile.get(location) ?? 0) + micros);
 }
+/** The project frame that asked for a native or utility frame's work, skipping shared utilities. */
+function isOwnerFrame(frame) {
+	return frame.url.includes("/pi-adaptative/packages/") && !frame.url.includes("/core/util/");
+}
+
 /**
  * Attribute time to the frames that called `functionName`: self time of its own nodes
  * (`inclusive` false) or every sample with it anywhere on the stack (`inclusive` true, natives
- * included). Either way the answer is "which caller is paying".
+ * included). Either way the answer is "which caller is paying". With `owner`, the nearest project
+ * frame above the target is charged instead of the immediate caller, which is what a native frame
+ * such as `writeFileUtf8` or `existsSync` needs: its immediate caller is Node's own wrapper.
  */
-function attributeToCallers(functionName, inclusive) {
+function attributeToCallers(functionName, inclusive, owner = false) {
 	const parentOf = new Map();
 	for (const node of profile.nodes) for (const child of node.children ?? []) parentOf.set(child, node.id);
 	const isTarget = (id) => (nodes.get(id)?.callFrame.functionName || "(anonymous)") === functionName;
@@ -81,18 +89,27 @@ function attributeToCallers(functionName, inclusive) {
 		for (let parentId = parentOf.get(target); parentId !== undefined; parentId = parentOf.get(parentId)) {
 			const parent = nodes.get(parentId);
 			if (!parent || isTarget(parentId)) continue;
+			if (owner && !isOwnerFrame(parent.callFrame)) continue;
 			label = `${parent.callFrame.functionName || "(anonymous)"} — ${shortUrl(parent.callFrame.url)}:${(parent.callFrame.lineNumber ?? -1) + 1}`;
 			break;
 		}
 		byCaller.set(label, (byCaller.get(label) ?? 0) + micros);
 	}
-	const kind = inclusive ? `Inclusive time of ${functionName}` : `Callers of ${functionName}`;
+	const kind = owner
+		? `Owners of ${functionName}`
+		: inclusive
+			? `Inclusive time of ${functionName}`
+			: `Callers of ${functionName}`;
 	console.log(`### ${kind} (${(matched / 1000).toFixed(1)} ms, ${((100 * matched) / total).toFixed(1)}% of samples)\n\n| ms | share | caller |\n|---:|---:|---|`);
 	for (const [label, micros] of [...byCaller.entries()].sort((a, b) => b[1] - a[1]).slice(0, top)) {
 		console.log(`| ${(micros / 1000).toFixed(1)} | ${((100 * micros) / Math.max(matched, 1)).toFixed(1)}% | ${label.replace(/\|/g, "\\|")} |`);
 	}
 }
 
+if (owner) {
+	attributeToCallers(owner, false, true);
+	process.exit(0);
+}
 if (inclusive) {
 	attributeToCallers(inclusive, true);
 	process.exit(0);

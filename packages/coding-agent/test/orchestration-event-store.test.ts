@@ -16,13 +16,17 @@ import {
 	OrchestrationSnapshotRequiredError,
 } from "../src/core/orchestration/event-store.ts";
 import { DurableTaskRuntime } from "../src/core/orchestration/task-runtime.ts";
-import { readBoundedDirectoryNamesSync } from "../src/core/util/bounded-file.ts";
+import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../src/core/util/bounded-file.ts";
 import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 // Pass-through spy: behavior is unchanged, only the number of tail listings becomes observable.
 vi.mock("../src/core/util/bounded-file.ts", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/core/util/bounded-file.ts")>();
-	return { ...actual, readBoundedDirectoryNamesSync: vi.fn(actual.readBoundedDirectoryNamesSync) };
+	return {
+		...actual,
+		readBoundedDirectoryNamesSync: vi.fn(actual.readBoundedDirectoryNamesSync),
+		readBoundedTextFileSync: vi.fn(actual.readBoundedTextFileSync),
+	};
 });
 
 const tempDirs: string[] = [];
@@ -780,15 +784,30 @@ describe("OrchestrationEventStore read polling", () => {
 			store.append({ type, aggregateId: "objective-1", actor: "human", payload: {} });
 		}
 		const listings = vi.mocked(readBoundedDirectoryNamesSync);
+		const fileReads = vi.mocked(readBoundedTextFileSync);
+		expect(store.readAfter(3)).toEqual([]);
 		listings.mockClear();
+		fileReads.mockClear();
 
+		// Nothing changed on disk: no listing, and the cursor and baseline are not re-read either.
 		expect(store.readAfter(3)).toEqual([]);
 		expect(store.readAfter(3)).toEqual([]);
 		expect(listings).not.toHaveBeenCalled();
+		expect(fileReads).not.toHaveBeenCalled();
 
 		peer().append({ type: "objective.cancelled", aggregateId: "objective-1", actor: "human", payload: {} });
 		expect(store.readAfter(3).map((event) => event.ordinal)).toEqual([4]);
 		expect(store.readAfter(4)).toEqual([]);
+	});
+
+	it("never serves its own cursor rewrite from the cache, even inside one timestamp tick", () => {
+		const store = makeStore();
+		store.append({ type: "objective.created", aggregateId: "objective-1", actor: "kernel", payload: {} });
+		expect(store.readAfter(1)).toEqual([]);
+		store.append({ type: "objective.paused", aggregateId: "objective-1", actor: "human", payload: {} });
+		unlinkSync(join(store.eventsDir, "0000000000000002.json"));
+
+		expect(() => store.readAfter(1)).toThrow("Orchestration cursor 2 is ahead of the last committed event 1");
 	});
 
 	it("reports a truncated committed event the cursor proves instead of nothing new", () => {
