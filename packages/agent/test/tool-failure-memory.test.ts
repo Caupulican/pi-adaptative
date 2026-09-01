@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	assessToolFailure,
 	createRepeatedToolFailureResult,
+	createToolFailureContextMemory,
 	createToolFailureResult,
 	getToolExecutionKey,
 	normalizeToolSignature,
@@ -1214,5 +1215,131 @@ describe("tool failure memory", () => {
 			expect(cold.ledger).toContain('"tool":"bash"');
 			expect(cold.ledger).toContain('"tool":"read"');
 		});
+	});
+});
+
+describe("tool failure context memory (session-scoped fold)", () => {
+	const usage = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	const call = (id: string, path = "data.json"): AgentMessage =>
+		({
+			role: "assistant",
+			content: [{ type: "toolCall", id, name: "read", arguments: { path } }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "test",
+			usage,
+			stopReason: "toolUse",
+			timestamp: 1,
+		}) as AgentMessage;
+	const ok = (id: string, text = "x".repeat(200)): AgentMessage =>
+		({
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "read",
+			content: [{ type: "text", text }],
+			isError: false,
+			timestamp: 2,
+		}) as AgentMessage;
+	const failed = (id: string): AgentMessage =>
+		({
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "read",
+			content: [{ type: "text", text: "read failed: ENOENT data.json" }],
+			isError: true,
+			timestamp: 2,
+		}) as AgentMessage;
+	const shape = (messages: AgentMessage[]) =>
+		messages.map((message) =>
+			message.role === "assistant"
+				? `call:${(message.content[0] as { id: string }).id}`
+				: message.role === "toolResult"
+					? `result:${message.toolCallId}`
+					: message.role,
+		);
+
+	it("keeps a call it deduplicated while unsent out of every later request, even once the sent mark passes it", () => {
+		// The pure fold, re-run per request, put the erased call BACK the moment the mark passed it,
+		// inserting a message inside the prefix the provider had already cached.
+		const memory = createToolFailureContextMemory();
+		const history = [call("A"), ok("A"), call("B"), ok("B")];
+		expect(shape(sanitizeToolFailureContext(history, "sys", 0, memory).messages)).toEqual(["call:B", "result:B"]);
+		// The request went out; the mark now covers all four input messages.
+		expect(shape(sanitizeToolFailureContext(history, "sys", 4, memory).messages)).toEqual(["call:B", "result:B"]);
+		// Later history appends; the erased call is still gone and nothing sent moved.
+		const later = [...history, call("C", "other.json"), ok("C", "y".repeat(200))];
+		expect(shape(sanitizeToolFailureContext(later, "sys", 4, memory).messages)).toEqual([
+			"call:B",
+			"result:B",
+			"call:C",
+			"result:C",
+		]);
+	});
+
+	it("never erases a call that had already been sent when its duplicate arrived", () => {
+		const memory = createToolFailureContextMemory();
+		const first = [call("A"), ok("A")];
+		expect(shape(sanitizeToolFailureContext(first, "sys", 0, memory).messages)).toEqual(["call:A", "result:A"]);
+		// A went out (mark 2). A duplicate lands in unsent history: A must stay, B is kept too.
+		const second = [...first, call("B"), ok("B")];
+		const sent = shape(sanitizeToolFailureContext(second, "sys", 2, memory).messages);
+		expect(sent).toEqual(["call:A", "result:A", "call:B", "result:B"]);
+		// And it keeps staying on every later request.
+		expect(shape(sanitizeToolFailureContext(second, "sys", 4, memory).messages)).toEqual(sent);
+	});
+
+	it("resumes from the processed prefix and matches the pure fold for appended history without erasures", () => {
+		const memory = createToolFailureContextMemory();
+		let history: AgentMessage[] = [call("A"), failed("A")];
+		let mark = 0;
+		for (let step = 0; step < 4; step++) {
+			const incremental = sanitizeToolFailureContext(history, "sys", mark, memory);
+			const pure = sanitizeToolFailureContext(history, "sys", mark);
+			expect(shape(incremental.messages)).toEqual(shape(pure.messages));
+			expect(incremental.ledger).toEqual(pure.ledger);
+			mark = history.length;
+			history = [
+				...history,
+				call(`R${step}`, `retry-${step}.json`),
+				step === 3 ? ok(`R${step}`) : failed(`R${step}`),
+			];
+		}
+	});
+
+	it("never rewrites what an earlier request sent while history only grows", () => {
+		const memory = createToolFailureContextMemory();
+		let history: AgentMessage[] = [call("A"), ok("A")];
+		let previous = sanitizeToolFailureContext(history, "sys", 0, memory).messages;
+		let mark = history.length;
+		for (let step = 0; step < 6; step++) {
+			// Alternate a duplicate of the previous op (erasable while unsent) and a fresh failure.
+			history =
+				step % 2 === 0
+					? [...history, call(`D${step}`), ok(`D${step}`)]
+					: [...history, call(`F${step}`, `f-${step}.json`), failed(`F${step}`)];
+			const current = sanitizeToolFailureContext(history, "sys", mark, memory).messages;
+			for (let index = 0; index < previous.length; index++) expect(current[index]).toBe(previous[index]);
+			previous = current;
+			mark = history.length;
+		}
+	});
+
+	it("refolds from the start when the processed prefix is replaced, keeping its erasure record", () => {
+		const memory = createToolFailureContextMemory();
+		const history = [call("A"), ok("A"), call("B"), ok("B")];
+		expect(shape(sanitizeToolFailureContext(history, "sys", 0, memory).messages)).toEqual(["call:B", "result:B"]);
+		// Compaction-like replacement: a different object at index 0, and a new tail.
+		const replaced = [call("A"), ok("A"), call("B"), ok("B"), call("C", "c.json"), failed("C")];
+		const fresh = createToolFailureContextMemory();
+		const refolded = sanitizeToolFailureContext(replaced, "sys", 0, memory);
+		expect(shape(refolded.messages)).toEqual(shape(sanitizeToolFailureContext(replaced, "sys", 0, fresh).messages));
+		expect(refolded.ledger).toEqual(sanitizeToolFailureContext(replaced, "sys", 0, fresh).ledger);
 	});
 });

@@ -37,6 +37,7 @@ import {
 	getUnresolvedToolFailure,
 	normalizeToolSignature,
 	rememberToolFailure,
+	type ToolFailureContextMemory,
 	type ToolFailureMemoryTracker,
 	toolFailureCorrection,
 } from "./tool-failure-memory.ts";
@@ -107,13 +108,20 @@ export interface AgentLoopContinuationState {
  * callers, tests). `Agent` is the one caller that owns a longer-lived session and must pass its own
  * persisted value here instead of accepting the default - see `Agent.runPromptMessages`.
  */
-export function createAgentLoopContinuationState(initialSanitizerSentPrefixCount = 0): AgentLoopContinuationState {
+export function createAgentLoopContinuationState(
+	initialSanitizerSentPrefixCount = 0,
+	sanitizerMemory?: ToolFailureContextMemory,
+): AgentLoopContinuationState {
 	return {
 		providerTurns: 0,
 		stallWindow: [],
 		stagnantResultWindow: [],
 		toolFailureRecoveryGate: new ToolFailureRecoveryGate(),
-		providerRequestPrefixState: { sentPrefixCount: 0, sanitizerSentPrefixCount: initialSanitizerSentPrefixCount },
+		providerRequestPrefixState: {
+			sentPrefixCount: 0,
+			sanitizerSentPrefixCount: initialSanitizerSentPrefixCount,
+			sanitizerMemory,
+		},
 	};
 }
 

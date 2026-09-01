@@ -125,18 +125,62 @@ function customMessageText(message: AgentMessage): string | undefined {
  * actually changed. A message lacking the suffix (nothing this module wrote, in practice - defensive
  * only) is returned as-is rather than mis-stripped.
  */
-function lastDurableTransientContent(messages: readonly AgentMessage[], kind: string): string | undefined {
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const message = messages[index];
-		if (message.role === "custom" && message.customType === kind) {
-			const text = customMessageText(message);
-			if (text === undefined) return undefined;
-			return text.endsWith(TRANSIENT_RECORD_SUPERSEDING_NOTE)
-				? text.slice(0, text.length - TRANSIENT_RECORD_SUPERSEDING_NOTE.length)
-				: text;
+function durableTransientContent(message: AgentMessage): string | undefined {
+	const text = customMessageText(message);
+	if (text === undefined) return undefined;
+	return text.endsWith(TRANSIENT_RECORD_SUPERSEDING_NOTE)
+		? text.slice(0, text.length - TRANSIENT_RECORD_SUPERSEDING_NOTE.length)
+		: text;
+}
+
+/**
+ * Last durable content per record kind, maintained incrementally. Each request reconciles every
+ * slot against history, and a kind with no record yet (a session with no failure so far, for the
+ * ledger) walked the whole history backwards on every request to learn that. The index is keyed by
+ * the history's first message and is valid while the history it reflects is the same objects in the
+ * same order (checked by reference); a history that changed underneath is indexed from the start.
+ */
+interface TransientContentIndex {
+	count: number;
+	processed: AgentMessage[];
+	byKind: Map<string, string | undefined>;
+}
+const transientContentIndexes = new WeakMap<AgentMessage, TransientContentIndex>();
+
+function transientContentIndex(messages: readonly AgentMessage[]): ReadonlyMap<string, string | undefined> {
+	const first = messages[0];
+	if (!first) return new Map();
+	let index = transientContentIndexes.get(first);
+	let from = 0;
+	if (index && index.count <= messages.length) {
+		from = index.count;
+		for (let position = 0; position < from; position++) {
+			if (index.processed[position] !== messages[position]) {
+				index = undefined;
+				from = 0;
+				break;
+			}
 		}
+	} else {
+		index = undefined;
 	}
-	return undefined;
+	if (!index) {
+		index = { count: 0, processed: [], byKind: new Map() };
+		transientContentIndexes.set(first, index);
+	}
+	for (let position = from; position < messages.length; position++) {
+		const message = messages[position];
+		if (message.role === "custom") index.byKind.set(message.customType, durableTransientContent(message));
+	}
+	if (from < messages.length) {
+		index.processed = messages.slice();
+		index.count = messages.length;
+	}
+	return index.byKind;
+}
+
+function lastDurableTransientContent(messages: readonly AgentMessage[], kind: string): string | undefined {
+	return transientContentIndex(messages).get(kind);
 }
 
 function buildTransientRecord(kind: string, content: string): AgentMessage {
@@ -208,10 +252,17 @@ export function reconcileTransientRecords(
 	if (active.length > 0) {
 		// Informational appends above (`newRecords` so far) are also "something appended after" from
 		// the trailing group's point of view, so they must count as part of the array being checked.
-		const provisional = [...durableMessages, ...newRecords];
-		const actualTailKinds = provisional
-			.slice(-active.length)
-			.map((message) => (message.role === "custom" ? message.customType : undefined));
+		// The tail of history-plus-new-records, read in place: copying the whole history to slice
+		// its last few entries was an O(history) allocation on nearly every request.
+		const provisionalLength = durableMessages.length + newRecords.length;
+		const actualTailKinds: Array<string | undefined> = [];
+		for (let position = Math.max(0, provisionalLength - active.length); position < provisionalLength; position++) {
+			const message =
+				position < durableMessages.length
+					? durableMessages[position]
+					: newRecords[position - durableMessages.length];
+			actualTailKinds.push(message?.role === "custom" ? message.customType : undefined);
+		}
 		const expectedTailKinds = active.map((entry) => entry.slot.kind);
 		const tailIntact =
 			actualTailKinds.length === expectedTailKinds.length &&

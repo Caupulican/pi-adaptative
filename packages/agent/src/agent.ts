@@ -16,6 +16,7 @@ import {
 	runAgentLoopContinue,
 } from "./agent-loop.ts";
 import { convertToLlm } from "./messages.ts";
+import { createToolFailureContextMemory } from "./tool-failure-memory.ts";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -290,6 +291,8 @@ export class Agent {
 	 * a host must call it.
 	 */
 	private sanitizerSentPrefixCount = 0;
+	/** Same lifetime as `sanitizerSentPrefixCount`; see ToolFailureContextMemory. */
+	private sanitizerMemory = createToolFailureContextMemory();
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
@@ -477,6 +480,7 @@ export class Agent {
 	 */
 	resetSanitizerPrefixHorizon(): void {
 		this.sanitizerSentPrefixCount = 0;
+		this.sanitizerMemory = createToolFailureContextMemory();
 	}
 
 	/** Start a new prompt from text, a single message, or a batch of messages. */
@@ -548,7 +552,7 @@ export class Agent {
 		// Seeded from the persistent, SESSION-scoped mark - NOT the zero-arg default, which would
 		// re-arm the sanitizer's dedup-erasure across the whole prior session on every new prompt.
 		// See ProviderRequestPrefixState in types.ts.
-		const continuationState = createAgentLoopContinuationState(this.sanitizerSentPrefixCount);
+		const continuationState = createAgentLoopContinuationState(this.sanitizerSentPrefixCount, this.sanitizerMemory);
 		this.loopContinuationState = continuationState;
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoop(
@@ -566,7 +570,8 @@ export class Agent {
 
 	private async runContinuation(): Promise<void> {
 		const continuationState =
-			this.loopContinuationState ?? createAgentLoopContinuationState(this.sanitizerSentPrefixCount);
+			this.loopContinuationState ??
+			createAgentLoopContinuationState(this.sanitizerSentPrefixCount, this.sanitizerMemory);
 		this.loopContinuationState = continuationState;
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoopContinue(

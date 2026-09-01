@@ -313,6 +313,7 @@ export async function startPlannedAgentProviderRequestWithId(
 			sourceContext.messages,
 			sourceContext.systemPrompt,
 			sanitizerSentPrefixCount,
+			config.providerRequestPrefixState?.sanitizerMemory,
 		);
 		const plan = await buildContextPlan(sanitized.messages, admissionAttempt, sentPrefixCount, config, signal);
 		// Checked on every admission attempt, including one later discarded as stale, so a host sees

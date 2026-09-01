@@ -16,6 +16,7 @@ import type {
 	Usage,
 } from "@caupulican/pi-ai";
 import type { Static, TSchema } from "typebox";
+import type { ToolFailureContextMemory } from "./tool-failure-memory.ts";
 
 /**
  * Stream function used by the agent loop.
@@ -124,6 +125,12 @@ export interface ProviderRequestPrefixState {
 	 * facing `AgentContextPlanRequest.sentPrefixCount`.
 	 */
 	sanitizerSentPrefixCount: number;
+	/**
+	 * SESSION-scoped like `sanitizerSentPrefixCount`, and reset with it: the sanitizer's record of
+	 * every call it has erased plus its resumable fold state (see `ToolFailureContextMemory`).
+	 * Threaded here so it survives the per-turn config clones the same way the marks do.
+	 */
+	sanitizerMemory?: ToolFailureContextMemory;
 }
 
 /**

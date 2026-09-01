@@ -1030,9 +1030,87 @@ function fastTextSignature(text: string): string {
 	return `${text.length}:${text.slice(0, 48)}:${text.slice(-48)}`;
 }
 
-function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0): FailureContextAnalysis {
-	const callById = new Map<string, AgentToolCall>();
-	const callMessageIndexById = new Map<string, number>();
+/**
+ * Everything the failure-context fold knows after processing a prefix of the history. Kept as one
+ * object so the fold can be RESUMED from where it stopped instead of re-walking the history on
+ * every provider request (see {@link ToolFailureContextMemory}).
+ */
+interface FailureFoldState {
+	callById: Map<string, AgentToolCall>;
+	callMessageIndexById: Map<string, number>;
+	/** Results whose call is unknown and that were omitted with their failure. */
+	omittedResults: Set<ToolResultMessage>;
+	/** Unbounded failure results to replace in place with their bounded record. */
+	boundedReplacements: Map<ToolResultMessage, ToolFailureMemoryRecord>;
+	/**
+	 * The replacement built for each of those, reused on every later request: the bytes were always
+	 * identical, but a fresh object per request defeated every consumer that keys the cached prefix
+	 * on message identity (the provider delta path among them).
+	 */
+	boundedMessages: Map<ToolResultMessage, AgentMessage>;
+	active: Map<string, ActiveFailure>;
+	activeDirectives: Map<string, ToolFailureDirectiveDetails["piToolFailureDirective"]>;
+	sequence: number;
+	kindMistakesMap: Map<string, number>;
+	latestSuccessfulByOpKey: Map<string, { callId: string; index: number }>;
+	latestSuccessfulByPayloadKey: Map<string, { callId: string; index: number }>;
+	/** How many leading messages this state reflects. */
+	processedCount: number;
+}
+
+function createFailureFoldState(): FailureFoldState {
+	return {
+		callById: new Map(),
+		callMessageIndexById: new Map(),
+		omittedResults: new Set(),
+		boundedReplacements: new Map(),
+		boundedMessages: new Map(),
+		active: new Map(),
+		activeDirectives: new Map(),
+		sequence: 0,
+		kindMistakesMap: new Map(),
+		latestSuccessfulByOpKey: new Map(),
+		latestSuccessfulByPayloadKey: new Map(),
+		processedCount: 0,
+	};
+}
+
+/**
+ * Session memory for the failure-context fold. Two things live here, and both are why the fold is
+ * no longer a pure function of (messages, sentPrefixCount):
+ *
+ * - `omittedCallIds` is the durable record of every call the sanitizer has ever erased. An erasure
+ *   is decided while the call is still unsent (`sentPrefixCount` guards that), and it has to STAY
+ *   decided: a pure fold re-run on the next request, with the sent mark now past the erased call,
+ *   found the call un-erasable and put it back -- inserting a message inside the prefix the
+ *   provider had already cached, one request after every deduplication. Recording the decision is
+ *   what makes "never rewrite already-sent bytes" hold across requests, not just within one.
+ * - `state` is the fold's bookkeeping after the last processed prefix. Messages are immutable and
+ *   keep their identity, so when the next request's history starts with the same objects the fold
+ *   resumes from `processedCount` and touches only what was appended; a history that changed
+ *   underneath (compaction, a branch) is folded from the start again, with the erasure record kept.
+ */
+export class ToolFailureContextMemory {
+	/** @internal */
+	readonly omittedCallIds = new Set<string>();
+	/** @internal */
+	state = createFailureFoldState();
+	/** @internal The exact message objects `state` reflects, for the resume check. */
+	processed: AgentMessage[] = [];
+}
+
+export function createToolFailureContextMemory(): ToolFailureContextMemory {
+	return new ToolFailureContextMemory();
+}
+
+/** Advance the fold over `messages[from..)`. Erasures land in `omittedCallIds`, which persists. */
+function foldToolFailureContext(
+	fold: FailureFoldState,
+	omittedCallIds: Set<string>,
+	messages: AgentMessage[],
+	from: number,
+	sentPrefixCount: number,
+): void {
 	/**
 	 * Deduplicating a superseded success ERASES the earlier call, which shifts every byte after it.
 	 * Providers prefill each request against the longest byte-identical prefix, so erasing a message
@@ -1042,32 +1120,22 @@ function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0
 	 * is still unsent and free to rewrite. Dedup therefore keeps working in full on fresh history (the
 	 * common case: a model repeating itself within the turn) and never reaches back into cached bytes.
 	 * The default of 0 means "nothing sent yet", i.e. dedup everything — the behavior every direct
-	 * caller and every unit test sees.
+	 * caller and test relied on before the mark existed.
 	 */
 	const erasable = (callIndex: number): boolean => callIndex >= sentPrefixCount;
-	/**
-	 * A call the agent made is erased only in two cases: a superseded success, whose newer identical
-	 * call is still present, and a discard-attempt directive, where the harness has taken ownership of
-	 * the attempt and the original arguments must not come back — either because it holds the payload
-	 * by reference (a retarget) or because replaying those bytes is itself the hazard (an encoding
-	 * corruption). Never for an ordinary failure: being told to change an operation is unactionable
-	 * once the operation itself is gone.
-	 */
-	const omittedCallIds = new Set<string>();
-	const omittedResults = new Set<ToolResultMessage>();
-	/** Unbounded failure results to replace in place with their bounded record. */
-	const boundedReplacements = new Map<ToolResultMessage, ToolFailureMemoryRecord>();
-	const active = new Map<string, ActiveFailure>();
-	const activeDirectives = new Map<string, ToolFailureDirectiveDetails["piToolFailureDirective"]>();
-	let sequence = 0;
-	const kindMistakesMap = new Map<string, number>();
+	const {
+		callById,
+		callMessageIndexById,
+		omittedResults,
+		boundedReplacements,
+		active,
+		activeDirectives,
+		kindMistakesMap,
+		latestSuccessfulByOpKey,
+		latestSuccessfulByPayloadKey,
+	} = fold;
 
-	// Call id plus the index of the assistant message that made it: erasing a call shifts every byte
-	// after it, so the index decides whether the erasure is affordable (see `sentPrefixCount`).
-	const latestSuccessfulByOpKey = new Map<string, { callId: string; index: number }>();
-	const latestSuccessfulByPayloadKey = new Map<string, { callId: string; index: number }>();
-
-	for (let index = 0; index < messages.length; index++) {
+	for (let index = from; index < messages.length; index++) {
 		const message = messages[index];
 		if (message.role === "assistant") {
 			activeDirectives.clear();
@@ -1085,11 +1153,6 @@ function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0
 		const call = callById.get(message.toolCallId);
 		callById.delete(message.toolCallId);
 		const textPayload = firstText(message);
-		// A completed operation reporting its own negative status is evidence, not a mistake: it never
-		// enters the ledger and its output stays exactly as the tool wrote it. It does resolve any
-		// earlier failure recorded for the same operation, though — a tool that could not run before
-		// has now run — so a transcript that predates this classification cannot keep an obsolete
-		// record active across the boundary.
 		if (message.errorKind === "operation_outcome") {
 			if (call) active.delete(memoizedOperationIdentity(call).failureKey);
 			continue;
@@ -1166,7 +1229,7 @@ function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0
 					fallbackFailureGuidance(state, false, inferToolFailurePhase(state, "tool_error")),
 			};
 			active.delete(failureKey);
-			active.set(failureKey, { record, sequence: sequence++ });
+			active.set(failureKey, { record, sequence: fold.sequence++ });
 			while (active.size > MAX_TRACKED_FAILURES) {
 				const oldest = active.keys().next().value;
 				if (oldest === undefined) break;
@@ -1187,19 +1250,33 @@ function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0
 			const opKey = memoizedOperationIdentity(call).failureKey;
 			active.delete(opKey);
 			const previousOperation = latestSuccessfulByOpKey.get(opKey);
-			if (previousOperation && erasable(previousOperation.index)) omittedCallIds.add(previousOperation.callId);
+			// A call erased on an earlier request stays erased whatever the mark says now; a new
+			// erasure is only allowed while the superseded call is still unsent.
+			if (previousOperation && (omittedCallIds.has(previousOperation.callId) || erasable(previousOperation.index))) {
+				omittedCallIds.add(previousOperation.callId);
+			}
 			latestSuccessfulByOpKey.set(opKey, { callId: call.id, index: callIndex });
 
 			const textPayload = firstText(message);
 			if (textPayload.length >= 64) {
 				const payloadKey = `payload:${fastTextSignature(textPayload)}`;
 				const previousPayload = latestSuccessfulByPayloadKey.get(payloadKey);
-				if (previousPayload && erasable(previousPayload.index)) omittedCallIds.add(previousPayload.callId);
+				if (previousPayload && (omittedCallIds.has(previousPayload.callId) || erasable(previousPayload.index))) {
+					omittedCallIds.add(previousPayload.callId);
+				}
 				latestSuccessfulByPayloadKey.set(payloadKey, { callId: call.id, index: callIndex });
 			}
 		}
 	}
+	fold.processedCount = messages.length;
+}
 
+function buildFailureContextAnalysis(
+	messages: AgentMessage[],
+	state: FailureFoldState,
+	omittedCallIds: ReadonlySet<string>,
+): FailureContextAnalysis {
+	const { omittedResults, boundedReplacements, boundedMessages, active, activeDirectives, kindMistakesMap } = state;
 	const kindMistakesSummary = Object.fromEntries(kindMistakesMap);
 	const activeRecords = [...active.values()]
 		.sort((left, right) => left.sequence - right.sequence)
@@ -1215,15 +1292,20 @@ function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0
 		if (message.role === "toolResult") {
 			if (omittedCallIds.has(message.toolCallId) || omittedResults.has(message)) continue;
 			const bounded = boundedReplacements.get(message);
-			filteredMessages.push(
-				bounded
-					? {
-							...message,
-							content: [{ type: "text", text: `[harness] ${formatRecordJson(bounded, false)}` }],
-							details: { piToolFailureMemory: bounded } satisfies ToolFailureMemoryDetails,
-						}
-					: message,
-			);
+			if (!bounded) {
+				filteredMessages.push(message);
+				continue;
+			}
+			let replacement = boundedMessages.get(message);
+			if (!replacement) {
+				replacement = {
+					...message,
+					content: [{ type: "text", text: `[harness] ${formatRecordJson(bounded, false)}` }],
+					details: { piToolFailureMemory: bounded } satisfies ToolFailureMemoryDetails,
+				};
+				boundedMessages.set(message, replacement);
+			}
+			filteredMessages.push(replacement);
 			continue;
 		}
 		if (message.role !== "assistant") {
@@ -1260,6 +1342,31 @@ function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0
 		activeDirectives: [...activeDirectives.values()],
 		kindMistakesSummary,
 	};
+}
+
+function analyzeToolFailureContext(
+	messages: AgentMessage[],
+	sentPrefixCount = 0,
+	memory?: ToolFailureContextMemory,
+): FailureContextAnalysis {
+	if (!memory) {
+		const state = createFailureFoldState();
+		const omittedCallIds = new Set<string>();
+		foldToolFailureContext(state, omittedCallIds, messages, 0, sentPrefixCount);
+		return buildFailureContextAnalysis(messages, state, omittedCallIds);
+	}
+	let from = memory.processed.length;
+	let resumable = from <= messages.length;
+	for (let index = 0; resumable && index < from; index++) {
+		if (memory.processed[index] !== messages[index]) resumable = false;
+	}
+	if (!resumable) {
+		memory.state = createFailureFoldState();
+		from = 0;
+	}
+	foldToolFailureContext(memory.state, memory.omittedCallIds, messages, from, sentPrefixCount);
+	memory.processed = messages.slice();
+	return buildFailureContextAnalysis(messages, memory.state, memory.omittedCallIds);
 }
 
 export function createToolFailureMemoryTracker(messages: AgentMessage[]): ToolFailureMemoryTracker {
@@ -1490,8 +1597,10 @@ export function sanitizeToolFailureContext(
 	 * whole history.
 	 */
 	sentPrefixCount = 0,
+	/** Session memory of erasures and fold state; see {@link ToolFailureContextMemory}. */
+	contextMemory?: ToolFailureContextMemory,
 ): { messages: AgentMessage[]; systemPrompt: string; ledger?: string } {
-	const analysis = analyzeToolFailureContext(messages, sentPrefixCount);
+	const analysis = analyzeToolFailureContext(messages, sentPrefixCount, contextMemory);
 	if (analysis.activeRecords.length === 0 && analysis.activeDirectives.length === 0) {
 		return { messages: analysis.messages, systemPrompt };
 	}
