@@ -12,21 +12,6 @@ import {
 import type { AgentMessage, AgentToolCall, AgentToolResult } from "./types.ts";
 import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
 
-/** Stable kind identity for the durable, append-on-change ledger record (see transient-records.ts).
- * Never changes across the life of a conversation - it is the join key `reconcileTransientRecords`
- * uses to find the last recorded instance in durable history. */
-export const TOOL_FAILURE_LEDGER_TRANSIENT_KIND = "pi_tool_failure_ledger";
-/**
- * Text for the durable record appended the moment the ledger empties (no active records, no active
- * directives - see transient-records.ts's `TransientRecordSlot.clearedText`). Without this explicit
- * record, append-on-change would leave the most recent ACTIVE ledger sitting in history with nothing
- * after it saying otherwise - indistinguishable, to a reader of the raw transcript, from "still
- * active, unchanged since it was last sent".
- */
-export const TOOL_FAILURE_LEDGER_CLEARED_TEXT =
-	"MANDATORY TOOL FAILURE RECOVERY\nEvery tool failure that was active earlier in this conversation " +
-	"has since cleared (superseded by a matching success or resolved). No ledger entry is currently " +
-	"active; no recovery protocol constraint from this ledger currently applies.";
 const TOOL_FAILURE_MEMORY_VERSION = 1;
 const TOOL_FAILURE_DIRECTIVE_VERSION = 1;
 const TOOL_FAILURE_EXECUTION_KEY = Symbol("ToolFailureExecutionKey");

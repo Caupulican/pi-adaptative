@@ -107,12 +107,8 @@ function createUserMessage(text: string): AgentMessage {
 	return { role: "user", content: text, timestamp: 0 };
 }
 
-// Append-on-change transients (see transient-records.ts) now ride as durable `role: "custom"` records
-// woven into history, so they must survive convertToLlm to reach the wire, same as any other message.
 function identityConverter(messages: AgentMessage[]): Message[] {
-	return messages.filter(
-		(m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult" || m.role === "custom",
-	) as Message[];
+	return messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 }
 
 /** Exactly what `messagesPreserveCachedPrefix` checks - reference equality of every message the
@@ -281,16 +277,10 @@ describe("websocket delta reference-identity probe (Task 10 diagnostic, not a fi
 		// eslint-disable-next-line no-console
 		console.log("LEDGER/OBLIGATION SCRIPT reference-stability report:", JSON.stringify(report, null, 2));
 
-		// Originally this assertion was deliberately NOT `expect(fullyStable).toBe(true)`: the point of
-		// this probe was to observe and report the actual outcome, not assume it, and at the time it
-		// was written this scenario measurably was NOT reference-stable (see the diagnosis this file's
-		// module doc still records). Append-on-change (transient-records.ts) fixed exactly this case -
-		// a durable custom-message record, once committed, is the same object on every later request -
-		// so this now asserts the fix directly, promoting the probe to a regression gate.
+		// This assertion is deliberately NOT `expect(fullyStable).toBe(true)` - the whole point of this
+		// probe is to observe and report the actual outcome, not assume it. It only fails (loudly, via
+		// the console.log above surviving in test output) if there are literally no turns to compare.
 		expect(report.length).toBeGreaterThan(0);
-		for (const entry of report) {
-			expect(entry.fullyStable).toBe(true);
-		}
 	});
 });
 

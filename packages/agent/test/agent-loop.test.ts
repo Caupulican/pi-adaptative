@@ -11,13 +11,8 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentLoop, agentLoopContinue } from "../src/agent-loop.ts";
-import { TOOL_FAILURE_LEDGER_CLEARED_TEXT, TOOL_FAILURE_LEDGER_TRANSIENT_KIND } from "../src/tool-failure-memory.ts";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
 import { createAgentToolFailureRecoveryAuthority } from "../src/types.ts";
-import {
-	VERIFICATION_OBLIGATION_TRANSIENT_KIND,
-	VERIFICATION_OBLIGATIONS_CLEARED_TEXT,
-} from "../src/verification-obligations.ts";
 
 // Mock stream for testing - mimics MockAssistantStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -34,51 +29,38 @@ class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMe
 }
 
 /**
- * Reads the last durable custom-message record of `kind` (see transient-records.ts) - "last" because
- * append-on-change never rewrites or repositions a record, so an older instance further back, if any,
- * is superseded and stale by construction. `Context["messages"]` is typed as the wire-level `Message`
- * union (no "custom" member), but `identityConverter` below deliberately passes a `role: "custom"`
- * message through uncast at runtime - test code bridges that gap explicitly here rather than widening
- * the production wire type for a test-only shape.
- *
- * Returns "" when the last record IS the kind's explicit cleared-state text (`clearedText`, a prefix
- * of the stored content - `reconcileTransientRecords` always appends its own superseding note after
- * it): callers of this helper predate append-on-change and mean "is there an ACTIVE constraint right
- * now", not "does a historical record of this kind exist anywhere" - the two questions were the same
- * thing when silence meant cleared, and are deliberately kept the same question here, since the
- * cleared record's whole PURPOSE is to make an old active record stop reading as current, not to
- * introduce a new "active" reading of its own.
- */
-function customRecordOf(context: Context | undefined, kind: string, clearedText: string): string {
-	const messages = context?.messages ?? [];
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const message = messages[index] as unknown as AgentMessage;
-		if (message.role === "custom" && message.customType === kind && typeof message.content === "string") {
-			return message.content.startsWith(clearedText) ? "" : message.content;
-		}
-	}
-	return "";
-}
-
-/**
- * The failure ledger reaches the model as a durable, append-on-change custom-message record, never
- * in the system prompt (see sanitizeToolFailureContext / transient-records.ts): ledger text in the
- * cached prefix re-prefills the whole conversation each time a failure appears, its counts change, or
- * a success clears it. Empty string means no ledger is currently active.
+ * The failure ledger reaches the model as the LAST message of the request, never in the system
+ * prompt (see sanitizeToolFailureContext): ledger text in the cached prefix re-prefills the whole
+ * conversation each time a failure appears, its counts change, or a success clears it. Empty string
+ * means no ledger was projected this request.
  */
 function ledgerOf(context: Context | undefined): string {
-	return customRecordOf(context, TOOL_FAILURE_LEDGER_TRANSIENT_KIND, TOOL_FAILURE_LEDGER_CLEARED_TEXT);
+	const last = context?.messages.at(-1);
+	if (!last || last.role !== "user") return "";
+	const text =
+		typeof last.content === "string"
+			? last.content
+			: last.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+	return text.startsWith("MANDATORY TOOL FAILURE RECOVERY") ? text : "";
 }
 
 /**
- * The verification-obligation instruction reaches the model as a durable, append-on-change transient
- * record, never in the system prompt (see agent-loop.ts's `trailingInstruction` composition /
- * transient-records.ts): the active id set changes as obligations appear and resolve, and
- * system-prompt text sits at byte zero of the request, where a change invalidates the whole cached
- * prefix. Empty string means no obligation is currently active.
+ * The verification-obligation instruction reaches the model as a trailing transient message, never
+ * in the system prompt (see agent-loop.ts's `trailingInstruction` composition): the active id set
+ * changes as obligations appear and resolve, and system-prompt text sits at byte zero of the
+ * request, where a change invalidates the whole cached prefix. Empty string means no obligation
+ * instruction was projected this request.
  */
 function obligationInstructionOf(context: Context | undefined): string {
-	return customRecordOf(context, VERIFICATION_OBLIGATION_TRANSIENT_KIND, VERIFICATION_OBLIGATIONS_CLEARED_TEXT);
+	for (const message of context?.messages ?? []) {
+		if (message.role !== "user") continue;
+		const text =
+			typeof message.content === "string"
+				? message.content
+				: message.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+		if (text.startsWith("ACTIVE VERIFICATION FAILURES")) return text;
+	}
+	return "";
 }
 
 function createUsage() {
@@ -139,15 +121,9 @@ function createUserMessage(text: string): UserMessage {
 	};
 }
 
-// Simple identity converter for tests - passes through standard messages plus durable
-// append-on-change transient records (role: "custom" - see transient-records.ts), mirroring what a
-// real convertToLlm must already do for host-owned transients like the path-alias legend to ever
-// reach the wire. Cast to Message[] like the production wire type does not model "custom" as a
-// distinct member; test code that needs to inspect one bridges the gap itself (see customRecordOf).
+// Simple identity converter for tests - just passes through standard messages
 function identityConverter(messages: AgentMessage[]): Message[] {
-	return messages.filter(
-		(m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult" || m.role === "custom",
-	) as Message[];
+	return messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 }
 
 describe("agentLoop with AgentMessage", () => {
@@ -825,13 +801,8 @@ describe("agentLoop with AgentMessage", () => {
 		let providerSawEscalation = false;
 		const config: AgentLoopConfig = {
 			model: createModel(),
-			// convertToLlm may be called more than once per request - once for the durable core, and
-			// again for any new-or-changed transient record (see transient-records.ts) - so this must
-			// accumulate across calls (||=) rather than overwrite: a later call's smaller message
-			// subset (e.g. just a cleared-ledger record) must never un-observe what an earlier call in
-			// the SAME request already saw reach the provider.
 			convertToLlm: (messages) => {
-				providerSawEscalation ||= messages.some(
+				providerSawEscalation = messages.some(
 					(message) =>
 						message.role === "toolResult" &&
 						message.content.some((block) => block.type === "text" && block.text.includes("Full tool schema:")),
@@ -1004,10 +975,8 @@ describe("agentLoop with AgentMessage", () => {
 			{
 				model: createModel(),
 				maxProviderTurns: 5,
-				// See the identical comment in "enriches the third identical validation bounce" above:
-				// convertToLlm can be called more than once per request, so this must accumulate.
 				convertToLlm: (messages) => {
-					providerSawSchema ||= messages.some(
+					providerSawSchema = messages.some(
 						(message) =>
 							message.role === "toolResult" &&
 							message.content.some((block) => block.type === "text" && block.text.includes("Full tool schema:")),
