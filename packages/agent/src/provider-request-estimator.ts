@@ -137,49 +137,89 @@ function semanticImageContent(
 	return changed ? projected : content;
 }
 
-function semanticMessages(messages: Message[], addImageChars: () => void): unknown[] {
-	return messages.map((message) => {
-		switch (message.role) {
-			case "user":
-				return {
-					role: message.role,
-					content: Array.isArray(message.content)
-						? semanticImageContent(message.content, addImageChars)
-						: message.content,
-				};
-			case "assistant":
-				return {
-					role: message.role,
-					content: message.content,
-					api: message.api,
-					provider: message.provider,
-					model: message.model,
-				};
-			case "toolResult":
-				return {
-					role: message.role,
-					toolCallId: message.toolCallId,
-					toolName: message.toolName,
-					content: semanticImageContent(message.content, addImageChars),
-					isError: message.isError,
-				};
-		}
-		const exhaustive: never = message;
-		return exhaustive;
-	});
+function semanticMessage(message: Message, addImageChars: () => void): unknown {
+	switch (message.role) {
+		case "user":
+			return {
+				role: message.role,
+				content: Array.isArray(message.content)
+					? semanticImageContent(message.content, addImageChars)
+					: message.content,
+			};
+		case "assistant":
+			return {
+				role: message.role,
+				content: message.content,
+				api: message.api,
+				provider: message.provider,
+				model: message.model,
+			};
+		case "toolResult":
+			return {
+				role: message.role,
+				toolCallId: message.toolCallId,
+				toolName: message.toolName,
+				content: semanticImageContent(message.content, addImageChars),
+				isError: message.isError,
+			};
+	}
+	const exhaustive: never = message;
+	return exhaustive;
 }
 
-/** Bounded semantic planning estimate over the complete, already-materialized provider Context. */
+interface SemanticMessageMeasure {
+	/** JSON length of the message's semantic projection, or the `null` length when unmeasurable. */
+	readonly length: number;
+	/** Image blocks the projection replaced, each worth ESTIMATED_IMAGE_CHARS. */
+	readonly images: number;
+}
+
+/**
+ * Per-message measurements, keyed by message identity. A request is estimated at least twice per
+ * provider call (admission plus the non-compactable floor) over the WHOLE context, and messages are
+ * immutable once built and keep their identity across requests unless a pipeline stage rewrites them,
+ * so measuring every message on every request re-walked the entire transcript: 8% of host CPU over a
+ * 1,500-turn session, growing with the transcript. Now only messages this process has never measured
+ * are walked. `WeakMap`, so a message that leaves the context takes its measurement with it.
+ */
+const semanticMessageMeasures = new WeakMap<Message, SemanticMessageMeasure>();
+
+function measureSemanticMessage(message: Message): SemanticMessageMeasure {
+	const cached = semanticMessageMeasures.get(message);
+	if (cached) return cached;
+	let images = 0;
+	const projected = semanticMessage(message, () => {
+		images += 1;
+	});
+	// `undefined` only for values JSON omits; a message is an object, so it serializes as `null` at worst.
+	const measure: SemanticMessageMeasure = { length: measureJsonLength(projected) ?? 4, images };
+	semanticMessageMeasures.set(message, measure);
+	return measure;
+}
+
+const MESSAGES_FIELD_LENGTH = jsonStringUtf16Length("messages") + 1;
+
+/**
+ * Bounded semantic planning estimate over the complete, already-materialized provider Context.
+ *
+ * Assembles the exact length of `{"systemPrompt":…,"messages":[…],"tools":…}` from the memoized
+ * per-message measurements above plus a direct measurement of the two bounded fields, so the result
+ * is byte-identical to measuring the assembled object -- pinned by test -- without walking messages
+ * measured on an earlier request.
+ */
 export function estimateProviderRequestTokens(context: Context, model?: Model<Api>): number {
-	let imageChars = 0;
 	const imageAwareMessages = model ? projectMessagesForModelImageSupport(context.messages, model) : context.messages;
-	const messages = semanticMessages(imageAwareMessages, () => {
-		imageChars += ESTIMATED_IMAGE_CHARS;
-	});
-	const serializedLength = measureJsonLength({
-		systemPrompt: context.systemPrompt,
-		messages,
-		tools: context.tools,
-	});
-	return serializedLength === undefined ? 0 : Math.ceil((serializedLength + imageChars) / CHARS_PER_TOKEN_ESTIMATE);
+	let messagesLength = 2;
+	let imageChars = 0;
+	for (let index = 0; index < imageAwareMessages.length; index++) {
+		const measure = measureSemanticMessage(imageAwareMessages[index]!);
+		messagesLength += measure.length + (index > 0 ? 1 : 0);
+		imageChars += measure.images * ESTIMATED_IMAGE_CHARS;
+	}
+	const otherFields = { systemPrompt: context.systemPrompt, tools: context.tools };
+	const otherLength = measureJsonLength(otherFields);
+	if (otherLength === undefined) return 0;
+	const otherFieldCount = (context.systemPrompt === undefined ? 0 : 1) + (context.tools === undefined ? 0 : 1);
+	const serializedLength = otherLength + (otherFieldCount > 0 ? 1 : 0) + MESSAGES_FIELD_LENGTH + messagesLength;
+	return Math.ceil((serializedLength + imageChars) / CHARS_PER_TOKEN_ESTIMATE);
 }

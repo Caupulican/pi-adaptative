@@ -55,6 +55,19 @@ export interface HostStateStoreOptions<THostData> {
 	parseHost(value: unknown, hostId: string): THostData | undefined;
 }
 
+/**
+ * Freeze a parsed state tree in place so the cached copy handed to readers cannot be mutated by
+ * accident: with the parse cache below, readers share one object graph instead of each getting a
+ * fresh parse, and a mutation through a shared reference would corrupt what the next write persists.
+ * Mutators never see frozen data; they work on a structured clone.
+ */
+function deepFreeze<T>(value: T): T {
+	if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
+	Object.freeze(value);
+	for (const key of Object.keys(value as object)) deepFreeze((value as Record<string, unknown>)[key]);
+	return value;
+}
+
 /** Shared lock-safe, atomic substrate for versioned state partitioned by host fingerprint. */
 export class HostStateStore<THostData> {
 	private readonly filePath: string;
@@ -62,6 +75,23 @@ export class HostStateStore<THostData> {
 	private readonly fingerprint: () => HostFingerprint;
 	private readonly readOnly: boolean;
 	private readonly parseHost: (value: unknown, hostId: string) => THostData | undefined;
+	/**
+	 * The host this process runs on does not change while it runs, but `currentHostFingerprint`
+	 * asks the OS for its CPU list every time -- measured at 4% of host CPU across a 1,500-turn
+	 * session, because every tool call resolves the host two or three times. Resolved once.
+	 */
+	private resolvedHost: HostFingerprint | undefined;
+	/**
+	 * The file text this instance last parsed or wrote, with the state it stands for. Every read
+	 * re-parses the whole file and every reader re-validates every host record; a tool-performance
+	 * file re-encodes up to a thousand observations per parse. Nearly every read follows this
+	 * instance's own write, so the file text is compared to the text last seen and the parse is
+	 * skipped when they are identical. Exact text comparison, so another process writing the same
+	 * host file is always parsed fresh. The cached tree is deep-frozen and shared with readers;
+	 * mutators work on a structured clone of it, and a mutation ends with the clone frozen and cached
+	 * as what was written.
+	 */
+	private parsed: { readonly text: string; readonly file: HostStateFile<THostData> } | undefined;
 
 	constructor(options: HostStateStoreOptions<THostData>) {
 		this.filePath = options.filePath;
@@ -72,7 +102,8 @@ export class HostStateStore<THostData> {
 	}
 
 	private currentHost(): HostFingerprint {
-		return this.fingerprint();
+		this.resolvedHost ??= this.fingerprint();
+		return this.resolvedHost;
 	}
 
 	getHost(hostId = this.currentHost().id): THostData | undefined {
@@ -89,12 +120,15 @@ export class HostStateStore<THostData> {
 	): TResult {
 		const host = this.currentHost();
 		const execute = (): TResult => {
-			const file = this.load();
+			// A clone, so a mutator that throws halfway leaves the cached tree exactly as persisted.
+			const file = structuredClone(this.load());
 			const data = file.hosts[host.id] ?? create(host);
 			file.hosts[host.id] = data;
 			const mutation = mutate(data, host);
 			if (mutation.changed && !this.readOnly) {
-				writeFileAtomicSync(this.filePath, `${JSON.stringify(file)}\n`);
+				const text = `${JSON.stringify(file)}\n`;
+				writeFileAtomicSync(this.filePath, text);
+				this.parsed = { text, file: deepFreeze(file) };
 			}
 			return mutation.result;
 		};
@@ -102,9 +136,26 @@ export class HostStateStore<THostData> {
 	}
 
 	private load(): HostStateFile<THostData> {
-		if (!existsSync(this.filePath)) return { version: this.version, hosts: {} };
+		if (!existsSync(this.filePath)) {
+			this.parsed = undefined;
+			return { version: this.version, hosts: {} };
+		}
+		let text: string;
 		try {
-			const parsed: unknown = JSON.parse(readFileSync(this.filePath, "utf-8"));
+			text = readFileSync(this.filePath, "utf-8");
+		} catch {
+			this.parsed = undefined;
+			return { version: this.version, hosts: {} };
+		}
+		if (this.parsed?.text === text) return this.parsed.file;
+		const file = deepFreeze(this.parseFile(text));
+		this.parsed = { text, file };
+		return file;
+	}
+
+	private parseFile(text: string): HostStateFile<THostData> {
+		try {
+			const parsed: unknown = JSON.parse(text);
 			if (!isPlainRecord(parsed) || parsed.version !== this.version || !isPlainRecord(parsed.hosts)) {
 				return { version: this.version, hosts: {} };
 			}

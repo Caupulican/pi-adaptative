@@ -316,6 +316,22 @@ export function isAutoLearnSessionId(id: string): boolean {
 }
 
 /** Generate a unique short ID (8 hex chars, collision-checked) */
+/**
+ * Id space for a batch being minted: the persisted ids plus the ones minted so far in this batch,
+ * WITHOUT copying the persisted set. Copying `byId.keys()` into a fresh Set per batch made every
+ * tool-call marker and message batch O(entries in the session) -- measured at 3% of host CPU over a
+ * 1,500-turn session, and growing with it.
+ */
+function pendingIdSpace(byId: ReadonlyMap<string, unknown>): { has(id: string): boolean; add(id: string): void } {
+	const pending = new Set<string>();
+	return {
+		has: (id) => byId.has(id) || pending.has(id),
+		add: (id) => {
+			pending.add(id);
+		},
+	};
+}
+
 function generateId(byId: { has(id: string): boolean }): string {
 	for (let i = 0; i < 100; i++) {
 		const id = randomUUID().slice(0, 8);
@@ -1837,7 +1853,7 @@ export class SessionManager {
 			);
 		}
 		const entries: SessionEntry[] = [];
-		const ids = new Set(this.byId.keys());
+		const ids = pendingIdSpace(this.byId);
 		let parentId = this.leafId;
 		for (const item of batch) {
 			if (!item || typeof item !== "object") {
@@ -2105,7 +2121,7 @@ export class SessionManager {
 		if (starts.length === 0) return [];
 		const entries: ForegroundToolStartEntry[] = [];
 		let parentId = this.leafId;
-		const ids = new Set(this.byId.keys());
+		const ids = pendingIdSpace(this.byId);
 		for (const start of starts) {
 			const entry: ForegroundToolStartEntry = {
 				type: "foreground_tool_start",

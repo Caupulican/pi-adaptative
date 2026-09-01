@@ -119,7 +119,11 @@ export function appendGoalStateSnapshot(
 			baseRevision: previousRevision,
 			events: state.events.slice(-eventCount).map(cloneGoalEventForStorage),
 		};
-		return sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
+		const entryId = sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
+		// The journal's newest entry now stands for exactly this state: prime the reader's cache so the
+		// next read does not reconstruct what was just written.
+		cacheGoalState(sessionManager, entryId, state);
+		return entryId;
 	}
 
 	const payload: GoalCheckpointPayload = {
@@ -127,7 +131,9 @@ export function appendGoalStateSnapshot(
 		kind: "checkpoint",
 		state: cloneGoalStateForStorage(state),
 	};
-	return sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
+	const entryId = sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
+	cacheGoalState(sessionManager, entryId, state);
+	return entryId;
 }
 
 export function appendGoalClearedSnapshot(
@@ -142,7 +148,9 @@ export function appendGoalClearedSnapshot(
 		baseRevision: state.revision ?? 0,
 		clearedAt,
 	};
-	return sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
+	const entryId = sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, payload);
+	cacheGoalState(sessionManager, entryId, undefined);
+	return entryId;
 }
 
 /** Legacy payload decode retained for imports and focused codec tests. */
@@ -159,10 +167,14 @@ interface GoalStateCacheEntry {
 	state: GoalState | undefined;
 }
 
-const goalStateCache = new WeakMap<GoalStateSource, GoalStateCacheEntry>();
+/**
+ * Keyed by the session manager object itself, so the writer (`appendGoalStateSnapshot`, which only
+ * sees the append surface) and the reader (`getLatestGoalStateSnapshot`) share one entry.
+ */
+const goalStateCache = new WeakMap<object, GoalStateCacheEntry>();
 
 function cacheGoalState(
-	sessionManager: GoalStateSource,
+	sessionManager: object,
 	latestEntryId: string | null,
 	state: GoalState | undefined,
 ): GoalState | undefined {
@@ -171,10 +183,27 @@ function cacheGoalState(
 	return stored ? cloneGoalStateForStorage(stored) : undefined;
 }
 
+function replayGoalEventBatches(base: GoalState, batches: readonly GoalEventBatchPayload[]): GoalState | undefined {
+	let state = base;
+	for (const batch of batches) {
+		if (batch.goalId !== state.goalId || batch.baseRevision !== (state.revision ?? 0)) return undefined;
+		for (const event of batch.events) state = applyGoalEvent(state, event);
+	}
+	return state;
+}
+
 /**
  * Reconstruct the latest goal from one checkpoint plus linear event batches. Any malformed newest
  * goal journal fails closed instead of skipping backward to an older active state and resurrecting
  * work after corruption.
+ *
+ * Cost is bounded by what changed since the last read, not by the session. The journal appends an
+ * event batch on nearly every request of an active goal (thousands per long session), so a cache
+ * keyed only on the newest entry id missed on every read and each miss walked the whole ancestry
+ * back to the checkpoint, replaying every batch since -- measured at 9ms growing to 94ms per
+ * `get_goal` across one 4,500-request session. The walk now stops at the entry the cache already
+ * reflects and replays only the batches after it, and every write primes the cache with the state
+ * it just journaled, so the common read after a write is a clone and nothing else.
  */
 export function getLatestGoalStateSnapshot(sessionManager: GoalStateSource): GoalState | undefined {
 	const latestEntry = sessionManager.getLatestCustomEntryOnBranch(GOAL_STATE_CUSTOM_TYPE);
@@ -188,6 +217,13 @@ export function getLatestGoalStateSnapshot(sessionManager: GoalStateSource): Goa
 	const batches: GoalEventBatchPayload[] = [];
 	let entry = latestEntry;
 	for (;;) {
+		if (cached?.state && entry.id === cached.latestEntryId) {
+			// Everything from here back is already reflected in the cached state; only the batches
+			// collected on the way down are new. A batch that does not chain onto it is corruption of
+			// the same kind the checkpoint path fails closed on, and gets the same answer.
+			batches.reverse();
+			return cacheGoalState(sessionManager, latestEntryId, replayGoalEventBatches(cached.state, batches));
+		}
 		const legacy = decodeGoalStateSnapshotPayload(entry.data);
 		const journal = legacy ? undefined : decodeGoalJournalPayload(entry.data);
 		if (!legacy && !journal) return cacheGoalState(sessionManager, latestEntryId, undefined);
@@ -195,14 +231,8 @@ export function getLatestGoalStateSnapshot(sessionManager: GoalStateSource): Goa
 
 		const checkpoint = legacy ?? (journal?.kind === "checkpoint" ? journal.state : undefined);
 		if (checkpoint) {
-			let state = checkpoint;
-			for (const batch of batches.reverse()) {
-				if (batch.goalId !== state.goalId || batch.baseRevision !== (state.revision ?? 0)) {
-					return cacheGoalState(sessionManager, latestEntryId, undefined);
-				}
-				for (const event of batch.events) state = applyGoalEvent(state, event);
-			}
-			return cacheGoalState(sessionManager, latestEntryId, state);
+			batches.reverse();
+			return cacheGoalState(sessionManager, latestEntryId, replayGoalEventBatches(checkpoint, batches));
 		}
 
 		if (journal?.kind !== "events") return cacheGoalState(sessionManager, latestEntryId, undefined);

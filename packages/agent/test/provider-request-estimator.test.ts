@@ -62,6 +62,93 @@ describe("provider request estimator", () => {
 		);
 	});
 
+	it("assembles the memoized per-message estimate byte-identically to measuring the whole payload", () => {
+		// The estimator remembers each message's measurement by identity and assembles the request length
+		// from those parts. The assembly must equal measuring the assembled object in every field
+		// combination, including the ones where a field is omitted from the JSON entirely.
+		const messages: Context["messages"] = [
+			{ role: "user", content: "plain string content", timestamp: 1 },
+			{ role: "user", content: [{ type: "text", text: "array content" }], timestamp: 2 },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "answer" }],
+				api: "openai-responses",
+				provider: "xai",
+				model: "estimator-test",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 3,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "file body" }],
+				isError: false,
+				timestamp: 4,
+			},
+		];
+		const providerVisible = messages.map((message) => {
+			switch (message.role) {
+				case "user":
+					return { role: message.role, content: message.content };
+				case "assistant":
+					return {
+						role: message.role,
+						content: message.content,
+						api: message.api,
+						provider: message.provider,
+						model: message.model,
+					};
+				case "toolResult":
+					return {
+						role: message.role,
+						toolCallId: message.toolCallId,
+						toolName: message.toolName,
+						content: message.content,
+						isError: message.isError,
+					};
+				default:
+					throw new Error(`unexpected role ${(message as { role: string }).role}`);
+			}
+		});
+		const tools: Context["tools"] = [
+			{
+				name: "read",
+				description: "Read a file.",
+				parameters: { type: "object", properties: { path: { type: "string" } } },
+			},
+		];
+		const cases: Array<Pick<Context, "systemPrompt" | "tools">> = [
+			{ systemPrompt: "system contract", tools },
+			{ systemPrompt: undefined, tools },
+			{ systemPrompt: "system contract", tools: undefined },
+			{ systemPrompt: undefined, tools: undefined },
+		];
+		for (const fields of cases) {
+			for (const slice of [messages, messages.slice(0, 1), []]) {
+				const context: Context = { ...fields, messages: slice };
+				const expected = Math.ceil(
+					JSON.stringify({
+						systemPrompt: fields.systemPrompt,
+						messages: providerVisible.slice(0, slice.length),
+						tools: fields.tools,
+					}).length / 4,
+				);
+				// Twice: the second call is served entirely from the memo and must not drift.
+				expect(estimateProviderRequestTokens(context)).toBe(expected);
+				expect(estimateProviderRequestTokens(context)).toBe(expected);
+			}
+		}
+	});
+
 	it("measures JSON UTF-8 bytes exactly without allocating the serialized payload", () => {
 		const payload = {
 			asciiEscapes: 'quote " slash \\ newline\n',
