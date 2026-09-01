@@ -1082,3 +1082,32 @@ describe("WorkerLifecycle", () => {
 		});
 	});
 });
+
+describe("WorkerLifecycle notification polling", () => {
+	it("appends nothing once a lane's terminal notification exists", () => {
+		const lifecycle = new WorkerLifecycle({ agentDir: root(), sessionId: "session-poll" });
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "implementation",
+			model: { provider: "test", id: "model" },
+		});
+		const prepared = lifecycle.prepare({
+			instructions: "implement",
+			executionContract: executionContract(profile),
+			requiredCapabilities: [],
+		});
+		const handle = startWithGrant(lifecycle, prepared.record.laneId, profile.leaseTtlMs);
+		lifecycle.finish(resultFor(handle), { notify: false });
+
+		const pending = lifecycle.getPendingTerminalNotifications();
+		expect(pending).toHaveLength(1);
+		const settled = lifecycle.getTaskRuntimeSnapshot();
+
+		expect(lifecycle.getPendingTerminalNotifications()).toEqual(pending);
+		expect(lifecycle.getTerminalNotification(prepared.record.laneId)).toMatchObject({
+			notificationId: pending[0]!.notificationId,
+			status: "pending",
+		});
+		// The shared projection keeps its identity: every poll settled in memory, no event was appended.
+		expect(lifecycle.getTaskRuntimeSnapshot()).toBe(settled);
+	});
+});

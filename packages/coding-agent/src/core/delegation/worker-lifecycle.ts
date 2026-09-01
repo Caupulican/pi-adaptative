@@ -30,6 +30,7 @@ import {
 	isManagedWorkerAttempt,
 	NONTERMINAL_WORKER_ATTEMPT_STATUSES,
 	projectManagedWorkerLaneRecords,
+	projectUnmanagedWorkerLaneRecords,
 	projectWorkerLaneRecord,
 	selectedManagedWorkerAttempt,
 	selectedWorkerAttempt,
@@ -516,13 +517,7 @@ export class WorkerLifecycle {
 	}
 
 	getRecords(): LaneRecord[] {
-		const snapshot = this.ledger.runtime.getSnapshot();
-		return Object.keys(snapshot.tasks).flatMap((taskId) => {
-			const attempt = selectedWorkerAttempt(snapshot, taskId);
-			if (!attempt || isManagedWorkerAttempt(attempt)) return [];
-			const record = projectWorkerLaneRecord(snapshot, taskId);
-			return record ? [record] : [];
-		});
+		return projectUnmanagedWorkerLaneRecords(this.ledger.runtime.getSnapshot());
 	}
 
 	getManagedRecords(): LaneRecord[] {
@@ -530,7 +525,8 @@ export class WorkerLifecycle {
 	}
 
 	getAllRecords(): LaneRecord[] {
-		return [...this.getRecords(), ...this.getManagedRecords()];
+		const snapshot = this.ledger.runtime.getSnapshot();
+		return [...projectUnmanagedWorkerLaneRecords(snapshot), ...projectManagedWorkerLaneRecords(snapshot)];
 	}
 
 	getRecord(laneId: string): LaneRecord | undefined {
@@ -591,13 +587,16 @@ export class WorkerLifecycle {
 	getTerminalNotification(
 		laneId: string,
 	): { notificationId: string; status: "pending" | "delivered"; record: LaneRecord } | undefined {
-		const record = this.getRecord(laneId) ?? this.getManagedRecord(laneId);
+		let snapshot = this.ledger.runtime.getSnapshot();
+		const record =
+			projectWorkerLaneRecord(snapshot, laneId) ??
+			projectManagedWorkerLaneRecords(snapshot).find((candidate) => candidate.laneId === laneId);
 		if (!record || record.status === "queued" || record.status === "running") return undefined;
-		this.enqueueTerminalNotification(record);
-		const attempt = this.getActiveAttempt(laneId) ?? this.getManagedAttempt(laneId);
+		if (this.enqueueTerminalNotificationFrom(snapshot, record)) snapshot = this.ledger.runtime.getSnapshot();
+		const attempt = selectedWorkerAttempt(snapshot, laneId) ?? selectedManagedWorkerAttempt(snapshot, laneId);
 		if (!attempt) return undefined;
 		const notificationId = `worker-terminal:${attempt.attemptId}`;
-		const notification = this.ledger.runtime.getSnapshot().notifications[notificationId];
+		const notification = snapshot.notifications[notificationId];
 		return notification ? { notificationId, status: notification.status, record } : undefined;
 	}
 
@@ -610,24 +609,44 @@ export class WorkerLifecycle {
 		for (const taskId of Object.keys(snapshot.tasks)) {
 			const record = projectWorkerLaneRecord(snapshot, taskId);
 			if (record && record.status !== "queued" && record.status !== "running") {
-				this.enqueueTerminalNotification(record);
+				this.enqueueTerminalNotificationFrom(snapshot, record);
 			}
 		}
 	}
 
 	private enqueueTerminalNotification(record: LaneRecord): void {
-		const attempt = this.getActiveAttempt(record.laneId) ?? this.getManagedAttempt(record.laneId);
-		if (!attempt || NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status)) return;
-		const snapshot = this.ledger.runtime.getSnapshot();
+		this.enqueueTerminalNotificationFrom(this.ledger.runtime.getSnapshot(), record);
+	}
+
+	/**
+	 * Idempotent against the given snapshot: a notification already enqueued with the same content
+	 * is settled in memory, so polling every terminal lane costs no runtime round-trip per lane.
+	 * Returns whether an event was appended.
+	 */
+	private enqueueTerminalNotificationFrom(snapshot: TaskRuntimeProjection, record: LaneRecord): boolean {
+		const attempt =
+			selectedWorkerAttempt(snapshot, record.laneId) ?? selectedManagedWorkerAttempt(snapshot, record.laneId);
+		if (!attempt || NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status)) return false;
 		const task = snapshot.tasks[attempt.taskId];
-		if (!task) return;
-		if (attempt.result?.nextAction === "independent_verification_required" && !task.verification) return;
-		this.ledger.runtime.enqueueNotification({
+		if (!task) return false;
+		if (attempt.result?.nextAction === "independent_verification_required" && !task.verification) return false;
+		const notification = {
 			notificationId: `worker-terminal:${attempt.attemptId}`,
 			objectiveId: task.task.objectiveId,
 			attemptId: attempt.attemptId,
 			message: `Worker ${record.laneId} reached ${record.status}.`,
-		});
+		};
+		const existing = snapshot.notifications[notification.notificationId];
+		if (
+			existing &&
+			existing.objectiveId === notification.objectiveId &&
+			existing.attemptId === notification.attemptId &&
+			existing.message === notification.message
+		) {
+			return false;
+		}
+		this.ledger.runtime.enqueueNotification(notification);
+		return true;
 	}
 
 	private requireActiveAttempt(laneId: string): AttemptRuntimeState {

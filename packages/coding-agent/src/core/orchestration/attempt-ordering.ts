@@ -5,9 +5,16 @@ import type { AttemptRuntimeState, TaskRuntimeProjection } from "./task-runtime.
  * Event replay appends every new attempt to this record, including a retry queued against an older
  * task, so task grouping, UUID spelling, and tied clocks never participate in lifecycle selection.
  */
+const latestAttemptsMemo = new WeakMap<object, ReadonlyMap<string, AttemptRuntimeState>>();
+
 export function latestAgentAttemptsByDurableOrder(
 	snapshot: Pick<TaskRuntimeProjection, "agents" | "attempts">,
-): Map<string, AttemptRuntimeState> {
+): ReadonlyMap<string, AttemptRuntimeState> {
+	// A frozen snapshot is immutable (the runtime deep-freezes what it shares), so the derived map
+	// is memoized on its identity; an unfrozen literal is scanned on every call.
+	const immutable = Object.isFrozen(snapshot);
+	const cached = immutable ? latestAttemptsMemo.get(snapshot) : undefined;
+	if (cached) return cached;
 	const latest = new Map<string, AttemptRuntimeState>();
 	const agents = snapshot.agents ?? {};
 	const attempts = snapshot.attempts ?? {};
@@ -22,6 +29,7 @@ export function latestAgentAttemptsByDurableOrder(
 		const activeAttempt = attempts[agent.activeAttemptId];
 		if (activeAttempt) latest.set(agent.agentId, activeAttempt);
 	}
+	if (immutable) latestAttemptsMemo.set(snapshot, latest);
 	return latest;
 }
 

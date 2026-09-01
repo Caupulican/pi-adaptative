@@ -94,6 +94,16 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 	};
 }
 
+/** Every in-process worker lane: one record per task whose selected attempt is not managed. */
+export function projectUnmanagedWorkerLaneRecords(snapshot: TaskRuntimeProjection): LaneRecord[] {
+	return Object.keys(snapshot.tasks).flatMap((taskId) => {
+		const attempt = selectedWorkerAttempt(snapshot, taskId);
+		if (!attempt || isManagedWorkerAttempt(attempt)) return [];
+		const record = projectWorkerLaneRecord(snapshot, taskId);
+		return record ? [record] : [];
+	});
+}
+
 /** Latest durable turn for each externally managed logical lane. */
 export function projectManagedWorkerLaneRecords(snapshot: TaskRuntimeProjection): LaneRecord[] {
 	const latest = new Map<string, { sequence: number; createdAt: string; record: LaneRecord }>();
@@ -115,15 +125,37 @@ export function projectManagedWorkerLaneRecords(snapshot: TaskRuntimeProjection)
 	return [...latest.values()].map((entry) => entry.record);
 }
 
+/**
+ * Latest managed attempt per logical lane, derived once per immutable snapshot. The runtime shares
+ * frozen projections whose identity changes only with a new event, so the index is memoized on that
+ * identity; an unfrozen snapshot (a hand-built literal) is scanned on every call.
+ */
+const managedAttemptsByLane = new WeakMap<TaskRuntimeProjection, ReadonlyMap<string, AttemptRuntimeState>>();
+
+function latestManagedAttemptsByLane(snapshot: TaskRuntimeProjection): ReadonlyMap<string, AttemptRuntimeState> {
+	const immutable = Object.isFrozen(snapshot);
+	const cached = immutable ? managedAttemptsByLane.get(snapshot) : undefined;
+	if (cached) return cached;
+	const latest = new Map<string, AttemptRuntimeState>();
+	for (const attempt of Object.values(snapshot.attempts)) {
+		const laneId = attempt.dispatch.logicalLaneId;
+		if (!isManagedWorkerAttempt(attempt) || laneId === undefined) continue;
+		const current = latest.get(laneId);
+		// A tie keeps the later attempt in durable order, as a stable ascending sort's last entry would.
+		if (!current || compareManagedAttemptOrder(attempt, current) >= 0) latest.set(laneId, attempt);
+	}
+	if (immutable) managedAttemptsByLane.set(snapshot, latest);
+	return latest;
+}
+
+function compareManagedAttemptOrder(left: AttemptRuntimeState, right: AttemptRuntimeState): number {
+	const sequence = (left.dispatch.dispatchSequence ?? 1) - (right.dispatch.dispatchSequence ?? 1);
+	return sequence !== 0 ? sequence : left.createdAt.localeCompare(right.createdAt);
+}
+
 export function selectedManagedWorkerAttempt(
 	snapshot: TaskRuntimeProjection,
 	logicalLaneId: string,
 ): AttemptRuntimeState | undefined {
-	return Object.values(snapshot.attempts)
-		.filter((attempt) => isManagedWorkerAttempt(attempt) && attempt.dispatch.logicalLaneId === logicalLaneId)
-		.sort((left, right) => {
-			const sequence = (left.dispatch.dispatchSequence ?? 1) - (right.dispatch.dispatchSequence ?? 1);
-			return sequence !== 0 ? sequence : left.createdAt.localeCompare(right.createdAt);
-		})
-		.at(-1);
+	return latestManagedAttemptsByLane(snapshot).get(logicalLaneId);
 }

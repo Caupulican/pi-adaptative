@@ -522,6 +522,14 @@ export class OrchestrationEventStore {
 		if (baseline && ordinal < baseline.throughOrdinal) {
 			throw new OrchestrationSnapshotRequiredError(baseline.throughOrdinal);
 		}
+		// The tail after the baseline is contiguous, so a committed event past `ordinal` implies a
+		// file for `ordinal + 1`. Its absence settles the common "nothing new" poll without listing
+		// and validating the whole tail, unless the cursor proves a commit past `ordinal` whose file
+		// is gone: that is lost data, and the validating path below reports it.
+		if (!this.hasEventFileUnlocked(ordinal + 1)) {
+			const cursor = parseCursor(this.cursorPath);
+			if (!cursor || cursor.lastOrdinal <= Math.max(ordinal, baseline?.throughOrdinal ?? 0)) return [];
+		}
 		const events: OrchestrationEvent[] = [];
 		const names = this.eventFileNamesUnlocked();
 		this.assertReadableTailUnlocked(names, baseline?.throughOrdinal ?? 0);
@@ -906,6 +914,11 @@ export class OrchestrationEventStore {
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}
+	}
+
+	/** Contiguity makes one existence check exact: no file for `ordinal` means no event at or past it. */
+	private hasEventFileUnlocked(ordinal: number): boolean {
+		return existsSync(join(this.eventsDir, eventFileName(ordinal)));
 	}
 
 	private readEventFileUnlocked(name: string): OrchestrationEvent {

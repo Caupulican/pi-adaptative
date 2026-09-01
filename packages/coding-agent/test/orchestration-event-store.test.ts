@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JsonObject } from "../src/core/autonomy/contracts.ts";
 import {
 	type AppendOrchestrationEventInput,
@@ -16,7 +16,14 @@ import {
 	OrchestrationSnapshotRequiredError,
 } from "../src/core/orchestration/event-store.ts";
 import { DurableTaskRuntime } from "../src/core/orchestration/task-runtime.ts";
+import { readBoundedDirectoryNamesSync } from "../src/core/util/bounded-file.ts";
 import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
+
+// Pass-through spy: behavior is unchanged, only the number of tail listings becomes observable.
+vi.mock("../src/core/util/bounded-file.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/core/util/bounded-file.ts")>();
+	return { ...actual, readBoundedDirectoryNamesSync: vi.fn(actual.readBoundedDirectoryNamesSync) };
+});
 
 const tempDirs: string[] = [];
 
@@ -758,5 +765,52 @@ describe("OrchestrationEventStore", () => {
 		expect(
 			() => new OrchestrationEventStore({ agentDir, sessionId: "max-idempotency", maxIdempotencyEvents: 1_025 }),
 		).toThrow("maxIdempotencyEvents must not exceed 1024");
+	});
+});
+
+describe("OrchestrationEventStore read polling", () => {
+	/** A second instance on the directory the latest makeStore() created, with its own retention. */
+	function peer(retention: { maxTailEvents?: number } = {}): OrchestrationEventStore {
+		return new OrchestrationEventStore({ agentDir: tempDirs.at(-1)!, sessionId: "session-1", ...retention });
+	}
+
+	it("answers a poll with nothing new without listing the tail, and still sees a peer's append", () => {
+		const store = makeStore();
+		for (const type of ["objective.created", "objective.paused", "objective.resumed"] as const) {
+			store.append({ type, aggregateId: "objective-1", actor: "human", payload: {} });
+		}
+		const listings = vi.mocked(readBoundedDirectoryNamesSync);
+		listings.mockClear();
+
+		expect(store.readAfter(3)).toEqual([]);
+		expect(store.readAfter(3)).toEqual([]);
+		expect(listings).not.toHaveBeenCalled();
+
+		peer().append({ type: "objective.cancelled", aggregateId: "objective-1", actor: "human", payload: {} });
+		expect(store.readAfter(3).map((event) => event.ordinal)).toEqual([4]);
+		expect(store.readAfter(4)).toEqual([]);
+	});
+
+	it("reports a truncated committed event the cursor proves instead of nothing new", () => {
+		const store = makeStore();
+		store.append({ type: "objective.created", aggregateId: "objective-1", actor: "kernel", payload: {} });
+		store.append({ type: "objective.paused", aggregateId: "objective-1", actor: "human", payload: {} });
+		unlinkSync(join(store.eventsDir, "0000000000000002.json"));
+
+		expect(() => store.readAfter(1)).toThrow("Orchestration cursor 2 is ahead of the last committed event 1");
+	});
+
+	it("keeps a peer's compaction visible at every ordinal a poll can ask about", () => {
+		const store = makeStore("session-1", { maxTailEvents: 2 });
+		const compactor = new DurableTaskRuntime({ store: peer({ maxTailEvents: 2 }) });
+		for (const id of ["objective-1", "objective-2", "objective-3"]) {
+			compactor.createObjective({ objectiveId: id, title: id, description: "compacted by a peer" });
+		}
+		const through = store.readProjectionSnapshot()?.throughOrdinal;
+		expect(through).toBe(2);
+
+		expect(() => store.readAfter(1)).toThrow(OrchestrationSnapshotRequiredError);
+		expect(store.readAfter(2).map((event) => event.ordinal)).toEqual([3]);
+		expect(store.readAfter(3)).toEqual([]);
 	});
 });

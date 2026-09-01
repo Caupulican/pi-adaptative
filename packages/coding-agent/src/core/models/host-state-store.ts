@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { deepFreeze } from "../util/deep-freeze.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 export interface HostFingerprint {
@@ -94,19 +95,6 @@ export function registerProcessExitFlush(flush: () => void): () => void {
 	return () => {
 		exitFlushes.delete(flush);
 	};
-}
-
-/**
- * Freeze a parsed state tree in place so the cached copy handed to readers cannot be mutated by
- * accident: with the parse cache below, readers share one object graph instead of each getting a
- * fresh parse, and a mutation through a shared reference would corrupt what the next write persists.
- * Mutators never see frozen data; they work on a structured clone.
- */
-function deepFreeze<T>(value: T): T {
-	if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
-	Object.freeze(value);
-	for (const key of Object.keys(value as object)) deepFreeze((value as Record<string, unknown>)[key]);
-	return value;
 }
 
 /** Shared lock-safe, atomic substrate for versioned state partitioned by host fingerprint. */

@@ -1881,7 +1881,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return agent.activeAttemptId ? lifecycle.getTaskRuntimeSnapshot().attempts[agent.activeAttemptId] : undefined;
 	}
 
-	private latestAttemptsByAgent(snapshot: TaskRuntimeProjection): Map<string, AttemptRuntimeState> {
+	private latestAttemptsByAgent(snapshot: TaskRuntimeProjection): ReadonlyMap<string, AttemptRuntimeState> {
 		return latestAgentAttemptsByDurableOrder(snapshot);
 	}
 

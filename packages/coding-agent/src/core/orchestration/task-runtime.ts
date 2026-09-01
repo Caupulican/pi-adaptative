@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
+import { deepFreeze } from "../util/deep-freeze.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
 import {
 	type AgentBindingContract,
@@ -56,7 +57,6 @@ import {
 	assertObjectiveEvidenceHasCapacity,
 	assertProjectionRecordReplacementWithinLimits,
 	assertRecordHasCapacity,
-	cloneProjection,
 	projectionCapacity,
 	requestedProjectionSlots,
 } from "./task-runtime-projection.ts";
@@ -136,6 +136,7 @@ export class DurableTaskRuntime {
 	private readonly store: OrchestrationEventStore;
 	private readonly now: () => number;
 	private readonly createId: () => string;
+	/** Immutable once adopted: every assignment deep-freezes it, so getSnapshot() shares it. */
 	private state: TaskRuntimeProjection;
 
 	constructor(options: DurableTaskRuntimeOptions) {
@@ -144,28 +145,35 @@ export class DurableTaskRuntime {
 		this.createId = options.createId ?? randomUUID;
 		const snapshot = this.store.readProjectionSnapshot();
 		if (snapshot) {
-			this.state = projectionFromSnapshot(snapshot.projection, snapshot.throughOrdinal);
+			this.state = deepFreeze(projectionFromSnapshot(snapshot.projection, snapshot.throughOrdinal));
 		} else {
 			const events = this.store.readAll();
 			// Compaction may install a baseline between the first snapshot read and readAll(). In that
 			// case readAll() returns only the new tail, which must be applied to that baseline rather
 			// than projected as a standalone history.
 			const snapshotAfterRead = this.store.readProjectionSnapshot();
-			this.state = snapshotAfterRead
-				? events
-						.filter((event) => event.ordinal > snapshotAfterRead.throughOrdinal)
-						.reduce(
-							reduceOrchestrationEvent,
-							projectionFromSnapshot(snapshotAfterRead.projection, snapshotAfterRead.throughOrdinal),
-						)
-				: projectOrchestrationEvents(events);
+			this.state = deepFreeze(
+				snapshotAfterRead
+					? events
+							.filter((event) => event.ordinal > snapshotAfterRead.throughOrdinal)
+							.reduce(
+								reduceOrchestrationEvent,
+								projectionFromSnapshot(snapshotAfterRead.projection, snapshotAfterRead.throughOrdinal),
+							)
+					: projectOrchestrationEvents(events),
+			);
 		}
 		this.refresh();
 	}
 
+	/**
+	 * The current projection as one immutable value shared by every reader. A later event yields a
+	 * new object, so holding a snapshot across appends is safe and its identity is a valid memo key
+	 * for derived indexes. Cloning it per read cost a third of a delegation-heavy session's host CPU.
+	 */
 	getSnapshot(): TaskRuntimeProjection {
 		this.refresh();
-		return cloneProjection(this.state);
+		return this.state;
 	}
 
 	/** Read-only retained-record counts and remaining lifetime slots for orchestration admission. */
@@ -1221,11 +1229,11 @@ export class DurableTaskRuntime {
 			if (!snapshot || snapshot.throughOrdinal < error.throughOrdinal) {
 				throw new DurableTaskRuntimeError("Required orchestration projection snapshot is unavailable.");
 			}
-			this.state = projectionFromSnapshot(snapshot.projection, snapshot.throughOrdinal);
+			this.state = deepFreeze(projectionFromSnapshot(snapshot.projection, snapshot.throughOrdinal));
 			events = this.store.readAfter(this.state.lastOrdinal);
 		}
 		for (const event of events) {
-			this.state = reduceOrchestrationEvent(this.state, event);
+			this.state = deepFreeze(reduceOrchestrationEvent(this.state, event));
 		}
 		this.compactCurrentProjection();
 	}
@@ -1242,14 +1250,14 @@ export class DurableTaskRuntime {
 			},
 		});
 		if (admittedProjection) {
-			this.state = admittedProjection;
+			this.state = deepFreeze(admittedProjection);
 			return;
 		}
 		// Exact idempotent replay can return an older event after another writer committed a
 		// contiguous suffix. Adopt through readAfter so no intervening ordinal is skipped. Test stores
 		// that do not execute append admission still fall back to reducing their returned next event.
 		if (event.ordinal > this.state.lastOrdinal) this.refresh();
-		if (event.ordinal > this.state.lastOrdinal) this.state = reduceOrchestrationEvent(this.state, event);
+		if (event.ordinal > this.state.lastOrdinal) this.state = deepFreeze(reduceOrchestrationEvent(this.state, event));
 	}
 
 	private compactCurrentProjection(): void {

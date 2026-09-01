@@ -1602,3 +1602,49 @@ describe("DurableTaskRuntime", () => {
 		expect(snapshot.attempts[attempt.attemptId]?.status).toBe("cancelled");
 	});
 });
+
+describe("DurableTaskRuntime snapshots", () => {
+	it("shares one frozen projection until the next event", () => {
+		const { runtime } = createHarness();
+		const objective = runtime.createObjective({
+			objectiveId: "shared-objective",
+			title: "Share",
+			description: "One immutable value for every reader",
+		});
+		const first = runtime.getSnapshot();
+		expect(runtime.getSnapshot()).toBe(first);
+		expect(Object.isFrozen(first)).toBe(true);
+		expect(Object.isFrozen(first.objectives[objective.objectiveId]?.objective)).toBe(true);
+		expect(() => {
+			(first.objectives as Record<string, unknown>).intruder = {};
+		}).toThrow(TypeError);
+
+		runtime.createTask({
+			taskId: "shared-task",
+			objectiveId: objective.objectiveId,
+			title: "Run",
+			description: "A later event yields a new object",
+			role: "implementer",
+		});
+		const second = runtime.getSnapshot();
+		expect(second).not.toBe(first);
+		expect(first.lastOrdinal).toBe(1);
+		expect(first.tasks["shared-task"]).toBeUndefined();
+		expect(second.lastOrdinal).toBe(2);
+		expect(second.tasks["shared-task"]?.task.objectiveId).toBe(objective.objectiveId);
+	});
+
+	it("adopts a peer runtime's append on the next read", () => {
+		const { agentDir, runtime } = createHarness();
+		const before = runtime.getSnapshot();
+		const peer = new DurableTaskRuntime({
+			store: new OrchestrationEventStore({ agentDir, sessionId: "session-1" }),
+		});
+		peer.createObjective({ objectiveId: "peer-objective", title: "Peer", description: "Appended elsewhere" });
+
+		const after = runtime.getSnapshot();
+		expect(after).not.toBe(before);
+		expect(after.objectives["peer-objective"]?.objective.title).toBe("Peer");
+		expect(runtime.getSnapshot()).toBe(after);
+	});
+});
