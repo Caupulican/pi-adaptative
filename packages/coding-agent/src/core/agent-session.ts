@@ -303,6 +303,7 @@ export class AgentSession {
 	private readonly _toolGate: ToolGateController;
 	private readonly _toolSelection: ToolSelectionController;
 	private readonly _toolPerformanceStore: ToolPerformanceStore;
+	private readonly _modelAdaptationStore: ModelAdaptationStore;
 
 	private _extensionRunner!: ExtensionRunner;
 	private _turnIndex = 0;
@@ -421,7 +422,9 @@ export class AgentSession {
 		// Wrapping also breaks the `streamFn === streamSimple` identity the auth-injection checks
 		// use, so the wrapper carries a rawness marker that _isRawStreamSimple reads.
 		const agentDir = config.agentDir ?? getAgentDir();
-		const modelAdaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
+		// Write-behind: a perf sample per provider stream is not worth a journaled write each (see HostStateStore).
+		const modelAdaptationStore = ModelAdaptationStore.forAgentDir(agentDir, { writeBehind: {} });
+		this._modelAdaptationStore = modelAdaptationStore;
 		const baseStreamFn = this.agent.streamFn;
 		const previousResolveRequestReasoning = this.agent.resolveRequestReasoning?.bind(this.agent);
 		this.agent.resolveRequestReasoning = (reasoning, request) => {
@@ -1173,11 +1176,8 @@ export class AgentSession {
 			isExplicitThinking: () => this._isExplicitThinking,
 			setThinkingLevel: (level) => this.setThinkingLevel(level, { persistSettings: false }),
 		});
-		// Write-behind: an observation is recorded on every tool call and the store's contents are
-		// advisory statistics, so persisting each one as its own durable transaction put a lock, a
-		// clone, a full re-encode and a file write on every tool call (14% of host CPU over a
-		// 1,500-turn session). Batches flush after a short idle, at a pending cap, on dispose, and at
-		// process exit; a flush replays onto whatever another process wrote in between.
+		// Write-behind: an observation per tool call is advisory statistics, not worth a durable
+		// transaction each (14% of host CPU over 1,500 turns); batches flush on idle, cap, dispose, exit.
 		this._toolPerformanceStore = ToolPerformanceStore.forAgentDir(this._agentDir, { writeBehind: {} });
 		this._toolSelection = new ToolSelectionController({
 			store: this._toolPerformanceStore,
@@ -2177,6 +2177,7 @@ export class AgentSession {
 		});
 		safely(() => this._extensionRunner.invalidate());
 		safely(() => this._toolPerformanceStore.close());
+		safely(() => this._modelAdaptationStore.close());
 		track(() => this._resourceLoader.dispose?.() ?? Promise.resolve());
 		safely(() => this._disconnectFromAgent());
 		this._eventListeners = [];

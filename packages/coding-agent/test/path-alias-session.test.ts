@@ -119,6 +119,49 @@ describe("PathAliasRuntime", () => {
 		runtime.close();
 	});
 
+	it("persists the last-scanned mark with alias inserts and at close, not on every sync", () => {
+		// The mark is a resume optimization, and writing it per request was one journaled SQLite
+		// commit per provider request. A lagging mark only means the next process rescans a few more
+		// messages, which the table extension makes idempotent.
+		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
+		tempDirs.push(dir);
+		const databasePath = join(dir, "runtime.sqlite");
+		const runtime = new PathAliasRuntime(
+			() => "/repo",
+			() => databasePath,
+			() => 1,
+		);
+		const meta = () => {
+			const store = createSqlitePathAliasStore({ databasePath });
+			try {
+				return store.getMeta("last_scanned_timestamp");
+			} finally {
+				store.close();
+			}
+		};
+		// Path-free messages: nothing to insert, so the mark stays in memory.
+		runtime.sync([toolResult("no paths here", 10)]);
+		runtime.sync([toolResult("no paths here", 10), toolResult("still none", 20)]);
+		expect(meta()).toBeUndefined();
+		// An insert is already a write; the mark rides along with it.
+		runtime.sync([
+			toolResult("no paths here", 10),
+			toolResult("still none", 20),
+			toolResult("packages/app/src/loader.ts", 30),
+		]);
+		expect(meta()).toBe("30");
+		// Later path-free syncs stay in memory again until close persists them.
+		runtime.sync([
+			toolResult("no paths here", 10),
+			toolResult("still none", 20),
+			toolResult("packages/app/src/loader.ts", 30),
+			toolResult("tail", 40),
+		]);
+		expect(meta()).toBe("30");
+		runtime.close();
+		expect(meta()).toBe("40");
+	});
+
 	it("avoids alias ids that collide with an on-disk p/ directory", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
 		tempDirs.push(dir);

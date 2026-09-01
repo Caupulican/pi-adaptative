@@ -24,6 +24,7 @@ import {
 
 const LAST_SCANNED_TS_KEY = "last_scanned_timestamp";
 const RESERVED_TOKENS_KEY = "reserved_alias_tokens";
+const LAST_SCANNED_TS_PERSIST_INTERVAL_MS = 5_000;
 const TABLE_CWD_KEY = "table_cwd";
 
 interface PathAliasRecord {
@@ -52,6 +53,17 @@ export class PathAliasRuntime {
 	private store: SqlitePathAliasStore | undefined;
 	private loaded = false;
 	private lastScannedTs = 0;
+	/**
+	 * Whether `lastScannedTs` has moved past what the store holds, and when it was last persisted.
+	 * The mark is a resume optimization (which messages an earlier process already scanned), so it
+	 * does not need to reach disk on every request: persisting it per request was one synchronous
+	 * journaled SQLite write per provider request -- 37% of host time on Windows in the CI profile.
+	 * It lands with any alias insert (already a write), at close, and otherwise at most every few
+	 * seconds; a mark that lags only means the next process rescans a few more messages, which is
+	 * idempotent.
+	 */
+	private lastScannedTsDirty = false;
+	private lastScannedTsPersistedAt = 0;
 	/**
 	 * Ids ever rendered into the legend. Monotone: an id whose last mention scrolls out of the
 	 * window keeps its line instead of retracting it, so the rendered legend only ever grows by
@@ -194,7 +206,14 @@ export class PathAliasRuntime {
 		const maxTs = maxMessageTimestamp(messages);
 		if (maxTs > this.lastScannedTs) {
 			this.lastScannedTs = maxTs;
-			this.store?.setMeta(LAST_SCANNED_TS_KEY, String(maxTs));
+			this.lastScannedTsDirty = true;
+		}
+		const wroteAliases = extended.inserted.length > 0;
+		if (
+			this.lastScannedTsDirty &&
+			(wroteAliases || Date.now() - this.lastScannedTsPersistedAt >= LAST_SCANNED_TS_PERSIST_INTERVAL_MS)
+		) {
+			this.persistLastScannedTs();
 		}
 		const rewritten = this.renderFrozen(messages);
 		const result = {
@@ -237,7 +256,15 @@ export class PathAliasRuntime {
 		return rendered;
 	}
 
+	private persistLastScannedTs(): void {
+		if (!this.lastScannedTsDirty || !this.store) return;
+		this.store.setMeta(LAST_SCANNED_TS_KEY, String(this.lastScannedTs));
+		this.lastScannedTsDirty = false;
+		this.lastScannedTsPersistedAt = Date.now();
+	}
+
 	close(): void {
+		this.persistLastScannedTs();
 		this.store?.close();
 		this.store = undefined;
 		this.records = [];
@@ -277,6 +304,9 @@ export class PathAliasRuntime {
 		if (!storedCwd) this.store.setMeta(TABLE_CWD_KEY, cwd);
 		const meta = this.store.getMeta(LAST_SCANNED_TS_KEY);
 		this.lastScannedTs = meta ? Number(meta) || 0 : 0;
+		// The persist interval counts from the load, so the first requests do not each write the mark.
+		this.lastScannedTsPersistedAt = Date.now();
+		this.lastScannedTsDirty = false;
 		this.loaded = true;
 	}
 
