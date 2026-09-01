@@ -157,7 +157,8 @@ import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
-import { REFLECTION_TURN_TRIGGER_CUSTOM_TYPE, ReflectionController } from "./reflection-controller.ts";
+import { ReflectionController } from "./reflection-controller.ts";
+import { ReflectionTurnLifecycle } from "./reflection-turn-lifecycle.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import {
@@ -373,6 +374,8 @@ export class AgentSession {
 	private _disposed = false;
 	private _disposeCompletion: Promise<void> | undefined;
 	private readonly _reflectionAbort = new AbortController();
+	/** Owns the lifetime of the one detached end-of-work reflection turn; see reflection-turn-lifecycle.ts. */
+	private readonly _reflectionTurnLifecycle: ReflectionTurnLifecycle;
 	/** Root-owned version transition state; construction performs no filesystem I/O. */
 	private readonly _durableLearningState: DurableLearningState | undefined;
 	/** Root current-turn reflection cue + explicit learning-apply/rollback compatibility path. */
@@ -850,8 +853,10 @@ export class AgentSession {
 			getAgentDir: () => this._agentDir,
 			getReflectionSignal: () => this._reflectionAbort.signal,
 			getBaseSystemPrompt: () => this._baseSystemPrompt,
-			runAgentPrompt: (messages) => this._foregroundRecovery.runAgentPrompt(messages, this._foregroundPromptLease),
-			runAgentContinuation: () => this._foregroundRecovery.runAgentContinuation(this._foregroundPromptLease),
+			runAgentPrompt: (messages, signal) =>
+				this._foregroundRecovery.runAgentPrompt(messages, this._foregroundPromptLease, signal),
+			runAgentContinuation: (signal) =>
+				this._foregroundRecovery.runAgentContinuation(this._foregroundPromptLease, signal),
 			buildSystemPromptForToolNames: (toolNames) => this._buildSystemPromptForToolNames(toolNames),
 			refreshCurrentModelFromRegistry: () => this._refreshCurrentModelFromRegistry(),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
@@ -892,6 +897,15 @@ export class AgentSession {
 			ensureModelReady: (model) => this._localRuntimeController.ensureIsolatedModelReady(model),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			saveLearningDecisionSnapshot: (decision) => this.saveLearningDecisionSnapshot(decision),
+		});
+		this._reflectionTurnLifecycle = new ReflectionTurnLifecycle({
+			prompt: (text, options) => this.prompt(text, options),
+			beginDueReflectionTurn: () => this._reflection.beginDueReflectionTurn(),
+			endReflectionTurn: () => this._reflection.endReflectionTurn(),
+			abortAgent: () => this.agent.abort(),
+			getLastAssistantStopReason: () => this._findLastAssistantMessage()?.stopReason,
+			isDisposed: () => this._disposed,
+			warn: (message) => this._emit({ type: "warning", message }),
 		});
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.orchestrationProfile
@@ -2158,7 +2172,21 @@ export class AgentSession {
 		track(() => this._resourceLoader.dispose?.() ?? Promise.resolve());
 		safely(() => this._disconnectFromAgent());
 		this._eventListeners = [];
-		track(() => this._memory.shutdown());
+		// Ordered, not parallel, and that ordering is the point. The lifecycle abort unwinds any in-flight
+		// reflection turn; awaiting it here means its `agent_end` — and the memory turn-sync that boundary
+		// schedules — have both happened BEFORE `_memory.shutdown()` captures the lifecycle tail it
+		// flushes. Tracked concurrently (as this was), the shutdown would capture that tail first and the
+		// reflection turn would append a write nothing awaits: work landing in the agent dir after
+		// `disposeAndWait()` has already returned.
+		// The abort precedes the settle, and is the lifecycle's rather than `agent.abort()` above, because
+		// a reflection turn still in its own preflight has no run for an agent-level abort to reach: that
+		// abort is a no-op, the settle then waits out a full provider turn, and it executes against
+		// infrastructure this method has already torn down.
+		track(async () => {
+			this._reflectionTurnLifecycle.abort();
+			await this.settleReflectionTurn();
+			await this._memory.shutdown();
+		});
 		track(() => this._toolRecoveryLogger.shutdown());
 		safely(() => cleanupSessionResources(this.sessionId));
 		// Best-effort final sweep for any grep/find artifact already released (reference
@@ -2503,6 +2531,7 @@ export class AgentSession {
 		if (options?.autoContinueGoal !== false) {
 			this._backgroundLanes.clearGoalAutoContinueTimer();
 		}
+		await this._reflectionTurnLifecycle.preemptFor(options);
 
 		const submissionLease = this._foregroundRecovery.tryAcquireSubmission();
 		if (!submissionLease && this._foregroundRecovery.isBusy && options?.streamingBehavior) {
@@ -2531,48 +2560,15 @@ export class AgentSession {
 				this._foregroundRecovery.releaseSubmission(submission.lease);
 			}
 		}
-		// After the lease is released, never before: the reflection turn is an ordinary submission and
-		// would deadlock against the lease this one still holds inside the try above.
-		await this._maybeRunDueReflectionTurn(options);
+		// Started after the lease is released, never before: the reflection turn is an ordinary
+		// submission and would deadlock against the lease this one still holds inside the try above.
+		// NOT awaited — the caller's answer must not wait on reflection — but tracked by the lifecycle.
+		this._reflectionTurnLifecycle.startDueTurn(options);
 	}
 
-	/**
-	 * Spend the ONE extra provider turn a completed unit of work may buy on reflection.
-	 *
-	 * The turn is bought only by evidence (see `ReflectionController.beginDueReflectionTurn`), so a run
-	 * with nothing durable to record costs exactly zero extra calls. It is fired here rather than at
-	 * `agent_end` because it is a real turn on this session's own history and tools — that is what lets
-	 * the model actually write to memory or promote a skill — and a turn cannot start while the run that
-	 * ended is still holding the foreground submission lease.
-	 *
-	 * Never fires from an internal-context turn, which is what bounds the whole mechanism to one extra
-	 * turn: the reflection turn is itself internal, so its completion cannot buy another.
-	 */
-	private async _maybeRunDueReflectionTurn(options?: PromptOptions): Promise<void> {
-		if (options?.internalContextType || this._disposed) return;
-		// An aborted run is the user asking for LESS work, not more; reflection waits for a turn that
-		// actually finished. The cue stays due and merges with whatever the next completed turn adds.
-		if (isInterruptedAssistantStopReason(this._findLastAssistantMessage()?.stopReason)) return;
-		const reflectionPrompt = this._reflection.beginDueReflectionTurn();
-		if (!reflectionPrompt) return;
-		try {
-			await this.prompt(reflectionPrompt, {
-				expandPromptTemplates: false,
-				processSlashCommands: false,
-				autoContinueGoal: false,
-				internalContextType: REFLECTION_TURN_TRIGGER_CUSTOM_TYPE,
-			});
-		} catch (error) {
-			// Reported, not swallowed: a reflection turn that cannot run (no model, auth revoked mid-run,
-			// provider outage) is a real failure worth surfacing, but it must not fail the user's own
-			// completed turn behind it — that turn's work already succeeded.
-			this._emit({
-				type: "warning",
-				message: `Reflection turn failed: ${error instanceof Error ? error.message : String(error)}`,
-			});
-		} finally {
-			this._reflection.endReflectionTurn();
-		}
+	/** Await the detached end-of-work reflection turn, if one is running; see ReflectionTurnLifecycle. */
+	async settleReflectionTurn(): Promise<void> {
+		await this._reflectionTurnLifecycle.settle();
 	}
 
 	private async _promptUnserialized(
@@ -2580,6 +2576,14 @@ export class AgentSession {
 		options: PromptOptions | undefined,
 		submission: ForegroundPromptSubmission,
 	): Promise<void> {
+		const submissionSignal = options?.signal;
+		// Fast path for a submission cancelled before it ever started: nothing has been built, painted or
+		// queued yet, so there is nothing to unwind. The authoritative check is the one just before the
+		// run, which also covers an abort arriving during the preflight awaits below.
+		if (submissionSignal?.aborted) {
+			options?.preflightResult?.(false);
+			return;
+		}
 		this._toolProtocol.applyRepairLayerSettings();
 		this._localPrefixWarm.cancel();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
@@ -2878,9 +2882,6 @@ export class AgentSession {
 				// Ensure we're using the base prompt (in case previous turn had modifications)
 				this.agent.state.systemPrompt = this._baseSystemPrompt;
 			}
-			// Commit consumption only after all fallible preflight hooks have succeeded. Messages added
-			// while the hook was running remain queued for the following turn.
-			this._pendingNextTurnMessages.splice(0, pendingNextTurnCount);
 		} catch (error) {
 			// The turn never reached the foreground run, so the authoritative message_start that would
 			// normally consume this entry (see _handleAgentEvent) never fires — un-register it here
@@ -2904,6 +2905,40 @@ export class AgentSession {
 			return;
 		}
 
+		// The submission's cancellation point. Listener FIRST, then the `aborted` read: in that order an
+		// abort either arrives later and reaches the live run through the listener, or has already
+		// arrived and is caught by the read — there is no gap between them for one to fall into. Reversed,
+		// an abort landing between the read and the attach would be dropped and the turn would run anyway.
+		// The listener is the same edge as `abort()`: a run in flight is unwound by its own controller, and
+		// a retry backoff in flight is cut rather than waited out. What the listener cannot reach is a run
+		// that does not exist yet — the drive loop still has its own preparation to await before entering
+		// one — so the signal also rides into `runRoutedTurn` and is read once more immediately before the
+		// run starts (see ForegroundRecoveryController.runAgentExecution). That read is the closing gate.
+		let releaseSubmissionSignal: (() => void) | undefined;
+		if (submissionSignal) {
+			const onAbort = () => {
+				this._foregroundRecovery.abortRetry();
+				this.agent.abort();
+			};
+			submissionSignal.addEventListener("abort", onAbort, { once: true });
+			releaseSubmissionSignal = () => submissionSignal.removeEventListener("abort", onAbort);
+			if (submissionSignal.aborted) {
+				releaseSubmissionSignal();
+				// Same unwind as the preflight-failure path above: the turn never reached the run, so the
+				// authoritative message_start that would normally consume this entry never fires.
+				if (userMessage) this._earlyDisplayedUserMessages.delete(userMessage);
+				preflightResult?.(false);
+				return;
+			}
+		}
+
+		// Commit consumption of the next-turn messages only now: after every fallible preflight hook has
+		// succeeded AND after the cancellation point above, so a turn that never runs never consumes them.
+		// Everything between the last hook and here is synchronous and infallible, which is what lets the
+		// commit sit this late without ever landing for a turn a hook rejected. Messages added while the
+		// hooks were running sit past `pendingNextTurnCount` and remain queued for the following turn.
+		this._pendingNextTurnMessages.splice(0, pendingNextTurnCount);
+
 		preflightResult?.(true);
 		const goalExecutionLease = this._goals.beginExecution(admittedGoalId, {
 			adoptNewGoal: goalToolStartAuthority !== undefined,
@@ -2912,9 +2947,20 @@ export class AgentSession {
 		this._goals.setStartAuthority(goalToolStartAuthority);
 		try {
 			this._toolProtocol.resetTurnState();
-			await this._modelRouter.runRoutedTurn(messages, routedTurnModel, routedTurnRouteDecision);
-			this._toolProtocol.recordParseOutcomeFromLastAssistant();
+			await this._modelRouter.runRoutedTurn(
+				messages,
+				routedTurnModel,
+				routedTurnRouteDecision,
+				true,
+				false,
+				submissionSignal,
+			);
+			// A cancelled submission records no outcome. Cancelled before the run, the last assistant
+			// message is the PREVIOUS turn's and scoring it here would count that turn twice; cancelled
+			// mid-run, the response is a fragment that is nobody's verdict on the protocol.
+			if (!submissionSignal?.aborted) this._toolProtocol.recordParseOutcomeFromLastAssistant();
 		} finally {
+			releaseSubmissionSignal?.();
 			this._goals.endQueuedOwnerChatGoalExecution();
 			this._goals.setStartAuthority(undefined);
 			this._goals.endExecution(goalExecutionLease);
@@ -2924,7 +2970,8 @@ export class AgentSession {
 		}
 
 		// Score whether the agent actually used the recalled context, so the recall gate can adapt.
-		if (injectedRecall) {
+		// Not for a cancelled submission: it has no response of its own to score (see above).
+		if (injectedRecall && !submissionSignal?.aborted) {
 			const response = this._findLastAssistantMessage();
 			const responseText = response
 				? response.content

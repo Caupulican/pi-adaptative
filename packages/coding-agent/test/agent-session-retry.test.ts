@@ -186,6 +186,9 @@ describe("AgentSession retry", () => {
 		// cue to `due`. A later turn that raises real evidence is what buys the one reflection turn that
 		// carries and settles it — and the claim must survive both the retry and that wait as ONE claim.
 		await created.session.prompt("Remember that this run retained its exact version claim");
+		// The reflection turn is detached from `prompt()`, so settle it deterministically rather than
+		// racing it with a timer.
+		await created.session.settleReflectionTurn();
 
 		// 2 for the retried first turn, 1 for the second, 1 for the single reflection turn it bought.
 		expect(created.getCallCount()).toBe(4);

@@ -2,6 +2,8 @@ import type { AgentTool } from "@caupulican/pi-agent-core";
 import { type Context, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ExtensionFactory } from "../src/core/extensions/types.ts";
+import { GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "../src/core/goals/goal-continuation-prompt.ts";
 import { DurableLearningState } from "../src/core/learning/durable-learning-state.ts";
 import { analyzeReflectionTurn } from "../src/core/learning/reflection-turn-analysis.ts";
 import {
@@ -15,6 +17,62 @@ import { createHarness, getMessageText, type Harness } from "./suite/harness.ts"
 const CUE_MARKER = "Root reflection contract";
 /** The durable half of the reflection turn: its prompt message. */
 const REFLECTION_TURN_PROMPT_MARKER = "Reflection checkpoint";
+
+interface ReflectionPreflightHold {
+	/** Install on a harness via `extensionFactories`. */
+	extension: ExtensionFactory;
+	/** Resolves once a reflection submission has entered the hold. */
+	entered: Promise<void>;
+	/** Let the submissions currently held continue; later ones are held again. */
+	releaseHeld(): void;
+	/** Let everything held now, and everything arriving later, continue. */
+	stopHolding(): void;
+}
+
+/**
+ * Park a reflection submission inside its own preflight, deterministically.
+ *
+ * The window these tests are about — a reflection turn that has STARTED but has not reached the
+ * provider — is exactly where `agent.abort()` has no run to reach, so it is where cancellation used to
+ * be a silent no-op. It is only observable from inside the submission, so it is opened with an
+ * extension `input` handler rather than a timer: entering the handler is proof the turn is in flight,
+ * and it stays there until the test says otherwise. A timer would pin nothing — it would pass whether
+ * or not the cancellation landed, which is the defect the previous preemption test could not see.
+ */
+function createReflectionPreflightHold(): ReflectionPreflightHold {
+	let signalEntered: (() => void) | undefined;
+	const entered = new Promise<void>((resolve) => {
+		signalEntered = resolve;
+	});
+	let waiting: Array<() => void> = [];
+	let holding = true;
+	const drain = () => {
+		const release = waiting;
+		waiting = [];
+		for (const resume of release) resume();
+	};
+	return {
+		extension: (pi) => {
+			pi.on("input", async (event) => {
+				if (holding && event.text.includes(REFLECTION_TURN_PROMPT_MARKER)) {
+					signalEntered?.();
+					await new Promise<void>((resolve) => waiting.push(resolve));
+				}
+				return { action: "continue" };
+			});
+		},
+		entered,
+		releaseHeld: drain,
+		stopHolding: () => {
+			holding = false;
+			drain();
+		},
+	};
+}
+
+function countMentions(context: Context | undefined, text: string): number {
+	return (context?.messages ?? []).filter((message) => getMessageText(message).includes(text)).length;
+}
 
 function countCues(context: Context | undefined): number {
 	return (context?.messages ?? []).filter((message) => getMessageText(message).includes(CUE_MARKER)).length;
@@ -76,7 +134,7 @@ describe("current-session reflection", () => {
 
 		// EXPLICIT_DURABLE_SIGNAL in the user text, so analyzeCompletedTurn raises `durable`.
 		await harness.session.prompt("Remember that this project pins its own runtime.");
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await harness.session.settleReflectionTurn();
 
 		// Two calls for one prompt: the work itself, then the one reflection turn its evidence bought.
 		expect(harness.faux.state.callCount).toBe(2);
@@ -128,7 +186,7 @@ describe("current-session reflection", () => {
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
 		await harness.session.prompt("three");
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await harness.session.settleReflectionTurn();
 
 		// The measured regression this pins: three plain-text turns used to send
 		//   [user, user] / [user, user, assistant, user, user] / [user, user, assistant, user, user, assistant, user]
@@ -180,7 +238,7 @@ describe("current-session reflection", () => {
 		]);
 
 		await harness.session.prompt("Remember to use the tool twice here.");
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await harness.session.settleReflectionTurn();
 
 		// Three provider requests inside the working run, then ONE reflection turn. The cue rides the
 		// reflection turn only — never once per request of the run that did the work.
@@ -210,7 +268,7 @@ describe("current-session reflection", () => {
 		await harness.session.prompt("a");
 		await harness.session.prompt("b");
 		await harness.session.prompt("c");
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await harness.session.settleReflectionTurn();
 
 		// One provider call per prompt, full stop. A turn with no durable evidence buys no reflection
 		// turn — not even for the session's first-observation version transition, which is audit-only.
@@ -237,11 +295,11 @@ describe("current-session reflection", () => {
 
 		// Turn 1 raises `durable`; turn 2 raises nothing.
 		await harness.session.prompt("Remember that the build pins its own runtime.");
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await harness.session.settleReflectionTurn();
 		expect(harness.faux.state.callCount).toBe(2);
 
 		await harness.session.prompt("thanks");
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await harness.session.settleReflectionTurn();
 
 		// EXACTLY one extra call in total, not one per turn: the reflection turn's own completion is
 		// never itself evidence, and an evidence-free turn buys nothing.
@@ -295,7 +353,7 @@ describe("current-session reflection", () => {
 		]);
 
 		await harness.session.prompt("Remember that the build pins its own runtime.");
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await harness.session.settleReflectionTurn();
 
 		// 1 working request + 2 requests inside the ONE reflection turn. The count stops there.
 		expect(harness.faux.state.callCount).toBe(3);
@@ -321,6 +379,300 @@ describe("current-session reflection", () => {
 			.map((entry) => (entry.type === "custom" ? (entry.data as { status: string }).status : ""));
 		expect(statuses).toEqual(["pending", "due", "due", "consumed", "consumed"]);
 		expect(statuses.lastIndexOf("due")).toBeLessThan(statuses.indexOf("consumed"));
+	});
+
+	it("owns the detached reflection turn's lifetime and lets nothing write after dispose() returns", async () => {
+		delete process.env.PI_NATIVE_REFLECTION;
+		delete process.env.PI_AUTO_LEARN_CHILD;
+		delete process.env.PI_SESSION_ROLE;
+		const harness = await createHarness({
+			settings: { autoLearn: { enabled: true, reflectionReview: true } },
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		harness.setResponses([
+			fauxAssistantMessage("Noted."),
+			fauxAssistantMessage("Reflected."),
+			fauxAssistantMessage("this response must remain unused"),
+		]);
+
+		await harness.session.prompt("Remember that the build pins its own runtime.");
+
+		// DETACHED: the user's answer is already returned and the extra call has not happened yet.
+		// Reflection is never on the caller's critical path.
+		expect(harness.faux.state.callCount).toBe(1);
+
+		// OWNED, not abandoned: the session holds the turn's promise, so this is a real barrier. An
+		// untracked turn would make this a no-op and leave the count at 1 — which is the whole
+		// difference between detached-and-owned and detached-and-escaped.
+		await harness.session.settleReflectionTurn();
+		expect(harness.faux.state.callCount).toBe(2);
+
+		// A second work turn, disposed while ITS reflection turn is still in flight.
+		harness.setResponses([fauxAssistantMessage("Noted again."), fauxAssistantMessage("Reflected again.")]);
+		await harness.session.prompt("Remember that this second fact is durable too.");
+		// 3 = turn 1 + its reflection turn + turn 2's work. Turn 2's reflection turn is detached and has
+		// not called the provider yet, so disposal below happens with it genuinely in flight.
+		expect(harness.faux.state.callCount).toBe(3);
+
+		await harness.session.disposeAndWait();
+		const callsAtDispose = harness.faux.state.callCount;
+		const entriesAtDispose = harness.sessionManager.getEntries().length;
+		// Disposal settled it rather than leaving it running.
+		await expect(harness.session.settleReflectionTurn()).resolves.toBeUndefined();
+
+		// A generous observation window — not a synchronization crutch. If the turn had escaped, this is
+		// where its provider call and session writes would land, after `disposeAndWait()` had already
+		// reported the session closed: in the test runner an ENOTEMPTY from a teardown racing a live
+		// writer, in production a session still writing to the agent dir after it was disposed.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+
+		expect(harness.faux.state.callCount).toBe(callsAtDispose);
+		expect(harness.sessionManager.getEntries().length).toBe(entriesAtDispose);
+	});
+
+	it("does not reject a prompt that arrives while the reflection turn is still running", async () => {
+		delete process.env.PI_NATIVE_REFLECTION;
+		delete process.env.PI_AUTO_LEARN_CHILD;
+		delete process.env.PI_SESSION_ROLE;
+		const harness = await createHarness({
+			settings: { autoLearn: { enabled: true, reflectionReview: true } },
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		harness.setResponses([
+			fauxAssistantMessage("Noted."),
+			fauxAssistantMessage("Reflected."),
+			fauxAssistantMessage("Answered the follow-up."),
+			fauxAssistantMessage("Reflected again."),
+		]);
+
+		await harness.session.prompt("Remember that the build pins its own runtime.");
+		// The session IS busy here — the detached reflection turn holds the foreground. A user typing
+		// straight after reading their answer lands in exactly this window, and must not be told the
+		// agent is already processing for work they cannot see. Reflection yields; the prompt runs.
+		expect(harness.faux.state.callCount).toBe(1);
+
+		await expect(harness.session.prompt("and one more thing")).resolves.toBeUndefined();
+		await harness.session.settleReflectionTurn();
+
+		const answers = harness.session.messages
+			.filter((message) => message.role === "assistant")
+			.map((message) => getMessageText(message));
+		expect(answers).toContain("Answered the follow-up.");
+		expect(durableCueCopies(harness)).toBe(0);
+	});
+
+	it("cancels a reflection turn still in its own preflight instead of waiting out its provider call", async () => {
+		delete process.env.PI_NATIVE_REFLECTION;
+		delete process.env.PI_AUTO_LEARN_CHILD;
+		delete process.env.PI_SESSION_ROLE;
+		const hold = createReflectionPreflightHold();
+		const harness = await createHarness({
+			settings: { autoLearn: { enabled: true, reflectionReview: true } },
+			extensionFactories: [hold.extension],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		const contexts: Context[] = [];
+		const capture = (text: string) => (context: Context) => {
+			contexts.push(context);
+			return fauxAssistantMessage(text);
+		};
+		harness.setResponses([
+			capture("Noted."),
+			capture("Answered the follow-up."),
+			capture("Reflected afterwards."),
+			fauxAssistantMessage("this response must remain unused"),
+		]);
+
+		await harness.session.prompt("Remember that the build pins its own runtime.");
+		await hold.entered;
+		expect(harness.faux.state.callCount).toBe(1);
+
+		// The user types while the reflection turn sits in its preflight. Not awaited yet: this call is
+		// itself blocked on that turn unwinding, and the release below is what lets it.
+		const followUp = harness.session.prompt("and one more thing");
+		hold.releaseHeld();
+		await expect(followUp).resolves.toBeUndefined();
+
+		// Two calls, not three. The reflection turn came out of its preflight into its own cancellation
+		// and never reached the provider — the whole point of a level-triggered signal over `agent.abort()`,
+		// which had no run to abort in that window and let the turn proceed. The arriving prompt paid for
+		// an unwind, not for a full provider turn, so the second call is the follow-up's own.
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(contexts.map(countCues)).toEqual([0, 0]);
+		expect(harness.session.messages.filter((message) => message.role === "assistant").map(getMessageText)).toEqual([
+			"Noted.",
+			"Answered the follow-up.",
+		]);
+		// Cancelling a reflection turn is this mechanism working, not a fault to report to the user.
+		expect(
+			harness.eventsOfType("warning").filter((event) => event.message.includes("Reflection turn failed")),
+		).toEqual([]);
+
+		// The cue was abandoned, not destroyed: the follow-up's own completion re-raises it, and that turn
+		// runs to the provider normally now that nothing is holding it.
+		hold.stopHolding();
+		await harness.session.settleReflectionTurn();
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(countCues(contexts[2])).toBe(1);
+		expect(durableCueCopies(harness)).toBe(0);
+	});
+
+	it("cancels a reflection turn still in its own preflight on dispose, before the provider is called", async () => {
+		delete process.env.PI_NATIVE_REFLECTION;
+		delete process.env.PI_AUTO_LEARN_CHILD;
+		delete process.env.PI_SESSION_ROLE;
+		const hold = createReflectionPreflightHold();
+		const harness = await createHarness({
+			settings: { autoLearn: { enabled: true, reflectionReview: true } },
+			extensionFactories: [hold.extension],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		harness.setResponses([fauxAssistantMessage("Noted."), fauxAssistantMessage("this response must remain unused")]);
+
+		await harness.session.prompt("Remember that the build pins its own runtime.");
+		await hold.entered;
+		expect(harness.faux.state.callCount).toBe(1);
+		const turnEntriesBeforeDispose = harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type !== "custom").length;
+
+		// Disposal starts with the reflection turn genuinely mid-preflight. Not awaited yet, for the same
+		// reason as above: it settles that turn, and the release below is what lets it unwind.
+		const disposal = harness.session.disposeAndWait();
+		hold.stopHolding();
+		await expect(disposal).resolves.toBeUndefined();
+
+		// No provider call and no session writes after disposal. Without the cancellation the turn would
+		// have run a full provider turn against infrastructure `dispose()` had already torn down — the
+		// foreground recovery controller, the reflection controller, the provider request runtime — and
+		// `_memory.shutdown()` would have been waiting behind all of it.
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type !== "custom").length).toBe(
+			turnEntriesBeforeDispose,
+		);
+		// The one thing disposal DOES write is the cue's release — the claim it can no longer review is
+		// handed back rather than left held, so the next session re-observes the evidence.
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.filter(
+					(entry) => entry.type === "custom" && entry.customType === CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
+				)
+				.map((entry) => (entry.type === "custom" ? (entry.data as { status: string }).status : "")),
+		).toEqual(["pending", "due", "due", "dismissed"]);
+		// Disposal is not a failure of the reflection turn; the user is shut down, not warned.
+		expect(
+			harness.eventsOfType("warning").filter((event) => event.message.includes("Reflection turn failed")),
+		).toEqual([]);
+	});
+
+	it("lets an internal continuation wait for the reflection turn instead of cancelling it", async () => {
+		delete process.env.PI_NATIVE_REFLECTION;
+		delete process.env.PI_AUTO_LEARN_CHILD;
+		delete process.env.PI_SESSION_ROLE;
+		const hold = createReflectionPreflightHold();
+		const harness = await createHarness({
+			settings: { autoLearn: { enabled: true, reflectionReview: true } },
+			extensionFactories: [hold.extension],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		const contexts: Context[] = [];
+		const capture = (text: string) => (context: Context) => {
+			contexts.push(context);
+			return fauxAssistantMessage(text);
+		};
+		harness.setResponses([
+			capture("Noted."),
+			capture("Reflected."),
+			capture("Continued the goal."),
+			fauxAssistantMessage("this response must remain unused"),
+		]);
+
+		await harness.session.prompt("Remember that the build pins its own runtime.");
+		await hold.entered;
+		expect(harness.faux.state.callCount).toBe(1);
+
+		// The session's own autonomous work arrives — a goal continuation, nobody watching a screen.
+		const continuation = harness.session.prompt("Continue the goal.", {
+			expandPromptTemplates: false,
+			processSlashCommands: false,
+			autoContinueGoal: false,
+			internalContextType: GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
+		});
+		hold.stopHolding();
+		await expect(continuation).resolves.toBeUndefined();
+
+		// Three calls: the work, the reflection turn it bought, then the continuation. Internal work waits
+		// its turn rather than cancelling reflection — cancelling here silently destroyed the bought turn,
+		// because `startDueTurn` refuses to start from an internal tail, so the abandoned cue had no next
+		// completed turn to merge into and could sit undelivered indefinitely.
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(harness.session.messages.filter((message) => message.role === "assistant").map(getMessageText)).toEqual([
+			"Noted.",
+			"Reflected.",
+			"Continued the goal.",
+		]);
+		// Delivered, not lost: the cue rode the reflection turn exactly once and nothing else.
+		expect(contexts.map(countCues)).toEqual([0, 1, 0]);
+		expect(durableCueCopies(harness)).toBe(0);
+	});
+
+	it("keeps queued next-turn messages when the reflection turn that consumed them is cancelled", async () => {
+		delete process.env.PI_NATIVE_REFLECTION;
+		delete process.env.PI_AUTO_LEARN_CHILD;
+		delete process.env.PI_SESSION_ROLE;
+		const NEXT_TURN_NOTE = "Lane note queued for the next turn";
+		const hold = createReflectionPreflightHold();
+		const harness = await createHarness({
+			settings: { autoLearn: { enabled: true, reflectionReview: true } },
+			extensionFactories: [hold.extension],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		const contexts: Context[] = [];
+		const capture = (text: string) => (context: Context) => {
+			contexts.push(context);
+			return fauxAssistantMessage(text);
+		};
+		harness.setResponses([
+			capture("Noted."),
+			capture("Answered the follow-up."),
+			capture("Reflected afterwards."),
+			fauxAssistantMessage("this response must remain unused"),
+		]);
+
+		await harness.session.prompt("Remember that the build pins its own runtime.");
+		await hold.entered;
+		// Queued while the reflection turn sits in its preflight, so that turn is the one that picks it
+		// up: it is counted, built into the turn's messages, and would be committed as consumed.
+		await harness.session.sendCustomMessage(
+			{ customType: "lane-note", content: NEXT_TURN_NOTE, display: false, details: undefined },
+			{ deliverAs: "nextTurn" },
+		);
+
+		const followUp = harness.session.prompt("and one more thing");
+		hold.releaseHeld();
+		await expect(followUp).resolves.toBeUndefined();
+
+		// The cancelled reflection turn never ran, so it must not have consumed the note: consumption
+		// is committed only for a turn that actually reaches the run. The follow-up is the next turn
+		// that does, and the note rides it exactly once.
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(countMentions(contexts[0], NEXT_TURN_NOTE)).toBe(0);
+		expect(countMentions(contexts[1], NEXT_TURN_NOTE)).toBe(1);
+
+		// Delivered once, it is history from then on: the re-bought reflection turn sees the one copy
+		// the follow-up carried, not a second delivery.
+		hold.stopHolding();
+		await harness.session.settleReflectionTurn();
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(countMentions(contexts[2], NEXT_TURN_NOTE)).toBe(1);
 	});
 
 	it.each([

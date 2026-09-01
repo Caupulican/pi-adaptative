@@ -164,22 +164,30 @@ export class ForegroundRecoveryController {
 		}
 	}
 
+	/**
+	 * @param signal The submission's cancellation signal, if its owner holds one. Level-triggered: it is
+	 * read immediately before every run this execution would start, so an abort that lands while no
+	 * run exists to receive `agent.abort()` still stops the provider call. Returns normally when
+	 * cancelled -- the submission simply never runs.
+	 */
 	async runAgentPrompt(
 		messages: AgentMessage | AgentMessage[],
 		submissionLease?: ForegroundSubmissionLease,
+		signal?: AbortSignal,
 	): Promise<void> {
-		await this.runAgentExecution("prompt", messages, submissionLease);
+		await this.runAgentExecution("prompt", messages, submissionLease, signal);
 	}
 
 	/** Continue from the already canonical agent history without replaying the original user message. */
-	async runAgentContinuation(submissionLease?: ForegroundSubmissionLease): Promise<void> {
-		await this.runAgentExecution("continue", undefined, submissionLease);
+	async runAgentContinuation(submissionLease?: ForegroundSubmissionLease, signal?: AbortSignal): Promise<void> {
+		await this.runAgentExecution("continue", undefined, submissionLease, signal);
 	}
 
 	private async runAgentExecution(
 		mode: "prompt" | "continue",
 		messages: AgentMessage | AgentMessage[] | undefined,
 		submissionLease?: ForegroundSubmissionLease,
+		signal?: AbortSignal,
 	): Promise<void> {
 		let lease = submissionLease;
 		let releaseLease = false;
@@ -201,6 +209,13 @@ export class ForegroundRecoveryController {
 		try {
 			const maxGoalLoopRounds = this.deps.settingsManager.getAutonomySettings().maxStallTurns;
 			await this.deps.prepareRun();
+			// The submission's closing cancellation gate. `agent.abort()` reaches only a run that already
+			// exists, and none exists until the `prompt()`/`continue()` below installs one, so an abort
+			// landing during `prepareRun()` -- or anywhere earlier in the submission -- would otherwise
+			// run this turn in full. Read HERE, with no await between the read and the run: both entry
+			// points install the run's own abort controller synchronously, so an abort that arrives
+			// after this read has a live run to reach, and one that arrived before it is caught by it.
+			if (signal?.aborted) return;
 			let goalLoopRounds = 1;
 			if (mode === "prompt") {
 				if (!messages) throw new Error("Foreground prompt execution requires messages.");
@@ -209,6 +224,15 @@ export class ForegroundRecoveryController {
 				await this.deps.agent.continue();
 			}
 			while ((maxGoalLoopRounds === 0 || goalLoopRounds < maxGoalLoopRounds) && (await this.handlePostAgentRun())) {
+				// Same gate before every further round. Post-run recovery awaits too (compaction, retry
+				// backoff), and an abort landing there has no run to reach either -- without this the
+				// next `continue()` would be a full provider turn on a cancelled submission. A retry the
+				// recovery just prepared is closed here as cancelled, not left counting towards a
+				// continuation that never comes.
+				if (signal?.aborted) {
+					this.finishRetry(false, "Submission cancelled");
+					return;
+				}
 				await this.deps.agent.continue();
 				goalLoopRounds++;
 			}

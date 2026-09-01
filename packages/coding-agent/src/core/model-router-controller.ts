@@ -138,10 +138,11 @@ export interface ModelRouterControllerDeps {
 	getReflectionSignal(): AbortSignal;
 	/** Base (extension-free) system prompt — the tier swap only sheds tools when the turn is on it. */
 	getBaseSystemPrompt(): string;
-	/** The session-owned foreground drive loop; the routed path delegates every turn here. */
-	runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void>;
+	/** The session-owned foreground drive loop; the routed path delegates every turn here. The
+	 * submission's cancellation signal rides along so the drive loop can read it before the run. */
+	runAgentPrompt(messages: AgentMessage | AgentMessage[], signal?: AbortSignal): Promise<void>;
 	/** Continue from canonical history after a committed cheap-route escalation. */
-	runAgentContinuation(): Promise<void>;
+	runAgentContinuation(signal?: AbortSignal): Promise<void>;
 	/** Rebuilds the system prompt for a filtered tool surface (routed-model capability shedding). */
 	buildSystemPromptForToolNames(toolNames: string[]): string;
 	/** Re-resolves the restored model against the registry after a routed turn (provider override safety). */
@@ -726,10 +727,11 @@ export class ModelRouterController {
 		routeDecision: RouteDecision | undefined,
 		persistDecision = true,
 		continueFromCanonicalHistory = false,
+		signal?: AbortSignal,
 	): Promise<void> {
 		if (!routedModel) {
-			if (continueFromCanonicalHistory) await this.deps.runAgentContinuation();
-			else await this.deps.runAgentPrompt(messages);
+			if (continueFromCanonicalHistory) await this.deps.runAgentContinuation(signal);
+			else await this.deps.runAgentPrompt(messages, signal);
 			return;
 		}
 
@@ -827,16 +829,19 @@ export class ModelRouterController {
 			}
 		}
 		try {
-			if (continueFromCanonicalHistory) await this.deps.runAgentContinuation();
-			else await this.deps.runAgentPrompt(messages);
+			if (continueFromCanonicalHistory) await this.deps.runAgentContinuation(signal);
+			else await this.deps.runAgentPrompt(messages, signal);
 			// Speculative muscle-retry: an executor-routed turn is a bet that the
 			// small model can run the toolkit command directly. If it ends WITHOUT a successful
 			// run_toolkit_script execution, retry ONCE on the same executor with the brain's
 			// refined instruction injected — the brain warms while the muscle tries, so the retry
 			// pays only when the muscle actually missed.
+			// Not on a cancelled submission: the miss is then the cancellation's doing, and the refine
+			// step is itself a provider call the submission's owner has already declined to pay for.
 			if (
 				routeDecision?.reasonCode === "executor_direct" &&
 				!this._isModelRouterRetry &&
+				!signal?.aborted &&
 				!this._executorTurnExecutedScript(originalHistoryLength)
 			) {
 				const refined = await this._buildExecutorRefinedPrompt(messages);
@@ -859,9 +864,10 @@ export class ModelRouterController {
 							}
 						}
 					}
-					await this.deps.runAgentPrompt([
-						{ role: "user", content: [{ type: "text", text: refined }], timestamp: Date.now() },
-					]);
+					await this.deps.runAgentPrompt(
+						[{ role: "user", content: [{ type: "text", text: refined }], timestamp: Date.now() }],
+						signal,
+					);
 					completedDecision = {
 						route: {
 							...routeDecision,
@@ -959,7 +965,8 @@ export class ModelRouterController {
 			this._modelRouterEscalationRequested = previousModelRouterEscalationRequested;
 		}
 
-		if (retryModel && !thrownError) {
+		// The escalation retry is more provider work, which a cancelled submission does not get.
+		if (retryModel && !thrownError && !signal?.aborted) {
 			const previousIsModelRouterRetry = this._isModelRouterRetry;
 			try {
 				this._isModelRouterRetry = true;
@@ -972,7 +979,7 @@ export class ModelRouterController {
 					fallbackFrom: "cheap",
 					model: formatModelRouterModel(retryModel),
 				};
-				await this.runRoutedTurn(messages, retryModel, retryDecision, false, retryFromCanonicalHistory);
+				await this.runRoutedTurn(messages, retryModel, retryDecision, false, retryFromCanonicalHistory, signal);
 				this._lastModelRouterDecision = completedDecision;
 			} catch (error) {
 				thrownError = error;

@@ -78,7 +78,7 @@ function syncAgentMessages(session: AgentSession, sessionManager: SessionManager
 }
 
 describe("AgentSession.getSessionStats", () => {
-	it("aggregates tool argument validation telemetry", () => {
+	it("aggregates tool argument validation telemetry", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
@@ -140,11 +140,11 @@ describe("AgentSession.getSessionStats", () => {
 			});
 			expect(sessionManager.getEntries().filter((entry) => entry.type === "custom")).toHaveLength(0);
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
-	it("aggregates persisted compaction gate failure telemetry", () => {
+	it("aggregates persisted compaction gate failure telemetry", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
@@ -188,11 +188,11 @@ describe("AgentSession.getSessionStats", () => {
 				},
 			});
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
-	it("exposes the current context usage alongside token totals", () => {
+	it("exposes the current context usage alongside token totals", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
@@ -206,11 +206,11 @@ describe("AgentSession.getSessionStats", () => {
 			expect(stats.contextUsage?.contextWindow).toBe(model.contextWindow);
 			expect(stats.contextUsage?.percent).toBe((200 / model.contextWindow) * 100);
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
-	it("reports unknown current context usage immediately after compaction", () => {
+	it("reports unknown current context usage immediately after compaction", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
@@ -228,11 +228,11 @@ describe("AgentSession.getSessionStats", () => {
 			expect(stats.contextUsage?.tokens).toBeNull();
 			expect(stats.contextUsage?.percent).toBeNull();
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
-	it("checks post-compaction usage without rebuilding the full session branch", () => {
+	it("checks post-compaction usage without rebuilding the full session branch", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
@@ -248,11 +248,11 @@ describe("AgentSession.getSessionStats", () => {
 			expect(session.getContextUsage()?.tokens).toBe(25_000);
 			expect(getBranch).not.toHaveBeenCalled();
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
-	it("updates context usage from only newly appended branch entries", () => {
+	it("updates context usage from only newly appended branch entries", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
@@ -272,11 +272,11 @@ describe("AgentSession.getSessionStats", () => {
 			expect(getEntry.mock.calls.length).toBeLessThanOrEqual(2);
 			expect(sessionManager.getEntry(userId)).toBeDefined();
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
-	it("uses post-compaction usage for current context instead of stale kept usage", () => {
+	it("uses post-compaction usage for current context instead of stale kept usage", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
@@ -296,7 +296,7 @@ describe("AgentSession.getSessionStats", () => {
 			expect(stats.contextUsage?.tokens).toBe(25_000);
 			expect(stats.contextUsage?.percent).toBe((25_000 / model.contextWindow) * 100);
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 });

@@ -155,6 +155,17 @@ export interface PromptOptions {
 	autoContinueGoal?: boolean;
 	/** Hidden internal turn persisted as a typed context marker. */
 	internalContextType?: string;
+	/**
+	 * Cancel this submission wherever it currently is.
+	 *
+	 * `AgentSession.abort()`/`Agent.abort()` can only reach a run that has already started, so a
+	 * submission still working through its preflight — extension `input` handlers, cross-session
+	 * recall, the route judge, compaction — is unreachable by them and runs to completion regardless.
+	 * A signal is level-triggered instead: it is honored both by an edge (aborting a live run) and by a
+	 * later read (a submission that has not reached the run yet returns without ever calling the
+	 * provider). Any caller owning a submission's lifetime can pass one; the reflection turn does.
+	 */
+	signal?: AbortSignal;
 	/** Active goal whose autonomous foreground execution owns this internal turn's provider usage. */
 	goalExecutionId?: string;
 }
