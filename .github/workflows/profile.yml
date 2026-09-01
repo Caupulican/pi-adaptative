@@ -22,6 +22,14 @@ on:
         description: Scripted tool-call turns for the agent-core per-turn profile
         default: '600'
         type: string
+      tools_turns:
+        description: Tool turns for the bash/grep/read host scenario
+        default: '400'
+        type: string
+      delegate_turns:
+        description: Tool turns for the delegation host scenario (one worker per 30 turns)
+        default: '600'
+        type: string
 
 permissions:
   contents: read
@@ -66,16 +74,40 @@ jobs:
         run: npm run build
 
       - name: Prepare profile directories
-        run: mkdir -p "$PROFILE_DIR/host" "$PROFILE_DIR/agent-core" "$PROFILE_DIR/startup"
+        run: mkdir -p "$PROFILE_DIR/host/goal" "$PROFILE_DIR/host/tools" "$PROFILE_DIR/host/delegate" "$PROFILE_DIR/agent-core" "$PROFILE_DIR/startup"
 
-      - name: Host long-session profile (real AgentSession, faux provider)
+      # Three host scenarios, each a real AgentSession over the faux provider: the goal mix that
+      # dominates real sessions, a bash/grep/read mix that runs the tool-output reducers on every
+      # call, and the goal mix with an in-process worker delegation every 30 turns.
+      - name: Host long-session profile (goal mix)
         working-directory: packages/coding-agent
         env:
           NODE_OPTIONS: --conditions=pi-source
           PI_PROFILE_LONG_SESSION: '1'
+          PI_PROFILE_SCENARIO: goal
           PI_PROFILE_TURNS: ${{ inputs.host_turns }}
-          PI_PROFILE_DIR: ${{ env.PROFILE_DIR }}/host
-        run: npx vitest run test/profiling/host-long-session.profile.test.ts --pool=forks || echo "::warning title=Host profile::the host long-session profile reported a failure; read the artifact"
+          PI_PROFILE_DIR: ${{ env.PROFILE_DIR }}/host/goal
+        run: npx vitest run test/profiling/host-long-session.profile.test.ts --pool=forks || echo "::warning title=Host profile (goal)::the host long-session profile reported a failure; read the artifact"
+
+      - name: Host long-session profile (tools mix)
+        working-directory: packages/coding-agent
+        env:
+          NODE_OPTIONS: --conditions=pi-source
+          PI_PROFILE_LONG_SESSION: '1'
+          PI_PROFILE_SCENARIO: tools
+          PI_PROFILE_TURNS: ${{ inputs.tools_turns }}
+          PI_PROFILE_DIR: ${{ env.PROFILE_DIR }}/host/tools
+        run: npx vitest run test/profiling/host-long-session.profile.test.ts --pool=forks || echo "::warning title=Host profile (tools)::the host long-session profile reported a failure; read the artifact"
+
+      - name: Host long-session profile (delegation mix)
+        working-directory: packages/coding-agent
+        env:
+          NODE_OPTIONS: --conditions=pi-source
+          PI_PROFILE_LONG_SESSION: '1'
+          PI_PROFILE_SCENARIO: delegate
+          PI_PROFILE_TURNS: ${{ inputs.delegate_turns }}
+          PI_PROFILE_DIR: ${{ env.PROFILE_DIR }}/host/delegate
+        run: npx vitest run test/profiling/host-long-session.profile.test.ts --pool=forks || echo "::warning title=Host profile (delegate)::the host long-session profile reported a failure; read the artifact"
 
       - name: Agent-core per-turn profile (stub provider stream)
         run: node scripts/profile-coding-agent-turn.mjs --turns ${{ inputs.loop_turns }} --profile-dir "$PROFILE_DIR/agent-core" --label turn-profile | tee "$PROFILE_DIR/agent-core/turn-profile.txt"
@@ -91,20 +123,22 @@ jobs:
           {
             echo "## ${{ matrix.os }}"
             echo
-            echo "## Long-session growth (host)"
-            if [ -f "$PROFILE_DIR/host/host-session-profile.txt" ]; then
-              node scripts/report-long-session-growth.mjs "$PROFILE_DIR/host/host-session-profile.txt"
-            else
-              echo "::warning title=Host profile::no host-session-profile.txt was produced"
-            fi
-            echo
-            echo "## Host long-session self time"
-            if [ -f "$PROFILE_DIR/host/host-session.cpuprofile" ]; then
-              node scripts/analyze-cpuprofile.mjs "$PROFILE_DIR/host/host-session.cpuprofile" --top 40 --title "host long-session (${{ inputs.host_turns }} turns)"
-            else
-              echo "(no host .cpuprofile was produced)"
-            fi
-            echo
+            for scenario in goal tools delegate; do
+              echo "## Long-session growth (host, $scenario mix)"
+              if [ -f "$PROFILE_DIR/host/$scenario/host-session-profile.txt" ]; then
+                node scripts/report-long-session-growth.mjs "$PROFILE_DIR/host/$scenario/host-session-profile.txt"
+              else
+                echo "::warning title=Host profile ($scenario)::no host-session-profile.txt was produced"
+              fi
+              echo
+              echo "## Host self time ($scenario mix)"
+              if [ -f "$PROFILE_DIR/host/$scenario/host-session.cpuprofile" ]; then
+                node scripts/analyze-cpuprofile.mjs "$PROFILE_DIR/host/$scenario/host-session.cpuprofile" --top 30 --title "host long-session, $scenario mix"
+              else
+                echo "(no host .cpuprofile was produced)"
+              fi
+              echo
+            done
             echo "## Agent-core per-turn self time"
             for f in "$PROFILE_DIR"/agent-core/*.cpuprofile; do node scripts/analyze-cpuprofile.mjs "$f" --top 30 --title "agent-core per-turn (${{ inputs.loop_turns }} turns)"; done
             echo
