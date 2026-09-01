@@ -311,3 +311,49 @@ describe("ModelAdaptationStore efficacy retirement", () => {
 		expect(adaptation.get("model", new Date(at(6))).rules.map((r) => r.mode)).toEqual(["mode-1"]);
 	});
 });
+
+describe("ModelAdaptationStore deferred perf samples", () => {
+	const deferredDirs: string[] = [];
+	afterEach(() => {
+		for (const dir of deferredDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	});
+	const sample = (headersToFirstTokenMs: number) => ({
+		promptTokens: 1_000,
+		completionTokens: 100,
+		headersToFirstTokenMs,
+		firstTokenToDoneMs: 1_000,
+	});
+
+	it("keeps every other mutation immediately visible to a fresh instance, and folds deferred samples exactly", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-adaptation-deferred-"));
+		const immediateDir = mkdtempSync(join(tmpdir(), "pi-adaptation-immediate-"));
+		deferredDirs.push(agentDir, immediateDir);
+		const deferred = ModelAdaptationStore.forAgentDir(agentDir, { deferPerfSamples: true, fingerprint: () => hostA });
+		const immediate = ModelAdaptationStore.forAgentDir(immediateDir, { fingerprint: () => hostA });
+		// Deferred: nothing reaches the file until a flush; immediate: each sample is a transaction.
+		for (const ms of [2_000, 1_000, 1_500]) {
+			deferred.recordPerfSample("provider/model", sample(ms), at(2));
+			immediate.recordPerfSample("provider/model", sample(ms), at(2));
+		}
+		expect(
+			ModelAdaptationStore.forAgentDir(agentDir, { fingerprint: () => hostA }).get("provider/model").perf,
+		).toBeUndefined();
+		deferred.flush();
+		expect(
+			ModelAdaptationStore.forAgentDir(agentDir, { fingerprint: () => hostA }).get("provider/model").perf,
+		).toEqual(immediate.get("provider/model").perf);
+
+		// A tool-probe verdict persists at once AND folds the samples queued before it, in order.
+		deferred.recordPerfSample("provider/model", sample(3_000), at(3));
+		deferred.setToolProbe(
+			"provider/model",
+			{ version: 1, status: "text-protocol", variant: "tool-tag", nativeGrade: "absent", probedAt: at(4) },
+			at(4),
+		);
+		immediate.recordPerfSample("provider/model", sample(3_000), at(3));
+		const fresh = ModelAdaptationStore.forAgentDir(agentDir, { fingerprint: () => hostA }).get("provider/model");
+		expect(fresh.toolProbe).toMatchObject({ status: "text-protocol", variant: "tool-tag" });
+		expect(fresh.perf).toEqual(immediate.get("provider/model").perf);
+		deferred.close();
+	});
+});

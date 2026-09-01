@@ -422,8 +422,8 @@ export class AgentSession {
 		// Wrapping also breaks the `streamFn === streamSimple` identity the auth-injection checks
 		// use, so the wrapper carries a rawness marker that _isRawStreamSimple reads.
 		const agentDir = config.agentDir ?? getAgentDir();
-		// Write-behind: a perf sample per provider stream is not worth a journaled write each (see HostStateStore).
-		const modelAdaptationStore = ModelAdaptationStore.forAgentDir(agentDir, { writeBehind: {} });
+		// Perf samples (one per provider stream) are deferred; everything else persists at once.
+		const modelAdaptationStore = ModelAdaptationStore.forAgentDir(agentDir, { deferPerfSamples: true });
 		this._modelAdaptationStore = modelAdaptationStore;
 		const baseStreamFn = this.agent.streamFn;
 		const previousResolveRequestReasoning = this.agent.resolveRequestReasoning?.bind(this.agent);

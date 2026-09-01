@@ -72,21 +72,28 @@ export interface HostStateStoreOptions<THostData> {
 const DEFAULT_WRITE_BEHIND_DEBOUNCE_MS = 250;
 const DEFAULT_WRITE_BEHIND_MAX_PENDING = 64;
 
-/** Every write-behind store, so a process exit flushes what its owners did not get to close. */
-const writeBehindStores = new Set<{ flush(): void }>();
+/** Every pending-write flush a process exit must run for owners that did not get to close. */
+const exitFlushes = new Set<() => void>();
 let exitFlushInstalled = false;
-function installExitFlush(): void {
-	if (exitFlushInstalled) return;
-	exitFlushInstalled = true;
-	process.on("exit", () => {
-		for (const store of writeBehindStores) {
-			try {
-				store.flush();
-			} catch {
-				// Exit is not the place to fail; the durable file keeps its last flushed state.
+
+/** Run `flush` at process exit until the returned unregister is called. Synchronous flushes only. */
+export function registerProcessExitFlush(flush: () => void): () => void {
+	exitFlushes.add(flush);
+	if (!exitFlushInstalled) {
+		exitFlushInstalled = true;
+		process.on("exit", () => {
+			for (const pending of exitFlushes) {
+				try {
+					pending();
+				} catch {
+					// Exit is not the place to fail; the durable file keeps its last flushed state.
+				}
 			}
-		}
-	});
+		});
+	}
+	return () => {
+		exitFlushes.delete(flush);
+	};
 }
 
 /**
@@ -141,6 +148,7 @@ export class HostStateStore<THostData> {
 	}> = [];
 	private flushTimer: NodeJS.Timeout | undefined;
 	private closed = false;
+	private unregisterExitFlush: (() => void) | undefined;
 
 	constructor(options: HostStateStoreOptions<THostData>) {
 		this.filePath = options.filePath;
@@ -155,10 +163,7 @@ export class HostStateStore<THostData> {
 						maxPending: options.writeBehind.maxPending ?? DEFAULT_WRITE_BEHIND_MAX_PENDING,
 					}
 				: undefined;
-		if (this.writeBehind) {
-			writeBehindStores.add(this);
-			installExitFlush();
-		}
+		if (this.writeBehind) this.unregisterExitFlush = registerProcessExitFlush(() => this.flush());
 	}
 
 	private currentHost(): HostFingerprint {
@@ -256,7 +261,8 @@ export class HostStateStore<THostData> {
 	/** Flush pending mutations and stop batching; later mutations persist one transaction each. */
 	close(): void {
 		this.closed = true;
-		writeBehindStores.delete(this);
+		this.unregisterExitFlush?.();
+		this.unregisterExitFlush = undefined;
 		this.flush();
 	}
 

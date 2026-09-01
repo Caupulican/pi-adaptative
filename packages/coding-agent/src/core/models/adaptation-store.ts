@@ -1,11 +1,15 @@
 import { stateFile } from "../agent-paths.ts";
 import { isWorkerSession } from "../session-role.ts";
+
+const DEFERRED_PERF_SAMPLE_IDLE_MS = 2_000;
+const DEFERRED_PERF_SAMPLE_CAP = 16;
+
 import { isRecordObject } from "../util/value-guards.ts";
 import {
 	type HostFingerprint,
 	HostStateStore,
-	type HostStateWriteBehindOptions,
 	isHostFingerprint,
+	registerProcessExitFlush,
 } from "./host-state-store.ts";
 import {
 	hasUsableModelPerfSample,
@@ -225,35 +229,85 @@ function parseAdaptationHost(value: unknown, hostId: string): Record<string, Sto
 export class ModelAdaptationStore {
 	private readonly storage: HostStateStore<Record<string, StoredModelAdaptation>>;
 
+	/**
+	 * Perf samples waiting to be folded into their model's profile, per model, in arrival order.
+	 *
+	 * Every other mutation here (a tool-probe verdict, a protocol change, a rule) persists at once,
+	 * because readers open their own store instances and expect to see it -- the capability gate
+	 * reads a verdict through a fresh instance right after it is graded. A perf sample arrives per
+	 * provider stream, is advisory, and read only for estimates, so the owning session may defer
+	 * those: they fold into one transaction after a short idle, at a cap, before any other mutation
+	 * of this instance (so ordering holds), at close, and at process exit. Folding N samples in one
+	 * transaction produces the profile N transactions would have.
+	 */
+	private readonly pendingPerf = new Map<string, Array<{ sample: ModelPerfSample; at: string }>>();
+	private pendingPerfCount = 0;
+	private perfFlushTimer: NodeJS.Timeout | undefined;
+	private readonly deferPerfSamples: boolean;
+	private unregisterExitFlush: (() => void) | undefined;
+	private closed = false;
+
 	constructor(
 		filePath: string,
-		options?: { fingerprint?: () => HostFingerprint; readOnly?: boolean; writeBehind?: HostStateWriteBehindOptions },
+		options?: { fingerprint?: () => HostFingerprint; readOnly?: boolean; deferPerfSamples?: boolean },
 	) {
+		const readOnly = options?.readOnly ?? isWorkerSession();
 		this.storage = new HostStateStore({
 			filePath,
 			version: STORE_VERSION,
 			fingerprint: options?.fingerprint,
-			readOnly: options?.readOnly ?? isWorkerSession(),
+			readOnly,
 			parseHost: parseAdaptationHost,
-			writeBehind: options?.writeBehind,
 		});
+		this.deferPerfSamples = options?.deferPerfSamples === true && !readOnly;
+		if (this.deferPerfSamples) this.unregisterExitFlush = registerProcessExitFlush(() => this.flush());
 	}
 
 	static forAgentDir(
 		agentDir: string,
-		options?: { fingerprint?: () => HostFingerprint; readOnly?: boolean; writeBehind?: HostStateWriteBehindOptions },
+		options?: { fingerprint?: () => HostFingerprint; readOnly?: boolean; deferPerfSamples?: boolean },
 	): ModelAdaptationStore {
 		return new ModelAdaptationStore(stateFile(agentDir, "model-adaptation.json"), options);
 	}
 
-	/** Persist pending write-behind mutations now; see HostStateStore.flush. */
+	/** Fold every deferred perf sample into its profile now, one transaction per model. */
 	flush(): void {
-		this.storage.flush();
+		if (this.perfFlushTimer) {
+			clearTimeout(this.perfFlushTimer);
+			this.perfFlushTimer = undefined;
+		}
+		if (this.pendingPerfCount === 0) return;
+		const pending = [...this.pendingPerf.entries()];
+		this.pendingPerf.clear();
+		this.pendingPerfCount = 0;
+		for (const [model, samples] of pending) {
+			const last = samples[samples.length - 1]!;
+			this.mutateProfile(
+				model,
+				new Date(last.at),
+				(profile) => {
+					let perf = profile.perf;
+					let changed = false;
+					for (const { sample, at } of samples) {
+						const next = updateModelPerfProfile(perf, sample, at);
+						if (next) {
+							perf = next;
+							changed = true;
+						}
+					}
+					return changed ? { ...profile, perf } : undefined;
+				},
+				last.at,
+			);
+		}
 	}
 
-	/** Flush and stop batching; the session owning a write-behind instance calls it on dispose. */
+	/** Flush deferred perf samples and stop deferring; the owning session calls it on dispose. */
 	close(): void {
-		this.storage.close();
+		this.closed = true;
+		this.unregisterExitFlush?.();
+		this.unregisterExitFlush = undefined;
+		this.flush();
 	}
 
 	/**
@@ -278,6 +332,13 @@ export class ModelAdaptationStore {
 		mutate: (profile: ModelAdaptationProfile) => ModelAdaptationProfile | undefined,
 		storedAt = now.toISOString(),
 	): ProfileMutation {
+		// Deferred perf samples for this model fold in first, so this mutation sees and keeps them.
+		if (this.pendingPerf.has(model)) {
+			const samples = this.pendingPerf.get(model) ?? [];
+			this.pendingPerf.delete(model);
+			this.pendingPerfCount -= samples.length;
+			for (const { sample, at } of samples) this.applyPerfSample(model, sample, at);
+		}
 		return this.storage.mutateCurrentHost<ProfileMutation>(
 			() => ({}),
 			(profiles, host) => {
@@ -366,6 +427,29 @@ export class ModelAdaptationStore {
 	recordPerfSample(model: string, sample: ModelPerfSample, at?: string): StoredModelAdaptation | undefined {
 		if (!hasUsableModelPerfSample(sample)) return undefined;
 		const now = at ?? sample.at ?? new Date().toISOString();
+		if (this.deferPerfSamples && !this.closed) {
+			const queue = this.pendingPerf.get(model) ?? [];
+			queue.push({ sample, at: now });
+			this.pendingPerf.set(model, queue);
+			this.pendingPerfCount += 1;
+			if (this.pendingPerfCount >= DEFERRED_PERF_SAMPLE_CAP) this.flush();
+			else if (!this.perfFlushTimer) {
+				this.perfFlushTimer = setTimeout(() => {
+					this.perfFlushTimer = undefined;
+					try {
+						this.flush();
+					} catch {
+						// The samples stay queued for the next flush.
+					}
+				}, DEFERRED_PERF_SAMPLE_IDLE_MS);
+				this.perfFlushTimer.unref?.();
+			}
+			return undefined;
+		}
+		return this.applyPerfSample(model, sample, now);
+	}
+
+	private applyPerfSample(model: string, sample: ModelPerfSample, now: string): StoredModelAdaptation | undefined {
 		const result = this.mutateProfile(
 			model,
 			new Date(now),
