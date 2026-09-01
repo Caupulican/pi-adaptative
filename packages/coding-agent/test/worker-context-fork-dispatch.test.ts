@@ -160,8 +160,11 @@ describe("durable context-fork dispatch", () => {
 		expect(store.readProjectionSnapshot()?.throughOrdinal).toBe(3);
 
 		const reopened = new DurableTaskRuntime({ store, now: () => NOW });
+		// The shared projection is immutable: a reader cannot corrupt what a later read returns.
 		const first = reopened.getSnapshot().attempts[attempt.attemptId]!.dispatch.birthContextForkReference!;
-		first.contentDigest = "f".repeat(64);
+		expect(() => {
+			first.contentDigest = "f".repeat(64);
+		}).toThrow(TypeError);
 		expect(reopened.getSnapshot().attempts[attempt.attemptId]?.dispatch.birthContextForkReference).toEqual(
 			reference(),
 		);
@@ -220,7 +223,8 @@ describe("durable context-fork dispatch", () => {
 			role: "implementer",
 		});
 		const attempt = runtime.queueAttempt(task.taskId, dispatch(task.taskId, reference()));
-		const projection = runtime.getSnapshot();
+		// Forge the malformed snapshot on a copy; the runtime's own projection is frozen.
+		const projection = structuredClone(runtime.getSnapshot());
 		projection.attempts[attempt.attemptId]!.dispatch.birthContextForkReference!.messageBytes = 1;
 		const malformedSnapshotStore = {
 			readProjectionSnapshot: () => ({
