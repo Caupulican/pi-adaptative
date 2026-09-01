@@ -182,8 +182,13 @@ describe("AgentSession retry", () => {
 		await created.session.bindExtensions({});
 
 		await created.session.prompt("Retry while retaining the exact version claim");
+		// A version claim never buys a reflection turn on its own, so the retried turn only promotes the
+		// cue to `due`. A later turn that raises real evidence is what buys the one reflection turn that
+		// carries and settles it — and the claim must survive both the retry and that wait as ONE claim.
+		await created.session.prompt("Remember that this run retained its exact version claim");
 
-		expect(created.getCallCount()).toBe(2);
+		// 2 for the retried first turn, 1 for the second, 1 for the single reflection turn it bought.
+		expect(created.getCallCount()).toBe(4);
 		const states = created.session.sessionManager
 			.getEntries()
 			.flatMap((entry) =>
@@ -195,7 +200,7 @@ describe("AgentSession retry", () => {
 			.map((state) => state.versionChange?.token.claimId)
 			.filter((claimId): claimId is string => !!claimId);
 		expect(new Set(claimIds)).toHaveLength(1);
-		expect(states.map((state) => state.status)).toEqual(["pending", "consumed", "pending", "consumed", "consumed"]);
+		expect(states.map((state) => state.status)).toEqual(["pending", "due", "due", "consumed", "consumed"]);
 		expect(DurableLearningState.forAgentDir(tempDir).readSnapshot()).toMatchObject({
 			currentTransitionId: null,
 			currentClaimOwnerId: null,

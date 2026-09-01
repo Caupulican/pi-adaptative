@@ -164,7 +164,6 @@ describe("AgentSession bash and persistence characterization", () => {
 			"custom_message",
 			"custom",
 			"message",
-			"custom",
 			"request_snapshot",
 			"message",
 			"foreground_tool_start",
@@ -174,15 +173,14 @@ describe("AgentSession bash and persistence characterization", () => {
 			"message",
 			"custom",
 		]);
+		// Two provider requests, and the reflection cue was delivered on neither: it is queued `pending`
+		// when the turn starts and only becomes `due` at the turn's end-of-work boundary, to be carried
+		// by the next ordinary request. No `consumed` state is written here because nothing consumed it.
 		const reflectionCueStates = entries.filter(
 			(entry) => entry.type === "custom" && entry.customType === CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
 		);
-		expect(reflectionCueStates).toMatchObject([
-			{ data: { status: "pending" } },
-			{ data: { status: "consumed", activeRunToken: expect.any(String) } },
-			{ data: { status: "consumed" } },
-		]);
-		expect(reflectionCueStates[2]).not.toMatchObject({ data: { activeRunToken: expect.any(String) } });
+		expect(reflectionCueStates).toMatchObject([{ data: { status: "pending" } }, { data: { status: "due" } }]);
+		expect(reflectionCueStates[1]).not.toMatchObject({ data: { activeRunToken: expect.any(String) } });
 		expect(entries.some((entry) => entry.type === "custom" && entry.customType === "tool_argument_validation")).toBe(
 			false,
 		);
@@ -243,11 +241,13 @@ describe("AgentSession bash and persistence characterization", () => {
 				expect(lastMessageEntry.message.stopReason).toBe("aborted");
 			}
 		}
+		// An aborted turn is still a turn whose work ended, so its undelivered cue is promoted to `due`
+		// rather than consumed — the abort means no provider request ever carried it.
 		const finalEntry = entries.at(-1);
 		expect(finalEntry).toMatchObject({
 			type: "custom",
 			customType: CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
-			data: { status: "consumed" },
+			data: { status: "due" },
 		});
 		if (finalEntry?.type === "custom") {
 			expect(finalEntry.data).not.toMatchObject({ activeRunToken: expect.any(String) });

@@ -157,7 +157,7 @@ import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
-import { ReflectionController } from "./reflection-controller.ts";
+import { REFLECTION_TURN_TRIGGER_CUSTOM_TYPE, ReflectionController } from "./reflection-controller.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import {
@@ -2530,6 +2530,48 @@ export class AgentSession {
 				if (this._foregroundPromptLease === submission.lease) this._foregroundPromptLease = undefined;
 				this._foregroundRecovery.releaseSubmission(submission.lease);
 			}
+		}
+		// After the lease is released, never before: the reflection turn is an ordinary submission and
+		// would deadlock against the lease this one still holds inside the try above.
+		await this._maybeRunDueReflectionTurn(options);
+	}
+
+	/**
+	 * Spend the ONE extra provider turn a completed unit of work may buy on reflection.
+	 *
+	 * The turn is bought only by evidence (see `ReflectionController.beginDueReflectionTurn`), so a run
+	 * with nothing durable to record costs exactly zero extra calls. It is fired here rather than at
+	 * `agent_end` because it is a real turn on this session's own history and tools — that is what lets
+	 * the model actually write to memory or promote a skill — and a turn cannot start while the run that
+	 * ended is still holding the foreground submission lease.
+	 *
+	 * Never fires from an internal-context turn, which is what bounds the whole mechanism to one extra
+	 * turn: the reflection turn is itself internal, so its completion cannot buy another.
+	 */
+	private async _maybeRunDueReflectionTurn(options?: PromptOptions): Promise<void> {
+		if (options?.internalContextType || this._disposed) return;
+		// An aborted run is the user asking for LESS work, not more; reflection waits for a turn that
+		// actually finished. The cue stays due and merges with whatever the next completed turn adds.
+		if (isInterruptedAssistantStopReason(this._findLastAssistantMessage()?.stopReason)) return;
+		const reflectionPrompt = this._reflection.beginDueReflectionTurn();
+		if (!reflectionPrompt) return;
+		try {
+			await this.prompt(reflectionPrompt, {
+				expandPromptTemplates: false,
+				processSlashCommands: false,
+				autoContinueGoal: false,
+				internalContextType: REFLECTION_TURN_TRIGGER_CUSTOM_TYPE,
+			});
+		} catch (error) {
+			// Reported, not swallowed: a reflection turn that cannot run (no model, auth revoked mid-run,
+			// provider outage) is a real failure worth surfacing, but it must not fail the user's own
+			// completed turn behind it — that turn's work already succeeded.
+			this._emit({
+				type: "warning",
+				message: `Reflection turn failed: ${error instanceof Error ? error.message : String(error)}`,
+			});
+		} finally {
+			this._reflection.endReflectionTurn();
 		}
 	}
 

@@ -235,15 +235,10 @@ describe("AgentSession concurrent prompt guard", () => {
 			});
 		}
 		// Exactly one provider request, and the only prompt text in it is the first prompt — the
-		// racing second prompt never reaches the provider. The trailing entry is the root reflection
-		// cue, a `role: "custom"` transient the provider-request planner adds to every root-session
-		// request; `convertToLlm` renders it as a user message, which is why it shows up here.
-		// Production has always sent it (src/core/sdk.ts has always wired the real converter) — it was
-		// invisible to this test only while `defaultConvertToLlm`, the fallback this locally built
-		// Agent uses because it wires no converter of its own, silently dropped custom messages.
-		expect(streamedUserTexts).toEqual([
-			["First preparing prompt", expect.stringContaining("Root reflection contract for this current turn")],
-		]);
+		// racing second prompt never reaches the provider. No reflection cue rides along either: the
+		// cue is delivered on the first request AFTER a unit of work ends, and this session's first
+		// unit of work is the request being inspected here.
+		expect(streamedUserTexts).toEqual([["First preparing prompt"]]);
 	});
 
 	it("should allow steer() while streaming", async () => {

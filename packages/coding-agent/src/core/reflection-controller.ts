@@ -150,6 +150,8 @@ export const SKILL_AUDIT_UNAVAILABLE_REASON_CODE = "skill_audit_unavailable";
 
 export const CURRENT_TURN_REFLECTION_CUSTOM_TYPE = "reflection_cue";
 export const CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE = "reflection_cue_state";
+/** `internalContextType` of the one dedicated end-of-work reflection turn. */
+export const REFLECTION_TURN_TRIGGER_CUSTOM_TYPE = "reflection_turn_trigger";
 
 export type CurrentTurnReflectionTrigger = "root-turn" | "version-change" | Exclude<DemandSignals["trigger"], "none">;
 
@@ -157,7 +159,19 @@ export interface CurrentTurnReflectionCueState {
 	version: 1;
 	revision: number;
 	cueId: string;
-	status: "pending" | "consumed" | "dismissed";
+	/**
+	 * Delivery lifecycle of one logical cue.
+	 *
+	 * - `pending` — evidence is accumulating for work that is still in flight. NEVER previewed: a cue
+	 *   offered here would ride every provider request of the run that is still producing the very
+	 *   work it asks the model to reflect on.
+	 * - `due` — the work this cue belongs to has ENDED (`finishCurrentTurnCue` observed the run's
+	 *   terminal boundary, or the cue was attached at one). Deliverable on the next ordinary provider
+	 *   request, and only that one.
+	 * - `consumed` — delivered on an accepted provider request; `activeRunToken` names that run.
+	 * - `dismissed` — reflection was disabled or the session disposed before delivery.
+	 */
+	status: "pending" | "due" | "consumed" | "dismissed";
 	triggers: CurrentTurnReflectionTrigger[];
 	createdAt: string;
 	updatedAt: string;
@@ -177,14 +191,43 @@ export interface CurrentTurnReflectionCuePlan {
 }
 
 const CURRENT_TURN_REFLECTION_CUE = [
-	"Root reflection contract for this current turn:",
-	"- Decide during this same turn whether the request or resulting evidence warrants durable learning.",
+	"Root reflection contract — this turn exists only to reflect on the work that just ended:",
+	"- Decide now, in this turn, whether that completed work warrants durable learning.",
 	"- When warranted, confront existing memory first, then use this root session's memory or skill tools now.",
 	"- Route canonical project semantics and evidence to OKF; keep ICM/workflow context as status plus OKF references, never duplicated project truth.",
 	"- Route stable collaborator preferences to USER, compact hot facts to MEMORY, and reusable procedures to skills.",
-	"- Do not defer reflection, request another model turn, call an isolated completion, or launch a background learner or worker for reflection.",
-	"- When nothing durable is warranted, continue normally and do not mention this cue.",
+	"- Do not defer reflection, ask for a further turn, call an isolated completion, or launch a background learner or worker for it. This turn is the whole budget.",
+	"- When nothing durable is warranted, say so in one short line and stop. Do not resume, restate, or extend the previous work.",
 ].join("\n");
+
+/**
+ * The durable half of the reflection turn: the short line that becomes its prompt message.
+ *
+ * The ~250-token contract above rides the same request as a request-local transient instead of being
+ * this text, so it is never written to history. What stays in the transcript is this one line - enough
+ * for a later reader (or a rebuilt context) to see that a reflection checkpoint happened, without
+ * accumulating a copy of the contract per checkpoint.
+ */
+const REFLECTION_TURN_PROMPT = "Reflection checkpoint: the unit of work above has ended.";
+
+/**
+ * Triggers that justify spending an extra provider turn — the demand signals `analyzeCompletedTurn`
+ * raises from what actually happened in a completed turn.
+ *
+ * Two triggers are deliberately absent. `root-turn` means only "a root turn happened"; buying a
+ * reflection turn on that would make every single turn cost two. `version-change` is excluded on its
+ * own authority: the cue's own version line states that first observation is audit-only and that
+ * version movement alone is never semantic evidence, so paying a provider turn for it would
+ * contradict the thing it says. It still rides the cue whenever real evidence buys a turn, and an
+ * unreviewed claim is released rather than lost (see `dismissCurrentTurnCue`), so the next session
+ * re-observes the transition.
+ */
+const REFLECTION_TURN_WORTHY_TRIGGERS = new Set<CurrentTurnReflectionTrigger>([
+	"complex",
+	"corrective",
+	"durable",
+	"session-end",
+]);
 
 const CURRENT_TURN_REFLECTION_TRIGGERS = new Set<CurrentTurnReflectionTrigger>([
 	"root-turn",
@@ -204,7 +247,10 @@ function parseCurrentTurnReflectionCueState(value: unknown): CurrentTurnReflecti
 		!Number.isSafeInteger(candidate.revision) ||
 		candidate.revision < 1 ||
 		typeof candidate.cueId !== "string" ||
-		(candidate.status !== "pending" && candidate.status !== "consumed" && candidate.status !== "dismissed") ||
+		(candidate.status !== "pending" &&
+			candidate.status !== "due" &&
+			candidate.status !== "consumed" &&
+			candidate.status !== "dismissed") ||
 		!Array.isArray(candidate.triggers) ||
 		candidate.triggers.length === 0 ||
 		candidate.triggers.some((trigger) => !CURRENT_TURN_REFLECTION_TRIGGERS.has(trigger)) ||
@@ -280,6 +326,8 @@ export class ReflectionController {
 	private cueStateCacheInitialized = false;
 	private cueStateCache: CurrentTurnReflectionCueState | undefined;
 	private activeRunToken: string | undefined;
+	/** True only while the one dedicated reflection turn is running; gates cue visibility entirely. */
+	private reflectionTurnInFlight = false;
 
 	constructor(deps: ReflectionControllerDeps) {
 		this.deps = deps;
@@ -323,15 +371,23 @@ export class ReflectionController {
 		return this.cueStateCache;
 	}
 
+	/**
+	 * A cue that still owns its durable claim: queued but undelivered (`pending`/`due`), or delivered
+	 * on a run this controller is still settling (`consumed` under our own run token).
+	 */
+	private ownsLiveClaim(current: CurrentTurnReflectionCueState | undefined): boolean {
+		if (!current) return false;
+		if (current.status === "pending" || current.status === "due") return true;
+		return (
+			current.status === "consumed" && !!current.activeRunToken && current.activeRunToken === this.activeRunToken
+		);
+	}
+
 	/** Branch/session navigation invalidates the lazy latest-state index; ordinary appends do not. */
 	invalidateCurrentTurnCueStateCache(options: { releaseActiveClaim?: boolean } = {}): void {
 		if (options.releaseActiveClaim) {
 			const current = this.cueStateCacheInitialized ? this.cueStateCache : undefined;
-			const isActive =
-				current?.status === "pending" ||
-				(current?.status === "consumed" &&
-					!!current.activeRunToken &&
-					current.activeRunToken === this.activeRunToken);
+			const isActive = this.ownsLiveClaim(current);
 			if (isActive && current?.versionChange) {
 				this.deps.getDurableLearningState?.()?.releaseClaim(current.versionChange.token);
 			}
@@ -355,10 +411,7 @@ export class ReflectionController {
 
 	private dismissCurrentTurnCue(): void {
 		const current = this.getCurrentTurnCueState();
-		const isActive =
-			current?.status === "pending" ||
-			(current?.status === "consumed" && !!current.activeRunToken && current.activeRunToken === this.activeRunToken);
-		if (!current || !isActive) return;
+		if (!current || !this.ownsLiveClaim(current)) return;
 		try {
 			this.persistCurrentTurnCueState({
 				...current,
@@ -383,11 +436,26 @@ export class ReflectionController {
 		this.dismissCurrentTurnCue();
 	}
 
+	/**
+	 * Attach or coalesce evidence into the single logical cue slot.
+	 *
+	 * `readyForDelivery` records WHERE the caller sits relative to the work the evidence describes,
+	 * and is the only thing that decides when the cue may reach the provider. A caller at a
+	 * completed-work boundary (`queueCurrentTurnCue`, fed by `analyzeCompletedTurn` at `agent_end`)
+	 * attaches a `due` cue; a caller at the START of a root turn (`queueExternalRootTurnCue`) attaches
+	 * a `pending` one, which `finishCurrentTurnCue` promotes when that turn's own work ends.
+	 * `due` always wins a merge: once a unit of work has ended, later accumulation into the same slot
+	 * cannot un-end it and must not push delivery out to the following turn.
+	 */
 	private attachCurrentTurnCue(
 		trigger: CurrentTurnReflectionTrigger,
-		versionChange?: { token: DurableLearningClaimToken; metadata: DurableLearningReviewMetadata },
-		clearVersionChange = false,
+		options: {
+			readyForDelivery: boolean;
+			versionChange?: { token: DurableLearningClaimToken; metadata: DurableLearningReviewMetadata };
+			clearVersionChange?: boolean;
+		},
 	): DurableLearningCueAttachOutcome {
+		const { readyForDelivery, versionChange, clearVersionChange = false } = options;
 		if (!this.isAutomaticReflectionEnabled()) {
 			this.synchronizeCurrentTurnCueWithSettings();
 			return "disabled";
@@ -395,7 +463,8 @@ export class ReflectionController {
 		try {
 			const current = this.getCurrentTurnCueState();
 			const updatedAt = new Date().toISOString();
-			if (current?.status === "pending") {
+			if (current?.status === "pending" || current?.status === "due") {
+				const status = current.status === "due" || readyForDelivery ? "due" : "pending";
 				if (clearVersionChange && current.versionChange) {
 					const triggers: CurrentTurnReflectionTrigger[] = current.triggers.filter(
 						(existing) => existing !== "version-change",
@@ -404,6 +473,7 @@ export class ReflectionController {
 					this.persistCurrentTurnCueState({
 						...current,
 						revision: current.revision + 1,
+						status,
 						triggers,
 						versionChange: undefined,
 						updatedAt,
@@ -415,7 +485,9 @@ export class ReflectionController {
 				const sameVersionClaim =
 					!versionChange ||
 					(!!current.versionChange && versionClaimTokensMatch(current.versionChange.token, versionChange.token));
-				if (alreadyHasTrigger && alreadyHasVersionTrigger && sameVersionClaim) return "coalesced";
+				if (alreadyHasTrigger && alreadyHasVersionTrigger && sameVersionClaim && status === current.status) {
+					return "coalesced";
+				}
 				const replacingVersionClaim = !!versionChange && !!current.versionChange && !sameVersionClaim;
 				const triggers = [...current.triggers];
 				if (!triggers.includes(trigger)) triggers.push(trigger);
@@ -423,10 +495,12 @@ export class ReflectionController {
 				this.persistCurrentTurnCueState({
 					...current,
 					revision: current.revision + 1,
+					status,
 					triggers,
 					updatedAt,
 					...(versionChange ? { versionChange } : {}),
 				});
+				if (alreadyHasTrigger && alreadyHasVersionTrigger && sameVersionClaim) return "coalesced";
 				return replacingVersionClaim ? "replaced-stale" : "attached";
 			}
 			const triggers: CurrentTurnReflectionTrigger[] = [trigger];
@@ -435,7 +509,7 @@ export class ReflectionController {
 				version: 1,
 				revision: 1,
 				cueId: randomUUID(),
-				status: "pending",
+				status: readyForDelivery ? "due" : "pending",
 				triggers,
 				createdAt: updatedAt,
 				updatedAt,
@@ -451,15 +525,54 @@ export class ReflectionController {
 		}
 	}
 
-	/** Persist one logical ordinary cue without exposing claim metadata to callers. */
+	/**
+	 * Persist one logical ordinary cue without exposing claim metadata to callers.
+	 *
+	 * Called only from a COMPLETED-work boundary (`AgentSession`'s `agent_end` handling, with evidence
+	 * projected by {@link analyzeCompletedTurn}), so the cue it attaches is immediately deliverable.
+	 */
 	queueCurrentTurnCue(trigger: CurrentTurnReflectionTrigger): boolean {
-		const outcome = this.attachCurrentTurnCue(trigger);
+		// The reflection turn's own completion is not evidence. Without this, a reflection turn that
+		// wrote to memory would analyze as `durable` and queue the cue that buys the NEXT reflection
+		// turn, and so on - one extra turn forever, which is exactly the cost this design bounds.
+		if (this.reflectionTurnInFlight) return false;
+		const outcome = this.attachCurrentTurnCue(trigger, { readyForDelivery: true });
 		return outcome === "attached" || outcome === "replaced-stale";
+	}
+
+	/**
+	 * Open the ONE extra provider turn a completed unit of work may buy, returning its prompt text, or
+	 * `undefined` when the work bought none.
+	 *
+	 * A turn is bought only by a `due` cue carrying real evidence ({@link REFLECTION_TURN_WORTHY_TRIGGERS}).
+	 * A cue holding nothing but `root-turn` sits and waits: it costs nothing, and it merges with whatever
+	 * evidence a later turn produces. Callers MUST pair this with {@link endReflectionTurn}.
+	 */
+	beginDueReflectionTurn(): string | undefined {
+		if (this.reflectionTurnInFlight) return undefined;
+		if (!this.isAutomaticReflectionEnabled()) {
+			this.synchronizeCurrentTurnCueWithSettings();
+			return undefined;
+		}
+		const current = this.getCurrentTurnCueState();
+		if (current?.status !== "due") return undefined;
+		if (!current.triggers.some((trigger) => REFLECTION_TURN_WORTHY_TRIGGERS.has(trigger))) return undefined;
+		this.reflectionTurnInFlight = true;
+		return REFLECTION_TURN_PROMPT;
+	}
+
+	/** Close the dedicated reflection turn. Infallible by contract; always call it in a `finally`. */
+	endReflectionTurn(): void {
+		this.reflectionTurnInFlight = false;
 	}
 
 	/**
 	 * Root-turn entrypoint: reconcile installed runtime/policy state and atomically attach any exact
 	 * version claim to the same provider cue. Fail-safe state faults degrade to an ordinary root cue.
+	 *
+	 * Called at the START of an external root turn, so what it attaches is `pending`, not deliverable:
+	 * the work this cue will ask the model to reflect on has not happened yet. `finishCurrentTurnCue`
+	 * promotes it the moment that work ends.
 	 */
 	queueExternalRootTurnCue(): DurableLearningCueAttachOutcome {
 		if (!this.isAutomaticReflectionEnabled()) {
@@ -476,12 +589,13 @@ export class ReflectionController {
 					"Installed runtime identity is unavailable; continuing with ordinary root reflection only.",
 				);
 			}
-			return this.attachCurrentTurnCue("root-turn", undefined, true);
+			return this.attachCurrentTurnCue("root-turn", { readyForDelivery: false, clearVersionChange: true });
 		}
 		const result = state.reconcileClaimAndAttach(
 			{ runtimeVersion, memoryPolicyVersion },
 			this.durableLearningOwnerId,
-			(token, metadata) => this.attachCurrentTurnCue("root-turn", { token, metadata }),
+			(token, metadata) =>
+				this.attachCurrentTurnCue("root-turn", { readyForDelivery: false, versionChange: { token, metadata } }),
 		);
 		if (result.warningCode) {
 			this.warnOnce(
@@ -498,21 +612,31 @@ export class ReflectionController {
 		) {
 			return result.status;
 		}
-		return this.attachCurrentTurnCue("root-turn", undefined, true);
+		return this.attachCurrentTurnCue("root-turn", { readyForDelivery: false, clearVersionChange: true });
 	}
 
 	/**
-	 * Preview one transient provider-only cue. An accepted cue remains visible across provider-tool
-	 * continuation requests until AgentSession reports one strict terminal success or failure.
+	 * Preview one request-local provider-only cue, and ONLY inside the dedicated reflection turn
+	 * ({@link beginDueReflectionTurn}) on a cue whose work has already ended (`due`).
+	 *
+	 * The reflection turn is the cue's ONLY delivery path — there is deliberately no piggyback onto an
+	 * ordinary request. Every other state is invisible here, each for its own reason. A `pending` cue
+	 * belongs to work still in flight; offering it would put a ~250-token MUST-protocol directive on
+	 * every provider request of that run, N copies for one unit of work, asking the model to reflect on
+	 * work it has not finished. A `consumed` cue was already carried by the accepted request that
+	 * consumed it, so re-offering it on the reflection turn's own continuation requests would restore
+	 * exactly that per-request cost. And a `due` cue outside a reflection turn is one whose work bought
+	 * no extra turn (no evidence beyond `root-turn`, or the run was aborted); it waits for evidence
+	 * rather than attaching itself to the next unrelated request.
 	 */
 	previewCurrentTurnCue(): CurrentTurnReflectionCuePlan | undefined {
 		let current = this.getCurrentTurnCueState();
 		if (!current || !this.isAutomaticReflectionEnabled()) return undefined;
-		let pending = current.status === "pending";
-		let continuing =
-			current.status === "consumed" && !!this.activeRunToken && current.activeRunToken === this.activeRunToken;
-		if (!pending && !continuing) return undefined;
-		if (continuing && current.versionChange) {
+		if (current.status !== "due" || !this.reflectionTurnInFlight) return undefined;
+		if (current.versionChange) {
+			// A `due` cue can wait through an arbitrary gap (the run that ended may be the session's
+			// last for a while), so its lease is renewed at the delivery boundary rather than assumed
+			// fresh from attach time.
 			const renewed = this.deps.getDurableLearningState?.()?.renewClaim(current.versionChange.token) ?? false;
 			if (!renewed) {
 				const withoutStaleClaim = {
@@ -525,8 +649,6 @@ export class ReflectionController {
 				try {
 					this.persistCurrentTurnCueState(withoutStaleClaim);
 					current = withoutStaleClaim;
-					pending = false;
-					continuing = true;
 				} catch {
 					this.warnOnce(
 						"cue-stale-claim-removal-failed",
@@ -546,11 +668,31 @@ export class ReflectionController {
 		const message: AgentMessage = {
 			role: "custom",
 			customType: CURRENT_TURN_REFLECTION_CUSTOM_TYPE,
-			content: `${CURRENT_TURN_REFLECTION_CUE}\n- Pending evidence classes: ${current.triggers.join(", ")}.${versionLine}`,
+			// Array (block) content, not a bare string, and that difference is load-bearing.
+			// `adaptHostTransients` (packages/agent/src/transient-records.ts, read-only reference from
+			// here) turns every host transient shaped as a `custom` message with STRING content into an
+			// append-on-change DURABLE record, and gives host-owned kinds no `clearedText`. That is right
+			// for reference material whose staleness is harmless — the path-alias legend is a lookup table
+			// that stays true — and wrong for this cue, which is a MUST-protocol directive true for exactly
+			// one request. Written durably, "a unit of your work has just ended, reflect now" would sit in
+			// history reading as current on every later request forever: the per-request reflection cost
+			// this whole delivery boundary exists to remove, plus a standing false claim that reflection is
+			// due when it is not, plus one more permanent copy every time the trigger list changes. Block
+			// content is the shape that module routes to `passThrough`: converted onto the wire for this
+			// request only (`convertToLlm` maps custom content through unchanged), never committed to
+			// durable history. `agent-session-prompt`/`agent-session-bash-persistence`/
+			// `proactive-reflection-integration` all pin the resulting invariant — no `reflection_cue`
+			// ever appears in session entries or `session.messages`.
+			content: [
+				{
+					type: "text",
+					text: `${CURRENT_TURN_REFLECTION_CUE}\n- Pending evidence classes: ${current.triggers.join(", ")}.${versionLine}`,
+				},
+			],
 			display: false,
 			details: {
 				version: 1,
-				scope: "root-current-turn",
+				scope: "root-completed-work",
 				automaticProviderRequests: 0,
 				cueId: current.cueId,
 				triggers: current.triggers,
@@ -579,7 +721,6 @@ export class ReflectionController {
 			isCurrent,
 			commit: () => {
 				if (!isCurrent()) throw new Error("Reflection cue changed before provider-plan commit");
-				if (expectedStatus === "consumed") return;
 				const latest = this.getCurrentTurnCueState();
 				if (!latest) throw new Error("Reflection cue disappeared before provider-plan commit");
 				const activeRunToken = randomUUID();
@@ -595,13 +736,43 @@ export class ReflectionController {
 		};
 	}
 
-	/** Settle one accepted cue-bearing provider run at its authoritative AgentSession boundary. */
+	/**
+	 * The authoritative end-of-work boundary, called by AgentSession at every `agent_end`.
+	 *
+	 * Two jobs, one boundary. It settles an accepted cue-bearing run (durable claim completed on a
+	 * strict terminal success, released otherwise), AND it promotes a still-`pending` cue to `due` —
+	 * the transition that makes the cue deliverable at all. Promotion is what implements the owner's
+	 * semantics directly: a cue queued at the start of a root turn becomes deliverable only once that
+	 * turn's work has actually ended, and is then carried by the next ordinary provider request rather
+	 * than by a request bought for it.
+	 *
+	 * `willRetry` means the run is not over — the same work is about to be attempted again — so neither
+	 * job runs to completion: a pending cue stays pending, and a consumed one returns to `due` (its work
+	 * DID end; only its delivery request failed) to be re-offered on the retry.
+	 */
 	finishCurrentTurnCue(messages: AgentMessage[], options: { willRetry: boolean }): void {
 		if (!this.isAutomaticReflectionEnabled()) {
 			this.synchronizeCurrentTurnCueWithSettings();
 			return;
 		}
 		const current = this.getCurrentTurnCueState();
+		if (current?.status === "pending") {
+			if (options.willRetry) return;
+			try {
+				this.persistCurrentTurnCueState({
+					...current,
+					revision: current.revision + 1,
+					status: "due",
+					updatedAt: new Date().toISOString(),
+				});
+			} catch {
+				this.warnOnce(
+					"cue-promotion-failed",
+					"Automatic reflection cue could not be marked deliverable; its durable claim will expire safely.",
+				);
+			}
+			return;
+		}
 		if (current?.status !== "consumed" || !current.activeRunToken || current.activeRunToken !== this.activeRunToken) {
 			return;
 		}
@@ -613,7 +784,7 @@ export class ReflectionController {
 				this.persistCurrentTurnCueState({
 					...current,
 					revision: current.revision + 1,
-					status: "pending",
+					status: "due",
 					activeRunToken: undefined,
 					triggers: versionChange
 						? current.triggers

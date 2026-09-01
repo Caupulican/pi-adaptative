@@ -483,17 +483,15 @@ describe("AgentSession queue characterization", () => {
 		await harness.session.prompt("normal prompt");
 
 		expect(sawCustomMessage).toBe(true);
-		// The second custom record is the root reflection cue, not a duplicate of the injected one.
-		// It is a transient the provider-request planner adds to every root-session request (production
-		// has always sent it to the provider); since transient records became append-on-change it is
-		// also committed to durable history, so a host that rebuilds its context from its own persisted
-		// transcript between turns keeps it instead of silently losing it. Pinned by customType so a
-		// future extra custom record cannot pass unnoticed.
+		// The injected nextTurn record is the ONLY custom record here. The root reflection cue is
+		// request-local: it is never committed to durable history, and this turn (the first) does not
+		// carry it at all, because a cue is delivered on the request that FOLLOWS a completed unit of
+		// work. Pinned by customType so a future extra custom record cannot pass unnoticed.
 		expect(
 			harness.session.messages.map((message) =>
 				message.role === "custom" ? `custom:${message.customType}` : message.role,
 			),
-		).toEqual(["user", "custom:next-turn", "custom:reflection_cue", "assistant"]);
+		).toEqual(["user", "custom:next-turn", "assistant"]);
 	});
 
 	it("retains nextTurn messages when extension preflight fails", async () => {

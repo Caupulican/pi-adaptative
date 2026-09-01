@@ -110,7 +110,7 @@ describe("durable current-turn reflection cue state", () => {
 		expect(controller.queueCurrentTurnCue("durable")).toBe(true);
 		expect(controller.queueCurrentTurnCue("corrective")).toBe(false);
 		expect(controller.getCurrentTurnCueState()).toMatchObject({
-			status: "pending",
+			status: "due",
 			revision: 2,
 			triggers: ["corrective", "durable"],
 		});
@@ -129,29 +129,33 @@ describe("durable current-turn reflection cue state", () => {
 		const reopened = SessionManager.open(sessionFile, directory);
 		const resumed = createCueController(reopened);
 		expect(resumed.getCurrentTurnCueState()).toMatchObject({
-			status: "pending",
+			status: "due",
 			revision: 2,
 			triggers: ["corrective", "durable"],
 		});
 		expect(cueMessages(reopened.buildSessionContext().messages)).toHaveLength(0);
 
+		// Evidence-bearing, so it buys the one reflection turn; the cue is visible only inside it.
+		expect(resumed.previewCurrentTurnCue()).toBeUndefined();
+		expect(resumed.beginDueReflectionTurn()).toBeDefined();
 		const preview = resumed.previewCurrentTurnCue();
 		expect(preview?.isCurrent()).toBe(true);
 		preview?.commit();
 		expect(resumed.getCurrentTurnCueState()).toMatchObject({ status: "consumed", revision: 3 });
-		const continuation = resumed.previewCurrentTurnCue();
-		expect(continuation).toBeDefined();
-		continuation?.commit();
+		// The continuation requests of the very run that consumed the cue must not carry it again.
+		expect(resumed.previewCurrentTurnCue()).toBeUndefined();
 		resumed.finishCurrentTurnCue([assistantReply("finished")], { willRetry: false });
 		expect(resumed.previewCurrentTurnCue()).toBeUndefined();
+		resumed.endReflectionTurn();
 	});
 
 	it("rebuilds the previewed cue message byte-identically when nothing about the cue state has changed", () => {
 		const sessionManager = SessionManager.inMemory();
 		const reflection = createCueController(sessionManager);
-		reflection.queueCurrentTurnCue("root-turn");
+		reflection.queueCurrentTurnCue("durable");
+		expect(reflection.beginDueReflectionTurn()).toBeDefined();
 
-		// Two independent preview builds of the SAME pending cue, with no commit or other state change
+		// Two independent preview builds of the SAME due cue, with no commit or other state change
 		// between them (as happens across a discarded/retried provider-request plan). The A1 contract:
 		// unchanged cue content must serialize to identical bytes, never differing only by a fresh
 		// Date.now() read — otherwise the provider's prefix cache is invalidated on every request.
@@ -161,10 +165,11 @@ describe("durable current-turn reflection cue state", () => {
 		expect(JSON.stringify(second?.message)).toBe(JSON.stringify(first?.message));
 	});
 
-	it("keeps discarded replans pending and projects exactly one cue only until the accepted plan commits", async () => {
+	it("keeps discarded replans deliverable and projects exactly one cue for the whole run", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const reflection = createCueController(sessionManager);
-		reflection.queueCurrentTurnCue("root-turn");
+		reflection.queueCurrentTurnCue("durable");
+		expect(reflection.beginDueReflectionTurn()).toBeDefined();
 		const skillVault = {
 			previewSystemPromptSection: () => undefined,
 			getContextRevision: () => 0,
@@ -191,7 +196,7 @@ describe("durable current-turn reflection cue state", () => {
 		const discarded = await controller.plan(source, 0);
 		expect(cueMessages(discarded.transientMessages ?? [])).toHaveLength(1);
 		expect(cueMessages(discarded.messages)).toHaveLength(0);
-		expect(reflection.getCurrentTurnCueState()).toMatchObject({ status: "pending", revision: 1 });
+		expect(reflection.getCurrentTurnCueState()).toMatchObject({ status: "due", revision: 1 });
 
 		const accepted = await controller.plan(source, 0);
 		expect(cueMessages(accepted.transientMessages ?? [])).toHaveLength(1);
@@ -200,8 +205,10 @@ describe("durable current-turn reflection cue state", () => {
 		expect(reflection.getCurrentTurnCueState()).toMatchObject({ status: "consumed", revision: 2 });
 		expect(discarded.isCurrent?.()).toBe(false);
 
+		// Every further request of the same run projects NOTHING: one unit of work buys one cue-bearing
+		// request, not one per request.
 		const continuation = await controller.plan(source, 0);
-		expect(cueMessages(continuation.transientMessages ?? [])).toHaveLength(1);
+		expect(cueMessages(continuation.transientMessages ?? [])).toHaveLength(0);
 		expect(cueMessages(continuation.messages)).toHaveLength(0);
 		expect(continuation.prepareCommit?.()).toBe(true);
 		continuation.commit?.();
@@ -230,10 +237,11 @@ describe("durable current-turn reflection cue state", () => {
 		expect(reflection.previewCurrentTurnCue()).toBeUndefined();
 
 		delete process.env.PI_NATIVE_REFLECTION;
-		expect(reflection.queueCurrentTurnCue("root-turn")).toBe(true);
+		expect(reflection.queueCurrentTurnCue("durable")).toBe(true);
+		expect(reflection.beginDueReflectionTurn()).toBeDefined();
 		const fresh = reflection.previewCurrentTurnCue();
 		expect(fresh?.message).toMatchObject({
-			details: { triggers: ["root-turn"] },
+			details: { triggers: ["durable"] },
 		});
 		expect(reflection.getCurrentTurnCueState()?.cueId).not.toBe(staleCueId);
 	});
@@ -289,6 +297,14 @@ describe("durable current-turn reflection cue state", () => {
 			},
 		});
 		expect(pending?.versionChange?.token.claimId).toMatch(/^[0-9a-f-]{36}$/);
+		// Attached at the START of the root turn, so nothing is deliverable yet.
+		expect(reflection.previewCurrentTurnCue()).toBeUndefined();
+		reflection.finishCurrentTurnCue([assistantReply("root work finished")], { willRetry: false });
+		expect(reflection.getCurrentTurnCueState()).toMatchObject({ status: "due" });
+		// A version claim alone never buys a turn — it rides one that real evidence bought.
+		expect(reflection.beginDueReflectionTurn()).toBeUndefined();
+		reflection.queueCurrentTurnCue("durable");
+		expect(reflection.beginDueReflectionTurn()).toBeDefined();
 		const preview = reflection.previewCurrentTurnCue();
 		const previewDetails = preview?.message.role === "custom" ? preview.message.details : undefined;
 		expect(previewDetails).toMatchObject({
@@ -296,11 +312,10 @@ describe("durable current-turn reflection cue state", () => {
 		});
 		expect(JSON.stringify(preview?.message)).not.toContain(pending?.versionChange?.token.claimId);
 		preview?.commit();
-		const continuationMessage = reflection.previewCurrentTurnCue()?.message;
-		const continuationDetails = continuationMessage?.role === "custom" ? continuationMessage.details : undefined;
-		expect(continuationDetails).toMatchObject({ cueId: pending?.cueId });
+		expect(reflection.previewCurrentTurnCue()).toBeUndefined();
 
 		reflection.finishCurrentTurnCue([assistantReply("Reviewed current semantics")], { willRetry: false });
+		reflection.endReflectionTurn();
 		expect(reflection.previewCurrentTurnCue()).toBeUndefined();
 		expect(DurableLearningState.forAgentDir(directory).readSnapshot()).toMatchObject({
 			observedRuntimeVersion: "0.96.5",
@@ -321,12 +336,17 @@ describe("durable current-turn reflection cue state", () => {
 		reflection.queueExternalRootTurnCue();
 		const cueId = reflection.getCurrentTurnCueState()?.cueId;
 		const claimId = reflection.getCurrentTurnCueState()?.versionChange?.token.claimId;
+		reflection.finishCurrentTurnCue([assistantReply("root work finished")], { willRetry: false });
+		reflection.queueCurrentTurnCue("durable");
+		expect(reflection.beginDueReflectionTurn()).toBeDefined();
 		reflection.previewCurrentTurnCue()?.commit();
 
+		// A retried run returns the cue to `due`, not `pending`: its work already ended, only the request
+		// that was carrying the cue failed, so the retry request must carry it again.
 		reflection.finishCurrentTurnCue([assistantReply("retryable failure")], { willRetry: true });
 		expect(reflection.getCurrentTurnCueState()).toMatchObject({
 			cueId,
-			status: "pending",
+			status: "due",
 			versionChange: { token: { claimId } },
 		});
 		reflection.previewCurrentTurnCue()?.commit();
@@ -348,6 +368,9 @@ describe("durable current-turn reflection cue state", () => {
 		const settingsManager = SettingsManager.inMemory({ autoLearn: { enabled: true, reflectionReview: true } });
 		const reflection = createCueController(SessionManager.inMemory(), settingsManager, { agentDir: directory });
 		reflection.queueExternalRootTurnCue();
+		reflection.finishCurrentTurnCue([assistantReply("root work finished")], { willRetry: false });
+		reflection.queueCurrentTurnCue("durable");
+		expect(reflection.beginDueReflectionTurn()).toBeDefined();
 		reflection.previewCurrentTurnCue()?.commit();
 		settingsManager.setAutoLearnSettings({ enabled: false, reflectionReview: true });
 		expect(reflection.getCurrentTurnCueState()).toMatchObject({ status: "dismissed" });
@@ -380,6 +403,9 @@ describe("durable current-turn reflection cue state", () => {
 			triggers: ["root-turn"],
 		});
 		expect(competingRoot.getCurrentTurnCueState()?.versionChange).toBeUndefined();
+		competingRoot.finishCurrentTurnCue([assistantReply("root work finished")], { willRetry: false });
+		competingRoot.queueCurrentTurnCue("durable");
+		expect(competingRoot.beginDueReflectionTurn()).toBeDefined();
 		expect(DurableLearningState.forAgentDir(directory).readSnapshot()?.currentClaimOwnerId).toBe(
 			owner.getCurrentTurnCueState()?.versionChange?.token.ownerId,
 		);
@@ -396,6 +422,9 @@ describe("durable current-turn reflection cue state", () => {
 			{ agentDir: directory },
 		);
 		reflection.queueExternalRootTurnCue();
+		reflection.finishCurrentTurnCue([assistantReply("root work finished")], { willRetry: false });
+		reflection.queueCurrentTurnCue("durable");
+		expect(reflection.beginDueReflectionTurn()).toBeDefined();
 		reflection.previewCurrentTurnCue()?.commit();
 		reflection.invalidateCurrentTurnCueStateCache({ releaseActiveClaim: true });
 
