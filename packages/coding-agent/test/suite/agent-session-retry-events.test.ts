@@ -326,11 +326,22 @@ describe("AgentSession retry and event characterization", () => {
 		// The user message paints early (see _promptUnserialized), via a public-only synthetic
 		// message_start fired before the turn actually starts — extensions never see that one, only
 		// the authoritative message_start/message_end pair once the real turn begins.
+		//
+		// The custom pair is the root reflection cue the provider-request planner adds to every
+		// root-session request (production has always sent it to the provider); since transient
+		// records became append-on-change it is also committed to durable history and announced on
+		// the same message_start/message_end pairing every other message uses. It carries no early
+		// synthetic paint, so extension-before-public holds for both halves — which is exactly the
+		// ordering invariant this test exists to pin.
 		expect(order).toEqual([
 			"public:message_start:user",
 			"extension:message_start:user",
 			"extension:message_end:user",
 			"public:message_end:user",
+			"extension:message_start:custom",
+			"public:message_start:custom",
+			"extension:message_end:custom",
+			"public:message_end:custom",
 			"extension:message_start:assistant",
 			"public:message_start:assistant",
 			"extension:message_end:assistant",
@@ -375,6 +386,10 @@ describe("AgentSession retry and event characterization", () => {
 		// via a synthetic emit that the later, authoritative message_start (same object) suppresses.
 		// routing_start/routing_end bracket the routing/prep phase in between (the working-spinner
 		// gap) and always end before agent_start, since that's when the turn actually starts.
+		// The custom pair is the root reflection cue: a transient the provider-request planner adds to
+		// every root-session request (production has always sent it to the provider), announced on the
+		// ordinary message_start/message_end pairing since transient records became append-on-change
+		// and are committed to durable history rather than rebuilt per request.
 		expect(normalizeEventOrder(harness.events)).toEqual([
 			"message_start:user",
 			"routing_start",
@@ -382,6 +397,8 @@ describe("AgentSession retry and event characterization", () => {
 			"agent_start",
 			"turn_start",
 			"message_end:user",
+			"message_start:custom",
+			"message_end:custom",
 			"message_start:assistant",
 			"message_update",
 			"message_end:assistant",
@@ -413,6 +430,9 @@ describe("AgentSession retry and event characterization", () => {
 		await harness.session.prompt("hi");
 
 		expect(toolRuns).toEqual(["hello"]);
+		// The custom pair is the root reflection cue (see the single-prompt test above). It appears
+		// only on the first turn: append-on-change commits a transient once and re-appends it only when
+		// its content changes, and the cue's content is identical on the second turn of this prompt.
 		expect(normalizeEventOrder(harness.events)).toEqual([
 			"message_start:user",
 			"routing_start",
@@ -420,6 +440,8 @@ describe("AgentSession retry and event characterization", () => {
 			"agent_start",
 			"turn_start",
 			"message_end:user",
+			"message_start:custom",
+			"message_end:custom",
 			"message_start:assistant",
 			"message_update",
 			"message_end:assistant",

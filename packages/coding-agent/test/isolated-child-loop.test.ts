@@ -232,10 +232,19 @@ describe("isolated child tool loop", () => {
 			});
 
 			expect(result.text).toBe("continued without the unavailable tool");
+			// The custom record between the rejection and the recovery is the MANDATORY TOOL FAILURE
+			// RECOVERY ledger for the rejected `memory` call — the repair teaching that is the whole
+			// reason the second turn continues without the unavailable tool, so this test's subject is
+			// now pinned rather than implied. The child loop has always sent it to the provider; since
+			// transient records became append-on-change it is also committed to the transcript the loop
+			// returns, so `result.messages` matches the loop's own message_end stream instead of
+			// silently disagreeing with it. Still fully isolated: the parent session's messages,
+			// entries, and event stream are all untouched by this call.
 			expect(result.messages).toEqual([
 				expect.objectContaining({ role: "user" }),
 				expect.objectContaining({ role: "assistant" }),
 				expect.objectContaining({ role: "toolResult", toolName: "memory", isError: true }),
+				expect.objectContaining({ role: "custom", customType: "pi_tool_failure_ledger" }),
 				expect.objectContaining({ role: "assistant" }),
 			]);
 			expect(harness.getPendingResponseCount()).toBe(0);

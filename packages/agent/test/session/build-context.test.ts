@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+	BRANCH_SUMMARY_PREFIX,
+	BRANCH_SUMMARY_SUFFIX,
+	bashExecutionToText,
+	COMPACTION_SUMMARY_PREFIX,
+	COMPACTION_SUMMARY_SUFFIX,
+	convertToLlm,
+	isCoreConversationMessageRole,
+	isWireNativeAgentMessageRole,
+} from "../../src/messages.ts";
+import {
 	type BranchSummaryEntry,
 	buildSessionContext,
 	type CompactionEntry,
@@ -8,6 +18,7 @@ import {
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
 } from "../../src/session/session-manager.ts";
+import type { AgentMessage } from "../../src/types.ts";
 
 function msg(id: string, parentId: string | null, role: "user" | "assistant", text: string): SessionMessageEntry {
 	const base = { type: "message" as const, id, parentId, timestamp: "2025-01-01T00:00:00Z" };
@@ -264,5 +275,235 @@ describe("buildSessionContext", () => {
 			// Should only get the orphan since parent chain is broken
 			expect(ctx.messages).toHaveLength(1);
 		});
+	});
+});
+
+const FIXED_TIMESTAMP_MS = Date.parse("2025-01-01T00:00:00Z");
+
+/**
+ * One representative message per AgentMessage kind. Typed as a total mapping over
+ * `AgentMessage["role"]`, so a newly added message kind is a compile error here too - the same
+ * drift protection the `never` checks in `isWireNativeAgentMessageRole` /
+ * `isCoreConversationMessageRole` give the predicates themselves.
+ */
+const AGENT_MESSAGE_FIXTURES: { [R in AgentMessage["role"]]: Extract<AgentMessage, { role: R }> } = {
+	user: { role: "user", content: "plain user turn", timestamp: 10 },
+	assistant: {
+		role: "assistant",
+		content: [{ type: "text", text: "assistant turn" }],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-test",
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 11,
+	},
+	toolResult: {
+		role: "toolResult",
+		toolCallId: "call-1",
+		toolName: "read",
+		content: [{ type: "text", text: "tool output" }],
+		isError: false,
+		timestamp: 12,
+	},
+	custom: {
+		role: "custom",
+		customType: "tool_failure_ledger",
+		content: "ledger body",
+		display: false,
+		timestamp: 13,
+	},
+	bashExecution: {
+		role: "bashExecution",
+		command: "ls",
+		output: "a.ts",
+		exitCode: 0,
+		cancelled: false,
+		truncated: false,
+		timestamp: 14,
+	},
+	branchSummary: { role: "branchSummary", summary: "abandoned branch", fromId: "9", timestamp: 15 },
+	compactionSummary: { role: "compactionSummary", summary: "compacted history", tokensBefore: 1000, timestamp: 16 },
+};
+
+const AGENT_MESSAGE_ROLES = Object.keys(AGENT_MESSAGE_FIXTURES) as AgentMessage["role"][];
+
+describe("convertToLlm over a built session context", () => {
+	it("wraps a compaction summary in the compaction markers and leaves real turns byte-identical", () => {
+		const entries: SessionEntry[] = [
+			msg("1", null, "user", "first"),
+			msg("2", "1", "assistant", "response1"),
+			compaction("3", "2", "Summary of the first turn", "2"),
+			msg("4", "3", "user", "second"),
+		];
+		const context = buildSessionContext(entries);
+		const wire = convertToLlm(context.messages);
+
+		expect(wire).toHaveLength(3);
+		expect(wire[0]).toEqual({
+			role: "user",
+			content: [
+				{
+					type: "text",
+					text: `${COMPACTION_SUMMARY_PREFIX}Summary of the first turn${COMPACTION_SUMMARY_SUFFIX}`,
+				},
+			],
+			timestamp: FIXED_TIMESTAMP_MS,
+		});
+		// The kept turns are already wire-shaped, so they must reach the provider as the very same
+		// objects - not re-serialized copies.
+		expect(wire[1]).toBe(context.messages[1]);
+		expect(wire[2]).toBe(context.messages[2]);
+	});
+
+	it("wraps a branch summary in the branch markers rather than the compaction markers", () => {
+		const entries: SessionEntry[] = [
+			msg("1", null, "user", "start"),
+			msg("2", "1", "assistant", "response"),
+			msg("3", "2", "user", "abandoned path"),
+			branchSummary("4", "2", "Tried the wrong approach", "3"),
+			msg("5", "4", "user", "new direction"),
+		];
+		const wire = convertToLlm(buildSessionContext(entries, "5").messages);
+
+		expect(wire).toHaveLength(4);
+		expect(wire[2]).toEqual({
+			role: "user",
+			content: [{ type: "text", text: `${BRANCH_SUMMARY_PREFIX}Tried the wrong approach${BRANCH_SUMMARY_SUFFIX}` }],
+			timestamp: FIXED_TIMESTAMP_MS,
+		});
+		expect(JSON.stringify(wire[2])).not.toContain(COMPACTION_SUMMARY_PREFIX);
+	});
+
+	it("lifts a string-content custom message into a single text block and keeps array content as authored", () => {
+		const authoredContent = [
+			{ type: "text" as const, text: "look at this" },
+			{ type: "image" as const, data: "AAAA", mimeType: "image/png" as const },
+		];
+		const wire = convertToLlm([
+			AGENT_MESSAGE_FIXTURES.custom,
+			{ ...AGENT_MESSAGE_FIXTURES.custom, content: authoredContent, timestamp: 99 },
+		]);
+
+		expect(wire[0]).toEqual({ role: "user", content: [{ type: "text", text: "ledger body" }], timestamp: 13 });
+		expect(wire[1]).toEqual({ role: "user", content: authoredContent, timestamp: 99 });
+	});
+
+	it("drops a bash execution marked excludeFromContext and keeps the rest of the conversation", () => {
+		const wire = convertToLlm([
+			AGENT_MESSAGE_FIXTURES.user,
+			{ ...AGENT_MESSAGE_FIXTURES.bashExecution, excludeFromContext: true },
+			AGENT_MESSAGE_FIXTURES.bashExecution,
+		]);
+
+		expect(wire).toHaveLength(2);
+		expect(wire[0]).toBe(AGENT_MESSAGE_FIXTURES.user);
+		expect(wire[1]).toEqual({
+			role: "user",
+			content: [{ type: "text", text: "Ran `ls`\n```\na.ts\n```" }],
+			timestamp: 14,
+		});
+	});
+});
+
+describe("bashExecutionToText", () => {
+	it("reports no output rather than an empty fenced block", () => {
+		expect(bashExecutionToText({ ...AGENT_MESSAGE_FIXTURES.bashExecution, output: "" })).toBe(
+			"Ran `ls`\n(no output)",
+		);
+	});
+
+	it("reports cancellation instead of the exit code when the command was cancelled", () => {
+		const text = bashExecutionToText({
+			...AGENT_MESSAGE_FIXTURES.bashExecution,
+			cancelled: true,
+			exitCode: 130,
+		});
+		expect(text).toContain("(command cancelled)");
+		expect(text).not.toContain("exited with code");
+	});
+
+	it("reports a non-zero exit code and points at the full output file when truncated", () => {
+		const text = bashExecutionToText({
+			...AGENT_MESSAGE_FIXTURES.bashExecution,
+			exitCode: 2,
+			truncated: true,
+			fullOutputPath: "/tmp/full.log",
+		});
+		expect(text).toContain("Command exited with code 2");
+		expect(text).toContain("[Output truncated. Full output: /tmp/full.log]");
+	});
+
+	it("stays silent about the exit code on success", () => {
+		expect(bashExecutionToText(AGENT_MESSAGE_FIXTURES.bashExecution)).not.toContain("exited with code");
+	});
+});
+
+describe("AgentMessage role predicates", () => {
+	it("accepts a role as wire-native exactly when convertToLlm passes that message through unchanged", () => {
+		for (const role of AGENT_MESSAGE_ROLES) {
+			const message = AGENT_MESSAGE_FIXTURES[role];
+			const [converted] = convertToLlm([message]);
+
+			if (isWireNativeAgentMessageRole(role)) {
+				expect(converted, `${role} should reach the provider untouched`).toBe(message);
+			} else {
+				expect(converted, `${role} should be converted, not passed through`).not.toBe(message);
+				expect(converted?.role).toBe("user");
+			}
+		}
+	});
+
+	it("answers the wire-native question for every AgentMessage role", () => {
+		const answers = Object.fromEntries(AGENT_MESSAGE_ROLES.map((role) => [role, isWireNativeAgentMessageRole(role)]));
+		expect(answers).toEqual({
+			user: true,
+			assistant: true,
+			toolResult: true,
+			custom: false,
+			bashExecution: false,
+			branchSummary: false,
+			compactionSummary: false,
+		});
+	});
+
+	it("answers the core-conversation question for every AgentMessage role", () => {
+		const answers = Object.fromEntries(
+			AGENT_MESSAGE_ROLES.map((role) => [role, isCoreConversationMessageRole(role)]),
+		);
+		expect(answers).toEqual({
+			user: true,
+			assistant: true,
+			toolResult: true,
+			custom: true,
+			bashExecution: false,
+			branchSummary: false,
+			compactionSummary: false,
+		});
+	});
+
+	it("disagrees on custom: durable conversation content that still needs conversion before the wire", () => {
+		expect(isWireNativeAgentMessageRole("custom")).toBe(false);
+		expect(isCoreConversationMessageRole("custom")).toBe(true);
+
+		// The disagreement is not cosmetic: reading `custom` as wire-native would hand the provider a
+		// message with a role no wire API knows, instead of the converted user message.
+		const [converted] = convertToLlm([AGENT_MESSAGE_FIXTURES.custom]);
+		expect(converted?.role).toBe("user");
+		expect(converted).not.toBe(AGENT_MESSAGE_FIXTURES.custom);
+	});
+
+	it("rejects host-computed annotations from both predicates", () => {
+		for (const role of ["bashExecution", "branchSummary", "compactionSummary"] as const) {
+			expect(isWireNativeAgentMessageRole(role), `${role} is not wire-native`).toBe(false);
+			expect(isCoreConversationMessageRole(role), `${role} is not core conversation content`).toBe(false);
+		}
 	});
 });
