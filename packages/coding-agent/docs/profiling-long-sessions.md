@@ -62,9 +62,20 @@ Or from the repo root: `npm run profile:long-session`, `npm run profile:analyze 
   and Windows charges for. Compare the two summaries before deciding where a cost lives.
 - **Self time.** Sort by self time first. The top rows at 1,500 turns before the 2026-09-01 fixes were
   the request estimator re-measuring every message, `os.cpus()` per store read, the host state store
-  re-parsing its file per read, and the GC/path-alias passes; after them the profile is dominated by
-  the tool-performance store's per-call durable write and `analyzeToolFailureContext`, which are the
-  next targets.
+  re-parsing its file per read, and the GC/path-alias passes; then the tool-performance store's
+  per-call durable write and `analyzeToolFailureContext` (now a session-scoped fold that resumes).
+- **The delegate scenario found the task runtime.** With the goal path flat, the first two-platform
+  run still showed one worker delegation growing from 83ms to 313ms across twenty of them on Linux:
+  every read of the durable task runtime listed the orchestration events directory, validated the
+  whole tail and deep-cloned the whole projection, about thirty times per delegation, which was 40%
+  of that scenario's host CPU. The runtime now shares one frozen projection whose identity turns
+  over per event, and a poll for new events is one existence check. What remains per request is
+  work over the context messages, which compaction bounds: the GC plan, the path-alias render, the
+  history fingerprint window, the token estimate.
+- **Tool spans on Windows are process creation.** In the tools mix, `grep` costs about 85ms per call
+  on Windows against 10ms on Linux and `bash` 80ms against 50ms, flat by decile: that is spawning
+  ripgrep or the shell, not harness bookkeeping. A rising row is the signal; a high flat row on one
+  platform is a platform cost.
 - **Thresholds are advisory.** The growth report warns above 2x growth and above 25ms per request /
   15ms per tool call at the warm baseline. Warnings annotate the workflow run; nothing fails.
 
