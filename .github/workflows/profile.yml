@@ -1,0 +1,100 @@
+name: Profile
+
+# A monitor, not a gate. Fired on demand to see where the harness's CPU goes on long sessions and
+# per turn, across the whole system: the coding-agent host driving a real session, the agent-core
+# loop, and process startup. It never fails the build; growth beyond the advisory thresholds
+# surfaces as warning annotations, and every raw .cpuprofile plus the ranked self-time tables are
+# published as artifacts and in the job summary so the next target is explicit.
+#
+# Read the results with scripts/analyze-cpuprofile.mjs (self time by function and file) and
+# scripts/report-long-session-growth.mjs (per-turn cost by session decile); see
+# packages/coding-agent/docs/profiling-long-sessions.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      host_turns:
+        description: Tool turns for the host long-session profile
+        default: '1500'
+        type: string
+      loop_turns:
+        description: Scripted tool-call turns for the agent-core per-turn profile
+        default: '600'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    name: Profile (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PROFILE_DIR: ${{ github.workspace }}/profiles
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.18.0'
+          cache: npm
+
+      - name: Install Linux system dependencies
+        run: ./scripts/install-linux-ci-deps.sh
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build
+        run: npm run build
+
+      - name: Prepare profile directories
+        run: mkdir -p "$PROFILE_DIR/host" "$PROFILE_DIR/agent-core" "$PROFILE_DIR/startup"
+
+      - name: Host long-session profile (real AgentSession, faux provider)
+        working-directory: packages/coding-agent
+        env:
+          NODE_OPTIONS: --conditions=pi-source
+          PI_PROFILE_LONG_SESSION: '1'
+          PI_PROFILE_TURNS: ${{ inputs.host_turns }}
+          PI_PROFILE_DIR: ${{ env.PROFILE_DIR }}/host
+        run: npx vitest run test/profiling/host-long-session.profile.test.ts --pool=forks || echo "::warning title=Host profile::the host long-session profile reported a failure; read the artifact"
+
+      - name: Agent-core per-turn profile (stub provider stream)
+        run: node scripts/profile-coding-agent-turn.mjs --turns ${{ inputs.loop_turns }} --profile-dir "$PROFILE_DIR/agent-core" --label turn-profile | tee "$PROFILE_DIR/agent-core/turn-profile.txt"
+
+      - name: Startup profile
+        run: node scripts/profile-coding-agent-node.mjs --mode rpc --profile-dir "$PROFILE_DIR/startup" | tee "$PROFILE_DIR/startup/startup.txt" || echo "::warning title=Startup profile::the startup profiler reported a failure; read the artifact"
+
+      - name: Summarize
+        run: |
+          {
+            echo "## Long-session growth (host)"
+            node scripts/report-long-session-growth.mjs "$PROFILE_DIR/host/host-session-profile.txt"
+            echo
+            echo "## Host long-session self time"
+            node scripts/analyze-cpuprofile.mjs "$PROFILE_DIR/host/host-session.cpuprofile" --top 40 --title "host long-session (${{ inputs.host_turns }} turns)"
+            echo
+            echo "## Agent-core per-turn self time"
+            for f in "$PROFILE_DIR"/agent-core/*.cpuprofile; do node scripts/analyze-cpuprofile.mjs "$f" --top 30 --title "agent-core per-turn (${{ inputs.loop_turns }} turns)"; done
+            echo
+            echo "## Agent-core turn durations by decile"
+            echo '```'
+            cat "$PROFILE_DIR/agent-core/turn-profile.txt"
+            echo '```'
+            echo
+            echo "## Startup self time"
+            for f in "$PROFILE_DIR"/startup/*.cpuprofile; do node scripts/analyze-cpuprofile.mjs "$f" --top 25 --title "startup $(basename "$f")"; done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload profiles
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cpu-profiles-${{ github.run_id }}
+          path: profiles/**
+          retention-days: 30
