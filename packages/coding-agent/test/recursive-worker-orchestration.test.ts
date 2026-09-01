@@ -11,10 +11,10 @@ import { DEFAULT_WORKER_FLEET_LIMITS } from "../src/core/delegation/worker-fleet
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { DEFAULT_LANE_MAX_OUTPUT_TOKENS } from "../src/core/model-capability.ts";
 import { ORCHESTRATION_SCHEMA_VERSION } from "../src/core/orchestration/contracts.ts";
+import { loadedSuiteTimeout } from "./loaded-suite-timeout.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
 import { createHarness } from "./suite/harness.ts";
 import { createTestResourceLoader } from "./suite/test-resources.ts";
-import { windowsLoadedSuiteTimeout } from "./windows-loaded-suite-timeout.ts";
 
 const UNAVAILABLE_SHELL_TOOL_NAME = "nonexistent_shell";
 
@@ -453,7 +453,7 @@ describe("leaf worker orchestration", () => {
 				await harness.cleanup();
 			}
 		},
-		(windowsLoadedSuiteTimeout() ?? 5000) + 10_000,
+		loadedSuiteTimeout(5000) + 10_000,
 	);
 
 	it.each([

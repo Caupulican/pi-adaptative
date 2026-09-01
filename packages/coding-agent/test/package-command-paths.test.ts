@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { APP_NAME, ENV_AGENT_DIR, VERSION } from "../src/config.ts";
 import { main } from "../src/main.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
-import { windowsLoadedSuiteTimeout } from "./windows-loaded-suite-timeout.ts";
+import { loadedSuiteTimeout } from "./loaded-suite-timeout.ts";
 
 describe("package commands", () => {
 	let tempDir: string;
@@ -56,7 +56,7 @@ describe("package commands", () => {
 		}
 		Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
 		rmSync(tempDir, { recursive: true, force: true });
-	}, windowsLoadedSuiteTimeout(10_000) ?? 10_000);
+	}, loadedSuiteTimeout(10_000));
 
 	it("should persist global relative local package paths relative to settings.json", async () => {
 		const relativePkgDir = join(projectDir, "packages", "local-package");

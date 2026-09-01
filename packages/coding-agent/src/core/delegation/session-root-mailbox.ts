@@ -169,10 +169,29 @@ function transitionTimestamp(createdAt: string): string {
 	return current < createdAt ? createdAt : current;
 }
 
+/**
+ * Every read of the mailbox re-derives a digest for each receipt (its message id), each reply (its
+ * message id) and each receipted reply (its content) to re-check durable integrity at parse time, and
+ * a mailbox is re-read on every one of its transactions. The inputs repeat across those reads, so the
+ * digest is memoized: it is a pure function of bounded strings, and the memo is evicted oldest-first
+ * at a bound sized to one mailbox's worth of distinct identities so it can never grow past that.
+ */
+const identityDigestMemo = new Map<string, string>();
+const MAX_IDENTITY_DIGEST_MEMO_ENTRIES = 2_048;
+
 function identityDigest(domain: string, identities: readonly string[]): string {
+	const memoKey = `${domain}\0${identities.join("\0")}`;
+	const memoized = identityDigestMemo.get(memoKey);
+	if (memoized !== undefined) return memoized;
 	const hash = createHash("sha256").update(domain);
 	for (const identity of identities) hash.update("\0").update(identity);
-	return hash.digest("hex");
+	const digest = hash.digest("hex");
+	if (identityDigestMemo.size >= MAX_IDENTITY_DIGEST_MEMO_ENTRIES) {
+		const oldest = identityDigestMemo.keys().next().value;
+		if (oldest !== undefined) identityDigestMemo.delete(oldest);
+	}
+	identityDigestMemo.set(memoKey, digest);
+	return digest;
 }
 
 /** Opaque host-owned sender address for root-originated reply-expected worker messages. */
@@ -402,8 +421,11 @@ function parseState(raw: string, parentSessionId: string): SessionRootMailboxSta
 	if (replayReceipts.filter((receipt) => !receipt.sourceOwned).length > MAX_DEFAULT_REPLAY_RECEIPTS) {
 		throw new Error("Session root mailbox exceeds its default replay receipt reserve.");
 	}
+	// One pass over the receipts, then one lookup per reply. A linear search per reply made this
+	// check quadratic in the mailbox's size, and it runs on every read of every durable transaction.
+	const receiptsByMessageId = new Map(replayReceipts.map((receipt) => [receipt.messageId, receipt]));
 	for (const reply of replies) {
-		const receipt = replayReceipts.find((candidate) => candidate.messageId === reply.messageId);
+		const receipt = receiptsByMessageId.get(reply.messageId);
 		if (receipt && !sameReplayIntent(receipt, reply)) {
 			throw new Error("Session root mailbox reply conflicts with its durable replay receipt.");
 		}
@@ -435,6 +457,18 @@ function abortReason(signal: AbortSignal): unknown {
 export class SessionRootMailbox {
 	private readonly parentSessionId: string;
 	private readonly file: string;
+	/**
+	 * The mailbox text this instance last parsed or wrote, with the state it stands for.
+	 *
+	 * Every transaction re-reads the file under the lock, and parsing it means re-validating every
+	 * reply and receipt -- most of a transaction's cost once the mailbox is full. Nearly every read
+	 * follows this instance's own write, so the file text is compared to the text last seen and the
+	 * parse is skipped when they are identical. Exactness is the point: a foreign writer (a worker in
+	 * another process) changes the text, so its state is always parsed fresh. Safe to hand back
+	 * because state is never mutated in place (every mutator returns a new object) and every public
+	 * reader clones what it returns.
+	 */
+	private parsed: { readonly text: string; readonly state: SessionRootMailboxState } | undefined;
 
 	constructor(options: SessionRootMailboxOptions) {
 		this.parentSessionId = requiredIdentity(options.parentSessionId, "parent session id");
@@ -716,12 +750,14 @@ export class SessionRootMailbox {
 
 	private read(): SessionRootMailboxState {
 		if (!existsSync(this.file)) {
+			this.parsed = undefined;
 			return { version: 1, parentSessionId: this.parentSessionId, replies: [], replayReceipts: [] };
 		}
-		return parseState(
-			readBoundedTextFileSync(this.file, MAX_MAILBOX_BYTES, "Session root mailbox durable size bound"),
-			this.parentSessionId,
-		);
+		const text = readBoundedTextFileSync(this.file, MAX_MAILBOX_BYTES, "Session root mailbox durable size bound");
+		if (this.parsed?.text === text) return this.parsed.state;
+		const state = parseState(text, this.parentSessionId);
+		this.parsed = { text, state };
+		return state;
 	}
 
 	private update(
@@ -730,31 +766,31 @@ export class SessionRootMailbox {
 	): void {
 		withFileLockSync(this.file, () => {
 			const state = this.read();
-			const previousDefaultBytes = lifecycleProjectedEncodedBytes(state);
+			// Every full-state encode below is a pass over up to MAX_MAILBOX_BYTES, and one durable
+			// transaction used to make seven of them. Each projection is now computed once, only on the
+			// path that reads it, and the encoding written to disk is the one the change check compared.
+			const previousDefaultBytes = defaultAdmission ? lifecycleProjectedEncodedBytes(state) : undefined;
 			const mutated = mutator(state);
 			let next = {
 				...mutated,
 				replies: pruneRetainedReplies(mutated.replies),
 				replayReceipts: [...mutated.replayReceipts],
 			};
-			while (
-				lifecycleProjectedEncodedBytes(next) > (defaultAdmission ? MAX_DEFAULT_MAILBOX_BYTES : MAX_MAILBOX_BYTES)
-			) {
+			const admissionCapBytes = defaultAdmission ? MAX_DEFAULT_MAILBOX_BYTES : MAX_MAILBOX_BYTES;
+			let nextDefaultBytes = lifecycleProjectedEncodedBytes(next);
+			while (nextDefaultBytes > admissionCapBytes) {
 				const oldestCompletedIndex = next.replies.findIndex((reply) => !isMandatory(reply));
-				if (oldestCompletedIndex >= 0) {
-					next = { ...next, replies: next.replies.filter((_, index) => index !== oldestCompletedIndex) };
-					continue;
-				}
-				break;
+				if (oldestCompletedIndex < 0) break;
+				next = { ...next, replies: next.replies.filter((_, index) => index !== oldestCompletedIndex) };
+				nextDefaultBytes = lifecycleProjectedEncodedBytes(next);
 			}
 			for (const reply of next.replies) assertReplyEncodedByteBound(reply);
 			const addedReplayReceipt = mutated.replayReceipts.length > state.replayReceipts.length;
 			const bytesWithoutAddedReceipt = addedReplayReceipt
 				? lifecycleProjectedEncodedBytes({ ...next, replayReceipts: next.replayReceipts.slice(0, -1) })
 				: undefined;
-			const nextDefaultBytes = lifecycleProjectedEncodedBytes(next);
 			if (
-				defaultAdmission &&
+				previousDefaultBytes !== undefined &&
 				nextDefaultBytes > MAX_DEFAULT_MAILBOX_BYTES &&
 				nextDefaultBytes > previousDefaultBytes
 			) {
@@ -767,8 +803,12 @@ export class SessionRootMailbox {
 				nextDefaultBytes,
 				bytesWithoutAddedReceipt,
 			);
-			if (JSON.stringify(next) !== JSON.stringify(state)) {
-				writeFileAtomicSync(this.file, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+			const encodedNext = JSON.stringify(next);
+			if (encodedNext !== JSON.stringify(state)) {
+				const text = `${encodedNext}\n`;
+				writeFileAtomicSync(this.file, text, { mode: 0o600 });
+				// What was just written is what the next read will find, unless someone else writes first.
+				this.parsed = { text, state: next };
 			}
 		});
 	}

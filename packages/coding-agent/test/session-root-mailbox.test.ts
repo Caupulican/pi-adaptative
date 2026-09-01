@@ -8,7 +8,7 @@ import {
 	sessionRootAddress,
 	sessionRootReplyMessageId,
 } from "../src/core/delegation/session-root-mailbox.ts";
-import { windowsLoadedSuiteTimeout } from "./windows-loaded-suite-timeout.ts";
+import { loadedSuiteTimeout } from "./loaded-suite-timeout.ts";
 
 const roots: string[] = [];
 
@@ -339,8 +339,43 @@ describe("SessionRootMailbox", () => {
 			).toEqual({ status: "completed_replay", messageId: original.messageId, created: false });
 			expect(mailbox.pendingReplies({ maxMessages: 64 })).toEqual([]);
 		},
-		windowsLoadedSuiteTimeout(15_000) ?? 15_000,
+		loadedSuiteTimeout(15_000),
 	);
+
+	it("always sees another writer's transaction, before and after its own", () => {
+		// Each instance keeps the last file text it parsed or wrote and skips the parse when the file
+		// still matches. The one thing that must never happen is an instance answering from that memory
+		// after a foreign writer -- a worker in another process -- has changed the file underneath it.
+		const agentDir = root();
+		const first = new SessionRootMailbox({ agentDir, parentSessionId: "parent-1" });
+		const second = new SessionRootMailbox({ agentDir, parentSessionId: "parent-1" });
+		const own = retainedReply(
+			first.enqueueReply({ sourceAgentId: "worker-1", requestMessageId: "request-own", content: "own evidence" }),
+		);
+		expect(first.pendingReplies().map((reply) => reply.messageId)).toEqual([own.messageId]);
+
+		const foreign = retainedReply(
+			second.enqueueReply({
+				sourceAgentId: "worker-2",
+				requestMessageId: "request-foreign",
+				content: "foreign evidence",
+			}),
+		);
+		expect(first.pendingReplies().map((reply) => reply.messageId)).toEqual([own.messageId, foreign.messageId]);
+
+		expect(second.markSourceReconciled(own.messageId)).toBe(true);
+		expect(second.acknowledge(own.messageId, own.ackToken)).toBe(true);
+		expect(first.pendingReplies().map((reply) => reply.messageId)).toEqual([foreign.messageId]);
+		expect(first.getReply(own.messageId)?.acknowledgedAt).toBeDefined();
+
+		// A hand-written file is a foreign write too.
+		const file = sessionRootMailboxFile(agentDir, "parent-1");
+		const state = JSON.parse(readFileSync(file, "utf-8")) as { replies: Array<{ messageId: string }> };
+		state.replies = state.replies.filter((reply) => reply.messageId !== foreign.messageId);
+		writeFileSync(file, `${JSON.stringify(state)}\n`);
+		expect(first.pendingReplies()).toEqual([]);
+		expect(second.getReply(foreign.messageId)).toBeUndefined();
+	});
 
 	it("reserves a source-owned reply across projected default lifecycle growth", () => {
 		const agentDir = root();

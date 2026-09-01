@@ -13,7 +13,7 @@ import type { Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 import { createDirectoryLink } from "./helpers/filesystem-links.ts";
-import { windowsLoadedSuiteTimeout } from "./windows-loaded-suite-timeout.ts";
+import { loadedSuiteTimeout } from "./loaded-suite-timeout.ts";
 
 function settingsWithExtensionsGranted(...allowedExtensions: string[]): SettingsManager {
 	return SettingsManager.inMemory({
@@ -669,7 +669,7 @@ Content`,
 				expect(extension?.tools.has("tmux_agent_manager")).toBe(true);
 				expect(loader.getExtensions().errors).toEqual([]);
 			},
-			windowsLoadedSuiteTimeout(60_000),
+			loadedSuiteTimeout(60_000),
 		);
 
 		it(
@@ -695,7 +695,7 @@ Content`,
 				expect(disposed).toBe(true);
 				expect(loader.getExtensions().extensions).toEqual([]);
 			},
-			windowsLoadedSuiteTimeout(60_000),
+			loadedSuiteTimeout(60_000),
 		);
 
 		it("should suppress external root extensions at load time when no resource profile is active", async () => {

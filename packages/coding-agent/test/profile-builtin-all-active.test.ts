@@ -10,7 +10,7 @@ import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import type { ResourceProfileKind } from "../src/core/settings-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import { windowsLoadedSuiteTimeout } from "./windows-loaded-suite-timeout.ts";
+import { loadedSuiteTimeout } from "./loaded-suite-timeout.ts";
 
 const RESOURCE_KINDS: ResourceProfileKind[] = ["extensions", "skills", "prompts", "themes", "agents", "tools"];
 
@@ -68,7 +68,7 @@ describe("built-in all-active profile", () => {
 describe("built-in all-active profile activation", () => {
 	let tempDir: string;
 	let agentDir: string;
-	const loadedSuiteMs = windowsLoadedSuiteTimeout(10_000) ?? 10_000;
+	const loadedSuiteMs = loadedSuiteTimeout(10_000);
 
 	beforeEach(() => {
 		tempDir = join(
@@ -121,6 +121,6 @@ describe("built-in all-active profile activation", () => {
 				dispose.mockRestore();
 			}
 		},
-		windowsLoadedSuiteTimeout(60_000),
+		loadedSuiteTimeout(60_000),
 	);
 });
