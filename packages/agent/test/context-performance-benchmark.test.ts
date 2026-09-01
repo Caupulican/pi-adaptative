@@ -278,39 +278,70 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 
 			const smallSuite = generateTrajectory(500); // N = 500
 			const largeSuite = generateTrajectory(2000); // N = 2000 (4x)
+			const inputGrowthFactor = largeSuite.length / smallSuite.length;
 
 			const measureBatchCpuMicros = (messages: AgentMessage[]) =>
 				measureStableCpuMicros(() => {
 					for (let pass = 0; pass < 4; pass++) sanitizeToolFailureContext(messages, "base");
 				});
+			// A deliberately quadratic pass over the SAME arrays: every message against every message,
+			// comparing one field per pair. Its own scaling on this machine is the yardstick below.
+			const quadraticReference = (messages: AgentMessage[]) => {
+				let coincidences = 0;
+				for (const outer of messages) {
+					for (const inner of messages) {
+						if (outer.timestamp === inner.timestamp) coincidences++;
+					}
+				}
+				return coincidences;
+			};
+			let referenceSink = 0;
+			const measureReferenceCpuMicros = (messages: AgentMessage[]) =>
+				measureStableCpuMicros(() => {
+					referenceSink += quadraticReference(messages);
+				});
 
 			// Absolute latency is gated above. Measure batched process CPU here so shared-runner
 			// scheduling pauses cannot turn one transient wall-clock sample into a false complexity verdict.
-			measureBatchCpuMicros(smallSuite);
-			measureBatchCpuMicros(largeSuite);
-			const smallDurations: number[] = [];
-			const largeDurations: number[] = [];
-			for (let sample = 0; sample < 7; sample++) {
-				if (sample % 2 === 0) {
-					smallDurations.push(measureBatchCpuMicros(smallSuite));
-					largeDurations.push(measureBatchCpuMicros(largeSuite));
-				} else {
-					largeDurations.push(measureBatchCpuMicros(largeSuite));
-					smallDurations.push(measureBatchCpuMicros(smallSuite));
+			// Interleaved so that any drift in machine state lands on both sizes alike.
+			const sampleScalingFactor = (measure: (messages: AgentMessage[]) => number) => {
+				measure(smallSuite);
+				measure(largeSuite);
+				const smallDurations: number[] = [];
+				const largeDurations: number[] = [];
+				for (let sample = 0; sample < 7; sample++) {
+					if (sample % 2 === 0) {
+						smallDurations.push(measure(smallSuite));
+						largeDurations.push(measure(largeSuite));
+					} else {
+						largeDurations.push(measure(largeSuite));
+						smallDurations.push(measure(smallSuite));
+					}
 				}
-			}
-			const durationSmall = median(smallDurations);
-			const durationLarge = median(largeDurations);
+				// Divide-by-near-zero guard: durations are in microseconds (measureStableCpuMicros / median
+				// return raw µs, never divided to ms), so the floor must be µs-scale too. 0.1 predates the
+				// ms->µs switch and is a no-op at this magnitude (typical durationSmall is ~2,000µs); 100µs
+				// mirrors the original 0.1ms floor's intent in the unit actually in use.
+				const durationSmallFloorMicros = 100;
+				return median(largeDurations) / Math.max(median(smallDurations), durationSmallFloorMicros);
+			};
 
-			// O(N) scaling check: the median of seven batched samples at 4x input must stay below 5.5x.
-			// A quadratic implementation remains near 16x and fails without relying on a timing outlier.
-			// Divide-by-near-zero guard: durationSmall is in microseconds (measureBatchCpuMicros / median
-			// return raw µs, never divided to ms), so the floor must be µs-scale too. 0.1 predates the
-			// ms->µs switch and is a no-op at this magnitude (typical durationSmall is ~5,000µs); 100µs
-			// mirrors the original 0.1ms floor's intent in the unit actually in use.
-			const durationSmallFloorMicros = 100;
-			const scalingFactor = durationLarge / Math.max(durationSmall, durationSmallFloorMicros);
-			expect(scalingFactor).toBeLessThan(5.5);
+			const scalingFactor = sampleScalingFactor(measureBatchCpuMicros);
+			const quadraticScalingFactor = sampleScalingFactor(measureReferenceCpuMicros);
+			expect(referenceSink).toBeGreaterThan(0);
+
+			// Complexity is judged against a reference measured on the same runner, not a fixed ratio.
+			// Per-item cost is not constant across a 4x working-set change: a linear implementation reads
+			// 4.5x-5.0x here and 5.55x on a loaded Windows runner, so the fixed 5.5x this replaced was
+			// grading a machine's cache behaviour, not an algorithm. The verdict is instead: the
+			// sanitizer must sit closer to the linear ideal (4x) than to what quadratic actually measures
+			// on this machine, on a log scale. Quadratic measures ~16x, so the bound is ~8x, and a
+			// quadratic sanitizer lands at the reference and fails without relying on a timing outlier.
+			// The reference must itself have behaved quadratically for the verdict to mean anything;
+			// if it did not, the failure is the measurement's and says so.
+			expect(quadraticScalingFactor).toBeGreaterThan(inputGrowthFactor * 2);
+			const complexityBound = Math.sqrt(inputGrowthFactor * quadraticScalingFactor);
+			expect(scalingFactor).toBeLessThan(complexityBound);
 		});
 	});
 
