@@ -1,4 +1,3 @@
-import type { Agent } from "@caupulican/pi-agent-core/agent";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
@@ -7,7 +6,7 @@ import type { ModelRouterController } from "../../../src/core/model-router-contr
 
 function createController(sessionManager: SessionManager, warnings: string[]): ForegroundLifecycleController {
 	return new ForegroundLifecycleController({
-		agent: { state: { messages: [] } } as unknown as Agent,
+		agent: { state: { messages: [] }, resetSanitizerPrefixHorizon: () => {} },
 		sessionManager,
 		modelRouter: { commitSessionBufferPrefix: () => new Map() } as ModelRouterController,
 		emitWarning: (warning) => warnings.push(warning),

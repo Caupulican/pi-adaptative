@@ -1,10 +1,10 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
-import type { Agent } from "@caupulican/pi-agent-core/agent";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import {
+	type ForegroundLifecycleAgentDependency,
 	ForegroundLifecycleController,
 	PROVIDER_TRANSPORT_TELEMETRY_CUSTOM_TYPE,
 } from "../src/core/foreground-lifecycle-controller.ts";
@@ -105,7 +105,12 @@ describe("foreground lifecycle controller", () => {
 
 	it("distinguishes same-length provider history without persisting its raw content", async () => {
 		const sessionManager = SessionManager.inMemory();
-		const agent = {} as Agent & { onProviderRequestSnapshot?: (...args: never[]) => Promise<void> };
+		const agent: ForegroundLifecycleAgentDependency & {
+			onProviderRequestSnapshot?: (...args: never[]) => Promise<void>;
+		} = {
+			state: { messages: [] },
+			resetSanitizerPrefixHorizon: () => {},
+		};
 		const controller = new ForegroundLifecycleController({
 			agent,
 			sessionManager,
@@ -142,7 +147,12 @@ describe("foreground lifecycle controller", () => {
 
 	it("correlates a completed assistant message's provider_transport diagnostic to the request that produced it", async () => {
 		const sessionManager = SessionManager.inMemory();
-		const agent = {} as Agent & { onProviderRequestSnapshot?: (...args: never[]) => Promise<void> };
+		const agent: ForegroundLifecycleAgentDependency & {
+			onProviderRequestSnapshot?: (...args: never[]) => Promise<void>;
+		} = {
+			state: { messages: [] },
+			resetSanitizerPrefixHorizon: () => {},
+		};
 		const controller = new ForegroundLifecycleController({
 			agent,
 			sessionManager,
@@ -185,7 +195,12 @@ describe("foreground lifecycle controller", () => {
 
 	it("writes one telemetry entry per provider_transport diagnostic and ignores unrelated ones", () => {
 		const sessionManager = SessionManager.inMemory();
-		const agent = {} as Agent & { onProviderRequestSnapshot?: (...args: never[]) => Promise<void> };
+		const agent: ForegroundLifecycleAgentDependency & {
+			onProviderRequestSnapshot?: (...args: never[]) => Promise<void>;
+		} = {
+			state: { messages: [] },
+			resetSanitizerPrefixHorizon: () => {},
+		};
 		const controller = new ForegroundLifecycleController({
 			agent,
 			sessionManager,
@@ -220,7 +235,12 @@ describe("foreground lifecycle controller", () => {
 
 	it("does nothing for a message with no provider_transport diagnostic", () => {
 		const sessionManager = SessionManager.inMemory();
-		const agent = {} as Agent & { onProviderRequestSnapshot?: (...args: never[]) => Promise<void> };
+		const agent: ForegroundLifecycleAgentDependency & {
+			onProviderRequestSnapshot?: (...args: never[]) => Promise<void>;
+		} = {
+			state: { messages: [] },
+			resetSanitizerPrefixHorizon: () => {},
+		};
 		const controller = new ForegroundLifecycleController({
 			agent,
 			sessionManager,
@@ -245,7 +265,12 @@ describe("foreground lifecycle controller", () => {
 		vi.spyOn(sessionManager, "appendCustomEntry").mockImplementation(() => {
 			throw new Error("disk full");
 		});
-		const agent = {} as Agent & { onProviderRequestSnapshot?: (...args: never[]) => Promise<void> };
+		const agent: ForegroundLifecycleAgentDependency & {
+			onProviderRequestSnapshot?: (...args: never[]) => Promise<void>;
+		} = {
+			state: { messages: [] },
+			resetSanitizerPrefixHorizon: () => {},
+		};
 		const controller = new ForegroundLifecycleController({
 			agent,
 			sessionManager,
@@ -367,7 +392,7 @@ describe("foreground lifecycle controller", () => {
 			appendForegroundToolTerminal: (...args: unknown[]) => terminals.push(args[5] as { errorKind?: string }),
 		} as never;
 		const controller = new ForegroundLifecycleController({
-			agent: {} as Agent,
+			agent: { state: { messages: [] }, resetSanitizerPrefixHorizon: () => {} },
 			sessionManager,
 			modelRouter: {} as ModelRouterController,
 			emitWarning: () => {},
@@ -410,7 +435,12 @@ describe("foreground lifecycle controller", () => {
 			entryLookups += 1;
 			return originalGetEntry(id);
 		};
-		const agent = {} as Agent & { onProviderRequestSnapshot?: (...args: never[]) => Promise<void> };
+		const agent: ForegroundLifecycleAgentDependency & {
+			onProviderRequestSnapshot?: (...args: never[]) => Promise<void>;
+		} = {
+			state: { messages: [] },
+			resetSanitizerPrefixHorizon: () => {},
+		};
 		const controller = new ForegroundLifecycleController({
 			agent,
 			sessionManager,

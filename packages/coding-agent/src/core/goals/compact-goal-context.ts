@@ -8,24 +8,31 @@ import { type GoalState, isGoalExecutionActive } from "./goal-state.ts";
 export const ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE = "active_goal_context";
 const LEGACY_GOAL_CONTINUATION_PREFIX = "Goal continuation context\n=========================";
 /**
- * `task_steps` is the only tool left here: its state is deliberately NOT injected on an internal
- * (continuation) turn (see `agent-session.ts`'s `taskStepsState = options?.internalContextType ?
- * undefined : ...`), so a continuation genuinely has no other way to see current step state.
- * `get_goal` was removed from this list once `formatCompactGoalContext` below started projecting
+ * History: this file used to instruct the model to "hydrate" state itself, once per continuation,
+ * for whichever tools' state wasn't otherwise visible on an internal (continuation) turn -- a
+ * `GOAL_HYDRATION_TOOLS` list with a `missingHydrationTools` projection field, checked against the
+ * transcript for a completed hydration call since the last continuation trigger.
+ *
+ * `get_goal` was the first removed: once `formatCompactGoalContext` below started projecting
  * everything `get_goal` provides for the common case (usage, elapsed time) directly into every
- * request -- see the turn-economics B1 investigation. Forcing a `get_goal` round trip for data
+ * request -- see the turn-economics B1 investigation -- forcing a `get_goal` round trip for data
  * already in front of the model bought nothing. The one thing `get_goal` still uniquely provides
  * -- the legacy requirements/evidence ledger, for a goal managed through the OLD unified `goal`
  * tool -- deliberately stays out of this projection: see the comment on `formatCompactGoalContext`
  * below for why (its individual entries can be model-supplied, not just host-generated).
+ *
+ * `task_steps` was the last one: it used to be genuinely ungated-uninjectable on a continuation
+ * turn (`agent-session.ts` built its `task_steps_context` message only when `!internalContextType`),
+ * so hydrate-yourself was the only way a continuation could ever see current step state. The
+ * turn-economics B6 investigation closed that the same way B1 closed `get_goal` -- by removing the
+ * gate instead of compensating for it -- so `task_steps_context` is now built unconditionally in
+ * `agent-session.ts`, on every prompt including continuations. With both tools directly visible,
+ * nothing needs hydrating; the whole mechanism (this list, the projection field, the transcript
+ * scan) is gone rather than left in place with zero members.
  */
-const GOAL_HYDRATION_TOOLS = ["task_steps"] as const;
-
-type GoalHydrationTool = (typeof GOAL_HYDRATION_TOOLS)[number];
 
 export interface GoalContextProjection {
 	continuationTurn: boolean;
-	missingHydrationTools: GoalHydrationTool[];
 }
 
 function messageText(message: AgentMessage): string {
@@ -60,42 +67,17 @@ function latestContinuationTriggerIndex(messages: AgentMessage[]): number {
 	return -1;
 }
 
-function missingContinuationHydrationTools(messages: AgentMessage[], triggerIndex: number): GoalHydrationTool[] {
-	if (triggerIndex < 0) return [];
-	const completed = new Set<GoalHydrationTool>();
-	for (let i = triggerIndex + 1; i < messages.length; i++) {
-		const message = messages[i];
-		if (message.role !== "toolResult" || message.isError) continue;
-		if (message.toolName === "task_steps") completed.add(message.toolName);
-	}
-	return GOAL_HYDRATION_TOOLS.filter((toolName) => !completed.has(toolName));
-}
-
 /** Capture continuation-only facts before historical goal payloads are removed for context GC. */
 export function captureGoalContextProjection(messages: AgentMessage[]): GoalContextProjection {
-	const triggerIndex = latestContinuationTriggerIndex(messages);
-	return {
-		continuationTurn: triggerIndex >= 0,
-		missingHydrationTools: missingContinuationHydrationTools(messages, triggerIndex),
-	};
+	return { continuationTurn: latestContinuationTriggerIndex(messages) >= 0 };
 }
 
-export function formatCompactGoalContext(
-	state: GoalState,
-	continuationTurn: boolean,
-	missingHydrationTools: readonly (typeof GOAL_HYDRATION_TOOLS)[number][] = continuationTurn
-		? GOAL_HYDRATION_TOOLS
-		: [],
-): string {
+export function formatCompactGoalContext(state: GoalState, continuationTurn: boolean): string {
 	const record = projectGoalRecord(state);
 	const instruction = continuationTurn ? "Continue objective." : "User steers.";
 	const recoveryInstruction =
 		continuationTurn && state.stallTurns > 0
 			? `RECOVERY REQUIRED: ${state.stallTurns} turns without authoritative progress. Inspect evidence; change approach/tool/route. Do not repeat unchanged work or ask owner without a proven approval boundary.`
-			: undefined;
-	const hydrationInstruction =
-		missingHydrationTools.length > 0
-			? `Hydrate missing state once this continuation: ${missingHydrationTools.join("; ")}. Never repeat a successful hydration call already present in current context.`
 			: undefined;
 	// Everything `get_goal` uniquely tells the model for the common case (a goal managed only
 	// through the modern create_goal/get_goal/update_goal trio, which has no action that ever adds
@@ -123,7 +105,6 @@ export function formatCompactGoalContext(
 		encodedRecord,
 		instruction,
 		recoveryInstruction,
-		hydrationInstruction,
 		"Recover/reassign timeouts; verify/reopen blocks.",
 		"update_goal: complete=audited requirements; blocked=proven owner/approval boundary or impossible capability after 3 no-progress turns and distinct recoveries requiring owner/external change; else continue.",
 	]
@@ -147,7 +128,7 @@ export function injectCompactGoalContext(
 		...filtered,
 		createCustomMessage(
 			ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE,
-			formatCompactGoalContext(state, projection.continuationTurn, projection.missingHydrationTools),
+			formatCompactGoalContext(state, projection.continuationTurn),
 			false,
 			{ goalId: state.goalId, revision: state.revision ?? 0 },
 			new Date().toISOString(),

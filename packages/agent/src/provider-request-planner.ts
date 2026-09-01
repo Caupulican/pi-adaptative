@@ -2,7 +2,12 @@ import { materializeProviderRequest, startMaterializedProviderStream, streamSimp
 import type { Context, Message } from "@caupulican/pi-ai/types";
 import { applyProviderRequestImageBudget } from "./provider-request-image-budget.ts";
 import { projectToolsForProvider } from "./provider-tool-projection.ts";
-import { sanitizeToolFailureContext } from "./tool-failure-memory.ts";
+import {
+	sanitizeToolFailureContext,
+	TOOL_FAILURE_LEDGER_CLEARED_TEXT,
+	TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
+} from "./tool-failure-memory.ts";
+import { adaptHostTransients, reconcileTransientRecords } from "./transient-records.ts";
 import type {
 	AgentContext,
 	AgentContextPlan,
@@ -16,6 +21,10 @@ import type {
 	StreamFn,
 } from "./types.ts";
 import { uuidv7 } from "./uuid.ts";
+import {
+	VERIFICATION_OBLIGATION_TRANSIENT_KIND,
+	VERIFICATION_OBLIGATIONS_CLEARED_TEXT,
+} from "./verification-obligations.ts";
 
 /**
  * Fallback store for BOTH "already sent" high-water marks (see {@link ProviderRequestPrefixState}
@@ -212,6 +221,19 @@ function detectSentPrefixDisturbance(
 	return disturbedCount > 0 ? { disturbedCount, firstDisturbedIndex, sentPrefixCount } : undefined;
 }
 
+/**
+ * The portion of a materialized request NOT eligible for the same compaction/GC treatment as the
+ * rest - the (usually empty) new-or-changed transient records this specific turn is committing, plus
+ * the protocol guard message, plus any host transient `adaptHostTransients` could not durably
+ * identify (see `transient-records.ts`). Slicing at `compactableMessageCount` (== `plan.messages`
+ * converted, i.e. everything durable) is correct rather than approximate: append-on-change means a
+ * PREVIOUSLY-recorded transient is now an ordinary durable message like any other (it flows through
+ * `sanitizeToolFailureContext`/`buildContextPlan` untouched, since `analyzeToolFailureContext` never
+ * inspects a `role: "custom"` message), so it is already inside `compactableMessageCount` - only a
+ * record newly minted THIS call, appended after `compactableMessages` was computed, is not. This
+ * boundary was reasoned through explicitly for the append-on-change design, not left as the
+ * pre-existing number and adjusted until tests passed - see the caller for the full argument.
+ */
 function nonCompactableProviderContext(
 	context: Context,
 	compactableMessageCount: number,
@@ -308,36 +330,47 @@ export async function startPlannedAgentProviderRequestWithId(
 				continue;
 			}
 
-			const transientMessages = plan.transientMessages ?? [];
-			const compactableMessages = await config.convertToLlm(plan.messages);
-			const providerTransients = transientMessages.length > 0 ? await config.convertToLlm(transientMessages) : [];
-			// The failure ledger rides last, never in the system prompt: its content changes as
-			// failures appear, accumulate, and clear, and in the system prompt each of those events
-			// re-prefills the entire conversation (see sanitizeToolFailureContext). Last position also
-			// gives a MUST protocol end-of-context salience.
+			// Append-on-change transients (turn-economics A1 extended - see transient-records.ts's
+			// module doc for the full mechanism and why it exists: the old approach rebuilt and
+			// re-appended every transient at the tail of every request, which the websocket delta cache
+			// measurably could never see past turn 1 as a stable prefix - see the Task 10 diagnosis).
 			//
-			// Every message pushed onto this trailing region below uses a FIXED timestamp constant,
-			// never `Date.now()`: none of them are real events, they are synthesized per request, and a
-			// wall-clock value regenerated per request makes two requests differ at that position even
-			// when the text itself is byte-identical - measured live, the reflection cue and path-alias
-			// legend (host-owned transients, same class) differed ONLY in a trailing timestamp field.
-			const llmMessages: Message[] = [...compactableMessages, ...providerTransients];
-			// Obligation text changes as obligations appear and resolve, so it rides the trailing
-			// region instead of `systemPrompt` (see `AgentContext.trailingInstruction`).
-			if (sourceContext.trailingInstruction) {
-				llmMessages.push({
-					role: "user",
-					content: [{ type: "text", text: sourceContext.trailingInstruction }],
-					timestamp: 0,
-				});
-			}
-			if (sanitized.ledger) {
-				llmMessages.push({
-					role: "user",
-					content: [{ type: "text", text: sanitized.ledger }],
-					timestamp: 0,
-				});
-			}
+			// `sanitized.messages` (and so `plan.messages`, absent a host planContext/transformContext
+			// that reshapes it) already contains every PREVIOUSLY-recorded durable transient: once
+			// committed below, a transient record is an ordinary durable message like any other -
+			// `analyzeToolFailureContext` never touches a `role: "custom"` message (it only inspects
+			// "assistant"/"toolResult"), so dedup/erasure can never rewrite or displace one. The only
+			// work left here is deciding whether THIS turn's true content differs from the last
+			// durably-recorded instance of each kind this package owns, plus every host-contributed kind
+			// it can safely identify (see `adaptHostTransients`) - typically it does not, so
+			// `pendingTransientRecords` is typically empty.
+			const hostTransients = adaptHostTransients(plan.transientMessages ?? []);
+			const pendingTransientRecords = reconcileTransientRecords(sourceContext.messages, [
+				{
+					kind: TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
+					content: sanitized.ledger,
+					clearedText: TOOL_FAILURE_LEDGER_CLEARED_TEXT,
+				},
+				{
+					kind: VERIFICATION_OBLIGATION_TRANSIENT_KIND,
+					content: sourceContext.trailingInstruction,
+					clearedText: VERIFICATION_OBLIGATIONS_CLEARED_TEXT,
+				},
+				...hostTransients.slots,
+			]);
+			const compactableMessages = await config.convertToLlm(plan.messages);
+			// `pendingTransientRecords` (this turn's new-or-changed durable records - almost always
+			// empty) plus `hostTransients.passThrough` (any host transient this module has no safe
+			// durable identity for, appended fresh every request exactly as before this mechanism
+			// existed - see `adaptHostTransients`) are the ONLY things ever appended fresh here now, so
+			// `nonCompactableProviderContext` below still slices correctly at `compactableMessages.length`
+			// without adjustment: everything durable, old transients included, is already inside
+			// `compactableMessages`, and everything after it is genuinely this request's own new,
+			// not-yet-committed tail. See that function's doc comment for the full boundary argument.
+			const newTransientMessages = [...pendingTransientRecords, ...hostTransients.passThrough];
+			const newTransientWireMessages =
+				newTransientMessages.length > 0 ? await config.convertToLlm(newTransientMessages) : [];
+			const llmMessages: Message[] = [...compactableMessages, ...newTransientWireMessages];
 			signal?.throwIfAborted();
 
 			const sourceProviderContext: Context = {
@@ -414,6 +447,20 @@ export async function startPlannedAgentProviderRequestWithId(
 				continue;
 			}
 			const requestId = uuidv7() as AgentRequestId;
+			// Commit this turn's new-or-changed transient records (almost always none) into DURABLE
+			// history before the prefix marks below capture `sourceContext.messages.length` - they were
+			// part of the wire payload just built above, so they must count as sent, exactly like any
+			// other new content this turn. Reassigns rather than mutates in place: `sourceContext` and
+			// `initialContext` are frequently the SAME array reference (no host replan occurred this
+			// call), and `adoptReplannedMessages` below relies on reference inequality to know a sync is
+			// needed - an in-place `.push` would make that check silently see "nothing changed" even
+			// though it had, corrupting the very caller-owned array `adoptReplannedMessages` exists to
+			// protect. See `nonCompactableProviderContext`'s doc comment for why these records are safe
+			// to fold into durable history with no special exemption from ordinary compaction/GC once
+			// the pack-freeze horizon moves past them.
+			if (pendingTransientRecords.length > 0) {
+				sourceContext = { ...sourceContext, messages: [...sourceContext.messages, ...pendingTransientRecords] };
+			}
 			// Everything in this accepted request is now bytes the provider has seen; later turns may
 			// no longer rewrite them. Monotone, so a shorter replanned history never lowers either
 			// mark. Both marks are updated identically here - they diverge only in WHEN they get reset

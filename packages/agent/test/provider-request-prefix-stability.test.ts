@@ -4,17 +4,26 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { agentLoop } from "../src/agent-loop.ts";
 import { Agent } from "../src/index.ts";
+import { TOOL_FAILURE_LEDGER_CLEARED_TEXT, TOOL_FAILURE_LEDGER_TRANSIENT_KIND } from "../src/tool-failure-memory.ts";
 import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
+import {
+	VERIFICATION_OBLIGATION_TRANSIENT_KIND,
+	VERIFICATION_OBLIGATIONS_CLEARED_TEXT,
+} from "../src/verification-obligations.ts";
 
 /**
  * Regression gate for the turn-economics remediation (see
  * packages/coding-agent/docs/turn-economics-remediation-2026-08-31.md, "A1 - Provider input must be
- * strictly append-only" and its A2/A4 sub-defects). The property under test:
+ * strictly append-only" and its A2/A4 sub-defects, plus the append-on-change extension to A1 -
+ * transient-records.ts). The property under test, now the STRONG form the websocket delta cache
+ * actually needs (see the Task 10 diagnosis and packages/ai's `messagesPreserveCachedPrefix`):
  *
- *   For consecutive provider requests R(n) and R(n+1) in one run, R(n)'s messages are a
- *   byte-identical PREFIX of R(n+1)'s messages, except for a trailing region (the verification
- *   obligation instruction and/or the tool-failure ledger). No message already sent to the
- *   provider is ever rewritten or removed by a later request.
+ *   For consecutive provider requests R(n) and R(n+1) in one run, R(n)'s ENTIRE messages array -
+ *   transients (the verification-obligation instruction, the tool-failure ledger) included, no
+ *   trailing carve-out - is both a byte-identical AND OBJECT-REFERENCE-identical PREFIX of
+ *   R(n+1)'s messages. No message already sent to the provider is ever rewritten, repositioned, or
+ *   removed by a later request; a durable transient record, once committed, is the literal same
+ *   object on every later request that includes it.
  *
  * The scenario below deliberately exercises every path that can violate this:
  *   - a failing tool call, which arms the tool-failure ledger (tool-failure-memory.ts);
@@ -22,7 +31,8 @@ import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool } from "../
  *     `sanitizeToolFailureContext`'s superseded-success dedup targets - if the "already sent" mark
  *     is lost, the first (already-sent) call is wrongly erased when the second is seen;
  *   - a verification obligation appearing (the failing call also reports a failed verification)
- *     and later resolving (a passing call for the same obligation id);
+ *     and later resolving (a passing call for the same obligation id) - exercising both the ACTIVE
+ *     and CLEARED durable record shapes append-on-change can commit;
  *   - a model/reasoning change on every turn via `prepareNextTurn`, which is precisely the path
  *     that replaces `config` with a new object each turn (agent-loop.ts).
  *
@@ -38,6 +48,10 @@ import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool } from "../
  *   - Task 5 (`sentPrefixCount` exposed on `AgentContextPlanRequest` for a host's context-GC packer):
  *     reverting it, or wiring it to the wrong value, breaks the bounds/monotonicity/non-vacuousness
  *     checks against `planContext`'s captured calls.
+ *   - Append-on-change (transient-records.ts): reverting it - rebuilding the ledger/obligation fresh
+ *     every request instead of committing a durable record only when content changes - fails the
+ *     REFERENCE-identity check specifically, even though the older VALUE-identity check on the core
+ *     alone could still pass.
  */
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -111,55 +125,66 @@ function createUserMessage(text: string): AgentMessage {
 	return { role: "user", content: text, timestamp: 0 };
 }
 
+// Append-on-change transients (see transient-records.ts) ride as durable `role: "custom"` records
+// woven into history at the point they changed, not a request-local trailing block rebuilt every
+// turn - so, unlike before this mechanism existed, they must survive convertToLlm to ever reach the
+// wire at all.
 function identityConverter(messages: AgentMessage[]): Message[] {
-	return messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
+	return messages.filter(
+		(m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult" || m.role === "custom",
+	) as Message[];
 }
 
 function messageText(message: Message): string {
-	if (message.role !== "user") return "";
-	return typeof message.content === "string"
-		? message.content
-		: message.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+	const custom = message as unknown as { role: string; content: unknown };
+	if (custom.role !== "user" && custom.role !== "custom") return "";
+	const content = custom.content;
+	return typeof content === "string"
+		? content
+		: Array.isArray(content)
+			? content
+					.map((part: { type: string; text?: string }) => (part.type === "text" ? (part.text ?? "") : ""))
+					.join("\n")
+			: "";
 }
 
-/** True for the two request-local transient messages this run can project: the ledger and the
- * verification-obligation instruction. Both always ride at the very tail (see
- * provider-request-planner.ts); this run configures no host-owned `planContext`/`transformContext`,
- * so nothing else can appear after the compactable core. */
-function isSyntheticTrailingMessage(message: Message): boolean {
-	const text = messageText(message);
-	return text.startsWith("ACTIVE VERIFICATION FAILURES") || text.startsWith("MANDATORY TOOL FAILURE RECOVERY");
-}
-
-/** The compactable core of a request: everything except the trailing ledger/obligation messages. */
-function coreMessages(context: Context): Message[] {
-	const messages = context.messages.slice();
-	while (messages.length > 0 && isSyntheticTrailingMessage(messages[messages.length - 1])) {
-		messages.pop();
+/**
+ * The last durable record of the given kind, or undefined if none exists - "last" because
+ * append-on-change never rewrites or repositions a record, so an earlier instance further back, if
+ * any, is superseded and stale by construction (see transient-records.ts). Recognizing `customType`
+ * directly rather than a text-prefix marker also means this is not fooled by the fact that CLEARED
+ * text for either kind still starts with the same header the ACTIVE text does (both ledger states
+ * start "MANDATORY TOOL FAILURE RECOVERY", both obligation states start "ACTIVE VERIFICATION
+ * FAILURES" - see tool-failure-memory.ts / verification-obligations.ts).
+ */
+function lastCustomRecord(context: Context, customType: string): Message | undefined {
+	const messages = context.messages as unknown as { role: string; customType?: string }[];
+	for (let index = messages.length - 1; index >= 0; index--) {
+		if (messages[index].role === "custom" && messages[index].customType === customType) {
+			return context.messages[index];
+		}
 	}
-	return messages;
+	return undefined;
 }
 
-function findTrailingMessage(context: Context, marker: string): Message | undefined {
-	return context.messages.find((message) => messageText(message).startsWith(marker));
-}
-
-function obligationMessage(context: Context): Message | undefined {
-	return findTrailingMessage(context, "ACTIVE VERIFICATION FAILURES");
-}
-
-function ledgerMessage(context: Context): Message | undefined {
-	return findTrailingMessage(context, "MANDATORY TOOL FAILURE RECOVERY");
-}
-
+/**
+ * Empty string means no obligation/ledger is CURRENTLY active - which now includes the case where
+ * the last durable record is an explicit cleared-state record (its content starts with the kind's
+ * `clearedText`, see verification-obligations.ts/tool-failure-memory.ts): that record's whole purpose
+ * is to stop an earlier active record from reading as current, not to introduce a new active reading
+ * of its own. Callers below predate append-on-change and mean "is there an active constraint right
+ * now" - deliberately kept the same question here.
+ */
 function obligationInstructionOf(context: Context): string {
-	const message = obligationMessage(context);
-	return message ? messageText(message) : "";
+	const message = lastCustomRecord(context, VERIFICATION_OBLIGATION_TRANSIENT_KIND);
+	const text = message ? messageText(message) : "";
+	return text.startsWith(VERIFICATION_OBLIGATIONS_CLEARED_TEXT) ? "" : text;
 }
 
 function ledgerOf(context: Context): string {
-	const message = ledgerMessage(context);
-	return message ? messageText(message) : "";
+	const message = lastCustomRecord(context, TOOL_FAILURE_LEDGER_TRANSIENT_KIND);
+	const text = message ? messageText(message) : "";
+	return text.startsWith(TOOL_FAILURE_LEDGER_CLEARED_TEXT) ? "" : text;
 }
 
 const verifySchema = Type.Object({ status: Type.Union([Type.Literal("failed"), Type.Literal("passed")]) });
@@ -331,44 +356,39 @@ describe("provider request prefix stability (turn-economics A1/A2/A4 regression 
 		expect(ledgerOf(requests[4].context)).not.toBe("");
 		expect(ledgerOf(requests[5].context)).not.toBe("");
 
-		// Task 1 (the core invariant): every request's compactable core is a byte-identical prefix of
-		// the next request's compactable core. Reverting Task 1 makes the mark reset to 0 every turn
-		// (since `prepareNextTurn` above clones `config` every turn), so requests[3] (built after the
-		// SECOND `read(a.ts)` at turn 3) wrongly erases the FIRST `read(a.ts)` call/result that
-		// requests[2] already sent - violating this exact check.
+		// Task 1 + Task 4 + append-on-change (turn-economics A1, extended): every request's FULL
+		// message array - transients included, no trailing carve-out needed anymore - is both a
+		// byte-identical (`toEqual`) AND OBJECT-REFERENCE-identical (`toBe`, index by index) prefix of
+		// the next request's array. Before append-on-change, the ledger/obligation were rebuilt fresh
+		// every request, so only a VALUE-prefix check of the core (excluding the ever-shifting trailing
+		// region) was possible; append-on-change makes the STRONGER claim provable, because a durable
+		// transient record, once committed, is the literal same object on every later request that
+		// includes it - exactly what `messagesPreserveCachedPrefix` in
+		// packages/ai/src/providers/openai-codex-responses.ts checks before letting the websocket delta
+		// continuation engage (see the Task 10 diagnosis this fix responds to). Reverting Task 1 makes
+		// the sanitizer mark reset to 0 every turn (since `prepareNextTurn` above clones `config` every
+		// turn), so requests[3] (built after the SECOND `read(a.ts)` at turn 3) wrongly erases the FIRST
+		// `read(a.ts)` call/result that requests[2] already sent - violating this exact check. Reverting
+		// append-on-change (rebuilding transients fresh every turn instead of committing them once)
+		// would fail the REFERENCE check specifically while the VALUE check could still pass, which is
+		// why both are asserted, not just one.
+		let comparedTransientBearingPairs = 0;
 		for (let i = 0; i < requests.length - 1; i++) {
-			const previousCore = coreMessages(requests[i].context);
-			const nextCore = coreMessages(requests[i + 1].context);
-			expect(nextCore.length).toBeGreaterThanOrEqual(previousCore.length);
-			expect(nextCore.slice(0, previousCore.length)).toEqual(previousCore);
-		}
-
-		// Task 4 (closes the hole the check above leaves open): `coreMessages` deliberately excludes
-		// the trailing region, so a nondeterministic trailing message - e.g. a ledger built with
-		// `timestamp: Date.now()` instead of a fixed constant - would slip past every assertion so
-		// far even though it rewrites an already-sent message on every single request. Whenever the
-		// ledger TEXT is unchanged between two consecutive requests, the ledger MESSAGE itself must be
-		// byte-identical too. Same check for the obligation message, for the same reason.
-		let comparedStableLedgerPairs = 0;
-		let comparedStableObligationPairs = 0;
-		for (let i = 0; i < requests.length - 1; i++) {
-			const previousLedger = ledgerMessage(requests[i].context);
-			const nextLedger = ledgerMessage(requests[i + 1].context);
-			if (previousLedger && nextLedger && messageText(previousLedger) === messageText(nextLedger)) {
-				expect(nextLedger).toEqual(previousLedger);
-				comparedStableLedgerPairs++;
+			const previous = requests[i].context.messages;
+			const next = requests[i + 1].context.messages;
+			expect(next.length).toBeGreaterThanOrEqual(previous.length);
+			expect(next.slice(0, previous.length)).toEqual(previous);
+			for (let index = 0; index < previous.length; index++) {
+				expect(next[index]).toBe(previous[index]);
 			}
-			const previousObligation = obligationMessage(requests[i].context);
-			const nextObligation = obligationMessage(requests[i + 1].context);
-			if (previousObligation && nextObligation && messageText(previousObligation) === messageText(nextObligation)) {
-				expect(nextObligation).toEqual(previousObligation);
-				comparedStableObligationPairs++;
+			if (previous.some((message) => (message as unknown as { role: string }).role === "custom")) {
+				comparedTransientBearingPairs++;
 			}
 		}
-		// Confirm the script actually exercised both comparisons above at least once - otherwise they
-		// would vacuously pass regardless of whether the timestamp were fixed.
-		expect(comparedStableLedgerPairs).toBeGreaterThan(0);
-		expect(comparedStableObligationPairs).toBeGreaterThan(0);
+		// Confirm the script actually exercised a transient-bearing comparison at least once -
+		// otherwise the reference check above would vacuously pass regardless of whether append-on-
+		// change actually committed a durable record anywhere.
+		expect(comparedTransientBearingPairs).toBeGreaterThan(0);
 
 		// Confirm the erasure hazard was genuinely present in the transcript for this check to mean
 		// anything: both `read(a.ts)` calls actually appear (uncollapsed) somewhere across the run.

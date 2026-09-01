@@ -9,6 +9,10 @@ const VERIFICATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 /** A durable bounded witness that more unresolved failures existed than individual slots can retain. */
 const VERIFICATION_OVERFLOW_ID = "_verification_overflow";
 export const VERIFICATION_HANDOFF_REQUIRED_ERROR = "verification_handoff_required";
+/** Stable kind identity for the durable, append-on-change obligation record (see
+ * transient-records.ts). Never changes across the life of a conversation - it is the join key
+ * `reconcileTransientRecords` uses to find the last recorded instance in durable history. */
+export const VERIFICATION_OBLIGATION_TRANSIENT_KIND = "pi_verification_obligation";
 
 type VerificationStatus = "failed" | "passed";
 
@@ -131,6 +135,18 @@ function formatActiveVerificationFailures(ids: readonly string[]): string | unde
 		...ids.map((id) => `- ${id}`),
 	].join("\n");
 }
+
+/**
+ * Text for the durable record appended the moment the LAST active obligation resolves (see
+ * transient-records.ts's `TransientRecordSlot.clearedText`). Without this explicit record,
+ * append-on-change would leave the most recent ACTIVE instruction sitting in history with nothing
+ * after it saying otherwise - indistinguishable, to a reader of the raw transcript, from "still
+ * active, unchanged since it was last sent".
+ */
+export const VERIFICATION_OBLIGATIONS_CLEARED_TEXT =
+	"ACTIVE VERIFICATION FAILURES\nAll verification obligations that were active earlier in this " +
+	"conversation have since resolved (a passing verification reported the same id). None are " +
+	"currently active; no id-specific completion format is required.";
 
 function rememberFailedVerification(activeIds: Map<string, true>, id: string): void {
 	if (activeIds.has(id)) {

@@ -2776,7 +2776,14 @@ export class AgentSession {
 				messages.push(msg);
 			}
 
-			const taskStepsState = options?.internalContextType ? undefined : this.getTaskStepsStateSnapshot();
+			// Unlike memory_context/pipeline_context above, task_steps state is cheap to compute (a
+			// snapshot read + pure string format, no recall/search) and is exactly what an internal
+			// continuation turn most needs to see: which step it is mid-way through. It must NOT be
+			// gated on internalContextType the way those are -- see the turn-economics B6 investigation
+			// and compact-goal-context.ts's doc comment for the B1-shaped defect this closes (a
+			// continuation used to have no way to see current step state short of a voluntary,
+			// instruction-driven tool call).
+			const taskStepsState = this.getTaskStepsStateSnapshot();
 			const taskStepsContext = taskStepsState ? formatTaskStepsContext(taskStepsState, 12) : undefined;
 			if (taskStepsState && taskStepsContext) {
 				messages.push(

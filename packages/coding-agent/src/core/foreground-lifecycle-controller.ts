@@ -30,8 +30,24 @@ const MAX_LIFECYCLE_ANCESTRY_STEPS = 4096;
 
 type AppendMessage = (message: Message) => string;
 
+/**
+ * The subset of `Agent` this controller actually touches: setting the provider-request/tool-call
+ * hooks, replacing `state.messages` during crash-recovery repair, and resetting the session-scoped
+ * sanitizer horizon immediately after doing so. Narrowed instead of depending on the full `Agent`
+ * class so a test stub missing one of these members fails `tsc` instead of crashing at runtime the
+ * first time `repair()` reaches it -- a real `Agent` always structurally satisfies this regardless,
+ * so production callers (ForegroundLifecycleAdapter) need no change. Field types are indexed off
+ * `Agent` itself, not redeclared, so they can never drift out of sync with the real class.
+ */
+export interface ForegroundLifecycleAgentDependency {
+	onProviderRequestSnapshot?: Agent["onProviderRequestSnapshot"];
+	onToolCallStart?: Agent["onToolCallStart"];
+	state: { messages: Agent["state"]["messages"] };
+	resetSanitizerPrefixHorizon: Agent["resetSanitizerPrefixHorizon"];
+}
+
 interface ForegroundLifecycleControllerDeps {
-	agent: Agent;
+	agent: ForegroundLifecycleAgentDependency;
 	sessionManager: SessionManager;
 	modelRouter: ModelRouterController;
 	emitWarning(message: string): void;

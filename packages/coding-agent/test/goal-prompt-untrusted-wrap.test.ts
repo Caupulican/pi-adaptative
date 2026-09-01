@@ -142,13 +142,16 @@ describe("compact active-goal context", () => {
 		expect(text).toContain("update_goal");
 	});
 
-	it("requests continuation hydration for task_steps only, and never for get_goal", () => {
+	it("never requests continuation hydration for get_goal or task_steps", () => {
 		// get_goal was dropped from the hydration list once formatCompactGoalContext started
 		// projecting everything get_goal provides for the common case (usage, elapsed time)
-		// directly into every request -- see the B1 investigation. task_steps state, unlike goal
-		// state, is never otherwise injected into an internal continuation turn (agent-session.ts
-		// gates task_steps_context on `!internalContextType`), so it is the one tool a continuation
-		// still has no other way to see current state from.
+		// directly into every request -- see the B1 investigation. task_steps followed the same
+		// path in B6: it used to be the one tool a continuation had no other way to see current
+		// state from (agent-session.ts gated task_steps_context on `!internalContextType`), so this
+		// file asked the model to hydrate it via a voluntary tool call. B6 removed that gate instead
+		// -- task_steps_context is now built unconditionally, including on continuation turns -- so
+		// the hydration mechanism itself is gone, not just empty. This test guards against it coming
+		// back for either tool, regardless of what tool calls do or don't appear in the transcript.
 		const state = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
 		const trigger = createCustomMessage(
 			GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
@@ -160,32 +163,11 @@ describe("compact active-goal context", () => {
 		const initial = injectCompactGoalContext([trigger], state);
 		const initialProjection = initial.at(-1);
 		if (!initialProjection || initialProjection.role !== "custom") throw new Error("Expected compact goal context");
-		expect(initialProjection.content).toContain("Hydrate missing state once this continuation: task_steps.");
+		expect(initialProjection.content).not.toContain("Hydrate missing state");
 		expect(initialProjection.content).not.toContain("get_goal");
+		expect(initialProjection.content).not.toContain("task_steps");
 
-		// A get_goal call -- successful or not -- has no bearing on hydration status anymore: it is
-		// not tracked at all, so the instruction is unaffected either way.
-		const afterGoalCallOnly = injectCompactGoalContext(
-			[
-				trigger,
-				{
-					role: "toolResult",
-					toolCallId: "goal-call",
-					toolName: "get_goal",
-					content: [{ type: "text", text: "current goal" }],
-					isError: false,
-					timestamp: 2,
-				},
-			],
-			state,
-		);
-		const afterGoalCallProjection = afterGoalCallOnly.at(-1);
-		if (!afterGoalCallProjection || afterGoalCallProjection.role !== "custom") {
-			throw new Error("Expected compact goal context");
-		}
-		expect(afterGoalCallProjection.content).toContain("Hydrate missing state once this continuation: task_steps.");
-
-		const afterFailedTaskStepsHydration = injectCompactGoalContext(
+		const afterFailedTaskStepsCall = injectCompactGoalContext(
 			[
 				trigger,
 				{
@@ -199,11 +181,11 @@ describe("compact active-goal context", () => {
 			],
 			state,
 		);
-		const failedProjection = afterFailedTaskStepsHydration.at(-1);
+		const failedProjection = afterFailedTaskStepsCall.at(-1);
 		if (!failedProjection || failedProjection.role !== "custom") throw new Error("Expected compact goal context");
-		expect(failedProjection.content).toContain("Hydrate missing state once this continuation: task_steps.");
+		expect(failedProjection.content).not.toContain("Hydrate missing state");
 
-		const fullyHydrated = injectCompactGoalContext(
+		const afterSuccessfulTaskStepsCall = injectCompactGoalContext(
 			[
 				trigger,
 				{
@@ -217,13 +199,12 @@ describe("compact active-goal context", () => {
 			],
 			state,
 		);
-		const hydratedProjection = fullyHydrated.at(-1);
+		const hydratedProjection = afterSuccessfulTaskStepsCall.at(-1);
 		if (!hydratedProjection || hydratedProjection.role !== "custom") throw new Error("Expected compact goal context");
 		expect(hydratedProjection.content).not.toContain("Hydrate missing state");
-		expect(hydratedProjection.content).not.toContain("task_steps");
 	});
 
-	it("preserves continuation hydration state across provider-context scrubbing", async () => {
+	it("preserves the continuation-turn goal projection across provider-context scrubbing", async () => {
 		const state = createGoalState({ goalId: "g-provider", userGoal: "Ship", now: "T0" });
 		const trigger = createCustomMessage(
 			GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
@@ -247,8 +228,12 @@ describe("compact active-goal context", () => {
 		);
 		if (!projection || projection.role !== "custom") throw new Error("Expected compact goal context");
 		expect(projection.content).toContain("Continue objective.");
+		// get_goal's toolResult above must not leak into the projection -- the compact block already
+		// contains everything get_goal would provide, and the now-removed hydration mechanism (see the
+		// doc comment at the top of this file) used to be the only place "task_steps" text could ever
+		// appear here; there is no other reason for either tool name to show up in this content.
 		expect(projection.content).not.toContain("get_goal");
-		expect(projection.content).toContain("task_steps");
+		expect(projection.content).not.toContain("task_steps");
 	});
 
 	it("removes stale goal context without injecting a record for terminal or missing goals", () => {
