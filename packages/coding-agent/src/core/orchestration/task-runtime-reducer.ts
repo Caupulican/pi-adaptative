@@ -50,7 +50,6 @@ import {
 	assertProjectionWithinLimits,
 	assertRecordHasCapacity,
 	cacheProjectionSerializedBytes,
-	cloneProjection,
 	emptyProjection,
 	ProjectionByteTracker,
 } from "./task-runtime-projection.ts";
@@ -1009,7 +1008,19 @@ export function reduceOrchestrationEvent(
 			`Orchestration event ordinal ${event.ordinal} is not contiguous after ${projection.lastOrdinal}.`,
 		);
 	}
-	const state = cloneProjection(projection);
+	// Copy only the record maps: records are replaced, never mutated, so every unchanged record is
+	// shared with the previous projection (which the runtime keeps frozen). Deep-cloning the whole
+	// projection per event cost as much as the delegations producing the events.
+	const state: TaskRuntimeProjection = {
+		...projection,
+		agents: { ...projection.agents },
+		objectives: { ...projection.objectives },
+		tasks: { ...projection.tasks },
+		attempts: { ...projection.attempts },
+		checkpoints: { ...projection.checkpoints },
+		approvals: { ...projection.approvals },
+		notifications: { ...projection.notifications },
+	};
 	const byteTracker = new ProjectionByteTracker(projection);
 	const rawAgents = state.agents as Record<string, AgentBindingContract>;
 	const rawObjectives = state.objectives as Record<string, ObjectiveRuntimeState>;

@@ -72,7 +72,7 @@ import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
-import { resolveSessionEntryIndex } from "./session-entry-index.ts";
+import { LatestCompactionEntryScan, resolveSessionEntryIndex } from "./session-entry-index.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { reportSpawnedUsage } from "./spawned-usage.ts";
 
@@ -199,6 +199,7 @@ export class ContextPipeline {
 	 * relies on -- same object-identity-keyed, fresh-rebuild-per-pass contract as `_auditMemo`,
 	 * just for a plain `estimateTokens(message)` number instead of a built ContextItem. */
 	private readonly _tokenMemo: TokenMemo = new Map();
+	private readonly _latestCompactionScan = new LatestCompactionEntryScan();
 
 	private readonly deps: ContextPipelineDeps;
 
@@ -285,6 +286,7 @@ export class ContextPipeline {
 		// GC-eligible even if this ContextPipeline instance itself briefly lingers.
 		this._auditMemo.clear();
 		this._tokenMemo.clear();
+		this._latestCompactionScan.reset();
 	}
 
 	/**
@@ -295,17 +297,7 @@ export class ContextPipeline {
 	private _getLatestCompactionEntry(): CompactionEntry | null {
 		const sessionManager = this.deps.getSessionManager();
 		const index = resolveSessionEntryIndex(sessionManager);
-		if (index) {
-			let currentId = index.leafId;
-			while (currentId !== null) {
-				const entry = index.getEntry(currentId);
-				if (!entry) break;
-				if (entry.type === "compaction") return entry;
-				currentId = entry.parentId;
-			}
-			return null;
-		}
-		return getLatestCompactionEntry(sessionManager.getBranch());
+		return index ? this._latestCompactionScan.find(index) : getLatestCompactionEntry(sessionManager.getBranch());
 	}
 
 	private _buildSessionEntryIdLookup(

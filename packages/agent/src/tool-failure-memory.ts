@@ -1278,9 +1278,7 @@ function buildFailureContextAnalysis(
 ): FailureContextAnalysis {
 	const { omittedResults, boundedReplacements, boundedMessages, active, activeDirectives, kindMistakesMap } = state;
 	const kindMistakesSummary = Object.fromEntries(kindMistakesMap);
-	const activeRecords = [...active.values()]
-		.sort((left, right) => left.sequence - right.sequence)
-		.map(({ record }) => record);
+	const activeRecords = activeFailureRecords(active);
 
 	if (omittedCallIds.size === 0 && omittedResults.size === 0 && boundedReplacements.size === 0) {
 		return { messages, activeRecords, activeDirectives: [...activeDirectives.values()], kindMistakesSummary };
@@ -1344,16 +1342,24 @@ function buildFailureContextAnalysis(
 	};
 }
 
-function analyzeToolFailureContext(
+function activeFailureRecords(active: FailureFoldState["active"]): ToolFailureMemoryRecord[] {
+	return [...active.values()].sort((left, right) => left.sequence - right.sequence).map(({ record }) => record);
+}
+
+/**
+ * The fold over `messages`, resumed from `memory` when its processed prefix is still the same
+ * objects (append-only history) and folded from the start otherwise. Without a memory, one fold.
+ */
+function resumeFailureFold(
 	messages: AgentMessage[],
-	sentPrefixCount = 0,
-	memory?: ToolFailureContextMemory,
-): FailureContextAnalysis {
+	sentPrefixCount: number,
+	memory: ToolFailureContextMemory | undefined,
+): { state: FailureFoldState; omittedCallIds: Set<string> } {
 	if (!memory) {
 		const state = createFailureFoldState();
 		const omittedCallIds = new Set<string>();
 		foldToolFailureContext(state, omittedCallIds, messages, 0, sentPrefixCount);
-		return buildFailureContextAnalysis(messages, state, omittedCallIds);
+		return { state, omittedCallIds };
 	}
 	let from = memory.processed.length;
 	let resumable = from <= messages.length;
@@ -1366,11 +1372,30 @@ function analyzeToolFailureContext(
 	}
 	foldToolFailureContext(memory.state, memory.omittedCallIds, messages, from, sentPrefixCount);
 	memory.processed = messages.slice();
-	return buildFailureContextAnalysis(messages, memory.state, memory.omittedCallIds);
+	return { state: memory.state, omittedCallIds: memory.omittedCallIds };
 }
 
-export function createToolFailureMemoryTracker(messages: AgentMessage[]): ToolFailureMemoryTracker {
-	return new Map(analyzeToolFailureContext(messages).activeRecords.map((record) => [record.failureKey, record]));
+function analyzeToolFailureContext(
+	messages: AgentMessage[],
+	sentPrefixCount = 0,
+	memory?: ToolFailureContextMemory,
+): FailureContextAnalysis {
+	const { state, omittedCallIds } = resumeFailureFold(messages, sentPrefixCount, memory);
+	return buildFailureContextAnalysis(messages, state, omittedCallIds);
+}
+
+/**
+ * The loop's in-run failure tracker, seeded from the same fold the sanitizer resumes. With the
+ * conversation's `memory`, seeding touches only messages appended since the last fold; a fresh fold
+ * per run walked and re-hashed the whole history at every turn start.
+ */
+export function createToolFailureMemoryTracker(
+	messages: AgentMessage[],
+	memory?: ToolFailureContextMemory,
+	sentPrefixCount = 0,
+): ToolFailureMemoryTracker {
+	const { state } = resumeFailureFold(messages, sentPrefixCount, memory);
+	return new Map(activeFailureRecords(state.active).map((record) => [record.failureKey, record]));
 }
 
 export function rememberToolFailure(

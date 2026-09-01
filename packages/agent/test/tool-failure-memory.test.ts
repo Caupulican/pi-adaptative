@@ -3,6 +3,7 @@ import {
 	assessToolFailure,
 	createRepeatedToolFailureResult,
 	createToolFailureContextMemory,
+	createToolFailureMemoryTracker,
 	createToolFailureResult,
 	getToolExecutionKey,
 	normalizeToolSignature,
@@ -1293,6 +1294,22 @@ describe("tool failure context memory (session-scoped fold)", () => {
 		expect(sent).toEqual(["call:A", "result:A", "call:B", "result:B"]);
 		// And it keeps staying on every later request.
 		expect(shape(sanitizeToolFailureContext(second, "sys", 4, memory).messages)).toEqual(sent);
+	});
+
+	it("seeds the loop's tracker from the shared fold and resumes it instead of refolding", () => {
+		const memory = createToolFailureContextMemory();
+		const history: AgentMessage[] = [call("A"), failed("A"), call("B"), ok("B")];
+		sanitizeToolFailureContext(history, "sys", 0, memory);
+		const state = memory.state;
+		const later = [...history, call("C", "other.json"), failed("C")];
+
+		const tracker = createToolFailureMemoryTracker(later, memory, 4);
+
+		// Resumed: the fold state kept its identity and now covers the appended messages.
+		expect(memory.state).toBe(state);
+		expect(memory.processed).toHaveLength(later.length);
+		expect(tracker.size).toBeGreaterThan(0);
+		expect([...tracker.keys()]).toEqual([...createToolFailureMemoryTracker(later).keys()]);
 	});
 
 	it("resumes from the processed prefix and matches the pure fold for appended history without erasures", () => {

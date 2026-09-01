@@ -10,8 +10,12 @@ import {
 } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { agentLoop, agentLoopContinue } from "../src/agent-loop.ts";
-import { TOOL_FAILURE_LEDGER_CLEARED_TEXT, TOOL_FAILURE_LEDGER_TRANSIENT_KIND } from "../src/tool-failure-memory.ts";
+import { agentLoop, agentLoopContinue, createAgentLoopContinuationState, runAgentLoop } from "../src/agent-loop.ts";
+import {
+	createToolFailureContextMemory,
+	TOOL_FAILURE_LEDGER_CLEARED_TEXT,
+	TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
+} from "../src/tool-failure-memory.ts";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
 import { createAgentToolFailureRecoveryAuthority } from "../src/types.ts";
 import {
@@ -6367,5 +6371,41 @@ describe("Phase 3 S5 - pool invariants, partition semantics, env matrix, full-lo
 			expect(finalMessages[0]).toMatchObject({ role: "assistant", stopReason: "aborted" });
 			expect(finalMessages.some((message) => message.role === "toolResult")).toBe(false);
 		});
+	});
+});
+
+describe("agent loop failure tracker seeding", () => {
+	it("seeds the tracker from the shared sanitizer memory before the first request", async () => {
+		const memory = createToolFailureContextMemory();
+		const history: AgentMessage[] = [createUserMessage("earlier")];
+		let processedAtStart = -1;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			pushDone(stream, createAssistantMessage([{ type: "text", text: "done" }]));
+			return stream;
+		};
+		const context: AgentContext = { systemPrompt: "You are helpful.", messages: history, tools: [] };
+
+		const messages = await runAgentLoop(
+			[createUserMessage("hello")],
+			context,
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				getSteeringMessages: async () => {
+					if (processedAtStart < 0) processedAtStart = memory.processed.length;
+					return [];
+				},
+			},
+			async () => {},
+			undefined,
+			streamFn,
+			createAgentLoopContinuationState(0, memory),
+		);
+
+		// The loop asks for steering input right after seeding its tracker and before any request:
+		// the shared fold already covers the history plus the prompt, so the sanitizer resumes it.
+		expect(processedAtStart).toBe(history.length + 1);
+		expect(messages.at(-1)).toMatchObject({ role: "assistant" });
 	});
 });

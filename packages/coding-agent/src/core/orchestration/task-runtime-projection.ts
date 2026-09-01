@@ -203,10 +203,6 @@ export class ProjectionByteTracker {
 	}
 }
 
-export function cloneProjection(state: TaskRuntimeProjection): TaskRuntimeProjection {
-	return structuredClone(state);
-}
-
 export function record(value: unknown, label: string): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
 		throw new DurableTaskRuntimeError(`${label} is not an object.`);

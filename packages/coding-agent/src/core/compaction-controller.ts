@@ -39,6 +39,7 @@ import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
+import { LatestCompactionEntryScan, resolveSessionEntryIndex } from "./session-entry-index.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
 export type AutoCompactionReason = "overflow" | "provider_recovery" | "threshold";
@@ -206,8 +207,7 @@ export class CompactionController {
 	private autoAbortController: AbortController | undefined;
 	private autoRunPromise: Promise<boolean> | undefined;
 	private activeCompactionLifecycle: ActiveCompactionLifecycle | undefined;
-	/** See {@link latestCompactionEntryOnBranch}. */
-	private latestCompactionScan: { leafId: string; entry: CompactionEntry | null } | undefined;
+	private readonly latestCompactionScan = new LatestCompactionEntryScan();
 	private overflowRecoveryAttempted = false;
 	private providerRecoveryAttempted = false;
 	private ineffectiveThresholdFrontier: IneffectiveThresholdFrontier | undefined;
@@ -741,31 +741,8 @@ export class CompactionController {
 	 */
 	private latestCompactionEntryOnBranch(): CompactionEntry | null {
 		const manager = this.deps.sessionManager;
-		const leaf = manager.getLeafEntry();
-		if (!leaf) {
-			this.latestCompactionScan = undefined;
-			return null;
-		}
-		const remembered = this.latestCompactionScan;
-		let entry: SessionEntry | undefined = leaf;
-		let found: CompactionEntry | null = null;
-		let reachedRemembered = false;
-		while (entry) {
-			if (remembered && entry.id === remembered.leafId) {
-				reachedRemembered = true;
-				break;
-			}
-			if (entry.type === "compaction") {
-				found = entry;
-				break;
-			}
-			entry = entry.parentId === null ? undefined : manager.getEntry(entry.parentId);
-		}
-		// Reaching the remembered leaf without meeting a compaction means the remembered answer still
-		// stands; reaching the root instead means a different branch, and the walk was the full answer.
-		if (remembered && reachedRemembered) found = remembered.entry;
-		this.latestCompactionScan = { leafId: leaf.id, entry: found };
-		return found;
+		const index = resolveSessionEntryIndex(manager);
+		return index ? this.latestCompactionScan.find(index) : getLatestCompactionEntry(manager.getBranch());
 	}
 
 	/**

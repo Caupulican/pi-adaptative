@@ -1648,3 +1648,37 @@ describe("DurableTaskRuntime snapshots", () => {
 		expect(runtime.getSnapshot()).toBe(after);
 	});
 });
+
+describe("DurableTaskRuntime structural sharing", () => {
+	it("shares unchanged records across events and leaves the previous projection untouched", () => {
+		const { runtime } = createHarness();
+		const objective = runtime.createObjective({
+			objectiveId: "shared-objective",
+			title: "Share",
+			description: "Records are replaced, never mutated",
+		});
+		const first = runtime.createTask({
+			taskId: "task-first",
+			objectiveId: objective.objectiveId,
+			title: "First",
+			description: "Stays shared",
+			role: "implementer",
+		});
+		const before = runtime.getSnapshot();
+		const beforeObjective = before.objectives[objective.objectiveId];
+
+		runtime.createTask({
+			taskId: "task-second",
+			objectiveId: objective.objectiveId,
+			title: "Second",
+			description: "Replaces the objective record",
+			role: "implementer",
+		});
+		const after = runtime.getSnapshot();
+
+		expect(after.tasks[first.taskId]).toBe(before.tasks[first.taskId]);
+		expect(after.objectives[objective.objectiveId]).not.toBe(beforeObjective);
+		expect(beforeObjective?.taskIds).toEqual([first.taskId]);
+		expect(after.objectives[objective.objectiveId]?.taskIds).toEqual([first.taskId, "task-second"]);
+	});
+});

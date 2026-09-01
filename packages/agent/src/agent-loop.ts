@@ -448,7 +448,11 @@ async function runLoop(
 	config = { ...config, providerRequestPrefixState, onTransientRecordsCommitted: emitCommittedTransientRecords };
 	const validationFailureTracker: ToolValidationFailureTracker = new Map();
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
-	let toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
+	let toolFailureMemory = createToolFailureMemoryTracker(
+		currentContext.messages,
+		providerRequestPrefixState.sanitizerMemory,
+		providerRequestPrefixState.sanitizerSentPrefixCount,
+	);
 	const verificationObligations = new VerificationObligationTracker(currentContext.messages);
 	const toolFailureRecoveryGate = continuationState.toolFailureRecoveryGate;
 	toolFailureRecoveryGate.restoreFromMessages(currentContext.messages);
@@ -648,7 +652,11 @@ async function runLoop(
 			if (nextTurnSnapshot) {
 				currentContext = nextTurnSnapshot.context ?? currentContext;
 				if (nextTurnSnapshot.context) {
-					toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
+					toolFailureMemory = createToolFailureMemoryTracker(
+						currentContext.messages,
+						providerRequestPrefixState.sanitizerMemory,
+						providerRequestPrefixState.sanitizerSentPrefixCount,
+					);
 					verificationObligations.restore(currentContext.messages);
 				}
 				config = {
