@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
 import type { AgentContextPlan, AgentMessage } from "@caupulican/pi-agent-core/types";
@@ -5,6 +6,7 @@ import type { ContextAuditReport } from "./context/context-audit.ts";
 import type { PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import type { PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
+import { frozenPrefixLength } from "./context/prefix-stability.ts";
 import type { ContextGcReport } from "./context-gc.ts";
 import { captureGoalContextProjection, injectCompactGoalContext } from "./goals/compact-goal-context.ts";
 import type { GoalState } from "./goals/goal-state.ts";
@@ -24,6 +26,8 @@ export interface ProviderRequestContextControllerDeps {
 	applyContextGc(
 		messages: AgentMessage[],
 		writePayloads: boolean,
+		/** Already-sent boundary packing must not rewrite below (see `frozenPrefixLength`). */
+		frozenBelow: number,
 	): { messages: AgentMessage[]; report: ContextGcReport };
 	correlatePromptPolicyWithContextGc(report: ContextGcReport): void;
 	runPromptEnforcement(
@@ -52,11 +56,32 @@ export const PATH_ALIAS_LEGEND_CUSTOM_TYPE = "path_alias_legend";
  * after it. The legend is a lookup table, not an instruction, so the tail is also where it reads
  * most naturally — right next to the ids it explains.
  */
+/**
+ * Deterministic stand-in for a build timestamp: this message is rebuilt from scratch on every
+ * provider request (see {@link appendPathAliasLegend}'s doc comment), and its content is stable
+ * whenever the alias table hasn't grown. A `Date.now()` read there made an otherwise
+ * byte-identical message differ on every single request, defeating the provider's prefix cache for
+ * the whole conversation behind it. The legend is a transient (see `provider-request-planner.ts`'s
+ * `transientMessages` handling) that never enters durable history, so this value carries no
+ * scheduling meaning of its own — it only has to be a valid, content-derived instant so identical
+ * content always serializes to identical bytes.
+ */
+function deterministicTransientTimestamp(content: string): string {
+	const digest = createHash("sha256").update(content).digest();
+	return new Date(digest.readUIntBE(0, 6)).toISOString();
+}
+
 function appendPathAliasLegend(transientMessages: AgentMessage[], legend: string | undefined): AgentMessage[] {
 	if (!legend) return transientMessages;
 	return [
 		...transientMessages,
-		createCustomMessage(PATH_ALIAS_LEGEND_CUSTOM_TYPE, legend, false, undefined, new Date().toISOString()),
+		createCustomMessage(
+			PATH_ALIAS_LEGEND_CUSTOM_TYPE,
+			legend,
+			false,
+			undefined,
+			deterministicTransientTimestamp(legend),
+		),
 	];
 }
 
@@ -68,7 +93,7 @@ export class ProviderRequestContextController {
 		this.deps = deps;
 	}
 
-	async plan(messages: AgentMessage[], signal?: AbortSignal): Promise<AgentContextPlan> {
+	async plan(messages: AgentMessage[], sentPrefixCount: number, signal?: AbortSignal): Promise<AgentContextPlan> {
 		const transformed = this.deps.transformBase ? await this.deps.transformBase(messages, signal) : messages;
 		const extensionPlan = await this.deps.transformExtensions(transformed);
 		const goalContextProjection = captureGoalContextProjection(extensionPlan.messages);
@@ -78,11 +103,17 @@ export class ProviderRequestContextController {
 			...(reflectionCuePlan ? [reflectionCuePlan.message] : []),
 		];
 		const durableMessages = injectCompactGoalContext(extensionPlan.messages, undefined);
+		// `sentPrefixCount` indexes `messages` as received above; `durableMessages` is the same
+		// conversation after transformBase/extension hooks/goal-context stripping may have reshaped
+		// it. Re-anchor the mark by reference so packing only ever freezes what is PROVABLY still the
+		// same already-sent content, computed once and reused for both the preview and commit GC
+		// passes below so they can never disagree about what is frozen.
+		const frozenBelow = frozenPrefixLength(messages, sentPrefixCount, durableMessages);
 		const extensionMessages = [...durableMessages, ...providerTransients];
 		const auditReport = this.deps.runContextAudit(extensionMessages);
 		const shadowReport = this.deps.runPromptPolicyPlanning(auditReport);
 		const memoryReport = await this.deps.runMemoryRetrieval(extensionMessages);
-		const previewGc = this.deps.applyContextGc(durableMessages, false);
+		const previewGc = this.deps.applyContextGc(durableMessages, false, frozenBelow);
 		const pathAliasPlan = this.deps.applyPathAliases(previewGc.messages);
 		const previewProviderMessages = [...pathAliasPlan.messages, ...providerTransients];
 		const previewEnforcement = this.deps.runPromptEnforcement(previewProviderMessages, shadowReport);
@@ -110,7 +141,7 @@ export class ProviderRequestContextController {
 			this.deps.skillVault.getContextRevision() === skillRevision &&
 			isDeepStrictEqual(this.deps.getGoalState(), goalState);
 		const projectCommit = (writePayloads: boolean) => {
-			const gc = this.deps.applyContextGc(durableMessages, writePayloads);
+			const gc = this.deps.applyContextGc(durableMessages, writePayloads, frozenBelow);
 			const aliased = this.deps.applyPathAliases(gc.messages);
 			const providerMessages = [...aliased.messages, ...providerTransients];
 			const enforcement = this.deps.runPromptEnforcement(providerMessages, shadowReport);

@@ -556,7 +556,13 @@ export class ReflectionController {
 				triggers: current.triggers,
 				...(current.versionChange ? { versionChange: { ...current.versionChange.metadata } } : {}),
 			},
-			timestamp: Date.now(),
+			// Derived from the cue state's own updatedAt, never a fresh Date.now() read: this message is
+			// rebuilt on every provider request (ProviderRequestContextController.plan), and its text only
+			// ever changes when the underlying cue state does (persistCurrentTurnCueState always bumps
+			// updatedAt alongside any real change). A wall-clock-at-build-time timestamp made an otherwise
+			// byte-identical message differ on every single request, defeating the provider's prefix cache
+			// for the whole conversation behind it.
+			timestamp: new Date(current.updatedAt).getTime(),
 		};
 		const isCurrent = (): boolean => {
 			const latest = this.getCurrentTurnCueState();

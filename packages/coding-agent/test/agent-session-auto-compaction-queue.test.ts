@@ -71,7 +71,9 @@ async function admitProviderPlan(
 	const planContext = session.agent.planContext;
 	const admitProviderRequest = session.agent.admitProviderRequest;
 	if (!model || !planContext || !admitProviderRequest) throw new Error("Expected provider request planning hooks");
-	const plan = await planContext({ messages, attempt: 0 });
+	// A fresh admission built from scratch: nothing in `messages` has gone out on a prior provider
+	// request in this synthetic call, so 0 is the correct value, not a placeholder.
+	const plan = await planContext({ messages, attempt: 0, sentPrefixCount: 0 });
 	try {
 		const compactableMessages = await session.agent.convertToLlm(plan.messages);
 		const messagesWithTransients = await session.agent.convertToLlm([

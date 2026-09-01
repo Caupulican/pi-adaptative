@@ -146,6 +146,21 @@ describe("durable current-turn reflection cue state", () => {
 		expect(resumed.previewCurrentTurnCue()).toBeUndefined();
 	});
 
+	it("rebuilds the previewed cue message byte-identically when nothing about the cue state has changed", () => {
+		const sessionManager = SessionManager.inMemory();
+		const reflection = createCueController(sessionManager);
+		reflection.queueCurrentTurnCue("root-turn");
+
+		// Two independent preview builds of the SAME pending cue, with no commit or other state change
+		// between them (as happens across a discarded/retried provider-request plan). The A1 contract:
+		// unchanged cue content must serialize to identical bytes, never differing only by a fresh
+		// Date.now() read — otherwise the provider's prefix cache is invalidated on every request.
+		const first = reflection.previewCurrentTurnCue();
+		const second = reflection.previewCurrentTurnCue();
+		expect(first?.message).toBeDefined();
+		expect(JSON.stringify(second?.message)).toBe(JSON.stringify(first?.message));
+	});
+
 	it("keeps discarded replans pending and projects exactly one cue only until the accepted plan commits", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const reflection = createCueController(sessionManager);
@@ -173,26 +188,26 @@ describe("durable current-turn reflection cue state", () => {
 		} as unknown as ProviderRequestContextControllerDeps);
 		const source: AgentMessage[] = [{ role: "user", content: "ordinary", timestamp: 1 }];
 
-		const discarded = await controller.plan(source);
+		const discarded = await controller.plan(source, 0);
 		expect(cueMessages(discarded.transientMessages ?? [])).toHaveLength(1);
 		expect(cueMessages(discarded.messages)).toHaveLength(0);
 		expect(reflection.getCurrentTurnCueState()).toMatchObject({ status: "pending", revision: 1 });
 
-		const accepted = await controller.plan(source);
+		const accepted = await controller.plan(source, 0);
 		expect(cueMessages(accepted.transientMessages ?? [])).toHaveLength(1);
 		expect(accepted.prepareCommit?.()).toBe(true);
 		accepted.commit?.();
 		expect(reflection.getCurrentTurnCueState()).toMatchObject({ status: "consumed", revision: 2 });
 		expect(discarded.isCurrent?.()).toBe(false);
 
-		const continuation = await controller.plan(source);
+		const continuation = await controller.plan(source, 0);
 		expect(cueMessages(continuation.transientMessages ?? [])).toHaveLength(1);
 		expect(cueMessages(continuation.messages)).toHaveLength(0);
 		expect(continuation.prepareCommit?.()).toBe(true);
 		continuation.commit?.();
 
 		reflection.finishCurrentTurnCue([assistantReply("finished")], { willRetry: false });
-		const afterTerminal = await controller.plan(source);
+		const afterTerminal = await controller.plan(source, 0);
 		expect(cueMessages(afterTerminal.transientMessages ?? [])).toHaveLength(0);
 		expect(cueMessages(afterTerminal.messages)).toHaveLength(0);
 	});

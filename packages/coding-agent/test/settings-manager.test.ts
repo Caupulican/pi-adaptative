@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS } from "../src/core/background-tool-task-controller.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "../src/core/context-gc.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS } from "../src/core/http-dispatcher.ts";
 import { getDirectoryResourceProfileInfo, SettingsManager } from "../src/core/settings-manager.ts";
@@ -1100,6 +1101,38 @@ describe("SettingsManager", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 
 			expect(() => manager.getHttpIdleTimeoutMs()).toThrow("Invalid httpIdleTimeoutMs setting");
+		});
+	});
+
+	describe("backgroundTool settings", () => {
+		it("should default callAfterMs to DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getBackgroundToolSettings().callAfterMs).toBe(DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS);
+		});
+
+		it("should let project settings override a global callAfterMs", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ backgroundTool: { callAfterMs: 20000 } }));
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ backgroundTool: { callAfterMs: 45000 } }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getBackgroundToolSettings().callAfterMs).toBe(45000);
+		});
+
+		it("should fall back to the default for a non-integer or out-of-range callAfterMs", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ backgroundTool: { callAfterMs: 500 } }));
+			expect(SettingsManager.create(projectDir, agentDir).getBackgroundToolSettings().callAfterMs).toBe(
+				DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS,
+			);
+
+			rmSync(join(agentDir, "settings.json"));
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ backgroundTool: { callAfterMs: 12.5 } }));
+			expect(SettingsManager.create(projectDir, agentDir).getBackgroundToolSettings().callAfterMs).toBe(
+				DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS,
+			);
 		});
 	});
 

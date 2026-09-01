@@ -63,6 +63,15 @@ export interface ContextGcOptions extends NormalizedContextGcSettings {
 	acquireStorageDir?: () => string;
 	writePayloads?: boolean;
 	curation?: ContextGcCurationHooks;
+	/**
+	 * Messages at this index and above are eligible for packing; every index strictly below it has
+	 * already gone out on an accepted provider request and packing must never rewrite it (see
+	 * `context/prefix-stability.ts`'s `frozenPrefixLength`, which derives this value from the
+	 * request's `sentPrefixCount`). Always populated by `applyContextGc` below (clamped from its own
+	 * optional `frozenBelow` input, defaulting to 0 — no freeze — for callers outside the live
+	 * provider-request path); never constructed elsewhere, so this stays a definite number.
+	 */
+	frozenBelow: number;
 }
 
 export interface ContextGcPackedRecord {
@@ -468,6 +477,7 @@ export function applyContextGc(
 		acquireStorageDir?: () => string;
 		writePayloads?: boolean;
 		curation?: ContextGcCurationHooks;
+		frozenBelow?: number;
 	},
 ): ContextGcResult {
 	const settings = normalizeContextGcSettings(rawSettings);
@@ -488,6 +498,8 @@ export function applyContextGc(
 		acquireStorageDir: rawSettings.acquireStorageDir,
 		writePayloads: rawSettings.writePayloads ?? true,
 		curation: rawSettings.curation,
+		// Clamped defensively: a caller-supplied mark must never be trusted past the array it indexes.
+		frozenBelow: Math.min(Math.max(0, Math.floor(rawSettings.frozenBelow ?? 0)), messages.length),
 	};
 	const eligibleTools = new Set(options.tools);
 	const plan = collectContextGcPlan(messages, options.cwd, options.semanticMemory);
@@ -508,6 +520,10 @@ export function applyContextGc(
 	let changed = false;
 
 	for (let index = 0; index < messages.length; index++) {
+		// Already sent on an accepted provider request: frozen for packing purposes for as long as
+		// it stays below the mark. Checked first, uniformly, so neither packing category below can
+		// rewrite it regardless of how eligible it would otherwise be.
+		if (index < options.frozenBelow) continue;
 		const message = messages[index];
 		if (semanticIndexSet.has(index) && !preservedSemanticIndexes.has(index) && index < recentStart) {
 			const originalText = agentMessageText(message);

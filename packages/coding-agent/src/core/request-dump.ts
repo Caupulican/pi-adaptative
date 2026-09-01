@@ -22,7 +22,15 @@ export function dumpProviderRequest(requestId: string, context: Context): void {
 		const payload = {
 			requestId,
 			systemPrompt: context.systemPrompt,
-			tools: (context.tools ?? []).map((tool) => ({ name: tool.name, description: tool.description })),
+			// Full projected tool payload (name, description, AND parameters schema) — not just
+			// name/description. Tool-schema churn is exactly the kind of prefix-stability defect this
+			// dump exists to diagnose, and a schema-only diff was invisible to a dump that dropped
+			// `parameters`.
+			tools: (context.tools ?? []).map((tool) => ({
+				name: tool.name,
+				description: tool.description,
+				parameters: tool.parameters,
+			})),
 			messages: context.messages,
 		};
 		const name = `request-${String(sequence++).padStart(4, "0")}.json`;

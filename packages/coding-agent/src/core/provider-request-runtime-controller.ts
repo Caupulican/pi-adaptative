@@ -108,13 +108,28 @@ export class ProviderRequestRuntimeController {
 		const previousAdmission = this.previousAdmission?.bind(agent);
 		const previousShouldStopAfterTurn = this.previousShouldStopAfterTurn?.bind(agent);
 
-		this.installedPlanContext = async ({ messages, attempt }, signal) => {
+		// Forward the whole request object to `previousPlanContext` instead of rebuilding a
+		// `{ messages, attempt }` literal from destructured parts: a request field this wrapper
+		// doesn't itself read (the required `sentPrefixCount`, and any field added after it) must
+		// still reach the wrapped hook unchanged. A destructure-and-rebuild silently drops whatever
+		// wasn't named at the time it was written -- which is exactly how `sentPrefixCount` itself
+		// went missing here before this fix.
+		this.installedPlanContext = async (request, signal) => {
 			const basePlan = previousPlanContext
-				? await previousPlanContext({ messages, attempt }, signal)
+				? await previousPlanContext(request, signal)
 				: {
-						messages: previousTransformContext ? await previousTransformContext(messages, signal) : messages,
+						messages: previousTransformContext
+							? await previousTransformContext(request.messages, signal)
+							: request.messages,
 					};
-			const sessionPlan = await this.deps.context.plan(basePlan.messages, signal);
+			// `request.sentPrefixCount` indexes `request.messages`. In this codebase's actual wiring
+			// `previousPlanContext`/`previousTransformContext` are never installed before this
+			// controller (nothing sets `agent.planContext`/`agent.transformContext` first), so
+			// `basePlan.messages` is `request.messages` unchanged and the mark applies directly. If a
+			// future previous hook ever DOES reshape messages, `ProviderRequestContextController.plan`
+			// re-anchors the mark by reference (`frozenPrefixLength`) rather than trusting the raw
+			// index, so a misaligned mark here degrades to under-freezing, never to a corrupted rewrite.
+			const sessionPlan = await this.deps.context.plan(basePlan.messages, request.sentPrefixCount, signal);
 			return {
 				messages: sessionPlan.messages,
 				transientMessages: [...(basePlan.transientMessages ?? []), ...(sessionPlan.transientMessages ?? [])],
@@ -137,8 +152,37 @@ export class ProviderRequestRuntimeController {
 				},
 			};
 		};
+		// `transformContext` carries no `attempt`/`sentPrefixCount` of its own -- it is a strictly
+		// narrower legacy hook (messages in, messages out) that this controller keeps wired only so
+		// a config built WITHOUT `planContext` still degrades to something reasonable. INVESTIGATED,
+		// not defaulted for convenience: `sentPrefixCount: 0` is not a placeholder here, it is the
+		// only value that can be correct at this call site, for two independent reasons traced
+		// through both packages (cross-package planContext routing fix).
+		//
+		// 1. This call is unreachable from any live production path today. `buildContextPlan`
+		//    (`provider-request-planner.ts`) only falls back to `config.transformContext` when
+		//    `config.planContext` is unset; `Agent.createLoopConfig()` (`agent.ts`) always copies
+		//    BOTH `this.planContext` and `this.transformContext` from the same instance, and this
+		//    controller always installs both together (`install()` above) -- so the foreground loop
+		//    never takes the fallback branch. No isolated/child completion threads this installed
+		//    `transformContext` through either (the only other consumer, `reflection-controller.ts`'s
+		//    `runIsolatedCompletion`, uses a caller-supplied `opts.transformContext`, never this one,
+		//    and never sets `planContext` on that config at all). Confirmed by grepping every
+		//    `.transformContext(` call in both packages.
+		// 2. Even if a future caller invoked `agent.transformContext(...)` directly, this class has
+		//    no way to answer "how much of `messages` has already gone out on a provider request":
+		//    that count lives in `Agent`'s private `loopContinuationState.providerRequestPrefixState`
+		//    (`agent.ts`), reset to a fresh zero at the start of every `runPromptMessages()` call and
+		//    never exposed outside the class. There is no cross-package accessor for it.
+		//
+		// `0` is also the SAFE direction to be wrong in if this ever does become reachable: per
+		// `AgentContextPlanRequest`'s own contract, a too-low count only makes the sanitizer more
+		// conservative about what it may rewrite (a cache-cost regression), never licenses it to
+		// touch bytes that were genuinely already sent (which a too-HIGH count could do). If this
+		// hook is ever wired to a real caller, that caller must supply its own tracked
+		// `sentPrefixCount` -- this wrapper cannot synthesize one.
 		this.installedTransformContext = async (messages, signal) => {
-			const plan = await this.installedPlanContext?.({ messages, attempt: 0 }, signal);
+			const plan = await this.installedPlanContext?.({ messages, attempt: 0, sentPrefixCount: 0 }, signal);
 			if (!plan) return messages;
 			try {
 				return [...plan.messages, ...(plan.transientMessages ?? [])];

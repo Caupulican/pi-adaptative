@@ -44,6 +44,25 @@ function ledgerOf(context: Context | undefined): string {
 	return text.startsWith("MANDATORY TOOL FAILURE RECOVERY") ? text : "";
 }
 
+/**
+ * The verification-obligation instruction reaches the model as a trailing transient message, never
+ * in the system prompt (see agent-loop.ts's `trailingInstruction` composition): the active id set
+ * changes as obligations appear and resolve, and system-prompt text sits at byte zero of the
+ * request, where a change invalidates the whole cached prefix. Empty string means no obligation
+ * instruction was projected this request.
+ */
+function obligationInstructionOf(context: Context | undefined): string {
+	for (const message of context?.messages ?? []) {
+		if (message.role !== "user") continue;
+		const text =
+			typeof message.content === "string"
+				? message.content
+				: message.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+		if (text.startsWith("ACTIVE VERIFICATION FAILURES")) return text;
+	}
+	return "";
+}
+
 function createUsage() {
 	return {
 		input: 0,
@@ -1625,7 +1644,7 @@ describe("agentLoop with AgentMessage", () => {
 			{ model: createModel(), convertToLlm: identityConverter },
 			undefined,
 			(_model, providerContext) => {
-				providerPrompts.push(providerContext.systemPrompt ?? "");
+				providerPrompts.push(obligationInstructionOf(providerContext));
 				const response = new MockAssistantStream();
 				const turn = providerCalls++;
 				queueMicrotask(() => {
@@ -1747,7 +1766,7 @@ describe("agentLoop with AgentMessage", () => {
 			{ model: createModel(), convertToLlm: identityConverter },
 			undefined,
 			(_model, providerContext) => {
-				providerPrompts.push(providerContext.systemPrompt ?? "");
+				providerPrompts.push(obligationInstructionOf(providerContext));
 				const response = new MockAssistantStream();
 				const turn = providerCalls++;
 				queueMicrotask(() => {
@@ -1811,7 +1830,7 @@ describe("agentLoop with AgentMessage", () => {
 			{ model: createModel(), convertToLlm: identityConverter },
 			undefined,
 			(_model, providerContext) => {
-				providerPrompts.push(providerContext.systemPrompt ?? "");
+				providerPrompts.push(obligationInstructionOf(providerContext));
 				const response = new MockAssistantStream();
 				const turn = providerCalls++;
 				queueMicrotask(() => {
@@ -1940,7 +1959,7 @@ describe("agentLoop with AgentMessage", () => {
 			{ model: createModel(), convertToLlm: identityConverter },
 			undefined,
 			(_model, providerContext) => {
-				providerPrompts.push(providerContext.systemPrompt ?? "");
+				providerPrompts.push(obligationInstructionOf(providerContext));
 				const response = new MockAssistantStream();
 				const turn = providerCalls++;
 				queueMicrotask(() => {
@@ -1990,7 +2009,7 @@ describe("agentLoop with AgentMessage", () => {
 			},
 			undefined,
 			(_model, providerContext) => {
-				providerPrompts.push(providerContext.systemPrompt ?? "");
+				providerPrompts.push(obligationInstructionOf(providerContext));
 				const response = new MockAssistantStream();
 				const turn = providerCalls++;
 				queueMicrotask(() => {
@@ -2093,7 +2112,7 @@ describe("agentLoop with AgentMessage", () => {
 			{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 2 },
 			undefined,
 			(_model, providerContext) => {
-				providerPrompts.push(providerContext.systemPrompt ?? "");
+				providerPrompts.push(obligationInstructionOf(providerContext));
 				const response = new MockAssistantStream();
 				const turn = providerCalls++;
 				queueMicrotask(() => {

@@ -178,6 +178,132 @@ describe("PathAliasRuntime", () => {
 		expect(ids).toContain("p/2/coding-agent/src/foo.ts");
 		runtime.close();
 	});
+
+	describe("sync memoization", () => {
+		it("returns the exact same result object on a repeated call with the same message-list identity", () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-memo-"));
+			tempDirs.push(dir);
+			const runtime = new PathAliasRuntime(
+				() => "/repo",
+				() => join(dir, "runtime.sqlite"),
+				() => 1,
+			);
+			const messages = [
+				toolResult("packages/coding-agent/src/foo.ts", 1),
+				toolResult("packages/coding-agent/test/foo.ts", 2),
+			];
+
+			const first = runtime.sync(messages);
+			const second = runtime.sync(messages);
+
+			// Reference-identical, not just deep-equal: proves the second call short-circuited on the
+			// memo instead of repeating the full transcript hash-and-rewrite pass.
+			expect(second).toBe(first);
+
+			// And the content itself matches a fresh, unmemoized runtime computing the same input in a
+			// single call -- the memo must never change the answer, only how often it's computed.
+			const freshDir = mkdtempSync(join(tmpdir(), "pi-path-alias-memo-fresh-"));
+			tempDirs.push(freshDir);
+			const fresh = new PathAliasRuntime(
+				() => "/repo",
+				() => join(freshDir, "runtime.sqlite"),
+				() => 1,
+			);
+			const unmemoized = fresh.sync(messages);
+			expect(second.legend).toBe(unmemoized.legend);
+			expect(second.messages).toEqual(unmemoized.messages);
+			runtime.close();
+			fresh.close();
+		});
+
+		it("misses the cache and recomputes correctly when the transcript grows", () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-memo-grow-"));
+			tempDirs.push(dir);
+			const runtime = new PathAliasRuntime(
+				() => "/repo",
+				() => join(dir, "runtime.sqlite"),
+				() => 1,
+			);
+			const base = [toolResult("packages/coding-agent/src/foo.ts", 1)];
+			const grown = [...base, toolResult("packages/coding-agent/src/bar.ts", 2)];
+
+			const firstResult = runtime.sync(base);
+			const grownResult = runtime.sync(grown);
+
+			// A genuinely different transcript must be a cache miss, not a stale hit.
+			expect(grownResult).not.toBe(firstResult);
+			expect(grownResult.legend).toContain("p/foo.ts=packages/coding-agent/src/foo.ts");
+			expect(grownResult.legend).toContain("p/bar.ts=packages/coding-agent/src/bar.ts");
+
+			// Matches a fresh, unmemoized runtime computing the grown transcript directly in one call.
+			const freshDir = mkdtempSync(join(tmpdir(), "pi-path-alias-memo-grow-fresh-"));
+			tempDirs.push(freshDir);
+			const fresh = new PathAliasRuntime(
+				() => "/repo",
+				() => join(freshDir, "runtime.sqlite"),
+				() => 1,
+			);
+			const direct = fresh.sync(grown);
+			expect(grownResult.legend).toBe(direct.legend);
+			expect(grownResult.messages).toEqual(direct.messages);
+			runtime.close();
+			fresh.close();
+		});
+
+		it("mints a new path correctly mid-session after an earlier cache hit", () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-memo-new-path-"));
+			tempDirs.push(dir);
+			const runtime = new PathAliasRuntime(
+				() => "/repo",
+				() => join(dir, "runtime.sqlite"),
+				() => 1,
+			);
+			const base = [toolResult("packages/coding-agent/src/foo.ts", 1)];
+
+			runtime.sync(base);
+			runtime.sync(base); // cache hit: same array identity, nothing changed
+
+			const withNewPath = [...base, toolResult("packages/coding-agent/src/newly-added.ts", 2)];
+			const result = runtime.sync(withNewPath);
+
+			expect(result.legend).toContain("p/foo.ts=packages/coding-agent/src/foo.ts");
+			expect(result.legend).toContain("p/newly-added.ts=packages/coding-agent/src/newly-added.ts");
+			expect(runtime.peekTable().entries.map((entry) => entry.path)).toContain(
+				"packages/coding-agent/src/newly-added.ts",
+			);
+			runtime.close();
+		});
+
+		it("recomputes instead of returning a stale result when the caller mutates the array in place", () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-memo-mutate-"));
+			tempDirs.push(dir);
+			const runtime = new PathAliasRuntime(
+				() => "/repo",
+				() => join(dir, "runtime.sqlite"),
+				() => 1,
+			);
+			const messages = [toolResult("packages/coding-agent/src/foo.ts", 1)];
+
+			const first = runtime.sync(messages);
+			expect(first.legend).toContain("p/foo.ts=packages/coding-agent/src/foo.ts");
+
+			// Mutate the SAME array object in place: same identity, different contents. Real callers do
+			// this to preserve array identity across a replan (`adoptReplannedMessages` in
+			// provider-request-planner.ts: `target.messages.length = 0` then re-push).
+			messages.length = 0;
+			messages.push(toolResult("packages/coding-agent/src/bar.ts", 2));
+
+			const second = runtime.sync(messages);
+
+			// Must NOT be the stale first-call result: if the memo stored the live array instead of a
+			// snapshot, `a === b` would compare the mutated array against itself and hand back an
+			// answer computed from the pre-mutation content -- which never saw "bar.ts" at all.
+			expect(second).not.toBe(first);
+			expect(second.legend).toContain("p/bar.ts=packages/coding-agent/src/bar.ts");
+			expect(runtime.peekTable().entries.map((entry) => entry.path)).toContain("packages/coding-agent/src/bar.ts");
+			runtime.close();
+		});
+	});
 });
 
 describe("loadPathAliasTableReadOnly", () => {

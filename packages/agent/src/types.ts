@@ -30,10 +30,101 @@ export type StreamFn = (
 	...args: Parameters<typeof streamSimple>
 ) => ReturnType<typeof streamSimple> | Promise<ReturnType<typeof streamSimple>>;
 
+/**
+ * D1 observability (turn-economics remediation): stream-timing fields agent-core stamps onto the
+ * FINAL assistant message of one provider request (see `streamAssistantResponse` in
+ * agent-loop.ts), never onto a host-synthesized message that never touched a provider stream.
+ *
+ * Declaration merging, not an edit to `@caupulican/pi-ai` (agent-core does not own that package):
+ * these fields become part of `AssistantMessage` everywhere it is imported from - including
+ * `packages/coding-agent`, which persists assistant messages verbatim into the session log - with
+ * zero code changes required there. Mirrors, in the opposite direction, how `messages.ts` merges
+ * new shapes into this package's own `CustomAgentMessages`.
+ *
+ * Both fields are optional so every existing construction of an AssistantMessage stays valid.
+ */
+declare module "@caupulican/pi-ai/types" {
+	interface AssistantMessage {
+		/**
+		 * Epoch milliseconds when the first event carrying actual generated content arrived: a
+		 * `text_delta`, `thinking_delta`, or `toolcall_delta` stream event specifically - never a
+		 * `_start`/`_end` framing event, which can arrive with no new bytes yet. This is the metric's
+		 * definition; picking a different event type changes what "first token" means.
+		 *
+		 * Absent, never `0` or a copy of `streamEndAt`, when the stream never produced one - an
+		 * immediate error, or an abort before any content streamed.
+		 */
+		firstTokenAt?: number;
+		/**
+		 * Epoch milliseconds when the provider stream was exhausted - its `done` or `error` terminal
+		 * event was observed - independent of when this message was later transformed or persisted.
+		 */
+		streamEndAt?: number;
+	}
+}
+
 declare const AGENT_REQUEST_ID: unique symbol;
 
 /** Opaque identity shared by one accepted provider request and its tool executions. */
 export type AgentRequestId = string & { readonly [AGENT_REQUEST_ID]: true };
+
+/**
+ * Holder for TWO DELIBERATELY DIFFERENT "already sent to the provider" high-water marks (see
+ * `provider-request-planner.ts`). A plain `WeakMap` keyed by config object identity loses either
+ * the instant the agent loop clones `config` for a per-turn model/reasoning change - `agent-loop.ts`
+ * replaces `config` with a new object whenever `prepareNextTurn` returns a snapshot, which a host
+ * may do on every turn. Threading one shared holder object through every clone
+ * (`{...config, providerRequestPrefixState}` copies the reference, never the value) keeps both
+ * marks alive across those clones.
+ *
+ * DO NOT COLLAPSE THESE INTO ONE VALUE. Each protects a different consumer against a different
+ * failure mode, and each consumer needs a different reset lifetime; unifying them recreates
+ * whichever defect the unified value's reset behavior doesn't fit:
+ *
+ * - `sanitizerSentPrefixCount` is SESSION-scoped: it persists across every top-level prompt for the
+ *   life of the owning `Agent` instance, and only ever grows (see `Agent.resetSanitizerPrefixHorizon`
+ *   for the one case it must drop back to zero). It confines `sanitizeToolFailureContext`'s
+ *   duplicate-erasure to history the provider has genuinely never seen. The provider's own prompt
+ *   cache is keyed by SESSION id, not by top-level prompt (`prompt_cache_key`,
+ *   `openai-codex-responses.ts`), so nothing about a new user prompt makes previously-sent bytes
+ *   un-sent - rewriting bytes the provider has already been sent is never acceptable, at any point
+ *   in a session. Making this run-scoped (resetting it every prompt, like `sentPrefixCount` below)
+ *   re-arms the exact defect the "already sent" mark exists to prevent, once per user turn instead
+ *   of once per process - measured live, this was silently happening on every prompt after the
+ *   first in an ordinary multi-turn conversation.
+ *
+ * - `sentPrefixCount` is RUN-scoped: it resets every top-level prompt (unchanged from its original
+ *   behavior). It is the pack-freeze horizon handed to a host through
+ *   `AgentContextPlanRequest.sentPrefixCount`, which a context-GC packer uses to decide what it must
+ *   not rewrite. A host's packing legitimately must rewrite old, already-sent content eventually -
+ *   you cannot both pack a message and keep it provider-cached, so the correct policy is to
+ *   invalidate rarely and in large strides, not never. Measured: within one long run this mark
+ *   outgrows the packer's `recentStart` (which trails the transcript by a constant
+ *   `preserveRecentMessages`), so packing goes to zero for the rest of that run - survivable only
+ *   because this mark resets each prompt and packing resumes. Making this session-scoped (matching
+ *   `sanitizerSentPrefixCount` above) would freeze packing PERMANENTLY within a session: context
+ *   grows without bound and compaction fires more often, trading the cache defect above for a much
+ *   more expensive unbounded-context defect.
+ *
+ * Whoever reads this next will be tempted to "simplify" it into one field. Resist that: it is
+ * cheaper to keep two clearly-named numbers than to re-debug either defect this split prevents.
+ */
+export interface ProviderRequestPrefixState {
+	/**
+	 * RUN-scoped pack-freeze horizon (resets every top-level prompt). Feeds
+	 * `AgentContextPlanRequest.sentPrefixCount` and the disturbance detector in
+	 * `provider-request-planner.ts` - both validate a host's context-GC packing against exactly this
+	 * value, so it must keep resetting per prompt for packing to ever resume. See the interface
+	 * doc comment above before changing this field's lifetime.
+	 */
+	sentPrefixCount: number;
+	/**
+	 * SESSION-scoped sanitizer horizon (persists across prompts; see the interface doc comment
+	 * above). Feeds `sanitizeToolFailureContext`'s duplicate-erasure clamp only - never the host-
+	 * facing `AgentContextPlanRequest.sentPrefixCount`.
+	 */
+	sanitizerSentPrefixCount: number;
+}
 
 /**
  * Configuration for how tool calls from a single assistant message are executed.
@@ -220,6 +311,25 @@ export interface AgentContextPlanRequest {
 	messages: AgentMessage[];
 	/** Zero-based admission generation; freshness-only retries repeat the same value. */
 	attempt: number;
+	/**
+	 * How many leading messages of `sourceContext.messages` - the durable history for this admission
+	 * attempt, indexed BEFORE `sanitizeToolFailureContext` ran and before this plan's `messages`
+	 * above - have already gone out on a previous accepted provider request in this run.
+	 *
+	 * Contract a host-supplied `planContext` must honor: messages below this index have already been
+	 * sent to the provider and must never be rewritten, reordered, or removed - a compaction/GC pass
+	 * may only ever append after this index, or leave the prefix below it untouched. Rewriting
+	 * anything below it invalidates the provider's cached prefix for the whole conversation from that
+	 * point on.
+	 *
+	 * Always a valid index into `sourceContext.messages` for the CURRENT admission attempt (clamped
+	 * to its length, so it can never exceed the message count it indexes into) and monotonically
+	 * non-decreasing across a run. It is also a valid index into this request's `messages` above for
+	 * the prefix the two arrays share: the sanitizer that produces `messages` from
+	 * `sourceContext.messages` never erases anything below this same mark, so their first
+	 * `sentPrefixCount` entries are identical. `0` means nothing has been sent yet.
+	 */
+	sentPrefixCount: number;
 }
 
 /**
@@ -246,6 +356,20 @@ export interface AgentContextPlan {
 	commit?: () => void;
 	/** Release request-local planning resources when a plan is not accepted. */
 	discard?: () => void;
+}
+
+/**
+ * Evidence that a host-owned `planContext`/`transformContext` result rewrote, reordered, or removed
+ * a message the planner had already marked as sent to the provider (see
+ * `AgentContextPlanRequest.sentPrefixCount`). See `AgentLoopConfig.onSentPrefixDisturbance`.
+ */
+export interface SentPrefixDisturbanceInfo {
+	/** How many messages at or above index 0 and below `sentPrefixCount` were disturbed. */
+	disturbedCount: number;
+	/** Zero-based index, into the plan's own input `messages`, of the first disturbed message. */
+	firstDisturbedIndex: number;
+	/** The `sentPrefixCount` this admission attempt was computed against. */
+	sentPrefixCount: number;
 }
 
 /** Provider-ready request inspected after full materialization and immediately before transport. */
@@ -296,6 +420,17 @@ export const DEFAULT_MAX_PROVIDER_TURNS = 0;
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
+
+	/**
+	 * Run-scoped storage for the provider-request prefix high-water mark; see
+	 * {@link ProviderRequestPrefixState}. The agent loop creates and injects this once per run and
+	 * carries it forward across every internal config clone. Direct one-shot callers (e.g.
+	 * `startAgentProviderRequest`, or a test that never goes through `agentLoop`) normally omit it -
+	 * a single request has no prior sent prefix, and a fallback keyed by config identity supplies
+	 * the correct default of "nothing sent yet". Hosts driving the loop should leave this unset and
+	 * let the loop manage it.
+	 */
+	providerRequestPrefixState?: ProviderRequestPrefixState;
 
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
@@ -352,6 +487,29 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * again after compaction or invalidation; only the accepted plan's `commit` is invoked.
 	 */
 	planContext?: (request: AgentContextPlanRequest, signal?: AbortSignal) => Promise<AgentContextPlan>;
+
+	/**
+	 * Observability hook fired when the `messages` returned by `planContext` OR `transformContext`
+	 * rewrites, reorders, or removes a message at or below `sentPrefixCount` (see
+	 * `AgentContextPlanRequest.sentPrefixCount`) - i.e. the host's own transform violated the
+	 * contract it was handed. Detection only: never blocks, replans, or otherwise changes the
+	 * request: the planner sends whatever the host returned either way. Fires on every admission
+	 * attempt that disturbs the prefix, including ones later discarded as stale, so a host sees the
+	 * full extent of what its own transform did.
+	 *
+	 * This host's own compaction never fires it - but NOT because compaction respects the boundary
+	 * this hook scans. Compaction summarizes the OLDEST messages, which sit at or below
+	 * `sentPrefixCount` (everything already sent starts from the beginning of the conversation); a
+	 * compaction pass running INSIDE `planContext`/`transformContext` would trip this on essentially
+	 * every pass. It stays silent only because compaction does not run there at all: it runs through
+	 * `admitProviderRequest` returning `{action: "replan"}`, entirely outside the two functions this
+	 * hook observes. The loop then re-enters with the new, shorter `sourceContext`, and
+	 * `sentPrefixCount` is re-clamped against that shorter array before this comparison ever runs
+	 * again - compaction sits on the OTHER SIDE of the boundary this hook scans, not inside it,
+	 * obeying it. If compaction is ever moved inside the plan path, this hook WILL fire on it; the
+	 * fix then is to re-clamp the mark before scanning, not to weaken this hook. Must not throw.
+	 */
+	onSentPrefixDisturbance?: (info: SentPrefixDisturbanceInfo) => void;
 
 	/**
 	 * Host-owned admission gate over the complete provider-visible materialization. It may accept the
@@ -834,6 +992,14 @@ export interface AgentContext {
 	messages: AgentMessage[];
 	/** Tools available for this run. */
 	tools?: AgentTool<any>[];
+	/**
+	 * Request-local instruction delivered at the same trailing transient position the failure
+	 * ledger uses (see `provider-request-planner.ts`), never composed into `systemPrompt`. Content
+	 * placed here can change turn to turn - e.g. verification obligations appearing and resolving -
+	 * without invalidating the provider's cached prefix, because it never sits at byte zero of the
+	 * request.
+	 */
+	trailingInstruction?: string;
 }
 
 /**

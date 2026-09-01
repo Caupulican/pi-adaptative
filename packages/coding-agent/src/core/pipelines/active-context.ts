@@ -27,6 +27,13 @@ export function createActivePipelineContextMessage(args: {
 	options: DiscoverPipelineOptions;
 	snapshot?: PipelineRun;
 	onError(message: string): void;
+	/**
+	 * ISO instant to stamp the message with — the caller's turn-owning timestamp, not a fresh
+	 * `Date.now()` read here. This message is built once per turn and then persists verbatim in
+	 * durable history, so anchoring it to the triggering turn keeps it a real, meaningful instant
+	 * without a second independent wall-clock read racing the rest of the turn's messages.
+	 */
+	timestamp: string;
 }): ReturnType<typeof createCustomMessage> | undefined {
 	try {
 		const context = resolveActivePipelineContext(args.options, args.snapshot);
@@ -36,7 +43,7 @@ export function createActivePipelineContextMessage(args: {
 					context.text,
 					false,
 					{ revision: context.run.revision },
-					new Date().toISOString(),
+					args.timestamp,
 				)
 			: undefined;
 	} catch (error) {

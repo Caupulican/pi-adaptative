@@ -1,6 +1,7 @@
 import { type BackgroundToolTaskRef, collectCitedRunningToolTaskIds } from "../background-tool-task-controller.ts";
 import { taskStepReferencesRequirement } from "../tasks/task-projection.ts";
 import {
+	formatRequirementsLedgerLine,
 	getTrustedRequirementEvidence,
 	getUnprovenGoalRequirementIds,
 	isTrustedGoalEvidence,
@@ -441,26 +442,8 @@ export function summarizeGoalState(
 	options?: { action?: GoalAction; openTaskSteps?: readonly OpenTaskStepRef[] },
 ): string {
 	const lines = [formatGoalRecord(projectGoalRecord(state))];
-	if (state.requirements.length > 0) {
-		const openIds = state.requirements
-			.filter((requirement) => requirement.status === "open")
-			.slice(0, 20)
-			.map((requirement) => requirement.id);
-		const unprovenIds = state.requirements
-			.filter(
-				(requirement) =>
-					requirement.status === "satisfied" && getTrustedRequirementEvidence(state, requirement).length === 0,
-			)
-			.slice(0, 20)
-			.map((requirement) => requirement.id);
-		const pending = [
-			...(openIds.length > 0 ? [`open: ${openIds.join(", ")}`] : []),
-			...(unprovenIds.length > 0 ? [`unproven: ${unprovenIds.join(", ")}`] : []),
-		];
-		lines.push(
-			`Legacy ledger: ${state.requirements.length} requirements, ${state.evidence.length} evidence${pending.length > 0 ? `; ${pending.join("; ")}` : ""}.`,
-		);
-	}
+	const ledgerLine = formatRequirementsLedgerLine(state);
+	if (ledgerLine) lines.push(ledgerLine);
 	if (options?.action) {
 		lines.push(...buildGoalTaskCrossVisibilityNudges(options.action, state, options.openTaskSteps));
 	}

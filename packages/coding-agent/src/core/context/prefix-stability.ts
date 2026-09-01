@@ -51,3 +51,30 @@ export function resolveRecentBoundaryStride(preserveRecent: number, configured?:
 	const requested = Number.isFinite(configured) && configured !== undefined ? Math.floor(configured) : window / 2;
 	return Math.min(Math.max(1, Math.floor(requested)), Math.max(1, window));
 }
+
+/**
+ * Translate an "already sent" mark (`sentPrefixCount`, an index into `source` — the messages a
+ * request-planning pass started from) into the equivalent boundary in `target` (the same
+ * conversation after `transformBase`/extension hooks/goal-context injection have run, right before
+ * a packing pass sees it). The two arrays are expected to be position-for-position IDENTICAL below
+ * the mark — nothing before it should ever be touched by any pass — so this walks both from the
+ * front by reference and stops at the first divergence.
+ *
+ * In the well-behaved case (no transform disturbs already-sent history) this reproduces
+ * `sentPrefixCount` exactly. If some transform — an extension hook is arbitrary code this module
+ * cannot audit — inserts, removes, or reorders something within the marked prefix, the result
+ * degrades to protecting only the untouched leading run that provably survived, never more: it is
+ * always safe to under-freeze (packing something that turns out to still be needed just costs cache
+ * efficiency) and never safe to over-freeze past a point this function cannot vouch for.
+ */
+export function frozenPrefixLength(
+	source: readonly unknown[],
+	sentPrefixCount: number,
+	target: readonly unknown[],
+): number {
+	const safeSentPrefixCount = Number.isFinite(sentPrefixCount) ? Math.floor(sentPrefixCount) : 0;
+	const bound = Math.min(Math.max(0, safeSentPrefixCount), source.length, target.length);
+	let index = 0;
+	while (index < bound && source[index] === target[index]) index++;
+	return index;
+}

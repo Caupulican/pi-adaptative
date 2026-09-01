@@ -366,7 +366,9 @@ describe("task_steps tool", () => {
 	});
 
 	it("declares native orchestration guidelines", () => {
-		expect(createHarness().tool.executionMode).toBe("sequential");
+		// No barrier: see the removal comment at the `executionMode` declaration site in
+		// task-steps.ts, and task-steps-tool-concurrency.test.ts for the correctness proof.
+		expect(createHarness().tool.executionMode).toBeUndefined();
 		expect(harnessGuidelines(createHarness().tool)).toContain("one in_progress step");
 		expect(harnessGuidelines(createHarness().tool)).toContain("first open step");
 		expect(harnessGuidelines(createHarness().tool)).toContain("Before final");

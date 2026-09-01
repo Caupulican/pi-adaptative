@@ -191,7 +191,7 @@ describe("path alias legend placement", () => {
 			applyPathAliases: (messages) => ({ messages, legend: "PATH ALIASES\np/alpha.ts=src/core/alpha.ts" }),
 		});
 
-		const plan = await controller.plan([user("hi", 1)]);
+		const plan = await controller.plan([user("hi", 1)], 0);
 
 		expect(plan.transientSystemPrompt).toBeUndefined();
 		expect(plan.transientMessages?.at(-1)).toMatchObject({

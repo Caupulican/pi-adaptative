@@ -95,7 +95,11 @@ describe("provider-bound runtime text budgets", () => {
 		];
 		for (const goalCase of goals) {
 			const goal = formatCompactGoalContext(goalCase.state, false);
-			expect(goal.length - goalCase.objective.length).toBeLessThanOrEqual(400);
+			// Budget raised from 400 (B1 turn-economics fix): formatCompactGoalContext now also
+			// projects tokensUsed/timeUsedSeconds/tokensRemaining, ~80 chars this request pays so a
+			// get_goal round trip (median 5.7s, ~3,642 occurrences measured) does not have to. Still
+			// bounded, not open-ended -- this guards against unrelated future growth.
+			expect(goal.length - goalCase.objective.length).toBeLessThanOrEqual(450);
 			expect(goal).not.toContain("<active_goal");
 		}
 	});

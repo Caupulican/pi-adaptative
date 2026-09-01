@@ -52,7 +52,6 @@ import { BackgroundLaneController } from "./background-lane-controller.ts";
 import {
 	BACKGROUND_TOOL_TASK_CUSTOM_TYPE,
 	BackgroundToolTaskController,
-	DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS,
 	loadBackgroundToolTaskRecordsNewestFirst,
 } from "./background-tool-task-controller.ts";
 import { BashExecutionController } from "./bash-execution-controller.ts";
@@ -760,7 +759,8 @@ export class AgentSession {
 			runContextAudit: (messages) => this._runContextAudit(messages),
 			runPromptPolicyPlanning: (report) => this._runPromptPolicyPlanning(report),
 			runMemoryRetrieval: (messages) => this._runMemoryRetrieval(messages),
-			applyContextGc: (messages, writePayloads) => this._applyContextGc(messages, writePayloads),
+			applyContextGc: (messages, writePayloads, frozenBelow) =>
+				this._applyContextGc(messages, writePayloads, frozenBelow),
 			correlatePromptPolicyWithContextGc: (report) => this._correlatePromptPolicyWithContextGc(report),
 			runPromptEnforcement: (messages, report) => this._runPromptEnforcement(messages, report),
 			enqueueRelevanceCuration: (messages, report) => this._enqueueRelevanceCuration(messages, report),
@@ -1517,7 +1517,11 @@ export class AgentSession {
 
 	getContextCompositionReport(): ContextCompositionReport {
 		const rawMessages = this.agent.state.messages.slice();
-		const gcResult = this._applyContextGc(rawMessages, false);
+		// Dashboard/diagnostic view, not a live provider request: the send-time `sentPrefixCount`
+		// mark lives inside the agent-core loop for the duration of one active plan() call and is
+		// not readable from here, so this shows full packing potential (0 = no freeze) rather than a
+		// stale or guessed mark.
+		const gcResult = this._applyContextGc(rawMessages, false, 0);
 		const requestMessages = gcResult.messages;
 		const requestSystemPrompt = this._skillVault.previewRequestSystemPrompt(this.systemPrompt);
 		const extensions = this._resourceLoader.getExtensions().extensions;
@@ -1664,8 +1668,10 @@ export class AgentSession {
 	private _applyContextGc(
 		messages: AgentMessage[],
 		writePayloads: boolean,
+		/** Already-sent boundary packing must not rewrite below. See {@link ContextPipeline.applyContextGc}. */
+		frozenBelow: number,
 	): { messages: AgentMessage[]; report: ContextGcReport } {
-		return this._pipeline.applyContextGc(messages, writePayloads);
+		return this._pipeline.applyContextGc(messages, writePayloads, frozenBelow);
 	}
 
 	/** Read-only inspection of the latest context-gc report (delegates to {@link ContextPipeline.getContextGcReport}). */
@@ -1676,7 +1682,7 @@ export class AgentSession {
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = this._toolGate.beforeToolCall;
 		this.agent.afterToolCall = this._toolGate.afterToolCall;
-		this.agent.backgroundToolCallAfterMs = DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS;
+		this.agent.backgroundToolCallAfterMs = this.settingsManager.getBackgroundToolSettings().callAfterMs;
 		this.agent.handoffToolCall = (context) =>
 			this.getActiveToolNames().includes("tool_task") ? this._backgroundToolTasks.handoff(context) : undefined;
 		this.agent.subscribeToolCallHandoffRequest = (toolCallId, request) =>
@@ -2731,6 +2737,13 @@ export class AgentSession {
 			// Build messages array (recall page, then custom message if any, then user message)
 			messages = [];
 
+			// Every custom context message built below anchors to this same turn-owning timestamp
+			// instead of its own fresh Date.now()/toISOString() read. Each is built once per turn and
+			// then persists verbatim in durable history for every later request, so a fresh wall-clock
+			// read here would just be noise; anchoring to the triggering message's own timestamp keeps
+			// it a real, meaningful instant (this turn's start) without inventing a second one.
+			const turnTimestamp = new Date(promptMessage.timestamp).toISOString();
+
 			// Cross-session similarity recall. For a substantive turn, ask the memory providers to
 			// prefetch a relevant <memory_context> page from past sessions and prepend it as data ahead of
 			// the user message. Best-effort and gated: trivial turns are skipped, and providers return ""
@@ -2745,9 +2758,7 @@ export class AgentSession {
 						// "memory_context"), NOT a persisted user message: the semantic-memory context-GC packs
 						// stale recall pages so they don't accumulate forever, and the transcript index
 						// only re-reads user/assistant text so recalled snippets can't recirculate.
-						messages.push(
-							createCustomMessage("memory_context", recall, false, undefined, new Date().toISOString()),
-						);
+						messages.push(createCustomMessage("memory_context", recall, false, undefined, turnTimestamp));
 					}
 				} catch {
 					// recall must never break a turn
@@ -2777,7 +2788,7 @@ export class AgentSession {
 						taskStepsContext,
 						false,
 						{ revision: taskStepsState.revision },
-						new Date().toISOString(),
+						turnTimestamp,
 					),
 				);
 			}
@@ -2788,6 +2799,7 @@ export class AgentSession {
 						options: { agentPipelinesDir: resourceDir("pipelines", this._agentDir), cwd: this._cwd },
 						snapshot: this.getPipelineRunSnapshot(),
 						onError: (message) => this._emit({ type: "warning", message }),
+						timestamp: turnTimestamp,
 					});
 			if (pipelineContextMessage) messages.push(pipelineContextMessage);
 

@@ -243,6 +243,17 @@ export class Agent {
 	private activeRun?: ActiveRun;
 	/** No-progress gates shared only by host continuations of the current logical prompt. */
 	private loopContinuationState: AgentLoopContinuationState | undefined;
+	/**
+	 * SESSION-scoped "already sent" mark for `sanitizeToolFailureContext` (see
+	 * `ProviderRequestPrefixState` in types.ts - do not merge this back with the RUN-scoped
+	 * `sentPrefixCount` that `loopContinuationState` resets every prompt; that recreates the exact
+	 * defect this field exists to prevent). Persists across every `prompt()`/`continue()` call for
+	 * the life of this `Agent` instance, seeding each new `AgentLoopContinuationState` instead of
+	 * letting it reset to zero, and is written back from the loop's own copy after each run. Reset
+	 * only by `reset()` and `resetSanitizerPrefixHorizon()` - see the latter's doc comment for when
+	 * a host must call it.
+	 */
+	private sanitizerSentPrefixCount = 0;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
@@ -405,8 +416,29 @@ export class Agent {
 		this._state.pendingToolCalls = new Set<string>();
 		this._state.errorMessage = undefined;
 		this.loopContinuationState = undefined;
+		this.resetSanitizerPrefixHorizon();
 		this.clearFollowUpQueue();
 		this.clearSteeringQueue();
+	}
+
+	/**
+	 * Drop the SESSION-scoped sanitizer mark back to zero (see `ProviderRequestPrefixState` in
+	 * types.ts and the field doc comment on `sanitizerSentPrefixCount`). `reset()` calls this
+	 * automatically, since it already clears `state.messages` to `[]` - after that, index 0 is
+	 * correctly "nothing sent yet" for the new, empty transcript.
+	 *
+	 * A host MUST also call this whenever it replaces `state.messages` with a DIFFERENT lineage
+	 * than the one the mark was tracking - a session reload, a fork, or a branch switch - since the
+	 * mark otherwise indexes into a message array that no longer exists. This package does not
+	 * expose a signal for those specific transitions beyond a full `reset()`; a host performing one
+	 * of them without calling this (or `reset()`) leaves the mark pointing at stale history, which
+	 * would incorrectly protect - or incorrectly permit erasing - positions in the new array that
+	 * have no relationship to what was actually sent for it. See the repo-root AGENTS.md entry under
+	 * "Compaction and Long Sessions" for the exact coding-agent call sites this needs wiring into
+	 * (session-tree-navigator.ts, agent-session.ts, sdk.ts) - none of them call this yet.
+	 */
+	resetSanitizerPrefixHorizon(): void {
+		this.sanitizerSentPrefixCount = 0;
 	}
 
 	/** Start a new prompt from text, a single message, or a batch of messages. */
@@ -475,7 +507,10 @@ export class Agent {
 		messages: AgentMessage[],
 		options: { skipInitialSteeringPoll?: boolean } = {},
 	): Promise<void> {
-		const continuationState = createAgentLoopContinuationState();
+		// Seeded from the persistent, SESSION-scoped mark - NOT the zero-arg default, which would
+		// re-arm the sanitizer's dedup-erasure across the whole prior session on every new prompt.
+		// See ProviderRequestPrefixState in types.ts.
+		const continuationState = createAgentLoopContinuationState(this.sanitizerSentPrefixCount);
 		this.loopContinuationState = continuationState;
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoop(
@@ -488,10 +523,12 @@ export class Agent {
 				continuationState,
 			);
 		});
+		this.syncSanitizerPrefixHorizon(continuationState);
 	}
 
 	private async runContinuation(): Promise<void> {
-		const continuationState = this.loopContinuationState ?? createAgentLoopContinuationState();
+		const continuationState =
+			this.loopContinuationState ?? createAgentLoopContinuationState(this.sanitizerSentPrefixCount);
 		this.loopContinuationState = continuationState;
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoopContinue(
@@ -503,6 +540,20 @@ export class Agent {
 				continuationState,
 			);
 		});
+		this.syncSanitizerPrefixHorizon(continuationState);
+	}
+
+	/**
+	 * Copies the loop's own (possibly just-grown) sanitizer mark back onto this persistent field
+	 * after a run, whether that run finished normally, failed, or was aborted -
+	 * `runWithLifecycle` swallows run failures internally and never rethrows, so this always runs.
+	 * `continuationState.providerRequestPrefixState` is the SAME object the loop wrote through
+	 * during the run (see `createAgentLoopContinuationState`), so this only ever reads a value
+	 * already updated in place - it does not recompute anything.
+	 */
+	private syncSanitizerPrefixHorizon(continuationState: AgentLoopContinuationState): void {
+		const updated = continuationState.providerRequestPrefixState?.sanitizerSentPrefixCount;
+		if (updated !== undefined) this.sanitizerSentPrefixCount = updated;
 	}
 
 	private createContextSnapshot(): AgentContext {

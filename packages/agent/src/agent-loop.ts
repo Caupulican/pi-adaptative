@@ -52,6 +52,7 @@ import type {
 	AgentToolCall,
 	AgentToolErrorKind,
 	AgentToolResult,
+	ProviderRequestPrefixState,
 	StreamFn,
 	ToolCallRepairInfo,
 	ToolCallStartContext,
@@ -81,14 +82,38 @@ export interface AgentLoopContinuationState {
 	/** Optional for compatibility with continuation snapshots created before result-aware cycle detection. */
 	stagnantResultWindow?: string[];
 	toolFailureRecoveryGate: ToolFailureRecoveryGate;
+	/**
+	 * Shared holder for the two provider-request prefix high-water marks (see
+	 * {@link ProviderRequestPrefixState} and `provider-request-planner.ts` - do not collapse the two
+	 * marks it carries into one). Optional for compatibility with continuation snapshots created
+	 * before this field existed; `runLoop` creates one on first use and persists it back onto this
+	 * object, so a legacy snapshot degrades to "nothing sent yet" instead of throwing, and every
+	 * later turn on the SAME continuation state (including a host-driven `runAgentLoopContinue`
+	 * reusing it) keeps sharing the one holder.
+	 *
+	 * A fresh `AgentLoopContinuationState` is exactly the run boundary `sentPrefixCount` (the
+	 * pack-freeze mark) is scoped to - `createAgentLoopContinuationState` correctly zeroes it below.
+	 * `sanitizerSentPrefixCount` (the sanitizer mark) is scoped to something LONGER-LIVED than one
+	 * continuation state - see `initialSanitizerSentPrefixCount` below and `Agent.runPromptMessages`,
+	 * which is the only correct place to seed it from a persistent value instead of zero.
+	 */
+	providerRequestPrefixState?: ProviderRequestPrefixState;
 }
 
-export function createAgentLoopContinuationState(): AgentLoopContinuationState {
+/**
+ * @param initialSanitizerSentPrefixCount Starting value for the SESSION-scoped sanitizer mark (see
+ * `ProviderRequestPrefixState` in types.ts). Defaults to 0, correct for any caller with no session
+ * longer-lived than this one continuation state (direct `runAgentLoop`/`runAgentLoopContinue`
+ * callers, tests). `Agent` is the one caller that owns a longer-lived session and must pass its own
+ * persisted value here instead of accepting the default - see `Agent.runPromptMessages`.
+ */
+export function createAgentLoopContinuationState(initialSanitizerSentPrefixCount = 0): AgentLoopContinuationState {
 	return {
 		providerTurns: 0,
 		stallWindow: [],
 		stagnantResultWindow: [],
 		toolFailureRecoveryGate: new ToolFailureRecoveryGate(),
+		providerRequestPrefixState: { sentPrefixCount: 0, sanitizerSentPrefixCount: initialSanitizerSentPrefixCount },
 	};
 }
 
@@ -374,6 +399,16 @@ async function runLoop(
 		stagnantResultWindow = [];
 		continuationState.stagnantResultWindow = stagnantResultWindow;
 	}
+	let providerRequestPrefixState = continuationState.providerRequestPrefixState;
+	if (providerRequestPrefixState === undefined) {
+		providerRequestPrefixState = { sentPrefixCount: 0, sanitizerSentPrefixCount: 0 };
+		continuationState.providerRequestPrefixState = providerRequestPrefixState;
+	}
+	// Inject once, before the first request: every later `config = {...config, ...}` clone below
+	// (the `prepareNextTurn` model/reasoning swap) copies this reference forward unchanged, so the
+	// "already sent" mark in provider-request-planner.ts survives a config clone instead of resetting
+	// to 0 on every turn a host's `prepareNextTurn` touches. See `ProviderRequestPrefixState`.
+	config = { ...config, providerRequestPrefixState };
 	const validationFailureTracker: ToolValidationFailureTracker = new Map();
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
 	let toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
@@ -424,9 +459,13 @@ async function runLoop(
 			// Process pending messages (inject before next assistant response).
 			await processPendingMessages();
 			continuationState.providerTurns++;
+			// Obligation instructions ride the trailing region (see `AgentContext.trailingInstruction`
+			// and `provider-request-planner.ts`), never `systemPrompt`: that set changes as obligations
+			// appear and resolve, and systemPrompt sits at byte zero of the request, where a change
+			// invalidates the provider's cached prefix for the whole conversation.
 			const requestContext: AgentContext = {
 				...currentContext,
-				systemPrompt: verificationObligations.appendSystemPrompt(currentContext.systemPrompt),
+				trailingInstruction: verificationObligations.requestInstruction(),
 			};
 			const response = await streamAssistantResponse(
 				requestContext,
@@ -645,17 +684,16 @@ async function streamToollessClosingTurn(
 	if (providerTurnLimit > 0 && continuationState.providerTurns >= providerTurnLimit) return;
 	continuationState.providerTurns++;
 	await emit({ type: "turn_start" });
+	// Same relocation as the main turn loop above: obligation text (if any) goes to
+	// `trailingInstruction`, never appended into `systemPrompt`. RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT
+	// itself stays in the system prompt - it is host-authored, stable text, and this is always the
+	// last request of the run, so there is no future turn whose cached prefix it could invalidate.
 	const closingContext: AgentContext = {
 		...currentContext,
-		systemPrompt: verificationObligations
-			? verificationObligations.appendSystemPrompt(
-					currentContext.systemPrompt
-						? `${currentContext.systemPrompt}\n\n${RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT}`
-						: RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT,
-				)
-			: currentContext.systemPrompt
-				? `${currentContext.systemPrompt}\n\n${RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT}`
-				: RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT,
+		systemPrompt: currentContext.systemPrompt
+			? `${currentContext.systemPrompt}\n\n${RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT}`
+			: RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT,
+		trailingInstruction: verificationObligations?.requestInstruction(),
 		tools: [],
 	};
 	const response = await streamAssistantResponse(
@@ -733,6 +771,12 @@ async function streamAssistantResponse(
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
 	let abortedForDegeneration = false;
+	/**
+	 * D1 observability (see AssistantMessage.firstTokenAt in types.ts): stamped on the first event
+	 * that carries actual generated content - a `_delta` event specifically, never a `_start`/`_end`
+	 * framing event - and left `undefined` if the stream errors or aborts before one ever arrives.
+	 */
+	let firstTokenAt: number | undefined;
 
 	responseEvents: for await (const event of response.stream) {
 		switch (event.type) {
@@ -752,6 +796,12 @@ async function streamAssistantResponse(
 			case "toolcall_start":
 			case "toolcall_delta":
 			case "toolcall_end":
+				if (
+					firstTokenAt === undefined &&
+					(event.type === "text_delta" || event.type === "thinking_delta" || event.type === "toolcall_delta")
+				) {
+					firstTokenAt = Date.now();
+				}
 				if (partialMessage) {
 					partialMessage = event.partial;
 					context.messages[context.messages.length - 1] = partialMessage;
@@ -777,6 +827,11 @@ async function streamAssistantResponse(
 				break responseEvents;
 		}
 	}
+	// D1 observability (see AssistantMessage.streamEndAt in types.ts): the stream is exhausted the
+	// instant its terminal `done`/`error` event was observed above, not when the message is later
+	// transformed or persisted. Unconditional: every path that reaches here saw a real terminal
+	// event, so this is never fabricated the way a value would be if set before the loop.
+	const streamEndAt = Date.now();
 
 	signal?.removeEventListener("abort", onOuterAbort);
 	const providerMessage = await response.stream.result();
@@ -795,6 +850,14 @@ async function streamAssistantResponse(
 	}
 	const comparisonMessage = finalMessage;
 	finalMessage = collapseDegenerateAssistantMessage(finalMessage, previousAssistant, collapseOptions);
+	// Attached last, after every transform above, so these are never silently dropped by a transform
+	// that constructs a new object without spreading its input (see AssistantMessage.firstTokenAt /
+	// streamEndAt in types.ts).
+	finalMessage = {
+		...finalMessage,
+		...(firstTokenAt !== undefined ? { firstTokenAt } : {}),
+		streamEndAt,
+	};
 	if (addedPartial) {
 		context.messages[context.messages.length - 1] = finalMessage;
 	} else {

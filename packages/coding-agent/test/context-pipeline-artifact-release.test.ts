@@ -63,7 +63,7 @@ describe("ContextPipeline packed artifact release", () => {
 			{ role: "user", content: [{ type: "text", text: "current" }], timestamp: 1 },
 		];
 
-		expect(pipeline.applyContextGc(packedMessages, true).report.packedCount).toBe(1);
+		expect(pipeline.applyContextGc(packedMessages, true, 0).report.packedCount).toBe(1);
 		expect(pipeline.getContextGcReport(currentMessages).packedCount).toBe(0);
 
 		expect(pipeline.getContextGcReport().packedCount).toBe(1);

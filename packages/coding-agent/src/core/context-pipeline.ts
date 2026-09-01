@@ -743,6 +743,14 @@ export class ContextPipeline {
 	applyContextGc(
 		messages: AgentMessage[],
 		writePayloads: boolean,
+		/**
+		 * Messages below this index have already gone out on an accepted provider request and must
+		 * never be rewritten by packing — see `context/prefix-stability.ts`'s `frozenPrefixLength`.
+		 * Required, not defaulted: an omitted mark would silently re-enable rewriting already-sent
+		 * history, exactly the defect this parameter exists to close. A diagnostic caller with no
+		 * live mark to honor (a read-only report/dashboard view) must pass 0 explicitly.
+		 */
+		frozenBelow: number,
 	): { messages: AgentMessage[]; report: ContextGcReport } {
 		try {
 			const settings = this.deps.getSettingsManager().getContextGcSettings();
@@ -763,6 +771,7 @@ export class ContextPipeline {
 				storageDir: this._contextGcStorageDir(),
 				acquireStorageDir: () => this._ensureContextStoreRetention().gcDir,
 				writePayloads,
+				frozenBelow,
 				curation: curationSettings.enabled
 					? {
 							resolveDigest: (digestKey) => {
@@ -839,7 +848,10 @@ export class ContextPipeline {
 	}
 
 	getContextGcReport(messages?: AgentMessage[]): ContextGcReport {
-		if (messages) return this.applyContextGc(messages, false).report;
+		// Read-only status/report view (tests, dashboards) with no live provider request behind it,
+		// so there is no `sentPrefixCount` to honor here — 0 shows full packing potential, same as
+		// before this parameter existed.
+		if (messages) return this.applyContextGc(messages, false, 0).report;
 		return (
 			this._latestContextGcReport ?? {
 				enabled: this.deps.getSettingsManager().getContextGcSettings().enabled,

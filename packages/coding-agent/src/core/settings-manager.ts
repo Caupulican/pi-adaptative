@@ -8,6 +8,7 @@ import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { configFile, directoryProfilesDir } from "./agent-paths.ts";
+import { DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS } from "./background-tool-task-controller.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
 import { type CostGuardSettings, DEFAULT_COST_GUARD_SETTINGS } from "./cost-guard.ts";
 import {
@@ -336,6 +337,16 @@ export const DEFAULT_PROCESS_MATRIX_HEARTBEAT_MS = 30_000;
 export const DEFAULT_PROCESS_MATRIX_ADOPTION_GRACE_MS = 300_000;
 export const DEFAULT_PROCESS_MATRIX_WATCHER_POLL_MS = 25_000;
 
+/** Auto-backgrounding threshold for long-running foreground tool calls; see `core/background-tool-task-controller.ts`. */
+export interface BackgroundToolSettings {
+	callAfterMs?: number; // default: DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS (15000) -- a foreground tool call running longer than this hands off to a background task; auto-backgrounding itself stays always-on, only the threshold is tunable
+}
+
+export type ResolvedBackgroundToolSettings = Required<BackgroundToolSettings>;
+
+const MIN_BACKGROUND_TOOL_CALL_AFTER_MS = 1_000;
+const MAX_BACKGROUND_TOOL_CALL_AFTER_MS = 3_600_000;
+
 /** Windows shell contract engine tier (`src/core/tools/windows-shell-engine.ts`). */
 export interface WindowsShellSettings {
 	pythonEngine?: boolean; // default: true -- routes complex/state-mutating Bash constructs to the bundled Python engine on Windows; explicit false restores the PowerShell-only floor verbatim
@@ -559,6 +570,7 @@ export interface Settings {
 	worktreeSync?: WorktreeSyncSettings; // Opt-in hard-gated worktree-per-lane parallel-work workflow (core/worktree-sync)
 	processMatrix?: ProcessMatrixSettings; // Durable master/worker process-matrix supervision (core/process-matrix); on by default
 	windowsShell?: WindowsShellSettings; // Windows shell contract engine tier (core/tools/windows-shell-engine); on by default
+	backgroundTool?: BackgroundToolSettings; // Auto-backgrounding threshold for long-running foreground tool calls (core/background-tool-task-controller); always on, threshold tunable
 	learningPolicy?: LearningPolicySettings; // Default-on audited learning policy; destructive supersessions remain proposal-gated
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
 	bedrock?: BedrockScopeSettings; // User-level verified profile/region/model scope for Amazon Bedrock
@@ -3790,6 +3802,18 @@ export class SettingsManager {
 		const configured = this.settings.windowsShell ?? {};
 		return {
 			pythonEngine: configured.pythonEngine !== false,
+		};
+	}
+
+	getBackgroundToolSettings(): ResolvedBackgroundToolSettings {
+		const configured = this.settings.backgroundTool ?? {};
+		return {
+			callAfterMs: sanitizeIntegerSetting(
+				configured.callAfterMs,
+				DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS,
+				MIN_BACKGROUND_TOOL_CALL_AFTER_MS,
+				MAX_BACKGROUND_TOOL_CALL_AFTER_MS,
+			),
 		};
 	}
 

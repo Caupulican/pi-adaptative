@@ -257,8 +257,26 @@ export class VerificationObligationTracker {
 		}
 	}
 
+	/**
+	 * Bounded instruction naming every currently active obligation, or `undefined` when none are
+	 * active. Meant for the request's trailing transient position (see
+	 * `AgentContext.trailingInstruction` and `provider-request-planner.ts`), never for
+	 * `systemPrompt`: unlike the system prompt, the trailing region is not byte zero of the request,
+	 * so this can change turn to turn - as obligations appear and resolve - without invalidating the
+	 * provider's cached prefix.
+	 */
+	requestInstruction(): string | undefined {
+		return formatActiveVerificationFailures(this.getActiveIds());
+	}
+
+	/**
+	 * Compose the same instruction directly into an arbitrary system prompt string. Kept for callers
+	 * that genuinely want system-prompt composition (e.g. a one-shot request with no separate
+	 * trailing channel); the agent loop itself uses {@link requestInstruction} instead so this text
+	 * never sits at byte zero of a multi-turn run's request.
+	 */
 	appendSystemPrompt(systemPrompt: string): string {
-		const instruction = formatActiveVerificationFailures(this.getActiveIds());
+		const instruction = this.requestInstruction();
 		if (!instruction) return systemPrompt;
 		return systemPrompt ? `${systemPrompt}\n\n${instruction}` : instruction;
 	}

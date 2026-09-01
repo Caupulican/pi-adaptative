@@ -65,6 +65,44 @@ describe("compact active-goal context", () => {
 		expect(messages).toHaveLength(4);
 	});
 
+	it("projects usage and elapsed time -- the B1 fix: this is what made a get_goal round trip unnecessary", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Ship it", tokenBudget: 1_000, now: "T0" });
+		state = applyGoalEvent(state, {
+			type: "record_continuation_budget",
+			turns: 3,
+			wallClockMs: 42_000,
+			spendUsd: 0,
+			tokens: 250,
+			now: "T1",
+		});
+
+		const text = formatCompactGoalContext(state, false);
+
+		expect(text).toContain('"tokenBudget":"1000"');
+		expect(text).toContain('"tokensRemaining":"750"');
+		expect(text).toContain('"tokensUsed":"250"');
+		expect(text).toContain('"timeUsedSeconds":"42"');
+	});
+
+	it("omits budget-derived fields but still projects usage/time for an unbudgeted goal", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Ship it", now: "T0" });
+		state = applyGoalEvent(state, {
+			type: "record_continuation_budget",
+			turns: 1,
+			wallClockMs: 5_000,
+			spendUsd: 0,
+			tokens: 10,
+			now: "T1",
+		});
+
+		const text = formatCompactGoalContext(state, false);
+
+		expect(text).not.toContain("tokenBudget");
+		expect(text).not.toContain("tokensRemaining");
+		expect(text).toContain('"tokensUsed":"10"');
+		expect(text).toContain('"timeUsedSeconds":"5"');
+	});
+
 	it("injects mandatory recovery guidance after unchanged continuation turns", () => {
 		let state = createGoalState({ goalId: "g-recovery", userGoal: "Ship it", now: "T0" });
 		state = applyGoalEvent(state, { type: "no_progress", now: "T1" });
@@ -104,7 +142,13 @@ describe("compact active-goal context", () => {
 		expect(text).toContain("update_goal");
 	});
 
-	it("requests continuation hydration once and suppresses completed state calls", () => {
+	it("requests continuation hydration for task_steps only, and never for get_goal", () => {
+		// get_goal was dropped from the hydration list once formatCompactGoalContext started
+		// projecting everything get_goal provides for the common case (usage, elapsed time)
+		// directly into every request -- see the B1 investigation. task_steps state, unlike goal
+		// state, is never otherwise injected into an internal continuation turn (agent-session.ts
+		// gates task_steps_context on `!internalContextType`), so it is the one tool a continuation
+		// still has no other way to see current state from.
 		const state = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
 		const trigger = createCustomMessage(
 			GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
@@ -116,15 +160,38 @@ describe("compact active-goal context", () => {
 		const initial = injectCompactGoalContext([trigger], state);
 		const initialProjection = initial.at(-1);
 		if (!initialProjection || initialProjection.role !== "custom") throw new Error("Expected compact goal context");
-		expect(initialProjection.content).toContain("get_goal; task_steps");
+		expect(initialProjection.content).toContain("Hydrate missing state once this continuation: task_steps.");
+		expect(initialProjection.content).not.toContain("get_goal");
 
-		const afterFailedGoalHydration = injectCompactGoalContext(
+		// A get_goal call -- successful or not -- has no bearing on hydration status anymore: it is
+		// not tracked at all, so the instruction is unaffected either way.
+		const afterGoalCallOnly = injectCompactGoalContext(
 			[
 				trigger,
 				{
 					role: "toolResult",
-					toolCallId: "failed-goal-call",
+					toolCallId: "goal-call",
 					toolName: "get_goal",
+					content: [{ type: "text", text: "current goal" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+			state,
+		);
+		const afterGoalCallProjection = afterGoalCallOnly.at(-1);
+		if (!afterGoalCallProjection || afterGoalCallProjection.role !== "custom") {
+			throw new Error("Expected compact goal context");
+		}
+		expect(afterGoalCallProjection.content).toContain("Hydrate missing state once this continuation: task_steps.");
+
+		const afterFailedTaskStepsHydration = injectCompactGoalContext(
+			[
+				trigger,
+				{
+					role: "toolResult",
+					toolCallId: "failed-task-call",
+					toolName: "task_steps",
 					content: [{ type: "text", text: "temporary failure" }],
 					isError: true,
 					timestamp: 2,
@@ -132,40 +199,13 @@ describe("compact active-goal context", () => {
 			],
 			state,
 		);
-		const failedProjection = afterFailedGoalHydration.at(-1);
+		const failedProjection = afterFailedTaskStepsHydration.at(-1);
 		if (!failedProjection || failedProjection.role !== "custom") throw new Error("Expected compact goal context");
-		expect(failedProjection.content).toContain("get_goal; task_steps");
-
-		const afterGoalHydration = injectCompactGoalContext(
-			[
-				trigger,
-				{
-					role: "toolResult",
-					toolCallId: "goal-call",
-					toolName: "get_goal",
-					content: [{ type: "text", text: "current goal" }],
-					isError: false,
-					timestamp: 2,
-				},
-			],
-			state,
-		);
-		const partialProjection = afterGoalHydration.at(-1);
-		if (!partialProjection || partialProjection.role !== "custom") throw new Error("Expected compact goal context");
-		expect(partialProjection.content).not.toContain("get_goal");
-		expect(partialProjection.content).toContain("task_steps");
+		expect(failedProjection.content).toContain("Hydrate missing state once this continuation: task_steps.");
 
 		const fullyHydrated = injectCompactGoalContext(
 			[
 				trigger,
-				{
-					role: "toolResult",
-					toolCallId: "goal-call",
-					toolName: "get_goal",
-					content: [{ type: "text", text: "current goal" }],
-					isError: false,
-					timestamp: 2,
-				},
 				{
 					role: "toolResult",
 					toolCallId: "task-call",
@@ -179,7 +219,7 @@ describe("compact active-goal context", () => {
 		);
 		const hydratedProjection = fullyHydrated.at(-1);
 		if (!hydratedProjection || hydratedProjection.role !== "custom") throw new Error("Expected compact goal context");
-		expect(hydratedProjection.content).not.toContain("get_goal");
+		expect(hydratedProjection.content).not.toContain("Hydrate missing state");
 		expect(hydratedProjection.content).not.toContain("task_steps");
 	});
 
@@ -201,7 +241,7 @@ describe("compact active-goal context", () => {
 			timestamp: 2,
 		};
 
-		const plan = await createProviderRequestController(state).plan([trigger, goalResult]);
+		const plan = await createProviderRequestController(state).plan([trigger, goalResult], 0);
 		const projection = plan.transientMessages?.find(
 			(message) => message.role === "custom" && message.customType === ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE,
 		);

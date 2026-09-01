@@ -9,6 +9,19 @@ import type { ArtifactStore } from "./context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "./context/tool-output-packer.ts";
 import { hasOnlyKeys, isPlainRecord, isRecordObject } from "./util/value-guards.ts";
 
+/**
+ * Foreground tool calls running longer than this hand off to a background task (see `handoff`
+ * below). Configurable via `SettingsManager.getBackgroundToolSettings().callAfterMs`; this constant
+ * is only its fallback default, used when the setting is unset or fails sanitization.
+ *
+ * The default's justification is measured, not assumed, and is under-tuned by that measurement:
+ * re-collecting a backgrounded result costs at least one extra provider round trip (observed p50
+ * 5.7s, p90 12.8s across a real fleet sample), so backgrounding anything that would have finished
+ * within roughly 25-30s is a net loss. 15s sits below that break-even point, and a real sample saw
+ * roughly 10% of bash calls terminate at exactly this threshold. The value is left unchanged here
+ * deliberately — raising the default is a product/cost tradeoff for the owner to make separately
+ * from making it configurable at all.
+ */
 export const DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS = 15_000;
 export const DEFAULT_BACKGROUND_TOOL_TASK_WAIT_TIMEOUT_MS = 30_000;
 export const BACKGROUND_TOOL_TASK_CUSTOM_TYPE = "background_tool_task";

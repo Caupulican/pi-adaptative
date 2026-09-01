@@ -7,7 +7,19 @@ import { type GoalState, isGoalExecutionActive } from "./goal-state.ts";
 
 export const ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE = "active_goal_context";
 const LEGACY_GOAL_CONTINUATION_PREFIX = "Goal continuation context\n=========================";
-const GOAL_HYDRATION_TOOLS = ["get_goal", "task_steps"] as const;
+/**
+ * `task_steps` is the only tool left here: its state is deliberately NOT injected on an internal
+ * (continuation) turn (see `agent-session.ts`'s `taskStepsState = options?.internalContextType ?
+ * undefined : ...`), so a continuation genuinely has no other way to see current step state.
+ * `get_goal` was removed from this list once `formatCompactGoalContext` below started projecting
+ * everything `get_goal` provides for the common case (usage, elapsed time) directly into every
+ * request -- see the turn-economics B1 investigation. Forcing a `get_goal` round trip for data
+ * already in front of the model bought nothing. The one thing `get_goal` still uniquely provides
+ * -- the legacy requirements/evidence ledger, for a goal managed through the OLD unified `goal`
+ * tool -- deliberately stays out of this projection: see the comment on `formatCompactGoalContext`
+ * below for why (its individual entries can be model-supplied, not just host-generated).
+ */
+const GOAL_HYDRATION_TOOLS = ["task_steps"] as const;
 
 type GoalHydrationTool = (typeof GOAL_HYDRATION_TOOLS)[number];
 
@@ -54,7 +66,7 @@ function missingContinuationHydrationTools(messages: AgentMessage[], triggerInde
 	for (let i = triggerIndex + 1; i < messages.length; i++) {
 		const message = messages[i];
 		if (message.role !== "toolResult" || message.isError) continue;
-		if (message.toolName === "get_goal" || message.toolName === "task_steps") completed.add(message.toolName);
+		if (message.toolName === "task_steps") completed.add(message.toolName);
 	}
 	return GOAL_HYDRATION_TOOLS.filter((toolName) => !completed.has(toolName));
 }
@@ -85,10 +97,26 @@ export function formatCompactGoalContext(
 		missingHydrationTools.length > 0
 			? `Hydrate missing state once this continuation: ${missingHydrationTools.join("; ")}. Never repeat a successful hydration call already present in current context.`
 			: undefined;
-	const compactRecord =
-		record.tokenBudget === undefined
-			? { untrustedObjective: record.objective }
-			: { untrustedObjective: record.objective, tokenBudget: String(record.tokenBudget) };
+	// Everything `get_goal` uniquely tells the model for the common case (a goal managed only
+	// through the modern create_goal/get_goal/update_goal trio, which has no action that ever adds
+	// a requirement or evidence record -- that ledger stays reachable only through the legacy
+	// unified `goal` tool), projected here instead: budget/usage/elapsed time, always present on a
+	// GoalRecord and always included. Every field lands inside this same JSON-encoded, escaped
+	// object -- including blockedReason (defensive: this message is gated to
+	// `isGoalExecutionActive`, so it is not expected to carry one, but a stale/legacy state should
+	// not silently drop it if it does) -- because `requirementId` (and so, transitively, a
+	// requirement's ledger id) can be MODEL-supplied, not only host-generated (see `goalSchema`'s
+	// `requirementId` field), which is why the legacy ledger's individual open/unproven ids are
+	// deliberately NOT projected here as bare text: unlike this escaped JSON block, they would be
+	// unescaped content inside a section the model is told to treat as HOST-OWNED and authoritative.
+	const compactRecord: Record<string, string> = { untrustedObjective: record.objective };
+	if (record.tokenBudget !== undefined) {
+		compactRecord.tokenBudget = String(record.tokenBudget);
+		compactRecord.tokensRemaining = String(record.tokensRemaining ?? 0);
+	}
+	compactRecord.tokensUsed = String(record.tokensUsed);
+	compactRecord.timeUsedSeconds = String(record.timeUsedSeconds);
+	if (record.blockedReason) compactRecord.blockedReason = record.blockedReason;
 	const encodedRecord = JSON.stringify(compactRecord).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
 	return [
 		"ACTIVE GOAL — HOST-OWNED",

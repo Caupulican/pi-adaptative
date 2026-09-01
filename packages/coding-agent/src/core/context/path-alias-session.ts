@@ -64,6 +64,41 @@ export class PathAliasRuntime {
 	 * context and a span that leaves the window (compaction, GC repacking) drops out.
 	 */
 	private frozenSpellings = new Map<string, string>();
+	/**
+	 * Result of the most recent {@link sync} call, keyed by the exact message-list identity it saw.
+	 * `sync` is called twice per provider request (preview, then commit — see
+	 * `ProviderRequestContextController.plan`) built from the same durable messages; when nothing
+	 * was freshly GC-packed in between, `applyContextGc` hands back its input array unchanged BY
+	 * REFERENCE (untouched messages keep their identity — see `context-gc.ts`'s `nextMessages =
+	 * messages.slice()`), so the two calls see the identical array and the second `sync` is a full
+	 * transcript hash-and-rewrite pass repeated for an answer already computed. Comparing by
+	 * per-element reference (never content) is what keeps the check itself cheap — a pointer scan is
+	 * orders of magnitude cheaper than the hashing it lets us skip — and it can never return a stale
+	 * answer: any message that actually changed (freshly packed, newly appended) fails the
+	 * comparison and falls through to a full, correct recompute. `cwd` is part of the key too: it
+	 * comes from a live getter (a session can change directory mid-run), and a cwd change can alter
+	 * every display path without touching a single message — keying on messages alone could hand
+	 * back a stale legend that a cwd-aware caller (`prepareCommit`'s own equality check) would
+	 * otherwise have caught as a genuine change.
+	 *
+	 * The stored `messages` is a SNAPSHOT (`messages.slice()`), never the caller's live array. That
+	 * is what makes `sameMessageSequence`'s `a === b` fast path safe: an array is not immutable just
+	 * because this class treats it that way, and at least one real caller mutates one in place to
+	 * preserve its identity across a replan (`adoptReplannedMessages` in
+	 * `provider-request-planner.ts`, which does `target.messages.length = 0` then re-pushes). Storing
+	 * the live reference would let `a === b` compare a mutated array against itself and report "same"
+	 * for content that has actually changed, handing back a result computed from the pre-mutation
+	 * bytes. The snapshot is a different object from the caller's array on every later call, so a
+	 * same-reference caller that mutated in place still falls through to the real (and correct)
+	 * length/element comparison below.
+	 */
+	private lastSync:
+		| {
+				readonly cwd: string;
+				readonly messages: readonly AgentMessage[];
+				readonly result: { messages: AgentMessage[]; legend?: string };
+		  }
+		| undefined;
 	private readonly getCwd: () => string;
 	private readonly getDatabasePath: () => string;
 	private readonly getTurnIndex: () => number;
@@ -81,6 +116,9 @@ export class PathAliasRuntime {
 
 	sync(messages: readonly AgentMessage[]): { messages: AgentMessage[]; legend?: string } {
 		this.ensureLoaded();
+		const cached = this.lastSync;
+		if (cached && cached.cwd === this.table.cwd && sameMessageSequence(cached.messages, messages))
+			return cached.result;
 		// A candidate id that names a real file or directory under cwd (a literal `p/`
 		// tree) must never be assigned, or expansion would redirect real-file references.
 		// Every id lives under the literal relative prefix `p/`, so when no `p` entry
@@ -123,10 +161,12 @@ export class PathAliasRuntime {
 		}
 		const rewritten = this.renderFrozen(messages);
 		for (const id of collectActiveAliasIds(collectMessageTexts(rewritten))) this.legendIds.add(id);
-		return {
+		const result = {
 			messages: rewritten,
 			legend: formatPathAliasLegendForIds(this.table, this.legendIds),
 		};
+		this.lastSync = { cwd: this.table.cwd, messages: messages.slice(), result };
+		return result;
 	}
 
 	/**
@@ -253,4 +293,18 @@ function maxMessageTimestamp(messages: readonly AgentMessage[]): number {
 		if (timestamp > max) max = timestamp;
 	}
 	return max;
+}
+
+/**
+ * Cheap same-input check for {@link PathAliasRuntime.sync}'s memo: a per-element reference scan,
+ * never a content comparison — content equality is exactly the expensive question `sync` itself
+ * answers, so testing it here would just move the cost rather than cut it.
+ */
+function sameMessageSequence(a: readonly AgentMessage[], b: readonly AgentMessage[]): boolean {
+	if (a === b) return true;
+	if (a.length !== b.length) return false;
+	for (let index = 0; index < a.length; index++) {
+		if (a[index] !== b[index]) return false;
+	}
+	return true;
 }

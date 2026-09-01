@@ -363,7 +363,41 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			"Before final, resolve or defer open work. goal owns outcomes; delegate owns workers.",
 		],
 		parameters: taskStepsSchema,
-		executionMode: "sequential",
+		// INVESTIGATED, not assumed (turn-economics remediation, TASK 6): this tool previously
+		// declared `executionMode: "sequential"`, which gives a tool call its own barrier group and
+		// guarantees it never shares a batch with any other tool call (see `partitionToolCalls` in
+		// `packages/agent/src/agent-loop.ts`). In two weeks of real logs every one of 4,326 calls ran
+		// with zero other tools in flight, and control-plane-only turns like this one cost 17.9 hours
+		// of wall clock. The barrier is NOT required for this tool's correctness, and removing it does
+		// not introduce a race:
+		//
+		// - `execute()` below performs one read-modify-write against `TaskStepsState`:
+		//   `getTaskStepsState()` -> a pure reducer (`setTaskSteps`/`addTaskStep`/`updateTaskStep`/
+		//   `clearTaskSteps`/`compactTaskSteps`/`advanceTaskSteps`) -> `saveTaskStepsState()`. Every
+		//   function in that chain, all the way down to the session-log append/read it ultimately
+		//   calls, is FULLY SYNCHRONOUS -- there is no `await` anywhere between the read and the
+		//   write.
+		// - `validatePipelineLink` similarly consults `getActivePipelineScope()` synchronously; the
+		//   only writer of that scope is the `pipeline` tool, which keeps its own
+		//   `executionMode: "sequential"` (pipeline.ts), so it can never mutate concurrently with this
+		//   call regardless of this tool's own barrier status.
+		// - JS is single-threaded: "concurrent" tool execution here is cooperative interleaving at
+		//   `await` boundaries only, never true simultaneous execution. A synchronous stretch of code
+		//   (this tool's entire critical section) cannot be interrupted mid-way by anything else, no
+		//   matter how many other tools are "in flight" in the same parallel pool
+		//   (`pooledExecuteToolCalls`) -- including a second `task_steps` call in the same batch: the
+		//   pool's refill loop invokes each prepared call's `execute()` in emission order without an
+		//   intervening await, so one call's fully-synchronous critical section always finishes before
+		//   the next one's begins.
+		//
+		// This is an IMPLICIT invariant, not a structural guarantee: if `execute()`, any reducer it
+		// calls, `getTaskStepsState`/`saveTaskStepsState`, or `getActivePipelineScope` ever gains a
+		// real `await` in the future, this reasoning silently stops applying and the barrier would
+		// need to come back. `test/task-steps-tool-concurrency.test.ts` exercises this tool alongside
+		// a sibling that genuinely yields mid-execution, and with two `task_steps` calls in one batch,
+		// as a regression guard -- it will not catch a future async leak on its own, so treat this
+		// comment as the authoritative reason, and restore `executionMode: "sequential"` on the day
+		// any part of that chain becomes genuinely asynchronous.
 		renderShell: "self",
 		renderCall() {
 			return emptyOrchestrationCall();

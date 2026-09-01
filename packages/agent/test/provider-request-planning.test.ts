@@ -3,7 +3,13 @@ import type { AssistantMessage, AssistantMessageEvent, Message, Model } from "@c
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { startAgentProviderRequest } from "../src/agent-loop.ts";
-import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
+import type {
+	AgentContext,
+	AgentLoopConfig,
+	AgentMessage,
+	AgentTool,
+	SentPrefixDisturbanceInfo,
+} from "../src/types.ts";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor(message: AssistantMessage) {
@@ -394,5 +400,187 @@ describe("provider request planning", () => {
 		expect(planAttempts).toEqual([0, 0, 1]);
 		expect(admissionAttempts).toEqual([0, 1]);
 		expect(initial.messages).toEqual([user("compacted history")]);
+	});
+
+	describe("onSentPrefixDisturbance", () => {
+		it("reports a disturbance when transformContext rewrites an already-sent message", async () => {
+			const captured: SentPrefixDisturbanceInfo[] = [];
+			let call = 0;
+			const config: AgentLoopConfig = {
+				model: model(),
+				convertToLlm: toLlm,
+				// The fallback (no planContext) branch - the exact gap the worker-attempt-executor /
+				// reflection-controller transformContext callers left uncovered.
+				transformContext: async (messages) => {
+					call++;
+					if (call === 1) return messages;
+					// Second call: rewrite message 0, which by then is already sent (see below).
+					return [{ ...messages[0], content: [{ type: "text", text: "REWRITTEN" }] }, ...messages.slice(1)];
+				},
+				onSentPrefixDisturbance: (info) => captured.push(info),
+			};
+
+			const first: AgentContext = { systemPrompt: "SYSTEM", messages: [user("first")], tools: [] };
+			const firstResponse = await startAgentProviderRequest(first, config, undefined, () => {
+				return new MockAssistantStream(assistant("ok-1"));
+			});
+			await firstResponse.result();
+			// After the first accepted request, the mark is 1 (only `user("first")` had been sent).
+			expect(captured).toHaveLength(0);
+
+			const second: AgentContext = {
+				systemPrompt: "SYSTEM",
+				messages: [...first.messages, assistant("ok-1"), user("second")],
+				tools: [],
+			};
+			const secondResponse = await startAgentProviderRequest(second, config, undefined, () => {
+				return new MockAssistantStream(assistant("ok-2"));
+			});
+			await secondResponse.result();
+
+			expect(captured).toHaveLength(1);
+			expect(captured[0]).toEqual({ disturbedCount: 1, firstDisturbedIndex: 0, sentPrefixCount: 1 });
+		});
+
+		// NOTE ON WHAT "LEGITIMATE COMPACTION" ACTUALLY LOOKS LIKE: compaction summarizes the OLDEST
+		// messages, which sit AT OR BELOW `sentPrefixCount` (everything already sent starts from the
+		// beginning of the conversation) - it does not touch messages above the mark, which is what
+		// the test below does. The test below is therefore NOT a stand-in for real compaction; it only
+		// demonstrates that this hook's scan is bounded to `[0, sentPrefixCount)` and structurally
+		// cannot see anything at or past it, regardless of what a `planContext` does out there. The
+		// test after it exercises the mechanism that actually makes real compaction safe: it never
+		// runs inside `planContext`/`transformContext` at all (see `onSentPrefixDisturbance`'s doc
+		// comment in types.ts for the full explanation).
+		it("does not report a disturbance when planContext only touches history past the scanned boundary", async () => {
+			const captured: SentPrefixDisturbanceInfo[] = [];
+			const config: AgentLoopConfig = {
+				model: model(),
+				convertToLlm: toLlm,
+				// Rewrites everything AFTER sentPrefixCount into one message, returning index 0 (and
+				// everything below sentPrefixCount) BY REFERENCE, unchanged. Deliberately NOT modeled on
+				// real compaction - see the note above.
+				planContext: async ({ messages, sentPrefixCount }) => {
+					if (messages.length <= sentPrefixCount + 1) return { messages };
+					const sent = messages.slice(0, sentPrefixCount);
+					const summarized = user("stand-in for whatever a host does past the scanned boundary");
+					const rest = messages.slice(messages.length - 1);
+					return { messages: [...sent, summarized, ...rest] };
+				},
+				onSentPrefixDisturbance: (info) => captured.push(info),
+			};
+
+			const first: AgentContext = { systemPrompt: "SYSTEM", messages: [user("first")], tools: [] };
+			const firstResponse = await startAgentProviderRequest(first, config, undefined, () => {
+				return new MockAssistantStream(assistant("ok-1"));
+			});
+			await firstResponse.result();
+
+			const second: AgentContext = {
+				systemPrompt: "SYSTEM",
+				messages: [...first.messages, assistant("ok-1"), user("second"), user("third")],
+				tools: [],
+			};
+			const secondResponse = await startAgentProviderRequest(second, config, undefined, () => {
+				return new MockAssistantStream(assistant("ok-2"));
+			});
+			await secondResponse.result();
+
+			expect(captured).toHaveLength(0);
+		});
+
+		it("does not report a disturbance across a real compaction replan, even though it rewrites an already-sent message", async () => {
+			// This is what actually makes real compaction safe (see the doc comment on
+			// AgentLoopConfig.onSentPrefixDisturbance in types.ts): compaction runs through
+			// admitProviderRequest's `{action: "replan"}`, entirely outside planContext/transformContext
+			// - the two functions this hook observes. It happens BETWEEN admission attempts, not within
+			// the one attempt this hook compares. So even though the replan below collapses the
+			// ALREADY-SENT `user("first")` into a summary, the hook never sees a "before" that still has
+			// the original message: by the time detection runs again on the next attempt, the mark has
+			// already been re-clamped against the new, shorter sourceContext, and both "before" and
+			// "after" for that attempt already reflect the post-compaction array.
+			const captured: SentPrefixDisturbanceInfo[] = [];
+			const config: AgentLoopConfig = {
+				model: model(),
+				convertToLlm: toLlm,
+				admitProviderRequest: ({ sourceContext, attempt }) => {
+					if (attempt === 0 && sourceContext.messages.length > 2) {
+						return {
+							action: "replan",
+							context: {
+								...sourceContext,
+								messages: [
+									user("summary of the oldest turns"),
+									sourceContext.messages[sourceContext.messages.length - 1],
+								],
+							},
+						};
+					}
+					return { action: "send" };
+				},
+				onSentPrefixDisturbance: (info) => captured.push(info),
+			};
+
+			const first: AgentContext = { systemPrompt: "SYSTEM", messages: [user("first")], tools: [] };
+			const firstResponse = await startAgentProviderRequest(first, config, undefined, () => {
+				return new MockAssistantStream(assistant("ok-1"));
+			});
+			await firstResponse.result();
+			// Mark is now 1: only `user("first")` had gone out on the first accepted request.
+
+			const second: AgentContext = {
+				systemPrompt: "SYSTEM",
+				messages: [...first.messages, assistant("ok-1"), user("second"), user("third")],
+				tools: [],
+			};
+			const secondResponse = await startAgentProviderRequest(second, config, undefined, () => {
+				return new MockAssistantStream(assistant("ok-2"));
+			});
+			await secondResponse.result();
+
+			// The already-sent `user("first")` is gone from the accepted context - replaced by a
+			// summary - yet the hook never fired.
+			expect(JSON.stringify(second.messages)).not.toContain("first");
+			expect(JSON.stringify(second.messages)).toContain("summary of the oldest turns");
+			expect(captured).toHaveLength(0);
+		});
+
+		it("does not report a disturbance when a host reconstructs an equivalent already-sent message", async () => {
+			// Not one of the two required scenarios, but exercises the specific behavior the escalation
+			// step exists for: a NEW reference at an already-sent index whose CONTENT is unchanged (e.g.
+			// a host that round-trips messages through its own normalization layer) must not be reported
+			// - nothing the provider would see actually changed. Neither test above exercises this: the
+			// rewrite test's replacement has different content, and the untouched-region test above keeps
+			// the same reference throughout.
+			const captured: SentPrefixDisturbanceInfo[] = [];
+			let call = 0;
+			const config: AgentLoopConfig = {
+				model: model(),
+				convertToLlm: toLlm,
+				transformContext: async (messages) => {
+					call++;
+					if (call === 1) return messages;
+					return [{ ...messages[0] }, ...messages.slice(1)];
+				},
+				onSentPrefixDisturbance: (info) => captured.push(info),
+			};
+
+			const first: AgentContext = { systemPrompt: "SYSTEM", messages: [user("first")], tools: [] };
+			const firstResponse = await startAgentProviderRequest(first, config, undefined, () => {
+				return new MockAssistantStream(assistant("ok-1"));
+			});
+			await firstResponse.result();
+
+			const second: AgentContext = {
+				systemPrompt: "SYSTEM",
+				messages: [...first.messages, assistant("ok-1"), user("second")],
+				tools: [],
+			};
+			const secondResponse = await startAgentProviderRequest(second, config, undefined, () => {
+				return new MockAssistantStream(assistant("ok-2"));
+			});
+			await secondResponse.result();
+
+			expect(captured).toHaveLength(0);
+		});
 	});
 });
