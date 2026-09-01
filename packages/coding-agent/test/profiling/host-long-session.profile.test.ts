@@ -136,7 +136,7 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 					}
 					if (entry.message.isError) {
 						errors++;
-						log(`tool error: ${JSON.stringify(entry.message.content).slice(0, 300)}`);
+						log(`tool error: ${JSON.stringify(entry.message.content).slice(0, 1500)}`);
 					}
 				}
 				if (entry.type === "request_snapshot") {

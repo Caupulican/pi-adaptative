@@ -1,5 +1,10 @@
 import { stateFile } from "../agent-paths.ts";
-import { type HostFingerprint, HostStateStore, isHostFingerprint } from "../models/host-state-store.ts";
+import {
+	type HostFingerprint,
+	HostStateStore,
+	type HostStateWriteBehindOptions,
+	isHostFingerprint,
+} from "../models/host-state-store.ts";
 import { isWorkerSession } from "../session-role.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 
@@ -320,21 +325,43 @@ function trimIntentAgreement(
 export class ToolPerformanceStore {
 	private readonly storage: HostStateStore<HostToolPerformanceData>;
 
-	constructor(filePath: string, options: { fingerprint?: () => HostFingerprint; readOnly?: boolean } = {}) {
+	constructor(
+		filePath: string,
+		options: {
+			fingerprint?: () => HostFingerprint;
+			readOnly?: boolean;
+			writeBehind?: HostStateWriteBehindOptions;
+		} = {},
+	) {
 		this.storage = new HostStateStore({
 			filePath,
 			version: STORE_VERSION,
 			fingerprint: options.fingerprint,
 			readOnly: options.readOnly ?? isWorkerSession(),
 			parseHost,
+			writeBehind: options.writeBehind,
 		});
 	}
 
 	static forAgentDir(
 		agentDir: string,
-		options: { fingerprint?: () => HostFingerprint; readOnly?: boolean } = {},
+		options: {
+			fingerprint?: () => HostFingerprint;
+			readOnly?: boolean;
+			writeBehind?: HostStateWriteBehindOptions;
+		} = {},
 	): ToolPerformanceStore {
 		return new ToolPerformanceStore(stateFile(agentDir, "tool-performance.json"), options);
+	}
+
+	/** Persist every pending write-behind observation now; see HostStateStore.flush. */
+	flush(): void {
+		this.storage.flush();
+	}
+
+	/** Flush and stop batching; the session owning this store calls it on dispose. */
+	close(): void {
+		this.storage.close();
 	}
 
 	private createHostData(host: HostFingerprint): HostToolPerformanceData {

@@ -302,6 +302,7 @@ export class AgentSession {
 	private readonly _profileFilter: ProfileFilterController;
 	private readonly _toolGate: ToolGateController;
 	private readonly _toolSelection: ToolSelectionController;
+	private readonly _toolPerformanceStore: ToolPerformanceStore;
 
 	private _extensionRunner!: ExtensionRunner;
 	private _turnIndex = 0;
@@ -1172,8 +1173,14 @@ export class AgentSession {
 			isExplicitThinking: () => this._isExplicitThinking,
 			setThinkingLevel: (level) => this.setThinkingLevel(level, { persistSettings: false }),
 		});
+		// Write-behind: an observation is recorded on every tool call and the store's contents are
+		// advisory statistics, so persisting each one as its own durable transaction put a lock, a
+		// clone, a full re-encode and a file write on every tool call (14% of host CPU over a
+		// 1,500-turn session). Batches flush after a short idle, at a pending cap, on dispose, and at
+		// process exit; a flush replays onto whatever another process wrote in between.
+		this._toolPerformanceStore = ToolPerformanceStore.forAgentDir(this._agentDir, { writeBehind: {} });
 		this._toolSelection = new ToolSelectionController({
-			store: ToolPerformanceStore.forAgentDir(this._agentDir),
+			store: this._toolPerformanceStore,
 			getModelRef: () => {
 				const model = this.model;
 				return model ? formatModelRouterModel(model) : "unknown";
@@ -2169,6 +2176,7 @@ export class AgentSession {
 			this.agent.subscribeToolCallHandoffRequest = undefined;
 		});
 		safely(() => this._extensionRunner.invalidate());
+		safely(() => this._toolPerformanceStore.close());
 		track(() => this._resourceLoader.dispose?.() ?? Promise.resolve());
 		safely(() => this._disconnectFromAgent());
 		this._eventListeners = [];
