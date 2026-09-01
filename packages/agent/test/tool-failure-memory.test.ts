@@ -1127,4 +1127,92 @@ describe("tool failure memory", () => {
 		expect(sanitized.ledger).not.toContain("Change the arguments or approach");
 		expect(sanitized.ledger).not.toContain('"repair":');
 	});
+
+	describe("per-call identity memoization (turn-economics O(n^2) fix)", () => {
+		function toolCallMessage(
+			id: string,
+			name: string,
+			args: Record<string, unknown>,
+			timestamp: number,
+		): AgentMessage {
+			return {
+				role: "assistant",
+				content: [{ type: "toolCall", id, name, arguments: args }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp,
+			};
+		}
+
+		function toolResultMessage(
+			toolCallId: string,
+			toolName: string,
+			text: string,
+			isError: boolean,
+			timestamp: number,
+		): AgentMessage {
+			return { role: "toolResult", toolCallId, toolName, content: [{ type: "text", text }], isError, timestamp };
+		}
+
+		it("produces identical analysis output whether a call's identity is freshly computed or already memoized", () => {
+			// One transcript exercising every shape the memo must stay transparent for: an ordinary
+			// success (call-1, later superseded), a failure that stays active (call-2), a DUPLICATE
+			// call with identical arguments that supersedes an earlier already-scanned success
+			// (call-3 supersedes call-1), an unrelated success (call-4), and a second, distinct
+			// failure (call-5).
+			const messages: AgentMessage[] = [
+				toolCallMessage("call-1", "read", { path: "a.ts" }, 1),
+				toolResultMessage("call-1", "read", "contents of a.ts", false, 2),
+				toolCallMessage("call-2", "bash", { command: "ls" }, 3),
+				toolResultMessage("call-2", "bash", "ls: command not found", true, 4),
+				toolCallMessage("call-3", "read", { path: "a.ts" }, 5),
+				toolResultMessage("call-3", "read", "contents of a.ts", false, 6),
+				toolCallMessage("call-4", "bash", { command: "ls -la" }, 7),
+				toolResultMessage("call-4", "bash", "total 0", false, 8),
+				toolCallMessage("call-5", "read", { path: "b.ts" }, 9),
+				toolResultMessage("call-5", "read", "not found", true, 10),
+			];
+
+			// The FIRST call, for every tool-call object in `messages`, is necessarily a memo MISS -
+			// this process has never hashed these specific objects before. The SECOND call, over the
+			// exact same objects, is a memo HIT for every one of them. That pair is precisely "cold"
+			// (non-memoized) vs "warm" (memoized) for the cache this task adds - output must be
+			// identical either way, since the memo is pure caching, never a behavior change.
+			const cold = sanitizeToolFailureContext(messages, "base system prompt", 0);
+			const warm = sanitizeToolFailureContext(messages, "base system prompt", 0);
+			expect(warm).toEqual(cold);
+
+			// Sanity: confirm the scenario actually exercised what it claims to, so a regression here
+			// means something. call-1 was superseded by the identical call-3 and erased; call-2's
+			// failure and call-5's failure are both still active; call-4's success is untouched.
+			expect(cold.messages.some((message) => message.role === "toolResult" && message.toolCallId === "call-1")).toBe(
+				false,
+			);
+			expect(
+				cold.messages.some(
+					(message) =>
+						message.role === "assistant" &&
+						message.content.some((block) => "id" in block && block.id === "call-1"),
+				),
+			).toBe(false);
+			expect(cold.messages.some((message) => message.role === "toolResult" && message.toolCallId === "call-3")).toBe(
+				true,
+			);
+			expect(cold.ledger).toBeDefined();
+			// Both distinct failures (call-2's bash, call-5's read) are active - not just one.
+			expect(cold.ledger).toContain("mistakes=bash:1, read:1");
+			expect(cold.ledger).toContain('"tool":"bash"');
+			expect(cold.ledger).toContain('"tool":"read"');
+		});
+	});
 });

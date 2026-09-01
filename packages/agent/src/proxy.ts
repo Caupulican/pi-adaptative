@@ -4,7 +4,7 @@
  */
 
 // Internal import for JSON parsing utility
-import { EventStream } from "@caupulican/pi-ai/event-stream";
+import { AssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
 import { parseStreamingJson } from "@caupulican/pi-ai/json-parse";
 import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
 import type {
@@ -24,20 +24,6 @@ import { GeometricStreamingProjector, StreamingTextBuffer } from "./utils/stream
 
 const textBuffers = new WeakMap<TextContent | ThinkingContent, StreamingTextBuffer>();
 const toolArgumentProjectors = new WeakMap<ToolCall, GeometricStreamingProjector<Record<string, unknown>>>();
-
-// Create stream class matching ProxyMessageEventStream
-class ProxyMessageEventStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
-	constructor() {
-		super(
-			(event) => event.type === "done" || event.type === "error",
-			(event) => {
-				if (event.type === "done") return event.message;
-				if (event.type === "error") return event.error;
-				throw new Error("Unexpected event type");
-			},
-		);
-	}
-}
 
 /**
  * Proxy event types - server sends these with partial field stripped to reduce bandwidth.
@@ -124,8 +110,12 @@ function buildProxyRequestOptions(options: ProxyStreamOptions): ProxySerializabl
 	};
 }
 
-export function streamProxy(model: Model<Api>, context: Context, options: ProxyStreamOptions): ProxyMessageEventStream {
-	const stream = new ProxyMessageEventStream();
+export function streamProxy(
+	model: Model<Api>,
+	context: Context,
+	options: ProxyStreamOptions,
+): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
 
 	(async () => {
 		// Initialize the partial message that we'll build up from events

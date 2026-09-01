@@ -1,6 +1,6 @@
 import type { Agent } from "@caupulican/pi-agent-core";
 import type { SessionManager, SessionMessageBatchEntry } from "@caupulican/pi-agent-core/session";
-import type { Message } from "@caupulican/pi-ai";
+import type { AssistantMessage, Message } from "@caupulican/pi-ai";
 import { ForegroundLifecycleController } from "./foreground-lifecycle-controller.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
 
@@ -52,6 +52,10 @@ export class ForegroundLifecycleAdapter {
 		const entryId = this.sessionManager.appendMessage(message);
 		this.lifecycle.onMessagePersisted(message, entryId);
 		return entryId;
+	}
+
+	recordTransportTelemetry(message: AssistantMessage): void {
+		this.lifecycle.recordTransportTelemetry(message);
 	}
 
 	appendMessageBatch(batch: readonly SessionMessageBatchEntry[]): string[] {

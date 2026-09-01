@@ -7,11 +7,19 @@ import type {
 } from "@caupulican/pi-agent-core/session";
 import { sessionLifecycleToolIdentityKey } from "@caupulican/pi-agent-core/session";
 import type { ProviderRequestSnapshotContext, ToolCallStartContext } from "@caupulican/pi-agent-core/types";
-import type { Api, Message, Model, ToolResultMessage } from "@caupulican/pi-ai";
+import type { Api, AssistantMessage, Message, Model, ToolResultMessage } from "@caupulican/pi-ai";
 import type { ModelRouterController } from "./model-router-controller.ts";
 import { dumpProviderRequest } from "./request-dump.ts";
 
 const MAX_MESSAGE_ENTRY_IDS = 256;
+/**
+ * Durable, per-request record of which transport actually carried a provider request and whether
+ * the WebSocket `previous_response_id` delta continuation engaged or fell back to a full send —
+ * the turn-economics transport-telemetry investigation. Diagnostic only, keyed by `requestId` so
+ * it can be joined against the `request_snapshot` entry the same request already produced; never
+ * read by any runtime decision.
+ */
+export const PROVIDER_TRANSPORT_TELEMETRY_CUSTOM_TYPE = "provider_transport_telemetry";
 const MAX_WARNING_LENGTH = 500;
 const MAX_EXACT_FINGERPRINT_CHARS = 32 * 1024;
 const MAX_FINGERPRINT_DEPTH = 16;
@@ -225,6 +233,13 @@ export class ForegroundLifecycleController {
 	private readonly startedTools = new Map<string, StartedToolIdentity>();
 	private readonly pendingToolsByCall = new Map<string, Set<string>>();
 	private readonly completedResultMessages = new WeakSet<object>();
+	/**
+	 * The requestId of the most recently snapshotted provider request, captured in
+	 * `onProviderRequestSnapshot` (which always runs before the resulting assistant message can
+	 * complete) so `recordTransportTelemetry` can correlate the two without agent-core needing to
+	 * carry a requestId on `AssistantMessage` itself.
+	 */
+	private lastRequestId: string | undefined;
 
 	constructor(deps: ForegroundLifecycleControllerDeps) {
 		this.deps = deps;
@@ -268,6 +283,7 @@ export class ForegroundLifecycleController {
 		const model = context.model as Model<Api>;
 		const ref = modelRef(model);
 		const requestId = context.requestId;
+		this.lastRequestId = requestId;
 		this.deps.sessionManager.appendRequestSnapshot({
 			requestId,
 			reason: this.requestReason(model),
@@ -294,6 +310,29 @@ export class ForegroundLifecycleController {
 		this.notePersistedMessage(message, entryId);
 		return entryId;
 	};
+
+	/**
+	 * Durably record this completed assistant message's `provider_transport` diagnostics (see
+	 * `openai-codex-responses.ts`), correlated to the request that produced it via
+	 * `lastRequestId`. A no-op for a message with none (every provider besides the Codex
+	 * WebSocket/SSE one, or a diagnostic-free success). Never throws: a failed diagnostic write
+	 * must never fail the request it observes, exactly like `dumpProviderRequest`.
+	 */
+	recordTransportTelemetry(message: AssistantMessage): void {
+		const diagnostics = message.diagnostics;
+		if (!diagnostics || diagnostics.length === 0) return;
+		for (const diagnostic of diagnostics) {
+			if (diagnostic.type !== "provider_transport") continue;
+			try {
+				this.deps.sessionManager.appendCustomEntry(PROVIDER_TRANSPORT_TELEMETRY_CUSTOM_TYPE, {
+					requestId: this.lastRequestId,
+					...diagnostic.details,
+				});
+			} catch {
+				// A failed diagnostic write must never fail the request it observes.
+			}
+		}
+	}
 
 	private async onToolCallStart(calls: readonly ToolCallStartContext[], signal?: AbortSignal): Promise<void> {
 		if (calls.length === 0) return;
@@ -439,6 +478,9 @@ export class ForegroundLifecycleController {
 		}
 		if (plan.toolClosers.length > 0 || plan.terminalPromotions.length > 0 || plan.compactionClosers.length > 0) {
 			this.deps.agent.state.messages = this.deps.sessionManager.buildSessionContext().messages;
+			// Crash-recovery repair rebuilds in-memory state from durable storage at startup, the same
+			// "session load" case Agent.resetSanitizerPrefixHorizon's doc comment calls out.
+			this.deps.agent.resetSanitizerPrefixHorizon();
 		}
 		for (const warning of warnings) this.deps.emitWarning(warning);
 		return warnings;

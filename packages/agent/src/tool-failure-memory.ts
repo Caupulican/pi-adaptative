@@ -461,6 +461,32 @@ function operationIdentity(tool: string, args: unknown): ToolOperationIdentity {
 	};
 }
 
+/**
+ * Memoizes `operationIdentity` by CALL OBJECT identity, not by a string built from its arguments -
+ * building that string is exactly the structured-hash cost this exists to avoid. `analyzeToolFailureContext`
+ * runs once per provider request and used to recompute this same identity for every already-scanned
+ * call on every single request - O(transcript length) work per request, O(n^2) total hashing over a
+ * session (measured: ~84% of sampled CPU time in a 2000-turn profile). A tool call's `name`/
+ * `arguments` never change once the message containing it is durable and reachable from
+ * `analyzeToolFailureContext` - the only two places in this package that mutate `.arguments`
+ * (agent-loop.ts's `prepareToolCall` argument-validation coercion, and proxy.ts's streaming JSON
+ * argument projector) both do so only while the assistant message is still being prepared/streamed,
+ * strictly before it is appended as a finalized message; `analyzeToolFailureContext` only ever runs
+ * while planning the NEXT request, before that turn's own response - and hence its own new tool
+ * calls - exist, so it can never observe a call before those mutations have already settled. A
+ * WeakMap so a call's memo entry is collected along with the call itself once nothing else
+ * references it (a message dropped by compaction leaks nothing).
+ */
+const callIdentityMemo = new WeakMap<AgentToolCall, ToolOperationIdentity>();
+
+function memoizedOperationIdentity(call: AgentToolCall): ToolOperationIdentity {
+	const cached = callIdentityMemo.get(call);
+	if (cached) return cached;
+	const identity = operationIdentity(call.name, call.arguments);
+	callIdentityMemo.set(call, identity);
+	return identity;
+}
+
 function getToolFailureKey(tool: string, args: unknown): string {
 	return toolOperationKey(tool, args, true);
 }
@@ -1050,7 +1076,7 @@ function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0
 		// has now run — so a transcript that predates this classification cannot keep an obsolete
 		// record active across the boundary.
 		if (message.errorKind === "operation_outcome") {
-			if (call) active.delete(getToolFailureKey(call.name, call.arguments));
+			if (call) active.delete(memoizedOperationIdentity(call).failureKey);
 			continue;
 		}
 		const isHarnessFailure = message.isError === true || textPayload.startsWith("[harness] ");
@@ -1081,16 +1107,20 @@ function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0
 			if (retained) {
 				failureKey = retained.failureKey;
 				executionKey = call
-					? getToolExecutionKey(call.name, call.arguments)
+					? memoizedOperationIdentity(call).executionKey
 					: getToolFailureRecordExecutionKey(retained);
-				rawKey = call ? getToolRawOperationKey(call.name, call.arguments) : getToolFailureRecordRawKey(retained);
+				rawKey = call ? memoizedOperationIdentity(call).rawKey : getToolFailureRecordRawKey(retained);
 				tool = retained.tool;
 				operation = retained.operation;
 			} else {
-				const identity = operationIdentity(
-					call?.name ?? message.toolName,
-					call?.arguments ?? { toolCallId: message.toolCallId },
-				);
+				// Equivalent to `operationIdentity(call?.name ?? message.toolName, call?.arguments ?? {...})`:
+				// when `call` exists this IS `operationIdentity(call.name, call.arguments)`, so it can go
+				// through the memo; the synthetic fallback (a call the harness no longer has, keyed only by
+				// the toolCallId it once had) has no call object to memoize against and stays uncached - it
+				// is not the repeated-rescan path this memo exists for.
+				const identity = call
+					? memoizedOperationIdentity(call)
+					: operationIdentity(message.toolName, { toolCallId: message.toolCallId });
 				failureKey = identity.failureKey;
 				executionKey = identity.executionKey;
 				rawKey = identity.rawKey;
@@ -1137,7 +1167,9 @@ function analyzeToolFailureContext(messages: AgentMessage[], sentPrefixCount = 0
 
 		if (call) {
 			const callIndex = callMessageIndexById.get(call.id) ?? index;
-			const opKey = getToolFailureKey(call.name, call.arguments);
+			// The hot path: every successful result re-derives this on every request. See
+			// memoizedOperationIdentity's doc comment.
+			const opKey = memoizedOperationIdentity(call).failureKey;
 			active.delete(opKey);
 			const previousOperation = latestSuccessfulByOpKey.get(opKey);
 			if (previousOperation && erasable(previousOperation.index)) omittedCallIds.add(previousOperation.callId);

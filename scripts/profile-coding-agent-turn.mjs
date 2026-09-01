@@ -4,8 +4,10 @@ import { dirname, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import { EventStream } from "../packages/ai/src/utils/event-stream.ts";
 import { agentLoop } from "../packages/agent/src/agent-loop.ts";
+import { createAssistantMessageEventStream } from "../packages/ai/src/utils/event-stream.ts";
+import { createEmptyUsage } from "../packages/ai/src/usage.ts";
+import { parseIntegerFlag, tryConsumeHelpFlag } from "./lib/cli-flags.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
@@ -80,14 +82,6 @@ Example:
 `);
 }
 
-function parseIntegerFlag(value, name) {
-	const parsed = Number.parseInt(value, 10);
-	if (!Number.isFinite(parsed) || parsed <= 0) {
-		throw new Error(`Invalid ${name}: ${value}`);
-	}
-	return parsed;
-}
-
 function parseArgs(argv) {
 	const options = {
 		turns: 300,
@@ -98,17 +92,14 @@ function parseArgs(argv) {
 	for (let index = 0; index < argv.length; index++) {
 		const arg = argv[index];
 
-		if (arg === "--help" || arg === "-h") {
-			options.help = true;
-			continue;
-		}
+		if (tryConsumeHelpFlag(arg, options)) continue;
 
 		if ((arg === "--turns" || arg === "--profile-dir" || arg === "--label") && index + 1 >= argv.length) {
 			throw new Error(`Missing value for ${arg}`);
 		}
 
 		if (arg === "--turns") {
-			options.turns = parseIntegerFlag(argv[++index], "--turns");
+			options.turns = parseIntegerFlag(argv[++index], "--turns", { min: 1 });
 			continue;
 		}
 
@@ -134,31 +125,6 @@ function toDisplayPath(path) {
 		return relativePath.replaceAll("\\", "/");
 	}
 	return path;
-}
-
-/** Same terminal-event contract as the pi-ai provider streams: `done` or `error`, never both. */
-class ScriptedAssistantStream extends EventStream {
-	constructor() {
-		super(
-			(event) => event.type === "done" || event.type === "error",
-			(event) => {
-				if (event.type === "done") return event.message;
-				if (event.type === "error") return event.error;
-				throw new Error("Unexpected event type");
-			},
-		);
-	}
-}
-
-function createEmptyUsage() {
-	return {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
 }
 
 function createStubModel() {
@@ -202,7 +168,13 @@ const stubTool = {
 	description: "Synthetic per-turn profiling tool. See scripts/profile-coding-agent-turn.mjs.",
 	parameters: Type.Object({ step: Type.Number() }),
 	async execute(_toolCallId, params) {
-		return { content: [{ type: "text", text: `stub step ${params.step}` }], details: { step: params.step } };
+		// Deliberately >= 64 chars: tool-failure-memory.ts's payload-based dedup signature
+		// (fastTextSignature) only runs above that length, and a short result would silently
+		// leave that path unprofiled.
+		return {
+			content: [{ type: "text", text: `stub step ${params.step} completed successfully with no errors to report` }],
+			details: { step: params.step },
+		};
 	},
 };
 
@@ -218,7 +190,7 @@ function createUserMessage(text) {
 function createScriptedStreamFn(turns) {
 	let turnIndex = 0;
 	return (model) => {
-		const stream = new ScriptedAssistantStream();
+		const stream = createAssistantMessageEventStream();
 		const thisTurn = turnIndex;
 		turnIndex++;
 		queueMicrotask(() => {

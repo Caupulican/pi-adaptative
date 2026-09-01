@@ -274,6 +274,21 @@ function appendCodexSubscriptionRateLimitDiagnostics(output: AssistantMessage, h
 	];
 }
 
+/**
+ * Observability only — records which transport actually carried this request and whether the
+ * WebSocket `previous_response_id` delta continuation engaged, never what was merely configured
+ * (`transport: "auto"` resolves silently and tells a caller nothing about what happened). This
+ * never influences transport selection; it only reports the decision already made above. Read
+ * from `AssistantMessage.diagnostics` — the same channel `provider_transport_failure` already
+ * uses for the failure side of this same decision — never a parallel logging path.
+ */
+function appendProviderTransportDiagnostic(
+	output: AssistantMessage,
+	details: { transport: "websocket" | "sse"; deltaEngaged: boolean; fallbackFromWebsocket?: boolean },
+): void {
+	appendAssistantMessageDiagnostic(output, { type: "provider_transport", timestamp: Date.now(), details });
+}
+
 // ============================================================================
 // Main Stream Function
 // ============================================================================
@@ -534,6 +549,11 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 
 			appendCodexSubscriptionRateLimitDiagnostics(output, response.headers);
+			appendProviderTransportDiagnostic(output, {
+				transport: "sse",
+				deltaEngaged: false,
+				fallbackFromWebsocket: transport !== "sse" && !websocketDisabledForSession,
+			});
 			if (!startEmitted) {
 				startEmitted = true;
 				stream.push({ type: "start", partial: output });
@@ -1664,6 +1684,10 @@ async function processWebSocketStream(
 					currentInputTail: appendCachedWebSocketInput(undefined, getBody().input ?? []),
 				};
 	const requestBody = prepared.requestBody;
+	appendProviderTransportDiagnostic(output, {
+		transport: "websocket",
+		deltaEngaged: Boolean(requestBody.previous_response_id),
+	});
 	const wireRequestBody = model.openaiResponsesLite
 		? {
 				...requestBody,

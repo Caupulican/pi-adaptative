@@ -3,8 +3,11 @@ import type { Agent } from "@caupulican/pi-agent-core/agent";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
-import { ForegroundLifecycleController } from "../src/core/foreground-lifecycle-controller.ts";
+import { describe, expect, it, vi } from "vitest";
+import {
+	ForegroundLifecycleController,
+	PROVIDER_TRANSPORT_TELEMETRY_CUSTOM_TYPE,
+} from "../src/core/foreground-lifecycle-controller.ts";
 import type { ModelRouterController } from "../src/core/model-router-controller.ts";
 import { createHarness } from "./test-harness.ts";
 
@@ -135,6 +138,129 @@ describe("foreground lifecycle controller", () => {
 		expect(snapshots[0]!.historyFingerprint).not.toBe(snapshots[1]!.historyFingerprint);
 		expect(JSON.stringify(snapshots)).not.toContain("alpha");
 		expect(JSON.stringify(snapshots)).not.toContain("bravo");
+	});
+
+	it("correlates a completed assistant message's provider_transport diagnostic to the request that produced it", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const agent = {} as Agent & { onProviderRequestSnapshot?: (...args: never[]) => Promise<void> };
+		const controller = new ForegroundLifecycleController({
+			agent,
+			sessionManager,
+			modelRouter: { commitSessionBufferPrefix: () => new Map() } as ModelRouterController,
+			emitWarning: () => {},
+		});
+		controller.install();
+		await agent.onProviderRequestSnapshot?.(
+			{
+				requestId: "req-transport-1",
+				model: { api: "faux", provider: "faux", id: "faux-1" },
+				reasoning: "off",
+				maxTokens: 128,
+				attempt: 0,
+				context: { systemPrompt: "", tools: [], messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			} as never,
+			undefined,
+		);
+
+		const message = {
+			...fauxAssistantMessage("ok"),
+			diagnostics: [
+				{
+					type: "provider_transport",
+					timestamp: Date.now(),
+					details: { transport: "websocket", deltaEngaged: true },
+				},
+			],
+		};
+		controller.recordTransportTelemetry(message);
+
+		const telemetry = sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "custom" && entry.customType === PROVIDER_TRANSPORT_TELEMETRY_CUSTOM_TYPE);
+		expect(telemetry).toHaveLength(1);
+		expect(telemetry[0]).toMatchObject({
+			data: { requestId: "req-transport-1", transport: "websocket", deltaEngaged: true },
+		});
+	});
+
+	it("writes one telemetry entry per provider_transport diagnostic and ignores unrelated ones", () => {
+		const sessionManager = SessionManager.inMemory();
+		const agent = {} as Agent & { onProviderRequestSnapshot?: (...args: never[]) => Promise<void> };
+		const controller = new ForegroundLifecycleController({
+			agent,
+			sessionManager,
+			modelRouter: { commitSessionBufferPrefix: () => new Map() } as ModelRouterController,
+			emitWarning: () => {},
+		});
+		controller.install();
+
+		const message = {
+			...fauxAssistantMessage("ok"),
+			diagnostics: [
+				{ type: "provider_transport_failure", timestamp: 1, error: { message: "boom" } },
+				{
+					type: "provider_transport",
+					timestamp: 2,
+					details: { transport: "websocket", deltaEngaged: false },
+				},
+				{
+					type: "provider_transport",
+					timestamp: 3,
+					details: { transport: "sse", deltaEngaged: false, fallbackFromWebsocket: true },
+				},
+			],
+		};
+		controller.recordTransportTelemetry(message);
+
+		const telemetry = sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "custom" && entry.customType === PROVIDER_TRANSPORT_TELEMETRY_CUSTOM_TYPE);
+		expect(telemetry).toHaveLength(2);
+	});
+
+	it("does nothing for a message with no provider_transport diagnostic", () => {
+		const sessionManager = SessionManager.inMemory();
+		const agent = {} as Agent & { onProviderRequestSnapshot?: (...args: never[]) => Promise<void> };
+		const controller = new ForegroundLifecycleController({
+			agent,
+			sessionManager,
+			modelRouter: { commitSessionBufferPrefix: () => new Map() } as ModelRouterController,
+			emitWarning: () => {},
+		});
+		controller.install();
+
+		controller.recordTransportTelemetry(fauxAssistantMessage("ok"));
+
+		expect(
+			sessionManager
+				.getEntries()
+				.filter(
+					(entry) => entry.type === "custom" && entry.customType === PROVIDER_TRANSPORT_TELEMETRY_CUSTOM_TYPE,
+				),
+		).toHaveLength(0);
+	});
+
+	it("never throws when the session log write fails -- a failed diagnostic must never fail the request it observes", () => {
+		const sessionManager = SessionManager.inMemory();
+		vi.spyOn(sessionManager, "appendCustomEntry").mockImplementation(() => {
+			throw new Error("disk full");
+		});
+		const agent = {} as Agent & { onProviderRequestSnapshot?: (...args: never[]) => Promise<void> };
+		const controller = new ForegroundLifecycleController({
+			agent,
+			sessionManager,
+			modelRouter: { commitSessionBufferPrefix: () => new Map() } as ModelRouterController,
+			emitWarning: () => {},
+		});
+		controller.install();
+
+		const message = {
+			...fauxAssistantMessage("ok"),
+			diagnostics: [
+				{ type: "provider_transport", timestamp: 1, details: { transport: "sse", deltaEngaged: false } },
+			],
+		};
+		expect(() => controller.recordTransportTelemetry(message)).not.toThrow();
 	});
 
 	it("does not write a terminal for an immediate tool result with no durable start", async () => {

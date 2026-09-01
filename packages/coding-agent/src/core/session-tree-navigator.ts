@@ -229,7 +229,12 @@ export class SessionTreeNavigator {
 
 			// Update agent state
 			const sessionContext = sessionManager.buildSessionContext();
-			this.deps.getAgent().state.messages = sessionContext.messages;
+			const agent = this.deps.getAgent();
+			agent.state.messages = sessionContext.messages;
+			// Branch/leaf just changed: the session-scoped sanitizer mark indexes into the array we
+			// just replaced and must not survive into this different lineage (see
+			// Agent.resetSanitizerPrefixHorizon's doc comment).
+			agent.resetSanitizerPrefixHorizon();
 
 			// Emit session_tree event
 			await extensionRunner.emit({

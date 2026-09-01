@@ -4,6 +4,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { StreamingLineDecoder } from "../packages/ai/src/utils/streaming-lines.ts";
+import { parseIntegerFlag, tryConsumeHelpFlag } from "./lib/cli-flags.mjs";
 import { acquireScriptWorkRun, removeScriptWorkRun } from "./lib/work-directory.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -52,14 +53,6 @@ Notes:
 `);
 }
 
-function parseIntegerFlag(value, name) {
-	const parsed = Number.parseInt(value, 10);
-	if (!Number.isFinite(parsed) || parsed < 0) {
-		throw new Error(`Invalid ${name}: ${value}`);
-	}
-	return parsed;
-}
-
 function parseRuntime(value) {
 	if (value === "auto" || value === "node" || value === "bun") {
 		return value;
@@ -92,10 +85,7 @@ function parseArgs(argv) {
 	for (let index = 0; index < argv.length; index++) {
 		const arg = argv[index];
 
-		if (arg === "--help" || arg === "-h") {
-			options.help = true;
-			continue;
-		}
+		if (tryConsumeHelpFlag(arg, options)) continue;
 
 		if (arg === "--no-offline") {
 			options.offline = false;

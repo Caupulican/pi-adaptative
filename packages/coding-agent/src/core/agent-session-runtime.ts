@@ -549,6 +549,9 @@ export class AgentSessionRuntime {
 			try {
 				await options.setup(prepared.session.sessionManager);
 				prepared.session.agent.state.messages = prepared.session.sessionManager.buildSessionContext().messages;
+				// New/replacement session (see "session_start" above): a fresh lineage, never the one
+				// any pre-existing sanitizer mark was tracking.
+				prepared.session.agent.resetSanitizerPrefixHorizon();
 			} catch (error) {
 				await this.discardPrepared(prepared);
 				this.removeCreatedSessionFile(sessionManager.getSessionFile());

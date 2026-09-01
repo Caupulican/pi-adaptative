@@ -221,3 +221,144 @@ describe("OpenAI Codex cache boundary", () => {
 		expect(global.fetch).not.toHaveBeenCalled();
 	});
 });
+
+describe("transport telemetry (turn-economics transport-observability task)", () => {
+	it("records which transport carried a directly-configured SSE request", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => completedSse()),
+		);
+
+		const result = await streamOpenAICodexResponses(
+			model,
+			context([{ role: "user", content: "hello", timestamp: 1 }]),
+			{ apiKey: mockToken(), transport: "sse" },
+		).result();
+
+		const transportDiagnostics = result.diagnostics?.filter((diagnostic) => diagnostic.type === "provider_transport");
+		expect(transportDiagnostics).toHaveLength(1);
+		expect(transportDiagnostics?.[0]?.details).toEqual({
+			transport: "sse",
+			deltaEngaged: false,
+			fallbackFromWebsocket: false,
+		});
+	});
+
+	it("records deltaEngaged=false for a full-context websocket send, then deltaEngaged=true once the cached continuation engages", async () => {
+		const sentBodies: Array<{ previous_response_id?: string }> = [];
+
+		class MockWebSocket {
+			static readonly OPEN = 1;
+			static readonly CLOSED = 3;
+			readyState = MockWebSocket.OPEN;
+			private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
+
+			constructor() {
+				queueMicrotask(() => this.dispatch("open", {}));
+			}
+
+			addEventListener(type: string, listener: (event: unknown) => void): void {
+				const listeners = this.listeners.get(type) ?? new Set<(event: unknown) => void>();
+				listeners.add(listener);
+				this.listeners.set(type, listeners);
+			}
+
+			removeEventListener(type: string, listener: (event: unknown) => void): void {
+				this.listeners.get(type)?.delete(listener);
+			}
+
+			send(data: string): void {
+				const body = JSON.parse(data) as { previous_response_id?: string };
+				sentBodies.push(body);
+				const responseId = sentBodies.length === 1 ? "resp_1" : "resp_2";
+				const messageId = sentBodies.length === 1 ? "msg_1" : "msg_2";
+				const text = sentBodies.length === 1 ? "first" : "second";
+				queueMicrotask(() => {
+					for (const event of responseEvents(responseId, messageId, text)) {
+						this.dispatch("message", { data: JSON.stringify(event) });
+					}
+				});
+			}
+
+			close(): void {
+				this.readyState = MockWebSocket.CLOSED;
+			}
+
+			private dispatch(type: string, event: unknown): void {
+				for (const listener of this.listeners.get(type) ?? []) listener(event);
+			}
+		}
+
+		vi.stubGlobal("WebSocket", MockWebSocket);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("unexpected", { status: 500 })),
+		);
+
+		const firstContext = context([{ role: "user", content: "hello", timestamp: 1 }]);
+		const first = await streamOpenAICodexResponses(model, firstContext, {
+			apiKey: mockToken(),
+			transport: "websocket-cached",
+			sessionId: "delta-telemetry-session",
+		}).result();
+		const firstTransport = first.diagnostics?.filter((diagnostic) => diagnostic.type === "provider_transport");
+		expect(firstTransport).toHaveLength(1);
+		expect(firstTransport?.[0]?.details).toMatchObject({ transport: "websocket", deltaEngaged: false });
+
+		const secondContext = context([
+			...firstContext.messages,
+			first,
+			{ role: "user", content: "continue", timestamp: 2 },
+		]);
+		const second = await streamOpenAICodexResponses(model, secondContext, {
+			apiKey: mockToken(),
+			transport: "websocket-cached",
+			sessionId: "delta-telemetry-session",
+		}).result();
+		const secondTransport = second.diagnostics?.filter((diagnostic) => diagnostic.type === "provider_transport");
+		expect(secondTransport).toHaveLength(1);
+		expect(secondTransport?.[0]?.details).toMatchObject({ transport: "websocket", deltaEngaged: true });
+		expect(global.fetch).not.toHaveBeenCalled();
+	});
+
+	it("records a websocket-to-sse fallback, alongside the existing failure diagnostic, when the connection cannot be established", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => completedSse()),
+			);
+			class NeverOpensWebSocket {
+				addEventListener(): void {}
+				removeEventListener(): void {}
+				send(): void {
+					throw new Error("send should not be called before websocket open");
+				}
+				close(): void {}
+			}
+			vi.stubGlobal("WebSocket", NeverOpensWebSocket);
+
+			const resultPromise = streamOpenAICodexResponses(
+				model,
+				context([{ role: "user", content: "hello", timestamp: 1 }]),
+				{ apiKey: mockToken(), transport: "auto", websocketConnectTimeoutMs: 50 },
+			).result();
+
+			await vi.advanceTimersByTimeAsync(50);
+			const result = await resultPromise;
+
+			const transportDiagnostics = result.diagnostics?.filter(
+				(diagnostic) => diagnostic.type === "provider_transport",
+			);
+			expect(transportDiagnostics).toHaveLength(1);
+			expect(transportDiagnostics?.[0]?.details).toEqual({
+				transport: "sse",
+				deltaEngaged: false,
+				fallbackFromWebsocket: true,
+			});
+			expect(result.diagnostics?.some((diagnostic) => diagnostic.type === "provider_transport_failure")).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});

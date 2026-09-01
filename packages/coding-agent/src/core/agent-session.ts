@@ -146,6 +146,7 @@ import {
 } from "./models/perf-profile.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
+import { PendingInputQueueController } from "./pending-input-queue-controller.ts";
 import {
 	appendPipelineRunSnapshot,
 	createActivePipelineContextMessage,
@@ -278,9 +279,9 @@ export class AgentSession {
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _extensionsChangedListeners: Array<() => void> = [];
 
-	private _steeringMessages: string[] = [];
-	private _followUpMessages: string[] = [];
-	private _queuedExtensionCommands: string[] = [];
+	/** Steering/follow-up/extension-command queues (see pending-input-queue-controller.ts); assigned
+	 * in the constructor body since it depends on `_skillVault` and `_goals` being ready. */
+	private readonly _pendingQueue: PendingInputQueueController;
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	private _streamingPromptSubmissionTail: Promise<void> = Promise.resolve();
 	/**
@@ -466,6 +467,9 @@ export class AgentSession {
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+		// Initial load: `config.agent` may be a reused Agent instance carrying a stale sanitizer mark
+		// from a different lineage. See Agent.resetSanitizerPrefixHorizon's doc comment.
+		this.agent.resetSanitizerPrefixHorizon();
 		if (config.orchestrationProfile) {
 			validateOrchestrationProfile(config.orchestrationProfile);
 			const resolved = resolveConfiguredOrchestrationModel(config.orchestrationProfile, config.modelRegistry);
@@ -600,6 +604,13 @@ export class AgentSession {
 			scheduleGoalAutoContinueFromIdle: () => this._backgroundLanes.scheduleGoalAutoContinueFromIdle(),
 			prompt: (text, options) => this.prompt(text, options),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
+		});
+		this._pendingQueue = new PendingInputQueueController({
+			agent: this.agent,
+			skillVault: this._skillVault,
+			goals: this._goals,
+			getExtensionRunner: () => this._extensionRunner,
+			getPromptTemplates: () => this.promptTemplates,
 		});
 		this._backgroundLanes = new BackgroundLaneController({
 			isDisposed: () => this._disposed,
@@ -1809,12 +1820,7 @@ export class AgentSession {
 	}
 
 	private _emitQueueUpdate(): void {
-		this._emit({
-			type: "queue_update",
-			steering: [...this._steeringMessages],
-			followUp: [...this._followUpMessages],
-			commands: [...this._queuedExtensionCommands],
-		});
+		this._emit({ type: "queue_update", ...this._pendingQueue.snapshot() });
 	}
 
 	/**
@@ -1835,20 +1841,8 @@ export class AgentSession {
 		if (event.type === "message_start" && event.message.role === "user") {
 			this._compaction.resetOverflowRecovery();
 			const messageText = this._getUserMessageText(event.message);
-			if (messageText) {
-				// Check steering queue first
-				const steeringIndex = this._steeringMessages.indexOf(messageText);
-				if (steeringIndex !== -1) {
-					this._steeringMessages.splice(steeringIndex, 1);
-					this._emitQueueUpdate();
-				} else {
-					// Check follow-up queue
-					const followUpIndex = this._followUpMessages.indexOf(messageText);
-					if (followUpIndex !== -1) {
-						this._followUpMessages.splice(followUpIndex, 1);
-						this._emitQueueUpdate();
-					}
-				}
+			if (messageText && this._pendingQueue.removeIfPending(messageText) !== undefined) {
+				this._emitQueueUpdate();
 			}
 			this._goals.activateQueuedOwnerChatGoal(event.message, this.agent.state.messages);
 		}
@@ -1913,6 +1907,7 @@ export class AgentSession {
 			// Track the response for ordered retry/failover/compaction handling after agent_end.
 			if (event.message.role === "assistant") {
 				const assistantMsg = event.message as AssistantMessage;
+				this._foregroundLifecycle.recordTransportTelemetry(assistantMsg);
 				this._goals.recordExecutionUsage(assistantMsg);
 				if (messagePersisted) {
 					this._pipeline.observeProviderUsage(this.agent.state.messages, assistantMsg);
@@ -2569,14 +2564,15 @@ export class AgentSession {
 			// command for the end of the run instead of sending it to the model.
 			if (processSlashCommands && text.startsWith("/")) {
 				if (this.isStreaming && options?.source === "extension" && options?.streamingBehavior) {
-					const commandName = this._parseCommandName(text);
+					const commandName = this._pendingQueue.parseCommandName(text);
 					if (this._extensionRunner.getCommand(commandName)) {
-						this._queueExtensionCommand(text);
+						this._pendingQueue.queueExtensionCommand(text);
+						this._emitQueueUpdate();
 						preflightResult?.(true);
 						return;
 					}
 				}
-				const handled = await this._tryExecuteExtensionCommand(text);
+				const handled = await this._pendingQueue.tryExecuteExtensionCommand(text);
 				if (handled) {
 					// Extension command executed, no prompt to send
 					preflightResult?.(true);
@@ -2607,7 +2603,7 @@ export class AgentSession {
 			// Expand skill commands (/skill:name args) and prompt templates (/template args)
 			let expandedText = currentText;
 			if (expandPromptTemplates) {
-				expandedText = this._expandSkillCommand(expandedText);
+				expandedText = this._pendingQueue.expandSkillCommand(expandedText);
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
 
@@ -2626,10 +2622,11 @@ export class AgentSession {
 					);
 				}
 				if (options.streamingBehavior === "followUp") {
-					await this._queueFollowUp(expandedText, currentImages, goalToolStartAuthority);
+					this._pendingQueue.queueFollowUp(expandedText, currentImages, goalToolStartAuthority);
 				} else {
-					await this._queueSteer(expandedText, currentImages, goalToolStartAuthority);
+					this._pendingQueue.queueSteer(expandedText, currentImages, goalToolStartAuthority);
 				}
+				this._emitQueueUpdate();
 				preflightResult?.(true);
 				return;
 			}
@@ -2902,68 +2899,6 @@ export class AgentSession {
 	}
 
 	/**
-	 * Try to execute an extension command. Returns true if command was found and executed.
-	 */
-	private _parseCommandName(text: string): string {
-		const spaceIndex = text.indexOf(" ");
-		return spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-	}
-
-	private async _tryExecuteExtensionCommand(text: string): Promise<boolean> {
-		// Parse command name and args
-		const spaceIndex = text.indexOf(" ");
-		const commandName = this._parseCommandName(text);
-		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
-
-		const command = this._extensionRunner.getCommand(commandName);
-		if (!command) return false;
-
-		// Get command context from extension runner (includes session control methods)
-		const ctx = this._extensionRunner.createCommandContext();
-
-		try {
-			await command.handler(args, ctx);
-			return true;
-		} catch (err) {
-			// Emit error via extension runner
-			this._extensionRunner.emitError({
-				extensionPath: `command:${commandName}`,
-				event: "command",
-				error: err instanceof Error ? err.message : String(err),
-			});
-			return true;
-		}
-	}
-
-	/** Route explicit /skill:name through the same host-owned vault as model tool calls. */
-	private _expandSkillCommand(text: string): string {
-		if (!text.startsWith("/skill:")) return text;
-
-		const spaceIndex = text.indexOf(" ");
-		const skillName = spaceIndex === -1 ? text.slice(7) : text.slice(7, spaceIndex);
-		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
-
-		const result = this._skillVault.load(skillName, "user");
-		if (!result.ok) {
-			this._extensionRunner.emitError({
-				extensionPath: "<skill-vault>",
-				event: "skill_load",
-				error: result.message,
-			});
-			return text;
-		}
-		return args || `Use loaded skill ${JSON.stringify(skillName)} for this request.`;
-	}
-
-	/** Reject extension commands, then expand a queued message through the shared skill/template path. */
-	private _prepareQueuedMessageText(text: string): string {
-		if (text.startsWith("/")) {
-			this._throwIfExtensionCommand(text);
-		}
-		return expandPromptTemplate(this._expandSkillCommand(text), [...this.promptTemplates]);
-	}
-
-	/**
 	 * Queue a steering message while the agent is running.
 	 * Delivered after the current assistant turn finishes executing its tool calls,
 	 * before the next LLM call.
@@ -2972,7 +2907,8 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async steer(text: string, images?: ImageContent[]): Promise<void> {
-		await this._queueSteer(this._prepareQueuedMessageText(text), images);
+		this._pendingQueue.queueSteer(this._pendingQueue.prepareQueuedMessageText(text), images);
+		this._emitQueueUpdate();
 	}
 
 	/**
@@ -2983,74 +2919,20 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async followUp(text: string, images?: ImageContent[]): Promise<void> {
-		await this._queueFollowUp(this._prepareQueuedMessageText(text), images);
-	}
-
-	private _createQueuedUserMessage(
-		text: string,
-		images: ImageContent[] | undefined,
-		queuedGoalAuthority: ExplicitGoalStartAuthority | undefined,
-	): AgentMessage {
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }, ...(images ?? [])];
-		const message: AgentMessage = { role: "user", content, timestamp: Date.now() };
-		if (queuedGoalAuthority) this._goals.queueOwnerChatGoal(message, text, queuedGoalAuthority);
-		return message;
-	}
-
-	/**
-	 * Internal: Queue a steering message (already expanded, no extension command check).
-	 */
-	private async _queueSteer(
-		text: string,
-		images?: ImageContent[],
-		queuedGoalAuthority?: ExplicitGoalStartAuthority,
-	): Promise<void> {
-		this._steeringMessages.push(text);
-		this._emitQueueUpdate();
-		this.agent.steer(this._createQueuedUserMessage(text, images, queuedGoalAuthority));
-	}
-
-	/**
-	 * Internal: Queue a follow-up message (already expanded, no extension command check).
-	 */
-	private async _queueFollowUp(
-		text: string,
-		images?: ImageContent[],
-		queuedGoalAuthority?: ExplicitGoalStartAuthority,
-	): Promise<void> {
-		this._followUpMessages.push(text);
-		this._emitQueueUpdate();
-		this.agent.followUp(this._createQueuedUserMessage(text, images, queuedGoalAuthority));
-	}
-
-	/**
-	 * Internal: Queue an extension command to execute after the current agent run.
-	 */
-	private _queueExtensionCommand(text: string): void {
-		this._queuedExtensionCommands.push(text);
+		this._pendingQueue.queueFollowUp(this._pendingQueue.prepareQueuedMessageText(text), images);
 		this._emitQueueUpdate();
 	}
+
+	// Steering/follow-up/extension-command queue mechanics (parsing, skill-command expansion,
+	// draining) live in PendingInputQueueController (pending-input-queue-controller.ts). This
+	// coordinator still owns the isStreaming-gated drain loop below and every _emitQueueUpdate()
+	// call, since those depend on coordinator-wide state the controller intentionally doesn't have.
 
 	private async _drainQueuedExtensionCommands(): Promise<void> {
-		while (this._queuedExtensionCommands.length > 0 && !this.isStreaming) {
-			const commandText = this._queuedExtensionCommands.shift()!;
+		while (this._pendingQueue.getCommands().length > 0 && !this.isStreaming) {
+			const commandText = this._pendingQueue.shiftCommand()!;
 			this._emitQueueUpdate();
-			await this._tryExecuteExtensionCommand(commandText);
-		}
-	}
-
-	/**
-	 * Throw an error if the text is an extension command.
-	 */
-	private _throwIfExtensionCommand(text: string): void {
-		const spaceIndex = text.indexOf(" ");
-		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-		const command = this._extensionRunner.getCommand(commandName);
-
-		if (command) {
-			throw new Error(
-				`Extension command "/${commandName}" cannot be queued. Use prompt() or execute the command when not streaming.`,
-			);
+			await this._pendingQueue.tryExecuteExtensionCommand(commandText);
 		}
 	}
 
@@ -3178,35 +3060,29 @@ export class AgentSession {
 	 * @returns Object with steering, followUp, and queued extension command arrays
 	 */
 	clearQueue(): { steering: string[]; followUp: string[]; commands: string[] } {
-		const steering = [...this._steeringMessages];
-		const followUp = [...this._followUpMessages];
-		const commands = [...this._queuedExtensionCommands];
-		this._steeringMessages = [];
-		this._followUpMessages = [];
-		this._queuedExtensionCommands = [];
-		this.agent.clearAllQueues();
+		const result = this._pendingQueue.clear();
 		this._emitQueueUpdate();
-		return { steering, followUp, commands };
+		return result;
 	}
 
 	/** Number of pending messages (includes steering, follow-up, and queued extension commands) */
 	get pendingMessageCount(): number {
-		return this._steeringMessages.length + this._followUpMessages.length + this._queuedExtensionCommands.length;
+		return this._pendingQueue.count;
 	}
 
 	/** Get pending steering messages (read-only) */
 	getSteeringMessages(): readonly string[] {
-		return this._steeringMessages;
+		return this._pendingQueue.getSteering();
 	}
 
 	/** Get pending follow-up messages (read-only) */
 	getFollowUpMessages(): readonly string[] {
-		return this._followUpMessages;
+		return this._pendingQueue.getFollowUp();
 	}
 
 	/** Get pending extension commands (read-only). */
 	getQueuedExtensionCommands(): readonly string[] {
-		return this._queuedExtensionCommands;
+		return this._pendingQueue.getCommands();
 	}
 
 	get resourceLoader(): ResourceLoader {
@@ -3453,6 +3329,9 @@ export class AgentSession {
 		this._foregroundLifecycle.reload();
 		this._reflection.invalidateCurrentTurnCueStateCache();
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+		// Extension/settings reload: guarded (see extension-binding-controller.ts) to never overlap
+		// compaction, so this is always a genuine resync, never compaction's own within-lineage pack.
+		this.agent.resetSanitizerPrefixHorizon();
 		return this._runtimeBuilder.reload();
 	}
 

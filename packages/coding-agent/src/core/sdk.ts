@@ -544,6 +544,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Restore messages if session has existing data
 	if (hasExistingSession) {
 		agent.state.messages = existingSession.messages;
+		// Loading a prior session's history: the sanitizer mark indexed into whatever array a
+		// previous Agent lifetime built, not this one. See Agent.resetSanitizerPrefixHorizon's doc
+		// comment.
+		agent.resetSanitizerPrefixHorizon();
 		if (!hasThinkingEntry) {
 			sessionManager.appendThinkingLevelChange(thinkingLevel);
 		}
