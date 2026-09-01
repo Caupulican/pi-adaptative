@@ -63,7 +63,15 @@ Or from the repo root: `npm run profile:long-session`, `npm run profile:analyze 
 ## The Profile workflow
 
 `.github/workflows/profile.yml`, `workflow_dispatch` only. Inputs: `host_turns` (default 1500) and
-`loop_turns` (default 600). It runs the three instruments on ubuntu-latest, writes the growth table
-and the ranked self-time tables to the job summary, and uploads every `.cpuprofile` and report as the
-`cpu-profiles-<run id>` artifact (30 days). Fire it from the Actions tab whenever a baseline is
-wanted; compare summaries across runs to see the trend.
+`loop_turns` (default 600). It runs the three instruments on ubuntu-latest AND windows-latest as
+separate matrix jobs, writes each platform's growth table and ranked self-time tables to the job
+summary, and uploads every `.cpuprofile` and report as the `cpu-profiles-<os>-<run id>` artifact
+(30 days). Fire it from the Actions tab whenever a baseline is wanted; compare summaries across
+runs, and across the two platforms, to see the trend and where they diverge.
+
+## Both platforms, always
+
+Every change on this path is verified on Linux (WSL) and on the Windows checkout on the D: drive
+before it is considered done: update that checkout, run the same targeted suites there, and run the
+profiler at a short turn count. Filesystem metadata cost, lock behaviour and CPU accounting differ
+enough between the two that a fix measured on one is only half measured.

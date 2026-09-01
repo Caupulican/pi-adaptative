@@ -2,9 +2,10 @@ name: Profile
 
 # A monitor, not a gate. Fired on demand to see where the harness's CPU goes on long sessions and
 # per turn, across the whole system: the coding-agent host driving a real session, the agent-core
-# loop, and process startup. It never fails the build; growth beyond the advisory thresholds
-# surfaces as warning annotations, and every raw .cpuprofile plus the ranked self-time tables are
-# published as artifacts and in the job summary so the next target is explicit.
+# loop, and process startup -- on Linux and on Windows, each reported on its own. It never fails
+# the build; growth beyond the advisory thresholds surfaces as warning annotations, and every raw
+# .cpuprofile plus the ranked self-time tables are published as artifacts and in the job summary
+# so the next target is explicit per platform.
 #
 # Read the results with scripts/analyze-cpuprofile.mjs (self time by function and file) and
 # scripts/report-long-session-growth.mjs (per-turn cost by session decile); see
@@ -27,9 +28,19 @@ permissions:
 
 jobs:
   profile:
-    name: Profile (ubuntu-latest)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Both platforms, separately: a hot path that is cheap on Linux can be the top row on Windows
+    # (filesystem metadata and process CPU accounting differ), so each gets its own tables and
+    # artifact to pinpoint against.
+    name: Profile (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     env:
       PROFILE_DIR: ${{ github.workspace }}/profiles
     steps:
@@ -45,6 +56,7 @@ jobs:
           cache: npm
 
       - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
         run: ./scripts/install-linux-ci-deps.sh
 
       - name: Install dependencies
@@ -95,6 +107,6 @@ jobs:
       - name: Upload profiles
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cpu-profiles-${{ github.run_id }}
+          name: cpu-profiles-${{ matrix.os }}-${{ github.run_id }}
           path: profiles/**
           retention-days: 30
