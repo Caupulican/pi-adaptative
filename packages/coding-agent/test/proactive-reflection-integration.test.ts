@@ -3,9 +3,11 @@ import { type Context, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { DurableLearningState } from "../src/core/learning/durable-learning-state.ts";
+import { analyzeReflectionTurn } from "../src/core/learning/reflection-turn-analysis.ts";
 import {
 	CURRENT_TURN_REFLECTION_CUSTOM_TYPE,
 	CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
+	REFLECTION_TURN_TRIGGER_CUSTOM_TYPE,
 } from "../src/core/reflection-controller.ts";
 import { createHarness, getMessageText, type Harness } from "./suite/harness.ts";
 
@@ -247,28 +249,25 @@ describe("current-session reflection", () => {
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 
-	it("does not recurse when the reflection turn itself writes durable memory", async () => {
+	it("does not recurse when the reflection turn itself produces durable evidence", async () => {
 		delete process.env.PI_NATIVE_REFLECTION;
 		delete process.env.PI_AUTO_LEARN_CHILD;
 		delete process.env.PI_SESSION_ROLE;
-		const memoryWrites: string[] = [];
-		// Named `memory` deliberately: `analyzeReflectionTurn` raises `durable` for any turn whose tool
-		// names include it. Without suppression, the reflection turn below would analyze as durable
-		// evidence, queue a cue, and buy the NEXT reflection turn — forever.
-		const memory: AgentTool = {
-			name: "memory",
-			label: "Memory",
+		const recorded: string[] = [];
+		const record: AgentTool = {
+			name: "echo",
+			label: "Echo",
 			description: "Record a durable fact",
 			parameters: Type.Object({ fact: Type.String() }),
 			execute: async (_toolCallId, params) => {
 				const fact = typeof params === "object" && params !== null && "fact" in params ? String(params.fact) : "";
-				memoryWrites.push(fact);
+				recorded.push(fact);
 				return { content: [{ type: "text", text: `stored:${fact}` }], details: { fact } };
 			},
 		};
 		const harness = await createHarness({
 			settings: { autoLearn: { enabled: true, reflectionReview: true } },
-			tools: [memory],
+			tools: [record],
 		});
 		harnesses.push(harness);
 		await harness.session.bindExtensions({});
@@ -279,13 +278,14 @@ describe("current-session reflection", () => {
 		};
 		harness.setResponses([
 			capture(() => fauxAssistantMessage("Noted.")),
-			// The reflection turn does exactly the thing the cue asks for, and says it in words that
-			// DURABLE_WORK_SIGNAL matches — every signal `analyzeReflectionTurn` looks for, at once.
+			// The reflection turn does exactly what the cue asks — writes something durable, and says so
+			// in words DURABLE_WORK_SIGNAL matches. Left unguarded, that is textbook `durable` evidence,
+			// which would queue a cue and buy the NEXT reflection turn, forever.
 			capture(() =>
 				fauxAssistantMessage(
 					[
 						{ type: "text", text: "Confirmed root cause; recording the invariant." },
-						fauxToolCall("memory", { fact: "the build pins its own runtime" }),
+						fauxToolCall("echo", { fact: "the build pins its own runtime" }),
 					],
 					{ stopReason: "toolUse" },
 				),
@@ -300,14 +300,21 @@ describe("current-session reflection", () => {
 		// 1 working request + 2 requests inside the ONE reflection turn. The count stops there.
 		expect(harness.faux.state.callCount).toBe(3);
 		expect(harness.getPendingResponseCount()).toBe(1);
-		expect(memoryWrites).toEqual(["the build pins its own runtime"]);
-
-		// The cue rode the reflection turn's first request and nothing else.
+		expect(recorded).toEqual(["the build pins its own runtime"]);
 		expect(contexts.map(countCues)).toEqual([0, 1, 0]);
 		expect(durableCueCopies(harness)).toBe(0);
 
-		// The proof that the suppression — not luck — stopped it: the reflection turn's own `agent_end`
-		// wrote no new `due` cue, even though its tool use and wording are textbook durable evidence.
+		// The premise, proven rather than assumed: run the SAME projection over the reflection turn's own
+		// messages that `agent_end` runs, and confirm it really does read as durable evidence. The
+		// threshold is set out of reach so this can only be the `durable` signal, not `complex`.
+		const reflectionTurnStart = harness.session.messages.findIndex(
+			(message) => message.role === "custom" && message.customType === REFLECTION_TURN_TRIGGER_CUSTOM_TYPE,
+		);
+		expect(reflectionTurnStart).toBeGreaterThan(0);
+		expect(analyzeReflectionTurn(harness.session.messages.slice(reflectionTurnStart), 99).trigger).toBe("durable");
+
+		// So the only reason the count stopped is the suppression: the reflection turn's `agent_end`
+		// wrote no new `due` cue after the `consumed` one it settled.
 		const statuses = harness.sessionManager
 			.getEntries()
 			.filter((entry) => entry.type === "custom" && entry.customType === CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE)
