@@ -2,7 +2,7 @@ import { type AssistantMessage, type AssistantMessageEvent, EventStream, getMode
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { Agent, AgentBusyError } from "../src/index.ts";
-import type { AgentTool } from "../src/types.ts";
+import type { AgentMessage, AgentTool } from "../src/types.ts";
 
 // Mock stream that mimics AssistantMessageEventStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -200,42 +200,74 @@ describe("Agent", () => {
 		expect(agent.state.isStreaming).toBe(false);
 	});
 
-	it("default convertToLlm converts a role:custom message instead of silently dropping it", async () => {
-		// Regression gate: an Agent constructed without its own convertToLlm falls back to
-		// defaultConvertToLlm, which used to hand-roll a narrower filter (user/assistant/toolResult
-		// only) instead of delegating to messages.ts's real convertToLlm. That silently dropped any
-		// "custom" (or bashExecution/branchSummary/compactionSummary) message with no error and
-		// nothing to notice - exactly what happened to a MUST-protocol verification directive
-		// represented as role:"custom" (see the turn-economics remediation doc's append-on-change
-		// incident). This message must reach the provider, converted to role:"user" per
-		// messages.ts's convertToLlm, not vanish.
-		const capturedContexts: Array<{ messages: unknown[] }> = [];
+	it("onSentPrefixDisturbance and requestPreflight both fire when set through Agent's constructor", async () => {
+		// Regression gate: createLoopConfig audit. Both hooks are real AgentLoopConfig features with
+		// full test coverage at that layer (see provider-request-planning.test.ts), but until this
+		// audit, Agent - the class most hosts actually construct - exposed no constructor option, no
+		// public instance field, and no createLoopConfig wiring for either. A host going through Agent
+		// could not have used them no matter how it tried; only a caller bypassing Agent entirely and
+		// driving agentLoop/startAgentProviderRequest directly ever saw them fire.
+		//
+		// onSentPrefixDisturbance needs a genuine within-run disturbance: sentPrefixCount is
+		// RUN-scoped (resets at the start of every top-level prompt() call - see
+		// ProviderRequestPrefixState in types.ts), so two separate prompt() calls can never trigger
+		// it - each starts its own run with the mark back at 0. It only fires between two PROVIDER
+		// TURNS of the SAME prompt, which requires a tool call to force a second turn.
+		const noopSchema = Type.Object({});
+		const noopTool: AgentTool<typeof noopSchema, undefined> = {
+			name: "noop",
+			label: "Noop",
+			description: "Does nothing",
+			parameters: noopSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "done" }], details: undefined };
+			},
+		};
+		const disturbances: unknown[] = [];
+		let preflightCalls = 0;
+		let transformCalls = 0;
+		let turn = 0;
 		const agent = new Agent({
-			streamFn: (_model, context) => {
-				capturedContexts.push(context);
+			initialState: { systemPrompt: "test", tools: [noopTool] },
+			// First turn's request passes through untouched. Second turn's request rewrites message 0,
+			// which by then is already sent (the first turn's accepted request set sentPrefixCount to
+			// 1) - exactly the disturbance onSentPrefixDisturbance exists to catch.
+			transformContext: async (messages) => {
+				transformCalls++;
+				if (transformCalls === 1) return messages;
+				const rewritten: AgentMessage = { role: "user", content: "REWRITTEN", timestamp: messages[0].timestamp };
+				return [rewritten, ...messages.slice(1)];
+			},
+			onSentPrefixDisturbance: (info) => disturbances.push(info),
+			requestPreflight: async () => {
+				preflightCalls++;
+				return undefined;
+			},
+			streamFn: () => {
 				const stream = new MockAssistantStream();
+				const thisTurn = turn;
+				turn++;
 				queueMicrotask(() => {
-					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+					if (thisTurn === 0) {
+						const message: AssistantMessage = {
+							...createAssistantMessage(""),
+							content: [{ type: "toolCall", id: "call-1", name: "noop", arguments: {} }],
+							stopReason: "toolUse",
+						};
+						stream.push({ type: "done", reason: "toolUse", message });
+						return;
+					}
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
 				});
 				return stream;
 			},
 		});
-		agent.state.messages.push({
-			role: "custom",
-			customType: "regression_marker",
-			content: "distinctive marker text for defaultConvertToLlm regression gate",
-			display: false,
-			timestamp: 0,
-		});
 
-		await agent.prompt("hello");
+		await agent.prompt("go");
 
-		expect(capturedContexts).toHaveLength(1);
-		const wireMessages = capturedContexts[0]?.messages ?? [];
-		expect(wireMessages.some((message) => JSON.stringify(message).includes("distinctive marker text"))).toBe(true);
-		// Converted, not passed through verbatim: the wire never sees role:"custom" (Message has no
-		// such variant), only what convertToLlm turned it into.
-		expect(wireMessages.some((message) => (message as { role?: string }).role === "custom")).toBe(false);
+		expect(preflightCalls).toBe(2);
+		expect(disturbances).toHaveLength(1);
+		expect(disturbances[0]).toMatchObject({ disturbedCount: 1, firstDisturbedIndex: 0 });
 	});
 
 	it("waitForIdle should wait for async subscribers", async () => {

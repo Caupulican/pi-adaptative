@@ -15,7 +15,6 @@ import {
 	runAgentLoop,
 	runAgentLoopContinue,
 } from "./agent-loop.ts";
-import { convertToLlm } from "./messages.ts";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -41,19 +40,10 @@ import { createEmptyUsage } from "./usage.ts";
 
 export type { QueueMode } from "./types.ts";
 
-/**
- * Default `convertToLlm` for a caller that supplies none of its own. Delegates to the real
- * converter (`./messages.ts`) rather than duplicating a narrower filter: that function has an
- * explicit case for every `AgentMessage` role - "custom", "bashExecution", "branchSummary",
- * "compactionSummary" - converting each into a valid `Message` instead of silently dropping it. A
- * narrower, hand-rolled filter here (user/assistant/toolResult only, as this used to be) is a
- * latent trap for any content injected as one of those other roles: a default-converter caller
- * never sees it reach the provider at all, no error, nothing to notice - exactly what happened to
- * a MUST-protocol verification directive represented as a `role: "custom"` message (see the
- * turn-economics remediation doc's append-on-change section for the incident this fixes).
- */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-	return convertToLlm(messages);
+	return messages.filter(
+		(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+	);
 }
 
 const DEFAULT_MODEL = {
@@ -119,18 +109,20 @@ export interface AgentOptions {
 	resolveRequestReasoning?: AgentLoopConfig["resolveRequestReasoning"];
 	/**
 	 * Observability hook for a host-owned `planContext`/`transformContext` disturbing the
-	 * already-sent prefix. See `AgentLoopConfig.onSentPrefixDisturbance` for the full contract - this
-	 * option exists to carry that same hook into `Agent`'s constructor; before it existed, a caller
-	 * could set `agent.onSentPrefixDisturbance` directly on an already-constructed instance (an
-	 * `AgentLoopConfig`-shaped public field with no constructor path to it, unlike every sibling hook
-	 * here), but the audit that added this option found no evidence anyone had.
+	 * already-sent prefix. See `AgentLoopConfig.onSentPrefixDisturbance` for the full contract. Not a
+	 * new capability - `AgentLoopConfig` has carried this since it was added - but until this audit
+	 * `Agent` exposed no path to it at all: no constructor option, no public instance field, nothing.
+	 * Any host going through `Agent` (as opposed to calling `agentLoop` directly) could not have used
+	 * it no matter how it tried. Same class of gap as `defaultConvertToLlm` silently dropping
+	 * `role:"custom"` - a real `AgentLoopConfig` feature with no way to reach it through the class
+	 * most hosts actually use.
 	 */
 	onSentPrefixDisturbance?: AgentLoopConfig["onSentPrefixDisturbance"];
 	/**
 	 * Request-local budget/authority check run immediately before every provider request. See
-	 * `AgentLoopConfig.requestPreflight` for the full contract - same story as
-	 * `onSentPrefixDisturbance` above: previously reachable only by mutating a constructed `Agent`,
-	 * never through its constructor.
+	 * `AgentLoopConfig.requestPreflight` for the full contract - same gap as
+	 * `onSentPrefixDisturbance` above: previously unreachable through `Agent` at all, not merely
+	 * unwired from the constructor.
 	 */
 	requestPreflight?: AgentLoopConfig["requestPreflight"];
 	streamFn?: StreamFn;
@@ -238,6 +230,8 @@ export class Agent {
 	) => ProviderRequestAdmissionResult | Promise<ProviderRequestAdmissionResult>;
 	public onProviderRequestSnapshot?: AgentLoopConfig["onProviderRequestSnapshot"];
 	public resolveRequestReasoning?: AgentLoopConfig["resolveRequestReasoning"];
+	public onSentPrefixDisturbance?: AgentLoopConfig["onSentPrefixDisturbance"];
+	public requestPreflight?: AgentLoopConfig["requestPreflight"];
 	public streamFn: StreamFn;
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
@@ -307,6 +301,8 @@ export class Agent {
 		this.admitProviderRequest = options.admitProviderRequest;
 		this.onProviderRequestSnapshot = options.onProviderRequestSnapshot;
 		this.resolveRequestReasoning = options.resolveRequestReasoning;
+		this.onSentPrefixDisturbance = options.onSentPrefixDisturbance;
+		this.requestPreflight = options.requestPreflight;
 		this.streamFn = options.streamFn ?? streamSimple;
 		this.getApiKey = options.getApiKey;
 		this.onPayload = options.onPayload;
@@ -629,6 +625,8 @@ export class Agent {
 			admitProviderRequest: this.admitProviderRequest,
 			onProviderRequestSnapshot: this.onProviderRequestSnapshot,
 			resolveRequestReasoning: this.resolveRequestReasoning,
+			onSentPrefixDisturbance: this.onSentPrefixDisturbance,
+			requestPreflight: this.requestPreflight,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
 				await this.beforeSteeringPoll?.(this.signal);
