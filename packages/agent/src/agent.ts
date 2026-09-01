@@ -15,6 +15,7 @@ import {
 	runAgentLoop,
 	runAgentLoopContinue,
 } from "./agent-loop.ts";
+import { convertToLlm } from "./messages.ts";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -40,10 +41,19 @@ import { createEmptyUsage } from "./usage.ts";
 
 export type { QueueMode } from "./types.ts";
 
+/**
+ * Default `convertToLlm` for a caller that supplies none of its own. Delegates to the real
+ * converter (`./messages.ts`) rather than duplicating a narrower filter: that function has an
+ * explicit case for every `AgentMessage` role - "custom", "bashExecution", "branchSummary",
+ * "compactionSummary" - converting each into a valid `Message` instead of silently dropping it. A
+ * narrower, hand-rolled filter here (user/assistant/toolResult only, as this used to be) is a
+ * latent trap for any content injected as one of those other roles: a default-converter caller
+ * never sees it reach the provider at all, no error, nothing to notice - exactly what happened to
+ * a MUST-protocol verification directive represented as a `role: "custom"` message (see the
+ * turn-economics remediation doc's append-on-change section for the incident this fixes).
+ */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.filter(
-		(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
-	);
+	return convertToLlm(messages);
 }
 
 const DEFAULT_MODEL = {
@@ -107,6 +117,22 @@ export interface AgentOptions {
 	) => ProviderRequestAdmissionResult | Promise<ProviderRequestAdmissionResult>;
 	onProviderRequestSnapshot?: AgentLoopConfig["onProviderRequestSnapshot"];
 	resolveRequestReasoning?: AgentLoopConfig["resolveRequestReasoning"];
+	/**
+	 * Observability hook for a host-owned `planContext`/`transformContext` disturbing the
+	 * already-sent prefix. See `AgentLoopConfig.onSentPrefixDisturbance` for the full contract - this
+	 * option exists to carry that same hook into `Agent`'s constructor; before it existed, a caller
+	 * could set `agent.onSentPrefixDisturbance` directly on an already-constructed instance (an
+	 * `AgentLoopConfig`-shaped public field with no constructor path to it, unlike every sibling hook
+	 * here), but the audit that added this option found no evidence anyone had.
+	 */
+	onSentPrefixDisturbance?: AgentLoopConfig["onSentPrefixDisturbance"];
+	/**
+	 * Request-local budget/authority check run immediately before every provider request. See
+	 * `AgentLoopConfig.requestPreflight` for the full contract - same story as
+	 * `onSentPrefixDisturbance` above: previously reachable only by mutating a constructed `Agent`,
+	 * never through its constructor.
+	 */
+	requestPreflight?: AgentLoopConfig["requestPreflight"];
 	streamFn?: StreamFn;
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	onPayload?: SimpleStreamOptions["onPayload"];
