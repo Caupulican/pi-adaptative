@@ -151,12 +151,20 @@ export function projectToolSchemaForProvider(schema: unknown): unknown {
 	return projectSchemaNode(schema);
 }
 
-export function projectToolsForProvider(tools: undefined): undefined;
-export function projectToolsForProvider(tools: readonly Tool[]): Tool[];
-export function projectToolsForProvider(tools: readonly Tool[] | undefined): Tool[] | undefined;
-export function projectToolsForProvider(tools: readonly Tool[] | undefined): Tool[] | undefined {
-	if (!tools) return undefined;
-	return tools.map((tool) => ({
+/**
+ * Projections by source tool identity. A tool definition is projected on every provider request,
+ * and a tool surface of a few dozen schemas is tens of kilobytes of schema walking per request for
+ * the same answer. Memoizing by the source object also makes the projected object itself stable
+ * across requests, which is what lets everything downstream that keys on it -- the request
+ * estimator, the request fingerprint -- memoize per tool instead of re-measuring the surface.
+ * Tool definitions are treated as immutable once registered, as they are everywhere else.
+ */
+const projectedTools = new WeakMap<Tool, Tool>();
+
+function projectToolForProvider(tool: Tool): Tool {
+	const cached = projectedTools.get(tool);
+	if (cached) return cached;
+	const projected: Tool = {
 		name: tool.name,
 		description: normalizeProviderToolDescription(
 			"providerDescription" in tool && typeof tool.providerDescription === "string"
@@ -164,5 +172,15 @@ export function projectToolsForProvider(tools: readonly Tool[] | undefined): Too
 				: tool.description,
 		),
 		parameters: projectSchemaNode(tool.parameters) as TSchema,
-	}));
+	};
+	projectedTools.set(tool, projected);
+	return projected;
+}
+
+export function projectToolsForProvider(tools: undefined): undefined;
+export function projectToolsForProvider(tools: readonly Tool[]): Tool[];
+export function projectToolsForProvider(tools: readonly Tool[] | undefined): Tool[] | undefined;
+export function projectToolsForProvider(tools: readonly Tool[] | undefined): Tool[] | undefined {
+	if (!tools) return undefined;
+	return tools.map(projectToolForProvider);
 }

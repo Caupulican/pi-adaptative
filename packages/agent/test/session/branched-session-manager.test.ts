@@ -114,3 +114,18 @@ describe("SessionManager batch id minting", () => {
 		expect(new Set(allIds).size).toBe(allIds.length);
 	});
 });
+
+describe("SessionManager.getMessageEntryId", () => {
+	it("answers by message identity, for persisted messages only, across appends", () => {
+		const manager = SessionManager.inMemory("/repo");
+		const first = { role: "user" as const, content: [{ type: "text" as const, text: "one" }], timestamp: 1 };
+		const firstId = manager.appendMessage(first);
+		expect(manager.getMessageEntryId(first)).toBe(firstId);
+		// A structurally identical but distinct object is not the persisted one.
+		expect(manager.getMessageEntryId({ ...first })).toBeUndefined();
+		const second = { role: "user" as const, content: [{ type: "text" as const, text: "two" }], timestamp: 2 };
+		const secondId = manager.appendMessage(second);
+		expect(manager.getMessageEntryId(second)).toBe(secondId);
+		expect(manager.getMessageEntryId(first)).toBe(firstId);
+	});
+});

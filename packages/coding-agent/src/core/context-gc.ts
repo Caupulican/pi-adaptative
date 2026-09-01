@@ -312,13 +312,26 @@ function agentMessageText(message: AgentMessage): string | undefined {
 	return undefined;
 }
 
+/**
+ * Marker scans by message identity and marker set. Every GC pass scanned every tool result's text
+ * for every marker -- the whole transcript's tool output, per request -- to answer a question whose
+ * inputs (an immutable message, the configured markers) do not change between requests.
+ */
+const semanticMarkerScans = new WeakMap<AgentMessage, { readonly markersKey: string; readonly result: boolean }>();
+
 function semanticMessageHasMarker(message: AgentMessage, settings: Required<SemanticMemoryGcSettings>): boolean {
-	if (message.role === "toolResult") return joinedPartsContainAnyMarker(toolResultParts(message), settings.markers);
-	if (isSemanticMemoryCustomMessage(message)) {
+	if (message.role !== "toolResult" && !isSemanticMemoryCustomMessage(message)) return false;
+	const markersKey = settings.markers.join("\0");
+	const cached = semanticMarkerScans.get(message);
+	if (cached && cached.markersKey === markersKey) return cached.result;
+	let result = false;
+	if (message.role === "toolResult") result = joinedPartsContainAnyMarker(toolResultParts(message), settings.markers);
+	else {
 		const parts = textContentParts((message as { content?: unknown }).content);
-		return parts ? joinedPartsContainAnyMarker(parts, settings.markers) : false;
+		result = parts ? joinedPartsContainAnyMarker(parts, settings.markers) : false;
 	}
-	return false;
+	semanticMarkerScans.set(message, { markersKey, result });
+	return result;
 }
 
 interface ContextGcPlan {

@@ -1148,6 +1148,15 @@ export class SessionManager {
 	private fileEntries: FileEntry[] = [];
 	private entries: SessionEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
+	/**
+	 * Persisted message object -> entry id, so "is this exact message object persisted, and where"
+	 * is O(1) instead of a walk over the branch. Built lazily from `byId` and kept in step with
+	 * appends; rebuilt whenever `byId` is replaced (a reload or branch rebuild), which the identity
+	 * guard detects. Weak, so a message that leaves memory leaves the index.
+	 */
+	private messageEntryIndex:
+		| { readonly byId: Map<string, SessionEntry>; readonly ids: WeakMap<object, string> }
+		| undefined;
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
@@ -1698,9 +1707,24 @@ export class SessionManager {
 			this.entries.push(entry);
 			this.byId.set(entry.id, entry);
 			this.leafId = entry.id;
+			if (entry.type === "message" && this.messageEntryIndex?.byId === this.byId) {
+				this.messageEntryIndex.ids.set(entry.message, entry.id);
+			}
 			this._advanceLifecycleActiveCache(entry);
 			this._advanceSessionContextCache(entry);
 		}
+	}
+
+	/** Entry id of the persisted entry holding exactly this message object, if any. */
+	getMessageEntryId(message: object): string | undefined {
+		if (this.messageEntryIndex?.byId !== this.byId) {
+			const ids = new WeakMap<object, string>();
+			for (const entry of this.byId.values()) {
+				if (entry.type === "message") ids.set(entry.message, entry.id);
+			}
+			this.messageEntryIndex = { byId: this.byId, ids };
+		}
+		return this.messageEntryIndex.ids.get(message);
 	}
 
 	private _appendEntry(entry: SessionEntry): void {

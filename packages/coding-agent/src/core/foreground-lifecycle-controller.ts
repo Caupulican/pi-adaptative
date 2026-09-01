@@ -137,6 +137,36 @@ function fingerprint(value: unknown, maxChars = MAX_EXACT_FINGERPRINT_CHARS): st
 	return createHash("sha256").update(serialized.slice(0, maxChars)).digest("hex");
 }
 
+/**
+ * The system prompt is the same string on nearly every request and the tool surface the same
+ * projected objects (see provider-tool-projection), yet both were canonicalized and hashed in full
+ * per request: with the history metadata memoized, they were the whole of the fingerprint cost.
+ * The prompt is remembered by value (one comparison of the last string seen); each tool by identity.
+ * The tools fingerprint covers every tool through its own bounded fingerprint, where the single
+ * bounded pass over the whole array stopped at the character budget.
+ */
+let lastSystemPromptFingerprint: { readonly prompt: unknown; readonly value: string } | undefined;
+function systemPromptFingerprint(prompt: unknown): string {
+	if (lastSystemPromptFingerprint && lastSystemPromptFingerprint.prompt === prompt)
+		return lastSystemPromptFingerprint.value;
+	const value = fingerprint(prompt);
+	lastSystemPromptFingerprint = { prompt, value };
+	return value;
+}
+
+const toolFingerprints = new WeakMap<object, string>();
+function toolsFingerprint(tools: readonly unknown[]): string {
+	const perTool = tools.map((tool) => {
+		if (!tool || typeof tool !== "object") return fingerprint(tool);
+		const cached = toolFingerprints.get(tool);
+		if (cached) return cached;
+		const value = fingerprint(tool);
+		toolFingerprints.set(tool, value);
+		return value;
+	});
+	return fingerprint(perTool);
+}
+
 function contentDescriptor(content: unknown): unknown {
 	if (typeof content === "string") {
 		return { kind: "text", length: content.length, fingerprint: fingerprint(content) };
@@ -327,8 +357,8 @@ export class ForegroundLifecycleController {
 				maxTokens: context.maxTokens,
 				attempt: context.attempt,
 			}),
-			systemFingerprint: fingerprint(context.context.systemPrompt),
-			toolsFingerprint: fingerprint(context.context.tools ?? []),
+			systemFingerprint: systemPromptFingerprint(context.context.systemPrompt),
+			toolsFingerprint: toolsFingerprint(context.context.tools ?? []),
 			historyFingerprint: fingerprint(providerHistoryMetadata(context.context.messages)),
 			messageEntryIds: messageEntryIds(this.deps.sessionManager),
 		});

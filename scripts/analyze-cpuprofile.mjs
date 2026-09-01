@@ -6,16 +6,17 @@
  * coding-agent long-session profile (packages/coding-agent/test/profiling/), all of which write
  * the format Node's own --cpu-prof writes.
  *
- * Usage: node scripts/analyze-cpuprofile.mjs <file.cpuprofile> [--top <n>] [--title <text>]
+ * Usage: node scripts/analyze-cpuprofile.mjs <file.cpuprofile> [--top <n>] [--title <text>] [--callers <functionName>]
  */
 import { readFileSync } from "node:fs";
 
 function parseArgs(argv) {
-	const args = { top: 30, title: undefined, file: undefined };
+	const args = { top: 30, title: undefined, file: undefined, callers: undefined };
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--top") args.top = Number(argv[++i]);
 		else if (arg === "--title") args.title = argv[++i];
+		else if (arg === "--callers") args.callers = argv[++i];
 		else if (arg === "--help" || arg === "-h") {
 			console.log("Usage: node scripts/analyze-cpuprofile.mjs <file.cpuprofile> [--top <n>] [--title <text>]");
 			process.exit(0);
@@ -37,7 +38,7 @@ function shortUrl(url) {
 	return url.startsWith("node:") ? url : url.split("/").pop() ?? url;
 }
 
-const { file, top, title } = parseArgs(process.argv.slice(2));
+const { file, top, title, callers } = parseArgs(process.argv.slice(2));
 const profile = JSON.parse(readFileSync(file, "utf-8"));
 const nodes = new Map(profile.nodes.map((node) => [node.id, node]));
 const selfMicros = new Map();
@@ -57,6 +58,36 @@ for (const [id, micros] of selfMicros) {
 	byFunction.set(fnKey, (byFunction.get(fnKey) ?? 0) + micros);
 	byFile.set(location, (byFile.get(location) ?? 0) + micros);
 }
+if (callers) {
+	// Attribute a function's self time to the frames that called it: which caller is paying.
+	const parentOf = new Map();
+	for (const node of profile.nodes) for (const child of node.children ?? []) parentOf.set(child, node.id);
+	const byCaller = new Map();
+	let matched = 0;
+	for (const [id, micros] of selfMicros) {
+		const node = nodes.get(id);
+		if (!node || (node.callFrame.functionName || "(anonymous)") !== callers) continue;
+		matched += micros;
+		let parentId = parentOf.get(id);
+		let label = "(root)";
+		while (parentId !== undefined) {
+			const parent = nodes.get(parentId);
+			const name = parent?.callFrame.functionName || "(anonymous)";
+			if (parent && name !== callers) {
+				label = `${name} — ${shortUrl(parent.callFrame.url)}:${(parent.callFrame.lineNumber ?? -1) + 1}`;
+				break;
+			}
+			parentId = parentOf.get(parentId);
+		}
+		byCaller.set(label, (byCaller.get(label) ?? 0) + micros);
+	}
+	console.log(`### Callers of ${callers} (${(matched / 1000).toFixed(1)} ms self time)\n\n| ms | share | caller |\n|---:|---:|---|`);
+	for (const [label, micros] of [...byCaller.entries()].sort((a, b) => b[1] - a[1]).slice(0, top)) {
+		console.log(`| ${(micros / 1000).toFixed(1)} | ${((100 * micros) / Math.max(matched, 1)).toFixed(1)}% | ${label.replace(/\|/g, "\\|")} |`);
+	}
+	process.exit(0);
+}
+
 const rows = (map, limit) =>
 	[...map.entries()]
 		.sort((a, b) => b[1] - a[1])

@@ -198,6 +198,42 @@ function measureSemanticMessage(message: Message): SemanticMessageMeasure {
 }
 
 const MESSAGES_FIELD_LENGTH = jsonStringUtf16Length("messages") + 1;
+const TOOLS_FIELD_LENGTH = jsonStringUtf16Length("tools") + 1;
+const SYSTEM_PROMPT_FIELD_LENGTH = jsonStringUtf16Length("systemPrompt") + 1;
+
+/**
+ * The two bounded fields are still tens of kilobytes measured per request for the same answer:
+ * the system prompt is one string repeated on nearly every request, and each projected tool
+ * object is identity-stable across requests (provider-tool-projection memoizes it). Remembered
+ * by value for the prompt and by identity per tool.
+ */
+let lastSystemPromptMeasure: { readonly prompt: string; readonly length: number } | undefined;
+function systemPromptLength(prompt: string): number {
+	if (lastSystemPromptMeasure && lastSystemPromptMeasure.prompt === prompt) return lastSystemPromptMeasure.length;
+	const length = jsonStringUtf16Length(prompt);
+	lastSystemPromptMeasure = { prompt, length };
+	return length;
+}
+
+const toolMeasures = new WeakMap<object, number>();
+function toolsLength(tools: readonly unknown[]): number {
+	let length = 2;
+	for (let index = 0; index < tools.length; index++) {
+		const tool = tools[index];
+		let measured: number | undefined;
+		if (tool && typeof tool === "object") {
+			measured = toolMeasures.get(tool);
+			if (measured === undefined) {
+				measured = measureJsonLength(tool) ?? 4;
+				toolMeasures.set(tool, measured);
+			}
+		} else {
+			measured = measureJsonLength(tool) ?? 4;
+		}
+		length += measured + (index > 0 ? 1 : 0);
+	}
+	return length;
+}
 
 /**
  * Bounded semantic planning estimate over the complete, already-materialized provider Context.
@@ -216,10 +252,18 @@ export function estimateProviderRequestTokens(context: Context, model?: Model<Ap
 		messagesLength += measure.length + (index > 0 ? 1 : 0);
 		imageChars += measure.images * ESTIMATED_IMAGE_CHARS;
 	}
-	const otherFields = { systemPrompt: context.systemPrompt, tools: context.tools };
-	const otherLength = measureJsonLength(otherFields);
-	if (otherLength === undefined) return 0;
-	const otherFieldCount = (context.systemPrompt === undefined ? 0 : 1) + (context.tools === undefined ? 0 : 1);
-	const serializedLength = otherLength + (otherFieldCount > 0 ? 1 : 0) + MESSAGES_FIELD_LENGTH + messagesLength;
+	// Exact assembly of `{"systemPrompt":…,"messages":[…],"tools":…}`: braces, each present field's
+	// name, colon and value, and a comma between fields. `undefined` fields are omitted, as JSON does.
+	let serializedLength = 2;
+	let fields = 0;
+	if (context.systemPrompt !== undefined) {
+		serializedLength += SYSTEM_PROMPT_FIELD_LENGTH + systemPromptLength(context.systemPrompt);
+		fields += 1;
+	}
+	serializedLength += (fields > 0 ? 1 : 0) + MESSAGES_FIELD_LENGTH + messagesLength;
+	fields += 1;
+	if (context.tools !== undefined) {
+		serializedLength += 1 + TOOLS_FIELD_LENGTH + toolsLength(context.tools);
+	}
 	return Math.ceil((serializedLength + imageChars) / CHARS_PER_TOKEN_ESTIMATE);
 }

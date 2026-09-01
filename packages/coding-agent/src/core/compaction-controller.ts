@@ -28,6 +28,7 @@ import {
 	type CompactionEntry,
 	getLatestCompactionEntry,
 	isSessionLifecycleEntry,
+	type SessionEntry,
 	type SessionManager,
 } from "@caupulican/pi-agent-core/session";
 import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
@@ -205,6 +206,8 @@ export class CompactionController {
 	private autoAbortController: AbortController | undefined;
 	private autoRunPromise: Promise<boolean> | undefined;
 	private activeCompactionLifecycle: ActiveCompactionLifecycle | undefined;
+	/** See {@link latestCompactionEntryOnBranch}. */
+	private latestCompactionScan: { leafId: string; entry: CompactionEntry | null } | undefined;
 	private overflowRecoveryAttempted = false;
 	private providerRecoveryAttempted = false;
 	private ineffectiveThresholdFrontier: IneffectiveThresholdFrontier | undefined;
@@ -631,7 +634,7 @@ export class CompactionController {
 		const model = this.deps.getModel();
 		const contextWindow = model?.contextWindow ?? 0;
 		const sameModel = model && assistantMessage.provider === model.provider && assistantMessage.model === model.id;
-		const compactionEntry = getLatestCompactionEntry(this.deps.sessionManager.getBranch());
+		const compactionEntry = this.latestCompactionEntryOnBranch();
 		const assistantIsFromBeforeCompaction = this.isAssistantFromBeforeCompaction(assistantMessage, compactionEntry);
 		if (assistantIsFromBeforeCompaction) return false;
 
@@ -720,27 +723,78 @@ export class CompactionController {
 		if (!assistantMessage || assistantMessage.stopReason === "error" || assistantMessage.stopReason === "aborted") {
 			return estimatedTokens;
 		}
-		const compactionEntry = getLatestCompactionEntry(this.deps.sessionManager.getBranch());
+		const compactionEntry = this.latestCompactionEntryOnBranch();
 		if (this.isAssistantFromBeforeCompaction(assistantMessage, compactionEntry)) {
 			return estimatedTokens;
 		}
 		return Math.max(calculateContextTokens(assistantMessage.usage), estimatedTokens);
 	}
 
-	/** Prefer authoritative branch order; timestamps are only a fallback for reconstructed messages. */
+	/**
+	 * The newest compaction entry on the active branch, found by walking parent pointers from the
+	 * leaf and remembered together with the leaf it was resolved at. The next call walks only the
+	 * entries appended since that leaf: if none of them is a compaction, the remembered entry still
+	 * stands. Materializing the whole branch for this answer (and then scanning it again per
+	 * assistant message) was the single largest branch walk per request in the long-session profile.
+	 * A leaf that does not descend from the remembered one -- a branch switch -- falls back to a full
+	 * walk, which is what the first call does too.
+	 */
+	private latestCompactionEntryOnBranch(): CompactionEntry | null {
+		const manager = this.deps.sessionManager;
+		const leaf = manager.getLeafEntry();
+		if (!leaf) {
+			this.latestCompactionScan = undefined;
+			return null;
+		}
+		const remembered = this.latestCompactionScan;
+		let entry: SessionEntry | undefined = leaf;
+		let found: CompactionEntry | null = null;
+		let reachedRemembered = false;
+		while (entry) {
+			if (remembered && entry.id === remembered.leafId) {
+				reachedRemembered = true;
+				break;
+			}
+			if (entry.type === "compaction") {
+				found = entry;
+				break;
+			}
+			entry = entry.parentId === null ? undefined : manager.getEntry(entry.parentId);
+		}
+		// Reaching the remembered leaf without meeting a compaction means the remembered answer still
+		// stands; reaching the root instead means a different branch, and the walk was the full answer.
+		if (remembered && reachedRemembered) found = remembered.entry;
+		this.latestCompactionScan = { leafId: leaf.id, entry: found };
+		return found;
+	}
+
+	/**
+	 * Prefer authoritative branch order; timestamps are only a fallback for reconstructed messages.
+	 *
+	 * Same answer as scanning the whole branch for the message, at the cost of the recent tail: the
+	 * walk from the leaf stops at the compaction (which {@link latestCompactionEntryOnBranch} found on
+	 * this branch), and meeting the assistant's own entry on the way means it came after. A message
+	 * object that is not persisted at all -- a reconstructed one -- is known in O(1) and takes the
+	 * timestamp fallback at once; only a persisted message not seen above the compaction is looked
+	 * for below it.
+	 */
 	private isAssistantFromBeforeCompaction(
 		assistantMessage: AssistantMessage,
 		compactionEntry: CompactionEntry | null,
 	): boolean {
 		if (!compactionEntry) return false;
-		const branch = this.deps.sessionManager.getBranch();
-		const compactionPosition = branch.findIndex((entry) => entry.id === compactionEntry.id);
-		if (compactionPosition >= 0) {
-			for (let position = branch.length - 1; position >= 0; position--) {
-				const entry = branch[position];
-				if (entry?.type === "message" && entry.message === assistantMessage) {
-					return position < compactionPosition;
-				}
+		const manager = this.deps.sessionManager;
+		const parentOf = (entry: SessionEntry): SessionEntry | undefined =>
+			entry.parentId === null ? undefined : manager.getEntry(entry.parentId);
+		let entry: SessionEntry | undefined = manager.getLeafEntry();
+		while (entry && entry.id !== compactionEntry.id) {
+			if (entry.type === "message" && entry.message === assistantMessage) return false;
+			entry = parentOf(entry);
+		}
+		const entryId = manager.getMessageEntryId(assistantMessage);
+		if (entryId !== undefined && entry) {
+			for (let below = parentOf(entry); below; below = parentOf(below)) {
+				if (below.id === entryId) return true;
 			}
 		}
 		return assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
