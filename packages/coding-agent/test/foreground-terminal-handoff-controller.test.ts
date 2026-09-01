@@ -54,6 +54,10 @@ describe("ForegroundTerminalHandoffController", () => {
 			tryAcquireSubmission: vi.fn(() => lease),
 			acquireSubmission: vi.fn(() => idle.then(() => lease)),
 			releaseSubmission: vi.fn(),
+			// This test's whole premise -- delivery folds into the boundary route "without waiting
+			// for the foreground run to end" -- IS the same-submission case: the turn currently
+			// running is the one the terminal belongs to, so its epoch must match.
+			getCurrentSubmissionEpoch: vi.fn(() => 1),
 		} as unknown as ForegroundRecoveryController;
 		const enqueueCustomMessageTurn = vi.fn(async () => undefined);
 		const deps = {
@@ -69,7 +73,7 @@ describe("ForegroundTerminalHandoffController", () => {
 
 		let settled = false;
 		const notification = controller
-			.notifyWorkers([{ laneId: "worker-fast", status: "succeeded", goalId: "goal-active" }])
+			.notifyWorkers([{ laneId: "worker-fast", status: "succeeded", goalId: "goal-active", ownerEpoch: 1 }])
 			.then(() => {
 				settled = true;
 			});
@@ -87,6 +91,86 @@ describe("ForegroundTerminalHandoffController", () => {
 		expect(foreground.acquireSubmission).not.toHaveBeenCalled();
 		expect(foreground.tryAcquireSubmission).not.toHaveBeenCalled();
 		releaseIdle();
+	});
+
+	it("does not fold a mismatched-ownership terminal into the boundary; delivers it once idle instead", async () => {
+		// Inverse of the sibling test above: the task's owner epoch (1, the submission that
+		// started it) no longer matches the CURRENT submission epoch (2, a later, unrelated one)
+		// by the time the boundary fires. Rule 3 of the delivery-boundary spec requires
+		// flushProviderBoundary to decline the fold and leave the delivery pending -- rule 4 says
+		// this is exactly the same "not a match" outcome as an outright absent owner epoch, just
+		// reached via a real disagreement instead of missing data. deliverWhenIdle's own loop
+		// (already running since notifyTools was first called, parked on waitForIdle()) must still
+		// pick up that same pending delivery and deliver it on its own turn once idle.
+		let releaseIdle!: () => void;
+		const idle = new Promise<void>((resolve) => {
+			releaseIdle = resolve;
+		});
+		const lease = {} as ForegroundSubmissionLease;
+		const foreground = {
+			isBusy: true,
+			waitForIdle: vi.fn(() => idle),
+			tryAcquireSubmission: vi.fn(() => lease),
+			releaseSubmission: vi.fn(),
+			getCurrentSubmissionEpoch: vi.fn(() => 2),
+		} as unknown as ForegroundRecoveryController;
+		const enqueueCustomMessageTurn = vi.fn(async () => undefined);
+		const startCustomMessageTurn = vi.fn(async () => ({ completion: Promise.resolve() }));
+		const controller = new ForegroundTerminalHandoffController({
+			foreground,
+			isDisposed: () => false,
+			getGoalStateSnapshot: () => ({ goalId: "goal-active", status: "active" as const }),
+			startCustomMessageTurn,
+			sendCustomMessage: vi.fn(async () => undefined),
+			enqueueCustomMessageTurn,
+			warn: vi.fn(),
+		});
+
+		let settled = false;
+		const notification = controller
+			.notifyTools(
+				[
+					{
+						sessionId: "session-a",
+						taskId: "tool-task-1",
+						toolCallId: "call-1",
+						toolName: "slow",
+						goalId: "goal-active",
+						status: "completed",
+						startedAt: "2026-08-21T20:00:00.000Z",
+						completedAt: "2026-08-21T20:00:01.000Z",
+						elapsedBeforeHandoffMs: 15_000,
+						summary: "slow completed",
+						output: "done",
+						ownerEpoch: 1,
+					},
+				],
+				true,
+			)
+			.then(() => {
+				settled = true;
+			});
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		// Fires more than once, same as any other in-flight turn's boundary checks -- must
+		// decline every time the mismatch stands, not just the first.
+		controller.flushProviderBoundary();
+		controller.flushProviderBoundary();
+		await Promise.resolve();
+		expect(enqueueCustomMessageTurn).not.toHaveBeenCalled();
+		expect(settled).toBe(false);
+
+		// Foreground goes idle: the idle route delivers the SAME pending handoff on its own turn.
+		releaseIdle();
+		await notification;
+
+		expect(startCustomMessageTurn).toHaveBeenCalledWith(
+			expect.objectContaining({ customType: "background-tool-completion" }),
+			lease,
+			"goal-active",
+		);
+		expect(enqueueCustomMessageTurn).not.toHaveBeenCalled();
 	});
 
 	it("persists one worker handoff when the same terminal generation is notified repeatedly", async () => {

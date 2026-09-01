@@ -62,6 +62,10 @@ export interface ManagedLaneControllerDeps {
 	getCwd(): string;
 	getSessionManager(): SessionManager;
 	getGoalStateSnapshot(): GoalState | undefined;
+	/** Current foreground submission epoch, or undefined when none is held. Read once, at genuine
+	 * dispatch-phase lane creation in `record()`, to stamp the new lane's owner epoch via
+	 * `noteLaneOwnerEpoch` -- mirrors `WorkerDelegationControllerDeps.getCurrentSubmissionEpoch`. */
+	getCurrentSubmissionEpoch?(): number | undefined;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;
 	/** Optional only for minimal host embeddings; normal AgentSession integration always supplies this. */
@@ -76,6 +80,7 @@ export class ManagedLaneController {
 	private readonly deps: ManagedLaneControllerDeps;
 	private readonly lifecycle: WorkerLifecycle;
 	private readonly recordTerminal: (record: LaneRecord, durableNotificationId: string) => void;
+	private readonly noteLaneOwnerEpoch: (laneId: string, ownerEpoch: number) => void;
 	private readonly warn: (message: string) => void;
 	private readonly deregisterByLane = new Map<string, () => void>();
 	private hydrated = false;
@@ -85,11 +90,13 @@ export class ManagedLaneController {
 		lifecycle: WorkerLifecycle,
 		recordTerminal: (record: LaneRecord, durableNotificationId: string) => void,
 		warn: (message: string) => void = () => {},
+		noteLaneOwnerEpoch: (laneId: string, ownerEpoch: number) => void = () => {},
 	) {
 		this.deps = deps;
 		this.lifecycle = lifecycle;
 		this.recordTerminal = recordTerminal;
 		this.warn = warn;
+		this.noteLaneOwnerEpoch = noteLaneOwnerEpoch;
 	}
 
 	ensureHydrated(): void {
@@ -165,6 +172,12 @@ export class ManagedLaneController {
 			if (!prepared.created) return undefined;
 			this.ensureRegistration(event.laneId);
 			appendLaneRecordSnapshot(this.deps.getSessionManager(), prepared.record);
+			// Genuine dispatch (guarded by `prepared.created` above -- a replayed/idempotent dispatch of
+			// an already-durable lane returns `undefined` earlier and never reaches here). Capture the
+			// owner epoch exactly once, at this same creation moment, never on a later terminal report
+			// for the same laneId.
+			const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
+			if (ownerEpoch !== undefined) this.noteLaneOwnerEpoch(event.laneId, ownerEpoch);
 			return prepared.record;
 		}
 

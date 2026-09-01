@@ -635,6 +635,7 @@ export class AgentSession {
 			notifyWorkerTerminalHandoff: (records) => this._terminalHandoffs.notifyWorkers(records),
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
+			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
 			getGoalRuntimeSnapshot: (settings) => this.getGoalRuntimeSnapshot(settings),
 			markGoalToolUnavailable: () => this._goals.markToolUnavailable(),
 			getEvidenceBundleSnapshot: () => this.getEvidenceBundleSnapshot(),
@@ -705,6 +706,7 @@ export class AgentSession {
 		this._backgroundToolTasks = new BackgroundToolTaskController({
 			getSessionId: () => this.sessionManager.getSessionId(),
 			getGoalId: () => this._goals.getOwnershipGoalId(),
+			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
 			getSessionLineageIds: () => this.sessionManager.getSessionLineageIds(),
 			getArtifactStore: () => this._getToolArtifactStore(),
 			loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(this.sessionManager),

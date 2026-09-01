@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { Agent } from "../src/agent.ts";
 import { agentLoop } from "../src/agent-loop.ts";
+import { TOOL_FAILURE_LEDGER_TRANSIENT_KIND } from "../src/tool-failure-memory.ts";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -105,8 +106,13 @@ const writeLikeSchema = Type.Union([
 	Type.Object({ path: Type.String(), contentRef: Type.String() }),
 ]);
 
+// Append-on-change transients (see transient-records.ts) now ride as durable `role: "custom"`
+// records - the failure ledger included - so they must survive this converter to ever reach
+// `providerPrompts`/`promptWithLedger`, exactly like any other message a real convertToLlm passes.
 const identityConverter = (messages: AgentMessage[]): Message[] =>
-	messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
+	messages.filter(
+		(m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult" || m.role === "custom",
+	) as Message[];
 
 const TEST_RECOVERY_AUTHORITY = createAgentToolFailureRecoveryAuthority();
 
@@ -123,27 +129,20 @@ function resultContainsFailureCode(result: AgentToolResult<unknown>, failureCode
 }
 
 /**
- * What the model actually reads: the system prompt plus the failure ledger, which rides as the
- * LAST message rather than in the system prompt (ledger text in the cached prefix re-prefills the
- * whole conversation whenever a failure appears, its counts change, or a success clears it).
+ * What the model actually reads: the system prompt plus the failure ledger, which rides as a
+ * durable, append-on-change `role: "custom"` record (see transient-records.ts) that occupies the
+ * LAST message position whenever active - never rewritten in place, but re-appended to reclaim that
+ * position if ordinary turn growth displaces it (see `TransientRecordSlot.trailing`) - rather than in
+ * the system prompt (ledger text in the cached prefix re-prefills the whole conversation whenever a
+ * failure appears, its counts change, or a success clears it).
  */
 function promptWithLedger(context: { systemPrompt?: string; messages?: readonly unknown[] }): string {
-	const last = (context.messages ?? []).at(-1) as { role?: string; content?: unknown } | undefined;
+	const last = (context.messages ?? []).at(-1) as
+		| { role?: string; customType?: string; content?: unknown }
+		| undefined;
 	let ledger = "";
-	if (last?.role === "user") {
-		const text =
-			typeof last.content === "string"
-				? last.content
-				: Array.isArray(last.content)
-					? last.content
-							.map((part) =>
-								part && typeof part === "object" && "text" in part && typeof part.text === "string"
-									? part.text
-									: "",
-							)
-							.join("\n")
-					: "";
-		if (text.startsWith("MANDATORY TOOL FAILURE RECOVERY")) ledger = text;
+	if (last?.role === "custom" && last.customType === TOOL_FAILURE_LEDGER_TRANSIENT_KIND) {
+		if (typeof last.content === "string") ledger = last.content;
 	}
 	return [context.systemPrompt ?? "", ledger].filter(Boolean).join("\n\n");
 }

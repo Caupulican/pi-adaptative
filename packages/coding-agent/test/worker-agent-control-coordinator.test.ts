@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { WorkerAgentMailbox, workerAgentMessageId } from "../src/core/delegation/worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "../src/core/delegation/worker-agent-control-coordinator.ts";
 import {
@@ -2090,6 +2091,73 @@ describe("WorkerAgentControlCoordinator", () => {
 		).toThrow("idempotency identity conflicts");
 		expect(mailbox.pending()).toEqual([]);
 		expect(prepareAgentTurn).toHaveBeenCalledOnce();
+	});
+
+	it("stamps the owner epoch only when prepareAgentTurn reports a genuinely new attempt, never on a replayed one", () => {
+		// TASK W2: prepareAgentTurn (the ledger's own decision point, delegation-ledger.ts) reports
+		// `created` explicitly rather than the caller reconstructing it -- a replayed controlMessageId
+		// returns an attempt that may predate the current process, shape-identical to a fresh mint
+		// otherwise. The coordinator must gate noteLaneOwnerEpoch on that signal, never call it
+		// unconditionally. Mutation check: forcing the gate to `if (true)` must turn the second half of
+		// this test red without touching the first half.
+		const agentDir = root();
+		const newAgent = registeredAgent({ agentId: "agent-new" });
+		const replayAgent = registeredAgent({ agentId: "agent-replay" });
+		const records = new Map<string, LaneRecord>();
+		let sequence = 0;
+		const prepareAgentTurn = vi.fn((args: { agentId: string; instructions: string; controlMessageId?: string }) => {
+			sequence++;
+			const record: LaneRecord = { laneId: `${args.agentId}:turn:${sequence}`, type: "worker", status: "queued" };
+			const attempt: AttemptRuntimeState = {
+				...activeAttempt("queued"),
+				taskId: record.laneId,
+				dispatch: {
+					...activeAttempt("queued").dispatch,
+					instructions: args.instructions,
+					logicalLaneId: args.agentId,
+					...(args.controlMessageId ? { controlMessageId: args.controlMessageId } : {}),
+				},
+			};
+			records.set(args.agentId, record);
+			// The coordinator has no way to independently verify this -- it must trust the ledger's
+			// own signal completely, which is exactly why the gate is the thing under test here.
+			return { record, attempt, created: args.agentId === newAgent.agentId };
+		});
+		const lifecycle = {
+			getAgent: (agentId: string) =>
+				agentId === newAgent.agentId ? newAgent : agentId === replayAgent.agentId ? replayAgent : undefined,
+			getTaskRuntimeSnapshot: () => ({ agents: {}, tasks: {}, attempts: {} }),
+			getRecord: (laneId: string) => [...records.values()].find((record) => record.laneId === laneId),
+			prepareAgentTurn,
+		} as unknown as WorkerLifecycle;
+		const getCurrentSubmissionEpoch = vi.fn(() => 3);
+		const noteLaneOwnerEpoch = vi.fn();
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir,
+			parentSessionId: "parent-owner-epoch",
+			processOwnerId: "pi-worker:owner-epoch:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "recovered" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+			getCurrentSubmissionEpoch,
+			noteLaneOwnerEpoch,
+		});
+
+		coordinator.startWorkerAgentTask(newAgent.agentId, "genuinely new turn");
+		expect(noteLaneOwnerEpoch).toHaveBeenCalledOnce();
+		expect(noteLaneOwnerEpoch).toHaveBeenCalledWith(records.get(newAgent.agentId)?.laneId, 3);
+
+		coordinator.startWorkerAgentTask(replayAgent.agentId, "replayed turn");
+		// The replay half: prepareAgentTurn was called again (a different agent, so nothing upstream
+		// short-circuited it), but reported created: false. noteLaneOwnerEpoch must still show exactly
+		// the one call from the genuinely-new half above -- not a second one for the replay.
+		expect(prepareAgentTurn).toHaveBeenCalledTimes(2);
+		expect(noteLaneOwnerEpoch).toHaveBeenCalledOnce();
 	});
 
 	it("recovers mailbox acceptance across prepare, scheduler enqueue, and drain crash boundaries", () => {

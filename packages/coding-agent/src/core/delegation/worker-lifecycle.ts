@@ -122,11 +122,16 @@ export class WorkerLifecycle {
 	}): {
 		record: LaneRecord;
 		attempt: AttemptRuntimeState;
+		/** True only when this call minted a genuinely new durable attempt -- false when a replayed
+		 * `controlMessageId` handed back an attempt that already existed (possibly from a prior
+		 * process, before a resume). Computed by the ledger at its own decision point; see
+		 * `DelegationOrchestrationLedger.prepareAgentTurn`'s doc comment on that return. */
+		created: boolean;
 	} {
-		const attempt = this.ledger.prepareAgentTurn(input);
+		const { attempt, created } = this.ledger.prepareAgentTurn(input);
 		const record = this.getRecord(attempt.taskId);
 		if (!record) throw new Error(`Logical worker '${input.agentId}' turn was not projected after enqueue.`);
-		return { record, attempt };
+		return { record, attempt, created };
 	}
 
 	ensureAgent(input: {

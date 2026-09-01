@@ -159,7 +159,7 @@ export class DelegationOrchestrationLedger {
 	 * execution contract are inherited from the last bound turn. Each distinct control message owns
 	 * one deterministic task/attempt identity; exact retries adopt it instead of minting new work.
 	 */
-	prepareAgentTurn(input: PrepareAgentTurnInput): AttemptRuntimeState {
+	prepareAgentTurn(input: PrepareAgentTurnInput): { attempt: AttemptRuntimeState; created: boolean } {
 		const agentId = input.agentId.trim();
 		const instructions = input.instructions.trim();
 		const controlMessageId = input.controlMessageId?.trim();
@@ -219,7 +219,13 @@ export class DelegationOrchestrationLedger {
 				}
 			}
 			const existingAttempt = existingAttempts.at(-1);
-			if (existingAttempt) return existingAttempt;
+			// This IS the decision point: a replayed controlMessageId hands back an attempt that
+			// already existed -- possibly minted in a prior process, before a resume -- shape-identical
+			// to a fresh one otherwise. `created: false` is the only reliable signal a caller has that
+			// this was NOT just dispatched; do not let it be reconstructed from the outside (e.g. via a
+			// before/after snapshot diff keyed on the private `mailboxTurnTaskId` identity) once this
+			// method already knows the answer with certainty.
+			if (existingAttempt) return { attempt: existingAttempt, created: false };
 		}
 		if (agent.status !== "registered") {
 			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' is not idle.`);
@@ -227,30 +233,35 @@ export class DelegationOrchestrationLedger {
 		if (existingTask && !controlMessageId) {
 			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' already has turn ${sequence}.`);
 		}
-		return this.prepareNormalized({
-			laneId: taskId,
-			instructions,
-			profileId: contract.worker.profile.profileId,
-			role: agent.role,
-			requiredCapabilities: contract.worker.authority.capabilities,
-			riskBudget: contract.worker.profile.budget,
-			...(priorTask.objectiveId.startsWith("goal:") ? { goalId: priorTask.objectiveId.slice("goal:".length) } : {}),
-			taskContext: {
-				requirementIds: prior.dispatch.requirementIds ?? [],
-				dependsOnTaskIds: dependencyTaskIds,
-				acceptanceCriterionIds: priorTask.acceptanceCriterionIds,
-				resourcePointerIds: prior.dispatch.resourcePointerIds,
-			},
-			executionContract: contract,
-			dispatchMetadata: {
-				logicalLaneId: agentId,
-				dispatchSequence: sequence,
-				...(controlMessageId ? { controlMessageId } : {}),
-				...(prior.dispatch.birthContextForkReference
-					? { birthContextForkReference: prior.dispatch.birthContextForkReference }
+		return {
+			attempt: this.prepareNormalized({
+				laneId: taskId,
+				instructions,
+				profileId: contract.worker.profile.profileId,
+				role: agent.role,
+				requiredCapabilities: contract.worker.authority.capabilities,
+				riskBudget: contract.worker.profile.budget,
+				...(priorTask.objectiveId.startsWith("goal:")
+					? { goalId: priorTask.objectiveId.slice("goal:".length) }
 					: {}),
-			},
-		});
+				taskContext: {
+					requirementIds: prior.dispatch.requirementIds ?? [],
+					dependsOnTaskIds: dependencyTaskIds,
+					acceptanceCriterionIds: priorTask.acceptanceCriterionIds,
+					resourcePointerIds: prior.dispatch.resourcePointerIds,
+				},
+				executionContract: contract,
+				dispatchMetadata: {
+					logicalLaneId: agentId,
+					dispatchSequence: sequence,
+					...(controlMessageId ? { controlMessageId } : {}),
+					...(prior.dispatch.birthContextForkReference
+						? { birthContextForkReference: prior.dispatch.birthContextForkReference }
+						: {}),
+				},
+			}),
+			created: true,
+		};
 	}
 
 	private prepareNormalized(input: {

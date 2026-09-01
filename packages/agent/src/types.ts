@@ -541,6 +541,32 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	onProviderRequestSnapshot?: (context: ProviderRequestSnapshotContext, signal?: AbortSignal) => void | Promise<void>;
 
 	/**
+	 * Internal wiring seam, not a host extension point: the agent loop creates and injects this once
+	 * per run, the same way it injects {@link providerRequestPrefixState}, and a host driving the loop
+	 * should leave it unset. `provider-request-planner.ts` calls it with exactly the transient records
+	 * (see `transient-records.ts`) it just folded into durable history for this request - the loop's
+	 * own implementation turns each into a `message_start`/`message_end` pair on its `emit` sink, the
+	 * same pairing `pendingMessages`/steering messages use, so a host's existing message persistence
+	 * (whatever already keeps its own transcript in sync with `message_end`) picks them up without new
+	 * host-side code.
+	 *
+	 * Why this exists: `provider-request-planner.ts` folding a record into `sourceContext.messages`
+	 * (and, via `adoptReplannedMessages`, into the caller's own array) keeps it alive for the rest of
+	 * THIS `agentLoop` run, but a host that rebuilds its own context snapshot between turns (see
+	 * `PrepareNextTurnContext`) reconstructs from ITS OWN persisted transcript, not from this package's
+	 * internal array - a record this package committed but never emitted is invisible to that
+	 * rebuild and silently vanishes at the next turn boundary. Emitting it is what makes the commit
+	 * reach the host's transcript at all.
+	 *
+	 * A direct one-shot caller that never goes through `agentLoop` (e.g.
+	 * `startPlannedAgentProviderRequest` called on its own) leaves this unset; the planner's call is
+	 * optional-chained, so a committed record simply isn't announced anywhere outside its own return
+	 * value - correct for a caller with no ongoing event stream for a host to listen to in the first
+	 * place.
+	 */
+	onTransientRecordsCommitted?: (records: AgentMessage[]) => void | Promise<void>;
+
+	/**
 	 * Resolve the reasoning effort after context transformation and immediately before the provider
 	 * request. This supports request-local policy decisions that must not mutate persisted agent state.
 	 */

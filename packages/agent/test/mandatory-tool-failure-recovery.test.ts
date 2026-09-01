@@ -12,6 +12,7 @@ import {
 	createRepeatedToolFailureResult,
 	createToolFailureResult,
 	sanitizeToolFailureContext,
+	TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
 	type ToolFailureMemoryRecord,
 } from "../src/tool-failure-memory.ts";
 import { MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT } from "../src/tool-failure-recovery-protocol.ts";
@@ -19,18 +20,19 @@ import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "../src/t
 import { createAgentToolFailureRecoveryAuthority } from "../src/types.ts";
 
 /**
- * The failure ledger reaches the model as the LAST message of the request, never in the system
- * prompt (see sanitizeToolFailureContext). Reading it back out is how a provider-context assertion
- * checks what the ledger actually projected.
+ * The failure ledger reaches the model as a durable, append-on-change `role: "custom"` record (see
+ * transient-records.ts) that occupies the LAST message position whenever active - never rewritten in
+ * place, but re-appended to reclaim that position if ordinary turn growth displaces it (see
+ * `TransientRecordSlot.trailing`). It is never in the system prompt (see sanitizeToolFailureContext).
+ * Reading it back out is how a provider-context assertion checks what the ledger actually projected.
+ * `Context["messages"]` is typed as the wire-level `Message` union (no "custom" member), but
+ * `identityConverter`-style test converters deliberately pass a `role: "custom"` message through
+ * uncast at runtime - test code bridges that gap explicitly here.
  */
 function ledgerOf(context: Context | undefined): string {
-	const last = context?.messages.at(-1);
-	if (!last || last.role !== "user") return "";
-	const text =
-		typeof last.content === "string"
-			? last.content
-			: last.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
-	return text.startsWith("MANDATORY TOOL FAILURE RECOVERY") ? text : "";
+	const last = context?.messages.at(-1) as unknown as AgentMessage | undefined;
+	if (!last || last.role !== "custom" || last.customType !== TOOL_FAILURE_LEDGER_TRANSIENT_KIND) return "";
+	return typeof last.content === "string" ? last.content : "";
 }
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -81,9 +83,16 @@ function assistantMessage(content: AssistantMessage["content"], stopReason: Assi
 	} satisfies AssistantMessage;
 }
 
+// Append-on-change transients (see transient-records.ts) now ride as durable `role: "custom"`
+// records - the failure ledger included - so they must survive this converter to ever reach
+// `providerContexts`/`ledgerOf`, exactly like any other message a real convertToLlm passes.
 const identityConverter = (messages: AgentMessage[]): Message[] =>
 	messages.filter(
-		(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+		(message) =>
+			message.role === "user" ||
+			message.role === "assistant" ||
+			message.role === "toolResult" ||
+			message.role === "custom",
 	) as Message[];
 
 function failureRecord(): ToolFailureMemoryRecord {

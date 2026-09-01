@@ -124,6 +124,14 @@ export interface BackgroundToolTaskRecord {
 	piVerification?: BackgroundToolVerification;
 	/** Runtime-only receipt; never serialized into the durable task record. */
 	observedAt?: string;
+	/**
+	 * Foreground submission epoch that was current when this task was STARTED (captured in
+	 * `handoff()`, never at completion or schedule time -- see
+	 * foreground-terminal-handoff-controller.ts's ownership check). Runtime-only; never serialized
+	 * into the durable task record, same as `observedAt`. Absent on legacy, resumed, or
+	 * cross-process records, which is the signal that the boundary-fold route must not use them.
+	 */
+	ownerEpoch?: number;
 }
 
 export interface BackgroundToolTaskLiveView {
@@ -153,6 +161,10 @@ export interface BackgroundToolTaskControllerDeps {
 	getSessionId(): string;
 	/** Authoritative goal execution attribution at the tool handoff boundary. */
 	getGoalId?(): string | undefined;
+	/** Current foreground submission epoch, or undefined when no submission is held. Read once at
+	 * task start to stamp `ownerEpoch` -- never read again later, so a task always remembers who
+	 * owned it when it began, not whoever happens to be current by the time it finishes. */
+	getCurrentSubmissionEpoch?(): number | undefined;
 	/** Current session followed by the authoritative fork ancestry whose branch records remain visible. */
 	getSessionLineageIds?(): readonly string[];
 	getArtifactStore(): ArtifactStore | undefined;
@@ -452,12 +464,14 @@ export class BackgroundToolTaskController {
 		const taskId = `tool-task-${this.nextTaskId++}`;
 		const startedAt = this.now().toISOString();
 		const goalId = this.deps.getGoalId?.();
+		const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
 		const record: BackgroundToolTaskRecord = {
 			sessionId,
 			taskId,
 			toolCallId: context.toolCall.id,
 			toolName: context.toolCall.name,
 			...(goalId ? { goalId } : {}),
+			...(ownerEpoch !== undefined ? { ownerEpoch } : {}),
 			status: "running",
 			startedAt,
 			elapsedBeforeHandoffMs: context.elapsedMs,
@@ -776,6 +790,7 @@ export class BackgroundToolTaskController {
 		try {
 			const durableRecord = { ...record };
 			delete durableRecord.observedAt;
+			delete durableRecord.ownerEpoch;
 			this.deps.persist(durableRecord);
 			return true;
 		} catch (error) {

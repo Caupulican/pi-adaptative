@@ -105,6 +105,12 @@ interface TerminalDeliveryPlan {
 	message: TerminalCustomMessage;
 	wakeParent: boolean;
 	goalId?: string;
+	/**
+	 * Foreground submission epoch that owned every record in this delivery, or undefined when that
+	 * is not established (no records carry one, or they disagree). `flushProviderBoundary` folds
+	 * only when this equals the CURRENT submission's epoch -- see `resolveWake`.
+	 */
+	ownerEpoch?: number;
 }
 
 interface PendingTerminalDelivery {
@@ -227,6 +233,16 @@ export class ForegroundTerminalHandoffController {
 					continue;
 				}
 				if (!plan.wakeParent) continue;
+				// Fold only into a request belonging to the submission that started the task. An
+				// absent owner epoch (legacy/resumed/cross-process record, or a batch whose records
+				// disagree) must NEVER satisfy this check, even when no submission is currently held
+				// either -- checked as its own guard, ahead of and independent of the equality
+				// comparison, so `undefined === undefined` can never read as a match by construction.
+				// A rejected delivery is left exactly as `!plan.wakeParent` already leaves one: still
+				// in `this.pending`, still eligible for the idle route on its own turn.
+				if (plan.ownerEpoch === undefined || plan.ownerEpoch !== this.deps.foreground.getCurrentSubmissionEpoch()) {
+					continue;
+				}
 				this.pending.delete(pending);
 				void this.deps.enqueueCustomMessageTurn(plan.message).then(pending.resolve, pending.reject);
 			} catch (error) {
@@ -418,14 +434,26 @@ export class ForegroundTerminalHandoffController {
 		};
 	}
 
-	private resolveWake(records: readonly { goalId?: string }[]): Pick<TerminalDeliveryPlan, "wakeParent" | "goalId"> {
+	private resolveWake(
+		records: readonly { goalId?: string; ownerEpoch?: number }[],
+	): Pick<TerminalDeliveryPlan, "wakeParent" | "goalId" | "ownerEpoch"> {
 		const goal = this.deps.getGoalStateSnapshot();
 		const wakeParent = records.some(
 			(record) => !record.goalId || (goal?.goalId === record.goalId && isGoalExecutionActive(goal.status)),
 		);
+		// A batch's owner epoch is established only when every record in it agrees -- mixed or
+		// partially-unknown ownership must fall back to the safe idle route for the whole batch
+		// rather than fold on a majority or a first-seen value. See rule 4 of the delivery-boundary
+		// spec: absent ownership must never be treated as a match.
+		const firstEpoch = records[0]?.ownerEpoch;
+		const ownerEpoch =
+			firstEpoch !== undefined && records.every((record) => record.ownerEpoch === firstEpoch)
+				? firstEpoch
+				: undefined;
 		return {
 			wakeParent,
 			...(wakeParent ? { goalId: records.find((record) => record.goalId === goal?.goalId)?.goalId } : {}),
+			...(ownerEpoch !== undefined ? { ownerEpoch } : {}),
 		};
 	}
 

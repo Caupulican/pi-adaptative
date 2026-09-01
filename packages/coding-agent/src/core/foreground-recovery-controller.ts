@@ -26,6 +26,9 @@ const foregroundSubmissionLeaseMarker: unique symbol = Symbol("foregroundSubmiss
 /** Identity-bound authority to prepare and execute one logical foreground submission. */
 export interface ForegroundSubmissionLease {
 	readonly [foregroundSubmissionLeaseMarker]: true;
+	/** Monotonic submission epoch assigned when this lease was acquired -- see
+	 * `ForegroundRecoveryController.getCurrentSubmissionEpoch`. */
+	readonly epoch: number;
 }
 
 export interface ForegroundRecoveryControllerDeps {
@@ -50,6 +53,10 @@ export class ForegroundRecoveryController {
 	private pendingCompactionRetryKey: string | undefined;
 	private activeRuns = 0;
 	private submissionLease: ForegroundSubmissionLease | undefined;
+	/** Next epoch to assign. Starts at 1 so the first successful `tryAcquireSubmission()` yields
+	 * epoch 1; only ever increases, including across releases -- it identifies a submission, not a
+	 * count of currently-held leases. */
+	private nextSubmissionEpoch = 1;
 	private shutdownReason: Error | undefined;
 	private readonly idleWaiters = new Set<() => void>();
 	private readonly deps: ForegroundRecoveryControllerDeps;
@@ -113,9 +120,24 @@ export class ForegroundRecoveryController {
 	/** Atomically reserve the full foreground lifecycle, including asynchronous prompt preparation. */
 	tryAcquireSubmission(): ForegroundSubmissionLease | undefined {
 		if (this.shutdownReason || this.isBusy) return undefined;
-		const lease: ForegroundSubmissionLease = { [foregroundSubmissionLeaseMarker]: true };
+		const lease: ForegroundSubmissionLease = {
+			[foregroundSubmissionLeaseMarker]: true,
+			epoch: this.nextSubmissionEpoch++,
+		};
 		this.submissionLease = lease;
 		return lease;
+	}
+
+	/**
+	 * Epoch of the currently held submission lease, or undefined when no submission is running.
+	 * Ownership identity for the terminal-handoff delivery boundary
+	 * (`foreground-terminal-handoff-controller.ts`): a delivery folds into the next provider request
+	 * only when its recorded owner epoch equals THIS value at flush time. An absent lease and an
+	 * absent owner epoch are different kinds of "unknown" and must never be compared to each other --
+	 * callers gate on the owner epoch being defined before reaching this getter at all.
+	 */
+	getCurrentSubmissionEpoch(): number | undefined {
+		return this.submissionLease?.epoch;
 	}
 
 	/** Wait until foreground ownership can be acquired without a check-then-act gap. */

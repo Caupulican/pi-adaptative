@@ -29,6 +29,27 @@ export interface WorkerTerminalHandoffRecord {
 	goalId?: string;
 	/** Runtime-only receipt. Observation consumes delivery, never mutation review. */
 	observedAt?: string;
+	/**
+	 * Foreground submission epoch that owned the worker lane at start, mirroring
+	 * `BackgroundToolTaskRecord.ownerEpoch` (background-tool-task-controller.ts) so
+	 * `ForegroundTerminalHandoffController.resolveWake` can gate both delivery kinds uniformly.
+	 * Populated via `noteLaneOwnerEpoch` at the three lane/attempt-creation surfaces that mint
+	 * genuinely new work: `WorkerDelegationController.prepareWorkerAttempt`'s fresh-creation branch
+	 * (ordinary in-process worker dispatch), `ManagedLaneController.record`'s dispatch phase (managed /
+	 * external-process workers, e.g. tmux-workers), and `WorkerAgentControlCoordinator`'s mailbox-turn
+	 * call site (a persistent worker agent's follow-up turn), gated there on
+	 * `WorkerLifecycle.prepareAgentTurn`'s own `created` signal -- a replayed control message returns
+	 * an attempt that may predate the current process, shape-identical to a fresh mint otherwise, and
+	 * must never be re-stamped with the current epoch. Deliberately NOT threaded into
+	 * `DelegationOrchestrationLedger`/`PrepareDelegationInput` -- that path is durably persisted
+	 * (`objectiveId`, `OrchestrationEventStore`, restart-fenced), and a submission epoch is
+	 * process-local and meaningless after a restart, so it is carried on this coordinator's own
+	 * runtime-only side map instead, exactly mirroring `observedAt`'s treatment. Absent ownership (a
+	 * legacy/resumed lane, a replayed mailbox turn, or any future surface that forgets to call
+	 * `noteLaneOwnerEpoch`) safely routes through the idle path -- it is a missed latency optimization,
+	 * never a correctness risk.
+	 */
+	ownerEpoch?: number;
 }
 
 export interface WorkerNotificationStatus {
@@ -77,6 +98,17 @@ export class WorkerNotificationCoordinator {
 	 */
 	private readonly inFlight = new Map<string, PendingWorkerNotification>();
 	private readonly observedTerminals = new Map<string, string>();
+	/**
+	 * Foreground submission epoch owning a lane, recorded once at lane-start time by whichever
+	 * creation surface minted it (`WorkerDelegationController.prepareWorkerAttempt`,
+	 * `ManagedLaneController.record`'s dispatch phase) via `noteLaneOwnerEpoch`. Read and consumed
+	 * exactly once, in `recordTerminal`, when that same lane's terminal record is built -- never
+	 * re-read afterward. A laneId with no entry (never noted, or a resumed/legacy/cross-process lane
+	 * whose creation surface could not establish current ownership) yields `ownerEpoch: undefined` on
+	 * the resulting `WorkerTerminalHandoffRecord`, which is the correct, safe default: absent
+	 * ownership routes the handoff through the idle delivery path, never the boundary fold.
+	 */
+	private readonly laneOwnerEpochs = new Map<string, number>();
 	private scheduled = false;
 	private disposed = false;
 	private deliveryTail = Promise.resolve();
@@ -91,6 +123,17 @@ export class WorkerNotificationCoordinator {
 	/** Every notification recorded but not yet confirmed delivered, for durable cross-restart replay. */
 	getOutstandingRecords(): readonly WorkerTerminalHandoffRecord[] {
 		return [...this.pending.values(), ...this.inFlight.values()].map((notification) => notification.record);
+	}
+
+	/**
+	 * Record the foreground submission epoch that owned `laneId` at the moment its creation surface
+	 * minted it. Call exactly once, at genuine lane creation -- never on a retry/resume/drain of an
+	 * already-tracked lane, the same discipline `goalId` already follows on this same record. A lane
+	 * never noted here (legacy, resumed, or a creation surface with no start-time capture wired yet)
+	 * simply has no entry, which `recordTerminal` treats as absent ownership, not a match.
+	 */
+	noteLaneOwnerEpoch(laneId: string, ownerEpoch: number): void {
+		this.laneOwnerEpochs.set(laneId, ownerEpoch);
 	}
 
 	recordTerminal(record: LaneRecord, durableNotificationId?: string): void {
@@ -113,6 +156,11 @@ export class WorkerNotificationCoordinator {
 			? new Date().toISOString()
 			: this.observedTerminals.get(identity);
 		if (observedAt) this.rememberObserved(identity, observedAt);
+		// Consumed exactly once, here, at the same point `goalId` is read off the durable projection --
+		// see `noteLaneOwnerEpoch`'s doc comment for why an absent entry must never be treated as epoch 0
+		// or any other sentinel; it is simply omitted, same as `goalId` is omitted when absent.
+		const ownerEpoch = this.laneOwnerEpochs.get(record.laneId);
+		this.laneOwnerEpochs.delete(record.laneId);
 		this.pending.set(key, {
 			key,
 			record: {
@@ -122,6 +170,7 @@ export class WorkerNotificationCoordinator {
 				...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
 				...(record.goalId ? { goalId: record.goalId } : {}),
 				...(observedAt ? { observedAt } : {}),
+				...(ownerEpoch !== undefined ? { ownerEpoch } : {}),
 			},
 			...(durableNotificationId ? { durableNotificationId } : {}),
 		});

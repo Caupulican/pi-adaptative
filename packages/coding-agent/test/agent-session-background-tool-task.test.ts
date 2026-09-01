@@ -889,6 +889,72 @@ describe("AgentSession background tool tasks", () => {
 		}
 	});
 
+	it("still rides the owning turn's own next provider call when the terminal is ready first, buying no extra call", async () => {
+		// The sibling test above proves the boundary route correctly DECLINES to fold into an
+		// unrelated turn. This proves the fix did not silently degrade into "never fold": a task
+		// that goes terminal while the SAME turn that started it is still running must still ride
+		// that turn's own next provider call -- the latency optimization the boundary route exists
+		// for -- with no separate call bought just to deliver the news. Gates on `shouldStopAfterTurn`
+		// (same technique as "injects a terminal into the next provider boundary of the same
+		// multi-request run" above) rather than a timer/event race: that hook is the one point
+		// guaranteed to run between this turn's own calls, after backgrounding and before the next
+		// request is built, so releasing the task there is deterministic instead of racing however
+		// fast the tool loop happens to move on its own.
+		let releaseSlow: (() => void) | undefined;
+		const slowCompletion = new Promise<void>((resolve) => {
+			releaseSlow = resolve;
+		});
+		const slowTool: AgentTool<typeof slowParameters, Record<string, never>> = {
+			name: "slow",
+			label: "slow",
+			description: "Deterministic slow test tool",
+			parameters: slowParameters,
+			execute: async () => {
+				await slowCompletion;
+				return { content: [{ type: "text" as const, text: "slow result" }], details: {} };
+			},
+		};
+		const harness = createHarness({
+			baseToolsOverride: { slow: slowTool },
+			responses: [{ toolCalls: [{ id: "slow-call", name: "slow", args: {} }] }, "foreground continued"],
+		});
+		harness.session.setActiveToolsByName(["slow", "tool_task"]);
+		harness.agent.backgroundToolCallAfterMs = 5;
+
+		let markTaskTerminal: (() => void) | undefined;
+		const taskTerminal = new Promise<void>((resolve) => {
+			markTaskTerminal = resolve;
+		});
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (event.type === "background_tools" && event.tasks.length === 0) markTaskTerminal?.();
+		});
+
+		const previousShouldStopAfterTurn = harness.agent.shouldStopAfterTurn?.bind(harness.agent);
+		let stopCheckCount = 0;
+		harness.agent.shouldStopAfterTurn = async (signal) => {
+			const shouldStop = (await previousShouldStopAfterTurn?.(signal)) ?? false;
+			stopCheckCount++;
+			if (stopCheckCount === 1) {
+				releaseSlow?.();
+				await taskTerminal;
+			}
+			return shouldStop;
+		};
+
+		try {
+			await harness.session.prompt("start slow work");
+
+			// No extra provider call bought for the handoff: exactly the two responses this turn's
+			// own tool loop needed -- the slow toolCall, then its own continuation -- nothing more.
+			expect(harness.faux.callCount).toBe(2);
+			expect(JSON.stringify(harness.faux.contexts[1]?.messages)).toContain("Background tool terminal handoff");
+		} finally {
+			unsubscribe();
+			releaseSlow?.();
+			harness.cleanup();
+		}
+	});
+
 	it("reconstructs only the resumed session's durable task projection", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const retained: BackgroundToolTaskRecord = {

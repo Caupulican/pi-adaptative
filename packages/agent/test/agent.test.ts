@@ -200,6 +200,44 @@ describe("Agent", () => {
 		expect(agent.state.isStreaming).toBe(false);
 	});
 
+	it("default convertToLlm converts a role:custom message instead of silently dropping it", async () => {
+		// Regression gate: an Agent constructed without its own convertToLlm falls back to
+		// defaultConvertToLlm, which used to hand-roll a narrower filter (user/assistant/toolResult
+		// only) instead of delegating to messages.ts's real convertToLlm. That silently dropped any
+		// "custom" (or bashExecution/branchSummary/compactionSummary) message with no error and
+		// nothing to notice - exactly what happened to a MUST-protocol verification directive
+		// represented as role:"custom" (see the turn-economics remediation doc's append-on-change
+		// incident). This message must reach the provider, converted to role:"user" per
+		// messages.ts's convertToLlm, not vanish.
+		const capturedContexts: Array<{ messages: unknown[] }> = [];
+		const agent = new Agent({
+			streamFn: (_model, context) => {
+				capturedContexts.push(context);
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+				});
+				return stream;
+			},
+		});
+		agent.state.messages.push({
+			role: "custom",
+			customType: "regression_marker",
+			content: "distinctive marker text for defaultConvertToLlm regression gate",
+			display: false,
+			timestamp: 0,
+		});
+
+		await agent.prompt("hello");
+
+		expect(capturedContexts).toHaveLength(1);
+		const wireMessages = capturedContexts[0]?.messages ?? [];
+		expect(wireMessages.some((message) => JSON.stringify(message).includes("distinctive marker text"))).toBe(true);
+		// Converted, not passed through verbatim: the wire never sees role:"custom" (Message has no
+		// such variant), only what convertToLlm turned it into.
+		expect(wireMessages.some((message) => (message as { role?: string }).role === "custom")).toBe(false);
+	});
+
 	it("onSentPrefixDisturbance and requestPreflight both fire when set through Agent's constructor", async () => {
 		// Regression gate: createLoopConfig audit. Both hooks are real AgentLoopConfig features with
 		// full test coverage at that layer (see provider-request-planning.test.ts), but until this

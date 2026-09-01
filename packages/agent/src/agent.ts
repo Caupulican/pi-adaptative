@@ -15,6 +15,7 @@ import {
 	runAgentLoop,
 	runAgentLoopContinue,
 } from "./agent-loop.ts";
+import { convertToLlm } from "./messages.ts";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -40,10 +41,25 @@ import { createEmptyUsage } from "./usage.ts";
 
 export type { QueueMode } from "./types.ts";
 
+/**
+ * Default `convertToLlm` for a caller that supplies none of its own. Delegates to the real
+ * converter (`./messages.ts`) rather than duplicating a narrower filter: that function has an
+ * explicit case for every `AgentMessage` role - "custom", "bashExecution", "branchSummary",
+ * "compactionSummary" - converting each into a valid `Message` instead of silently dropping it. A
+ * narrower, hand-rolled filter here (user/assistant/toolResult only, as this used to be) is a
+ * latent trap for any content injected as one of those other roles: a default-converter caller
+ * never sees it reach the provider at all, no error, nothing to notice - exactly what happened to
+ * a MUST-protocol verification directive represented as a `role: "custom"` message (see the
+ * turn-economics remediation doc's append-on-change section for the incident this fixes).
+ *
+ * Confirmed zero production behaviour change: `packages/coding-agent/src/core/sdk.ts` has always
+ * wired its own `convertToLlm` explicitly (wrapping this same `messages.ts` function), so this
+ * default only ever governed callers that never supply one - the test harness being the one that
+ * mattered, which is why the harness silently dropped role:"custom" content while production never
+ * did.
+ */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.filter(
-		(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
-	);
+	return convertToLlm(messages);
 }
 
 const DEFAULT_MODEL = {

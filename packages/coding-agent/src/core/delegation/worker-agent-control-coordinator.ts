@@ -81,6 +81,15 @@ export interface WorkerAgentControlCoordinatorOptions {
 	 */
 	subscribeReservationAvailability?(listener: () => void): () => void;
 	warn?(message: string): void;
+	/** Current foreground submission epoch, or undefined when none is held. Read once, at genuine
+	 * mailbox-turn creation (gated on `prepareAgentTurn`'s own `created` signal), to stamp the new
+	 * attempt's owner epoch via `noteLaneOwnerEpoch` -- mirrors
+	 * `WorkerDelegationControllerDeps.getCurrentSubmissionEpoch`. */
+	getCurrentSubmissionEpoch?(): number | undefined;
+	/** Mirrors `WorkerNotificationCoordinator.noteLaneOwnerEpoch` -- called only when
+	 * `prepareAgentTurn` reports `created: true`, never for a replayed control message returning an
+	 * attempt that may predate the current process. */
+	noteLaneOwnerEpoch?(laneId: string, ownerEpoch: number): void;
 }
 
 type QueuedPeerMessage = ReturnType<WorkerAgentMailbox["enqueueWithReceipt"]>;
@@ -1650,6 +1659,14 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 							? { dependsOnTaskIds: message.task.dependsOnTaskIds }
 							: {}),
 					});
+					// `created` is the ledger's own decision, not a reconstruction of it -- a replayed
+					// control message (e.g. a mailbox message redelivered after a resume) returns an
+					// attempt that may predate the current process, and must never be re-stamped with
+					// this process's epoch.
+					if (prepared.created) {
+						const ownerEpoch = this.options.getCurrentSubmissionEpoch?.();
+						if (ownerEpoch !== undefined) this.options.noteLaneOwnerEpoch?.(prepared.record.laneId, ownerEpoch);
+					}
 					return this.scheduleTaskBearingAttempt(prepared.record, prepared.attempt);
 				} catch (error) {
 					const recovered = this.controlMessageAttempt(agent.agentId, message);

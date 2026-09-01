@@ -182,6 +182,10 @@ export interface WorkerDelegationControllerDeps {
 	notifyWorkerTerminalHandoff(records: readonly WorkerTerminalHandoffRecord[]): Promise<void>;
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
 	getGoalStateSnapshot(): GoalState | undefined;
+	/** Current foreground submission epoch, or undefined when none is held. Read once, at genuine
+	 * lane-creation time in `prepareWorkerAttempt`, to stamp the new lane's owner epoch via
+	 * `WorkerNotificationCoordinator.noteLaneOwnerEpoch` -- see that method's doc comment. */
+	getCurrentSubmissionEpoch?(): number | undefined;
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;
 	readMemoryForLane(query: string): Promise<string>;
 	/** Session-owned artifact store broker; worker adapters receive fresh retrieval tools only. */
@@ -358,6 +362,8 @@ export class WorkerDelegationController {
 			yieldCallerForWait: (callerAgentId) => this.yieldWorkerForWait(callerAgentId),
 			subscribeReservationAvailability: (listener) => this.writeReservations.subscribeAvailability(listener),
 			warn: (message) => this.safeWarn(message),
+			getCurrentSubmissionEpoch: () => this.deps.getCurrentSubmissionEpoch?.(),
+			noteLaneOwnerEpoch: (laneId, ownerEpoch) => this.notifications.noteLaneOwnerEpoch(laneId, ownerEpoch),
 		});
 		this.terminalHandoffs = new WorkerTerminalHandoffCoordinator({
 			deliver: (handoff) => this.deliverTerminalHandoff(handoff),
@@ -1628,6 +1634,14 @@ export class WorkerDelegationController {
 						);
 					},
 				});
+				// Genuine lane creation (not a retry/resume/drain -- those all supply `existingRecord`
+				// and return earlier, above). Capture the owner epoch exactly once, here, at the same
+				// moment `goal`/`goalId` above is fixed into the durable dispatch -- never re-read on a
+				// later touch of this same laneId.
+				const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
+				if (ownerEpoch !== undefined) {
+					this.notifications.noteLaneOwnerEpoch(captured.value.record.laneId, ownerEpoch);
+				}
 				return { executionPlan: admission.executionPlan, lifecycle, ...captured.value };
 			} catch (error) {
 				if (error instanceof WorkerContextForkStoreError && error.code === "identity_claimed") continue;

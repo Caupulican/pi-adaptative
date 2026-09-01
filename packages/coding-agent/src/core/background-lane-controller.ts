@@ -273,6 +273,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._getWorkerLifecycle(),
 			(record, notificationId) => this._recordWorkerTerminal(record, notificationId),
 			(message) => this._safeWarn(message),
+			(laneId, ownerEpoch) => this._getWorkerNotificationCoordinator().noteLaneOwnerEpoch(laneId, ownerEpoch),
 		);
 		return this._managedLanes;
 	}

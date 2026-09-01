@@ -404,11 +404,40 @@ async function runLoop(
 		providerRequestPrefixState = { sentPrefixCount: 0, sanitizerSentPrefixCount: 0 };
 		continuationState.providerRequestPrefixState = providerRequestPrefixState;
 	}
+	// Announce a transient record `provider-request-planner.ts` just committed to durable history, on
+	// THIS run's own `emit` - the same `message_start`/`message_end` pairing `pendingMessages` below
+	// uses, so a host's existing message persistence (whatever already keeps its transcript in sync
+	// with `message_end`) picks a committed record up without new host-side code. See
+	// `onTransientRecordsCommitted`'s doc comment in types.ts for why this needs to exist at all: a
+	// record folded only into `sourceContext.messages` survives THIS run but is invisible to a host
+	// that rebuilds its own snapshot from its own persisted transcript between turns.
+	//
+	// Also pushes onto `newMessages` (this run's own "what did I add" record, returned from
+	// `agentLoop`/`agentLoopContinue` and used to seed the next turn - see its declaration in the
+	// caller) - not just `currentContext.messages`, which `provider-request-planner.ts`'s
+	// `adoptReplannedMessages` already keeps in sync via `sourceContext`, so pushing there too would
+	// duplicate the entry. Before this, `newMessages` silently disagreed with this run's OWN event
+	// stream about what was added: anything committed only into `sourceContext.messages` (every
+	// transient record) was invisible to `newMessages` while fully visible via `message_end`. Harmless
+	// while nothing distinguished the two views; a real defect once something did - a consumer that
+	// builds its own transcript by listening to `message_end` (as a worker's completion-callback
+	// evidence check does) legitimately expects it to match what this same run officially returned as
+	// new, and a mismatch there is this run's own inconsistency, not that consumer's to special-case
+	// around.
+	const emitCommittedTransientRecords = async (records: AgentMessage[]): Promise<void> => {
+		for (const message of records) {
+			await emit({ type: "message_start", message });
+			await emit({ type: "message_end", message });
+			newMessages.push(message);
+		}
+	};
 	// Inject once, before the first request: every later `config = {...config, ...}` clone below
-	// (the `prepareNextTurn` model/reasoning swap) copies this reference forward unchanged, so the
+	// (the `prepareNextTurn` model/reasoning swap) copies both references forward unchanged, so the
 	// "already sent" mark in provider-request-planner.ts survives a config clone instead of resetting
-	// to 0 on every turn a host's `prepareNextTurn` touches. See `ProviderRequestPrefixState`.
-	config = { ...config, providerRequestPrefixState };
+	// to 0 on every turn a host's `prepareNextTurn` touches (see `ProviderRequestPrefixState`), and the
+	// commit-announcement hook stays bound to THIS run's `emit` rather than reverting to whatever (if
+	// anything) `initialConfig` held.
+	config = { ...config, providerRequestPrefixState, onTransientRecordsCommitted: emitCommittedTransientRecords };
 	const validationFailureTracker: ToolValidationFailureTracker = new Map();
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
 	let toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);

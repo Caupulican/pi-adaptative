@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
-import { WorkerNotificationCoordinator } from "../src/core/delegation/worker-notification-coordinator.ts";
+import {
+	WorkerNotificationCoordinator,
+	type WorkerTerminalHandoffRecord,
+} from "../src/core/delegation/worker-notification-coordinator.ts";
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -498,6 +501,64 @@ describe("WorkerNotificationCoordinator", () => {
 				observedAt: expect.any(String),
 			}),
 		]);
+		coordinator.dispose();
+	});
+
+	it("carries the noted owner epoch onto the terminal handoff record", async () => {
+		// Mirrors the real production capture site (WorkerDelegationController.prepareWorkerAttempt's
+		// fresh-creation branch): the owning surface calls noteLaneOwnerEpoch exactly once, at genuine
+		// lane-creation time, well before this same lane ever reaches recordTerminal. recordTerminal
+		// reads and consumes that one entry -- see noteLaneOwnerEpoch's and recordTerminal's own doc
+		// comments for why an absent entry must never read as a match downstream.
+		const record: LaneRecord = {
+			laneId: "worker-owner-epoch",
+			type: "worker",
+			status: "succeeded",
+			completedAt: "2026-08-12T00:00:00.000Z",
+		};
+		const notify = vi.fn(async () => undefined);
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => [],
+			emitStatus: vi.fn(),
+			notify,
+			warn: vi.fn(),
+			markDurableDelivered: vi.fn(),
+		});
+
+		coordinator.noteLaneOwnerEpoch("worker-owner-epoch", 4);
+		coordinator.recordTerminal(record);
+		await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
+
+		expect(notify).toHaveBeenCalledWith([expect.objectContaining({ laneId: "worker-owner-epoch", ownerEpoch: 4 })]);
+		coordinator.dispose();
+	});
+
+	it("omits ownerEpoch from a terminal handoff whose lane was never noted", async () => {
+		// Absent ownership (no noteLaneOwnerEpoch call for this laneId -- a legacy lane, a resumed
+		// session, or a creation surface that hasn't been wired yet) must produce a record with the
+		// field genuinely OMITTED, not defaulted to some sentinel that could later compare equal to a
+		// real epoch.
+		const record: LaneRecord = {
+			laneId: "worker-unnoted",
+			type: "worker",
+			status: "succeeded",
+			completedAt: "2026-08-12T00:00:01.000Z",
+		};
+		const notify = vi.fn(async (_records: readonly WorkerTerminalHandoffRecord[]) => undefined);
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => [],
+			emitStatus: vi.fn(),
+			notify,
+			warn: vi.fn(),
+			markDurableDelivered: vi.fn(),
+		});
+
+		coordinator.recordTerminal(record);
+		await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
+
+		const delivered = notify.mock.calls[0]?.[0]?.[0];
+		expect(delivered).toEqual(expect.objectContaining({ laneId: "worker-unnoted" }));
+		expect(delivered && "ownerEpoch" in delivered).toBe(false);
 		coordinator.dispose();
 	});
 });

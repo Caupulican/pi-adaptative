@@ -1255,7 +1255,7 @@ describe("durable orchestration projection ceilings", () => {
 				instructions: `turn ${index}`,
 				controlMessageId: `message-${index}`,
 			});
-			ledger.runtime.cancelAttempt(turn.attemptId, "test_turn_complete");
+			ledger.runtime.cancelAttempt(turn.attempt.attemptId, "test_turn_complete");
 		}
 		const before = ledger.runtime.getSnapshot();
 		expect(Object.keys(before.agents)).toHaveLength(1);
