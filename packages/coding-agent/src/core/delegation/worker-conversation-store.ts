@@ -10,7 +10,12 @@ import {
 	prepareCompaction,
 } from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
-import { convertToLlm } from "@caupulican/pi-agent-core/messages";
+import {
+	type CustomMessage,
+	convertToLlm,
+	isCoreConversationMessageRole,
+	isWireNativeAgentMessageRole,
+} from "@caupulican/pi-agent-core/messages";
 import { measureJsonStringUtf8Bytes } from "@caupulican/pi-agent-core/provider-request-estimator";
 import {
 	assertValidSessionId,
@@ -177,7 +182,7 @@ interface WorkerTranscriptCommitCursorState {
 	entryIndex: number;
 	generation: number;
 	status: "active" | "committed" | "aborted";
-	committedSuffix?: Message[];
+	committedSuffix?: WorkerTranscriptMessage[];
 }
 
 const workerTranscriptCommitCursorStates = new WeakMap<
@@ -195,13 +200,31 @@ interface CachedWorkerConversationCore {
 type WorkerSessionEntry = ReturnType<SessionManager["getEntries"]>[number];
 type WorkerSessionMessage = Extract<WorkerSessionEntry, { type: "message" }>["message"];
 
-function isRawWorkerTranscriptMessage(message: WorkerSessionMessage): message is Message {
-	return message.role === "user" || message.role === "assistant" || message.role === "toolResult";
+/**
+ * A worker transcript entry that is genuine conversation content: either an already wire-native
+ * `Message`, or a durable custom transient record (packages/agent's transient-records.ts - the
+ * tool-failure ledger, a verification obligation) that still needs `convertToLlm`'s conversion
+ * before it can reach a provider but is nonetheless real, persisted conversation history. See
+ * `isCoreConversationMessageRole`'s doc comment (packages/agent/src/messages.ts) for the full
+ * reasoning on why these, and only these, are the roles a worker transcript can legitimately hold.
+ */
+export type WorkerTranscriptMessage = Message | CustomMessage;
+
+function isRawWorkerTranscriptMessage(message: WorkerSessionMessage): message is WorkerTranscriptMessage {
+	return isCoreConversationMessageRole(message.role);
 }
 
-function rawWorkerTranscriptMessage(entry: Readonly<WorkerSessionEntry>): Message | undefined {
+function rawWorkerTranscriptMessage(entry: Readonly<WorkerSessionEntry>): WorkerTranscriptMessage | undefined {
 	if (entry.type !== "message" || !isRawWorkerTranscriptMessage(entry.message)) return undefined;
 	return entry.message;
+}
+
+/** Object-level wrapper around `isWireNativeAgentMessageRole` (packages/agent) so a role check on
+ * `message.role` narrows `message` itself - a role-only predicate applied to a property access does
+ * not automatically narrow its parent object. Delegates to the same canonical, exhaustively-checked
+ * logic; adds no role list of its own. */
+function isWireNativeWorkerTranscriptMessage(message: WorkerTranscriptMessage): message is Message {
+	return isWireNativeAgentMessageRole(message.role);
 }
 
 function visitWorkerSessionEntries(
@@ -356,8 +379,8 @@ function workerDiagnosticForPersistence(
 }
 
 /** Apply the canonical JSON, diagnostic, and shared details-retention shape used on session reopen. */
-function workerMessageForPersistence(message: Message): Message {
-	let projected: Message = message;
+function workerMessageForPersistence(message: WorkerTranscriptMessage): WorkerTranscriptMessage {
+	let projected: WorkerTranscriptMessage = message;
 	if (message.role === "assistant") {
 		const errorMessage =
 			message.errorMessage === undefined
@@ -382,7 +405,7 @@ function workerMessageForPersistence(message: Message): Message {
 	// drops them. Real value, ordering, and content differences remain fail-closed.
 	const serialized = JSON.stringify(projected);
 	if (serialized === undefined) throw new TypeError("Worker transcript message is not JSON-persistable.");
-	const persisted = JSON.parse(serialized) as Message;
+	const persisted = JSON.parse(serialized) as WorkerTranscriptMessage;
 	compactToolResultDetailsForRetention(persisted);
 	return persisted;
 }
@@ -899,12 +922,22 @@ export class WorkerConversation {
 	/**
 	 * The immutable, append-only raw worker messages, including messages compacted out of provider
 	 * context. This is recovery/audit data; it is never loaded into a provider request implicitly.
+	 *
+	 * Deliberately scoped to wire-native `Message` content only, unlike `commitTranscript`'s
+	 * reconciliation (which must recognize a durable custom transient record - see
+	 * `WorkerTranscriptMessage` - to avoid the off-by-one this type-narrowing caused there). A
+	 * committed transient record is still real conversation history, but this method's own public
+	 * `Message[]` contract has external callers outside this module (`getRawTranscriptPage` below,
+	 * via `WorkerAgentControlPort`) that were never built to receive anything else; changing that
+	 * contract is a separate, wider decision this fix does not make. `isWireNativeAgentMessageRole`
+	 * filters explicitly here rather than relying on `rawWorkerTranscriptMessage`'s return type to
+	 * narrow it away, so the exclusion is a visible, deliberate choice, not an accident of typing.
 	 */
 	getRawTranscript(): Message[] {
 		const messages: Message[] = [];
 		visitWorkerSessionEntries(this.sessionManager, 0, this.sessionManager.getEntryCount(), (entry) => {
 			const message = rawWorkerTranscriptMessage(entry);
-			if (message) messages.push(structuredClone(message));
+			if (message && isWireNativeWorkerTranscriptMessage(message)) messages.push(structuredClone(message));
 		});
 		return messages;
 	}
@@ -952,7 +985,8 @@ export class WorkerConversation {
 				(entry, entryIndex, persistedBytes) => {
 					if (pageClosed) return;
 					const message = rawWorkerTranscriptMessage(entry);
-					if (!message) {
+					// Same deliberate wire-native-only scope as getRawTranscript above - see its doc comment.
+					if (!message || !isWireNativeWorkerTranscriptMessage(message)) {
 						nextEntryCursor = entryIndex + 1;
 						return;
 					}
@@ -1333,7 +1367,7 @@ export class WorkerConversation {
 	}
 
 	/** Append one already-authorized worker message to the canonical transcript. */
-	appendMessage(message: Message): string {
+	appendMessage(message: WorkerTranscriptMessage): string {
 		return this.appendSessionEntry((sessionManager) =>
 			sessionManager.appendMessage(structuredClone(workerMessageForPersistence(message))),
 		);
@@ -1535,7 +1569,7 @@ export class WorkerConversation {
 
 	commitTranscript(
 		cursor: WorkerTranscriptCommitCursor,
-		suffix: readonly Message[],
+		suffix: readonly WorkerTranscriptMessage[],
 		options?: { appendMissing?: boolean },
 	): number {
 		const state = workerTranscriptCommitCursorStates.get(cursor);

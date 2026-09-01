@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../src/core/agent-session-contracts.ts";
 import type { LaneToolSurface } from "../src/core/autonomy/lane-tool-surface.ts";
 import { createWorkerAttemptExecutor } from "../src/core/delegation/worker-attempt-executor.ts";
-import { WorkerConversation } from "../src/core/delegation/worker-conversation-store.ts";
+import { WorkerConversation, type WorkerTranscriptMessage } from "../src/core/delegation/worker-conversation-store.ts";
 import type { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { WorkerTreeBudgetCoordinator } from "../src/core/delegation/worker-tree-budget-coordinator.ts";
 import { CapabilityGateway, type SharedCapabilityBudget } from "../src/core/orchestration/capability-gateway.ts";
@@ -66,7 +66,7 @@ async function invokeRequestPreflight(options: IsolatedCompletionOptions) {
 function createExecutorHarness(
 	runIsolatedCompletion: (options: IsolatedCompletionOptions) => Promise<IsolatedCompletionResult>,
 	maxTokens = 100,
-	appendMessage?: (message: Message) => void,
+	appendMessage?: (message: WorkerTranscriptMessage) => void,
 	retentionPolicy?: { maxContextTokens: number; keepRecentTokens: number },
 	signal?: AbortSignal,
 	maxWallClockMs = 30_000,

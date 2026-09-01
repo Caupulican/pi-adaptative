@@ -808,6 +808,18 @@ export class ReflectionController {
 					childContext,
 					loopConfig,
 					async (event) => {
+						// KNOWN TYPE GAP, not an oversight: `event.message` is `AgentMessage` (packages/agent),
+						// which - since the turn-economics step-3 host-gap hook - can genuinely be a durable
+						// custom transient record (a committed tool-failure ledger or verification obligation),
+						// not only `Message`'s narrower {user, assistant, toolResult}. `onMessage`'s parameter
+						// is declared `Message` in `IsolatedCompletionOptions` (agent-session-contracts.ts);
+						// widening that declaration ripples beyond this fix's scope (every `runIsolatedCompletion`
+						// caller: research/fitness/judge lanes, not only worker delegation) and was not made
+						// here. This cast forces a wider runtime value into that narrower declared type - see
+						// `messages: [...history, ...(messages as Message[])]` below for the matching cast on
+						// the return side, and `WorkerTranscriptMessage` in worker-conversation-store.ts, which
+						// exists specifically so the two files that DO need the honest wider type (this call's
+						// actual worker-delegation consumer) do not also have to cast.
 						if (event.type === "message_end") await opts.onMessage?.(event.message as Message, event.origin);
 					},
 					opts.signal,
@@ -879,8 +891,18 @@ export class ReflectionController {
 					.filter((content): content is TextContent => content.type === "text")
 					.map((content) => content.text)
 					.join("");
-				// Isolated inputs are Message values and this loop only adds assistant/tool-result messages,
-				// so the child transcript is safely representable by the public Message[] contract.
+				// KNOWN TYPE GAP, not an oversight (see the matching note on the emit callback above): this
+				// was once true - "the loop only adds assistant/tool-result messages" - and is not anymore.
+				// Since the turn-economics step-3 host-gap hook, `messages` (this run's own `newMessages`,
+				// packages/agent's agent-loop.ts) can genuinely include a durable custom transient record.
+				// `IsolatedCompletionResult.messages` is declared `Message[]` (agent-session-contracts.ts);
+				// making that field, and `IsolatedCompletionOptions.onMessage`'s parameter, honestly wider
+				// would touch every `runIsolatedCompletion` caller (research/fitness/judge lanes too, not
+				// only worker delegation), which is beyond this fix's granted scope. Documented as an open
+				// defect rather than silently left to look intentional - see AGENTS.md's "Delegation and
+				// Orchestration" section for the full trace. `worker-attempt-executor.ts` and
+				// `worker-conversation-store.ts`'s `WorkerTranscriptMessage` type recover the honest wider
+				// type on the read side, immediately after this cast forces it narrow here.
 				return {
 					text,
 					usage,

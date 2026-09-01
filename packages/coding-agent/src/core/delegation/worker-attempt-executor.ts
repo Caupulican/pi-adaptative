@@ -25,7 +25,11 @@ import { WorkerActionJournal } from "./worker-action-journal.ts";
 import type { AppliedActionsReport, WorkerAction } from "./worker-actions.ts";
 import type { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
 import { WorkerConversationOwnershipError } from "./worker-conversation-revision.ts";
-import type { WorkerConversation, WorkerConversationRetentionPolicy } from "./worker-conversation-store.ts";
+import type {
+	WorkerConversation,
+	WorkerConversationRetentionPolicy,
+	WorkerTranscriptMessage,
+} from "./worker-conversation-store.ts";
 import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { WorkerCompletionProtocolError, WorkerProviderTurnProtocol } from "./worker-provider-turn-protocol.ts";
@@ -179,14 +183,20 @@ function workerCompletionCallbackFailure(error: unknown): Error {
 function callbackEvidencedCompletion(
 	result: IsolatedCompletionResult,
 	historyLength: number,
-	emittedMessages: readonly Message[],
-): { completion: IsolatedCompletionResult; suffix: Message[] } {
+	emittedMessages: readonly WorkerTranscriptMessage[],
+): { completion: IsolatedCompletionResult; suffix: WorkerTranscriptMessage[] } {
 	if (result.messages !== undefined && result.messages.length < historyLength) {
 		throw new WorkerCompletionProtocolError(
 			"Worker completion protocol returned fewer messages than its input history.",
 		);
 	}
-	let suffix: Message[];
+	// `result.messages` is declared `Message[]` (IsolatedCompletionResult, agent-session-contracts.ts)
+	// but a child loop that committed a transient record (packages/agent's step-3 host-gap hook) makes
+	// it genuinely WorkerTranscriptMessage[] at runtime - widening here, not narrowing, so this
+	// assignment needs no cast; only reflection-controller.ts's construction of `result.messages`
+	// itself still does, where a wide value is forced into that narrower declared field. See this
+	// module's and worker-conversation-store.ts's `WorkerTranscriptMessage` doc comments.
+	let suffix: WorkerTranscriptMessage[];
 	if (result.messages !== undefined) {
 		suffix = result.messages.slice(historyLength);
 		if (!isDeepStrictEqual(suffix, emittedMessages)) {
@@ -488,7 +498,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 						history = transcriptCommit.history;
 						const historyLength = history.length;
 						const transcriptCursor = transcriptCommit.cursor;
-						const durableCallbackMessages: Message[] = [];
+						const durableCallbackMessages: WorkerTranscriptMessage[] = [];
 						let callbackFailed = false;
 						let callbackFailure: unknown;
 						const retainCallbackFailure = (error: unknown): void => {
