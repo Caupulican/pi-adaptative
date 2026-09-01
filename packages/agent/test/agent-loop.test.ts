@@ -6409,3 +6409,122 @@ describe("agent loop failure tracker seeding", () => {
 		expect(messages.at(-1)).toMatchObject({ role: "assistant" });
 	});
 });
+
+describe("agent loop run-scoped resolution", () => {
+	const collectSchema = Type.Object({ items: Type.Array(Type.Object({ value: Type.String() })) });
+	const collect: AgentTool<typeof collectSchema, { items: Array<{ value: string }> }> = {
+		name: "collect",
+		label: "Collect",
+		description: "Collect items",
+		parameters: collectSchema,
+		async execute(_toolCallId, params) {
+			return { content: [{ type: "text", text: "ok" }], details: params };
+		},
+	};
+
+	/** One repairable text-protocol call (a JSON-string-encoded array), then a plain stop. */
+	function repairableStream() {
+		let callIndex = 0;
+		return () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex++ === 0) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: "tool-1",
+									name: "collect",
+									arguments: { items: JSON.stringify([{ value: "v" }]) },
+									source: "text-protocol",
+								},
+							],
+							"toolUse",
+						),
+					});
+				} else {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+			});
+			return stream;
+		};
+	}
+
+	it("gives a run without a host memory its own fold, resumed request after request", async () => {
+		const state = createAgentLoopContinuationState();
+		const memory = state.providerRequestPrefixState?.sanitizerMemory;
+		expect(memory).toBeDefined();
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [collect] };
+
+		const messages = await runAgentLoop(
+			[createUserMessage("collect")],
+			context,
+			{ model: createModel(), convertToLlm: identityConverter },
+			async () => {},
+			undefined,
+			repairableStream(),
+			state,
+		);
+
+		// user, assistant(toolUse), toolResult, assistant(done): the last request folded the first three.
+		expect(messages).toHaveLength(4);
+		expect(memory?.processed).toHaveLength(3);
+	});
+
+	it("reads the repair emergency switch once per run", async () => {
+		const previous = process.env.PI_TOOL_REPAIR_DISABLED;
+		const outcomes: string[] = [];
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [collect] };
+		try {
+			delete process.env.PI_TOOL_REPAIR_DISABLED;
+			const stream = agentLoop(
+				[createUserMessage("collect")],
+				context,
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					onToolArgumentValidation: (event) => outcomes.push(event.outcome),
+					getSteeringMessages: async () => {
+						// Flipped after the run started: this run keeps the answer it resolved at start.
+						process.env.PI_TOOL_REPAIR_DISABLED = "1";
+						return [];
+					},
+				},
+				undefined,
+				repairableStream(),
+			);
+			for await (const _ of stream) {
+				// consume
+			}
+			expect(outcomes).toEqual(["repaired"]);
+
+			// Already set when the next run starts: that run does not repair.
+			const disabled = agentLoop(
+				[createUserMessage("collect")],
+				{ ...context, messages: [] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					onToolArgumentValidation: (event) => outcomes.push(event.outcome),
+				},
+				undefined,
+				repairableStream(),
+			);
+			for await (const _ of disabled) {
+				// consume
+			}
+			expect(outcomes).toHaveLength(2);
+			expect(outcomes[1]).not.toBe("repaired");
+		} finally {
+			if (previous === undefined) delete process.env.PI_TOOL_REPAIR_DISABLED;
+			else process.env.PI_TOOL_REPAIR_DISABLED = previous;
+		}
+	});
+});

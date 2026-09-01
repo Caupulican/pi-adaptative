@@ -30,6 +30,7 @@ import {
 	assessToolFailure,
 	clearToolFailure,
 	createRepeatedToolFailureResult,
+	createToolFailureContextMemory,
 	createToolFailureMemoryTracker,
 	createToolFailureResult,
 	describeOperationOutcome,
@@ -108,9 +109,16 @@ export interface AgentLoopContinuationState {
  * callers, tests). `Agent` is the one caller that owns a longer-lived session and must pass its own
  * persisted value here instead of accepting the default - see `Agent.runPromptMessages`.
  */
+/**
+ * A run always carries one tool-failure fold memory: the sanitizer resumes it on every request and
+ * the loop's tracker seeds from it, so within a run each request folds only the messages appended
+ * since the previous one. Without it, every request of a raw `agentLoop` run re-folded the whole
+ * history -- a third of the per-turn profile at 600 turns. A host that keeps its continuation
+ * state across runs (`Agent`) passes its own memory and resumes across them as well.
+ */
 export function createAgentLoopContinuationState(
 	initialSanitizerSentPrefixCount = 0,
-	sanitizerMemory?: ToolFailureContextMemory,
+	sanitizerMemory: ToolFailureContextMemory = createToolFailureContextMemory(),
 ): AgentLoopContinuationState {
 	return {
 		providerTurns: 0,
@@ -409,7 +417,11 @@ async function runLoop(
 	}
 	let providerRequestPrefixState = continuationState.providerRequestPrefixState;
 	if (providerRequestPrefixState === undefined) {
-		providerRequestPrefixState = { sentPrefixCount: 0, sanitizerSentPrefixCount: 0 };
+		providerRequestPrefixState = {
+			sentPrefixCount: 0,
+			sanitizerSentPrefixCount: 0,
+			sanitizerMemory: createToolFailureContextMemory(),
+		};
 		continuationState.providerRequestPrefixState = providerRequestPrefixState;
 	}
 	// Announce a transient record `provider-request-planner.ts` just committed to durable history, on
@@ -445,7 +457,12 @@ async function runLoop(
 	// to 0 on every turn a host's `prepareNextTurn` touches (see `ProviderRequestPrefixState`), and the
 	// commit-announcement hook stays bound to THIS run's `emit` rather than reverting to whatever (if
 	// anything) `initialConfig` held.
-	config = { ...config, providerRequestPrefixState, onTransientRecordsCommitted: emitCommittedTransientRecords };
+	config = {
+		...config,
+		providerRequestPrefixState,
+		onTransientRecordsCommitted: emitCommittedTransientRecords,
+		toolArgumentRepairEnabled: !isToolArgumentRepairEmergencyDisabled(),
+	};
 	const validationFailureTracker: ToolValidationFailureTracker = new Map();
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
 	let toolFailureMemory = createToolFailureMemoryTracker(
@@ -1636,7 +1653,7 @@ async function prepareToolCall(
 		const validatedArgs = validateToolArguments(tool, preparedToolCall, {
 			model: config.model.id,
 			provider: config.model.provider,
-			repairEnabled: !isToolArgumentRepairEmergencyDisabled(),
+			repairEnabled: config.toolArgumentRepairEnabled ?? !isToolArgumentRepairEmergencyDisabled(),
 			telemetry: (event) => {
 				validationEvent = event;
 			},

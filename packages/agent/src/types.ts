@@ -700,6 +700,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 	/** Disable in-band tool repair teaching notes. Default: enabled. */
 	toolArgumentTeachEnabled?: boolean;
+	/**
+	 * Whether argument repair is on for this run. The loop resolves it once at run start from the
+	 * `PI_TOOL_REPAIR_DISABLED` emergency switch and hosts never set it: reading the environment on
+	 * every validated call was a visible row of the per-turn profile for a two-microsecond answer.
+	 */
+	toolArgumentRepairEnabled?: boolean;
 
 	/**
 	 * Observe tool argument validation outcomes. Events contain only shape metadata
