@@ -188,7 +188,7 @@ describe("tool-probe and text-protocol-calibration spend counting", () => {
 			expect(entries[0]).toMatchObject({ label: "tool-probe", usage: { totalTokens: 2 } });
 			expect(entries[0]?.reportId).toMatch(new RegExp(`^tool-probe:${model.provider}/${model.id}:read-task:\\d+$`));
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 			modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -231,7 +231,7 @@ describe("tool-probe and text-protocol-calibration spend counting", () => {
 			const reportIds = entries.map((e) => e.reportId);
 			expect(new Set(reportIds).size).toBe(reportIds.length);
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 			modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -255,7 +255,7 @@ describe("tool-probe and text-protocol-calibration spend counting", () => {
 			expect(session.getSpawnedUsage().reports).toBe(1);
 			expect(spawnedUsageEntries(sessionManager)).toHaveLength(1);
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 			modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -282,7 +282,7 @@ describe("tool-probe and text-protocol-calibration spend counting", () => {
 			expect(entries).toHaveLength(2);
 			expect(entries[0]?.reportId).not.toBe(entries[1]?.reportId);
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 			modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -331,7 +331,7 @@ describe("tool-probe and text-protocol-calibration spend counting", () => {
 			expect(session.getSpawnedUsage().reports).toBe(0);
 			expect(spawnedUsageEntries(sessionManager)).toHaveLength(0);
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 			modelRegistry.unregisterProvider(model.provider);
 		}
 	});

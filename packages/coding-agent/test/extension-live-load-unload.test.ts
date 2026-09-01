@@ -259,9 +259,9 @@ export default (pi) => {
 			session.subscribe(() => {});
 		});
 
-		afterEach(() => {
+		afterEach(async () => {
 			if (session) {
-				session.dispose();
+				await session.disposeAndWait();
 			}
 		});
 
@@ -446,9 +446,9 @@ export default () => {};
 			session.subscribe(() => {});
 		});
 
-		afterEach(() => {
+		afterEach(async () => {
 			if (session) {
-				session.dispose();
+				await session.disposeAndWait();
 			}
 		});
 
@@ -637,9 +637,9 @@ export default (pi) => {
 			session.subscribe(() => {});
 		});
 
-		afterEach(() => {
+		afterEach(async () => {
 			if (session) {
-				session.dispose();
+				await session.disposeAndWait();
 			}
 		});
 

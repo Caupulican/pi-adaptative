@@ -141,7 +141,7 @@ describe("runIsolatedCompletion isolation invariants", () => {
 		expect(session.state.messages.length).toBe(historyBefore);
 		expect(session.getAllTools().map((t) => t.name)).toEqual(toolsBefore);
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("gives each lane a stable, namespace-isolated synthetic cache-affinity key", async () => {
@@ -197,7 +197,7 @@ describe("runIsolatedCompletion isolation invariants", () => {
 		expect(worker).toMatch(/^lane:worker:/);
 		expect(researchA).toMatch(/^lane:research:/);
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("clamps an isolated lane's requested thinking to the selected model's capabilities", async () => {
@@ -240,7 +240,7 @@ describe("runIsolatedCompletion isolation invariants", () => {
 		});
 
 		expect(capturedOptions?.reasoning).toBe("high");
-		session.dispose();
+		await session.disposeAndWait();
 	});
 });
 
@@ -332,7 +332,7 @@ describe("runIsolatedCompletion — reload-gate quiesce registration", () => {
 		await completionPromise;
 
 		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("still deregisters when the completion throws", async () => {
@@ -351,6 +351,6 @@ describe("runIsolatedCompletion — reload-gate quiesce registration", () => {
 		).rejects.toThrow("boom");
 
 		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 });

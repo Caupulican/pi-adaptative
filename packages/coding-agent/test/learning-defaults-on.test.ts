@@ -87,7 +87,7 @@ describe("self-adaptation defaults on", () => {
 			"ROOT REFLECTION: decide and apply warranted durable learning in the current root provider turn only; never add a provider request or delegate reflection.",
 		);
 		expect(session.systemPrompt).not.toContain("learners may use");
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("every autonomy mode defaults self-adaptation on (monotonic lattice), and kill switches still win in each", async () => {
@@ -104,7 +104,7 @@ describe("self-adaptation defaults on", () => {
 			expect(controller.getEffectiveAutoLearnSettings().enabled).toBe(false);
 			expect(controller.isNativeReflectionEnabled()).toBe(false);
 
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
@@ -112,7 +112,7 @@ describe("self-adaptation defaults on", () => {
 		const { controller, session } = await newController();
 		process.env.PI_NATIVE_REFLECTION = "0";
 		expect(controller.isNativeReflectionEnabled()).toBe(false);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("explicit learningPolicy.enabled=false overrides the new default", () => {
@@ -126,7 +126,7 @@ describe("self-adaptation defaults on", () => {
 		settingsManager.setAutoLearnSettings({ enabled: false });
 		expect(controller.getEffectiveAutoLearnSettings().enabled).toBe(false);
 		expect(controller.isNativeReflectionEnabled()).toBe(false);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("refreshes the materialized root reflection contract at the settings transition", async () => {
@@ -139,7 +139,7 @@ describe("self-adaptation defaults on", () => {
 
 		settingsManager.setAutoLearnSettings({ enabled: true, reflectionReview: true });
 		expect(session.systemPrompt).toContain(reflectionContract);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("does not drag delegation or goal-autonomy defaults along with the flip", async () => {
@@ -147,6 +147,6 @@ describe("self-adaptation defaults on", () => {
 		expect(settingsManager.getAutonomySettings().mode).toBe("off");
 		expect(settingsManager.getAutonomySettings().goalAutoContinue).toBe(DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE);
 		expect(settingsManager.getWorkerDelegationSettings().enabled).toBe(DEFAULT_WORKER_DELEGATION_ENABLED);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 });

@@ -88,7 +88,7 @@ describe("session dispose releases long-session resources", () => {
 		expect(session.getSpawnedUsage().cost).toBeCloseTo(0.05, 10);
 		session.addSpawnedUsage(usage, { label: "b" });
 		expect(session.getSpawnedUsage().cost).toBeCloseTo(0.1, 10);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("disposeAndWait reports a shell terminal-release watchdog failure", async () => {

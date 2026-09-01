@@ -116,7 +116,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 		expect(session.systemPrompt).toContain("- dynamic_tool: Run dynamic test behavior");
 		expect(session.systemPrompt).not.toContain("- read:");
 		expect(session.systemPrompt).not.toContain("- bash:");
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("still disables all tools when noTools is all", async () => {
@@ -125,7 +125,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 		expect(session.getAllTools()).toEqual([]);
 		expect(session.getActiveToolNames()).toEqual([]);
 		expect(session.systemPrompt).toContain("Available tools:\n(none)");
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("propagates noTools through service-based session creation", async () => {
@@ -151,6 +151,6 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 		);
 		expect(session.systemPrompt).not.toContain("Available tools:\n(none)");
 		expect(session.systemPrompt).not.toContain("- read:");
-		session.dispose();
+		await session.disposeAndWait();
 	});
 });

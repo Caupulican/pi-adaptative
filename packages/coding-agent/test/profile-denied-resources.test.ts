@@ -59,7 +59,7 @@ describe("profile-denied resources surface in /context", () => {
 			true,
 		);
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("reports nothing withheld when no resource profile is active", async () => {
@@ -69,6 +69,6 @@ describe("profile-denied resources surface in /context", () => {
 		const observations = session.getContextCompositionReport().observations;
 		expect(observations.some((line) => line.includes("withheld by the active resource profile"))).toBe(false);
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 });

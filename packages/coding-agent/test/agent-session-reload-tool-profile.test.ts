@@ -74,6 +74,6 @@ describe("AgentSession reload re-applies the resource-profile tool filter", () =
 		expect(names).toContain("read");
 		expect(names).toContain("bash");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 });

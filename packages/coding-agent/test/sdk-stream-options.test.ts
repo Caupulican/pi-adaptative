@@ -117,7 +117,7 @@ describe("createAgentSession stream options", () => {
 			await session.agent.streamFn(model, { messages: [] }, requestOptions);
 			return capturedOptions;
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 			modelRegistry.unregisterProvider(model.provider);
 		}
 	}
@@ -285,7 +285,7 @@ describe("createAgentSession stream options", () => {
 		try {
 			expect(session.thinkingLevel).toBe("high");
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 			modelRegistry.unregisterProvider(model.provider);
 		}
 	});

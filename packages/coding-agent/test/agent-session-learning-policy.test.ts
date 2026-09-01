@@ -110,7 +110,7 @@ describe("learning apply policy — audit and rollback", () => {
 		const diagnostics = session.getAutonomyDiagnosticSnapshot();
 		expect(diagnostics.learning?.some((entry) => entry.title.startsWith("Audit audit-1"))).toBe(true);
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("stock main-reflection policy autonomously applies an additive memory write with audit", async () => {
@@ -132,7 +132,7 @@ describe("learning apply policy — audit and rollback", () => {
 		expect(audits[0]?.action).toBe("apply");
 		expect(audits[0]?.reasonCode).toBe("eligible_auto_apply");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("policy enabled with permissive thresholds: eligible memory write auto-applies with audit", async () => {
@@ -153,7 +153,7 @@ describe("learning apply policy — audit and rollback", () => {
 		expect(decisions[0]?.reasonCode).toBe("eligible_auto_apply");
 		expect(session.getLearningAuditRecords()[0]?.action).toBe("apply");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("gate decides apply but the memory tool refuses the write: no phantom apply audit, rollback refuses", async () => {
@@ -195,7 +195,7 @@ describe("learning apply policy — audit and rollback", () => {
 		const rollback = await session.rollbackLearningWrite(audits[0]!.id);
 		expect(rollback).toEqual({ ok: false, reason: "not_an_applied_change" });
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("legacy path (policy disabled): memory tool refusal also avoids a phantom apply audit", async () => {
@@ -220,7 +220,7 @@ describe("learning apply policy — audit and rollback", () => {
 		expect(audits[0]?.action).toBe("apply_failed");
 		expect(audits[0]?.rollback).toBeUndefined();
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("a memory_replace supersedes an existing fact: gated as a contradiction, not auto-applied", async () => {
@@ -249,7 +249,7 @@ describe("learning apply policy — audit and rollback", () => {
 		expect(decisions[0]?.requiresApproval).toBe(true);
 		expect(session.getLearningAuditRecords()[0]?.action).toBe("propose");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("Bug F: autoApplySupersessions opted in, otherwise eligible: a memory_replace auto-applies with audit", async () => {
@@ -274,7 +274,7 @@ describe("learning apply policy — audit and rollback", () => {
 		expect(decisions[0]?.reasonCode).toBe("eligible_auto_apply");
 		expect(session.getLearningAuditRecords()[0]?.action).toBe("apply");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("Bug F: autoApplySupersessions opted in but below the confidence threshold: still proposes", async () => {
@@ -302,7 +302,7 @@ describe("learning apply policy — audit and rollback", () => {
 		expect(decisions[0]?.reasonCode).toBe("below_confidence_threshold");
 		expect(session.getLearningAuditRecords()[0]?.action).toBe("propose");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("evidence strength (G6): first observation proposes, the second auto-applies", async () => {
@@ -335,7 +335,7 @@ describe("learning apply policy — audit and rollback", () => {
 		expect(decisions.at(-1)?.reasonCode).toBe("eligible_auto_apply");
 		expect(session.getLearningAuditRecords().at(-1)?.action).toBe("apply");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("stock policy applies a clean promote_skill so a memory procedure becomes a durable skill", async () => {
@@ -355,7 +355,7 @@ describe("learning apply policy — audit and rollback", () => {
 			expect(decisions[0]?.reasonCode).toBe("additive_skill_promotion");
 			expect(session.getLearningAuditRecords()[0]?.action).toBe("apply");
 
-			session.dispose();
+			await session.disposeAndWait();
 		} finally {
 			if (previousEnvAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
 			else process.env[ENV_AGENT_DIR] = previousEnvAgentDir;
@@ -385,7 +385,7 @@ describe("learning apply policy — audit and rollback", () => {
 		expect(audits[0]?.action).toBe("propose");
 		expect(audits[0]?.layer).toBe("skill");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("audit ids reseed from stored snapshots so passes never reuse an id", async () => {
@@ -405,7 +405,7 @@ describe("learning apply policy — audit and rollback", () => {
 		const ids = session.getLearningAuditRecords().map((record) => record.id);
 		expect(ids).toEqual(["audit-1", "audit-2", "audit-3"]);
 		expect(new Set(ids).size).toBe(ids.length);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("rolls back an applied memory_add exactly once", async () => {
@@ -429,7 +429,7 @@ describe("learning apply policy — audit and rollback", () => {
 		const second = await session.rollbackLearningWrite(audit!.id);
 		expect(second).toEqual({ ok: false, reason: "already_rolled_back" });
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("stock policy organizes an exact hot-memory fact into project OKF and rolls it back loss-safely", async () => {
@@ -526,12 +526,12 @@ describe("learning apply policy — audit and rollback", () => {
 		expect(retried).toEqual({ ok: true, reason: "rollback_applied" });
 		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).not.toContain("Fact to roll back");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("returns audit_not_found for unknown ids and refuses to roll back proposals", async () => {
 		const session = await newSession({ enabled: true, allowedAutoApplyLayers: [] });
 		expect(await session.rollbackLearningWrite("nope")).toEqual({ ok: false, reason: "audit_not_found" });
-		session.dispose();
+		await session.disposeAndWait();
 	});
 });

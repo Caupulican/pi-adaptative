@@ -198,7 +198,7 @@ describe("Bug D: profile-denial observation must not misattribute user disables"
 			false,
 		);
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("active profile denies one skill, user disables a different (profile-allowed) skill: count reflects only the profile denial", async () => {
@@ -210,7 +210,7 @@ describe("Bug D: profile-denial observation must not misattribute user disables"
 			const line = session
 				.getContextCompositionReport()
 				.observations.find((entry) => entry.includes("skill(s) withheld by the active resource profile"));
-			session.dispose();
+			await session.disposeAndWait();
 			return Number(line?.match(/^(\d+) skill/)?.[1] ?? 0);
 		};
 

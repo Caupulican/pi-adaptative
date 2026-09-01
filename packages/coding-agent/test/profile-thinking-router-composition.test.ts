@@ -99,6 +99,6 @@ describe("profile-set session thinking composes with per-tier router thinking", 
 		// ...and the profile-set session level is restored afterward.
 		expect(session.thinkingLevel).toBe("high");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 });

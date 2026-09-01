@@ -81,7 +81,7 @@ describe("Cost aggregation (spawned-usage roll-up)", () => {
 		const totals = session.getSpawnedUsage();
 		expect(totals.reports).toBe(2);
 		expect(totals.cost).toBeCloseTo(0.43, 10);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("persists reports as `spawned_usage` custom entries (does NOT enter LLM context)", async () => {
@@ -95,7 +95,7 @@ describe("Cost aggregation (spawned-usage roll-up)", () => {
 		// CustomEntry (type "custom") is persistence-only — not custom_message — so it never injects
 		// into the model context.
 		expect(session.systemPrompt).not.toContain("spawned_usage");
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("is idempotent on reportId — a duplicate report does not double-count", async () => {
@@ -107,7 +107,7 @@ describe("Cost aggregation (spawned-usage roll-up)", () => {
 		expect(firstId).toBeTruthy();
 		expect(secondId).toBeUndefined();
 		expect(session.getSpawnedUsage()).toEqual({ cost: 0.2, reports: 1 });
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("counts reports without a reportId independently (no accidental dedupe)", async () => {
@@ -116,7 +116,7 @@ describe("Cost aggregation (spawned-usage roll-up)", () => {
 		session.addSpawnedUsage(usage(0.1));
 		expect(session.getSpawnedUsage().reports).toBe(2);
 		expect(session.getSpawnedUsage().cost).toBeCloseTo(0.2, 10);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("getCumulativeUsage() returns a zeroed Usage for a session with no assistant turns", async () => {
@@ -125,7 +125,7 @@ describe("Cost aggregation (spawned-usage roll-up)", () => {
 		expect(cumulative.cost.total).toBe(0);
 		expect(cumulative.input).toBe(0);
 		expect(cumulative.totalTokens).toBe(0);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("getCumulativeUsage() rolls up spawned-usage so single-hop reporting can't drop grandchildren", async () => {
@@ -139,7 +139,7 @@ describe("Cost aggregation (spawned-usage roll-up)", () => {
 		expect(cumulative.cost.total).toBeCloseTo(0.4, 10);
 		// Token breakdown is carried through too (each fixture report = 150 totalTokens).
 		expect(cumulative.totalTokens).toBe(300);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("exposes pi.reportSpawnedUsage to extensions, routing to the session roll-up", async () => {
@@ -157,7 +157,7 @@ describe("Cost aggregation (spawned-usage roll-up)", () => {
 		const totals = session.getSpawnedUsage();
 		expect(totals.reports).toBe(1);
 		expect(totals.cost).toBeCloseTo(0.77, 10);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	describe("aggregateCumulativeUsageFromSessionEntries", () => {
@@ -374,7 +374,7 @@ describe("Cost aggregation (spawned-usage roll-up)", () => {
 			expect(spawnedUsage.cost).toBeCloseTo(0.25, 10);
 
 			expect(logs).toContain(`Auto Learn usage reported: ${childSessionId}.`);
-			session.dispose();
+			await session.disposeAndWait();
 		});
 
 		it("Auto Learn cleanup report is idempotent by reportId", async () => {
@@ -424,7 +424,7 @@ describe("Cost aggregation (spawned-usage roll-up)", () => {
 			const spawnedUsage = session.getSpawnedUsage();
 			expect(spawnedUsage.reports).toBe(1);
 			expect(spawnedUsage.cost).toBeCloseTo(0.4, 10);
-			session.dispose();
+			await session.disposeAndWait();
 		});
 
 		it("drives cleanupCompletedAutoLearnRun ordering: reports child usage, then deletes artifacts", async () => {
@@ -478,7 +478,7 @@ describe("Cost aggregation (spawned-usage roll-up)", () => {
 				"deleted:run-id-ghi", // sessionDir name is runId
 			]);
 			expect(session.getSpawnedUsage().cost).toBeCloseTo(0.3, 10);
-			session.dispose();
+			await session.disposeAndWait();
 		});
 	});
 });

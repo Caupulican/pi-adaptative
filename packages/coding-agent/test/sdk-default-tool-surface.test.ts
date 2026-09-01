@@ -63,7 +63,7 @@ describe("SDK default tool surface", () => {
 			expect(session.getActiveToolNames()).not.toContain("context_audit");
 			expect(session.getToolDefinition("tool_task")).toBeDefined();
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
@@ -97,7 +97,7 @@ describe("SDK default tool surface", () => {
 				cheapThinking: "low",
 			});
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
@@ -149,7 +149,7 @@ describe("SDK default tool surface", () => {
 			expect(session.getToolDefinition("tool_task")).toBeUndefined();
 			expect(session.getToolDefinition("bash")).toBeUndefined();
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 
 		await expect(
@@ -192,7 +192,7 @@ describe("SDK default tool surface", () => {
 			expect(settingsManager.getActiveResourceProfileNames()).toEqual([]);
 			expect(session.getActiveToolNames()).toEqual([...DEFAULT_ACTIVE_TOOL_NAMES, "artifact_retrieve"]);
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
@@ -218,7 +218,7 @@ describe("SDK default tool surface", () => {
 			expect(settingsManager.getActiveResourceProfileNames()).toEqual([]);
 			expect(session.getActiveToolNames()).toEqual([...DEFAULT_ACTIVE_TOOL_NAMES, "artifact_retrieve"]);
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 });

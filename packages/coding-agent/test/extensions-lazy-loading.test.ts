@@ -177,7 +177,7 @@ describe("lazy extension loading", () => {
 
 		expect(session.getAllTools().map((tool) => tool.name)).toEqual(["lazy_a"]);
 		expect(counters().imports).toEqual([]);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("does not import or construct a profile-withheld extension", async () => {

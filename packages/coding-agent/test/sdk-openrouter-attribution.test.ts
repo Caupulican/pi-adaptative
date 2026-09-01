@@ -127,7 +127,7 @@ describe("createAgentSession OpenRouter attribution headers", () => {
 			);
 			return capturedOptions?.headers;
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 			for (const provider of registeredProviders.reverse()) {
 				modelRegistry.unregisterProvider(provider);
 			}

@@ -52,7 +52,7 @@ describe("profile tool grants activate", () => {
 			await session.reload();
 			expect(session.getActiveToolNames().sort()).toEqual(["bash", "grep", "read"]);
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
@@ -61,7 +61,7 @@ describe("profile tool grants activate", () => {
 		try {
 			expect(session.getActiveToolNames().sort()).toEqual(["grep", "ls"]);
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
@@ -74,7 +74,7 @@ describe("profile tool grants activate", () => {
 			// grep is permitted by "*" but was never requested nor explicitly named
 			expect(active).not.toContain("grep");
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
@@ -103,7 +103,7 @@ describe("profile tool grants activate", () => {
 			expect(session.getActiveToolNames()).not.toContain("grep");
 			expect(session.getActiveToolNames()).toContain("read");
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 });

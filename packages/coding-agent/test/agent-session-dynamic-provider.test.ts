@@ -111,7 +111,7 @@ describe("AgentSession dynamic provider registration", () => {
 		expect(session.model?.baseUrl).toBe("http://localhost:8080/top-level");
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/top-level");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("keeps provider-only extensions active when an explicit profile also restricts tools", async () => {
@@ -127,7 +127,7 @@ describe("AgentSession dynamic provider registration", () => {
 		expect(session.model?.baseUrl).toBe("http://localhost:8080/provider-only");
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/provider-only");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("applies inline SDK extension providers when no profile filter is active", async () => {
@@ -143,7 +143,7 @@ describe("AgentSession dynamic provider registration", () => {
 		expect(session.model?.baseUrl).toBe("http://localhost:8080/default-leak");
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/default-leak");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("applies session_start registerProvider overrides to the active model", async () => {
@@ -160,7 +160,7 @@ describe("AgentSession dynamic provider registration", () => {
 		expect(session.model?.baseUrl).toBe("http://localhost:8080/session-start");
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/session-start");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("applies command-time registerProvider overrides without reload", async () => {
@@ -181,7 +181,7 @@ describe("AgentSession dynamic provider registration", () => {
 		expect(session.model?.baseUrl).toBe("http://localhost:8080/command");
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/command");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("resolves an active profile model after its startup extension provider is bound", async () => {
@@ -243,7 +243,7 @@ describe("AgentSession dynamic provider registration", () => {
 			expect(result.session.model?.id).toBe("sol");
 			expect(result.session.thinkingLevel).toBe("ultra");
 		} finally {
-			result.session.dispose();
+			await result.session.disposeAndWait();
 		}
 	});
 
@@ -314,7 +314,7 @@ describe("AgentSession dynamic provider registration", () => {
 			await session.reload();
 			expect(session.modelRegistry.find("profile-provider", "sol")).toBeUndefined();
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
@@ -370,7 +370,7 @@ describe("AgentSession dynamic provider registration", () => {
 			await session.reload();
 			expect(session.modelRegistry.find("startup-provider", "sol")).toBeUndefined();
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
@@ -468,7 +468,7 @@ describe("AgentSession dynamic provider registration", () => {
 			expect(session.modelRegistry.find("profile-provider", "sol")).toBeUndefined();
 			expect(session.getAllTools().map((tool) => tool.name)).not.toContain("profile_only_tool");
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
@@ -521,7 +521,7 @@ describe("AgentSession dynamic provider registration", () => {
 			await expect(session.reload()).rejects.toThrow(/invalid-provider.*baseUrl/i);
 			expect(session.modelRegistry.find("invalid-provider", "unused")).toBeUndefined();
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 
@@ -596,7 +596,7 @@ describe("AgentSession dynamic provider registration", () => {
 				block: ["*"],
 			});
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 	});
 });

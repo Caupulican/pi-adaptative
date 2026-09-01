@@ -115,7 +115,7 @@ describe("reflection skill promotion (R7)", () => {
 		expect(content).toContain("npm run release:patch");
 		expect(session.resourceLoader.getActiveSkills().map((skill) => skill.name)).toContain("release-flow");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	/**
@@ -201,7 +201,7 @@ describe("reflection skill promotion (R7)", () => {
 		expect(proposal?.action).toBe("propose");
 		expect(proposal?.summary).toContain("release-workflow");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("holds automatic promotion when the visible skill universe exceeds its audit bound", async () => {
@@ -272,6 +272,6 @@ describe("reflection skill promotion (R7)", () => {
 				reasonCode: SKILL_AUDIT_UNAVAILABLE_REASON_CODE,
 			}),
 		);
-		session.dispose();
+		await session.disposeAndWait();
 	});
 });

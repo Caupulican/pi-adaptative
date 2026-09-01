@@ -92,7 +92,7 @@ describe("AgentSession dynamic tool registration", () => {
 		expect(session.systemPrompt).toContain("- dynamic_tool: Run dynamic test behavior");
 		expect(session.systemPrompt).toContain("- Use dynamic_tool when the user asks for dynamic behavior tests.");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("bounds oversized extension prompt metadata during session construction", async () => {
@@ -138,7 +138,7 @@ describe("AgentSession dynamic tool registration", () => {
 		);
 		expect(session.systemPrompt).toContain(`- ${promptGuideline.slice(0, MAX_PROVIDER_TOOL_GUIDELINE_CHARS - 1)}…`);
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("returns source metadata for SDK custom tools", async () => {
@@ -181,7 +181,7 @@ describe("AgentSession dynamic tool registration", () => {
 		});
 		expect(session.getActiveToolNames()).toContain("sdk_tool");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("keeps custom tools active but omits them from available tools when promptSnippet is not provided", async () => {
@@ -227,6 +227,6 @@ describe("AgentSession dynamic tool registration", () => {
 		expect(session.systemPrompt).not.toContain("hidden_tool");
 		expect(session.systemPrompt).not.toContain("Description should not appear in available tools");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 });

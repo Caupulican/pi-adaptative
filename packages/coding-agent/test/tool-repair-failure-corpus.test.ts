@@ -96,7 +96,7 @@ describe("tool repair failure corpus", () => {
 			});
 			await session.flushToolRecoveryLogsForTests();
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 
 		const corpusPath = join(agentDir, "state", "failure-corpus.jsonl");
@@ -136,7 +136,7 @@ describe("tool repair failure corpus", () => {
 			});
 			await session.flushToolRecoveryLogsForTests();
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 
 		await new Promise((resolve) => setTimeout(resolve, 50));
@@ -170,7 +170,7 @@ describe("tool repair failure corpus", () => {
 			await (session as unknown as { _handleAgentEvent(event: AgentEvent): Promise<void> })._handleAgentEvent(event);
 			await session.flushToolRecoveryLogsForTests();
 		} finally {
-			session.dispose();
+			await session.disposeAndWait();
 		}
 
 		const corpusPath = join(agentDir, "state", "failure-corpus.jsonl");

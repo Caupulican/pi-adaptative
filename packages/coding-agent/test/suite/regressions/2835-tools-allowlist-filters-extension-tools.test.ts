@@ -79,7 +79,7 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 		expect(session.systemPrompt).toContain("- dynamic_tool: Run dynamic test behavior");
 		expect(session.systemPrompt).not.toContain("- bash:");
 		expect(session.systemPrompt).not.toContain("- edit:");
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("disables all tools when the allowlist is empty", async () => {
@@ -89,6 +89,6 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 		expect(session.getActiveToolNames()).toEqual([]);
 		expect(session.systemPrompt).toContain("Available tools:\n(none)");
 		expect(session.systemPrompt).not.toContain("dynamic_tool");
-		session.dispose();
+		await session.disposeAndWait();
 	});
 });

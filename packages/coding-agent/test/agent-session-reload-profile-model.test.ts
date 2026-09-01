@@ -61,7 +61,7 @@ describe("AgentSession reload re-applies the active profile's model/thinking", (
 		await session.reload();
 		expect(session.model?.id).toBe("claude-sonnet-4-5");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("preserves an explicit launch model across reload even if the profile differs", async () => {
@@ -86,7 +86,7 @@ describe("AgentSession reload re-applies the active profile's model/thinking", (
 		await session.reload();
 		expect(session.model?.id).toBe("claude-sonnet-4-5");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("switches the thinking level on reload when the active profile's thinking changes (no explicit flag)", async () => {
@@ -110,7 +110,7 @@ describe("AgentSession reload re-applies the active profile's model/thinking", (
 		await session.reload();
 		expect(session.thinkingLevel).toBe("high");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("preserves an explicit launch thinking level across reload even if the profile differs", async () => {
@@ -135,7 +135,7 @@ describe("AgentSession reload re-applies the active profile's model/thinking", (
 		await session.reload();
 		expect(session.thinkingLevel).toBe("medium");
 
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("loads settings exactly once and does not persist profile thinking as the global default", async () => {
@@ -162,7 +162,7 @@ describe("AgentSession reload re-applies the active profile's model/thinking", (
 		expect(reloadSettings).toHaveBeenCalledTimes(1);
 		expect(session.thinkingLevel).toBe("high");
 		expect(settingsManager.getGlobalSettings().defaultThinkingLevel).toBe("low");
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("preserves non-explicit model and thinking provenance through the services startup path", async () => {
@@ -183,7 +183,7 @@ describe("AgentSession reload re-applies the active profile's model/thinking", (
 
 		expect(session.model?.id).toBe("claude-sonnet-4-5");
 		expect(session.thinkingLevel).toBe("high");
-		session.dispose();
+		await session.disposeAndWait();
 	});
 
 	it("serializes a follow-up reload when settings mutate during an active generation", async () => {
@@ -250,6 +250,6 @@ describe("AgentSession reload re-applies the active profile's model/thinking", (
 		expect(reloadSettings).toHaveBeenCalledTimes(2);
 		expect(session.model?.id).toBe("claude-sonnet-4-5");
 		expect(session.thinkingLevel).toBe("high");
-		session.dispose();
+		await session.disposeAndWait();
 	});
 });
