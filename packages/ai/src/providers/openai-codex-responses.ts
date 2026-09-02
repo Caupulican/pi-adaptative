@@ -1748,10 +1748,26 @@ async function processWebSocketStream(
 			};
 		}
 	} catch (error) {
-		if (entry) {
-			entry.continuation = undefined;
+		// A response-level rejection -- the server overloaded, a rate limit, a failed response -- on a
+		// socket that is still open created no response and invalidated nothing: the last successful
+		// response remains the continuation anchor, so the retry sends only the delta again. Dropping
+		// the continuation here made every retry after such a rejection re-send the whole conversation
+		// and re-prefill the provider's cache from zero (a live 24k-token prompt, cacheRead 0). A
+		// transport failure, an unusable socket, or a continuation the server no longer has still
+		// resets both; the missing-continuation replay below handles the last case.
+		const rejectedOnLiveSocket =
+			isCodexNonTransportError(error) &&
+			!isPreviousResponseNotFoundError(error) &&
+			!isWebSocketConnectionLimitError(error) &&
+			isWebSocketReusable(socket);
+		if (rejectedOnLiveSocket) {
+			keepConnection = true;
+		} else {
+			if (entry) {
+				entry.continuation = undefined;
+			}
+			keepConnection = false;
 		}
-		keepConnection = false;
 		throw error;
 	} finally {
 		release({ keep: keepConnection });
