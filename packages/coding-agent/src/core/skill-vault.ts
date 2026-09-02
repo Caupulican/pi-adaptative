@@ -312,9 +312,13 @@ export class SkillVaultController {
 		return [...this.slots.values()].map((slot) => slot.systemPromptSection).join("\n\n");
 	}
 
-	/** Compose the exact provider system prompt for read-only diagnostics. */
+	/**
+	 * The exact provider system prompt for read-only diagnostics. Active skills no longer ride it:
+	 * they are a durable host record in the message stream (see `ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE`
+	 * in provider-request-context-controller.ts), so the system prompt is the base prompt alone.
+	 */
 	previewRequestSystemPrompt(base: string | undefined): string | undefined {
-		return composeRequestSystemPrompt(base, this.previewSystemPromptSection());
+		return composeRequestSystemPrompt(base, undefined);
 	}
 
 	/** Monotonic identity for provider-visible skill projection changes. */

@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall, type Model } from "@caupulican/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type Message, type Model } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { InputEvent } from "../../src/core/extensions/index.ts";
@@ -144,7 +144,7 @@ describe("AgentSession prompt characterization", () => {
 		expect(sawImage).toBe(true);
 	});
 
-	it("loads slash-command skills into request-local system context without persisting the body", async () => {
+	it("loads slash-command skills as one durable hidden record, never into the system prompt or user text", async () => {
 		const tempDir = join(tmpdir(), `pi-skill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		tempDirs.push(tempDir);
@@ -176,10 +176,12 @@ describe("AgentSession prompt characterization", () => {
 		harnesses.push(harness);
 		let providerUserText: string[] = [];
 		let providerSystemPrompt = "";
+		let providerMessages: Message[] = [];
 
 		harness.setResponses([
 			(context) => {
 				providerSystemPrompt = context.systemPrompt ?? "";
+				providerMessages = context.messages;
 				providerUserText = context.messages
 					.filter((message) => message.role === "user")
 					.map((message) => getMessageText(message));
@@ -189,17 +191,25 @@ describe("AgentSession prompt characterization", () => {
 
 		await harness.session.prompt("/skill:test explain this");
 
-		expect(providerUserText).toContain("explain this");
-		expect(providerUserText.some((text) => text.includes("Use the skill body."))).toBe(false);
-		expect(providerSystemPrompt).toContain("ACTIVE SKILL test");
-		expect(providerSystemPrompt).toContain("Use the skill body.");
+		// The record reaches the wire as its own message; the owner's prompt never carries the body.
+		const ownerPrompt = providerUserText.find((text) => text.includes("explain this"));
+		expect(ownerPrompt).toBeDefined();
+		expect(ownerPrompt).not.toContain("Use the skill body.");
 		expect(providerUserText.join("\n")).not.toContain("<skill");
-		expect(harness.session.messages.map((message) => getMessageText(message)).join("\n")).not.toContain(
-			"Use the skill body.",
+		// The body rides a durable hidden record in the message stream, not the system prompt: a
+		// system-prompt change invalidates the provider's cached prefix for the whole conversation,
+		// while a record is appended once per change and cached like any other message.
+		expect(providerSystemPrompt).not.toContain("Use the skill body.");
+		expect(JSON.stringify(providerMessages)).toContain("ACTIVE SKILL test");
+		expect(JSON.stringify(providerMessages)).toContain("Use the skill body.");
+		const skillRecords = harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === "active_skill_context",
 		);
+		expect(skillRecords).toHaveLength(1);
+		expect(getMessageText(skillRecords[0]!)).toContain("Use the skill body.");
 		const composition = harness.session.getContextCompositionReport();
-		expect(composition.systemPromptChars).toBeGreaterThan(harness.session.systemPrompt.length);
-		expect(composition.messageClasses.some((row) => row.label === "custom (active_skill_context)")).toBe(false);
+		expect(composition.systemPromptChars).toBe(harness.session.systemPrompt.length);
+		expect(composition.messageClasses.some((row) => row.label === "custom (active_skill_context)")).toBe(true);
 	});
 
 	it("expands prompt templates before sending the prompt", async () => {

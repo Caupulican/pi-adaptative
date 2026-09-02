@@ -117,7 +117,8 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			{
 				maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
 				uniqueItems: true,
-				description: "Optional leaf-worker tool subset. Omitted inherits every compatible foreground tool.",
+				description:
+					"Optional leaf-worker tool subset drawn from this session's active tools; a name outside them is refused. Omitted inherits every compatible foreground tool.",
 			},
 		),
 	);
@@ -991,6 +992,12 @@ function delegateStartSkipText(reason: string): string {
 	}
 	if (reason === "worker_agent_session_limit_reached") {
 		return "delegate not started: CAVEMAN MODE - MANDATORY: worker_agent_session_limit_reached is expected policy capacity, not harness instability. Reuse an idle worker returned by delegate list, or return the constraint to the user.";
+	}
+	if (reason.startsWith("orchestration_tool_unavailable:")) {
+		// Measured live: an orchestrator asked a worker for grep/find/ls, which exist in the catalog
+		// but were not in its own tool surface, lost the turn and armed the failure ledger. Say what
+		// the rule is so the retry is right the first time.
+		return `delegate skipped: ${reason}. A worker's tools come from this session's own active tool set (the tools you can call); omit toolNames to inherit every compatible tool.`;
 	}
 	return `delegate skipped: ${reason}`;
 }

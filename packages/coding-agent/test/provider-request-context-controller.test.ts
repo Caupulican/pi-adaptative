@@ -3,6 +3,7 @@ import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { applyContextGc } from "../src/core/context-gc.ts";
 import {
+	ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
 	PATH_ALIAS_LEGEND_CUSTOM_TYPE,
 	ProviderRequestContextController,
 } from "../src/core/provider-request-context-controller.ts";
@@ -173,5 +174,57 @@ describe("ProviderRequestContextController", () => {
 		// isDeepStrictEqual check is exactly the desync guard the A3 contract requires.
 		expect(plan.prepareCommit?.()).toBe(true);
 		expect(() => plan.commit?.()).not.toThrow();
+	});
+
+	it("offers the active skill context as a durable record and clears it once the last skill leaves", async () => {
+		let section: string | undefined =
+			"ACTIVE SKILL test\nBASE /repo/skills/test\nNON-NEGOTIABLE WHILE ACTIVE:\nUse the skill body.";
+		let revision = 1;
+		const skillVault = {
+			previewSystemPromptSection: () => section,
+			commitSystemPromptSection: () => section,
+			getContextRevision: () => revision,
+		} as unknown as SkillVaultController;
+		const controller = new ProviderRequestContextController({
+			transformExtensions: async (msgs) => ({ messages: msgs, transientMessages: [] }),
+			runContextAudit: () => ({}) as any,
+			runPromptPolicyPlanning: () => ({}) as any,
+			runMemoryRetrieval: async () => ({}) as any,
+			applyContextGc: (msgs) =>
+				({ messages: msgs, report: {} as any, isCurrent: () => true, commit: () => {} }) as any,
+			correlatePromptPolicyWithContextGc: () => {},
+			runPromptEnforcement: (msgs) => ({ messages: msgs, report: {} as any }),
+			enqueueRelevanceCuration: () => {},
+			maybeDrainBrainCuration: () => {},
+			appendMemoryEvidence: (msgs) => msgs,
+			previewReflectionCue: () => undefined,
+			getGoalState: () => undefined,
+			skillVault,
+			applyPathAliases: (msgs) => ({ messages: msgs }),
+		});
+		const history: AgentMessage[] = [{ role: "user", content: "hello", timestamp: 1 }];
+		const loaded = await controller.plan(history, 0);
+		// Never the system prompt: a system-prompt change invalidates the whole cached prefix.
+		expect(loaded.transientSystemPrompt).toBeUndefined();
+		const skillRecords = (messages: readonly AgentMessage[] | undefined) =>
+			(messages ?? []).filter(
+				(message): message is AgentMessage & { role: "custom"; content: string } =>
+					message.role === "custom" &&
+					message.customType === ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE &&
+					typeof message.content === "string",
+			);
+		expect(skillRecords(loaded.transientMessages)).toHaveLength(1);
+		expect(skillRecords(loaded.transientMessages)[0]).toMatchObject({ content: section, display: false });
+		expect(() => loaded.commit?.()).not.toThrow();
+
+		// The last skill leaves (unload or idle expiry): one explicit cleared record, so the model
+		// never trusts the earlier record as current. A vault that never projected a skill offers nothing.
+		section = undefined;
+		revision = 2;
+		const cleared = skillRecords((await controller.plan(history, 0)).transientMessages);
+		expect(cleared).toHaveLength(1);
+		expect(cleared[0]?.content).toContain("ACTIVE SKILL CONTEXT: none");
+		revision = 0;
+		expect(skillRecords((await controller.plan(history, 0)).transientMessages)).toEqual([]);
 	});
 });

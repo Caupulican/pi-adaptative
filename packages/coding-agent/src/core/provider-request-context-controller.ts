@@ -72,6 +72,35 @@ function deterministicTransientTimestamp(content: string): string {
 	return new Date(digest.readUIntBE(0, 6)).toISOString();
 }
 
+/** Durable record kind carrying the active skill context; one record per change, never the system prompt. */
+export const ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE = "active_skill_context";
+const ACTIVE_SKILL_CONTEXT_CLEARED_TEXT =
+	"ACTIVE SKILL CONTEXT: none. Every skill record above is no longer active; load a skill again before relying on it.";
+
+/**
+ * Active skills used to ride the system prompt. Every load, unload and idle expiry then rewrote the
+ * first bytes of the request, which invalidated the provider's cached prefix for the whole
+ * conversation and disengaged the websocket delta path (measured live: the request after a
+ * `skill load` re-prefilled all 10.5k tokens with cacheRead 0; an idle expiry ten minutes into a
+ * long session would have done the same to a far larger prefix). The context now rides a durable
+ * host record like memory evidence and goal context: appended once per change by
+ * `reconcileTransientRecords`, superseded records packed by context GC. When the last skill leaves,
+ * one cleared record says so, so the model never trusts a stale skill record as current.
+ */
+function appendActiveSkillContext(transientMessages: AgentMessage[], context: string | undefined): AgentMessage[] {
+	if (context === undefined) return transientMessages;
+	return [
+		...transientMessages,
+		createCustomMessage(
+			ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
+			context,
+			false,
+			undefined,
+			deterministicTransientTimestamp(context),
+		),
+	];
+}
+
 function appendPathAliasLegend(transientMessages: AgentMessage[], legend: string | undefined): AgentMessage[] {
 	if (!legend) return transientMessages;
 	return [
@@ -133,9 +162,14 @@ export class ProviderRequestContextController {
 			throw new Error("Provider request transient contributors changed compactable history");
 		}
 		const legend = pathAliasPlan.legend;
-		const transientMessages = appendPathAliasLegend(beforeSkill.slice(compactableMessages.length), legend);
-		const transientSystemPrompt = this.deps.skillVault.previewSystemPromptSection();
+		const skillSection = this.deps.skillVault.previewSystemPromptSection();
 		const skillRevision = this.deps.skillVault.getContextRevision();
+		// A vault that has projected skills before and holds none now clears the record explicitly.
+		const skillContext = skillSection ?? (skillRevision > 0 ? ACTIVE_SKILL_CONTEXT_CLEARED_TEXT : undefined);
+		const transientMessages = appendPathAliasLegend(
+			appendActiveSkillContext(beforeSkill.slice(compactableMessages.length), skillContext),
+			legend,
+		);
 		const dependenciesCurrent = () =>
 			extensionPlan.isCurrent?.() !== false &&
 			reflectionCuePlan?.isCurrent() !== false &&
@@ -150,12 +184,11 @@ export class ProviderRequestContextController {
 		const planCurrent = () =>
 			dependenciesCurrent() &&
 			previewGc.isCurrent() &&
-			this.deps.skillVault.previewSystemPromptSection() === transientSystemPrompt;
+			this.deps.skillVault.previewSystemPromptSection() === skillSection;
 
 		return {
 			messages: compactableMessages,
 			transientMessages,
-			transientSystemPrompt,
 			isCurrent: dependenciesCurrent,
 			prepareCommit: () => planCurrent(),
 			commit: () => {
@@ -166,7 +199,7 @@ export class ProviderRequestContextController {
 				this.deps.correlatePromptPolicyWithContextGc(previewGc.report);
 				this.deps.enqueueRelevanceCuration(previewProviderMessages, shadowReport);
 				this.deps.maybeDrainBrainCuration();
-				if (this.deps.skillVault.commitSystemPromptSection() !== transientSystemPrompt) {
+				if (this.deps.skillVault.commitSystemPromptSection() !== skillSection) {
 					throw new Error("Committed active skill context diverged from its accepted plan");
 				}
 				reflectionCuePlan?.commit();

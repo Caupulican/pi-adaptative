@@ -8,6 +8,7 @@ import type {
 	ProviderRequestCompactionDecision,
 	ProviderRequestCompactionInput,
 } from "../src/core/compaction-controller.ts";
+import { ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE } from "../src/core/provider-request-context-controller.ts";
 import type { SkillVaultController } from "../src/core/skill-vault.ts";
 import { loadSkillsFromDir } from "../src/core/skills.ts";
 import { createHarness, type Harness } from "./test-harness.ts";
@@ -48,10 +49,19 @@ describe("provider request compaction integration", () => {
 		harness.agent.textToolCallProtocol = true;
 		const sessionPlanContext = harness.agent.planContext?.bind(harness.agent);
 		if (!sessionPlanContext) throw new Error("Expected session provider request planner");
-		const plannedSkillPrompts: Array<string | undefined> = [];
+		// The active skill rides a durable host record in the message stream, never the system prompt
+		// (a system-prompt change invalidates the whole cached prefix); the planner offers the record
+		// on every request and reconciliation appends it only when history lacks it.
+		const plannedSkillRecords: Array<string | undefined> = [];
 		harness.agent.planContext = async (request, signal) => {
 			const plan = await sessionPlanContext(request, signal);
-			plannedSkillPrompts.push(plan.transientSystemPrompt);
+			const record = plan.transientMessages?.find(
+				(message): message is AgentMessage & { role: "custom"; content: string } =>
+					message.role === "custom" &&
+					message.customType === ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE &&
+					typeof message.content === "string",
+			);
+			plannedSkillRecords.push(record?.content);
 			return plan;
 		};
 
@@ -84,16 +94,16 @@ describe("provider request compaction integration", () => {
 		expect(admissions.map((input) => input.attempt)).toEqual([0, 1, 0]);
 		expect(admittedContexts).toHaveLength(3);
 		expect(admittedContexts.map((context) => context.systemPrompt)).toEqual([
-			expect.stringContaining(bodyMarker),
-			expect.stringContaining(bodyMarker),
-			expect.stringContaining(bodyMarker),
+			expect.not.stringContaining(bodyMarker),
+			expect.not.stringContaining(bodyMarker),
+			expect.not.stringContaining(bodyMarker),
 		]);
 		expect(admittedContexts.map((context) => JSON.stringify(context.messages))).toEqual([
-			expect.not.stringContaining(bodyMarker),
-			expect.not.stringContaining(bodyMarker),
-			expect.not.stringContaining(bodyMarker),
+			expect.stringContaining(bodyMarker),
+			expect.stringContaining(bodyMarker),
+			expect.stringContaining(bodyMarker),
 		]);
-		expect(plannedSkillPrompts).toEqual([
+		expect(plannedSkillRecords).toEqual([
 			expect.stringContaining(bodyMarker),
 			expect.stringContaining(bodyMarker),
 			expect.stringContaining(bodyMarker),
@@ -104,9 +114,10 @@ describe("provider request compaction integration", () => {
 		for (const delivered of harness.faux.contexts) {
 			expect(delivered.tools).toBeUndefined();
 			expect(delivered.systemPrompt).toContain('<pi:call name="TOOL">');
-			expect(delivered.systemPrompt).toContain(bodyMarker);
+			expect(delivered.systemPrompt).not.toContain(bodyMarker);
 			expect(JSON.stringify(delivered.messages)).toContain("COMPACTED-HISTORY");
-			expect(JSON.stringify(delivered.messages)).not.toContain(bodyMarker);
+			// The skill record survives compaction: history was replaced, so reconciliation appends it again.
+			expect(JSON.stringify(delivered.messages)).toContain(bodyMarker);
 			expect(JSON.stringify(delivered.messages)).not.toContain("ORIGINAL-HISTORY");
 		}
 		expect(internals._skillVault.status()).toMatchObject({ slots: [{ state: "active", useCount: 2 }] });

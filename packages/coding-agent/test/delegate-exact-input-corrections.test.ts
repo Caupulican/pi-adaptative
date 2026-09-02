@@ -152,6 +152,28 @@ describe("delegate exact-action input corrections", () => {
 		expect(result.details).toMatchObject({ started: true, action: "wait_many", agentIds: ["worker-1", "worker-2"] });
 	});
 
+	it("names the tool-surface rule when a worker asks for tools outside the session's own", async () => {
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
+			startWorkerDelegation: () => ({ started: false, skipReason: "orchestration_tool_unavailable:grep,find,ls" }),
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl(controlSpies()),
+		});
+		const result = await tool.execute(
+			"start-tools",
+			{ action: "start", task: "implement the export command", toolNames: ["read", "grep", "find", "ls"] },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(result.isError).toBe(true);
+		const text = delegateText(result);
+		expect(text).toContain("orchestration_tool_unavailable:grep,find,ls");
+		expect(text).toContain("this session's own active tool set");
+		expect(text).toContain("omit toolNames");
+	});
+
 	it("rejects plural agentIds on every singular lifecycle action with a named singular correction", async () => {
 		for (const action of ["cancel", "interrupt", "resume", "retire"] as const) {
 			const spies = controlSpies();

@@ -78,7 +78,7 @@ For project-level Claude Code skills, add to `.pi/settings.json`:
 1. At startup, Pi reads a bounded frontmatter prefix from each skill. It retains routing metadata, not the body.
 2. When the `skill` tool is active, the stable system prompt carries one brief rule: search the vault if, and only if, specialist focus would help. It contains no skill catalog, paths, bodies, or XML wrappers.
 3. The agent searches metadata with `skill { action: "search", query: "..." }`, then loads an exact name. `/skill:name` performs the same load when the user selects a skill explicitly.
-4. The host keeps one loaded skill. It appends that body as a hidden, request-local message after normal context processing; it never writes the body into session history or concatenates it into the system prompt.
+4. The host keeps one loaded skill. Its body rides one hidden durable record in the message stream (`active_skill_context`), appended once per change and cached like any other message; when the last skill leaves, one cleared record says so. The body never enters the system prompt: a system-prompt change would invalidate the provider's cached prefix for the whole conversation on every load, unload, or expiry.
 5. The host moves the skill from `loaded_pending` to `active` on the first provider request. It records monotonic time on provider projections, completed model turns, tool execution; invalidates changed or profile-blocked resources; expires ten minutes of observed inactivity before the next host event. No polling timer runs.
 6. Loading another skill replaces the current one. Explicit unload is optional; host expiry and invalidation do not depend on model cooperation.
 
@@ -86,7 +86,7 @@ This is progressive disclosure: the reminder and compact tool schema are stable,
 
 Descriptions are the routing contract. Write narrow descriptions so metadata search can select the most task-specific skill. The `/context` dashboard includes the active request-local body in its estimate without refreshing the skill's activity clock.
 
-Compaction never serializes an active skill body into history or a summary. Provider admission treats it as mandatory request-local context, compacts durable history around it, then re-injects it from the host vault on the replanned request. If the fixed envelope still cannot fit, Pi reports an explicit overflow instead of truncating or dropping the skill. Skill-vault state is in memory: `/new`, `/resume`, `/fork`, or a process restart starts a new unloaded vault. `/reload` retains an unchanged eligible skill and invalidates it if the resource changed or became unavailable.
+Compaction never serializes an active skill body into a summary. The skill record is host-owned request context: provider admission compacts durable history around it, and the host vault offers the record again on the replanned request, so a compacted conversation still carries the active skill. If the fixed envelope still cannot fit, Pi reports an explicit overflow instead of truncating or dropping the skill. Skill-vault state is in memory: `/new`, `/resume`, `/fork`, or a process restart starts a new unloaded vault. `/reload` retains an unchanged eligible skill and invalidates it if the resource changed or became unavailable.
 
 Skills may carry optional resource profile blocks:
 

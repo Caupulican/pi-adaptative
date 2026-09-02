@@ -135,13 +135,16 @@ describe("path alias windows-shape rewriting", () => {
 		}
 	});
 
-	it("keeps the punctuation-free prose/path ambiguity explicit", () => {
-		// This is lexically identical to a valid unquoted relative filename
-		// `extensions/packages only with Node.js`. Rejecting it would also reject that supported
-		// filename class, so the owning boundary deliberately fixes only the sentence-punctuation
-		// case above rather than adding prose-word heuristics.
+	it("treats a relative spaced segment carrying a function word as prose, not a path", () => {
+		// Lexically this is also a valid unquoted relative filename (`extensions/packages only with
+		// Node.js`), and the boundary once kept that ambiguity explicit by accepting it. Measured live,
+		// the same shape ("storage/id/commands in DESIGN.md") was aliased and the model re-read its own
+		// sentence as a filename. An alias is a compression: a missed alias costs a few tokens, a false
+		// one costs meaning. So a function word inside a relative spaced segment now reads as prose;
+		// spaced filenames without one ("release notes (final).md") and anchored absolute paths keep
+		// aliasing.
 		const ambiguous = "Use extensions/packages only with Node.js";
-		expect(extractPathCandidates(ambiguous)).toEqual(["extensions/packages only with Node.js"]);
+		expect(extractPathCandidates(ambiguous)).toEqual([]);
 	});
 
 	it("still aliases a legitimate relative path with spaced and parenthesized filename", () => {
