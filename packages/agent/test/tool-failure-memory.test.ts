@@ -880,6 +880,83 @@ describe("tool failure memory", () => {
 		expect(sanitized.messages).toEqual(messages);
 	});
 
+	it("resolves a failure once a later call of the same tool executes, and keeps escalating an identical repeat", () => {
+		const tracker = new Map();
+		const wrong = { action: "wait", agentIds: ["worker-1"], timeoutMs: 300000 };
+		const corrected = { action: "wait", agentId: "worker-1", timeoutMs: 300000 };
+		const failed = rememberToolFailure(
+			tracker,
+			"delegate",
+			wrong,
+			"failed",
+			"tool_result_error",
+			"Use singular agentId — one call per worker.",
+			"delegate wait does not accept field agentIds. Nothing was executed.",
+		);
+		const assistant = (id: string, args: Record<string, unknown>): AgentMessage => ({
+			role: "assistant",
+			content: [{ type: "toolCall", id, name: "delegate", arguments: args }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "mock",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		});
+		const failure = (id: string, timestamp: number): AgentMessage => ({
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "delegate",
+			content: createToolFailureResult(failed).content,
+			details: createToolFailureResult(failed).details,
+			isError: true,
+			timestamp,
+		});
+		// The live shape: a wrong field, then the corrected call with different arguments, then the
+		// model moves on with the same tool. The failed operation itself never repeats, so
+		// exact-identity clearing left the record active - and the trailing ledger re-appended - for
+		// the rest of the session.
+		const success = (id: string, text: string, timestamp: number): AgentMessage => ({
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "delegate",
+			content: [{ type: "text", text }],
+			isError: false,
+			timestamp,
+		});
+		const corrected1: AgentMessage[] = [
+			assistant("delegate-1", wrong),
+			failure("delegate-1", 2),
+			assistant("delegate-2", corrected),
+			success("delegate-2", '{"agentId":"worker-1","status":"idle","waitState":"completed"}', 4),
+		];
+		// One later call of the tool may be the corrective step a record asks for before its retry
+		// (a declared recovery check, a repair call): the record stays listed.
+		expect(sanitizeToolFailureContext(corrected1, "base").ledger).toContain('"tool":"delegate"');
+
+		const messages: AgentMessage[] = [
+			...corrected1,
+			assistant("delegate-3", { action: "status", agentIds: ["worker-1", "worker-2"] }),
+			success("delegate-3", "workers: 1 running, 0 queued, 1 terminal", 6),
+		];
+		const resolved = sanitizeToolFailureContext(messages, "base");
+		expect(resolved.ledger).toBeUndefined();
+		expect(resolved.messages).toEqual(messages);
+
+		// The identical mistake again: the record comes back at its second occurrence, not its first.
+		const repeated: AgentMessage[] = [...messages, assistant("delegate-4", wrong), failure("delegate-4", 8)];
+		const again = sanitizeToolFailureContext(repeated, "base");
+		expect(again.ledger).toContain("ACTIVE TOOL FAILURES mistakes=delegate:2");
+		expect(again.ledger).toContain('"occ":2');
+	});
+
 	it("forgets an encoding-corrupt attempt after one change-approach directive", () => {
 		const assessment = assessToolFailure(
 			"PI_FILE_ENCODING_CORRUPTION: corrupt.dat is not valid UTF-8 text",

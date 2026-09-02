@@ -121,6 +121,8 @@ interface ToolOperationIdentity {
 interface ActiveFailure {
 	record: ToolFailureMemoryRecord;
 	sequence: number;
+	/** Later calls of the same tool that executed without being this operation; see resolveToolFailures. */
+	laterCalls: number;
 }
 
 interface FailureContextAnalysis {
@@ -1054,6 +1056,12 @@ interface FailureFoldState {
 	 */
 	filteredAssistantMessages: WeakMap<AssistantMessage, { omittedIds: string; message: AgentMessage | undefined }>;
 	active: Map<string, ActiveFailure>;
+	/**
+	 * Occurrence counts of failures that a later call of the same tool resolved, by failure key. A
+	 * resolved record leaves the ledger, but an identical failure afterwards keeps escalating from
+	 * where it left off instead of starting again at one. Bounded like `active`.
+	 */
+	resolvedOccurrences: Map<string, number>;
 	activeDirectives: Map<string, ToolFailureDirectiveDetails["piToolFailureDirective"]>;
 	sequence: number;
 	kindMistakesMap: Map<string, number>;
@@ -1072,6 +1080,7 @@ function createFailureFoldState(): FailureFoldState {
 		boundedMessages: new Map(),
 		filteredAssistantMessages: new WeakMap(),
 		active: new Map(),
+		resolvedOccurrences: new Map(),
 		activeDirectives: new Map(),
 		sequence: 0,
 		kindMistakesMap: new Map(),
@@ -1160,7 +1169,9 @@ function foldToolFailureContext(
 		callById.delete(message.toolCallId);
 		const textPayload = firstText(message);
 		if (message.errorKind === "operation_outcome") {
-			if (call) active.delete(memoizedOperationIdentity(call).failureKey);
+			// The tool executed and reported an outcome: a successful call of the tool as far as the
+			// ledger is concerned, whatever the outcome says about the operation itself.
+			if (call) resolveToolFailures(fold, memoizedOperationIdentity(call));
 			continue;
 		}
 		const isHarnessFailure = message.isError === true || textPayload.startsWith("[harness] ");
@@ -1212,7 +1223,10 @@ function foldToolFailureContext(
 				operation = identity.operation;
 			}
 			const previous = active.get(failureKey)?.record;
-			const occurrence = Math.max(retained?.occurrence ?? 0, (previous?.occurrence ?? 0) + 1);
+			const occurrence = Math.max(
+				retained?.occurrence ?? 0,
+				(previous?.occurrence ?? fold.resolvedOccurrences.get(failureKey) ?? 0) + 1,
+			);
 			const record: ToolFailureMemoryRecord = {
 				version: TOOL_FAILURE_MEMORY_VERSION,
 				failureKey,
@@ -1235,7 +1249,7 @@ function foldToolFailureContext(
 					fallbackFailureGuidance(state, false, inferToolFailurePhase(state, "tool_error")),
 			};
 			active.delete(failureKey);
-			active.set(failureKey, { record, sequence: fold.sequence++ });
+			active.set(failureKey, { record, sequence: fold.sequence++, laterCalls: 0 });
 			while (active.size > MAX_TRACKED_FAILURES) {
 				const oldest = active.keys().next().value;
 				if (oldest === undefined) break;
@@ -1253,8 +1267,9 @@ function foldToolFailureContext(
 			const callIndex = callMessageIndexById.get(call.id) ?? index;
 			// The hot path: every successful result re-derives this on every request. See
 			// memoizedOperationIdentity's doc comment.
-			const opKey = memoizedOperationIdentity(call).failureKey;
-			active.delete(opKey);
+			const identity = memoizedOperationIdentity(call);
+			const opKey = identity.failureKey;
+			resolveToolFailures(fold, identity);
 			const previousOperation = latestSuccessfulByOpKey.get(opKey);
 			// A call erased on an earlier request stays erased whatever the mark says now; a new
 			// erasure is only allowed while the superseded call is still unsent.
@@ -1275,6 +1290,47 @@ function foldToolFailureContext(
 		}
 	}
 	fold.processedCount = messages.length;
+}
+
+const MAX_RESOLVED_OCCURRENCES = 64;
+
+/**
+ * How many later calls of the failed tool, none of them the failed operation, show that the model
+ * has moved on from it. One is not enough: a record can ask for exactly one corrective call of the
+ * same tool before the retry (a declared recovery check, a repair call), and the ledger must still
+ * name the retry after it.
+ */
+const LATER_CALLS_THAT_RESOLVE = 2;
+
+/**
+ * Called for every call that executed (a plain success or an operation outcome). The exact operation
+ * succeeding clears its record, as always. Any other call of the same tool counts toward
+ * `LATER_CALLS_THAT_RESOLVE`; at the threshold the record is resolved whatever arguments those calls
+ * used. The protocol had already readmitted it - any success readmits - so nothing remains for the
+ * record to guard, and the transcript keeps the failed call and its bounded diagnostic as evidence.
+ * Keeping the record active instead left the ledger, a trailing record, re-appended at the tail of
+ * every later request for the rest of the session (measured live: 29 identical ledger records
+ * after one corrected delegate call, because the corrected call never repeats the failed
+ * arguments). The occurrence count is remembered so an identical repeat keeps escalating.
+ */
+function resolveToolFailures(fold: FailureFoldState, identity: ToolOperationIdentity): void {
+	for (const [failureKey, failure] of fold.active) {
+		if (failureKey === identity.failureKey) {
+			fold.active.delete(failureKey);
+			continue;
+		}
+		if (failure.record.tool !== identity.tool) continue;
+		failure.laterCalls += 1;
+		if (failure.laterCalls < LATER_CALLS_THAT_RESOLVE) continue;
+		fold.active.delete(failureKey);
+		fold.resolvedOccurrences.delete(failureKey);
+		fold.resolvedOccurrences.set(failureKey, failure.record.occurrence);
+	}
+	while (fold.resolvedOccurrences.size > MAX_RESOLVED_OCCURRENCES) {
+		const oldest = fold.resolvedOccurrences.keys().next().value;
+		if (oldest === undefined) break;
+		fold.resolvedOccurrences.delete(oldest);
+	}
 }
 
 function buildFailureContextAnalysis(

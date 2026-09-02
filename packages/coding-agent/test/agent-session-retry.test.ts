@@ -14,7 +14,7 @@ import {
 	CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
 	type CurrentTurnReflectionCueState,
 } from "../src/core/reflection-controller.ts";
-import { SettingsManager } from "../src/core/settings-manager.ts";
+import { DEFAULT_MAX_OUTPUT_TOKENS, SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -92,6 +92,7 @@ describe("AgentSession retry", () => {
 		baseDelayMs?: number;
 		onRequest?: (callCount: number, maxTokens: number | undefined) => void;
 		autoLearn?: boolean;
+		maxOutputTokens?: number;
 	}) {
 		const failCount = options?.failCount ?? 1;
 		const maxRetries = options?.maxRetries ?? 3;
@@ -133,6 +134,7 @@ describe("AgentSession retry", () => {
 		settingsManager.applyOverrides({
 			retry: { enabled: true, maxRetries, baseDelayMs },
 			...(options?.autoLearn ? { autoLearn: { enabled: true, reflectionReview: true } } : {}),
+			...(options?.maxOutputTokens !== undefined ? { maxOutputTokens: options.maxOutputTokens } : {}),
 		});
 
 		session = new AgentSession({
@@ -268,8 +270,31 @@ describe("AgentSession retry", () => {
 		await queuedGoal;
 
 		expect(created.getCallCount()).toBe(2);
-		expect(requestMaxTokens).toEqual([undefined, 5000]);
+		// Every request carries the session output cap; the goal budget narrows it once it applies.
+		expect(requestMaxTokens).toEqual([DEFAULT_MAX_OUTPUT_TOKENS, 5000]);
 		expect(created.session.getGoalStateSnapshot()).toMatchObject({ tokenBudget: 5000 });
+	});
+
+	it("caps every request's output at the session setting, never above the model's own limit", async () => {
+		const capped: Array<number | undefined> = [];
+		const created = createSession({
+			failCount: 0,
+			maxOutputTokens: 1234,
+			onRequest: (_callCount, maxTokens) => capped.push(maxTokens),
+		});
+		await created.session.prompt("Hello", { autoContinueGoal: false });
+		expect(capped).toEqual([1234]);
+
+		// A cap above the model's limit is narrowed to the limit, so a registry maximum is never widened.
+		const wide: Array<number | undefined> = [];
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const widened = createSession({
+			failCount: 0,
+			maxOutputTokens: model.maxTokens + 1,
+			onRequest: (_callCount, maxTokens) => wide.push(maxTokens),
+		});
+		await widened.session.prompt("Hello", { autoContinueGoal: false });
+		expect(wide).toEqual([model.maxTokens]);
 	});
 
 	it("exhausts max retries and emits failure", async () => {

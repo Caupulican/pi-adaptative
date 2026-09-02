@@ -106,8 +106,19 @@ describe("tool_task", () => {
 			undefined,
 			extensionContext,
 		);
-		expect(wait).toHaveBeenCalledWith("tool-task-1", signal);
+		expect(wait).toHaveBeenCalledWith("tool-task-1", signal, undefined);
 		expect(result.content).toEqual([{ type: "text", text: "tests passed" }]);
+		// A wait is the model's own decision to block: it is never handed off, and it may bound itself.
+		expect(tool.foregroundWait?.({ action: "wait", taskId: "tool-task-1" })).toBe(true);
+		expect(tool.foregroundWait?.({ action: "list" })).toBe(false);
+		await tool.execute(
+			"call-2",
+			{ action: "wait", taskId: "tool-task-1", timeoutMs: 120_000 },
+			signal,
+			undefined,
+			extensionContext,
+		);
+		expect(wait).toHaveBeenLastCalledWith("tool-task-1", signal, 120_000);
 		expect(result.details).toMatchObject({ kind: "wait", taskId: "tool-task-1", status: "completed" });
 		expect(result.isError).not.toBe(true);
 	});
@@ -132,7 +143,7 @@ describe("tool_task", () => {
 		expect(result.details).toMatchObject({ kind: "wait", taskId: running.taskId, status: "running" });
 		expect(result.content[0]).toMatchObject({
 			type: "text",
-			text: expect.stringContaining("terminal handoff will wake the session"),
+			text: expect.stringContaining("the terminal handoff wakes the session"),
 		});
 	});
 

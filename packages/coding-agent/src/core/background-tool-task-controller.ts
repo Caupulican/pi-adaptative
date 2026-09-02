@@ -23,7 +23,12 @@ import { hasOnlyKeys, isPlainRecord, isRecordObject } from "./util/value-guards.
  * from making it configurable at all.
  */
 export const DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS = 15_000;
-export const DEFAULT_BACKGROUND_TOOL_TASK_WAIT_TIMEOUT_MS = 30_000;
+/**
+ * How long one `tool_task wait` may block by default. A wait is the model's own decision to have
+ * nothing else to do until the task ends, so it blocks as long as a delegate wait may (five
+ * minutes) instead of returning "still running" after thirty seconds and inviting a poll.
+ */
+export const DEFAULT_BACKGROUND_TOOL_TASK_WAIT_TIMEOUT_MS = 300_000;
 export const BACKGROUND_TOOL_TASK_CUSTOM_TYPE = "background_tool_task";
 
 const MAX_RETAINED_TERMINAL_TASKS = 64;
@@ -178,6 +183,8 @@ export interface BackgroundToolTaskControllerDeps {
 	now?(): Date;
 	/** Event-wait watchdog; completion still arrives through the terminal handoff after this bound. */
 	waitTimeoutMs?: number;
+	/** True when the tool declares this call a foreground wait; such a call is never handed off. */
+	isForegroundWait?: (toolName: string, args: unknown) => boolean;
 }
 
 interface BackgroundToolTaskState {
@@ -459,7 +466,13 @@ export class BackgroundToolTaskController {
 	}
 
 	handoff(context: BackgroundToolCallContext): BackgroundToolCallHandoff | undefined {
-		if (this.disposed || context.toolCall.name === "tool_task") return undefined;
+		if (
+			this.disposed ||
+			context.toolCall.name === "tool_task" ||
+			this.deps.isForegroundWait?.(context.toolCall.name, context.args) === true
+		) {
+			return undefined;
+		}
 		const sessionId = this.deps.getSessionId();
 		const taskId = `tool-task-${this.nextTaskId++}`;
 		const startedAt = this.now().toISOString();
@@ -523,7 +536,11 @@ export class BackgroundToolTaskController {
 		return states.map((state) => ({ ...state.record }));
 	}
 
-	wait(taskId: string, signal?: AbortSignal): Promise<BackgroundToolTaskRecord> {
+	wait(taskId: string, signal?: AbortSignal, timeoutMs?: number): Promise<BackgroundToolTaskRecord> {
+		const waitBoundMs = timeoutMs ?? this.waitTimeoutMs;
+		if (!Number.isSafeInteger(waitBoundMs) || waitBoundMs < 1) {
+			return Promise.reject(new TypeError("Background tool task wait timeout must be a positive safe integer."));
+		}
 		const state = this.tasks.get(taskId);
 		if (!state) return Promise.reject(new Error(`Unknown background tool task: ${taskId}`));
 		if (state.record.status !== "running") {
@@ -552,7 +569,7 @@ export class BackgroundToolTaskController {
 			const onAbort = (): void => {
 				finishWait(state.record);
 			};
-			const watchdog = setTimeout(() => finishWait(state.record), this.waitTimeoutMs);
+			const watchdog = setTimeout(() => finishWait(state.record), waitBoundMs);
 			watchdog.unref?.();
 			signal?.addEventListener("abort", onAbort, { once: true });
 			state.terminal.then(finishWait);

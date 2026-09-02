@@ -21,6 +21,8 @@ export interface ProviderRequestRuntimeControllerDeps {
 	compaction: Pick<CompactionController, "admitProviderRequest" | "measureLiveContextTokens">;
 	context: ProviderRequestContextController;
 	admitGoalRequest(): number | undefined;
+	/** Session-wide per-response output cap; see SettingsManager.getMaxOutputTokens. */
+	maxOutputTokens(): number;
 	/**
 	 * True once the goal owning the currently held execution lease crossed its token budget from
 	 * charging the response just received. Checked before EVERY provider request (including a
@@ -210,14 +212,17 @@ export class ProviderRequestRuntimeController {
 			const previous = (await previousAdmission?.(request, signal)) ?? { action: "send" as const };
 			if (previous.action === "replan") return previous;
 			const goalMaxTokens = this.deps.admitGoalRequest();
-			// Validated narrowing (shared with the planner's own final pass) instead of a hand-rolled
-			// min-merge, so a degenerate goal-computed ceiling fails loudly here at admission instead of
-			// silently passing through to fail deep inside the planner.
+			// Every request carries an output cap: the session-wide per-response cap, narrowed further
+			// by the goal's remaining budget when one applies. Validated narrowing (shared with the
+			// planner's own final pass) instead of a hand-rolled min-merge, so a degenerate ceiling
+			// fails loudly here at admission instead of silently passing through to fail deep inside
+			// the planner.
+			const outputCap = this.deps.maxOutputTokens();
 			const maxTokens = narrowRequestMaxTokens(
 				previous.maxTokens,
-				goalMaxTokens,
+				goalMaxTokens === undefined ? outputCap : Math.min(goalMaxTokens, outputCap),
 				request.model.maxTokens,
-				"goal execution budget",
+				goalMaxTokens === undefined || goalMaxTokens >= outputCap ? "output cap" : "goal execution budget",
 			);
 			this.recordSentEnvelope(request.model, nonCompactableTokens);
 			return maxTokens === undefined ? previous : { action: "send", maxTokens };

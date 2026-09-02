@@ -478,6 +478,15 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 */
 	executionMode?: ToolExecutionMode;
 
+	/**
+	 * True when this call blocks by the caller's own request (a wait on a worker, a task, a reply).
+	 * Such a call is never handed off to a background task when it crosses the foreground latency
+	 * budget: the caller chose to block, and the call's own timeout bounds it. Handing it off turned
+	 * one explicit wait into a poll loop (measured live: a 300s wait_many became a 15s handoff, a 30s
+	 * task wait, then status calls every turn until the workers finished).
+	 */
+	foregroundWait?(args: Static<TParams>): boolean;
+
 	/** Execute the tool. */
 	execute(
 		toolCallId: string,

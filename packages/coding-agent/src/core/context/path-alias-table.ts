@@ -4,6 +4,12 @@ import { formatPathRelativeToCwdOrAbsolute, resolvePath } from "../../utils/path
 
 const MIN_ALIAS_CHARS = 20;
 const MIN_SEPARATORS = 2;
+/**
+ * The least an alias must save per mention, in characters, to be worth its legend line. A legend
+ * line costs the id plus the display path (about 35 characters for a typical source path), so a
+ * saving of ten a mention earns it back by the fourth mention; a saving of three never does.
+ */
+export const DEFAULT_MIN_ALIAS_SAVING = 10;
 // One boundary vocabulary shared by extraction, rewriting, and expansion: a path or an
 // alias token starts only at text start or after one of these delimiters. Rewriting may
 // emit an id ONLY where extraction could have registered the containing path, and
@@ -54,6 +60,19 @@ const RELATIVE_PATH_RE = new RegExp(
 // prose that happens to straddle a separator ("see the src/lib and docs/api"). A trailing file
 // extension is that evidence; the length gate alone is not, because prose clears it trivially.
 const SPACED_CANDIDATE_EVIDENCE_RE = /^(?!.*\.\s).*\.\w+$/;
+// A relative candidate whose spaced segment reads as prose is a sentence straddling separators,
+// extension or not: "storage/id/commands in DESIGN.md" carries the extension evidence and was
+// still aliased live (as p/commands-in-DESIGN.md, so the model re-read its own sentence as a
+// filename). A function word between the words is the signature of prose; a spaced filename
+// ("report (1).pdf", "notes 2024.txt") has none. Absolute candidates are anchored by their prefix
+// and keep their spaces ("C:/Games/The Sims 4/save.dat").
+const PROSE_FUNCTION_WORD_RE =
+	/(?:^| )(?:a|an|and|as|at|be|by|for|from|if|in|into|is|it|its|of|on|or|per|the|then|this|to|via|with)(?= )/i;
+
+function relativeSpacedProse(candidate: string): boolean {
+	if (!candidate.includes(" ")) return false;
+	return candidate.split("/").some((segment) => PROSE_FUNCTION_WORD_RE.test(segment));
+}
 
 export interface PathAliasEntry {
 	id: string;
@@ -167,11 +186,16 @@ function dedupeKey(path: string): string {
 	return pathSemantics(path).identityKey(path);
 }
 
-// An alias only saves space when the display path is longer than its own shortest
-// possible id (`p/` + basename); `.` and bare basenames fail this.
-function aliasWorthwhile(displayPath: string): boolean {
+// An alias pays for itself only when each mention saves real space: the legend line that
+// introduces it costs the id plus the display path, so a saving of a few characters per mention
+// never earns the line back (measured live: `test/commands.test.ts` aliased as
+// `p/commands.test.ts` saved three characters a mention, cost a forty-character legend line, and
+// then cost a model ten turns when it read the alias in `git status` as a literal path). The id is
+// at least `p/` + basename, so the directory part is the most a mention can save; `.` and bare
+// basenames save nothing.
+function aliasWorthwhile(displayPath: string, minSaving: number): boolean {
 	const basename = displayPath.slice(displayPath.lastIndexOf("/") + 1);
-	return displayPath.length > basename.length + 2;
+	return displayPath.length - (basename.length + 2) >= minSaving;
 }
 
 export function extractPathCandidates(text: string): string[] {
@@ -192,7 +216,7 @@ export function extractPathCandidates(text: string): string[] {
 		windowsSpans.push([start, start + match[0].length]);
 		push(match[0]);
 	}
-	const pushPosixMatches = (regex: RegExp) => {
+	const pushPosixMatches = (regex: RegExp, relative = false) => {
 		// Both spans and match starts ascend, so one monotone cursor replaces a per-match
 		// scan over all spans.
 		let cursor = 0;
@@ -203,11 +227,12 @@ export function extractPathCandidates(text: string): string[] {
 			while (cursor < windowsSpans.length && (windowsSpans[cursor]?.[1] ?? 0) <= start) cursor += 1;
 			const span = windowsSpans[cursor];
 			if (span !== undefined && start >= span[0] && start < span[1]) continue;
+			if (relative && relativeSpacedProse(path)) continue;
 			push(path);
 		}
 	};
 	pushPosixMatches(POSIX_ABS_PATH_RE);
-	pushPosixMatches(RELATIVE_PATH_RE);
+	pushPosixMatches(RELATIVE_PATH_RE, true);
 	return found;
 }
 
@@ -351,6 +376,8 @@ export interface ExtendPathAliasOptions {
 	 * real `p/` paths in already-scanned history still reserve their names after a resume.
 	 */
 	reservationTexts?: readonly string[];
+	/** Least saving per mention an alias must offer; defaults to `DEFAULT_MIN_ALIAS_SAVING`. */
+	minAliasSaving?: number;
 	isIdTaken?: (aliasId: string) => boolean;
 }
 
@@ -359,6 +386,7 @@ export function extendPathAliasTable(
 	texts: readonly string[],
 	options?: ExtendPathAliasOptions,
 ): { table: PathAliasTable; inserted: PathAliasEntry[] } {
+	const minSaving = options?.minAliasSaving ?? DEFAULT_MIN_ALIAS_SAVING;
 	const existingPaths = new Set(table.entries.map((entry) => dedupeKey(entry.path)));
 	const entryIds = new Set(table.entries.map((entry) => entry.id));
 	const reservations = new Set(table.reservedIds ?? []);
@@ -381,7 +409,7 @@ export function extendPathAliasTable(
 			}
 			const key = dedupeKey(path);
 			if (existingPaths.has(key)) continue;
-			if (!aliasWorthwhile(path)) continue;
+			if (!aliasWorthwhile(path, minSaving)) continue;
 			existingPaths.add(key);
 			newPaths.push(path);
 		}
@@ -401,7 +429,9 @@ export function buildPathAliasTable(
 	cwd: string,
 	texts: readonly string[],
 	isIdTaken?: (aliasId: string) => boolean,
+	options?: { readonly minAliasSaving?: number },
 ): PathAliasTable {
+	const minSaving = options?.minAliasSaving ?? DEFAULT_MIN_ALIAS_SAVING;
 	const byKey = new Map<string, string>();
 	const uniquePaths: string[] = [];
 	const reservations = new Set<string>();
@@ -415,7 +445,7 @@ export function buildPathAliasTable(
 			}
 			const key = dedupeKey(path);
 			if (byKey.has(key)) continue;
-			if (!aliasWorthwhile(path)) continue;
+			if (!aliasWorthwhile(path, minSaving)) continue;
 			byKey.set(key, path);
 			uniquePaths.push(path);
 		}
@@ -521,7 +551,7 @@ function compileRewriter(table: PathAliasTable): CompiledRewriter {
 		// whose display is shorter than any alias, or whose display lives inside the
 		// reserved `p/` namespace (an alias-shaped form the token guard would rewrite at
 		// positions expansion refuses); none may ever be written into text.
-		if (!FULL_TOKEN_RE.test(entry.id) || !aliasWorthwhile(entry.path) || entry.path.startsWith("p/")) continue;
+		if (!FULL_TOKEN_RE.test(entry.id) || !aliasWorthwhile(entry.path, 1) || entry.path.startsWith("p/")) continue;
 		for (const form of rewriteForms(entry, table.cwd, home)) forms.push({ form, id: entry.id });
 	}
 	forms.sort((left, right) => right.form.length - left.form.length);

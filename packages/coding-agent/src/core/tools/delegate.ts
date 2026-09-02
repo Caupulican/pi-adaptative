@@ -345,7 +345,9 @@ const EXACT_ACTION_FIELD_CORRECTIONS: ReadonlyArray<{
 	readonly counterpart?: { readonly field: DelegateInputField; readonly conflict: string };
 }> = [
 	{
-		actions: ["cancel", "interrupt", "resume", "retire", "wait"],
+		// `wait` is not here: waiting is read-only, so a plural wait can only mean wait_many and is
+		// normalized to it before this table runs (see the action resolution in the executor).
+		actions: ["cancel", "interrupt", "resume", "retire"],
 		field: "agentIds",
 		correction: (action) =>
 			`delegate ${action} does not accept field agentIds. Nothing was executed. Use singular agentId — one call per worker.`,
@@ -1030,6 +1032,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 		promptGuidelines: boundedGuidelines,
 		parameters: createDelegateSchema(availableActions),
 		renderShell: "self",
+		foregroundWait: (input: { action?: unknown }) =>
+			input.action === "wait" || input.action === "wait_many" || input.action === "inbox_wait",
 		renderCall() {
 			return emptyOrchestrationCall();
 		},
@@ -1069,8 +1073,20 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					skipReason: "action_unavailable",
 				});
 			}
-			const action = requestedAction;
-			const { input, violation } = sanitizeExactActionInput(originalInput, action);
+			// A wait for several workers is wait_many however the caller spelled it: waiting is
+			// read-only, so the plural never means anything else (unlike cancel/interrupt/resume/retire,
+			// whose plural spelling stays refused). Measured live: `wait` with agentIds was refused, the
+			// corrected call came a turn later, and the failure ledger rode every request after it. A
+			// plural wait without a mode waits for all of them.
+			const pluralWait =
+				requestedAction === "wait" &&
+				originalInput.agentIds !== undefined &&
+				originalInput.agentId === undefined &&
+				availableActions.includes("wait_many");
+			const action: DelegateAction = pluralWait ? "wait_many" : requestedAction;
+			const normalizedInput =
+				pluralWait && originalInput.mode === undefined ? { ...originalInput, mode: "all" as const } : originalInput;
+			const { input, violation } = sanitizeExactActionInput(normalizedInput, action);
 			if (violation) {
 				return invalid(violation.message, {
 					started: false,

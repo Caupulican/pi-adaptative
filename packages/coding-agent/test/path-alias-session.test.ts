@@ -213,9 +213,9 @@ describe("PathAliasRuntime", () => {
 			() => databasePath,
 			() => 1,
 		);
-		runtime.sync([toolResult("a/b/foo.ts", 1)]);
-		runtime.sync([toolResult("a/src/foo.ts", 2)]);
-		runtime.sync([toolResult("a/coding-agent/src/foo.ts", 3)]);
+		runtime.sync([toolResult("alpha-beta/b/foo.ts", 1)]);
+		runtime.sync([toolResult("alpha-beta/src/foo.ts", 2)]);
+		runtime.sync([toolResult("alpha-beta/coding-agent/src/foo.ts", 3)]);
 		expect(() => runtime.sync([toolResult("coding-agent/src/foo.ts", 4)])).not.toThrow();
 		const ids = runtime.peekTable().entries.map((entry) => entry.id);
 		expect(new Set(ids).size).toBe(ids.length);

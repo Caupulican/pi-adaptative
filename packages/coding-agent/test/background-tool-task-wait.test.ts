@@ -65,6 +65,27 @@ describe("background tool task wait watchdog", () => {
 		expect(notifications).toEqual([{ status: "completed", wakeParent: true }]);
 	});
 
+	it("blocks for a caller-supplied bound instead of the controller default", async () => {
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => createInMemoryArtifactStore(),
+			persist: () => {},
+			notifyTerminal: () => {},
+			waitTimeoutMs: 1,
+		});
+		const controlled = controlledContext();
+		controller.handoff(controlled.context);
+		const pending = controller.wait("tool-task-1", undefined, 60_000);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		controlled.resolveCompletion({
+			toolCall: controlled.context.toolCall,
+			result: { content: [{ type: "text", text: "done" }], details: {} },
+			isError: false,
+		});
+		await expect(pending).resolves.toMatchObject({ status: "completed" });
+		await expect(controller.wait("tool-task-1", undefined, 0)).rejects.toThrow(/positive safe integer/);
+	});
+
 	it("projects an aborted wait as a running snapshot rather than rejecting", async () => {
 		const controller = new BackgroundToolTaskController({
 			getSessionId: () => "session-a",

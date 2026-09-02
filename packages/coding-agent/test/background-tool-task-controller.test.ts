@@ -70,6 +70,26 @@ function createHarness(sessionId: string) {
 }
 
 describe("BackgroundToolTaskController", () => {
+	it("never hands off a call the tool declares a foreground wait", () => {
+		const persisted: BackgroundToolTaskRecord[] = [];
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => createInMemoryArtifactStore(),
+			persist: (record) => persisted.push(record),
+			notifyTerminal: () => {},
+			isForegroundWait: (toolName, args) => toolName === "slow" && (args as { value?: string }).value === "x",
+		});
+		// The model chose to block on this call; its own timeout bounds it, so there is nothing to hand off.
+		expect(controller.handoff(controlledContext("wait-1").context)).toBeUndefined();
+		expect(controller.list()).toEqual([]);
+		expect(persisted).toEqual([]);
+		// A call the tool does not declare a wait still hands off as before.
+		const other = controlledContext("call-2");
+		other.context.toolCall.arguments = { value: "y" };
+		other.context.args = other.context.toolCall.arguments;
+		expect(controller.handoff(other.context)).toMatchObject({ result: { details: { taskId: "tool-task-1" } } });
+	});
+
 	// Origin: session 01a058a5. `tool_task list` showed `…"tool":"bash","failure_code` — the record was
 	// head-truncated mid-key, so the only field that says why the task failed was the field it lost.
 	it("projects the cause out of a harness failure record instead of truncating its bookkeeping", async () => {

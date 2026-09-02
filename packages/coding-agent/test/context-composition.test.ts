@@ -157,12 +157,13 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// skill_audit, improvement_loop, and the three lifecycle goal tools. Delegate's
 			// enum-heavy surface measures 844 tokens. task_steps now measures 1,120 after adding
 			// authoritative pipeline linkage and action-discriminated admission; its 1,200-token
-			// ceiling preserves roughly 7.1% headroom. skill grew to 74
-			// with the pin parameter (a bare boolean in the projected schema; annotations are
-			// stripped at the provider boundary, so there is no prose to trim).
+			// ceiling preserves roughly 7.1% headroom. skill measures 97 after the names array
+			// (several skills load in one call, so a setup no longer costs one turn per skill); its
+			// 105-token ceiling preserves roughly 8% headroom (annotations are stripped at the
+			// provider boundary, so there is no prose to trim).
 			expect(report.toolSchemaTokens).toBeLessThanOrEqual(4_500);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
-			expect(toolTokens.get("skill")).toBeLessThanOrEqual(74);
+			expect(toolTokens.get("skill")).toBeLessThanOrEqual(105);
 			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);
 			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(1_200);
 			expect(toolTokens.get("secret_store")).toBeLessThanOrEqual(330);

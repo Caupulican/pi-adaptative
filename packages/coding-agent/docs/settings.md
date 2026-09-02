@@ -444,7 +444,7 @@ For models with `contextWindow <= 2048`, provider-visible memory is capped to 10
 
 When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs` (e.g., Google's "quota will reset after 5h"), the request fails immediately with an informative error instead of waiting silently. Set to `0` to disable the cap.
 
-Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explicitly needed. Setting it above `0` can make SDK/provider retries handle out-of-usage-limit errors before Pi sees them, which may block the agent until the provider quota resets in some circumstances.
+Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explicitly needed. Setting it above `0` can make SDK/provider retries handle out-of-usage-limit errors before Pi sees them, which may block the agent until the provider quota resets in some circumstances. The same budget bounds the OpenAI Codex WebSocket path's in-stream retry of a transient rejection (`server_is_overloaded` and the like) that arrives before any output: each retry is one delta on the same connection, and whatever survives the budget reaches the agent-level retry as before.
 
 ```json
 {
@@ -458,6 +458,20 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
       "maxRetryDelayMs": 60000
     }
   }
+}
+```
+
+### Output Cap
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `maxOutputTokens` | number | `32768` | Per-response output cap sent with every provider request. Narrows the model's own limit and is narrowed further by a goal's remaining token budget; it never widens a model's limit. |
+
+A model's registry limit is a theoretical maximum (grok-4.6 advertises 500,000 output tokens), and a request that carries no cap lets a degenerate generation run to it: one measured continuation turn streamed a single repeated sentence for over twenty minutes at the model's output price. Real responses, a long file write included, stay far below the default.
+
+```json
+{
+  "maxOutputTokens": 32768
 }
 ```
 

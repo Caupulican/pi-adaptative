@@ -118,8 +118,42 @@ function toolWithSpies(spies: ReturnType<typeof controlSpies>, startWorkerDelega
 }
 
 describe("delegate exact-action input corrections", () => {
+	it("waits for every listed worker when wait is spelled with agentIds", async () => {
+		// Waiting is read-only, so the plural can only mean wait_many; refusing it cost a live run a
+		// turn and left the failure ledger riding every request afterwards.
+		const spies = controlSpies();
+		const waitForWorkerAgents = vi.fn(async () => ({
+			statuses: [
+				{ agentId: "worker-1", status: "idle" as const },
+				{ agentId: "worker-2", status: "idle" as const },
+			],
+			updatedAgentIds: [],
+			timedOut: false,
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
+			startWorkerDelegation: vi.fn(),
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ ...spies, waitForWorkerAgents }),
+		});
+
+		const result = await tool.execute(
+			"wait-plural",
+			{ action: "wait", agentIds: ["worker-1", "worker-2"], timeoutMs: 300_000 },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.isError).not.toBe(true);
+		expect(waitForWorkerAgents).toHaveBeenCalledWith(["worker-1", "worker-2"], "all", 300_000);
+		expect(spies.waitForWorkerAgent).not.toHaveBeenCalled();
+		expect(result.details).toMatchObject({ started: true, action: "wait_many", agentIds: ["worker-1", "worker-2"] });
+	});
+
 	it("rejects plural agentIds on every singular lifecycle action with a named singular correction", async () => {
-		for (const action of ["cancel", "interrupt", "resume", "retire", "wait"] as const) {
+		for (const action of ["cancel", "interrupt", "resume", "retire"] as const) {
 			const spies = controlSpies();
 			const tool = toolWithSpies(spies);
 

@@ -715,6 +715,7 @@ export class AgentSession {
 			getGoalId: () => this._goals.getOwnershipGoalId(),
 			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
 			getSessionLineageIds: () => this.sessionManager.getSessionLineageIds(),
+			isForegroundWait: (tool, args) => this.getToolDefinition(tool)?.foregroundWait?.(args as never) === true,
 			getArtifactStore: () => this._getToolArtifactStore(),
 			loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(this.sessionManager),
 			persist: (record) => this.sessionManager.appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, record),
@@ -796,6 +797,7 @@ export class AgentSession {
 			compaction: this._compaction,
 			context: providerRequestContext,
 			admitGoalRequest: () => this._goals.admitProviderRequest(),
+			maxOutputTokens: () => this.settingsManager.getMaxOutputTokens(),
 			shouldStopGoalExecutionAfterTurn: () => this._goals.hasExecutionLeaseCrossedBudgetLimit(),
 		});
 		this._toolRecoveryLogger = new ToolRecoveryLogger({

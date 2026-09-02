@@ -16,6 +16,9 @@ import {
 } from "../src/core/context/path-alias-table.ts";
 
 describe("path alias table", () => {
+	// Alias-id mechanics under test, not alias economics: admit every candidate.
+	const MECHANICS = { minAliasSaving: 0 };
+
 	it("aliases a long Windows screenshot path to p/basename and expands it back", () => {
 		const windows = String.raw`C:\Users\Caupulican\Downloads\Screenshot_2.jpg`;
 		const table = buildPathAliasTable("/repo", [`read ${windows}`]);
@@ -103,16 +106,16 @@ describe("path alias table", () => {
 
 	it("does not reuse a reserved full-path alias when every suffix is taken", () => {
 		let table = emptyPathAliasTable("/repo");
-		const first = extendPathAliasTable(table, ["a/b/foo.ts"]);
+		const first = extendPathAliasTable(table, ["a/b/foo.ts"], MECHANICS);
 		expect(first.inserted.map((entry) => entry.id)).toEqual(["p/foo.ts"]);
 		table = first.table;
-		const second = extendPathAliasTable(table, ["a/src/foo.ts"]);
+		const second = extendPathAliasTable(table, ["a/src/foo.ts"], MECHANICS);
 		expect(second.inserted.map((entry) => entry.id)).toEqual(["p/src/foo.ts"]);
 		table = second.table;
-		const third = extendPathAliasTable(table, ["a/coding-agent/src/foo.ts"]);
+		const third = extendPathAliasTable(table, ["a/coding-agent/src/foo.ts"], MECHANICS);
 		expect(third.inserted.map((entry) => entry.id)).toEqual(["p/coding-agent/src/foo.ts"]);
 		table = third.table;
-		const fourth = extendPathAliasTable(table, ["coding-agent/src/foo.ts"]);
+		const fourth = extendPathAliasTable(table, ["coding-agent/src/foo.ts"], MECHANICS);
 		expect(fourth.inserted).toHaveLength(1);
 		expect(fourth.inserted[0]?.path).toBe("coding-agent/src/foo.ts");
 		expect(fourth.inserted[0]?.id).not.toBe("p/foo.ts");
@@ -124,8 +127,8 @@ describe("path alias table", () => {
 
 	it("still assigns the shortest free suffix when reserved ids do not cover it", () => {
 		let table = emptyPathAliasTable("/repo");
-		table = extendPathAliasTable(table, ["a/b/foo.ts"]).table;
-		const inserted = extendPathAliasTable(table, ["a/b/unique-name.ts"]).inserted;
+		table = extendPathAliasTable(table, ["a/b/foo.ts"], MECHANICS).table;
+		const inserted = extendPathAliasTable(table, ["a/b/unique-name.ts"], MECHANICS).inserted;
 		expect(inserted).toEqual([{ id: "p/unique-name.ts", path: "a/b/unique-name.ts" }]);
 	});
 
@@ -249,22 +252,25 @@ describe("path alias table", () => {
 	});
 
 	it("is safe around p-suffixed segments and the reserved p/ namespace", () => {
-		const table = buildPathAliasTable("/repo", ["see contap/contadp/ts.tsx here"]);
+		const table = buildPathAliasTable("/repo", ["see contap/contadp/ts.tsx here"], undefined, MECHANICS);
 		expect(table.entries).toEqual([{ id: "p/ts.tsx", path: "contap/contadp/ts.tsx" }]);
 		const rewritten = rewriteText(table, "see contap/contadp/ts.tsx here");
 		expect(rewritten).toBe("see p/ts.tsx here");
 		expect(expandText(table, rewritten)).toBe("see contap/contadp/ts.tsx here");
 		expect(extractPathCandidates("open p/contadp/ts.tsx")).toEqual([]);
 		expect(rewriteText(table, "open p/contadp/ts.tsx")).toBe("open p/contadp/ts.tsx");
-		const mid = buildPathAliasTable("/repo", ["read src/p/util-helpers.ts now"]);
+		const mid = buildPathAliasTable("/repo", ["read src/p/util-helpers.ts now"], undefined, MECHANICS);
 		expect(rewriteText(mid, "read src/p/util-helpers.ts now")).toBe("read p/util-helpers.ts now");
 		expect(expandText(mid, "read p/util-helpers.ts now")).toBe("read src/p/util-helpers.ts now");
 	});
 
 	it("round-trips paths behind colon and comma delimiters without prefix mangling", () => {
-		const table = buildPathAliasTable("/repo", [
-			"see packages/coding-agent then git show HEAD:packages/coding-agent/src/index.ts",
-		]);
+		const table = buildPathAliasTable(
+			"/repo",
+			["see packages/coding-agent then git show HEAD:packages/coding-agent/src/index.ts"],
+			undefined,
+			MECHANICS,
+		);
 		const byPath = new Map(table.entries.map((entry) => [entry.path, entry.id]));
 		expect(byPath.get("packages/coding-agent")).toBe("p/coding-agent");
 		expect(byPath.get("packages/coding-agent/src/index.ts")).toBe("p/index.ts");
@@ -275,7 +281,7 @@ describe("path alias table", () => {
 			"packages/coding-agent/src/index.ts",
 		]);
 		// a shorter entry must never rewrite a prefix inside a longer unregistered path
-		const short = buildPathAliasTable("/repo", ["see packages/coding-agent"]);
+		const short = buildPathAliasTable("/repo", ["see packages/coding-agent"], undefined, MECHANICS);
 		expect(rewriteText(short, "git show HEAD:packages/coding-agent/src/index.ts")).toBe(
 			"git show HEAD:packages/coding-agent/src/index.ts",
 		);
@@ -315,7 +321,12 @@ describe("path alias table", () => {
 	});
 
 	it("does not fail when a repo has a real p/ directory", () => {
-		const table = buildPathAliasTable("/repo", ["read p/config-loader.ts and src/lib/config-loader.ts"]);
+		const table = buildPathAliasTable(
+			"/repo",
+			["read p/config-loader.ts and src/lib/config-loader.ts"],
+			undefined,
+			MECHANICS,
+		);
 		expect(table.entries).toEqual([{ id: "p/lib/config-loader.ts", path: "src/lib/config-loader.ts" }]);
 		expect(rewriteText(table, "read p/config-loader.ts")).toBe("read p/config-loader.ts");
 		expect(expandText(table, "read p/config-loader.ts")).toBe("read p/config-loader.ts");
@@ -323,7 +334,7 @@ describe("path alias table", () => {
 	});
 
 	it("expands only standalone tokens and is idempotent when parsing back", () => {
-		const table = buildPathAliasTable("/repo", ["read src/p/util-helpers.ts now"]);
+		const table = buildPathAliasTable("/repo", ["read src/p/util-helpers.ts now"], undefined, MECHANICS);
 		expect(expandText(table, "read src/p/util-helpers.ts now")).toBe("read src/p/util-helpers.ts now");
 		const once = expandText(table, "read p/util-helpers.ts now");
 		expect(once).toBe("read src/p/util-helpers.ts now");
@@ -389,6 +400,26 @@ describe("path alias table", () => {
 			String.raw`C:\Users\Dev\Downloads\notes-archive.txt then c:\users\dev\downloads\NOTES-ARCHIVE.TXT`,
 		]);
 		expect(windows.entries).toHaveLength(1);
+	});
+
+	it("does not alias prose that straddles separators, even with a file extension", () => {
+		const table = buildPathAliasTable("/repo", [
+			"explain the storage/id/commands in DESIGN.md sections, then open docs/reports/2026/q3/quarterly report (1).pdf",
+		]);
+		expect(table.entries.map((entry) => entry.path)).toEqual(["docs/reports/2026/q3/quarterly report (1).pdf"]);
+		// An absolute path is anchored by its prefix and keeps its spaces, function words included.
+		const anchored = buildPathAliasTable("/repo", ["saved to C:/Games/The Sims 4/saves/household of the year.dat"]);
+		expect(anchored.entries.map((entry) => entry.path)).toEqual([
+			"C:/Games/The Sims 4/saves/household of the year.dat",
+		]);
+	});
+
+	it("does not alias a path whose alias would save only a few characters a mention", () => {
+		const table = buildPathAliasTable("/repo", [
+			"git status lists test/commands.test.ts and packages/coding-agent/test/goal-tool.test.ts",
+		]);
+		expect(table.entries.map((entry) => entry.path)).toEqual(["packages/coding-agent/test/goal-tool.test.ts"]);
+		expect(rewriteText(table, "see test/commands.test.ts")).toBe("see test/commands.test.ts");
 	});
 });
 

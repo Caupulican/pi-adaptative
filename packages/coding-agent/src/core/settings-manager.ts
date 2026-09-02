@@ -523,6 +523,7 @@ export interface Settings {
 	contextPolicy?: ContextPolicySettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
+	maxOutputTokens?: number; // default: 32768 — per-response output cap; narrows the model's own limit, never widens it
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	exposeSessionEnvironment?: boolean; // Default true: inject session identity env vars (PI_SESSION_ID, etc.) into shell processes
@@ -795,6 +796,8 @@ function parseStallBoundMs(value: unknown, settingName: string): number | undefi
 	}
 	return Math.floor(value);
 }
+
+export const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
 
 function sanitizeIntegerSetting(value: unknown, fallback: number, min: number, max: number): number {
 	if (typeof value !== "number" || !Number.isInteger(value)) return fallback;
@@ -3144,6 +3147,18 @@ export class SettingsManager {
 			maxRetries: this.settings.retry?.provider?.maxRetries,
 			maxRetryDelayMs: this.settings.retry?.provider?.maxRetryDelayMs ?? 60000,
 		};
+	}
+
+	/**
+	 * Per-response output cap, in tokens. A model's registry limit is a theoretical maximum (grok-4.6
+	 * advertises 500,000), and a request that carries no cap lets a degenerate generation run to it:
+	 * measured live, one continuation turn streamed for over twenty minutes at the model's output
+	 * price with nothing persisted. Real responses, a long file write included, stay far below this
+	 * default; a goal's remaining budget still narrows it further, and a model with a smaller limit
+	 * keeps that limit.
+	 */
+	getMaxOutputTokens(): number {
+		return sanitizeIntegerSetting(this.settings.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, 1, 2_000_000);
 	}
 
 	getWebSocketConnectTimeoutMs(): number | undefined {

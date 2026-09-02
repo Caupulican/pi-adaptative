@@ -55,6 +55,19 @@ describe("delegate tool capability description", () => {
 		expect(new Set(DELEGATE_ACTIONS).size).toBe(DELEGATE_ACTIONS.length);
 	});
 
+	it("declares its wait actions foreground waits and nothing else", () => {
+		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "test" }),
+		});
+		const isWait = (input: Record<string, unknown>) => definition.foregroundWait?.(input as never) === true;
+		expect(isWait({ action: "wait", agentId: "worker-1", timeoutMs: 300_000 })).toBe(true);
+		expect(isWait({ action: "wait_many", agentIds: ["worker-1"], mode: "all" })).toBe(true);
+		expect(isWait({ action: "inbox_wait", timeoutMs: 300_000 })).toBe(true);
+		expect(isWait({ action: "status", agentIds: ["worker-1"] })).toBe(false);
+		expect(isWait({ action: "start", task: "do it" })).toBe(false);
+	});
+
 	it("derives durable dispatch and authority bounds from the orchestration contracts", () => {
 		const definition = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
