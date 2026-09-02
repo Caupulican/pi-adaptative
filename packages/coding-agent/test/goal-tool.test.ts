@@ -457,3 +457,39 @@ describe("goal tool", () => {
 		});
 	});
 });
+
+describe("goal setup in one call", () => {
+	it("create_goal records every requirement with the same executor, in order, in one call", async () => {
+		const harness = createHarness();
+		const [createGoal] = createGoalLifecycleToolDefinitions(harness.tool);
+		const result = await createGoal!.execute(
+			"call-1",
+			{ objective: "Ship the ledger", requirements: ["Strict TypeScript", "node:test coverage", "DESIGN.md"] },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(result.isError).toBeFalsy();
+		expect(harness.getState()?.requirements.map((requirement) => requirement.text)).toEqual([
+			"Strict TypeScript",
+			"node:test coverage",
+			"DESIGN.md",
+		]);
+		expect(JSON.stringify(result.details)).toContain("DESIGN.md");
+	});
+
+	it("reports the first requirement the executor rejects and keeps the goal it already started", async () => {
+		const harness = createHarness();
+		const [createGoal] = createGoalLifecycleToolDefinitions(harness.tool);
+		const result = await createGoal!.execute(
+			"call-1",
+			{ objective: "Ship the ledger", requirements: ["Strict TypeScript", "Strict TypeScript"] },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(result.isError).toBe(true);
+		expect(JSON.stringify(result.content)).toContain("already exists");
+		expect(harness.getState()?.requirements).toHaveLength(1);
+	});
+});

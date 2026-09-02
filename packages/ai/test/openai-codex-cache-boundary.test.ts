@@ -323,6 +323,107 @@ describe("OpenAI Codex continuation across a response-level rejection", () => {
 	});
 });
 
+describe("OpenAI Codex transient rejection retry", () => {
+	it("retries an overloaded rejection inside the stream as one delta, so the model never sees a failed turn", async () => {
+		const sentBodies: Array<{ connectionId: number; previous_response_id?: string; inputItems: number }> = [];
+		let connections = 0;
+
+		class MockWebSocket {
+			static readonly OPEN = 1;
+			static readonly CLOSED = 3;
+			readyState = MockWebSocket.OPEN;
+			private readonly connectionId = ++connections;
+			private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
+
+			constructor() {
+				queueMicrotask(() => this.dispatch("open", {}));
+			}
+
+			addEventListener(type: string, listener: (event: unknown) => void): void {
+				const listeners = this.listeners.get(type) ?? new Set<(event: unknown) => void>();
+				listeners.add(listener);
+				this.listeners.set(type, listeners);
+			}
+
+			removeEventListener(type: string, listener: (event: unknown) => void): void {
+				this.listeners.get(type)?.delete(listener);
+			}
+
+			send(data: string): void {
+				const body = JSON.parse(data) as { previous_response_id?: string; input?: unknown[] };
+				sentBodies.push({
+					connectionId: this.connectionId,
+					previous_response_id: body.previous_response_id,
+					inputItems: body.input?.length ?? 0,
+				});
+				if (sentBodies.length === 2) {
+					queueMicrotask(() =>
+						this.dispatch("message", {
+							data: JSON.stringify({
+								type: "error",
+								status: 503,
+								error: { code: "server_is_overloaded", message: "Our servers are currently overloaded." },
+							}),
+						}),
+					);
+					return;
+				}
+				const responseId = sentBodies.length === 1 ? "resp_1" : "resp_2";
+				const messageId = sentBodies.length === 1 ? "msg_1" : "msg_2";
+				const text = sentBodies.length === 1 ? "first" : "second";
+				queueMicrotask(() => {
+					for (const event of responseEvents(responseId, messageId, text)) {
+						this.dispatch("message", { data: JSON.stringify(event) });
+					}
+				});
+			}
+
+			close(): void {
+				this.readyState = MockWebSocket.CLOSED;
+			}
+
+			private dispatch(type: string, event: unknown): void {
+				for (const listener of this.listeners.get(type) ?? []) listener(event);
+			}
+		}
+
+		vi.stubGlobal("WebSocket", MockWebSocket);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("unexpected", { status: 500 })),
+		);
+		const options = {
+			apiKey: mockToken(),
+			transport: "websocket-cached" as const,
+			sessionId: "transient-session",
+			maxRetries: 2,
+		};
+		const firstContext = context([{ role: "user", content: "hello", timestamp: 1 }]);
+		const first = await streamOpenAICodexResponses(model, firstContext, options).result();
+		const secondContext = context([
+			...firstContext.messages,
+			first,
+			{ role: "user", content: "continue", timestamp: 2 },
+		]);
+		const eventTypes: string[] = [];
+		const secondStream = streamOpenAICodexResponses(model, secondContext, options);
+		for await (const event of secondStream) eventTypes.push(event.type);
+		const second = await secondStream.result();
+
+		expect(second.stopReason).toBe("stop");
+		expect(second.content.find((part) => part.type === "text")?.text).toBe("second");
+		expect(eventTypes).not.toContain("error");
+		expect(eventTypes.filter((type) => type === "start")).toHaveLength(1);
+		expect(connections).toBe(1);
+		expect(sentBodies.map((body) => [body.previous_response_id, body.inputItems])).toEqual([
+			[undefined, 1],
+			["resp_1", 1],
+			["resp_1", 1],
+		]);
+		expect(global.fetch).not.toHaveBeenCalled();
+	});
+});
+
 describe("transport telemetry (turn-economics transport-observability task)", () => {
 	it("records which transport carried a directly-configured SSE request", async () => {
 		vi.stubGlobal(

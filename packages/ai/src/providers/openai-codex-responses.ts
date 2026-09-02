@@ -372,6 +372,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				let websocketStarted = false;
 				let websocketConnectionLimitRetries = 0;
 				let missingContinuationRetries = 0;
+				let transientRejectionRetries = 0;
 				try {
 					while (true) {
 						websocketStarted = false;
@@ -415,6 +416,28 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 								isWebSocketConnectionLimitError(error)
 							) {
 								websocketConnectionLimitRetries++;
+								continue;
+							}
+							// A transient rejection before any output is retried here, inside the same host
+							// retry budget the SSE path honors, with the same backoff: the socket and the
+							// continuation are kept across it, so the retry is one delta. Surfacing it as a failed
+							// turn cost the model a round trip and the host its slower turn-level recovery for a
+							// momentary overload; that recovery still owns whatever survives this budget.
+							if (
+								!options?.signal?.aborted &&
+								transientRejectionRetries < (options?.maxRetries ?? DEFAULT_MAX_RETRIES) &&
+								isTransientCodexRejection(error) &&
+								output.content.length === 0 &&
+								output.usage.totalTokens === 0
+							) {
+								transientRejectionRetries++;
+								await abortableSleep(
+									Math.min(
+										BASE_DELAY_MS * 2 ** (transientRejectionRetries - 1),
+										options?.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS,
+									),
+									options?.signal,
+								);
 								continue;
 							}
 							throw error;
@@ -787,6 +810,19 @@ function isWebSocketConnectionLimitError(error: unknown): boolean {
 
 function isPreviousResponseNotFoundError(error: unknown): boolean {
 	return error instanceof CodexApiError && error.code === PREVIOUS_RESPONSE_NOT_FOUND_ERROR_CODE;
+}
+
+/**
+ * A rejection the server may not repeat a moment later: overloaded, a non-terminal rate limit, a
+ * 5xx status on the event. The same classification the SSE path applies to an HTTP status and body,
+ * read here from the event's status and text; the two continuation-specific codes have their own
+ * replay paths and are never treated as transient.
+ */
+function isTransientCodexRejection(error: unknown): boolean {
+	if (!(error instanceof CodexApiError)) return false;
+	if (isPreviousResponseNotFoundError(error) || isWebSocketConnectionLimitError(error)) return false;
+	const status = typeof error.payload?.status === "number" ? error.payload.status : 0;
+	return isRetryableError(status, `${error.code ?? ""} ${error.message}`);
 }
 
 function formatCodexEventError(prefix: string, event: Record<string, unknown>, code: string, message: string): string {

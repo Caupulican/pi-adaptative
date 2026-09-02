@@ -102,6 +102,14 @@ const goalSchema = Type.Object(
 const createGoalSchema = Type.Object(
 	{
 		objective: Type.String({ description: "Required. The concrete objective to start pursuing." }),
+		requirements: Type.Optional(
+			Type.Array(Type.String({ minLength: 1 }), {
+				minItems: 1,
+				maxItems: 20,
+				description:
+					"Every requirement the goal must satisfy, recorded in this same call with stable host ids. Prefer this over adding them one call at a time afterwards.",
+			}),
+		),
 		token_budget: Type.Optional(
 			Type.Integer({ minimum: 1, description: "Positive token budget. Omit unless explicitly requested." }),
 		),
@@ -692,22 +700,34 @@ export function createGoalLifecycleToolDefinitions(goalTool: GoalToolDefinition)
 		name: GOAL_LIFECYCLE_TOOL_NAMES[0],
 		label: GOAL_LIFECYCLE_TOOL_NAMES[0],
 		description:
-			"Create a durable goal when persistent autonomous continuation materially benefits the current work, or when the user/system explicitly requests one. Use agent discretion; skip routine short tasks. Set token_budget only when explicitly requested. Fails if an unfinished goal exists.",
+			"Create a durable goal when persistent autonomous continuation materially benefits the current work, or when the user/system explicitly requests one. Use agent discretion; skip routine short tasks. Pass every known requirement in `requirements` so the goal is fully set up in this one call, then record task steps with one task_steps set. Set token_budget only when explicitly requested. Fails if an unfinished goal exists.",
 		promptSnippet: "Start durable goal.",
 		parameters: createGoalSchema,
-		execute(toolCallId, input: Static<typeof createGoalSchema>, signal, onUpdate, context) {
-			return goalTool.execute(
+		async execute(toolCallId, input: Static<typeof createGoalSchema>, signal, onUpdate, context) {
+			const goalId = `goal-${randomUUID()}`;
+			const started = await goalTool.execute(
 				toolCallId,
-				{
-					action: "start",
-					goalId: `goal-${randomUUID()}`,
-					userGoal: input.objective,
-					tokenBudget: input.token_budget,
-				},
+				{ action: "start", goalId, userGoal: input.objective, tokenBudget: input.token_budget },
 				signal,
 				onUpdate,
 				context,
 			);
+			if (started.isError || !input.requirements?.length) return started;
+			// Each requirement goes through the same executor in order, so ids, validation and
+			// journaling are exactly what one call per requirement produced; the last result renders
+			// the whole goal. Before this, setting up a goal cost one provider round trip per requirement.
+			let last = started;
+			for (const text of input.requirements) {
+				last = await goalTool.execute(
+					toolCallId,
+					{ action: "add_requirement", goalId, text },
+					signal,
+					onUpdate,
+					context,
+				);
+				if (last.isError) return last;
+			}
+			return last;
 		},
 	};
 

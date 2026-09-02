@@ -736,7 +736,9 @@ describe("SkillVaultController", () => {
 
 		const primer = generateTextToolProtocolPrimer(projectToolsForProvider([tool]));
 
-		expect(primer).toContain("skill(action:search|load|unload|status, query:string?, name:string?, pin:bool?)");
+		expect(primer).toContain(
+			"skill(action:search|load|unload|status, query:string?, name:string?, names:string[]?, pin:bool?)",
+		);
 		expect(primer).not.toContain("filePath");
 	});
 
@@ -748,5 +750,36 @@ describe("SkillVaultController", () => {
 		const status: SkillVaultStatus = vault.status();
 
 		expect(status).toEqual({ idleTimeoutMs: expect.any(Number), slots: [] });
+	});
+	it("loads every named skill in one call and reports each outcome", async () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "a".repeat(200) },
+			{ name: "bravo", description: "Bravo guidance.", body: "b".repeat(200) },
+		]);
+		const vault = new SkillVaultController({ getSkills: () => skills, getMaxBodyBytes: () => 4_096 });
+		const tool = createSkillVaultToolDefinition(vault);
+
+		const loaded = await tool.execute(
+			"load-both",
+			{ action: "load", names: ["alpha", "bravo"] },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(loaded.isError).toBeFalsy();
+		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["alpha", "bravo"]);
+		const text = JSON.stringify(loaded.content);
+		expect(text).toContain("alpha");
+		expect(text).toContain("bravo");
+
+		const partial = await tool.execute(
+			"load-missing",
+			{ action: "load", names: ["alpha", "missing"] },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(partial.isError).toBe(true);
+		expect(JSON.stringify(partial.content)).toContain("skill load failed");
 	});
 });

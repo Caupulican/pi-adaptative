@@ -16,6 +16,13 @@ const skillSchema = Type.Object(
 		),
 		query: Type.Optional(Type.String({ description: "search query" })),
 		name: Type.Optional(Type.String({ description: "exact skill name; unload without it unloads all" })),
+		names: Type.Optional(
+			Type.Array(Type.String({ minLength: 1 }), {
+				minItems: 1,
+				maxItems: 8,
+				description: "several exact skill names to load in ONE call, in order; prefer this over one call per skill",
+			}),
+		),
 		pin: Type.Optional(Type.Boolean({ description: "protect from eviction while loaded; max 2" })),
 	},
 	{ additionalProperties: false },
@@ -24,7 +31,7 @@ const skillSchema = Type.Object(
 export type SkillToolInput = Static<typeof skillSchema>;
 export type SkillToolDetails =
 	| { action: "search"; result: SkillSearchResult }
-	| { action: "load"; result: SkillLoadResult }
+	| { action: "load"; result: SkillLoadResult; results?: SkillLoadResult[] }
 	| { action: "unload"; result: { ok: true; unloaded: string[] } }
 	| { action: "status"; result: SkillVaultStatus };
 
@@ -144,18 +151,32 @@ export function createSkillVaultToolDefinition(vault: SkillVaultController): Too
 					};
 				}
 				case "load": {
-					const result: SkillLoadResult = input.name?.trim()
-						? vault.load(input.name.trim(), "model", input.pin === true)
-						: { ok: false, reason: "not_found", message: "skill load requires exact name" };
+					const names = [...(input.names ?? []), ...(input.name ? [input.name] : [])]
+						.map((name) => name.trim())
+						.filter((name, index, all) => name.length > 0 && all.indexOf(name) === index);
+					if (names.length === 0) {
+						const result: SkillLoadResult = {
+							ok: false,
+							reason: "not_found",
+							message: "skill load requires an exact name",
+						};
+						return {
+							content: [{ type: "text" as const, text: `skill load failed: ${result.message}` }],
+							details: { action: "load" as const, result },
+							isError: true,
+						};
+					}
+					// Several names load in order through the same vault call each; one round trip instead of
+					// one per skill, with every outcome reported.
+					const results = names.map((name) => vault.load(name, "model", input.pin === true));
+					const lines = results.map((result) =>
+						result.ok ? loadText(result) : `skill load failed: ${result.message}`,
+					);
+					const last = results[results.length - 1]!;
 					return {
-						content: [
-							{
-								type: "text" as const,
-								text: result.ok ? loadText(result) : `skill load failed: ${result.message}`,
-							},
-						],
-						details: { action: "load" as const, result },
-						isError: !result.ok,
+						content: [{ type: "text" as const, text: lines.join("\n") }],
+						details: { action: "load" as const, result: last, ...(results.length > 1 ? { results } : {}) },
+						isError: results.some((result) => !result.ok),
 					};
 				}
 				case "unload": {
