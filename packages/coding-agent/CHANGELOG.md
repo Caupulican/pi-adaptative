@@ -1,5 +1,24 @@
 ## [Unreleased]
 
+### Fixed
+
+- Every provider request is a byte-append of the previous one again. Memory evidence was rebuilt at the tail of every request with a fresh nonce, the goal-context record was stripped from durable history after it had been sent, and the path-alias legend rewrote its own text, so the provider's cached prefix was invalidated on most turns of a goal session (measured on real sessions: reuse fell from 0.97 to 0.11). Each of these is now one durable record appended only when its content changes; superseded records are packed by context GC. Live on Codex: reuse 0.95 to 0.98 per request, no cache wipes.
+- Active skills no longer ride the system prompt. Every load, unload and ten-minute idle expiry rewrote the first bytes of the request and invalidated the cached prefix for the whole conversation. The skill context is one hidden durable record (`active_skill_context`), appended once per change, with a cleared record when the last skill leaves; compaction keeps it.
+- The OpenAI Codex WebSocket path keeps its continuation across a response-level rejection such as `server_is_overloaded`, so the retry is one delta instead of a full resend of the conversation. Within `retry.provider.maxRetries`, a transient rejection that arrives before any output is retried in the stream.
+- A tool failure is resolved once two later calls of the same tool have executed without retrying it. A corrected call that never repeats the failed arguments previously left the record active for the rest of the session, and the trailing failure ledger was re-appended on every later request (29 identical records after one corrected `delegate` call). The occurrence count survives resolution, so an identical repeat keeps escalating.
+- An explicit wait is never handed off to a background task. A `delegate wait`, `wait_many`, `inbox_wait` or `tool_task wait` blocks up to its own timeout in the foreground instead of becoming a fifteen-second handoff followed by a thirty-second task wait and status calls every turn; `tool_task wait` blocks up to five minutes by default and accepts `timeoutMs`.
+- `delegate wait` with `agentIds` waits for every listed worker (as `wait_many`, mode `all`) instead of being refused; waiting is read-only, so the plural is unambiguous. The singular lifecycle actions still refuse it. A `delegate start` that asks for tools outside the parent's own tool surface is still refused, and the refusal now states the rule and the way out.
+- Every request carries an output cap. `maxOutputTokens` (default 32,768) narrows the model's registry limit and is narrowed further by a goal's remaining budget; a model that advertises 500,000 output tokens can no longer stream a degenerate loop for twenty minutes. The cost guard still projects against the session response reserve.
+- Path aliases are minted only when each mention saves at least ten characters; an alias that saved three characters against a forty-character legend line was read by a model in `git status` as a literal path. A relative candidate whose spaced segment reads as prose ("storage/id/commands in DESIGN.md") is not a path.
+- Setting up a goal takes one or two turns. `create_goal` records every requirement in the same call, and `skill load` accepts several names in one call.
+- The adaptation store writes immediately again, so a second process sees a profile as soon as it is recorded; only perf samples are deferred.
+- The delegation task runtime shares one frozen projection instead of deep-cloning it and re-listing the event directory on every read, and event-store reads are O(1) when nothing new arrived. A 1,500-turn delegation session's host time fell from 17.5s to 8.8s on Linux and from 34.8s to 8.9s on Windows CI.
+
+### Performance
+
+- Per-request host work no longer re-walks the whole history: tool-failure analysis, compaction usage lookup, request estimation, image budgeting, context GC planning, the context audit and path-alias rendering all resume from the prefix they already covered. A 1,500-turn goal session's idle host time fell from 94s to 12s; the per-turn profiler's median turn from 315ms to 175ms.
+- The Profile workflow reports prompt-cache reuse per request (appends versus rewrites, and what broke the prefix), samples memory, disk, CPU and process pressure per decile, and can write a heap snapshot; the profiler's own event records no longer pin every prompt in memory (peak heap 683MB to 228MB).
+
 ## [0.97.23] - 2026-09-01
 
 ## [0.97.22] - 2026-09-01
