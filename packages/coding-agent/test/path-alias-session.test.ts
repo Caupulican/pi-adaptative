@@ -4,6 +4,7 @@ import { join, resolve as pathResolve } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadPathAliasTableReadOnly, PathAliasRuntime } from "../src/core/context/path-alias-session.ts";
+import { PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "../src/core/context/path-alias-table.ts";
 import { createSqlitePathAliasStore } from "../src/core/context/sqlite-runtime-index.ts";
 
 function toolResult(text: string, timestamp: number): AgentMessage {
@@ -436,6 +437,28 @@ describe("PathAliasRuntime incremental render", () => {
 		expect(text(second.messages[2]!)).toContain(text(first.messages[0]!).split(" ").at(-1)!);
 		// The first result's array was not grown behind the caller's back.
 		expect(first.messages).toHaveLength(2);
+		runtime.close();
+	});
+
+	it("never rewrites the legend record's own text", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-legend-"));
+		tempDirs.push(dir);
+		const runtime = new PathAliasRuntime(
+			() => "/repo",
+			() => join(dir, "runtime.sqlite"),
+			() => 1,
+		);
+		const minted = runtime.sync([toolResult("packages/coding-agent/src/foo.ts", 10)]);
+		const legend: AgentMessage = {
+			role: "custom",
+			customType: PATH_ALIAS_LEGEND_CUSTOM_TYPE,
+			content: minted.legend ?? "",
+			display: false,
+			timestamp: 11,
+		};
+		const withLegend = runtime.sync([toolResult("packages/coding-agent/src/foo.ts", 10), legend]);
+		// The legend maps alias to display path; rewriting it would turn the display path into the alias.
+		expect(withLegend.messages[1]).toBe(legend);
 		runtime.close();
 	});
 });

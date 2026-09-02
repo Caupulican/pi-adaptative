@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
+import { createCustomMessage } from "@caupulican/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { applyContextGc } from "../src/core/context-gc.ts";
@@ -70,5 +71,36 @@ describe("context-gc plan fold", () => {
 		const trimmed = history.slice(2);
 		expect(reasons(trimmed)).toEqual(reasons(structuredClone(trimmed)));
 		expect(reasons(trimmed).some((entry) => entry.endsWith("superseded-read"))).toBe(false);
+	});
+});
+
+describe("context-gc superseded transient records", () => {
+	const record = (kind: string, text: string, at: number) =>
+		createCustomMessage(kind, text, false, undefined, new Date(at).toISOString());
+
+	it("packs every record that a later record of the same kind supersedes, and keeps the newest", () => {
+		const long = (label: string) => `${label} ${"0123456789abcdef".repeat(40)}`;
+		const messages: AgentMessage[] = [
+			record("active_goal_context", long("goal v1"), 1),
+			readCall(1, "a.ts"),
+			readResult(1),
+			record("active_goal_context", long("goal v2"), 2),
+			record("path_alias_legend", long("legend v1"), 3),
+			readCall(2, "b.ts"),
+			readResult(2),
+			record("active_goal_context", long("goal v3"), 4),
+		];
+		const result = applyContextGc(messages, { ...settings, tools: [] });
+		const packed = result.report.records.filter((entry) => entry.reason === "superseded-transient-record");
+		expect(packed.map((entry) => entry.messageIndex)).toEqual([0, 3]);
+		expect(packed.map((entry) => entry.toolName)).toEqual(["active_goal_context", "active_goal_context"]);
+		// The packed record keeps its role and kind and names the newer record as current.
+		const first = result.messages[0];
+		expect(first?.role).toBe("custom");
+		expect((first as { customType: string }).customType).toBe("active_goal_context");
+		expect((first as { content: string }).content).toContain("superseded active_goal_context record");
+		// The newest of each kind is untouched.
+		expect(result.messages[4]).toBe(messages[4]);
+		expect(result.messages[7]).toBe(messages[7]);
 	});
 });

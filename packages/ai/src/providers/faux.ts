@@ -119,6 +119,8 @@ export interface FauxRequestEvent {
 	divergedAt: number | undefined;
 	divergedRole: string | undefined;
 	divergedText: string | undefined;
+	/** Head of the message the previous request had at `divergedAt`, when it had one there. */
+	previousDivergedText: string | undefined;
 }
 
 export interface RegisterFauxProviderOptions {
@@ -234,7 +236,7 @@ function withUsageEstimate(
 	message: AssistantMessage,
 	context: Context,
 	options: StreamOptions | undefined,
-	promptCache: Map<string, string>,
+	promptCache: Map<string, SerializedContext>,
 	onRequest?: (event: FauxRequestEvent) => void,
 ): AssistantMessage {
 	const serialized = serializeContext(context);
@@ -252,25 +254,26 @@ function withUsageEstimate(
 	// id only routes, so a host that names no session is still measured, per registration.
 	const accounted = sessionId !== undefined && options?.cacheRetention !== "none";
 	const cacheKey = accounted ? sessionId : "";
-	const previousPrompt = promptCache.get(cacheKey);
-	if (previousPrompt) {
+	const previous = promptCache.get(cacheKey);
+	if (previous) {
 		firstRequest = false;
-		cachedChars = commonPrefixLength(previousPrompt, promptText);
+		cachedChars = commonPrefixLength(previous.text, promptText);
 	}
 	if (accounted) {
-		if (previousPrompt) {
-			cacheRead = estimateTokens(previousPrompt.slice(0, cachedChars));
+		if (previous) {
+			cacheRead = estimateTokens(previous.text.slice(0, cachedChars));
 			cacheWrite = estimateTokens(promptText.slice(cachedChars));
 			input = Math.max(0, promptTokens - cacheRead);
 		} else {
 			cacheWrite = promptTokens;
 		}
 	}
-	promptCache.set(cacheKey, promptText);
+	promptCache.set(cacheKey, serialized);
 	if (onRequest) {
 		const divergedAt = serialized.messageSpans.findIndex(([, end]) => end > cachedChars);
 		const diverged = divergedAt >= 0 ? context.messages[divergedAt] : undefined;
 		const span = divergedAt >= 0 ? serialized.messageSpans[divergedAt]! : undefined;
+		const previousSpan = divergedAt >= 0 ? previous?.messageSpans[divergedAt] : undefined;
 		onRequest({
 			sessionId,
 			firstRequest,
@@ -280,6 +283,10 @@ function withUsageEstimate(
 			divergedAt: divergedAt >= 0 ? divergedAt : undefined,
 			divergedRole: diverged?.role,
 			divergedText: span ? promptText.slice(span[0], Math.min(span[1], span[0] + 120)) : undefined,
+			previousDivergedText:
+				previous && previousSpan
+					? previous.text.slice(previousSpan[0], Math.min(previousSpan[1], previousSpan[0] + 120))
+					: undefined,
 		});
 	}
 
@@ -489,7 +496,7 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 	let pendingResponses: FauxResponseStep[] = [];
 	const tokensPerSecond = options.tokensPerSecond;
 	const state = { callCount: 0 };
-	const promptCache = new Map<string, string>();
+	const promptCache = new Map<string, SerializedContext>();
 
 	const modelDefinitions = options.models?.length
 		? options.models

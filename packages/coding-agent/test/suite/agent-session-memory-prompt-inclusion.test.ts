@@ -310,7 +310,7 @@ describe("AgentSession live memory prompt inclusion (safe-auto, budget-gated)", 
 		expect(messages.some((message) => message.role === "custom")).toBe(false);
 	});
 
-	it("R10: transcript/session.messages never contain a memory_evidence message after a turn with injection active", async () => {
+	it("R10: memory evidence is recorded once per change as a hidden host record, never per request", async () => {
 		const harness = await createHarness({
 			settings: { contextPolicy: { memory: { enabled: true, maxResults: 5, includeInPrompt: true } } },
 		});
@@ -321,21 +321,31 @@ describe("AgentSession live memory prompt inclusion (safe-auto, budget-gated)", 
 			okfDocument("Widget rollout plan", "Design decision about the widget rollout plan.", "Body."),
 		);
 
-		harness.setResponses([fauxAssistantMessage("ok")]);
+		harness.setResponses([fauxAssistantMessage("ok"), fauxAssistantMessage("ok again")]);
 		await harness.session.prompt("what was the widget rollout plan?");
+		await harness.session.prompt("and what was the widget rollout plan again?");
 
-		const hasMemoryEvidenceInMessages = (messages: readonly AgentMessage[]): boolean =>
-			messages.some(
+		const memoryEvidence = (messages: readonly AgentMessage[]): AgentMessage[] =>
+			messages.filter(
 				(message) =>
 					message.role === "custom" && (message as { customType?: string }).customType === "memory_evidence",
 			);
 
-		expect(hasMemoryEvidenceInMessages(harness.session.messages)).toBe(false);
-		const branchMessages: AgentMessage[] = [];
-		for (const entry of harness.sessionManager.getBranch()) {
-			if (entry.type === "message") branchMessages.push(entry.message);
+		// The record is a transient record (agent-core transient-records.ts): appended to history the
+		// first time the recall is included and again only when its content changes, so a request is an
+		// append of the previous one instead of rewriting the tail; it is never displayed.
+		const records = memoryEvidence(harness.session.messages);
+		expect(records.length).toBeGreaterThanOrEqual(1);
+		expect(records.length).toBeLessThanOrEqual(2);
+		for (const record of records) {
+			expect((record as { display?: boolean }).display).toBe(false);
+			expect(typeof (record as { content: unknown }).content).toBe("string");
 		}
-		expect(hasMemoryEvidenceInMessages(branchMessages)).toBe(false);
+		// Persisted as custom_message entries, one per record, so a resumed session carries them.
+		const persisted = harness.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "custom_message" && entry.customType === "memory_evidence");
+		expect(persisted).toHaveLength(records.length);
 	});
 
 	it("no directory access when disabled (existing R2 behavior unaffected by this slice)", async () => {

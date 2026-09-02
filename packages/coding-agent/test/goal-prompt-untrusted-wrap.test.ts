@@ -38,7 +38,7 @@ function createProviderRequestController(state: GoalState): ProviderRequestConte
 }
 
 describe("compact active-goal context", () => {
-	it("injects one current ephemeral record and removes historical trigger payloads", () => {
+	it("offers one current record, keeps earlier records in place, and removes continuation payloads", () => {
 		const state = createGoalState({ goalId: "g1", userGoal: "Ship it", tokenBudget: 1_000, now: "T0" });
 		const messages = [
 			{ role: "user" as const, content: "ordinary user turn", timestamp: 1 },
@@ -53,15 +53,19 @@ describe("compact active-goal context", () => {
 
 		const result = injectCompactGoalContext(messages, state);
 
-		expect(result).toHaveLength(2);
+		// The legacy prose payload and the trigger go; the earlier record stays where the provider
+		// already read it (a transient record is never repositioned), and the current projection is
+		// offered last for the planner to record if it changed.
+		expect(result).toHaveLength(3);
 		expect(result[0]).toBe(messages[0]);
-		expect(result[1]?.role).toBe("custom");
-		if (result[1]?.role !== "custom") throw new Error("Expected compact goal context");
-		expect(result[1].customType).toBe(ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE);
-		expect(result[1].content).toContain("Ship it");
-		expect(result[1].content).toContain('"tokenBudget":"1000"');
-		expect(result[1].content).toContain("Continue objective.");
-		expect(result[1].display).toBe(false);
+		expect(result[1]).toBe(messages[3]);
+		expect(result[2]?.role).toBe("custom");
+		if (result[2]?.role !== "custom") throw new Error("Expected compact goal context");
+		expect(result[2].customType).toBe(ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE);
+		expect(result[2].content).toContain("Ship it");
+		expect(result[2].content).toContain('"tokenBudget":"1000"');
+		expect(result[2].content).toContain("Continue objective.");
+		expect(result[2].display).toBe(false);
 		expect(messages).toHaveLength(4);
 	});
 

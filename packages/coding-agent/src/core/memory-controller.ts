@@ -386,12 +386,12 @@ export class MemoryController {
 	 * (the same fenced boundary + always-on system-prompt rule used for other untrusted content)
 	 * to the END of `messages`. It is a host transient in the transient-record sense
 	 * (agent-core transient-records.ts): string content keyed by its customType, so the request
-	 * planner records it durably once and again only when the recall changes, and the boundary
-	 * id derives from the block's content so identical recall is byte-identical across requests.
-	 * Before this, the message carried its text as a content array with a fresh random id per
-	 * request: never a record, rebuilt at the tail of every request, and the previous request's
-	 * last message therefore changed on every request -- no request was an append of the last,
-	 * and the provider's prompt cache was re-prefilled from that point every time.
+	 * planner records it durably once and again only when the recall changes, never displayed,
+	 * and its boundary id derives from the block's content so identical recall is byte-identical.
+	 * Superseded records are packed by context GC. Before this, the message carried its text as a
+	 * content array with a fresh random id per request: never a record, rebuilt at the tail of
+	 * every request, so the previous request's last message changed on every request and the
+	 * provider's prompt cache was re-prefilled from that point every time.
 	 *
 	 * Also records a `MemoryPromptInclusionReport` (context/memory-diagnostics.ts) at each
 	 * branch below, for context_audit's diagnostic surface only -- this is pure bookkeeping

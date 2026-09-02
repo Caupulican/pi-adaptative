@@ -11,6 +11,7 @@ import {
 	extendPathAliasTable,
 	formatPathAliasLegendForIds,
 	MAX_RESERVED_TOKENS,
+	PATH_ALIAS_LEGEND_CUSTOM_TYPE,
 	type PathAliasTable,
 	rewriteAgentMessagesWith,
 	rewriteText,
@@ -258,6 +259,12 @@ export class PathAliasRuntime {
 		}
 		for (let index = from; index < messages.length; index++) {
 			const message = messages[index]!;
+			// The legend defines the aliases; once recorded, rewriting its own text turned every alias
+			// display back into an alias and changed the bytes of an already-sent record per request.
+			if (message.role === "custom" && message.customType === PATH_ALIAS_LEGEND_CUSTOM_TYPE) {
+				rendered.push(message);
+				continue;
+			}
 			const memo = this.rendered.get(message);
 			if (memo) {
 				// Its spellings stay live for any later message that repeats one of its spans.

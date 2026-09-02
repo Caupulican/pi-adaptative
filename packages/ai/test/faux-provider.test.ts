@@ -635,6 +635,8 @@ describe("faux prompt-cache request events", () => {
 		expect(events[1]!.cachedChars).toBe(events[0]!.promptChars);
 		expect(events[2]!.cachedChars).toBeLessThan(events[0]!.promptChars);
 		expect(events[2]!.divergedText).toContain("user:bye");
+		expect(events[2]!.previousDivergedText).toContain("user:hello");
+		expect(events[1]!.previousDivergedText).toBeUndefined();
 		expect(events.map((event) => event.messageCount)).toEqual([1, 3, 3]);
 	});
 });

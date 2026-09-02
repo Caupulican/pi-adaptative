@@ -10,7 +10,11 @@ import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AssistantMessage } from "@caupulican/pi-ai/types";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE, injectCompactGoalContext } from "../src/core/goals/compact-goal-context.ts";
+import {
+	ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE,
+	captureGoalContextProjection,
+	injectCompactGoalContext,
+} from "../src/core/goals/compact-goal-context.ts";
 import { GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "../src/core/goals/goal-continuation-prompt.ts";
 import { GoalSessionController } from "../src/core/goals/goal-session-controller.ts";
 import { createGoalState } from "../src/core/goals/goal-state.ts";
@@ -137,10 +141,10 @@ describe("goal/task custom-entry snapshot resolution survives compaction", () =>
 			undefined,
 			new Date().toISOString(),
 		);
-		const providerMessages = injectCompactGoalContext(
-			injectCompactGoalContext([...sessionManager.buildSessionContext().messages, continuationTrigger], state),
-			state,
-		);
+		const withTrigger = [...sessionManager.buildSessionContext().messages, continuationTrigger];
+		// Captured before the trigger is stripped, exactly as the request planner does.
+		const goalProjection = captureGoalContextProjection(withTrigger);
+		const providerMessages = injectCompactGoalContext(withTrigger, state, goalProjection);
 		const projections = providerMessages.filter(
 			(message) => message.role === "custom" && message.customType === ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE,
 		);
@@ -149,6 +153,11 @@ describe("goal/task custom-entry snapshot resolution survives compaction", () =>
 		if (!projection || projection.role !== "custom" || typeof projection.content !== "string") {
 			throw new Error("Expected one textual compact goal projection");
 		}
+		// Offered again for the same state, the projection is byte-identical, which is what lets the
+		// request planner record it once and keep every later request an append of the previous one.
+		const again = injectCompactGoalContext(providerMessages, state, goalProjection).at(-1);
+		const againRecord = again && again.role === "custom" ? again : undefined;
+		expect(againRecord?.content).toBe(projection.content);
 		expect(projection.display).toBe(false);
 		expect(projection.content).toContain(objective);
 		expect(projection.content.match(/ACTIVE GOAL — HOST-OWNED/g)).toHaveLength(1);

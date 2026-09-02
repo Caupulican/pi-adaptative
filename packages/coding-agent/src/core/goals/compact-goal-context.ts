@@ -44,13 +44,15 @@ function messageText(message: AgentMessage): string {
 		.join("\n");
 }
 
-function isGoalContextMessage(message: AgentMessage): boolean {
-	if (message.role === "custom") {
-		return (
-			message.customType === GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE ||
-			message.customType === ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE
-		);
-	}
+/**
+ * A continuation payload the model must not see twice: the host's continuation trigger, or the
+ * legacy prose payload. The active goal context record is NOT one of them: it is a transient
+ * record (agent-core transient-records.ts), appended once per change and left in place. Stripping
+ * a record the provider had already read shortened every later request in the middle, and the
+ * provider re-prefilled everything after that point on every request of a goal loop.
+ */
+function isGoalContinuationPayload(message: AgentMessage): boolean {
+	if (message.role === "custom") return message.customType === GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE;
 	return messageText(message).startsWith(LEGACY_GOAL_CONTINUATION_PREFIX);
 }
 
@@ -113,16 +115,16 @@ export function formatCompactGoalContext(state: GoalState, continuationTurn: boo
 }
 
 /**
- * Replace every historical goal continuation payload with one current compact projection. The
- * projection exists only in the provider request returned from context assembly; it is never
- * appended to the transcript or session log.
+ * Strip every historical goal continuation payload and offer one current compact projection as a
+ * host transient. The request planner records the projection durably when it changes and leaves
+ * earlier records where they were; context GC packs the superseded ones.
  */
 export function injectCompactGoalContext(
 	messages: AgentMessage[],
 	state: GoalState | undefined,
 	projection: GoalContextProjection = captureGoalContextProjection(messages),
 ): AgentMessage[] {
-	const filtered = messages.filter((message) => !isGoalContextMessage(message));
+	const filtered = messages.filter((message) => !isGoalContinuationPayload(message));
 	if (!state || !isGoalExecutionActive(state.status)) return filtered;
 	return [
 		...filtered,

@@ -733,6 +733,9 @@ export interface MessageRewriteHooks {
  * One walk, so message shape is handled in exactly one place. A message whose spans all come back
  * unchanged is returned by identity, so an unchanged history costs no allocation.
  */
+/** The custom message kind that carries the alias legend; its own text is never alias-rewritten. */
+export const PATH_ALIAS_LEGEND_CUSTOM_TYPE = "path_alias_legend";
+
 export function rewriteAgentMessagesWith(
 	messages: readonly AgentMessage[],
 	rewriter: TextRewriter | MessageRewriteHooks,

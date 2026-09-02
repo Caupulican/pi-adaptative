@@ -194,7 +194,8 @@ function renderCacheReport(events: FauxRequestEvent[]): string {
 		rewrites += 1;
 		const offset = event.divergedAt - previous.messageCount;
 		const head = (event.divergedText ?? "").replace(/\s+/g, " ").replace(/\d+/g, "#").slice(0, 60);
-		const kind = `${event.divergedRole ?? "?"} at previous-end${offset} :: ${head}`;
+		const was = (event.previousDivergedText ?? "(nothing)").replace(/\s+/g, " ").replace(/\d+/g, "#").slice(0, 60);
+		const kind = `${event.divergedRole ?? "?"} at previous-end${offset} :: now ${head} :: was ${was}`;
 		rewriteKinds.set(kind, (rewriteKinds.get(kind) ?? 0) + 1);
 	}
 	const measured = appends + rewrites;
@@ -203,7 +204,7 @@ function renderCacheReport(events: FauxRequestEvent[]): string {
 	const lines = [
 		`cache: requests=${main.length} p50 reuse=${p50.toFixed(2)} share>=0.9=${high.toFixed(2)} appends=${appends}/${measured} rewrites=${rewrites}/${measured}`,
 		`reuse by decile (median cachedChars/promptChars): ${deciles(reuse)}`,
-		"top rewrite points (role at offset from the previous request's last message :: head of the changed message):",
+		"top rewrite points (role at offset from the previous request's last message :: what is there now :: what was there):",
 		...[...rewriteKinds.entries()]
 			.sort((a, b) => b[1] - a[1])
 			.slice(0, 10)

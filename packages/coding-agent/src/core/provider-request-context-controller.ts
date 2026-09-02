@@ -6,6 +6,7 @@ import type { ContextAuditReport } from "./context/context-audit.ts";
 import type { PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import type { PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
+import { PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "./context/path-alias-table.ts";
 import { frozenPrefixLength } from "./context/prefix-stability.ts";
 import type { ContextGcReport, ContextGcResult } from "./context-gc.ts";
 import { captureGoalContextProjection, injectCompactGoalContext } from "./goals/compact-goal-context.ts";
@@ -43,7 +44,7 @@ export interface ProviderRequestContextControllerDeps {
 	applyPathAliases(messages: AgentMessage[]): { messages: AgentMessage[]; legend?: string };
 }
 
-export const PATH_ALIAS_LEGEND_CUSTOM_TYPE = "path_alias_legend";
+export { PATH_ALIAS_LEGEND_CUSTOM_TYPE };
 
 /**
  * Carry the path-alias legend as the last transient message rather than in the system prompt.

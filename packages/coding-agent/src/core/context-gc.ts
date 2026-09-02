@@ -79,7 +79,7 @@ export interface ContextGcPackedRecord {
 	toolName: string;
 	toolCallId: string;
 	messageIndex: number;
-	reason: "superseded-read" | "stale-tool-result" | "stale-semantic-memory";
+	reason: "superseded-read" | "stale-tool-result" | "stale-semantic-memory" | "superseded-transient-record";
 	originalChars: number;
 	originalTokens: number;
 	packedTokens: number;
@@ -341,6 +341,8 @@ interface ContextGcPlan {
 	calls: Map<string, ToolCallMeta>;
 	latestReadByPath: Map<string, string>;
 	semanticIndexes: number[];
+	/** Index of the newest string-content custom record per kind; every earlier one is superseded. */
+	lastRecordIndexByKind: Map<string, number>;
 }
 
 function normalizeToolPath(cwd: string, value: unknown): string | undefined {
@@ -365,8 +367,11 @@ const gcPlanFolds = new WeakMap<AgentMessage, GcPlanFold>();
 
 function createGcPlanFold(cwd: string, semanticSettings: Required<SemanticMemoryGcSettings>): GcPlanFold {
 	const fold = new PrefixFold<AgentMessage, ContextGcPlan>(
-		() => ({ calls: new Map(), latestReadByPath: new Map(), semanticIndexes: [] }),
+		() => ({ calls: new Map(), latestReadByPath: new Map(), semanticIndexes: [], lastRecordIndexByKind: new Map() }),
 		(plan, message, messageIndex) => {
+			if (message.role === "custom" && typeof message.content === "string") {
+				plan.lastRecordIndexByKind.set(message.customType, messageIndex);
+			}
 			if (message.role === "assistant") {
 				for (const part of message.content) {
 					if (part.type !== "toolCall") continue;
@@ -457,6 +462,7 @@ function packedShape(record: ContextGcPackedRecord): string {
 
 function reasonText(record: ContextGcPackedRecord): string {
 	if (record.reason === "superseded-read") return "superseded by later same-file read";
+	if (record.reason === "superseded-transient-record") return "superseded by a later record of the same kind";
 	if (record.reason === "stale-semantic-memory") {
 		return "stale semantic page outside freshness window";
 	}
@@ -465,9 +471,14 @@ function reasonText(record: ContextGcPackedRecord): string {
 
 function buildSummary(record: ContextGcPackedRecord): string {
 	const semantic = record.reason === "stale-semantic-memory";
+	const supersededRecord = record.reason === "superseded-transient-record";
 	const lines = [
-		semantic ? "[Semantic GC packed stale Automata/Mind context page]" : "[Context GC packed stale tool result]",
-		semantic ? undefined : `tool: ${record.toolName}`,
+		semantic
+			? "[Semantic GC packed stale Automata/Mind context page]"
+			: supersededRecord
+				? `[Context GC packed superseded ${record.toolName} record; a later record of this kind is current]`
+				: "[Context GC packed stale tool result]",
+		semantic || supersededRecord ? undefined : `tool: ${record.toolName}`,
 		record.path ? `path: ${record.path}` : undefined,
 		record.command ? `command: ${boundedTextPreview(record.command)}` : undefined,
 		`reason: ${reasonText(record)}`,
@@ -511,6 +522,15 @@ function makePackedToolResult(message: ToolResultMessage, record: ContextGcPacke
 		content: [{ type: "text", text: summary }],
 		details: gcDetails(message, record),
 	};
+}
+
+/** A superseded record keeps its role and kind, so record resolution still sees the kind's history. */
+function makePackedTransientRecord(message: AgentMessage, record: ContextGcPackedRecord): AgentMessage {
+	return {
+		...(message as unknown as Record<string, unknown>),
+		content: buildSummary(record),
+		details: gcDetails(message as { details?: unknown }, record),
+	} as AgentMessage;
 }
 
 function makePackedSemanticMemoryMessage(message: AgentMessage, record: ContextGcPackedRecord): AgentMessage {
@@ -631,6 +651,45 @@ export function applyContextGc(
 		// rewrite it regardless of how eligible it would otherwise be.
 		if (index < options.frozenBelow) continue;
 		const message = messages[index];
+		// A transient record with a later record of its kind is superseded by construction: the
+		// planner appends on change and never rewrites, so only the newest carries current content.
+		if (
+			message.role === "custom" &&
+			typeof message.content === "string" &&
+			index < recentStart &&
+			!preservedSemanticIndexes.has(index) &&
+			(plan.lastRecordIndexByKind.get(message.customType) ?? -1) > index
+		) {
+			const memo = packedMemos.get(message);
+			const originalText = memo?.originalText ?? message.content;
+			if (originalText.length >= options.minToolResultChars) {
+				const originalTokens = memo?.originalTokens ?? estimateTokens(message);
+				const key =
+					memo?.key ??
+					createHash("sha256")
+						.update("transient-record\0")
+						.update(message.customType)
+						.update("\0")
+						.update(originalText)
+						.digest("hex")
+						.slice(0, 24);
+				const storagePath = storagePathFor(options.storageDir, key);
+				const record: ContextGcPackedRecord = {
+					toolName: message.customType,
+					toolCallId: `record-${index}`,
+					messageIndex: index,
+					reason: "superseded-transient-record",
+					originalChars: originalText.length,
+					originalTokens,
+					packedTokens: 0,
+					storagePath,
+					key,
+				};
+				commitPackedMessage(pass, index, message, memo, originalText, key, record, makePackedTransientRecord);
+				changed = true;
+				continue;
+			}
+		}
 		if (semanticIndexSet.has(index) && !preservedSemanticIndexes.has(index) && index < recentStart) {
 			const memo = packedMemos.get(message);
 			const originalText = memo?.originalText ?? agentMessageText(message);
