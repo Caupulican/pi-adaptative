@@ -83,6 +83,72 @@ Or from the repo root: `npm run profile:long-session`, `npm run profile:analyze 
 - **Thresholds are advisory.** The growth report warns above 2x growth and above 25ms per request /
   15ms per tool call at the warm baseline. Warnings annotate the workflow run; nothing fails.
 
+## Pressure: memory, disk, CPU, processes
+
+Alongside the timing report, the host long-session profile also samples `process.memoryUsage()`
+and `process.resourceUsage()` at every turn boundary (each `toolResult` message finalizing --
+the same unit the per-tool decile tables use), and counts child processes. It writes
+`host-session-pressure.txt` (the decile table plus totals) and `host-session-pressure.json` (the
+raw per-turn samples and per-spawn records) into the same `PI_PROFILE_DIR` as
+`host-session-profile.txt`. Feed both files to the growth report to get one combined table:
+
+```bash
+node scripts/report-long-session-growth.mjs host-session-profile.txt host-session-pressure.txt
+```
+
+- **rssMB / heapMB** — median resident set size and V8 heap used across the turns in that decile
+  (point-in-time values, not deltas). Flat means the process isn't retaining more per turn; a
+  rising row across deciles (or the totals' peak far above the warm baseline) means something is
+  holding onto memory as the session grows -- a history structure that never trims, a cache keyed
+  by turn number, an ever-growing array of samples.
+- **cpuMs/turn** — `userCPUTime + systemCPUTime` (from `resourceUsage()`, in microseconds)
+  consumed since the previous decile boundary, divided by the number of turns in the decile. This
+  is host CPU, not wall-clock time: a flat row alongside a rising wall-clock/tool-latency row in
+  the timing report means the extra time is waiting (I/O, another process), not extra computation.
+- **fsRead/turn, fsWrite/turn** — `resourceUsage()`'s `fsRead`/`fsWrite` (block I/O operation
+  counts, not bytes) delta per turn. Usually near zero for the goal/delegate mixes, since their
+  reads are small and stay in the page cache; a sustained non-zero value is real disk traffic per
+  turn, worth chasing the same way a rising CPU row is.
+- **ctxSw/turn** — voluntary plus involuntary context switches (`resourceUsage()`) per turn.
+  Voluntary switches usually mean the turn blocked on I/O or another process; a rising involuntary
+  count alongside rising CPU means more contention for the CPU itself (more concurrent work, not
+  just more work).
+- **spawns** — child processes created during that decile's turns, tagged by the turn that
+  started them (see "How spawns are counted" below). Zero for the `goal` mix (task_steps,
+  get_goal, update_goal, read never shell out). Non-zero for the `tools` mix, where `bash` and
+  `grep` both spawn a process per call.
+- **Totals** — peak rss/heap across the whole run (not just the decile medians, so a short-lived
+  spike between turn boundaries wouldn't be averaged away), total CPU ms, total fsRead/fsWrite,
+  total spawn count, and the top 5 spawned commands by basename. The growth report folds this
+  totals line in verbatim under the rss/heapUsed growth table.
+- **Growth vs. flat**, same method as the timing rows: warm baseline is the median of deciles two
+  through five (JIT/cache warm-up in the first tenth is not growth), compared against the last
+  decile and the peak decile; the growth report warns above 2x on either, advisory only, never a
+  non-zero exit.
+- **Post-GC heapUsed** — if the test process was started with `NODE_OPTIONS=--expose-gc`
+  (`global.gc` available), one forced GC's resulting heapUsed is printed at the end of the
+  pressure report -- a useful check for whether a rising heapMB decile is retained data or just
+  uncollected garbage. Without `--expose-gc` the report says so plainly instead of guessing.
+- **Spawn counts on Windows are the dominant tool cost.** As the "Tool spans on Windows are
+  process creation" note above already shows for wall-clock time, the pressure report's spawn
+  count explains *why*: every `bash`/`grep` call on Windows starts a shell or `ripgrep.exe`
+  process, and process creation is far more expensive on Windows than on Linux. A high, flat
+  spawn-per-decile row is a platform cost to budget for, not a regression; a *rising* spawn count
+  across deciles (more processes per turn as the session grows) is a real bug.
+- **How spawns are counted.** All of this project's own tool code imports `spawn`/`exec`/etc. as
+  ESM named bindings resolved once when the module loads, so reassigning
+  `child_process.spawn`/`exec`/`execFile`/`fork` from outside is a no-op for them (verified by
+  experiment: a monkeypatched property is simply never seen by a caller already holding the
+  original function). The profiler instead subscribes to Node's `diagnostics_channel`
+  `"child_process"` channel, which fires from inside `node:child_process` itself whenever any of
+  `spawn`/`exec`/`execFile`/`fork` creates a process, regardless of how the caller obtained its
+  reference -- this is what actually counts the `bash`/`grep` spawns in the `tools` mix.
+  `spawnSync`/`execFileSync` publish nothing on that channel (Node only instruments the async
+  `ChildProcess` constructor), so those two are additionally wrapped by reassigning the module
+  property; that still can't catch this project's own synchronous callers, but it does catch any
+  CommonJS dependency that reaches them through a live `require("child_process").spawnSync(...)`
+  property lookup.
+
 ## The Profile workflow
 
 `.github/workflows/profile.yml`, `workflow_dispatch` only. Inputs: `host_turns` (default 1500),

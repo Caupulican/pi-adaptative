@@ -10,11 +10,17 @@
  * writes a V8 .cpuprofile of the whole run. The decile tables are the growth signal: a flat row
  * means no per-turn cost grows with the session; a rising row is a re-walk of history somewhere.
  *
+ * It also samples memory, disk, CPU and child-process pressure at every turn boundary (see
+ * `samplePressure` / the `message_end` subscription below) and writes those to
+ * `host-session-pressure.txt` / `.json`, alongside the existing `host-session-profile.txt`.
+ *
  * PI_PROFILE_TURNS (default 300) tool turns; PI_PROFILE_DIR output directory (default profiles-node).
  */
+import childProcess from "node:child_process";
+import diagnosticsChannel from "node:diagnostics_channel";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import inspector from "node:inspector";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
@@ -52,6 +58,111 @@ function deciles(values: number[]): string {
 				.padStart(7),
 		);
 	return out.join(" ");
+}
+interface PressureSample {
+	turn: number;
+	rss: number;
+	heapUsed: number;
+	heapTotal: number;
+	external: number;
+	userCPUTime: number;
+	systemCPUTime: number;
+	fsRead: number;
+	fsWrite: number;
+	maxRSS: number;
+	voluntaryContextSwitches: number;
+	involuntaryContextSwitches: number;
+}
+interface SpawnRecord {
+	turn: number;
+	command: string;
+}
+function samplePressure(turn: number): PressureSample {
+	const mem = process.memoryUsage();
+	const ru = process.resourceUsage();
+	return {
+		turn,
+		rss: mem.rss,
+		heapUsed: mem.heapUsed,
+		heapTotal: mem.heapTotal,
+		external: mem.external,
+		userCPUTime: ru.userCPUTime,
+		systemCPUTime: ru.systemCPUTime,
+		fsRead: ru.fsRead,
+		fsWrite: ru.fsWrite,
+		maxRSS: ru.maxRSS,
+		voluntaryContextSwitches: ru.voluntaryContextSwitches,
+		involuntaryContextSwitches: ru.involuntaryContextSwitches,
+	};
+}
+function commandBasename(value: string | null | undefined): string {
+	if (!value) return "unknown";
+	const first = value.trim().split(/\s+/)[0] ?? value;
+	return basename(first) || first;
+}
+/**
+ * Renders the pressure decile table plus totals. `samples[0]` is the pre-run baseline; `samples[i]`
+ * (i >= 1) is the state right after turn `i` completed, so the delta over any range of turns is a
+ * plain difference of the cumulative counters at its start and end -- no need to store per-turn
+ * deltas separately.
+ */
+function renderPressureReport(samples: PressureSample[], spawns: SpawnRecord[]): string {
+	const mb = (bytes: number) => bytes / (1024 * 1024);
+	const perTurn = samples.slice(1);
+	const lines: string[] = [];
+	lines.push(`pressure samples: turns=${perTurn.length} (plus 1 pre-run baseline)`);
+	lines.push("decile   rssMB   heapMB  cpuMs/turn  fsRead/turn  fsWrite/turn  ctxSw/turn  spawns");
+	const n = perTurn.length;
+	for (let i = 0; i < 10; i++) {
+		const start = Math.floor((i * n) / 10);
+		const end = Math.floor(((i + 1) * n) / 10);
+		const group = perTurn.slice(start, end);
+		const label = String(i + 1).padStart(6);
+		if (group.length === 0) {
+			lines.push(`${label}       -       -           -            -             -           -       0`);
+			continue;
+		}
+		const before = samples[start]!;
+		const after = samples[end]!;
+		const cpuMsPerTurn =
+			(after.userCPUTime - before.userCPUTime + (after.systemCPUTime - before.systemCPUTime)) / 1000 / group.length;
+		const fsReadPerTurn = (after.fsRead - before.fsRead) / group.length;
+		const fsWritePerTurn = (after.fsWrite - before.fsWrite) / group.length;
+		const ctxPerTurn =
+			(after.voluntaryContextSwitches -
+				before.voluntaryContextSwitches +
+				(after.involuntaryContextSwitches - before.involuntaryContextSwitches)) /
+			group.length;
+		const medianRssMb = median(group.map((s) => mb(s.rss)));
+		const medianHeapMb = median(group.map((s) => mb(s.heapUsed)));
+		const turnRangeStart = start + 1;
+		const turnRangeEnd = end;
+		const spawnCount = spawns.filter((s) => s.turn >= turnRangeStart && s.turn <= turnRangeEnd).length;
+		lines.push(
+			`${label} ${medianRssMb.toFixed(1).padStart(7)} ${medianHeapMb.toFixed(1).padStart(7)} ${cpuMsPerTurn.toFixed(2).padStart(11)} ${fsReadPerTurn.toFixed(2).padStart(12)} ${fsWritePerTurn.toFixed(2).padStart(13)} ${ctxPerTurn.toFixed(2).padStart(11)} ${String(spawnCount).padStart(7)}`,
+		);
+	}
+	const baseline0 = samples[0]!;
+	const last = samples[samples.length - 1]!;
+	const peakRssMb = Math.max(...samples.map((s) => mb(s.rss)));
+	const peakHeapMb = Math.max(...samples.map((s) => mb(s.heapUsed)));
+	const totalCpuMs =
+		(last.userCPUTime - baseline0.userCPUTime + (last.systemCPUTime - baseline0.systemCPUTime)) / 1000;
+	const totalFsRead = last.fsRead - baseline0.fsRead;
+	const totalFsWrite = last.fsWrite - baseline0.fsWrite;
+	lines.push("");
+	lines.push(
+		`totals: peak rss=${peakRssMb.toFixed(1)}MB peak heap=${peakHeapMb.toFixed(1)}MB total cpu=${totalCpuMs.toFixed(1)}ms total fsRead=${totalFsRead} total fsWrite=${totalFsWrite} total spawns=${spawns.length}`,
+	);
+	const byCommand = new Map<string, number>();
+	for (const spawn of spawns) byCommand.set(spawn.command, (byCommand.get(spawn.command) ?? 0) + 1);
+	const top5 = [...byCommand.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+	lines.push(
+		top5.length > 0
+			? `top spawned commands: ${top5.map(([command, count]) => `${command}=${count}`).join(", ")}`
+			: "top spawned commands: (none spawned)",
+	);
+	return lines.join("\n");
 }
 function startProfiler(): Promise<inspector.Session> {
 	const session = new inspector.Session();
@@ -108,6 +219,56 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 		const bigOutputCommand = `node -e "for (let i = 0; i < 3000; i++) console.log('row ' + i + ' ' + 'z'.repeat(60))"`;
 		const smallOutputCommand = `node -e "console.log('ok')"`;
 		const delegateDurations: number[] = [];
+
+		// Child-process pressure: how many processes the scenario spawns, tagged with the turn that
+		// spawned them. All the project's own callers (bash/grep/git tools) import `spawn` etc. as a
+		// named ESM binding resolved once at load time, so reassigning `childProcess.spawn` here is a
+		// no-op for them (verified empirically -- a monkeypatched property is never seen by a caller
+		// holding its own copy of the original function). Node's `diagnostics_channel` "child_process"
+		// channel is the mechanism that actually observes process creation regardless of how the
+		// caller obtained its reference: it fires for spawn/exec/execFile/fork alike (fork spawns
+		// internally). `spawnSync`/`execFileSync` publish nothing on that channel -- Node only
+		// instruments the async ChildProcess constructor -- so those two are additionally wrapped by
+		// reassigning the module property, which still catches any dependency that reaches them via a
+		// live CJS `require("child_process").spawnSync(...)` property lookup, even though it cannot
+		// catch this project's own ESM-bound named imports.
+		const spawnRecords: SpawnRecord[] = [];
+		let turnsCompleted = 0;
+		const childProcessChannel = diagnosticsChannel.channel("child_process");
+		const onChildProcessSpawn = (message: unknown) => {
+			const proc = (message as { process?: { spawnfile?: string | null; spawnargs?: string[] } } | undefined)
+				?.process;
+			// The channel publishes before the ChildProcess's spawnfile/spawnargs are populated
+			// (verified empirically); defer the read one tick so the command is actually resolvable.
+			// The turn is captured now, synchronously, since it belongs to the tool call in flight.
+			const turnAtSpawn = turnsCompleted + 1;
+			setImmediate(() => {
+				const raw = proc?.spawnfile || proc?.spawnargs?.[0] || null;
+				spawnRecords.push({ turn: turnAtSpawn, command: commandBasename(raw) });
+			});
+		};
+		childProcessChannel.subscribe(onChildProcessSpawn);
+		const originalSpawnSync = childProcess.spawnSync;
+		const originalExecFileSync = childProcess.execFileSync;
+		childProcess.spawnSync = ((...args: Parameters<typeof originalSpawnSync>) => {
+			spawnRecords.push({ turn: turnsCompleted + 1, command: commandBasename(args[0] as string) });
+			return originalSpawnSync(...args);
+		}) as typeof childProcess.spawnSync;
+		childProcess.execFileSync = ((...args: Parameters<typeof originalExecFileSync>) => {
+			spawnRecords.push({ turn: turnsCompleted + 1, command: commandBasename(args[0] as string) });
+			return originalExecFileSync(...args);
+		}) as typeof childProcess.execFileSync;
+
+		// Memory/CPU/disk pressure, sampled at every turn boundary: `message_end` fires synchronously
+		// as each message finalizes, and a `toolResult` message marks the end of exactly one tool
+		// turn -- the same unit the existing per-tool decile tables use.
+		const pressureSamples: PressureSample[] = [samplePressure(0)];
+		const unsubscribePressure = harness.session.subscribe((event) => {
+			if (event.type === "message_end" && event.message.role === "toolResult") {
+				turnsCompleted++;
+				pressureSamples.push(samplePressure(turnsCompleted));
+			}
+		});
 		try {
 			harness.setResponses([
 				fauxAssistantMessage([fauxToolCall("create_goal", { objective: "Profile the host over a long session" })], {
@@ -242,12 +403,36 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 					`tool ${"delegate-run".padEnd(12)} n=${String(delegateDurations.length).padStart(4)} ms by decile: ${deciles(delegateDurations)}`,
 				);
 			}
+
+			// Memory/disk/CPU/process pressure: a separate report and raw-sample dump, alongside the
+			// existing timing report above. Never gates the run -- see docs/profiling-long-sessions.md.
+			writeFileSync(
+				join(OUT_DIR, "host-session-pressure.json"),
+				JSON.stringify({ samples: pressureSamples, spawns: spawnRecords }, null, 2),
+			);
+			const pressureLines = [
+				`turns=${TURNS} scenario=${SCENARIO}`,
+				renderPressureReport(pressureSamples, spawnRecords),
+			];
+			if (typeof global.gc === "function") {
+				global.gc();
+				const postGcHeapMb = process.memoryUsage().heapUsed / (1024 * 1024);
+				pressureLines.push(`post-GC heapUsed: ${postGcHeapMb.toFixed(1)}MB`);
+			} else {
+				pressureLines.push("post-GC heapUsed: unavailable (run with NODE_OPTIONS=--expose-gc)");
+			}
+			writeFileSync(join(OUT_DIR, "host-session-pressure.txt"), `${pressureLines.join("\n")}\n`);
+
 			// A load generator, not a correctness test: a handful of scripted task-step misses across the
 			// periodic compact are realistic and exercise the failure-ledger path this profile measures, so
 			// the error count is reported, not asserted to zero. What must hold is that the run did real work.
 			expect(entries.length).toBeGreaterThan(TURNS);
 			expect(byTool.size).toBeGreaterThan(0);
 		} finally {
+			unsubscribePressure();
+			childProcessChannel.unsubscribe(onChildProcessSpawn);
+			childProcess.spawnSync = originalSpawnSync;
+			childProcess.execFileSync = originalExecFileSync;
 			await harness.cleanup();
 		}
 	}, 600_000);
