@@ -42,6 +42,7 @@
 			"packages/coding-agent/test-destructive/**/*.ts",
 			"packages/coding-agent/examples/**/*.ts",
 			"!.worktrees",
+			"!!.claude",
 			"!**/node_modules/**/*",
 			"!**/test-sessions.ts",
 			"!**/models.generated.ts",
