@@ -653,11 +653,13 @@ export function applyContextGc(
 		const message = messages[index];
 		// A transient record with a later record of its kind is superseded by construction: the
 		// planner appends on change and never rewrites, so only the newest carries current content.
+		// Semantic-memory pages are left to the semantic rule below, whose freshness window and
+		// preserved recent pages are the policy for that kind of record.
 		if (
 			message.role === "custom" &&
 			typeof message.content === "string" &&
 			index < recentStart &&
-			!preservedSemanticIndexes.has(index) &&
+			!semanticIndexSet.has(index) &&
 			(plan.lastRecordIndexByKind.get(message.customType) ?? -1) > index
 		) {
 			const memo = packedMemos.get(message);
