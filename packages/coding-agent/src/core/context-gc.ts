@@ -187,6 +187,8 @@ type ToolCallMeta = {
 	name: string;
 	args: Record<string, unknown>;
 	messageIndex: number;
+	/** The call's `path` argument resolved against the working directory, once, at plan time. */
+	path?: string;
 };
 
 function normalizeSemanticMemoryGcSettings(settings?: SemanticMemoryGcSettings): Required<SemanticMemoryGcSettings> {
@@ -368,10 +370,12 @@ function createGcPlanFold(cwd: string, semanticSettings: Required<SemanticMemory
 			if (message.role === "assistant") {
 				for (const part of message.content) {
 					if (part.type !== "toolCall") continue;
-					plan.calls.set(part.id, { id: part.id, name: part.name, args: part.arguments ?? {}, messageIndex });
+					const args = part.arguments ?? {};
+					const path = normalizeToolPath(cwd, args.path);
+					plan.calls.set(part.id, { id: part.id, name: part.name, args, messageIndex, ...(path ? { path } : {}) });
 				}
 			} else if (message.role === "toolResult" && message.toolName === "read") {
-				const path = normalizeToolPath(cwd, plan.calls.get(message.toolCallId)?.args.path);
+				const path = plan.calls.get(message.toolCallId)?.path;
 				if (path) plan.latestReadByPath.set(path, message.toolCallId);
 			}
 			if (semanticSettings.enabled && semanticMessageHasMarker(message, semanticSettings)) {
@@ -669,7 +673,7 @@ export function applyContextGc(
 		if (originalText.length < options.minToolResultChars) continue;
 
 		const call = plan.calls.get(message.toolCallId);
-		const path = normalizeToolPath(options.cwd, call?.args.path);
+		const path = call?.path;
 		const command = typeof call?.args.command === "string" ? call.args.command : undefined;
 		let reason: ContextGcPackedRecord["reason"] = "stale-tool-result";
 		if (message.toolName === "read" && path) {

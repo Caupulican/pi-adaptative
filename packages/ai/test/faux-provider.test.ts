@@ -9,6 +9,7 @@ import {
 	stream,
 	Type,
 } from "../src/index.ts";
+import type { FauxRequestEvent } from "../src/providers/faux.ts";
 import type { AssistantMessageEvent, Context } from "../src/types.ts";
 
 async function collectEvents(streamResult: ReturnType<typeof stream>): Promise<AssistantMessageEvent[]> {
@@ -593,5 +594,47 @@ describe("faux provider", () => {
 		await expect(
 			complete(registration.getModel(), { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
 		).rejects.toThrow(`No API provider registered for api: ${registration.api}`);
+	});
+});
+
+describe("faux prompt-cache request events", () => {
+	const registrations: ReturnType<typeof registerFauxProvider>[] = [];
+	afterEach(() => {
+		for (const registration of registrations.splice(0)) registration.unregister?.();
+	});
+
+	it("reports each request's cached prefix and the message that broke it", async () => {
+		const events: FauxRequestEvent[] = [];
+		const registration = registerFauxProvider({ onRequest: (event) => events.push(event) });
+		registrations.push(registration);
+		registration.setResponses([
+			fauxAssistantMessage("one"),
+			fauxAssistantMessage("two"),
+			fauxAssistantMessage("three"),
+		]);
+
+		const first: Context = { systemPrompt: "sys", messages: [{ role: "user", content: "hello", timestamp: 1 }] };
+		await complete(registration.getModel(), first, { sessionId: "cache-1" });
+		const appended: Context = {
+			...first,
+			messages: [...first.messages, fauxAssistantMessage("one"), { role: "user", content: "next", timestamp: 2 }],
+		};
+		await complete(registration.getModel(), appended, { sessionId: "cache-1" });
+		const rewritten: Context = {
+			...appended,
+			messages: [{ role: "user", content: "bye", timestamp: 1 }, ...appended.messages.slice(1)],
+		};
+		await complete(registration.getModel(), rewritten, { sessionId: "cache-1" });
+
+		expect(events.map((event) => [event.firstRequest, event.divergedAt, event.divergedRole])).toEqual([
+			[true, 0, "user"],
+			[false, 1, "assistant"],
+			[false, 0, "user"],
+		]);
+		// An append reuses the whole previous prompt; a rewrite of the first message reuses only the system part.
+		expect(events[1]!.cachedChars).toBe(events[0]!.promptChars);
+		expect(events[2]!.cachedChars).toBeLessThan(events[0]!.promptChars);
+		expect(events[2]!.divergedText).toContain("user:bye");
+		expect(events.map((event) => event.messageCount)).toEqual([1, 3, 3]);
 	});
 });

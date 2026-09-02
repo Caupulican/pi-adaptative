@@ -105,6 +105,23 @@ interface ContextTokenEstimate {
  * `_auditMemo`. Produces byte-identical output to `estimateContextTokens(messages)` for the same
  * input regardless of `memo` -- see the equivalence test.
  */
+/**
+ * Empty `memo` when `messages` no longer extends the array it was last filled for, and return the
+ * lineage to remember. A message leaving the context is the only way an entry goes stale.
+ */
+function continueMemoLineage(
+	memo: { clear(): void },
+	previous: readonly AgentMessage[],
+	messages: readonly AgentMessage[],
+): readonly AgentMessage[] {
+	let extension = previous.length <= messages.length;
+	for (let index = 0; extension && index < previous.length; index++) {
+		if (previous[index] !== messages[index]) extension = false;
+	}
+	if (!extension) memo.clear();
+	return messages.slice();
+}
+
 function estimateContextTokensMemoized(
 	messages: AgentMessage[],
 	memo?: TokenMemo,
@@ -198,12 +215,14 @@ export class ContextPipeline {
 	 * contract. Rebuilt fresh (stale entries dropped) by `runContextAudit` every pass. */
 	private readonly _auditMemo: ContextAuditMemo = new Map();
 	/**
-	 * The messages the two memos above were last filled for. Entries go stale only when a message
-	 * leaves the context -- a compaction, a branch -- which shows as the next array not extending
-	 * this one; then both memos are emptied and refilled. Rebuilding them on every pass, to the same
-	 * contents, copied every entry per request.
+	 * The messages each memo above was last filled for, one lineage per memo: the audit and the
+	 * estimate are fed different projections of the history, and a shared lineage made each call
+	 * evict the other's entries. Entries go stale only when a message leaves the context -- a
+	 * compaction, a branch -- which shows as the next array not extending the previous one; then
+	 * that memo is emptied and refilled. Rebuilding on every pass copied every entry per request.
 	 */
-	private _memoMessages: readonly AgentMessage[] = [];
+	private _auditMemoMessages: readonly AgentMessage[] = [];
+	private _tokenMemoMessages: readonly AgentMessage[] = [];
 	private readonly _usageFinder = createApplicableAssistantUsageFinder();
 	/** Incremental memo for the per-message token estimate `estimateContextTokensMemoized`
 	 * relies on -- same object-identity-keyed, fresh-rebuild-per-pass contract as `_auditMemo`,
@@ -296,22 +315,9 @@ export class ContextPipeline {
 		// GC-eligible even if this ContextPipeline instance itself briefly lingers.
 		this._auditMemo.clear();
 		this._tokenMemo.clear();
-		this._memoMessages = [];
+		this._auditMemoMessages = [];
+		this._tokenMemoMessages = [];
 		this._latestCompactionScan.reset();
-	}
-
-	/** Empty both memos when `messages` no longer extends the array they were filled for. */
-	private _syncMemoLineage(messages: readonly AgentMessage[]): void {
-		const previous = this._memoMessages;
-		let extension = previous.length <= messages.length;
-		for (let index = 0; extension && index < previous.length; index++) {
-			if (previous[index] !== messages[index]) extension = false;
-		}
-		if (!extension) {
-			this._auditMemo.clear();
-			this._tokenMemo.clear();
-		}
-		this._memoMessages = messages.slice();
 	}
 
 	/**
@@ -411,7 +417,7 @@ export class ContextPipeline {
 	 */
 	runContextAudit(messages: AgentMessage[]): ContextAuditReport {
 		try {
-			this._syncMemoLineage(messages);
+			this._auditMemoMessages = continueMemoLineage(this._auditMemo, this._auditMemoMessages, messages);
 			const report = runContextAudit(messages, this._buildContextAuditOptions(messages), this._auditMemo);
 			this._latestContextAuditReport = report;
 			return report;
@@ -927,7 +933,7 @@ export class ContextPipeline {
 	}
 
 	private _estimateContextTokens(messages: AgentMessage[]): ContextTokenEstimate {
-		this._syncMemoLineage(messages);
+		this._tokenMemoMessages = continueMemoLineage(this._tokenMemo, this._tokenMemoMessages, messages);
 		return estimateContextTokensMemoized(messages, this._tokenMemo, this._usageFinder);
 	}
 

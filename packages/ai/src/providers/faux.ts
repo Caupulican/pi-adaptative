@@ -105,9 +105,27 @@ export type FauxResponseFactory = (
 
 export type FauxResponseStep = AssistantMessage | FauxResponseFactory;
 
+/**
+ * One provider request as the faux prompt cache saw it: how much of the serialized prompt was a
+ * byte prefix of the previous request on the same session, and which message broke the prefix.
+ * `divergedAt` is the index of the first message not fully covered by the cached prefix.
+ */
+export interface FauxRequestEvent {
+	sessionId: string | undefined;
+	firstRequest: boolean;
+	promptChars: number;
+	cachedChars: number;
+	messageCount: number;
+	divergedAt: number | undefined;
+	divergedRole: string | undefined;
+	divergedText: string | undefined;
+}
+
 export interface RegisterFauxProviderOptions {
 	api?: string;
 	provider?: string;
+	/** Observe every request's prompt-cache reuse; see {@link FauxRequestEvent}. */
+	onRequest?: (event: FauxRequestEvent) => void;
 	models?: FauxModelDefinition[];
 	tokensPerSecond?: number;
 	tokenSize?: {
@@ -178,18 +196,26 @@ function messageToText(message: Message): string {
 	return toolResultToText(message);
 }
 
-function serializeContext(context: Context): string {
+interface SerializedContext {
+	text: string;
+	/** `[start, end)` of each message's part inside `text`, by message index. */
+	messageSpans: Array<readonly [number, number]>;
+}
+
+function serializeContext(context: Context): SerializedContext {
 	const parts: string[] = [];
-	if (context.systemPrompt) {
-		parts.push(`system:${context.systemPrompt}`);
-	}
-	for (const message of context.messages) {
-		parts.push(`${message.role}:${messageToText(message)}`);
-	}
-	if (context.tools?.length) {
-		parts.push(`tools:${JSON.stringify(context.tools)}`);
-	}
-	return parts.join("\n\n");
+	const messageSpans: Array<readonly [number, number]> = [];
+	let offset = 0;
+	const push = (part: string): readonly [number, number] => {
+		const start = offset + (parts.length > 0 ? 2 : 0);
+		parts.push(part);
+		offset = start + part.length;
+		return [start, offset];
+	};
+	if (context.systemPrompt) push(`system:${context.systemPrompt}`);
+	for (const message of context.messages) messageSpans.push(push(`${message.role}:${messageToText(message)}`));
+	if (context.tools?.length) push(`tools:${JSON.stringify(context.tools)}`);
+	return { text: parts.join("\n\n"), messageSpans };
 }
 
 function commonPrefixLength(a: string, b: string): number {
@@ -206,19 +232,24 @@ function withUsageEstimate(
 	context: Context,
 	options: StreamOptions | undefined,
 	promptCache: Map<string, string>,
+	onRequest?: (event: FauxRequestEvent) => void,
 ): AssistantMessage {
-	const promptText = serializeContext(context);
+	const serialized = serializeContext(context);
+	const promptText = serialized.text;
 	const promptTokens = estimateTokens(promptText);
 	const outputTokens = estimateTokens(assistantContentToText(message.content));
 	let input = promptTokens;
 	let cacheRead = 0;
 	let cacheWrite = 0;
+	let cachedChars = 0;
+	let firstRequest = true;
 	const sessionId = options?.sessionId;
 
 	if (sessionId && options?.cacheRetention !== "none") {
 		const previousPrompt = promptCache.get(sessionId);
 		if (previousPrompt) {
-			const cachedChars = commonPrefixLength(previousPrompt, promptText);
+			firstRequest = false;
+			cachedChars = commonPrefixLength(previousPrompt, promptText);
 			cacheRead = estimateTokens(previousPrompt.slice(0, cachedChars));
 			cacheWrite = estimateTokens(promptText.slice(cachedChars));
 			input = Math.max(0, promptTokens - cacheRead);
@@ -226,6 +257,21 @@ function withUsageEstimate(
 			cacheWrite = promptTokens;
 		}
 		promptCache.set(sessionId, promptText);
+	}
+	if (onRequest) {
+		const divergedAt = serialized.messageSpans.findIndex(([, end]) => end > cachedChars);
+		const diverged = divergedAt >= 0 ? context.messages[divergedAt] : undefined;
+		const span = divergedAt >= 0 ? serialized.messageSpans[divergedAt]! : undefined;
+		onRequest({
+			sessionId,
+			firstRequest,
+			promptChars: promptText.length,
+			cachedChars,
+			messageCount: context.messages.length,
+			divergedAt: divergedAt >= 0 ? divergedAt : undefined,
+			divergedRole: diverged?.role,
+			divergedText: span ? promptText.slice(span[0], Math.min(span[1], span[0] + 120)) : undefined,
+		});
 	}
 
 	return {
@@ -483,7 +529,7 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 						provider,
 						requestModel.id,
 					);
-					message = withUsageEstimate(message, context, streamOptions, promptCache);
+					message = withUsageEstimate(message, context, streamOptions, promptCache, options.onRequest);
 					outer.push({ type: "error", reason: "error", error: message });
 					outer.end(message);
 					return;
@@ -492,7 +538,7 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 				const resolved =
 					typeof step === "function" ? await step(context, streamOptions, state, requestModel) : step;
 				let message = cloneMessage(resolved, api, provider, requestModel.id);
-				message = withUsageEstimate(message, context, streamOptions, promptCache);
+				message = withUsageEstimate(message, context, streamOptions, promptCache, options.onRequest);
 				await streamWithDeltas(outer, message, minTokenSize, maxTokenSize, tokensPerSecond, streamOptions?.signal);
 			} catch (error) {
 				const message = createErrorMessage(error, api, provider, requestModel.id);
