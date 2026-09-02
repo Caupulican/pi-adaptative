@@ -125,8 +125,17 @@ jobs:
             echo
             for scenario in goal tools delegate; do
               echo "## Long-session growth (host, $scenario mix)"
+              # The pressure file (host-session-pressure.txt, memory/disk/CPU/process sampling
+              # from the same run) is optional here only for defensiveness -- the test always
+              # writes it alongside host-session-profile.txt -- and folds its rss/heapUsed
+              # growth table plus totals line into this same report, never failing the job.
               if [ -f "$PROFILE_DIR/host/$scenario/host-session-profile.txt" ]; then
-                node scripts/report-long-session-growth.mjs "$PROFILE_DIR/host/$scenario/host-session-profile.txt"
+                if [ -f "$PROFILE_DIR/host/$scenario/host-session-pressure.txt" ]; then
+                  node scripts/report-long-session-growth.mjs "$PROFILE_DIR/host/$scenario/host-session-profile.txt" "$PROFILE_DIR/host/$scenario/host-session-pressure.txt"
+                else
+                  node scripts/report-long-session-growth.mjs "$PROFILE_DIR/host/$scenario/host-session-profile.txt"
+                  echo "::warning title=Host pressure ($scenario)::no host-session-pressure.txt was produced"
+                fi
               else
                 echo "::warning title=Host profile ($scenario)::no host-session-profile.txt was produced"
               fi
@@ -152,6 +161,8 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY" || true
 
       - name: Upload profiles
+        # profiles/** already covers host-session-pressure.txt and .json: the test writes them into
+        # the same PI_PROFILE_DIR as host-session-profile.txt and the .cpuprofile.
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cpu-profiles-${{ matrix.os }}-${{ github.run_id }}
