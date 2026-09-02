@@ -505,7 +505,11 @@ describe("transport telemetry (turn-economics transport-observability task)", ()
 		}).result();
 		const firstTransport = first.diagnostics?.filter((diagnostic) => diagnostic.type === "provider_transport");
 		expect(firstTransport).toHaveLength(1);
-		expect(firstTransport?.[0]?.details).toMatchObject({ transport: "websocket", deltaEngaged: false });
+		expect(firstTransport?.[0]?.details).toMatchObject({
+			transport: "websocket",
+			deltaEngaged: false,
+			deltaSkipReason: "no_continuation",
+		});
 
 		const secondContext = context([
 			...firstContext.messages,
@@ -520,7 +524,29 @@ describe("transport telemetry (turn-economics transport-observability task)", ()
 		const secondTransport = second.diagnostics?.filter((diagnostic) => diagnostic.type === "provider_transport");
 		expect(secondTransport).toHaveLength(1);
 		expect(secondTransport?.[0]?.details).toMatchObject({ transport: "websocket", deltaEngaged: true });
+		expect(secondTransport?.[0]?.details).not.toHaveProperty("deltaSkipReason");
 		expect(global.fetch).not.toHaveBeenCalled();
+
+		// A rewritten already-sent item cannot continue from the server's state: the telemetry names
+		// the refusal, so a live census can tell a rewrite from a lost connection.
+		const rewrittenContext = context([
+			{ role: "user", content: "hello, rewritten", timestamp: 1 },
+			first,
+			{ role: "user", content: "continue", timestamp: 2 },
+			second,
+			{ role: "user", content: "again", timestamp: 3 },
+		]);
+		const third = await streamOpenAICodexResponses(model, rewrittenContext, {
+			apiKey: mockToken(),
+			transport: "websocket-cached",
+			sessionId: "delta-telemetry-session",
+		}).result();
+		const thirdTransport = third.diagnostics?.filter((diagnostic) => diagnostic.type === "provider_transport");
+		expect(thirdTransport?.[0]?.details).toMatchObject({
+			transport: "websocket",
+			deltaEngaged: false,
+			deltaSkipReason: "input_prefix_mismatch",
+		});
 	});
 
 	it("records a websocket-to-sse fallback, alongside the existing failure diagnostic, when the connection cannot be established", async () => {

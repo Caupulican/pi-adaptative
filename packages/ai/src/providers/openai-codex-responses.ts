@@ -284,7 +284,13 @@ function appendCodexSubscriptionRateLimitDiagnostics(output: AssistantMessage, h
  */
 function appendProviderTransportDiagnostic(
 	output: AssistantMessage,
-	details: { transport: "websocket" | "sse"; deltaEngaged: boolean; fallbackFromWebsocket?: boolean },
+	details: {
+		transport: "websocket" | "sse";
+		deltaEngaged: boolean;
+		fallbackFromWebsocket?: boolean;
+		/** Why the delta did not engage; absent when it did. Names the exact refusal for a live census. */
+		deltaSkipReason?: DeltaSkipReason;
+	},
 ): void {
 	appendAssistantMessageDiagnostic(output, { type: "provider_transport", timestamp: Date.now(), details });
 }
@@ -1001,6 +1007,8 @@ interface CachedWebSocketContinuationState {
 interface PreparedWebSocketRequest {
 	requestBody: RequestBody;
 	currentInputTail?: CachedWebSocketInputPart;
+	/** Set when the request goes out in full; names the refusal for the transport telemetry. */
+	deltaSkipReason?: DeltaSkipReason;
 }
 
 interface CachedWebSocketConnection {
@@ -1616,15 +1624,36 @@ function getCachedWebSocketInputDelta(
 	return currentInput.slice(currentIndex);
 }
 
+/**
+ * Why a request went out in full instead of as a delta. `no_continuation`: nothing to continue
+ * from (first request on a connection, or the state was reset by a transport error).
+ * `shape_mismatch`: instructions, tools, reasoning or another body field changed, so the server
+ * state is for a different request shape. `input_prefix_mismatch`: an already-sent input item is
+ * not byte-identical any more (a rewritten message). `no_response_id`: the previous response never
+ * yielded an id to continue from.
+ */
+type DeltaSkipReason = "no_continuation" | "shape_mismatch" | "input_prefix_mismatch" | "no_response_id";
+
 function prepareFullWebSocketRequest(entry: CachedWebSocketConnection, body: RequestBody): PreparedWebSocketRequest {
 	const continuation = entry.continuation;
-	if (!continuation) {
-		return { requestBody: body, currentInputTail: appendCachedWebSocketInput(undefined, body.input ?? []) };
+	const full = (deltaSkipReason: DeltaSkipReason): PreparedWebSocketRequest => ({
+		requestBody: body,
+		currentInputTail: appendCachedWebSocketInput(undefined, body.input ?? []),
+		deltaSkipReason,
+	});
+	if (!continuation) return full("no_continuation");
+	if (!requestBodiesMatchExceptInput(body, continuation.requestShape)) {
+		entry.continuation = undefined;
+		return full("shape_mismatch");
 	}
 	const delta = getCachedWebSocketInputDelta(body, continuation);
-	if (!delta || !continuation.lastResponseId) {
+	if (!delta) {
 		entry.continuation = undefined;
-		return { requestBody: body, currentInputTail: appendCachedWebSocketInput(undefined, body.input ?? []) };
+		return full("input_prefix_mismatch");
+	}
+	if (!continuation.lastResponseId) {
+		entry.continuation = undefined;
+		return full("no_response_id");
 	}
 	return {
 		requestBody: { ...body, previous_response_id: continuation.lastResponseId, input: delta },
@@ -1723,6 +1752,9 @@ async function processWebSocketStream(
 	appendProviderTransportDiagnostic(output, {
 		transport: "websocket",
 		deltaEngaged: Boolean(requestBody.previous_response_id),
+		...(!requestBody.previous_response_id && prepared.deltaSkipReason
+			? { deltaSkipReason: prepared.deltaSkipReason }
+			: {}),
 	});
 	const wireRequestBody = model.openaiResponsesLite
 		? {
