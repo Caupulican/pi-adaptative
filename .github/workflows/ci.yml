@@ -90,7 +90,16 @@ jobs:
       # pre-commit chain checks the staged tree; a push is checked over its commit range.
       - name: Contract-doctrine gate
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
-        run: node scripts/check-contract-doctrine.mjs --range ${{ github.event.before }}..${{ github.sha }}
+        shell: bash
+        run: |
+          # The checkout is shallow: fetch the push's base so the range diff has both ends. A base
+          # that no longer exists (a force-push) falls back to the head commit alone.
+          if git fetch --no-tags --depth=1 origin "${{ github.event.before }}"; then
+            node scripts/check-contract-doctrine.mjs --range "${{ github.event.before }}..${{ github.sha }}"
+          else
+            git fetch --no-tags --deepen=1 origin
+            node scripts/check-contract-doctrine.mjs --range "HEAD~1..HEAD"
+          fi
 
       - name: Verification-harness coverage gate
         if: >

@@ -329,10 +329,12 @@ export class SystemPromptBuilder {
 			this._buildSituationSoulPrompt(),
 			// Always-on untrusted-content boundary contract (gives the <untrusted_content> fences meaning).
 			UNTRUSTED_BOUNDARY_SYSTEM_RULE,
-			// The tool-failure protocol lives here once, stable for the whole session; each active
-			// ledger record then carries one pointer line instead of repeating the protocol text
-			// (pi-agent-core's toolFailureProtocolProse, set from the capability tier).
-			MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT,
+			// The tool-failure protocol lives here once, stable for the whole session, for the full
+			// capability class: each active ledger record then carries one pointer line instead of
+			// repeating the protocol text (pi-agent-core's toolFailureProtocolProse, set from the
+			// capability tier). Constrained classes keep the text in the record instead, so their
+			// bounded stable-prompt envelope is not spent on it.
+			modelCapability.class === "full" ? MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT : undefined,
 			this._buildProjectInstructionIsolationPrompt(modelCapability),
 			this._buildSelfModificationPrompt(modelCapability),
 			this._buildAutonomyPrompt(modelCapability),

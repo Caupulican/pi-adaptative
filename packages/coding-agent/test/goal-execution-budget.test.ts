@@ -10,6 +10,22 @@ import { appendGoalClearedSnapshot, appendGoalStateSnapshot } from "../src/core/
 import { budgetedTokens } from "../src/core/orchestration/capability-gateway.ts";
 import { createHarness } from "./suite/harness.ts";
 
+/**
+ * Varied text of about `chars` characters. A single repeated character is exactly what the stream
+ * output-repetition guard ends as a runaway, so a budget-exhausting synthetic response must read
+ * like real output.
+ */
+function bigVariedText(chars: number): string {
+	const lines: string[] = [];
+	let length = 0;
+	for (let index = 0; length < chars; index++) {
+		const line = `line ${index}: value ${index * 7919} checksum ${(index * 31) % 997}\n`;
+		lines.push(line);
+		length += line.length;
+	}
+	return lines.join("");
+}
+
 describe("goal-owned execution budget", () => {
 	it("exposes goal correlation only while an authoritative execution lease owns it", () => {
 		const sessionManager = SessionManager.inMemory();
@@ -514,7 +530,7 @@ describe("goal-owned execution budget", () => {
 		});
 		appendGoalStateSnapshot(harness.sessionManager, goal);
 		harness.setResponses([
-			fauxAssistantMessage([fauxText("x".repeat(220_000)), fauxToolCall("tick", {})], { stopReason: "toolUse" }),
+			fauxAssistantMessage([fauxText(bigVariedText(220_000)), fauxToolCall("tick", {})], { stopReason: "toolUse" }),
 			fauxAssistantMessage("must not reach a second provider request"),
 		]);
 
@@ -573,7 +589,7 @@ describe("goal-owned execution budget", () => {
 		});
 		appendGoalStateSnapshot(harness.sessionManager, goal);
 		harness.setResponses([
-			fauxAssistantMessage([fauxText("x".repeat(220_000)), fauxToolCall("tick", {})], { stopReason: "toolUse" }),
+			fauxAssistantMessage([fauxText(bigVariedText(220_000)), fauxToolCall("tick", {})], { stopReason: "toolUse" }),
 			fauxAssistantMessage("must not be reached: the budget was already crossed by the prior response"),
 		]);
 

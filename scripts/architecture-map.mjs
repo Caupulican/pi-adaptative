@@ -12,8 +12,9 @@
  */
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
 const core = join(root, "packages/coding-agent/src/core");
 const tests = join(root, "packages/coding-agent/test");
 const out = join(root, "docs/architecture.md");
