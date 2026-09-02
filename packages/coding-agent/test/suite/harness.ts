@@ -68,7 +68,7 @@ export function getAssistantTexts(harness: Harness): string[] {
 
 export interface HarnessOptions {
 	models?: FauxModelDefinition[];
-	fauxProvider?: Pick<RegisterFauxProviderOptions, "api" | "provider">;
+	fauxProvider?: Pick<RegisterFauxProviderOptions, "api" | "provider" | "onRequest">;
 	settings?: Partial<Settings>;
 	systemPrompt?: string;
 	tools?: AgentTool[];

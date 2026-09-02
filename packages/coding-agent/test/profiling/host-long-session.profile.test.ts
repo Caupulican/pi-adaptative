@@ -23,6 +23,7 @@ import inspector from "node:inspector";
 import { basename, join } from "node:path";
 import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
+import type { FauxRequestEvent } from "@caupulican/pi-ai/faux";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "../../src/core/default-tool-surface.ts";
 import { createHarness } from "../suite/harness.ts";
@@ -164,6 +165,54 @@ function renderPressureReport(samples: PressureSample[], spawns: SpawnRecord[]):
 	);
 	return lines.join("\n");
 }
+/**
+ * Per session, every request after the first is either an append (the previous request's messages
+ * are a byte prefix of it, so the diverging message is at or past the previous end) or a rewrite
+ * (something inside the previously sent messages changed). Rewrites are grouped by where they hit,
+ * counted from the previous request's end, and by the head of the message that changed.
+ */
+function renderCacheReport(events: FauxRequestEvent[]): string {
+	const bySession = new Map<string, FauxRequestEvent[]>();
+	for (const event of events) {
+		const key = event.sessionId ?? "(no session)";
+		bySession.set(key, [...(bySession.get(key) ?? []), event]);
+	}
+	const main = [...bySession.values()].sort((a, b) => b.length - a.length)[0] ?? [];
+	const reuse: number[] = [];
+	let appends = 0;
+	let rewrites = 0;
+	const rewriteKinds = new Map<string, number>();
+	for (let index = 1; index < main.length; index++) {
+		const event = main[index]!;
+		const previous = main[index - 1]!;
+		if (event.firstRequest) continue;
+		reuse.push(event.promptChars > 0 ? event.cachedChars / event.promptChars : 1);
+		if (event.divergedAt === undefined || event.divergedAt >= previous.messageCount) {
+			appends += 1;
+			continue;
+		}
+		rewrites += 1;
+		const offset = event.divergedAt - previous.messageCount;
+		const head = (event.divergedText ?? "").replace(/\s+/g, " ").replace(/\d+/g, "#").slice(0, 60);
+		const kind = `${event.divergedRole ?? "?"} at previous-end${offset} :: ${head}`;
+		rewriteKinds.set(kind, (rewriteKinds.get(kind) ?? 0) + 1);
+	}
+	const measured = appends + rewrites;
+	const p50 = reuse.length > 0 ? median(reuse) : 1;
+	const high = reuse.length > 0 ? reuse.filter((value) => value >= 0.9).length / reuse.length : 1;
+	const lines = [
+		`cache: requests=${main.length} p50 reuse=${p50.toFixed(2)} share>=0.9=${high.toFixed(2)} appends=${appends}/${measured} rewrites=${rewrites}/${measured}`,
+		`reuse by decile (median cachedChars/promptChars): ${deciles(reuse)}`,
+		"top rewrite points (role at offset from the previous request's last message :: head of the changed message):",
+		...[...rewriteKinds.entries()]
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, 10)
+			.map(([kind, count]) => `  ${String(count).padStart(5)}  ${kind}`),
+	];
+	if (rewriteKinds.size === 0) lines.push("  (none: every request appended to the previous one)");
+	return lines.join("\n");
+}
+
 function startProfiler(): Promise<inspector.Session> {
 	const session = new inspector.Session();
 	session.connect();
@@ -192,7 +241,9 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 		const report = join(OUT_DIR, "host-session-profile.txt");
 		writeFileSync(report, "");
 		const log = (line: string) => appendFileSync(report, `${line}\n`);
+		const requestEvents: FauxRequestEvent[] = [];
 		const harness = await createHarness({
+			fauxProvider: { onRequest: (event) => requestEvents.push(event) },
 			settings: {
 				autoLearn: { enabled: false },
 				...(SCENARIO === "delegate" ? { workerDelegation: { enabled: true, maxConcurrent: 1 } } : {}),
@@ -422,6 +473,15 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 				pressureLines.push("post-GC heapUsed: unavailable (run with NODE_OPTIONS=--expose-gc)");
 			}
 			writeFileSync(join(OUT_DIR, "host-session-pressure.txt"), `${pressureLines.join("\n")}\n`);
+
+			// Prompt-cache reuse as the faux provider's byte-prefix cache saw every request: what the
+			// owner pays for is every request that is not an append of the previous one.
+			const cacheReport = renderCacheReport(requestEvents);
+			writeFileSync(
+				join(OUT_DIR, "host-session-cache.txt"),
+				`turns=${TURNS} scenario=${SCENARIO}\n${cacheReport}\n`,
+			);
+			log(cacheReport.split("\n")[0] ?? "");
 
 			// A load generator, not a correctness test: a handful of scripted task-step misses across the
 			// periodic compact are realistic and exercise the failure-ledger path this profile measures, so

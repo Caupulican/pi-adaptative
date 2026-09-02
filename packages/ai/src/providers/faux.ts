@@ -244,20 +244,26 @@ function withUsageEstimate(
 	let cachedChars = 0;
 	let firstRequest = true;
 	const sessionId = options?.sessionId;
-
-	if (sessionId && options?.cacheRetention !== "none") {
-		const previousPrompt = promptCache.get(sessionId);
+	// Usage models a cache only for a named session that keeps its cache, as before. The request
+	// event measures prefix reuse regardless: a real provider caches by content prefix and a session
+	// id only routes, so a host that names no session is still measured, per registration.
+	const accounted = sessionId !== undefined && options?.cacheRetention !== "none";
+	const cacheKey = accounted ? sessionId : "";
+	const previousPrompt = promptCache.get(cacheKey);
+	if (previousPrompt) {
+		firstRequest = false;
+		cachedChars = commonPrefixLength(previousPrompt, promptText);
+	}
+	if (accounted) {
 		if (previousPrompt) {
-			firstRequest = false;
-			cachedChars = commonPrefixLength(previousPrompt, promptText);
 			cacheRead = estimateTokens(previousPrompt.slice(0, cachedChars));
 			cacheWrite = estimateTokens(promptText.slice(cachedChars));
 			input = Math.max(0, promptTokens - cacheRead);
 		} else {
 			cacheWrite = promptTokens;
 		}
-		promptCache.set(sessionId, promptText);
 	}
+	promptCache.set(cacheKey, promptText);
 	if (onRequest) {
 		const divergedAt = serialized.messageSpans.findIndex(([, end]) => end > cachedChars);
 		const diverged = divergedAt >= 0 ? context.messages[divergedAt] : undefined;

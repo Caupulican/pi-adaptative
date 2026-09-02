@@ -136,6 +136,11 @@ jobs:
                   node scripts/report-long-session-growth.mjs "$PROFILE_DIR/host/$scenario/host-session-profile.txt"
                   echo "::warning title=Host pressure ($scenario)::no host-session-pressure.txt was produced"
                 fi
+                if [ -f "$PROFILE_DIR/host/$scenario/host-session-cache.txt" ]; then
+                  echo; echo "#### prompt-cache reuse ($scenario)"; echo '```'
+                  cat "$PROFILE_DIR/host/$scenario/host-session-cache.txt"
+                  echo '```'
+                fi
               else
                 echo "::warning title=Host profile ($scenario)::no host-session-profile.txt was produced"
               fi
