@@ -130,7 +130,54 @@ describe("goal tool", () => {
 		const first = evidence.content[0];
 		expect(first?.type).toBe("text");
 		if (first?.type !== "text") return;
-		expect(first.text).toContain(`Evidence '${evidenceId}' recorded (unverified)`);
+		expect(first.text).toContain(`Evidence '${evidenceId}' recorded (unverified: a finding never verifies`);
+	});
+
+	it("verifies test evidence through the tool call that ran it, and says what an unverified entry needs", async () => {
+		let state: GoalState | undefined;
+		const tool = createGoalToolDefinition({
+			getGoalState: () => state,
+			saveGoalState: (next) => {
+				state = next;
+			},
+			now: () => "T0",
+			hasToolCallId: (toolCallId) => toolCallId === "call-npm-test",
+		});
+		const text = (result: Awaited<ReturnType<typeof tool.execute>>) =>
+			result.content[0]?.type === "text" ? result.content[0].text : "";
+		await tool.execute("call-start", { action: "start", goalId: "g1", userGoal: "Ship" }, undefined, undefined, ctx);
+		await tool.execute("call-req", { action: "add_requirement", text: "Tests pass" }, undefined, undefined, ctx);
+		// Measured live: a passing run recorded with a command string as its locator could never
+		// verify, and the model then failed satisfy_requirement, complete and increment in a row.
+		const guessed = await tool.execute(
+			"call-ev-1",
+			{ action: "add_evidence", kind: "test", uri: "command:npm test", summary: "9 passing" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(text(guessed)).toContain(
+			"recorded (unverified: it cannot satisfy a requirement; set uri to the toolCallId",
+		);
+		const proven = await tool.execute(
+			"call-ev-2",
+			{ action: "add_evidence", kind: "test", uri: "call-npm-test", summary: "9 passing" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(text(proven)).toContain("recorded (verified)");
+		const requirementId = state?.requirements[0]?.id ?? "";
+		const provenId = state?.evidence.find((entry) => entry.uri === "call-npm-test")?.id ?? "";
+		const satisfied = await tool.execute(
+			"call-satisfy",
+			{ action: "satisfy_requirement", requirementId, evidenceIds: [provenId] },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(satisfied.isError).not.toBe(true);
+		expect(state?.requirements[0]?.status).toBe("satisfied");
 	});
 
 	it("does not persist when an action fails validation", async () => {

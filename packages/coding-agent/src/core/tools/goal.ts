@@ -86,7 +86,8 @@ const goalSchema = Type.Object(
 		summary: Type.Optional(Type.String({ description: "Evidence summary. Required for add_evidence." })),
 		uri: Type.Optional(
 			Type.String({
-				description: "Optional file/URL, toolCallId, or laneId evidence locator.",
+				description:
+					"Evidence locator that verifies it: file -> a path under cwd; tool or test -> the toolCallId of the call that produced it; worker -> a laneId. Only verified or user evidence can satisfy a requirement; finding never verifies.",
 			}),
 		),
 		reason: Type.Optional(Type.String({ description: "Reason for block_requirement or block_goal." })),
@@ -264,7 +265,11 @@ async function resolveEvidenceVerified(
 ): Promise<boolean | undefined> {
 	const trimmedUri = uri?.trim();
 	if (!trimmedUri) return undefined;
-	if (kind === "tool") {
+	// A test run is proven by the tool call that ran it, exactly like any other tool evidence.
+	// Measured live: a model recorded its passing test run as kind "test" with a command string as
+	// the locator, which could never verify, then failed satisfy_requirement, complete and increment
+	// in a row without being told why.
+	if (kind === "tool" || kind === "test") {
 		if (deps.resolveToolEvidence) return deps.resolveToolEvidence(trimmedUri);
 		return deps.hasToolCallId ? deps.hasToolCallId(trimmedUri) : false;
 	}
@@ -291,6 +296,25 @@ async function resolveEvidenceVerified(
 		return claim.status === "completed";
 	}
 	return undefined;
+}
+
+/**
+ * Why a recorded evidence entry did not verify, and what would. An unverified entry cannot satisfy
+ * a requirement, so saying only "unverified" left the model to guess (measured live: three failed
+ * goal calls in a row after a test run recorded with a command string as its locator).
+ */
+function unverifiedEvidenceReason(kind: GoalEvidenceKind): string {
+	switch (kind) {
+		case "tool":
+		case "test":
+			return `it cannot satisfy a requirement; set uri to the toolCallId of the call that produced it`;
+		case "file":
+			return "it cannot satisfy a requirement; set uri to a path under cwd that exists";
+		case "worker":
+			return "it cannot satisfy a requirement; set uri to a completed, reviewed worker laneId";
+		default:
+			return "a finding never verifies and cannot satisfy a requirement; cite tool, test, file, or worker evidence instead";
+	}
 }
 
 function generatedGoalRecordId(prefix: "req" | "ev", value: unknown): string {
@@ -671,7 +695,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			const summary = summarizeGoalState(nextState, { action, openTaskSteps: deps.getOpenTaskSteps?.() });
 			const evidenceNote =
 				action.action === "add_evidence"
-					? `Evidence '${action.evidenceId}' recorded (${action.kind === "user" ? "user-confirmed" : action.verified === true ? "verified" : "unverified"}).`
+					? `Evidence '${action.evidenceId}' recorded (${action.kind === "user" ? "user-confirmed" : action.verified === true ? "verified" : `unverified: ${unverifiedEvidenceReason(action.kind)}`}).`
 					: "";
 			const text = [`goal ${input.action} recorded.`, evidenceNote, summary, dispatchNote]
 				.filter((line): line is string => Boolean(line))
