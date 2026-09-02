@@ -1,5 +1,6 @@
 import { projectMessagesForModelImageSupport } from "@caupulican/pi-ai";
 import type { Api, Context, ImageContent, Message, Model, TextContent } from "@caupulican/pi-ai/types";
+import { PrefixFoldByFirstItem } from "./prefix-fold.ts";
 
 const CHARS_PER_TOKEN_ESTIMATE = 4;
 export const ESTIMATED_IMAGE_TOKENS = 1_200;
@@ -197,6 +198,20 @@ function measureSemanticMessage(message: Message): SemanticMessageMeasure {
 	return measure;
 }
 
+/**
+ * The `[...]` length and image count of a message array, summed once per appended message: the
+ * per-message measure above is memoized, but adding up every message on every request was still
+ * a full pass over the transcript, twice per provider call.
+ */
+const messagesMeasures = new PrefixFoldByFirstItem<Message, { length: number; imageChars: number }>(
+	() => ({ length: 2, imageChars: 0 }),
+	(state, message, index) => {
+		const measure = measureSemanticMessage(message);
+		state.length += measure.length + (index > 0 ? 1 : 0);
+		state.imageChars += measure.images * ESTIMATED_IMAGE_CHARS;
+	},
+);
+
 const MESSAGES_FIELD_LENGTH = jsonStringUtf16Length("messages") + 1;
 const TOOLS_FIELD_LENGTH = jsonStringUtf16Length("tools") + 1;
 const SYSTEM_PROMPT_FIELD_LENGTH = jsonStringUtf16Length("systemPrompt") + 1;
@@ -245,13 +260,9 @@ function toolsLength(tools: readonly unknown[]): number {
  */
 export function estimateProviderRequestTokens(context: Context, model?: Model<Api>): number {
 	const imageAwareMessages = model ? projectMessagesForModelImageSupport(context.messages, model) : context.messages;
-	let messagesLength = 2;
-	let imageChars = 0;
-	for (let index = 0; index < imageAwareMessages.length; index++) {
-		const measure = measureSemanticMessage(imageAwareMessages[index]!);
-		messagesLength += measure.length + (index > 0 ? 1 : 0);
-		imageChars += measure.images * ESTIMATED_IMAGE_CHARS;
-	}
+	const measured = messagesMeasures.fold(imageAwareMessages);
+	const messagesLength = measured.length;
+	const imageChars = measured.imageChars;
 	// Exact assembly of `{"systemPrompt":…,"messages":[…],"tools":…}`: braces, each present field's
 	// name, colon and value, and a comma between fields. `undefined` fields are omitted, as JSON does.
 	let serializedLength = 2;

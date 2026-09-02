@@ -21,6 +21,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
+import { PrefixFold } from "../prefix-fold.ts";
 import { ESTIMATED_IMAGE_CHARS, estimateProviderRequestTokens } from "../provider-request-estimator.ts";
 import {
 	buildSessionContext,
@@ -337,19 +338,37 @@ export interface ContextUsageEstimate {
 export function getApplicableAssistantUsageInfo(
 	messages: readonly AgentMessage[],
 ): { usage: Usage; index: number } | undefined {
-	let latestPrefixTimestamp = Number.NEGATIVE_INFINITY;
-	let usageInfo: { usage: Usage; index: number } | undefined;
+	const scan = createUsageScan();
+	for (let index = 0; index < messages.length; index++) scanUsage(scan, messages[index], index);
+	return scan.usageInfo;
+}
 
-	for (let i = 0; i < messages.length; i++) {
-		const message = messages[i];
-		const usage = getAssistantUsage(message);
-		if (usage && message.timestamp >= latestPrefixTimestamp) {
-			usageInfo = { usage, index: i };
-		}
-		latestPrefixTimestamp = Math.max(latestPrefixTimestamp, message.timestamp);
-	}
+interface UsageScan {
+	latestPrefixTimestamp: number;
+	usageInfo: { usage: Usage; index: number } | undefined;
+}
 
-	return usageInfo;
+function createUsageScan(): UsageScan {
+	return { latestPrefixTimestamp: Number.NEGATIVE_INFINITY, usageInfo: undefined };
+}
+
+function scanUsage(scan: UsageScan, message: AgentMessage, index: number): void {
+	const usage = getAssistantUsage(message);
+	if (usage && message.timestamp >= scan.latestPrefixTimestamp) scan.usageInfo = { usage, index };
+	scan.latestPrefixTimestamp = Math.max(scan.latestPrefixTimestamp, message.timestamp);
+}
+
+/**
+ * The same answer as {@link getApplicableAssistantUsageInfo}, replayed only over the messages
+ * appended since the previous call on this finder. The walk is a left fold whose state is one
+ * timestamp and one candidate, so an append-only history never re-reads its prefix. One finder
+ * per call site: each site hands it one lineage of arrays.
+ */
+export function createApplicableAssistantUsageFinder(): (
+	messages: readonly AgentMessage[],
+) => { usage: Usage; index: number } | undefined {
+	const fold = new PrefixFold<AgentMessage, UsageScan>(createUsageScan, scanUsage);
+	return (messages) => fold.fold(messages).usageInfo;
 }
 
 /**

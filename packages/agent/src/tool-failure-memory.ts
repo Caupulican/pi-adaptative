@@ -1048,6 +1048,11 @@ interface FailureFoldState {
 	 * on message identity (the provider delta path among them).
 	 */
 	boundedMessages: Map<ToolResultMessage, AgentMessage>;
+	/**
+	 * The assistant message rebuilt without its omitted calls, per source message, reused while
+	 * the same calls are omitted: a fresh copy per request had the same bytes and a new identity.
+	 */
+	filteredAssistantMessages: WeakMap<AssistantMessage, { omittedIds: string; message: AgentMessage | undefined }>;
 	active: Map<string, ActiveFailure>;
 	activeDirectives: Map<string, ToolFailureDirectiveDetails["piToolFailureDirective"]>;
 	sequence: number;
@@ -1065,6 +1070,7 @@ function createFailureFoldState(): FailureFoldState {
 		omittedResults: new Set(),
 		boundedReplacements: new Map(),
 		boundedMessages: new Map(),
+		filteredAssistantMessages: new WeakMap(),
 		active: new Map(),
 		activeDirectives: new Map(),
 		sequence: 0,
@@ -1276,7 +1282,15 @@ function buildFailureContextAnalysis(
 	state: FailureFoldState,
 	omittedCallIds: ReadonlySet<string>,
 ): FailureContextAnalysis {
-	const { omittedResults, boundedReplacements, boundedMessages, active, activeDirectives, kindMistakesMap } = state;
+	const {
+		omittedResults,
+		boundedReplacements,
+		boundedMessages,
+		filteredAssistantMessages,
+		active,
+		activeDirectives,
+		kindMistakesMap,
+	} = state;
 	const kindMistakesSummary = Object.fromEntries(kindMistakesMap);
 	const activeRecords = activeFailureRecords(active);
 
@@ -1317,22 +1331,29 @@ function buildFailureContextAnalysis(
 			filteredMessages.push(message);
 			continue;
 		}
-		let hasOmitted = false;
+		const omittedHere: string[] = [];
 		for (let blockIdx = 0; blockIdx < content.length; blockIdx++) {
 			const block = content[blockIdx];
-			if (block.type === "toolCall" && omittedCallIds.has(block.id)) {
-				hasOmitted = true;
-				break;
-			}
+			if (block.type === "toolCall" && omittedCallIds.has(block.id)) omittedHere.push(block.id);
 		}
-		if (!hasOmitted) {
+		if (omittedHere.length === 0) {
 			filteredMessages.push(message);
 			continue;
 		}
-		const retainedContent = content.filter((block) => block.type !== "toolCall" || !omittedCallIds.has(block.id));
-		if (retainedContent.length > 0) {
-			filteredMessages.push({ ...message, content: retainedContent } satisfies AssistantMessage);
+		const omittedIds = omittedHere.join("\0");
+		let filtered = filteredAssistantMessages.get(message);
+		if (!filtered || filtered.omittedIds !== omittedIds) {
+			const retainedContent = content.filter((block) => block.type !== "toolCall" || !omittedCallIds.has(block.id));
+			filtered = {
+				omittedIds,
+				message:
+					retainedContent.length > 0
+						? ({ ...message, content: retainedContent } satisfies AssistantMessage)
+						: undefined,
+			};
+			filteredAssistantMessages.set(message, filtered);
 		}
+		if (filtered.message) filteredMessages.push(filtered.message);
 	}
 	return {
 		messages: filteredMessages,

@@ -1312,6 +1312,28 @@ describe("tool failure context memory (session-scoped fold)", () => {
 		expect([...tracker.keys()]).toEqual([...createToolFailureMemoryTracker(later).keys()]);
 	});
 
+	it("keeps the identity of an assistant message rebuilt without its erased call across requests", () => {
+		const memory = createToolFailureContextMemory();
+		const pair: AgentMessage = {
+			...call("A"),
+			content: [
+				{ type: "toolCall", id: "A", name: "read", arguments: { path: "data.json" } },
+				{ type: "toolCall", id: "K", name: "read", arguments: { path: "keep.json" } },
+			],
+		} as AgentMessage;
+		// C repeats A's read of data.json with the same payload, so A is erased from the pair; K's
+		// distinct path and payload keep it.
+		const history = [pair, ok("A"), ok("K", "k".repeat(200)), call("C"), ok("C")];
+		const first = sanitizeToolFailureContext(history, "sys", 0, memory).messages;
+		const rebuilt = first[0] as { content: Array<{ id: string }> };
+		expect(rebuilt.content.map((block) => block.id)).toEqual(["K"]);
+		expect(rebuilt).not.toBe(pair);
+
+		const later = [...history, call("D", "other.json"), ok("D")];
+		const second = sanitizeToolFailureContext(later, "sys", 5, memory).messages;
+		expect(second[0]).toBe(first[0]);
+	});
+
 	it("resumes from the processed prefix and matches the pure fold for appended history without erasures", () => {
 		const memory = createToolFailureContextMemory();
 		let history: AgentMessage[] = [call("A"), failed("A")];
