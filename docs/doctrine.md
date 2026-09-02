@@ -72,9 +72,12 @@ active record carries one pointer line (the constrained tier keeps the full text
 window repeats the tier's number of times, classified as a runaway, never retried unchanged.
 Pinned by `packages/agent/test/reliability/stream-idle.test.ts`.
 
-**A runaway is evidence.** It records a runaway stop, demotes the model to the strong tier for
-thirty days, and the goal continues on a recovery path. Pinned by
-`packages/coding-agent/test/agent-session-runaway-escalation.test.ts` and
+**A tool-loop runaway is evidence.** A repeated tool call, a stagnant tool cycle, or the
+provider-turn limit records a runaway stop, demotes the model to the strong tier for thirty days,
+and the goal continues on a recovery path. An output runaway from the stream guard ends the
+response and leaves the goal to change approach, but does not demote on its own: the guard is
+measured against one real loop and a legitimately repetitive output must not cost a model a month.
+Pinned by `packages/coding-agent/test/agent-session-runaway-escalation.test.ts` and
 `packages/coding-agent/test/capability-tier.test.ts`.
 
 ## Workers
@@ -104,3 +107,4 @@ measurement gains no new surface.
 |---|---|
 | 2026-09-02 | First edition: the invariants proven live on v0.97.24 and the ratchet model's gates. |
 | 2026-09-02 | The output-repetition guard also watches the string values of a streaming tool call's arguments (a live probe looped inside a step selector). |
+| 2026-09-02 | Demotion is evidence from tool-loop guards only; an output runaway ends the response without demoting. |
