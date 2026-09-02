@@ -12,6 +12,7 @@ export default defineConfig({
 			"test/verification-obligations.test.ts",
 			"test/agent-loop.test.ts",
 			"test/compaction/compaction.test.ts",
+			"test/compaction/applicable-usage-finder.test.ts",
 			"test/compaction/verification.test.ts",
 			"test/compaction/session-replacement-compaction.test.ts",
 			"test/compaction/branch-summarization.test.ts",

@@ -436,5 +436,6 @@ describe("PathAliasRuntime incremental render", () => {
 		expect(text(second.messages[2]!)).toContain(text(first.messages[0]!).split(" ").at(-1)!);
 		// The first result's array was not grown behind the caller's back.
 		expect(first.messages).toHaveLength(2);
+		runtime.close();
 	});
 });

@@ -201,8 +201,14 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 			settings: { maxStallTurns: 3 },
 		});
 
-		// Mutate everything returned
-		if (snapshot1.goalState) snapshot1.goalState.userGoal = "Mutated";
+		// Mutate everything returned. The goal state is one frozen value shared by every reader, so a
+		// write through it is rejected outright; the other values are still per-read clones.
+		if (snapshot1.goalState) {
+			const goalState = snapshot1.goalState;
+			expect(() => {
+				goalState.userGoal = "Mutated";
+			}).toThrow(TypeError);
+		}
 		if (snapshot1.latestEvidenceBundle) snapshot1.latestEvidenceBundle.query = "Mutated";
 		snapshot1.workerClaims[0].summary = "Mutated";
 		snapshot1.learningDecisions[0].summary = "Mutated";

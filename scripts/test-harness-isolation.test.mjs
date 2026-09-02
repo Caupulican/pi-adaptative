@@ -83,6 +83,7 @@ const agentVerificationCoverageTests = [
 	"test/verification-obligations.test.ts",
 	"test/agent-loop.test.ts",
 	"test/compaction/compaction.test.ts",
+	"test/compaction/applicable-usage-finder.test.ts",
 	"test/compaction/verification.test.ts",
 	"test/compaction/session-replacement-compaction.test.ts",
 	"test/compaction/branch-summarization.test.ts",
@@ -501,8 +502,14 @@ function createReleaseExecutionProofFixture(context, ciConclusion) {
 	mkdirSync(workDir, { recursive: true });
 	mkdirSync(fakeBin, { recursive: true });
 
+	// A git hook exports GIT_DIR, GIT_INDEX_FILE and friends for the repository being committed,
+	// and `cwd` does not override them: with them inherited, this fixture's `git init` and `git add`
+	// ran against the REAL repository's index and config from inside the pre-commit check (a bare
+	// flag on the main checkout, thousands of staged deletions). Only the identity variables the
+	// fixture sets itself may come through.
+	const hookFreeEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
 	const gitEnv = {
-		...process.env,
+		...hookFreeEnv,
 		GIT_AUTHOR_NAME: "pi-release-test",
 		GIT_AUTHOR_EMAIL: "pi-release-test@example.com",
 		GIT_COMMITTER_NAME: "pi-release-test",
@@ -517,7 +524,7 @@ function createReleaseExecutionProofFixture(context, ciConclusion) {
 		return result.stdout;
 	}
 
-	spawnSync("git", ["init", "--bare", "--initial-branch=main", originDir], { encoding: "utf8" });
+	spawnSync("git", ["init", "--bare", "--initial-branch=main", originDir], { encoding: "utf8", env: gitEnv });
 
 	mkdirSync(join(workDir, "packages", "ai"), { recursive: true });
 	writeFileSync(
