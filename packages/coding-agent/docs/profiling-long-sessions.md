@@ -149,6 +149,18 @@ node scripts/report-long-session-growth.mjs host-session-profile.txt host-sessio
   CommonJS dependency that reaches them through a live `require("child_process").spawnSync(...)`
   property lookup.
 
+## Heap: what the memory is made of
+
+`PI_PROFILE_HEAP_SNAPSHOT=1` makes the host profiler write `host-session.heapsnapshot` at the end
+of the run (after a `global.gc()` when Node was started with `--expose-gc`), and
+`node scripts/analyze-heapsnapshot.mjs <file>` ranks it by self size: node type and constructor
+first, then strings of 256 bytes or more grouped by shape (whitespace collapsed, digits replaced),
+so a thousand copies of one kind of text read as one row. Self size answers "what is the memory
+made of", which is the question a rising rss or heap column raises first. It found the profiler's
+own 460 MB: the request events kept 120-character heads cut from each serialized prompt, and V8
+keeps such a slice as a view onto its parent, so every event pinned a whole prompt. Snapshots are
+tens of megabytes; they stay local and are not uploaded by the workflow.
+
 ## The Profile workflow
 
 `.github/workflows/profile.yml`, `workflow_dispatch` only. Inputs: `host_turns` (default 1500),

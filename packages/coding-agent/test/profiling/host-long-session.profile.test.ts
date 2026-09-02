@@ -21,6 +21,7 @@ import diagnosticsChannel from "node:diagnostics_channel";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import inspector from "node:inspector";
 import { basename, join } from "node:path";
+import { writeHeapSnapshot } from "node:v8";
 import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import type { FauxRequestEvent } from "@caupulican/pi-ai/faux";
@@ -474,6 +475,12 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 				pressureLines.push("post-GC heapUsed: unavailable (run with NODE_OPTIONS=--expose-gc)");
 			}
 			writeFileSync(join(OUT_DIR, "host-session-pressure.txt"), `${pressureLines.join("\n")}\n`);
+			// PI_PROFILE_HEAP_SNAPSHOT=1: what the heap holds at the end of the run, for
+			// scripts/analyze-heapsnapshot.mjs to rank by constructor and by string shape.
+			if (process.env.PI_PROFILE_HEAP_SNAPSHOT === "1") {
+				if (typeof global.gc === "function") global.gc();
+				writeHeapSnapshot(join(OUT_DIR, "host-session.heapsnapshot"));
+			}
 
 			// Prompt-cache reuse as the faux provider's byte-prefix cache saw every request: what the
 			// owner pays for is every request that is not an append of the previous one.

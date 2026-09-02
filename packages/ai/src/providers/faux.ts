@@ -223,6 +223,15 @@ function serializeContext(context: Context): SerializedContext {
 	return { text: parts.join("\n\n"), messageSpans };
 }
 
+/**
+ * A slice that owns its bytes. V8 represents `text.slice()` of a long string as a view onto the
+ * parent, so a 120-character head kept per request event pinned the whole serialized prompt it was
+ * cut from: a 1,500-turn profile retained 460 MB of prompts through its event list.
+ */
+function flatSlice(text: string, start: number, end: number): string {
+	return Buffer.from(text.slice(start, end), "utf8").toString("utf8");
+}
+
 function commonPrefixLength(a: string, b: string): number {
 	const length = Math.min(a.length, b.length);
 	let index = 0;
@@ -282,10 +291,10 @@ function withUsageEstimate(
 			messageCount: context.messages.length,
 			divergedAt: divergedAt >= 0 ? divergedAt : undefined,
 			divergedRole: diverged?.role,
-			divergedText: span ? promptText.slice(span[0], Math.min(span[1], span[0] + 120)) : undefined,
+			divergedText: span ? flatSlice(promptText, span[0], Math.min(span[1], span[0] + 120)) : undefined,
 			previousDivergedText:
 				previous && previousSpan
-					? previous.text.slice(previousSpan[0], Math.min(previousSpan[1], previousSpan[0] + 120))
+					? flatSlice(previous.text, previousSpan[0], Math.min(previousSpan[1], previousSpan[0] + 120))
 					: undefined,
 		});
 	}
