@@ -59,20 +59,20 @@ describe("path alias projection is append-only across requests", () => {
 	});
 
 	it("keeps already-sent history byte-identical when a later turn mints an alias matching it", () => {
-		// `src/a.ts` carries one separator and too few characters to mint an alias on turn 1, so turn 1
-		// goes to the provider spelled literally. Turn 2 names the same file as `./src/a.ts`, which does
-		// clear the bar and mints `p/a.ts` — whose rewrite forms include the bare `src/a.ts` that turn 1
+		// `srcdirectory/a.ts` carries one separator and too few characters to mint an alias on turn 1, so turn 1
+		// goes to the provider spelled literally. Turn 2 names the same file as `./srcdirectory/a.ts`, which does
+		// clear the bar and mints `p/a.ts` — whose rewrite forms include the bare `srcdirectory/a.ts` that turn 1
 		// already sent. Both spellings are relative with forward slashes, so the trigger does not depend
 		// on how the host resolves an absolute path (an absolute spelling here passed on Linux and
 		// minted nothing on Windows).
-		const first: AgentMessage[] = [user("open src/a.ts", 1)];
+		const first: AgentMessage[] = [user("open srcdirectory/a.ts", 1)];
 		const firstRender = runtime.sync(first);
-		expect(JSON.stringify(firstRender.messages[0])).toContain("src/a.ts");
+		expect(JSON.stringify(firstRender.messages[0])).toContain("srcdirectory/a.ts");
 
-		const second: AgentMessage[] = [...first, user("now compare with ./src/a.ts", 2)];
+		const second: AgentMessage[] = [...first, user("now compare with ./srcdirectory/a.ts", 2)];
 		const secondRender = runtime.sync(second);
 
-		expect(secondRender.legend).toContain("=src/a.ts");
+		expect(secondRender.legend).toContain("=srcdirectory/a.ts");
 		expect(textsOf(secondRender.messages.slice(0, first.length))).toEqual(textsOf(firstRender.messages));
 	});
 

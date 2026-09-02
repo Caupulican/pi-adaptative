@@ -275,7 +275,7 @@ describe("AgentSession retry", () => {
 		expect(created.session.getGoalStateSnapshot()).toMatchObject({ tokenBudget: 5000 });
 	});
 
-	it("caps every request's output at the session setting, never above the model's own limit", async () => {
+	it("caps every request's output at the session setting", async () => {
 		const capped: Array<number | undefined> = [];
 		const created = createSession({
 			failCount: 0,
@@ -284,8 +284,9 @@ describe("AgentSession retry", () => {
 		});
 		await created.session.prompt("Hello", { autoContinueGoal: false });
 		expect(capped).toEqual([1234]);
+	});
 
-		// A cap above the model's limit is narrowed to the limit, so a registry maximum is never widened.
+	it("narrows a cap above the model's limit to the limit, never widening a registry maximum", async () => {
 		const wide: Array<number | undefined> = [];
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const widened = createSession({

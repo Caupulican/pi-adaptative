@@ -78,18 +78,18 @@ describe("goal-owned execution budget", () => {
 						action: "start",
 						goalId: "explicit-goal",
 						userGoal: "Continue the current work",
-						tokenBudget: 40_000,
+						tokenBudget: 20_000,
 					}),
 					{ stopReason: "toolUse" },
 				);
 			},
 			fauxAssistantMessage("goal recorded"),
 		]);
-		await accepted.session.prompt("this is a goal with a 40k token budget", { autoContinueGoal: false });
-		expect(firstRequestMaxTokens).toBe(40_000);
+		await accepted.session.prompt("this is a goal with a 20k token budget", { autoContinueGoal: false });
+		expect(firstRequestMaxTokens).toBe(20_000);
 		expect(accepted.session.getGoalStateSnapshot()).toMatchObject({
 			goalId: "explicit-goal",
-			tokenBudget: 40_000,
+			tokenBudget: 20_000,
 		});
 		expect(accepted.session.getGoalStateSnapshot()?.tokensUsed).toBeGreaterThan(0);
 

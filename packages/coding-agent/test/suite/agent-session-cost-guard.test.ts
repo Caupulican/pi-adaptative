@@ -3,6 +3,7 @@ import { fauxAssistantMessage, fauxToolCall, type Usage } from "@caupulican/pi-a
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { estimateContextPromptTokens } from "../../src/core/models/perf-profile.ts";
+import { DEFAULT_MAX_OUTPUT_TOKENS } from "../../src/core/settings-manager.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function spawnedUsage(costTotal: number): Usage {
@@ -80,7 +81,7 @@ describe("AgentSession cost guard", () => {
 		expect(harness.session.getForegroundEnvelope()?.maxEstimatedUsd).toBeUndefined();
 	});
 
-	it("projects against the session response reserve without imposing a hidden output cap", async () => {
+	it("projects against the session response reserve while the request carries the documented output cap", async () => {
 		let requestMaxTokens: number | undefined;
 		const harness = await createHarness({
 			models: [
@@ -110,7 +111,7 @@ describe("AgentSession cost guard", () => {
 		expect(decision).toBeDefined();
 		expect(decision?.over).toBe(false);
 		expect(decision?.estUsd).toBeLessThan(2.5);
-		expect(requestMaxTokens).toBeUndefined();
+		expect(requestMaxTokens).toBe(DEFAULT_MAX_OUTPUT_TOKENS);
 	});
 
 	it("prices the exact provider projection instead of execution-only tool prose", async () => {

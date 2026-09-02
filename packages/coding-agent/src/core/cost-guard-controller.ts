@@ -73,11 +73,12 @@ export class CostGuardController {
 				return reasoning;
 			}
 			const inputTokens = estimateContextPromptTokens(context);
-			// Use an explicit request cap when present; otherwise project against the session response
-			// reserve instead of a frontier model's theoretical output maximum.
+			// Project against the session response reserve, never a frontier model's theoretical output
+			// maximum; a request cap (the session output cap, a goal budget) can only lower that.
 			const maxOutputTokens = Math.min(
 				model.maxTokens ?? 4096,
-				requestMaxTokens ?? this.deps.getCompactionReserveTokens(),
+				this.deps.getCompactionReserveTokens(),
+				requestMaxTokens ?? Number.POSITIVE_INFINITY,
 			);
 			const estUsd = estimateTurnCostUsd({
 				inputTokens,
