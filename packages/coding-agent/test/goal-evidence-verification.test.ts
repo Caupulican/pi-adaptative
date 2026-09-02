@@ -6,10 +6,20 @@ import type { Message } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { isCompletedBackgroundToolEvidence } from "../src/core/background-tool-task-controller.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
-import { createGoalState, isGoalState, parseGoalState, serializeGoalState } from "../src/core/goals/goal-state.ts";
+import {
+	createGoalState,
+	type GoalState,
+	isGoalState,
+	parseGoalState,
+	serializeGoalState,
+} from "../src/core/goals/goal-state.ts";
 import { applyGoalAction } from "../src/core/goals/goal-tool-core.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
-import { deriveOpenTaskStepRefs, hasAnsweredToolCallOnBranch } from "../src/core/runtime-builder.ts";
+import {
+	deriveOpenTaskStepRefs,
+	findAnsweredToolCallOnBranchByText,
+	hasAnsweredToolCallOnBranch,
+} from "../src/core/runtime-builder.ts";
 import { addTaskStep, createTaskStepsState } from "../src/core/tasks/task-state.ts";
 import {
 	createGoalToolDefinition,
@@ -372,6 +382,73 @@ function toolResultMessage(toolCallId: string, timestamp: number): Message {
 		timestamp,
 	};
 }
+
+describe("findAnsweredToolCallOnBranchByText (a run cited by the command the model typed)", () => {
+	function bashCall(id: string, command: string, timestamp: number) {
+		return {
+			role: "assistant" as const,
+			content: [{ type: "toolCall" as const, id, name: "bash", arguments: { command } }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "mock",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse" as const,
+			timestamp,
+		};
+	}
+
+	it("resolves the most recent answered call whose arguments contain the text, ignoring a locator prefix", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(bashCall("run-1", "npm test", 1000) as never);
+		sessionManager.appendMessage(toolResultMessage("run-1", 1001));
+		sessionManager.appendMessage(bashCall("run-2", "npm test -- --grep store", 1002) as never);
+		sessionManager.appendMessage(toolResultMessage("run-2", 1003));
+		sessionManager.appendMessage(bashCall("run-3", "npm test", 1004) as never);
+
+		// run-3 never answered: not evidence of anything. run-2 is the most recent answered match.
+		expect(findAnsweredToolCallOnBranchByText(sessionManager, "command:npm test")).toBe("run-2");
+		expect(findAnsweredToolCallOnBranchByText(sessionManager, "npm test -- --grep store")).toBe("run-2");
+		expect(findAnsweredToolCallOnBranchByText(sessionManager, "pytest")).toBeUndefined();
+		expect(findAnsweredToolCallOnBranchByText(sessionManager, "np")).toBeUndefined();
+	});
+
+	it("through the wired path: test evidence cited by command text verifies and carries the call id", async () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(bashCall("run-1", "npm test", 1000) as never);
+		sessionManager.appendMessage(toolResultMessage("run-1", 1001));
+		let state: GoalState | undefined;
+		const tool = createGoalToolDefinition({
+			getGoalState: () => state,
+			saveGoalState: (next) => {
+				state = next;
+			},
+			now: () => "T0",
+			resolveToolEvidence: (uri) => {
+				if (hasAnsweredToolCallOnBranch(sessionManager, uri)) return true;
+				const toolCallId = findAnsweredToolCallOnBranchByText(sessionManager, uri);
+				return toolCallId ? { verified: true, toolCallId } : false;
+			},
+		});
+		await tool.execute("call-start", { action: "start", goalId: "g1", userGoal: "Ship" }, undefined, undefined, ctx);
+		const result = await tool.execute(
+			"call-ev",
+			{ action: "add_evidence", kind: "test", uri: "command:npm test", summary: "9 passing" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("recorded (verified via toolCallId run-1)");
+		expect(state?.evidence[0]).toMatchObject({ kind: "test", uri: "run-1", verified: true });
+	});
+});
 
 describe("hasAnsweredToolCallOnBranch (production wiring, closes the runtime-builder handoff)", () => {
 	it("resolves true for a real toolResult on the active branch, false for an unknown id", () => {

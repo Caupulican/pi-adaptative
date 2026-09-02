@@ -419,6 +419,13 @@ export function resolveTaskStepSelector(steps: readonly TaskStep[], selector: st
 
 	const exactId = steps.find((step) => step.id.toLocaleLowerCase() === normalized);
 	if (exactId) return exactId;
+	// An ordinal spelling of a step id ("2", "s2", "step2", "step 2", "#2") is unambiguous: ids are
+	// `step-<n>`. Measured live, a model that wrote "s2" lost the turn and armed the failure ledger.
+	const ordinal = /^(?:#|s|step)?[\s-]*(\d+)$/.exec(normalized);
+	if (ordinal) {
+		const byOrdinal = steps.find((step) => step.id.toLocaleLowerCase() === `step-${Number(ordinal[1])}`);
+		if (byOrdinal) return byOrdinal;
+	}
 	const idPrefix = steps.filter((step) => step.id.toLocaleLowerCase().startsWith(normalized));
 	if (idPrefix.length === 1) return idPrefix[0];
 	if (idPrefix.length > 1) {
@@ -433,7 +440,16 @@ export function resolveTaskStepSelector(steps: readonly TaskStep[], selector: st
 		const matches = exactContent.length > 1 ? exactContent : contentMatches;
 		throw new TaskStepsError(`Task step selector is ambiguous: ${matches.map((step) => step.id).join(", ")}.`);
 	}
-	throw new TaskStepsError(`Task step not found for selector: ${selector}.`);
+	// Name what can be selected: a refusal that only repeats the bad selector left the model guessing.
+	const open = steps.filter((step) => step.status !== "completed" && step.status !== "cancelled");
+	const choices = open.length > 0 ? open : steps;
+	throw new TaskStepsError(
+		`Task step not found for selector: ${selector}. ${
+			choices.length > 0
+				? `${open.length > 0 ? "Open steps" : "Steps"}: ${choices.map((step) => `${step.id} (${step.status})`).join(", ")}. Use an id, a unique id prefix, an ordinal like 2, or current.`
+				: "There are no task steps yet; add one first."
+		}`,
+	);
 }
 
 /**

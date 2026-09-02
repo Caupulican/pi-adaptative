@@ -107,13 +107,20 @@ describe("bash broad-search guard", () => {
 		rmSync(outputDirectory, { recursive: true, force: true });
 	});
 
-	it("rejects a broad scan before execution and teaches the bounded alternatives", async () => {
+	it("runs a broad scan with its output routed to a managed file, and says why it was routed", async () => {
+		// Refusing the scan cost a turn and armed the failure ledger in every live session that tried
+		// one, for an outcome the route already makes safe: nothing but the path and a bounded view
+		// reaches the context.
 		const tool = createBashTool("/repo", { operations, outputDirectory, platform: "linux" });
 
-		await expect(tool.execute("search-1", { command: "rg needle" })).rejects.toThrow(
-			/PI_TOOL_OPERATION_REJECTED.*narrow.*path.*glob.*broadSearch="route-to-file"/is,
-		);
-		expect(executedCommands).toEqual([]);
+		const result = await tool.execute("search-1", { command: "rg needle" });
+		const text = result.content.map((item) => (item.type === "text" ? item.text : "")).join("");
+		const details = result.details as BashToolDetails | undefined;
+
+		expect(executedCommands).toHaveLength(1);
+		expect(result.isError).not.toBe(true);
+		expect(text).toMatch(/Broad search output routed to .*Routed automatically because .*narrower search/s);
+		expect(details?.fullOutputPath).toBeTruthy();
 	});
 
 	it("publishes the existing timeout ceiling in the tool schema", () => {

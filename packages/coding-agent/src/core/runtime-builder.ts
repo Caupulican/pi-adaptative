@@ -187,6 +187,39 @@ export function hasAnsweredToolCallOnBranch(sessionManager: SessionManager, tool
 }
 
 /**
+ * The most recent answered tool call on the active branch whose arguments contain `text`: a model
+ * cites a run by what it typed ("npm test", "command:npm test"), not by the call id it never sees
+ * spelled out. Measured live, that citation could never verify and the goal stalled for three
+ * turns. Exported (pure) so the goal tool's evidence wiring is directly testable.
+ */
+export function findAnsweredToolCallOnBranchByText(sessionManager: SessionManager, text: string): string | undefined {
+	const needle = text
+		.replace(/^(?:command|cmd|run|shell|tool)\s*[:=]\s*/i, "")
+		.trim()
+		.toLocaleLowerCase();
+	if (needle.length < 3) return undefined;
+	const branch = sessionManager.getBranch();
+	const answered = new Set<string>();
+	for (const entry of branch) {
+		if (entry.type === "message" && entry.message.role === "toolResult") answered.add(entry.message.toolCallId);
+	}
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry?.type !== "message" || entry.message.role !== "assistant") continue;
+		for (const part of entry.message.content) {
+			if (part.type !== "toolCall" || !answered.has(part.id)) continue;
+			const args = part.arguments as Record<string, unknown> | undefined;
+			const haystack = Object.values(args ?? {})
+				.filter((value): value is string => typeof value === "string")
+				.join("\n")
+				.toLocaleLowerCase();
+			if (haystack.includes(needle)) return part.id;
+		}
+	}
+	return undefined;
+}
+
+/**
  * Goal-tool adapter over the canonical open-task projection. Exported (pure, no `this`) so the
  * production `getOpenTaskSteps` wiring below remains directly testable without another filter.
  */
@@ -1038,7 +1071,12 @@ export class RuntimeBuilder {
 							uri,
 						);
 						if (completed !== undefined) return completed;
-						return hasAnsweredToolCallOnBranch(this.deps.getSessionManager(), uri);
+						const sessionManager = this.deps.getSessionManager();
+						if (hasAnsweredToolCallOnBranch(sessionManager, uri)) return true;
+						// Not a call id: the model cited the run by its command text. Resolve it to the call
+						// that ran it, so the record carries the real locator.
+						const toolCallId = findAnsweredToolCallOnBranchByText(sessionManager, uri);
+						return toolCallId ? { verified: true, toolCallId } : false;
 					},
 					// kind:"worker" evidence refs verify against the SAME live lane/claim accessors the
 					// delegate action=status uses below -- live wiring (these were declared optional

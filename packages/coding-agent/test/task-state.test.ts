@@ -57,6 +57,17 @@ describe("task step state", () => {
 		expect(resolveTaskStepSelector(state.steps, "current").id).toBe("step-1");
 		expect(resolveTaskStepSelector(state.steps, "step-2").content).toBe("Implement native task steps");
 		expect(resolveTaskStepSelector(state.steps, "step-3").content).toBe("Verify migration");
+		// Ordinal spellings of an id are unambiguous and resolve; a refusal names what can be selected.
+		expect(resolveTaskStepSelector(state.steps, "s2").id).toBe("step-2");
+		expect(resolveTaskStepSelector(state.steps, "2").id).toBe("step-2");
+		expect(resolveTaskStepSelector(state.steps, "step 3").id).toBe("step-3");
+		expect(resolveTaskStepSelector(state.steps, "#1").id).toBe("step-1");
+		expect(() => resolveTaskStepSelector(state.steps, "s1-1?")).toThrow(
+			/not found for selector: s1-1\?\. Open steps: step-1 \(in_progress\)/,
+		);
+		expect(() => resolveTaskStepSelector(state.steps, "s9")).toThrow(
+			/Use an id, a unique id prefix, an ordinal like 2, or current/,
+		);
 		expect(resolveTaskStepSelector(state.steps, "implement native").id).toBe("step-2");
 	});
 

@@ -241,7 +241,8 @@ function toGoalEvent(
 			if (!requirementExists(state, id)) {
 				return { ok: false, error: `Unknown requirement '${id}'.` };
 			}
-			const evidenceIds = action.evidenceIds ?? [];
+			const requireVerified = options?.requireVerifiedEvidenceForCompletion !== false;
+			let evidenceIds = action.evidenceIds ?? [];
 			for (const evidenceId of evidenceIds) {
 				if (!evidenceExists(state, evidenceId)) {
 					return {
@@ -250,14 +251,25 @@ function toGoalEvent(
 					};
 				}
 			}
-			if (options?.requireVerifiedEvidenceForCompletion !== false) {
+			if (requireVerified && evidenceIds.length === 0) {
+				// A satisfy call that cites nothing adopts the evidence nobody has cited yet, exactly as
+				// `increment` does: the intent is unambiguous and the entries are already recorded.
+				// Measured live, the bare call was refused and the model spent the next turns guessing.
+				const used = new Set(state.requirements.flatMap((requirement) => requirement.evidenceIds));
+				evidenceIds = state.evidence
+					.filter((evidence) => !used.has(evidence.id) && isTrustedGoalEvidence(evidence))
+					.map((evidence) => evidence.id);
+			}
+			if (requireVerified) {
 				const trustedEvidence = state.evidence.some(
 					(evidence) => evidenceIds.includes(evidence.id) && isTrustedGoalEvidence(evidence),
 				);
 				if (!trustedEvidence) {
 					return {
 						ok: false,
-						error: `Cannot satisfy requirement '${id}': cite at least one verified or user-confirmed evidence entry.`,
+						error: `Cannot satisfy requirement '${id}': cite at least one verified or user-confirmed evidence entry${
+							(action.evidenceIds ?? []).length === 0 ? " (none is recorded and unused)" : ""
+						}.`,
 					};
 				}
 			}

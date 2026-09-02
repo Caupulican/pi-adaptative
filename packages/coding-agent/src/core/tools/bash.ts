@@ -11,7 +11,6 @@ import {
 	type TruncationResult,
 } from "@caupulican/pi-agent-core/truncate";
 import { type AgentTool, AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
-import { TOOL_OPERATION_REJECTED_MARKER } from "@caupulican/pi-ai/tool-repair-registry";
 import { Container, Text, truncateToWidth } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
@@ -639,11 +638,11 @@ function createShellToolDefinition(
 					"cd/export/unset state persists across bash calls and PowerShell/Python tiers.",
 					"File commands use literal paths; verify targets before recursive rm/cp/mv.",
 					`Bash timeout values are seconds; omit to use the ${DEFAULT_COMMAND_TIMEOUT_SECONDS}s default.`,
-					`Search narrowly: root/filters, prefer grep/find. Broad scans fail; unavoidable scan: broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}", then inspect narrowly.`,
+					`Search narrowly: root/filters, prefer grep/find. A broad scan runs with its output routed to a managed file (as with broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}"); inspect it narrowly.`,
 				]
 			: [
 					`Bash timeout values are seconds, not milliseconds; omit timeout to use the ${DEFAULT_COMMAND_TIMEOUT_SECONDS}s default.`,
-					`Search narrowly: root/filters, prefer grep/find. Broad scans fail; unavoidable scan: broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}", then inspect narrowly.`,
+					`Search narrowly: root/filters, prefer grep/find. A broad scan runs with its output routed to a managed file (as with broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}"); inspect it narrowly.`,
 				],
 		parameters: bashSchema,
 		failureRecovery: {
@@ -666,12 +665,14 @@ function createShellToolDefinition(
 			_ctx?,
 		) {
 			const searchScope = assessShellSearchScope(command, cwd);
-			if (searchScope.kind === "broad" && broadSearch !== BROAD_SEARCH_OUTPUT_ROUTE) {
-				throw new Error(
-					`${TOOL_OPERATION_REJECTED_MARKER}: Broad search blocked before execution: ${searchScope.reason}. Narrow the path, glob, type, or pattern; prefer the grep/find tool with explicit path/glob/limit. If an exhaustive scan is required, retry with broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}"; Pi will keep its output out of context and return a managed file path for bounded read or search follow-up.`,
-				);
-			}
+			// A broad scan is not refused: it runs with its output routed to a managed file, exactly as
+			// the explicit broadSearch route does, and the result says why. Refusing it cost a turn and
+			// armed the failure ledger in every live session that tried one (3 of 15 refusals measured),
+			// for an outcome the route already makes safe: nothing of the scan reaches the context
+			// except the path and a bounded view.
 			const routeBroadSearchOutput = searchScope.kind === "broad";
+			const autoRoutedReason =
+				searchScope.kind === "broad" && broadSearch !== BROAD_SEARCH_OUTPUT_ROUTE ? searchScope.reason : undefined;
 			let outputProjector =
 				routeBroadSearchOutput || commandPrefix || spawnHook ? undefined : createShellOutputProjector(command);
 			const output = new OutputAccumulator({
@@ -789,8 +790,11 @@ function createShellToolDefinition(
 						const persistenceNotice = snapshot.persistedOutputTruncated
 							? `The managed ${formatSize(BROAD_SEARCH_MAX_PERSISTED_BYTES)} file limit was reached; later output was discarded.`
 							: "";
+						const autoRoutedNotice = autoRoutedReason
+							? `Routed automatically because ${autoRoutedReason}; a narrower search would have returned inline. `
+							: "";
 						return {
-							text: `Broad search output routed to ${snapshot.fullOutputPath}. ${persistenceNotice} Inspect it with bounded read offsets or a narrower search.`,
+							text: `Broad search output routed to ${snapshot.fullOutputPath}. ${autoRoutedNotice}${persistenceNotice} Inspect it with bounded read offsets or a narrower search.`,
 							details: {
 								...(truncation.truncated ? { truncation } : {}),
 								fullOutputPath: snapshot.fullOutputPath,

@@ -246,7 +246,7 @@ export interface GoalToolDependencies {
 	 * Live tool-evidence check. When wired, kind:"tool" uses this instead of {@link hasToolCallId}
 	 * so a still-running background handoff cannot verify as done.
 	 */
-	resolveToolEvidence?: (uri: string) => boolean;
+	resolveToolEvidence?: (uri: string) => boolean | { verified: boolean; toolCallId?: string };
 }
 
 function allowsNativeTmuxFallback(reason: string | undefined): boolean {
@@ -262,40 +262,45 @@ async function resolveEvidenceVerified(
 	kind: GoalEvidenceKind,
 	uri: string | undefined,
 	deps: GoalToolDependencies,
-): Promise<boolean | undefined> {
+): Promise<{ verified: boolean | undefined; uri?: string }> {
 	const trimmedUri = uri?.trim();
-	if (!trimmedUri) return undefined;
+	if (!trimmedUri) return { verified: undefined };
 	// A test run is proven by the tool call that ran it, exactly like any other tool evidence.
 	// Measured live: a model recorded its passing test run as kind "test" with a command string as
 	// the locator, which could never verify, then failed satisfy_requirement, complete and increment
-	// in a row without being told why.
+	// in a row without being told why. A locator that is the command text rather than the call id
+	// resolves to the call that ran it, and the record then carries the real id.
 	if (kind === "tool" || kind === "test") {
-		if (deps.resolveToolEvidence) return deps.resolveToolEvidence(trimmedUri);
-		return deps.hasToolCallId ? deps.hasToolCallId(trimmedUri) : false;
+		if (deps.resolveToolEvidence) {
+			const resolved = deps.resolveToolEvidence(trimmedUri);
+			if (typeof resolved === "boolean") return { verified: resolved };
+			return { verified: resolved.verified, ...(resolved.toolCallId ? { uri: resolved.toolCallId } : {}) };
+		}
+		return { verified: deps.hasToolCallId ? deps.hasToolCallId(trimmedUri) : false };
 	}
 	if (kind === "file") {
 		const cwd = deps.cwd?.() ?? process.cwd();
 		try {
 			const stats = await fsStat(resolveToCwd(trimmedUri, cwd));
-			return stats.isFile();
+			return { verified: stats.isFile() };
 		} catch {
-			return false;
+			return { verified: false };
 		}
 	}
 	if (kind === "worker") {
-		if (!deps.getLaneRecords || !deps.getWorkerClaimSnapshots) return false;
+		if (!deps.getLaneRecords || !deps.getWorkerClaimSnapshots) return { verified: false };
 		const laneId = trimmedUri;
 		const record = deps.getLaneRecords().find((candidate) => candidate.laneId === laneId);
-		if (!record) return false;
+		if (!record) return { verified: false };
 		const claim = deps.getWorkerClaimSnapshots().find((candidate) => candidate.requestId === laneId);
-		if (!claim) return false;
+		if (!claim) return { verified: false };
 		// An unreviewed mutation (parentReviewRequired && no parentReviewedAt) can never verify true --
 		// this is what stops an unreviewed worker completion from ungating goal completion through
 		// the existing verified/complete gate (goal-tool-core's isVerifiedOrUserEvidence/complete).
-		if (claim.parentReviewRequired === true && claim.parentReviewedAt === undefined) return false;
-		return claim.status === "completed";
+		if (claim.parentReviewRequired === true && claim.parentReviewedAt === undefined) return { verified: false };
+		return { verified: claim.status === "completed" };
 	}
-	return undefined;
+	return { verified: undefined };
 }
 
 /**
@@ -529,8 +534,8 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 
 			let action: GoalAction = mapped;
 			if (action.action === "add_evidence") {
-				const verified = await resolveEvidenceVerified(action.kind, action.uri, deps);
-				action = { ...action, verified };
+				const resolved = await resolveEvidenceVerified(action.kind, action.uri, deps);
+				action = { ...action, verified: resolved.verified, ...(resolved.uri ? { uri: resolved.uri } : {}) };
 			}
 			// Honest dispatch reporting: distinguish "dispatched" (laneId), "declined" (skipReason --
 			// the dependency IS wired but the underlying delegation starter refused, e.g. disabled or
@@ -695,7 +700,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			const summary = summarizeGoalState(nextState, { action, openTaskSteps: deps.getOpenTaskSteps?.() });
 			const evidenceNote =
 				action.action === "add_evidence"
-					? `Evidence '${action.evidenceId}' recorded (${action.kind === "user" ? "user-confirmed" : action.verified === true ? "verified" : `unverified: ${unverifiedEvidenceReason(action.kind)}`}).`
+					? `Evidence '${action.evidenceId}' recorded (${action.kind === "user" ? "user-confirmed" : action.verified === true ? `verified${action.uri && action.uri !== input.uri?.trim() ? ` via toolCallId ${action.uri}` : ""}` : `unverified: ${unverifiedEvidenceReason(action.kind)}`}).`
 					: "";
 			const text = [`goal ${input.action} recorded.`, evidenceNote, summary, dispatchNote]
 				.filter((line): line is string => Boolean(line))

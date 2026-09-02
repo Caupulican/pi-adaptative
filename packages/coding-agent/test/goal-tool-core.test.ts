@@ -4,6 +4,31 @@ import { createGoalState } from "../src/core/goals/goal-state.ts";
 import { applyGoalAction, completeGoalManually, summarizeGoalState } from "../src/core/goals/goal-tool-core.ts";
 
 describe("applyGoalAction (goal producer core)", () => {
+	it("satisfy_requirement with no cited evidence adopts the unused verified evidence, and refuses when there is none", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
+		const refused = applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1" }, "T2");
+		expect(refused.ok).toBe(false);
+		if (!refused.ok) expect(refused.error).toContain("none is recorded and unused");
+		state = expectOk(
+			applyGoalAction(
+				state,
+				{
+					action: "add_evidence",
+					evidenceId: "e1",
+					kind: "tool",
+					uri: "call-1",
+					summary: "tests passed",
+					verified: true,
+				},
+				"T3",
+			),
+		);
+		state = expectOk(applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1" }, "T4"));
+		expect(state.requirements[0]?.status).toBe("satisfied");
+		expect(state.requirements[0]?.evidenceIds).toEqual(["e1"]);
+	});
+
 	it("starts a new active goal", () => {
 		const result = applyGoalAction(undefined, { action: "start", goalId: "g1", userGoal: "Ship feature" }, "T0");
 		expect(result.ok).toBe(true);
