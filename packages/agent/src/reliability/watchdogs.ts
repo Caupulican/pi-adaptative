@@ -78,6 +78,15 @@ export function isStreamStallError(value: unknown): value is StreamStallError {
 }
 
 export interface StreamIdleOptions {
+	/**
+	 * Output repetition guard: when the trailing `outputRepetitionWindowChars` of generated text
+	 * already occur this many times in the recent output, the response is a runaway and the stream
+	 * is ended with an `output runaway` error. Measured live, one model streamed a single sentence
+	 * for twenty-three minutes and 486 KB before any bound applied. 0 disables the guard.
+	 */
+	outputRepetitionRepeats?: number;
+	/** Size of the repeated window the guard looks for. */
+	outputRepetitionWindowChars?: number;
 	/** Max ms to wait for the FIRST event (connection/first-token allowance). */
 	connectMs: number;
 	/** Max ms between events while content is flowing — the latest content block is
@@ -98,6 +107,8 @@ export interface StreamIdleOptions {
  *  below the HTTP dispatcher idle timeout (see coding-agent http-dispatcher.ts, 660s) or the
  *  HTTP layer would kill quiet-but-healthy streams before this watchdog ever sees the gap. */
 export const DEFAULT_STREAM_IDLE: StreamIdleOptions = {
+	outputRepetitionRepeats: 6,
+	outputRepetitionWindowChars: 200,
 	connectMs: 120_000,
 	firstProgressMs: 120_000,
 	activeIdleMs: 180_000,
@@ -106,6 +117,49 @@ export const DEFAULT_STREAM_IDLE: StreamIdleOptions = {
 
 /** Re-resolved at the start of every request, so hosts can wire live-tunable settings. */
 export type StreamIdleOptionsResolver = (...args: Parameters<StreamFn>) => Partial<StreamIdleOptions>;
+
+/**
+ * How many times the trailing window of generated text occurs in the recent output, when that
+ * count reaches the guard's threshold; undefined otherwise. Text, thinking, and the string values
+ * of a streaming tool call's arguments all count.
+ */
+export const DEFAULT_OUTPUT_REPETITION_REPEATS = 6;
+export const DEFAULT_OUTPUT_REPETITION_WINDOW_CHARS = 200;
+
+function outputRepetition(message: AssistantMessage, opts: StreamIdleOptions): number | undefined {
+	const repeatsNeeded = opts.outputRepetitionRepeats ?? DEFAULT_OUTPUT_REPETITION_REPEATS;
+	const window = opts.outputRepetitionWindowChars ?? DEFAULT_OUTPUT_REPETITION_WINDOW_CHARS;
+	if (!(repeatsNeeded > 0) || !(window > 0)) return undefined;
+	const lastBlock = message.content[message.content.length - 1];
+	if (!lastBlock) return undefined;
+	// A loop can also live inside a tool call's arguments (measured live: a step selector of
+	// "s1-1-1-1..." hundreds of characters long), so the string values of the streamed arguments
+	// count as output too.
+	const text =
+		lastBlock.type === "text"
+			? lastBlock.text
+			: lastBlock.type === "thinking"
+				? lastBlock.thinking
+				: lastBlock.type === "toolCall"
+					? Object.values(lastBlock.arguments ?? {})
+							.filter((value): value is string => typeof value === "string")
+							.join("\n")
+					: undefined;
+	if (text === undefined) return undefined;
+	if (text.length < window * repeatsNeeded) return undefined;
+	const recent = text.slice(-window * repeatsNeeded * 2);
+	const tail = recent.slice(-window);
+	let count = 0;
+	let from = 0;
+	for (;;) {
+		const at = recent.indexOf(tail, from);
+		if (at === -1) break;
+		count++;
+		from = at + 1;
+		if (count >= repeatsNeeded) return count;
+	}
+	return undefined;
+}
 
 /** Extracts the current AssistantMessage snapshot carried by any stream event variant. */
 function partialFromEvent(event: AssistantMessageEvent): AssistantMessage {
@@ -307,6 +361,24 @@ export function withStreamIdleWatchdog(
 				for await (const event of inner) {
 					if (stalled) break;
 					latest = partialFromEvent(event);
+					const repeats = outputRepetition(latest, opts);
+					if (repeats !== undefined) {
+						// A degenerate loop: end it here, before the output cap, with a message the host
+						// classifies as a runaway rather than a retryable stall.
+						stalled = true;
+						watchdog.disarm();
+						callerSignal?.removeEventListener("abort", onCallerAbort);
+						controller.abort();
+						terminalPushed = true;
+						const message: AssistantMessage = {
+							...latest,
+							stopReason: "error",
+							errorMessage: `output runaway: the last ${opts.outputRepetitionWindowChars ?? DEFAULT_OUTPUT_REPETITION_WINDOW_CHARS} characters repeated ${repeats} times`,
+						};
+						outer.push({ type: "error", reason: "error", error: message });
+						settleReady();
+						return;
+					}
 					const meaningfulProgress = eventHasMeaningfulProgress(event);
 					if (meaningfulProgress) meaningfulProgressSeen = true;
 					if (!transportConfirmed && !meaningfulProgress) {

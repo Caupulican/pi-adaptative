@@ -3,7 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type AgentEvent, type AgentTool } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
-import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@caupulican/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	EventStream,
+	getModel,
+	type Model,
+} from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
@@ -93,6 +100,7 @@ describe("AgentSession retry", () => {
 		onRequest?: (callCount: number, maxTokens: number | undefined) => void;
 		autoLearn?: boolean;
 		maxOutputTokens?: number;
+		model?: Model<Api>;
 	}) {
 		const failCount = options?.failCount ?? 1;
 		const maxRetries = options?.maxRetries ?? 3;
@@ -100,7 +108,7 @@ describe("AgentSession retry", () => {
 		const baseDelayMs = options?.baseDelayMs ?? 1;
 		let callCount = 0;
 
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = options?.model ?? getModel("anthropic", "claude-sonnet-4-5")!;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: "Test", tools: [] },
@@ -288,14 +296,16 @@ describe("AgentSession retry", () => {
 
 	it("narrows a cap above the model's limit to the limit, never widening a registry maximum", async () => {
 		const wide: Array<number | undefined> = [];
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		// A model whose own limit sits below the frontier tier cap: the limit wins over the setting.
+		const model = { ...getModel("anthropic", "claude-sonnet-4-5")!, maxTokens: 8_192 };
 		const widened = createSession({
 			failCount: 0,
-			maxOutputTokens: model.maxTokens + 1,
+			model,
+			maxOutputTokens: 9_000,
 			onRequest: (_callCount, maxTokens) => wide.push(maxTokens),
 		});
 		await widened.session.prompt("Hello", { autoContinueGoal: false });
-		expect(wide).toEqual([model.maxTokens]);
+		expect(wide).toEqual([8_192]);
 	});
 
 	it("exhausts max retries and emits failure", async () => {

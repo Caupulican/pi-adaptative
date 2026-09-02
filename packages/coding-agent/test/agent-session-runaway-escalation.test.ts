@@ -94,6 +94,14 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 				status: "active",
 				blockedReason: undefined,
 			});
+			// Graded evidence: the runaway demotes this model to the strong tier for the store's TTL,
+			// tightening its caps and guards without turning any feature off.
+			expect(harness.session.getCapabilityTierPolicy()).toMatchObject({
+				tier: "strong",
+				pathAliasing: true,
+				maxOutputTokens: 16_384,
+				repetitionGuardRepeats: 4,
+			});
 			const guard = recovered?.events.findLast((event) => event.type === "system_stop_goal");
 			expect(guard).toMatchObject({
 				type: "system_stop_goal",

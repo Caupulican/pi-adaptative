@@ -157,6 +157,8 @@ function estimateContextTokensMemoized(
 }
 
 export interface ContextPipelineDeps {
+	/** Capability-tier switch for path aliasing; absent means enabled. */
+	isPathAliasingEnabled?(): boolean;
 	/** Current turn index, stamped into audit/policy/enforcement reports. */
 	getTurnIndex(): number;
 	/** Session log: audit lookup, gc/artifact storage dirs, curation entries, token-estimate compaction anchor. */
@@ -260,6 +262,8 @@ export class ContextPipeline {
 	}
 
 	applyPathAliases(messages: AgentMessage[]): { messages: AgentMessage[]; legend?: string } {
+		// A tier without aliasing sends paths as they are: no table, no legend, no rewrite.
+		if (this.deps.isPathAliasingEnabled?.() === false) return { messages };
 		this._pathAliasRuntime ??= new PathAliasRuntime(
 			() => this.deps.getCwd(),
 			() => join(this._indexDir(), "runtime.sqlite"),

@@ -13,6 +13,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT } from "@caupulican/pi-agent-core";
 import { resolvePath } from "../utils/paths.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import type { Extension } from "./extensions/types.ts";
@@ -328,6 +329,10 @@ export class SystemPromptBuilder {
 			this._buildSituationSoulPrompt(),
 			// Always-on untrusted-content boundary contract (gives the <untrusted_content> fences meaning).
 			UNTRUSTED_BOUNDARY_SYSTEM_RULE,
+			// The tool-failure protocol lives here once, stable for the whole session; each active
+			// ledger record then carries one pointer line instead of repeating the protocol text
+			// (pi-agent-core's toolFailureProtocolProse, set from the capability tier).
+			MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT,
 			this._buildProjectInstructionIsolationPrompt(modelCapability),
 			this._buildSelfModificationPrompt(modelCapability),
 			this._buildAutonomyPrompt(modelCapability),

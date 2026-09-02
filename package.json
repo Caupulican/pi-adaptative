@@ -12,9 +12,11 @@
 	"scripts": {
 		"clean": "npm run clean --workspaces",
 		"build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build",
-		"check": "biome check --error-on-warnings . && npm run check:test-harness-isolation && npm run check:release-binary-benchmark && npm run check:pinned-deps && npm run check:typescript-toolchain && npm run check:ts-imports && npm run check:coordinator-boundaries && npm run check:clone-config && npm run check:clones && node scripts/run-tsc.mjs --noEmit && npm run check:browser-smoke",
+		"check": "biome check --error-on-warnings . && npm run check:test-harness-isolation && npm run check:release-binary-benchmark && npm run check:pinned-deps && npm run check:typescript-toolchain && npm run check:ts-imports && npm run check:coordinator-boundaries && npm run check:clone-config && npm run check:clones && npm run check:contract-doctrine && npm run check:architecture-map && node scripts/run-tsc.mjs --noEmit && npm run check:browser-smoke",
 		"format": "biome check --write --error-on-warnings .",
 		"check:browser-smoke": "node --test scripts/browser-smoke-node-import-policy.test.mjs && node scripts/check-browser-smoke.mjs",
+		"check:contract-doctrine": "node scripts/check-contract-doctrine.mjs",
+		"check:architecture-map": "node scripts/architecture-map.mjs --check",
 		"check:clone-config": "node --test scripts/check-production-clones.test.mjs",
 		"check:clones": "node scripts/check-production-clones.mjs",
 		"check:coordinator-boundaries": "node scripts/check-coordinator-boundaries.mjs",

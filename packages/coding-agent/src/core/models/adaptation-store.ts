@@ -1,4 +1,5 @@
 import { stateFile } from "../agent-paths.ts";
+import { type CapabilityTierDemotion, isCapabilityTierDemotion } from "../capability-tier.ts";
 import { isWorkerSession } from "../session-role.ts";
 
 const DEFERRED_PERF_SAMPLE_IDLE_MS = 2_000;
@@ -67,6 +68,8 @@ export interface ModelAdaptationProfile {
 	protocol?: ModelProtocolCalibration;
 	toolProbe?: ModelToolProbe;
 	perf?: ModelPerfProfile;
+	/** Evidence-driven capability tier demotion; see capability-tier.ts. Absent = frontier. */
+	capabilityTier?: CapabilityTierDemotion;
 	teachStats: Record<string, ModelTeachStats>;
 }
 
@@ -93,6 +96,7 @@ function normalizeProfile(profile: Partial<ModelAdaptationProfile> | undefined):
 		...(isProtocol(profile?.protocol) && { protocol: profile.protocol }),
 		...(isToolProbe(profile?.toolProbe) && { toolProbe: profile.toolProbe }),
 		...(isModelPerfProfile(profile?.perf) && { perf: profile.perf }),
+		...(isCapabilityTierDemotion(profile?.capabilityTier) && { capabilityTier: profile.capabilityTier }),
 		teachStats: isRecordObject(profile?.teachStats) ? filterTeachStats(profile.teachStats) : {},
 	};
 }
@@ -417,6 +421,20 @@ export class ModelAdaptationStore {
 	setProtocol(model: string, protocol: ModelProtocolCalibration, at?: string): StoredModelAdaptation {
 		const now = at ?? (protocol.status === "failed" ? protocol.attemptedAt : protocol.calibratedAt);
 		return this.mutateProfile(model, new Date(now), (profile) => ({ ...profile, protocol }), now).entry!;
+	}
+
+	/** Record graded evidence that demotes a model's capability tier; `undefined` clears it. */
+	setCapabilityTier(model: string, demotion: CapabilityTierDemotion | undefined, at?: string): StoredModelAdaptation {
+		const now = at ?? demotion?.at ?? new Date().toISOString();
+		return this.mutateProfile(
+			model,
+			new Date(now),
+			(profile) => {
+				const { capabilityTier: _previous, ...rest } = profile;
+				return demotion ? { ...rest, capabilityTier: demotion } : rest;
+			},
+			now,
+		).entry!;
 	}
 
 	setToolProbe(model: string, toolProbe: ModelToolProbe, at?: string): StoredModelAdaptation {

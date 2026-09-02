@@ -957,6 +957,54 @@ describe("tool failure memory", () => {
 		expect(again.ledger).toContain('"occ":2');
 	});
 
+	it("carries one pointer line instead of the protocol text when the host keeps the protocol in the system prompt", () => {
+		const tracker = new Map();
+		const failed = rememberToolFailure(
+			tracker,
+			"bash",
+			{ command: "ls" },
+			"failed",
+			"tool_error",
+			"Retry later.",
+			"ls: boom",
+		);
+		const messages: AgentMessage[] = [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "ls" } }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "mock",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "bash-1",
+				toolName: "bash",
+				content: createToolFailureResult(failed).content,
+				details: createToolFailureResult(failed).details,
+				isError: true,
+				timestamp: 2,
+			},
+		];
+		const full = sanitizeToolFailureContext(messages, "base", 0, undefined, "full");
+		const pointer = sanitizeToolFailureContext(messages, "base", 0, undefined, "pointer");
+		expect(full.ledger).toContain("MANDATORY TOOL FAILURE RECOVERY v1");
+		expect(pointer.ledger).not.toContain("MANDATORY AND NON-NEGOTIABLE");
+		expect(pointer.ledger).toContain("protocol in the system prompt applies to every record below");
+		expect(pointer.ledger).toContain('"tool":"bash"');
+		expect((pointer.ledger ?? "").length).toBeLessThan((full.ledger ?? "").length - 300);
+	});
+
 	it("forgets an encoding-corrupt attempt after one change-approach directive", () => {
 		const assessment = assessToolFailure(
 			"PI_FILE_ENCODING_CORRUPTION: corrupt.dat is not valid UTF-8 text",

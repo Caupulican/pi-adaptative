@@ -465,7 +465,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `maxOutputTokens` | number | `32768` | Per-response output cap sent with every provider request. Narrows the model's own limit and is narrowed further by a goal's remaining token budget; it never widens a model's limit. |
+| `maxOutputTokens` | number | `32768` | Per-response output cap sent with every provider request. Narrows the model's own limit; the model's capability tier (16,384 on the strong tier, 8,192 on the constrained tier) and a goal's remaining token budget narrow it further; it never widens a model's limit. |
 
 A model's registry limit is a theoretical maximum (grok-4.6 advertises 500,000 output tokens), and a request that carries no cap lets a degenerate generation run to it: one measured continuation turn streamed a single repeated sentence for over twenty minutes at the model's output price. Real responses, a long file write included, stay far below the default.
 

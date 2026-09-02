@@ -156,6 +156,7 @@ export interface AgentOptions {
 	subscribeToolCallHandoffRequest?: AgentLoopConfig["subscribeToolCallHandoffRequest"];
 	onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
 	toolArgumentTeachEnabled?: boolean;
+	toolFailureProtocolProse?: AgentLoopConfig["toolFailureProtocolProse"];
 	toolValidationEscalationThreshold?: number;
 	onToolValidationEscalation?: AgentLoopConfig["onToolValidationEscalation"];
 	prepareNextTurn?: (
@@ -269,6 +270,7 @@ export class Agent {
 	public subscribeToolCallHandoffRequest?: AgentLoopConfig["subscribeToolCallHandoffRequest"];
 	public onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
 	public toolArgumentTeachEnabled?: boolean;
+	public toolFailureProtocolProse?: AgentLoopConfig["toolFailureProtocolProse"];
 	public toolValidationEscalationThreshold?: number;
 	public onToolValidationEscalation?: AgentLoopConfig["onToolValidationEscalation"];
 	public prepareNextTurn?: (
@@ -336,6 +338,7 @@ export class Agent {
 		this.subscribeToolCallHandoffRequest = options.subscribeToolCallHandoffRequest;
 		this.onToolArgumentValidation = options.onToolArgumentValidation;
 		this.toolArgumentTeachEnabled = options.toolArgumentTeachEnabled;
+		this.toolFailureProtocolProse = options.toolFailureProtocolProse;
 		this.toolValidationEscalationThreshold = options.toolValidationEscalationThreshold;
 		this.onToolValidationEscalation = options.onToolValidationEscalation;
 		this.prepareNextTurn = options.prepareNextTurn;
@@ -627,6 +630,7 @@ export class Agent {
 			toolExecution: this.toolExecution,
 			toolConcurrency: this.toolConcurrency,
 			toolArgumentTeachEnabled: this.toolArgumentTeachEnabled,
+			toolFailureProtocolProse: this.toolFailureProtocolProse,
 			onToolArgumentValidation: this.onToolArgumentValidation,
 			toolValidationEscalationThreshold: this.toolValidationEscalationThreshold,
 			onToolValidationEscalation: this.onToolValidationEscalation,

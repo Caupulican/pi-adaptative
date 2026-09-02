@@ -314,6 +314,7 @@ export async function startPlannedAgentProviderRequestWithId(
 			sourceContext.systemPrompt,
 			sanitizerSentPrefixCount,
 			config.providerRequestPrefixState?.sanitizerMemory,
+			config.toolFailureProtocolProse ?? "full",
 		);
 		const plan = await buildContextPlan(sanitized.messages, admissionAttempt, sentPrefixCount, config, signal);
 		// Checked on every admission attempt, including one later discarded as stale, so a host sees

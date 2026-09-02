@@ -7,11 +7,11 @@ const boundaries = [
 	{
 		path: "packages/coding-agent/src/core/agent-session.ts",
 		// Ratchet policy: this ceiling only ever moves DOWN, as a follow-on extraction shrinks the
-		// file — never raised to silence an overage. Last ratcheted after the extension-binding
-		// extraction (bindExtensions/bindExtensionCore/applyExtensionBindings/resource discovery
-		// moved to extension-binding-controller.ts) landed the file at 3,849 lines; 3,900 is that
-		// count plus ~50 lines of headroom, rounded up to a clean number.
-		maxLines: 3_900,
+		// file — never raised to silence an overage. Last ratcheted after the guard handlers moved to
+		// agent-session-guards.ts and the background tool-task construction to
+		// agent-session-background-tasks.ts (2026-09-02), which landed the file at 3,842 lines;
+		// 3,850 is that count plus eight lines of headroom.
+		maxLines: 3_850,
 		required: [
 			'from "./agent-session-contracts.ts"',
 			'from "./goals/goal-session-controller.ts"',

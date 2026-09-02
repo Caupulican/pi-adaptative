@@ -202,6 +202,13 @@ function renderCacheReport(events: FauxRequestEvent[]): string {
 	const measured = appends + rewrites;
 	const p50 = reuse.length > 0 ? median(reuse) : 1;
 	const high = reuse.length > 0 ? reuse.filter((value) => value >= 0.9).length / reuse.length : 1;
+	// The contract gate (PI_PROFILE_GATE=1, run in CI on a short session): every request is a
+	// byte-append of the previous one except the packs and summaries the harness makes on purpose.
+	// A floor that only moves up; a regression here is a cache invalidation the census would pay for.
+	if (process.env.PI_PROFILE_GATE === "1") {
+		expect(p50).toBeGreaterThanOrEqual(0.98);
+		expect(measured > 0 ? appends / measured : 1).toBeGreaterThanOrEqual(0.95);
+	}
 	const lines = [
 		`cache: requests=${main.length} p50 reuse=${p50.toFixed(2)} share>=0.9=${high.toFixed(2)} appends=${appends}/${measured} rewrites=${rewrites}/${measured}`,
 		`reuse by decile (median cachedChars/promptChars): ${deciles(reuse)}`,
@@ -448,6 +455,15 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 				`turns=${TURNS} scenario=${SCENARIO} wall=${wallMs.toFixed(0)}ms entries=${entries.length} toolErrors=${errors}`,
 			);
 			log(`host pre-request ms by decile: ${deciles(snapshotGaps)}  (n=${snapshotGaps.length})`);
+			// The contract gate: per-request host work must not grow with history. The last decile's
+			// median may not exceed twice the first decile's (both floored at one millisecond so a
+			// fast machine cannot fail on timer granularity).
+			if (process.env.PI_PROFILE_GATE === "1" && snapshotGaps.length >= 100) {
+				const slice = Math.floor(snapshotGaps.length / 10);
+				const firstDecile = median(snapshotGaps.slice(0, slice));
+				const lastDecile = median(snapshotGaps.slice(-slice));
+				expect(Math.max(1, lastDecile)).toBeLessThanOrEqual(2 * Math.max(1, firstDecile));
+			}
 			for (const [tool, values] of [...byTool.entries()].sort((a, b) => b[1].length - a[1].length)) {
 				log(`tool ${tool.padEnd(12)} n=${String(values.length).padStart(4)} ms by decile: ${deciles(values)}`);
 			}

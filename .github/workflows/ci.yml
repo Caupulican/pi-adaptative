@@ -86,12 +86,33 @@ jobs:
       - name: Check
         run: npm run check
 
+      # A contract test may change only alongside docs/doctrine.md (see contracts.json). The
+      # pre-commit chain checks the staged tree; a push is checked over its commit range.
+      - name: Contract-doctrine gate
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        run: node scripts/check-contract-doctrine.mjs --range ${{ github.event.before }}..${{ github.sha }}
+
       - name: Verification-harness coverage gate
         if: >
           runner.os == 'Linux' &&
           inputs.skip_tests != true &&
           (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
         run: npm run coverage:verification-harness
+
+      # Contract gate: a short goal session must stay append-only (reuse p50 >= 0.98, appends >= 95%)
+      # with flat per-request host work. Two seconds; the full Profile workflow stays on demand.
+      - name: Long-session contract gate
+        if: >
+          inputs.skip_tests != true &&
+          (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
+        working-directory: packages/coding-agent
+        env:
+          PI_PROFILE_LONG_SESSION: '1'
+          PI_PROFILE_SCENARIO: goal
+          PI_PROFILE_TURNS: '300'
+          PI_PROFILE_GATE: '1'
+          PI_PROFILE_DIR: ${{ runner.temp }}/profile-gate
+        run: npx vitest run test/profiling/host-long-session.profile.test.ts --pool=forks
 
       - name: Test non-coding-agent workspaces
         if: >

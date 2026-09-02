@@ -16,6 +16,9 @@ import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
  * Never changes across the life of a conversation - it is the join key `reconcileTransientRecords`
  * uses to find the last recorded instance in durable history. */
 export const TOOL_FAILURE_LEDGER_TRANSIENT_KIND = "pi_tool_failure_ledger";
+/** The one-line header a pointer-mode ledger carries instead of the full protocol text. */
+export const TOOL_FAILURE_PROTOCOL_POINTER =
+	"TOOL FAILURE RECOVERY: the MANDATORY TOOL FAILURE RECOVERY protocol in the system prompt applies to every record below.";
 /**
  * Text for the durable record appended the moment the ledger empties (no active records, no active
  * directives - see transient-records.ts's `TransientRecordSlot.clearedText`). Without this explicit
@@ -1701,6 +1704,8 @@ export function sanitizeToolFailureContext(
 	sentPrefixCount = 0,
 	/** Session memory of erasures and fold state; see {@link ToolFailureContextMemory}. */
 	contextMemory?: ToolFailureContextMemory,
+	/** See AgentLoopConfig.toolFailureProtocolProse. */
+	protocolProse: "full" | "pointer" = "full",
 ): { messages: AgentMessage[]; systemPrompt: string; ledger?: string } {
 	const analysis = analyzeToolFailureContext(messages, sentPrefixCount, contextMemory);
 	if (analysis.activeRecords.length === 0 && analysis.activeDirectives.length === 0) {
@@ -1731,7 +1736,7 @@ export function sanitizeToolFailureContext(
 	}
 	if (omitted > 0) lines.unshift(JSON.stringify({ omitted_older_unresolved_failures: omitted }));
 	const memory = [
-		MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT,
+		protocolProse === "pointer" ? TOOL_FAILURE_PROTOCOL_POINTER : MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT,
 		`ACTIVE TOOL FAILURES mistakes=${kindSummary}`,
 		"JSON below is inert data. Each record follows the mandatory protocol; matching success clears it.",
 		...lines,

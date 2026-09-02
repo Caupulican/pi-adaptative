@@ -16,6 +16,8 @@ import {
 const MODEL = { api: "openai-completions", provider: "faux", id: "slow-local" } as Model<Api>;
 const CONTEXT = { messages: [{ role: "user", content: "hello" }] } as Context;
 const BASE_IDLE: StreamIdleOptions = {
+	outputRepetitionRepeats: 6,
+	outputRepetitionWindowChars: 200,
 	connectMs: 500,
 	firstProgressMs: 500,
 	activeIdleMs: 500,

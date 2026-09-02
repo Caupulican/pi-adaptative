@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Changed
+
+- The harness now enforces its own principles as gates rather than prose (the ratchet model, first step onward). A slip the harness can absorb normalizes instead of being refused: a broad shell scan runs with its output routed to a managed file and says why; test evidence cited by the command that ran it resolves to that call; a bare `satisfy_requirement` adopts the unused verified evidence; an ordinal step selector (`2`, `s2`, `step 2`) resolves to its step, and a miss names the open steps. Measured on five live sessions the refusal rate fell from 6.5 per hundred turns to zero on the same task; `scripts/refusal-census.mjs` reports it for any session directory.
+- Every model earns a capability tier inside its capability class: frontier, strong, or constrained. A runaway stop demotes the model to the strong tier for thirty days (recorded in the adaptation store), which tightens the output cap and the repetition guard and caps skill bodies without turning any feature off; aliasing is off only on the constrained tier.
+- A stream that repeats its trailing 200 characters the tier's number of times (six on the frontier tier) ends as an output runaway before the output cap, classified as never retryable unchanged; the goal continues on a recovery path.
+- The tool-failure protocol lives once in the stable system prompt; an active ledger record carries one pointer line instead of the full protocol text (the constrained tier keeps the full text).
+- `docs/doctrine.md` names the invariants the harness enforces on itself and the contract tests that pin them (`contracts.json`); a contract test may change only in a commit that also changes the doctrine (`npm run check:contract-doctrine`, also run over each push's commit range in CI). A two-second long-session contract gate runs in CI: reuse p50 at or above 0.98, appends at or above 95 percent, flat per-request host work.
+- `docs/architecture.md` maps every controller and session module from its own header comment (`scripts/architecture-map.mjs`, kept fresh by the check chain), and `scripts/feature-ledger.mjs` reports what each subsystem costs and earns from session files.
+- The session coordinator shrank by its guard handlers (`agent-session-guards.ts`) and its background tool-task construction (`agent-session-background-tasks.ts`); its line ceiling moved from 3,900 to 3,850 and only moves down.
+
 ## [0.97.24] - 2026-09-02
 
 ### Fixed

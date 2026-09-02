@@ -1,0 +1,26 @@
+{
+  "$comment": "Contract tests: the invariants in docs/doctrine.md. A file listed here may change only in a commit that also changes docs/doctrine.md (npm run check:contract-doctrine). Everything not listed is a behavior test and follows the design.",
+  "doctrine": "docs/doctrine.md",
+  "contracts": [
+    "packages/agent/test/provider-request-prefix-stability.test.ts",
+    "packages/agent/test/tool-failure-memory.test.ts",
+    "packages/agent/test/reliability/stream-idle.test.ts",
+    "packages/coding-agent/test/provider-prefix-stability.test.ts",
+    "packages/coding-agent/test/path-alias-session.test.ts",
+    "packages/coding-agent/test/agent-session-retry.test.ts",
+    "packages/coding-agent/test/context-composition.test.ts",
+    "packages/coding-agent/test/delegate-exact-input-corrections.test.ts",
+    "packages/coding-agent/test/task-state.test.ts",
+    "packages/coding-agent/test/goal-tool-core.test.ts",
+    "packages/coding-agent/test/goal-evidence-verification.test.ts",
+    "packages/coding-agent/test/bash-search-guard.test.ts",
+    "packages/coding-agent/test/phone-filesystem-workflow.test.ts",
+    "packages/coding-agent/test/agent-session-runaway-escalation.test.ts",
+    "packages/coding-agent/test/capability-tier.test.ts",
+    "packages/coding-agent/test/worker-authority-resolver.test.ts",
+    "packages/coding-agent/test/native-worker-autonomy.test.ts",
+    "packages/coding-agent/test/background-tool-task-controller.test.ts",
+    "packages/coding-agent/test/tool-task.test.ts",
+    "packages/coding-agent/test/profiling/host-long-session.profile.test.ts"
+  ]
+}

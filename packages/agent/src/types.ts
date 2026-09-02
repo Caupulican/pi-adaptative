@@ -701,6 +701,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/** Disable in-band tool repair teaching notes. Default: enabled. */
 	toolArgumentTeachEnabled?: boolean;
 	/**
+	 * How much of the tool-failure protocol rides each request's ledger record. "full" (default)
+	 * repeats the protocol text in every active ledger; "pointer" sends one line that points at the
+	 * protocol block a host placed once in the stable system prompt. The readmission gate and the
+	 * ledger resolution enforce the protocol either way; the prose only tells the model where to
+	 * read it. Measured live, the full text cost about 600 characters per active record per request.
+	 */
+	toolFailureProtocolProse?: "full" | "pointer";
+	/**
 	 * Whether argument repair is on for this run. The loop resolves it once at run start from the
 	 * `PI_TOOL_REPAIR_DISABLED` emergency switch and hosts never set it: reading the environment on
 	 * every validated call was a visible row of the per-turn profile for a two-microsecond answer.

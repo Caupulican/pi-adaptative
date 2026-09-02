@@ -43,6 +43,130 @@ const BOUNDS: Partial<StreamIdleOptions> = {
 	quietIdleMs: 90_000,
 };
 
+describe("withStreamIdleWatchdog output repetition guard", () => {
+	it("ends a response whose trailing window repeats the configured number of times, before any cap", async () => {
+		const fake = makeFakeStreamFn();
+		const wrapped = withStreamIdleWatchdog(fake.streamFn, {
+			...BOUNDS,
+			outputRepetitionRepeats: 4,
+			outputRepetitionWindowChars: 40,
+		});
+		const stream = await wrapped({} as never, {} as never, {});
+		const sentence = "Use id=step-2 with status=completed and evidence (not s2). ";
+		let text = "";
+		const partial = () => ({
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text }],
+			api: "x",
+			provider: "x",
+			model: "x",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: 1,
+		});
+		fake.inner.push({ type: "start", partial: partial() });
+		// Three repetitions are still fine; the fourth is the runaway.
+		for (let index = 0; index < 3; index++) {
+			text += sentence;
+			fake.inner.push({ type: "text_delta", contentIndex: 0, delta: sentence, partial: partial() });
+		}
+		text += sentence;
+		fake.inner.push({ type: "text_delta", contentIndex: 0, delta: sentence, partial: partial() });
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/output runaway: the last 40 characters repeated 4 times/);
+		expect(fake.signal()?.aborted).toBe(true);
+		expect(classifyFailure({ message: result.errorMessage ?? "" }).reason).toBe("runaway_output");
+	});
+
+	it("catches a loop inside a streaming tool call's arguments", async () => {
+		const fake = makeFakeStreamFn();
+		const wrapped = withStreamIdleWatchdog(fake.streamFn, {
+			...BOUNDS,
+			outputRepetitionRepeats: 4,
+			outputRepetitionWindowChars: 20,
+		});
+		const stream = await wrapped({} as never, {} as never, {});
+		let selector = "s1";
+		const partial = () => ({
+			role: "assistant" as const,
+			content: [
+				{
+					type: "toolCall" as const,
+					id: "call-1",
+					name: "task_steps",
+					arguments: { action: "update", id: selector },
+				},
+			],
+			api: "x",
+			provider: "x",
+			model: "x",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: 1,
+		});
+		fake.inner.push({ type: "start", partial: partial() });
+		for (let index = 0; index < 60; index++) {
+			selector += "-1";
+			fake.inner.push({ type: "toolcall_delta", contentIndex: 0, delta: "-1", partial: partial() });
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/output runaway/);
+	});
+
+	it("leaves ordinary long output alone", async () => {
+		const fake = makeFakeStreamFn();
+		const wrapped = withStreamIdleWatchdog(fake.streamFn, {
+			...BOUNDS,
+			outputRepetitionRepeats: 4,
+			outputRepetitionWindowChars: 40,
+		});
+		const stream = await wrapped({} as never, {} as never, {});
+		let text = "";
+		const partial = () => ({
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text }],
+			api: "x",
+			provider: "x",
+			model: "x",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: 1,
+		});
+		fake.inner.push({ type: "start", partial: partial() });
+		for (let index = 0; index < 40; index++) {
+			const delta = `line ${index}: a different sentence about item ${index * 7} every time.\n`;
+			text += delta;
+			fake.inner.push({ type: "text_delta", contentIndex: 0, delta, partial: partial() });
+		}
+		fake.inner.push({ type: "done", reason: "stop", message: partial() });
+		const result = await stream.result();
+		expect(result.stopReason).toBe("stop");
+	});
+});
+
 describe("withStreamIdleWatchdog (phase-aware)", () => {
 	beforeEach(() => vi.useFakeTimers());
 	afterEach(() => vi.useRealTimers());

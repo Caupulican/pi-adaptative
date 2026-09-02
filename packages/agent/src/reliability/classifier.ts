@@ -20,6 +20,7 @@ export type FailureReason =
 	| "server_error"
 	| "network"
 	| "stream_stall"
+	| "runaway_output"
 	| "context_overflow"
 	| "auth"
 	| "billing_or_quota"
@@ -153,6 +154,9 @@ export function classifyFailure(input: ClassifyFailureInput): ClassifiedError {
 			});
 		}
 	}
+	// An output runaway (the stream guard ended a degenerate loop) is never retried as-is: the same
+	// prompt reproduces the loop. The host records it and lets the goal loop change approach.
+	if (/^output runaway:/i.test(message)) return { ...base, reason: "runaway_output", retryable: false };
 	if (BILLING_OR_QUOTA.test(message)) return withRetry({ ...base, reason: "billing_or_quota", shouldFallback: true });
 	if (AUTH.test(message))
 		return withRetry({ ...base, reason: "auth", shouldRotateCredential: true, shouldFallback: true });

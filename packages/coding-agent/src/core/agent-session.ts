@@ -32,6 +32,8 @@ import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
 import { streamSimple } from "@caupulican/pi-ai/stream";
 import { getAgentDir, VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
 import { resourceDir, stateFile } from "./agent-paths.ts";
+import { createSessionBackgroundToolTasks } from "./agent-session-background-tasks.ts";
+import { handleRunawayStop, handleToolValidationEscalation, type SessionGuardDeps } from "./agent-session-guards.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import type {
 	CapabilityEnvelope,
@@ -49,13 +51,10 @@ import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, GateOutcomeHis
 import type { AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import { AutonomyTelemetry } from "./autonomy-telemetry.ts";
 import { BackgroundLaneController } from "./background-lane-controller.ts";
-import {
-	BACKGROUND_TOOL_TASK_CUSTOM_TYPE,
-	BackgroundToolTaskController,
-	loadBackgroundToolTaskRecordsNewestFirst,
-} from "./background-tool-task-controller.ts";
+import type { BackgroundToolTaskController } from "./background-tool-task-controller.ts";
 import { BashExecutionController } from "./bash-execution-controller.ts";
 import type { BashResult } from "./bash-executor.ts";
+import { type CapabilityTierPolicy, capabilityTierPolicy, resolveCapabilityTier } from "./capability-tier.ts";
 import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
 import { CompactionSupport } from "./compaction-support.ts";
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
@@ -244,17 +243,11 @@ import type {
 	ModelCycleResult,
 	PromptOptions,
 	ResearchLaneRunOutcome,
-	RunawayStopRecord,
 	SessionStats,
 	SpawnedUsageTotals,
-	ToolValidationEscalationRecord,
 	WorkerDelegationRunOutcome,
 } from "./agent-session-contracts.ts";
-import {
-	isInterruptedAssistantStopReason,
-	RUNAWAY_STOP_CUSTOM_TYPE,
-	TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE,
-} from "./agent-session-contracts.ts";
+import { isInterruptedAssistantStopReason } from "./agent-session-contracts.ts";
 
 export type { ToolProbeReport, ToolProbeResult, ToolProbeVerdict } from "./tool-protocol-controller.ts";
 
@@ -451,6 +444,8 @@ export class AgentSession {
 			withStreamIdleWatchdog(profiledStreamFn, (model, context) => {
 				const configured = {
 					...stallSettingsSource.getStreamStallSettings(),
+					// The output repetition guard's threshold follows the model's capability tier.
+					outputRepetitionRepeats: this.getCapabilityTierPolicy().repetitionGuardRepeats,
 					...streamIdleOptionsOverride,
 				};
 				const httpIdleTimeoutMs = stallSettingsSource.getHttpIdleTimeoutMs();
@@ -506,7 +501,11 @@ export class AgentSession {
 		this._durableLearningState = this._isChildSession ? undefined : DurableLearningState.forAgentDir(agentDir);
 		this._skillVault = new SkillVaultController({
 			getSkills: () => this._resourceLoader.getActiveSkills(),
-			getMaxBodyBytes: () => resolveActiveSkillBodyByteLimit(this.model?.contextWindow),
+			getMaxBodyBytes: () =>
+				Math.min(
+					resolveActiveSkillBodyByteLimit(this.model?.contextWindow),
+					this.getCapabilityTierPolicy().skillBodyMaxBytes,
+				),
 			onSkillUsed: (skill) => {
 				if (skill.promoted) this._skillCurator.recordUse(skill.name, Date.now());
 			},
@@ -698,6 +697,7 @@ export class AgentSession {
 		});
 		this._pipeline = new ContextPipeline({
 			getTurnIndex: () => this._turnIndex,
+			isPathAliasingEnabled: () => this.getCapabilityTierPolicy().pathAliasing,
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
 			getModelRegistry: () => this._modelRegistry,
@@ -710,29 +710,15 @@ export class AgentSession {
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 		});
-		this._backgroundToolTasks = new BackgroundToolTaskController({
-			getSessionId: () => this.sessionManager.getSessionId(),
+		this._backgroundToolTasks = createSessionBackgroundToolTasks({
+			getSessionManager: () => this.sessionManager,
 			getGoalId: () => this._goals.getOwnershipGoalId(),
 			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
-			getSessionLineageIds: () => this.sessionManager.getSessionLineageIds(),
 			isForegroundWait: (tool, args) => this.getToolDefinition(tool)?.foregroundWait?.(args as never) === true,
 			getArtifactStore: () => this._getToolArtifactStore(),
-			loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(this.sessionManager),
-			persist: (record) => this.sessionManager.appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, record),
-			notifyTerminal: (records, options) => this._terminalHandoffs.notifyTools(records, options.wakeParent),
-			onLiveTasksChanged: (tasks) => this._emit({ type: "background_tools", tasks }),
-			recordUsage: (taskId, usage) => {
-				this.addSpawnedUsage(usage, {
-					label: "background-tool",
-					sourceSessionId: this.sessionManager.getSessionId(),
-					reportId: `background-tool:${this.sessionManager.getSessionId()}:${taskId}`,
-				});
-			},
-			onError: (message, error) =>
-				this._emit({
-					type: "warning",
-					message: `${message}: ${error instanceof Error ? error.message : String(error)}`,
-				}),
+			notifyTerminal: (records, wakeParent) => this._terminalHandoffs.notifyTools(records, wakeParent),
+			emit: (event) => this._emit(event),
+			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 		});
 		const failureCorpusPath = stateFile(this._agentDir, "failure-corpus.jsonl");
 		this._toolRecoveryEventLogPath = stateFile(this._agentDir, TOOL_RECOVERY_EVENT_LOG_FILE);
@@ -797,7 +783,8 @@ export class AgentSession {
 			compaction: this._compaction,
 			context: providerRequestContext,
 			admitGoalRequest: () => this._goals.admitProviderRequest(),
-			maxOutputTokens: () => this.settingsManager.getMaxOutputTokens(),
+			maxOutputTokens: () =>
+				Math.min(this.settingsManager.getMaxOutputTokens(), this.getCapabilityTierPolicy().maxOutputTokens),
 			shouldStopGoalExecutionAfterTurn: () => this._goals.hasExecutionLeaseCrossedBudgetLimit(),
 		});
 		this._toolRecoveryLogger = new ToolRecoveryLogger({
@@ -1725,102 +1712,39 @@ export class AgentSession {
 			this._backgroundToolTasks.subscribeHandoffRequest(toolCallId, request);
 		this.agent.onRunawayStop = (info) => this._handleRunawayStop(info);
 		this.agent.onToolValidationEscalation = (event) => this._handleToolValidationEscalation(event);
+		this.agent.toolFailureProtocolProse = this.getCapabilityTierPolicy().protocolProse;
 	}
 
-	/** Persist the guard evidence, retain active work, and force the next pass onto a recovery path. */
+	/** Guard handlers live in agent-session-guards.ts; the coordinator only supplies their dependencies. */
+	private _guardDeps(): SessionGuardDeps {
+		return {
+			getModel: () => this.model,
+			formatModel: (model) => formatModelRouterModel(model),
+			appendCustomEntry: (customType, record) => this.sessionManager.appendCustomEntry(customType, record),
+			recoverGoalFromHarnessGuard: (info) => this._goals.recoverFromHarnessGuard(info),
+			setCapabilityTierDemotion: (modelKey, demotion) => {
+				this._modelAdaptationStore.setCapabilityTier(modelKey, demotion);
+			},
+			refreshCapabilityTierPolicy: () => {
+				this.agent.toolFailureProtocolProse = this.getCapabilityTierPolicy().protocolProse;
+			},
+			sendNextTurnMessage: (customType, content, details) => {
+				void this.sendCustomMessage({ customType, content, display: false, details }, { deliverAs: "nextTurn" });
+			},
+			emitWarning: (message) => this._emit({ type: "warning", message }),
+			findModel: (provider, modelId) => this._modelRegistry.find(provider, modelId),
+			isLocalOrManagedModel: (model) => isLocalOrManagedRouterModel(model),
+			maybeAutoProbe: (model) => this._toolProtocol.maybeAutoProbe(model),
+			requestValidationFailureEscalation: () => this._modelRouter.requestValidationFailureEscalation(),
+		};
+	}
+
 	private _handleRunawayStop(info: AgentRunawayStopInfo): void {
-		const goalRecovered = this._goals.recoverFromHarnessGuard(info);
-		const record: RunawayStopRecord = {
-			reason: info.reason,
-			signature: info.signature,
-			repeats: info.repeats,
-			model: this.model?.id,
-			provider: this.model?.provider,
-			at: new Date().toISOString(),
-		};
-		this.sessionManager.appendCustomEntry(RUNAWAY_STOP_CUSTOM_TYPE, record);
-		if (goalRecovered) {
-			void this.sendCustomMessage(
-				{
-					customType: "runaway-recovery",
-					content:
-						info.reason === "stagnant_tool_cycle"
-							? "A bounded harness guard ended an unchanged tool-result cycle, but the durable goal remains active and must continue automatically. Reuse the latest returned state; do not call the same status/read cycle again. Execute an available state-changing or finalization action, wait once on the true dependency, or record a concrete blocker."
-							: "A bounded harness guard ended the previous agent loop, but the durable goal remains active and must continue automatically. Do not repeat the same failed operation unchanged. Inspect the recorded failure, change tool or approach, and keep working unless evidence proves a true owner/approval boundary.",
-					display: false,
-					details: info,
-				},
-				{ deliverAs: "nextTurn" },
-			);
-		}
-		const cause =
-			info.reason === "provider_turn_limit"
-				? `the configured provider-turn limit of ${info.repeats} requests was reached`
-				: info.reason === "stagnant_tool_cycle"
-					? `the same tool-call cycle returned identical results ${info.repeats} times`
-					: `the model repeated the same tool call ${info.repeats} times in a row without making progress`;
-		this._emit({
-			type: "warning",
-			message: `Bounded guard ended this run: ${cause}.${goalRecovered ? " The active goal remains scheduled; the next pass must use a different approach." : ""}`,
-		});
+		handleRunawayStop(this._guardDeps(), info);
 	}
 
-	/**
-	 * Evidence-gated native→phone auto-probe for a LOCAL/MANAGED model (never cloud — see
-	 * {@link isLocalOrManagedRouterModel}) that just crossed the tool-argument-validation escalation
-	 * threshold — repeated identical validation failures with no successful native call in between,
-	 * which is exactly the graded evidence {@link Agent.onToolValidationEscalation} already requires
-	 * before firing. Runs the SAME probe `/toolprobe` uses ({@link _probeToolCallingForModel}: native
-	 * trials first, so a model that can actually tool-call natively still resolves to verdict
-	 * "native" and is never phoned) entirely OFF the hot path — fired here but never awaited by the
-	 * caller, so a slow or failing probe can never block or throw the user's in-flight turn.
-	 * Anti-loop: skipped when this session already auto-probed this model, or a fresh persisted
-	 * verdict already exists (enforced by {@link ToolProtocolController}) — otherwise a model that keeps
-	 * failing validation every turn would re-fire the (multi-completion) probe every single turn.
-	 */
-	private _maybeAutoProbeOnValidationEscalation(model: Model<Api>): void {
-		this._toolProtocol.maybeAutoProbe(model);
-	}
-
-	/**
-	 * A repeated identical tool-argument-validation failure crossed the escalation threshold
-	 * ({@link Agent.toolValidationEscalationThreshold}) — the graded evidence the capability-gate
-	 * spine acts on. Always records a session-log/telemetry entry (see {@link
-	 * TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE}), then branches on the failing model's class:
-	 * - LOCAL/MANAGED ({@link isLocalOrManagedRouterModel}, never cloud): the failure is evidence the
-	 *   model may lack native tool-calling, so it fires the evidence-gated native→phone auto-probe
-	 *   off the hot path ({@link _maybeAutoProbeOnValidationEscalation}). Escalating a local model's
-	 *   ROUTER TIER on a tool-call failure would not fix a capability problem, so this branch never
-	 *   touches the model router.
-	 * - CLOUD (known tool-capable): the failure is evidence the routed tier is too weak for this
-	 *   request, so it escalates via {@link ModelRouterController.requestValidationFailureEscalation}
-	 *   — de-conflated from the beforeToolCall mutation gate ({@link
-	 *   ModelRouterController.maybeEscalateToolCall}/`shouldEscalateModelRouterTool`): repeated
-	 *   validation failure is grounds to escalate REGARDLESS of the failing tool's mutation status,
-	 *   so a read-only tool's repeated failure now escalates too (previously a no-op, since the old
-	 *   code reused the mutation gate verbatim for this unrelated signal). Cloud models are never
-	 *   probe-gated or phoned by this handler.
-	 * If the registry can no longer resolve `event.model`/`event.provider` (e.g. the model was
-	 * unregistered mid-session), falls back to the cloud/tier-escalation path — the previously
-	 * existing behavior — rather than silently dropping the signal.
-	 */
 	private _handleToolValidationEscalation(event: ToolValidationEscalationEvent): void {
-		const record: ToolValidationEscalationRecord = {
-			tool: event.tool,
-			signature: event.signature,
-			repeats: event.repeats,
-			model: event.model,
-			provider: event.provider,
-			at: new Date().toISOString(),
-		};
-		this.sessionManager.appendCustomEntry(TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE, record);
-
-		const model = this._modelRegistry.find(event.provider, event.model);
-		if (model && isLocalOrManagedRouterModel(model)) {
-			this._maybeAutoProbeOnValidationEscalation(model);
-			return;
-		}
-		this._modelRouter.requestValidationFailureEscalation();
+		handleToolValidationEscalation(this._guardDeps(), event);
 	}
 
 	// =========================================================================
@@ -3728,6 +3652,20 @@ export class AgentSession {
 			contextWindow: this.model?.contextWindow,
 			mode: this.settingsManager.getModelCapabilitySettings().mode,
 		});
+	}
+
+	/**
+	 * The evidence-driven tier inside the capability class (see capability-tier.ts): the class says
+	 * what a model can carry, the tier says which defaults it has earned. Read from the adaptation
+	 * store so a demotion recorded by an earlier session still applies.
+	 */
+	getCapabilityTierPolicy(): CapabilityTierPolicy {
+		const demotion = this.model
+			? this._modelAdaptationStore.get(formatModelRouterModel(this.model)).capabilityTier
+			: undefined;
+		return capabilityTierPolicy(
+			resolveCapabilityTier({ capabilityClass: this.getModelCapabilityProfile().class, demotion }),
+		);
 	}
 
 	/**
