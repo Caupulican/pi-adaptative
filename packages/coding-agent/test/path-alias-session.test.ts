@@ -204,6 +204,38 @@ describe("PathAliasRuntime", () => {
 		second.close();
 	});
 
+	it("leaves host records opaque: their bytes never change and their paths mint nothing", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
+		tempDirs.push(dir);
+		const runtime = new PathAliasRuntime(
+			() => "/repo",
+			() => join(dir, "runtime.sqlite"),
+			() => 1,
+		);
+		const record: AgentMessage = {
+			role: "custom",
+			customType: "active_skill_context",
+			content: "ACTIVE SKILL test\nBASE /repo/packages/coding-agent/src/bundled-resources/skills/test",
+			display: false,
+			timestamp: 1,
+		};
+		// A record is sent raw as a fresh transient before any alias pass; once durable, rendering it
+		// would change the bytes of an already-sent message. So it passes through by identity, and
+		// its path never enters the table.
+		const first = runtime.sync([record]);
+		expect(first.messages[0]).toBe(record);
+		expect(runtime.peekTable().entries).toEqual([]);
+		const later = runtime.sync([
+			record,
+			toolResult("packages/coding-agent/src/bundled-resources/skills/test/SKILL.md", 2),
+		]);
+		expect(later.messages[0]).toBe(record);
+		expect(runtime.peekTable().entries.map((entry) => entry.path)).toEqual([
+			"packages/coding-agent/src/bundled-resources/skills/test/SKILL.md",
+		]);
+		runtime.close();
+	});
+
 	it("persists a new path when every suffix alias_id is already stored", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
 		tempDirs.push(dir);

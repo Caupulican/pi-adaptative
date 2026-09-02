@@ -684,6 +684,13 @@ function contentTexts(content: unknown): string[] {
 function textsFromMessage(message: AgentMessage): string[] {
 	if (message.role === "bashExecution") return [message.command, message.output];
 	if (message.role === "compactionSummary" || message.role === "branchSummary") return [message.summary];
+	// Host records (memory evidence, goal context, skill context, the failure ledger, the legend)
+	// are opaque to aliasing: they are sent the first time as fresh transients, before any alias
+	// pass, and become durable history afterwards. Rendering them once durable changed their bytes
+	// between those two requests (measured live: a skill record's absolute base path was aliased on
+	// the request after the one that introduced it, and the delta path disengaged), so neither
+	// their paths nor their text ever enter the alias system.
+	if (message.role === "custom") return [];
 	if ("content" in message) return contentTexts(message.content);
 	return [];
 }

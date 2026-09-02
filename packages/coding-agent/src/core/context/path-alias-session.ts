@@ -11,7 +11,6 @@ import {
 	extendPathAliasTable,
 	formatPathAliasLegendForIds,
 	MAX_RESERVED_TOKENS,
-	PATH_ALIAS_LEGEND_CUSTOM_TYPE,
 	type PathAliasTable,
 	rewriteAgentMessagesWith,
 	rewriteText,
@@ -259,9 +258,13 @@ export class PathAliasRuntime {
 		}
 		for (let index = from; index < messages.length; index++) {
 			const message = messages[index]!;
-			// The legend defines the aliases; once recorded, rewriting its own text turned every alias
-			// display back into an alias and changed the bytes of an already-sent record per request.
-			if (message.role === "custom" && message.customType === PATH_ALIAS_LEGEND_CUSTOM_TYPE) {
+			// Host records pass through untouched. The legend defines the aliases: rewriting its own
+			// text turned every alias display back into an alias. Every other host record (memory
+			// evidence, goal context, skill context, the failure ledger) is sent raw as a fresh
+			// transient before any alias pass and becomes durable afterwards; rendering it then changed
+			// the bytes of an already-sent message (a skill record's base path, measured live), which
+			// broke the cached prefix and disengaged the delta path on the very next request.
+			if (message.role === "custom") {
 				rendered.push(message);
 				continue;
 			}
