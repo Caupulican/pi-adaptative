@@ -212,9 +212,12 @@ function serializeContext(context: Context): SerializedContext {
 		offset = start + part.length;
 		return [start, offset];
 	};
+	// System prompt and tool schemas first, then messages: that is the order a provider's prefix
+	// cache sees, so an appended message extends the cached prefix instead of breaking it at the
+	// tool schemas.
 	if (context.systemPrompt) push(`system:${context.systemPrompt}`);
-	for (const message of context.messages) messageSpans.push(push(`${message.role}:${messageToText(message)}`));
 	if (context.tools?.length) push(`tools:${JSON.stringify(context.tools)}`);
+	for (const message of context.messages) messageSpans.push(push(`${message.role}:${messageToText(message)}`));
 	return { text: parts.join("\n\n"), messageSpans };
 }
 

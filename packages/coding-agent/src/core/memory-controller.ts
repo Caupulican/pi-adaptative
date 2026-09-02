@@ -18,7 +18,8 @@
  * stays the single owner of the pass ordering.
  */
 
-import type { AgentMessage, CustomMessage } from "@caupulican/pi-agent-core";
+import { createHash } from "node:crypto";
+import { type AgentMessage, createCustomMessage } from "@caupulican/pi-agent-core";
 import { configFile, okfMemoryDir } from "./agent-paths.ts";
 import { collectCurrentWorkMemory } from "./context/current-work-memory.ts";
 import { createFileStoreMemoryProvider } from "./context/file-store-memory-provider.ts";
@@ -381,13 +382,16 @@ export class MemoryController {
 	 * `includeInPrompt`. Reuses the `report` this pass's `runMemoryRetrieval` call already
 	 * computed -- never re-queries the provider here.
 	 *
-	 * Appends exactly one ephemeral `custom`/"memory_evidence" message wrapped by
-	 * `wrapUntrustedText` (the same nonce-fenced boundary + always-on system-prompt rule
-	 * used for other untrusted content) to the END of `messages`. This is purely additive
-	 * (never mutates an existing message) and purely transient: `messages` here is the
-	 * array about to be sent to the provider, not `this.agent.state.messages` or anything
-	 * persisted via `sessionManager` -- so the injected message can never reach the
-	 * transcript, regardless of how many times this pass runs.
+	 * Appends exactly one `custom`/"memory_evidence" message wrapped by `wrapUntrustedText`
+	 * (the same fenced boundary + always-on system-prompt rule used for other untrusted content)
+	 * to the END of `messages`. It is a host transient in the transient-record sense
+	 * (agent-core transient-records.ts): string content keyed by its customType, so the request
+	 * planner records it durably once and again only when the recall changes, and the boundary
+	 * id derives from the block's content so identical recall is byte-identical across requests.
+	 * Before this, the message carried its text as a content array with a fresh random id per
+	 * request: never a record, rebuilt at the tail of every request, and the previous request's
+	 * last message therefore changed on every request -- no request was an append of the last,
+	 * and the provider's prompt cache was re-prefilled from that point every time.
 	 *
 	 * Also records a `MemoryPromptInclusionReport` (context/memory-diagnostics.ts) at each
 	 * branch below, for context_audit's diagnostic surface only -- this is pure bookkeeping
@@ -450,14 +454,17 @@ export class MemoryController {
 				return messages;
 			}
 
-			const wrapped = wrapUntrustedText(block.text, "memory:tiered");
-			const evidenceMessage: CustomMessage = {
-				role: "custom",
-				customType: "memory_evidence",
-				content: [{ type: "text", text: wrapped }],
-				display: false,
-				timestamp: Date.now(),
-			};
+			// The boundary id is a function of the content: unpredictable to whoever authored the
+			// content (it would have to contain its own digest), and identical for identical recall.
+			const boundaryId = createHash("sha256").update(block.text).digest("hex").slice(0, 32);
+			const wrapped = wrapUntrustedText(block.text, "memory:tiered", { nonce: boundaryId });
+			const evidenceMessage = createCustomMessage(
+				"memory_evidence",
+				wrapped,
+				false,
+				undefined,
+				new Date().toISOString(),
+			);
 			this._latestMemoryPromptInclusionReport = {
 				...base,
 				status: "included",

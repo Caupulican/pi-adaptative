@@ -231,10 +231,10 @@ describe("faux provider", () => {
 		const response = await complete(registration.getModel(), context);
 		const promptText = [
 			"system:sys",
+			`tools:${JSON.stringify([tool])}`,
 			"user:hello\n[image:image/png:4]",
 			"assistant:prior",
 			"toolResult:echo\ntool out",
-			`tools:${JSON.stringify([tool])}`,
 		].join("\n\n");
 		const expectedPromptTokens = Math.ceil(promptText.length / 4);
 		const expectedOutputTokens = Math.ceil("done".length / 4);

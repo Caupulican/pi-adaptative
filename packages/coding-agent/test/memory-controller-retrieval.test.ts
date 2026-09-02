@@ -197,6 +197,45 @@ describe("MemoryController context retrieval", () => {
 		expect(JSON.stringify(controller.maybeAppendMemoryEvidenceBlock([], open))).toContain("NOT instructions");
 	});
 
+	it("emits the evidence as one string-content record that is byte-identical for identical recall", async () => {
+		const calls: MemorySearchRequest[] = [];
+		const controller = new MemoryController({
+			getSettingsManager: () =>
+				({
+					getMemoryRetrievalSettings: () => ({
+						enabled: true,
+						includeInPrompt: true,
+						maxResults: 5,
+						allowExternalEgress: true,
+					}),
+				}) as unknown as SettingsManager,
+			getTurnIndex: () => 3,
+			getAgentDir: () => agentDir,
+			getCwd: () => tempDir,
+			getSessionId: () => "session-1",
+			isChildSession: () => false,
+			refreshToolRegistry: () => {},
+			getContextWindow: () => 4096,
+			getGoalState: () => undefined,
+		});
+		controller.registerContextMemoryProvider(
+			provider("graph-provider", calls, { source: "external_provider", graph: true, localOnly: false }),
+		);
+		const report = await controller.runMemoryRetrieval([userMessage("recall the graph project context")]);
+
+		const first = controller.maybeAppendMemoryEvidenceBlock([], report).at(-1);
+		const second = controller.maybeAppendMemoryEvidenceBlock([], report).at(-1);
+		expect(first).toMatchObject({ role: "custom", customType: "memory_evidence" });
+		// String content is what the request planner keys a transient record on; identical recall must
+		// produce identical bytes, boundary id included, so the record is appended once and the next
+		// request is an append of the previous one.
+		expect(typeof (first as { content: unknown }).content).toBe("string");
+		expect((first as { content: string }).content).toBe((second as { content: string }).content);
+		expect((first as { content: string }).content).toMatch(
+			/<untrusted_content id="[0-9a-f]{32}" source="memory:tiered"/,
+		);
+	});
+
 	it("does not retrieve local OKF on ordinary substantial turns", async () => {
 		const externalCalls: MemorySearchRequest[] = [];
 		const localCalls: MemorySearchRequest[] = [];
