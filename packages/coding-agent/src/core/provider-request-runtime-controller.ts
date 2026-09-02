@@ -1,5 +1,5 @@
 import type { Agent } from "@caupulican/pi-agent-core/agent";
-import { getApplicableAssistantUsageInfo } from "@caupulican/pi-agent-core/compaction/compaction";
+import { createApplicableAssistantUsageFinder } from "@caupulican/pi-agent-core/compaction/compaction";
 import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
 import { composeRequestSystemPrompt, narrowRequestMaxTokens } from "@caupulican/pi-agent-core/provider-request-planner";
 import type { ProviderRequestAdmissionContext } from "@caupulican/pi-agent-core/types";
@@ -32,6 +32,8 @@ export interface ProviderRequestRuntimeControllerDeps {
 
 /** Installs and owns the one provider planning/admission hook generation on an Agent. */
 export class ProviderRequestRuntimeController {
+	/** One usage-anchor finder per controller: it replays only messages appended since its last call. */
+	private readonly findUsage = createApplicableAssistantUsageFinder();
 	private readonly deps: ProviderRequestRuntimeControllerDeps;
 	private previousTransformContext: Agent["transformContext"];
 	private previousPlanContext: Agent["planContext"];
@@ -63,7 +65,7 @@ export class ProviderRequestRuntimeController {
 		fallbackTokens: number,
 		nonCompactableTokens: number,
 	): number {
-		const usageInfo = getApplicableAssistantUsageInfo(request.sourceContext.messages);
+		const usageInfo = this.findUsage(request.sourceContext.messages);
 		if (!usageInfo) return fallbackTokens;
 		const usageMessage = request.sourceContext.messages[usageInfo.index];
 		if (

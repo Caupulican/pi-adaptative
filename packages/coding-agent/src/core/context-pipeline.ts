@@ -26,6 +26,7 @@
 import { join } from "node:path";
 import {
 	calculateContextTokens,
+	createApplicableAssistantUsageFinder,
 	estimateTokens,
 	getApplicableAssistantUsageInfo,
 } from "@caupulican/pi-agent-core/compaction/compaction";
@@ -104,16 +105,22 @@ interface ContextTokenEstimate {
  * `_auditMemo`. Produces byte-identical output to `estimateContextTokens(messages)` for the same
  * input regardless of `memo` -- see the equivalence test.
  */
-function estimateContextTokensMemoized(messages: AgentMessage[], memo?: TokenMemo): ContextTokenEstimate {
-	const freshMemo: TokenMemo | undefined = memo ? new Map() : undefined;
+function estimateContextTokensMemoized(
+	messages: AgentMessage[],
+	memo?: TokenMemo,
+	findUsage: (
+		messages: readonly AgentMessage[],
+	) => ReturnType<typeof getApplicableAssistantUsageInfo> = getApplicableAssistantUsageInfo,
+): ContextTokenEstimate {
 	const tokensFor = (message: AgentMessage): number => {
 		const cached = memo?.get(message);
-		const tokens = cached ?? estimateTokens(message);
-		freshMemo?.set(message, tokens);
+		if (cached !== undefined) return cached;
+		const tokens = estimateTokens(message);
+		memo?.set(message, tokens);
 		return tokens;
 	};
 
-	const usageInfo = getApplicableAssistantUsageInfo(messages);
+	const usageInfo = findUsage(messages);
 	let result: ContextTokenEstimate;
 	if (!usageInfo) {
 		let estimated = 0;
@@ -128,11 +135,6 @@ function estimateContextTokensMemoized(messages: AgentMessage[], memo?: TokenMem
 			trailingTokens += tokensFor(messages[index]);
 		}
 		result = { tokens: usageTokens + trailingTokens, usageTokens, trailingTokens, lastUsageIndex: usageInfo.index };
-	}
-
-	if (memo && freshMemo) {
-		memo.clear();
-		for (const [key, value] of freshMemo) memo.set(key, value);
 	}
 	return result;
 }
@@ -195,6 +197,14 @@ export class ContextPipeline {
 	 * message object identity -- see {@link ContextAuditMemo}'s doc for the invalidation
 	 * contract. Rebuilt fresh (stale entries dropped) by `runContextAudit` every pass. */
 	private readonly _auditMemo: ContextAuditMemo = new Map();
+	/**
+	 * The messages the two memos above were last filled for. Entries go stale only when a message
+	 * leaves the context -- a compaction, a branch -- which shows as the next array not extending
+	 * this one; then both memos are emptied and refilled. Rebuilding them on every pass, to the same
+	 * contents, copied every entry per request.
+	 */
+	private _memoMessages: readonly AgentMessage[] = [];
+	private readonly _usageFinder = createApplicableAssistantUsageFinder();
 	/** Incremental memo for the per-message token estimate `estimateContextTokensMemoized`
 	 * relies on -- same object-identity-keyed, fresh-rebuild-per-pass contract as `_auditMemo`,
 	 * just for a plain `estimateTokens(message)` number instead of a built ContextItem. */
@@ -286,7 +296,22 @@ export class ContextPipeline {
 		// GC-eligible even if this ContextPipeline instance itself briefly lingers.
 		this._auditMemo.clear();
 		this._tokenMemo.clear();
+		this._memoMessages = [];
 		this._latestCompactionScan.reset();
+	}
+
+	/** Empty both memos when `messages` no longer extends the array they were filled for. */
+	private _syncMemoLineage(messages: readonly AgentMessage[]): void {
+		const previous = this._memoMessages;
+		let extension = previous.length <= messages.length;
+		for (let index = 0; extension && index < previous.length; index++) {
+			if (previous[index] !== messages[index]) extension = false;
+		}
+		if (!extension) {
+			this._auditMemo.clear();
+			this._tokenMemo.clear();
+		}
+		this._memoMessages = messages.slice();
 	}
 
 	/**
@@ -386,6 +411,7 @@ export class ContextPipeline {
 	 */
 	runContextAudit(messages: AgentMessage[]): ContextAuditReport {
 		try {
+			this._syncMemoLineage(messages);
 			const report = runContextAudit(messages, this._buildContextAuditOptions(messages), this._auditMemo);
 			this._latestContextAuditReport = report;
 			return report;
@@ -869,7 +895,7 @@ export class ContextPipeline {
 			return;
 		}
 
-		const estimate = estimateContextTokensMemoized(messages, this._tokenMemo);
+		const estimate = this._estimateContextTokens(messages);
 		if (estimate.lastUsageIndex === null || messages[estimate.lastUsageIndex] !== usageMessage) {
 			return;
 		}
@@ -900,8 +926,13 @@ export class ContextPipeline {
 		this._lastTokenBudgetAnchorKey = anchorKey;
 	}
 
+	private _estimateContextTokens(messages: AgentMessage[]): ContextTokenEstimate {
+		this._syncMemoLineage(messages);
+		return estimateContextTokensMemoized(messages, this._tokenMemo, this._usageFinder);
+	}
+
 	estimateCurrentContextTokens(messages: AgentMessage[]): number {
-		const estimate = estimateContextTokensMemoized(messages, this._tokenMemo);
+		const estimate = this._estimateContextTokens(messages);
 		if (estimate.lastUsageIndex === null) {
 			return this._tokenBudget.estimateDelta(estimateConversationChars(messages));
 		}

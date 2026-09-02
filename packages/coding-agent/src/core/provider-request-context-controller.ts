@@ -139,7 +139,8 @@ export class ProviderRequestContextController {
 			extensionPlan.isCurrent?.() !== false &&
 			reflectionCuePlan?.isCurrent() !== false &&
 			this.deps.skillVault.getContextRevision() === skillRevision &&
-			isDeepStrictEqual(this.deps.getGoalState(), goalState);
+			// The goal snapshot is one shared frozen value per journal position (session-goal-state.ts).
+			this.deps.getGoalState() === goalState;
 		// One projection serves preview, currency check and commit. The plan is a pure function of the
 		// durable messages (same array, same objects), the dependencies `dependenciesCurrent` tracks,
 		// and the curator digests the GC pass looked up -- which `previewGc.isCurrent()` re-resolves.

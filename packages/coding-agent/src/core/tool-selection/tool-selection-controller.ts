@@ -89,7 +89,19 @@ function tokenize(value: string): string[] {
 		.filter(Boolean);
 }
 
+/** Intent is a pure function of a tool's name and description; classified once per distinct pair. */
+const toolIntents = new Map<string, ToolSelectionIntentClass>();
+
 function classifyToolIntent(tool: ToolSelectionTool): ToolSelectionIntentClass {
+	const key = `${tool.name}\0${tool.description ?? ""}`;
+	const cached = toolIntents.get(key);
+	if (cached !== undefined) return cached;
+	const intent = classifyToolIntentUncached(tool);
+	toolIntents.set(key, intent);
+	return intent;
+}
+
+function classifyToolIntentUncached(tool: ToolSelectionTool): ToolSelectionIntentClass {
 	const tokens = tokenize(`${tool.name} ${tool.description ?? ""}`);
 	let best: ToolSelectionIntentClass = "other";
 	let bestScore = 0;

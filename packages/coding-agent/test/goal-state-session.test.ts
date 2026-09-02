@@ -242,3 +242,21 @@ describe("Phase 9A: Goal State Session Persistence", () => {
 		expect(after.continuation.openRequirementIds).toEqual(["r1"]);
 	});
 });
+
+describe("goal state snapshot sharing", () => {
+	it("returns one frozen value per journal position and a new one after a write", () => {
+		const sessionManager = SessionManager.inMemory();
+		appendGoalStateSnapshot(sessionManager, createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" }));
+		const first = getLatestGoalStateSnapshot(sessionManager);
+		expect(first).toBeDefined();
+		expect(getLatestGoalStateSnapshot(sessionManager)).toBe(first);
+		expect(Object.isFrozen(first)).toBe(true);
+		expect(Object.isFrozen(first?.events)).toBe(true);
+
+		appendGoalStateSnapshot(sessionManager, applyGoalEvent(first!, { type: "cancel_goal", now: "T1" }));
+		const second = getLatestGoalStateSnapshot(sessionManager);
+		expect(second).not.toBe(first);
+		expect(second?.status).toBe("cancelled");
+		expect(first?.status).not.toBe("cancelled");
+	});
+});

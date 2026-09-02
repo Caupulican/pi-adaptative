@@ -5,6 +5,7 @@ import {
 	type SessionSnapshotCodec,
 	type SessionSnapshotPayload,
 } from "../session-snapshot.ts";
+import { deepFreeze } from "../util/deep-freeze.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import {
 	applyGoalEvent,
@@ -178,9 +179,12 @@ function cacheGoalState(
 	latestEntryId: string | null,
 	state: GoalState | undefined,
 ): GoalState | undefined {
-	const stored = state ? cloneGoalStateForStorage(state) : undefined;
+	// One frozen value per journal position, shared by every reader: its identity changes exactly
+	// when the journal does, so a reader compares snapshots by identity instead of deep-comparing
+	// two fresh clones, and no reader pays a clone of every event per read.
+	const stored = state ? deepFreeze(cloneGoalStateForStorage(state)) : undefined;
 	goalStateCache.set(sessionManager, { latestEntryId, state: stored });
-	return stored ? cloneGoalStateForStorage(stored) : undefined;
+	return stored;
 }
 
 function replayGoalEventBatches(base: GoalState, batches: readonly GoalEventBatchPayload[]): GoalState | undefined {
@@ -209,9 +213,7 @@ export function getLatestGoalStateSnapshot(sessionManager: GoalStateSource): Goa
 	const latestEntry = sessionManager.getLatestCustomEntryOnBranch(GOAL_STATE_CUSTOM_TYPE);
 	const latestEntryId = latestEntry?.id ?? null;
 	const cached = goalStateCache.get(sessionManager);
-	if (cached?.latestEntryId === latestEntryId) {
-		return cached.state ? cloneGoalStateForStorage(cached.state) : undefined;
-	}
+	if (cached?.latestEntryId === latestEntryId) return cached.state;
 	if (!latestEntry) return cacheGoalState(sessionManager, latestEntryId, undefined);
 
 	const batches: GoalEventBatchPayload[] = [];

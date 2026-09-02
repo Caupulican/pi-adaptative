@@ -77,6 +77,14 @@ export class PathAliasRuntime {
 	 */
 	private frozenSpellings = new Map<string, string>();
 	/**
+	 * The last render: the messages it covered, what they rendered to, and the live spellings after
+	 * them. A request whose history extends that prefix renders only the appended messages; rebuilding
+	 * the live map from every message's spellings on every request walked the whole transcript.
+	 */
+	private renderRun:
+		| { processed: readonly AgentMessage[]; rendered: AgentMessage[]; live: Map<string, string> }
+		| undefined;
+	/**
 	 * Result of the most recent {@link sync} call, keyed by the exact message-list identity it saw.
 	 * `sync` is called twice per provider request (preview, then commit — see
 	 * `ProviderRequestContextController.plan`) built from the same durable messages; when nothing
@@ -230,13 +238,32 @@ export class PathAliasRuntime {
 	 * same bytes each time; it does, because the freeze is resolved before the fresh rewrite.
 	 */
 	private renderFrozen(messages: readonly AgentMessage[]): AgentMessage[] {
-		const live = new Map<string, string>();
-		const rendered = messages.map((message) => {
+		const run = this.renderRun;
+		let from = run ? run.processed.length : -1;
+		if (from > messages.length) from = -1;
+		for (let index = 0; run && from > 0 && index < from; index++) {
+			if (run.processed[index] !== messages[index]) from = -1;
+		}
+		let live: Map<string, string>;
+		let rendered: AgentMessage[];
+		if (run && from >= 0) {
+			live = run.live;
+			rendered = run.rendered.slice();
+		} else {
+			// A diverged history renders from the start; what the last render froze stays frozen.
+			if (run) this.frozenSpellings = run.live;
+			live = new Map();
+			rendered = [];
+			from = 0;
+		}
+		for (let index = from; index < messages.length; index++) {
+			const message = messages[index]!;
 			const memo = this.rendered.get(message);
 			if (memo) {
 				// Its spellings stay live for any later message that repeats one of its spans.
 				for (const [key, spelling] of memo.spellings) live.set(key, spelling);
-				return memo.message;
+				rendered.push(memo.message);
+				continue;
 			}
 			const spellings: Array<readonly [string, string]> = [];
 			const [output] = rewriteAgentMessagesWith([message], (text) => {
@@ -250,8 +277,9 @@ export class PathAliasRuntime {
 			const aliasIds = [...collectActiveAliasIds(collectMessageTexts([output!]))];
 			for (const id of aliasIds) this.legendIds.add(id);
 			this.rendered.set(message, { message: output!, spellings, aliasIds });
-			return output!;
-		});
+			rendered.push(output!);
+		}
+		this.renderRun = { processed: messages.slice(), rendered, live };
 		this.frozenSpellings = live;
 		return rendered;
 	}
@@ -270,6 +298,7 @@ export class PathAliasRuntime {
 		this.records = [];
 		this.loaded = false;
 		this.rendered = new WeakMap();
+		this.renderRun = undefined;
 		this.reservationHistoryScanned = false;
 	}
 
@@ -279,6 +308,7 @@ export class PathAliasRuntime {
 			if (this.table.cwd !== cwd) {
 				this.table = this.buildTableForCwd(cwd);
 				this.rendered = new WeakMap();
+				this.renderRun = undefined;
 			}
 			return;
 		}

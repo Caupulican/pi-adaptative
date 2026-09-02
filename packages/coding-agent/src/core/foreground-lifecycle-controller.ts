@@ -216,8 +216,25 @@ function providerMessageDescriptor(message: object): unknown {
 	return entry;
 }
 
-function providerHistoryMetadata(messages: readonly unknown[]): unknown {
-	const metadata: unknown[] = [];
+const messageFingerprints = new WeakMap<object, string>();
+
+function messageFingerprint(message: unknown): string {
+	if (!message || typeof message !== "object") return fingerprint({ type: typeof message });
+	const cached = messageFingerprints.get(message);
+	if (cached) return cached;
+	const value = fingerprint(providerMessageDescriptor(message));
+	messageFingerprints.set(message, value);
+	return value;
+}
+
+/**
+ * Fingerprint of a bounded window of the history: the first quarter of the window budget and the
+ * newest messages up to it, plus the counts. Each sampled message contributes its own memoized
+ * fingerprint and the window digests those, so a request hashes a few kilobytes of digests and
+ * canonicalizes nothing it has seen before; canonicalizing the window's descriptors afresh on every
+ * request was the single largest per-request cost left in the host at 1,500 turns.
+ */
+function historyFingerprint(messages: readonly unknown[]): string {
 	const firstCount = Math.min(messages.length, Math.floor(MAX_PROVIDER_HISTORY_MESSAGES / 4));
 	const indexes =
 		messages.length <= MAX_PROVIDER_HISTORY_MESSAGES
@@ -229,19 +246,9 @@ function providerHistoryMetadata(messages: readonly unknown[]): unknown {
 						(_, index) => messages.length - (MAX_PROVIDER_HISTORY_MESSAGES - firstCount) + index,
 					),
 				];
-	for (const index of indexes) {
-		const message = messages[index];
-		if (!message || typeof message !== "object") {
-			metadata.push({ type: typeof message });
-			continue;
-		}
-		metadata.push(providerMessageDescriptor(message));
-	}
-	return {
-		messageCount: messages.length,
-		omittedMessageCount: Math.max(0, messages.length - metadata.length),
-		messages: metadata,
-	};
+	const digest = createHash("sha256").update(`${messages.length}\0${Math.max(0, messages.length - indexes.length)}\0`);
+	for (const index of indexes) digest.update(messageFingerprint(messages[index])).update("\0");
+	return digest.digest("hex");
 }
 
 function messageEntryIds(sessionManager: SessionManager): string[] {
@@ -359,7 +366,7 @@ export class ForegroundLifecycleController {
 			}),
 			systemFingerprint: systemPromptFingerprint(context.context.systemPrompt),
 			toolsFingerprint: toolsFingerprint(context.context.tools ?? []),
-			historyFingerprint: fingerprint(providerHistoryMetadata(context.context.messages)),
+			historyFingerprint: historyFingerprint(context.context.messages),
 			messageEntryIds: messageEntryIds(this.deps.sessionManager),
 		});
 		dumpProviderRequest(requestId, context.context);

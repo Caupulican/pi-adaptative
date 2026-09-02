@@ -145,6 +145,48 @@ describe("foreground lifecycle controller", () => {
 		expect(JSON.stringify(snapshots)).not.toContain("bravo");
 	});
 
+	it("fingerprints history by content, so the same history through fresh objects matches", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const agent: ForegroundLifecycleAgentDependency & {
+			onProviderRequestSnapshot?: (...args: never[]) => Promise<void>;
+		} = {
+			state: { messages: [] },
+			resetSanitizerPrefixHorizon: () => {},
+		};
+		const controller = new ForegroundLifecycleController({
+			agent,
+			sessionManager,
+			modelRouter: { commitSessionBufferPrefix: () => new Map() } as ModelRouterController,
+			emitWarning: () => {},
+		});
+		controller.install();
+		const history = [
+			{ role: "user", content: "alpha", timestamp: 1 },
+			{ role: "user", content: "bravo", timestamp: 2 },
+		];
+		for (const [requestId, messages] of [
+			["same-objects", history],
+			["fresh-objects", structuredClone(history)],
+			["shorter", history.slice(0, 1)],
+		] as const) {
+			await agent.onProviderRequestSnapshot?.(
+				{
+					requestId,
+					model: { api: "faux", provider: "faux", id: "faux-1" },
+					reasoning: "off",
+					maxTokens: 128,
+					attempt: 0,
+					context: { systemPrompt: "", tools: [], messages },
+				} as never,
+				undefined,
+			);
+		}
+		const snapshots = sessionManager.getEntries().filter((entry) => entry.type === "request_snapshot");
+		expect(snapshots).toHaveLength(3);
+		expect(snapshots[0]!.historyFingerprint).toBe(snapshots[1]!.historyFingerprint);
+		expect(snapshots[2]!.historyFingerprint).not.toBe(snapshots[0]!.historyFingerprint);
+	});
+
 	it("correlates a completed assistant message's provider_transport diagnostic to the request that produced it", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const agent: ForegroundLifecycleAgentDependency & {

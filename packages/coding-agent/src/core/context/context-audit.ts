@@ -227,16 +227,16 @@ export function runContextAudit(
 	options: ContextAuditOptions,
 	memo?: ContextAuditMemo,
 ): ContextAuditReport {
-	const freshMemo: ContextAuditMemo | undefined = memo ? new Map() : undefined;
 	const items: ContextAuditItemReport[] = [];
 	messages.forEach((message, messageIndex) => {
 		if (message.role !== "toolResult") return;
 		const cached = memo?.get(message);
-		const built =
-			cached && cached.messageIndex === messageIndex
-				? cached.built
-				: buildToolOutputItem(message, messageIndex, options);
-		freshMemo?.set(message, { messageIndex, built });
+		let built: BuiltToolOutputItem;
+		if (cached && cached.messageIndex === messageIndex) built = cached.built;
+		else {
+			built = buildToolOutputItem(message, messageIndex, options);
+			memo?.set(message, { messageIndex, built });
+		}
 		// Re-derive the turnIndex-dependent tail every call, cache hit or miss: a resolved
 		// artifact's real capture turn never changes (see buildToolOutputItem), while a
 		// non-artifact item's createdAtTurn is always the CURRENT audit turn -- exactly what a
@@ -258,9 +258,5 @@ export function runContextAudit(
 			summarizeHardConstraints: evaluateHardConstraints("summarize", features, flags),
 		});
 	});
-	if (memo && freshMemo) {
-		memo.clear();
-		for (const [key, entry] of freshMemo) memo.set(key, entry);
-	}
 	return { turnIndex: options.turnIndex, items };
 }

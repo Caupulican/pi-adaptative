@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
+import { PrefixFold } from "@caupulican/pi-agent-core";
 import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { normalizePath } from "../utils/paths.ts";
@@ -346,44 +347,55 @@ function normalizeToolPath(cwd: string, value: unknown): string | undefined {
 	return normalizePath(isAbsolute(path) ? path : resolve(cwd, path));
 }
 
+/**
+ * The plan is a left fold over the history -- every tool call, the latest read per path, the
+ * semantic-memory pages -- so it resumes past the prefix it already covered instead of walking and
+ * re-resolving every message on every request. One fold per conversation, keyed by its first
+ * message; a change of working directory or marker set starts a new one, since both shape the plan.
+ */
+interface GcPlanFold {
+	readonly cwd: string;
+	readonly markersKey: string;
+	readonly fold: PrefixFold<AgentMessage, ContextGcPlan>;
+}
+
+const gcPlanFolds = new WeakMap<AgentMessage, GcPlanFold>();
+
+function createGcPlanFold(cwd: string, semanticSettings: Required<SemanticMemoryGcSettings>): GcPlanFold {
+	const fold = new PrefixFold<AgentMessage, ContextGcPlan>(
+		() => ({ calls: new Map(), latestReadByPath: new Map(), semanticIndexes: [] }),
+		(plan, message, messageIndex) => {
+			if (message.role === "assistant") {
+				for (const part of message.content) {
+					if (part.type !== "toolCall") continue;
+					plan.calls.set(part.id, { id: part.id, name: part.name, args: part.arguments ?? {}, messageIndex });
+				}
+			} else if (message.role === "toolResult" && message.toolName === "read") {
+				const path = normalizeToolPath(cwd, plan.calls.get(message.toolCallId)?.args.path);
+				if (path) plan.latestReadByPath.set(path, message.toolCallId);
+			}
+			if (semanticSettings.enabled && semanticMessageHasMarker(message, semanticSettings)) {
+				plan.semanticIndexes.push(messageIndex);
+			}
+		},
+	);
+	return { cwd, markersKey: semanticSettings.markers.join("\0"), fold };
+}
+
 function collectContextGcPlan(
 	messages: AgentMessage[],
 	cwd: string,
 	semanticSettings: Required<SemanticMemoryGcSettings>,
 ): ContextGcPlan {
-	const calls = new Map<string, ToolCallMeta>();
-	const readResultCallIds: string[] = [];
-	const semanticIndexes: number[] = [];
-
-	for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
-		const message = messages[messageIndex];
-		if (message.role === "assistant") {
-			for (const part of message.content) {
-				if (part.type !== "toolCall") continue;
-				calls.set(part.id, {
-					id: part.id,
-					name: part.name,
-					args: part.arguments ?? {},
-					messageIndex,
-				});
-			}
-		} else if (message.role === "toolResult" && message.toolName === "read") {
-			readResultCallIds.push(message.toolCallId);
-		}
-
-		if (semanticSettings.enabled && semanticMessageHasMarker(message, semanticSettings)) {
-			semanticIndexes.push(messageIndex);
-		}
+	const first = messages[0];
+	if (!first) return createGcPlanFold(cwd, semanticSettings).fold.fold(messages);
+	const markersKey = semanticSettings.markers.join("\0");
+	let planFold = gcPlanFolds.get(first);
+	if (!planFold || planFold.cwd !== cwd || planFold.markersKey !== markersKey) {
+		planFold = createGcPlanFold(cwd, semanticSettings);
+		gcPlanFolds.set(first, planFold);
 	}
-
-	const latestReadByPath = new Map<string, string>();
-	for (const toolCallId of readResultCallIds) {
-		const call = calls.get(toolCallId);
-		const path = normalizeToolPath(cwd, call?.args.path);
-		if (path) latestReadByPath.set(path, toolCallId);
-	}
-
-	return { calls, latestReadByPath, semanticIndexes };
+	return planFold.fold.fold(messages);
 }
 
 function storagePathFor(storageDir: string | undefined, key: string): string | undefined {

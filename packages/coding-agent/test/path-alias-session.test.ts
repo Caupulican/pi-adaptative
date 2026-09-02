@@ -404,3 +404,37 @@ describe("loadPathAliasTableReadOnly", () => {
 		expect(() => loadPathAliasTableReadOnly("/repo", databasePath)).toThrow();
 	});
 });
+
+describe("PathAliasRuntime incremental render", () => {
+	const tempDirs: string[] = [];
+	afterEach(() => {
+		for (const dir of tempDirs.splice(0))
+			rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	});
+
+	it("keeps the rendered prefix and renders only what was appended, with earlier spellings frozen", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-render-"));
+		tempDirs.push(dir);
+		const runtime = new PathAliasRuntime(
+			() => "/repo",
+			() => join(dir, "runtime.sqlite"),
+			() => 1,
+		);
+		const history = [
+			toolResult("packages/coding-agent/src/foo.ts", 10),
+			toolResult("see packages/coding-agent/src/bar.ts", 11),
+		];
+		const first = runtime.sync(history);
+		const appended = [...history, toolResult("again packages/coding-agent/src/foo.ts", 12)];
+		const second = runtime.sync(appended);
+
+		expect(second.messages[0]).toBe(first.messages[0]);
+		expect(second.messages[1]).toBe(first.messages[1]);
+		expect(second.messages).toHaveLength(3);
+		const text = (message: AgentMessage) => (message as { content: Array<{ text: string }> }).content[0]!.text;
+		// The repeated path renders through the spelling it was first sent with.
+		expect(text(second.messages[2]!)).toContain(text(first.messages[0]!).split(" ").at(-1)!);
+		// The first result's array was not grown behind the caller's back.
+		expect(first.messages).toHaveLength(2);
+	});
+});
