@@ -13,7 +13,7 @@ const fixtures = join(import.meta.dirname, "fixtures", "tool-output");
 const fixture = (name: string) => readFileSync(join(fixtures, name), "utf-8");
 const reduce = (command: string, text: string) => reduceDiagnosticsOutput(classifyCommandFamily(command), text);
 
-/** `path\0line:col` of every reduced diagnostic line, keyed under its group path. */
+/** `path\0line:col` of every reduced diagnostic, single-position lines and merged `at` lists alike. */
 function reducedPositions(text: string): Set<string> {
 	const positions = new Set<string>();
 	let path = "";
@@ -23,8 +23,13 @@ function reducedPositions(text: string): Set<string> {
 			path = line;
 			continue;
 		}
-		const match = /^ {2}(\d+(?::\d+)?) (?:error|warning|info)/u.exec(line);
-		if (match) positions.add(`${path}\0${match[1]}`);
+		const single = /^ {2}(\d+(?::\d+)?) (?:error|warning|info)/u.exec(line);
+		if (single) {
+			positions.add(`${path}\0${single[1]}`);
+			continue;
+		}
+		const merged = /^ {2}(?:error|warning|info).* {2}at ((?:\d+(?::\d+)?)(?:, \d+(?::\d+)?)*)$/u.exec(line);
+		if (merged) for (const position of merged[1].split(", ")) positions.add(`${path}\0${position}`);
 	}
 	return positions;
 }
@@ -48,7 +53,7 @@ describe("reduceDiagnosticsOutput: cargo check", () => {
 	});
 
 	it("names the lint from the rustc note and keeps the frame of the error only", () => {
-		expect(reduced!.text).toContain("  20:9 warning[unused_variables]: unused variable: `tmp0`");
+		expect(reduced!.text).toContain("  20:9 warning[unused_variables]: unused variable: `tmp0`\n");
 		expect(reduced!.text).toContain("  42:18 error[E0308]: mismatched types");
 		expect(reduced!.text).toContain('    42 |     let n: u32 = "text";');
 		expect(reduced!.text).toContain("expected `u32`, found `&str`");
@@ -60,19 +65,49 @@ describe("reduceDiagnosticsOutput: cargo check", () => {
 		expect(lines.at(-1)).toMatch(/^error: could not compile `demo-crate`/u);
 	});
 
-	it("collapses identical diagnostics with a count", () => {
-		const block = [
-			"warning: unused import: `x`",
-			"  --> src/lib.rs:3:5",
-			"   |",
-			" 3 | use x;",
-			"   |     ^",
-			"",
-		].join("\n");
-		const text = `${block}\n${block}\nwarning: \`demo\` (lib) generated 2 warnings\n`;
+	it("merges diagnostics with the same message inside a file into one line listing the positions", () => {
+		const block = (line: number) =>
+			[
+				"warning: unused import: `x`",
+				`  --> src/lib.rs:${line}:5`,
+				"   |",
+				` ${line} | use x;`,
+				"   |     ^",
+				"",
+			].join("\n");
+		const text = `${block(3)}\n${block(9)}\nwarning: \`demo\` (lib) generated 2 warnings\n`;
 		expect(reduce("cargo build", text)?.text).toBe(
-			"src/lib.rs\n  3:5 warning: unused import: `x` [x2]\nwarning: `demo` (lib) generated 2 warnings\n",
+			"src/lib.rs\n  warning: unused import: `x`  at 3:5, 9:5\nwarning: `demo` (lib) generated 2 warnings\n",
 		);
+	});
+
+	it("frames only the first instances of a repeated error and keeps the rest as one-liners", () => {
+		const errorBlock = (index: number) =>
+			[
+				"error[E0433]: failed to resolve: use of undeclared crate or module `store`",
+				`  --> src/app/module_${index % 4}.rs:${10 + index}:5`,
+				"   |",
+				`${10 + index} |     store::open(path)`,
+				"   |     ^^^^^ use of undeclared crate or module `store`",
+				"   |",
+				"help: consider importing this module",
+				"   |",
+				" 1 + use crate::store;",
+				"   |",
+				"",
+			].join("\n");
+		const summary = 'error: could not compile `demo` (bin "demo") due to 30 previous errors';
+		const text = `${Array.from({ length: 30 }, (_, index) => errorBlock(index)).join("\n")}\n${summary}\n`;
+		const standard = reduce("cargo check", text);
+		expect(standard).toBeDefined();
+		expect(reducedPositions(standard!.text).size).toBe(30);
+		expect(standard!.text.match(/store::open\(path\)/gu)).toHaveLength(2);
+		expect(standard!.text.length).toBeLessThan(text.length * 0.3);
+		const compact = reduceDiagnosticsOutput(classifyCommandFamily("cargo check"), text, "compact");
+		expect(compact!.text.match(/store::open\(path\)/gu)).toHaveLength(1);
+		// Secondary spans stay inside the frame instead of leaking as unknown lines.
+		const secondary = `${errorBlock(0).replace("   |\n", "   |\n  ::: src/store.rs:3:1\n   |\n")}\n`;
+		expect(reduce("cargo check", secondary)!.text).toContain("    ::: src/store.rs:3:1");
 	});
 
 	it("reduces a progress-only build to its final line", () => {
@@ -143,7 +178,7 @@ describe("reduceDiagnosticsOutput: biome", () => {
 		expect(reduced).toBeDefined();
 		expect(reduced!.text).toContain("src/sample.ts\n");
 		expect(reduced!.text).toContain(
-			"  1:10 warning[lint/suspicious/noExplicitAny]: Unexpected any. Specify a different type.",
+			"  warning[lint/suspicious/noExplicitAny]: Unexpected any. Specify a different type.  at 1:10, 3:17",
 		);
 		expect(reduced!.text).toContain("  2:10 warning[lint/correctness/noUnusedVariables]: This function f is unused.");
 		expect(reduced!.text).toContain(

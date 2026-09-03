@@ -7,7 +7,7 @@
  * Output shape (a shorter version of the real report, grouped by file):
  *
  *   src/module.rs
- *     42:9 warning[unused_variables]: unused variable: `tmp` [x3]
+ *     warning[unused_variables]: unused variable: `tmp`  at 42:9, 57:9, 90:13
  *     88:5 error[E0308]: mismatched types
  *       88 |     let n: u32 = "text";
  *          |                  ^^^^^^ expected `u32`, found `&str`
@@ -18,7 +18,16 @@
  * raw output so any frame is one read away.
  */
 import type { CommandFamilyClassification } from "./command-family.ts";
-import type { OutputReducer, OutputReductionRequest } from "./output-reduction.ts";
+import type { OutputReducer, OutputReductionLevel, OutputReductionRequest } from "./output-reduction.ts";
+
+/**
+ * Frames are kept for errors, but not for every repeat of the same error: measured on a live
+ * session one `cargo check` carried 81 errors of two messages, each with a 10-line frame, and the
+ * frames were 89 % of the bytes. The first instances of each distinct message keep their frame; the
+ * rest are one-liners, and the raw output holds every frame.
+ */
+const FRAMED_ERRORS_PER_MESSAGE: Record<OutputReductionLevel, number> = { standard: 2, compact: 1 };
+const FRAMED_ERRORS_TOTAL: Record<OutputReductionLevel, number> = { standard: 8, compact: 3 };
 
 interface Diagnostic {
 	path: string;
@@ -95,8 +104,13 @@ function parseRustc(lines: string[]): ParsedDiagnostics | undefined {
 			continue;
 		}
 		if (current) {
-			// Frame gutters (`   |`, `42 |`), notes and help belong to the current diagnostic.
-			if (/^\s*(?:\d+\s*)?\|/u.test(line) || /^\s*=\s+(?:note|help)/u.test(line) || line.trim() === "") {
+			// Frame gutters (`   |`, `42 |`), secondary spans (`:::`, `-->`), notes and help belong to
+			// the current diagnostic.
+			if (
+				/^\s*(?:\d+\s*)?\|/u.test(line) ||
+				/^\s*(?:=\s+(?:note|help)|:::\s|-->\s)/u.test(line) ||
+				line.trim() === ""
+			) {
 				// rustc names the lint only in the note: `#[warn(unused_variables)] on by default`.
 				const lintName = RUSTC_LINT_NOTE_RE.exec(line);
 				if (lintName && current.code === undefined) current.code = lintName[1];
@@ -248,7 +262,9 @@ function parseBiome(lines: string[]): ParsedDiagnostics | undefined {
 // Grouped rendering shared by every toolchain
 // ---------------------------------------------------------------------------------------------
 
-function renderGrouped(parsed: ParsedDiagnostics): string {
+function renderGrouped(parsed: ParsedDiagnostics, level: OutputReductionLevel): string {
+	const framedPerMessage = new Map<string, number>();
+	let framedTotal = 0;
 	const byFile = new Map<string, Diagnostic[]>();
 	for (const diagnostic of parsed.diagnostics) {
 		const list = byFile.get(diagnostic.path);
@@ -258,21 +274,35 @@ function renderGrouped(parsed: ParsedDiagnostics): string {
 	const out: string[] = [];
 	for (const [path, list] of byFile) {
 		out.push(path);
-		// Identical diagnostics (same position, message and code) collapse to one line with a count.
-		const seen = new Map<string, { diagnostic: Diagnostic; count: number }>();
+		// Within a file, diagnostics with the same severity, code and message merge into one line that
+		// lists every position (`at 12:5, 40:5`); the positions are what differs, so nothing is lost.
+		const merged = new Map<string, { diagnostic: Diagnostic; positions: string[]; frames: string[][] }>();
 		for (const diagnostic of list) {
-			const key = `${diagnostic.line}\0${diagnostic.column ?? ""}\0${diagnostic.code ?? ""}\0${diagnostic.message}`;
-			const entry = seen.get(key);
-			if (entry) entry.count++;
-			else seen.set(key, { diagnostic, count: 1 });
-		}
-		for (const { diagnostic, count } of seen.values()) {
+			const key = `${diagnostic.severity}\0${diagnostic.code ?? ""}\0${diagnostic.message}`;
 			const position =
 				diagnostic.column !== undefined ? `${diagnostic.line}:${diagnostic.column}` : `${diagnostic.line}`;
+			const entry = merged.get(key);
+			if (entry) {
+				entry.positions.push(position);
+				entry.frames.push(diagnostic.frame);
+			} else merged.set(key, { diagnostic, positions: [position], frames: [diagnostic.frame] });
+		}
+		for (const { diagnostic, positions, frames } of merged.values()) {
 			const code = diagnostic.code ? `[${diagnostic.code}]` : "";
-			const suffix = count > 1 ? ` [x${count}]` : "";
-			out.push(`  ${position} ${diagnostic.severity}${code}: ${diagnostic.message}${suffix}`);
-			for (const frameLine of diagnostic.frame) out.push(frameLine);
+			const label = `${diagnostic.severity}${code}: ${diagnostic.message}`;
+			if (positions.length === 1) out.push(`  ${positions[0]} ${label}`);
+			else out.push(`  ${label}  at ${positions.join(", ")}`);
+			// Frames survive for the first instances of each distinct message, within a total budget.
+			const messageKey = `${diagnostic.code ?? ""}\0${diagnostic.message}`;
+			for (const frame of frames) {
+				if (frame.length === 0) continue;
+				const framedForMessage = framedPerMessage.get(messageKey) ?? 0;
+				if (framedForMessage >= FRAMED_ERRORS_PER_MESSAGE[level] || framedTotal >= FRAMED_ERRORS_TOTAL[level])
+					break;
+				framedPerMessage.set(messageKey, framedForMessage + 1);
+				framedTotal++;
+				for (const frameLine of frame) out.push(frameLine);
+			}
 		}
 	}
 	// Summary and unrecognized lines close the report so counts and failures stay visible.
@@ -306,6 +336,7 @@ export interface DiagnosticsReduction {
 export function reduceDiagnosticsOutput(
 	classification: CommandFamilyClassification,
 	text: string,
+	level: OutputReductionLevel = "standard",
 ): DiagnosticsReduction | undefined {
 	const parse = parserFor(classification);
 	if (!parse) return undefined;
@@ -313,7 +344,7 @@ export function reduceDiagnosticsOutput(
 	if (lines.at(-1) === "") lines.pop();
 	const parsed = parse(lines);
 	if (!parsed) return undefined;
-	const rendered = renderGrouped(parsed);
+	const rendered = renderGrouped(parsed, level);
 	const renderedLines = rendered.split("\n").length - 1;
 	return { text: rendered, omittedLines: Math.max(0, lines.length - renderedLines) };
 }
@@ -324,6 +355,6 @@ export const diagnosticsOutputReducer: OutputReducer = {
 		return classification.family === "diagnostics" && parserFor(classification) !== undefined;
 	},
 	reduce(classification: CommandFamilyClassification, request: OutputReductionRequest) {
-		return reduceDiagnosticsOutput(classification, request.text);
+		return reduceDiagnosticsOutput(classification, request.text, request.level);
 	},
 };
