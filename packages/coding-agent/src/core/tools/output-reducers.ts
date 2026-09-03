@@ -3,10 +3,11 @@
  * reducers) wherever reduction must be live: the bash and python tools and the census replay all
  * see the same registry.
  */
+import { diagnosticsOutputReducer } from "./diagnostics-output-reducer.ts";
 import { registeredOutputReducers, registerOutputReducer } from "./output-reduction.ts";
 import { searchOutputReducer } from "./search-output-reducer.ts";
 
-const BUNDLED = [searchOutputReducer];
+const BUNDLED = [searchOutputReducer, diagnosticsOutputReducer];
 
 /** Idempotent: a second call (hot reload, a second importer) changes nothing. */
 export function ensureOutputReducersRegistered(): void {

@@ -70,5 +70,11 @@
   "command": "gh api repos/o/r/items",
   "file": "json-list.json",
   "family": "gh api"
+ },
+ {
+  "name": "biome",
+  "command": "npx biome lint src",
+  "file": "biome.txt",
+  "family": "biome"
  }
 ]

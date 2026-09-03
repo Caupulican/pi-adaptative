@@ -17,7 +17,7 @@
 		"check:browser-smoke": "node --test scripts/browser-smoke-node-import-policy.test.mjs && node scripts/check-browser-smoke.mjs",
 		"check:contract-doctrine": "node scripts/check-contract-doctrine.mjs",
 		"check:architecture-map": "node scripts/architecture-map.mjs --check",
-		"check:output-reduction": "node --test scripts/output-reduction-census.test.mjs && node scripts/output-reduction-census.mjs --corpus packages/coding-agent/test/fixtures/tool-output/corpus.json --gate \"{\\\"rg\\\":0.25}\"",
+		"check:output-reduction": "node --test scripts/output-reduction-census.test.mjs && node scripts/output-reduction-census.mjs --corpus packages/coding-agent/test/fixtures/tool-output/corpus.json --gate \"{\\\"rg\\\":0.25,\\\"cargo check\\\":0.6,\\\"biome\\\":0.6}\"",
 		"check:clone-config": "node --test scripts/check-production-clones.test.mjs",
 		"check:clones": "node scripts/check-production-clones.mjs",
 		"check:coordinator-boundaries": "node scripts/check-coordinator-boundaries.mjs",

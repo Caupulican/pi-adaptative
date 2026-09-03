@@ -1,0 +1,73 @@
+src/sample.ts:1:10 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+  > 1 │ const a: any = 1;
+      │          ^^^
+    2 │ function f(x) { return x == null; }
+    3 │ export const b: any = a;
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+src/sample.ts:3:17 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    1 │ const a: any = 1;
+    2 │ function f(x) { return x == null; }
+  > 3 │ export const b: any = a;
+      │                 ^^^
+    4 │ debugger;
+    5 │ 
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+src/sample.ts:2:10 lint/correctness/noUnusedVariables  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! This function f is unused.
+  
+    1 │ const a: any = 1;
+  > 2 │ function f(x) { return x == null; }
+      │          ^
+    3 │ export const b: any = a;
+    4 │ debugger;
+  
+  i Unused variables are often the result of an incomplete refactoring, typos, or other sources of bugs.
+  
+  i Unsafe fix: If this is intentional, prepend f with an underscore.
+  
+    1 1 │   const a: any = 1;
+    2   │ - function·f(x)·{·return·x·==·null;·}
+      2 │ + function·_f(x)·{·return·x·==·null;·}
+    3 3 │   export const b: any = a;
+    4 4 │   debugger;
+  
+
+src/sample.ts:4:1 lint/suspicious/noDebugger  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × This is an unexpected use of the debugger statement.
+  
+    2 │ function f(x) { return x == null; }
+    3 │ export const b: any = a;
+  > 4 │ debugger;
+      │ ^^^^^^^^^
+    5 │ 
+  
+  i Unsafe fix: Remove debugger statement
+  
+    2 2 │   function f(x) { return x == null; }
+    3 3 │   export const b: any = a;
+    4   │ - debugger;
+    5 4 │   
+  
+
+Checked 1 file in 3ms. No fixes applied.
+Found 1 error.
+Found 3 warnings.
+lint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Some errors were emitted while running checks.
+  
+
