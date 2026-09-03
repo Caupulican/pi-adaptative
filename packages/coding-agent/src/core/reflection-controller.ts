@@ -1417,6 +1417,7 @@ export class ReflectionController {
 					...target,
 					expectedDigest: rollback.expectedDigest,
 					sourceText: rollback.previous,
+					...(rollback.previousTarget ? { sourceTarget: rollback.previousTarget } : {}),
 					removeRecord: rollback.removeOkf === true,
 				});
 				if (!applied) return { ok: false, reason: "rollback_apply_failed" };
@@ -1479,6 +1480,7 @@ export class ReflectionController {
 									kind: "okf_organize",
 									target: `${write.type}\0${write.title}`,
 									previous: write.sourceText,
+									...(result.sourceTarget ? { previousTarget: result.sourceTarget } : {}),
 									expectedDigest: result.digest,
 									removeOkf: result.created,
 									instructions:

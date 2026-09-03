@@ -26,6 +26,7 @@ import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import type { FauxRequestEvent } from "@caupulican/pi-ai/faux";
 import { describe, expect, it } from "vitest";
+import { DEFAULT_CONTEXT_GC_SETTINGS } from "../../src/core/context-gc.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "../../src/core/default-tool-surface.ts";
 import { createHarness } from "../suite/harness.ts";
 
@@ -203,11 +204,16 @@ function renderCacheReport(events: FauxRequestEvent[]): string {
 	const p50 = reuse.length > 0 ? median(reuse) : 1;
 	const high = reuse.length > 0 ? reuse.filter((value) => value >= 0.9).length / reuse.length : 1;
 	// The contract gate (PI_PROFILE_GATE=1, run in CI on a short session): every request is a
-	// byte-append of the previous one except the packs and summaries the harness makes on purpose.
-	// A floor that only moves up; a regression here is a cache invalidation the census would pay for.
+	// byte-append of the previous one except the packs and summaries the harness makes on purpose,
+	// and context GC packs only at a grid crossing of its quantized recent boundary (one batch per
+	// stride, never one message per turn, never a whole run at a new prompt). A regression here is a
+	// cache invalidation the census would pay for.
 	if (process.env.PI_PROFILE_GATE === "1") {
+		const { preserveRecentMessages, packStrideMessages } = DEFAULT_CONTEXT_GC_SETTINGS;
+		const lastMessageCount = main[main.length - 1]?.messageCount ?? 0;
+		const crossings = Math.floor(Math.max(0, lastMessageCount - preserveRecentMessages) / packStrideMessages);
 		expect(p50).toBeGreaterThanOrEqual(0.98);
-		expect(measured > 0 ? appends / measured : 1).toBeGreaterThanOrEqual(0.95);
+		expect(rewrites).toBeLessThanOrEqual(crossings + 1);
 	}
 	const lines = [
 		`cache: requests=${main.length} p50 reuse=${p50.toFixed(2)} share>=0.9=${high.toFixed(2)} appends=${appends}/${measured} rewrites=${rewrites}/${measured}`,

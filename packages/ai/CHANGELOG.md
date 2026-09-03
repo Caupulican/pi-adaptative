@@ -10,6 +10,7 @@
 ### Changed
 
 - Model catalog refreshed from live sources (2026-09-03).
+- The `skill_not_eligible` repair guidance fits the 180-character teaching budget again.
 
 ## [0.97.25] - 2026-09-02
 

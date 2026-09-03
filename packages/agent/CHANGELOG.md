@@ -4,6 +4,7 @@
 
 - Host transient records stop bloating the prompt: a trailing record whose content is unchanged re-appends as a one-line pointer instead of the full text, cumulative slots (the path-alias legend) persist only the lines added since the last record, the sent-prefix mark survives across runs, and compaction summarizes the packed projection (superseded host records collapsed) instead of every raw entry. A compaction that ends on a deterministic checkpoint records `fallback` with its cause (`deterministic-only`, `max-llm-cycles`, or the failing cycle's cause), never `success`.
 - A tool call that fails identically `maxRepeatedFailures` times (default 6) ends the run as `repeated_tool_call` on the failure ledger's own occurrence count, independent of batch composition; stagnant-cycle signatures ignore the envelope's `occ`, `kind_mistakes` and `state` fields so an identical failure repeated three times is a stagnant cycle as designed.
+- `ProviderRequestPrefixState.sentPrefixCount` is session-scoped like the sanitizer mark: a new prompt no longer lets the host repack the whole previous run. The host packer decides where below the mark a batched rewrite may land (the coding agent uses the grid crossings of its context-GC boundary), so the mark is neither an absolute freeze nor reset per prompt.
 
 ## [0.97.25] - 2026-09-02
 

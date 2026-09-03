@@ -39,7 +39,9 @@ describe("provider-request compaction continuation", () => {
 
 		expect(outcome).toMatchObject({ kind: "success", result: tightened, cycles: 1 });
 		expect(build).toHaveBeenCalledTimes(1);
-		expect(apply).toHaveBeenCalledWith(tightened);
+		// A forced deterministic checkpoint names its own cause so the lifecycle ledger records the
+		// compaction as a `fallback`, never as a summarizer success.
+		expect(apply).toHaveBeenCalledWith({ ...tightened, deterministic: { cause: "deterministic-only" } });
 		expect(summarize).not.toHaveBeenCalled();
 	});
 });

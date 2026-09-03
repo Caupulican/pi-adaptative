@@ -126,23 +126,28 @@ function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
+/** A rendered hot-memory section header: the general file or a project file, never USER.md or OKF. */
+const HOT_MEMORY_SECTION_RE = /^## MEMORY\.md(?: \([^)\n]*\))?:\n/gm;
+
+/**
+ * The hot-memory lines an organize write may cite: every `## MEMORY.md …:` section of the rendered
+ * persistent-memory block (the general file and the project file each render as one), cut at the
+ * next section header or at fenced untrusted content. Neither USER.md nor OKF text is hot memory.
+ */
 function currentHotMemory(existingMemory: string): string {
-	const marker = "## MEMORY.md:\n";
-	const markerIndex = existingMemory.indexOf(marker);
-	if (markerIndex === -1) {
-		// Unit callers may provide a raw MEMORY.md snapshot. A rendered persistent-memory block
-		// without this section, however, proves that MEMORY.md is empty; never treat OKF text as hot memory.
-		return existingMemory.includes("=== Persistent Memory (file-store) ===") ||
-			/<\s*untrusted_content\b/i.test(existingMemory)
-			? ""
-			: existingMemory;
+	const sections: string[] = [];
+	for (const match of existingMemory.matchAll(HOT_MEMORY_SECTION_RE)) {
+		const body = existingMemory.slice(match.index + match[0].length);
+		const boundaries = [body.indexOf("\n## "), body.search(/<\s*untrusted_content\b/i)].filter((index) => index >= 0);
+		sections.push(boundaries.length > 0 ? body.slice(0, Math.min(...boundaries)) : body);
 	}
-	const afterMemory = existingMemory.slice(markerIndex + marker.length);
-	const boundaries = [afterMemory.indexOf("\n## USER.md:"), afterMemory.search(/<\s*untrusted_content\b/i)].filter(
-		(index) => index >= 0,
-	);
-	const boundaryIndex = boundaries.length > 0 ? Math.min(...boundaries) : -1;
-	return boundaryIndex === -1 ? afterMemory : afterMemory.slice(0, boundaryIndex);
+	if (sections.length > 0) return sections.join("\n");
+	// Unit callers may provide a raw MEMORY.md snapshot. A rendered persistent-memory block without a
+	// hot-memory section, however, proves that the hot files are empty; never treat OKF text as hot memory.
+	return existingMemory.includes("=== Persistent Memory (file-store) ===") ||
+		/<\s*untrusted_content\b/i.test(existingMemory)
+		? ""
+		: existingMemory;
 }
 
 function containsExactHotMemoryItem(existingMemory: string, sourceText: string): boolean {

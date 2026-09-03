@@ -32,6 +32,14 @@ export interface ContextGcSettings {
 	 * 1 restores continuous, pack-as-soon-as-it-ages behavior.
 	 */
 	packStrideMessages?: number;
+	/**
+	 * A message that became packable only because a later message superseded it (an older read of a
+	 * re-read file, an older record of a re-issued kind) sits deep inside the already-sent prefix, and
+	 * rewriting it re-prefills everything after it. Such deep packs wait for a grid crossing and then
+	 * land only when, together, they save at least this many estimated tokens on every later request;
+	 * below the floor they wait for a later crossing. 0 packs them at the first crossing.
+	 */
+	deepPackMinTokens?: number;
 	/** Minimum provider-visible text chars before a stale tool result is packed. */
 	minToolResultChars?: number;
 	/** Tool names eligible for stale result packing. */
@@ -65,12 +73,17 @@ export interface ContextGcOptions extends NormalizedContextGcSettings {
 	writePayloads?: boolean;
 	curation?: ContextGcCurationHooks;
 	/**
-	 * Messages at this index and above are eligible for packing; every index strictly below it has
-	 * already gone out on an accepted provider request and packing must never rewrite it (see
-	 * `context/prefix-stability.ts`'s `frozenPrefixLength`, which derives this value from the
-	 * request's `sentPrefixCount`). Always populated by `applyContextGc` below (clamped from its own
-	 * optional `frozenBelow` input, defaulting to 0 — no freeze — for callers outside the live
-	 * provider-request path); never constructed elsewhere, so this stays a definite number.
+	 * Every index strictly below this mark has already gone out on an accepted provider request (see
+	 * `context/prefix-stability.ts`'s `frozenPrefixLength`, which derives it from the request's
+	 * `sentPrefixCount`). Between two grid crossings of the preserve-recent boundary nothing below the
+	 * mark changes spelling: a message packed on an earlier request keeps its memoized packed form,
+	 * everything else stays as sent. At a crossing the messages that aged past the boundary the
+	 * previous request packed against rewrite as one batch even though they sit below the mark, and
+	 * deep supersessions join that batch once they clear `deepPackMinTokens`. Rewrites therefore
+	 * land only where the grid already re-prefills the tail, never one message per turn and never
+	 * at a new prompt because a run started. With no grid (`packStrideMessages` 1) the mark is an
+	 * absolute freeze. Always populated by `applyContextGc` below (clamped from its own optional
+	 * `frozenBelow` input, defaulting to 0 for callers outside the live provider-request path).
 	 */
 	frozenBelow: number;
 }
@@ -187,6 +200,7 @@ export const DEFAULT_CONTEXT_GC_SETTINGS: NormalizedContextGcSettings = {
 	enabled: true,
 	preserveRecentMessages: 24,
 	packStrideMessages: resolveRecentBoundaryStride(24),
+	deepPackMinTokens: 8_000,
 	minToolResultChars: 1200,
 	tools: [
 		"read",
@@ -252,6 +266,10 @@ function normalizeContextGcSettings(settings?: ContextGcSettings): NormalizedCon
 		enabled: settings?.enabled ?? DEFAULT_CONTEXT_GC_SETTINGS.enabled,
 		preserveRecentMessages,
 		packStrideMessages: resolveRecentBoundaryStride(preserveRecentMessages, settings?.packStrideMessages),
+		deepPackMinTokens: Math.max(
+			0,
+			Math.floor(settings?.deepPackMinTokens ?? DEFAULT_CONTEXT_GC_SETTINGS.deepPackMinTokens),
+		),
 		minToolResultChars: Math.max(
 			0,
 			Math.floor(settings?.minToolResultChars ?? DEFAULT_CONTEXT_GC_SETTINGS.minToolResultChars),
@@ -489,9 +507,36 @@ interface PackedMemo {
 	readonly shape: string;
 	readonly packed: AgentMessage;
 	readonly packedTokens: number;
+	/** The record the packed form was rendered from; re-emitted while the message stays frozen. */
+	readonly record: ContextGcPackedRecord;
 }
 
 const packedMemos = new WeakMap<AgentMessage, PackedMemo>();
+
+/**
+ * A frozen message that an earlier request already packed keeps its packed form: the packed bytes
+ * are what the provider has seen, so emitting the original again would itself be a rewrite. The
+ * curator digest is not re-resolved here on purpose: a digest that changed since cannot rewrite a
+ * frozen stub either.
+ */
+function emitMemoizedPack(pass: PackingPass, messageIndex: number, memo: PackedMemo): void {
+	const record: ContextGcPackedRecord = { ...memo.record, messageIndex };
+	pass.nextMessages[messageIndex] = memo.packed;
+	pass.report.records.push(record);
+	pass.report.originalTokens += record.originalTokens;
+	pass.report.packedTokens += record.packedTokens;
+	pass.pending.push({ record, originalText: memo.originalText });
+}
+
+interface PackDecision {
+	readonly index: number;
+	readonly message: AgentMessage;
+	readonly memo: PackedMemo | undefined;
+	readonly originalText: string;
+	readonly key: string;
+	readonly record: ContextGcPackedRecord;
+	readonly makePacked: (message: AgentMessage, record: ContextGcPackedRecord) => AgentMessage;
+}
 
 function packedShape(record: ContextGcPackedRecord): string {
 	return `${record.reason}\0${record.storagePath ?? ""}\0${record.digest ?? ""}\0${record.path ?? ""}\0${record.command ?? ""}`;
@@ -618,6 +663,7 @@ function commitPackedMessage<TMessage extends AgentMessage>(
 			shape,
 			packed,
 			packedTokens: record.packedTokens,
+			record,
 		});
 	}
 	pass.nextMessages[messageIndex] = packed;
@@ -672,6 +718,19 @@ export function applyContextGc(
 		Math.max(0, messages.length - options.preserveRecentMessages),
 		options.packStrideMessages,
 	);
+	// The boundary the previous accepted request packed against: its message count is the sent mark.
+	// A pass whose boundary moved past it is a grid crossing and may rewrite the batch that aged out,
+	// below the mark included; any other pass leaves everything below the mark exactly as sent (see
+	// `ContextGcOptions.frozenBelow`). Without a grid there are no crossings and the mark is absolute.
+	const gridded = options.packStrideMessages > 1;
+	const previousRecentStart = gridded
+		? quantizeRecentBoundary(
+				Math.max(0, options.frozenBelow - options.preserveRecentMessages),
+				options.packStrideMessages,
+			)
+		: options.frozenBelow;
+	const crossing = gridded && recentStart > previousRecentStart;
+	const rewriteFloor = crossing ? previousRecentStart : options.frozenBelow;
 	const semanticIndexSet = new Set(plan.semanticIndexes);
 	const preservedSemanticIndexes = new Set(
 		options.semanticMemory.preserveRecentPages > 0
@@ -681,13 +740,25 @@ export function applyContextGc(
 	const nextMessages = messages.slice();
 	let changed = false;
 	const pass: PackingPass = { options, report: baseReport, nextMessages, resolvedDigests: new Map(), pending: [] };
+	const decisions: PackDecision[] = [];
 
 	for (let index = 0; index < messages.length; index++) {
-		// Already sent on an accepted provider request: frozen for packing purposes for as long as
-		// it stays below the mark. Checked first, uniformly, so neither packing category below can
-		// rewrite it regardless of how eligible it would otherwise be.
-		if (index < options.frozenBelow) continue;
 		const message = messages[index];
+		// Below the rewrite floor nothing changes spelling: a message packed on an earlier request is
+		// re-emitted in its memoized packed form, anything else stays as sent. Checked first, uniformly,
+		// so neither packing category below can rewrite it regardless of how eligible it would be.
+		if (index < rewriteFloor) {
+			const memo = packedMemos.get(message);
+			if (memo && (memo.keyIndex === undefined || memo.keyIndex === index)) {
+				emitMemoizedPack(pass, index, memo);
+				changed = true;
+				continue;
+			}
+			// Between crossings nothing else below the mark may change. At a crossing a never-packed
+			// message this far back can only be a deep supersession; it falls through to the eligibility
+			// checks and joins the batch only if the deep floor is met (see below).
+			if (!crossing) continue;
+		}
 		// A transient record with a later record of its kind is superseded by construction: the
 		// planner appends on change and never rewrites, so only the newest carries current content.
 		// Semantic-memory pages are left to the semantic rule below, whose freshness window and
@@ -724,8 +795,7 @@ export function applyContextGc(
 					storagePath,
 					key,
 				};
-				commitPackedMessage(pass, index, message, memo, originalText, key, record, makePackedTransientRecord);
-				changed = true;
+				decisions.push({ index, message, memo, originalText, key, record, makePacked: makePackedTransientRecord });
 				continue;
 			}
 		}
@@ -756,8 +826,15 @@ export function applyContextGc(
 					storagePath,
 					key,
 				};
-				commitPackedMessage(pass, index, message, memo, originalText, key, record, makePackedSemanticMemoryMessage);
-				changed = true;
+				decisions.push({
+					index,
+					message,
+					memo,
+					originalText,
+					key,
+					record,
+					makePacked: makePackedSemanticMemoryMessage,
+				});
 				continue;
 			}
 		}
@@ -804,7 +881,38 @@ export function applyContextGc(
 			command,
 			key,
 		};
-		commitPackedMessage(pass, index, message, memo, originalText, key, record, makePackedToolResult);
+		decisions.push({
+			index,
+			message,
+			memo,
+			originalText,
+			key,
+			record,
+			makePacked: (packable, packedRecord) => makePackedToolResult(packable as ToolResultMessage, packedRecord),
+		});
+	}
+
+	// Deep supersessions (below the boundary the previous request already packed against) rewrite
+	// far back into the sent prefix; they land in this crossing's batch only when together they clear
+	// the floor, otherwise they wait for a later crossing. Everything else in `decisions` is either
+	// unsent or part of the batch that just aged out.
+	const deepSavings = decisions.reduce(
+		(sum, decision) => (decision.index < previousRecentStart ? sum + decision.record.originalTokens : sum),
+		0,
+	);
+	const packDeep = deepSavings >= options.deepPackMinTokens;
+	for (const decision of decisions) {
+		if (decision.index < previousRecentStart && !packDeep) continue;
+		commitPackedMessage(
+			pass,
+			decision.index,
+			decision.message,
+			decision.memo,
+			decision.originalText,
+			decision.key,
+			decision.record,
+			decision.makePacked,
+		);
 		changed = true;
 	}
 

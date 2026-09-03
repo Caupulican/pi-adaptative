@@ -203,6 +203,32 @@ Some conversational prelude.
 		expect(result.writes).toEqual([]);
 	});
 
+	it("accepts organization of a fact from either hot-memory section of the rendered block, never from USER.md or OKF", async () => {
+		const rendered = [
+			"=== Persistent Memory (file-store) ===",
+			"## MEMORY.md (general):\nGeneral fact",
+			"## MEMORY.md (project pi-adaptative):\nProject fact",
+			"## USER.md:\nUser preference",
+			"OKF record text",
+		].join("\n\n");
+		const organize = (sourceText: string) =>
+			`\`\`\`json\n{"writes":[{"kind":"okf_organize","type":"Design Decision","title":"Moved","description":"Moved into OKF.","scope":"project","text":"Structured body.","sourceText":${JSON.stringify(sourceText)},"evidenceRefs":["transcript:entry-4"]}]}\n\`\`\``;
+		const reflectOn = async (sourceText: string) =>
+			(
+				await new ReflectionEngine().reflect({
+					recentTurnText: "Organize.",
+					existingMemory: rendered,
+					plan: { act: "reflect", reason: "test", tokenBudget: 1000 },
+					complete: async () => ({ text: organize(sourceText), usage: defaultUsage, stopReason: "stop" }),
+				})
+			).writes;
+
+		expect(await reflectOn("General fact")).toHaveLength(1);
+		expect(await reflectOn("Project fact")).toHaveLength(1);
+		expect(await reflectOn("User preference")).toEqual([]);
+		expect(await reflectOn("OKF record text")).toEqual([]);
+	});
+
 	it("rejects oversized structured memory fields at the reflection boundary", async () => {
 		const result = await new ReflectionEngine().reflect({
 			recentTurnText: "Store a decision.",

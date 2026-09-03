@@ -709,6 +709,60 @@ describe("Memory Subsystem - FileStoreProvider", () => {
 		).toHaveLength(0);
 	});
 
+	it("organizes a project hot-memory fact from the project file and rolls it back into that file", async () => {
+		const provider = new FileStoreProvider();
+		await provider.initialize("test-session", { agentDir, cwd: testDir, isChildSession: false });
+		const memoryTool = provider.getToolDefinitions()[0]!;
+		await memoryTool.execute(
+			"c1",
+			{ action: "add", target: "memory", content: "General fact" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		await memoryTool.execute(
+			"c2",
+			{ action: "add", target: "project", content: "Project decision" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		const projectFiles = () =>
+			readdirSync(join(agentDir, "memory", "projects"), { recursive: true })
+				.map(String)
+				.filter((entry) => entry.endsWith("MEMORY.md"))
+				.map((entry) => join(agentDir, "memory", "projects", entry));
+		expect(projectFiles()).toHaveLength(1);
+
+		const result = await provider.applyStructuredReflectionWrite({
+			kind: "okf_organize",
+			type: "Design Decision",
+			title: "Project decision",
+			description: "A project fact becomes a structured record.",
+			text: "Structured decision body.",
+			sourceText: "Project decision",
+			evidenceRefs: ["transcript:project-organize"],
+		});
+		expect(result).toEqual(
+			expect.objectContaining({ applied: true, created: true, sourceRemoved: true, sourceTarget: "project" }),
+		);
+		expect(readFileSync(projectFiles()[0]!, "utf8")).not.toContain("Project decision");
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf8")).toBe("General fact\n");
+
+		expect(
+			await provider.rollbackStructuredReflectionWrite({
+				type: "Design Decision",
+				title: "Project decision",
+				expectedDigest: result.digest,
+				sourceText: "Project decision",
+				sourceTarget: "project",
+				removeRecord: true,
+			}),
+		).toBe(true);
+		expect(readFileSync(projectFiles()[0]!, "utf8")).toContain("Project decision");
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf8")).toBe("General fact\n");
+	});
+
 	it("should detect out-of-band drift, back up the file, and refuse to overwrite", async () => {
 		const provider = new FileStoreProvider();
 		const ctx: MemoryLifecycleContext = {
