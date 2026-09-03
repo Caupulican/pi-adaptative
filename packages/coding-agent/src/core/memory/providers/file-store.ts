@@ -898,14 +898,18 @@ export class FileStoreProvider implements MemoryProvider {
 							}
 
 							if (newContent.length > budget) {
+								// An error the loop can see: returned as plain text, the model looped four times
+								// trimming a line by a few characters each (measured live).
 								return {
 									content: [
 										{
 											type: "text",
-											text: `Error: Memory budget exceeded. ${target === "memory" ? "MEMORY.md" : "USER.md"} limit is ${budget} characters. Current operation would result in ${newContent.length} characters.`,
+											text: `Error: Memory budget exceeded. ${target === "memory" ? "MEMORY.md" : "USER.md"} limit is ${budget} characters. Current operation would result in ${newContent.length} characters. Remove or shorten an existing line first.`,
 										},
 									],
 									details: { success: false, error: "Memory budget exceeded" },
+									isError: true,
+									errorKind: "operation_outcome",
 								};
 							}
 

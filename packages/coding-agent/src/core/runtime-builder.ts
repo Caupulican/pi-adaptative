@@ -520,6 +520,8 @@ export class RuntimeBuilder {
 				managedSecretEnvDir(deps.getAgentDir()),
 				...(this._workerSessionPrivatePathEnvelope?.deniedPaths ?? []),
 			],
+			// The harness's own memory, skills and sessions are searchable without a file glob.
+			agentDir: deps.getAgentDir(),
 		};
 		this._fileMutationIntents = new FileMutationIntentController();
 	}

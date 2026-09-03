@@ -159,10 +159,12 @@ describe("pi-shell-engine commands/text.py", () => {
 			expect(refusal.construct).toBe("unsupported-flag");
 		});
 
-		it("multi-file form is out-of-matrix -> unsupported-flag", () => {
+		it("several files print coreutils headers, and -c takes bytes", () => {
 			writeFileSync(join(cwd, "b.txt"), "x\n");
-			const refusal = runRefusal(python, cwd, "head", ["head", "lines.txt", "b.txt"], "");
-			expect(refusal.construct).toBe("unsupported-flag");
+			const multi = runBuiltin(python, cwd, "head", ["head", "-n", "1", "lines.txt", "b.txt"], "");
+			expect(multi.stdout).toMatch(/^==> lines\.txt <==\n.*\n\n==> b\.txt <==\nx\n$/s);
+			expect(runBuiltin(python, cwd, "head", ["head", "-c", "3", "b.txt"], "").stdout).toBe("x\n");
+			expect(runBuiltin(python, cwd, "head", ["head", "-80", "b.txt"], "").exitCode).toBe(0);
 		});
 	});
 
@@ -201,6 +203,17 @@ describe("pi-shell-engine commands/text.py", () => {
 	});
 
 	describe("wc", () => {
+		it("counts several files with a total and accepts combined flags", () => {
+			writeFileSync(join(cwd, "a.txt"), "foo one\nbar\nfoo two\n");
+			writeFileSync(join(cwd, "b.txt"), "x\n");
+			const multi = runBuiltin(python, cwd, "wc", ["wc", "a.txt", "b.txt"], "");
+			expect(multi.exitCode).toBe(0);
+			expect(multi.stdout.split("\n").filter(Boolean)).toHaveLength(3);
+			expect(multi.stdout).toMatch(/\s+4\s+6\s+22 total$/m);
+			expect(runBuiltin(python, cwd, "wc", ["wc", "-lc", "a.txt"], "").stdout).toMatch(/\s+3\s+20 a\.txt/);
+			expect(runBuiltin(python, cwd, "wc", ["wc", "-l"], "one\ntwo\n").stdout).toBe("2\n");
+		});
+
 		it("single -l flag with stdin -> bare integer (D)", () => {
 			const res = runBuiltin(python, cwd, "wc", ["wc", "-l"], "a\nb\nc\n");
 			expect(res.stdout).toBe("3\n");

@@ -1,5 +1,6 @@
 import { realpathSync, statSync } from "node:fs";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type AgentTool, AgentToolExecutionError, type AgentToolResult } from "@caupulican/pi-agent-core";
 import type { TSchema } from "typebox";
 import { redactKnownSecrets } from "../security/secret-text.ts";
@@ -37,6 +38,22 @@ export interface CredentialExposureBoundary {
 	redactSensitiveText(text: string): string;
 	protectedFiles?: readonly string[];
 	protectedDirectories?: readonly string[];
+	/** The harness home; its memory, skills and sessions are the harness's own data, never credentials. */
+	agentDir?: string;
+}
+
+/** Directory targets a content search may scan without a file glob: the harness's own state. */
+function isHarnessOwnedSearchTarget(rawPath: string, cwd: string, boundary?: CredentialExposureBoundary): boolean {
+	const agentDir = resolve(boundary?.agentDir ?? join(homedir(), ".pi", "agent"));
+	const target = resolve(cwd, rawPath.replace(/^~(?=$|[\\/])/u, homedir()));
+	const roots = [
+		join(agentDir, "okf-memory"),
+		join(agentDir, "skills"),
+		join(agentDir, "sessions"),
+		join(agentDir, "memory"),
+	];
+	if (roots.some((root) => isInside(root, target))) return true;
+	return target === join(agentDir, "MEMORY.md") || target === join(agentDir, "USER.md");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -92,7 +109,20 @@ function shellCredentialRisk(
 	boundary?: CredentialExposureBoundary,
 ): "broad_search" | "credential_path" | "process_environment" | undefined {
 	const shellTokens = tokenizeShellCommand(command);
-	if (!shellTokens) return /\b(?:grep|rg)\b/iu.test(command) ? "broad_search" : undefined;
+	if (!shellTokens) {
+		// The whole script did not tokenize (a heredoc, an unbalanced quote). Refusing on the bare
+		// word `rg`/`grep` anywhere in it refused a 14-line deploy script for its last line (measured
+		// live); assess each search line on its own instead, and let the rest pass.
+		for (const line of command.split(/\r?\n/u)) {
+			const trimmed = line.trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*/u, "");
+			if (!/^(?:rg|ripgrep|grep)\b/iu.test(trimmed)) continue;
+			const lineTokens = tokenizeShellCommand(trimmed);
+			if (!lineTokens) continue;
+			const risk = shellCredentialRisk(trimmed, cwd, boundary);
+			if (risk) return risk;
+		}
+		return undefined;
+	}
 
 	const assessInvocation = (
 		invocation: string[],
@@ -170,6 +200,9 @@ function jqFilterReadsProcessEnvironment(filter: string): boolean {
 function isCredentialSafeGlob(glob: string): boolean {
 	if (/(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(glob)) return false;
 	const filePattern = glob.replace(/\\/g, "/").split("/").at(-1) ?? "";
+	// A literal filename prefix (`Buildfile*`, `report-*`) is as narrow as a suffix glob: it names a
+	// family of files, not a directory (measured live: refused with the suffix-only rule).
+	if (/^[A-Za-z0-9_][A-Za-z0-9_.-]{2,}\*$/u.test(filePattern) && !/\.env/i.test(filePattern)) return true;
 	const braceSuffixes = filePattern.match(/\.\{([A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)+)\}$/)?.[1];
 	const suffixes = braceSuffixes
 		? braceSuffixes.split(",").map((suffix) => suffix.toLowerCase())
@@ -210,7 +243,14 @@ function searchCredentialRisk(
 		scope.positiveGlobs.length > 0 && scope.positiveGlobs.every((glob) => isCredentialSafeGlob(glob));
 	const hasOnlyExplicitFiles =
 		scope.targets.length > 0 &&
-		scope.targets.every((target) => target === "-" || isCredentialSafeExplicitFile(target, cwd));
+		scope.targets.every(
+			(target) =>
+				target === "-" ||
+				// A shell variable names one file the lexical guard cannot resolve; it is not a directory scan.
+				/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/u.test(target) ||
+				isCredentialSafeExplicitFile(target, cwd) ||
+				isHarnessOwnedSearchTarget(target, cwd, boundary),
+		);
 	if (!scope.metaOnly && !scope.readsStdin && !hasSafeGlob && !hasOnlyExplicitFiles) return "broad_search";
 	return undefined;
 }

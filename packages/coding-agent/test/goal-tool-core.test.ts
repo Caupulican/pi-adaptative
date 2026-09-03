@@ -550,3 +550,37 @@ function expectOk(result: ReturnType<typeof applyGoalAction>) {
 	if (!result.ok) throw new Error(result.error);
 	return result.state;
 }
+
+describe("evidence on a blocked goal", () => {
+	it("accepts evidence, requirement satisfaction and progress while blocked, but keeps lifecycle changes owner-controlled", () => {
+		let state = createGoalState({ goalId: "g-blocked", userGoal: "Ship", now: "T0" });
+		state = expectOk(
+			applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Prove it" }, "T1"),
+		);
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T2"));
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T3"));
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T4"));
+		state = expectOk(applyGoalAction(state, { action: "block_goal", reason: "stuck" }, "T5"));
+		expect(state.status).toBe("blocked");
+		state = expectOk(
+			applyGoalAction(
+				state,
+				{
+					action: "add_evidence",
+					evidenceId: "ev-1",
+					kind: "file",
+					summary: "Screenshot of the skip path",
+					verified: true,
+				},
+				"T6",
+			),
+		);
+		expect(state.evidence.map((entry) => entry.id)).toEqual(["ev-1"]);
+		state = expectOk(applyGoalAction(state, { action: "progress" }, "T7"));
+		const reopen = applyGoalAction(state, { action: "reopen_requirement", requirementId: "r1" }, "T8");
+		expect(reopen.ok).toBe(false);
+		if (!reopen.ok) expect(reopen.error).toContain("Lifecycle changes are owner/system controlled");
+		const complete = applyGoalAction(state, { action: "complete" }, "T9");
+		expect(complete.ok).toBe(false);
+	});
+});

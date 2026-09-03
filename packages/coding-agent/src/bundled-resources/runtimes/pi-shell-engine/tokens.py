@@ -375,11 +375,11 @@ def _scan_word(src: str, pos: int) -> tuple[Word, int]:
 def _scan_operator(src: str, pos: int) -> tuple[str, int]:
     """`src[pos]` starts an operator character. Returns (operator text, new_pos)."""
     if src[pos : pos + 3] == "<<-":
-        raise UnsupportedConstruct("heredoc", "Heredocs ('<<-') are not supported; use a temp file or a literal argument.")
+        return "<<-", pos + 3
     if src[pos : pos + 3] == "<<<":
-        raise UnsupportedConstruct("here-string", "Here-strings ('<<<') are not supported; pipe the value in instead.")
+        return "<<<", pos + 3
     if src[pos : pos + 2] == "<<":
-        raise UnsupportedConstruct("heredoc", "Heredocs ('<<') are not supported; use a temp file or a literal argument.")
+        return "<<", pos + 2
     if src[pos : pos + 2] == "&>":
         return "&>", pos + 2
     if src[pos : pos + 2] == "&&":
@@ -422,10 +422,28 @@ def _scan_arithmetic_group(src: str, pos: int) -> tuple[str, int]:
     raise _unterminated("arithmetic loop header")
 
 
+def _read_heredoc_body(src: str, pos: int, delimiter: str, strip_tabs: bool) -> tuple[str, int]:
+    """Consume heredoc lines starting at `pos` (just after a newline) up to the delimiter line."""
+    lines: list[str] = []
+    while pos < len(src):
+        newline = src.find("\n", pos)
+        line = src[pos:] if newline == -1 else src[pos:newline]
+        pos = len(src) if newline == -1 else newline + 1
+        candidate = line.lstrip("\t") if strip_tabs else line
+        if candidate == delimiter:
+            return "".join(l + "\n" for l in lines), pos
+        lines.append(candidate)
+    raise UnsupportedConstruct("malformed-syntax", f"Heredoc delimiter {delimiter!r} was never closed.")
+
+
 def tokenize(src: str) -> list[Token]:
     n = len(src)
     tokens: list[Token] = []
     pos = 0
+    # Heredocs (<<EOF ... EOF, <<-EOF, <<< word): the body becomes the redirect's target word as
+    # one literal, so a command can receive multi-line input without a temp file. The measured
+    # sessions were refused on `<<` alone; the engine now reads the body like a shell does.
+    pending_heredocs: list[tuple[int, str, bool]] = []
     while pos < n:
         c = src[pos]
         if c in " \t":
@@ -434,6 +452,10 @@ def tokenize(src: str) -> list[Token]:
         if c == "\n":
             tokens.append(Token(kind="OP", text="\n"))
             pos += 1
+            for token_index, delimiter, strip_tabs in pending_heredocs:
+                body, pos = _read_heredoc_body(src, pos, delimiter, strip_tabs)
+                tokens[token_index] = Token(kind="WORD", segments=[Lit(text=body)])
+            pending_heredocs = []
             continue
         if c == "\\" and src[pos + 1 : pos + 2] == "\n":
             pos += 2
@@ -467,8 +489,19 @@ def tokenize(src: str) -> list[Token]:
             op_text, newpos = _scan_operator(src, pos)
             tokens.append(Token(kind="OP", text=op_text))
             pos = newpos
+            if op_text in ("<<", "<<-"):
+                while pos < n and src[pos] in " \t":
+                    pos += 1
+                delimiter_word, pos = _scan_word(src, pos)
+                delimiter = "".join(getattr(segment, "text", "") for segment in delimiter_word.segments)
+                tokens.append(Token(kind="WORD", segments=[Lit(text="")]))
+                pending_heredocs.append((len(tokens) - 1, delimiter, op_text == "<<-"))
             continue
         word, newpos = _scan_word(src, pos)
         tokens.append(Token(kind="WORD", segments=word.segments))
         pos = newpos
+    if pending_heredocs:
+        for token_index, delimiter, strip_tabs in pending_heredocs:
+            body, pos = _read_heredoc_body(src, pos, delimiter, strip_tabs)
+            tokens[token_index] = Token(kind="WORD", segments=[Lit(text=body)])
     return tokens

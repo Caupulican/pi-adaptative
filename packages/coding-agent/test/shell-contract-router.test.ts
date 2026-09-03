@@ -124,14 +124,19 @@ describe("stable Bash-like shell contract router", () => {
 		}
 	});
 
-	it("teaches direct script invocation when rejecting a nested PowerShell host", () => {
+	it("teaches direct script invocation when the PowerShell-only floor rejects a nested host", () => {
 		const route = routeShellContract("powershell.exe -NoProfile -File D:/Temp/probe.ps1", "win32", {
-			pythonEngine: true,
+			pythonEngine: false,
 		});
 		expect(route).toMatchObject({ kind: "unsupported" });
 		if (route.kind !== "unsupported") throw new Error("Expected nested-shell refusal");
 		expect(route.error).toContain("Invoke the .ps1 path directly");
 		expect(route.error).toContain("without powershell.exe -File");
+	});
+
+	it("runs a nested host through the engine as an external process when the engine is enabled", () => {
+		const command = "powershell.exe -NoProfile -File D:/Temp/probe.ps1";
+		expect(routeShellContract(command, "win32", { pythonEngine: true })).toEqual({ kind: "python-engine", command });
 	});
 
 	describe("engine tier (options.pythonEngine)", () => {
@@ -205,9 +210,15 @@ describe("stable Bash-like shell contract router", () => {
 			});
 		});
 
-		it("keeps nested shells and POSIX scripts unsupported even with the engine enabled", () => {
+		it("hands nested shells and POSIX scripts to the engine, which spawns them as external processes", () => {
 			for (const command of ["bash -lc 'rm -rf build'", "sh script.sh", "./script.sh"]) {
-				expect(routeShellContract(command, "win32", { pythonEngine: true })).toMatchObject({ kind: "unsupported" });
+				expect(routeShellContract(command, "win32", { pythonEngine: true })).toEqual({
+					kind: "python-engine",
+					command,
+				});
+				expect(routeShellContract(command, "win32", { pythonEngine: false })).toMatchObject({
+					kind: "unsupported",
+				});
 			}
 		});
 

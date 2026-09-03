@@ -313,15 +313,11 @@ describe("pi-shell-engine tokenizer + parser", () => {
 			["process-substitution", "foo <(bar)"],
 			["arithmetic-expansion", "echo $((1+1))"],
 			["brace-expansion", "foo {a,b,c}"],
-			["nested-shell", "bash -c foo"],
 			["exec-builtin", "exec foo"],
-			["heredoc", "foo <<EOF"],
-			["here-string", "foo <<< bar"],
 			["function-definition", "name() { echo hi; }"],
 			["control-flow", "if true; then echo hi; fi"],
 			["extended-glob", "foo @(a|b)"],
 			["unsupported-builtin", "eval foo"],
-			["posix-script", "foo.sh"],
 		])("construct id: %s", (construct, command) => {
 			const refusal = parseRefusal(python, command);
 			expect(refusal.code).toBe("unsupported");

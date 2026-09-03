@@ -7,59 +7,158 @@ Pure builtins per windows-shell-workpackages-2026-07-19.md §2.2. Regex dialect 
 from __future__ import annotations
 
 import re
+import os
+import fnmatch
 
 from context import BuiltinContext
 from errors import UnsupportedConstruct
 from paths import resolve_request_path
-from shell_args import split_leading_short_options
 
-_GREP_FLAGS = set("ivnclwFE")
+_GREP_FLAGS = set("ivnclwFExhHoqsrRa")
+_GREP_VALUE_FLAGS = {"A", "B", "C", "e", "m"}
+
+
+def _parse_grep_args(args: list[str]) -> tuple[set[str], dict[str, str], list[str], list[str], list[str], list[str]]:
+    """Returns (flags, valued, patterns, files, includes, excludes)."""
+    flags: set[str] = set()
+    valued: dict[str, str] = {}
+    patterns: list[str] = []
+    includes: list[str] = []
+    excludes: list[str] = []
+    positional: list[str] = []
+    i = 0
+    end_of_options = False
+    while i < len(args):
+        arg = args[i]
+        if end_of_options or arg == "-" or not arg.startswith("-"):
+            positional.append(arg)
+            i += 1
+            continue
+        if arg == "--":
+            end_of_options = True
+            i += 1
+            continue
+        if arg.startswith("--"):
+            name, _, value = arg[2:].partition("=")
+            if name in ("include", "exclude"):
+                if not value:
+                    i += 1
+                    value = args[i] if i < len(args) else ""
+                (includes if name == "include" else excludes).append(value)
+            elif name in ("ignore-case",):
+                flags.add("i")
+            elif name in ("recursive", "dereference-recursive"):
+                flags.add("r")
+            elif name in ("line-number",):
+                flags.add("n")
+            elif name in ("count",):
+                flags.add("c")
+            elif name in ("files-with-matches",):
+                flags.add("l")
+            elif name in ("invert-match",):
+                flags.add("v")
+            elif name in ("fixed-strings",):
+                flags.add("F")
+            elif name in ("extended-regexp",):
+                flags.add("E")
+            elif name in ("only-matching",):
+                flags.add("o")
+            elif name in ("quiet", "silent"):
+                flags.add("q")
+            elif name in ("no-messages",):
+                flags.add("s")
+            elif name in ("word-regexp",):
+                flags.add("w")
+            elif name in ("line-regexp",):
+                flags.add("x")
+            elif name in ("with-filename",):
+                flags.add("H")
+            elif name in ("no-filename",):
+                flags.add("h")
+            elif name in ("color", "colour"):
+                pass
+            elif name in ("regexp",):
+                patterns.append(value)
+            else:
+                raise UnsupportedConstruct("unsupported-flag", f"grep: unsupported flag '--{name}'")
+            i += 1
+            continue
+        chars = arg[1:]
+        j = 0
+        while j < len(chars):
+            char = chars[j]
+            if char in _GREP_VALUE_FLAGS:
+                value = chars[j + 1 :]
+                if not value:
+                    i += 1
+                    if i >= len(args):
+                        raise UnsupportedConstruct("unsupported-flag", f"grep: -{char} requires a value")
+                    value = args[i]
+                if char == "e":
+                    patterns.append(value)
+                else:
+                    valued[char] = value
+                break
+            if char.isdigit():
+                valued["C"] = chars[j:]
+                break
+            if char not in _GREP_FLAGS:
+                raise UnsupportedConstruct("unsupported-flag", f"grep: unsupported flag '-{char}'")
+            flags.add(char)
+            j += 1
+        i += 1
+    if not patterns:
+        if not positional:
+            raise UnsupportedConstruct("unsupported-flag", "grep: PATTERN operand required")
+        patterns.append(positional.pop(0))
+    return flags, valued, patterns, positional, includes, excludes
+
+
+def _context_count(valued: dict[str, str], key: str) -> int:
+    raw = valued.get(key, valued.get("C", "0"))
+    if not raw.isdigit():
+        raise UnsupportedConstruct("unsupported-flag", f"grep: -{key} requires a non-negative integer")
+    return int(raw)
 
 
 def cmd_grep(ctx: BuiltinContext) -> int:
-    args = ctx.argv[1:]
-    flags: set[str] = set()
-    option_args, remaining = split_leading_short_options(args)
-    for option in option_args:
-        for char in option[1:]:
-            if char not in _GREP_FLAGS:
-                raise UnsupportedConstruct(
-                    "unsupported-flag", f"grep: unsupported flag '-{char}'"
-                )
-            flags.add(char)
-    if not remaining:
-        raise UnsupportedConstruct("unsupported-flag", "grep: PATTERN operand required")
-    pattern = remaining[0]
-    files = remaining[1:]
-
+    # Full coreutils surface the sessions used: recursion, context lines, include/exclude globs,
+    # only-matching, quiet, whole-line and filename control. Refusing `grep -R` cost turns.
+    flags, valued, patterns, files, includes, excludes = _parse_grep_args(ctx.argv[1:])
     ignore_case = "i" in flags
     invert = "v" in flags
     show_lineno = "n" in flags
     count_only = "c" in flags
     files_only = "l" in flags
     whole_word = "w" in flags
+    whole_line = "x" in flags
     fixed = "F" in flags
-
-    if fixed:
-        needle = pattern
-    else:
-        pat = pattern
+    only_matching = "o" in flags
+    quiet = "q" in flags
+    suppress_errors = "s" in flags
+    recursive = "r" in flags or "R" in flags
+    before = _context_count(valued, "B")
+    after = _context_count(valued, "A")
+    max_count = int(valued["m"]) if valued.get("m", "").isdigit() else None
+    re_flags = re.IGNORECASE if ignore_case else 0
+    compiled: list["re.Pattern[str]"] = []
+    for pattern in patterns:
+        source = re.escape(pattern) if fixed else pattern
         if whole_word:
-            pat = r"\b" + pat + r"\b"
-        re_flags = re.IGNORECASE if ignore_case else 0
+            source = r"(?<!\w)(?:" + source + r")(?!\w)"
+        if whole_line:
+            source = r"^(?:" + source + r")$"
         try:
-            compiled = re.compile(pat, re_flags)
+            compiled.append(re.compile(source, re_flags))
         except re.error as exc:
             raise UnsupportedConstruct("malformed-syntax", f"grep: invalid pattern: {exc}") from exc
 
-    def matches(line: str) -> bool:
-        if fixed:
-            hay = line.lower() if ignore_case else line
-            n = needle.lower() if ignore_case else needle
-            if whole_word:
-                return re.search(r"(?<!\w)" + re.escape(n) + r"(?!\w)", hay) is not None
-            return n in hay
-        return compiled.search(line) is not None
+    def find_match(line: str):
+        for pattern in compiled:
+            found = pattern.search(line)
+            if found:
+                return found
+        return None
 
     def read_lines(data: bytes) -> list[str]:
         text = data.decode("utf-8", errors="replace")
@@ -70,53 +169,101 @@ def cmd_grep(ctx: BuiltinContext) -> int:
             lines.pop()
         return lines
 
-    multi_file = len(files) > 1
+    def expand_files() -> list[str]:
+        if not files:
+            return []
+        expanded: list[str] = []
+        for name in files:
+            abs_name = resolve_request_path(ctx.cwd, name)
+            if os.path.isdir(abs_name):
+                if not recursive:
+                    expanded.append(name)
+                    continue
+                for dirpath, dirnames, filenames in os.walk(abs_name):
+                    dirnames.sort()
+                    for filename in sorted(filenames):
+                        if includes and not any(fnmatch.fnmatch(filename, glob) for glob in includes):
+                            continue
+                        if excludes and any(fnmatch.fnmatch(filename, glob) for glob in excludes):
+                            continue
+                        rel = os.path.relpath(os.path.join(dirpath, filename), ctx.cwd)
+                        display = rel if not rel.startswith("..") else os.path.join(dirpath, filename)
+                        expanded.append(display.replace(os.sep, "/"))
+            else:
+                expanded.append(name)
+        return expanded
+
+    targets = expand_files()
+    multi_file = ("H" in flags or len(targets) > 1 or (recursive and files)) and "h" not in flags
     any_match = False
     any_error = False
     out_lines: list[str] = []
 
     def process(name: str, lines: list[str]) -> None:
         nonlocal any_match
-        matched = [ln for ln in lines if matches(ln) != invert]
-        if matched:
+        matched_indexes = [index for index, line in enumerate(lines) if (find_match(line) is not None) != invert]
+        if max_count is not None:
+            matched_indexes = matched_indexes[:max_count]
+        if matched_indexes:
             any_match = True
+        if quiet:
+            return
         if count_only:
             prefix = f"{name}:" if multi_file else ""
-            out_lines.append(f"{prefix}{len(matched)}")
+            out_lines.append(f"{prefix}{len(matched_indexes)}")
             return
         if files_only:
-            if matched:
+            if matched_indexes:
                 out_lines.append(name)
             return
-        for i, ln in enumerate(lines):
-            if matches(ln) == invert:
-                continue
-            prefix = ""
-            if multi_file:
-                prefix += f"{name}:"
-            if show_lineno:
-                prefix += f"{i + 1}:"
-            out_lines.append(f"{prefix}{ln}")
+        matched_set = set(matched_indexes)
+        shown: set[int] = set()
+        last_shown = -2
+        for index in matched_indexes:
+            lo = max(0, index - before)
+            hi = min(len(lines) - 1, index + after)
+            if (before or after) and last_shown >= 0 and lo > last_shown + 1:
+                out_lines.append("--")
+            for k in range(lo, hi + 1):
+                if k in shown:
+                    continue
+                shown.add(k)
+                last_shown = k
+                is_match = k in matched_set
+                prefix = ""
+                if multi_file:
+                    prefix += f"{name}{':' if is_match else '-'}"
+                if show_lineno:
+                    prefix += f"{k + 1}{':' if is_match else '-'}"
+                if only_matching and is_match:
+                    for pattern in compiled:
+                        for found in pattern.finditer(lines[k]):
+                            out_lines.append(f"{prefix}{found.group(0)}")
+                    continue
+                out_lines.append(f"{prefix}{lines[k]}")
 
-    if not files:
+    if not targets:
         data = ctx.stdin.read()
         process("(standard input)", read_lines(data))
     else:
-        for name in files:
+        for name in targets:
+            abs_name = resolve_request_path(ctx.cwd, name)
+            if os.path.isdir(abs_name):
+                if not suppress_errors:
+                    ctx.stdout.write(f"grep: {name}: Is a directory\n".encode("utf-8"))
+                continue
             try:
-                with open(resolve_request_path(ctx.cwd, name), "rb") as fh:
+                with open(abs_name, "rb") as fh:
                     data = fh.read()
             except OSError as exc:
-                out_lines_msg = f"grep: {name}: {exc.strerror or exc}"
-                ctx.stdout.write((out_lines_msg + "\n").encode("utf-8"))
+                if not suppress_errors:
+                    ctx.stdout.write(f"grep: {name}: {exc.strerror or exc}\n".encode("utf-8"))
                 any_error = True
                 continue
             process(name, read_lines(data))
-
     if out_lines:
         ctx.stdout.write(("\n".join(out_lines) + "\n").encode("utf-8"))
-
-    if any_error:
+    if any_error and not any_match:
         return 2
     return 0 if any_match else 1
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import os
 import subprocess
+import tempfile
 import threading
 import time
 from typing import BinaryIO
@@ -37,6 +38,15 @@ class _Redirected:
         self.handles.append(handle)
         return handle
 
+    def literal_input(self, data: bytes) -> BinaryIO:
+        """A real file handle carrying heredoc bytes, so external children can inherit it as stdin."""
+        handle = tempfile.TemporaryFile()  # noqa: SIM115 - closed explicitly in close()
+        handle.write(data)
+        handle.flush()
+        handle.seek(0)
+        self.handles.append(handle)
+        return handle
+
     def close(self) -> None:
         for handle in self.handles:
             try:
@@ -61,6 +71,16 @@ def _redirect_target_path(redirect: nodes.Redirect, ctx: ExecContext) -> str:
     return path
 
 
+def _heredoc_body(redirect: nodes.Redirect, ctx: ExecContext, *, here_string: bool) -> bytes:
+    if redirect.target is None:
+        raise UnsupportedConstruct("malformed-syntax", "heredoc is missing its body")
+    if here_string:
+        parts = ctx.expand_word(redirect.target, ctx)
+        return (" ".join(parts) + "\n").encode("utf-8")
+    text = "".join(getattr(segment, "text", "") for segment in redirect.target.segments)
+    return text.encode("utf-8")
+
+
 def _apply_redirects(
     redirects: list[nodes.Redirect],
     ctx: ExecContext,
@@ -79,6 +99,8 @@ def _apply_redirects(
             cur_out = tracker.open(_redirect_target_path(redirect, ctx), "ab")
         elif op == "<":
             cur_in = tracker.open(_redirect_target_path(redirect, ctx), "rb")
+        elif op in ("<<", "<<-", "<<<"):
+            cur_in = tracker.literal_input(_heredoc_body(redirect, ctx, here_string=op == "<<<"))
         elif op == "2>":
             cur_err = tracker.open(_redirect_target_path(redirect, ctx), "wb")
         elif op == "2>>":

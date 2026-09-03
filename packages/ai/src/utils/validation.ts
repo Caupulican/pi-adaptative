@@ -291,6 +291,39 @@ function literalValues(schema: unknown): unknown[] | undefined {
 	return undefined;
 }
 
+/**
+ * The union alternative whose literal discriminator matches the supplied arguments, when every
+ * alternative is an object schema declaring a literal for one shared property and exactly one of
+ * them matches. Returns undefined for anything else, so non-discriminated unions keep the
+ * whole-schema behaviour.
+ */
+export function selectUnionBranch(schema: unknown, args: unknown): Record<string, unknown> | undefined {
+	const root = asRecord(schema);
+	const record = asRecord(args);
+	if (!root || !record) return undefined;
+	const alternatives = schemaAlternatives(root).map(asRecord);
+	if (alternatives.length < 2 || alternatives.some((alternative) => !alternative)) return undefined;
+	const literalKeys = alternatives.map((alternative) => {
+		const properties = asRecord(alternative?.properties);
+		if (!properties) return new Map<string, unknown>();
+		const keys = new Map<string, unknown>();
+		for (const [key, property] of Object.entries(properties)) {
+			const values = literalValues(property);
+			if (values && values.length === 1) keys.set(key, values[0]);
+		}
+		return keys;
+	});
+	const shared = [...(literalKeys[0]?.keys() ?? [])].filter((key) => literalKeys.every((keys) => keys.has(key)));
+	for (const key of shared) {
+		const matches = alternatives.filter((alternative, index) => {
+			void alternative;
+			return literalKeys[index]?.get(key) === record[key];
+		});
+		if (matches.length === 1) return matches[0] ?? undefined;
+	}
+	return undefined;
+}
+
 function schemaAlternatives(schema: Record<string, unknown>): unknown[] {
 	const alternatives = Array.isArray(schema.anyOf)
 		? schema.anyOf
@@ -507,13 +540,19 @@ export function validateToolArguments(
 		return args;
 	}
 
-	const validationErrors = [...validator.Errors(args)] as TLocalizedValidationError[];
-	const repairIssues = analyzeToolArgumentErrors(toolCall.name, tool.parameters, args, validationErrors);
+	// A union of action shapes is validated against the branch the supplied discriminator names,
+	// so the errors, the repairs and the repair text all speak about that branch (measured live:
+	// a `list` call was told to fix the `set` branch's fields and its "true" was never coerced).
+	const branch = selectUnionBranch(tool.parameters, args);
+	const schema = branch ?? tool.parameters;
+	const branchValidator = branch ? getValidator(branch) : validator;
+	const validationErrors = [...branchValidator.Errors(args)] as TLocalizedValidationError[];
+	const repairIssues = analyzeToolArgumentErrors(toolCall.name, schema, args, validationErrors);
 	const failureModes = uniqueFailureModes(repairIssues.flatMap((issue) => issue.modes));
 	const repaired =
 		options?.repairEnabled === false
 			? undefined
-			: repairToolArguments(toolCall.name, tool.parameters, args, validationErrors, (candidate) =>
+			: repairToolArguments(toolCall.name, schema, args, validationErrors, (candidate) =>
 					validator.Check(candidate),
 				);
 	if (repaired) {
@@ -538,14 +577,14 @@ export function validateToolArguments(
 		source: toolCall.source,
 		failureModes,
 		repairsApplied: [],
-		failureShape: formatFailureShape(validationErrors, toolCall.arguments, tool.parameters),
+		failureShape: formatFailureShape(validationErrors, toolCall.arguments, schema),
 		errorKeywords: errorKeywords(validationErrors),
 	});
 
 	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${formatValidationErrors(
 		validationErrors,
 		toolCall.arguments,
-		tool.parameters,
+		schema,
 	)}\n\nReceived arguments:\n${truncateText(JSON.stringify(toolCall.arguments, null, 2), 2000)}`;
 
 	throw new ToolArgumentValidationError(errorMessage, {

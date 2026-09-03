@@ -365,3 +365,55 @@ describe("credential exposure guard", () => {
 		expect(genericThrown).toMatchObject({ message: "generic [REDACTED_SECRET]" });
 	});
 });
+
+describe("credential guard false positives measured live", () => {
+	const cwd = "/mnt/c/work";
+	it("allows a literal-prefix glob, a multi-line script whose last line searches a variable, and the harness's own memory roots", () => {
+		const agentDir = "/home/owner/.pi/agent";
+		const boundary = { redactSensitiveText: (text: string) => text, agentDir };
+		expect(
+			credentialToolBlockReason(
+				"bash",
+				{
+					command: `rg -n "BuildInstaller|InstallerCmd|DEBUG" "/mnt/c/work/PROJ-1234" -g '*.want' -g '*.xml' -g '*.bat' -g 'Buildfile*' | head -80`,
+				},
+				cwd,
+				boundary,
+			),
+		).toBeUndefined();
+		const script = [
+			'LOG="/mnt/c/work/installers/update.log"',
+			"date -u +%Y-%m-%dT%H:%M:%SZ",
+			'echo "---- log tail before ----"',
+			'tail -n 5 "$LOG" 2>/dev/null || echo no-log',
+			"cd /mnt/c/work/PROJ-1234/src/installer/test-installer",
+			'./InstallerCmd.exe "C:\\work\\x.ini" > /mnt/c/work/out.txt 2>&1',
+			"echo EXIT:$?",
+			'rg -n "UpJarvis|InstallJar" "$LOG" || true',
+		].join("\n");
+		expect(credentialToolBlockReason("bash", { command: script }, cwd, boundary)).toBeUndefined();
+		expect(
+			credentialToolBlockReason(
+				"bash",
+				{
+					command: `rg -l "FPCORPORAT-581|branch is always the story" ${agentDir}/okf-memory ${agentDir}/MEMORY.md`,
+				},
+				cwd,
+				boundary,
+			),
+		).toBeUndefined();
+	});
+
+	it("still refuses dotenv globs, credential paths, and a directory scan outside the harness home", () => {
+		const boundary = { redactSensitiveText: (text: string) => text, agentDir: "/home/owner/.pi/agent" };
+		expect(credentialToolBlockReason("bash", { command: "rg TOKEN -g '.env*' src" }, cwd, boundary)).toContain(
+			"narrow non-dotenv",
+		);
+		expect(credentialToolBlockReason("bash", { command: "rg TOKEN /home/owner/projects" }, cwd, boundary)).toContain(
+			"narrow non-dotenv",
+		);
+		expect(credentialToolBlockReason("bash", { command: "cat .env.local" }, cwd, boundary)).toContain(
+			"secret_store migrate",
+		);
+	});
+});
