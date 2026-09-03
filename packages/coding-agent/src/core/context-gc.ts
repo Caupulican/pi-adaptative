@@ -120,6 +120,43 @@ export interface ContextGcResult {
 	commit(): void;
 }
 
+/**
+ * A cumulative host record (the path-alias legend delta) stays current forever: later records add
+ * to it rather than replace it, so it is never superseded and never packed.
+ */
+function isCumulativeRecord(message: AgentMessage): boolean {
+	return (
+		message.role === "custom" &&
+		typeof message.details === "object" &&
+		message.details !== null &&
+		(message.details as { cumulative?: unknown }).cumulative === true
+	);
+}
+
+/**
+ * Pure projection for the compaction summarizer: every superseded host record (a custom record
+ * with a later record of the same kind) becomes its one-line packed form. No storage, no memo:
+ * the summarizer must not read stale copies the live request already packs (measured live: the
+ * summarizer request reached 596k to 861k tokens for 202k to 418k conversations and overflowed).
+ */
+export function packSupersededHostRecords(messages: readonly AgentMessage[]): AgentMessage[] {
+	const lastIndexByKind = new Map<string, number>();
+	messages.forEach((message, index) => {
+		if (message.role === "custom" && typeof message.content === "string" && !isCumulativeRecord(message)) {
+			lastIndexByKind.set(message.customType, index);
+		}
+	});
+	return messages.map((message, index) => {
+		if (message.role !== "custom" || typeof message.content !== "string" || isCumulativeRecord(message))
+			return message;
+		if ((lastIndexByKind.get(message.customType) ?? -1) <= index) return message;
+		return {
+			...message,
+			content: `[Context GC packed superseded ${message.customType} record; a later record of this kind is current]`,
+		};
+	});
+}
+
 const DEFAULT_SEMANTIC_MEMORY_GC_SETTINGS: Required<SemanticMemoryGcSettings> = {
 	enabled: true,
 	preserveRecentPages: 1,
@@ -369,7 +406,7 @@ function createGcPlanFold(cwd: string, semanticSettings: Required<SemanticMemory
 	const fold = new PrefixFold<AgentMessage, ContextGcPlan>(
 		() => ({ calls: new Map(), latestReadByPath: new Map(), semanticIndexes: [], lastRecordIndexByKind: new Map() }),
 		(plan, message, messageIndex) => {
-			if (message.role === "custom" && typeof message.content === "string") {
+			if (message.role === "custom" && typeof message.content === "string" && !isCumulativeRecord(message)) {
 				plan.lastRecordIndexByKind.set(message.customType, messageIndex);
 			}
 			if (message.role === "assistant") {

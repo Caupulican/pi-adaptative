@@ -651,3 +651,25 @@ describe("runCompactionLoop", () => {
 		expect(outcome).toEqual({ kind: "skip", reason: "within threshold" });
 	});
 });
+
+describe("runCompactionLoop fallback marking", () => {
+	it("marks a forced deterministic checkpoint as a fallback with its cause", async () => {
+		const outcome = await runCompactionLoop({
+			getBranch: () => createBranch(),
+			measureLiveTokens: scriptedMeasure([1200, 100]),
+			shouldCompact: (tokens) => tokens > 1000,
+			getPostApplyMargin: () => 10,
+			getBaseKeepRecentTokens: () => 800,
+			resolveModelAndAuth: vi.fn(async () => ({ model: createModel() })),
+			summarizeAndVerify: vi.fn(async () => ({ result: createResult("primary") })),
+			buildDeterministicCheckpoint: vi.fn(async () => ({ result: createResult("deterministic") })),
+			apply: vi.fn(async () => {}),
+			onTransition: vi.fn(),
+			forceDeterministic: true,
+		});
+		expect(outcome.kind).toBe("success");
+		if (outcome.kind !== "success") throw new Error("expected success");
+		expect(outcome.result.summary).toBe("deterministic");
+		expect(outcome.result.deterministic).toEqual({ cause: "deterministic-only" });
+	});
+});

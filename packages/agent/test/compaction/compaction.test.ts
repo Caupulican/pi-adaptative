@@ -15,6 +15,7 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "../../src/compaction/index.ts";
+import { createCustomMessage } from "../../src/messages.ts";
 import {
 	buildSessionContext,
 	type CompactionEntry,
@@ -938,4 +939,48 @@ describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
 		console.log("Original messages:", loaded.messages.length);
 		console.log("After compaction:", reloaded.messages.length);
 	}, 60000);
+});
+
+describe("prepareCompaction host-record projection", () => {
+	it("hands the summarizer the packed projection and records the input estimate", () => {
+		const u1 = createMessageEntry(createUserMessage("start ".repeat(20)));
+		const g1 = createMessageEntry(
+			createCustomMessage(
+				"active_goal_context",
+				`goal v1 ${"x".repeat(400)}`,
+				false,
+				undefined,
+				"2026-09-03T00:00:00.000Z",
+			),
+		);
+		const a1 = createMessageEntry(createAssistantMessage("assistant ".repeat(20)));
+		const g2 = createMessageEntry(
+			createCustomMessage(
+				"active_goal_context",
+				`goal v2 ${"y".repeat(400)}`,
+				false,
+				undefined,
+				"2026-09-03T00:00:01.000Z",
+			),
+		);
+		const u2 = createMessageEntry(createUserMessage("tail ".repeat(200)));
+		const a2 = createMessageEntry(createAssistantMessage("answer ".repeat(200), createMockUsage(5000, 1000)));
+		const entries = [u1, g1, a1, g2, u2, a2];
+		const settings: CompactionSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 100 };
+		const packed = prepareCompaction(entries, settings, {
+			packHostRecords: (messages) =>
+				messages.map((message) =>
+					message.role === "custom" && message.content.toString().startsWith("goal v1")
+						? { ...message, content: "[packed goal v1]" }
+						: message,
+				),
+		});
+		const raw = prepareCompaction(entries, settings);
+		expect(packed).toBeDefined();
+		expect(raw).toBeDefined();
+		expect(extractText(packed!.messagesToSummarize)).toContain("[packed goal v1]");
+		expect(extractText(packed!.messagesToSummarize)).not.toContain("goal v1 xxxx");
+		expect(packed!.summarizerInputTokens).toBeGreaterThan(0);
+		expect(packed!.summarizerInputTokens!).toBeLessThan(raw!.summarizerInputTokens!);
+	});
 });

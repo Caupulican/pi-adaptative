@@ -69,7 +69,7 @@ describe("compact active-goal context", () => {
 		expect(messages).toHaveLength(4);
 	});
 
-	it("projects usage and elapsed time -- the B1 fix: this is what made a get_goal round trip unnecessary", () => {
+	it("projects the budget as a 10% bucket and stays byte-identical while the bucket holds", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "Ship it", tokenBudget: 1_000, now: "T0" });
 		state = applyGoalEvent(state, {
 			type: "record_continuation_budget",
@@ -83,12 +83,22 @@ describe("compact active-goal context", () => {
 		const text = formatCompactGoalContext(state, false);
 
 		expect(text).toContain('"tokenBudget":"1000"');
-		expect(text).toContain('"tokensRemaining":"750"');
-		expect(text).toContain('"tokensUsed":"250"');
-		expect(text).toContain('"timeUsedSeconds":"42"');
+		expect(text).toContain('"budgetRemainingPct":"70"');
+		// Running counters made every request a new durable record; they no longer ride the context.
+		expect(text).not.toContain("tokensUsed");
+		expect(text).not.toContain("timeUsedSeconds");
+		const later = applyGoalEvent(state, {
+			type: "record_continuation_budget",
+			turns: 4,
+			wallClockMs: 60_000,
+			spendUsd: 0,
+			tokens: 40,
+			now: "T2",
+		});
+		expect(formatCompactGoalContext(later, false)).toBe(text);
 	});
 
-	it("omits budget-derived fields but still projects usage/time for an unbudgeted goal", () => {
+	it("omits every budget field for an unbudgeted goal and carries no per-request counters", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "Ship it", now: "T0" });
 		state = applyGoalEvent(state, {
 			type: "record_continuation_budget",
@@ -102,9 +112,9 @@ describe("compact active-goal context", () => {
 		const text = formatCompactGoalContext(state, false);
 
 		expect(text).not.toContain("tokenBudget");
-		expect(text).not.toContain("tokensRemaining");
-		expect(text).toContain('"tokensUsed":"10"');
-		expect(text).toContain('"timeUsedSeconds":"5"');
+		expect(text).not.toContain("budgetRemainingPct");
+		expect(text).not.toContain("tokensUsed");
+		expect(text).not.toContain("timeUsedSeconds");
 	});
 
 	it("injects mandatory recovery guidance after unchanged continuation turns", () => {

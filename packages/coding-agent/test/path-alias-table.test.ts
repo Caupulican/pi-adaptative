@@ -10,6 +10,9 @@ import {
 	expandText,
 	extendPathAliasTable,
 	extractPathCandidates,
+	formatPathAliasLegendDeltaForIds,
+	PATH_ALIAS_LEGEND_DELTA_HEADER,
+	PATH_ALIAS_LEGEND_PAUSED_LINE,
 	type PathAliasTable,
 	rewriteAgentMessagesWith,
 	rewriteText,
@@ -450,5 +453,24 @@ describe("rewriteAgentMessagesWith thinking-block scope", () => {
 			thinkingText: (text) => text.replace("p/module02.ts", "src/core/module02.ts"),
 		});
 		expect(rewritten).toEqual(thinkingMessage("check src/core/module02.ts"));
+	});
+});
+
+describe("formatPathAliasLegendDeltaForIds", () => {
+	it("renders only uncommitted lines under the cumulative header, in mint order", () => {
+		const table = extendPathAliasTable(emptyPathAliasTable("/repo"), [
+			"packages/coding-agent/src/foo.ts",
+			"packages/coding-agent/test/bar.ts",
+		]).table;
+		const ids = new Set(table.entries.map((entry) => entry.id));
+		const full = formatPathAliasLegendDeltaForIds(table, ids, new Set());
+		expect(full?.split("\n")[0]).toBe(PATH_ALIAS_LEGEND_DELTA_HEADER);
+		expect(full?.split("\n").slice(1)).toEqual(table.entries.map((entry) => `${entry.id}=${entry.path}`));
+		const committed = new Set([table.entries[0]!.id]);
+		const delta = formatPathAliasLegendDeltaForIds(table, ids, committed, { paused: true });
+		expect(delta).toContain(PATH_ALIAS_LEGEND_PAUSED_LINE);
+		expect(delta).not.toContain(`${table.entries[0]!.id}=`);
+		expect(delta).toContain(`${table.entries[1]!.id}=`);
+		expect(formatPathAliasLegendDeltaForIds(table, ids, ids)).toBeUndefined();
 	});
 });

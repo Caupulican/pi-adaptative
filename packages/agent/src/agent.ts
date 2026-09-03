@@ -293,6 +293,12 @@ export class Agent {
 	 * a host must call it.
 	 */
 	private sanitizerSentPrefixCount = 0;
+	/**
+	 * How many messages the provider has already seen as a byte-stable prefix, carried across runs
+	 * like `sanitizerSentPrefixCount` so a new prompt appends to the cached prefix instead of
+	 * letting the context GC repack it. Bounded by reference equality at use (prefix-stability).
+	 */
+	private sentPrefixCount = 0;
 	/** Same lifetime as `sanitizerSentPrefixCount`; see ToolFailureContextMemory. */
 	private sanitizerMemory = createToolFailureContextMemory();
 	/** Session identifier forwarded to providers for cache-aware backends. */
@@ -483,6 +489,7 @@ export class Agent {
 	 */
 	resetSanitizerPrefixHorizon(): void {
 		this.sanitizerSentPrefixCount = 0;
+		this.sentPrefixCount = 0;
 		this.sanitizerMemory = createToolFailureContextMemory();
 	}
 
@@ -555,7 +562,11 @@ export class Agent {
 		// Seeded from the persistent, SESSION-scoped mark - NOT the zero-arg default, which would
 		// re-arm the sanitizer's dedup-erasure across the whole prior session on every new prompt.
 		// See ProviderRequestPrefixState in types.ts.
-		const continuationState = createAgentLoopContinuationState(this.sanitizerSentPrefixCount, this.sanitizerMemory);
+		const continuationState = createAgentLoopContinuationState(
+			this.sanitizerSentPrefixCount,
+			this.sanitizerMemory,
+			this.sentPrefixCount,
+		);
 		this.loopContinuationState = continuationState;
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoop(
@@ -574,7 +585,7 @@ export class Agent {
 	private async runContinuation(): Promise<void> {
 		const continuationState =
 			this.loopContinuationState ??
-			createAgentLoopContinuationState(this.sanitizerSentPrefixCount, this.sanitizerMemory);
+			createAgentLoopContinuationState(this.sanitizerSentPrefixCount, this.sanitizerMemory, this.sentPrefixCount);
 		this.loopContinuationState = continuationState;
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoopContinue(
@@ -600,6 +611,8 @@ export class Agent {
 	private syncSanitizerPrefixHorizon(continuationState: AgentLoopContinuationState): void {
 		const updated = continuationState.providerRequestPrefixState?.sanitizerSentPrefixCount;
 		if (updated !== undefined) this.sanitizerSentPrefixCount = updated;
+		const sent = continuationState.providerRequestPrefixState?.sentPrefixCount;
+		if (sent !== undefined) this.sentPrefixCount = sent;
 	}
 
 	private createContextSnapshot(): AgentContext {

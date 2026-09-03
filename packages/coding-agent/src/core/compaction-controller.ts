@@ -36,6 +36,7 @@ import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
+import { packSupersededHostRecords } from "./context-gc.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
@@ -91,7 +92,7 @@ interface ActiveCompactionLifecycle {
 	endAttempted: boolean;
 }
 
-type CompactionLifecycleOutcome = "success" | "failure" | "cancelled";
+type CompactionLifecycleOutcome = "success" | "failure" | "cancelled" | "fallback";
 
 function boundedCompactionLifecycleError(error: unknown): string {
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : "compaction failed";
@@ -272,6 +273,13 @@ export class CompactionController {
 	 * The caller must invoke this before extension or provider work begins. A failed append deliberately
 	 * leaves no active lifecycle, so the caller fails closed before starting summarization.
 	 */
+	/** The summarizer reads the packed projection, never stale host records in full. */
+	private prepareCompactionWithPackedHostRecords(
+		...[branch, settings, options]: Parameters<typeof prepareCompaction>
+	): ReturnType<typeof prepareCompaction> {
+		return prepareCompaction(branch, settings, { ...options, packHostRecords: packSupersededHostRecords });
+	}
+
 	private beginCompactionLifecycle(preparation: CompactionPreparation): void {
 		if (this.activeCompactionLifecycle) return;
 		const compactionId = randomUUID();
@@ -279,6 +287,7 @@ export class CompactionController {
 			compactionId,
 			preparation.firstKeptEntryId,
 			preparation.tokensBefore,
+			preparation.summarizerInputTokens,
 		);
 		this.activeCompactionLifecycle = { compactionId, endAttempted: false };
 	}
@@ -319,15 +328,16 @@ export class CompactionController {
 		let terminalOutcome = outcome;
 		let terminalError = error === undefined ? undefined : boundedCompactionLifecycleError(error);
 		let invalidSuccess = false;
-		if (terminalOutcome === "success" && !lifecycle.latestCompactionEntryId) {
+		if ((terminalOutcome === "success" || terminalOutcome === "fallback") && !lifecycle.latestCompactionEntryId) {
 			terminalOutcome = "failure";
 			terminalError = "compaction succeeded without a persisted compaction entry";
 			invalidSuccess = true;
 		}
 		try {
-			if (terminalOutcome === "success") {
+			if (terminalOutcome === "success" || terminalOutcome === "fallback") {
 				this.deps.sessionManager.appendCompactionEnd(lifecycle.compactionId, terminalOutcome, {
 					compactionEntryId: lifecycle.latestCompactionEntryId,
+					...(terminalOutcome === "fallback" && terminalError ? { error: terminalError } : {}),
 				});
 			} else if (terminalError) {
 				this.deps.sessionManager.appendCompactionEnd(lifecycle.compactionId, terminalOutcome, {
@@ -513,7 +523,7 @@ export class CompactionController {
 		const selectionReason = this.deps.getSelectionReason() ?? "unknown";
 		const settings = this.deps.getAdaptedSettings();
 		const initialBranch = this.getCompactionBranch();
-		const initialPreparation = prepareCompaction(initialBranch, settings);
+		const initialPreparation = this.prepareCompactionWithPackedHostRecords(initialBranch, settings);
 		if (!initialPreparation) {
 			const lastEntry = initialBranch[initialBranch.length - 1];
 			if (lastEntry?.type === "compaction") throw new Error("Already compacted");
@@ -556,7 +566,7 @@ export class CompactionController {
 				return this.deps.resolveModelAndAuth(model, sessionModel);
 			},
 			summarizeAndVerify: async (params, model, apiKey, headers, branch) => {
-				const preparation = prepareCompaction(
+				const preparation = this.prepareCompactionWithPackedHostRecords(
 					branch,
 					{ ...settings, keepRecentTokens: params.keepRecentTokens },
 					COMPACTION_RETRY_PREPARATION_OPTIONS,
@@ -583,7 +593,7 @@ export class CompactionController {
 				return { result };
 			},
 			buildDeterministicCheckpoint: (params) => {
-				const preparation = prepareCompaction(
+				const preparation = this.prepareCompactionWithPackedHostRecords(
 					initialBranch,
 					{ ...settings, keepRecentTokens: params.keepRecentTokens },
 					COMPACTION_RETRY_PREPARATION_OPTIONS,
@@ -615,7 +625,10 @@ export class CompactionController {
 		if (outcome.kind === "skip" || !appliedResult) {
 			throw new Error(outcome.kind === "skip" ? outcome.reason : "Compaction failed");
 		}
-		this.finishCompactionLifecycle("success");
+		this.finishCompactionLifecycle(
+			appliedResult.deterministic ? "fallback" : "success",
+			appliedResult.deterministic?.cause,
+		);
 		this.deps.emit({
 			type: "compaction_end",
 			reason: "manual",
@@ -838,7 +851,7 @@ export class CompactionController {
 				(options.initialTokens !== undefined &&
 					shouldCompact(options.initialTokens, contextWindow, settings, model.autoCompactionTriggerTokens));
 			if (canPreflight && preflightShouldCompact) {
-				const preflightPreparation = prepareCompaction(
+				const preflightPreparation = this.prepareCompactionWithPackedHostRecords(
 					this.getCompactionBranch(),
 					settings,
 					options.allowTrailingCompactionAsPrevious ? COMPACTION_RETRY_PREPARATION_OPTIONS : undefined,
@@ -858,7 +871,7 @@ export class CompactionController {
 					this.deps.resolveModelAndAuth(modelTier === "session" ? model : this.deps.resolveModel(model), model),
 				summarizeAndVerify: async (params, compactModel, apiKey, headers, branchEntries) => {
 					fromExtension = false;
-					const preparation = prepareCompaction(
+					const preparation = this.prepareCompactionWithPackedHostRecords(
 						branchEntries,
 						{
 							...settings,
@@ -908,7 +921,7 @@ export class CompactionController {
 					return { result };
 				},
 				buildDeterministicCheckpoint: (params) => {
-					const preparation = prepareCompaction(
+					const preparation = this.prepareCompactionWithPackedHostRecords(
 						this.getCompactionBranch(),
 						{ ...settings, keepRecentTokens: params.keepRecentTokens },
 						COMPACTION_RETRY_PREPARATION_OPTIONS,
@@ -969,7 +982,7 @@ export class CompactionController {
 				this.dropTrailingAssistantErrors();
 				if (reason === "provider_recovery") this.appendProviderRecoveryContinuation();
 			}
-			this.finishCompactionLifecycle("success");
+			this.finishCompactionLifecycle(result.deterministic ? "fallback" : "success", result.deterministic?.cause);
 			this.deps.emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 			if (willRetry) return true;
 			return hadQueuedMessages || this.deps.agent.hasQueuedMessages();

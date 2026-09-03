@@ -2,7 +2,7 @@ import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { createCustomMessage } from "@caupulican/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
-import { applyContextGc } from "../src/core/context-gc.ts";
+import { applyContextGc, packSupersededHostRecords } from "../src/core/context-gc.ts";
 
 const usage = {
 	input: 0,
@@ -102,5 +102,46 @@ describe("context-gc superseded transient records", () => {
 		// The newest of each kind is untouched.
 		expect(result.messages[4]).toBe(messages[4]);
 		expect(result.messages[7]).toBe(messages[7]);
+	});
+});
+
+describe("context-gc cumulative host records and the compaction projection", () => {
+	const long = (label: string) => `${label} ${"0123456789abcdef".repeat(40)}`;
+	const record = (kind: string, text: string, at: number, details?: unknown) =>
+		createCustomMessage(kind, text, false, details, new Date(at).toISOString());
+
+	it("never packs a cumulative record, however many later records of the kind exist", () => {
+		const messages: AgentMessage[] = [
+			record("path_alias_legend", long("legend delta 1"), 1, { cumulative: true }),
+			readCall(1, "a.ts"),
+			readResult(1),
+			record("path_alias_legend", long("legend delta 2"), 2, { cumulative: true }),
+			record("active_goal_context", long("goal v1"), 3),
+			record("active_goal_context", long("goal v2"), 4),
+		];
+		const result = applyContextGc(messages, { ...settings, tools: [] });
+		expect(result.report.records.map((entry) => entry.messageIndex)).toEqual([4]);
+		expect(result.messages[0]).toBe(messages[0]);
+		expect(result.messages[3]).toBe(messages[3]);
+	});
+
+	it("projects superseded host records to one line for the summarizer without touching anything else", () => {
+		const messages: AgentMessage[] = [
+			record("active_goal_context", long("goal v1"), 1),
+			readCall(1, "a.ts"),
+			readResult(1),
+			record("path_alias_legend", long("legend delta 1"), 2, { cumulative: true }),
+			record("active_goal_context", long("goal v2"), 3),
+		];
+		const packed = packSupersededHostRecords(messages);
+		expect((packed[0] as { content: string }).content).toBe(
+			"[Context GC packed superseded active_goal_context record; a later record of this kind is current]",
+		);
+		expect(packed[1]).toBe(messages[1]);
+		expect(packed[2]).toBe(messages[2]);
+		expect(packed[3]).toBe(messages[3]);
+		expect(packed[4]).toBe(messages[4]);
+		// Pure: the input is untouched.
+		expect((messages[0] as { content: string }).content).toContain("goal v1");
 	});
 });

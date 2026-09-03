@@ -2200,7 +2200,12 @@ export class SessionManager {
 	}
 
 	/** Append a bounded compaction transaction start marker. */
-	appendCompactionStart(compactionId: string, firstKeptEntryId: string, tokensBefore: number): string {
+	appendCompactionStart(
+		compactionId: string,
+		firstKeptEntryId: string,
+		tokensBefore: number,
+		summarizerInputTokens?: number,
+	): string {
 		const entry: CompactionStartEntry = {
 			type: "compaction_start",
 			id: generateId(this.byId),
@@ -2209,6 +2214,7 @@ export class SessionManager {
 			compactionId,
 			firstKeptEntryId,
 			tokensBefore,
+			...(summarizerInputTokens !== undefined ? { summarizerInputTokens } : {}),
 		};
 		this._validateCompactionStart(entry);
 		this._appendEntry(entry);

@@ -119,6 +119,7 @@ export interface AgentLoopContinuationState {
 export function createAgentLoopContinuationState(
 	initialSanitizerSentPrefixCount = 0,
 	sanitizerMemory: ToolFailureContextMemory = createToolFailureContextMemory(),
+	initialSentPrefixCount = 0,
 ): AgentLoopContinuationState {
 	return {
 		providerTurns: 0,
@@ -126,7 +127,10 @@ export function createAgentLoopContinuationState(
 		stagnantResultWindow: [],
 		toolFailureRecoveryGate: new ToolFailureRecoveryGate(),
 		providerRequestPrefixState: {
-			sentPrefixCount: 0,
+			// Seeded from the previous run: a run that starts at zero lets the context GC repack
+			// everything already sent, which was measured live as the prompt halving and the prefix
+			// cache missing at the head on every user, reflection and continuation turn.
+			sentPrefixCount: initialSentPrefixCount,
 			sanitizerSentPrefixCount: initialSanitizerSentPrefixCount,
 			sanitizerMemory,
 		},

@@ -49,12 +49,15 @@ export interface CompactionStartEntry extends SessionEntryBase {
 	compactionId: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
+	/** Estimated tokens handed to the summarizer, for the census gate against `tokensBefore`. */
+	summarizerInputTokens?: number;
 }
 
 export interface CompactionEndEntry extends SessionEntryBase {
 	type: "compaction_end";
 	compactionId: string;
-	outcome: "success" | "failure" | "cancelled" | "interrupted";
+	/** `fallback`: a facts-only checkpoint was applied because no summarizer accepted a summary. */
+	outcome: "success" | "failure" | "cancelled" | "interrupted" | "fallback";
 	compactionEntryId?: string;
 	error?: string;
 }
@@ -143,7 +146,7 @@ function fieldsForType(type: string): readonly string[] {
 				"errorKind",
 			];
 		case "compaction_start":
-			return ["compactionId", "firstKeptEntryId", "tokensBefore"];
+			return ["compactionId", "firstKeptEntryId", "tokensBefore", "summarizerInputTokens"];
 		case "compaction_end":
 			return ["compactionId", "outcome", "compactionEntryId", "error"];
 		default:
@@ -225,6 +228,9 @@ export function validateSessionLifecycleEntry(value: unknown): asserts value is 
 			assertExternalId(record.compactionId, "compactionId");
 			assertSessionEntryId(record.firstKeptEntryId, "firstKeptEntryId");
 			assertNonNegativeSafeInteger(record.tokensBefore, "tokensBefore");
+			if (record.summarizerInputTokens !== undefined) {
+				assertNonNegativeSafeInteger(record.summarizerInputTokens, "summarizerInputTokens");
+			}
 			break;
 		case "compaction_end":
 			assertExternalId(record.compactionId, "compactionId");
@@ -232,14 +238,17 @@ export function validateSessionLifecycleEntry(value: unknown): asserts value is 
 				record.outcome !== "success" &&
 				record.outcome !== "failure" &&
 				record.outcome !== "cancelled" &&
-				record.outcome !== "interrupted"
+				record.outcome !== "interrupted" &&
+				record.outcome !== "fallback"
 			) {
-				throw lifecycleValidationError("outcome", "expected success, failure, cancelled, or interrupted");
+				throw lifecycleValidationError("outcome", "expected success, failure, cancelled, interrupted, or fallback");
 			}
 			if (record.outcome === "success") {
 				assertSessionEntryId(record.compactionEntryId, "compactionEntryId");
 				if ("error" in record)
 					throw lifecycleValidationError("error", "successful compactions cannot carry an error");
+			} else if (record.outcome === "fallback") {
+				assertSessionEntryId(record.compactionEntryId, "compactionEntryId");
 			} else {
 				if ("compactionEntryId" in record) {
 					throw lifecycleValidationError("compactionEntryId", "only successful compactions may carry an entry id");

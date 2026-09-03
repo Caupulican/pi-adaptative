@@ -32,3 +32,51 @@ describe("transient record reconciliation index", () => {
 		expect(kinds(reconcileTransientRecords(rewritten, [slot]))).toEqual(["ledger"]);
 	});
 });
+
+describe("transient record pointers and cumulative kinds", () => {
+	const ledger = "TOOL FAILURE RECOVERY: the protocol applies\nACTIVE TOOL FAILURES mistakes=read:3";
+	it("reclaims the tail with a pointer when only the position changed, and re-sends the full record on change", () => {
+		const slot: TransientRecordSlot = { kind: "ledger", content: ledger, clearedText: "cleared", trailing: true };
+		let history: AgentMessage[] = [user("one")];
+		const first = reconcileTransientRecords(history, [slot]);
+		expect(kinds(first)).toEqual(["ledger"]);
+		history = [...history, ...first];
+		// Displaced by ordinary turn growth: a pointer, not the full ledger.
+		history = [...history, user("two")];
+		const pointer = reconcileTransientRecords(history, [slot]);
+		expect(kinds(pointer)).toEqual(["ledger"]);
+		const pointerText = (pointer[0] as { content: string }).content;
+		expect(pointerText).toBe(
+			"TOOL FAILURE RECOVERY: the protocol applies unchanged; the last full record of this kind above is current.",
+		);
+		expect((pointer[0] as { details?: { pointer?: boolean } }).details?.pointer).toBe(true);
+		history = [...history, ...pointer];
+		// At the tail again: nothing new.
+		expect(reconcileTransientRecords(history, [slot])).toEqual([]);
+		// Displaced again after a pointer: another pointer, still not the full text.
+		history = [...history, user("three")];
+		const again = reconcileTransientRecords(history, [slot]);
+		expect((again[0] as { content: string }).content).toContain("unchanged; the last full record");
+		history = [...history, ...again];
+		// Content changed: the full record returns.
+		const changed = reconcileTransientRecords(history, [{ ...slot, content: `${ledger}\nmistakes=read:4` }]);
+		expect((changed[0] as { content: string }).content).toContain("mistakes=read:4");
+		expect((changed[0] as { details?: unknown }).details).toBeUndefined();
+	});
+
+	it("appends a cumulative record without a superseding note whenever its delta is new", () => {
+		const slot: TransientRecordSlot = {
+			kind: "legend",
+			content: "PATH ALIASES (cumulative)\np/a=one",
+			cumulative: true,
+		};
+		let history: AgentMessage[] = [user("one")];
+		const first = reconcileTransientRecords(history, [slot]);
+		expect((first[0] as { content: string }).content).toBe("PATH ALIASES (cumulative)\np/a=one");
+		expect((first[0] as { details?: { cumulative?: boolean } }).details?.cumulative).toBe(true);
+		history = [...history, ...first];
+		expect(reconcileTransientRecords(history, [slot])).toEqual([]);
+		const next = reconcileTransientRecords(history, [{ ...slot, content: "PATH ALIASES (cumulative)\np/b=two" }]);
+		expect((next[0] as { content: string }).content).toBe("PATH ALIASES (cumulative)\np/b=two");
+	});
+});
