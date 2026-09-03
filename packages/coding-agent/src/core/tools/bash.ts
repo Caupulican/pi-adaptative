@@ -1009,8 +1009,15 @@ function createShellToolDefinition(
 						throw new Error(appendStatus(text, "Command aborted"));
 					}
 					if (err instanceof Error && err.message.startsWith("timeout:")) {
+						// The command ran and did not finish in the time the caller allowed: that is the
+						// operation's own status, like a non-zero exit, not a failure of this tool.
 						const timeoutSecs = err.message.split(":")[1];
-						throw new Error(appendStatus(text, `Command timed out after ${timeoutSecs} seconds`));
+						throw new AgentToolExecutionError(
+							appendStatus(text, `Command timed out after ${timeoutSecs} seconds`),
+							"timeout",
+							output.getOutputSignature(),
+							"operation_outcome",
+						);
 					}
 					if (err instanceof Error && err.message.startsWith("silence:")) {
 						const secs = err.message.split(":")[1];

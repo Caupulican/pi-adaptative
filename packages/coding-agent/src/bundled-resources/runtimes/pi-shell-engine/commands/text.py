@@ -77,7 +77,7 @@ def _parse_simple_flags(
         if arg == "--":
             continue
         if arg.startswith("-") and arg != "-":
-            if arg not in known_flags:
+            if arg not in known_flags and not all(f"-{ch}" in known_flags for ch in arg[1:]):
                 _refuse_flag(name, arg)
             flags.append(arg)
         else:
@@ -130,9 +130,12 @@ def cat(ctx: "BuiltinContext") -> int:
 # --- head / tail ---------------------------------------------------------------
 
 
-def _parse_n_flag(name: str, argv: list[str]) -> tuple[int, list[str]]:
-    """Parse `[-n N|-N] [FILE]`. Any other flag/form -> unsupported-flag."""
+def _parse_n_flag(name: str, argv: list[str]) -> tuple[int, str, list[str], bool, bool]:
+    """Parse `[-n N|-N|-c N] [-q|-v] [FILE...]`. Returns (count, unit, operands, quiet, verbose)."""
     n = 10
+    unit = "lines"
+    quiet = False
+    verbose = False
     operands: list[str] = []
     args = argv[1:]
     i = 0
@@ -141,15 +144,25 @@ def _parse_n_flag(name: str, argv: list[str]) -> tuple[int, list[str]]:
         if a == "--":
             operands.extend(args[i + 1 :])
             break
-        if a == "-n":
+        if a in ("-n", "-c"):
+            unit = "bytes" if a == "-c" else "lines"
             i += 1
             if i >= len(args):
-                _refuse_flag(name, "-n")
+                _refuse_flag(name, a)
             n = _parse_int_operand(name, args[i])
             i += 1
             continue
-        if a.startswith("-n") and len(a) > 2:
+        if (a.startswith("-n") or a.startswith("-c")) and len(a) > 2 and a[2:].lstrip("-").isdigit():
+            unit = "bytes" if a.startswith("-c") else "lines"
             n = _parse_int_operand(name, a[2:])
+            i += 1
+            continue
+        if a in ("-q", "--quiet", "--silent"):
+            quiet = True
+            i += 1
+            continue
+        if a in ("-v", "--verbose"):
+            verbose = True
             i += 1
             continue
         if len(a) > 1 and a[0] == "-" and a[1:].isdigit():
@@ -160,9 +173,7 @@ def _parse_n_flag(name: str, argv: list[str]) -> tuple[int, list[str]]:
             _refuse_flag(name, a)
         operands.append(a)
         i += 1
-    if len(operands) > 1:
-        _refuse_flag(name, "multi-file")
-    return n, operands
+    return n, unit, operands, quiet, verbose
 
 
 def _parse_int_operand(name: str, raw: str) -> int:
@@ -175,23 +186,43 @@ def _parse_int_operand(name: str, raw: str) -> int:
     raise AssertionError("unreachable")
 
 
+def _head_or_tail(ctx: "BuiltinContext", name: str, tail: bool) -> int:
+    n, unit, operands, quiet, verbose = _parse_n_flag(name, ctx.argv)
+    sources = operands if operands else ["-"]
+    headers = (len(sources) > 1 and not quiet) or verbose
+    exit_code = 0
+    first = True
+    for operand in sources:
+        try:
+            data = _read_operand_or_stdin(ctx, [operand])
+        except OSError as exc:
+            ctx.stdout.write(f"{name}: cannot open '{operand}' for reading: {exc.strerror}\n".encode())
+            exit_code = 1
+            continue
+        if headers:
+            label = "standard input" if operand == "-" else operand
+            ctx.stdout.write((("" if first else "\n") + f"==> {label} <==\n").encode())
+        first = False
+        if unit == "bytes":
+            chunk = data[-n:] if tail else data[:n]
+            if tail and n <= 0:
+                chunk = b""
+            ctx.stdout.write(chunk)
+            continue
+        lines = data.splitlines(keepends=True)
+        if tail:
+            ctx.stdout.write(b"" if n <= 0 else b"".join(lines[-n:]))
+        else:
+            ctx.stdout.write(b"".join(lines[:n]))
+    return exit_code
+
+
 def head(ctx: "BuiltinContext") -> int:
-    n, operands = _parse_n_flag("head", ctx.argv)
-    data = _read_operand_or_stdin(ctx, operands)
-    lines = data.splitlines(keepends=True)
-    ctx.stdout.write(b"".join(lines[:n]))
-    return 0
+    return _head_or_tail(ctx, "head", False)
 
 
 def tail(ctx: "BuiltinContext") -> int:
-    n, operands = _parse_n_flag("tail", ctx.argv)
-    data = _read_operand_or_stdin(ctx, operands)
-    lines = data.splitlines(keepends=True)
-    if n <= 0:
-        ctx.stdout.write(b"")
-    else:
-        ctx.stdout.write(b"".join(lines[-n:]))
-    return 0
+    return _head_or_tail(ctx, "tail", True)
 
 
 def _read_operand_or_stdin(ctx: "BuiltinContext", operands: list[str]) -> bytes:
@@ -217,42 +248,43 @@ def _wc_counts(data: bytes) -> tuple[int, int, int, int]:
 
 
 def wc(ctx: "BuiltinContext") -> int:
-    flags, operands = _parse_simple_flags(
-        ctx, "wc", {"-l", "-w", "-c", "-m"}, 1
-    )
+    # Coreutils shape in full: several files with a `total` row, combined short flags (`-lc`),
+    # and the single-count stdin form. Refusing `wc a b` cost turns in the measured sessions.
+    raw_flags, operands = _parse_simple_flags(ctx, "wc", {"-l", "-w", "-c", "-m", "-L"}, None)
+    flags: list[str] = []
+    for raw in raw_flags:
+        for ch in raw[1:]:
+            flags.append(f"-{ch}")
+    selected_keys = [f for f in ("-l", "-w", "-c", "-m", "-L") if f in flags] or ["-l", "-w", "-c"]
 
-    single_flag = len(flags) == 1 and not operands
-    if single_flag:
-        data = _read_stdin(ctx)
+    def counts_of(data: bytes) -> dict[str, int]:
         lines, words, byte_count, char_count = _wc_counts(data)
-        value = {"-l": lines, "-w": words, "-c": byte_count, "-m": char_count}[flags[0]]
-        ctx.stdout.write(f"{value}\n".encode())
-        return 0
+        longest = max((len(line) for line in data.decode("utf-8", errors="replace").split("\n")), default=0)
+        return {"-l": lines, "-w": words, "-c": byte_count, "-m": char_count, "-L": longest}
 
-    # Bare wc / multi-count / file-arg form: GNU-style column padding (C-marked).
-    if operands:
-        path = _resolve_path(ctx, operands[0])
-        with open(path, "rb") as fh:
-            data = fh.read()
-        label = operands[0]
-    else:
-        data = _read_stdin(ctx)
-        label = None
-
-    lines, words, byte_count, char_count = _wc_counts(data)
-    if flags:
-        selected = []
-        for f in flags:
-            selected.append({"-l": lines, "-w": words, "-c": byte_count, "-m": char_count}[f])
-    else:
-        selected = [lines, words, byte_count]
-
-    width = max((len(str(v)) for v in selected), default=1)
-    width = max(width, 7)
-    columns = "".join(str(v).rjust(width) for v in selected)
-    out = columns + (f" {label}" if label is not None else "")
-    ctx.stdout.write(f"{out}\n".encode())
-    return 0
+    rows: list[tuple[dict[str, int], str | None]] = []
+    exit_code = 0
+    if not operands:
+        rows.append((counts_of(_read_stdin(ctx)), None))
+    for operand in operands:
+        try:
+            with open(_resolve_path(ctx, operand), "rb") as fh:
+                rows.append((counts_of(fh.read()), operand))
+        except OSError as exc:
+            ctx.stdout.write(f"wc: {operand}: {exc.strerror}\n".encode())
+            exit_code = 1
+    if len(rows) > 1:
+        total = {key: sum(row[0][key] for row in rows) for key in selected_keys}
+        rows.append((total, "total"))
+    if len(rows) == 1 and rows[0][1] is None and len(selected_keys) == 1:
+        ctx.stdout.write(f"{rows[0][0][selected_keys[0]]}\n".encode())
+        return exit_code
+    width = max([len(str(row[0][key])) for row in rows for key in selected_keys] + [1])
+    width = max(width, 7) if len(rows) > 1 or rows[0][1] is not None or len(selected_keys) > 1 else width
+    for counts, label in rows:
+        columns = "".join(str(counts[key]).rjust(width) for key in selected_keys)
+        ctx.stdout.write((columns + (f" {label}" if label is not None else "") + "\n").encode())
+    return exit_code
 
 
 # --- sort --------------------------------------------------------------------

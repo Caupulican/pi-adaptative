@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -207,9 +207,10 @@ describeOrSkip("pi-shell-engine commands/fs.py", () => {
 			expect(missing.stdout).toContain("No such file or directory");
 
 			writeFileSync(join(root, "file.txt"), "");
+			// coreutils lists a file operand under -R instead of refusing it.
 			const file = p(python as string, "ls", ["ls", "-R", "file.txt"]);
-			expect(file.exitCode).toBe(1);
-			expect(file.stdout).toContain("Not a directory");
+			expect(file.exitCode).toBe(0);
+			expect(file.stdout).toBe("file.txt\n");
 		});
 
 		it("-1 is accepted (no-op formatting change)", () => {
@@ -253,15 +254,81 @@ describeOrSkip("pi-shell-engine commands/fs.py", () => {
 			expect(res.stdout).toBe("a.txt\nls: missing.txt: No such file or directory\n");
 		});
 
-		it("multiple DIRECTORY operands stay refused", () => {
+		it("lists several DIRECTORY operands as headed sections in ordinal order", () => {
 			mkdirSync(join(root, "sub1"));
 			mkdirSync(join(root, "sub2"));
-			const res = p(python as string, "ls", ["ls", "sub1", "sub2"]);
-			expect(res.error?.construct).toBe("unsupported-flag");
+			writeFileSync(join(root, "sub1", "one.txt"), "");
+			writeFileSync(join(root, "sub2", "two.txt"), "");
+			const res = p(python as string, "ls", ["ls", "sub2", "sub1"]);
+			expect(res.error).toBeNull();
+			expect(res.exitCode).toBe(0);
+			expect(res.stdout).toBe("sub1:\none.txt\n\nsub2:\ntwo.txt\n");
+		});
+
+		it("answers the long, time-sorted and directory-itself forms the sessions used", () => {
+			mkdirSync(join(root, "dir"));
+			writeFileSync(join(root, "older.txt"), "aaaa");
+			const past = new Date(Date.now() - 60_000);
+			utimesSync(join(root, "older.txt"), past, past);
+			writeFileSync(join(root, "newer.txt"), "bb");
+			const long = p(python as string, "ls", ["ls", "-l"]);
+			expect(long.error).toBeNull();
+			expect(long.stdout).toMatch(/^-rw.* {2,}\d+ .* older\.txt$/m);
+			expect(long.stdout).toMatch(/^drw.* dir$/m);
+			const byTime = p(python as string, "ls", ["ls", "-t"]);
+			expect(byTime.stdout.indexOf("newer.txt")).toBeLessThan(byTime.stdout.indexOf("older.txt"));
+			const itself = p(python as string, "ls", ["ls", "-d", "dir"]);
+			expect(itself.stdout).toBe("dir/\n");
+			const human = p(python as string, "ls", ["ls", "-lh", "older.txt"]);
+			expect(human.error).toBeNull();
+			expect(human.stdout).toContain("older.txt");
 		});
 	});
 
 	describe("find", () => {
+		it("supports depth bounds, case-insensitive and path predicates, print0, negation and -exec", () => {
+			mkdirSync(join(root, "sub", "deep"), { recursive: true });
+			writeFileSync(join(root, "top.txt"), "");
+			writeFileSync(join(root, "sub", "Mid.TXT"), "");
+			writeFileSync(join(root, "sub", "deep", "leaf.txt"), "");
+			const shallow = p(python as string, "find", ["find", ".", "-maxdepth", "1", "-name", "*.txt", "-print"]);
+			expect(shallow.error).toBeNull();
+			expect(shallow.stdout).toBe("./top.txt\n");
+			const insensitive = p(python as string, "find", ["find", ".", "-mindepth", "2", "-iname", "mid.txt"]);
+			expect(insensitive.stdout).toBe("./sub/Mid.TXT\n");
+			const byPath = p(python as string, "find", ["find", ".", "-path", "*deep*", "-type", "f"]);
+			expect(byPath.stdout).toBe("./sub/deep/leaf.txt\n");
+			// -a binds tighter than -o: (type f and not *.txt) or leaf.txt; Mid.TXT misses the
+			// case-sensitive *.txt and so qualifies.
+			const negated = p(python as string, "find", [
+				"find",
+				".",
+				"-type",
+				"f",
+				"-not",
+				"-name",
+				"*.txt",
+				"-o",
+				"-name",
+				"leaf.txt",
+			]);
+			expect(negated.stdout).toBe("./sub/Mid.TXT\n./sub/deep/leaf.txt\n");
+			const nul = p(python as string, "find", ["find", "sub", "-type", "f", "-print0"]);
+			expect(nul.stdout).toBe("sub/Mid.TXT\u0000sub/deep/leaf.txt\u0000");
+			const executed = p(python as string, "find", [
+				"find",
+				"sub",
+				"-name",
+				"leaf.txt",
+				"-exec",
+				"echo",
+				"found",
+				"{}",
+				";",
+			]);
+			expect(executed.stdout.trim()).toBe("found sub/deep/leaf.txt");
+		});
+
 		it("recursively lists /-normalized, ordinal-sorted paths rooted at PATH", () => {
 			mkdirSync(join(root, "sub"));
 			writeFileSync(join(root, "sub", "b.txt"), "");

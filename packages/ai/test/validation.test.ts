@@ -1,7 +1,12 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { Tool, ToolCall } from "../src/types.ts";
-import { getValidator, ToolArgumentValidationError, validateToolArguments } from "../src/utils/validation.ts";
+import {
+	getValidator,
+	selectUnionBranch,
+	ToolArgumentValidationError,
+	validateToolArguments,
+} from "../src/utils/validation.ts";
 
 function createToolCallWithPlainSchema(
 	schema: Tool["parameters"],
@@ -415,5 +420,53 @@ describe("validateToolArguments", () => {
 			const { tool, toolCall } = createToolCallWithPlainSchema(testCase.schema, testCase.input);
 			expect(() => validateToolArguments(tool, toolCall)).toThrow("Validation failed");
 		}
+	});
+});
+
+describe("discriminated unions", () => {
+	const taskSteps: Tool = {
+		name: "task_steps",
+		description: "steps",
+		parameters: Type.Union([
+			Type.Object({ action: Type.Literal("set"), steps: Type.Array(Type.Object({ content: Type.String() })) }),
+			Type.Object({ action: Type.Literal("list"), showCompleted: Type.Optional(Type.Boolean()) }),
+			Type.Object({ action: Type.Literal("update"), id: Type.String() }),
+		]),
+	};
+
+	it("selects the branch the action names", () => {
+		expect(selectUnionBranch(taskSteps.parameters, { action: "list" })).toMatchObject({
+			properties: { action: { const: "list" } },
+		});
+		expect(selectUnionBranch(taskSteps.parameters, { action: "nope" })).toBeUndefined();
+		expect(selectUnionBranch(Type.Object({ a: Type.String() }), { a: 1 })).toBeUndefined();
+	});
+
+	it("coerces a string boolean on the named branch instead of reporting another branch's fields", () => {
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "tool-list",
+			name: "task_steps",
+			arguments: { action: "list", showCompleted: "true" as unknown as boolean },
+		};
+		expect(validateToolArguments(taskSteps, toolCall)).toEqual({ action: "list", showCompleted: true });
+	});
+
+	it("reports only the named branch's errors when repair is impossible", () => {
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "tool-update",
+			name: "task_steps",
+			arguments: { action: "update", id: 42 as unknown as string },
+		};
+		let message = "";
+		try {
+			validateToolArguments(taskSteps, toolCall);
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+		expect(message).toContain("id: expected string");
+		expect(message).not.toContain("expected object");
+		expect(message).not.toContain('"set"');
 	});
 });

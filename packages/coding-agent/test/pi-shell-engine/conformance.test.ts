@@ -432,7 +432,24 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 				const { frame, stdout } = runEngine(python, "ls -la", dir);
 				expect(frame.exitCode).toBe(0);
 				expect(frame.unsupported).toBeNull();
-				expect(stdout).toBe("./\n../\n.hidden\nvisible\n");
+				// Long format now, like coreutils: one mode-led line per entry, hidden entries included.
+				const lines = stdout.split("\n").filter(Boolean);
+				expect(lines.map((line) => line.split(/\s+/).at(-1))).toEqual([".", "..", ".hidden", "visible"]);
+				expect(lines.every((line) => /^[-dl][rwx-]{9} /.test(line))).toBe(true);
+			});
+		});
+
+		it("heredocs, here-strings and nested shells run instead of refusing", () => {
+			withTmpDir((dir) => {
+				const heredoc = runEngine(python, "cat <<EOF\nhello\nworld\nEOF", dir);
+				expect(heredoc.frame.unsupported).toBeNull();
+				expect(heredoc.stdout).toBe("hello\nworld\n");
+				const hereString = runEngine(python, "cat <<< 'one line'", dir);
+				expect(hereString.stdout).toBe("one line\n");
+				const nested = runEngine(python, "sh -c 'echo nested ok'", dir);
+				expect(nested.frame.unsupported).toBeNull();
+				if (nested.frame.exitCode === 0) expect(nested.stdout).toBe("nested ok\n");
+				else expect(nested.frame.exitCode).toBe(127);
 			});
 		});
 
@@ -575,16 +592,12 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 			["arithmetic-expansion", "echo $((1+1))"],
 			["arithmetic-expansion", "((1+1))"],
 			["brace-expansion", "foo {a,b,c}"],
-			["nested-shell", "bash -c foo"],
 			["exec-builtin", "exec foo"],
-			["heredoc", "foo <<EOF"],
-			["here-string", "foo <<< bar"],
 			["function-definition", "name() { echo hi; }"],
 			["control-flow", "if true; then echo hi; fi"],
 			["extended-glob", "foo @(a|b)"],
 			["unsupported-builtin", "eval foo"],
 			["unsupported-flag", "ls -Z"],
-			["posix-script", "foo.sh"],
 			["tilde-user", "echo ~someuser"],
 			["malformed-syntax", ")"],
 			["malformed-syntax", "echo 'unterminated"],

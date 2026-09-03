@@ -38,7 +38,6 @@ _JOB_CONTROL_WORDS = {"fg", "bg", "jobs", "wait", "disown"}
 _CONTROL_FLOW_WORDS = {"if", "while", "until", "case", "select"}
 _ARITHMETIC_WORDS = {"let"}
 _UNSUPPORTED_BUILTIN_WORDS = {"eval", "source", ".", "alias", "trap", "set", "shopt", "read", "declare", "local"}
-_NESTED_SHELL_WORDS = {"bash", "sh", "zsh", "fish", "cmd", "powershell", "pwsh", "wsl"}
 
 
 def _literal_text_from_segments(segments: list) -> str | None:
@@ -90,12 +89,9 @@ def _check_command_word_banned(text: str) -> None:
         raise UnsupportedConstruct("exec-builtin", "The 'exec' builtin is not supported.")
     if text in _UNSUPPORTED_BUILTIN_WORDS:
         raise UnsupportedConstruct("unsupported-builtin", f"The '{text}' builtin is not supported.")
-    if text in _NESTED_SHELL_WORDS:
-        raise UnsupportedConstruct(
-            "nested-shell", f"Nesting another shell ('{text}') is not supported; run the command directly."
-        )
-    if text.endswith(".sh") or text.startswith("/bin/"):
-        raise UnsupportedConstruct("posix-script", f"Invoking a script/path directly ('{text}') is not supported.")
+    # Nested shells (`powershell -Command`, `cmd /c`, `bash -lc`) and scripts run as external
+    # processes: the engine spawns whatever the host has on PATH and reports "command not found"
+    # honestly when it does not. Refusing them by name capped what the model could do on Windows.
 
 
 _REDIRECT_OP_RE = re.compile(r"^(\d*)(.*)$", re.DOTALL)

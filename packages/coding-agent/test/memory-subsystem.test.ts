@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -751,5 +752,30 @@ describe("Memory Subsystem - FileStoreProvider", () => {
 		const dirContents = readdirSync(agentDir);
 		const hasBackup = dirContents.some((f) => /^MEMORY\.md\.bak\.\d+$/.test(f));
 		expect(hasBackup).toBe(true);
+	});
+});
+
+describe("memory budget as an operation outcome", () => {
+	it("returns the budget refusal as an error the loop can see, not as plain text", async () => {
+		const dir = join(tmpdir(), `pi-mem-budget-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const agentDirLocal = join(dir, "agent");
+		mkdirSync(agentDirLocal, { recursive: true });
+		try {
+			const provider = new FileStoreProvider();
+			await provider.initialize("budget-session", { agentDir: agentDirLocal, cwd: dir, isChildSession: false });
+			const memoryTool = provider.getToolDefinitions().find((t) => t.name === "memory");
+			const result = await memoryTool!.execute(
+				"call-budget",
+				{ action: "add", target: "memory", content: "x".repeat(3000) },
+				undefined,
+				undefined,
+				{} as any,
+			);
+			expect((result as any).isError).toBe(true);
+			expect((result as any).errorKind).toBe("operation_outcome");
+			expect((result as any).content[0].text).toContain("Memory budget exceeded");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

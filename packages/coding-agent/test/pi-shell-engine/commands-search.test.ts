@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -321,5 +321,62 @@ describe("pi-shell-engine commands/search.py", () => {
 			}) as Result;
 			expect(r.stdout).toBe("baz bar\n");
 		});
+	});
+});
+
+describe("grep coreutils surface the sessions used", () => {
+	const python = resolvePython();
+	if (!python) {
+		it.skip("no Python interpreter available", () => {});
+		return;
+	}
+	it("recurses with include globs, prints context, counts, only-matching, quiet and whole-line forms", () => {
+		const dir = withTmpFiles({ "a.txt": "foo one\nbar\nfoo two\n", "b.log": "foo log\n" });
+		mkdirSync(join(dir, "sub"));
+		writeFileSync(join(dir, "sub", "c.txt"), "foo deep\n", "utf-8");
+		const recursive = runBuiltin(python as string, "search.cmd_grep", {
+			argv: ["grep", "-rn", "foo", "."],
+			cwd: dir,
+		});
+		expect(recursive).toMatchObject({ refused: false, exitCode: 0 });
+		if (recursive.refused) throw new Error("refused");
+		expect(recursive.stdout.split("\n").filter(Boolean).sort()).toEqual([
+			"a.txt:1:foo one",
+			"a.txt:3:foo two",
+			"b.log:1:foo log",
+			"sub/c.txt:1:foo deep",
+		]);
+		const included = runBuiltin(python as string, "search.cmd_grep", {
+			argv: ["grep", "-rl", "--include=*.txt", "foo", "."],
+			cwd: dir,
+		});
+		if (included.refused) throw new Error("refused");
+		expect(included.stdout.split("\n").filter(Boolean).sort()).toEqual(["a.txt", "sub/c.txt"]);
+		const context = runBuiltin(python as string, "search.cmd_grep", {
+			argv: ["grep", "-n", "-A1", "bar", "a.txt"],
+			cwd: dir,
+		});
+		if (context.refused) throw new Error("refused");
+		expect(context.stdout).toBe("2:bar\n3-foo two\n");
+		const count = runBuiltin(python as string, "search.cmd_grep", { argv: ["grep", "-c", "foo", "a.txt"], cwd: dir });
+		if (count.refused) throw new Error("refused");
+		expect(count.stdout).toBe("2\n");
+		const only = runBuiltin(python as string, "search.cmd_grep", { argv: ["grep", "-o", "fo.", "a.txt"], cwd: dir });
+		if (only.refused) throw new Error("refused");
+		expect(only.stdout).toBe("foo\nfoo\n");
+		const quiet = runBuiltin(python as string, "search.cmd_grep", { argv: ["grep", "-q", "foo", "a.txt"], cwd: dir });
+		expect(quiet).toMatchObject({ refused: false, exitCode: 0, stdout: "" });
+		const wholeLine = runBuiltin(python as string, "search.cmd_grep", {
+			argv: ["grep", "-x", "bar", "a.txt"],
+			cwd: dir,
+		});
+		if (wholeLine.refused) throw new Error("refused");
+		expect(wholeLine.stdout).toBe("bar\n");
+		const upper = runBuiltin(python as string, "search.cmd_grep", {
+			argv: ["grep", "-R", "-i", "FOO", "sub"],
+			cwd: dir,
+		});
+		if (upper.refused) throw new Error("refused");
+		expect(upper.stdout).toBe("sub/c.txt:foo deep\n");
 	});
 });

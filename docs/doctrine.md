@@ -140,6 +140,26 @@ Python `f = p/name` was refused as an invented alias. Pinned by
 `packages/coding-agent/test/path-alias-tool-wrap.test.ts` and
 `packages/coding-agent/test/path-alias-session.test.ts` (existence gate).
 
+**A refusal names a real ambiguity or a real risk, never a shape the harness can absorb.** The
+credential guard accepts a literal filename prefix as a narrow glob, treats the harness's own
+memory, skills and sessions as searchable without a glob, judges a multi-line script line by line
+when the whole does not tokenize, and treats a shell variable as one file it cannot resolve. A
+command that ran and timed out reports an operation outcome, like a non-zero exit. Evidence,
+requirement satisfaction and progress are accepted on a blocked goal; only lifecycle changes stay
+owner-controlled. A union of action shapes is validated against the branch the supplied `action`
+names, so coercions run and the repair text speaks about that branch. On Windows the bundled
+shell engine answers the coreutils surface the sessions use (`ls -l/-t/-d/-h/-S` and several
+operands, `find` depth bounds, `-iname/-path/-o/-not/-prune/-print0/-printf/-exec`, `wc` with
+several files and combined flags, `head`/`tail -c` and several files, `grep -r/-A/-B/-C/-o/-q/-x/
+--include/--exclude`), reads heredocs and here-strings, and spawns nested shells and scripts as
+external processes; there is no cap on the emulated surface, an unsupported construct names
+itself. Why: measured live, refusals rose to 12 to 30 per 100 turns on the new versions and 132 of
+5,049 Windows bash calls were refused for ordinary flags. Pinned by
+`packages/coding-agent/test/credential-exposure-guard.test.ts`,
+`packages/coding-agent/test/goal-tool-core.test.ts`, `packages/ai/test/validation.test.ts`, and
+the `packages/coding-agent/test/pi-shell-engine` suite (conformance, commands-fs, commands-search,
+commands-text).
+
 **A feature earns its tokens or is gated by tier, never removed.** `scripts/feature-ledger.mjs`
 measures each subsystem's cost and benefit from session files; a subsystem without a benefit
 measurement gains no new surface.

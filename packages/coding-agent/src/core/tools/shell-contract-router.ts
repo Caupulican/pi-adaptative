@@ -368,6 +368,9 @@ export function routeShellContract(
 	}
 
 	if (BLOCKED_NESTED_SHELLS.has(commandName)) {
+		// The Python engine spawns a nested shell as an ordinary external process; only the
+		// PowerShell-only floor has to refuse it.
+		if (pythonEngine) return { kind: "python-engine", command };
 		const powershellGuidance = ["powershell", "powershell.exe", "pwsh", "pwsh.exe"].includes(commandName)
 			? " Invoke the .ps1 path directly with its arguments, without powershell.exe -File or pwsh -File."
 			: " Invoke the target executable or supported script directly.";
@@ -388,6 +391,7 @@ export function routeShellContract(
 		};
 	}
 	if (commandName.endsWith(".sh") || commandName.includes("/bin/")) {
+		if (pythonEngine) return { kind: "python-engine", command };
 		return {
 			kind: "unsupported",
 			error: "POSIX shell scripts are not supported by the Windows shell contract router.",

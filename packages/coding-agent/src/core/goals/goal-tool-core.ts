@@ -154,7 +154,12 @@ export function applyGoalAction(
 		return { ok: false, error: "No active goal. Use action 'start' before recording goal updates." };
 	}
 
-	if (!isGoalExecutionActive(current.status)) {
+	// Recording evidence, satisfying a requirement with it, or reporting progress is not a lifecycle
+	// change: a blocked goal still needs the evidence that unblocks it (measured live: three refusals
+	// while the model tried to attach proof to a goal the harness had blocked).
+	const evidenceOnly =
+		action.action === "add_evidence" || action.action === "satisfy_requirement" || action.action === "progress";
+	if (!isGoalExecutionActive(current.status) && !(evidenceOnly && current.status === "blocked")) {
 		return {
 			ok: false,
 			error: `Goal '${current.goalId}' is ${current.status}. Lifecycle changes are owner/system controlled; use the /goal controls.`,
