@@ -38,7 +38,7 @@ import {
 	workspaceRecoveryTarget,
 } from "./file-failure-recovery.ts";
 import { withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
-import { classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
+import { applyGitTailStage, classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
 import { prepareManagedShellEnvironment } from "./managed-shell-preparation.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
@@ -340,6 +340,11 @@ export function buildShellSessionContext(deps: ShellSessionContextDeps): ShellSe
 	};
 }
 
+/** Single-quote one argument for the Bash-like contract (the only quoting every tier accepts). */
+function shellQuoteArgument(value: string): string {
+	return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 function resolveSpawnContext(
 	command: string,
 	cwd: string,
@@ -597,8 +602,15 @@ function createShellToolDefinition(
 	);
 	const commandPrefix = options?.commandPrefix;
 	const spawnHook = options?.spawnHook;
-	const hasExecutionOverrides = Boolean(options?.operations || options?.shellPath || commandPrefix || spawnHook);
-	const canFilterCommand = !hasExecutionOverrides;
+	// Family filters (the git filter) spawn the tool directly instead of going through the shell, so
+	// they need the real shell backend (no custom operations) and a command the shell would have run
+	// verbatim (no prefix). A spawn hook that only adjusts env or cwd keeps them on: its result is
+	// checked per call, and a hook that rewrites the command text turns them off for that call. The
+	// output-only stages (test projection, verification classification) never depend on this.
+	const familyFiltersAllowed = options?.operations === undefined && !commandPrefix;
+	// The directory the persistent POSIX session last reported ($PWD after the previous command):
+	// a filtered run must happen where the shell is, not where the tool was created.
+	let lastSessionCwd: string | undefined;
 	const routesWindowsContract = contractPlatform === "win32";
 	const pythonEngineEnabled = options?.windowsShellPythonEngine !== false;
 	const engineOperations = routesWindowsContract
@@ -673,8 +685,7 @@ function createShellToolDefinition(
 			const routeBroadSearchOutput = searchScope.kind === "broad";
 			const autoRoutedReason =
 				searchScope.kind === "broad" && broadSearch !== BROAD_SEARCH_OUTPUT_ROUTE ? searchScope.reason : undefined;
-			let outputProjector =
-				routeBroadSearchOutput || commandPrefix || spawnHook ? undefined : createShellOutputProjector(command);
+			let outputProjector = routeBroadSearchOutput ? undefined : createShellOutputProjector(command);
 			const output = new OutputAccumulator({
 				tempFilePrefix: `pi-${toolName}`,
 				tempDirectory: options?.outputDirectory,
@@ -891,8 +902,7 @@ function createShellToolDefinition(
 				status: "failed" | "passed",
 				effectiveCwd: string,
 			) => {
-				const verification =
-					!commandPrefix && !spawnHook ? classifyShellVerificationCommand(command, effectiveCwd) : undefined;
+				const verification = classifyShellVerificationCommand(command, effectiveCwd);
 				return verification
 					? { ...(details ?? {}), piVerification: { version: 1 as const, id: verification.id, status } }
 					: details;
@@ -912,44 +922,18 @@ function createShellToolDefinition(
 					? resolveCommandTimeoutSeconds(timeout)
 					: (commandTimeoutMsOverride ?? DEFAULT_COMMAND_TIMEOUT_SECONDS * 1000) / 1000;
 
-			try {
-				if (canFilterCommand) {
-					const classification = classifyGitCommand(command, getShellEnv());
-					if (classification.eligible && classification.subcommand) {
-						const res = await executeFilteredGit(
-							cwd,
-							classification.subcommand,
-							classification.globalOptions || [],
-							classification.subcommandArgs || [],
-							{ signal, timeout: effectiveTimeoutSeconds },
-						);
-						if (res.exitCode !== -100) {
-							output.append(res.rawBytes ?? Buffer.from(res.rawOut, "utf-8"));
-							const snapshot = await finishOutput();
-							if (res.exitCode !== 0) {
-								const { text: rawOutputText } = formatOutput(snapshot);
-								// executeFilteredGit runs at the host cwd by construction.
-								throw createExitError(rawOutputText, res.exitCode, cwd);
-							}
-							const details = snapshot.truncation.truncated
-								? {
-										truncation: snapshot.truncation,
-										fullOutputPath: snapshot.fullOutputPath,
-										fullOutputError: snapshot.fullOutputError,
-									}
-								: snapshot.fullOutputPath || snapshot.fullOutputError
-									? { fullOutputPath: snapshot.fullOutputPath, fullOutputError: snapshot.fullOutputError }
-									: undefined;
-							return { content: [{ type: "text", text: res.output }], details };
-						}
-					}
-				}
-
-				let backendCommand = command;
+			// One execution path for the shell: routing on the Windows contract, the operator's command
+			// prefix, the spawn hook, the session env, the mutation barrier. The main command and the
+			// `cd` a filtered git run replays into the session both go through it.
+			const runInSession = async (
+				source: string,
+				onData: (data: Buffer) => void,
+			): Promise<{ exitCode: number | null; cwd?: string; spawnCwd: string }> => {
+				let backendCommand = source;
 				let engineRoute = false;
 				let effectiveCwd = cwd;
 				if (routesWindowsContract) {
-					const route = routeShellContract(command, contractPlatform, { pythonEngine: pythonEngineEnabled });
+					const route = routeShellContract(source, contractPlatform, { pythonEngine: pythonEngineEnabled });
 					if (route.kind === "unsupported") throw new Error(route.error);
 					if (route.kind === "python-engine") engineRoute = true;
 					backendCommand = route.command;
@@ -981,27 +965,89 @@ function createShellToolDefinition(
 						options?.managedToolResolver,
 					);
 				}
-
+				// Shell commands cannot statically declare which files they mutate, so the
+				// actual execution takes the coarse exclusive barrier: it waits for
+				// in-flight edit/write mutations to drain and blocks new ones meanwhile.
+				const result = await withExclusiveMutationBarrier(() =>
+					(engineRoute && engineOperations ? engineOperations : ops).exec(spawnContext.command, spawnContext.cwd, {
+						onData,
+						signal,
+						timeout: effectiveTimeoutSeconds,
+						env: spawnContext.env,
+					}),
+				);
+				if (!routesWindowsContract && result.cwd) lastSessionCwd = result.cwd;
+				return { exitCode: result.exitCode, cwd: result.cwd, spawnCwd: spawnContext.cwd };
+			};
+			try {
+				// Classify on the resolved spawn context: a hook may adjust env or cwd (filters stay on,
+				// the filtered run receives that env) or rewrite the command (filters off for this call).
+				const filterContext = familyFiltersAllowed
+					? resolveSpawnContext(command, cwd, spawnHook, options?.getShellSessionContext)
+					: undefined;
+				if (filterContext && filterContext.command === command) {
+					const classification = classifyGitCommand(command, filterContext.env);
+					if (classification.eligible && classification.subcommand) {
+						let gitCwd = routesWindowsContract
+							? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
+							: (lastSessionCwd ?? filterContext.cwd);
+						if (classification.cwdPrefix !== undefined) {
+							// `cd <path> && git …`: the shell would leave the session in <path>, so the cd is
+							// replayed into the session first and the filtered run happens where it landed.
+							const cdChunks: Buffer[] = [];
+							const moved = await runInSession(`cd ${shellQuoteArgument(classification.cwdPrefix)}`, (data) =>
+								cdChunks.push(data),
+							);
+							const movedCwd = routesWindowsContract
+								? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
+								: (moved.cwd ?? moved.spawnCwd);
+							if (moved.exitCode !== 0) {
+								// The cd failed: that is the command's outcome, reported like any non-zero exit.
+								for (const chunk of cdChunks) output.append(chunk);
+								const snapshot = await finishOutput();
+								const { text: cdText } = formatOutput(snapshot, "");
+								throw createExitError(cdText, moved.exitCode ?? 1, movedCwd);
+							}
+							gitCwd = movedCwd;
+						}
+						const res = await executeFilteredGit(
+							gitCwd,
+							classification.subcommand,
+							classification.globalOptions || [],
+							classification.subcommandArgs || [],
+							{ signal, timeout: effectiveTimeoutSeconds, environment: filterContext.env },
+						);
+						if (res.exitCode !== -100) {
+							output.append(res.rawBytes ?? Buffer.from(res.rawOut, "utf-8"));
+							const snapshot = await finishOutput();
+							if (res.exitCode !== 0) {
+								const { text: rawOutputText } = formatOutput(snapshot);
+								throw createExitError(rawOutputText, res.exitCode, gitCwd);
+							}
+							const details = snapshot.truncation.truncated
+								? {
+										truncation: snapshot.truncation,
+										fullOutputPath: snapshot.fullOutputPath,
+										fullOutputError: snapshot.fullOutputError,
+									}
+								: snapshot.fullOutputPath || snapshot.fullOutputError
+									? { fullOutputPath: snapshot.fullOutputPath, fullOutputError: snapshot.fullOutputError }
+									: undefined;
+							return {
+								content: [{ type: "text", text: applyGitTailStage(res.output, classification.tailStage) }],
+								details,
+							};
+						}
+					}
+				}
 				let exitCode: number | null;
 				let sessionCwd: string | undefined;
+				let spawnCwd = cwd;
 				try {
-					// Shell commands cannot statically declare which files they mutate, so the
-					// actual execution takes the coarse exclusive barrier: it waits for
-					// in-flight edit/write mutations to drain and blocks new ones meanwhile.
-					const result = await withExclusiveMutationBarrier(() =>
-						(engineRoute && engineOperations ? engineOperations : ops).exec(
-							spawnContext.command,
-							spawnContext.cwd,
-							{
-								onData: handleData,
-								signal,
-								timeout: effectiveTimeoutSeconds,
-								env: spawnContext.env,
-							},
-						),
-					);
+					const result = await runInSession(command, handleData);
 					exitCode = result.exitCode;
 					sessionCwd = result.cwd;
+					spawnCwd = result.spawnCwd;
 				} catch (err) {
 					const snapshot = await finishOutput();
 					const { text } = formatOutput(snapshot, "");
@@ -1049,9 +1095,8 @@ function createShellToolDefinition(
 				// does not report one), or the host-requested cwd for per-command backends.
 				const reportedCwd = routesWindowsContract
 					? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
-					: (sessionCwd ?? spawnContext.cwd);
-				const verification =
-					!commandPrefix && !spawnHook ? classifyShellVerificationCommand(command, reportedCwd) : undefined;
+					: (sessionCwd ?? spawnCwd);
+				const verification = classifyShellVerificationCommand(command, reportedCwd);
 				if (exitCode === null) {
 					return {
 						content: [

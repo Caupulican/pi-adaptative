@@ -77,4 +77,15 @@ describe("bash verification boundary", () => {
 		expect(ordinary).toMatchObject({ isError: true, errorKind: "tool_failure" });
 		expect(ordinary.details?.piVerification).toBeUndefined();
 	});
+	it("records verification when a spawn hook only adjusts the environment (the live configuration)", async () => {
+		const operations: BashOperations = {
+			exec: async () => ({ exitCode: 0 }),
+		};
+		const tool = createBashTool(process.cwd(), {
+			operations,
+			spawnHook: (context) => ({ ...context, env: { ...context.env, PI_TEST_HOOK_MARK: "1" } }),
+		});
+		const result = await tool.execute("verify-with-env-hook", { command: "npx vitest run test/a.test.ts" });
+		expect(result.details?.piVerification).toMatchObject({ version: 1, status: "passed" });
+	});
 });

@@ -8,7 +8,7 @@
 
 import { randomBytes } from "node:crypto";
 import type { WriteStream } from "node:fs";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
 import { DEFAULT_MAX_BYTES, truncateMiddle } from "@caupulican/pi-agent-core/truncate";
 import { getAgentDir } from "../config.ts";
@@ -16,7 +16,7 @@ import { stripAnsi } from "../utils/ansi.ts";
 import { createSafeWriteStream, endWriteStream } from "../utils/safe-write-stream.ts";
 import { getProcessWorkRun } from "../utils/work-directory.ts";
 import type { BashOperations } from "./tools/bash.ts";
-import { classifyGitCommand, executeFilteredGit } from "./tools/git-filter.ts";
+import { applyGitTailStage, classifyGitCommand, executeFilteredGit } from "./tools/git-filter.ts";
 import { createShellOutputDecoder } from "./tools/shell-output-decoder.ts";
 
 // ============================================================================
@@ -72,8 +72,10 @@ export async function executeBashWithOperations(
 	if (options?.enableGitFilter) {
 		const classification = classifyGitCommand(command, process.env);
 		if (classification.eligible && classification.subcommand) {
+			// Per-command backends have no persistent session: `cd <path> &&` only scopes this command.
+			const gitCwd = classification.cwdPrefix !== undefined ? resolvePath(cwd, classification.cwdPrefix) : cwd;
 			const res = await executeFilteredGit(
-				cwd,
+				gitCwd,
 				classification.subcommand,
 				classification.globalOptions || [],
 				classification.subcommandArgs || [],
@@ -97,9 +99,10 @@ export async function executeBashWithOperations(
 					// Await the flush so the returned path points at a COMPLETE file, not one mid-write.
 					await endWriteStream(tempFileStream);
 				}
-				options.onChunk?.(res.output);
+				const filteredOutput = applyGitTailStage(res.output, classification.tailStage);
+				options.onChunk?.(filteredOutput);
 				return {
-					output: res.output,
+					output: filteredOutput,
 					exitCode: res.exitCode,
 					cancelled: options.signal?.aborted ?? false,
 					truncated: res.fullOutputPath !== undefined || rawBytes.length > DEFAULT_MAX_BYTES,

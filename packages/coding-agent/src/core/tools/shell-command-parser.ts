@@ -216,3 +216,50 @@ export function parseCommandPrefixes(
 export function isComplexShellCommand(command: string): boolean {
 	return /[|><&;\n\r$`()*?[\]#]/u.test(command);
 }
+
+/**
+ * Shell syntax a direct (shell-less) spawn of the same tokens cannot reproduce: expansions,
+ * substitutions, globs and comments. Pipes and chains are not listed: a caller that parses the
+ * command into a sequence (`parseShellCommandSequence`) decides about those stage by stage.
+ */
+export function hasShellOnlySyntax(command: string): boolean {
+	return /[$`()*?[\]#]/u.test(command);
+}
+
+export interface ShellCommandSequence {
+	/** One argument vector per simple command, in order. */
+	invocations: string[][];
+	/** The connector after each invocation (`&&`, `||`, `|`, `;`, newline); one fewer than invocations. */
+	connectors: string[];
+}
+
+/**
+ * Split a command into simple commands and the connectors between them. Redirects and empty stages
+ * make the command opaque (undefined): the callers only reason about plain invocation chains.
+ */
+export function parseShellCommandSequence(command: string): ShellCommandSequence | undefined {
+	const tokens = tokenizeShellCommand(command);
+	if (!tokens) return undefined;
+	const invocations: string[][] = [];
+	const connectors: string[] = [];
+	let invocation: string[] = [];
+	for (const token of tokens) {
+		if (token.kind === "redirect") return undefined;
+		if (token.kind === "arg") {
+			invocation.push(token.value);
+			continue;
+		}
+		if (invocation.length === 0) return undefined;
+		invocations.push(invocation);
+		connectors.push(token.value);
+		invocation = [];
+	}
+	if (invocation.length === 0) return undefined;
+	invocations.push(invocation);
+	return { invocations, connectors };
+}
+
+/** `cd <one path>`: the only stage a filtered run replays into the session before the command. */
+export function isChangeDirectoryInvocation(args: string[]): boolean {
+	return args[0] === "cd" && args.length === 2 && args[1].length > 0;
+}

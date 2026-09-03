@@ -7,7 +7,7 @@ import { waitForChildProcessWithTermination } from "../../utils/child-process.ts
 import { createSafeWriteStream } from "../../utils/safe-write-stream.ts";
 import { trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
-import { isComplexShellCommand, parseCommandPrefixes } from "./shell-command-parser.ts";
+import { hasShellOnlySyntax, isChangeDirectoryInvocation, parseShellCommandSequence } from "./shell-command-parser.ts";
 
 export { isComplexShellCommand, parseCommandPrefixes, tokenizeCommand } from "./shell-command-parser.ts";
 
@@ -209,22 +209,87 @@ export async function runGitQuery(
 	}
 }
 
-export function classifyGitCommand(
-	command: string,
-	parentEnv?: NodeJS.ProcessEnv,
-): {
+export type GitTailStage = { kind: "head" | "tail"; lines: number } | { kind: "cat" };
+
+export interface GitCommandClassification {
 	eligible: boolean;
 	subcommand?: string;
 	globalOptions?: string[];
 	subcommandArgs?: string[];
 	localEnv?: Record<string, string>;
-} {
-	if (isComplexShellCommand(command)) return { eligible: false };
+	/** `cd <path> &&` before the git invocation: replayed into the shell session before the filtered run. */
+	cwdPrefix?: string;
+	/** A final `| head -N`, `| tail -N` or `| cat` stage, applied to the filtered output. */
+	tailStage?: GitTailStage;
+}
 
-	const parsed = parseCommandPrefixes(command);
-	if (!parsed || parsed.coreCommandTokens.length === 0) return { eligible: false };
+const INELIGIBLE: GitCommandClassification = { eligible: false };
 
-	const { envVars, coreCommandTokens } = parsed;
+/** `head -N`, `head -n N`, `tail -N`, `tail -n N`, or a bare `cat`: stages that only bound or pass output. */
+function parseGitTailStage(args: string[]): GitTailStage | undefined {
+	const name = args[0];
+	if (name === "cat" && args.length === 1) return { kind: "cat" };
+	if (name !== "head" && name !== "tail") return undefined;
+	let lines: number | undefined;
+	if (args.length === 2) {
+		const match = args[1].match(/^-n?(\d+)$/u);
+		if (match) lines = Number.parseInt(match[1], 10);
+	} else if (args.length === 3 && args[1] === "-n" && /^\d+$/u.test(args[2])) {
+		lines = Number.parseInt(args[2], 10);
+	} else if (args.length === 1) {
+		lines = 10;
+	}
+	if (lines === undefined || lines <= 0) return undefined;
+	return { kind: name, lines };
+}
+
+/** Apply a classified tail stage to filtered text the way the shell would to raw text. */
+export function applyGitTailStage(output: string, stage: GitTailStage | undefined): string {
+	if (!stage || stage.kind === "cat") return output;
+	const trailingNewline = output.endsWith("\n");
+	const lines = (trailingNewline ? output.slice(0, -1) : output).split("\n");
+	const kept = stage.kind === "head" ? lines.slice(0, stage.lines) : lines.slice(-stage.lines);
+	if (kept.length === lines.length) return output;
+	return `${kept.join("\n")}${trailingNewline || kept.length > 0 ? "\n" : ""}`;
+}
+
+/**
+ * Decide whether a bash command is a git invocation the filter can run directly. Accepted shapes:
+ * `[cd <path> &&] [ENV=…] git [global options] <subcommand> [args] [| head -N | tail -N | cat]`.
+ * Anything the shell would interpret (expansions, globs, redirects, other pipelines or chains) is
+ * left to the shell so the filtered run can never diverge from what the model asked for.
+ */
+export function classifyGitCommand(command: string, parentEnv?: NodeJS.ProcessEnv): GitCommandClassification {
+	if (hasShellOnlySyntax(command)) return INELIGIBLE;
+	const sequence = parseShellCommandSequence(command);
+	if (!sequence) return INELIGIBLE;
+	let stage = 0;
+	let cwdPrefix: string | undefined;
+	if (isChangeDirectoryInvocation(sequence.invocations[0] ?? [])) {
+		if (sequence.connectors[0] !== "&&") return INELIGIBLE;
+		cwdPrefix = sequence.invocations[0][1];
+		stage = 1;
+	}
+	const core = sequence.invocations[stage];
+	if (!core || core.length === 0) return INELIGIBLE;
+	let tailStage: GitTailStage | undefined;
+	const connector = sequence.connectors[stage];
+	if (connector !== undefined) {
+		if (connector !== "|" || sequence.connectors.length !== stage + 1) return INELIGIBLE;
+		tailStage = parseGitTailStage(sequence.invocations[stage + 1] ?? []);
+		if (!tailStage) return INELIGIBLE;
+	}
+	const envVars: Record<string, string> = {};
+	let index = 0;
+	const envPattern = /^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)$/u;
+	while (index < core.length) {
+		const match = core[index].match(envPattern);
+		if (!match) break;
+		envVars[match[1]] = match[2];
+		index++;
+	}
+	const coreCommandTokens = core.slice(index);
+	if (coreCommandTokens.length === 0) return INELIGIBLE;
 	const toolFilterDisabled =
 		process.env.PI_TOOL_FILTER_DISABLED === "1" ||
 		parentEnv?.PI_TOOL_FILTER_DISABLED === "1" ||
@@ -233,22 +298,19 @@ export function classifyGitCommand(
 		process.env.PI_GIT_FILTER_DISABLED === "1" ||
 		parentEnv?.PI_GIT_FILTER_DISABLED === "1" ||
 		envVars.PI_GIT_FILTER_DISABLED === "1";
-	if (toolFilterDisabled || gitFilterDisabled) return { eligible: false };
-
+	if (toolFilterDisabled || gitFilterDisabled) return INELIGIBLE;
 	const envKeys = Object.keys(envVars).filter(
 		(key) => key !== "PI_TOOL_FILTER_DISABLED" && key !== "PI_GIT_FILTER_DISABLED",
 	);
-	if (envKeys.length > 0) return { eligible: false };
-
+	if (envKeys.length > 0) return INELIGIBLE;
 	const cmdName = coreCommandTokens[0];
-	if (cmdName !== "git" && cmdName !== "yadm") return { eligible: false };
-
+	if (cmdName !== "git" && cmdName !== "yadm") return INELIGIBLE;
 	let idx = 1;
 	const globalOptions: string[] = [];
 	while (idx < coreCommandTokens.length) {
 		const token = coreCommandTokens[idx];
 		if (token === "-C" || token === "-c" || token === "--git-dir" || token === "--work-tree") {
-			if (idx + 1 >= coreCommandTokens.length) return { eligible: false };
+			if (idx + 1 >= coreCommandTokens.length) return INELIGIBLE;
 			globalOptions.push(token, coreCommandTokens[idx + 1]);
 			idx += 2;
 		} else if (token.startsWith("--git-dir=") || token.startsWith("--work-tree=")) {
@@ -266,17 +328,17 @@ export function classifyGitCommand(
 			break;
 		}
 	}
-
-	if (idx === coreCommandTokens.length) return { eligible: false };
+	if (idx === coreCommandTokens.length) return INELIGIBLE;
 	const subcommand = coreCommandTokens[idx];
-	if (!SUPPORTED_SUBCOMMANDS.has(subcommand)) return { eligible: false };
-
+	if (!SUPPORTED_SUBCOMMANDS.has(subcommand)) return INELIGIBLE;
 	return {
 		eligible: true,
 		subcommand,
 		globalOptions,
 		subcommandArgs: coreCommandTokens.slice(idx + 1),
 		localEnv: envVars,
+		...(cwdPrefix !== undefined ? { cwdPrefix } : {}),
+		...(tailStage !== undefined ? { tailStage } : {}),
 	};
 }
 

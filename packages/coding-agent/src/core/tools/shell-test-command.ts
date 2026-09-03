@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import { tokenizeShellCommand } from "./shell-command-parser.ts";
+import {
+	isChangeDirectoryInvocation,
+	parseShellCommandSequence,
+	type ShellCommandSequence,
+	tokenizeShellCommand,
+} from "./shell-command-parser.ts";
 
 const DIRECT_TEST_RUNNERS = new Set([
 	"ava",
@@ -126,37 +131,6 @@ export interface ShellVerificationCommand {
 	kind: "test";
 	/** Stable, bounded identifier of one exact command in one working directory. */
 	id: string;
-}
-
-interface ShellCommandSequence {
-	invocations: string[][];
-	connectors: string[];
-}
-
-function parseShellCommandSequence(command: string): ShellCommandSequence | undefined {
-	const tokens = tokenizeShellCommand(command);
-	if (!tokens) return undefined;
-	const invocations: string[][] = [];
-	const connectors: string[] = [];
-	let invocation: string[] = [];
-	for (const token of tokens) {
-		if (token.kind === "redirect") return undefined;
-		if (token.kind === "arg") {
-			invocation.push(token.value);
-			continue;
-		}
-		if (invocation.length === 0) return undefined;
-		invocations.push(invocation);
-		connectors.push(token.value);
-		invocation = [];
-	}
-	if (invocation.length === 0) return undefined;
-	invocations.push(invocation);
-	return { invocations, connectors };
-}
-
-function isChangeDirectoryInvocation(args: string[]): boolean {
-	return args[0] === "cd" && args.length === 2 && args[1].length > 0;
 }
 
 function isPipefailSetup(args: string[]): boolean {

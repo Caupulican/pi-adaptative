@@ -89,4 +89,19 @@ describe("bash test-output projection", () => {
 		expect(result.details?.outputProjection).toBeUndefined();
 		expect(result.details?.fullOutputError).toBeDefined();
 	});
+	it("projects test output when a spawn hook only adjusts the environment (the live configuration)", async () => {
+		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-projection-hook-"));
+		cleanupDirectories.push(outputDirectory);
+		const rawOutput = noisyTestOutput(true);
+		const tool = createBashTool(process.cwd(), {
+			operations: operationsFor(rawOutput, 1),
+			outputDirectory,
+			spawnHook: (context) => ({ ...context, env: { ...context.env, PI_TEST_HOOK_MARK: "1" } }),
+		});
+		const result = await tool.execute("test-projection-env-hook", { command: "run-tests.cmd" });
+		const text = getTextOutput(result, false);
+		expect(text).toContain("[FAIL] focused case");
+		expect(text).toContain("Test output filtered");
+		expect(result.details?.outputProjection).toMatchObject({ kind: "test" });
+	});
 });
