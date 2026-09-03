@@ -198,7 +198,7 @@ function appendPromptResources(
 	// Day-granularity only; keep this tail stable across every call on the same calendar day.
 	result += `\nCurrent date: ${options.date}`;
 	// Constrained prompt budgets must not depend on host path length. Chat has no filesystem
-	// tools. Lean's 8192 envelope is too tight for Windows/temp cwd variation; tools still
+	// tools. Lean's envelope is too tight for Windows/temp cwd variation; tools still
 	// receive cwd at runtime. Full and minimal keep the path.
 	if (options.modelCapability?.class !== "chat" && options.modelCapability?.class !== "lean") {
 		result += `\nCurrent working directory: ${options.promptCwd}`;
@@ -320,7 +320,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	}
 	if (fullPrompt || leanPrompt) {
 		if (hasBash || hasGrep || hasFind) {
-			addGuideline("rg/jq: scoped roots/filters; JSON via jq; exhaustive output to file");
+			addGuideline(
+				"rg/jq: scoped roots/filters; JSON through a jq projection, never dumped; exhaustive output to file",
+			);
 		}
 		if (hasPython) {
 			addGuideline("Python: bounded scripts/data, source edits via read/edit/write");

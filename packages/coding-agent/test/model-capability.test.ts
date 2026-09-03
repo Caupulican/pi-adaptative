@@ -49,7 +49,7 @@ describe("deriveModelCapabilityProfile", () => {
 
 	it("owns the aggregate system-prompt envelope in the same derived profile", () => {
 		expect(deriveModelCapabilityProfile({ contextWindow: 200_000 }).systemPromptMaxChars).toBeUndefined();
-		expect(deriveModelCapabilityProfile({ contextWindow: 16_384 }).systemPromptMaxChars).toBe(8_192);
+		expect(deriveModelCapabilityProfile({ contextWindow: 16_384 }).systemPromptMaxChars).toBe(10_240);
 		expect(deriveModelCapabilityProfile({ contextWindow: 8_192 }).systemPromptMaxChars).toBe(4_096);
 		expect(deriveModelCapabilityProfile({ contextWindow: 4_096 }).systemPromptMaxChars).toBe(2_048);
 	});

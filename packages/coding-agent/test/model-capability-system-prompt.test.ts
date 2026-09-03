@@ -64,7 +64,7 @@ describe("capability-shaped system prompts", () => {
 		expect(prompt).toContain(CONTEXT_PATH);
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
 		expect(prompt).not.toContain("n-plus-2-architecture");
-		expect(prompt.length).toBeLessThanOrEqual(8_192);
+		expect(prompt.length).toBeLessThanOrEqual(10_240);
 	});
 
 	it("uses a concise no-execution role for a chat-class model", () => {

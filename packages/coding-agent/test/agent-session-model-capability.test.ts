@@ -270,7 +270,7 @@ describe("model capability auto-detection", () => {
 			settings: { researchLane: { enabled: true }, autonomy: { mode: "balanced" } },
 		});
 		try {
-			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(8_192);
+			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(10_240);
 			expect(harness.session.systemPrompt).not.toContain("Current working directory:");
 			seedActiveGoal(harness);
 			let seenMaxTokens: number | undefined;
@@ -289,7 +289,7 @@ describe("model capability auto-detection", () => {
 		}
 	});
 
-	it("keeps Windows lean model session system prompt within the 8192-char budget even with a long working directory", async () => {
+	it("keeps Windows lean model session system prompt within the 10240-char budget even with a long working directory", async () => {
 		const longTempRoot = mkdtempSync(join(tmpdir(), "pi-windows-long-temp-root-runneradmin-appdata-local-temp-"));
 		const prevTemp = process.env.TEMP;
 		const prevTmp = process.env.TMP;
@@ -306,7 +306,7 @@ describe("model capability auto-detection", () => {
 					models: [{ id: "mid-model", contextWindow: 16_384 }],
 					settings: { researchLane: { enabled: true }, autonomy: { mode: "balanced" } },
 				});
-				expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(8_192);
+				expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(10_240);
 				expect(harness.session.systemPrompt).toContain("Pi-Adaptative bounded coding agent");
 				expect(harness.session.systemPrompt).not.toContain("Current working directory:");
 			} finally {

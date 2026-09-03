@@ -45,7 +45,10 @@ export const MODEL_CAPABILITY_MINIMAL_MIN_CONTEXT = 8_192;
  */
 export const MODEL_CAPABILITY_SYSTEM_PROMPT_MAX_CHARS: Readonly<Record<ModelCapabilityClass, number | undefined>> = {
 	full: undefined,
-	lean: 8_192,
+	// 10,240 characters is about 2,500 tokens: 15 % of the 16k window that defines the lean class.
+	// The previous 8,192 left under 100 characters of margin once tool schemas and a Windows temp
+	// path were in place (bug ledger 155), so any guidance change overflowed it.
+	lean: 10_240,
 	minimal: 4_096,
 	chat: 2_048,
 };
@@ -58,7 +61,7 @@ export const MODEL_CAPABILITY_SYSTEM_PROMPT_MAX_CHARS: Readonly<Record<ModelCapa
  */
 export const MODEL_CAPABILITY_TOOL_GUIDELINES_MAX_CHARS: Readonly<Record<ModelCapabilityClass, number | undefined>> = {
 	full: undefined,
-	lean: 3_072,
+	lean: 3_584,
 	minimal: 1_536,
 	chat: 0,
 };
