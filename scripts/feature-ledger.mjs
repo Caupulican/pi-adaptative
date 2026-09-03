@@ -19,32 +19,13 @@
  * - skills and memory: record chars persisted.
  * - output cap: responses that ended at the cap (stopReason length).
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { listSessionFiles, messageText, parseSessionEntries } from "./session-stats-common.mjs";
 import { join } from "node:path";
 
 const dirs = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
 if (dirs.length === 0) {
 	console.error("usage: node scripts/feature-ledger.mjs <session-dir> [...]");
 	process.exit(2);
-}
-
-function sessionFiles(dir) {
-	const out = [];
-	for (const name of readdirSync(dir)) {
-		const path = join(dir, name);
-		if (statSync(path).isDirectory()) out.push(...sessionFiles(path));
-		else if (name.endsWith(".jsonl")) out.push(path);
-	}
-	return out;
-}
-
-function textOf(content) {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.filter((part) => part && part.type === "text" && typeof part.text === "string")
-		.map((part) => part.text)
-		.join("\n");
 }
 
 function median(values) {
@@ -73,14 +54,8 @@ const totals = {
 };
 
 for (const dir of dirs) {
-	for (const file of sessionFiles(dir)) {
-		const entries = [];
-		for (const line of readFileSync(file, "utf8").split("\n")) {
-			if (!line.trim()) continue;
-			try {
-				entries.push(JSON.parse(line));
-			} catch {}
-		}
+	for (const file of listSessionFiles(dir)) {
+		const entries = parseSessionEntries(file);
 		const legend = new Map(); // id -> display
 		const distinctPerKind = new Map(); // kind -> Set of contents in this session
 		let first = true;
@@ -139,7 +114,7 @@ for (const dir of dirs) {
 				continue;
 			}
 			if (message.role === "toolResult") {
-				const text = textOf(message.content);
+				const text = messageText(message.content, "\n");
 				if (message.isError && text.startsWith("[harness]")) totals.refusals += 1;
 				if (text.includes("[Context GC packed")) totals.packedToolResults += 1;
 				countAliases(text);

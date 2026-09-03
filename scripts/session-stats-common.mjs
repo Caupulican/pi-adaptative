@@ -1,4 +1,4 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync, readdirSync, statSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -194,4 +194,40 @@ export function runMain(main) {
 		console.error(error instanceof Error ? error.message : String(error));
 		process.exit(1);
 	});
+}
+
+/** Text of a message `content` value: a string as-is, text parts joined by `separator`. */
+export function messageText(content, separator = "") {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((part) => part && part.type === "text" && typeof part.text === "string")
+		.map((part) => part.text)
+		.join(separator);
+}
+
+/** Every `.jsonl` under `target` (a file is returned as-is), sorted by name, recursively. */
+export function listSessionFiles(target) {
+	if (statSync(target).isFile()) return [target];
+	const out = [];
+	for (const name of readdirSync(target).sort()) {
+		const full = path.join(target, name);
+		if (statSync(full).isDirectory()) out.push(...listSessionFiles(full));
+		else if (name.endsWith(".jsonl")) out.push(full);
+	}
+	return out;
+}
+
+/** Parsed entries of one session file; malformed lines are skipped (the scripts are diagnostics). */
+export function parseSessionEntries(file) {
+	const entries = [];
+	for (const line of readFileSync(file, "utf8").split("\n")) {
+		if (!line.trim()) continue;
+		try {
+			entries.push(JSON.parse(line));
+		} catch {
+			// skip malformed line
+		}
+	}
+	return entries;
 }

@@ -15,8 +15,9 @@
  * Prints one summary row per session and a total. `--list` also prints every refusal with its
  * tool, arguments, and diagnostic, which is the slip corpus.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+
+import { listSessionFiles, messageText } from "./session-stats-common.mjs";
 
 const args = process.argv.slice(2);
 const list = args.includes("--list");
@@ -26,30 +27,15 @@ if (dirs.length === 0) {
 	process.exit(2);
 }
 
-function sessionFiles(dir) {
-	const out = [];
-	for (const name of readdirSync(dir)) {
-		const path = join(dir, name);
-		const stats = statSync(path);
-		if (stats.isDirectory()) out.push(...sessionFiles(path));
-		else if (name.endsWith(".jsonl")) out.push(path);
-	}
-	return out;
-}
-
-function textOf(message) {
-	if (typeof message.content === "string") return message.content;
-	if (!Array.isArray(message.content)) return "";
-	return message.content
-		.filter((part) => part && part.type === "text" && typeof part.text === "string")
-		.map((part) => part.text)
-		.join(" ");
-}
+const SHELL_CONTRACT_RE =
+	/[a-z]+: unsupported flag|not supported by the Windows shell contract|Heredocs \('<<'\) are not supported|Nesting another shell/;
 
 function census(file) {
 	const calls = new Map();
 	let turns = 0;
 	const refusals = [];
+	let outcomes = 0;
+	const shellContract = [];
 	for (const line of readFileSync(file, "utf8").split("\n")) {
 		if (!line.trim()) continue;
 		let entry;
@@ -67,10 +53,24 @@ function census(file) {
 			}
 			continue;
 		}
-		if (message.role !== "toolResult" || message.isError !== true) continue;
-		const text = textOf(message);
-		if (!text.startsWith("[harness]")) continue;
+		if (message.role !== "toolResult") continue;
+		const text = messageText(message.content, " ");
 		const known = calls.get(message.toolCallId);
+		if ((known?.call.name ?? message.toolName) === "bash" && SHELL_CONTRACT_RE.test(text)) {
+			shellContract.push({
+				turn: known?.turn ?? turns,
+				command: String(known?.call.arguments?.command ?? "").replace(/\s+/g, " "),
+				message: (text.match(SHELL_CONTRACT_RE) ?? [""])[0],
+			});
+		}
+		if (message.isError !== true) continue;
+		if (!text.startsWith("[harness]")) continue;
+		// A tool reporting that its own operation ended badly (a timeout, a non-zero exit) is an
+		// outcome the model must act on, not a harness refusal; it is counted apart.
+		if (message.errorKind === "operation_outcome") {
+			outcomes += 1;
+			continue;
+		}
 		let diagnostic = text.slice(0, 200);
 		try {
 			const record = JSON.parse(text.slice("[harness] ".length));
@@ -83,19 +83,23 @@ function census(file) {
 			diagnostic: String(diagnostic).replace(/\s+/g, " "),
 		});
 	}
-	return { file, turns, refusals };
+	return { file, turns, refusals, outcomes, shellContract };
 }
 
-const results = dirs.flatMap((dir) => sessionFiles(dir).map(census));
+const results = dirs.flatMap((dir) => listSessionFiles(dir).map(census));
 let totalTurns = 0;
 let totalRefusals = 0;
+let totalOutcomes = 0;
+let totalShellContract = 0;
 const perTool = new Map();
 console.log(
-	`${"session".padEnd(44)} ${"turns".padStart(6)} ${"refused".padStart(8)} ${"per100".padStart(7)}  by tool`,
+	`${"session".padEnd(44)} ${"turns".padStart(6)} ${"refused".padStart(8)} ${"per100".padStart(7)} ${"outcomes".padStart(8)} ${"shell".padStart(5)}  by tool`,
 );
 for (const result of results) {
 	totalTurns += result.turns;
 	totalRefusals += result.refusals.length;
+	totalOutcomes += result.outcomes;
+	totalShellContract += result.shellContract.length;
 	const byTool = new Map();
 	for (const refusal of result.refusals) {
 		byTool.set(refusal.tool, (byTool.get(refusal.tool) ?? 0) + 1);
@@ -104,12 +108,12 @@ for (const result of results) {
 	const per100 = result.turns > 0 ? ((100 * result.refusals.length) / result.turns).toFixed(1) : "-";
 	const name = result.file.split("/").slice(-2).join("/").slice(-44);
 	console.log(
-		`${name.padEnd(44)} ${String(result.turns).padStart(6)} ${String(result.refusals.length).padStart(8)} ${per100.padStart(7)}  ${[...byTool].map(([tool, count]) => `${tool}:${count}`).join(" ")}`,
+		`${name.padEnd(44)} ${String(result.turns).padStart(6)} ${String(result.refusals.length).padStart(8)} ${per100.padStart(7)} ${String(result.outcomes).padStart(8)} ${String(result.shellContract.length).padStart(5)}  ${[...byTool].map(([tool, count]) => `${tool}:${count}`).join(" ")}`,
 	);
 }
 const totalPer100 = totalTurns > 0 ? ((100 * totalRefusals) / totalTurns).toFixed(1) : "-";
 console.log(
-	`${"TOTAL".padEnd(44)} ${String(totalTurns).padStart(6)} ${String(totalRefusals).padStart(8)} ${totalPer100.padStart(7)}  ${[...perTool].map(([tool, count]) => `${tool}:${count}`).join(" ")}`,
+	`${"TOTAL".padEnd(44)} ${String(totalTurns).padStart(6)} ${String(totalRefusals).padStart(8)} ${totalPer100.padStart(7)} ${String(totalOutcomes).padStart(8)} ${String(totalShellContract).padStart(5)}  ${[...perTool].map(([tool, count]) => `${tool}:${count}`).join(" ")}`,
 );
 if (list) {
 	console.log("\nrefusals (the slip corpus):");
@@ -117,6 +121,12 @@ if (list) {
 		for (const refusal of result.refusals) {
 			console.log(`  t${refusal.turn} ${refusal.tool} ${refusal.args.slice(0, 160)}`);
 			console.log(`      -> ${refusal.diagnostic.slice(0, 220)}`);
+		}
+	}
+	console.log("\nshell-contract refusals (Windows shell contract corpus):");
+	for (const result of results) {
+		for (const item of result.shellContract) {
+			console.log(`  t${item.turn} ${item.message} :: ${item.command.slice(0, 200)}`);
 		}
 	}
 }
