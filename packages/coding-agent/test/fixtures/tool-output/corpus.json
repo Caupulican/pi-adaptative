@@ -1,0 +1,74 @@
+[
+ {
+  "name": "rg-multi-file",
+  "command": "rg -n compute src",
+  "file": "rg-multi-file.txt",
+  "family": "rg"
+ },
+ {
+  "name": "rg-single-file",
+  "command": "rg -n needle packages/app/src",
+  "file": "rg-single-file.txt",
+  "family": "rg"
+ },
+ {
+  "name": "rg-context",
+  "command": "rg -n -C 1 needle src/lib",
+  "file": "rg-context.txt",
+  "family": "rg"
+ },
+ {
+  "name": "git-status",
+  "command": "git status",
+  "file": "git-status.txt",
+  "family": "git status"
+ },
+ {
+  "name": "git-diff",
+  "command": "git diff",
+  "file": "git-diff.txt",
+  "family": "git diff"
+ },
+ {
+  "name": "cargo-check",
+  "command": "cargo check",
+  "file": "cargo-check.txt",
+  "family": "cargo check"
+ },
+ {
+  "name": "tsc",
+  "command": "tsc --noEmit",
+  "file": "tsc.txt",
+  "family": "tsc"
+ },
+ {
+  "name": "vitest",
+  "command": "npx vitest run",
+  "file": "vitest.txt",
+  "family": "vitest"
+ },
+ {
+  "name": "npm-install",
+  "command": "npm install",
+  "file": "npm-install.txt",
+  "family": "npm install"
+ },
+ {
+  "name": "ls-la",
+  "command": "ls -la src",
+  "file": "ls-la.txt",
+  "family": "ls"
+ },
+ {
+  "name": "nl-dump",
+  "command": "nl -ba src/index.ts",
+  "file": "nl-dump.txt",
+  "family": "nl"
+ },
+ {
+  "name": "json-list",
+  "command": "gh api repos/o/r/items",
+  "file": "json-list.json",
+  "family": "gh api"
+ }
+]

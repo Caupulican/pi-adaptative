@@ -1,0 +1,24 @@
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   src/file_0.ts
+	modified:   src/file_1.ts
+	modified:   src/file_2.ts
+	modified:   src/file_3.ts
+	modified:   src/file_4.ts
+	modified:   src/file_5.ts
+	modified:   src/file_6.ts
+	modified:   src/file_7.ts
+	modified:   src/file_8.ts
+	modified:   src/file_9.ts
+	modified:   src/file_10.ts
+	modified:   src/file_11.ts
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	notes.md
+
+no changes added to commit (use "git add" and/or "git commit -a")

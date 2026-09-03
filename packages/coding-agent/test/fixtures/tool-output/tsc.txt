@@ -1,0 +1,27 @@
+src/module_0/file_0.ts(10,3): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_1/file_1.ts(11,4): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_2/file_2.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_3/file_3.ts(13,6): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_4/file_4.ts(14,7): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_0/file_5.ts(15,8): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_1/file_6.ts(16,9): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_2/file_7.ts(17,10): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_3/file_8.ts(18,11): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_4/file_9.ts(19,12): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_0/file_10.ts(20,13): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_1/file_11.ts(21,14): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_2/file_12.ts(22,15): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_3/file_13.ts(23,16): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_4/file_14.ts(24,17): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_0/file_15.ts(25,18): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_1/file_16.ts(26,19): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_2/file_17.ts(27,20): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_3/file_18.ts(28,21): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_4/file_19.ts(29,22): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_0/file_20.ts(30,3): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_1/file_21.ts(31,4): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_2/file_22.ts(32,5): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_3/file_23.ts(33,6): error TS2322: Type 'string' is not assignable to type 'number'.
+src/module_4/file_24.ts(34,7): error TS2322: Type 'string' is not assignable to type 'number'.
+
+Found 25 errors in 25 files.

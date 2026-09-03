@@ -1,0 +1,60 @@
+src/lib/parser.ts-99-  // before
+src/lib/parser.ts:100:  needle(token);
+src/lib/parser.ts-101-  // after
+--
+src/lib/parser.ts-119-  // before
+src/lib/parser.ts:120:  needle(token);
+src/lib/parser.ts-121-  // after
+--
+src/lib/parser.ts-139-  // before
+src/lib/parser.ts:140:  needle(token);
+src/lib/parser.ts-141-  // after
+--
+src/lib/parser.ts-159-  // before
+src/lib/parser.ts:160:  needle(token);
+src/lib/parser.ts-161-  // after
+--
+src/lib/parser.ts-179-  // before
+src/lib/parser.ts:180:  needle(token);
+src/lib/parser.ts-181-  // after
+--
+src/lib/parser.ts-199-  // before
+src/lib/parser.ts:200:  needle(token);
+src/lib/parser.ts-201-  // after
+--
+src/lib/parser.ts-219-  // before
+src/lib/parser.ts:220:  needle(token);
+src/lib/parser.ts-221-  // after
+--
+src/lib/parser.ts-239-  // before
+src/lib/parser.ts:240:  needle(token);
+src/lib/parser.ts-241-  // after
+--
+src/lib/parser.ts-259-  // before
+src/lib/parser.ts:260:  needle(token);
+src/lib/parser.ts-261-  // after
+--
+src/lib/parser.ts-279-  // before
+src/lib/parser.ts:280:  needle(token);
+src/lib/parser.ts-281-  // after
+--
+src/lib/parser.ts-299-  // before
+src/lib/parser.ts:300:  needle(token);
+src/lib/parser.ts-301-  // after
+--
+src/lib/parser.ts-319-  // before
+src/lib/parser.ts:320:  needle(token);
+src/lib/parser.ts-321-  // after
+--
+src/lib/parser.ts-339-  // before
+src/lib/parser.ts:340:  needle(token);
+src/lib/parser.ts-341-  // after
+--
+src/lib/parser.ts-359-  // before
+src/lib/parser.ts:360:  needle(token);
+src/lib/parser.ts-361-  // after
+--
+src/lib/parser.ts-379-  // before
+src/lib/parser.ts:380:  needle(token);
+src/lib/parser.ts-381-  // after
+--

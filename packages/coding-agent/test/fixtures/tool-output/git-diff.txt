@@ -1,0 +1,180 @@
+diff --git a/src/f0.ts b/src/f0.ts
+index 1111111..2222222 100644
+--- a/src/f0.ts
++++ b/src/f0.ts
+@@ -1,40 +1,42 @@
+- line 0 of file 0 with some content;
+  line 1 of file 0 with some content;
+  line 2 of file 0 with some content;
+  line 3 of file 0 with some content;
+  line 4 of file 0 with some content;
++ line 5 of file 0 with some content;
+  line 6 of file 0 with some content;
+  line 7 of file 0 with some content;
+  line 8 of file 0 with some content;
+  line 9 of file 0 with some content;
+- line 10 of file 0 with some content;
+  line 11 of file 0 with some content;
+  line 12 of file 0 with some content;
+  line 13 of file 0 with some content;
+  line 14 of file 0 with some content;
++ line 15 of file 0 with some content;
+  line 16 of file 0 with some content;
+  line 17 of file 0 with some content;
+  line 18 of file 0 with some content;
+  line 19 of file 0 with some content;
+- line 20 of file 0 with some content;
+  line 21 of file 0 with some content;
+  line 22 of file 0 with some content;
+  line 23 of file 0 with some content;
+  line 24 of file 0 with some content;
++ line 25 of file 0 with some content;
+  line 26 of file 0 with some content;
+  line 27 of file 0 with some content;
+  line 28 of file 0 with some content;
+  line 29 of file 0 with some content;
+- line 30 of file 0 with some content;
+  line 31 of file 0 with some content;
+  line 32 of file 0 with some content;
+  line 33 of file 0 with some content;
+  line 34 of file 0 with some content;
++ line 35 of file 0 with some content;
+  line 36 of file 0 with some content;
+  line 37 of file 0 with some content;
+  line 38 of file 0 with some content;
+  line 39 of file 0 with some content;
+diff --git a/src/f1.ts b/src/f1.ts
+index 1111111..2222222 100644
+--- a/src/f1.ts
++++ b/src/f1.ts
+@@ -1,40 +1,42 @@
+- line 0 of file 1 with some content;
+  line 1 of file 1 with some content;
+  line 2 of file 1 with some content;
+  line 3 of file 1 with some content;
+  line 4 of file 1 with some content;
++ line 5 of file 1 with some content;
+  line 6 of file 1 with some content;
+  line 7 of file 1 with some content;
+  line 8 of file 1 with some content;
+  line 9 of file 1 with some content;
+- line 10 of file 1 with some content;
+  line 11 of file 1 with some content;
+  line 12 of file 1 with some content;
+  line 13 of file 1 with some content;
+  line 14 of file 1 with some content;
++ line 15 of file 1 with some content;
+  line 16 of file 1 with some content;
+  line 17 of file 1 with some content;
+  line 18 of file 1 with some content;
+  line 19 of file 1 with some content;
+- line 20 of file 1 with some content;
+  line 21 of file 1 with some content;
+  line 22 of file 1 with some content;
+  line 23 of file 1 with some content;
+  line 24 of file 1 with some content;
++ line 25 of file 1 with some content;
+  line 26 of file 1 with some content;
+  line 27 of file 1 with some content;
+  line 28 of file 1 with some content;
+  line 29 of file 1 with some content;
+- line 30 of file 1 with some content;
+  line 31 of file 1 with some content;
+  line 32 of file 1 with some content;
+  line 33 of file 1 with some content;
+  line 34 of file 1 with some content;
++ line 35 of file 1 with some content;
+  line 36 of file 1 with some content;
+  line 37 of file 1 with some content;
+  line 38 of file 1 with some content;
+  line 39 of file 1 with some content;
+diff --git a/src/f2.ts b/src/f2.ts
+index 1111111..2222222 100644
+--- a/src/f2.ts
++++ b/src/f2.ts
+@@ -1,40 +1,42 @@
+- line 0 of file 2 with some content;
+  line 1 of file 2 with some content;
+  line 2 of file 2 with some content;
+  line 3 of file 2 with some content;
+  line 4 of file 2 with some content;
++ line 5 of file 2 with some content;
+  line 6 of file 2 with some content;
+  line 7 of file 2 with some content;
+  line 8 of file 2 with some content;
+  line 9 of file 2 with some content;
+- line 10 of file 2 with some content;
+  line 11 of file 2 with some content;
+  line 12 of file 2 with some content;
+  line 13 of file 2 with some content;
+  line 14 of file 2 with some content;
++ line 15 of file 2 with some content;
+  line 16 of file 2 with some content;
+  line 17 of file 2 with some content;
+  line 18 of file 2 with some content;
+  line 19 of file 2 with some content;
+- line 20 of file 2 with some content;
+  line 21 of file 2 with some content;
+  line 22 of file 2 with some content;
+  line 23 of file 2 with some content;
+  line 24 of file 2 with some content;
++ line 25 of file 2 with some content;
+  line 26 of file 2 with some content;
+  line 27 of file 2 with some content;
+  line 28 of file 2 with some content;
+  line 29 of file 2 with some content;
+- line 30 of file 2 with some content;
+  line 31 of file 2 with some content;
+  line 32 of file 2 with some content;
+  line 33 of file 2 with some content;
+  line 34 of file 2 with some content;
++ line 35 of file 2 with some content;
+  line 36 of file 2 with some content;
+  line 37 of file 2 with some content;
+  line 38 of file 2 with some content;
+  line 39 of file 2 with some content;
+diff --git a/src/f3.ts b/src/f3.ts
+index 1111111..2222222 100644
+--- a/src/f3.ts
++++ b/src/f3.ts
+@@ -1,40 +1,42 @@
+- line 0 of file 3 with some content;
+  line 1 of file 3 with some content;
+  line 2 of file 3 with some content;
+  line 3 of file 3 with some content;
+  line 4 of file 3 with some content;
++ line 5 of file 3 with some content;
+  line 6 of file 3 with some content;
+  line 7 of file 3 with some content;
+  line 8 of file 3 with some content;
+  line 9 of file 3 with some content;
+- line 10 of file 3 with some content;
+  line 11 of file 3 with some content;
+  line 12 of file 3 with some content;
+  line 13 of file 3 with some content;
+  line 14 of file 3 with some content;
++ line 15 of file 3 with some content;
+  line 16 of file 3 with some content;
+  line 17 of file 3 with some content;
+  line 18 of file 3 with some content;
+  line 19 of file 3 with some content;
+- line 20 of file 3 with some content;
+  line 21 of file 3 with some content;
+  line 22 of file 3 with some content;
+  line 23 of file 3 with some content;
+  line 24 of file 3 with some content;
++ line 25 of file 3 with some content;
+  line 26 of file 3 with some content;
+  line 27 of file 3 with some content;
+  line 28 of file 3 with some content;
+  line 29 of file 3 with some content;
+- line 30 of file 3 with some content;
+  line 31 of file 3 with some content;
+  line 32 of file 3 with some content;
+  line 33 of file 3 with some content;
+  line 34 of file 3 with some content;
++ line 35 of file 3 with some content;
+  line 36 of file 3 with some content;
+  line 37 of file 3 with some content;
+  line 38 of file 3 with some content;
+  line 39 of file 3 with some content;

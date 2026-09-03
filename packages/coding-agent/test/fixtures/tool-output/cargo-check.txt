@@ -1,0 +1,270 @@
+    Checking crate-0 v0.0.0
+    Checking crate-1 v0.1.0
+    Checking crate-2 v0.2.0
+    Checking crate-3 v0.3.0
+    Checking crate-4 v0.4.0
+    Checking crate-5 v0.5.0
+    Checking crate-6 v0.6.0
+    Checking crate-7 v0.7.0
+    Checking crate-8 v0.8.0
+    Checking crate-9 v0.9.0
+    Checking crate-10 v0.10.0
+    Checking crate-11 v0.11.0
+    Checking crate-12 v0.12.0
+    Checking crate-13 v0.13.0
+    Checking crate-14 v0.14.0
+    Checking crate-15 v0.15.0
+    Checking crate-16 v0.16.0
+    Checking crate-17 v0.17.0
+    Checking crate-18 v0.18.0
+    Checking crate-19 v0.19.0
+warning: unused variable: `tmp0`
+  --> src/module_0.rs:20:9
+   |
+ 20 |     let tmp0 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp0`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp1`
+  --> src/module_1.rs:27:9
+   |
+ 27 |     let tmp1 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp1`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp2`
+  --> src/module_2.rs:34:9
+   |
+ 34 |     let tmp2 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp2`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp3`
+  --> src/module_3.rs:41:9
+   |
+ 41 |     let tmp3 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp3`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp4`
+  --> src/module_4.rs:48:9
+   |
+ 48 |     let tmp4 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp4`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp5`
+  --> src/module_5.rs:55:9
+   |
+ 55 |     let tmp5 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp5`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp6`
+  --> src/module_0.rs:62:9
+   |
+ 62 |     let tmp6 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp6`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp7`
+  --> src/module_1.rs:69:9
+   |
+ 69 |     let tmp7 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp7`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp8`
+  --> src/module_2.rs:76:9
+   |
+ 76 |     let tmp8 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp8`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp9`
+  --> src/module_3.rs:83:9
+   |
+ 83 |     let tmp9 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp9`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp10`
+  --> src/module_4.rs:90:9
+   |
+ 90 |     let tmp10 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp10`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp11`
+  --> src/module_5.rs:97:9
+   |
+ 97 |     let tmp11 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp11`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp12`
+  --> src/module_0.rs:104:9
+   |
+104 |     let tmp12 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp12`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp13`
+  --> src/module_1.rs:111:9
+   |
+111 |     let tmp13 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp13`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp14`
+  --> src/module_2.rs:118:9
+   |
+118 |     let tmp14 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp14`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp15`
+  --> src/module_3.rs:125:9
+   |
+125 |     let tmp15 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp15`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp16`
+  --> src/module_4.rs:132:9
+   |
+132 |     let tmp16 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp16`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp17`
+  --> src/module_5.rs:139:9
+   |
+139 |     let tmp17 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp17`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp18`
+  --> src/module_0.rs:146:9
+   |
+146 |     let tmp18 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp18`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp19`
+  --> src/module_1.rs:153:9
+   |
+153 |     let tmp19 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp19`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp20`
+  --> src/module_2.rs:160:9
+   |
+160 |     let tmp20 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp20`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp21`
+  --> src/module_3.rs:167:9
+   |
+167 |     let tmp21 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp21`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp22`
+  --> src/module_4.rs:174:9
+   |
+174 |     let tmp22 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp22`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp23`
+  --> src/module_5.rs:181:9
+   |
+181 |     let tmp23 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp23`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp24`
+  --> src/module_0.rs:188:9
+   |
+188 |     let tmp24 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp24`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp25`
+  --> src/module_1.rs:195:9
+   |
+195 |     let tmp25 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp25`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp26`
+  --> src/module_2.rs:202:9
+   |
+202 |     let tmp26 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp26`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp27`
+  --> src/module_3.rs:209:9
+   |
+209 |     let tmp27 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp27`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp28`
+  --> src/module_4.rs:216:9
+   |
+216 |     let tmp28 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp28`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tmp29`
+  --> src/module_5.rs:223:9
+   |
+223 |     let tmp29 = compute();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_tmp29`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+error[E0308]: mismatched types
+  --> src/main.rs:42:18
+   |
+42 |     let n: u32 = "text";
+   |            ---   ^^^^^^ expected `u32`, found `&str`
+   |            |
+   |            expected due to this
+
+warning: `demo-crate` (bin "demo") generated 30 warnings
+error: could not compile `demo-crate` (bin "demo") due to 1 previous error; 30 warnings emitted

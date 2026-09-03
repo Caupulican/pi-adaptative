@@ -1,0 +1,66 @@
+ ✓ test/suite_0.test.ts > case 0 12ms
+ ✓ test/suite_1.test.ts > case 1 12ms
+ ✓ test/suite_2.test.ts > case 2 12ms
+ ✓ test/suite_3.test.ts > case 3 12ms
+ ✓ test/suite_0.test.ts > case 4 12ms
+ ✓ test/suite_1.test.ts > case 5 12ms
+ ✓ test/suite_2.test.ts > case 6 12ms
+ ✓ test/suite_3.test.ts > case 7 12ms
+ ✓ test/suite_0.test.ts > case 8 12ms
+ ✓ test/suite_1.test.ts > case 9 12ms
+ ✓ test/suite_2.test.ts > case 10 12ms
+ ✓ test/suite_3.test.ts > case 11 12ms
+ ✓ test/suite_0.test.ts > case 12 12ms
+ ✓ test/suite_1.test.ts > case 13 12ms
+ ✓ test/suite_2.test.ts > case 14 12ms
+ ✓ test/suite_3.test.ts > case 15 12ms
+ ✓ test/suite_0.test.ts > case 16 12ms
+ ✓ test/suite_1.test.ts > case 17 12ms
+ ✓ test/suite_2.test.ts > case 18 12ms
+ ✓ test/suite_3.test.ts > case 19 12ms
+ ✓ test/suite_0.test.ts > case 20 12ms
+ ✓ test/suite_1.test.ts > case 21 12ms
+ ✓ test/suite_2.test.ts > case 22 12ms
+ ✓ test/suite_3.test.ts > case 23 12ms
+ ✓ test/suite_0.test.ts > case 24 12ms
+ ✓ test/suite_1.test.ts > case 25 12ms
+ ✓ test/suite_2.test.ts > case 26 12ms
+ ✓ test/suite_3.test.ts > case 27 12ms
+ ✓ test/suite_0.test.ts > case 28 12ms
+ ✓ test/suite_1.test.ts > case 29 12ms
+ ✓ test/suite_2.test.ts > case 30 12ms
+ ✓ test/suite_3.test.ts > case 31 12ms
+ ✓ test/suite_0.test.ts > case 32 12ms
+ ✓ test/suite_1.test.ts > case 33 12ms
+ ✓ test/suite_2.test.ts > case 34 12ms
+ ✓ test/suite_3.test.ts > case 35 12ms
+ ✓ test/suite_0.test.ts > case 36 12ms
+ ✓ test/suite_1.test.ts > case 37 12ms
+ ✓ test/suite_2.test.ts > case 38 12ms
+ ✓ test/suite_3.test.ts > case 39 12ms
+ ✓ test/suite_0.test.ts > case 40 12ms
+ ✓ test/suite_1.test.ts > case 41 12ms
+ ✓ test/suite_2.test.ts > case 42 12ms
+ ✓ test/suite_3.test.ts > case 43 12ms
+ ✓ test/suite_0.test.ts > case 44 12ms
+ ✓ test/suite_1.test.ts > case 45 12ms
+ ✓ test/suite_2.test.ts > case 46 12ms
+ ✓ test/suite_3.test.ts > case 47 12ms
+ ✓ test/suite_0.test.ts > case 48 12ms
+ ✓ test/suite_1.test.ts > case 49 12ms
+ ✓ test/suite_2.test.ts > case 50 12ms
+ ✓ test/suite_3.test.ts > case 51 12ms
+ ✓ test/suite_0.test.ts > case 52 12ms
+ ✓ test/suite_1.test.ts > case 53 12ms
+ ✓ test/suite_2.test.ts > case 54 12ms
+ ✓ test/suite_3.test.ts > case 55 12ms
+ ✓ test/suite_0.test.ts > case 56 12ms
+ ✓ test/suite_1.test.ts > case 57 12ms
+ ✓ test/suite_2.test.ts > case 58 12ms
+ ✓ test/suite_3.test.ts > case 59 12ms
+ × test/suite_2.test.ts > failing case
+AssertionError: expected 1 to be 2
+  at test/suite_2.test.ts:42:5
+
+ Test Files  1 failed | 3 passed (4)
+      Tests  1 failed | 60 passed (61)
