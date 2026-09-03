@@ -40,6 +40,8 @@ export interface OutputReductionDetails {
 	omittedLines: number;
 	/** Path of the persisted raw output when the caller stored it. */
 	rawPath?: string;
+	/** A command prefix that projects the raw output (`jq -c '.items[] | {id,status}'`); the notice appends the path. */
+	recoveryHint?: string;
 	/**
 	 * Whether the caller should persist the raw output and append the recovery notice: true when a
 	 * family or rule reducer reshaped the output or the generic stage dropped lines, and the cut is
@@ -66,7 +68,9 @@ export interface OutputReducer {
 	reduce(
 		classification: CommandFamilyClassification,
 		request: OutputReductionRequest,
-	): (Omit<OutputReductionResult, "details"> & { omittedLines: number; kind?: string }) | undefined;
+	):
+		| (Omit<OutputReductionResult, "details"> & { omittedLines: number; kind?: string; recoveryHint?: string })
+		| undefined;
 }
 
 const reducers: OutputReducer[] = [];
@@ -136,6 +140,7 @@ export function reduceToolOutput(
 	let text = generic.text;
 	let omittedLines = generic.omittedLines;
 	let kind: string | undefined;
+	let recoveryHint: string | undefined;
 	for (const reducer of [...reducers, ...(options?.extraReducers ?? [])]) {
 		if (!reducer.applies(classification, cleaned)) continue;
 		const reduced = reducer.reduce(classification, cleaned);
@@ -146,6 +151,7 @@ export function reduceToolOutput(
 		text = reduced.text;
 		omittedLines += reduced.omittedLines;
 		kind = reduced.kind ?? reducer.name;
+		recoveryHint = reduced.recoveryHint;
 		break;
 	}
 	const outputBytes = Buffer.byteLength(text, "utf-8");
@@ -167,6 +173,7 @@ export function reduceToolOutput(
 			inputLines: countLines(request.text),
 			outputLines: countLines(text),
 			omittedLines,
+			...(recoveryHint !== undefined ? { recoveryHint } : {}),
 			// A family or rule reducer changed the shape of the output; the generic stage only cleaned it
 			// unless it dropped lines. Either way a small cut is not worth a file.
 			persistRaw: saved >= MIN_PERSIST_SAVED_BYTES && (omittedLines > 0 || kind !== "generic"),
@@ -184,7 +191,9 @@ export function formatOutputReductionNotice(details: OutputReductionDetails): st
 		details.omittedLines === 0
 			? `${details.inputLines} lines regrouped, none omitted`
 			: `retained ${details.outputLines} of ${details.inputLines} lines`;
-	const recovery = details.rawPath ? ` Full output: ${details.rawPath}` : "";
+	const projection =
+		details.rawPath && details.recoveryHint ? `; project it with: ${details.recoveryHint} ${details.rawPath}` : "";
+	const recovery = details.rawPath ? ` Full output: ${details.rawPath}${projection}` : "";
 	return `[${details.family} output filtered: ${kept}.${recovery}]`;
 }
 

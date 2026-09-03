@@ -79,7 +79,9 @@ ceiling on the frontier tier is one. Pinned by
 read away.** Every reducer only removes lines, collapses repeats or regroups what the command
 printed (a search hit keeps its path and line, a diagnostic its file, position, code and message);
 an unknown shape passes through untouched; the raw output is persisted and named in the notice
-whenever lines were dropped, and the model bypasses every stage with `fullOutput: true`. Reduction
+whenever lines were dropped (for a JSON document the notice ends with a jq projection over the
+persisted file, so the omitted records are one jq call away, never a full read), and the model
+bypasses every stage with `fullOutput: true`. Reduction
 is byte-stable: the same output reduces to the same bytes, so a re-sent result never re-prefills.
 Measured on live sessions (`scripts/output-reduction-census.mjs`): search results save a quarter of
 their bytes, compiler reports three quarters. Pinned by

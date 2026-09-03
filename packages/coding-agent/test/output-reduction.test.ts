@@ -159,6 +159,25 @@ describe("formatOutputReductionNotice", () => {
 		).toBe("[rg output filtered: retained 18 of 50 lines. Full output: /tmp/pi-bash-1.log]");
 	});
 
+	it("appends the projection command after the raw path when the reducer offered one", () => {
+		expect(
+			formatOutputReductionNotice({
+				kind: "json",
+				family: "gh api",
+				inputBytes: 20000,
+				outputBytes: 1200,
+				inputLines: 300,
+				outputLines: 40,
+				omittedLines: 260,
+				rawPath: "/tmp/pi-bash-3.log",
+				recoveryHint: "jq -c '.items[] | {id,status}'",
+				persistRaw: true,
+			}),
+		).toBe(
+			"[gh api output filtered: retained 40 of 300 lines. Full output: /tmp/pi-bash-3.log; project it with: jq -c '.items[] | {id,status}' /tmp/pi-bash-3.log]",
+		);
+	});
+
 	it("names a regrouping that omitted nothing when the raw output was persisted", () => {
 		expect(
 			formatOutputReductionNotice({

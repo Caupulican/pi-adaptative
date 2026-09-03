@@ -151,6 +151,49 @@ export function reduceJsonOutput(text: string, level: OutputReductionLevel = "st
 	};
 }
 
+const JQ_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+const MAX_PROJECTED_KEYS = 4;
+
+function jqKey(key: string): string {
+	return JQ_IDENTIFIER_RE.test(key) ? key : JSON.stringify(key);
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Keys of the first record worth projecting: scalars first, at most a few, in document order. */
+function projectedKeys(item: unknown): string[] {
+	if (!isObjectRecord(item)) return [];
+	const scalar = Object.entries(item)
+		.filter(([, value]) => value === null || typeof value !== "object")
+		.map(([key]) => key);
+	const keys = scalar.length > 0 ? scalar : Object.keys(item);
+	return keys.slice(0, MAX_PROJECTED_KEYS);
+}
+
+/**
+ * A jq filter over the persisted raw document, derived from its shape, so the model queries the
+ * file with one jq call instead of reading it whole: `.[] | {id,status}` for a list, `.items[] |
+ * {id,status}` for an object holding a list, `keys` for anything else. Deterministic.
+ */
+export function suggestJqProjection(document: unknown): string {
+	if (Array.isArray(document)) {
+		const keys = projectedKeys(document[0]);
+		return keys.length > 0 ? `.[] | {${keys.map(jqKey).join(",")}}` : ".[]";
+	}
+	if (isObjectRecord(document)) {
+		for (const [key, value] of Object.entries(document)) {
+			if (Array.isArray(value) && value.length > 0) {
+				const keys = projectedKeys(value[0]);
+				return keys.length > 0 ? `.${jqKey(key)}[] | {${keys.map(jqKey).join(",")}}` : `.${jqKey(key)}[]`;
+			}
+		}
+		return "keys";
+	}
+	return ".";
+}
+
 export const jsonOutputReducer: OutputReducer = {
 	name: "json",
 	applies(_classification: CommandFamilyClassification, request: OutputReductionRequest): boolean {
@@ -159,6 +202,17 @@ export const jsonOutputReducer: OutputReducer = {
 	},
 	reduce(_classification: CommandFamilyClassification, request: OutputReductionRequest) {
 		const reduced = reduceJsonOutput(request.text, request.level);
-		return reduced ? { text: reduced.text, omittedLines: reduced.omittedLines } : undefined;
+		if (!reduced) return undefined;
+		let document: unknown;
+		try {
+			document = JSON.parse(request.text.trim());
+		} catch {
+			return { text: reduced.text, omittedLines: reduced.omittedLines };
+		}
+		return {
+			text: reduced.text,
+			omittedLines: reduced.omittedLines,
+			recoveryHint: `jq -c '${suggestJqProjection(document)}'`,
+		};
 	},
 };

@@ -7,7 +7,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { classifyCommandFamily } from "../src/core/tools/command-family.ts";
-import { isAnomalousItem, jsonOutputReducer, reduceJsonOutput } from "../src/core/tools/json-output-reducer.ts";
+import {
+	isAnomalousItem,
+	jsonOutputReducer,
+	reduceJsonOutput,
+	suggestJqProjection,
+} from "../src/core/tools/json-output-reducer.ts";
 
 const fixtures = join(import.meta.dirname, "fixtures", "tool-output");
 const request = { tool: "bash", command: "gh api repos/o/r/items", text: "", exitCode: 0, level: "standard" as const };
@@ -79,5 +84,17 @@ describe("reduceJsonOutput", () => {
 	it("is deterministic", () => {
 		const raw = readFileSync(join(fixtures, "json-list.json"), "utf-8");
 		expect(reduceJsonOutput(raw)).toEqual(reduceJsonOutput(raw));
+	});
+
+	it("offers a jq projection over the raw document derived from its shape", () => {
+		expect(suggestJqProjection([{ id: 1, name: "a", tags: ["x"], status: "ok" }])).toBe(".[] | {id,name,status}");
+		expect(suggestJqProjection({ total: 3, items: [{ "content-type": "t", size: 2 }] })).toBe(
+			'.items[] | {"content-type",size}',
+		);
+		expect(suggestJqProjection({ a: 1, b: { c: 2 } })).toBe("keys");
+		expect(suggestJqProjection([1, 2, 3])).toBe(".[]");
+		const raw = readFileSync(join(fixtures, "json-list.json"), "utf-8");
+		const reduced = jsonOutputReducer.reduce(classifyCommandFamily(request.command), { ...request, text: raw });
+		expect(reduced?.recoveryHint).toBe("jq -c '.items[] | {id,name,status,payload}'");
 	});
 });
