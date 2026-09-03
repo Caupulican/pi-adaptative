@@ -14,6 +14,7 @@ import {
 	type OutputReductionDetails,
 	type OutputReductionToolOptions,
 	reduceToolOutput,
+	resolveOutputReductionLevel,
 } from "./output-reduction.ts";
 import "./output-reducers.ts";
 import { getAgentDir } from "../../config.ts";
@@ -200,7 +201,7 @@ export function createPythonToolDefinition(
 	const operations = options.operations ?? createLocalPythonOperations();
 	// Output reduction: on unless the operator turned it off (settings or PI_TOOL_FILTER_DISABLED=1).
 	const reductionEnabled = options.outputReduction?.enabled !== false && process.env.PI_TOOL_FILTER_DISABLED !== "1";
-	const reductionLevel = options.outputReduction?.level ?? "standard";
+	const reductionLevel = () => resolveOutputReductionLevel(options.outputReduction?.level);
 	const reductionOptions = reductionEnabled
 		? {
 				extraReducers: [
@@ -270,7 +271,7 @@ export function createPythonToolDefinition(
 									command: "python",
 									text: rawStdout.content,
 									exitCode: 0,
-									level: reductionLevel,
+									level: reductionLevel(),
 								},
 								reductionOptions,
 							)

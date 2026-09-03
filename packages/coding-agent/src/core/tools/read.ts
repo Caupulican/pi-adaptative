@@ -22,6 +22,7 @@ import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import { buildCodeOutline, renderCodeOutline } from "./code-outline.ts";
 import {
 	FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
 	FILE_EXISTS_RECOVERY_TARGET_KIND,
@@ -40,6 +41,12 @@ const readSchema = Type.Object({
 	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
 	lineNumbers: Type.Optional(Type.Boolean({ description: "Include line numbers in the output" })),
 	tail: Type.Optional(Type.Number({ description: "Number of lines to read from the end of the file" })),
+	mode: Type.Optional(
+		Type.Literal("outline", {
+			description:
+				"Return the file's outline instead of its text: one `line: declaration` row per function, class, type, method, heading (TypeScript/JavaScript, Python, Rust, Go, C#, PowerShell, shell, Markdown). Use it first on files over ~300 lines, then read the range you need with offset/limit.",
+		}),
+	),
 	filter: Type.Optional(
 		Type.Union([Type.Literal("none"), Type.Literal("minimal"), Type.Literal("aggressive")], {
 			description: "Safe text filtering level (none, minimal, aggressive)",
@@ -51,6 +58,8 @@ export type ReadToolInput = Static<typeof readSchema>;
 
 export interface ReadToolDetails {
 	truncation?: TruncationResult;
+	/** Present for `mode: "outline"`. */
+	outline?: { language: string; entries: number; totalLines: number; headFallback: boolean };
 }
 
 interface CompactReadClassification {
@@ -181,6 +190,9 @@ const defaultReadOperations: ReadOperations = {
 // far above any real screenshot/photo so quality-degrading workarounds are never
 // needed in practice; it only guards against pathological files.
 const DEFAULT_MAX_TEXT_READ_BYTES = 16 * 1024 * 1024;
+/** An outline of an oversized file reads this much of its head. */
+const OUTLINE_MAX_SOURCE_LINES = 50_000;
+const OUTLINE_MAX_SOURCE_CHARS = 8 * 1024 * 1024;
 const DEFAULT_MAX_IMAGE_READ_BYTES = 128 * 1024 * 1024;
 
 export interface ReadToolOptions {
@@ -356,7 +368,7 @@ export function createReadToolDefinition(
 	return {
 		name: "read",
 		label: "read",
-		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Batchable: emit alongside other independent calls in one message; never spend a turn per read.`,
+		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. For a file over ~300 lines start with mode="outline" (declarations with line numbers, a fraction of the size) and then read only the ranges you need. Batchable: emit alongside other independent calls in one message; never spend a turn per read.`,
 		promptSnippet: "Read file contents",
 		promptGuidelines: ["Use read to examine files instead of cat or sed."],
 		parameters: readSchema,
@@ -383,6 +395,7 @@ export function createReadToolDefinition(
 				path,
 				offset,
 				limit,
+				mode,
 				lineNumbers,
 				tail,
 				filter,
@@ -390,6 +403,7 @@ export function createReadToolDefinition(
 				path: string;
 				offset?: number;
 				limit?: number;
+				mode?: "outline";
 				lineNumbers?: boolean;
 				tail?: number;
 				filter?: "none" | "minimal" | "aggressive";
@@ -465,6 +479,31 @@ export function createReadToolDefinition(
 										{ type: "image", data: buffer.toString("base64"), mimeType },
 									];
 								}
+							} else if (mode === "outline") {
+								// Orientation instead of paging: the declarations with their line numbers, so the
+								// next read is the range the model needs. Verbatim reads are untouched.
+								const outlineText =
+									fileSize !== undefined && fileSize > maxTextReadBytes && ops.readLineSlice !== undefined
+										? (
+												await ops.readLineSlice(absolutePath, {
+													startLine: 0,
+													maxLines: OUTLINE_MAX_SOURCE_LINES,
+													maxChars: OUTLINE_MAX_SOURCE_CHARS,
+												})
+											).lines
+												.map((item) => item.text)
+												.join("\n")
+										: (await ops.readFile(absolutePath)).toString("utf-8");
+								const outline = buildCodeOutline(path, outlineText);
+								content = [{ type: "text", text: renderCodeOutline(path, outline) }];
+								details = {
+									outline: {
+										language: outline.language,
+										entries: outline.entries.length,
+										totalLines: outline.totalLines,
+										headFallback: outline.headFallback,
+									},
+								};
 							} else {
 								// Read text content. Oversized files are streamed as line slices so
 								// any region stays reachable in batches without loading the whole file.

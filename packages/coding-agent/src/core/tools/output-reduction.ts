@@ -93,11 +93,19 @@ const MIN_PERSIST_SAVED_BYTES = 512;
 export interface OutputReductionToolOptions {
 	/** `false` turns every stage off for the tool; the model's `fullOutput` does the same per call. */
 	enabled?: boolean;
-	level?: OutputReductionLevel;
+	/** Fixed level, or a function read per call (the runtime binds it to the capability tier). */
+	level?: OutputReductionLevel | (() => OutputReductionLevel);
 	/** Extra rule files (settings `toolOutput.rulesFile`), loaded after the user and project files. */
 	rulesFiles?: readonly string[];
 	/** Agent directory holding the user rule file; defaults to the runtime's agent directory. */
 	agentDir?: string;
+}
+
+export function resolveOutputReductionLevel(
+	level: OutputReductionToolOptions["level"] | undefined,
+): OutputReductionLevel {
+	if (typeof level === "function") return level();
+	return level ?? "standard";
 }
 
 export interface ReduceToolOutputOptions {

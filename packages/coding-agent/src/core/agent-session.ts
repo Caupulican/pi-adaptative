@@ -931,6 +931,7 @@ export class AgentSession {
 			getAgent: () => this.agent,
 			getCwd: () => this._cwd,
 			getShellSessionKey: () => this._shellSessionKey,
+			getCapabilityTierPolicy: () => this.getCapabilityTierPolicy(),
 			getAgentDir: () => this._agentDir,
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,

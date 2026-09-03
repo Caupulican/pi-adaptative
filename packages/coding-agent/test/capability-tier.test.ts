@@ -38,6 +38,8 @@ describe("capability tier", () => {
 		expect(strong.repetitionGuardRepeats).toBeGreaterThanOrEqual(constrained.repetitionGuardRepeats);
 		expect(frontier.skillBodyMaxBytes).toBeGreaterThan(strong.skillBodyMaxBytes);
 		expect(constrained.protocolProse).toBe("full");
+		expect(frontier.outputReduction).toBe("standard");
+		expect(constrained.outputReduction).toBe("compact");
 	});
 
 	it("validates a stored demotion record", () => {

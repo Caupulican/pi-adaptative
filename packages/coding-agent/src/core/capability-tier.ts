@@ -55,6 +55,8 @@ export interface CapabilityTierPolicy {
 	skillBodyMaxBytes: number;
 	/** How much of the failure protocol rides each request: a pointer, or the full text. */
 	protocolProse: "pointer" | "full";
+	/** How hard tool-output reducers cut (see tools/output-reduction.ts): lower caps on the constrained tier. */
+	outputReduction: "standard" | "compact";
 }
 
 const POLICIES: Readonly<Record<CapabilityTier, Omit<CapabilityTierPolicy, "tier">>> = {
@@ -64,6 +66,7 @@ const POLICIES: Readonly<Record<CapabilityTier, Omit<CapabilityTierPolicy, "tier
 		repetitionGuardRepeats: 6,
 		skillBodyMaxBytes: 64 * 1024,
 		protocolProse: "pointer",
+		outputReduction: "standard",
 	},
 	strong: {
 		pathAliasing: true,
@@ -71,6 +74,7 @@ const POLICIES: Readonly<Record<CapabilityTier, Omit<CapabilityTierPolicy, "tier
 		repetitionGuardRepeats: 4,
 		skillBodyMaxBytes: 32 * 1024,
 		protocolProse: "pointer",
+		outputReduction: "standard",
 	},
 	constrained: {
 		pathAliasing: false,
@@ -78,6 +82,7 @@ const POLICIES: Readonly<Record<CapabilityTier, Omit<CapabilityTierPolicy, "tier
 		repetitionGuardRepeats: 3,
 		skillBodyMaxBytes: 16 * 1024,
 		protocolProse: "full",
+		outputReduction: "compact",
 	},
 };
 

@@ -18,6 +18,7 @@
  * - delegation: delegate calls per worker started, worker claims reviewed without correction.
  * - skills and memory: record chars persisted.
  * - output cap: responses that ended at the cap (stopReason length).
+ * - output reduction: tool results a reducer touched, bytes in and out, share saved.
  */
 import { listSessionFiles, messageText, parseSessionEntries } from "./session-stats-common.mjs";
 import { join } from "node:path";
@@ -51,6 +52,10 @@ const totals = {
 	aliasSavedChars: 0,
 	legendChars: 0,
 	lengthStops: 0,
+	toolResults: 0,
+	reducedResults: 0,
+	reductionInputBytes: 0,
+	reductionOutputBytes: 0,
 };
 
 for (const dir of dirs) {
@@ -114,6 +119,13 @@ for (const dir of dirs) {
 				continue;
 			}
 			if (message.role === "toolResult") {
+				totals.toolResults += 1;
+				const reduction = message.details?.outputReduction;
+				if (reduction && typeof reduction.inputBytes === "number" && typeof reduction.outputBytes === "number") {
+					totals.reducedResults += 1;
+					totals.reductionInputBytes += reduction.inputBytes;
+					totals.reductionOutputBytes += reduction.outputBytes;
+				}
 				const text = messageText(message.content, "\n");
 				if (message.isError && text.startsWith("[harness]")) totals.refusals += 1;
 				if (text.includes("[Context GC packed")) totals.packedToolResults += 1;
@@ -157,6 +169,12 @@ rows.push(["failure ledger", `${totals.refusals} refusals in ${totals.turns} tur
 rows.push(["context GC", `${totals.packedToolResults} packed tool results`, "measured"]);
 rows.push(["delegation", `${totals.delegateCalls} delegate calls, ${totals.workersStarted} workers started, ${totals.workerReviews} reviews, ${totals.workerCorrections} follow-ups`, totals.workersStarted ? `${(totals.delegateCalls / totals.workersStarted).toFixed(1)} calls per worker` : "no workers"]);
 rows.push(["output cap", `${totals.lengthStops} responses ended at the cap`, totals.lengthStops ? "inspect: a capped response is either a runaway or a cap set too low" : "none"]);
+const reductionSaved = totals.reductionInputBytes - totals.reductionOutputBytes;
+rows.push([
+	"output reduction",
+	`${totals.reducedResults}/${totals.toolResults} results reduced; ${totals.reductionInputBytes} bytes in, ${totals.reductionOutputBytes} out (saved ${totals.reductionInputBytes ? ((100 * reductionSaved) / totals.reductionInputBytes).toFixed(1) : "-"}%)`,
+	totals.reducedResults ? "measured; passthrough families in scripts/output-reduction-census.mjs" : "no reduced results (session predates the pipeline or reduction is off)",
+]);
 for (const kind of ["reflection_turn_trigger", "reflection_cue"]) {
 	if (!totals.records.has(kind)) rows.push([`record ${kind}`, "no records", "unmeasured benefit: needs skills promoted that are later loaded"]);
 }

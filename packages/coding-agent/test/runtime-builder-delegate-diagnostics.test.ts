@@ -6,6 +6,7 @@ import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Model } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { capabilityTierPolicy } from "../src/core/capability-tier.ts";
 import { ExtensionRunner } from "../src/core/extensions/index.ts";
 import { createExtensionRuntime } from "../src/core/extensions/loader.ts";
 import type { MemoryManager } from "../src/core/memory/memory-manager.ts";
@@ -73,6 +74,7 @@ function makeDeps(
 		getAgent: () => agent,
 		getCwd: () => cwd,
 		getShellSessionKey: () => "test-shell-session",
+		getCapabilityTierPolicy: () => capabilityTierPolicy("frontier"),
 		getAgentDir: () => cwd,
 		getLaneWorkerRefusal: () => undefined,
 		getSessionManager: () => sessionManager,

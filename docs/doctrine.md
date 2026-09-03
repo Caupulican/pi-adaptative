@@ -75,6 +75,20 @@ ceiling on the frontier tier is one. Pinned by
 `packages/coding-agent/test/goal-evidence-verification.test.ts`, and
 `packages/coding-agent/test/bash-search-guard.test.ts`.
 
+**Tool output is a shorter version of the real output, never a different one; the original is one
+read away.** Every reducer only removes lines, collapses repeats or regroups what the command
+printed (a search hit keeps its path and line, a diagnostic its file, position, code and message);
+an unknown shape passes through untouched; the raw output is persisted and named in the notice
+whenever lines were dropped, and the model bypasses every stage with `fullOutput: true`. Reduction
+is byte-stable: the same output reduces to the same bytes, so a re-sent result never re-prefills.
+Measured on live sessions (`scripts/output-reduction-census.mjs`): search results save a quarter of
+their bytes, compiler reports three quarters. Pinned by
+`packages/coding-agent/test/output-reduction.test.ts`,
+`packages/coding-agent/test/generic-output-reducer.test.ts`,
+`packages/coding-agent/test/search-output-reducer.test.ts`,
+`packages/coding-agent/test/diagnostics-output-reducer.test.ts` and
+`packages/coding-agent/test/json-output-reducer.test.ts`.
+
 **The tool list never changes mid-session.** It sits before the messages in every prompt; any
 change re-prefills the whole conversation. Disclosure happens at session start per caller. Pinned
 by `packages/coding-agent/test/context-composition.test.ts` (schema token ceilings, only lowered).

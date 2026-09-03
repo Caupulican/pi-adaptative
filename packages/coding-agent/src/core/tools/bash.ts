@@ -47,6 +47,7 @@ import {
 	type OutputReductionDetails,
 	type OutputReductionToolOptions,
 	type ReduceToolOutputOptions,
+	resolveOutputReductionLevel,
 } from "./output-reduction.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import {
@@ -633,7 +634,7 @@ function createShellToolDefinition(
 	// Output reduction: on unless the operator turned it off (settings or PI_TOOL_FILTER_DISABLED=1).
 	// Rules are loaded once per tool instance: bundled, then the user file, then the project file.
 	const reductionEnabled = options?.outputReduction?.enabled !== false && process.env.PI_TOOL_FILTER_DISABLED !== "1";
-	const reductionLevel = options?.outputReduction?.level ?? "standard";
+	const reductionLevel = () => resolveOutputReductionLevel(options?.outputReduction?.level);
 	const reductionOptions: ReduceToolOutputOptions | undefined = reductionEnabled
 		? {
 				extraReducers: [
@@ -734,7 +735,7 @@ function createShellToolDefinition(
 				routeBroadSearchOutput || fullOutput === true || !reductionEnabled
 					? undefined
 					: (createShellOutputProjector(command) ??
-						createReductionProjector(toolName, command, reductionLevel, reductionOptions));
+						createReductionProjector(toolName, command, reductionLevel(), reductionOptions));
 			const output = new OutputAccumulator({
 				tempFilePrefix: `pi-${toolName}`,
 				tempDirectory: options?.outputDirectory,

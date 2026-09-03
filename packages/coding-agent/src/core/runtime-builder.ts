@@ -56,6 +56,7 @@ import { isPathWithinEnvelope, wrapToolWithEnvelopeScope } from "./autonomy/enve
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import { buildWorkerSessionPrivatePathEnvelope } from "./autonomy/worker-session-private-scope.ts";
 import { isCompletedBackgroundToolEvidence } from "./background-tool-task-controller.ts";
+import type { CapabilityTierPolicy } from "./capability-tier.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./context/memory-diagnostics.ts";
 import type { ContextGcReport } from "./context-gc.ts";
@@ -280,6 +281,8 @@ export interface RuntimeBuilderDeps {
 	getCwd(): string;
 	/** Per-agent persistent shell session key; stable across reloads so the shell survives them. */
 	getShellSessionKey(): string;
+	/** The session's capability tier policy, read per call (tool-output reduction level on `auto`). */
+	getCapabilityTierPolicy(): CapabilityTierPolicy;
 	/** Agent state root, including the host-keyed fitness store. */
 	getAgentDir(): string;
 	/** Session log, passed to the extension runner. */
@@ -960,7 +963,10 @@ export class RuntimeBuilder {
 		const toolOutputSettings = this.deps.getSettingsManager().getToolOutputSettings();
 		const outputReduction: OutputReductionToolOptions = {
 			enabled: toolOutputSettings.reduction !== "off",
-			level: toolOutputSettings.level === "compact" ? "compact" : "standard",
+			level:
+				toolOutputSettings.level === "auto"
+					? () => this.deps.getCapabilityTierPolicy().outputReduction
+					: toolOutputSettings.level,
 			rulesFiles: toolOutputSettings.rulesFile ? [toolOutputSettings.rulesFile] : [],
 			agentDir: this.deps.getAgentDir(),
 		};
