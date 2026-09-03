@@ -891,7 +891,7 @@ describe("project-scoped hot memory", () => {
 			expect(readFileSync(join(agentDirLocal, "MEMORY.md"), "utf-8")).toContain("Prefer explicit-path git adds");
 			const hinted = await memoryTool.execute(
 				"g2",
-				{ action: "add", target: "memory", content: "FPCON-2182 ships from C:\\Projetos\\Deploy" },
+				{ action: "add", target: "memory", content: "PROJ-1234 ships from C:\\work\\Deploy" },
 				undefined,
 				undefined,
 				{} as any,

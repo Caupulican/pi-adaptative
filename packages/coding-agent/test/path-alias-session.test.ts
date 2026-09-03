@@ -595,11 +595,11 @@ describe("PathAliasRuntime existence gate", () => {
 		const synced = runtime.sync([
 			toolResult("packages/coding-agent/src/real.ts", 10),
 			// A git line relative to a repo root that is not cwd: it resolves to nothing here.
-			toolResult("(Release/Source/SysMain.cpp", 11),
+			toolResult("(Release/Source/Engine.cpp", 11),
 		]);
 		expect(runtime.peekTable().entries.map((entry) => entry.path)).toEqual(["packages/coding-agent/src/real.ts"]);
 		expect(synced.legend).toContain("p/real.ts=packages/coding-agent/src/real.ts");
-		expect(synced.legend).not.toContain("SysMain");
+		expect(synced.legend).not.toContain("Engine.cpp");
 		runtime.close();
 	});
 });

@@ -200,7 +200,7 @@ function jqFilterReadsProcessEnvironment(filter: string): boolean {
 function isCredentialSafeGlob(glob: string): boolean {
 	if (/(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(glob)) return false;
 	const filePattern = glob.replace(/\\/g, "/").split("/").at(-1) ?? "";
-	// A literal filename prefix (`Wantfile*`, `report-*`) is as narrow as a suffix glob: it names a
+	// A literal filename prefix (`Buildfile*`, `report-*`) is as narrow as a suffix glob: it names a
 	// family of files, not a directory (measured live: refused with the suffix-only rule).
 	if (/^[A-Za-z0-9_][A-Za-z0-9_.-]{2,}\*$/u.test(filePattern) && !/\.env/i.test(filePattern)) return true;
 	const braceSuffixes = filePattern.match(/\.\{([A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)+)\}$/)?.[1];

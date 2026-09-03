@@ -367,7 +367,7 @@ describe("credential exposure guard", () => {
 });
 
 describe("credential guard false positives measured live", () => {
-	const cwd = "/mnt/c/Projetos";
+	const cwd = "/mnt/c/work";
 	it("allows a literal-prefix glob, a multi-line script whose last line searches a variable, and the harness's own memory roots", () => {
 		const agentDir = "/home/owner/.pi/agent";
 		const boundary = { redactSensitiveText: (text: string) => text, agentDir };
@@ -375,19 +375,19 @@ describe("credential guard false positives measured live", () => {
 			credentialToolBlockReason(
 				"bash",
 				{
-					command: `rg -n "CompilarAtualizador|AtualizaCMD|DEBUG" "/mnt/c/Projetos/FPCON-2182" -g '*.want' -g '*.xml' -g '*.bat' -g 'Wantfile*' | head -80`,
+					command: `rg -n "BuildInstaller|InstallerCmd|DEBUG" "/mnt/c/work/PROJ-1234" -g '*.want' -g '*.xml' -g '*.bat' -g 'Buildfile*' | head -80`,
 				},
 				cwd,
 				boundary,
 			),
 		).toBeUndefined();
 		const script = [
-			'LOG="/mnt/c/Fortes/Atualizadores/Update.log"',
+			'LOG="/mnt/c/work/installers/update.log"',
 			"date -u +%Y-%m-%dT%H:%M:%SZ",
 			'echo "---- log tail before ----"',
 			'tail -n 5 "$LOG" 2>/dev/null || echo no-log',
-			"cd /mnt/c/Projetos/FPCON-2182/Fontes/Atualizador/TesteAtualizador",
-			'./AtualizaCMD.exe "C:\\Projetos\\x.ini" > /mnt/c/Projetos/out.txt 2>&1',
+			"cd /mnt/c/work/PROJ-1234/src/installer/test-installer",
+			'./InstallerCmd.exe "C:\\work\\x.ini" > /mnt/c/work/out.txt 2>&1',
 			"echo EXIT:$?",
 			'rg -n "UpJarvis|InstallJar" "$LOG" || true',
 		].join("\n");

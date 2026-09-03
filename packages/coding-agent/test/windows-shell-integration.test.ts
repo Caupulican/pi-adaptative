@@ -213,7 +213,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 	it.skipIf(!hasRipgrep)("(g) invokes native rg.exe through both the simple and combined routes", async () => {
 		const sessionKey = freshSessionKey("native-ripgrep");
 		const root = mkdtempSync(join(tmpdir(), "pi-win-shell-rg-"));
-		const sourcePath = join(root, "Hairware 7 (Release).txt");
+		const sourcePath = join(root, "Project 7 (Release).txt");
 		writeFileSync(sourcePath, "needle\nother\nmiss\n", "utf8");
 
 		try {

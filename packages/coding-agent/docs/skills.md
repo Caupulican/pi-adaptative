@@ -45,7 +45,7 @@ Unload specific skills with settings filters. Put user-wide filters in `~/.pi/ag
 ```json
 {
   "disabledResources": {
-    "skills": ["zuvi-trello-fix-release", "project-only-skill"]
+    "skills": ["trello-fix-release", "project-only-skill"]
   }
 }
 ```

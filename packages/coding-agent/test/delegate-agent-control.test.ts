@@ -1416,14 +1416,14 @@ describe("delegate persistent worker reuse", () => {
 
 		const result = await tool.execute(
 			"call",
-			{ action: "start", agentId: "worker-1", instructions: "Now audit SysMain too" },
+			{ action: "start", agentId: "worker-1", instructions: "Now audit the scheduler too" },
 			undefined,
 			undefined,
 			context,
 		);
 		expect(startWorkerAgentTask).toHaveBeenCalledWith(
 			"worker-1",
-			"Now audit SysMain too",
+			"Now audit the scheduler too",
 			expect.objectContaining({ idempotencyKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/) }),
 		);
 		expect(startWorkerDelegation).not.toHaveBeenCalled();

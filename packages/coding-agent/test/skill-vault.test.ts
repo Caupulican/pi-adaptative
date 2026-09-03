@@ -807,15 +807,15 @@ describe("SkillVaultController refresh on miss", () => {
 			skills = loadSkillsFromDir({ dir: root, source: "user" }).skills;
 		});
 		const vault = new SkillVaultController({ getSkills: () => skills, refreshSkills });
-		expect(vault.load("wincontrol-host", "model").ok).toBe(false);
+		expect(vault.load("host-bridge", "model").ok).toBe(false);
 		expect(refreshSkills).toHaveBeenCalledTimes(1);
 		// The skill appears on disk (skillify, a write, the owner) after the vault was built.
-		writeSkill("wincontrol-host", "Control the Windows host with WinAgent from WSL");
-		const loaded = vault.load("wincontrol-host", "model");
+		writeSkill("host-bridge", "Drive the host shell from the sandbox");
+		const loaded = vault.load("host-bridge", "model");
 		expect(loaded.ok).toBe(true);
 		expect(refreshSkills).toHaveBeenCalledTimes(2);
 		expect(vault.search("windows host winagent").candidates.map((candidate) => candidate.name)).toEqual([
-			"wincontrol-host",
+			"host-bridge",
 		]);
 	});
 

@@ -156,10 +156,10 @@ describe("bash broad-search guard", () => {
 	it.each([
 		[
 			"ripgrep",
-			"printf '%s\\n' '--- first search ---'; rg -n TBits src/PBAppBook.cpp; printf '%s\\n' '--- final search ---'; rg -n TBits src/Hairware",
+			"printf '%s\\n' '--- first search ---'; rg -n TBits src/AppBook.cpp; printf '%s\\n' '--- final search ---'; rg -n TBits src/Engine",
 		],
-		["ripgrep with a trailing separator", "rg -n TBits src/Hairware;"],
-		["grep", "grep TBits src/Hairware.cpp"],
+		["ripgrep with a trailing separator", "rg -n TBits src/Engine;"],
+		["grep", "grep TBits src/Engine.cpp"],
 		["piped grep", "printf '%s\\n' value | grep TBits"],
 	])("treats a final %s exit 1 as a successful zero-match search", async (_label, command) => {
 		operations.exec = async (_command, _cwd, { onData }) => {

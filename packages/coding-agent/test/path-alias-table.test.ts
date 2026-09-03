@@ -24,13 +24,11 @@ describe("path alias table", () => {
 	const MECHANICS = { minAliasSaving: 0 };
 
 	it("aliases a long Windows screenshot path to p/basename and expands it back", () => {
-		const windows = String.raw`C:\Users\Caupulican\Downloads\Screenshot_2.jpg`;
+		const windows = String.raw`C:\Users\Dev\Downloads\Screenshot_2.jpg`;
 		const table = buildPathAliasTable("/repo", [`read ${windows}`]);
-		expect(table.entries).toEqual([
-			{ id: "p/Screenshot_2.jpg", path: "C:/Users/Caupulican/Downloads/Screenshot_2.jpg" },
-		]);
+		expect(table.entries).toEqual([{ id: "p/Screenshot_2.jpg", path: "C:/Users/Dev/Downloads/Screenshot_2.jpg" }]);
 		expect(rewriteText(table, `read ${windows}`)).toBe("read p/Screenshot_2.jpg");
-		expect(expandText(table, "read p/Screenshot_2.jpg")).toBe("read C:/Users/Caupulican/Downloads/Screenshot_2.jpg");
+		expect(expandText(table, "read p/Screenshot_2.jpg")).toBe("read C:/Users/Dev/Downloads/Screenshot_2.jpg");
 	});
 
 	it("uses unique basenames and grows the suffix when two files share a name", () => {
@@ -494,7 +492,7 @@ describe("alias mint exclusions", () => {
 		const existing = new Set(["packages/coding-agent/src/core/tools/grep.ts"]);
 		const table = extendPathAliasTable(
 			emptyPathAliasTable("/repo"),
-			["(Release/Source/SysMain.cpp", "packages/coding-agent/src/core/tools/grep.ts"],
+			["(Release/Source/Engine.cpp", "packages/coding-agent/src/core/tools/grep.ts"],
 			{ candidateExists: (path) => existing.has(path) },
 		).table;
 		expect(table.entries.map((entry) => entry.path)).toEqual(["packages/coding-agent/src/core/tools/grep.ts"]);

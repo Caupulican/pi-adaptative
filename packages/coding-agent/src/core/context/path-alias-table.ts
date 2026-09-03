@@ -396,7 +396,7 @@ export interface ExtendPathAliasOptions {
 	 * Whether a display path names something that exists from the table's cwd. A candidate that
 	 * does not is a spelling relative to some other root (a repo root, a memory root, a listing
 	 * header) and minting it would hand the model an alias that resolves to ENOENT (measured
-	 * live: `p/SysMain.cpp=(Release/Source/SysMain.cpp` from a repo-root-relative git line).
+	 * live: `p/Engine.cpp=(Release/Source/Engine.cpp` from a repo-root-relative git line).
 	 */
 	candidateExists?: (displayPath: string) => boolean;
 }

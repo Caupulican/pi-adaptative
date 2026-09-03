@@ -139,7 +139,7 @@ resolves to something on disk from the table's cwd; git refs, revision ranges, n
 timestamp directories and extension-only fragments are never candidates; and only path-typed tool
 parameters can be refused as unminted aliases, never code, commands or prose. Model-facing
 listings print absolute paths. Why: measured live, a repo-root-relative git line became
-`p/SysMain.cpp=(Release/Source/SysMain.cpp` and three reads failed with ENOENT, a memory listing's
+`p/Engine.cpp=(Release/Source/Engine.cpp` and three reads failed with ENOENT, a memory listing's
 root-relative names did the same, `ls` output minted 759 legend lines nothing mentioned, and a
 Python `f = p/name` was refused as an invented alias. Pinned by
 `packages/coding-agent/test/path-alias-table.test.ts`,
