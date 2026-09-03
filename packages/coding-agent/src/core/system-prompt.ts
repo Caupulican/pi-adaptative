@@ -320,9 +320,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	}
 	if (fullPrompt || leanPrompt) {
 		if (hasBash || hasGrep || hasFind) {
-			addGuideline(
-				"rg/jq: scoped roots/filters; JSON through a jq projection, never dumped; exhaustive output to file",
-			);
+			addGuideline("rg/jq: scoped roots/filters; JSON via jq; exhaustive output to file");
 		}
 		if (hasPython) {
 			addGuideline("Python: bounded scripts/data, source edits via read/edit/write");

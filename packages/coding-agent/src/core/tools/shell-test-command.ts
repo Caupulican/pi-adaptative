@@ -156,7 +156,9 @@ function hasOnlyVerificationStages(sequence: ShellCommandSequence): boolean {
 		index++;
 	}
 
-	for (; index < sequence.invocations.length; index++) {
+	// Every path out of this loop is a return: past the last stage `invocations[index]` is undefined,
+	// which is not a test invocation, so the trailing stage decides and no statement follows the loop.
+	for (; ; index++) {
 		if (!isTestInvocation(sequence.invocations[index] ?? [], true)) return false;
 		const connector = sequence.connectors[index];
 		if (connector === undefined) return true;
@@ -171,7 +173,6 @@ function hasOnlyVerificationStages(sequence: ShellCommandSequence): boolean {
 		}
 		return false;
 	}
-	return false;
 }
 
 /**
