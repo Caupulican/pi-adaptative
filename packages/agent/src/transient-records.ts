@@ -142,6 +142,30 @@ function deterministicRecordTimestamp(content: string): string {
 
 /** Text of a `CustomMessage`, or undefined for the array-content shape this module never produces
  * itself but may encounter when scanning durable history for a prior instance. */
+/**
+ * Whether a persisted custom record was written by this module (a transient record): the superseding
+ * note marks a plain record, `details.cumulative` a cumulative one; pointer records are excluded, as
+ * `transientContentIndex` excludes them. The session context builder uses this to carry the current
+ * record of each kind across a compaction cut: without it every kind is re-appended on the first
+ * request after compaction (measured on a live session: the skill context re-sent 75 times for 7
+ * distinct contents, the legend 256 times).
+ */
+export function classifyTransientRecord(
+	content: unknown,
+	details: unknown,
+): { transient: boolean; cumulative: boolean } {
+	const cumulative =
+		typeof details === "object" && details !== null && (details as { cumulative?: unknown }).cumulative === true;
+	const pointer =
+		typeof details === "object" && details !== null && (details as { pointer?: unknown }).pointer === true;
+	if (pointer) return { transient: false, cumulative: false };
+	if (cumulative) return { transient: true, cumulative: true };
+	return {
+		transient: typeof content === "string" && content.endsWith(TRANSIENT_RECORD_SUPERSEDING_NOTE),
+		cumulative: false,
+	};
+}
+
 function customMessageText(message: AgentMessage): string | undefined {
 	if (message.role !== "custom") return undefined;
 	return typeof message.content === "string" ? message.content : undefined;

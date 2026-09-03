@@ -25,6 +25,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
+import { classifyTransientRecord } from "../transient-records.ts";
 import type { AgentMessage } from "../types.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { uuidv7 } from "../uuid.ts";
@@ -559,16 +560,43 @@ export function buildSessionContext(
 			),
 		);
 
+		// Transient records (append-on-change host and kernel records: skill context, goal context,
+		// legend deltas, failure ledger) that fell before the cut are carried forward: the last record
+		// of each kind, every record of a cumulative kind. Without them the reconciler sees no durable
+		// instance after compaction and re-appends every kind on the next request, re-sending the same
+		// content the compacted history already carried. Kinds with a record in the kept tail need none.
+		let firstKeptIdx = compactionIdx;
+		for (let i = 0; i < compactionIdx; i++) {
+			if (path[i].id === compaction.firstKeptEntryId) {
+				firstKeptIdx = i;
+				break;
+			}
+		}
+		const tailKinds = new Set<string>();
+		for (let i = firstKeptIdx; i < path.length; i++) {
+			const entry = path[i];
+			if (entry.type === "custom_message" && classifyTransientRecord(entry.content, entry.details).transient) {
+				tailKinds.add(entry.customType);
+			}
+		}
+		const carriedByKind = new Map<string, SessionEntry[]>();
+		for (let i = 0; i < firstKeptIdx; i++) {
+			const entry = path[i];
+			if (entry.type !== "custom_message" || tailKinds.has(entry.customType)) continue;
+			const record = classifyTransientRecord(entry.content, entry.details);
+			if (!record.transient) continue;
+			if (record.cumulative) {
+				const list = carriedByKind.get(entry.customType) ?? [];
+				list.push(entry);
+				carriedByKind.set(entry.customType, list);
+			} else carriedByKind.set(entry.customType, [entry]);
+		}
+		const carried = [...carriedByKind.values()].flat().sort((a, b) => path.indexOf(a) - path.indexOf(b));
+		for (const entry of carried) appendMessage(entry);
+
 		if (!compaction.retention) {
 			// Emit the standard contiguous tail before compaction, starting from firstKeptEntryId.
-			let foundFirstKept = false;
-			for (let i = 0; i < compactionIdx; i++) {
-				const entry = path[i];
-				if (entry.id === compaction.firstKeptEntryId) {
-					foundFirstKept = true;
-				}
-				if (foundFirstKept) appendMessage(entry);
-			}
+			for (let i = firstKeptIdx; i < compactionIdx; i++) appendMessage(path[i]);
 		}
 
 		// Emit messages after compaction

@@ -18,6 +18,7 @@ import {
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
 } from "../../src/session/session-manager.ts";
+import { reconcileTransientRecords } from "../../src/transient-records.ts";
 import type { AgentMessage } from "../../src/types.ts";
 
 function msg(id: string, parentId: string | null, role: "user" | "assistant", text: string): SessionMessageEntry {
@@ -162,6 +163,92 @@ describe("buildSessionContext", () => {
 			// Summary + all messages (1,2,4)
 			expect(ctx.messages).toHaveLength(4);
 			expect((ctx.messages[0] as any).summary).toContain("Empty summary");
+		});
+
+		it("carries the current transient record of each kind across the compaction cut", () => {
+			const record = (kind: string, content: string) => {
+				const message = reconcileTransientRecords([], [{ kind, content }])[0];
+				if (message.role !== "custom" || typeof message.content !== "string") throw new Error("record");
+				return message.content;
+			};
+			const custom = (
+				id: string,
+				parentId: string,
+				customType: string,
+				content: string,
+				details?: Record<string, unknown>,
+			): SessionEntry => ({
+				type: "custom_message",
+				id,
+				parentId,
+				timestamp: "2025-01-01T00:00:00Z",
+				customType,
+				content,
+				display: false,
+				...(details ? { details } : {}),
+			});
+			const entries: SessionEntry[] = [
+				msg("u1", null, "user", "start"),
+				custom("s1", "u1", "active_skill_context", record("active_skill_context", "skill A")),
+				custom("l1", "s1", "path_alias_legend", "p/1=src/a.ts", { cumulative: true }),
+				custom("p1", "l1", "pi_tool_failure_protocol", "pointer", { pointer: true }),
+				msg("a1", "p1", "assistant", "working"),
+				custom("s2", "a1", "active_skill_context", record("active_skill_context", "skill B")),
+				custom("l2", "s2", "path_alias_legend", "p/2=src/b.ts", { cumulative: true }),
+				custom("n1", "l2", "plain_note", "not a transient record"),
+				msg("u2", "n1", "user", "continue"),
+				msg("a2", "u2", "assistant", "done"),
+				compaction("c1", "a2", "Summary", "u2"),
+			];
+			const context = buildSessionContext(entries, "c1");
+			const shape = context.messages.map((message) =>
+				message.role === "custom"
+					? `${message.customType}:${typeof message.content === "string" ? message.content.split("\n")[0] : "?"}`
+					: message.role,
+			);
+			// Summary, then the current skill record (skill A superseded), every legend delta, then the tail.
+			expect(shape).toEqual([
+				shape[0],
+				"path_alias_legend:p/1=src/a.ts",
+				"active_skill_context:skill B",
+				"path_alias_legend:p/2=src/b.ts",
+				"user",
+				"assistant",
+			]);
+			expect(shape[0]).toMatch(/^compactionSummary/u);
+		});
+
+		it("carries nothing for a kind that already has a record in the kept tail", () => {
+			const record = (kind: string, content: string) => {
+				const message = reconcileTransientRecords([], [{ kind, content }])[0];
+				if (message.role !== "custom" || typeof message.content !== "string") throw new Error("record");
+				return message.content;
+			};
+			const goal = (id: string, parentId: string, content: string): SessionEntry => ({
+				type: "custom_message",
+				id,
+				parentId,
+				timestamp: "2025-01-01T00:00:00Z",
+				customType: "goal_context",
+				content: record("goal_context", content),
+				display: false,
+			});
+			const entries: SessionEntry[] = [
+				msg("u1", null, "user", "start"),
+				goal("g1", "u1", "goal v1"),
+				msg("a1", "g1", "assistant", "working"),
+				msg("u2", "a1", "user", "continue"),
+				goal("g2", "u2", "goal v2"),
+				msg("a2", "g2", "assistant", "done"),
+				compaction("c1", "a2", "Summary", "u2"),
+			];
+			const context = buildSessionContext(entries, "c1");
+			const goals = context.messages.filter(
+				(message): message is Extract<AgentMessage, { role: "custom" }> =>
+					message.role === "custom" && message.customType === "goal_context",
+			);
+			expect(goals).toHaveLength(1);
+			expect(typeof goals[0].content === "string" && goals[0].content.startsWith("goal v2")).toBe(true);
 		});
 
 		it("multiple compactions uses latest", () => {
