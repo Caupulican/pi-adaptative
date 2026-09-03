@@ -779,3 +779,112 @@ describe("memory budget as an operation outcome", () => {
 		}
 	});
 });
+
+describe("project-scoped hot memory", () => {
+	async function providerIn(root: string, project: string) {
+		const agentDirLocal = join(root, "agent");
+		const cwdLocal = join(root, project);
+		mkdirSync(agentDirLocal, { recursive: true });
+		mkdirSync(cwdLocal, { recursive: true });
+		const provider = new FileStoreProvider();
+		await provider.initialize(`session-${project}`, {
+			agentDir: agentDirLocal,
+			cwd: cwdLocal,
+			isChildSession: false,
+		});
+		const memoryTool = provider.getToolDefinitions().find((t) => t.name === "memory");
+		if (!memoryTool) throw new Error("memory tool missing");
+		return { provider, memoryTool, agentDirLocal };
+	}
+
+	it("routes writes to the project's own file by default and keeps projects apart", async () => {
+		const root = join(tmpdir(), `pi-mem-project-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		try {
+			const a = await providerIn(root, "alpha");
+			const b = await providerIn(root, "beta");
+			const written = await a.memoryTool.execute(
+				"w1",
+				{ action: "add", content: "Alpha builds with make" },
+				undefined,
+				undefined,
+				{} as any,
+			);
+			expect((written as any).details.success).toBe(true);
+			expect((written as any).content[0].text).toContain("MEMORY.md (project)");
+			expect(readFileSync(a.provider.getProjectMemoryFilePath(), "utf-8")).toContain("Alpha builds with make");
+			expect(readFileSync(join(a.agentDirLocal, "MEMORY.md"), "utf-8")).not.toContain("Alpha builds");
+			expect(a.provider.systemPromptBlock()).toContain("## MEMORY.md (project alpha):");
+			expect(a.provider.systemPromptBlock()).toContain("Alpha builds with make");
+			expect(b.provider.systemPromptBlock()).not.toContain("Alpha builds");
+			expect(a.provider.getProjectMemoryFilePath()).toContain(join("memory", "projects"));
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the general file for general facts, hints when a write looks project-specific, and lists all three", async () => {
+		const root = join(tmpdir(), `pi-mem-general-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		try {
+			const { memoryTool, agentDirLocal } = await providerIn(root, "gamma");
+			const general = await memoryTool.execute(
+				"g1",
+				{ action: "add", target: "memory", content: "Prefer explicit-path git adds" },
+				undefined,
+				undefined,
+				{} as any,
+			);
+			expect((general as any).content[0].text).toBe("Successfully updated MEMORY.md (general).");
+			expect(readFileSync(join(agentDirLocal, "MEMORY.md"), "utf-8")).toContain("Prefer explicit-path git adds");
+			const hinted = await memoryTool.execute(
+				"g2",
+				{ action: "add", target: "memory", content: "PROJ-1234 ships from C:\\work\\Deploy" },
+				undefined,
+				undefined,
+				{} as any,
+			);
+			expect((hinted as any).details.success).toBe(true);
+			expect((hinted as any).content[0].text).toContain('consider target "project"');
+			const listed = await memoryTool.execute(
+				"g3",
+				{ action: "list", target: "memory" },
+				undefined,
+				undefined,
+				{} as any,
+			);
+			const text = (listed as any).content[0].text as string;
+			expect(text).toContain("## MEMORY.md (general)");
+			expect(text).toContain("/1200 chars");
+			expect(text).toContain("## MEMORY.md (project gamma)");
+			expect(text).toContain("/2200 chars");
+			expect(text).toContain("## USER.md");
+			const over = await memoryTool.execute(
+				"g4",
+				{ action: "add", target: "memory", content: "y".repeat(1300) },
+				undefined,
+				undefined,
+				{} as any,
+			);
+			expect((over as any).isError).toBe(true);
+			expect((over as any).content[0].text).toContain("MEMORY.md (general) limit is 1200");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("tells the model to triage when the general file is over budget, without deleting anything", async () => {
+		const root = join(tmpdir(), `pi-mem-triage-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		try {
+			const agentDirLocal = join(root, "agent");
+			mkdirSync(agentDirLocal, { recursive: true });
+			const bloated = `${"project fact ".repeat(120)}\n`;
+			writeFileSync(join(agentDirLocal, "MEMORY.md"), bloated);
+			const provider = new FileStoreProvider();
+			await provider.initialize("triage", { agentDir: agentDirLocal, cwd: root, isChildSession: false });
+			expect(provider.generalMemoryOverBudget()).toBe(true);
+			expect(provider.systemPromptBlock()).toContain("[Memory triage:");
+			expect(readFileSync(join(agentDirLocal, "MEMORY.md"), "utf-8")).toBe(bloated);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});

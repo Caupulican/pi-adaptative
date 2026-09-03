@@ -98,6 +98,33 @@ export function configFile(agentDir: string, name: string): string {
 	return join(agentDir, name);
 }
 
+/**
+ * `<agentDir>/memory/projects/<project-key>` -- the project's hot memory (its own MEMORY.md), keyed
+ * like OKF so one derivation names both. The global MEMORY.md keeps facts true in any task.
+ */
+export function projectMemoryDir(agentDir: string, projectKey: string): string {
+	if (!/^[a-f0-9]{16}$/i.test(projectKey)) {
+		throw new TypeError("Project memory key must be a 16-character hexadecimal digest.");
+	}
+	return join(agentDir, "memory", "projects", projectKey.toLowerCase());
+}
+
+/** `<agentDir>/memory/projects` -- every project's hot memory; private to the main lane. */
+export function projectMemoryRoot(agentDir: string): string {
+	return join(agentDir, "memory", "projects");
+}
+
+/** Managed-state sidecar for a project's MEMORY.md (drift detection, like the global files). */
+export function managedProjectMemoryStateFile(agentDir: string, projectKey: string): string {
+	return stateFile(
+		agentDir,
+		"memory",
+		"file-store",
+		"projects",
+		`${projectKey.toLowerCase()}.MEMORY.md.pi-managed.json`,
+	);
+}
+
 /** `<agentDir>/okf-memory` -- user-authored durable OKF memory documents. */
 export function okfMemoryDir(agentDir: string): string {
 	return join(agentDir, "okf-memory");

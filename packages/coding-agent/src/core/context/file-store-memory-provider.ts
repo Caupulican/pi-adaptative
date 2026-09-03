@@ -18,6 +18,8 @@ export const PI_FILE_STORE_MEMORY_PROVIDER_ID = "pi-file-store";
 export interface FileStoreMemoryProviderOptions {
 	memoryFilePath: string;
 	userFilePath: string;
+	/** This project's MEMORY.md; searched with scope "project" when present. */
+	projectMemoryFilePath?: string;
 	providerId?: string;
 }
 
@@ -37,7 +39,7 @@ const FILE_STORE_MEMORY_CAPABILITIES: MemoryProviderCapabilities = {
 	longTerm: true,
 	graph: false,
 	citations: true,
-	scopes: ["user", "global"],
+	scopes: ["user", "global", "project"],
 	localOnly: true,
 };
 
@@ -89,6 +91,16 @@ export function createFileStoreMemoryProvider(options: FileStoreMemoryProviderOp
 	const sources: FileStoreLineSource[] = [
 		{ path: options.userFilePath, fileName: "USER.md", scope: "user", kind: "user_preference" },
 		{ path: options.memoryFilePath, fileName: "MEMORY.md", scope: "global", kind: "fact" },
+		...(options.projectMemoryFilePath
+			? [
+					{
+						path: options.projectMemoryFilePath,
+						fileName: "MEMORY.md" as const,
+						scope: "project" as const,
+						kind: "fact" as const,
+					},
+				]
+			: []),
 	];
 
 	function items(): MemoryItem[] {
