@@ -148,6 +148,22 @@ describe("GPT-5.6 integration", () => {
 		expect(getSupportedThinkingLevels(codexLuna)).toEqual(["low", "medium", "high", "xhigh", "max"]);
 	});
 
+	it("publishes Codex GPT-6 Astra with the Responses Lite contract and ultra as its own effort", () => {
+		const astra = getModel("openai-codex", "gpt-6-astra");
+		expect(astra).toMatchObject({
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+			defaultThinkingLevel: "low",
+			openaiResponsesLite: true,
+			input: ["text", "image"],
+		});
+		// No list price is published yet; the Codex entry stays at zero until models.dev lists it.
+		expect(astra.cost).toMatchObject({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(getSupportedThinkingLevels(astra)).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+		expect(astra.thinkingLevelMap?.ultra).toBe("ultra");
+		expect(astra.thinkingLevelMap?.max).toBe("max");
+	});
+
 	it("sends direct GPT-5.6 pro reasoning, cache policy, safety identifier, and Ultra as max", async () => {
 		let capturedPayload: unknown;
 		vi.stubGlobal(

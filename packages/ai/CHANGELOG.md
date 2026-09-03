@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Codex GPT-6 Astra (`openai-codex` / `gpt-6-astra`), from Codex's bundled catalogue of 2026-09-03: the Responses Lite contract (websockets preferred), text and image input, a 272k context window, reasoning `low` (default) through `xhigh`, `max` and `ultra`, where `ultra` is Astra's own wire effort ("maximum reasoning with automatic task delegation") rather than the GPT-5.6 alias for `max`. No OpenAI list price is published and models.dev has no entry yet, so the Codex cost stays zero until the listing appears; the direct `openai` entry will follow models.dev when it lands. Codex still hides the model from its own picker while it rolls out, and the `openai-codex` default stays GPT-5.6 Sol.
+
 ## [0.97.26] - 2026-09-03
 
 ### Fixed

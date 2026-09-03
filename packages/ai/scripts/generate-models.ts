@@ -245,6 +245,7 @@ const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
+	"gpt-6-astra",
 ]);
 const XAI_RESPONSES_MODEL_IDS = new Set(["grok-4.5", "grok-4.6"]);
 const XAI_BUILTIN_EXCLUDED_MODEL_IDS = new Set([
@@ -343,12 +344,22 @@ function supportsOpenAiXhigh(modelId: string): boolean {
 		modelId.includes("gpt-5.3") ||
 		modelId.includes("gpt-5.4") ||
 		modelId.includes("gpt-5.5") ||
-		modelId.includes("gpt-5.6")
+		modelId.includes("gpt-5.6") ||
+		isOpenAiGpt6(modelId)
 	);
 }
 
 function isOpenAiGpt56(modelId: string): boolean {
 	return modelId.includes("gpt-5.6");
+}
+
+/** GPT-6 (Astra first, 2026-09-03 in Codex's bundled catalogue): the Responses Lite family continues. */
+function isOpenAiGpt6(modelId: string): boolean {
+	return /(?:^|[^0-9.])gpt-6(?:[.-]|$)/u.test(modelId);
+}
+
+function isOpenAiResponsesLiteFamily(modelId: string): boolean {
+	return isOpenAiGpt56(modelId) || isOpenAiGpt6(modelId);
 }
 
 function supportsUltraThinkingAlias(model: Model<Api>): boolean {
@@ -437,17 +448,21 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 	}
-	if (isOpenAiGpt56(model.id)) {
+	if (isOpenAiResponsesLiteFamily(model.id)) {
 		mergeThinkingLevelMap(model, { max: "max" });
 	}
 	if (supportsUltraThinkingAlias(model)) {
 		// Ultra is a UI reasoning label; supported GPT-5.6 variants receive max on the wire.
 		mergeThinkingLevelMap(model, { ultra: "max" });
 	}
+	if (isOpenAiGpt6(model.id)) {
+		// GPT-6 Astra lists ultra as its own effort ("maximum reasoning with automatic task delegation").
+		mergeThinkingLevelMap(model, { ultra: "ultra" });
+	}
 	if (model.provider === "openai" && model.id === "gpt-5.5") {
 		mergeThinkingLevelMap(model, { minimal: null });
 	}
-	if (model.provider === "openai" && isOpenAiGpt56(model.id)) {
+	if (model.provider === "openai" && isOpenAiResponsesLiteFamily(model.id)) {
 		mergeThinkingLevelMap(model, { minimal: null });
 	}
 	if (model.id.endsWith("gpt-5.5-pro")) {
@@ -508,7 +523,7 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.provider === "openai-codex" && supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { minimal: "low" });
 	}
-	if (model.provider === "openai-codex" && isOpenAiGpt56(model.id)) {
+	if (model.provider === "openai-codex" && isOpenAiResponsesLiteFamily(model.id)) {
 		mergeThinkingLevelMap(model, { off: null, minimal: null });
 	}
 	if (model.provider === "openrouter" && model.id === "stealth/ox-alpha") {
@@ -1888,6 +1903,8 @@ async function generateModels() {
 	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 	const CODEX_CONTEXT = 272000;
 	const CODEX_GPT_5_6_CONTEXT = 272000;
+	// Codex's catalogue: context_window 272000, max_context_window 872000 (the long tier).
+	const CODEX_GPT_6_CONTEXT = 272000;
 	const CODEX_SPARK_CONTEXT = 128000;
 	const CODEX_MAX_TOKENS = 128000;
 	// ChatGPT subscriptions are not billed per token; the catalogue mirrors OpenAI's list prices
@@ -2014,6 +2031,25 @@ async function generateModels() {
 			input: ["text", "image"],
 			cost: openAiListCost("gpt-5.6-luna", { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 }),
 			contextWindow: CODEX_GPT_5_6_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+		{
+			// From Codex's bundled catalogue (openai/codex ed391d4dd, 2026-09-03): Responses Lite,
+			// websockets preferred, image input, reasoning low..ultra with low as the default, hidden
+			// from Codex's own picker while it rolls out. No OpenAI list price is published yet and
+			// models.dev has no entry; the cost stays zero (ChatGPT plans are not billed per token)
+			// until the listing appears, at which point `openAiListCost` takes it over.
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			defaultThinkingLevel: "low",
+			openaiResponsesLite: true,
+			input: ["text", "image"],
+			cost: openAiListCost("gpt-6-astra", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+			contextWindow: CODEX_GPT_6_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 	];
