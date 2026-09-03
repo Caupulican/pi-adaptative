@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Changed
+
+- Census tooling: `scripts/session-reuse-census.mjs` reports prompt-cache reuse per session, model and trigger group (tool loop, user, reflection, continuation, after compaction), wipes, and persisted host-record volume against tool output, and fails thresholds with `--gate`; `scripts/refusal-census.mjs` separates operation outcomes from refusals and counts Windows shell-contract refusals.
+- Host records no longer dominate the prompt (measured at 2.7× to 3.3× all tool output on live 0.97.25 sessions): the path-alias legend persists as delta records, the goal context carries no running counters, the failure ledger re-appends as a pointer when unchanged, superseded host records pack inside the recent window, alias minting pauses when the legend outweighs its measured savings, and compaction summarizes the packed projection with an honest `fallback` outcome.
+- Repeated-failure guard: a call failing identically the tier's repeat count (6/4/3) ends the run on the ledger's own count; ordinal step selectors followed by uuid-like or parenthetical noise (`s1-<uuid>`, `step 2 (done)`) resolve to their step and the result names the normalization.
+- Aliases mint only for paths that exist from cwd, never for git refs, ranges or bare listings; the unminted-alias refusal looks only at path-typed parameters (a Python `p/name` passes); OKF listings print absolute paths.
+- Skills: a `skill load`, `read` or `search` miss re-scans the skill roots once before refusing, and search names the skills the loader could not index with the reason.
+- Refusal false positives: a literal filename prefix (`Buildfile*`) is a narrow glob; the harness's own memory, skills and session directories are searchable; a shell-variable target is one file; a script that does not tokenize is assessed line by line; a bash timeout is an operation outcome; evidence and progress land on blocked goals; discriminated-union tool arguments validate on the branch the `action` names, with string-to-boolean coercion.
+- The Windows shell engine covers the coreutils surface live sessions use: `ls -l/-t/-d/-h/-S/-F/-R` with several operands, `find` with depth, type, name, path, size, time, prune, print0, printf, exec and delete predicates and boolean operators, `head`/`tail -c` and multi-file headers, multi-file `wc`, `grep -r/-R/-A/-B/-C/-o/-q/-x/-h/-H/-e/-m/--include/--exclude`, heredocs and here-strings, and nested shells and scripts as external processes.
+- Project-scoped hot memory: the global `MEMORY.md` holds facts true in any task (budget 1,200 chars); each project gets `memory/projects/<key>/MEMORY.md` under the agent home (budget 2,200), keyed like OKF; the `memory` tool's `target` gains `project` and defaults to it; the rendered block shows the general, project and user sections; an over-budget general file adds a triage note; nothing is moved or deleted automatically; workers read project memory and never write it.
+
 ## [0.97.25] - 2026-09-02
 
 ### Changed

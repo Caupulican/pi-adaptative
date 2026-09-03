@@ -110,13 +110,28 @@ describe("GPT-5.6 integration", () => {
 		const codexTerra = getModel("openai-codex", "gpt-5.6-terra");
 		const codexLuna = getModel("openai-codex", "gpt-5.6-luna");
 
+		// Prices, the 272k context tier and limits come from models.dev; the advertised window stops at
+		// the tier threshold (short-context pricing by default, as in Codex's own catalogue).
 		expect(alias).toMatchObject({
-			contextWindow: 1_050_000,
+			contextWindow: 272_000,
 			maxTokens: 128_000,
 			defaultThinkingLevel: "medium",
-			longContextPricing: { thresholdTokens: 272_000, inputMultiplier: 2, outputMultiplier: 1.5 },
+			cost: {
+				input: 4,
+				output: 20,
+				cacheRead: 0.4,
+				cacheWrite: 5,
+				tiers: [{ inputTokensAbove: 272_000, input: 8, output: 30, cacheRead: 0.8, cacheWrite: 10 }],
+			},
 		});
+		expect(alias.longContextPricing).toBeUndefined();
 		expect(alias.autoCompactionTriggerTokens).toBeUndefined();
+		expect(directTerra.cost).toMatchObject({ input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 });
+		expect(directLuna.cost).toMatchObject({ input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 });
+		// ChatGPT plans are not billed per token; the Codex entries mirror the OpenAI list prices.
+		expect(codexSol.cost).toEqual(directSol.cost);
+		expect(codexTerra.cost).toEqual(directTerra.cost);
+		expect(codexLuna.cost).toEqual(directLuna.cost);
 		expect(directSol.defaultThinkingLevel).toBe("medium");
 		expect(directTerra.defaultThinkingLevel).toBe("medium");
 		expect(directLuna.defaultThinkingLevel).toBe("medium");
@@ -224,6 +239,33 @@ describe("GPT-5.6 integration", () => {
 		).result();
 
 		expect(capturedPayload).not.toHaveProperty("prompt_cache_options");
+	});
+
+	it("turns GPT-5.6 caching off with explicit mode and no breakpoints when retention is none", async () => {
+		let capturedPayload: Record<string, unknown> | undefined;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => completedSse()),
+		);
+
+		await streamOpenAIResponses(
+			getModel("openai", "gpt-5.6-sol"),
+			{ messages: [{ role: "user", content: "Summarize this.", timestamp: Date.now() }] },
+			{
+				apiKey: "test-key",
+				sessionId: "session-gpt56",
+				cacheRetention: "none",
+				onPayload: (payload) => {
+					capturedPayload = payload as Record<string, unknown>;
+				},
+			},
+		).result();
+
+		// Explicit mode without a breakpoint neither reads nor writes the cache, so a one-shot request
+		// (compaction summary, branch summary) pays no 1.25× cache-write charge.
+		expect(capturedPayload).toMatchObject({ prompt_cache_options: { mode: "explicit" } });
+		expect(capturedPayload?.prompt_cache_key).toBeUndefined();
+		expect(capturedPayload).not.toHaveProperty("prompt_cache_retention");
 	});
 
 	it("uses the ChatGPT Responses Lite contract for Codex GPT-5.6", async () => {
@@ -430,10 +472,12 @@ describe("GPT-5.6 integration", () => {
 			output: 1_000,
 			totalTokens: 301_000,
 		});
-		expect(output.usage.cost.input).toBeCloseTo(2.3);
-		expect(output.usage.cost.cacheRead).toBeCloseTo(0.05);
-		expect(output.usage.cost.cacheWrite).toBeCloseTo(0.25);
-		expect(output.usage.cost.output).toBeCloseTo(0.045);
-		expect(output.usage.cost.total).toBeCloseTo(2.645);
+		// 300k total input exceeds the 272k tier: the whole request bills at the long-context rate
+		// (Sol: 8 / 30 / 0.8 / 10 per million).
+		expect(output.usage.cost.input).toBeCloseTo(1.84);
+		expect(output.usage.cost.cacheRead).toBeCloseTo(0.04);
+		expect(output.usage.cost.cacheWrite).toBeCloseTo(0.2);
+		expect(output.usage.cost.output).toBeCloseTo(0.03);
+		expect(output.usage.cost.total).toBeCloseTo(2.11);
 	});
 });

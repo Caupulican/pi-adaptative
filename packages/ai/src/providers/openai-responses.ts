@@ -179,6 +179,11 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		requestFormat: compat.requestFormat,
 		toolNameMap,
 	});
+	// GPT-5.6 and later replace `prompt_cache_retention` with `prompt_cache_options` and bill cache
+	// writes (1.25× input). Implicit mode caches through the latest eligible message; explicit
+	// mode with no breakpoints neither reads nor writes the cache, which is what "none" means for
+	// a one-shot request such as a compaction summary.
+	// https://developers.openai.com/api/docs/guides/prompt-caching
 	const isGpt56 = model.provider === "openai" && model.id.startsWith("gpt-5.6");
 	const params: ResponseCreateParamsStreaming = {
 		model: model.id,
@@ -186,10 +191,14 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		input: messages,
 		stream: true,
 		prompt_cache_key: cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options?.sessionId),
-		...(cacheRetention !== "none" && isGpt56
-			? { prompt_cache_options: options?.promptCacheOptions ?? { mode: "implicit" as const, ttl: "30m" as const } }
-			: {}),
-		...(isGpt56 ? {} : { prompt_cache_retention: getPromptCacheRetention(compat, cacheRetention) }),
+		...(isGpt56
+			? {
+					prompt_cache_options:
+						cacheRetention === "none"
+							? { mode: "explicit" as const }
+							: (options?.promptCacheOptions ?? { mode: "implicit" as const, ttl: "30m" as const }),
+				}
+			: { prompt_cache_retention: getPromptCacheRetention(compat, cacheRetention) }),
 		store: false,
 	};
 	const safetyIdentifier = options?.metadata?.safety_identifier;
