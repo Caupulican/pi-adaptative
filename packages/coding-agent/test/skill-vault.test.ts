@@ -783,3 +783,55 @@ describe("SkillVaultController", () => {
 		expect(JSON.stringify(partial.content)).toContain("skill load failed");
 	});
 });
+
+describe("SkillVaultController refresh on miss", () => {
+	let root = "";
+	afterEach(() => {
+		if (root) rmSync(root, { recursive: true, force: true });
+		root = "";
+	});
+	function writeSkill(name: string, description: string): void {
+		const dir = join(root, name);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "SKILL.md"),
+			["---", `name: ${name}`, `description: ${description}`, "---", "", `# ${name}`].join("\n"),
+		);
+	}
+
+	it("re-scans once on a load or search miss so a skill written mid-session is eligible", () => {
+		root = mkdtempSync(join(tmpdir(), "pi-skill-vault-refresh-"));
+		writeSkill("first-skill", "Handles the first thing");
+		let skills = loadSkillsFromDir({ dir: root, source: "user" }).skills;
+		const refreshSkills = vi.fn(() => {
+			skills = loadSkillsFromDir({ dir: root, source: "user" }).skills;
+		});
+		const vault = new SkillVaultController({ getSkills: () => skills, refreshSkills });
+		expect(vault.load("host-bridge", "model").ok).toBe(false);
+		expect(refreshSkills).toHaveBeenCalledTimes(1);
+		// The skill appears on disk (skillify, a write, the owner) after the vault was built.
+		writeSkill("host-bridge", "Drive the host shell from the sandbox");
+		const loaded = vault.load("host-bridge", "model");
+		expect(loaded.ok).toBe(true);
+		expect(refreshSkills).toHaveBeenCalledTimes(2);
+		expect(vault.search("host shell sandbox").candidates.map((candidate) => candidate.name)).toEqual(["host-bridge"]);
+	});
+
+	it("names the rescan in the refusal and lists skills the loader could not index", () => {
+		root = mkdtempSync(join(tmpdir(), "pi-skill-vault-diag-"));
+		writeSkill("first-skill", "Handles the first thing");
+		const skills = loadSkillsFromDir({ dir: root, source: "user" }).skills;
+		const vault = new SkillVaultController({
+			getSkills: () => skills,
+			refreshSkills: () => {},
+			getSkillDiagnostics: () => [`${join(root, "query-morro-erros", "SKILL.md")}: description is required`],
+		});
+		const missing = vault.load("ghost", "model");
+		expect(missing.ok).toBe(false);
+		if (missing.ok) throw new Error("expected a miss");
+		expect(missing.message).toBe('No eligible skill named "ghost" after re-scanning the skill roots.');
+		const search = vault.search("first thing");
+		expect(search.candidates.map((candidate) => candidate.name)).toEqual(["first-skill"]);
+		expect(search.diagnostics?.[0]).toContain("description is required");
+	});
+});

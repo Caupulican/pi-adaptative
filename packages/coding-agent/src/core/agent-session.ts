@@ -501,6 +501,11 @@ export class AgentSession {
 		this._durableLearningState = this._isChildSession ? undefined : DurableLearningState.forAgentDir(agentDir);
 		this._skillVault = new SkillVaultController({
 			getSkills: () => this._resourceLoader.getActiveSkills(),
+			refreshSkills: () => this._resourceLoader.refreshSkills?.(),
+			getSkillDiagnostics: () =>
+				this._resourceLoader
+					.getSkills()
+					.diagnostics.map((diagnostic) => `${diagnostic.path}: ${diagnostic.message}`),
 			getMaxBodyBytes: () =>
 				Math.min(
 					resolveActiveSkillBodyByteLimit(this.model?.contextWindow),
