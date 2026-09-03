@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -213,5 +214,60 @@ describe("native python tool", () => {
 	it("resolves path syntax using the target platform rules", () => {
 		expect(resolvePythonToolPath("C:\\repo", "scripts\\edit.py", "win32")).toBe("C:\\repo\\scripts\\edit.py");
 		expect(resolvePythonToolPath("/repo", "scripts/edit.py", "linux")).toBe("/repo/scripts/edit.py");
+	});
+});
+
+describe("native python tool: output reduction", () => {
+	it("collapses repeated stdout lines, persists the raw stream and names it in one notice", async () => {
+		const cwd = await createTempDirectory();
+		const repeated = `${Array.from({ length: 200 }, () => "polling job status: pending").join("\n")}\ndone\n`;
+		const tool = createPythonToolDefinition(cwd, {
+			resolveRuntime: readyRuntime,
+			operations: operation(async (request) => {
+				request.onStdout(Buffer.from(repeated));
+				return { exitCode: 0, reason: "exited", signal: null };
+			}),
+			outputDirectory: cwd,
+		});
+		const result = await tool.execute("python-reduce", { code: "poll()" }, undefined, undefined, undefined as never);
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text.startsWith("polling job status: pending\n[line repeated 200 times]\ndone")).toBe(true);
+		expect(text).toContain("[python output filtered: retained 3 of 201 lines. Full output: ");
+		expect(text).not.toContain("stdout saved to");
+		const details = result.details as { outputReduction?: { kind: string; omittedLines: number; rawPath?: string } };
+		expect(details.outputReduction).toMatchObject({ kind: "generic", omittedLines: 199 });
+		expect(readFileSync(details.outputReduction!.rawPath!, "utf-8")).toBe(repeated);
+	});
+
+	it("returns raw stdout when the model asks for fullOutput or the operator turned reduction off", async () => {
+		const cwd = await createTempDirectory();
+		const repeated = `${Array.from({ length: 50 }, () => "same").join("\n")}\n`;
+		const build = (outputReduction?: { enabled: boolean }) =>
+			createPythonToolDefinition(cwd, {
+				resolveRuntime: readyRuntime,
+				operations: operation(async (request) => {
+					request.onStdout(Buffer.from(repeated));
+					return { exitCode: 0, reason: "exited", signal: null };
+				}),
+				outputDirectory: cwd,
+				...(outputReduction ? { outputReduction } : {}),
+			});
+		const full = await build().execute(
+			"python-full",
+			{ code: "x", fullOutput: true },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(full.content[0]?.type === "text" ? full.content[0].text : "").toContain(repeated.trimEnd());
+		const off = await build({ enabled: false }).execute(
+			"python-off",
+			{ code: "x" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(off.content[0]?.type === "text" ? off.content[0].text : "").toContain(repeated.trimEnd());
+		expect((off.details as { outputReduction?: unknown }).outputReduction).toBeUndefined();
 	});
 });

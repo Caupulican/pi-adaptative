@@ -9,6 +9,16 @@ import type { ToolDefinition } from "../extensions/types.ts";
 import { ensurePythonRuntime, type PythonRuntimeOutcome } from "../python-runtime.ts";
 import { withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
+import {
+	formatOutputReductionNotice,
+	type OutputReductionDetails,
+	type OutputReductionToolOptions,
+	reduceToolOutput,
+} from "./output-reduction.ts";
+import "./output-reducers.ts";
+import { getAgentDir } from "../../config.ts";
+import { BUNDLED_OUTPUT_RULES } from "./output-rules.bundled.ts";
+import { createRuleOutputReducer, loadOutputRules } from "./output-rules.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 export const DEFAULT_PYTHON_TIMEOUT_SECONDS = 30;
@@ -46,6 +56,12 @@ const pythonSchema = Type.Object(
 		timeoutSeconds: Type.Optional(
 			Type.Number({
 				description: `Wall-clock timeout. Defaults to ${DEFAULT_PYTHON_TIMEOUT_SECONDS} seconds and is capped at ${MAX_PYTHON_TIMEOUT_SECONDS}.`,
+			}),
+		),
+		fullOutput: Type.Optional(
+			Type.Boolean({
+				description:
+					"Return the complete raw stdout for this call: no output filters (generic cleaning, rules). The persisted full output named in a filtered notice is usually enough.",
 			}),
 		),
 		maxOutputBytes: Type.Optional(
@@ -108,6 +124,8 @@ export interface PythonToolOptions {
 	omitEnvironmentVariables?: readonly string[];
 	/** Override only for tests or embedded runtimes; production uses the process work directory. */
 	outputDirectory?: string;
+	/** Output reduction switches (settings `toolOutput`); reduction is on at the standard level by default. */
+	outputReduction?: OutputReductionToolOptions;
 }
 
 function stripAtPrefix(value: string): string {
@@ -180,6 +198,23 @@ export function createPythonToolDefinition(
 ): ToolDefinition<typeof pythonSchema, PythonToolDetails> {
 	const resolveRuntime = options.resolveRuntime ?? (() => ensurePythonRuntime({ silent: true }));
 	const operations = options.operations ?? createLocalPythonOperations();
+	// Output reduction: on unless the operator turned it off (settings or PI_TOOL_FILTER_DISABLED=1).
+	const reductionEnabled = options.outputReduction?.enabled !== false && process.env.PI_TOOL_FILTER_DISABLED !== "1";
+	const reductionLevel = options.outputReduction?.level ?? "standard";
+	const reductionOptions = reductionEnabled
+		? {
+				extraReducers: [
+					createRuleOutputReducer(
+						loadOutputRules({
+							cwd: baseCwd,
+							agentDir: options.outputReduction?.agentDir ?? getAgentDir(),
+							extraFiles: options.outputReduction?.rulesFiles,
+							bundled: BUNDLED_OUTPUT_RULES,
+						}),
+					),
+				],
+			}
+		: undefined;
 	return {
 		name: "python",
 		label: "python",
@@ -220,12 +255,41 @@ export function createPythonToolDefinition(
 			};
 			const stdout = new OutputAccumulator({ ...accumulatorOptions, tempFilePrefix: "pi-python-stdout" });
 			const stderr = new OutputAccumulator({ ...accumulatorOptions, tempFilePrefix: "pi-python-stderr" });
+			const reduceStdout = input.fullOutput !== true && reductionEnabled;
 			const finishStreams = () => {
 				stdout.finish();
 				stderr.finish();
+				// Reduce the complete stdout before the cap so the model sees the shorter version of the
+				// whole output, not of its head+tail; the raw stream is persisted when lines were dropped.
+				const rawStdout = reduceStdout ? stdout.snapshot({ persistIfTruncated: true }) : undefined;
+				const reduction =
+					rawStdout && !rawStdout.truncation.truncated
+						? reduceToolOutput(
+								{
+									tool: "python",
+									command: "python",
+									text: rawStdout.content,
+									exitCode: 0,
+									level: reductionLevel,
+								},
+								reductionOptions,
+							)
+						: undefined;
+				const stdoutSnapshot = reduction
+					? stdout.snapshot({ persistIfTruncated: true, persistAlways: reduction.details.persistRaw })
+					: (rawStdout ?? stdout.snapshot({ persistIfTruncated: true }));
+				const outputReduction: OutputReductionDetails | undefined = reduction
+					? {
+							...reduction.details,
+							...(reduction.details.persistRaw && stdoutSnapshot.fullOutputPath
+								? { rawPath: stdoutSnapshot.fullOutputPath }
+								: {}),
+						}
+					: undefined;
 				return {
-					stdout: stdout.snapshot({ persistIfTruncated: true }),
+					stdout: reduction ? { ...stdoutSnapshot, content: reduction.text } : stdoutSnapshot,
 					stderr: stderr.snapshot({ persistIfTruncated: true }),
+					outputReduction,
 				};
 			};
 			let execution: PythonExecutionResult;
@@ -267,7 +331,11 @@ export function createPythonToolDefinition(
 					snapshots.stderr.fullOutputPath,
 					snapshots.stderr.fullOutputError,
 				);
-				if (stdoutNotice) sections.push(stdoutNotice);
+				const reductionNotice = snapshots.outputReduction
+					? formatOutputReductionNotice(snapshots.outputReduction)
+					: undefined;
+				if (reductionNotice) sections.push(reductionNotice);
+				if (stdoutNotice && !snapshots.outputReduction?.rawPath) sections.push(stdoutNotice);
 				if (stderrNotice) sections.push(stderrNotice);
 				const status = `[python exitCode=${execution.exitCode ?? "null"}${execution.signal ? `; signal=${execution.signal}` : ""}]`;
 				sections.push(status);
@@ -297,6 +365,7 @@ export function createPythonToolDefinition(
 						...(snapshots.stderr.truncation.truncated ? { stderrTruncation: snapshots.stderr.truncation } : {}),
 						stdoutOutputPath: snapshots.stdout.fullOutputPath,
 						stderrOutputPath: snapshots.stderr.fullOutputPath,
+						...(snapshots.outputReduction ? { outputReduction: snapshots.outputReduction } : {}),
 						stdoutOutputError: snapshots.stdout.fullOutputError,
 						stderrOutputError: snapshots.stderr.fullOutputError,
 					},

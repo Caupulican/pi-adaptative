@@ -40,7 +40,7 @@ describe("bash tool: search output reduction", () => {
 		const result = await tool.execute("rg-reduced", { command: "rg -n needle packages/app/src" });
 		const text = getTextOutput(result, false);
 		expect(text.startsWith("packages/app/src/services/search-service.ts\n  5: ")).toBe(true);
-		expect(text).toContain("[rg output filtered: retained 41 of 40 lines. Full output: ");
+		expect(text).toContain("[rg output filtered: 40 lines regrouped, none omitted. Full output: ");
 		const reduction = result.details?.outputReduction;
 		expect(reduction).toMatchObject({ kind: "search", family: "rg", inputLines: 40, omittedLines: 0 });
 		expect(reduction?.rawPath).toBeDefined();
@@ -62,6 +62,23 @@ describe("bash tool: search output reduction", () => {
 		expect(getTextOutput(verbose, false)).toBe(rgOutput);
 	});
 
+	it("returns the raw output when the model asks for fullOutput or the operator turned reduction off", async () => {
+		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-reduction-"));
+		cleanupDirectories.push(outputDirectory);
+		const tool = createBashTool(process.cwd(), { operations: operationsFor(rgOutput), outputDirectory });
+		const full = await tool.execute("rg-full", { command: "rg -n needle packages/app/src", fullOutput: true });
+		expect(getTextOutput(full, false)).toBe(rgOutput);
+		expect(full.details?.outputReduction).toBeUndefined();
+		const offTool = createBashTool(process.cwd(), {
+			operations: operationsFor(rgOutput),
+			outputDirectory,
+			outputReduction: { enabled: false },
+		});
+		const off = await offTool.execute("rg-off", { command: "rg -n needle packages/app/src" });
+		expect(getTextOutput(off, false)).toBe(rgOutput);
+		expect(off.details?.outputReduction).toBeUndefined();
+	});
+
 	it("leaves a result alone when the reduction would not be materially smaller", async () => {
 		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-reduction-"));
 		cleanupDirectories.push(outputDirectory);
@@ -70,5 +87,44 @@ describe("bash tool: search output reduction", () => {
 		const result = await tool.execute("rg-sparse", { command: "rg -n x src" });
 		expect(getTextOutput(result, false)).toBe(sparse);
 		expect(result.details?.outputReduction).toBeUndefined();
+	});
+});
+
+describe("bash tool: generic output cleaning", () => {
+	it("cleans any command's output silently and collapses repeats with a persisted raw copy", async () => {
+		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-reduction-"));
+		cleanupDirectories.push(outputDirectory);
+		const esc = String.fromCharCode(27);
+		const colored = `${Array.from({ length: 12 }, (_, index) => `${esc}[32mok${esc}[0m step ${index}   `).join("\n")}\n`;
+		const cleanTool = createBashTool(process.cwd(), { operations: operationsFor(colored), outputDirectory });
+		const cleaned = await cleanTool.execute("clean", { command: "./scripts/build.sh" });
+		expect(getTextOutput(cleaned, false)).toBe(
+			Array.from({ length: 12 }, (_, index) => `ok step ${index}`)
+				.join("\n")
+				.concat("\n"),
+		);
+		expect(cleaned.details?.outputReduction).toMatchObject({ kind: "generic", omittedLines: 0, persistRaw: false });
+		expect(cleaned.details?.outputReduction?.rawPath).toBeUndefined();
+
+		const repeated = `${Array.from({ length: 200 }, () => "waiting for the service to come up").join("\n")}\nready\n`;
+		const repeatTool = createBashTool(process.cwd(), { operations: operationsFor(repeated), outputDirectory });
+		const collapsed = await repeatTool.execute("collapse", { command: "./scripts/wait.sh" });
+		const text = getTextOutput(collapsed, false);
+		expect(text.startsWith("waiting for the service to come up\n[line repeated 200 times]\nready\n")).toBe(true);
+		expect(text).toContain("[wait.sh output filtered: retained 3 of 201 lines. Full output: ");
+		const reduction = collapsed.details?.outputReduction;
+		expect(reduction).toMatchObject({ kind: "generic", omittedLines: 199, persistRaw: true });
+		expect(readFileSync(reduction!.rawPath!, "utf-8")).toBe(repeated);
+	});
+
+	it("applies a bundled rule and names it", async () => {
+		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-reduction-"));
+		cleanupDirectories.push(outputDirectory);
+		const npm = `${Array.from({ length: 30 }, (_, index) => `npm warn deprecated pkg${index}@1.0.0: no longer supported`).join("\n")}\n\nadded 412 packages in 9s\n\nfound 0 vulnerabilities\n`;
+		const tool = createBashTool(process.cwd(), { operations: operationsFor(npm), outputDirectory });
+		const result = await tool.execute("npm", { command: "cd packages/app && npm install" });
+		const text = getTextOutput(result, false);
+		expect(text.startsWith("added 412 packages in 9s\nfound 0 vulnerabilities\n")).toBe(true);
+		expect(result.details?.outputReduction).toMatchObject({ kind: "rule:npm-install", family: "npm install" });
 	});
 });

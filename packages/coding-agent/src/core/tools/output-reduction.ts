@@ -10,6 +10,7 @@
  * outcome, so the bash tool, the python tool and the census script share exactly one decision.
  */
 import { type CommandFamilyClassification, classifyCommandFamily, commandFamilyLabel } from "./command-family.ts";
+import { reduceGenericOutput } from "./generic-output-reducer.ts";
 import type { ShellOutputProjection, ShellOutputProjectorLike } from "./shell-output-projection.ts";
 
 /** How hard a reducer may cut. The capability tier decides; `standard` is the frontier default. */
@@ -28,7 +29,7 @@ export interface OutputReductionRequest {
 
 /** What a reduction did, persisted in the tool result's `details.outputReduction` for the census. */
 export interface OutputReductionDetails {
-	/** Reducer name (`search`, `diagnostics`, `generic`, `rule:<name>`). */
+	/** Reducer name (`search`, `diagnostics`, `generic`, `rule:<name>`); `+generic` when the generic stage also cut lines. */
 	kind: string;
 	/** Command family label the reducer was chosen for (`rg`, `git diff`, `cargo check`). */
 	family: string;
@@ -39,6 +40,13 @@ export interface OutputReductionDetails {
 	omittedLines: number;
 	/** Path of the persisted raw output when the caller stored it. */
 	rawPath?: string;
+	/**
+	 * Whether the caller should persist the raw output and append the recovery notice: true when a
+	 * family or rule reducer reshaped the output or the generic stage dropped lines, and the cut is
+	 * large enough to be worth a file. Pure cleaning (ANSI, whitespace, resolved progress frames)
+	 * leaves it false: nothing to recover.
+	 */
+	persistRaw: boolean;
 }
 
 export interface OutputReductionResult {
@@ -58,7 +66,7 @@ export interface OutputReducer {
 	reduce(
 		classification: CommandFamilyClassification,
 		request: OutputReductionRequest,
-	): (Omit<OutputReductionResult, "details"> & { omittedLines: number }) | undefined;
+	): (Omit<OutputReductionResult, "details"> & { omittedLines: number; kind?: string }) | undefined;
 }
 
 const reducers: OutputReducer[] = [];
@@ -74,8 +82,28 @@ export function registeredOutputReducers(): readonly OutputReducer[] {
 	return reducers;
 }
 
-/** A reduction is worth sending only when it removes at least this share of the raw bytes. */
+/** A family or rule reduction is worth sending only when it removes at least this share of the raw bytes. */
 const MIN_REDUCTION_SHARE = 0.2;
+/** The generic stage alone is worth sending when it removes at least this many bytes. */
+const MIN_GENERIC_SAVED_BYTES = 128;
+/** Below this many dropped bytes the raw output is not worth a managed file. */
+const MIN_PERSIST_SAVED_BYTES = 512;
+
+/** Operator-facing switches shared by the bash and python tools (settings `toolOutput`). */
+export interface OutputReductionToolOptions {
+	/** `false` turns every stage off for the tool; the model's `fullOutput` does the same per call. */
+	enabled?: boolean;
+	level?: OutputReductionLevel;
+	/** Extra rule files (settings `toolOutput.rulesFile`), loaded after the user and project files. */
+	rulesFiles?: readonly string[];
+	/** Agent directory holding the user rule file; defaults to the runtime's agent directory. */
+	agentDir?: string;
+}
+
+export interface ReduceToolOutputOptions {
+	/** Reducers tried after the registered ones (the tool instance's rule reducer). */
+	extraReducers?: readonly OutputReducer[];
+}
 
 function countLines(text: string): number {
 	if (text.length === 0) return 0;
@@ -83,38 +111,71 @@ function countLines(text: string): number {
 }
 
 /**
- * Pick the reducer for a request and run it. Undefined when no reducer applies, the model asked for
- * verbose output, or the result is not materially smaller. Pure: safe for replay over recorded text.
+ * Run the pipeline for a request: the generic stage first (ANSI, progress frames, whitespace,
+ * repeated lines), then the first family or rule reducer that applies on the cleaned text. Undefined
+ * when nothing changed, the model asked for verbose output, or the result is not materially smaller.
+ * Pure: safe for replay over recorded text.
  */
-export function reduceToolOutput(request: OutputReductionRequest): OutputReductionResult | undefined {
+export function reduceToolOutput(
+	request: OutputReductionRequest,
+	options?: ReduceToolOutputOptions,
+): OutputReductionResult | undefined {
 	const classification = classifyCommandFamily(request.command);
 	if (classification.verbose) return undefined;
-	for (const reducer of reducers) {
-		if (!reducer.applies(classification, request)) continue;
-		const reduced = reducer.reduce(classification, request);
-		if (!reduced) return undefined;
-		const inputBytes = Buffer.byteLength(request.text, "utf-8");
-		const outputBytes = Buffer.byteLength(reduced.text, "utf-8");
-		if (outputBytes > inputBytes * (1 - MIN_REDUCTION_SHARE)) return undefined;
-		return {
-			text: reduced.text,
-			details: {
-				kind: reducer.name,
-				family: commandFamilyLabel(classification),
-				inputBytes,
-				outputBytes,
-				inputLines: countLines(request.text),
-				outputLines: countLines(reduced.text),
-				omittedLines: reduced.omittedLines,
-			},
-		};
+	const inputBytes = Buffer.byteLength(request.text, "utf-8");
+	const generic = reduceGenericOutput(request.text, request.level);
+	const cleaned: OutputReductionRequest = { ...request, text: generic.text };
+	let text = generic.text;
+	let omittedLines = generic.omittedLines;
+	let kind: string | undefined;
+	for (const reducer of [...reducers, ...(options?.extraReducers ?? [])]) {
+		if (!reducer.applies(classification, cleaned)) continue;
+		const reduced = reducer.reduce(classification, cleaned);
+		if (!reduced) break;
+		const reducedBytes = Buffer.byteLength(reduced.text, "utf-8");
+		// A family cut that saves less than the floor is not worth a different spelling of the output.
+		if (reducedBytes > inputBytes * (1 - MIN_REDUCTION_SHARE)) break;
+		text = reduced.text;
+		omittedLines += reduced.omittedLines;
+		kind = reduced.kind ?? reducer.name;
+		break;
 	}
-	return undefined;
+	const outputBytes = Buffer.byteLength(text, "utf-8");
+	const saved = inputBytes - outputBytes;
+	if (kind === undefined) {
+		if (!generic.changed) return undefined;
+		if (saved < MIN_GENERIC_SAVED_BYTES && outputBytes > inputBytes * (1 - MIN_REDUCTION_SHARE)) return undefined;
+		kind = "generic";
+	} else if (generic.omittedLines > 0) {
+		kind = `${kind}+generic`;
+	}
+	return {
+		text,
+		details: {
+			kind,
+			family: commandFamilyLabel(classification),
+			inputBytes,
+			outputBytes,
+			inputLines: countLines(request.text),
+			outputLines: countLines(text),
+			omittedLines,
+			// A family or rule reducer changed the shape of the output; the generic stage only cleaned it
+			// unless it dropped lines. Either way a small cut is not worth a file.
+			persistRaw: saved >= MIN_PERSIST_SAVED_BYTES && (omittedLines > 0 || kind !== "generic"),
+		},
+	};
 }
 
-/** The one-line notice appended to a reduced result; deterministic, no timestamps or random ids. */
-export function formatOutputReductionNotice(details: OutputReductionDetails): string {
-	const kept = `retained ${details.outputLines} of ${details.inputLines} lines`;
+/**
+ * The one-line notice appended to a reduced result; deterministic, no timestamps or random ids.
+ * Undefined when no line was dropped and no raw file was written: cleaning needs no announcement.
+ */
+export function formatOutputReductionNotice(details: OutputReductionDetails): string | undefined {
+	if (details.omittedLines === 0 && !details.rawPath) return undefined;
+	const kept =
+		details.omittedLines === 0
+			? `${details.inputLines} lines regrouped, none omitted`
+			: `retained ${details.outputLines} of ${details.inputLines} lines`;
 	const recovery = details.rawPath ? ` Full output: ${details.rawPath}` : "";
 	return `[${details.family} output filtered: ${kept}.${recovery}]`;
 }
@@ -122,12 +183,12 @@ export function formatOutputReductionNotice(details: OutputReductionDetails): st
 /** Reducers see the whole output; beyond this the raw path (caps and managed file) takes over. */
 const MAX_BUFFERED_REDUCTION_BYTES = 8 * 1024 * 1024;
 
-/** Whether any registered reducer would consider this command at all (cheap pre-check for the tool). */
-export function outputReductionApplies(command: string): boolean {
+/** Whether a family reducer (registered or extra) would consider this command; the generic stage always applies. */
+export function outputReductionApplies(command: string, options?: ReduceToolOutputOptions): boolean {
 	const classification = classifyCommandFamily(command);
 	if (classification.verbose) return false;
 	const probe: OutputReductionRequest = { tool: "bash", command, text: "", exitCode: 0, level: "standard" };
-	return reducers.some((reducer) => reducer.applies(classification, probe));
+	return [...reducers, ...(options?.extraReducers ?? [])].some((reducer) => reducer.applies(classification, probe));
 }
 
 /**
@@ -140,8 +201,9 @@ export function createReductionProjector(
 	tool: string,
 	command: string,
 	level: OutputReductionLevel,
+	options?: ReduceToolOutputOptions,
 ): ShellOutputProjectorLike | undefined {
-	if (!outputReductionApplies(command)) return undefined;
+	if (classifyCommandFamily(command).verbose) return undefined;
 	const chunks: Buffer[] = [];
 	let bufferedBytes = 0;
 	let overflowed = false;
@@ -163,8 +225,8 @@ export function createReductionProjector(
 				finished = null;
 				return undefined;
 			}
-			const text = Buffer.concat(chunks).toString("utf-8").replace(/\r\n?/g, "\n");
-			const result = reduceToolOutput({ tool, command, text, exitCode, level });
+			const text = Buffer.concat(chunks).toString("utf-8");
+			const result = reduceToolOutput({ tool, command, text, exitCode, level }, options);
 			if (!result) {
 				finished = null;
 				return undefined;
@@ -179,6 +241,7 @@ export function createReductionProjector(
 				omittedLines: result.details.omittedLines,
 				collapsedPassingLines: 0,
 				reduction: result.details,
+				persistRaw: result.details.persistRaw,
 			};
 			return finished;
 		},

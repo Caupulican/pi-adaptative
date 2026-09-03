@@ -29,6 +29,10 @@ const { classifyCommandFamily, commandFamilyLabel } = await jiti.import(
 	"../packages/coding-agent/src/core/tools/command-family.ts",
 );
 const { reduceToolOutput } = await jiti.import("../packages/coding-agent/src/core/tools/output-reduction.ts");
+const { BUNDLED_OUTPUT_RULES } = await jiti.import("../packages/coding-agent/src/core/tools/output-rules.bundled.ts");
+const { createRuleOutputReducer } = await jiti.import("../packages/coding-agent/src/core/tools/output-rules.ts");
+/** Replay uses the bundled rules exactly as a fresh tool instance would (no user or project file). */
+const replayOptions = { extraReducers: [createRuleOutputReducer(BUNDLED_OUTPUT_RULES)] };
 // Registers the bundled reducers so the replay measures exactly what the tools run.
 await jiti.import("../packages/coding-agent/src/core/tools/output-reducers.ts");
 
@@ -64,7 +68,10 @@ export function replayCorpus(manifestPath) {
 	const rows = [];
 	for (const entry of entries) {
 		const text = readFileSync(join(base, entry.file), "utf8");
-		const reduced = reduceToolOutput({ tool: "bash", command: entry.command, text, exitCode: 0, level: "standard" });
+		const reduced = reduceToolOutput(
+			{ tool: "bash", command: entry.command, text, exitCode: 0, level: "standard" },
+			replayOptions,
+		);
 		const from = Buffer.byteLength(text, "utf-8");
 		const to = reduced ? reduced.details.outputBytes : from;
 		rows.push({ name: entry.name, family: entry.family, kind: reduced?.details.kind ?? "-", from, to });
@@ -113,7 +120,7 @@ export function censusSession(entries, options = {}) {
 		const family = tool === "python" ? "python" : command ? commandFamilyLabel(classifyCommandFamily(command)) : "(unpaired)";
 		let replayExtra = {};
 		if (options.replay && command !== undefined) {
-			const reduced = reduceToolOutput({ tool, command, text, exitCode: 0, level: "standard" });
+			const reduced = reduceToolOutput({ tool, command, text, exitCode: 0, level: "standard" }, replayOptions);
 			replayExtra = { replayFrom: bytes, replayTo: reduced ? reduced.details.outputBytes : bytes };
 		}
 		bump(byFamily, family, bytes, { ...reducedExtra, ...replayExtra });

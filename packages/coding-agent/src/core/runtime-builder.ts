@@ -140,6 +140,7 @@ import { createFindTool } from "./tools/find.ts";
 import { createGoalLifecycleToolDefinitions, createGoalToolDefinition, type GoalToolInput } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
+import type { OutputReductionToolOptions } from "./tools/output-reduction.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
 import { createPipelineToolDefinition } from "./tools/pipeline.ts";
 import { createReadTool } from "./tools/read.ts";
@@ -956,9 +957,17 @@ export class RuntimeBuilder {
 		const toolArtifactStore =
 			!baseToolsOverride && toolAccess.allows("artifact_retrieve") ? this.deps.getToolArtifactStore() : undefined;
 		const resourceLoader = this.deps.getResourceLoader();
+		const toolOutputSettings = this.deps.getSettingsManager().getToolOutputSettings();
+		const outputReduction: OutputReductionToolOptions = {
+			enabled: toolOutputSettings.reduction !== "off",
+			level: toolOutputSettings.level === "compact" ? "compact" : "standard",
+			rulesFiles: toolOutputSettings.rulesFile ? [toolOutputSettings.rulesFile] : [],
+			agentDir: this.deps.getAgentDir(),
+		};
 		const toolOptions: ToolDefinitionOptions = {
 			read: { autoResizeImages },
 			bash: {
+				outputReduction,
 				commandPrefix: shellCommandPrefix,
 				shellPath,
 				sessionKey: this.deps.getShellSessionKey(),
@@ -976,6 +985,7 @@ export class RuntimeBuilder {
 				},
 			},
 			python: {
+				outputReduction,
 				environment: (cwd) => this._credentialManager.getEnvironmentForCwd(cwd) ?? {},
 				omitEnvironmentVariables: ["BW_SESSION"],
 			},

@@ -45,6 +45,8 @@ import {
 	createReductionProjector,
 	formatOutputReductionNotice,
 	type OutputReductionDetails,
+	type OutputReductionToolOptions,
+	type ReduceToolOutputOptions,
 } from "./output-reduction.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import {
@@ -55,6 +57,9 @@ import {
 import { tokenizeShellCommand } from "./shell-command-parser.ts";
 import { routeShellContract } from "./shell-contract-router.ts";
 import "./output-reducers.ts";
+import { getAgentDir } from "../../config.ts";
+import { BUNDLED_OUTPUT_RULES } from "./output-rules.bundled.ts";
+import { createRuleOutputReducer, loadOutputRules } from "./output-rules.ts";
 import {
 	createShellOutputProjector,
 	type ShellOutputProjection,
@@ -105,6 +110,12 @@ const bashSchema = Type.Object({
 		Type.Literal(BROAD_SEARCH_OUTPUT_ROUTE, {
 			description:
 				"Explicit override for a broad rg/grep/find/fd scan that cannot be narrowed. The command runs, but its complete output is routed to a file and excluded from model context.",
+		}),
+	),
+	fullOutput: Type.Optional(
+		Type.Boolean({
+			description:
+				"Return the complete raw output for this call: no output filters (test projection, family reducers, generic cleaning). Use only when the filtered notice says lines were omitted and you need them verbatim; the persisted full output named in the notice is usually enough.",
 		}),
 	),
 });
@@ -406,6 +417,8 @@ export interface BashToolOptions {
 	outputDirectory?: string;
 	/** Injectable managed-tool resolver for local shell preparation. */
 	managedToolResolver?: ManagedToolResolver;
+	/** Output reduction switches (settings `toolOutput`); reduction is on at the standard level by default. */
+	outputReduction?: OutputReductionToolOptions;
 }
 
 const BASH_PREVIEW_LINES = 5;
@@ -617,6 +630,24 @@ function createShellToolDefinition(
 	// checked per call, and a hook that rewrites the command text turns them off for that call. The
 	// output-only stages (test projection, verification classification) never depend on this.
 	const familyFiltersAllowed = options?.operations === undefined && !commandPrefix;
+	// Output reduction: on unless the operator turned it off (settings or PI_TOOL_FILTER_DISABLED=1).
+	// Rules are loaded once per tool instance: bundled, then the user file, then the project file.
+	const reductionEnabled = options?.outputReduction?.enabled !== false && process.env.PI_TOOL_FILTER_DISABLED !== "1";
+	const reductionLevel = options?.outputReduction?.level ?? "standard";
+	const reductionOptions: ReduceToolOutputOptions | undefined = reductionEnabled
+		? {
+				extraReducers: [
+					createRuleOutputReducer(
+						loadOutputRules({
+							cwd,
+							agentDir: options?.outputReduction?.agentDir ?? getAgentDir(),
+							extraFiles: options?.outputReduction?.rulesFiles,
+							bundled: BUNDLED_OUTPUT_RULES,
+						}),
+					),
+				],
+			}
+		: undefined;
 	// The directory the persistent POSIX session last reported ($PWD after the previous command):
 	// a filtered run must happen where the shell is, not where the tool was created.
 	let lastSessionCwd: string | undefined;
@@ -680,7 +711,8 @@ function createShellToolDefinition(
 				command,
 				timeout,
 				broadSearch,
-			}: { command: string; timeout?: number; broadSearch?: typeof BROAD_SEARCH_OUTPUT_ROUTE },
+				fullOutput,
+			}: { command: string; timeout?: number; broadSearch?: typeof BROAD_SEARCH_OUTPUT_ROUTE; fullOutput?: boolean },
 			signal?: AbortSignal,
 			onUpdate?,
 			_ctx?,
@@ -694,12 +726,15 @@ function createShellToolDefinition(
 			const routeBroadSearchOutput = searchScope.kind === "broad";
 			const autoRoutedReason =
 				searchScope.kind === "broad" && broadSearch !== BROAD_SEARCH_OUTPUT_ROUTE ? searchScope.reason : undefined;
-			// Output-only stages: the test projector for recognized runners, otherwise a family reducer
-			// (search, diagnostics, ...) streaming over the same seam. Neither depends on how the command
-			// is executed; the raw output is persisted whenever either one is used.
-			let outputProjector: ShellOutputProjectorLike | undefined = routeBroadSearchOutput
-				? undefined
-				: (createShellOutputProjector(command) ?? createReductionProjector(toolName, command, "standard"));
+			// Output-only stages: the test projector for recognized runners, otherwise the reduction
+			// pipeline (generic cleaning, then a family or rule reducer) streaming over the same seam.
+			// Neither depends on how the command is executed. The model's `fullOutput` and the operator's
+			// `toolOutput.reduction: "off"` (or PI_TOOL_FILTER_DISABLED=1) skip both for the call.
+			let outputProjector: ShellOutputProjectorLike | undefined =
+				routeBroadSearchOutput || fullOutput === true || !reductionEnabled
+					? undefined
+					: (createShellOutputProjector(command) ??
+						createReductionProjector(toolName, command, reductionLevel, reductionOptions));
 			const output = new OutputAccumulator({
 				tempFilePrefix: `pi-${toolName}`,
 				tempDirectory: options?.outputDirectory,
@@ -902,9 +937,13 @@ function createShellToolDefinition(
 						},
 					};
 					if (projection.kind === "reduction" && projection.reduction) {
-						const reduction = { ...projection.reduction, rawPath: snapshot.fullOutputPath };
+						const reduction = {
+							...projection.reduction,
+							...(projection.persistRaw ? { rawPath: snapshot.fullOutputPath } : {}),
+						};
 						details = { ...details, outputReduction: reduction };
-						text += `\n\n${formatOutputReductionNotice(reduction)}`;
+						const notice = formatOutputReductionNotice(reduction);
+						if (notice) text += `\n\n${notice}`;
 					} else {
 						const passingNotice =
 							projection.collapsedPassingLines > 0
@@ -1102,8 +1141,12 @@ function createShellToolDefinition(
 				}
 
 				const candidateProjection = finishProjection(exitCode);
-				const snapshot = await finishOutput(candidateProjection !== undefined);
-				const projection = candidateProjection && snapshot.fullOutputPath ? candidateProjection : undefined;
+				// Test projections and lossy reductions persist the raw output for recovery; pure cleaning
+				// (nothing omitted) has nothing to recover and writes no file.
+				const persistRaw = candidateProjection !== undefined && candidateProjection.persistRaw !== false;
+				const snapshot = await finishOutput(persistRaw);
+				const projection =
+					candidateProjection && (!persistRaw || snapshot.fullOutputPath) ? candidateProjection : undefined;
 				const expectedNoMatch = expectedContentSearchNoMatch(command, exitCode);
 				const { text: outputText, details } = formatOutput(
 					snapshot,

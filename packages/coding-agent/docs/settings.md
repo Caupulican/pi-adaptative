@@ -533,6 +533,33 @@ The native `python` tool is active by default and resolves Python through pinned
 
 `npmCommand` is used only for third-party npm package operations, including installs, uninstalls, and dependency installs inside git packages. User-scoped npm packages install under `~/.pi/agent/npm/`; project-scoped npm packages install under `.pi/npm/`. Use argv-style entries exactly as the process should be launched. When `npmCommand` is configured, git package dependency installs use plain `install` to avoid npm-specific flags in wrappers or alternate package managers. The CLI itself is a standalone Linux or Windows release and has no npm publication path.
 
+### Tool Output
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `toolOutput.reduction` | `"on"` \| `"off"` | `"on"` | Runs every `bash` and `python` result through the output-reduction pipeline: generic cleaning (ANSI codes, carriage-return progress frames resolved, trailing whitespace, blank runs, repeated lines collapsed), then the first family reducer (`rg`/`grep` hits regrouped per file, compiler and linter diagnostics as one line each, git filters, test-run projections) or data-driven rule that applies. `"off"` sends raw output; `PI_TOOL_FILTER_DISABLED=1` does the same for one process. |
+| `toolOutput.level` | `"auto"` \| `"standard"` \| `"compact"` | `"auto"` | How hard reducers may cut: `compact` lowers per-file hit caps and collapses repeats sooner. `auto` follows the model's capability tier. |
+| `toolOutput.rulesFile` | string | - | Extra rules file with the `.pi/output-filters.json` schema, loaded after the user file (`~/.pi/agent/output-filters.json`) and the project file (`.pi/output-filters.json`). |
+
+Reduced output reads as a shorter version of the real output, never a different one: every stage only removes lines or collapses repeats, and unknown shapes pass through. When lines were dropped and the cut is at least 512 bytes, the raw output is persisted to a managed file and the result ends with one notice, `[<family> output filtered: retained X of Y lines. Full output: <path>]`; the model reads the file only when it needs the omitted lines. Pure cleaning writes no file and adds no notice. The model can bypass every stage for one call with `fullOutput: true`, and explicit verbose flags (`--verbose`, `-vv`, `--nocapture`) do the same automatically. `details.outputReduction` on the tool result records bytes in and out for `scripts/output-reduction-census.mjs`.
+
+Rules files hold `{ "rules": [ ... ] }`. Each rule names the commands it matches (`match`, a regular expression tested against the program and its arguments, with `cd` prefixes and environment assignments removed) and the operations to apply: `stripLinesMatching`, `keepLinesMatching`, `replace` (`[{ "pattern", "with" }]`), `maxLines`, `tailLines`, `onEmpty`; `tools` defaults to `["bash"]` (`"python"` matches the tool label). Every rule should carry `tests` (`[{ "input", "expected" }]`): `npm run check` runs the inline tests of the bundled rules and of the project file, and a rule file with a defect fails tool creation with the file and rule named. Later files override earlier rules of the same name.
+
+```json
+{
+  "rules": [
+    {
+      "name": "make-build",
+      "match": "^make\\b",
+      "stripLinesMatching": ["^make\\[\\d+\\]: (?:Entering|Leaving) directory"],
+      "tests": [
+        { "input": "make[1]: Entering directory '/repo/src'\ncc -c a.c\nmake[1]: Leaving directory '/repo/src'\n", "expected": "cc -c a.c\n" }
+      ]
+    }
+  ]
+}
+```
+
 ### Sessions
 
 | Setting | Type | Default | Description |

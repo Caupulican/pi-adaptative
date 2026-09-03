@@ -26,6 +26,8 @@ export interface ShellOutputProjection {
 	collapsedPassingLines: number;
 	/** Present for `reduction`: what the reducer reported, minus the raw path the caller adds. */
 	reduction?: OutputReductionDetails;
+	/** Whether the raw output must be persisted for recovery; absent means yes (test projections always are). */
+	persistRaw?: boolean;
 }
 
 export type ShellOutputProjectionDetails = Omit<ShellOutputProjection, "content" | "reduction">;

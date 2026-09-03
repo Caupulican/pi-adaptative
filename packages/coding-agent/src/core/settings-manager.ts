@@ -303,6 +303,21 @@ export type ResolvedWorkerDelegationSettings = Required<
 /** Staleness-propagation policy for worktree-sync; see `core/worktree-sync/codes.ts`. */
 export type WorktreeSyncPolicySetting = "on_land_mandatory" | "overlap_mandatory" | "land_time_only";
 
+export interface ToolOutputSettings {
+	/** `off` disables every reduction stage for bash and python output. Default `on`. */
+	reduction?: "on" | "off";
+	/** Reduction level; `auto` follows the model's capability tier. Default `auto`. */
+	level?: "standard" | "compact" | "auto";
+	/** Extra rules file (same schema as `.pi/output-filters.json`), loaded after the user and project files. */
+	rulesFile?: string;
+}
+
+export interface ResolvedToolOutputSettings {
+	reduction: "on" | "off";
+	level: "standard" | "compact" | "auto";
+	rulesFile?: string;
+}
+
 export interface WorktreeSyncSettings {
 	enabled?: boolean; // default: true -- master switch; explicit false is the hard off-switch (zero behavior change when off)
 	mainBranch?: string; // overrides default-branch resolution (main, then master; never guessed further)
@@ -570,6 +585,7 @@ export interface Settings {
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
 	workerDelegation?: WorkerDelegationSettings; // Autonomous persistent leaf-worker scheduling; enabled by default on capable models
 	worktreeSync?: WorktreeSyncSettings; // Opt-in hard-gated worktree-per-lane parallel-work workflow (core/worktree-sync)
+	toolOutput?: ToolOutputSettings; // Tool-output reduction pipeline (core/tools/output-reduction); on at the standard level by default
 	processMatrix?: ProcessMatrixSettings; // Durable master/worker process-matrix supervision (core/process-matrix); on by default
 	windowsShell?: WindowsShellSettings; // Windows shell contract engine tier (core/tools/windows-shell-engine); on by default
 	backgroundTool?: BackgroundToolSettings; // Auto-backgrounding threshold for long-running foreground tool calls (core/background-tool-task-controller); always on, threshold tunable
@@ -3759,6 +3775,21 @@ export class SettingsManager {
 		this.globalSettings.researchLane = { ...settings };
 		this.markModified("researchLane");
 		this.save();
+	}
+
+	getToolOutputSettings(): ResolvedToolOutputSettings {
+		const configured = this.settings.toolOutput ?? {};
+		const resolved: ResolvedToolOutputSettings = {
+			reduction: configured.reduction === "off" ? "off" : "on",
+			level:
+				configured.level === "standard" || configured.level === "compact" || configured.level === "auto"
+					? configured.level
+					: "auto",
+		};
+		if (typeof configured.rulesFile === "string" && configured.rulesFile.trim().length > 0) {
+			resolved.rulesFile = configured.rulesFile.trim();
+		}
+		return resolved;
 	}
 
 	getWorktreeSyncSettings(): ResolvedWorktreeSyncSettings {
