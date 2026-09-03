@@ -97,7 +97,7 @@ describe("bash tool: generic output cleaning", () => {
 		const esc = String.fromCharCode(27);
 		const colored = `${Array.from({ length: 12 }, (_, index) => `${esc}[32mok${esc}[0m step ${index}   `).join("\n")}\n`;
 		const cleanTool = createBashTool(process.cwd(), { operations: operationsFor(colored), outputDirectory });
-		const cleaned = await cleanTool.execute("clean", { command: "./scripts/build.sh" });
+		const cleaned = await cleanTool.execute("clean", { command: "node scripts/build.mjs" });
 		expect(getTextOutput(cleaned, false)).toBe(
 			Array.from({ length: 12 }, (_, index) => `ok step ${index}`)
 				.join("\n")
@@ -108,10 +108,10 @@ describe("bash tool: generic output cleaning", () => {
 
 		const repeated = `${Array.from({ length: 200 }, () => "waiting for the service to come up").join("\n")}\nready\n`;
 		const repeatTool = createBashTool(process.cwd(), { operations: operationsFor(repeated), outputDirectory });
-		const collapsed = await repeatTool.execute("collapse", { command: "./scripts/wait.sh" });
+		const collapsed = await repeatTool.execute("collapse", { command: "node scripts/wait.mjs" });
 		const text = getTextOutput(collapsed, false);
 		expect(text.startsWith("waiting for the service to come up\n[line repeated 200 times]\nready\n")).toBe(true);
-		expect(text).toContain("[wait.sh output filtered: retained 3 of 201 lines. Full output: ");
+		expect(text).toContain("[node output filtered: retained 3 of 201 lines. Full output: ");
 		const reduction = collapsed.details?.outputReduction;
 		expect(reduction).toMatchObject({ kind: "generic", omittedLines: 199, persistRaw: true });
 		expect(readFileSync(reduction!.rawPath!, "utf-8")).toBe(repeated);
