@@ -122,7 +122,7 @@ describe("bash tool: generic output cleaning", () => {
 		cleanupDirectories.push(outputDirectory);
 		const npm = `${Array.from({ length: 30 }, (_, index) => `npm warn deprecated pkg${index}@1.0.0: no longer supported`).join("\n")}\n\nadded 412 packages in 9s\n\nfound 0 vulnerabilities\n`;
 		const tool = createBashTool(process.cwd(), { operations: operationsFor(npm), outputDirectory });
-		const result = await tool.execute("npm", { command: "cd packages/app && npm install" });
+		const result = await tool.execute("npm", { command: "npm install --no-audit" });
 		const text = getTextOutput(result, false);
 		expect(text.startsWith("added 412 packages in 9s\nfound 0 vulnerabilities\n")).toBe(true);
 		expect(result.details?.outputReduction).toMatchObject({ kind: "rule:npm-install", family: "npm install" });
