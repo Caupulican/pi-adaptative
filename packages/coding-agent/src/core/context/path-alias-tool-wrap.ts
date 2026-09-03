@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
-import { collectUnknownAliasTokens, expandParams, type PathAliasTable } from "./path-alias-table.ts";
+import { collectUnknownAliasTokensInPathParams, expandParams, type PathAliasTable } from "./path-alias-table.ts";
 
 const MAX_REPORTED_UNKNOWN_TOKENS = 3;
 
@@ -15,7 +15,9 @@ const MAX_REPORTED_UNKNOWN_TOKENS = 3;
  * and must pass through untouched (the same case `isIdTaken` protects at mint time).
  */
 function assertNoUnmintedAliases(table: PathAliasTable, params: unknown, cwd: string): void {
-	const unknown = collectUnknownAliasTokens(table, params).filter((token) => !existsSync(resolve(cwd, token)));
+	const unknown = collectUnknownAliasTokensInPathParams(table, params).filter(
+		(token) => !existsSync(resolve(cwd, token)),
+	);
 	if (unknown.length === 0) return;
 	const [first, ...rest] = unknown;
 	const also = rest.length > 0 ? ` Also unminted: ${rest.slice(0, MAX_REPORTED_UNKNOWN_TOKENS - 1).join(", ")}.` : "";

@@ -121,9 +121,11 @@ export class OkfProjectMemoryStore {
 			projectRoot: this.projectRoot,
 			maxDocuments,
 		})
-			.entries.map(({ relativePath, parsed }) => {
+			.entries.map(({ path, parsed }) => {
 				const item = parsed.item;
-				return item === undefined ? "" : `${relativePath}: ${item.title ?? "Untitled"} — ${item.summary}`;
+				// Absolute on purpose: a root-relative spelling in model-facing text was minted as a path
+				// alias and resolved against the working directory (measured live: ENOENT on read).
+				return item === undefined ? "" : `${path}: ${item.title ?? "Untitled"} — ${item.summary}`;
 			})
 			.filter((entry) => entry.length > 0)
 			.join("\n")

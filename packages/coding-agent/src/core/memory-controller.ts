@@ -554,11 +554,11 @@ export class MemoryController {
 				maxDocuments: 64,
 			}).entries;
 			const snapshot = entries
-				.map(({ relativePath, parsed }) => {
+				.map(({ path, parsed }) => {
 					const item = parsed.item;
 					return item === undefined
 						? ""
-						: `[OKF ${relativePath}] ${item.title ?? "Untitled"}: ${item.summary}\n${item.content ?? ""}`;
+						: `[OKF ${path}] ${item.title ?? "Untitled"}: ${item.summary}\n${item.content ?? ""}`;
 				})
 				.filter((entry) => entry.length > 0)
 				.join("\n\n")

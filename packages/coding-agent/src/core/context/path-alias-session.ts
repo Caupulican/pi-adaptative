@@ -175,10 +175,23 @@ export class PathAliasRuntime {
 	private readonly getDatabasePath: () => string;
 	private readonly getTurnIndex: () => number;
 
-	constructor(getCwd: () => string, getDatabasePath: () => string, getTurnIndex: () => number) {
+	/**
+	 * Whether a candidate must exist on disk (from the table's cwd) before it is minted. Production
+	 * keeps this on: a spelling relative to another root would otherwise become an alias that
+	 * resolves to ENOENT. Tests of the table mechanics turn it off to mint synthetic paths.
+	 */
+	private readonly requireExistingTargets: boolean;
+
+	constructor(
+		getCwd: () => string,
+		getDatabasePath: () => string,
+		getTurnIndex: () => number,
+		options?: { requireExistingTargets?: boolean },
+	) {
 		this.getCwd = getCwd;
 		this.getDatabasePath = getDatabasePath;
 		this.getTurnIndex = getTurnIndex;
+		this.requireExistingTargets = options?.requireExistingTargets ?? true;
 		this.table = emptyPathAliasTable(".");
 	}
 
@@ -214,8 +227,21 @@ export class PathAliasRuntime {
 		let scanWholeHistoryForReservations = !this.reservationHistoryScanned;
 		const reservationTexts = scanWholeHistoryForReservations ? collectMessageTexts(messages) : textsToScan;
 		this.reservationHistoryScanned = true;
+		const existsMemo = new Map<string, boolean>();
 		const extended = extendPathAliasTable(this.table, textsToScan, {
 			reservationTexts,
+			...(this.requireExistingTargets
+				? {
+						candidateExists: (path: string) => {
+							let exists = existsMemo.get(path);
+							if (exists === undefined) {
+								exists = existsSync(toStoredAbsolute(path, this.table.cwd));
+								existsMemo.set(path, exists);
+							}
+							return exists;
+						},
+					}
+				: {}),
 			isIdTaken: (aliasId) => {
 				if (!pEntryExists) return false;
 				let taken = idTakenMemo.get(aliasId);
