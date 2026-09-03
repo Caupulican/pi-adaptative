@@ -158,9 +158,13 @@ function messageText(message: Message): string {
  * FAILURES" - see tool-failure-memory.ts / verification-obligations.ts).
  */
 function lastCustomRecord(context: Context, customType: string): Message | undefined {
-	const messages = context.messages as unknown as { role: string; customType?: string }[];
+	const messages = context.messages as unknown as { role: string; customType?: string; details?: unknown }[];
 	for (let index = messages.length - 1; index >= 0; index--) {
 		if (messages[index].role === "custom" && messages[index].customType === customType) {
+			// A pointer record only reclaims the tail ("unchanged, see above"); the last full record
+			// above it carries the current content.
+			const details = messages[index].details as { pointer?: unknown } | undefined;
+			if (details?.pointer === true) continue;
 			return context.messages[index];
 		}
 	}

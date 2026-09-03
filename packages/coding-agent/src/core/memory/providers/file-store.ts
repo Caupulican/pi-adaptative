@@ -152,11 +152,15 @@ export type StructuredReflectionWrite =
 			evidenceRefs: string[];
 	  };
 
+/** The hot-memory file an organize write took its source line from; rollback restores it there. */
+export type HotMemoryTarget = "memory" | "project";
+
 export interface StructuredReflectionApplyResult {
 	applied: boolean;
 	created: boolean;
 	digest?: string;
 	sourceRemoved?: boolean;
+	sourceTarget?: HotMemoryTarget;
 	error?: string;
 }
 
@@ -165,6 +169,8 @@ export interface StructuredReflectionRollback {
 	title: string;
 	expectedDigest?: string;
 	sourceText?: string;
+	/** Where `sourceText` came from; absent means the general file (records written before project memory). */
+	sourceTarget?: HotMemoryTarget;
 	removeRecord: boolean;
 }
 
@@ -476,25 +482,55 @@ export class FileStoreProvider implements MemoryProvider {
 		};
 	}
 
-	private async hasExactHotMemoryItem(sourceText: string): Promise<boolean> {
-		return withFileLock(this.memoryFilePath, async () => {
-			const current = await fs.readFile(this.memoryFilePath, "utf8");
-			return removeExactHotMemoryItem(current, sourceText) !== undefined;
-		});
+	/** Hot files an organize write may cite, project first: a project fact is the common case. */
+	private hotMemoryFiles(): { target: HotMemoryTarget; filePath: string; statePath: string }[] {
+		return [
+			{ target: "project", filePath: this.projectMemoryFilePath, statePath: this.projectMemoryStatePath },
+			{ target: "memory", filePath: this.memoryFilePath, statePath: this.memoryStatePath },
+		];
 	}
 
-	private async removeExactHotMemoryItem(sourceText: string): Promise<{ success: boolean; error?: string }> {
+	private async hasExactHotMemoryItem(sourceText: string): Promise<boolean> {
+		for (const file of this.hotMemoryFiles()) {
+			const found = await withFileLock(file.filePath, async () => {
+				const current = await fs.readFile(file.filePath, "utf8");
+				return removeExactHotMemoryItem(current, sourceText) !== undefined;
+			});
+			if (found) return true;
+		}
+		return false;
+	}
+
+	/** Removes the exact item from the first hot file that holds it and names that file. */
+	private async removeExactHotMemoryItem(
+		sourceText: string,
+	): Promise<{ success: boolean; target?: HotMemoryTarget; error?: string }> {
+		let lastError: string | undefined;
+		for (const file of this.hotMemoryFiles()) {
+			const removed = await this.removeExactHotMemoryItemFrom(file, sourceText);
+			if (removed.success) return { success: true, target: file.target };
+			// Only "not found here" moves on to the next file; drift or a write failure stops here.
+			if (removed.error !== "Exact hot-memory item was not found") return removed;
+			lastError = removed.error;
+		}
+		return { success: false, error: lastError ?? "Exact hot-memory item was not found" };
+	}
+
+	private async removeExactHotMemoryItemFrom(
+		file: { target: HotMemoryTarget; filePath: string; statePath: string },
+		sourceText: string,
+	): Promise<{ success: boolean; error?: string }> {
 		try {
-			return await withFileLock(this.memoryFilePath, async () => {
-				const currentOnDisk = await fs.readFile(this.memoryFilePath, "utf8");
+			return await withFileLock(file.filePath, async () => {
+				const currentOnDisk = await fs.readFile(file.filePath, "utf8");
 				const currentDigest = contentDigest(currentOnDisk);
-				const stateRead = await readManagedMemoryState(this.memoryStatePath);
+				const stateRead = await readManagedMemoryState(file.statePath);
 				let managedState: ManagedMemoryState | undefined;
 				if (stateRead.status === "valid") {
 					const reconciled = reconcileManagedMemoryState(currentDigest, stateRead.state);
 					if (reconciled.recognized) {
 						managedState = reconciled.state;
-						if (reconciled.changed) await writeManagedMemoryState(this.memoryStatePath, reconciled.state);
+						if (reconciled.changed) await writeManagedMemoryState(file.statePath, reconciled.state);
 					}
 				}
 				if (!managedState) return { success: false, error: "Drift detected" };
@@ -502,14 +538,15 @@ export class FileStoreProvider implements MemoryProvider {
 				const newContent = removeExactHotMemoryItem(currentOnDisk, sourceText);
 				if (newContent === undefined) return { success: false, error: "Exact hot-memory item was not found" };
 				const newDigest = contentDigest(newContent);
-				await writeManagedMemoryState(this.memoryStatePath, {
+				await writeManagedMemoryState(file.statePath, {
 					version: 1,
 					committedDigest: managedState.committedDigest,
 					pendingDigest: newDigest,
 				});
-				await writeFileAtomic(this.memoryFilePath, newContent, { mode: 0o600 });
-				await writeManagedMemoryState(this.memoryStatePath, { version: 1, committedDigest: newDigest });
-				this.lastWrittenMemory = newContent;
+				await writeFileAtomic(file.filePath, newContent, { mode: 0o600 });
+				await writeManagedMemoryState(file.statePath, { version: 1, committedDigest: newDigest });
+				if (file.target === "project") this.lastWrittenProjectMemory = newContent;
+				else this.lastWrittenMemory = newContent;
 				this.options.onDurableMemoryChanged?.();
 				return { success: true };
 			});
@@ -568,6 +605,7 @@ export class FileStoreProvider implements MemoryProvider {
 			created,
 			...(storedDigest ? { digest: storedDigest } : {}),
 			sourceRemoved,
+			...(removed.target ? { sourceTarget: removed.target } : {}),
 			...(!sourceRemoved ? { error: removed.error ?? "Hot-memory removal failed" } : {}),
 		};
 	}
@@ -579,7 +617,7 @@ export class FileStoreProvider implements MemoryProvider {
 	): Promise<boolean> {
 		if (rollback.sourceText !== undefined) {
 			const restored = await this.executeMemoryCommand(
-				{ action: "add", target: "memory", content: rollback.sourceText },
+				{ action: "add", target: rollback.sourceTarget ?? "memory", content: rollback.sourceText },
 				signal,
 			);
 			if (restored.details?.success !== true) return false;

@@ -404,7 +404,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		phase: "policy",
 		failureCode: "skill_not_eligible",
 		guidance:
-			"Skill name is not eligible after a rescan of the skill roots. Use skill search with different words, or fix the SKILL.md frontmatter (name, description). Do not retry the same name.",
+			"Skill name is not eligible after a rescan of the skill roots. Search with different words or fix the SKILL.md frontmatter (name, description). Do not retry the same name.",
 		matches(message: string): boolean {
 			return /No eligible skill named/i.test(message);
 		},

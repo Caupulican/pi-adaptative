@@ -378,6 +378,8 @@ Context GC only rewrites the provider-bound context view. It does not delete or 
 |---------|------|---------|-------------|
 | `contextGc.enabled` | boolean | `true` | Enable provider-context packing for stale bulky context |
 | `contextGc.preserveRecentMessages` | number | `24` | Recent messages kept verbatim |
+| `contextGc.packStrideMessages` | number | half the window (`12`) | Grid the recent boundary advances on; packs land as one batch per grid crossing (below the already-sent mark included) instead of one rewrite per turn; `1` packs continuously |
+| `contextGc.deepPackMinTokens` | number | `8000` | Tokens a batch of deep supersessions (older reads of a re-read file, older records of a re-issued kind) must save before it rewrites far back into the sent prefix at a grid crossing; `0` packs them at the first crossing |
 | `contextGc.minToolResultChars` | number | `1200` | Minimum stale tool-result size before packing |
 | `contextGc.tools` | string[] | `read`, `bash`, `python`, `powershell`, `rg`, `grep`, `find`, `run_toolkit_script`, `ls`, `skill_open`, `automata_graph_status`, `automata_graph_search`, `automata_graph_query`, `automata_graph_neighbors`, `automata_graph_path`, `automata_graph_pointer_pack`, `learning_query_memory`, `subagent`, `delegate`, `task_steps`, `pipeline`, `task_background`, `task_goal`, `run_ledger`, `context_headroom_retrieve`, `headroom_retrieve` | Tool results eligible for stale-output packing |
 | `contextGc.semanticMemory.enabled` | boolean | `true` | Pack stale Automata/Mind semantic context pages from provider context |

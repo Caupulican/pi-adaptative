@@ -94,29 +94,32 @@ export type AgentRequestId = string & { readonly [AGENT_REQUEST_ID]: true };
  *   of once per process - measured live, this was silently happening on every prompt after the
  *   first in an ordinary multi-turn conversation.
  *
- * - `sentPrefixCount` is RUN-scoped: it resets every top-level prompt (unchanged from its original
- *   behavior). It is the pack-freeze horizon handed to a host through
+ * - `sentPrefixCount` is SESSION-scoped as well (since 2026-09-03; it used to reset every top-level
+ *   prompt). It is the pack-freeze horizon handed to a host through
  *   `AgentContextPlanRequest.sentPrefixCount`, which a context-GC packer uses to decide what it must
  *   not rewrite. A host's packing legitimately must rewrite old, already-sent content eventually -
  *   you cannot both pack a message and keep it provider-cached, so the correct policy is to
  *   invalidate rarely and in large strides, not never. Measured: within one long run this mark
  *   outgrows the packer's `recentStart` (which trails the transcript by a constant
- *   `preserveRecentMessages`), so packing goes to zero for the rest of that run - survivable only
- *   because this mark resets each prompt and packing resumes. Making this session-scoped (matching
- *   `sanitizerSentPrefixCount` above) would freeze packing PERMANENTLY within a session: context
- *   grows without bound and compaction fires more often, trading the cache defect above for a much
- *   more expensive unbounded-context defect.
+ *   `preserveRecentMessages`), so a packer that treats the mark as absolute packs nothing for the
+ *   rest of that run; while the mark reset per prompt, every run start then repacked the whole
+ *   previous run at once - measured live as the prompt halving and the head cache miss on every
+ *   user, reflection and continuation turn. The stride is therefore the host's: the coding-agent
+ *   packer batches every below-mark rewrite onto the grid crossings of its quantized recent boundary
+ *   (`context/prefix-stability.ts`), whatever the run boundaries, and keeps a message it already
+ *   packed in its packed form while frozen. A host that treats this mark as an absolute freeze
+ *   would grow context without bound; a host that ignores it rewrites history every turn.
  *
  * Whoever reads this next will be tempted to "simplify" it into one field. Resist that: it is
  * cheaper to keep two clearly-named numbers than to re-debug either defect this split prevents.
  */
 export interface ProviderRequestPrefixState {
 	/**
-	 * RUN-scoped pack-freeze horizon (resets every top-level prompt). Feeds
-	 * `AgentContextPlanRequest.sentPrefixCount` and the disturbance detector in
-	 * `provider-request-planner.ts` - both validate a host's context-GC packing against exactly this
-	 * value, so it must keep resetting per prompt for packing to ever resume. See the interface
-	 * doc comment above before changing this field's lifetime.
+	 * SESSION-scoped pack-freeze horizon (carried across top-level prompts like the sanitizer mark).
+	 * Feeds `AgentContextPlanRequest.sentPrefixCount` and the disturbance detector in
+	 * `provider-request-planner.ts`; the host's packer decides where below it a batched rewrite may
+	 * land (grid crossings only). See the interface doc comment above before changing this field's
+	 * lifetime.
 	 */
 	sentPrefixCount: number;
 	/**

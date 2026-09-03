@@ -68,6 +68,7 @@ export interface ContextGcSettings {
 	// Grid the preserve-recent boundary advances on, so packing batches instead of rewriting history
 	// every turn and busting the provider prefix cache -- see context/prefix-stability.ts.
 	packStrideMessages?: number; // default: half preserveRecentMessages; 1 restores continuous packing
+	deepPackMinTokens?: number; // default: 8000 -- deep supersessions pack at a grid crossing once they save this much
 	minToolResultChars?: number; // default: 1200
 	tools?: string[]; // default: read,bash,rg,grep,context_headroom_retrieve,headroom_retrieve
 	semanticMemory?: SemanticMemoryGcSettings;
@@ -2951,6 +2952,7 @@ export class SettingsManager {
 		enabled: boolean;
 		preserveRecentMessages: number;
 		packStrideMessages: number;
+		deepPackMinTokens: number;
 		minToolResultChars: number;
 		tools: string[];
 		semanticMemory: {
@@ -2976,6 +2978,7 @@ export class SettingsManager {
 				this.settings.contextGc?.preserveRecentMessages ?? DEFAULT_CONTEXT_GC_SETTINGS.preserveRecentMessages,
 			packStrideMessages:
 				this.settings.contextGc?.packStrideMessages ?? DEFAULT_CONTEXT_GC_SETTINGS.packStrideMessages,
+			deepPackMinTokens: this.settings.contextGc?.deepPackMinTokens ?? DEFAULT_CONTEXT_GC_SETTINGS.deepPackMinTokens,
 			minToolResultChars:
 				this.settings.contextGc?.minToolResultChars ?? DEFAULT_CONTEXT_GC_SETTINGS.minToolResultChars,
 			tools: this.settings.contextGc?.tools ?? DEFAULT_CONTEXT_GC_SETTINGS.tools,

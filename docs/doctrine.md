@@ -19,7 +19,7 @@ sessions, losing this took cache reuse from 0.97 to 0.11. Pinned by
 `packages/agent/test/provider-request-prefix-stability.test.ts`,
 `packages/coding-agent/test/provider-prefix-stability.test.ts`, and the long-session contract gate
 (`PI_PROFILE_GATE=1` on `test/profiling/host-long-session.profile.test.ts`: reuse p50 at or above
-0.98, appends at or above 95 percent).
+0.98, and no more rewrites than grid crossings of the context-GC boundary plus one).
 
 **Sent bytes are never rewritten.** Deduplication and erasure act only on history the provider has
 not seen (`sentPrefixCount`); host records are opaque to path aliasing so their bytes are the same
@@ -36,13 +36,19 @@ the legend rides as a cumulative delta (only lines an accepted plan has not comm
 superseding note, never packed); the goal context is byte-identical while the goal is unchanged
 (budget as a 10 percent bucket, no counters); a trailing kind displaced without a content change
 reclaims the tail with a one-line pointer, and the full record returns only when its content
-changes. The sent-prefix mark is seeded from the previous run so a user, reflection or
-continuation turn appends to the cached prefix instead of letting context GC repack it (the
-measured prompt halving and head miss). Compaction summarizes the packed projection, and a
-deterministic checkpoint is recorded as `fallback` with its cause, never `success`. Pinned by
-`packages/coding-agent/test/path-alias-session.test.ts` (delta and budget),
+changes. The sent-prefix mark is carried across runs, so a user, reflection or continuation turn
+appends to the cached prefix instead of letting context GC repack the whole previous run (the
+measured prompt halving and head miss); context GC still rewrites below the mark, but only at a
+grid crossing of its quantized recent boundary, as one batch of everything that aged out, and a
+message it packed once stays packed while frozen. Deep supersessions (an older read of a re-read
+file) join a crossing batch once they save `deepPackMinTokens`. Rewrites therefore happen once per
+stride, never per turn and never because a run started; the long-session gate counts them against
+the number of crossings instead of a flat append share. Compaction summarizes the packed
+projection, and a deterministic checkpoint is recorded as `fallback` with its cause, never
+`success`. Pinned by `packages/coding-agent/test/path-alias-session.test.ts` (delta and budget),
 `packages/agent/test/transient-records-index.test.ts` (pointer and cumulative kinds),
-`packages/coding-agent/test/compact-goal-context.test.ts`, and
+`packages/coding-agent/test/context-gc-frozen-prefix.test.ts` (crossing batches, frozen stubs, deep
+floor), `packages/coding-agent/test/compact-goal-context.test.ts`, and
 `packages/agent/test/session/lifecycle-ledger.test.ts` (fallback outcome).
 
 **Per-request host work is bounded.** Every request-time scan resumes from the history prefix it

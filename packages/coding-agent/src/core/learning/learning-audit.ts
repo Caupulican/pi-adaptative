@@ -30,6 +30,8 @@ export interface LearningRollbackPlan {
 	target?: string;
 	/** Original text to restore (memory_restore/memory_add). */
 	previous?: string;
+	/** Organization rollback only: the hot file `previous` was removed from; absent means the general file. */
+	previousTarget?: "memory" | "project";
 	/** Compare-and-delete guard for a structured record created by this exact audited write. */
 	expectedDigest?: string;
 	/** Organization rollback only: false when the OKF record predated this hot-memory move. */
@@ -171,6 +173,9 @@ function isLearningRollbackPlan(value: unknown): value is LearningRollbackPlan {
 	const plan = value as Record<string, unknown>;
 	if (typeof plan.kind !== "string" || !ROLLBACK_KINDS.includes(plan.kind)) return false;
 	if (!isOptionalString(plan.target) || !isOptionalString(plan.previous)) return false;
+	if (plan.previousTarget !== undefined && plan.previousTarget !== "memory" && plan.previousTarget !== "project") {
+		return false;
+	}
 	if (!isOptionalString(plan.expectedDigest)) return false;
 	if (plan.removeOkf !== undefined && typeof plan.removeOkf !== "boolean") return false;
 	return typeof plan.instructions === "string";
