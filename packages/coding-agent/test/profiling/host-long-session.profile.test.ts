@@ -183,18 +183,38 @@ function renderCacheReport(events: FauxRequestEvent[]): string {
 	const reuse: number[] = [];
 	let appends = 0;
 	let rewrites = 0;
+	// Re-read cost: every byte the provider could not serve from its prefix cache, summed over the
+	// session; the count of rewrites says nothing about their price, their depth does.
+	let promptCharsTotal = 0;
+	let uncachedCharsTotal = 0;
+	let uncachedCharsOnRewrites = 0;
+	let unpackFlips = 0;
+	const depthBuckets = new Map<string, number>();
 	const rewriteKinds = new Map<string, number>();
 	for (let index = 1; index < main.length; index++) {
 		const event = main[index]!;
 		const previous = main[index - 1]!;
 		if (event.firstRequest) continue;
 		reuse.push(event.promptChars > 0 ? event.cachedChars / event.promptChars : 1);
+		promptCharsTotal += event.promptChars;
+		uncachedCharsTotal += Math.max(0, event.promptChars - event.cachedChars);
 		if (event.divergedAt === undefined || event.divergedAt >= previous.messageCount) {
 			appends += 1;
 			continue;
 		}
 		rewrites += 1;
+		uncachedCharsOnRewrites += Math.max(0, event.promptChars - event.cachedChars);
 		const offset = event.divergedAt - previous.messageCount;
+		const depth = -offset;
+		const bucket = depth <= 36 ? "<=36" : depth <= 100 ? "37-100" : depth <= 300 ? "101-300" : ">300";
+		depthBuckets.set(bucket, (depthBuckets.get(bucket) ?? 0) + 1);
+		// Heads read `<role>:<tool> <text>`, so the marker sits inside the head, not at its start.
+		if (
+			(event.previousDivergedText ?? "").includes("[Context GC packed") &&
+			!(event.divergedText ?? "").includes("[Context GC packed")
+		) {
+			unpackFlips += 1;
+		}
 		const head = (event.divergedText ?? "").replace(/\s+/g, " ").replace(/\d+/g, "#").slice(0, 60);
 		const was = (event.previousDivergedText ?? "(nothing)").replace(/\s+/g, " ").replace(/\d+/g, "#").slice(0, 60);
 		const kind = `${event.divergedRole ?? "?"} at previous-end${offset} :: now ${head} :: was ${was}`;
@@ -215,8 +235,14 @@ function renderCacheReport(events: FauxRequestEvent[]): string {
 		expect(p50).toBeGreaterThanOrEqual(0.98);
 		expect(rewrites).toBeLessThanOrEqual(crossings + 1);
 	}
+	const lastPromptChars = main[main.length - 1]?.promptChars ?? 0;
+	const depthSummary = ["<=36", "37-100", "101-300", ">300"]
+		.map((bucket) => `${bucket}:${depthBuckets.get(bucket) ?? 0}`)
+		.join(" ");
 	const lines = [
 		`cache: requests=${main.length} p50 reuse=${p50.toFixed(2)} share>=0.9=${high.toFixed(2)} appends=${appends}/${measured} rewrites=${rewrites}/${measured}`,
+		`cache cost: prompt chars total=${promptCharsTotal} uncached total=${uncachedCharsTotal} (${promptCharsTotal > 0 ? ((100 * uncachedCharsTotal) / promptCharsTotal).toFixed(2) : "0"}%) uncached on rewrites=${uncachedCharsOnRewrites} last prompt chars=${lastPromptChars}`,
+		`rewrite depth (messages before the previous request's end): ${depthSummary}; unpack flips (packed stub replaced by its original): ${unpackFlips}`,
 		`reuse by decile (median cachedChars/promptChars): ${deciles(reuse)}`,
 		"top rewrite points (role at offset from the previous request's last message :: what is there now :: what was there):",
 		...[...rewriteKinds.entries()]

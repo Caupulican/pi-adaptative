@@ -19,7 +19,11 @@ sessions, losing this took cache reuse from 0.97 to 0.11. Pinned by
 `packages/agent/test/provider-request-prefix-stability.test.ts`,
 `packages/coding-agent/test/provider-prefix-stability.test.ts`, and the long-session contract gate
 (`PI_PROFILE_GATE=1` on `test/profiling/host-long-session.profile.test.ts`: reuse p50 at or above
-0.98, and no more rewrites than grid crossings of the context-GC boundary plus one).
+0.98, and no more rewrites than grid crossings of the context-GC boundary plus one). The gate's
+cache report prices rewrites rather than counting them: bytes the provider could not serve from
+its prefix cache, overall and on rewrites, each rewrite's depth before the previous request's end,
+and packed stubs replaced by their original, because a rewrite 30 messages deep and one 300
+messages deep are not the same cost.
 
 **Sent bytes are never rewritten.** Deduplication and erasure act only on history the provider has
 not seen (`sentPrefixCount`); host records are opaque to path aliasing so their bytes are the same

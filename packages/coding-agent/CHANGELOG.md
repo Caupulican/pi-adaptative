@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- The long-session profile's cache report prices rewrites instead of counting them: total prompt bytes, bytes the provider could not serve from its prefix cache (overall and on rewrites), rewrite depth buckets (within 36 messages of the previous request's end, 37 to 100, 101 to 300, deeper) and the count of packed stubs replaced by their original. Measured on the goal mix at 1,500 turns, v0.97.25's 51 rewrites re-read 5.9 M chars (33 of them deeper than 300 messages) against 2.0 M for v0.97.26's 131 tail rewrites.
+
 ## [0.97.26] - 2026-09-03
 
 ### Changed
