@@ -1,0 +1,34 @@
+Traceback (most recent call last):
+  File "/srv/app/main.py", line 12, in <module>
+    run()
+  File "/srv/app/lib/layer_0.py", line 30, in step_0
+    return step_1(payload)
+  File "/srv/app/lib/layer_1.py", line 31, in step_1
+    return step_2(payload)
+  File "/srv/app/lib/layer_2.py", line 32, in step_2
+    return step_3(payload)
+  File "/srv/app/lib/layer_3.py", line 33, in step_3
+    return step_4(payload)
+  File "/srv/app/lib/layer_4.py", line 34, in step_4
+    return step_5(payload)
+  File "/srv/app/lib/layer_5.py", line 35, in step_5
+    return step_6(payload)
+  File "/srv/app/lib/layer_6.py", line 36, in step_6
+    return step_7(payload)
+  File "/srv/app/lib/layer_7.py", line 37, in step_7
+    return step_8(payload)
+  File "/srv/app/lib/layer_8.py", line 38, in step_8
+    return step_9(payload)
+  File "/srv/app/lib/layer_9.py", line 39, in step_9
+    return step_10(payload)
+  File "/srv/app/lib/layer_10.py", line 40, in step_10
+    return step_11(payload)
+  File "/srv/app/lib/layer_11.py", line 41, in step_11
+    return step_12(payload)
+  File "/srv/app/lib/layer_12.py", line 42, in step_12
+    return step_13(payload)
+  File "/srv/app/lib/layer_13.py", line 43, in step_13
+    return step_14(payload)
+  File "/srv/app/lib/final.py", line 7, in finish
+    return payload['key']
+KeyError: 'key'

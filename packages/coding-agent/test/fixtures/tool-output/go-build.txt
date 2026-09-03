@@ -1,0 +1,26 @@
+# example.com/app/internal/store
+internal/store/file_0.go:12:7: undefined: legacyOpen
+internal/store/file_0.go:23:8: undefined: legacyOpen
+internal/store/file_0.go:34:9: undefined: legacyOpen
+internal/store/file_0.go:45:10: undefined: legacyOpen
+internal/store/file_0.go:99:2: declared and not used: tmp
+internal/store/file_1.go:12:7: undefined: legacyOpen
+internal/store/file_1.go:23:8: undefined: legacyOpen
+internal/store/file_1.go:34:9: undefined: legacyOpen
+internal/store/file_1.go:45:10: undefined: legacyOpen
+internal/store/file_1.go:99:2: declared and not used: tmp
+internal/store/file_2.go:12:7: undefined: legacyOpen
+internal/store/file_2.go:23:8: undefined: legacyOpen
+internal/store/file_2.go:34:9: undefined: legacyOpen
+internal/store/file_2.go:45:10: undefined: legacyOpen
+internal/store/file_2.go:99:2: declared and not used: tmp
+internal/store/file_3.go:12:7: undefined: legacyOpen
+internal/store/file_3.go:23:8: undefined: legacyOpen
+internal/store/file_3.go:34:9: undefined: legacyOpen
+internal/store/file_3.go:45:10: undefined: legacyOpen
+internal/store/file_3.go:99:2: declared and not used: tmp
+internal/store/file_4.go:12:7: undefined: legacyOpen
+internal/store/file_4.go:23:8: undefined: legacyOpen
+internal/store/file_4.go:34:9: undefined: legacyOpen
+internal/store/file_4.go:45:10: undefined: legacyOpen
+internal/store/file_4.go:99:2: declared and not used: tmp

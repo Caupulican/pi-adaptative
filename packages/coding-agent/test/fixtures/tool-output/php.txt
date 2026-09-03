@@ -1,0 +1,25 @@
+PHP Warning:  Undefined variable $item_0 in /srv/app/src/Controller_0.php on line 30
+PHP Warning:  Undefined variable $item_1 in /srv/app/src/Controller_0.php on line 47
+PHP Warning:  Undefined variable $item_2 in /srv/app/src/Controller_0.php on line 64
+PHP Deprecated:  Creation of dynamic property App\Controller_0::$cache is deprecated in /srv/app/src/Controller_0.php on line 12
+PHP Warning:  Undefined variable $item_0 in /srv/app/src/Controller_1.php on line 30
+PHP Warning:  Undefined variable $item_1 in /srv/app/src/Controller_1.php on line 47
+PHP Warning:  Undefined variable $item_2 in /srv/app/src/Controller_1.php on line 64
+PHP Deprecated:  Creation of dynamic property App\Controller_1::$cache is deprecated in /srv/app/src/Controller_1.php on line 12
+PHP Warning:  Undefined variable $item_0 in /srv/app/src/Controller_2.php on line 30
+PHP Warning:  Undefined variable $item_1 in /srv/app/src/Controller_2.php on line 47
+PHP Warning:  Undefined variable $item_2 in /srv/app/src/Controller_2.php on line 64
+PHP Deprecated:  Creation of dynamic property App\Controller_2::$cache is deprecated in /srv/app/src/Controller_2.php on line 12
+PHP Warning:  Undefined variable $item_0 in /srv/app/src/Controller_3.php on line 30
+PHP Warning:  Undefined variable $item_1 in /srv/app/src/Controller_3.php on line 47
+PHP Warning:  Undefined variable $item_2 in /srv/app/src/Controller_3.php on line 64
+PHP Deprecated:  Creation of dynamic property App\Controller_3::$cache is deprecated in /srv/app/src/Controller_3.php on line 12
+PHP Warning:  Undefined variable $item_0 in /srv/app/src/Controller_4.php on line 30
+PHP Warning:  Undefined variable $item_1 in /srv/app/src/Controller_4.php on line 47
+PHP Warning:  Undefined variable $item_2 in /srv/app/src/Controller_4.php on line 64
+PHP Deprecated:  Creation of dynamic property App\Controller_4::$cache is deprecated in /srv/app/src/Controller_4.php on line 12
+PHP Warning:  Undefined variable $item_0 in /srv/app/src/Controller_5.php on line 30
+PHP Warning:  Undefined variable $item_1 in /srv/app/src/Controller_5.php on line 47
+PHP Warning:  Undefined variable $item_2 in /srv/app/src/Controller_5.php on line 64
+PHP Deprecated:  Creation of dynamic property App\Controller_5::$cache is deprecated in /srv/app/src/Controller_5.php on line 12
+PHP Fatal error:  Uncaught TypeError: render(): Argument #1 must be of type array, null given in /srv/app/src/View.php on line 88

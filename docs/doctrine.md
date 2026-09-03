@@ -77,7 +77,9 @@ ceiling on the frontier tier is one. Pinned by
 
 **Tool output is a shorter version of the real output, never a different one; the original is one
 read away.** Every reducer only removes lines, collapses repeats or regroups what the command
-printed (a search hit keeps its path and line, a diagnostic its file, position, code and message);
+printed (a search hit keeps its path and line, a diagnostic its file, position, code and message;
+the diagnostics reducer keys on the location grammars every compiler and linter prints, not on a
+list of tools, so an unknown toolchain reduces the same way or passes through whole);
 an unknown shape passes through untouched; the raw output is persisted and named in the notice
 whenever lines were dropped (for a JSON document the notice ends with a jq projection over the
 persisted file, so the omitted records are one jq call away, never a full read), and the model

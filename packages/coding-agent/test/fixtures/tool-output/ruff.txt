@@ -1,0 +1,32 @@
+src/pkg/module_0.py:3:1: F401 `os.path` imported but unused
+src/pkg/module_0.py:4:1: F401 `os.path` imported but unused
+src/pkg/module_0.py:5:1: F401 `os.path` imported but unused
+src/pkg/module_0.py:6:1: F401 `os.path` imported but unused
+src/pkg/module_0.py:40:5: E501 Line too long (121 > 100)
+src/pkg/module_1.py:3:1: F401 `os.path` imported but unused
+src/pkg/module_1.py:4:1: F401 `os.path` imported but unused
+src/pkg/module_1.py:5:1: F401 `os.path` imported but unused
+src/pkg/module_1.py:6:1: F401 `os.path` imported but unused
+src/pkg/module_1.py:40:5: E501 Line too long (121 > 100)
+src/pkg/module_2.py:3:1: F401 `os.path` imported but unused
+src/pkg/module_2.py:4:1: F401 `os.path` imported but unused
+src/pkg/module_2.py:5:1: F401 `os.path` imported but unused
+src/pkg/module_2.py:6:1: F401 `os.path` imported but unused
+src/pkg/module_2.py:40:5: E501 Line too long (121 > 100)
+src/pkg/module_3.py:3:1: F401 `os.path` imported but unused
+src/pkg/module_3.py:4:1: F401 `os.path` imported but unused
+src/pkg/module_3.py:5:1: F401 `os.path` imported but unused
+src/pkg/module_3.py:6:1: F401 `os.path` imported but unused
+src/pkg/module_3.py:40:5: E501 Line too long (121 > 100)
+src/pkg/module_4.py:3:1: F401 `os.path` imported but unused
+src/pkg/module_4.py:4:1: F401 `os.path` imported but unused
+src/pkg/module_4.py:5:1: F401 `os.path` imported but unused
+src/pkg/module_4.py:6:1: F401 `os.path` imported but unused
+src/pkg/module_4.py:40:5: E501 Line too long (121 > 100)
+src/pkg/module_5.py:3:1: F401 `os.path` imported but unused
+src/pkg/module_5.py:4:1: F401 `os.path` imported but unused
+src/pkg/module_5.py:5:1: F401 `os.path` imported but unused
+src/pkg/module_5.py:6:1: F401 `os.path` imported but unused
+src/pkg/module_5.py:40:5: E501 Line too long (121 > 100)
+Found 30 errors.
+[*] 24 fixable with the `--fix` option.

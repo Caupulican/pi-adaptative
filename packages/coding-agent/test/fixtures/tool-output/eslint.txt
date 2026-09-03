@@ -1,0 +1,35 @@
+/work/project/src/app/routes.ts
+  10:3  error  'value0' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  17:4  error  'value1' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  24:5  error  'value2' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  31:6  error  'value3' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  38:7  error  'value4' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  45:8  error  'value5' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  52:9  error  'value6' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  59:10  error  'value7' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  90:1  warning  Unexpected console statement  no-console
+
+/work/project/src/app/handlers.ts
+  10:3  error  'value0' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  17:4  error  'value1' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  24:5  error  'value2' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  31:6  error  'value3' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  38:7  error  'value4' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  45:8  error  'value5' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  52:9  error  'value6' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  59:10  error  'value7' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  91:1  warning  Unexpected console statement  no-console
+
+/work/project/src/lib/format.ts
+  10:3  error  'value0' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  17:4  error  'value1' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  24:5  error  'value2' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  31:6  error  'value3' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  38:7  error  'value4' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  45:8  error  'value5' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  52:9  error  'value6' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  59:10  error  'value7' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  92:1  warning  Unexpected console statement  no-console
+
+✖ 27 problems (24 errors, 3 warnings)
+  24 errors and 0 warnings potentially fixable with the `--fix` option.

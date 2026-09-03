@@ -287,10 +287,36 @@ export function createPythonToolDefinition(
 								: {}),
 						}
 					: undefined;
+				// stderr carries tracebacks and compiler-style diagnostics; the same pipeline applies.
+				const rawStderr = reduceStdout ? stderr.snapshot({ persistIfTruncated: true }) : undefined;
+				const stderrReduction =
+					rawStderr && !rawStderr.truncation.truncated && rawStderr.content
+						? reduceToolOutput(
+								{
+									tool: "python",
+									command: "python",
+									text: rawStderr.content,
+									exitCode: 0,
+									level: reductionLevel(),
+								},
+								reductionOptions,
+							)
+						: undefined;
+				const stderrSnapshot = stderrReduction
+					? stderr.snapshot({ persistIfTruncated: true, persistAlways: stderrReduction.details.persistRaw })
+					: (rawStderr ?? stderr.snapshot({ persistIfTruncated: true }));
 				return {
 					stdout: reduction ? { ...stdoutSnapshot, content: reduction.text } : stdoutSnapshot,
-					stderr: stderr.snapshot({ persistIfTruncated: true }),
+					stderr: stderrReduction ? { ...stderrSnapshot, content: stderrReduction.text } : stderrSnapshot,
 					outputReduction,
+					stderrReduction: stderrReduction
+						? {
+								...stderrReduction.details,
+								...(stderrReduction.details.persistRaw && stderrSnapshot.fullOutputPath
+									? { rawPath: stderrSnapshot.fullOutputPath }
+									: {}),
+							}
+						: undefined,
 				};
 			};
 			let execution: PythonExecutionResult;
@@ -337,7 +363,11 @@ export function createPythonToolDefinition(
 					: undefined;
 				if (reductionNotice) sections.push(reductionNotice);
 				if (stdoutNotice && !snapshots.outputReduction?.rawPath) sections.push(stdoutNotice);
-				if (stderrNotice) sections.push(stderrNotice);
+				const stderrReductionNotice = snapshots.stderrReduction
+					? formatOutputReductionNotice(snapshots.stderrReduction)
+					: undefined;
+				if (stderrReductionNotice) sections.push(`[stderr] ${stderrReductionNotice}`);
+				if (stderrNotice && !snapshots.stderrReduction?.rawPath) sections.push(stderrNotice);
 				const status = `[python exitCode=${execution.exitCode ?? "null"}${execution.signal ? `; signal=${execution.signal}` : ""}]`;
 				sections.push(status);
 				const text = sections.join("\n\n");
@@ -367,6 +397,7 @@ export function createPythonToolDefinition(
 						stdoutOutputPath: snapshots.stdout.fullOutputPath,
 						stderrOutputPath: snapshots.stderr.fullOutputPath,
 						...(snapshots.outputReduction ? { outputReduction: snapshots.outputReduction } : {}),
+						...(snapshots.stderrReduction ? { stderrReduction: snapshots.stderrReduction } : {}),
 						stdoutOutputError: snapshots.stdout.fullOutputError,
 						stderrOutputError: snapshots.stderr.fullOutputError,
 					},

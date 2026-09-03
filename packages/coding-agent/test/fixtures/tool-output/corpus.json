@@ -76,5 +76,53 @@
   "command": "npx biome lint src",
   "file": "biome.txt",
   "family": "biome"
+ },
+ {
+  "name": "tsc-pretty",
+  "command": "tsc -p . --pretty",
+  "file": "tsc-pretty.txt",
+  "family": "tsc"
+ },
+ {
+  "name": "eslint",
+  "command": "npx eslint src",
+  "file": "eslint.txt",
+  "family": "eslint"
+ },
+ {
+  "name": "gcc",
+  "command": "make -j8",
+  "file": "gcc.txt",
+  "family": "make"
+ },
+ {
+  "name": "go-build",
+  "command": "go build ./...",
+  "file": "go-build.txt",
+  "family": "go build"
+ },
+ {
+  "name": "fpc",
+  "command": "fpc program.pas",
+  "file": "fpc.txt",
+  "family": "fpc"
+ },
+ {
+  "name": "php",
+  "command": "php artisan test",
+  "file": "php.txt",
+  "family": "php"
+ },
+ {
+  "name": "ruff",
+  "command": "ruff check src",
+  "file": "ruff.txt",
+  "family": "ruff check"
+ },
+ {
+  "name": "traceback",
+  "command": "python main.py",
+  "file": "traceback.txt",
+  "family": "python"
  }
 ]

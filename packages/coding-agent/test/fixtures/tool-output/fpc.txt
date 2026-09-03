@@ -1,0 +1,41 @@
+Free Pascal Compiler version 3.2.2 [2021/05/16] for x86_64
+Copyright (c) 1993-2021 by Florian Klaempfl and others
+Target OS: Linux for x86-64
+Compiling program.pas
+Compiling unit_0.pas
+unit_0.pas(20,8) Error: Identifier not found "OldProc"
+unit_0.pas(33,9) Error: Identifier not found "OldProc"
+unit_0.pas(46,10) Error: Identifier not found "OldProc"
+unit_0.pas(59,11) Error: Identifier not found "OldProc"
+unit_0.pas(80,3) Warning: Variable "count" does not seem to be initialized
+unit_0.pas(81,3) Hint: Local variable "idx" not used
+Compiling unit_1.pas
+unit_1.pas(20,8) Error: Identifier not found "OldProc"
+unit_1.pas(33,9) Error: Identifier not found "OldProc"
+unit_1.pas(46,10) Error: Identifier not found "OldProc"
+unit_1.pas(59,11) Error: Identifier not found "OldProc"
+unit_1.pas(80,3) Warning: Variable "count" does not seem to be initialized
+unit_1.pas(81,3) Hint: Local variable "idx" not used
+Compiling unit_2.pas
+unit_2.pas(20,8) Error: Identifier not found "OldProc"
+unit_2.pas(33,9) Error: Identifier not found "OldProc"
+unit_2.pas(46,10) Error: Identifier not found "OldProc"
+unit_2.pas(59,11) Error: Identifier not found "OldProc"
+unit_2.pas(80,3) Warning: Variable "count" does not seem to be initialized
+unit_2.pas(81,3) Hint: Local variable "idx" not used
+Compiling unit_3.pas
+unit_3.pas(20,8) Error: Identifier not found "OldProc"
+unit_3.pas(33,9) Error: Identifier not found "OldProc"
+unit_3.pas(46,10) Error: Identifier not found "OldProc"
+unit_3.pas(59,11) Error: Identifier not found "OldProc"
+unit_3.pas(80,3) Warning: Variable "count" does not seem to be initialized
+unit_3.pas(81,3) Hint: Local variable "idx" not used
+Compiling unit_4.pas
+unit_4.pas(20,8) Error: Identifier not found "OldProc"
+unit_4.pas(33,9) Error: Identifier not found "OldProc"
+unit_4.pas(46,10) Error: Identifier not found "OldProc"
+unit_4.pas(59,11) Error: Identifier not found "OldProc"
+unit_4.pas(80,3) Warning: Variable "count" does not seem to be initialized
+unit_4.pas(81,3) Hint: Local variable "idx" not used
+program.pas(40) Fatal: There were 20 errors compiling module, stopping
+Fatal: Compilation aborted

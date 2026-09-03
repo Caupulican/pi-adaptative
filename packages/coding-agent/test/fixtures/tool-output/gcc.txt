@@ -1,0 +1,97 @@
+src/module_0.cpp: In function 'int run_0(int)':
+src/module_0.cpp:10:5: error: 'helper_0' was not declared in this scope
+   10 |     return helper_0(value);
+      |            ^~~~~~~~
+src/module_0.cpp:19:6: error: 'helper_1' was not declared in this scope
+   19 |     return helper_1(value);
+      |            ^~~~~~~~
+src/module_0.cpp:28:7: error: 'helper_2' was not declared in this scope
+   28 |     return helper_2(value);
+      |            ^~~~~~~~
+src/module_0.cpp:37:8: error: 'helper_3' was not declared in this scope
+   37 |     return helper_3(value);
+      |            ^~~~~~~~
+src/module_0.cpp:60:12: warning: unused variable 'tmp' [-Wunused-variable]
+   60 |     int tmp = 0;
+      |         ^~~
+src/module_1.cpp: In function 'int run_1(int)':
+src/module_1.cpp:10:5: error: 'helper_0' was not declared in this scope
+   10 |     return helper_0(value);
+      |            ^~~~~~~~
+src/module_1.cpp:19:6: error: 'helper_1' was not declared in this scope
+   19 |     return helper_1(value);
+      |            ^~~~~~~~
+src/module_1.cpp:28:7: error: 'helper_2' was not declared in this scope
+   28 |     return helper_2(value);
+      |            ^~~~~~~~
+src/module_1.cpp:37:8: error: 'helper_3' was not declared in this scope
+   37 |     return helper_3(value);
+      |            ^~~~~~~~
+src/module_1.cpp:60:12: warning: unused variable 'tmp' [-Wunused-variable]
+   60 |     int tmp = 0;
+      |         ^~~
+src/module_2.cpp: In function 'int run_2(int)':
+src/module_2.cpp:10:5: error: 'helper_0' was not declared in this scope
+   10 |     return helper_0(value);
+      |            ^~~~~~~~
+src/module_2.cpp:19:6: error: 'helper_1' was not declared in this scope
+   19 |     return helper_1(value);
+      |            ^~~~~~~~
+src/module_2.cpp:28:7: error: 'helper_2' was not declared in this scope
+   28 |     return helper_2(value);
+      |            ^~~~~~~~
+src/module_2.cpp:37:8: error: 'helper_3' was not declared in this scope
+   37 |     return helper_3(value);
+      |            ^~~~~~~~
+src/module_2.cpp:60:12: warning: unused variable 'tmp' [-Wunused-variable]
+   60 |     int tmp = 0;
+      |         ^~~
+src/module_3.cpp: In function 'int run_3(int)':
+src/module_3.cpp:10:5: error: 'helper_0' was not declared in this scope
+   10 |     return helper_0(value);
+      |            ^~~~~~~~
+src/module_3.cpp:19:6: error: 'helper_1' was not declared in this scope
+   19 |     return helper_1(value);
+      |            ^~~~~~~~
+src/module_3.cpp:28:7: error: 'helper_2' was not declared in this scope
+   28 |     return helper_2(value);
+      |            ^~~~~~~~
+src/module_3.cpp:37:8: error: 'helper_3' was not declared in this scope
+   37 |     return helper_3(value);
+      |            ^~~~~~~~
+src/module_3.cpp:60:12: warning: unused variable 'tmp' [-Wunused-variable]
+   60 |     int tmp = 0;
+      |         ^~~
+src/module_4.cpp: In function 'int run_4(int)':
+src/module_4.cpp:10:5: error: 'helper_0' was not declared in this scope
+   10 |     return helper_0(value);
+      |            ^~~~~~~~
+src/module_4.cpp:19:6: error: 'helper_1' was not declared in this scope
+   19 |     return helper_1(value);
+      |            ^~~~~~~~
+src/module_4.cpp:28:7: error: 'helper_2' was not declared in this scope
+   28 |     return helper_2(value);
+      |            ^~~~~~~~
+src/module_4.cpp:37:8: error: 'helper_3' was not declared in this scope
+   37 |     return helper_3(value);
+      |            ^~~~~~~~
+src/module_4.cpp:60:12: warning: unused variable 'tmp' [-Wunused-variable]
+   60 |     int tmp = 0;
+      |         ^~~
+src/module_5.cpp: In function 'int run_5(int)':
+src/module_5.cpp:10:5: error: 'helper_0' was not declared in this scope
+   10 |     return helper_0(value);
+      |            ^~~~~~~~
+src/module_5.cpp:19:6: error: 'helper_1' was not declared in this scope
+   19 |     return helper_1(value);
+      |            ^~~~~~~~
+src/module_5.cpp:28:7: error: 'helper_2' was not declared in this scope
+   28 |     return helper_2(value);
+      |            ^~~~~~~~
+src/module_5.cpp:37:8: error: 'helper_3' was not declared in this scope
+   37 |     return helper_3(value);
+      |            ^~~~~~~~
+src/module_5.cpp:60:12: warning: unused variable 'tmp' [-Wunused-variable]
+   60 |     int tmp = 0;
+      |         ^~~
+make: *** [Makefile:12: build/app] Error 1
