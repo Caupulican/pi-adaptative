@@ -116,7 +116,8 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 				const built = await Promise.resolve(deps.buildDeterministicCheckpoint(params));
 				const result = markDeterministic(
 					mergeCompactionVerificationReports(built.result, pendingVerificationReports),
-					lastCause ?? (params.deterministicOnly ? "deterministic-only" : "max-llm-cycles"),
+					// "start" is the loop's own sentinel for "no summarizer attempt yet", not a cause.
+					lastCause !== "start" ? lastCause : params.deterministicOnly ? "deterministic-only" : "max-llm-cycles",
 				);
 				pendingVerificationReports.length = 0;
 				await deps.apply(result);
