@@ -102,9 +102,22 @@ function separatorCount(value: string): number {
 // type, not a filesystem path, even when it clears the length gate.
 const MIME_TYPE_RE = /^(?:application|audio|example|font|haptics|image|message|model|multipart|text|video)\/[\w.+-]+$/i;
 
+/**
+ * Spellings that look like paths but are not files the model will name again: git refs and
+ * revision ranges, directories named only by numbers or timestamps (listing artifacts: `2026/01`,
+ * `20260903-125251`), and prose fragments whose last segment is a bare extension (`Foo.cpp/.h`).
+ * Measured live: 759 legend lines minted from `ls` output and git refs that nothing ever mentioned.
+ */
+const NON_FILE_CANDIDATE_RE = /(?:^|\/)(?:refs|heads|origin|remotes)\/|\.\.\.|\.\.(?:\/|$)/;
+const NUMERIC_BASENAME_RE = /^\d+(?:[-_.]\d+)*$/;
+const EXTENSION_ONLY_BASENAME_RE = /^\.\w+$/;
+
 function shouldAlias(path: string): boolean {
 	if (path.startsWith("http://") || path.startsWith("https://") || path.startsWith("git@")) return false;
 	if (/^P#?\d+$/i.test(path) || path.startsWith("p/")) return false;
+	if (NON_FILE_CANDIDATE_RE.test(path)) return false;
+	const basename = path.slice(path.lastIndexOf("/") + 1);
+	if (NUMERIC_BASENAME_RE.test(basename) || EXTENSION_ONLY_BASENAME_RE.test(basename)) return false;
 	if (MIME_TYPE_RE.test(path)) return false;
 	if (path.includes(" ") && !SPACED_CANDIDATE_EVIDENCE_RE.test(path)) return false;
 	return path.length >= MIN_ALIAS_CHARS || separatorCount(path) >= MIN_SEPARATORS;
@@ -379,6 +392,13 @@ export interface ExtendPathAliasOptions {
 	/** Least saving per mention an alias must offer; defaults to `DEFAULT_MIN_ALIAS_SAVING`. */
 	minAliasSaving?: number;
 	isIdTaken?: (aliasId: string) => boolean;
+	/**
+	 * Whether a display path names something that exists from the table's cwd. A candidate that
+	 * does not is a spelling relative to some other root (a repo root, a memory root, a listing
+	 * header) and minting it would hand the model an alias that resolves to ENOENT (measured
+	 * live: `p/Engine.cpp=(Release/Source/Engine.cpp` from a repo-root-relative git line).
+	 */
+	candidateExists?: (displayPath: string) => boolean;
 }
 
 export function extendPathAliasTable(
@@ -410,6 +430,7 @@ export function extendPathAliasTable(
 			const key = dedupeKey(path);
 			if (existingPaths.has(key)) continue;
 			if (!aliasWorthwhile(path, minSaving)) continue;
+			if (options?.candidateExists && !options.candidateExists(path)) continue;
 			existingPaths.add(key);
 			newPaths.push(path);
 		}
@@ -653,6 +674,53 @@ export function expandText(table: PathAliasTable, text: string): string {
  * ENOENT that names a `p/` directory nobody has — a diagnostic that hides the actual mistake.
  * Walks the same shapes as {@link expandParams}. Deduplicated, in first-seen order.
  */
+/** Parameter names whose string values are paths; only these may be refused as unminted aliases. */
+export const PATH_PARAMETER_KEYS: ReadonlySet<string> = new Set([
+	"path",
+	"paths",
+	"file",
+	"files",
+	"cwd",
+	"dir",
+	"directory",
+	"target",
+	"source",
+	"destination",
+	"oldPath",
+	"newPath",
+]);
+
+/**
+ * Unminted alias tokens inside path-typed parameters only. Free text, code and shell commands
+ * (`code`, `command`, `content`, `query`) are never refused: a Python `p / name` or a `p/…` in
+ * prose is not a path the tool will open (measured live: `f = p/name` refused a whole call).
+ */
+export function collectUnknownAliasTokensInPathParams(table: PathAliasTable, params: unknown): string[] {
+	if (!params || typeof params !== "object" || Array.isArray(params)) return [];
+	const unknown: string[] = [];
+	const seen = new Set<string>();
+	for (const [key, value] of Object.entries(params)) {
+		if (!PATH_PARAMETER_KEYS.has(key)) {
+			if (value && typeof value === "object" && !Array.isArray(value)) {
+				for (const token of collectUnknownAliasTokensInPathParams(table, value)) {
+					if (!seen.has(token)) {
+						seen.add(token);
+						unknown.push(token);
+					}
+				}
+			}
+			continue;
+		}
+		for (const token of collectUnknownAliasTokens(table, value)) {
+			if (!seen.has(token)) {
+				seen.add(token);
+				unknown.push(token);
+			}
+		}
+	}
+	return unknown;
+}
+
 export function collectUnknownAliasTokens(table: PathAliasTable, params: unknown): string[] {
 	const known = new Set<string>(table.entries.map((entry) => entry.id));
 	for (const reserved of table.reservedIds ?? []) known.add(reserved);

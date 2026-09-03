@@ -128,6 +128,18 @@ numeric fragment still refuses with the open-step list. Pinned by
 (envelope-stable signatures, corrective diagnostic tail) and
 `packages/coding-agent/test/task-state.test.ts`.
 
+**An alias names a path that exists, or it does not exist.** A candidate is minted only when it
+resolves to something on disk from the table's cwd; git refs, revision ranges, numeric or
+timestamp directories and extension-only fragments are never candidates; and only path-typed tool
+parameters can be refused as unminted aliases, never code, commands or prose. Model-facing
+listings print absolute paths. Why: measured live, a repo-root-relative git line became
+`p/Engine.cpp=(Release/Source/Engine.cpp` and three reads failed with ENOENT, a memory listing's
+root-relative names did the same, `ls` output minted 759 legend lines nothing mentioned, and a
+Python `f = p/name` was refused as an invented alias. Pinned by
+`packages/coding-agent/test/path-alias-table.test.ts`,
+`packages/coding-agent/test/path-alias-tool-wrap.test.ts` and
+`packages/coding-agent/test/path-alias-session.test.ts` (existence gate).
+
 **A feature earns its tokens or is gated by tier, never removed.** `scripts/feature-ledger.mjs`
 measures each subsystem's cost and benefit from session files; a subsystem without a benefit
 measurement gains no new surface.
@@ -141,3 +153,4 @@ measurement gains no new surface.
 | 2026-09-02 | Demotion is evidence from tool-loop guards only; an output runaway ends the response without demoting. |
 | 2026-09-03 | A host record carries only what changed (legend delta, goal bucket, ledger pointer); the sent prefix survives a new prompt; compaction summarizes the packed projection and names a deterministic checkpoint `fallback`. |
 | 2026-09-03 | A call failing identically the tier's repeat count ends the run on the ledger's own occurrence; stagnant signatures ignore the occurrence stamp; ordinal-prefix selectors normalize. |
+| 2026-09-03 | Aliases are minted only for existing paths; refs, listings and fragments never mint; only path parameters can be refused as unminted; listings print absolute paths. |

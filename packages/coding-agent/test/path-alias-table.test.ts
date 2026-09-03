@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
 	applyPathAliases,
 	buildPathAliasTable,
+	collectUnknownAliasTokensInPathParams,
 	emptyPathAliasTable,
 	expandParams,
 	expandText,
@@ -472,5 +473,43 @@ describe("formatPathAliasLegendDeltaForIds", () => {
 		expect(delta).not.toContain(`${table.entries[0]!.id}=`);
 		expect(delta).toContain(`${table.entries[1]!.id}=`);
 		expect(formatPathAliasLegendDeltaForIds(table, ids, ids)).toBeUndefined();
+	});
+});
+
+describe("alias mint exclusions", () => {
+	it("never mints git refs, revision ranges, numeric or timestamp directories, or extension-only fragments", () => {
+		const table = extendPathAliasTable(emptyPathAliasTable("/repo"), [
+			"refs/heads/fix/pr13-client-history-review-fixes",
+			"fix/pr13-client-history-review-fixes...origin/fix/pr13-client-history-review-fixes",
+			"origin/feature/long-branch-name-here",
+			"/home/user/.codex/sessions/2026/01",
+			"scripts/hb/logs/build/20260903-125251",
+			"ClientHistoryNewv2.cpp/.h",
+			"packages/coding-agent/src/core/tools/grep.ts",
+		]).table;
+		expect(table.entries.map((entry) => entry.path)).toEqual(["packages/coding-agent/src/core/tools/grep.ts"]);
+	});
+
+	it("mints only candidates that exist when the caller can check, skipping other-root spellings", () => {
+		const existing = new Set(["packages/coding-agent/src/core/tools/grep.ts"]);
+		const table = extendPathAliasTable(
+			emptyPathAliasTable("/repo"),
+			["(Release/Source/Engine.cpp", "packages/coding-agent/src/core/tools/grep.ts"],
+			{ candidateExists: (path) => existing.has(path) },
+		).table;
+		expect(table.entries.map((entry) => entry.path)).toEqual(["packages/coding-agent/src/core/tools/grep.ts"]);
+	});
+
+	it("reports unminted tokens only from path-typed parameters", () => {
+		const table = extendPathAliasTable(emptyPathAliasTable("/repo"), [
+			"packages/coding-agent/src/core/tools/grep.ts",
+		]).table;
+		expect(collectUnknownAliasTokensInPathParams(table, { code: "f = p/name\nprint(p/other)" })).toEqual([]);
+		expect(collectUnknownAliasTokensInPathParams(table, { command: "cat p/ghost.ts" })).toEqual([]);
+		expect(collectUnknownAliasTokensInPathParams(table, { path: "p/ghost.ts" })).toEqual(["p/ghost.ts"]);
+		expect(collectUnknownAliasTokensInPathParams(table, { path: "p/grep.ts" })).toEqual([]);
+		expect(
+			collectUnknownAliasTokensInPathParams(table, { paths: ["p/a.ts", "p/grep.ts"], nested: { file: "p/b.ts" } }),
+		).toEqual(["p/a.ts", "p/b.ts"]);
 	});
 });

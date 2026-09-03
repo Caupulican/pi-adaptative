@@ -37,6 +37,7 @@ describe("PathAliasRuntime", () => {
 			() => "/repo",
 			() => databasePath,
 			() => 1,
+			{ requireExistingTargets: false },
 		);
 		const firstSync = first.sync([
 			toolResult("packages/coding-agent/src/foo.ts", 10),
@@ -50,6 +51,7 @@ describe("PathAliasRuntime", () => {
 			() => "/repo",
 			() => databasePath,
 			() => 2,
+			{ requireExistingTargets: false },
 		);
 		const resumed = second.sync([toolResult("packages/coding-agent/src/foo.ts", 11)]);
 		expect(resumed.legend).toContain("p/src/foo.ts=packages/coding-agent/src/foo.ts");
@@ -74,6 +76,7 @@ describe("PathAliasRuntime", () => {
 			() => cwdA,
 			() => databasePath,
 			() => 1,
+			{ requireExistingTargets: false },
 		);
 		first.sync([toolResult("packages/coding-agent/src/foo.ts", 1)]);
 		expect(first.peekTable().entries[0]).toEqual({ id: "p/foo.ts", path: "packages/coding-agent/src/foo.ts" });
@@ -82,6 +85,7 @@ describe("PathAliasRuntime", () => {
 			() => cwdB,
 			() => databasePath,
 			() => 2,
+			{ requireExistingTargets: false },
 		);
 		second.sync([toolResult("hello", 2)]);
 		const entry = second.peekTable().entries[0];
@@ -108,6 +112,7 @@ describe("PathAliasRuntime", () => {
 			() => "/repo",
 			() => databasePath,
 			() => 2,
+			{ requireExistingTargets: false },
 		);
 		const result = runtime.sync([
 			toolResult("read p/config-loader.ts today", 1),
@@ -131,6 +136,7 @@ describe("PathAliasRuntime", () => {
 			() => "/repo",
 			() => databasePath,
 			() => 1,
+			{ requireExistingTargets: false },
 		);
 		const meta = () => {
 			const store = createSqlitePathAliasStore({ databasePath });
@@ -173,6 +179,7 @@ describe("PathAliasRuntime", () => {
 			() => cwd,
 			() => join(dir, "runtime.sqlite"),
 			() => 1,
+			{ requireExistingTargets: false },
 		);
 		runtime.sync([toolResult("packages/app/src/util-helpers.ts", 1)]);
 		const entry = runtime.peekTable().entries[0];
@@ -189,6 +196,7 @@ describe("PathAliasRuntime", () => {
 			() => "/repo",
 			() => databasePath,
 			() => 1,
+			{ requireExistingTargets: false },
 		);
 		first.sync([toolResult("read p/config-loader.ts today", 1)]);
 		expect(first.peekTable().entries).toHaveLength(0);
@@ -197,6 +205,7 @@ describe("PathAliasRuntime", () => {
 			() => "/repo",
 			() => databasePath,
 			() => 2,
+			{ requireExistingTargets: false },
 		);
 		second.sync([toolResult("packages/app/src/config-loader.ts", 2)]);
 		const entry = second.peekTable().entries[0];
@@ -211,6 +220,7 @@ describe("PathAliasRuntime", () => {
 			() => "/repo",
 			() => join(dir, "runtime.sqlite"),
 			() => 1,
+			{ requireExistingTargets: false },
 		);
 		const record: AgentMessage = {
 			role: "custom",
@@ -244,6 +254,7 @@ describe("PathAliasRuntime", () => {
 			() => "/repo",
 			() => databasePath,
 			() => 1,
+			{ requireExistingTargets: false },
 		);
 		runtime.sync([toolResult("alpha-beta/b/foo.ts", 1)]);
 		runtime.sync([toolResult("alpha-beta/src/foo.ts", 2)]);
@@ -263,6 +274,7 @@ describe("PathAliasRuntime", () => {
 				() => "/repo",
 				() => join(dir, "runtime.sqlite"),
 				() => 1,
+				{ requireExistingTargets: false },
 			);
 			const messages = [
 				toolResult("packages/coding-agent/src/foo.ts", 1),
@@ -284,6 +296,7 @@ describe("PathAliasRuntime", () => {
 				() => "/repo",
 				() => join(freshDir, "runtime.sqlite"),
 				() => 1,
+				{ requireExistingTargets: false },
 			);
 			const unmemoized = fresh.sync(messages);
 			expect(second.legend).toBe(unmemoized.legend);
@@ -299,6 +312,7 @@ describe("PathAliasRuntime", () => {
 				() => "/repo",
 				() => join(dir, "runtime.sqlite"),
 				() => 1,
+				{ requireExistingTargets: false },
 			);
 			const base = [toolResult("packages/coding-agent/src/foo.ts", 1)];
 			const grown = [...base, toolResult("packages/coding-agent/src/bar.ts", 2)];
@@ -318,6 +332,7 @@ describe("PathAliasRuntime", () => {
 				() => "/repo",
 				() => join(freshDir, "runtime.sqlite"),
 				() => 1,
+				{ requireExistingTargets: false },
 			);
 			const direct = fresh.sync(grown);
 			expect(grownResult.legend).toBe(direct.legend);
@@ -333,6 +348,7 @@ describe("PathAliasRuntime", () => {
 				() => "/repo",
 				() => join(dir, "runtime.sqlite"),
 				() => 1,
+				{ requireExistingTargets: false },
 			);
 			const base = [toolResult("packages/coding-agent/src/foo.ts", 1)];
 
@@ -357,6 +373,7 @@ describe("PathAliasRuntime", () => {
 				() => "/repo",
 				() => join(dir, "runtime.sqlite"),
 				() => 1,
+				{ requireExistingTargets: false },
 			);
 			const messages = [toolResult("packages/coding-agent/src/foo.ts", 1)];
 
@@ -452,6 +469,7 @@ describe("PathAliasRuntime incremental render", () => {
 			() => "/repo",
 			() => join(dir, "runtime.sqlite"),
 			() => 1,
+			{ requireExistingTargets: false },
 		);
 		const history = [
 			toolResult("packages/coding-agent/src/foo.ts", 10),
@@ -479,6 +497,7 @@ describe("PathAliasRuntime incremental render", () => {
 			() => "/repo",
 			() => join(dir, "runtime.sqlite"),
 			() => 1,
+			{ requireExistingTargets: false },
 		);
 		const minted = runtime.sync([toolResult("packages/coding-agent/src/foo.ts", 10)]);
 		const legend: AgentMessage = {
@@ -508,6 +527,7 @@ describe("PathAliasRuntime legend delta records", () => {
 			() => "/repo",
 			() => join(dir, "runtime.sqlite"),
 			() => 1,
+			{ requireExistingTargets: false },
 		);
 	}
 
@@ -552,5 +572,34 @@ describe("PathAliasRuntime legend delta records", () => {
 		expect(runtime1.peekTable().entries.length).toBe(paths.length);
 		expect(next.legend).toBeUndefined();
 		runtime1.close();
+	});
+});
+
+describe("PathAliasRuntime existence gate", () => {
+	const tempDirs: string[] = [];
+	afterEach(() => {
+		for (const dir of tempDirs.splice(0))
+			rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	});
+
+	it("mints only paths that exist from cwd, so a repo-root-relative spelling never becomes an alias", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "pi-path-alias-exists-"));
+		tempDirs.push(cwd);
+		mkdirSync(join(cwd, "packages", "coding-agent", "src"), { recursive: true });
+		writeFileSync(join(cwd, "packages", "coding-agent", "src", "real.ts"), "export {};\n");
+		const runtime = new PathAliasRuntime(
+			() => cwd,
+			() => join(cwd, "runtime.sqlite"),
+			() => 1,
+		);
+		const synced = runtime.sync([
+			toolResult("packages/coding-agent/src/real.ts", 10),
+			// A git line relative to a repo root that is not cwd: it resolves to nothing here.
+			toolResult("(Release/Source/Engine.cpp", 11),
+		]);
+		expect(runtime.peekTable().entries.map((entry) => entry.path)).toEqual(["packages/coding-agent/src/real.ts"]);
+		expect(synced.legend).toContain("p/real.ts=packages/coding-agent/src/real.ts");
+		expect(synced.legend).not.toContain("Engine.cpp");
+		runtime.close();
 	});
 });

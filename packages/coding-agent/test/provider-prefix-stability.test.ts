@@ -50,6 +50,7 @@ describe("path alias projection is append-only across requests", () => {
 			() => CWD,
 			() => join(dir, "aliases.sqlite"),
 			() => turn++,
+			{ requireExistingTargets: false },
 		);
 	});
 
