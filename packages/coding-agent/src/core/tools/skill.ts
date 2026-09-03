@@ -102,8 +102,14 @@ export function createReadOnlySkillToolDefinition(
 }
 
 function searchText(result: SkillSearchResult): string {
-	if (result.candidates.length === 0) return "skill search: no match";
-	return result.candidates.map((candidate) => `${candidate.name}: ${candidate.description}`).join("\n");
+	const lines =
+		result.candidates.length === 0
+			? ["skill search: no match"]
+			: result.candidates.map((candidate) => `${candidate.name}: ${candidate.description}`);
+	// A skill the loader could not index is otherwise invisible; naming it here is what lets the
+	// model (or the owner) fix the SKILL.md instead of retrying a name that will never load.
+	for (const diagnostic of result.diagnostics ?? []) lines.push(`skipped ${diagnostic}`);
+	return lines.join("\n");
 }
 
 function loadText(result: Extract<SkillLoadResult, { ok: true }>): string {

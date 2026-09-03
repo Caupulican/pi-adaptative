@@ -56,6 +56,8 @@ export interface SkillVaultStatus {
 
 export interface SkillSearchResult {
 	candidates: Array<{ name: string; description: string }>;
+	/** Skills on disk the loader could not index (`<path>: <reason>`), so a broken SKILL.md is visible. */
+	diagnostics?: string[];
 }
 
 export type SkillLoadResult =
@@ -79,6 +81,14 @@ type SkillBodyReadResult = { ok: true; body: string; bodyBytes: number; file: Sk
 
 export interface SkillVaultControllerOptions {
 	getSkills(): readonly Skill[];
+	/**
+	 * Re-scan the skill roots. Called once on a lookup miss before refusing: a skill written during
+	 * the session (by `skillify`, a write, or the owner) must be loadable in that session (measured
+	 * live: two refusals 45 minutes apart for a skill that existed on disk the whole time).
+	 */
+	refreshSkills?: () => void;
+	/** Loader diagnostics for skills that failed to index, rendered as `<path>: <message>`. */
+	getSkillDiagnostics?: () => readonly string[];
 	now?: () => number;
 	idleTimeoutMs?: number;
 	getMaxBodyBytes?: () => number;
@@ -152,6 +162,8 @@ export function resolveActiveSkillBodyByteLimit(contextWindow: number | undefine
 /** One host-owned, event-driven lifecycle for lazy skill discovery and transient context projection. */
 export class SkillVaultController {
 	private readonly getSkills: () => readonly Skill[];
+	private readonly refreshSkills: (() => void) | undefined;
+	private readonly getSkillDiagnostics: (() => readonly string[]) | undefined;
 	private readonly now: () => number;
 	private readonly idleTimeoutMs: number;
 	private readonly getMaxBodyBytes: () => number;
@@ -165,6 +177,8 @@ export class SkillVaultController {
 			throw new TypeError("Skill idle timeout must be finite.");
 		}
 		this.getSkills = options.getSkills;
+		this.refreshSkills = options.refreshSkills;
+		this.getSkillDiagnostics = options.getSkillDiagnostics;
 		this.now = options.now ?? (() => performance.now());
 		this.idleTimeoutMs = Math.max(1, options.idleTimeoutMs ?? DEFAULT_SKILL_IDLE_TIMEOUT_MS);
 		this.getMaxBodyBytes = options.getMaxBodyBytes ?? (() => MAX_ACTIVE_SKILL_BODY_BYTES);
@@ -175,23 +189,48 @@ export class SkillVaultController {
 		const query = rawQuery.trim().toLowerCase();
 		const tokens = queryTokens(query);
 		if (!query || tokens.length === 0) return { candidates: [] };
-		const candidates = this.getSkills()
+		let candidates = this.searchCandidates(query, tokens);
+		if (candidates.length === 0 && this.refreshSkills) {
+			this.refreshSkills();
+			candidates = this.searchCandidates(query, tokens);
+		}
+		const diagnostics = this.getSkillDiagnostics?.() ?? [];
+		return { candidates, ...(diagnostics.length > 0 ? { diagnostics: [...diagnostics] } : {}) };
+	}
+
+	private searchCandidates(query: string, tokens: readonly string[]): SkillSearchResult["candidates"] {
+		return this.getSkills()
 			.filter((skill) => !skill.disableModelInvocation)
 			.map((skill) => ({ skill, score: searchScore(skill, query, tokens) }))
 			.filter((entry) => entry.score > 0)
 			.sort((left, right) => right.score - left.score || left.skill.name.localeCompare(right.skill.name))
 			.slice(0, MAX_SEARCH_RESULTS)
 			.map(({ skill }) => ({ name: skill.name, description: compactDescription(skill.description) }));
-		return { candidates };
+	}
+
+	/** The named eligible skill, after one re-scan of the roots when the first lookup misses. */
+	private findEligible(name: string, requester: SkillVaultRequester): Skill | undefined {
+		const eligible = (candidate: Skill) =>
+			candidate.name === name && (requester === "user" || !candidate.disableModelInvocation);
+		const found = this.getSkills().find(eligible);
+		if (found || !this.refreshSkills) return found;
+		this.refreshSkills();
+		return this.getSkills().find(eligible);
+	}
+
+	private notFound(name: string): { ok: false; reason: "not_found"; message: string } {
+		const rescanned = this.refreshSkills ? " after re-scanning the skill roots" : "";
+		return {
+			ok: false,
+			reason: "not_found",
+			message: `No eligible skill named ${JSON.stringify(name)}${rescanned}.`,
+		};
 	}
 
 	/** Read one eligible skill body without loading, evicting, or otherwise mutating the vault. */
 	read(name: string, requester: SkillVaultRequester = "model"): SkillReadResult {
-		const skill = this.getSkills().find(
-			(candidate) => candidate.name === name && (requester === "user" || !candidate.disableModelInvocation),
-		);
-		if (!skill)
-			return { ok: false, reason: "not_found", message: `No eligible skill named ${JSON.stringify(name)}.` };
+		const skill = this.findEligible(name, requester);
+		if (!skill) return this.notFound(name);
 		const bodyResult = this.readSkillBody(skill, this.resolveMaxBodyBytes(), "read");
 		if (!bodyResult.ok) return bodyResult;
 		return { ok: true, name: skill.name, description: skill.description, body: bodyResult.body };
@@ -205,12 +244,8 @@ export class SkillVaultController {
 	load(name: string, requester: SkillVaultRequester, pin = false): SkillLoadResult {
 		const now = this.now();
 		this.reconcile(now);
-		const skill = this.getSkills().find(
-			(candidate) => candidate.name === name && (requester === "user" || !candidate.disableModelInvocation),
-		);
-		if (!skill) {
-			return { ok: false, reason: "not_found", message: `No eligible skill named ${JSON.stringify(name)}.` };
-		}
+		const skill = this.findEligible(name, requester);
+		if (!skill) return this.notFound(name);
 		if (pin) {
 			let pinnedCount = 0;
 			for (const [slotName, slot] of this.slots) {

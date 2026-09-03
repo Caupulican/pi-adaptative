@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1609,5 +1609,30 @@ Content`,
 			// User skill should win over external root's copy
 			expect(skill?.description).toBe("User description");
 		});
+	});
+});
+
+describe("refreshSkills", () => {
+	it("picks up a skill directory created after the initial scan", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-loader-refresh-"));
+		try {
+			const cwd = join(tempDir, "project");
+			const agentDir = join(tempDir, "agent");
+			mkdirSync(cwd, { recursive: true });
+			mkdirSync(join(agentDir, "skills"), { recursive: true });
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+			expect(loader.getSkills().skills.some((skill) => skill.name === "late-skill")).toBe(false);
+			mkdirSync(join(agentDir, "skills", "late-skill"), { recursive: true });
+			writeFileSync(
+				join(agentDir, "skills", "late-skill", "SKILL.md"),
+				"---\nname: late-skill\ndescription: Written after the scan\n---\nBody.",
+			);
+			loader.refreshSkills();
+			expect(loader.getSkills().skills.some((skill) => skill.name === "late-skill")).toBe(true);
+			expect(loader.getActiveSkills().some((skill) => skill.name === "late-skill")).toBe(true);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 });
