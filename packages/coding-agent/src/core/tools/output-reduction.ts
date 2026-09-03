@@ -10,6 +10,7 @@
  * outcome, so the bash tool, the python tool and the census script share exactly one decision.
  */
 import { type CommandFamilyClassification, classifyCommandFamily, commandFamilyLabel } from "./command-family.ts";
+import type { ShellOutputProjection, ShellOutputProjectorLike } from "./shell-output-projection.ts";
 
 /** How hard a reducer may cut. The capability tier decides; `standard` is the frontier default. */
 export type OutputReductionLevel = "standard" | "compact";
@@ -116,4 +117,70 @@ export function formatOutputReductionNotice(details: OutputReductionDetails): st
 	const kept = `retained ${details.outputLines} of ${details.inputLines} lines`;
 	const recovery = details.rawPath ? ` Full output: ${details.rawPath}` : "";
 	return `[${details.family} output filtered: ${kept}.${recovery}]`;
+}
+
+/** Reducers see the whole output; beyond this the raw path (caps and managed file) takes over. */
+const MAX_BUFFERED_REDUCTION_BYTES = 8 * 1024 * 1024;
+
+/** Whether any registered reducer would consider this command at all (cheap pre-check for the tool). */
+export function outputReductionApplies(command: string): boolean {
+	const classification = classifyCommandFamily(command);
+	if (classification.verbose) return false;
+	const probe: OutputReductionRequest = { tool: "bash", command, text: "", exitCode: 0, level: "standard" };
+	return reducers.some((reducer) => reducer.applies(classification, probe));
+}
+
+/**
+ * Streaming adapter over the pure reducers for the bash tool: buffers the output as it arrives and
+ * reduces it once the command finished, in the same shape as the test projector so the tool's
+ * persistence and notice flow applies unchanged. Gives up (undefined) when the output outgrows the
+ * buffer or the reducer declines; the raw path then handles the result exactly as before.
+ */
+export function createReductionProjector(
+	tool: string,
+	command: string,
+	level: OutputReductionLevel,
+): ShellOutputProjectorLike | undefined {
+	if (!outputReductionApplies(command)) return undefined;
+	const chunks: Buffer[] = [];
+	let bufferedBytes = 0;
+	let overflowed = false;
+	let finished: ShellOutputProjection | null | undefined;
+	return {
+		append(data: Buffer): void {
+			if (overflowed) return;
+			bufferedBytes += data.length;
+			if (bufferedBytes > MAX_BUFFERED_REDUCTION_BYTES) {
+				overflowed = true;
+				chunks.length = 0;
+				return;
+			}
+			chunks.push(data);
+		},
+		finish(exitCode: number | null): ShellOutputProjection | undefined {
+			if (finished !== undefined) return finished ?? undefined;
+			if (overflowed) {
+				finished = null;
+				return undefined;
+			}
+			const text = Buffer.concat(chunks).toString("utf-8").replace(/\r\n?/g, "\n");
+			const result = reduceToolOutput({ tool, command, text, exitCode, level });
+			if (!result) {
+				finished = null;
+				return undefined;
+			}
+			finished = {
+				kind: "reduction",
+				content: result.text,
+				inputLines: result.details.inputLines,
+				inputBytes: result.details.inputBytes,
+				outputLines: result.details.outputLines,
+				outputBytes: result.details.outputBytes,
+				omittedLines: result.details.omittedLines,
+				collapsedPassingLines: 0,
+				reduction: result.details,
+			};
+			return finished;
+		},
+	};
 }

@@ -1,4 +1,5 @@
 import { stripAnsi } from "../../utils/ansi.ts";
+import type { OutputReductionDetails } from "./output-reduction.ts";
 import { isProjectableTestCommand } from "./shell-test-command.ts";
 
 const MIN_PROJECTABLE_LINES = 24;
@@ -14,7 +15,8 @@ const FAILURE_CONTEXT_AFTER = 6;
 const FINAL_CONTEXT_LINES = 8;
 
 export interface ShellOutputProjection {
-	kind: "test";
+	/** `test`: the failure/summary projection below; `reduction`: a family reducer (see output-reduction.ts). */
+	kind: "test" | "reduction";
 	content: string;
 	inputLines: number;
 	inputBytes: number;
@@ -22,9 +24,17 @@ export interface ShellOutputProjection {
 	outputBytes: number;
 	omittedLines: number;
 	collapsedPassingLines: number;
+	/** Present for `reduction`: what the reducer reported, minus the raw path the caller adds. */
+	reduction?: OutputReductionDetails;
 }
 
-export type ShellOutputProjectionDetails = Omit<ShellOutputProjection, "content">;
+export type ShellOutputProjectionDetails = Omit<ShellOutputProjection, "content" | "reduction">;
+
+/** What the bash tool drives: bytes in as they stream, one projection (or nothing) at the end. */
+export interface ShellOutputProjectorLike {
+	append(data: Buffer): void;
+	finish(exitCode: number | null): ShellOutputProjection | undefined;
+}
 
 interface SelectedLine {
 	index: number;

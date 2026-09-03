@@ -29,6 +29,8 @@ const { classifyCommandFamily, commandFamilyLabel } = await jiti.import(
 	"../packages/coding-agent/src/core/tools/command-family.ts",
 );
 const { reduceToolOutput } = await jiti.import("../packages/coding-agent/src/core/tools/output-reduction.ts");
+// Registers the bundled reducers so the replay measures exactly what the tools run.
+await jiti.import("../packages/coding-agent/src/core/tools/output-reducers.ts");
 
 function parseArgs(argv) {
 	const options = { targets: [], top: 20, replay: false, gate: undefined, corpus: undefined };

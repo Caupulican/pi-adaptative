@@ -41,6 +41,11 @@ import { withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
 import { applyGitTailStage, classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
 import { prepareManagedShellEnvironment } from "./managed-shell-preparation.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
+import {
+	createReductionProjector,
+	formatOutputReductionNotice,
+	type OutputReductionDetails,
+} from "./output-reduction.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import {
 	assessShellSearchScope,
@@ -49,10 +54,12 @@ import {
 } from "./search-command-guard.ts";
 import { tokenizeShellCommand } from "./shell-command-parser.ts";
 import { routeShellContract } from "./shell-contract-router.ts";
+import "./output-reducers.ts";
 import {
 	createShellOutputProjector,
 	type ShellOutputProjection,
 	type ShellOutputProjectionDetails,
+	type ShellOutputProjectorLike,
 } from "./shell-output-projection.ts";
 import { acquirePersistentShellSession } from "./shell-session.ts";
 import { classifyShellVerificationCommand } from "./shell-test-command.ts";
@@ -115,6 +122,8 @@ export interface BashToolDetails {
 		skippedLines: number;
 	};
 	outputProjection?: ShellOutputProjectionDetails;
+	/** Present when a family reducer produced the text; `rawPath` names the persisted raw output. */
+	outputReduction?: OutputReductionDetails;
 	piVerification?: {
 		version: 1;
 		id: string;
@@ -685,7 +694,12 @@ function createShellToolDefinition(
 			const routeBroadSearchOutput = searchScope.kind === "broad";
 			const autoRoutedReason =
 				searchScope.kind === "broad" && broadSearch !== BROAD_SEARCH_OUTPUT_ROUTE ? searchScope.reason : undefined;
-			let outputProjector = routeBroadSearchOutput ? undefined : createShellOutputProjector(command);
+			// Output-only stages: the test projector for recognized runners, otherwise a family reducer
+			// (search, diagnostics, ...) streaming over the same seam. Neither depends on how the command
+			// is executed; the raw output is persisted whenever either one is used.
+			let outputProjector: ShellOutputProjectorLike | undefined = routeBroadSearchOutput
+				? undefined
+				: (createShellOutputProjector(command) ?? createReductionProjector(toolName, command, "standard"));
 			const output = new OutputAccumulator({
 				tempFilePrefix: `pi-${toolName}`,
 				tempDirectory: options?.outputDirectory,
@@ -887,11 +901,17 @@ function createShellToolDefinition(
 							collapsedPassingLines: projection.collapsedPassingLines,
 						},
 					};
-					const passingNotice =
-						projection.collapsedPassingLines > 0
-							? ` ${projection.collapsedPassingLines} passing/progress lines collapsed.`
-							: "";
-					text += `\n\n[Test output filtered: retained ${projection.inputLines - projection.omittedLines} of ${projection.inputLines} lines.${passingNotice} ${fullOutputNotice}]`;
+					if (projection.kind === "reduction" && projection.reduction) {
+						const reduction = { ...projection.reduction, rawPath: snapshot.fullOutputPath };
+						details = { ...details, outputReduction: reduction };
+						text += `\n\n${formatOutputReductionNotice(reduction)}`;
+					} else {
+						const passingNotice =
+							projection.collapsedPassingLines > 0
+								? ` ${projection.collapsedPassingLines} passing/progress lines collapsed.`
+								: "";
+						text += `\n\n[Test output filtered: retained ${projection.inputLines - projection.omittedLines} of ${projection.inputLines} lines.${passingNotice} ${fullOutputNotice}]`;
+					}
 				}
 				return { text, details };
 			};
