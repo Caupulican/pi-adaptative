@@ -98,21 +98,19 @@ describe("P2l: calculateCost multi-tiered pricing", () => {
 		expect(cost.total).toBeCloseTo(7.8);
 	});
 
-	describe("E5: regression against existing longContextPricing catalog entries", () => {
-		// gpt-5.6 ships with longContextPricing and NO tiers — the tiers code path must be a
-		// complete no-op for it, leaving pricing byte-identical to the pre-tiers implementation.
+	describe("E5: catalog entries carry the models.dev context tier", () => {
+		// gpt-5.6 ships with the 272k context tier from models.dev and no legacy longContextPricing:
+		// the tier path prices it request-wide above the threshold and the legacy multiplier never runs.
 		const gpt56 = getModel("openai", "gpt-5.6");
 
-		it("has no tiers configured (precondition for this regression pin)", () => {
-			expect(gpt56.cost.tiers).toBeUndefined();
-			expect(gpt56.longContextPricing).toEqual({
-				thresholdTokens: 272_000,
-				inputMultiplier: 2,
-				outputMultiplier: 1.5,
-			});
+		it("carries the single 272k tier and no legacy multiplier", () => {
+			expect(gpt56.longContextPricing).toBeUndefined();
+			expect(gpt56.cost.tiers).toEqual([
+				{ inputTokensAbove: 272_000, input: 8, output: 30, cacheRead: 0.8, cacheWrite: 10 },
+			]);
 		});
 
-		it("prices a below-threshold request exactly as before tiers existed", () => {
+		it("prices a below-threshold request at the base rate", () => {
 			const usage: Usage = {
 				input: 100_000,
 				output: 10_000,
@@ -122,14 +120,14 @@ describe("P2l: calculateCost multi-tiered pricing", () => {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
 			const cost = calculateCost(gpt56, usage);
-			expect(cost.input).toBe(0.5); // 100k * 5/1e6
-			expect(cost.output).toBe(0.3); // 10k * 30/1e6
+			expect(cost.input).toBeCloseTo(0.4); // 100k * 4/1e6
+			expect(cost.output).toBeCloseTo(0.2); // 10k * 20/1e6
 			expect(cost.cacheRead).toBe(0);
 			expect(cost.cacheWrite).toBe(0);
-			expect(cost.total).toBeCloseTo(0.8);
+			expect(cost.total).toBeCloseTo(0.6);
 		});
 
-		it("prices an above-threshold request with the legacy longContextPricing multiplier exactly as before tiers existed", () => {
+		it("prices an above-threshold request at the tier rate for the whole request", () => {
 			const usage: Usage = {
 				input: 300_000,
 				output: 20_000,
@@ -139,11 +137,10 @@ describe("P2l: calculateCost multi-tiered pricing", () => {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
 			const cost = calculateCost(gpt56, usage);
-			// Base: input 300k*5/1e6=1.5, output 20k*30/1e6=0.6; longContextPricing then applies
-			// (total input 300k > 272k threshold): input *2, output *1.5.
-			expect(cost.input).toBeCloseTo(3.0);
-			expect(cost.output).toBeCloseTo(0.9);
-			expect(cost.total).toBeCloseTo(3.9);
+			// Total input 300k > 272k: input 300k*8/1e6, output 20k*30/1e6.
+			expect(cost.input).toBeCloseTo(2.4);
+			expect(cost.output).toBeCloseTo(0.6);
+			expect(cost.total).toBeCloseTo(3.0);
 		});
 	});
 

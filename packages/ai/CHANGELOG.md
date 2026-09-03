@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Fixed
+
+- GPT-5.6 catalog prices follow models.dev again. The generator's launch-day table for the family overrode the catalogue, so the 2026-07-30 Terra and Luna price cut never landed (per million input/output: Sol 5/30 → 4/20, Terra 2.5/15 → 2/12, Luna 1/6 → 0.2/1.2; cache read and write follow). The table now only backs the family while the catalogue lags a launch, and the Codex GPT-5.6 entries mirror the listed OpenAI prices instead of carrying their own copy.
+- The catalogue carries models.dev context tiers as `cost.tiers`. Every GPT-5.4, 5.5 and 5.6 entry prices a request whose total input exceeds 272k tokens at the long-context rate for the whole request (input, cache read and cache write ×2, output ×1.5); the legacy `longContextPricing` field is no longer emitted. Tiers published for other providers (Anthropic on Bedrock, GitHub Copilot and OpenCode, Google, xAI, Azure) are carried the same way.
+- Direct OpenAI GPT-5.6 entries advertise the 272k short-context window, like GPT-5.4 and 5.5 and Codex's own catalogue; a `models.json` override can raise it and the retained tier prices what runs above the threshold.
+- GPT-5.6 requests with cache retention `none` send `prompt_cache_options: { mode: "explicit" }` with no breakpoints, which neither reads nor writes the cache, so one-shot requests such as compaction and branch summaries stop paying the 1.25× cache-write charge. Requests with retention keep the implicit 30-minute mode.
+
+### Changed
+
+- Model catalog refreshed from live sources (2026-09-03).
+
 ## [0.97.25] - 2026-09-02
 
 ## [0.97.24] - 2026-09-02

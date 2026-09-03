@@ -38,18 +38,22 @@ interface ModelsDevModel {
 		context?: number;
 		output?: number;
 	};
-	cost?: {
-		input?: number;
-		output?: number;
-		cache_read?: number;
-		cache_write?: number;
-	};
+	cost?: ModelsDevCost;
 	modalities?: {
 		input?: string[];
 	};
 	provider?: {
 		npm?: string;
 	};
+}
+
+interface ModelsDevCost {
+	input?: number;
+	output?: number;
+	cache_read?: number;
+	cache_write?: number;
+	/** Context-window pricing tiers; `tier.size` is the input-token threshold above which the tier applies. */
+	tiers?: (Omit<ModelsDevCost, "tiers"> & { tier?: { type?: string; size?: number } })[];
 }
 
 interface AiGatewayModel {
@@ -255,6 +259,60 @@ const XAI_BUILTIN_EXCLUDED_MODEL_IDS = new Set([
 const XAI_RESPONSES_COMPAT: OpenAIResponsesCompat = {
 	supportsLongCacheRetention: false,
 };
+
+type ModelCost = Model<Api>["cost"];
+
+function roundCost(value: number): number {
+	return Number(value.toFixed(6));
+}
+
+/**
+ * models.dev cost record → catalog cost. Context tiers (`tier.type === "context"`) become
+ * `cost.tiers`, which `calculateCost` applies request-wide once the total input exceeds the
+ * tier's threshold; a record without tiers keeps the flat shape.
+ */
+function getModelsDevCost(cost: ModelsDevCost | undefined): ModelCost {
+	const tiers = (cost?.tiers ?? []).flatMap((tier) => {
+		const context = tier.tier;
+		if (context?.type !== "context" || context.size === undefined) return [];
+		return [
+			{
+				inputTokensAbove: context.size,
+				input: tier.input || 0,
+				output: tier.output || 0,
+				cacheRead: tier.cache_read || 0,
+				cacheWrite: tier.cache_write || 0,
+			},
+		];
+	});
+	return {
+		input: cost?.input || 0,
+		output: cost?.output || 0,
+		cacheRead: cost?.cache_read || 0,
+		cacheWrite: cost?.cache_write || 0,
+		...(tiers.length > 0 ? { tiers } : {}),
+	};
+}
+
+// OpenAI bills a GPT-5.4/5.5/5.6 request whose total input exceeds 272k tokens at the
+// long-context rate for the whole request: input, cache read and cache write ×2, output ×1.5.
+// models.dev publishes the same tier; this helper only backs the fallback entries used while
+// the catalogue lags a launch.
+const OPENAI_LONG_CONTEXT_INPUT_THRESHOLD = 272_000;
+function withOpenAiLongContextTier(cost: ModelCost): ModelCost {
+	return {
+		...cost,
+		tiers: [
+			{
+				inputTokensAbove: OPENAI_LONG_CONTEXT_INPUT_THRESHOLD,
+				input: roundCost(cost.input * 2),
+				output: roundCost(cost.output * 1.5),
+				cacheRead: roundCost(cost.cacheRead * 2),
+				cacheWrite: roundCost(cost.cacheWrite * 2),
+			},
+		],
+	};
+}
 
 function mergeThinkingLevelMap(model: Model<any>, map: NonNullable<Model<any>["thinkingLevelMap"]>): void {
 	model.thinkingLevelMap = { ...model.thinkingLevelMap, ...map };
@@ -648,12 +706,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: getBedrockBaseUrl(id),
 					reasoning: m.reasoning === true,
 					input: (m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"]) as ("text" | "image")[],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});
@@ -674,12 +727,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: "https://api.anthropic.com",
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});
@@ -700,12 +748,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: "https://generativelanguage.googleapis.com/v1beta",
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});
@@ -726,12 +769,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: "https://api.openai.com/v1",
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});
@@ -752,12 +790,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: "https://api.groq.com/openai/v1",
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});
@@ -778,12 +811,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: "https://api.cerebras.ai/v1",
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});
@@ -804,12 +832,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: CLOUDFLARE_WORKERS_AI_BASE_URL,
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 					compat: { sendSessionAffinityHeaders: true },
@@ -859,12 +882,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl,
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 					...(compat ? { compat } : {}),
@@ -889,12 +907,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					...(useResponsesApi ? { compat: { ...XAI_RESPONSES_COMPAT } } : {}),
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});
@@ -916,12 +929,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: "https://api.z.ai/api/coding/paas/v4",
 					reasoning: m.reasoning === true,
 					input: supportsImage ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					compat: {
 						supportsDeveloperRole: false,
 						thinkingFormat: "zai",
@@ -947,12 +955,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: "https://api.mistral.ai",
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});
@@ -973,12 +976,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: "https://router.huggingface.co/v1",
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					compat: {
 						supportsDeveloperRole: false,
 					},
@@ -1003,12 +1001,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: "https://api.fireworks.ai/inference",
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 					// Fireworks prompt caching uses automatic prefix matching + session affinity.
@@ -1044,12 +1037,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					reasoning,
 					...(thinkingLevelMap ? { thinkingLevelMap } : {}),
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					compat: getTogetherCompat(modelId, reasoning),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
@@ -1140,12 +1128,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl,
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					...(compat ? { compat } : {}),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
@@ -1183,12 +1166,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: "https://api.individual.githubcopilot.com",
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 128000,
 					maxTokens: m.limit?.output || 8192,
 					headers: { ...COPILOT_STATIC_HEADERS },
@@ -1228,12 +1206,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						baseUrl,
 						reasoning: m.reasoning === true,
 						input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-						cost: {
-							input: m.cost?.input || 0,
-							output: m.cost?.output || 0,
-							cacheRead: m.cost?.cache_read || 0,
-							cacheWrite: m.cost?.cache_write || 0,
-						},
+						cost: getModelsDevCost(m.cost),
 						contextWindow: m.limit?.context || 4096,
 						maxTokens: m.limit?.output || 4096,
 					});
@@ -1269,12 +1242,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					compat: { authFormat: "bearer" },
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});
@@ -1309,12 +1277,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl,
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 					compat: moonshotCompat,
@@ -1353,12 +1316,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						compat: xiaomiCompat,
 						reasoning: m.reasoning === true,
 						input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-						cost: {
-							input: m.cost?.input || 0,
-							output: m.cost?.output || 0,
-							cacheRead: m.cost?.cache_read || 0,
-							cacheWrite: m.cost?.cache_write || 0,
-						},
+						cost: getModelsDevCost(m.cost),
 						contextWindow: m.limit?.context || 4096,
 						maxTokens: m.limit?.output || 4096,
 					});
@@ -1382,12 +1340,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					compat: QWEN_TOKEN_PLAN_COMPAT,
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					cost: getModelsDevCost(m.cost),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});
@@ -1456,8 +1409,15 @@ async function generateModels() {
 			candidate.contextWindow = 272000;
 			candidate.maxTokens = 128000;
 		}
-		if (candidate.provider === "openai" && (candidate.id === "gpt-5.4" || candidate.id === "gpt-5.5")) {
-			candidate.contextWindow = 272000;
+		// Direct OpenAI GPT-5.4/5.5/5.6 requests stay in the short-context pricing tier by default:
+		// above 272k input tokens the whole request bills at the long-context rate (cost.tiers), so
+		// the advertised window stops there, as in Codex's own catalogue. A models.json override can
+		// raise it; the retained tier prices what runs above the threshold.
+		if (
+			candidate.provider === "openai" &&
+			(candidate.id === "gpt-5.4" || candidate.id === "gpt-5.5" || isOpenAiGpt56(candidate.id))
+		) {
+			candidate.contextWindow = OPENAI_LONG_CONTEXT_INPUT_THRESHOLD;
 			candidate.maxTokens = 128000;
 		}
 		// Keep selected OpenRouter model metadata stable until upstream settles.
@@ -1687,42 +1647,40 @@ async function generateModels() {
 		});
 	}
 
-	// GPT-5.6 public API metadata is kept explicit so the alias and the full family
-	// remain available even when models.dev is still rolling out catalogue updates.
+	// GPT-5.6 public API metadata: models.dev is the source of truth for prices, tiers and limits.
+	// The table below only backs the family while the catalogue lags a launch; it never overrides a
+	// listed entry (the 2026-07-30 Terra/Luna price cut sat unnoticed for a month while it did).
+	// The reasoning default is ours in either case.
 	const openAiGpt56Models = [
-		{ id: "gpt-5.6", name: "GPT-5.6", input: 5, output: 30, cacheRead: 0.5 },
-		{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", input: 5, output: 30, cacheRead: 0.5 },
-		{ id: "gpt-5.6-terra", name: "GPT-5.6 Terra", input: 2.5, output: 15, cacheRead: 0.25 },
-		{ id: "gpt-5.6-luna", name: "GPT-5.6 Luna", input: 1, output: 6, cacheRead: 0.1 },
+		{ id: "gpt-5.6", name: "GPT-5.6", input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 },
+		{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 },
+		{ id: "gpt-5.6-terra", name: "GPT-5.6 Terra", input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 },
+		{ id: "gpt-5.6-luna", name: "GPT-5.6 Luna", input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
 	] as const;
 	for (const spec of openAiGpt56Models) {
-		const metadata = {
+		const existing = allModels.find((model) => model.provider === "openai" && model.id === spec.id);
+		if (existing) {
+			existing.defaultThinkingLevel = "medium";
+			continue;
+		}
+		allModels.push({
+			id: spec.id,
 			name: spec.name,
+			api: "openai-responses",
+			baseUrl: "https://api.openai.com/v1",
+			provider: "openai",
 			reasoning: true,
-			defaultThinkingLevel: "medium" as const,
-			input: ["text", "image"] as ("text" | "image")[],
-			cost: {
+			defaultThinkingLevel: "medium",
+			input: ["text", "image"],
+			cost: withOpenAiLongContextTier({
 				input: spec.input,
 				output: spec.output,
 				cacheRead: spec.cacheRead,
-				cacheWrite: spec.input * 1.25,
-			},
-			contextWindow: 1_050_000,
-			longContextPricing: { thresholdTokens: 272_000, inputMultiplier: 2, outputMultiplier: 1.5 },
+				cacheWrite: spec.cacheWrite,
+			}),
+			contextWindow: OPENAI_LONG_CONTEXT_INPUT_THRESHOLD,
 			maxTokens: 128_000,
-		};
-		const existing = allModels.find((model) => model.provider === "openai" && model.id === spec.id);
-		if (existing) {
-			Object.assign(existing, metadata);
-		} else {
-			allModels.push({
-				id: spec.id,
-				api: "openai-responses",
-				baseUrl: "https://api.openai.com/v1",
-				provider: "openai",
-				...metadata,
-			});
-		}
+		});
 	}
 
 	// Add missing gpt models
@@ -1932,6 +1890,17 @@ async function generateModels() {
 	const CODEX_GPT_5_6_CONTEXT = 272000;
 	const CODEX_SPARK_CONTEXT = 128000;
 	const CODEX_MAX_TOKENS = 128000;
+	// ChatGPT subscriptions are not billed per token; the catalogue mirrors OpenAI's list prices
+	// for usage display, so a Codex GPT-5.6 entry follows the listed openai entry (tiers included)
+	// and falls back to the same numbers only while the catalogue lags.
+	const openAiListCost = (id: string, fallback: ModelCost): ModelCost => {
+		const listed = allModels.find((model) => model.provider === "openai" && model.id === id);
+		if (!listed) return withOpenAiLongContextTier(fallback);
+		return {
+			...listed.cost,
+			...(listed.cost.tiers ? { tiers: listed.cost.tiers.map((tier) => ({ ...tier })) } : {}),
+		};
+	};
 	const codexModels: Model<"openai-codex-responses">[] = [
 		{
 			id: "gpt-5.2",
@@ -2015,7 +1984,7 @@ async function generateModels() {
 			defaultThinkingLevel: "low",
 			openaiResponsesLite: true,
 			input: ["text", "image"],
-			cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
+			cost: openAiListCost("gpt-5.6-sol", { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 }),
 			contextWindow: CODEX_GPT_5_6_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
@@ -2029,7 +1998,7 @@ async function generateModels() {
 			defaultThinkingLevel: "medium",
 			openaiResponsesLite: true,
 			input: ["text", "image"],
-			cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 3.125 },
+			cost: openAiListCost("gpt-5.6-terra", { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 }),
 			contextWindow: CODEX_GPT_5_6_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
@@ -2043,7 +2012,7 @@ async function generateModels() {
 			defaultThinkingLevel: "medium",
 			openaiResponsesLite: true,
 			input: ["text", "image"],
-			cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 1.25 },
+			cost: openAiListCost("gpt-5.6-luna", { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 }),
 			contextWindow: CODEX_GPT_5_6_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
@@ -2398,6 +2367,9 @@ export const MODELS = {
 			output += `\t\t\t\toutput: ${model.cost.output},\n`;
 			output += `\t\t\t\tcacheRead: ${model.cost.cacheRead},\n`;
 			output += `\t\t\t\tcacheWrite: ${model.cost.cacheWrite},\n`;
+			if (model.cost.tiers && model.cost.tiers.length > 0) {
+				output += `\t\t\t\ttiers: ${JSON.stringify(model.cost.tiers)},\n`;
+			}
 			output += `\t\t\t},\n`;
 			output += `\t\t\tcontextWindow: ${model.contextWindow},\n`;
 			if (model.autoCompactionTriggerTokens !== undefined) {
