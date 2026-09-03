@@ -184,7 +184,8 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	// mode with no breakpoints neither reads nor writes the cache, which is what "none" means for
 	// a one-shot request such as a compaction summary.
 	// https://developers.openai.com/api/docs/guides/prompt-caching
-	const isGpt56 = model.provider === "openai" && model.id.startsWith("gpt-5.6");
+	// GPT-6 follows the GPT-5.6 cache contract (explicit cache mode, retention none turns caching off).
+	const isGpt56 = model.provider === "openai" && (model.id.startsWith("gpt-5.6") || model.id.startsWith("gpt-6"));
 	const params: ResponseCreateParamsStreaming = {
 		model: model.id,
 		instructions: useXaiCliFormat ? undefined : buildResponsesInstructions(context),

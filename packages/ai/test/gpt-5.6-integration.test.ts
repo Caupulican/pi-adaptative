@@ -148,8 +148,26 @@ describe("GPT-5.6 integration", () => {
 		expect(getSupportedThinkingLevels(codexLuna)).toEqual(["low", "medium", "high", "xhigh", "max"]);
 	});
 
-	it("publishes Codex GPT-6 Astra with the Responses Lite contract and ultra as its own effort", () => {
+	it("publishes GPT-6 Astra: list prices with the long tier on the API, Responses Lite and ultra on Codex", () => {
+		const direct = getModel("openai", "gpt-6-astra");
 		const astra = getModel("openai-codex", "gpt-6-astra");
+		// OpenAI model page 2026-09-03: $10 / $1 cached / $12.5 cache write / $50 per 1M; above 272k
+		// input tokens 2x input and cache, 1.5x output; 1,050,000 window, 128,000 max output. The
+		// advertised window stops at the tier threshold, as for GPT-5.6.
+		expect(direct).toMatchObject({
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+			defaultThinkingLevel: "medium",
+			cost: {
+				input: 10,
+				output: 50,
+				cacheRead: 1,
+				cacheWrite: 12.5,
+				tiers: [{ inputTokensAbove: 272_000, input: 20, output: 75, cacheRead: 2, cacheWrite: 25 }],
+			},
+		});
+		// The API lists low, medium, high, xhigh and max; no minimal, no ultra.
+		expect(getSupportedThinkingLevels(direct)).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
 		expect(astra).toMatchObject({
 			contextWindow: 272_000,
 			maxTokens: 128_000,
@@ -157,11 +175,9 @@ describe("GPT-5.6 integration", () => {
 			openaiResponsesLite: true,
 			input: ["text", "image"],
 		});
-		// No list price is published yet; the Codex entry stays at zero until models.dev lists it.
-		expect(astra.cost).toMatchObject({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(astra.cost).toEqual(direct.cost);
 		expect(getSupportedThinkingLevels(astra)).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
 		expect(astra.thinkingLevelMap?.ultra).toBe("ultra");
-		expect(astra.thinkingLevelMap?.max).toBe("max");
 	});
 
 	it("sends direct GPT-5.6 pro reasoning, cache policy, safety identifier, and Ultra as max", async () => {

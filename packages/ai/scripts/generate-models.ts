@@ -455,8 +455,9 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		// Ultra is a UI reasoning label; supported GPT-5.6 variants receive max on the wire.
 		mergeThinkingLevelMap(model, { ultra: "max" });
 	}
-	if (isOpenAiGpt6(model.id)) {
-		// GPT-6 Astra lists ultra as its own effort ("maximum reasoning with automatic task delegation").
+	if (model.provider === "openai-codex" && isOpenAiGpt6(model.id)) {
+		// Codex's GPT-6 Astra lists ultra as its own effort ("maximum reasoning with automatic task
+		// delegation"); the public API stops at max.
 		mergeThinkingLevelMap(model, { ultra: "ultra" });
 	}
 	if (model.provider === "openai" && model.id === "gpt-5.5") {
@@ -1662,15 +1663,18 @@ async function generateModels() {
 		});
 	}
 
-	// GPT-5.6 public API metadata: models.dev is the source of truth for prices, tiers and limits.
-	// The table below only backs the family while the catalogue lags a launch; it never overrides a
-	// listed entry (the 2026-07-30 Terra/Luna price cut sat unnoticed for a month while it did).
-	// The reasoning default is ours in either case.
+	// GPT-5.6 and GPT-6 public API metadata: models.dev is the source of truth for prices, tiers and
+	// limits. The table below only backs the family while the catalogue lags a launch; it never
+	// overrides a listed entry (the 2026-07-30 Terra/Luna price cut sat unnoticed for a month while it
+	// did). The reasoning default is ours in either case. GPT-6 Astra prices are the OpenAI model page
+	// of 2026-09-03 (input 10, cached 1, cache write 12.5, output 50; the long tier above 272k input
+	// tokens is 2x input and cache, 1.5x output, as for 5.6).
 	const openAiGpt56Models = [
 		{ id: "gpt-5.6", name: "GPT-5.6", input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 },
 		{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 },
 		{ id: "gpt-5.6-terra", name: "GPT-5.6 Terra", input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 },
 		{ id: "gpt-5.6-luna", name: "GPT-5.6 Luna", input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
+		{ id: "gpt-6-astra", name: "GPT-6 Astra", input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
 	] as const;
 	for (const spec of openAiGpt56Models) {
 		const existing = allModels.find((model) => model.provider === "openai" && model.id === spec.id);
@@ -2036,9 +2040,8 @@ async function generateModels() {
 		{
 			// From Codex's bundled catalogue (openai/codex ed391d4dd, 2026-09-03): Responses Lite,
 			// websockets preferred, image input, reasoning low..ultra with low as the default, hidden
-			// from Codex's own picker while it rolls out. No OpenAI list price is published yet and
-			// models.dev has no entry; the cost stays zero (ChatGPT plans are not billed per token)
-			// until the listing appears, at which point `openAiListCost` takes it over.
+			// from Codex's own picker while it rolls out. The cost mirrors the OpenAI list price
+			// (ChatGPT plans are not billed per token); models.dev takes over once it lists the model.
 			id: "gpt-6-astra",
 			name: "GPT-6 Astra",
 			api: "openai-codex-responses",
@@ -2048,7 +2051,7 @@ async function generateModels() {
 			defaultThinkingLevel: "low",
 			openaiResponsesLite: true,
 			input: ["text", "image"],
-			cost: openAiListCost("gpt-6-astra", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+			cost: openAiListCost("gpt-6-astra", { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }),
 			contextWindow: CODEX_GPT_6_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
