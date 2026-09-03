@@ -37,7 +37,9 @@ import {
 	getToolExecutionKey,
 	getUnresolvedToolFailure,
 	normalizeToolSignature,
+	readToolFailureOccurrence,
 	rememberToolFailure,
+	stableToolFailureEnvelopeText,
 	type ToolFailureContextMemory,
 	type ToolFailureMemoryTracker,
 	toolFailureCorrection,
@@ -59,7 +61,12 @@ import type {
 	ToolCallRepairInfo,
 	ToolCallStartContext,
 } from "./types.ts";
-import { AgentToolExecutionError, DEFAULT_MAX_PROVIDER_TURNS, DEFAULT_MAX_STALL_TURNS } from "./types.ts";
+import {
+	AgentToolExecutionError,
+	DEFAULT_MAX_PROVIDER_TURNS,
+	DEFAULT_MAX_REPEATED_FAILURES,
+	DEFAULT_MAX_STALL_TURNS,
+} from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
 import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
 import { retainedVerificationDetails, VerificationObligationTracker } from "./verification-obligations.ts";
@@ -343,16 +350,34 @@ function textProtocolBatchSignature(toolCalls: readonly AgentToolCall[]): string
 	);
 }
 
-/** Hash only provider-visible result state; per-execution IDs/timestamps cannot hide a stagnant cycle. */
+/**
+ * Hash only provider-visible result state; per-execution IDs/timestamps cannot hide a stagnant
+ * cycle, and neither can the failure ledger's own occurrence stamp on an otherwise identical result.
+ */
 function toolResultBatchSignature(toolResults: readonly ToolResultMessage[]): string {
 	return getToolExecutionKey(
 		"tool_result_batch",
 		toolResults.map((result) => ({
 			toolName: result.toolName,
-			content: result.content,
+			content: result.content.map((block) =>
+				block.type === "text" ? { ...block, text: stableToolFailureEnvelopeText(block.text) } : block,
+			),
 			isError: result.isError,
 		})),
 	);
+}
+
+/** The most-repeated failure key among this turn's results, as the ledger counted it. */
+function mostRepeatedToolFailure(
+	toolResults: readonly ToolResultMessage[],
+): { failureKey: string; occurrence: number; diagnostic?: string } | undefined {
+	let worst: { failureKey: string; occurrence: number; diagnostic?: string } | undefined;
+	for (const result of toolResults) {
+		if (result.isError !== true) continue;
+		const occurrence = readToolFailureOccurrence(result.details);
+		if (occurrence && (!worst || occurrence.occurrence > worst.occurrence)) worst = occurrence;
+	}
+	return worst;
 }
 
 function toolCallRecord(toolCall: AgentToolCall): Record<string, unknown> | undefined {
@@ -609,6 +634,33 @@ async function runLoop(
 			if (verificationBlocksCompletion) hasMoreToolCalls = true;
 
 			await emit({ type: "turn_end", message, toolResults });
+
+			// One call failing identically N times ends the run, whatever else rode in its batches:
+			// keyed on the ledger's own count, not on batch or result-text repetition.
+			const repeatLimit = config.maxRepeatedFailures ?? DEFAULT_MAX_REPEATED_FAILURES;
+			const repeated = repeatLimit > 0 && toolCalls.length > 0 ? mostRepeatedToolFailure(toolResults) : undefined;
+			if (repeated && repeated.occurrence >= repeatLimit) {
+				config.onRunawayStop?.({
+					reason: "repeated_tool_call",
+					signature: repeated.failureKey,
+					repeats: repeated.occurrence,
+					...(repeated.diagnostic ? { detail: repeated.diagnostic } : {}),
+				});
+				await streamToollessClosingTurn(
+					currentContext,
+					newMessages,
+					config,
+					continuationState,
+					providerTurnLimit,
+					signal,
+					emit,
+					streamFn,
+					previousAssistantForDegenerateCollapse,
+					verificationObligations,
+				);
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
 
 			// Runaway-loop backstop (cost guard): detect only a repeated suffix cycle. Counting
 			// signatures anywhere in the window falsely stopped progressing workflows whose status

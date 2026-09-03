@@ -424,6 +424,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			let demotedStepIds: readonly string[] = [];
 			let autoPromotedStepId: string | undefined;
 			try {
+				const selectorNotes: string[] = [];
 				switch (input.action) {
 					case "set":
 					case "intake": {
@@ -452,7 +453,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 						// "current"/"active" resolution (including its "no in_progress step" error naming
 						// the open steps) instead of duplicating that logic here.
 						const selector = input.id?.trim() || "current";
-						const selected = resolveTaskStepSelector(before.steps, selector);
+						const selected = resolveTaskStepSelector(before.steps, selector, (note) => selectorNotes.push(note));
 						if (
 							input.pipelineRunId !== undefined ||
 							input.pipelineStageId !== undefined ||
@@ -506,7 +507,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 				if (mutated) deps.saveTaskStepsState(state);
 
 				const stateCounts = counts(state);
-				const noticeLines: string[] = [];
+				const noticeLines: string[] = [...selectorNotes];
 				if (duplicateStepId) {
 					noticeLines.push(
 						`Duplicate open step ignored; existing ${duplicateStepId} already tracks this content.`,

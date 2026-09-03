@@ -2002,6 +2002,9 @@ describe("runaway-loop backstop", () => {
 					model: createModel(),
 					convertToLlm: identityConverter,
 					maxStallTurns: 4,
+					// This test pins the batch-level fuses; the per-call guard is disabled so the
+					// stagnant-cycle detector is what ends the run.
+					maxRepeatedFailures: 0,
 					onRunawayStop: (info) => stalls.push(info),
 				},
 				undefined,
@@ -2010,13 +2013,14 @@ describe("runaway-loop backstop", () => {
 		);
 
 		// Each successful repair genuinely moves the world, so each replay is genuinely admitted. That
-		// is correct per call and still unproductive in aggregate, which is exactly what the cost guard
-		// is for — after four complete two-operation cycles, not merely four sightings of one member.
-		expect(turns).toBe(8);
+		// is correct per call and still unproductive in aggregate. The results of each cycle are
+		// identical once the ledger's occurrence stamp is ignored, so the stagnant-cycle detector
+		// ends the run after three complete two-operation cycles, before the call-only fuse at four.
+		expect(turns).toBe(6);
 		expect(deliveryTurns).toBe(1);
-		expect(targetExecutions).toBe(4);
-		expect(recoveryExecutions).toBe(4);
-		expect(stalls).toMatchObject([{ reason: "repeated_tool_call" }]);
+		expect(targetExecutions).toBe(3);
+		expect(recoveryExecutions).toBe(3);
+		expect(stalls).toMatchObject([{ reason: "stagnant_tool_cycle" }]);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
 
@@ -2074,7 +2078,7 @@ describe("runaway-loop backstop", () => {
 			agentLoop(
 				[{ role: "user", content: "go", timestamp: 1 }],
 				context,
-				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0, maxRepeatedFailures: 0 },
 				undefined,
 				streamFn,
 			),
@@ -3024,5 +3028,106 @@ describe("runaway-loop backstop", () => {
 
 		expect(stalls).toHaveLength(1); // periodic oscillation is caught, not just back-to-back repeats
 		expect(events.filter((e) => e.type === "agent_end")).toHaveLength(1);
+	});
+});
+
+describe("repeated-failure guard on the ledger occurrence", () => {
+	function failingTool(): AgentTool<typeof toolSchema, { value: string }> {
+		return {
+			name: "fragile",
+			label: "Fragile",
+			description: "Always fails",
+			parameters: toolSchema,
+			async execute() {
+				throw new Error("fragile: step not found for selector s1-phantom");
+			},
+		};
+	}
+	function scriptedStream(turns: number, failingArgs: (turn: number) => { value: string }) {
+		let providerTurns = 0;
+		return () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				providerTurns++;
+				if (providerTurns <= turns) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								// A different productive call every turn: the batch signature never repeats.
+								{
+									type: "toolCall",
+									id: `echo-${providerTurns}`,
+									name: "echo",
+									arguments: { value: `v${providerTurns}` },
+								},
+								{
+									type: "toolCall",
+									id: `fragile-${providerTurns}`,
+									name: "fragile",
+									arguments: failingArgs(providerTurns),
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "done" }], "stop"),
+				});
+			});
+			return stream;
+		};
+	}
+
+	it("stops after one call fails identically the tier's number of times, however the batches vary", async () => {
+		const stops: Array<{ reason: string; signature: string; repeats: number; detail?: string }> = [];
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "keep trying", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [echoTool, failingTool()] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 12,
+					maxRepeatedFailures: 4,
+					onRunawayStop: (info) => stops.push(info),
+				},
+				undefined,
+				scriptedStream(30, () => ({ value: "same" })),
+			),
+		);
+		expect(stops).toHaveLength(1);
+		expect(stops[0]).toMatchObject({ reason: "repeated_tool_call", repeats: 4 });
+		expect(stops[0]?.detail).toContain("step not found");
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+		const fragileResults = events.filter(
+			(event) => event.type === "tool_execution_end" && event.toolName === "fragile",
+		);
+		expect(fragileResults.length).toBeLessThanOrEqual(4);
+	});
+
+	it("does not stop when the failures are different calls", async () => {
+		const stops: Array<{ reason: string }> = [];
+		await drain(
+			agentLoop(
+				[{ role: "user", content: "keep trying", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [echoTool, failingTool()] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 12,
+					maxRepeatedFailures: 4,
+					onRunawayStop: (info) => stops.push(info),
+				},
+				undefined,
+				scriptedStream(8, (turn) => ({ value: `attempt-${turn}` })),
+			),
+		);
+		expect(stops).toEqual([]);
 	});
 });

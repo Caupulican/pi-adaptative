@@ -995,6 +995,38 @@ export interface ToolFailureTelemetry {
 	nextAction: string;
 }
 
+/** The ledger's own count for the call behind a failed result: the signal the repeated-failure guard reads. */
+export function readToolFailureOccurrence(
+	details: unknown,
+): { failureKey: string; occurrence: number; diagnostic?: string } | undefined {
+	const record = readFailureRecord(details);
+	if (!record) return undefined;
+	return {
+		failureKey: record.failureKey,
+		occurrence: record.occurrence,
+		...(record.diagnostic ? { diagnostic: record.diagnostic } : {}),
+	};
+}
+
+/**
+ * A `[harness] {...}` envelope with its per-occurrence fields removed, so two identical failures
+ * compare equal even though the ledger stamps a new `occ`/`kind_mistakes`/`state` on each. Any
+ * other text is returned unchanged.
+ */
+export function stableToolFailureEnvelopeText(text: string): string {
+	if (!text.startsWith("[harness] ")) return text;
+	const start = text.indexOf("{");
+	const end = text.lastIndexOf("}");
+	if (start < 0 || end <= start) return text;
+	try {
+		const parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
+		const { occ: _occ, kind_mistakes: _kind, state: _state, ...stable } = parsed;
+		return `${text.slice(0, start)}${JSON.stringify(stable)}${text.slice(end + 1)}`;
+	} catch {
+		return text;
+	}
+}
+
 /** Read only bounded failure identity and guidance; operation arguments never cross this telemetry boundary. */
 export function readToolFailureTelemetry(details: unknown): ToolFailureTelemetry | undefined {
 	const record = readFailureRecord(details);

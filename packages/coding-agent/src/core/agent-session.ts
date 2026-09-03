@@ -1714,6 +1714,7 @@ export class AgentSession {
 		this.agent.onRunawayStop = (info) => this._handleRunawayStop(info);
 		this.agent.onToolValidationEscalation = (event) => this._handleToolValidationEscalation(event);
 		this.agent.toolFailureProtocolProse = this.getCapabilityTierPolicy().protocolProse;
+		this.agent.maxRepeatedFailures = this.getCapabilityTierPolicy().repetitionGuardRepeats;
 	}
 
 	/** Guard handlers live in agent-session-guards.ts; the coordinator only supplies their dependencies. */
@@ -1728,6 +1729,7 @@ export class AgentSession {
 			},
 			refreshCapabilityTierPolicy: () => {
 				this.agent.toolFailureProtocolProse = this.getCapabilityTierPolicy().protocolProse;
+				this.agent.maxRepeatedFailures = this.getCapabilityTierPolicy().repetitionGuardRepeats;
 			},
 			sendNextTurnMessage: (customType, content, details) => {
 				void this.sendCustomMessage({ customType, content, display: false, details }, { deliverAs: "nextTurn" });

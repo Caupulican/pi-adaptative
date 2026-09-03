@@ -115,6 +115,19 @@ call blocks up to its own timeout. Pinned by
 **The coordinator only shrinks.** `agent-session.ts` has a line ceiling in
 `scripts/check-coordinator-boundaries.mjs` that is lowered with each extraction and never raised.
 
+**One call failing identically ends the run on the ledger's own count.** The failure ledger
+counts every occurrence of a failure key; when one key reaches the tier's repeat count the run ends
+as a `repeated_tool_call` runaway, whatever else the model mixed into the same turns. The batch
+fuses stay: the stagnant-cycle detector compares results with the ledger's per-occurrence stamp
+removed, so an identical failure is identical. Why: measured live, one invented `task_steps` id
+failed 28 times in 22 minutes inside batches whose other calls varied, and no guard fired. A slip
+the resolver can name normalizes instead of refusing: an ordinal prefix followed by uuid-like or
+parenthetical noise resolves to the one step carrying that number and the result says so; a short
+numeric fragment still refuses with the open-step list. Pinned by
+`packages/agent/test/runaway-loop.test.ts`, `packages/agent/test/tool-failure-memory.test.ts`
+(envelope-stable signatures, corrective diagnostic tail) and
+`packages/coding-agent/test/task-state.test.ts`.
+
 **A feature earns its tokens or is gated by tier, never removed.** `scripts/feature-ledger.mjs`
 measures each subsystem's cost and benefit from session files; a subsystem without a benefit
 measurement gains no new surface.
@@ -126,3 +139,5 @@ measurement gains no new surface.
 | 2026-09-02 | First edition: the invariants proven live on v0.97.24 and the ratchet model's gates. |
 | 2026-09-02 | The output-repetition guard also watches the string values of a streaming tool call's arguments (a live probe looped inside a step selector). |
 | 2026-09-02 | Demotion is evidence from tool-loop guards only; an output runaway ends the response without demoting. |
+| 2026-09-03 | A host record carries only what changed (legend delta, goal bucket, ledger pointer); the sent prefix survives a new prompt; compaction summarizes the packed projection and names a deterministic checkpoint `fallback`. |
+| 2026-09-03 | A call failing identically the tier's repeat count ends the run on the ledger's own occurrence; stagnant signatures ignore the occurrence stamp; ordinal-prefix selectors normalize. |

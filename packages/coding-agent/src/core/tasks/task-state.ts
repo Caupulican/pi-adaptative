@@ -400,7 +400,18 @@ export function addTaskStep(state: TaskStepsState, input: TaskStepInput, now: st
 	return { ...nextState(state, steps, now), nextStepNumber: state.nextStepNumber + 1 };
 }
 
-export function resolveTaskStepSelector(steps: readonly TaskStep[], selector: string): TaskStep {
+/**
+ * Noise a model appends to an ordinal that cannot name another step: a parenthetical remark or a
+ * uuid-like hex run (six or more hex chars with a letter). A short numeric fragment ("s1-1?") is
+ * left to the refusal below, because it may name a different step.
+ */
+const ORDINAL_NOISE_RE = /^[\s-]*(?:\([^)]*\)|[0-9a-f-]*[a-f][0-9a-f-]{5,})$/i;
+
+export function resolveTaskStepSelector(
+	steps: readonly TaskStep[],
+	selector: string,
+	onNormalized?: (note: string) => void,
+): TaskStep {
 	const normalized = selector.trim().toLocaleLowerCase();
 	if (!normalized) throw new TaskStepsError("Task step selector is required.");
 	if (normalized === "current" || normalized === "active") {
@@ -425,6 +436,17 @@ export function resolveTaskStepSelector(steps: readonly TaskStep[], selector: st
 	if (ordinal) {
 		const byOrdinal = steps.find((step) => step.id.toLocaleLowerCase() === `step-${Number(ordinal[1])}`);
 		if (byOrdinal) return byOrdinal;
+	}
+	// An ordinal prefix with trailing noise ("s1-<uuid>", "step 2 (done)") names one step when
+	// exactly one id carries that number: measured live, a model invented "s1-<uuid>" and lost 28
+	// turns to the refusal instead of one normalization it was told about.
+	const ordinalPrefix = /^(?:#|s|step)[\s-]*(\d+)(.*)$/.exec(normalized);
+	if (ordinalPrefix && ORDINAL_NOISE_RE.test(ordinalPrefix[2] ?? "")) {
+		const byPrefix = steps.filter((step) => step.id.toLocaleLowerCase() === `step-${Number(ordinalPrefix[1])}`);
+		if (byPrefix.length === 1) {
+			onNormalized?.(`selector ${JSON.stringify(selector.trim())} resolved to ${byPrefix[0]!.id}`);
+			return byPrefix[0]!;
+		}
 	}
 	const idPrefix = steps.filter((step) => step.id.toLocaleLowerCase().startsWith(normalized));
 	if (idPrefix.length === 1) return idPrefix[0];
