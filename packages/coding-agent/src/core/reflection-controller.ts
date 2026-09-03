@@ -1536,7 +1536,7 @@ export class ReflectionController {
 		// outcomes via `details.success` (it catches its own errors rather than throwing). Only a
 		// genuine "not found in the file" justifies trying the other file; a real failure for a file
 		// (budget exceeded / drift) must NOT fall through and mutate the wrong target.
-		for (const target of ["memory", "user"] as const) {
+		for (const target of ["project", "memory", "user"] as const) {
 			try {
 				const params =
 					write.kind === "memory_replace"

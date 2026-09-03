@@ -60,3 +60,30 @@ describe("file-store context memory provider", () => {
 		expect(hits.map((hit) => hit.item.summary)).toEqual(["Safe artifact note."]);
 	});
 });
+
+describe("file-store context memory provider project source", () => {
+	it("searches the project's MEMORY.md with project scope", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-file-store-project-"));
+		try {
+			writeFileSync(join(dir, "MEMORY.md"), "General: prefer explicit git adds\n");
+			writeFileSync(join(dir, "USER.md"), "");
+			writeFileSync(join(dir, "PROJECT.md"), "Project: Alpha builds with make\n");
+			const provider = createFileStoreMemoryProvider({
+				memoryFilePath: join(dir, "MEMORY.md"),
+				userFilePath: join(dir, "USER.md"),
+				projectMemoryFilePath: join(dir, "PROJECT.md"),
+			});
+			const projectHits = await provider.search({ query: "Alpha make", scope: "project", maxResults: 5 });
+			expect(projectHits).toHaveLength(1);
+			expect(projectHits[0]?.item).toMatchObject({
+				kind: "fact",
+				scope: "project",
+				summary: "Project: Alpha builds with make",
+			});
+			const globalHits = await provider.search({ query: "Alpha make", scope: "global", maxResults: 5 });
+			expect(globalHits.map((hit) => hit.item.summary)).not.toContain("Project: Alpha builds with make");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});

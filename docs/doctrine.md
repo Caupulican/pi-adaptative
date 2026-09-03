@@ -140,6 +140,13 @@ Python `f = p/name` was refused as an invented alias. Pinned by
 `packages/coding-agent/test/path-alias-tool-wrap.test.ts` and
 `packages/coding-agent/test/path-alias-session.test.ts` (existence gate).
 
+**A skill on disk is loadable in the session that wrote it.** A `skill` load, read or search that
+misses re-scans the skill roots once before refusing, the refusal says the roots were re-scanned,
+and search names the skills the loader could not index. Why: measured live, a skill written by
+`skillify` mid-session was refused twice, 45 minutes apart, while its SKILL.md existed the whole
+time. Pinned by `packages/coding-agent/test/skill-vault.test.ts` and
+`packages/coding-agent/test/resource-loader.test.ts` (refreshSkills).
+
 **A refusal names a real ambiguity or a real risk, never a shape the harness can absorb.** The
 credential guard accepts a literal filename prefix as a narrow glob, treats the harness's own
 memory, skills and sessions as searchable without a glob, judges a multi-line script line by line
@@ -160,6 +167,19 @@ itself. Why: measured live, refusals rose to 12 to 30 per 100 turns on the new v
 the `packages/coding-agent/test/pi-shell-engine` suite (conformance, commands-fs, commands-search,
 commands-text).
 
+**The general memory holds facts true in any task; a project's facts live in its own file.**
+`<agentDir>/MEMORY.md` (1,200 chars) carries cross-project facts; each project has
+`<agentDir>/memory/projects/<key>/MEMORY.md` (2,200 chars), keyed like OKF; `USER.md` stays
+global. The `memory` tool defaults to `project` inside a project, `memory` (general) stays
+explicit, a general write that names a path, ticket or branch gets a hint (never a silent
+reroute), `list` shows all three with their budgets, an over-budget general file puts a triage
+note in the memory block (move project lines, never delete), and workers cannot write any project
+memory. Why: on both owner machines the single global file was full of ticket and build facts,
+refused writes four times in a row, and sent every project's facts to every other project's
+sessions. Pinned by `packages/coding-agent/test/memory-subsystem.test.ts` (project-scoped hot
+memory), `packages/coding-agent/test/file-store-memory-provider.test.ts` (project scope search)
+and `packages/coding-agent/test/lane-private-paths.test.ts`.
+
 **A feature earns its tokens or is gated by tier, never removed.** `scripts/feature-ledger.mjs`
 measures each subsystem's cost and benefit from session files; a subsystem without a benefit
 measurement gains no new surface.
@@ -174,3 +194,6 @@ measurement gains no new surface.
 | 2026-09-03 | A host record carries only what changed (legend delta, goal bucket, ledger pointer); the sent prefix survives a new prompt; compaction summarizes the packed projection and names a deterministic checkpoint `fallback`. |
 | 2026-09-03 | A call failing identically the tier's repeat count ends the run on the ledger's own occurrence; stagnant signatures ignore the occurrence stamp; ordinal-prefix selectors normalize. |
 | 2026-09-03 | Aliases are minted only for existing paths; refs, listings and fragments never mint; only path parameters can be refused as unminted; listings print absolute paths. |
+| 2026-09-03 | A skill lookup miss re-scans the roots once before refusing; search lists skills the loader could not index. |
+| 2026-09-03 | Refusal false positives: prefix globs, harness roots, variable targets and line-wise scripts pass the credential guard; timeouts are operation outcomes; evidence lands on blocked goals; unions validate on the named branch; the Windows shell engine covers the full coreutils surface, heredocs and nested shells. |
+| 2026-09-03 | Memory is scoped: the general MEMORY.md holds facts true in any task, each project has its own hot MEMORY.md under the agent home, the memory tool defaults to the project file, and workers cannot write project memory. |

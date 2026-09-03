@@ -1,7 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { basename, join } from "node:path";
 import { type Static, Type } from "typebox";
-import { configFile, managedMemoryStateFile } from "../../agent-paths.ts";
+import {
+	configFile,
+	managedMemoryStateFile,
+	managedProjectMemoryStateFile,
+	projectMemoryDir,
+} from "../../agent-paths.ts";
 import type { MemoryPromptBudget } from "../../context/memory-prompt-budget.ts";
 import {
 	OKF_MEMORY_LIMITS,
@@ -15,6 +21,7 @@ import {
 	scanContextFileThreats,
 	stripInvisibleUnicode,
 } from "../../security/context-threat-scanner.ts";
+import { getDirectoryResourceProfileInfo } from "../../settings-manager.ts";
 import { jaccard, tokenize } from "../../tools/skill-audit.ts";
 import { isMissingFileError, withFileLock, writeFileAtomic } from "../../util/atomic-file.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
@@ -55,9 +62,12 @@ const memorySchema = Type.Object({
 	action: Type.Union([Type.Literal("add"), Type.Literal("replace"), Type.Literal("remove"), Type.Literal("list")], {
 		description: "Action to perform: add new content, replace existing content, or remove content",
 	}),
-	target: Type.Union([Type.Literal("memory"), Type.Literal("user"), Type.Literal("okf")], {
-		description: "Target: 'memory' for MEMORY.md, 'user' for USER.md, or 'okf' for structured project memory",
-	}),
+	target: Type.Optional(
+		Type.Union([Type.Literal("memory"), Type.Literal("project"), Type.Literal("user"), Type.Literal("okf")], {
+			description:
+				"Target: 'project' (default) for this project's MEMORY.md, 'memory' for the general MEMORY.md (facts true in any task), 'user' for USER.md preferences, or 'okf' for structured project records",
+		}),
+	),
 	content: Type.Optional(
 		Type.String({
 			maxLength: OKF_MEMORY_LIMITS.bodyChars,
@@ -159,7 +169,11 @@ export interface StructuredReflectionRollback {
 }
 
 export const FILE_STORE_MEMORY_SYSTEM_NOTE =
-	"[System Note: Below is a snapshot of persistent memory. Proactively record verified reusable project facts and user preferences with the 'memory' tool. Keep MEMORY.md for compact hot facts, USER.md for preferences, and use target 'okf' for durable project decisions, architecture, rules, findings, and references. Never store transient noise.]";
+	"[System Note: Below is a snapshot of persistent memory. Record verified reusable facts with the 'memory' tool by scope: target 'memory' = general facts true in any repo or task; target 'project' (the default) = facts true only for this project (paths, tickets, branches, build steps); target 'user' = preferences; target 'okf' = durable structured records (decisions, architecture, findings). A memory write that names a path, ticket key or branch belongs in 'project'. Never store transient noise.]";
+const FILE_STORE_MEMORY_TRIAGE_NOTE =
+	"[Memory triage: MEMORY.md (general) is over budget; move project-specific lines to target 'project' with memory replace/remove and keep the general lines. Never delete a line you did not move.]";
+/** Content that reads as project-specific: a ticket key, an absolute or drive path, or a branch. */
+const PROJECT_MARKER_RE = /\b[A-Z]{2,}-\d+\b|[A-Za-z]:[\\/]|(?:^|\s)\/[a-z][\w-]*\/|\bbranch\b/;
 
 interface ManagedMemoryState {
 	version: 1;
@@ -282,17 +296,25 @@ export class FileStoreProvider implements MemoryProvider {
 	private ctx?: MemoryLifecycleContext;
 	private memoryFilePath = "";
 	private userFilePath = "";
+	private projectMemoryFilePath = "";
 	private memoryStatePath = "";
 	private userStatePath = "";
+	private projectMemoryStatePath = "";
+	private projectKey = "";
+	private projectRoot = "";
 
 	private lastWrittenMemory = "";
 	private lastWrittenUser = "";
+	private lastWrittenProjectMemory = "";
 	private userArchive?: UserMemoryArchive;
 	private okfStore?: OkfProjectMemoryStore;
 	private readonly options: FileStoreProviderOptions;
 
 	// Character budgets
-	private static readonly BUDGET_MEMORY = 2200;
+	/** The general file holds facts true in any task; project facts have their own file (measured live:
+	 * one 2,200-char global file filled with ticket and build facts refused four writes in a row). */
+	private static readonly BUDGET_MEMORY = 1200;
+	private static readonly BUDGET_PROJECT = 2200;
 	private static readonly BUDGET_USER = 1375;
 
 	constructor(options: FileStoreProviderOptions = {}) {
@@ -314,13 +336,30 @@ export class FileStoreProvider implements MemoryProvider {
 		this.memoryStatePath = managedMemoryStateFile(ctx.agentDir, "MEMORY.md");
 		this.userStatePath = managedMemoryStateFile(ctx.agentDir, "USER.md");
 		this.userArchive = new UserMemoryArchive(ctx.agentDir);
+		const identity = getDirectoryResourceProfileInfo(ctx.cwd, ctx.agentDir);
+		this.projectKey = identity.hash;
+		this.projectRoot = identity.root;
+		this.projectMemoryFilePath = join(projectMemoryDir(ctx.agentDir, identity.hash), "MEMORY.md");
+		this.projectMemoryStatePath = managedProjectMemoryStateFile(ctx.agentDir, identity.hash);
 
 		await fs.mkdir(ctx.agentDir, { recursive: true });
+		await fs.mkdir(projectMemoryDir(ctx.agentDir, identity.hash), { recursive: true });
 		this.okfStore = new OkfProjectMemoryStore(ctx.agentDir, ctx.cwd);
-		[this.lastWrittenMemory, this.lastWrittenUser] = await Promise.all([
+		[this.lastWrittenMemory, this.lastWrittenUser, this.lastWrittenProjectMemory] = await Promise.all([
 			this.initializeManagedFile(this.memoryFilePath, this.memoryStatePath),
 			this.initializeManagedFile(this.userFilePath, this.userStatePath),
+			this.initializeManagedFile(this.projectMemoryFilePath, this.projectMemoryStatePath),
 		]);
+	}
+
+	/** Where this session's project memory lives, for hosts that render or protect it. */
+	getProjectMemoryFilePath(): string {
+		return this.projectMemoryFilePath;
+	}
+
+	/** The general file is over its budget: project lines must move to the project file. */
+	generalMemoryOverBudget(): boolean {
+		return this.lastWrittenMemory.length > FileStoreProvider.BUDGET_MEMORY;
 	}
 
 	private async initializeManagedFile(filePath: string, statePath: string): Promise<string> {
@@ -379,11 +418,15 @@ export class FileStoreProvider implements MemoryProvider {
 		};
 
 		const mem = cap(sanitize(this.lastWrittenMemory), FileStoreProvider.BUDGET_MEMORY);
+		const proj = cap(sanitize(this.lastWrittenProjectMemory), FileStoreProvider.BUDGET_PROJECT);
 		const usr = cap(sanitize(this.lastWrittenUser), FileStoreProvider.BUDGET_USER);
 
 		const blocks: string[] = [];
 		if (mem.trim()) {
-			blocks.push(`## MEMORY.md:\n${mem}`);
+			blocks.push(`## MEMORY.md (general):\n${mem}`);
+		}
+		if (proj.trim()) {
+			blocks.push(`## MEMORY.md (project ${basename(this.projectRoot) || this.projectKey}):\n${proj}`);
 		}
 		if (usr.trim()) {
 			blocks.push(`## USER.md:\n${usr}`);
@@ -393,7 +436,8 @@ export class FileStoreProvider implements MemoryProvider {
 			return "";
 		}
 
-		const block = `=== Persistent Memory (file-store) ===\n${FILE_STORE_MEMORY_SYSTEM_NOTE}\n\n${blocks.join("\n\n")}`;
+		const triage = this.generalMemoryOverBudget() ? `\n${FILE_STORE_MEMORY_TRIAGE_NOTE}` : "";
+		const block = `=== Persistent Memory (file-store) ===\n${FILE_STORE_MEMORY_SYSTEM_NOTE}${triage}\n\n${blocks.join("\n\n")}`;
 		return fitMemoryBlockToBudget(block, budget);
 	}
 
@@ -575,7 +619,7 @@ export class FileStoreProvider implements MemoryProvider {
 				execute: async (_toolCallId, params: MemoryParams, _signal, _onUpdate, _execCtx) => {
 					const {
 						action,
-						target,
+						target: requestedTarget,
 						content,
 						oldContent,
 						title,
@@ -586,6 +630,7 @@ export class FileStoreProvider implements MemoryProvider {
 						evidenceRefs,
 						expectedDigest,
 					} = params;
+					const target = requestedTarget ?? "project";
 
 					// Strict-scope injection guard on the high-privilege WRITE path (agy #31): a poisoned
 					// memory entry persists across sessions and is injected into every future system prompt,
@@ -783,15 +828,56 @@ export class FileStoreProvider implements MemoryProvider {
 						}
 					}
 					if (action === "list") {
-						return {
-							content: [{ type: "text", text: "Error: action 'list' is only supported for target 'okf'." }],
-							details: { success: false, error: "Unsupported list target" },
-						};
+						const rows = [
+							["MEMORY.md (general)", this.lastWrittenMemory, FileStoreProvider.BUDGET_MEMORY],
+							[
+								`MEMORY.md (project ${basename(this.projectRoot) || this.projectKey})`,
+								this.lastWrittenProjectMemory,
+								FileStoreProvider.BUDGET_PROJECT,
+							],
+							["USER.md", this.lastWrittenUser, FileStoreProvider.BUDGET_USER],
+						] as const;
+						const text = rows
+							.map(
+								([label, body, budgetChars]) =>
+									`## ${label} (${body.length}/${budgetChars} chars)\n${body.trim() || "(empty)"}`,
+							)
+							.join("\n\n");
+						return { content: [{ type: "text", text }], details: { success: true } };
 					}
 
-					const filePath = target === "memory" ? this.memoryFilePath : this.userFilePath;
-					const statePath = target === "memory" ? this.memoryStatePath : this.userStatePath;
-					const budget = target === "memory" ? FileStoreProvider.BUDGET_MEMORY : FileStoreProvider.BUDGET_USER;
+					const fileLabel =
+						target === "memory"
+							? "MEMORY.md (general)"
+							: target === "project"
+								? "MEMORY.md (project)"
+								: "USER.md";
+					const filePath =
+						target === "memory"
+							? this.memoryFilePath
+							: target === "project"
+								? this.projectMemoryFilePath
+								: this.userFilePath;
+					const statePath =
+						target === "memory"
+							? this.memoryStatePath
+							: target === "project"
+								? this.projectMemoryStatePath
+								: this.userStatePath;
+					const budget =
+						target === "memory"
+							? FileStoreProvider.BUDGET_MEMORY
+							: target === "project"
+								? FileStoreProvider.BUDGET_PROJECT
+								: FileStoreProvider.BUDGET_USER;
+					// A hint, never a reroute: the model decides, the harness names the better target.
+					const projectHint =
+						target === "memory" &&
+						(action === "add" || action === "replace") &&
+						content !== undefined &&
+						PROJECT_MARKER_RE.test(content)
+							? '\nhint: this looks project-specific; consider target "project".'
+							: "";
 
 					try {
 						return await withFileLock(filePath, async () => {
@@ -823,6 +909,7 @@ export class FileStoreProvider implements MemoryProvider {
 							// A peer session's committed write is authoritative. Refresh this provider's prompt
 							// snapshot before applying the caller's mutation to that current content.
 							if (target === "memory") this.lastWrittenMemory = currentOnDisk;
+							else if (target === "project") this.lastWrittenProjectMemory = currentOnDisk;
 							else this.lastWrittenUser = currentOnDisk;
 
 							let newContent = currentOnDisk;
@@ -904,7 +991,7 @@ export class FileStoreProvider implements MemoryProvider {
 									content: [
 										{
 											type: "text",
-											text: `Error: Memory budget exceeded. ${target === "memory" ? "MEMORY.md" : "USER.md"} limit is ${budget} characters. Current operation would result in ${newContent.length} characters. Remove or shorten an existing line first.`,
+											text: `Error: Memory budget exceeded. ${fileLabel} limit is ${budget} characters. Current operation would result in ${newContent.length} characters. Remove or shorten an existing line first.`,
 										},
 									],
 									details: { success: false, error: "Memory budget exceeded" },
@@ -925,6 +1012,7 @@ export class FileStoreProvider implements MemoryProvider {
 							}
 
 							if (target === "memory") this.lastWrittenMemory = newContent;
+							else if (target === "project") this.lastWrittenProjectMemory = newContent;
 							else this.lastWrittenUser = newContent;
 							if (archiveChanged || newContent !== currentOnDisk) this.options.onDurableMemoryChanged?.();
 
@@ -932,7 +1020,7 @@ export class FileStoreProvider implements MemoryProvider {
 								content: [
 									{
 										type: "text",
-										text: `Successfully updated ${target === "memory" ? "MEMORY.md" : "USER.md"}.`,
+										text: `Successfully updated ${fileLabel}.${projectHint}`,
 									},
 								],
 								details: { success: true },

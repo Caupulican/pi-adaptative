@@ -19,8 +19,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { type AgentMessage, createCustomMessage } from "@caupulican/pi-agent-core";
-import { configFile, okfMemoryDir } from "./agent-paths.ts";
+import { configFile, okfMemoryDir, projectMemoryDir } from "./agent-paths.ts";
 import { collectCurrentWorkMemory } from "./context/current-work-memory.ts";
 import { createFileStoreMemoryProvider } from "./context/file-store-memory-provider.ts";
 import { createLocalGraphMemoryProvider } from "./context/local-graph-memory-provider.ts";
@@ -225,9 +226,11 @@ export class MemoryController {
 	}
 
 	private _getFileStoreMemoryProvider(): ContextMemoryProvider {
+		const project = getDirectoryResourceProfileInfo(this.deps.getCwd(), this.deps.getAgentDir());
 		this._fileStoreMemoryProvider ??= createFileStoreMemoryProvider({
 			memoryFilePath: configFile(this.deps.getAgentDir(), "MEMORY.md"),
 			userFilePath: configFile(this.deps.getAgentDir(), "USER.md"),
+			projectMemoryFilePath: join(projectMemoryDir(this.deps.getAgentDir(), project.hash), "MEMORY.md"),
 		});
 		return this._fileStoreMemoryProvider;
 	}
