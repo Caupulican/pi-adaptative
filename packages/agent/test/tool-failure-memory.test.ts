@@ -9,6 +9,7 @@ import {
 	normalizeToolSignature,
 	rememberToolFailure,
 	sanitizeToolFailureContext,
+	stableToolFailureEnvelopeText,
 	type ToolFailureMemoryRecord,
 } from "../src/tool-failure-memory.ts";
 import type { AgentMessage } from "../src/types.ts";
@@ -1505,5 +1506,26 @@ describe("tool failure context memory (session-scoped fold)", () => {
 		const refolded = sanitizeToolFailureContext(replaced, "sys", 0, memory);
 		expect(shape(refolded.messages)).toEqual(shape(sanitizeToolFailureContext(replaced, "sys", 0, fresh).messages));
 		expect(refolded.ledger).toEqual(sanitizeToolFailureContext(replaced, "sys", 0, fresh).ledger);
+	});
+});
+
+describe("repeated-failure guard inputs", () => {
+	it("compares two identical failures equal despite the ledger's per-occurrence stamp", () => {
+		const first =
+			'[harness] {"MUST":true,"failure_key":"task_steps:abc","occ":1,"kind_mistakes":1,"state":"failed","phase":"execution","diagnostic":"not found"}';
+		const second =
+			'[harness] {"MUST":true,"failure_key":"task_steps:abc","occ":28,"kind_mistakes":28,"state":"rejected","phase":"execution","diagnostic":"not found"}';
+		expect(stableToolFailureEnvelopeText(first)).toBe(stableToolFailureEnvelopeText(second));
+		expect(stableToolFailureEnvelopeText(first)).not.toContain('"occ"');
+		expect(stableToolFailureEnvelopeText("plain output")).toBe("plain output");
+		expect(stableToolFailureEnvelopeText("[harness] not json")).toBe("[harness] not json");
+	});
+
+	it("keeps the corrective tail of a long selector diagnostic", () => {
+		const message =
+			"task_steps update failed: Task step not found for selector: s1-1e31e8d3-c8d8-4c6e-b7c0-5c0e5c5e5c01. Open steps: step-1 (in_progress), step-2 (pending), step-3 (pending), step-4 (pending). Use an id, a unique id prefix, an ordinal like 2, or current.";
+		const diagnostic = assessToolFailure(message, "failed").diagnostic ?? "";
+		expect(diagnostic).toContain("Use an id, a unique id prefix, an ordinal like 2, or current.");
+		expect(diagnostic).toContain("s1-1e31e8d3");
 	});
 });

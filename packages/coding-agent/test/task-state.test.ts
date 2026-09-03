@@ -362,3 +362,22 @@ describe("task step state", () => {
 		expect(state.steps[0].requirementIds).toEqual([]);
 	});
 });
+
+describe("resolveTaskStepSelector ordinal prefixes", () => {
+	it("resolves an ordinal prefix with trailing noise to the one step carrying that number, and says so", () => {
+		const state = setTaskSteps(
+			createTaskStepsState("T0"),
+			[{ content: "Survey" }, { content: "Write tests" }, { content: "Apply fix" }],
+			"T1",
+		);
+		const notes: string[] = [];
+		expect(
+			resolveTaskStepSelector(state.steps, "s1-1e31e8d3-c8d8-4c6e-b7c0-5c0e5c5e5c01", (note) => notes.push(note)).id,
+		).toBe("step-1");
+		expect(notes).toEqual(['selector "s1-1e31e8d3-c8d8-4c6e-b7c0-5c0e5c5e5c01" resolved to step-1']);
+		expect(resolveTaskStepSelector(state.steps, "step 2 (done)").id).toBe("step-2");
+		expect(() => resolveTaskStepSelector(state.steps, "s9-anything")).toThrow(
+			/Task step not found for selector: s9-anything\. Open steps: step-1/,
+		);
+	});
+});

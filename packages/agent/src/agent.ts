@@ -171,6 +171,7 @@ export interface AgentOptions {
 	transport?: Transport;
 	maxRetryDelayMs?: number;
 	maxStallTurns?: number;
+	maxRepeatedFailures?: number;
 	maxProviderTurns?: number;
 	onRunawayStop?: AgentLoopConfig["onRunawayStop"];
 	toolExecution?: ToolExecutionMode;
@@ -311,6 +312,8 @@ export class Agent {
 	public maxRetryDelayMs?: number;
 	/** Runaway-loop backstop for repeated identical tool-call turns. */
 	public maxStallTurns?: number;
+	/** Per-call guard: one failure key reaching this ledger occurrence ends the run. */
+	public maxRepeatedFailures?: number;
 	/** Optional provider-request fuse for one logical prompt; disabled when omitted or zero. */
 	public maxProviderTurns?: number;
 	/** Observability hook fired once if a repeated-call or provider-turn guard trips. */
@@ -357,6 +360,7 @@ export class Agent {
 		this.transport = options.transport ?? "auto";
 		this.maxRetryDelayMs = options.maxRetryDelayMs;
 		this.maxStallTurns = options.maxStallTurns;
+		this.maxRepeatedFailures = options.maxRepeatedFailures;
 		this.maxProviderTurns = options.maxProviderTurns;
 		this.onRunawayStop = options.onRunawayStop;
 		this.toolExecution = options.toolExecution ?? "parallel";
@@ -638,6 +642,7 @@ export class Agent {
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			maxStallTurns: this.maxStallTurns,
+			maxRepeatedFailures: this.maxRepeatedFailures,
 			maxProviderTurns: this.maxProviderTurns,
 			onRunawayStop: this.onRunawayStop,
 			toolExecution: this.toolExecution,

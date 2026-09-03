@@ -300,6 +300,8 @@ export interface AgentRunawayStopInfo {
 	reason: AgentRunawayStopReason;
 	signature: string;
 	repeats: number;
+	/** The failing call's diagnostic when the stop came from one call failing identically. */
+	detail?: string;
 }
 
 export interface ToolValidationEscalationEvent {
@@ -422,6 +424,13 @@ export type ProviderRequestAdmissionResult =
  * trips it, but bounds the cost of a model wedged repeating one failing call forever.
  */
 export const DEFAULT_MAX_STALL_TURNS = 12;
+/**
+ * One tool call failing with the same failure key this many times ends the run, whatever else the
+ * model mixes into the same turns. The batch-level stall fuse above never fired on the measured
+ * case (28 identical failing calls in 22 minutes, each riding a batch whose other calls varied,
+ * each result text carrying a new occurrence count) while the failure ledger counted every one.
+ */
+export const DEFAULT_MAX_REPEATED_FAILURES = 6;
 /** Provider-turn fuse is opt-in; varied productive work has no implicit request-count ceiling. */
 export const DEFAULT_MAX_PROVIDER_TURNS = 0;
 
@@ -614,6 +623,13 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Default: {@link DEFAULT_MAX_STALL_TURNS}.
 	 */
 	maxStallTurns?: number;
+
+	/**
+	 * Per-call repeated-failure guard: a failure key whose ledger occurrence reaches this count
+	 * stops the run with `repeated_tool_call`. Defaults to {@link DEFAULT_MAX_REPEATED_FAILURES};
+	 * hosts follow the model's capability tier. Zero disables it.
+	 */
+	maxRepeatedFailures?: number;
 
 	/**
 	 * Optional provider-request fuse for one logical prompt, including host continuations.
