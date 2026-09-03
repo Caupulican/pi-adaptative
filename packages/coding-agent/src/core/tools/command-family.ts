@@ -185,8 +185,43 @@ function familyFor(tool: string, argv: string[], command: string): CommandFamily
 	return "other";
 }
 
+/**
+ * `powershell -NoProfile -Command "Set-Location D:\\repo; cargo check"`, `bash -lc "cd /repo && rg …"`,
+ * `cmd /c dir`: a shell wrapper hides the program that produced the output. Returns the wrapped
+ * script when the invocation is one, so the classifier can look inside. Measured on a live Windows
+ * session every cargo, git and rg call went through such a wrapper and was classified as "powershell".
+ */
+function unwrapShellWrapper(tool: string, argv: string[]): string | undefined {
+	if (tool === "powershell" || tool === "pwsh") {
+		const index = argv.findIndex((arg, position) => position > 0 && /^-c(?:ommand)?$/iu.test(arg));
+		if (index === -1 || index + 1 >= argv.length) return undefined;
+		return argv.slice(index + 1).join(" ");
+	}
+	if (tool === "bash" || tool === "sh" || tool === "zsh") {
+		const index = argv.findIndex((arg, position) => position > 0 && /^-[a-z]*c$/u.test(arg));
+		if (index === -1 || index + 1 >= argv.length) return undefined;
+		return argv[index + 1];
+	}
+	if (tool === "cmd") {
+		const index = argv.findIndex((arg, position) => position > 0 && /^\/[ck]$/iu.test(arg));
+		if (index === -1 || index + 1 >= argv.length) return undefined;
+		return argv.slice(index + 1).join(" ");
+	}
+	return undefined;
+}
+
+/** `Set-Location "D:\\repo"; …` or `cd /d C:\\repo && …` at the start of a wrapped script. */
+const SCRIPT_CWD_PREFIX_RE =
+	/^\s*(?:Set-Location|Push-Location|cd|pushd|chdir)\s+(?:\/d\s+)?(?:"([^"]*)"|'([^']*)'|(\S+))\s*(?:;|&&)\s*/iu;
+
+const MAX_WRAPPER_DEPTH = 3;
+
 /** Classify a bash command by its primary stage. Never throws; an unparseable command is `other`. */
 export function classifyCommandFamily(command: string): CommandFamilyClassification {
+	return classifyCommandFamilyAtDepth(command, 0);
+}
+
+function classifyCommandFamilyAtDepth(command: string, depth: number): CommandFamilyClassification {
 	const fallback: CommandFamilyClassification = {
 		family: "other",
 		tool: "",
@@ -194,7 +229,9 @@ export function classifyCommandFamily(command: string): CommandFamilyClassificat
 		argv: [],
 		verbose: false,
 	};
-	const sequence = parseShellCommandSequence(command);
+	// Redirections only move bytes the tool already captured (`2>&1`) or away from it (`> log`);
+	// they never change which program produced the output, so classification drops them.
+	const sequence = parseShellCommandSequence(command, { redirects: "drop" });
 	if (!sequence) return fallback;
 	let stage = 0;
 	let cwdPrefix: string | undefined;
@@ -210,6 +247,18 @@ export function classifyCommandFamily(command: string): CommandFamilyClassificat
 	if (argv.length === 0) return fallback;
 	argv = unwrapRunner(argv);
 	const tool = normalizeExecutable(argv[0]);
+	if (SHELLS.has(tool) && depth < MAX_WRAPPER_DEPTH) {
+		const script = unwrapShellWrapper(tool, argv);
+		if (script !== undefined) {
+			const prefix = SCRIPT_CWD_PREFIX_RE.exec(script);
+			const inner = classifyCommandFamilyAtDepth(prefix ? script.slice(prefix[0].length) : script, depth + 1);
+			if (inner.tool) {
+				const innerCwd = prefix ? (prefix[1] ?? prefix[2] ?? prefix[3]) : inner.cwdPrefix;
+				const outerCwd = cwdPrefix ?? innerCwd;
+				return { ...inner, ...(outerCwd !== undefined ? { cwdPrefix: outerCwd } : {}) };
+			}
+		}
+	}
 	const trailingStages = sequence.invocations
 		.slice(stage + 1)
 		.map((invocation) => normalizeExecutable(invocation[0] ?? ""));

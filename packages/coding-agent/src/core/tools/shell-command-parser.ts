@@ -237,14 +237,37 @@ export interface ShellCommandSequence {
  * Split a command into simple commands and the connectors between them. Redirects and empty stages
  * make the command opaque (undefined): the callers only reason about plain invocation chains.
  */
-export function parseShellCommandSequence(command: string): ShellCommandSequence | undefined {
+export interface ParseShellCommandSequenceOptions {
+	/**
+	 * `reject` (default): any redirection makes the command unparseable, the right answer for code that
+	 * would run the stages itself. `drop`: redirections and their targets are removed, the right answer
+	 * for code that only reads the output the shell produced (`cargo check 2>&1`, `cmd > log`).
+	 */
+	redirects?: "reject" | "drop";
+}
+
+export function parseShellCommandSequence(
+	command: string,
+	options?: ParseShellCommandSequenceOptions,
+): ShellCommandSequence | undefined {
 	const tokens = tokenizeShellCommand(command);
 	if (!tokens) return undefined;
 	const invocations: string[][] = [];
 	const connectors: string[] = [];
 	let invocation: string[] = [];
+	let dropNextTarget = false;
 	for (const token of tokens) {
-		if (token.kind === "redirect") return undefined;
+		if (token.kind === "redirect") {
+			if (options?.redirects !== "drop") return undefined;
+			// `2>&1` names its target inline; `>`, `>>`, `2>`, `<` take the next word as the target.
+			dropNextTarget = !token.value.includes("&");
+			continue;
+		}
+		if (token.kind === "arg" && dropNextTarget) {
+			dropNextTarget = false;
+			continue;
+		}
+		dropNextTarget = false;
 		if (token.kind === "arg") {
 			invocation.push(token.value);
 			continue;

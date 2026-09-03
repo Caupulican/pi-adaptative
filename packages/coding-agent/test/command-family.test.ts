@@ -74,3 +74,45 @@ describe("classifyCommandFamily", () => {
 		expect(classifyCommandFamily("").family).toBe("other");
 	});
 });
+
+describe("classifyCommandFamily: shell wrappers", () => {
+	it("looks inside powershell, bash -c and cmd /c wrappers and takes the script's cd as the prefix", () => {
+		const powershell = classifyCommandFamily(
+			'/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "Set-Location \\"D:\\\\work\\\\repo\\"; cargo check --all-targets 2>&1"',
+		);
+		expect(powershell).toMatchObject({
+			family: "diagnostics",
+			tool: "cargo",
+			subcommand: "check",
+			cwdPrefix: "D:\\work\\repo",
+		});
+		const bash = classifyCommandFamily("bash -lc 'cd /repo && rg -n needle src | head -20'");
+		expect(bash).toMatchObject({ family: "search", tool: "rg", cwdPrefix: "/repo", trailingStages: ["head"] });
+		const cmd = classifyCommandFamily('cmd.exe /c "cd /d C:\\repo && dir /b"');
+		expect(cmd).toMatchObject({ family: "listing", tool: "dir", cwdPrefix: "C:\\repo" });
+		expect(commandFamilyLabel(powershell)).toBe("cargo check");
+	});
+
+	it("keeps a bare or unparseable shell invocation as the shell family", () => {
+		expect(classifyCommandFamily("pwsh -NoProfile")).toMatchObject({ family: "shell", tool: "pwsh" });
+		expect(classifyCommandFamily("bash")).toMatchObject({ family: "shell", tool: "bash" });
+	});
+});
+
+describe("classifyCommandFamily: redirections", () => {
+	it("classifies through stderr merges and file redirections", () => {
+		expect(classifyCommandFamily("cargo check --all-targets 2>&1")).toMatchObject({
+			family: "diagnostics",
+			tool: "cargo",
+			subcommand: "check",
+			argv: ["cargo", "check", "--all-targets"],
+		});
+		expect(classifyCommandFamily("rg -n needle src > hits.txt")).toMatchObject({ family: "search", tool: "rg" });
+		expect(commandFamilyLabel(classifyCommandFamily("npm install >/dev/null 2>&1"))).toBe("npm install");
+		expect(classifyCommandFamily("cd /repo && cargo check 2>&1 | tail -20")).toMatchObject({
+			tool: "cargo",
+			cwdPrefix: "/repo",
+			trailingStages: ["tail"],
+		});
+	});
+});
