@@ -690,7 +690,7 @@ describe("profile model editing", () => {
 		const settingsManager = SettingsManager.inMemory({
 			resourceProfiles: {
 				"pi-fortes": {
-					description: "Fortes development",
+					description: "Client development",
 					model: "openai-codex/gpt-5.5",
 					thinking: "high",
 					modelRouter: { enabled: false, mediumModel: "openai-codex/gpt-5.5" },
@@ -731,7 +731,7 @@ describe("profile model editing", () => {
 		const saved = settingsManager.getGlobalSettings().resourceProfiles?.["pi-fortes"];
 		expect(saved).not.toHaveProperty("model");
 		expect(saved).toMatchObject({
-			description: "Fortes development",
+			description: "Client development",
 			thinking: "high",
 			modelRouter: { enabled: false, mediumModel: "openai-codex/gpt-5.5" },
 			soul: "Work surgically.",

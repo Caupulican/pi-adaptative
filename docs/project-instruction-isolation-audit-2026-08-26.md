@@ -14,7 +14,7 @@ No commit, release, or publication is claimed.
 
 ## Source archive and handling
 
-- Source: `/mnt/c/Users/Caupulican/Downloads/Nova pasta/.pi.7z`
+- Source: a private session archive (`.pi.7z`, kept outside the repository)
 - SHA-256: `acb57138299ef0b9dfe089ecce396a38ff405125aaa8caf2168b9563790d07c6`
 - Integrity: 7-Zip reported `Everything is Ok` for 2,254 files and 192 folders (235,121,543 uncompressed bytes).
 - Listing coverage: 2,447 archive paths.

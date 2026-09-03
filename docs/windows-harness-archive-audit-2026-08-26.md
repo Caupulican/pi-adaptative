@@ -10,7 +10,7 @@ No claim below relies only on a version transition. Each resolved classification
 
 ## Scope and evidence handling
 
-- Source archive: `C:\Users\Caupulican\Downloads\.pi.7z`
+- Source archive: a private session archive (`.pi.7z`, kept outside the repository)
 - SHA-256: `fef1d0dc5303726dc697c2765ac3738b0942ebd653718149c6b10f4867b70247`
 - Archive integrity: 7-Zip test passed; 8,177 files, 443 directories, 546,975,366 uncompressed bytes; no encrypted entries or unsafe traversal paths.
 - Selectively extracted evidence: sessions, recovery/failure telemetry, orchestration state, background-task state, and tool-output artifacts. Authentication, settings, trust, memory, caches, and unrelated files were excluded.
