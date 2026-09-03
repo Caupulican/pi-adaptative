@@ -58,6 +58,9 @@ function customRecordOf(context: Context | undefined, kind: string, clearedText:
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index] as unknown as AgentMessage;
 		if (message.role === "custom" && message.customType === kind && typeof message.content === "string") {
+			// A pointer record only reclaims the tail; the last full record above it is current.
+			const details = message.details as { pointer?: unknown } | undefined;
+			if (details?.pointer === true) continue;
 			return message.content.startsWith(clearedText) ? "" : message.content;
 		}
 	}
@@ -6526,5 +6529,14 @@ describe("agent loop run-scoped resolution", () => {
 			if (previous === undefined) delete process.env.PI_TOOL_REPAIR_DISABLED;
 			else process.env.PI_TOOL_REPAIR_DISABLED = previous;
 		}
+	});
+});
+
+describe("continuation state seeds the sent prefix across runs", () => {
+	it("starts the next run at the previous run's sent prefix instead of zero", () => {
+		const state = createAgentLoopContinuationState(3, undefined, 42);
+		expect(state.providerRequestPrefixState?.sentPrefixCount).toBe(42);
+		expect(state.providerRequestPrefixState?.sanitizerSentPrefixCount).toBe(3);
+		expect(createAgentLoopContinuationState().providerRequestPrefixState?.sentPrefixCount).toBe(0);
 	});
 });

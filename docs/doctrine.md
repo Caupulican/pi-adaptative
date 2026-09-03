@@ -27,6 +27,24 @@ on the request that introduces them and every request after. Pinned by
 `packages/agent/test/provider-request-prefix-stability.test.ts` and
 `packages/coding-agent/test/path-alias-session.test.ts`.
 
+**A host record carries only what changed, and the sent prefix survives a new prompt.** Append
+once per change was not enough: measured on the owner's 0.97.25 sessions the alias legend was
+re-persisted as its whole cumulative table on every change (91 copies, 2.7 times all tool output),
+the goal context changed every request because it embedded running counters, and the failure
+ledger was re-appended in full whenever ordinary growth displaced it from the tail. The rule is now:
+the legend rides as a cumulative delta (only lines an accepted plan has not committed, no
+superseding note, never packed); the goal context is byte-identical while the goal is unchanged
+(budget as a 10 percent bucket, no counters); a trailing kind displaced without a content change
+reclaims the tail with a one-line pointer, and the full record returns only when its content
+changes. The sent-prefix mark is seeded from the previous run so a user, reflection or
+continuation turn appends to the cached prefix instead of letting context GC repack it (the
+measured prompt halving and head miss). Compaction summarizes the packed projection, and a
+deterministic checkpoint is recorded as `fallback` with its cause, never `success`. Pinned by
+`packages/coding-agent/test/path-alias-session.test.ts` (delta and budget),
+`packages/agent/test/transient-records-index.test.ts` (pointer and cumulative kinds),
+`packages/coding-agent/test/compact-goal-context.test.ts`, and
+`packages/agent/test/session/lifecycle-ledger.test.ts` (fallback outcome).
+
 **Per-request host work is bounded.** Every request-time scan resumes from the history prefix it
 already covered; the profiler's last decile of pre-request time may not exceed twice its first.
 Pinned by the long-session contract gate and `packages/agent/test/tool-failure-memory.test.ts`.

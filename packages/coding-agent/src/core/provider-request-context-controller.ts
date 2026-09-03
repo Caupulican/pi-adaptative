@@ -41,7 +41,13 @@ export interface ProviderRequestContextControllerDeps {
 	previewReflectionCue?(): CurrentTurnReflectionCuePlan | undefined;
 	getGoalState(): GoalState | undefined;
 	skillVault: SkillVaultController;
-	applyPathAliases(messages: AgentMessage[]): { messages: AgentMessage[]; legend?: string };
+	applyPathAliases(messages: AgentMessage[]): {
+		messages: AgentMessage[];
+		legend?: string;
+		legendIds?: readonly string[];
+	};
+	/** An accepted plan committed the legend delta it carried; later requests send only newer lines. */
+	commitPathAliasLegend?(ids: readonly string[]): void;
 }
 
 export { PATH_ALIAS_LEGEND_CUSTOM_TYPE };
@@ -109,7 +115,9 @@ function appendPathAliasLegend(transientMessages: AgentMessage[], legend: string
 			PATH_ALIAS_LEGEND_CUSTOM_TYPE,
 			legend,
 			false,
-			undefined,
+			// A legend record is a cumulative delta: every earlier record of the kind stays current,
+			// so the planner must not stamp it as superseding and the GC must not pack the earlier ones.
+			{ cumulative: true },
 			deterministicTransientTimestamp(legend),
 		),
 	];
@@ -203,6 +211,9 @@ export class ProviderRequestContextController {
 					throw new Error("Committed active skill context diverged from its accepted plan");
 				}
 				reflectionCuePlan?.commit();
+				if (pathAliasPlan.legendIds && pathAliasPlan.legendIds.length > 0) {
+					this.deps.commitPathAliasLegend?.(pathAliasPlan.legendIds);
+				}
 			},
 		};
 	}

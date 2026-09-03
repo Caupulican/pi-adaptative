@@ -539,7 +539,10 @@ describe("CompactionController auto-compaction re-entry", () => {
 		expect(lifecycleRecords).toHaveLength(1);
 		expect(lifecycleRecords[0]?.starts).toHaveLength(1);
 		expect(lifecycleRecords[0]?.ends).toHaveLength(1);
-		expect(lifecycleRecords[0]?.end?.outcome).toBe("success");
+		// The applied checkpoint is deterministic progress, not an accepted summary: the ledger says
+		// so instead of reporting success, and names why the summary path stopped.
+		expect(lifecycleRecords[0]?.end?.outcome).toBe("fallback");
+		expect(lifecycleRecords[0]?.end?.error).toContain("effect-not-restored");
 		expect(lifecycleRecords[0]?.end?.compactionEntryId).toBe(
 			sessionManager.getBranch().findLast((entry) => entry.type === "compaction")?.id,
 		);

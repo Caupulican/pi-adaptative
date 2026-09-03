@@ -64,6 +64,45 @@ export interface TransientRecordSlot {
 	 * what makes the stranded older copy safe to leave in place rather than needing removal.
 	 */
 	trailing?: boolean;
+	/**
+	 * A cumulative kind: every record of it stays current and each new record only adds to the
+	 * earlier ones (the path-alias legend delta). Such records carry no superseding note, are never
+	 * packed as superseded, and a new record is appended whenever the host offers new content.
+	 */
+	cumulative?: boolean;
+}
+
+/** Marks a record as a pointer ("unchanged, see above") so content comparison ignores it. */
+const POINTER_RECORD_DETAILS = { pointer: true } as const;
+const CUMULATIVE_RECORD_DETAILS = { cumulative: true } as const;
+
+function isPointerRecord(message: AgentMessage): boolean {
+	return (
+		message.role === "custom" &&
+		typeof message.details === "object" &&
+		message.details !== null &&
+		(message.details as { pointer?: unknown }).pointer === true
+	);
+}
+
+function isCumulativeTransient(message: AgentMessage): boolean {
+	return (
+		message.role === "custom" &&
+		typeof message.details === "object" &&
+		message.details !== null &&
+		(message.details as { cumulative?: unknown }).cumulative === true
+	);
+}
+
+/** The first line of a record, bounded, used to name the kind in a pointer record. */
+function recordHeader(content: string): string {
+	const line = content.split("\n", 1)[0]?.trim() ?? "";
+	return line.length > 80 ? `${line.slice(0, 77)}...` : line;
+}
+
+function buildPointerRecord(kind: string, content: string): AgentMessage {
+	const text = `${recordHeader(content)} unchanged; the last full record of this kind above is current.`;
+	return createCustomMessage(kind, text, false, POINTER_RECORD_DETAILS, deterministicRecordTimestamp(text));
 }
 
 /**
@@ -170,7 +209,9 @@ function transientContentIndex(messages: readonly AgentMessage[]): ReadonlyMap<s
 	}
 	for (let position = from; position < messages.length; position++) {
 		const message = messages[position];
-		if (message.role === "custom") index.byKind.set(message.customType, durableTransientContent(message));
+		if (message.role === "custom" && !isPointerRecord(message)) {
+			index.byKind.set(message.customType, durableTransientContent(message));
+		}
 	}
 	if (from < messages.length) {
 		index.processed = messages.slice();
@@ -183,7 +224,16 @@ function lastDurableTransientContent(messages: readonly AgentMessage[], kind: st
 	return transientContentIndex(messages).get(kind);
 }
 
-function buildTransientRecord(kind: string, content: string): AgentMessage {
+function buildTransientRecord(kind: string, content: string, cumulative = false): AgentMessage {
+	if (cumulative) {
+		return createCustomMessage(
+			kind,
+			content,
+			false,
+			CUMULATIVE_RECORD_DETAILS,
+			deterministicRecordTimestamp(content),
+		);
+	}
 	const text = `${content}${TRANSIENT_RECORD_SUPERSEDING_NOTE}`;
 	return createCustomMessage(kind, text, false, undefined, deterministicRecordTimestamp(text));
 }
@@ -230,7 +280,7 @@ export function reconcileTransientRecords(
 		if (slot.trailing) continue;
 		const { lastContent, nextContent } = resolveSlotContent(durableMessages, slot);
 		if (nextContent === undefined || nextContent === lastContent) continue;
-		newRecords.push(buildTransientRecord(slot.kind, nextContent));
+		newRecords.push(buildTransientRecord(slot.kind, nextContent, slot.cumulative === true));
 	}
 
 	const trailingSlots = slots.filter((slot) => slot.trailing);
@@ -268,8 +318,12 @@ export function reconcileTransientRecords(
 			actualTailKinds.length === expectedTailKinds.length &&
 			expectedTailKinds.every((kind, index) => kind === actualTailKinds[index]);
 		const anyContentChanged = active.some((entry) => entry.nextContent !== entry.lastContent);
-		if (!tailIntact || anyContentChanged) {
+		if (anyContentChanged) {
 			for (const entry of active) newRecords.push(buildTransientRecord(entry.slot.kind, entry.nextContent));
+		} else if (!tailIntact) {
+			// Only the position changed: a pointer reclaims the tail without re-sending the full
+			// content (measured live: 119 ledger records for 19 distinct contents in one session).
+			for (const entry of active) newRecords.push(buildPointerRecord(entry.slot.kind, entry.nextContent));
 		}
 	}
 
@@ -337,7 +391,11 @@ export function adaptHostTransients(transientMessages: readonly AgentMessage[]):
 	for (const message of transientMessages) {
 		const text = customMessageText(message);
 		if (message.role === "custom" && text !== undefined) {
-			slots.push({ kind: message.customType, content: text });
+			slots.push({
+				kind: message.customType,
+				content: text,
+				...(isCumulativeTransient(message) ? { cumulative: true } : {}),
+			});
 		} else {
 			passThrough.push(message);
 		}

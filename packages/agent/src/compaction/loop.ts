@@ -54,6 +54,11 @@ const MAX_CYCLES = 4;
 const MAX_LLM_CYCLES = 3;
 const DEFAULT_KEEP_RECENT = 20_000;
 
+/** A facts-only checkpoint is a fallback, never a success the ledger may report as one. */
+function markDeterministic(result: CompactionResult, cause: string): CompactionResult {
+	return { ...result, deterministic: { cause } };
+}
+
 export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<CompactionLoopOutcome> {
 	let lastCause = "start";
 	let lastParams: CompactionCycleParams | undefined;
@@ -109,7 +114,10 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 			}
 			try {
 				const built = await Promise.resolve(deps.buildDeterministicCheckpoint(params));
-				const result = mergeCompactionVerificationReports(built.result, pendingVerificationReports);
+				const result = markDeterministic(
+					mergeCompactionVerificationReports(built.result, pendingVerificationReports),
+					lastCause ?? (params.deterministicOnly ? "deterministic-only" : "max-llm-cycles"),
+				);
 				pendingVerificationReports.length = 0;
 				await deps.apply(result);
 				return { kind: "success", result, cycles: cycle };
@@ -170,7 +178,10 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 			if (lastCause === "deterministic-required") {
 				try {
 					const built = await Promise.resolve(deps.buildDeterministicCheckpoint(params));
-					const deterministicResult = mergeCompactionVerificationReports(built.result, pendingVerificationReports);
+					const deterministicResult = markDeterministic(
+						mergeCompactionVerificationReports(built.result, pendingVerificationReports),
+						"deterministic-required",
+					);
 					pendingVerificationReports.length = 0;
 					await deps.apply(deterministicResult);
 					return { kind: "success", result: deterministicResult, cycles: cycle };

@@ -169,6 +169,8 @@ export interface CompactionResult<T = unknown> {
 	verification?: VerificationReport;
 	verificationGateFailures?: VerificationReport[];
 	deterministicGapFills?: number;
+	/** Set when no summarizer accepted a summary and a facts-only checkpoint was applied instead. */
+	deterministic?: { cause: string };
 }
 
 /** Host-owned provider boundary for shared compaction request enforcement and accounting. */
@@ -1244,12 +1246,23 @@ export interface CompactionPreparation {
 	facts?: CompactionFacts;
 	/** Compaction settions from settings.jsonl	*/
 	settings: CompactionSettings;
+	/** Estimated tokens the summarizer will read (messages to summarize plus a split-turn prefix). */
+	summarizerInputTokens?: number;
+}
+
+export interface PrepareCompactionOptions {
+	allowTrailingCompactionAsPrevious?: boolean;
+	/**
+	 * Host projection applied to the messages the summarizer reads, so stale host records the live
+	 * request already packs never reach it in full (see `packSupersededHostRecords` in the host).
+	 */
+	packHostRecords?: (messages: AgentMessage[]) => AgentMessage[];
 }
 
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
-	options?: { allowTrailingCompactionAsPrevious?: boolean },
+	options?: PrepareCompactionOptions,
 ): CompactionPreparation | undefined {
 	const trailingEntry = pathEntries[pathEntries.length - 1];
 	if (trailingEntry?.type === "compaction" && !options?.allowTrailingCompactionAsPrevious) {
@@ -1301,10 +1314,12 @@ export function prepareCompaction(
 			facts = mergePersistentCompactionUserFacts(facts, persistedUserFacts);
 		}
 
+		const messagesToSummarize = options?.packHostRecords ? options.packHostRecords(liveMessages) : liveMessages;
 		return {
 			firstKeptEntryId: originalUserEntry.id,
-			messagesToSummarize: liveMessages,
+			messagesToSummarize,
 			turnPrefixMessages: [],
+			summarizerInputTokens: messagesToSummarize.reduce((sum, message) => sum + estimateTokens(message), 0),
 			isSplitTurn: false,
 			tokensBefore,
 			retention: { mode: "original-user", userEntryId: originalUserEntry.id },
@@ -1326,20 +1341,27 @@ export function prepareCompaction(
 	const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
 
 	// Messages to summarize (will be discarded after summary)
-	const messagesToSummarize: AgentMessage[] = [];
+	const rawMessagesToSummarize: AgentMessage[] = [];
 	for (let i = boundaryStart; i < historyEnd; i++) {
 		const msg = getMessageFromEntryForCompaction(pathEntries[i]);
-		if (msg) messagesToSummarize.push(msg);
+		if (msg) rawMessagesToSummarize.push(msg);
 	}
 
 	// Messages for turn prefix summary (if splitting a turn)
-	const turnPrefixMessages: AgentMessage[] = [];
+	const rawTurnPrefixMessages: AgentMessage[] = [];
 	if (cutPoint.isSplitTurn) {
 		for (let i = cutPoint.turnStartIndex; i < cutPoint.firstKeptEntryIndex; i++) {
 			const msg = getMessageFromEntryForCompaction(pathEntries[i]);
-			if (msg) turnPrefixMessages.push(msg);
+			if (msg) rawTurnPrefixMessages.push(msg);
 		}
 	}
+	const packHostRecords = options?.packHostRecords;
+	const messagesToSummarize = packHostRecords ? packHostRecords(rawMessagesToSummarize) : rawMessagesToSummarize;
+	const turnPrefixMessages = packHostRecords ? packHostRecords(rawTurnPrefixMessages) : rawTurnPrefixMessages;
+	const summarizerInputTokens = [...messagesToSummarize, ...turnPrefixMessages].reduce(
+		(sum, message) => sum + estimateTokens(message),
+		0,
+	);
 
 	// Extract file operations from messages and previous compaction
 	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, prevCompactionIndex);
@@ -1369,6 +1391,7 @@ export function prepareCompaction(
 		fileOps,
 		facts,
 		settings,
+		summarizerInputTokens,
 	};
 }
 

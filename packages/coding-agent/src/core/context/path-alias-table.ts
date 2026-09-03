@@ -482,6 +482,31 @@ export function formatPathAliasLegendForIds(table: PathAliasTable, ids: Readonly
 	return lines.join("\n");
 }
 
+export const PATH_ALIAS_LEGEND_DELTA_HEADER =
+	"PATH ALIASES (cumulative: this record adds to every earlier PATH ALIASES record; earlier lines stay valid)";
+export const PATH_ALIAS_LEGEND_PAUSED_LINE = "(alias minting paused: the legend costs more than the aliases save)";
+
+/**
+ * Render only the legend lines for `ids` that were not committed before, as a cumulative delta
+ * record. A durable record per change must carry what changed, not the whole table again: the
+ * whole table per change was the single largest prompt cost measured live (91 copies, 1.36 MB
+ * for a session whose tool output was 0.5 MB).
+ */
+export function formatPathAliasLegendDeltaForIds(
+	table: PathAliasTable,
+	ids: ReadonlySet<string>,
+	committed: ReadonlySet<string>,
+	options?: { paused?: boolean },
+): string | undefined {
+	if (table.entries.length === 0) return undefined;
+	const pending = table.entries.filter((entry) => ids.has(entry.id) && !committed.has(entry.id));
+	if (pending.length === 0) return undefined;
+	const lines = [PATH_ALIAS_LEGEND_DELTA_HEADER];
+	if (options?.paused) lines.push(PATH_ALIAS_LEGEND_PAUSED_LINE);
+	for (const entry of pending) lines.push(`${entry.id}=${entry.path}`);
+	return lines.join("\n");
+}
+
 export function formatPathAliasLegend(table: PathAliasTable, activeTexts?: string[]): string | undefined {
 	if (table.entries.length === 0) return undefined;
 	if (!activeTexts) {

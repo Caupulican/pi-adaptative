@@ -9,7 +9,7 @@ import {
 	displayPath,
 	emptyPathAliasTable,
 	extendPathAliasTable,
-	formatPathAliasLegendForIds,
+	formatPathAliasLegendDeltaForIds,
 	MAX_RESERVED_TOKENS,
 	type PathAliasTable,
 	rewriteAgentMessagesWith,
@@ -47,6 +47,23 @@ interface PathAliasRecord {
  *   visible in the current window makes it flap as the window slides, and the legend is re-sent
  *   verbatim on every request.
  */
+/** Legend bytes below which the budget never pauses minting (a table this small cannot be the cost). */
+const LEGEND_BUDGET_FLOOR_CHARS = 4096;
+/**
+ * The legend may cost up to this multiple of what the aliases saved before minting pauses. One:
+ * a legend line that saves less than it costs is a loss the rest of the session keeps paying
+ * (measured live: 315 lines minted from directory listings that nothing ever mentioned).
+ */
+const LEGEND_BUDGET_MARGIN = 1;
+
+export interface PathAliasSyncResult {
+	messages: AgentMessage[];
+	/** Cumulative delta legend record for this request, or undefined when nothing new was minted. */
+	legend?: string;
+	/** The ids whose lines `legend` carries; `markLegendCommitted` takes them once the plan commits. */
+	legendIds: readonly string[];
+}
+
 export class PathAliasRuntime {
 	private table: PathAliasTable;
 	private records: PathAliasRecord[] = [];
@@ -70,6 +87,15 @@ export class PathAliasRuntime {
 	 * lines appended in table (mint) order.
 	 */
 	private readonly legendIds = new Set<string>();
+	/**
+	 * Ids whose legend line was committed into durable history by an accepted request plan. The
+	 * legend a request carries is the delta `legendIds \ committedLegendIds`, so the table reaches
+	 * the model once, line by line, instead of once per change in full.
+	 */
+	private readonly committedLegendIds = new Set<string>();
+	/** Mentions per alias id in rendered text, the savings side of the legend budget. */
+	private readonly mentionsById = new Map<string, number>();
+	private mintingPaused = false;
 	/**
 	 * Frozen provider spelling per already-rendered text span, keyed by a hash of the span BEFORE
 	 * rewriting. Rebuilt each sync from the spans actually present, so it holds exactly the live
@@ -116,7 +142,8 @@ export class PathAliasRuntime {
 		| {
 				readonly cwd: string;
 				readonly messages: readonly AgentMessage[];
-				readonly result: { messages: AgentMessage[]; legend?: string };
+				readonly committedCount: number;
+				readonly result: PathAliasSyncResult;
 		  }
 		| undefined;
 	/**
@@ -159,10 +186,15 @@ export class PathAliasRuntime {
 		return this.table;
 	}
 
-	sync(messages: readonly AgentMessage[]): { messages: AgentMessage[]; legend?: string } {
+	sync(messages: readonly AgentMessage[]): PathAliasSyncResult {
 		this.ensureLoaded();
 		const cached = this.lastSync;
-		if (cached && cached.cwd === this.table.cwd && sameMessageSequence(cached.messages, messages))
+		if (
+			cached &&
+			cached.cwd === this.table.cwd &&
+			cached.committedCount === this.committedLegendIds.size &&
+			sameMessageSequence(cached.messages, messages)
+		)
 			return cached.result;
 		// A candidate id that names a real file or directory under cwd (a literal `p/`
 		// tree) must never be assigned, or expansion would redirect real-file references.
@@ -174,7 +206,11 @@ export class PathAliasRuntime {
 		const idTakenMemo = new Map<string, boolean>();
 		// Reservations persist with the table whenever they grow, so texts scanned on an earlier
 		// request have already reserved every standalone token they carry; only new texts need scanning.
-		const textsToScan = this.textsToScan(messages);
+		// Whole-table budget: an alias pays for itself per mention, but the legend is paid per line
+		// for the rest of the session. Once the lines cost more than every mention saves, minting
+		// stops (existing aliases keep working) until the balance recovers.
+		this.mintingPaused = this.legendCostExceedsSavings();
+		const textsToScan = this.mintingPaused ? [] : this.textsToScan(messages);
 		let scanWholeHistoryForReservations = !this.reservationHistoryScanned;
 		const reservationTexts = scanWholeHistoryForReservations ? collectMessageTexts(messages) : textsToScan;
 		this.reservationHistoryScanned = true;
@@ -224,12 +260,51 @@ export class PathAliasRuntime {
 			this.persistLastScannedTs();
 		}
 		const rewritten = this.renderFrozen(messages);
-		const result = {
+		const pendingIds = [...this.legendIds].filter((id) => !this.committedLegendIds.has(id));
+		const result: PathAliasSyncResult = {
 			messages: rewritten,
-			legend: formatPathAliasLegendForIds(this.table, this.legendIds),
+			legend: formatPathAliasLegendDeltaForIds(this.table, this.legendIds, this.committedLegendIds, {
+				paused: this.mintingPaused,
+			}),
+			legendIds: pendingIds,
 		};
-		this.lastSync = { cwd: this.table.cwd, messages: messages.slice(), result };
+		this.lastSync = {
+			cwd: this.table.cwd,
+			messages: messages.slice(),
+			committedCount: this.committedLegendIds.size,
+			result,
+		};
 		return result;
+	}
+
+	/** An accepted plan committed these legend lines durably; later requests carry only newer ones. */
+	markLegendCommitted(ids: Iterable<string>): void {
+		for (const id of ids) this.committedLegendIds.add(id);
+	}
+
+	/** The legend budget as the census reads it: legend bytes owed against bytes the aliases saved. */
+	getAliasEconomics(): { legendChars: number; savedChars: number; paused: boolean } {
+		const byId = new Map(this.table.entries.map((entry) => [entry.id, entry] as const));
+		let legendChars = 0;
+		let savedChars = 0;
+		for (const id of this.legendIds) {
+			const entry = byId.get(id);
+			if (!entry) continue;
+			legendChars += entry.id.length + entry.path.length + 2;
+			savedChars += (this.mentionsById.get(id) ?? 0) * Math.max(0, entry.path.length - entry.id.length);
+		}
+		return { legendChars, savedChars, paused: this.mintingPaused };
+	}
+
+	private legendCostExceedsSavings(): boolean {
+		if (this.legendIds.size === 0) return false;
+		const economics = this.getAliasEconomics();
+		// A floor keeps a young table minting (every alias starts at one mention); above it the
+		// legend must have paid for itself or minting stops until the mentions catch up.
+		return (
+			economics.legendChars > LEGEND_BUDGET_FLOOR_CHARS &&
+			economics.legendChars > LEGEND_BUDGET_MARGIN * economics.savedChars
+		);
 	}
 
 	/**
@@ -285,7 +360,10 @@ export class PathAliasRuntime {
 				return spelling;
 			});
 			const aliasIds = [...collectActiveAliasIds(collectMessageTexts([output!]))];
-			for (const id of aliasIds) this.legendIds.add(id);
+			for (const id of aliasIds) {
+				this.legendIds.add(id);
+				this.mentionsById.set(id, (this.mentionsById.get(id) ?? 0) + 1);
+			}
 			this.rendered.set(message, { message: output!, spellings, aliasIds });
 			rendered.push(output!);
 		}

@@ -494,3 +494,63 @@ describe("PathAliasRuntime incremental render", () => {
 		runtime.close();
 	});
 });
+
+describe("PathAliasRuntime legend delta records", () => {
+	const tempDirs: string[] = [];
+	afterEach(() => {
+		for (const dir of tempDirs.splice(0))
+			rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	});
+	function runtime(): PathAliasRuntime {
+		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-delta-"));
+		tempDirs.push(dir);
+		return new PathAliasRuntime(
+			() => "/repo",
+			() => join(dir, "runtime.sqlite"),
+			() => 1,
+		);
+	}
+
+	it("carries each legend line once: a committed line never rides a later request", () => {
+		const runtime1 = runtime();
+		const first = runtime1.sync([toolResult("packages/coding-agent/src/foo.ts", 10)]);
+		expect(first.legend).toContain("PATH ALIASES (cumulative");
+		expect(first.legend).toContain("p/foo.ts=packages/coding-agent/src/foo.ts");
+		expect(first.legendIds).toEqual(["p/foo.ts"]);
+		// The plan was not committed: the same request must carry the same delta again.
+		const again = runtime1.sync([toolResult("packages/coding-agent/src/foo.ts", 10)]);
+		expect(again.legend).toBe(first.legend);
+		runtime1.markLegendCommitted(first.legendIds);
+		// Committed: nothing new to send for the same history.
+		expect(runtime1.sync([toolResult("packages/coding-agent/src/foo.ts", 10)]).legend).toBeUndefined();
+		// A new alias rides alone, without the earlier line.
+		const second = runtime1.sync([
+			toolResult("packages/coding-agent/src/foo.ts", 10),
+			toolResult("packages/coding-agent/test/bar.ts", 11),
+		]);
+		expect(second.legend).toContain("p/bar.ts=packages/coding-agent/test/bar.ts");
+		expect(second.legend).not.toContain("p/foo.ts=");
+		expect(second.legendIds).toEqual(["p/bar.ts"]);
+		runtime1.close();
+	});
+
+	it("pauses minting once the legend outgrows what its aliases saved", () => {
+		const runtime1 = runtime();
+		// Each path is mentioned once and each alias saves the bare minimum, so every legend line
+		// costs more than its alias ever saved; enough of them push the table over the floor.
+		const paths = Array.from({ length: 160 }, (_, index) => `longdirname/abcde${String(index).padStart(3, "0")}.ts`);
+		const history = paths.map((path, index) => toolResult(path, 10 + index));
+		const first = runtime1.sync(history);
+		expect(first.legendIds.length).toBe(paths.length);
+		runtime1.markLegendCommitted(first.legendIds);
+		const economics = runtime1.getAliasEconomics();
+		expect(economics.legendChars).toBeGreaterThan(4096);
+		expect(economics.legendChars).toBeGreaterThan(economics.savedChars);
+		// The next request would mint another alias; the budget says no, existing aliases keep working.
+		const next = runtime1.sync([...history, toolResult("longdirname/zzzzz-new.ts", 999)]);
+		expect(runtime1.getAliasEconomics().paused).toBe(true);
+		expect(runtime1.peekTable().entries.length).toBe(paths.length);
+		expect(next.legend).toBeUndefined();
+		runtime1.close();
+	});
+});

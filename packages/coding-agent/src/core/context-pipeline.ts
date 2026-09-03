@@ -261,7 +261,15 @@ export class ContextPipeline {
 		return getContextStoreDir(this.deps.getAgentDir(), "index", this.deps.getSessionManager().getSessionId());
 	}
 
-	applyPathAliases(messages: AgentMessage[]): { messages: AgentMessage[]; legend?: string } {
+	commitPathAliasLegend(ids: readonly string[]): void {
+		this._pathAliasRuntime?.markLegendCommitted(ids);
+	}
+
+	applyPathAliases(messages: AgentMessage[]): {
+		messages: AgentMessage[];
+		legend?: string;
+		legendIds?: readonly string[];
+	} {
 		// A tier without aliasing sends paths as they are: no table, no legend, no rewrite.
 		if (this.deps.isPathAliasingEnabled?.() === false) return { messages };
 		this._pathAliasRuntime ??= new PathAliasRuntime(

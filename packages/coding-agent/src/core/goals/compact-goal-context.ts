@@ -74,6 +74,13 @@ export function captureGoalContextProjection(messages: AgentMessage[]): GoalCont
 	return { continuationTurn: latestContinuationTriggerIndex(messages) >= 0 };
 }
 
+/** Remaining budget as a 10% step (100, 90, ..., 0), so the record changes only when the bucket does. */
+export function budgetRemainingBucket(tokensRemaining: number, tokenBudget: number): number {
+	if (!(tokenBudget > 0)) return 0;
+	const ratio = Math.min(1, Math.max(0, tokensRemaining / tokenBudget));
+	return Math.floor(ratio * 10) * 10;
+}
+
 export function formatCompactGoalContext(state: GoalState, continuationTurn: boolean): string {
 	const record = projectGoalRecord(state);
 	const instruction = continuationTurn ? "Continue objective." : "User steers.";
@@ -93,13 +100,14 @@ export function formatCompactGoalContext(state: GoalState, continuationTurn: boo
 	// `requirementId` field), which is why the legacy ledger's individual open/unproven ids are
 	// deliberately NOT projected here as bare text: unlike this escaped JSON block, they would be
 	// unescaped content inside a section the model is told to treat as HOST-OWNED and authoritative.
+	// Byte-identical across requests while the goal itself is unchanged: the running counters
+	// (tokens used, seconds elapsed) made every request a new record under append-on-change
+	// persistence (92 records in one session). Budget awareness survives as a 10% bucket.
 	const compactRecord: Record<string, string> = { untrustedObjective: record.objective };
 	if (record.tokenBudget !== undefined) {
 		compactRecord.tokenBudget = String(record.tokenBudget);
-		compactRecord.tokensRemaining = String(record.tokensRemaining ?? 0);
+		compactRecord.budgetRemainingPct = String(budgetRemainingBucket(record.tokensRemaining ?? 0, record.tokenBudget));
 	}
-	compactRecord.tokensUsed = String(record.tokensUsed);
-	compactRecord.timeUsedSeconds = String(record.timeUsedSeconds);
 	if (record.blockedReason) compactRecord.blockedReason = record.blockedReason;
 	const encodedRecord = JSON.stringify(compactRecord).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
 	return [

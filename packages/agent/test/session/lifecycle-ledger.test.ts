@@ -746,3 +746,25 @@ describe("session lifecycle ledger", () => {
 		expect(readFileSync(file, "utf8")).not.toContain("would-be-first");
 	});
 });
+
+describe("compaction fallback outcome", () => {
+	it("records a facts-only checkpoint as fallback with its cause and the summarizer input estimate", () => {
+		const session = SessionManager.inMemory();
+		const userEntryId = session.appendMessage({ role: "user", content: "compact me", timestamp: Date.now() });
+		session.appendCompactionStart("compaction-fallback", userEntryId, 418_104, 596_320);
+		const entry = session.appendCompaction("facts only", userEntryId, 418_104);
+		session.appendCompactionEnd("compaction-fallback", "fallback", {
+			compactionEntryId: entry,
+			error: "input-overflow",
+		});
+		const entries = session.getEntries();
+		const start = entries.find((candidate) => candidate.type === "compaction_start");
+		expect(start && "summarizerInputTokens" in start ? start.summarizerInputTokens : undefined).toBe(596_320);
+		const end = entries.find((candidate) => candidate.type === "compaction_end");
+		expect(end && "outcome" in end ? end.outcome : undefined).toBe("fallback");
+		expect(end && "error" in end ? end.error : undefined).toBe("input-overflow");
+		expect(() => session.appendCompactionEnd("compaction-other", "fallback", { error: "no entry" })).toThrow(
+			/compactionEntryId/,
+		);
+	});
+});
