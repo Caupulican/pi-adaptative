@@ -1,3 +1,4 @@
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { consumeRuntimeEnvelope, RUNTIME_SUPERVISOR_ENV, RuntimeChildChannel } from "../src/cli/runtime-channel.ts";
 
@@ -14,28 +15,30 @@ function channel() {
 
 describe("runtime acknowledgement recovery", () => {
 	it("consumes a bounded stable launcher only on its exact parent channel", () => {
+		const origin = resolve("runtime-original");
+		const entrypoint = join(origin, "cli.ts");
 		const stableTarget = {
-			executable: "/original/node",
-			argsPrefix: ["--conditions=pi-source", "/original/cli.ts"],
-			environment: { PI_PACKAGE_DIR: "/original/package", TSX_TSCONFIG_PATH: "/original/tsconfig.json" },
+			executable: join(origin, "node"),
+			argsPrefix: ["--conditions=pi-source", entrypoint],
+			environment: { PI_PACKAGE_DIR: join(origin, "package"), TSX_TSCONFIG_PATH: join(origin, "tsconfig.json") },
 		};
-		const encoded = JSON.stringify({ parentPid: 12, origin: "/original", stableTarget });
+		const encoded = JSON.stringify({ parentPid: 12, origin, stableTarget });
 		const env = { [RUNTIME_SUPERVISOR_ENV]: encoded };
 		expect(consumeRuntimeEnvelope(env, 12, true)?.stableTarget).toEqual(stableTarget);
 		expect(env).toEqual({});
 		for (const mutation of [
 			{ executable: "relative-node" },
-			{ executable: "/original/node\0bad" },
-			{ argsPrefix: ["--import", "unresolved-package", "/original/cli.ts"] },
+			{ executable: `${stableTarget.executable}\0bad` },
+			{ argsPrefix: ["--import", "unresolved-package", entrypoint] },
 			{ argsPrefix: ["./relative-cli.ts"] },
-			{ argsPrefix: Array.from({ length: 33 }, () => "/original/cli.ts") },
+			{ argsPrefix: Array.from({ length: 33 }, () => entrypoint) },
 			{ environment: { ...stableTarget.environment, OTHER: "unowned" } },
 			{ environment: { ...stableTarget.environment, TSX_TSCONFIG_PATH: "relative.json" } },
 		]) {
 			const invalid = {
 				[RUNTIME_SUPERVISOR_ENV]: JSON.stringify({
 					parentPid: 12,
-					origin: "/original",
+					origin,
 					stableTarget: { ...stableTarget, ...mutation },
 				}),
 			};
