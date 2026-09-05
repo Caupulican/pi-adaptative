@@ -97,6 +97,7 @@ import { openEditorForPath, openExternalEditor } from "./external-editor.ts";
 import { handleFastModeCommand } from "./fast-mode-command.ts";
 import * as historyReloadMath from "./history-reload-math.ts";
 import { handleInteractiveEvent, type InteractiveEventHost } from "./interactive-event-controller.ts";
+import { type InteractiveLayoutHost, mountInteractiveLayout } from "./interactive-layout.ts";
 import * as keyHandlers from "./key-handlers.ts";
 import { type LoadedResourcesViewOptions, renderLoadedResources } from "./loaded-resources-view.ts";
 import * as localModelCommands from "./local-model-commands.ts";
@@ -123,6 +124,7 @@ import {
 	theme,
 } from "./theme/theme.ts";
 import * as usageCommands from "./usage-commands.ts";
+import type { WorkbenchController } from "./workbench-controller.ts";
 
 const TUI_HISTORY_RELOAD_CHUNK_SIZE = 20;
 const TUI_LIVE_HISTORY_MAX_COMPONENTS = 260;
@@ -288,6 +290,8 @@ export class InteractiveMode {
 	private widgetContainerAbove!: Container;
 	private widgetContainerBelow!: Container;
 	private activityLane: ActivityLaneComponent | undefined;
+	private workbench?: WorkbenchController;
+	private workbenchInputCleanup?: () => void;
 	private readonly hasHumanAudience: boolean;
 
 	// Header container that holds the built-in or custom header
@@ -350,7 +354,10 @@ export class InteractiveMode {
 		// Must run before anything (including TUI/ProcessTerminal construction) can call
 		// getCapabilities() and cache a settings-less result (P1g).
 		applyTerminalSettings(terminalCapabilityOverridesFromSettings(this.settingsManager));
-		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
+		this.ui = new TUI(
+			new ProcessTerminal({ workbench: this.hasHumanAudience }),
+			this.settingsManager.getShowHardwareCursor(),
+		);
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.chatContainer = new Container();
@@ -580,7 +587,6 @@ export class InteractiveMode {
 		}
 
 		// Add header container as first child
-		this.ui.addChild(this.headerContainer);
 
 		// Add header with keybindings from config (unless silenced)
 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
@@ -648,19 +654,7 @@ export class InteractiveMode {
 			this.headerContainer.addChild(this.builtInHeader);
 		}
 
-		this.ui.addChild(this.chatContainer);
-		if (this.hasHumanAudience) {
-			this.ui.addChild(this.pendingMessagesContainer);
-			this.ui.addChild(this.statusContainer);
-			this.extensionUiHost.renderWidgets(); // Initialize with default spacer
-			this.ui.addChild(this.widgetContainerAbove);
-			if (this.activityLane) this.ui.addChild(this.activityLane);
-		}
-		this.ui.addChild(this.editorContainer);
-		if (this.hasHumanAudience) {
-			this.ui.addChild(this.widgetContainerBelow);
-			this.ui.addChild(this.footer);
-		}
+		mountInteractiveLayout(this as unknown as InteractiveLayoutHost);
 		this.ui.setFocus(this.editor);
 
 		this.setupKeyHandlers();
@@ -854,11 +848,14 @@ export class InteractiveMode {
 	private refreshActivityLane(options: { replace?: boolean } = {}): void {
 		if (!this.activityLane) return;
 		const sessionKey = this.sessionManager.getSessionId();
+		const snapshot = this.activityLaneSnapshot();
 		if (options.replace) {
-			this.activityLane.replaceCanonical(sessionKey, this.activityLaneSnapshot());
+			this.activityLane.replaceCanonical(sessionKey, snapshot);
+			this.workbench?.reset();
 		} else {
-			this.activityLane.updateCanonical(sessionKey, this.activityLaneSnapshot());
+			this.activityLane.updateCanonical(sessionKey, snapshot);
 		}
+		this.workbench?.refresh({ ...snapshot, items: this.activityLane.getItems() });
 	}
 
 	public toolActivityKind(toolName: string): ActivityLaneKind {
@@ -2077,7 +2074,11 @@ export class InteractiveMode {
 					message,
 					this.hideThinkingBlock,
 					this.getMarkdownThemeWithSettings(),
-					{ isStreaming: false, transformMarkdown: this.transformMarkdownForDisplay },
+					{
+						isStreaming: false,
+						showCommentary: this.hasHumanAudience,
+						transformMarkdown: this.transformMarkdownForDisplay,
+					},
 				);
 				this.chatContainer.addChild(assistantComponent);
 				break;
@@ -3321,7 +3322,11 @@ export class InteractiveMode {
 			showStatus: (message) => this.showStatus(message),
 			getSelectionText: () => {
 				const activeOverlay = this.editorContainer.children[0];
-				return activeOverlay instanceof TreeSelectorComponent ? activeOverlay.getSelectedCopyText() : undefined;
+				return activeOverlay instanceof TreeSelectorComponent
+					? activeOverlay.getSelectedCopyText()
+					: activeOverlay === this.editor
+						? this.workbench?.view.conversation.selectionText()
+						: undefined;
 			},
 		});
 	}
@@ -3660,6 +3665,9 @@ export class InteractiveMode {
 	}
 
 	stop(): void {
+		this.workbenchInputCleanup?.();
+		this.workbenchInputCleanup = undefined;
+		this.workbench?.dispose();
 		this.unregisterSignalHandlers();
 		this.closeAgentsOverlay();
 		if (this.settingsManager.getShowTerminalProgress()) {

@@ -25,6 +25,7 @@ export class BashExecutionComponent extends Container {
 	private fullOutputPath?: string;
 	private expanded = false;
 	private contentContainer: Container;
+	private workbenchPreview?: Text;
 
 	constructor(command: string, ui: TUI, excludeFromContext = false) {
 		super();
@@ -125,6 +126,7 @@ export class BashExecutionComponent extends Container {
 	}
 
 	private updateDisplay(): void {
+		this.workbenchPreview = undefined;
 		// Apply truncation for LLM context limits (same limits as bash tool)
 		const fullOutput = this.outputLines.join("\n");
 		const contextTruncation = truncateTail(fullOutput, {
@@ -187,6 +189,27 @@ export class BashExecutionComponent extends Container {
 	 */
 	getOutput(): string {
 		return this.outputLines.join("\n");
+	}
+
+	/** Independent bounded view of the same command; does not toggle the full transcript. */
+	getWorkbenchPreview(): Text {
+		this.workbenchPreview ??= new Text(
+			theme.fg("bashMode", `$ ${this.command}`) +
+				"\n" +
+				this.outputLines.slice(-12).join("\n") +
+				"\n" +
+				theme.fg(
+					this.status === "error" ? "error" : "muted",
+					this.status === "running"
+						? "Running"
+						: this.status === "cancelled"
+							? "Cancelled"
+							: `exit ${this.exitCode ?? "unknown"}`,
+				),
+			0,
+			0,
+		);
+		return this.workbenchPreview;
 	}
 
 	/**

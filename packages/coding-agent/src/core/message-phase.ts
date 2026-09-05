@@ -23,6 +23,11 @@ export function isAssistantCommentary(content: Pick<TextContent, "textSignature"
 	return assistantTextPhase(content) === "commentary";
 }
 
+/** User-facing prose, optionally including commentary; control payloads never become conversation. */
+export function isAssistantDisplayText(content: TextContent, showCommentary = false): boolean {
+	return !isAssistantCommentary(content) || (showCommentary && !isStructuredPayload(content.text.trim()));
+}
+
 /** Project prose commentary onto the bounded activity lane; structured control payloads stay inspector-only. */
 export function latestAssistantCommentaryLabel(message: AssistantMessage): string | undefined {
 	for (let index = message.content.length - 1; index >= 0; index--) {

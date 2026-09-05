@@ -4,6 +4,7 @@ import { setKittyProtocolActive } from "./keys.ts";
 import { loadNativeAddon } from "./native-loader.ts";
 import { isNativeModifierPressed } from "./native-modifiers.ts";
 import { StdinBuffer } from "./stdin-buffer.ts";
+import { TerminalViewportMode } from "./viewport-mode.ts";
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
@@ -107,6 +108,12 @@ export interface Terminal {
  * Real terminal using process.stdin/stdout
  */
 export class ProcessTerminal implements Terminal {
+	private readonly viewportMode?: TerminalViewportMode;
+
+	constructor(options: { workbench?: boolean } = {}) {
+		if (options.workbench) this.viewportMode = new TerminalViewportMode((data) => this.write(data));
+	}
+
 	private wasRaw = false;
 	private inputHandler?: (data: string) => void;
 	private resizeHandler?: () => void;
@@ -141,6 +148,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	start(onInput: (data: string) => void, onResize: () => void): void {
+		this.viewportMode?.enter();
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
 
@@ -449,6 +457,7 @@ export class ProcessTerminal implements Terminal {
 		process.stdout.write("\x1b[?2004l");
 
 		this.disableKeyboardProtocols();
+		this.viewportMode?.leave();
 
 		// Clean up StdinBuffer
 		if (this.stdinBuffer) {

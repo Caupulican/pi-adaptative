@@ -6,6 +6,7 @@
 
 ### Added
 
+- Human interactive Workbench with compact work/team and execution panes, a full-width independently scrollable conversation, full-width status/input, selection and conversation copying, visible edit/command evidence, and bounded event-triggered observation of silent shell/Python file effects. Completed activity folds; full transcripts and persistent worker sessions remain available. See `docs/workbench.md` for shortcuts and observation limits.
 - Native `webfetch` retrieves public HTTP(S) content as Markdown, text, or HTML with DNS-pinned public-address admission, redirect checks, streaming size limits, and Effect-managed cancellation, resource release, and one request deadline. A browser-style User-Agent has one bounded Pi-identity fallback for an explicit Cloudflare challenge. Large outputs use the shared artifact store and bounded preview.
 - Persistent interactive Pi, Codex, Claude and agy teams through Herdr, with pinned provisioning, login/readiness checks, distinct worker responsibilities, bounded peer mailboxes, authenticated exact-turn result claims, terminal/question handoffs, and exact-turn cleanup. Foreign native CLIs use the explicitly requested unrestricted permission flags; their tool grants and usage remain advisory.
 - Root-only `image_generate` on OpenAI Codex models uses stored ChatGPT OAuth for native generation and edits. References and responses are bounded, output is retained in the session image store, and uncertain paid requests are never automatically replayed.

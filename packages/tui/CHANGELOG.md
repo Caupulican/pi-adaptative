@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Opt-in alternate-screen viewport lifecycle with SGR button/drag mouse reporting, restored on terminal stop and re-entered on restart. Exported the existing column-slicing helper for selection-aware viewport consumers.
+
 ## [0.97.27] - 2026-09-03
 
 ## [0.97.26] - 2026-09-03

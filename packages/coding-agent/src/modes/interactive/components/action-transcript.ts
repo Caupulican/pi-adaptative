@@ -18,6 +18,7 @@ export const ACTION_TRANSCRIPT_SEGMENT_LIMIT = 256;
 export class ActionTranscriptComponent implements Component {
 	private readonly actions: ToolExecutionComponent[] = [];
 	private transcriptExpanded = false;
+	private readonly conversation: Component[] = [];
 
 	constructor(actions: ToolExecutionComponent[] = []) {
 		for (const action of actions) this.addAction(action);
@@ -26,6 +27,12 @@ export class ActionTranscriptComponent implements Component {
 	addAction(action: ToolExecutionComponent): void {
 		action.setExpanded(this.transcriptExpanded);
 		this.actions.push(action);
+		const conversation = action.getConversationComponent();
+		if (conversation) this.conversation.push(conversation);
+	}
+
+	conversationComponents(): readonly Component[] {
+		return this.conversation;
 	}
 
 	canAccept(): boolean {

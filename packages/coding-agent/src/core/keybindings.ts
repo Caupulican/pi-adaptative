@@ -33,6 +33,11 @@ export interface AppKeybindings {
 	"app.message.followUp": true;
 	"app.message.dequeue": true;
 	"app.message.copy": true;
+	"app.conversation.copy": true;
+	"app.conversation.pageUp": true;
+	"app.conversation.pageDown": true;
+	"app.conversation.latest": true;
+	"app.execution.toggle": true;
 	"app.clipboard.pasteImage": true;
 	"app.transcript.open": true;
 	"app.transcript.scrollUp": true;
@@ -142,6 +147,11 @@ export const KEYBINDINGS = {
 		defaultKeys: "ctrl+x",
 		description: "Copy last message or selection",
 	},
+	"app.conversation.copy": { defaultKeys: "alt+c", description: "Copy full conversation without tool output" },
+	"app.conversation.pageUp": { defaultKeys: "alt+pageUp", description: "Scroll conversation up" },
+	"app.conversation.pageDown": { defaultKeys: "alt+pageDown", description: "Scroll conversation down" },
+	"app.conversation.latest": { defaultKeys: "ctrl+end", description: "Follow latest conversation" },
+	"app.execution.toggle": { defaultKeys: "alt+o", description: "Expand or fold current workbench execution" },
 	"app.clipboard.pasteImage": {
 		defaultKeys: defaultImagePasteKeys(),
 		description: "Paste image from clipboard",

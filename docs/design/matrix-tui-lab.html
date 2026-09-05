@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Matrix — TUI design lab</title>
+<style>
+/* Matrix tokens mirror the packaged matrix-machine theme. No downloaded assets. */
+:root{--void:#02070a;--panel:#071316;--soft:#0b1a1d;--blue-panel:#0b1b28;--green-panel:#0a1c14;--red-panel:#261015;--green:#57d889;--green-soft:#4aa974;--blue:#5fa8d3;--cyan:#64c3c9;--text:#d7eadb;--muted:#789b84;--dim:#3f6558;--yellow:#c6c970;--red:#d86c82;--space:8px;--radius:6px;--mono:Consolas,"Cascadia Mono","Liberation Mono",monospace;--ui:"Segoe UI",system-ui,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--void);color:var(--text);font:15px/1.5 var(--ui)}button,input,select,textarea{font:inherit}button,select{cursor:pointer}button{border:1px solid transparent;border-radius:var(--radius);padding:8px 14px;background:var(--soft);color:var(--text);min-height:36px}button:hover{background:var(--blue-panel)}button:active{background:var(--green-panel)}button[aria-pressed=true],button[aria-selected=true]{color:var(--green);background:var(--green-panel);border-color:var(--green-soft)}button:disabled{opacity:.5;cursor:not-allowed}button.primary{color:var(--void);background:var(--green);font-weight:600}button.primary:hover{background:var(--text)}:focus-visible{outline:2px solid var(--cyan);outline-offset:3px}::selection{background:var(--blue-panel);color:var(--text)}input,textarea,select{background:var(--panel);color:var(--text);border:1px solid var(--dim);border-radius:var(--radius);padding:8px;caret-color:var(--green)}textarea{width:100%;resize:vertical;min-height:112px;line-height:1.6}textarea::placeholder,input::placeholder{color:var(--muted)}h1,h2,h3,p{margin:0}h1{font-size:22px;font-weight:600;letter-spacing:-.02em}h2{font-size:20px;font-weight:600}h3{font-size:15px;font-weight:600}.muted{color:var(--muted)}.green{color:var(--green)}.cyan{color:var(--cyan)}.red{color:var(--red)}.yellow{color:var(--yellow)}.mono{font-family:var(--mono)}.small{font-size:12px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}[hidden]{display:none!important}
+.masthead{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:24px 32px;background:var(--panel)}.brand{display:flex;align-items:center;gap:16px}.mark{font:700 24px var(--mono);color:var(--green);width:44px;height:44px;display:grid;place-items:center;background:var(--green-panel)}.brand p{color:var(--muted);font-size:13px;margin-top:2px}.header-actions{display:flex;gap:12px;align-items:center}.save-label{color:var(--muted);font-size:12px;max-width:220px;text-align:right}.shell{max-width:1680px;margin:auto;padding:24px 32px 48px}.intro{display:flex;justify-content:space-between;gap:24px;align-items:baseline;margin-bottom:20px}.intro p{color:var(--muted);max-width:76ch;font-size:14px}.fixed-theme{white-space:nowrap;font:12px var(--mono);color:var(--green)}.concepts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:24px}.concept{position:relative;text-align:left;padding:16px 20px;background:var(--panel);min-width:0}.concept strong{display:block;font-size:16px;font-weight:600}.concept span{display:block;color:var(--muted);font-size:12px;margin-top:4px}.concept .chosen{position:absolute;right:12px;top:12px;font-size:11px;color:var(--green)}.concept[aria-pressed=true] span{color:var(--text)}.direction{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:16px}.direction p{color:var(--muted);margin-top:4px;font-size:13px}.votes{display:flex;gap:8px;flex-shrink:0}.controls{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:12px 16px;background:var(--panel)}.control{display:flex;gap:8px;align-items:center;color:var(--muted);font-size:12px}.control select{font-size:12px;min-height:34px}.control input[type=range]{width:100px;padding:0;accent-color:var(--green)}.controls .spacer{flex:1}.controls button{font-size:12px}.arrange-help{padding:12px 16px;background:var(--green-panel);font-size:13px;color:var(--text)}.stage{padding:24px 0;background:var(--void)}.terminal-wrap{overflow:auto;padding:2px;scrollbar-color:var(--dim) var(--void)}.terminal{--cols:140;--font:13px;--leading:1.65;font:var(--font)/var(--leading) var(--mono);width:calc(var(--cols)*1ch + 32px);max-width:100%;margin:0 auto;background:var(--void);padding:16px;border:1px solid var(--dim);border-radius:var(--radius)}.terminal-top{display:flex;justify-content:space-between;gap:16px;color:var(--muted);padding:0 0 16px}.terminal-top strong{color:var(--green);font-weight:700}.terminal-top .identity{display:flex;gap:16px;flex-wrap:wrap}.terminal-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(25ch,var(--side-width,30%));gap:20px}.terminal-grid.no-side,.terminal.narrow .terminal-grid{grid-template-columns:minmax(0,1fr)}.zone{min-width:0}.zone:empty{display:none}.zone[data-zone=dock]{grid-column:1/-1}.terminal.narrow .zone[data-zone=side]{grid-column:1}.panel{min-width:0;position:relative;margin-bottom:16px;overflow-wrap:anywhere}.panel:last-child{margin-bottom:0}.panel-title{display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--muted);font-size:inherit;margin-bottom:8px;font-weight:400}.panel-title b{color:var(--cyan);font-weight:400}.panel button{font:inherit;font-size:12px;padding:4px 8px;min-height:28px}.panel details>summary{cursor:pointer;color:var(--muted);padding:4px 0;list-style-position:inside}.panel details[open]>summary{color:var(--cyan)}.panel p+p{margin-top:8px}.prompt{padding:12px 16px;background:var(--blue-panel);margin-bottom:12px}.assistant{padding:0 0 4px;max-width:84ch}.aside-content{padding:12px 16px;background:var(--panel)}.progress-row{display:flex;align-items:baseline;gap:10px;margin:6px 0}.progress-row .meta{margin-left:auto;color:var(--muted);white-space:nowrap}.progress-row strong{font-weight:400}.diff-head{display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap}.diff-head .counts{margin-left:auto}.diff{background:var(--panel);padding:8px 0;overflow-x:auto;white-space:pre;tab-size:2;scrollbar-color:var(--dim) var(--panel)}.diff-row{display:block;padding:0 12px}.diff-row .number{display:inline-block;width:4ch;color:var(--muted);user-select:none}.diff-row.add{color:var(--green);background:var(--green-panel)}.diff-row.remove{color:var(--red);background:var(--red-panel)}.activity{padding:12px 16px;background:var(--green-panel)}.activity.repair{background:var(--red-panel)}.activity.question{background:var(--blue-panel)}.activity .headline{display:flex;gap:10px;align-items:baseline}.activity .headline strong{font-weight:400;color:var(--green)}.activity.repair .headline strong{color:var(--red)}.activity.question .headline strong{color:var(--yellow)}.activity .detail{margin-left:2ch;color:var(--muted);margin-top:4px}.input-line{display:flex;align-items:center;gap:12px;background:var(--panel);padding:10px 12px;border-top:1px solid var(--blue);border-bottom:1px solid var(--blue)}.input-line input{font:inherit;flex:1;min-width:0;background:none;border:0;padding:0;outline-offset:6px}.input-hints{display:flex;justify-content:space-between;gap:16px;color:var(--muted);margin-top:6px;font-size:12px;flex-wrap:wrap}.status-line{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px 24px;color:var(--muted);font-size:12px}.status-line span{white-space:normal}.zone[data-zone=side] .status-line,.zone[data-zone=side] .input-hints{flex-direction:column;gap:8px}.terminal-bottom{padding-top:12px;color:var(--muted);font-size:11px}.panel-tools{display:none;align-items:center;gap:4px;flex-wrap:wrap;background:var(--blue-panel);padding:6px;margin-bottom:8px;font:11px var(--ui)}.panel-tools label{display:flex;align-items:center;gap:4px}.panel-tools select{font:11px var(--ui);max-width:115px;padding:4px}.panel-tools button{font:11px var(--ui);min-height:26px}.panel-tools .grip{cursor:grab;color:var(--cyan);margin-right:auto;font-weight:600}.arranging .panel-tools{display:flex}.arranging .panel{outline:1px dashed var(--dim);padding:8px;margin-bottom:16px}.arranging .zone{display:block;min-height:96px;padding:12px;background:var(--panel)}.arranging .zone::before{content:attr(data-label);display:block;font:11px var(--ui);color:var(--cyan);margin-bottom:12px}.arranging .drop-target{outline:2px dashed var(--green);outline-offset:2px}.arranging .panel.dragging{opacity:.5}.shelf{padding:12px 16px;background:var(--panel);display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--muted)}.shelf button{font-size:12px}.review{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:40px;margin-top:24px;padding-top:24px}.review h2{margin-bottom:8px}.review p{color:var(--muted);font-size:13px;margin-bottom:12px}.field{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:12px 0 8px}.field label{font-size:13px}.field select{font-size:12px}.feedback-note{min-height:120px}.detail-note{min-height:88px}.review-summary{padding:16px;background:var(--panel)}.review-summary ul{list-style:none;margin:8px 0 0;padding:0}.review-summary li{display:flex;gap:12px;justify-content:space-between;padding:8px 0;font-size:13px}.review-summary li span{color:var(--muted)}.summary-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}.summary-actions button{font-size:12px}.footer-note{color:var(--muted);font-size:12px;margin-top:24px;max-width:100ch}.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:12px 20px;background:var(--blue-panel);border:1px solid var(--cyan);border-radius:var(--radius);max-width:calc(100vw - 32px);z-index:5;box-shadow:0 12px 32px #02070aaa}.compare{display:grid;gap:32px}.compare-item>h3{margin:12px 0 4px}.compare-item>p{color:var(--muted);font-size:13px;margin-bottom:12px}.compare .terminal{width:100%}.compare-vote{margin-top:8px;display:flex;gap:8px}.compare-vote button{font-size:12px}.panel-comment-marker{color:var(--green);font:11px var(--ui)}.no-motion *{transition:none!important;animation:none!important}
+@media(min-width:1900px){.compare{grid-template-columns:repeat(2,minmax(0,1fr))}.compare .terminal-grid{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:900px){.masthead{padding:16px;flex-wrap:wrap}.shell{padding:16px}.intro{display:block}.fixed-theme{margin-top:8px}.concepts{grid-template-columns:repeat(2,minmax(0,1fr))}.concept{padding:12px}.direction{align-items:flex-start;flex-direction:column;gap:12px}.review{grid-template-columns:1fr;gap:24px}.terminal-grid{grid-template-columns:minmax(0,1fr)}.terminal .zone[data-zone=side]{grid-column:1}.terminal{font-size:12px;padding:12px}.controls{gap:12px}.terminal-top{flex-wrap:wrap}.status-line{flex-direction:column}}
+@media(max-width:480px){.header-actions{width:100%;justify-content:space-between}.save-label{text-align:left}.intro p{font-size:13px}.concept span{font-size:11px}.votes{width:100%}.votes button{flex:1}.controls .spacer{display:none}.stage{padding:16px 0}.terminal{font-size:11px;padding:8px}.terminal-grid{gap:16px}.prompt,.activity,.aside-content{padding:8px}.panel-tools{gap:6px}.review h2{font-size:18px}.field{align-items:flex-start;flex-direction:column;gap:6px}}
+.terminal.side-left:not(.narrow) .terminal-grid:not(.no-side){grid-template-columns:minmax(25ch,var(--side-width,30%)) minmax(0,1fr)}
+.terminal.side-left:not(.narrow) .terminal-grid:not(.no-side)>.zone[data-zone=side]{grid-column:1;grid-row:1}
+.terminal.side-left:not(.narrow) .terminal-grid:not(.no-side)>.zone[data-zone=main]{grid-column:2;grid-row:1}
+@media(max-width:900px){.terminal.side-left:not(.narrow) .terminal-grid:not(.no-side){grid-template-columns:minmax(0,1fr)}.terminal.side-left:not(.narrow) .terminal-grid:not(.no-side)>.zone[data-zone=main],.terminal.side-left:not(.narrow) .terminal-grid:not(.no-side)>.zone[data-zone=side]{grid-column:1;grid-row:auto}}
+@media(max-width:480px){.concept .chosen{position:static;margin-top:8px}.concept{min-height:100px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+.workbench-demo{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:12px 16px;background:var(--soft);font-size:12px}.workbench-demo button{font-size:12px}.workbench-demo p{color:var(--muted)}
+.workbench{--workbench-height:560px;--conversation-reserve:208px}.workbench-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(22ch,var(--side-width,30%));grid-template-rows:minmax(0,1fr);gap:16px;min-height:0;max-height:min(var(--execution-height,240px),calc(var(--workbench-height) - var(--conversation-reserve)));flex:0 1 auto}.workbench-layout.left{grid-template-columns:minmax(22ch,var(--side-width,30%)) minmax(0,1fr)}.workbench-layout.no-inspector{grid-template-columns:minmax(0,1fr)}.workbench-layout>.inspector-window{min-height:0;max-height:inherit;overflow:auto;scrollbar-color:var(--dim) var(--void)}
+.workbench-center{height:var(--workbench-height);min-width:0;display:flex;flex-direction:column;gap:0}.execution-window{min-width:0;min-height:0;max-height:inherit;overflow:auto;scrollbar-color:var(--dim) var(--void);overscroll-behavior:contain;padding-right:8px}.execution-window .panel{margin-bottom:8px}.workbench-center.no-execution .execution-window,.workbench-center.no-execution .height-divider{display:none}.workbench-layout .aside-content{padding:8px 12px}.workbench-layout .panel{margin-bottom:8px}.workbench-layout .panel:last-child{margin-bottom:0}.workbench-layout.summary-mode{display:flex;flex-direction:column;gap:8px;overflow:auto;scrollbar-color:var(--dim) var(--void)}.summary-mode .inspector-window>[data-zone=side]{display:flex;flex-wrap:wrap;gap:8px}.summary-mode .inspector-window .panel{flex:1 1 24ch;margin:0}.summary-mode .execution-window,.summary-mode .inspector-window{flex-shrink:0;max-height:160px}.workbench-center.no-support .workbench-layout{display:none}.workbench .conversation-scroll{min-height:144px}.workbench .assistant{max-width:none}
+.height-divider{height:20px;flex:0 0 20px;display:flex;align-items:center;justify-content:center;cursor:row-resize;touch-action:none;color:var(--muted);font-size:11px;background:var(--panel);margin:8px 0}.height-divider:hover,.height-divider:focus-visible{color:var(--green);background:var(--green-panel)}
+.conversation-header{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:8px 0;color:var(--cyan)}.conversation-header button{font:11px var(--mono);padding:2px 8px;min-height:26px}.conversation-scroll{flex:1;min-height:96px;overflow:auto;overscroll-behavior:contain;scrollbar-color:var(--dim) var(--void);padding-right:8px;scrollbar-gutter:stable}.conversation-scroll .prompt{padding:8px 12px}.conversation-scroll .panel{margin-bottom:8px}.conversation-dock{padding-top:12px;flex-shrink:0}.conversation-dock .panel{margin-bottom:8px}.conversation-dock .status-line{font-size:11px;gap:4px 12px}.workbench-live{display:flex;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:12px;padding-bottom:12px}.workbench-live strong{color:var(--green);font-weight:400}.workbench-live.repair strong{color:var(--red)}.workbench-live.question strong{color:var(--yellow)}.message-entry{margin:8px 0 16px}.conversation-question{padding:12px;background:var(--blue-panel);margin-top:12px}.conversation-question .summary-actions{margin-top:8px}.execution-summary{padding:8px 12px;background:var(--green-panel);color:var(--green)}.execution-summary summary{cursor:pointer}.execution-summary details[open]{color:var(--text)}.workbench.arranging .workbench-center{height:960px}.workbench.arranging .execution-window{min-height:160px}.workbench.arranging .conversation-scroll{min-height:220px}.workbench.arranging .zone[data-zone=dock]{min-height:0}.workbench.arranging .zone[data-zone=conversation]{min-height:160px}.workbench .zone[data-zone=conversation]::before{content:none}
+@media(max-width:900px){.workbench-layout,.workbench-layout.left{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);gap:8px}.workbench-layout>.inspector-window{max-height:128px}.workbench{--workbench-height:600px;--conversation-reserve:240px}}
+.terminal.narrow .workbench-layout{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);gap:8px}.terminal.narrow .inspector-window{max-height:128px}
+.conversation-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.conversation-actions button{font:11px var(--mono);padding:4px 6px;min-height:28px}.conversation-scroll{overflow-anchor:none;scroll-behavior:auto}.conversation-follow-state{display:block;color:var(--muted);font:11px var(--mono)}.conversation-dock{width:100%}.demo-progress{color:var(--cyan);font:12px var(--mono)}.scene-message{padding-top:8px}.question-answers{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.question-answers button{font:12px var(--mono);padding:6px 8px}.animation-note{color:var(--muted);font-size:12px}.execution-heading{display:flex;align-items:baseline;gap:12px;justify-content:space-between;margin-bottom:8px;color:var(--cyan)}
+</style>
+</head>
+<body>
+<!-- THESIS: Compare and arrange terminal-realistic work surfaces before changing the harness.
+OWN-WORLD: Preserve the user's packaged Matrix palette, terminal cells, restrained glyphs, and green identity.
+STORY: Explore four layouts with identical synthetic work; shortlist, arrange, annotate, and export a decision.
+FIRST VIEWPORT: Compact lab controls above a large terminal preview; feedback below, never inside agent context.
+FORM: User-requested interactive comparison board. No selected production direction; this page IS the approval step.
+SCOPE: No runtime changes, no actual agents, no private screenshots, no network dependencies. -->
+<header class="masthead">
+ <div class="brand"><div class="mark" aria-hidden="true">pi</div><div><h1>Matrix / TUI design lab</h1><p>Your theme. Four ways to work.</p></div></div>
+ <div class="header-actions"><span id="save-status" class="save-label" role="status">Local draft</span><button id="export" class="primary">Export feedback</button></div>
+</header>
+<main class="shell">
+ <div class="intro"><p>Choose a direction. Move the pieces. Tell me what feels right.<br>These are interactive design proposals, not the running harness.</p><div class="fixed-theme">matrix-machine · palette preserved</div></div>
+ <nav id="concepts" class="concepts" aria-label="Design concepts"></nav>
+ <section aria-labelledby="concept-title">
+  <div class="direction"><div><h2 id="concept-title"></h2><p id="concept-description"></p></div><div class="votes"><button id="favorite" aria-pressed="false">Shortlist</button><button id="winner" aria-pressed="false">Make preferred</button></div></div>
+  <div class="controls">
+   <label class="control">Scene <select id="scenario"><option value="editing">Editing</option><option value="long">Long task · 120 steps</option><option value="repair">Recovering</option><option value="question">Needs you</option><option value="complete">Complete</option><option value="reading">New cycle · no edits</option></select></label>
+   <label class="control">Width <select id="width"><option value="80">80 columns</option><option value="110">110 columns</option><option value="140" selected>140 columns</option></select></label>
+   <label class="control">Density <select id="density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
+   <label class="control" id="split-control">Inspector <input id="split" type="range" min="24" max="45" value="30" aria-label="Inspector width percentage"><span id="split-value">30%</span></label>
+   <label class="control">Side <select id="side-position"><option value="right">Right</option><option value="left">Left</option></select></label>
+   <span class="spacer"></span><button id="compare" aria-pressed="false">Compare all</button><button id="arrange" aria-pressed="false">Arrange panels</button><button id="undo" disabled>Undo layout</button><button id="reset">Reset layout</button>
+  </div>
+  <div id="workbench-demo" class="workbench-demo" hidden>
+   <button id="demo-play" aria-pressed="false">Play execution</button><button id="demo-step">Step</button><button id="demo-restart">Restart demo</button>
+   <label class="control">Speed <select id="demo-speed"><option value="1">1×</option><option value="2">2×</option><option value="0.5">0.5×</option></select></label><span id="demo-progress" class="demo-progress">Ready</span>
+   <label class="control">Upper area limit <input id="execution-height" type="range" min="100" max="360" step="20" value="240" aria-label="Maximum upper work area height"><span id="execution-height-value">240px max</span></label>
+   <button id="demo-reply">Simulate model reply</button><button id="demo-change">Simulate file event</button>
+   <p>Upper panes use only the space their content needs, up to your limit. Conversation reclaims the rest. Scroll up to pause following; Jump to latest resumes it.</p>
+  </div>
+  <p id="arrange-help" class="arrange-help" hidden>Drag a panel by its Move handle. Drop above another panel or into an empty area. Alternatively use its area selector and Up / Down buttons. Comment opens a note for that panel. Input is only a preview.</p>
+  <div class="stage"><div id="preview" class="terminal-wrap"></div><div id="comparison" class="compare" hidden></div></div>
+  <div id="shelf" class="shelf"></div>
+ </section>
+ <section class="review" aria-label="Design feedback">
+  <div><h2 id="feedback-title">Your take</h2><p>Notes stay separate for each concept. Mix the best parts; choosing one is not a commitment.</p>
+   <div class="field"><label for="note">What would you keep, change, or remove?</label><span id="note-count" class="small muted">0 / 8000</span></div>
+   <textarea id="note" class="feedback-note" maxlength="8000" placeholder="For example: keep the inline diffs, put the team on the left, and make the current activity more prominent."></textarea>
+   <div class="field"><label for="panel-note">Comment on a specific component</label><select id="note-target" aria-label="Component to comment on"></select></div>
+   <textarea id="panel-note" class="detail-note" maxlength="4000" placeholder="What should this component look or behave like?"></textarea>
+  </div>
+  <div><div class="review-summary"><h3>Your comparison</h3><ul id="review-list"></ul><div class="summary-actions"><button id="copy">Copy review text</button><button id="import">Import saved feedback</button><input id="import-file" type="file" accept=".json,application/json" hidden></div></div><p class="footer-note">Export creates a JSON file containing your selections, panel placement, scene settings, and comments. Send that file back in chat, or ask me to read it from Downloads. Nothing is sent automatically.</p><p class="footer-note">Browser-only controls are outside the terminal. Drag handles are design tools, not a promise of terminal drag-and-drop. All displayed tasks, timing, test counts, and code are synthetic examples. This page does not measure TUI performance.</p></div>
+ </section>
+ <footer class="footer-note">Offline and dependency-free. No accounts, telemetry, remote fonts, or model calls. Browser storage can be cleared or unavailable: export a copy before closing if the design matters.</footer>
+</main>
+<div id="toast" class="toast" role="status" hidden></div>
+<noscript><p>JavaScript is needed for arranging panels and saving comments. No network connection is needed.</p></noscript>
+<script id="lab-model">
+"use strict";
+const zones = ["main", "side", "conversation", "dock", "shelf"];
+const panels = { conversation: "Conversation", changes: "File changes", activity: "Current activity", work: "Work plan", team: "Team", input: "Command input", status: "Session status" };
+const concepts = [
+ { id: "signal", name: "Signal", summary: "A clear, continuous workstream", description: "Conversation first. Edits and progress stay inline. Supporting panels wait on the shelf.", layout: { main: ["conversation", "changes", "activity"], side: [], conversation: [], dock: ["input", "status"], shelf: ["work", "team"] }, split: 28 },
+ { id: "workbench", name: "Workbench", summary: "Stable conversation. Visible execution.", description: "A compact work area above full-width conversation. Work and team shrink with their content; status and input stay full-width below.", layout: { main: ["changes"], side: ["work", "team"], conversation: ["conversation"], dock: ["status", "input"], shelf: ["activity"] }, split: 30 },
+ { id: "command", name: "Command", summary: "An instrument panel for teams", description: "Current state leads. Agents and the plan stay visible while the central area shows concrete changes.", layout: { main: ["activity", "changes"], side: ["team", "work", "conversation"], conversation: [], dock: ["input", "status"], shelf: [] }, split: 34 },
+ { id: "focus", name: "Focus", summary: "Changes lead. Everything has a place.", description: "Review the code first, read the explanation beside it, and keep progress close to the command line.", layout: { main: ["changes", "work"], side: ["conversation", "team"], conversation: [], dock: ["activity", "input", "status"], shelf: [] }, split: 34 }
+];
+function initialState() {
+ return { version: 1, active: "workbench", winner: null, scenario: "editing", width: 110, density: "comfortable", reviews: Object.fromEntries(concepts.map(c => [c.id, { favorite: false, note: "", notes: {}, layout: JSON.parse(JSON.stringify(c.layout)), split: c.split, sidePosition: c.id === "workbench" ? "left" : "right", executionHeight: 240 }])) };
+}
+function normalizeLayout(value, fallback) {
+ const seen = new Set(); const next = Object.fromEntries(zones.map(zone => [zone, []]));
+ if (!value || typeof value !== "object") return JSON.parse(JSON.stringify(fallback));
+ for (const zone of zones) for (const id of (Array.isArray(value[zone]) ? value[zone] : []).slice(0, 20)) {
+  if (typeof id === "string" && Object.hasOwn(panels, id) && !seen.has(id)) { next[zone].push(id); seen.add(id); }
+ }
+ for (const zone of zones) for (const id of fallback[zone]) if (!seen.has(id)) { next[zone].push(id); seen.add(id); }
+ return next;
+}
+function normalizeState(raw) {
+ const next = initialState();
+ if (!raw || typeof raw !== "object" || raw.version !== 1) return next;
+ if (concepts.some(c => c.id === raw.active)) next.active = raw.active;
+ if (concepts.some(c => c.id === raw.winner)) next.winner = raw.winner;
+ if (["editing", "long", "repair", "question", "complete", "reading"].includes(raw.scenario)) next.scenario = raw.scenario;
+ if ([80, 110, 140].includes(raw.width)) next.width = raw.width;
+ if (raw.density === "compact") next.density = "compact";
+ for (const c of concepts) {
+  const r = raw.reviews?.[c.id]; if (!r || typeof r !== "object") continue;
+  const dest = next.reviews[c.id]; dest.favorite = r.favorite === true;
+  dest.note = typeof r.note === "string" ? r.note.slice(0, 8000) : "";
+  for (const id of Object.keys(panels)) if (typeof r.notes?.[id] === "string") dest.notes[id] = r.notes[id].slice(0, 4000);
+  dest.layout = normalizeLayout(r.layout, c.layout);
+  if (c.id === "workbench" && !Array.isArray(r.layout?.conversation)) dest.layout = movePanel(dest.layout, "conversation", "conversation");
+  if (Number.isFinite(r.split)) dest.split = Math.max(24, Math.min(45, Math.round(r.split)));
+  if (["left", "right"].includes(r.sidePosition)) dest.sidePosition = r.sidePosition;
+  if (Number.isFinite(r.executionHeight)) dest.executionHeight = Math.max(100, Math.min(360, Math.round(r.executionHeight)));
+ }
+ return next;
+}
+function movePanel(layout, id, destination, before) {
+ if (!Object.hasOwn(panels, id) || !zones.includes(destination) || id === before) return layout;
+ const next = Object.fromEntries(zones.map(zone => [zone, layout[zone].filter(item => item !== id)]));
+ const index = before ? next[destination].indexOf(before) : -1;
+ next[destination].splice(index < 0 ? next[destination].length : index, 0, id);
+ return next;
+}
+function exportReview(state) { return { ...normalizeState(state), kind: "pi-matrix-tui-design-feedback", palette: "matrix-machine", notice: "Design preferences only; no harness settings were changed." }; }
+</script>
+<script>
+"use strict";
+const storageKey = "pi.matrix-tui-design-lab.v1";
+const $ = selector => document.querySelector(selector);
+let state = initialState(); let arrange = false; let comparing = false; let noteTarget = "changes"; let dragging = null;
+let saveTimer; let toastTimer; let storageAvailable = true;
+let playbackTimer; let playing = false; let frameIndex = -1; let replySequence = 0; let changeSequence = 0; let copiedSelection = "";
+const playbackFrames = ["reading", "editing", "long", "repair", "editing", "question", "complete", "reading"];
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const undo = new Map(concepts.map(c => [c.id, []]));
+try { const saved = localStorage.getItem(storageKey); if (saved && saved.length <= 300000) state = normalizeState(JSON.parse(saved)); }
+catch { storageAvailable = false; }
+function saveNow() {
+ clearTimeout(saveTimer);
+ try { localStorage.setItem(storageKey, JSON.stringify(state)); storageAvailable = true; $("#save-status").textContent = "Saved in this browser"; }
+ catch { storageAvailable = false; $("#save-status").textContent = "Browser storage unavailable — export to save"; }
+}
+function save() { clearTimeout(saveTimer); $("#save-status").textContent = storageAvailable ? "Saving locally…" : "Browser storage unavailable — export to save"; saveTimer = setTimeout(saveNow, 300); }
+function toast(message) { clearTimeout(toastTimer); $("#toast").textContent = message; $("#toast").hidden = false; toastTimer = setTimeout(() => { $("#toast").hidden = true; }, 4500); }
+function element(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
+function button(text, callback, attrs = {}) { const node = element("button", "", text); node.type = "button"; for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value)); node.addEventListener("click", callback); return node; }
+function activeReview() { return state.reviews[state.active]; }
+function snapshotLayout() { const stack = undo.get(state.active); stack.push({ layout: structuredClone(activeReview().layout), split: activeReview().split, sidePosition: activeReview().sidePosition, executionHeight: activeReview().executionHeight }); if (stack.length > 30) stack.shift(); }
+function move(id, destination, before) {
+ const current = activeReview().layout; const next = movePanel(current, id, destination, before);
+ if (JSON.stringify(current) === JSON.stringify(next)) return;
+ snapshotLayout(); activeReview().layout = next; save(); renderPreview(); renderSummary();
+ toast(`${panels[id]} moved to ${destination === "side" ? "inspector" : destination}.`);
+ if (arrange && destination !== "shelf") $(`#terminal [data-panel="${id}"] [data-zone-select]`)?.focus({ preventScroll: true });
+}
+function shift(id, delta) { const zone = zones.find(z => activeReview().layout[z].includes(id)); const list = activeReview().layout[zone]; const at = list.indexOf(id); const to = at + delta; if (to < 0 || to >= list.length) return; move(id, zone, delta < 0 ? list[to] : list[to + 1]); }
+function commentOn(id) { noteTarget = id; $("#note-target").value = id; $("#panel-note").value = activeReview().notes[id] ?? ""; $("#panel-note").focus(); }
+const scene = {
+ reading: { title: "Inspecting the next task", detail: "Reading the relevant files. No file changes yet.", mark: "●", state: "INSPECTING", note: "The previous cycle is in history; the empty changes area takes no space." },
+ long: { title: "Verifying phase 4 of 6", detail: "83 of 120 steps complete. The current phase stays visible; older phases are folded away.", mark: "●", state: "VERIFYING", note: "2 agents active · 4 sessions idle · 37 steps remaining" },
+ editing: { title: "Editing reload ownership", detail: "Applying the verified change. Tests are next.", mark: "●", state: "WORKING", note: "Read 6 files · searched 3 symbols · routine output tucked away" },
+ repair: { title: "Repairing the tool update", detail: "Validation failed. The previous tool is still active; repair attempt 1 of 3.", mark: "!", state: "RECOVERING", note: "Main task is waiting for repair. No repeated task submission." },
+ question: { title: "One decision needs you", detail: "Should the inspector open automatically when a second agent joins?", mark: "?", state: "NEEDS INPUT", note: "Work is waiting for your answer. The session and team remain available." },
+ complete: { title: "Change verified", detail: "24 focused tests passed. Two files changed. Ready for your review.", mark: "✓", state: "COMPLETE", note: "The completed result stays visible until the next task." }
+};
+function panelContent(id) {
+ const box = element("div"); const s = scene[state.scenario];
+ if (id === "changes" && state.scenario === "reading") return box;
+ if (id === "conversation") {
+  box.dataset.message = "true";
+  box.innerHTML = '<div class="prompt"><span class="cyan">you</span>  Make tool reloads reliable without losing the task.</div><div class="assistant"><p><span class="green">pi</span>  I found the reload boundary. I’m keeping the last working tool available until its replacement passes validation.</p><p class="muted">The change is small. The important part is that a failed update cannot strand the running task.</p></div>';
+ } else if (id === "changes") {
+  box.innerHTML = '<div class="panel-title"><b>Changes</b><span class="muted">2 files · applied</span></div><div class="diff-head"><span>src/runtime/reload.ts</span><span class="counts"><span class="green">+4</span> <span class="red">−2</span></span></div><div class="diff" role="region" aria-label="Example code diff" tabindex="0"><span class="diff-row"><span class="number"> 42</span> async function reload(candidate) {</span><span class="diff-row remove"><span class="number"> 43</span>−  dispose(current);</span><span class="diff-row remove"><span class="number"> 44</span>−  current = await load(candidate);</span><span class="diff-row add"><span class="number"> 43</span>+  const next = await load(candidate);</span><span class="diff-row add"><span class="number"> 44</span>+  await validate(next);</span><span class="diff-row add"><span class="number"> 45</span>+  const previous = current;</span><span class="diff-row add"><span class="number"> 46</span>+  current = next; dispose(previous);</span><span class="diff-row"><span class="number"> 47</span> }</span></div><details><summary>test/reload.test.ts <span class="green">+8</span> <span class="muted">· changed by Python</span></summary><div class="diff"><span class="diff-row add">+ it("keeps the active tool when validation fails");</span><span class="diff-row add">+ it("continues the same task after a valid reload");</span><span class="diff-row muted">  Synthetic test outline; remaining 6 lines omitted.</span></div></details><div class="small muted">File effects are visible even when a script prints nothing.</div>';
+ } else if (id === "activity") {
+  box.className = `activity ${state.scenario}`;
+  const headline = element("div", "headline"); headline.append(element("span", state.scenario === "repair" ? "red" : "green", s.mark), element("strong", "", s.title)); box.append(headline, element("p", "detail", s.detail));
+  const details = element("details"); details.append(element("summary", "small", "Execution details"), element("p", "small muted", s.note)); box.append(details);
+ } else if (id === "work") {
+  box.className = "aside-content"; box.innerHTML = '<div class="panel-title"><b>Work plan</b><span>2 / 3</span></div><div class="progress-row"><span class="green">✓</span><span>Inspect reload lifecycle</span></div><div class="progress-row"><span class="green">●</span><strong>Preserve the active tool</strong></div><div class="progress-row"><span class="muted">○</span><span class="muted">Verify task continuation</span></div><p class="small muted">Checkpoint: replacement validated</p>';
+  if (state.scenario === "long") box.innerHTML = '<div class="panel-title"><b>Work plan</b><span>83 / 120</span></div><p class="cyan">Phase 4 / 6 · verification</p><div class="progress-row"><span class="green">●</span><span>84. Exercise failure recovery</span></div><div class="progress-row"><span class="muted">○</span><span>85. Check task continuity</span></div><div class="progress-row"><span class="muted">○</span><span>86. Review worker handoffs</span></div><details><summary>83 completed steps</summary><p>Discovery · 28 / 28</p><p>Implementation · 40 / 40</p><p>Verification · 15 / 52</p><p class="small muted">A real inspector would open searchable step history, not print all 120 items.</p></details><p class="small muted">Next: integration and handoff</p>';
+  if (state.scenario === "repair") box.innerHTML = '<div class="panel-title"><b>Work plan</b><span class="yellow">waiting</span></div><p class="red">! Repair tool validation</p><p class="muted">Main task resumes after repair.</p><details><summary>Completed steps</summary><p>✓ Inspect reload lifecycle</p><p>✓ Prepare replacement</p></details>';
+  if (state.scenario === "complete") box.innerHTML = '<details><summary><span class="green">✓ Work completed · 3 / 3</span></summary><p>✓ Inspect · implement · verify</p><p class="muted">24 focused tests passed. Evidence retained.</p></details>';
+  if (state.scenario === "reading") box.innerHTML = '<div class="panel-title"><b>Work plan</b><span>1 / 2</span></div><p class="green">● Inspect next task</p><p class="muted">○ Report findings</p><details><summary>Previous cycle</summary><p>Tool reload verified. 2 files changed.</p></details>';
+ } else if (id === "team") {
+  box.className = "aside-content"; box.innerHTML = '<div class="panel-title"><b>Team</b><span>2 agents</span></div><div class="progress-row"><span class="green">●</span><strong>Builder</strong><span class="meta">working</span></div><p class="small muted">Pi · reload implementation</p><div class="progress-row"><span class="cyan">○</span><strong>Reviewer</strong><span class="meta">waiting</span></div><p class="small muted">Peer CLI · test review</p><details><summary>Session details</summary><p class="small muted">Persistent conversations. Questions and completed results reach the parent; every thought does not.</p></details>';
+  if (state.scenario === "long") { const idle = element("details"); idle.append(element("summary", "", "4 idle sessions"), element("p", "muted", "Researcher · Auditor · Tester · Integrator. Sessions retained; no active tasks.")); box.append(idle); }
+  if (state.scenario === "question") box.innerHTML = '<div class="panel-title"><b>Team</b><span class="yellow">needs you</span></div><p class="yellow">? Reviewer · question pending</p><p class="muted">Answer in the conversation.</p><p class="small muted">Builder is waiting. Sessions remain open.</p>';
+  if (["complete", "reading"].includes(state.scenario)) box.innerHTML = '<details><summary><span class="green">✓ Team idle · 2 sessions retained</span></summary><p>Builder · available</p><p>Reviewer · available</p><p class="small muted">New tasks reactivate these conversations; collapsing this panel does not terminate them.</p></details>';
+ } else if (id === "input") {
+  box.innerHTML = '<div class="input-line"><span class="green">›</span><input aria-label="Example prompt (not sent)" placeholder="Steer the work, or ask a question…" spellcheck="false"></div><div class="input-hints"><span>Input preview only · nothing is submitted</span><span>/ commands · Esc interrupt</span></div>';
+ } else if (id === "status") {
+  box.innerHTML = '<div class="status-line"><span>sample-project <span class="green">main</span></span><span>context 18% · cache 97% · session saved</span><span>model / reasoning level</span></div>';
+ }
+ if (id === "changes" && state.scenario === "complete") { const content = element("details", "execution-summary"); content.append(element("summary", "", "✓ 2 files changed · verification passed · expand diff")); while (box.firstChild) content.append(box.firstChild); box.append(content); }
+ return box;
+}
+function buildPanel(id, interactive, conceptId) {
+ const section = element("section", "panel"); section.dataset.panel = id; section.setAttribute("aria-label", panels[id]);
+ if (interactive) {
+  const tools = element("div", "panel-tools");
+  const grip = button(`Move ${panels[id]}`, () => section.querySelector("select").focus(), { "aria-label": `Move ${panels[id]}: drag or choose an area` }); grip.className = "grip"; grip.draggable = true;
+  grip.addEventListener("dragstart", event => { dragging = id; event.dataTransfer.setData("text/plain", id); event.dataTransfer.effectAllowed = "move"; section.classList.add("dragging"); });
+  grip.addEventListener("dragend", () => { dragging = null; document.querySelectorAll(".drop-target,.dragging").forEach(node => node.classList.remove("drop-target", "dragging")); });
+  const label = element("label", "", "Area"); const select = element("select"); select.dataset.zoneSelect = id; select.setAttribute("aria-label", `Area for ${panels[id]}`);
+  for (const [value, text] of [["main", "Execution"], ["side", "Inspector"], ["conversation", "Conversation"], ["dock", "Bottom dock"], ["shelf", "Hidden shelf"]]) { const option = element("option", "", text); option.value = value; select.append(option); }
+  const zone = zones.find(z => state.reviews[conceptId].layout[z].includes(id)); select.value = zone; select.addEventListener("change", () => move(id, select.value)); label.append(select);
+  const up = button("Up", () => shift(id, -1), { "aria-label": `Move ${panels[id]} up` }); const down = button("Down", () => shift(id, 1), { "aria-label": `Move ${panels[id]} down` });
+  up.disabled = state.reviews[conceptId].layout[zone].indexOf(id) === 0; down.disabled = state.reviews[conceptId].layout[zone].at(-1) === id;
+  tools.append(grip, label, up, down, button("Comment", () => commentOn(id))); section.append(tools);
+ }
+ section.append(panelContent(id));
+ if (interactive && arrange && activeReview().notes[id]) section.append(element("span", "panel-comment-marker", "Comment saved"));
+ return section;
+}
+function buildTerminal(conceptId, interactive) {
+ const review = state.reviews[conceptId]; const terminal = element("div", `terminal${state.width === 80 ? " narrow" : ""}${review.sidePosition === "left" ? " side-left" : ""}${interactive && arrange ? " arranging" : ""}`);
+ if (interactive) terminal.id = "terminal";
+ terminal.style.setProperty("--cols", state.width); terminal.style.setProperty("--side-width", `${review.split}%`); terminal.style.setProperty("--leading", state.density === "compact" ? "1.4" : "1.65");
+ const top = element("div", "terminal-top"); top.innerHTML = '<div class="identity"><strong>pi-adaptative</strong><span>tool reload reliability</span></div>'; top.append(element("span", state.scenario === "repair" ? "red" : state.scenario === "question" ? "yellow" : "green", scene[state.scenario].state)); terminal.append(top);
+ if (conceptId === "workbench") { terminal.classList.add("workbench"); buildWorkbench(terminal, conceptId, interactive); return terminal; }
+ const grid = element("div", `terminal-grid${review.layout.side.length === 0 && !arrange ? " no-side" : ""}`);
+ for (const zone of ["main", "side", "conversation", "dock"]) grid.append(buildZone(zone, conceptId, interactive));
+ terminal.append(grid); return terminal;
+}
+function buildZone(zone, conceptId, interactive) {
+ const review = state.reviews[conceptId];
+  const area = element("div", "zone"); area.dataset.zone = zone; area.dataset.label = zone === "side" ? "Inspector" : zone === "dock" ? "Bottom dock" : "Main workstream";
+  if (zone === "conversation") area.dataset.label = "Conversation";
+  for (const id of review.layout[zone]) { if (id === "changes" && state.scenario === "reading" && !arrange) continue; area.append(buildPanel(id, interactive, conceptId)); }
+  if (interactive) {
+   area.addEventListener("dragover", event => { if (!arrange || !dragging) return; event.preventDefault(); event.dataTransfer.dropEffect = "move"; document.querySelectorAll(".drop-target").forEach(n => n.classList.remove("drop-target")); (event.target.closest("[data-panel]") ?? area).classList.add("drop-target"); });
+   area.addEventListener("drop", event => { if (!arrange || !dragging) return; event.preventDefault(); const id = dragging; dragging = null; const target = event.target.closest("[data-panel]"); move(id, zone, target?.dataset.panel); });
+  }
+ return area;
+}
+function workbenchSignature() { const r = activeReview(); return JSON.stringify([r.layout, r.split, r.sidePosition, state.width, state.density, arrange]); }
+function atBottom(area) { return area.scrollHeight - area.clientHeight - area.scrollTop <= 2; }
+function hasConversationSelection(area) { const selection = getSelection(); return Boolean(selection && !selection.isCollapsed && area.contains(selection.anchorNode) && area.contains(selection.focusNode)); }
+const conversationViewports = new WeakMap();
+// Follow intent belongs to the conversation, never to the current pane dimensions.
+class ConversationViewport {
+ constructor(terminal, area, latest, indicator) {
+  this.area = area; this.latest = latest; this.indicator = indicator;
+  this.following = true; this.unread = 0; this.top = 0; this.height = 0; this.contentHeight = 0;
+  conversationViewports.set(terminal, this);
+  area.addEventListener("scroll", () => {
+   if (area.clientHeight !== this.height || area.scrollHeight !== this.contentHeight) { this.refresh(); return; }
+   this.rememberPosition();
+   this.updateControls();
+  }, { passive: true });
+  area.addEventListener("wheel", event => { if (event.deltaY < 0) { this.following = false; this.updateControls(); } }, { passive: true });
+  this.observer = new ResizeObserver(() => this.refresh()); this.observer.observe(area);
+ }
+ rememberPosition() {
+  if (this.area.clientHeight !== this.height || this.area.scrollHeight !== this.contentHeight || Math.abs(this.area.scrollTop - this.top) < 1) return;
+  this.top = this.area.scrollTop; this.following = atBottom(this.area) && !hasConversationSelection(this.area);
+  if (this.following) this.unread = 0;
+ }
+ updateControls() {
+  this.latest.hidden = this.following;
+  this.latest.textContent = `${this.unread ? `${this.unread} new · ` : ""}Jump to latest ↓`;
+  this.indicator.textContent = this.following ? "Following latest" : "Reading history · follow paused";
+ }
+ refresh() {
+  if (!this.area.isConnected || !this.area.clientHeight) return;
+  if (hasConversationSelection(this.area)) this.following = false;
+  this.area.scrollTop = this.following ? this.area.scrollHeight : this.top;
+  this.top = this.area.scrollTop; this.height = this.area.clientHeight; this.contentHeight = this.area.scrollHeight;
+  if (this.following) this.unread = 0;
+  this.updateControls();
+ }
+ append(node) {
+  this.rememberPosition();
+  if (hasConversationSelection(this.area)) this.following = false;
+  this.area.append(node);
+  if (!this.following) this.unread += 1;
+  this.refresh();
+ }
+ jumpToLatest() {
+  if (hasConversationSelection(this.area)) getSelection().removeAllRanges();
+  this.following = true; this.unread = 0; this.refresh();
+ }
+ dispose() { this.observer.disconnect(); }
+}
+function animateArrival(node) {
+ if (reducedMotion.matches || !playing || !node) return;
+ node.animate([{ opacity: .45 }, { opacity: 1 }], { duration: 180, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+}
+function appendMessage(terminal, author, text) {
+ const area = terminal.querySelector(".conversation-scroll"); if (!area) return;
+ const message = element("div", "message-entry"); message.dataset.message = "true";
+ const line = element("p"); line.append(element("span", author === "you" ? "cyan" : "green", `${author}  `), document.createTextNode(text)); message.append(line);
+ conversationViewports.get(terminal).append(message);
+ // Only synthetic demo additions are bounded here, not any real conversation.
+ const additions = area.querySelectorAll(":scope > .message-entry"); if (additions.length > 40) additions[0].remove();
+ conversationViewports.get(terminal).refresh();
+ animateArrival(message); return message;
+}
+async function copyConversation(selectionOnly) {
+ const area = $("#terminal .conversation-scroll");
+ const text = selectionOnly ? copiedSelection : Array.from(area?.querySelectorAll("[data-message]") ?? []).map(node => node.innerText.trim()).filter(Boolean).join("\n\n");
+ if (!text) { toast(selectionOnly ? "Select text inside the conversation first." : "No conversation content to copy."); return; }
+ try { await navigator.clipboard.writeText(text); toast(selectionOnly ? "Selected conversation text copied." : "Conversation copied. Tool output was not included."); }
+ catch { download(text, "text/plain", selectionOnly ? "pi-conversation-selection.txt" : "pi-conversation.txt"); toast("Clipboard unavailable; downloaded the conversation text instead."); }
+}
+function setExecutionHeight(terminal, value, persist) {
+ const height = Math.max(100, Math.min(360, Math.round(value / 20) * 20));
+ terminal.style.setProperty("--execution-height", `${height}px`);
+ $("#execution-height").value = height; $("#execution-height-value").textContent = `${height}px max`;
+ terminal.querySelector(".height-divider")?.setAttribute("aria-valuenow", String(height));
+ if (persist) { activeReview().executionHeight = height; save(); }
+}
+function syncWorkbench(terminal, conceptId, interactive) {
+ conversationViewports.get(terminal).rememberPosition();
+ const center = terminal.querySelector(".workbench-center"); const execution = terminal.querySelector(".execution-window");
+ const main = buildZone("main", conceptId, interactive); const noEffects = main.childElementCount === 0 && !arrange;
+ center.classList.toggle("no-execution", noEffects);
+ center.classList.toggle("no-support", noEffects && state.reviews[conceptId].layout.side.length === 0);
+ terminal.querySelector(".workbench-layout").classList.toggle("summary-mode", !arrange && (noEffects || state.scenario === "complete"));
+ const heading = element("div", "execution-heading"); heading.append(element("span", "", "Execution"), element("span", "muted small", "File effects and command outcomes"));
+ execution.replaceChildren(heading, main); animateArrival(main);
+ const inspector = terminal.querySelector(".inspector-window"); const inspectorScroll = inspector.scrollTop;
+ const support = buildZone("side", conceptId, interactive);
+ // Keep the active step visible when the effects pane is absent; details stay available.
+ if (noEffects && !arrange) {
+  const work = support.querySelector('[data-panel="work"] .aside-content');
+  if (work && state.scenario !== "complete") {
+   const summary = element("details");
+   summary.append(element("summary", "", `Work · ${scene[state.scenario].title}`));
+   while (work.firstChild) summary.append(work.firstChild);
+   work.append(summary);
+  }
+ }
+ inspector.replaceChildren(support); inspector.scrollTop = inspectorScroll;
+ const live = terminal.querySelector(".workbench-live"); live.className = `workbench-live ${state.scenario}`; live.replaceChildren(element("strong", "", `${scene[state.scenario].mark} ${scene[state.scenario].title}`));
+ if (state.scenario === "repair") live.append(element("span", "", "Task paused · repairing tool"));
+ const status = terminal.querySelector(".terminal-top > span"); status.textContent = scene[state.scenario].state; status.className = state.scenario === "repair" ? "red" : state.scenario === "question" ? "yellow" : "green";
+ if (terminal.dataset.lastScene !== state.scenario) {
+  terminal.dataset.lastScene = state.scenario;
+  const previousQuestion = terminal.querySelector('.conversation-question[data-pending="true"]');
+  if (previousQuestion && terminal.dataset.awaitingAnswer === "true") {
+   previousQuestion.querySelector(".question-answers")?.remove();
+   previousQuestion.dataset.pending = "false";
+   appendMessage(terminal, "demo", "The scene was changed manually. The unanswered sample question is retained above; no answer was submitted.");
+  }
+  terminal.dataset.awaitingAnswer = "false";
+  const messages = {
+   reading: "I’m inspecting the next task. The previous changes are retained in history, and there are no new file effects to show yet.",
+   editing: "The reload change is applied above. I’ll verify it before continuing the task.",
+   long: "This is a larger cycle: 83 of 120 steps are complete. I’m verifying recovery now; the left inspector shows the active phase rather than every finished step.",
+   repair: "Validation failed. The previous tool is still available. I’m repairing the replacement before resuming the main task.",
+   complete: "The change is verified: 24 focused tests passed. Two files changed. The plan and team have collapsed into summaries; the conversations and evidence remain available."
+  };
+  if (messages[state.scenario]) appendMessage(terminal, "pi", messages[state.scenario]);
+  if (state.scenario === "long") {
+   for (const text of ["The file ownership review is complete.", "The implementation phase preserved the original session.", "The first verification batch passed.", "I’m checking cancellation and recovery next.", "The reviewer is waiting for the final evidence."]) appendMessage(terminal, "pi", text);
+  }
+  if (state.scenario === "question") {
+   const question = element("div", "conversation-question"); question.dataset.pending = "true"; const message = element("p"); message.dataset.message = "true";
+   message.append(element("span", "yellow", "Reviewer asks  "), document.createTextNode("Should the inspector open automatically when another agent joins?"));
+   const answers = element("div", "question-answers");
+   for (const answer of ["Open automatically", "Only when I ask"]) answers.append(button(answer, () => {
+    appendMessage(terminal, "you", answer); appendMessage(terminal, "Reviewer", "Understood. I’ll use that behavior for this example.");
+    answers.replaceChildren(element("span", "muted small", "Answered in this simulation only.")); question.dataset.pending = "false"; terminal.dataset.awaitingAnswer = "false";
+    if (frameIndex === 5) { playing = true; updatePlaybackControls(); scheduleFrame(); }
+   }));
+   question.append(message, answers); conversationViewports.get(terminal).append(question); terminal.dataset.awaitingAnswer = "true";
+  }
+ }
+}
+function buildWorkbench(terminal, conceptId, interactive) {
+ const r = state.reviews[conceptId]; terminal.dataset.layoutSignature = interactive ? workbenchSignature() : "comparison";
+ terminal.style.setProperty("--execution-height", `${r.executionHeight}px`);
+ const live = element("div", "workbench-live"); terminal.append(live);
+ const layout = element("div", `workbench-layout${r.sidePosition === "left" ? " left" : ""}${r.layout.side.length === 0 && !arrange ? " no-inspector" : ""}`);
+ const inspector = element("div", "inspector-window"); inspector.hidden = r.layout.side.length === 0 && !arrange;
+ const center = element("div", "workbench-center"); const execution = element("div", "execution-window");
+ if (r.sidePosition === "left") layout.append(inspector, execution); else layout.append(execution, inspector);
+ center.append(layout);
+ const divider = element("div", "height-divider", "↕  upper area limit / conversation"); divider.tabIndex = 0;
+ for (const [key, value] of Object.entries({ role: "slider", "aria-label": "Maximum upper work area height", "aria-valuemin": "100", "aria-valuemax": "360", "aria-valuenow": String(r.executionHeight), "aria-orientation": "vertical" })) divider.setAttribute(key, value);
+ if (interactive) {
+  divider.addEventListener("keydown", event => { if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return; event.preventDefault(); const value = event.key === "Home" ? 100 : event.key === "End" ? 360 : activeReview().executionHeight + (event.key === "ArrowDown" ? 20 : -20); setExecutionHeight(terminal, value, true); });
+  let origin;
+  divider.addEventListener("pointerdown", event => { if (event.button !== 0) return; origin = { y: event.clientY, height: activeReview().executionHeight }; divider.setPointerCapture(event.pointerId); });
+  divider.addEventListener("pointermove", event => { if (origin) setExecutionHeight(terminal, origin.height + event.clientY - origin.y, false); });
+  const finishDrag = () => { if (origin) { setExecutionHeight(terminal, Number($("#execution-height").value), true); origin = undefined; } };
+  divider.addEventListener("pointerup", finishDrag); divider.addEventListener("pointercancel", finishDrag);
+ }
+ center.append(divider);
+ const header = element("div", "conversation-header"); const heading = element("div", "", "Conversation");
+ const indicator = element("span", "conversation-follow-state", "Following latest"); heading.append(indicator); header.append(heading);
+ const actions = element("div", "conversation-actions");
+ const badge = button("Jump to latest ↓", () => conversationViewports.get(terminal).jumpToLatest()); badge.dataset.newMessages = "true"; badge.hidden = true; actions.append(badge);
+ if (interactive) {
+  const copySelection = button("Copy selection", () => copyConversation(true)); copySelection.dataset.copySelection = "true"; copySelection.disabled = true;
+  copySelection.addEventListener("mousedown", event => event.preventDefault());
+  actions.append(copySelection, button("Copy conversation", () => copyConversation(false)));
+ }
+ header.append(actions); center.append(header);
+ const conversation = buildZone("conversation", conceptId, interactive); conversation.classList.add("conversation-scroll"); conversation.tabIndex = 0; conversation.setAttribute("aria-label", "Conversation history; scroll independently from execution");
+ new ConversationViewport(terminal, conversation, badge, indicator);
+ center.append(conversation);
+ const dock = buildZone("dock", conceptId, interactive); dock.classList.add("conversation-dock");
+ terminal.append(center, dock); syncWorkbench(terminal, conceptId, interactive);
+}
+function renderPreview() {
+ const current = $("#terminal");
+ if (current?.classList.contains("workbench") && state.active === "workbench" && !arrange && current.dataset.layoutSignature === workbenchSignature()) syncWorkbench(current, state.active, true);
+ else { conversationViewports.get(current)?.dispose(); $("#preview").replaceChildren(buildTerminal(state.active, true)); }
+ $("#preview").hidden = comparing; $("#comparison").hidden = !comparing;
+ $("#workbench-demo").hidden = state.active !== "workbench" || comparing;
+ $("#execution-height").value = activeReview().executionHeight; $("#execution-height-value").textContent = `${activeReview().executionHeight}px max`;
+ $("#arrange-help").hidden = !arrange || comparing; $("#arrange").setAttribute("aria-pressed", String(arrange)); $("#arrange").disabled = comparing;
+ $("#undo").disabled = comparing || undo.get(state.active).length === 0; $("#reset").disabled = comparing;
+ $("#shelf").hidden = comparing; $("#shelf").replaceChildren(element("span", "", "On the shelf:"));
+ for (const id of activeReview().layout.shelf) $("#shelf").append(button(`Show ${panels[id]}`, () => move(id, "side")));
+ if (activeReview().layout.shelf.length === 0) $("#shelf").append(element("span", "", "All seven components are on the canvas. Use Arrange to tuck any away."));
+ for (const terminal of $("#comparison").querySelectorAll(".workbench")) conversationViewports.get(terminal)?.dispose();
+ if (comparing) {
+  $("#comparison").replaceChildren();
+  for (const c of concepts) { const item = element("article", "compare-item"); item.append(element("h3", "", c.name), element("p", "", c.summary), buildTerminal(c.id, false)); const actions = element("div", "compare-vote"); actions.append(button("Edit this concept", () => { comparing = false; selectConcept(c.id); }), button(state.reviews[c.id].favorite ? "Shortlisted" : "Shortlist", () => { state.reviews[c.id].favorite = !state.reviews[c.id].favorite; save(); render(); }, { "aria-pressed": state.reviews[c.id].favorite })); item.append(actions); $("#comparison").append(item); }
+ }
+}
+function renderSummary() {
+ $("#review-list").replaceChildren();
+ for (const c of concepts) { const r = state.reviews[c.id]; const row = element("li"); row.append(element("strong", "", c.name), element("span", "", [state.winner === c.id ? "preferred" : r.favorite ? "shortlisted" : "not rated", `${Object.values(r.notes).filter(Boolean).length + (r.note ? 1 : 0)} notes`].join(" · "))); $("#review-list").append(row); }
+}
+function render() {
+ $("#concepts").replaceChildren();
+ for (const c of concepts) { const tab = button("", () => selectConcept(c.id), { "data-concept": c.id, "aria-pressed": state.active === c.id }); tab.className = "concept"; tab.append(element("strong", "", c.name), element("span", "", c.summary)); if (state.winner === c.id || state.reviews[c.id].favorite) tab.append(element("span", "chosen", state.winner === c.id ? "Preferred" : "Saved")); $("#concepts").append(tab); }
+ const c = concepts.find(c => c.id === state.active); $("#concept-title").textContent = c.name; $("#concept-description").textContent = c.description;
+ $("#favorite").setAttribute("aria-pressed", String(activeReview().favorite)); $("#favorite").textContent = activeReview().favorite ? "Shortlisted" : "Shortlist";
+ $("#winner").setAttribute("aria-pressed", String(state.winner === state.active)); $("#winner").textContent = state.winner === state.active ? "Preferred concept" : "Make preferred";
+ $("#compare").setAttribute("aria-pressed", String(comparing)); $("#compare").textContent = comparing ? "Back to editing" : "Compare all";
+ $("#scenario").value = state.scenario; $("#width").value = state.width; $("#density").value = state.density; $("#split").value = activeReview().split; $("#split-value").textContent = `${activeReview().split}%`; $("#side-position").value = activeReview().sidePosition;
+ $("#feedback-title").textContent = `Your take on ${c.name}`; $("#note").value = activeReview().note; $("#note-count").textContent = `${activeReview().note.length} / 8000`;
+ $("#panel-note").value = activeReview().notes[noteTarget] ?? ""; renderPreview(); renderSummary();
+}
+function updatePlaybackControls() {
+ $("#demo-play").textContent = playing ? "Pause" : frameIndex >= 0 && frameIndex < playbackFrames.length - 1 ? "Resume" : "Play execution";
+ $("#demo-play").setAttribute("aria-pressed", String(playing));
+ $("#demo-progress").textContent = frameIndex < 0 ? "Ready" : `${frameIndex + 1} / ${playbackFrames.length}${$("#terminal")?.dataset.awaitingAnswer === "true" ? " · answer below to continue" : playing ? " · playing" : " · paused"}`;
+}
+function pausePlayback() { clearTimeout(playbackTimer); playing = false; updatePlaybackControls(); }
+function scheduleFrame() { clearTimeout(playbackTimer); if (playing) playbackTimer = setTimeout(advanceFrame, 3200 / Number($("#demo-speed").value)); }
+function advanceFrame() {
+ if ($("#terminal")?.dataset.awaitingAnswer === "true") { pausePlayback(); toast("Answer the sample question in the conversation to continue."); return; }
+ frameIndex += 1;
+ if (frameIndex >= playbackFrames.length) { frameIndex = playbackFrames.length - 1; pausePlayback(); return; }
+ state.scenario = playbackFrames[frameIndex]; $("#scenario").value = state.scenario; save(); renderPreview();
+ if (state.scenario === "question" || frameIndex === playbackFrames.length - 1) pausePlayback();
+ else { updatePlaybackControls(); scheduleFrame(); }
+}
+function selectConcept(id) { pausePlayback(); state.active = id; save(); render(); }
+for (const [id, title] of Object.entries(panels)) { const option = element("option", "", title); option.value = id; $("#note-target").append(option); } $("#note-target").value = noteTarget;
+$("#favorite").addEventListener("click", () => { activeReview().favorite = !activeReview().favorite; save(); render(); });
+$("#winner").addEventListener("click", () => { state.winner = state.winner === state.active ? null : state.active; save(); render(); });
+$("#arrange").addEventListener("click", () => { pausePlayback(); arrange = !arrange; renderPreview(); });
+$("#compare").addEventListener("click", () => { pausePlayback(); comparing = !comparing; render(); });
+$("#undo").addEventListener("click", () => { const last = undo.get(state.active).pop(); if (last) { Object.assign(activeReview(), last); save(); render(); toast("Previous layout restored."); } });
+$("#reset").addEventListener("click", () => { pausePlayback(); snapshotLayout(); const c = concepts.find(c => c.id === state.active); activeReview().layout = structuredClone(c.layout); activeReview().split = c.split; activeReview().sidePosition = c.id === "workbench" ? "left" : "right"; activeReview().executionHeight = 240; save(); render(); toast("Original layout restored. Your comments are unchanged; Undo is available."); });
+$("#side-position").addEventListener("change", event => { snapshotLayout(); activeReview().sidePosition = event.target.value; save(); render(); });
+for (const id of ["scenario", "width", "density"]) $(`#${id}`).addEventListener("change", event => { pausePlayback(); if (id === "scenario") frameIndex = -1; state[id] = id === "width" ? Number(event.target.value) : event.target.value; save(); renderPreview(); updatePlaybackControls(); });
+$("#execution-height").addEventListener("input", event => { const terminal = $("#terminal"); if (terminal) setExecutionHeight(terminal, Number(event.target.value), true); });
+$("#demo-play").addEventListener("click", () => { if (playing) { pausePlayback(); return; } if ($("#terminal")?.dataset.awaitingAnswer === "true") { toast("Answer the sample question below before resuming."); return; } arrange = false; renderPreview(); playing = true; if (frameIndex >= playbackFrames.length - 1) frameIndex = -1; advanceFrame(); });
+$("#demo-step").addEventListener("click", () => { pausePlayback(); advanceFrame(); });
+$("#demo-restart").addEventListener("click", () => { pausePlayback(); frameIndex = -1; replySequence = 0; changeSequence = 0; state.scenario = "reading"; conversationViewports.get($("#terminal"))?.dispose(); $("#preview").replaceChildren(); render(); toast("Demo restarted. Your layout and design comments were kept."); updatePlaybackControls(); });
+$("#demo-speed").addEventListener("change", scheduleFrame);
+$("#demo-reply").addEventListener("click", () => { const terminal = $("#terminal"); if (terminal) appendMessage(terminal, "pi", `Example update ${++replySequence}: I checked another boundary. Your conversation position and the command input stay independent of file activity.`); });
+$("#demo-change").addEventListener("click", () => {
+ const terminal = $("#terminal"); if (!terminal) return;
+ terminal.querySelector(".workbench-center")?.classList.remove("no-execution", "no-support");
+ terminal.querySelector(".workbench-layout")?.classList.remove("summary-mode");
+ const main = terminal.querySelector(".execution-window [data-zone=main]"); if (!main) return;
+ const event = element("p", "execution-summary", `Applied example-${++changeSequence}.ts  +3 −1 · silent script file effect`); main.append(event);
+ const additions = main.querySelectorAll(":scope > p"); if (additions.length > 20) additions[0].remove();
+ animateArrival(event);
+});
+document.addEventListener("selectionchange", () => {
+ const area = $("#terminal .conversation-scroll"); const selection = getSelection();
+ copiedSelection = area && hasConversationSelection(area) ? selection.toString() : "";
+ if (copiedSelection) { const viewport = conversationViewports.get($("#terminal")); viewport.following = false; viewport.updateControls(); }
+ const control = $("#terminal [data-copy-selection]"); if (control) control.disabled = !copiedSelection;
+});
+$("#split").addEventListener("change", event => { snapshotLayout(); activeReview().split = Number(event.target.value); save(); render(); });
+$("#split").addEventListener("input", event => { $("#split-value").textContent = `${event.target.value}%`; $("#terminal")?.style.setProperty("--side-width", `${event.target.value}%`); });
+$("#note").addEventListener("input", event => { activeReview().note = event.target.value.slice(0, 8000); $("#note-count").textContent = `${activeReview().note.length} / 8000`; save(); renderSummary(); });
+$("#note-target").addEventListener("change", event => { noteTarget = event.target.value; $("#panel-note").value = activeReview().notes[noteTarget] ?? ""; });
+$("#panel-note").addEventListener("input", event => { activeReview().notes[noteTarget] = event.target.value.slice(0, 4000); save(); renderSummary(); });
+function reviewText() { return ["Matrix TUI design feedback", `Preferred: ${state.winner ?? "undecided"}`, `Preview: ${state.scenario}, ${state.width} columns, ${state.density}`, ...concepts.flatMap(c => { const r = state.reviews[c.id]; return ["", `${c.name}${r.favorite ? " [shortlisted]" : ""}`, `Main: ${r.layout.main.join(" → ")}`, `Inspector (${r.sidePosition}, ${r.split}%): ${r.layout.side.join(" → ") || "empty"}`, `Conversation: ${r.layout.conversation.join(" → ") || "inline"}${c.id === "workbench" ? " · full width below work area" : ""}`, c.id === "workbench" ? `Upper area: content-sized · ${r.executionHeight}px maximum` : `Execution viewport: ${r.executionHeight}px`, `Dock: ${r.layout.dock.join(" → ")}`, `Shelf: ${r.layout.shelf.join(", ") || "empty"}`, `Comment: ${r.note || "none"}`, ...Object.entries(r.notes).filter(([, note]) => note).map(([id, note]) => `${panels[id]}: ${note}`)]; })].join("\n"); }
+function download(content, type, name) { const url = URL.createObjectURL(new Blob([content], {type})); const link = element("a"); link.href = url; link.download = name; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 10000); }
+$("#export").addEventListener("click", () => { saveNow(); download(JSON.stringify(exportReview(state), null, 2), "application/json", "pi-matrix-design-feedback.json"); toast("Feedback exported. Send the JSON file back when you’re ready."); });
+$("#copy").addEventListener("click", async () => { try { await navigator.clipboard.writeText(reviewText()); toast("Review copied. Paste it into our conversation."); } catch { download(reviewText(), "text/plain", "pi-matrix-design-feedback.txt"); toast("Clipboard unavailable here; downloaded your review instead."); } });
+$("#import").addEventListener("click", () => $("#import-file").click());
+$("#import-file").addEventListener("change", async event => {
+ const file = event.target.files[0]; event.target.value = ""; if (!file) return;
+ if (file.size > 300000) { toast("File is too large. Feedback imports are limited to 300 KB."); return; }
+ try { const raw = JSON.parse(await file.text()); if (raw.kind !== "pi-matrix-tui-design-feedback" || raw.version !== 1 || !raw.reviews) throw new Error("format"); if (!confirm("Replace this browser’s current review with the imported feedback? Export first if you need both.")) return; state = normalizeState(raw); for (const stack of undo.values()) stack.length = 0; saveNow(); render(); toast("Feedback restored."); } catch { toast("Could not import this file. Choose a feedback JSON exported by this lab."); }
+});
+window.addEventListener("pagehide", saveNow);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") { saveNow(); pausePlayback(); } });
+render();
+$("#save-status").textContent = storageAvailable ? "Private draft · saved in this browser" : "Browser storage unavailable — export to save";
+</script>
+</body>
+</html>

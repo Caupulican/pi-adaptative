@@ -115,6 +115,7 @@ describe("InteractiveMode TUI reload history cap", () => {
 	test("retains the transcript owner of an active nested tool call", () => {
 		const activeAction = {
 			setExpanded: () => {},
+			getConversationComponent: () => undefined,
 		} as unknown as ToolExecutionComponent;
 		const transcript = new ActionTranscriptComponent([activeAction]);
 		const ctx = Object.create((InteractiveMode as any).prototype);

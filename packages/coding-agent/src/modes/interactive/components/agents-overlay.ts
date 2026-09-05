@@ -187,6 +187,28 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 	};
 }
 
+/** Content-sized preview of the same inspector model. Detail remains in the work inspector. */
+export function compactWorkPanel(model: OrchestrationPanelModel, limit = 6): OrchestrationPanelModel {
+	const rows = model.rows ?? [];
+	const urgent = rows.filter((row) =>
+		["blocked", "failed", "timeout", "budget_exhausted", "partial"].includes(row.status),
+	);
+	const active = rows.filter((row) => ["running", "in_progress", "queued"].includes(row.status));
+	const pending = rows.filter((row) => row.status === "pending");
+	const shown = [...urgent, ...active, ...pending].slice(0, limit);
+	return {
+		...model,
+		label: "Work / Team",
+		rows: shown.map((row) => ({ ...row, meta: undefined, details: undefined })),
+		summary:
+			shown.length === 0 && rows.length > 0 ? [...(model.summary ?? []), `${rows.length} finished`] : model.summary,
+		description: undefined,
+		wrapRows: false,
+		emptyText: undefined,
+		hiddenRowCount: shown.length ? rows.length - shown.length : 0,
+	};
+}
+
 export class AgentsOverlay implements Component {
 	private readonly options: AgentsOverlayOptions;
 	private mounted = false;

@@ -30,9 +30,12 @@ import { keyText } from "./components/keybinding-hints.ts";
 import type { MarkdownTransformFn } from "./components/markdown-transform.ts";
 import type { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { theme } from "./theme/theme.ts";
+import type { WorkbenchController } from "./workbench-controller.ts";
 
 /** Structural host consumed by the event owner. InteractiveMode deliberately remains a thin facade. */
 export interface InteractiveEventHost {
+	readonly hasHumanAudience?: boolean;
+	workbench?: WorkbenchController;
 	isInitialized: boolean;
 	session: AgentSession;
 	settingsManager: SettingsManager;
@@ -130,6 +133,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			break;
 
 		case "agent_start":
+			if (host.workbench) host.workbench.beginCycle(host.session.sessionManager.getCwd());
 			host.clearActiveToolCalls();
 			if (host.settingsManager.getShowTerminalProgress()) host.ui.terminal.setProgress(true);
 			clearRetryControls(host);
@@ -207,7 +211,11 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 					undefined,
 					host.hideThinkingBlock,
 					host.getMarkdownThemeWithSettings(),
-					{ isStreaming: true, transformMarkdown: host.transformMarkdownForDisplay },
+					{
+						isStreaming: true,
+						showCommentary: host.hasHumanAudience,
+						transformMarkdown: host.transformMarkdownForDisplay,
+					},
 				);
 				host.streamingMessage = event.message;
 				host.chatContainer.addChild(host.streamingComponent);
@@ -260,6 +268,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			break;
 
 		case "tool_execution_start": {
+			if (host.workbench) host.workbench.beforeTool(event.toolName, host.session.sessionManager.getCwd());
 			host.updateRuntimeStatus();
 			host.activityLane?.start({
 				id: `tool:${event.toolCallId}`,
@@ -312,10 +321,13 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			if (["task_steps", "goal", "delegate"].includes(event.toolName)) {
 				host.refreshActivityLane();
 			}
+			host.workbench?.record(component?.getWorkbenchPreview(), event.isError);
+			void host.workbench?.afterTool(event.toolName);
 			break;
 		}
 
 		case "agent_end": {
+			if (!event.willRetry) host.workbench?.complete();
 			if (host.isNativeReflectionEnabled()) host.maybeRunNativeReflection(event.messages);
 			else if (!host.maybeStartAutoLearn()) host.maybeStartAutonomyReview(event.messages);
 			if (host.settingsManager.getShowTerminalProgress()) host.ui.terminal.setProgress(false);

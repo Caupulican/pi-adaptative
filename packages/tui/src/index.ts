@@ -114,6 +114,7 @@ export {
 export {
 	getAmbiguousWidthMode,
 	setAmbiguousWidthMode,
+	sliceByColumn,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,

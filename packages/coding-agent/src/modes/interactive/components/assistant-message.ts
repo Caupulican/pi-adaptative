@@ -1,6 +1,6 @@
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { Container, Markdown, type MarkdownTheme, Spacer, Text, VisibilityContainer } from "@caupulican/pi-tui";
-import { isAssistantCommentary } from "../../../core/message-phase.ts";
+import { isAssistantDisplayText } from "../../../core/message-phase.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { applyMarkdownTransform, type MarkdownTransformFn, type MarkdownTransformSlot } from "./markdown-transform.ts";
 
@@ -10,6 +10,7 @@ const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 
 export interface AssistantMessageComponentOptions {
 	isStreaming?: boolean;
+	showCommentary?: boolean;
 	transformMarkdown?: MarkdownTransformFn;
 }
 
@@ -17,6 +18,11 @@ export interface AssistantMessageComponentOptions {
  * Component that renders a complete assistant message
  */
 export class AssistantMessageComponent extends Container {
+	private contentRevision = 0;
+	private readonly showCommentary: boolean;
+	override get renderRevision(): number {
+		return this.contentRevision;
+	}
 	private contentContainer: Container;
 	private hideThinkingBlock: boolean;
 	private markdownTheme: MarkdownTheme;
@@ -40,6 +46,7 @@ export class AssistantMessageComponent extends Container {
 		this.hideThinkingBlock = hideThinkingBlock;
 		this.markdownTheme = markdownTheme;
 		this.isStreaming = options?.isStreaming ?? false;
+		this.showCommentary = options?.showCommentary ?? false;
 		this.transformMarkdown = options?.transformMarkdown;
 
 		// Container for text/thinking content
@@ -77,6 +84,7 @@ export class AssistantMessageComponent extends Container {
 	 * until the next real content update.
 	 */
 	setHideThinkingBlock(hide: boolean): void {
+		this.contentRevision++;
 		this.hideThinkingBlock = hide;
 		this.thinkingContainer?.setVisible(!hide);
 	}
@@ -112,6 +120,7 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	updateContent(message: AssistantMessage): void {
+		this.contentRevision++;
 		this.lastMessage = message;
 
 		// Clear content container
@@ -121,7 +130,7 @@ export class AssistantMessageComponent extends Container {
 
 		const hasVisibleContent = message.content.some(
 			(c) =>
-				(c.type === "text" && !isAssistantCommentary(c) && c.text.trim()) ||
+				(c.type === "text" && isAssistantDisplayText(c, this.showCommentary) && c.text.trim()) ||
 				(!this.hideThinkingBlock && c.type === "thinking" && c.thinking.trim()),
 		);
 		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
@@ -135,7 +144,7 @@ export class AssistantMessageComponent extends Container {
 		// Render content in order
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
-			if (content.type === "text" && !isAssistantCommentary(content) && content.text.trim()) {
+			if (content.type === "text" && isAssistantDisplayText(content, this.showCommentary) && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const rawText = content.text.trim();
@@ -162,7 +171,7 @@ export class AssistantMessageComponent extends Container {
 					.slice(i + 1)
 					.some(
 						(c) =>
-							(c.type === "text" && !isAssistantCommentary(c) && c.text.trim()) ||
+							(c.type === "text" && isAssistantDisplayText(c, this.showCommentary) && c.text.trim()) ||
 							(c.type === "thinking" && c.thinking.trim()),
 					);
 				const thinkingRaw = thinkingBlocks.join("\n\n");

@@ -25,7 +25,9 @@ import {
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { type ThemeBg, theme } from "../theme/theme.ts";
+import { questionConversationText } from "./question-conversation.ts";
 import { renderTitleBadge, titleBadge } from "./tool-title.ts";
+import { createWorkbenchToolPreview } from "./workbench-tool-preview.ts";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -174,6 +176,9 @@ export class ToolExecutionComponent extends Container {
 	private convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
 	private hideComponent = false;
 	private readonly timing = new ToolTimingComponent(monotonicNow);
+	private questionView?: Component;
+	private questionText?: Text;
+	private questionRevision = 0;
 
 	constructor(
 		toolName: string,
@@ -466,6 +471,35 @@ export class ToolExecutionComponent extends Container {
 		return this.result?.isError === true;
 	}
 
+	/** Requested once at the live terminal event, never while replaying retained tool history. */
+	getWorkbenchPreview(): Component | undefined {
+		if (!this.result || this.isPartial || this.deferResultUntilExpanded) return undefined;
+		return createWorkbenchToolPreview(this.toolName, this.args, this.result);
+	}
+
+	getConversationComponent(): Component | undefined {
+		if (this.toolName !== "ask_question") return undefined;
+		const action = this;
+		this.questionView ??= {
+			get renderRevision() {
+				return action.questionRevision;
+			},
+			render(width) {
+				action.questionText ??= new Text(
+					questionConversationText(action.args, action.result?.content, action.result?.isError).slice(0, 16_384),
+					1,
+					0,
+				);
+				return action.questionText.render(width);
+			},
+			invalidate() {
+				action.questionText = undefined;
+				action.questionRevision++;
+			},
+		};
+		return this.questionView;
+	}
+
 	override invalidate(): void {
 		super.invalidate();
 		this.updateDisplay();
@@ -480,6 +514,8 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private updateDisplay(): void {
+		this.questionText = undefined;
+		this.questionRevision++;
 		const bgFn = (text: string) => theme.bg(this.getBackgroundColor(), text);
 		const materializedResult = this.getMaterializedResult();
 

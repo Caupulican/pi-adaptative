@@ -28,6 +28,20 @@ function createAssistantMessage(content: AssistantMessage["content"]): Assistant
 }
 
 describe("AssistantMessageComponent", () => {
+	test("Workbench shows prose commentary while filtering control payloads and invalidates streamed rows", () => {
+		initTheme("dark");
+		const message = createAssistantMessage([
+			{ type: "text", text: "Inspecting the renderer", textSignature: '{"phase":"commentary"}' },
+			{ type: "text", text: '{"action":"advance"}', textSignature: '{"phase":"commentary"}' },
+		]);
+		const component = new AssistantMessageComponent(message, true, undefined, { showCommentary: true });
+		const rendered = component.render(80).join("\n");
+		expect(rendered).toContain("Inspecting the renderer");
+		expect(rendered).not.toContain('"action"');
+		const revision = component.renderRevision;
+		component.updateContent(createAssistantMessage([{ type: "text", text: "Now complete" }]));
+		expect(component.renderRevision).not.toBe(revision);
+	});
 	test("adds OSC 133 zone markers to assistant messages without tool calls", () => {
 		initTheme("dark");
 
