@@ -10,7 +10,8 @@ import { getManagedToolBinaryPath } from "../src/utils/tools-manager.ts";
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
 function fixture() {
-	const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-herdr-command-")));
+	// Native resolution expands Windows 8.3 temp aliases, matching the provisioner's async realpath.
+	const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-herdr-command-")));
 	const home = join(root, "home");
 	const agent = join(home, "agent");
 	const bin = join(home, "bin");
