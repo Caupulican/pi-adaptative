@@ -1,6 +1,6 @@
 {
 	"name": "@caupulican/pi-agent-core",
-	"version": "0.98.0",
+	"version": "0.98.1",
 	"private": true,
 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
 	"type": "module",
@@ -152,7 +152,7 @@
 		"coverage:verification-harness": "vitest --run --config vitest.verification-harness.config.ts --coverage"
 	},
 	"dependencies": {
-		"@caupulican/pi-ai": "^0.98.0",
+		"@caupulican/pi-ai": "^0.98.1",
 		"ignore": "7.0.8",
 		"typebox": "1.3.25",
 		"yaml": "2.9.0"

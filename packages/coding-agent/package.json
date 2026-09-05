@@ -1,6 +1,6 @@
 {
 	"name": "@caupulican/pi-adaptative",
-	"version": "0.98.0",
+	"version": "0.98.1",
 	"private": true,
 	"description": "Reliability-first coding-agent harness with verified tool execution, recovery, and standalone releases",
 	"type": "module",
@@ -88,9 +88,9 @@
 		"postinstall": "node scripts/postinstall-python-runtime.mjs"
 	},
 	"dependencies": {
-		"@caupulican/pi-agent-core": "^0.98.0",
-		"@caupulican/pi-ai": "^0.98.0",
-		"@caupulican/pi-tui": "^0.98.0",
+		"@caupulican/pi-agent-core": "^0.98.1",
+		"@caupulican/pi-ai": "^0.98.1",
+		"@caupulican/pi-tui": "^0.98.1",
 		"@effect/platform": "0.97.1",
 		"@effect/platform-node": "0.108.1",
 		"@silvia-odwyer/photon-node": "0.3.4",
