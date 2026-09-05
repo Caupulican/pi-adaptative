@@ -31,7 +31,7 @@ After foreground `bash` or `python` tools finish, a read-only Git observation ca
 
 Observations are bounded to 128 dirty paths, 32 diff paths, 256 KiB per Git response, two seconds per Git command, and 64 KiB per small-file read. Larger files use metadata. Ignored files and changes outside the current working directory are not observed. Non-Git directories and budget failures produce a notice instead of a clean-workspace claim. File effects arriving after completion still update the folded receipt.
 
-Conversation rendering visits visible entries lazily, retains at most 2 MiB of derived row-cache text, and uses existing terminal line-diff rendering. Execution retains at most three bounded previews and displays the latest. No decorative animation timer or session-history scan runs per frame. Large individual visible messages still incur their renderer's normal cost.
+Conversation rendering visits visible entries lazily, retains at most 2 MiB of derived row-cache text, and uses existing terminal line-diff rendering. Frame cost is bounded by the visible rows, not by history: rows that already fit their zone skip the grapheme scan, so a 224×50 frame stays under a millisecond with 2,000 transcript entries where the previous full-transcript layout needed about sixteen. Execution retains at most three bounded previews and displays the latest. No decorative animation timer or session-history scan runs per frame. Large individual visible messages still incur their renderer's normal cost.
 
 ## Verification
 

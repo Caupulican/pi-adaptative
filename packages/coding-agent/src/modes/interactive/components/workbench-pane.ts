@@ -4,11 +4,23 @@ import { theme } from "../theme/theme.ts";
 const FULL_RESET = "\x1b[0m";
 const BG_RESET = "\x1b[49m";
 
+/**
+ * Pad or clip one row to exactly `width` cells. Rows that already fit skip the grapheme scan, which
+ * is the per-frame hot path: the width lookup is cached per string, the scan is not.
+ */
+export function fitRow(content: string, width: number): string {
+	if (width <= 0) return "";
+	const visible = visibleWidth(content);
+	if (visible === width) return content;
+	if (visible < width) return content + " ".repeat(width - visible);
+	return truncateToWidth(content, width, "", true);
+}
+
 /** Paint the pane surface under one row. Inner resets re-open the surface; rows never exceed `width`. */
 export function surfaceRow(content: string, width: number): string {
 	if (width <= 0) return "";
 	const surface = theme.getBgAnsi("workbenchSurface");
-	const padded = truncateToWidth(content, width, "", true);
+	const padded = fitRow(content, width);
 	return `${surface}${padded
 		.split(FULL_RESET)
 		.join(FULL_RESET + surface)
@@ -74,7 +86,7 @@ export class WorkbenchPane {
 				: "";
 		const rows = [` ${labelRow(title, [meta, range].filter(Boolean).join(" · "), this.width)} `];
 		for (let row = 0; row < this.height; row++) {
-			rows.push(` ${truncateToWidth(lines[this.offset + row] ?? "", this.width, "", true)} `);
+			rows.push(` ${fitRow(lines[this.offset + row] ?? "", this.width)} `);
 		}
 		return rows.map((row) => surfaceRow(row, width));
 	}

@@ -83,6 +83,29 @@ export class WorkbenchComponent extends Container {
 	upperHeight = 0;
 	/** Row of the divider that collapses or expands the work area; -1 in the native fallback. */
 	dividerRow = -1;
+	/** Key labels resolve once; the keybinding manager is static after startup. */
+	private keyLabels?: { toggle: string; resize: string; hint: string };
+
+	private keys(): { toggle: string; resize: string; hint: string } {
+		if (this.keyLabels) return this.keyLabels;
+		const key = (binding: Parameters<typeof keyText>[0], text: string) => {
+			const keys = keyText(binding);
+			return keys ? `${keys} ${text}` : "";
+		};
+		this.keyLabels = {
+			toggle: keyText("app.execution.toggle"),
+			resize: [keyText("app.workbench.grow"), keyText("app.workbench.shrink")].filter(Boolean).join(" "),
+			hint: [
+				"/ commands",
+				key("app.interrupt", "interrupt"),
+				key("app.transcript.open", "transcript"),
+				key("app.conversation.copy", "copy conversation"),
+			]
+				.filter(Boolean)
+				.join(" · "),
+		};
+		return this.keyLabels;
+	}
 
 	constructor(options: WorkbenchOptions) {
 		super();
@@ -210,8 +233,7 @@ export class WorkbenchComponent extends Container {
 	}
 
 	private divider(columns: number, expanded: boolean): string {
-		const toggle = keyText("app.execution.toggle");
-		const resize = [keyText("app.workbench.grow"), keyText("app.workbench.shrink")].filter(Boolean).join(" ");
+		const { toggle, resize } = this.keys();
 		const summary = expanded
 			? ["↕ work area", toggle && `${toggle} collapse`, resize && `${resize} rows`].filter(Boolean).join(" · ")
 			: [
@@ -241,19 +263,7 @@ export class WorkbenchComponent extends Container {
 	}
 
 	private hintRow(columns: number): string {
-		const key = (binding: Parameters<typeof keyText>[0], text: string) => {
-			const keys = keyText(binding);
-			return keys ? `${keys} ${text}` : "";
-		};
-		const hint = [
-			"/ commands",
-			key("app.interrupt", "interrupt"),
-			key("app.transcript.open", "transcript"),
-			key("app.conversation.copy", "copy conversation"),
-		]
-			.filter(Boolean)
-			.join(" · ");
-		return truncateToWidth(` ${theme.fg("dim", hint)}`, columns, "");
+		return truncateToWidth(` ${theme.fg("dim", this.keys().hint)}`, columns, "");
 	}
 
 	private inspectorContent(width: number): { title: string; meta: string; lines: string[] } {
@@ -375,7 +385,9 @@ export class WorkbenchComponent extends Container {
 				: [];
 			return [...Array.from({ length: remaining - dock.length }, () => ""), ...dock, ...nativeEditor];
 		}
-		const gutter = (line: string) => (line ? ` ${truncateToWidth(line, inner, "")}` : "");
+		// Rows that already fit skip the grapheme scan; the width lookup is cached per string.
+		const gutter = (line: string) =>
+			line ? ` ${visibleWidth(line) <= inner ? line : truncateToWidth(line, inner, "")}` : "";
 		// Title strip, activity, divider, conversation header and three conversation rows stay.
 		const dockBudget = Math.max(0, total - editor.length - 8);
 		const above = this.options.dock.flatMap((component) => component.render(inner)).slice(-dockBudget);
