@@ -44,11 +44,12 @@ function fakeTool(name: string): AgentTool {
 const WORKER_ROOT_ONLY_OR_AGENT_LAUNCHING_TOOLS = [
 	"goal",
 	"secret_store",
+	"image_generate",
 	"memory",
 	"delegate",
 	"improvement_loop",
 	"model_fitness",
-	"tmux_agent_manager",
+	"pi_collaboration",
 	"context_scout",
 ] as const;
 

@@ -18,4 +18,4 @@ Steps:
 6. Treat this explicit `/skillify` request as authorization to write the resulting safe user-level skill or refine the matching user-level skill. Do not ask for duplicate confirmation. Ask only if the change would alter settings, expand executable authority, require credentials, delete data, or publish/push/release.
 7. Write the validated skill to the audited path, then report the final path, audit evidence, and invocation (`/skill:<name>`). Suggest `/reload` only when the current runtime requires it; do not make reloading a completion gate.
 
-This runs in the main session. Delegate only a bounded independent audit when it materially improves confidence; delegation is never required for progress.
+This runs in the main session. Follow the session's PI DELEGATION policy for independent work; the parent owns integration and activation.

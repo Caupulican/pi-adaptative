@@ -64,6 +64,45 @@ async function handleFailure(fixture: ReturnType<typeof createFixture>, message:
 }
 
 describe("ForegroundRecoveryController", () => {
+	it("reports lease changes without treating an agent end or a foreign release as settlement", async () => {
+		const f = createFixture();
+		const activity: Array<number | undefined> = [];
+		const off = f.controller.subscribeActivity(() => activity.push(f.controller.getCurrentSubmissionEpoch()));
+		const lease = f.controller.tryAcquireSubmission()!;
+		expect(activity).toEqual([1]);
+		await f.controller.runAgentPrompt({ role: "user", content: "work", timestamp: 0 }, lease);
+		expect(activity).toEqual([1]);
+		expect(f.controller.isBusy).toBe(true);
+		expect(() => f.controller.releaseSubmission({ ...lease })).toThrow("another caller");
+		expect(activity).toEqual([1]);
+		f.controller.releaseSubmission(lease);
+		expect(activity).toEqual([1, undefined]);
+		off();
+		f.controller.tryAcquireSubmission();
+		expect(activity).toEqual([1, undefined]);
+	});
+	it.each([
+		["network error: fetch failed", 1],
+		["Invalid API key", 0],
+	])("keeps runtime repair priority while the existing retry owner handles %s", async (error, retries) => {
+		const f = createFixture();
+		f.checkCompaction.mockResolvedValue(false);
+		const settle = vi.fn(async () => "stop" as const);
+		const controller = new ForegroundRecoveryController({ ...f.deps, settleRuntimeUpdate: settle });
+		vi.mocked(f.agent.prompt).mockImplementation(async () => {
+			const message = errorAssistant("openai", error);
+			f.agent.state.messages.push(message);
+			controller.observeAssistant(message);
+		});
+		vi.mocked(f.agent.continue).mockImplementation(async () => {
+			expect(settle).not.toHaveBeenCalled();
+			controller.observeAssistant(fauxAssistantMessage("repair resumed"));
+		});
+		await controller.runAgentPrompt({ role: "user", content: "update", timestamp: 0 });
+		expect(f.agent.continue).toHaveBeenCalledTimes(retries);
+		expect(f.retryStarts).toHaveLength(retries);
+		expect(settle).toHaveBeenCalledOnce();
+	});
 	it("tries an unchanged xAI generation request once, then compacts before another retry", async () => {
 		const fixture = createFixture();
 

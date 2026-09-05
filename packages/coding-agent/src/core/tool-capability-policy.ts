@@ -47,10 +47,16 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 		(toolName) => [toolName, PROCESS_POLICY] as const,
 	),
 	...["fetch", "web_search"].map((toolName) => [toolName, NETWORK_POLICY] as const),
+	["webfetch", policy([["network.http"]], "service-proxy")],
+	[
+		"image_generate",
+		policy([["network.http"], ["credentials.use"], ["filesystem.read"]], ["service-proxy", "path-scope"]),
+	],
 	["skill", policy([["skill.read"]], "path-scope")],
 	["skill_audit", policy([["skill.read"]], "path-scope")],
 	["skillify", policy([["skill.write"]], "path-scope")],
 	["extensionify", policy([["source.write"]], "path-scope")],
+	["runtime_update", policy([["source.write"], ["process.exec"]], "control-plane")],
 	["goal", policy([["memory.mutate", "memory.query"]], "memory-broker")],
 	[GOAL_LIFECYCLE_TOOL_NAMES[0], policy([["memory.mutate"]], "memory-broker")],
 	[GOAL_LIFECYCLE_TOOL_NAMES[1], policy([["memory.query"]], "memory-broker")],
@@ -67,16 +73,11 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["ask_question", policy([["workflow.plan", "memory.query"]], "control-plane")],
 	["artifact_retrieve", policy([["filesystem.read"]], "path-scope")],
 	["context_scout", policy([["filesystem.read"]], "path-scope")],
-	["tmux_dispatch", policy([["process.exec", "workflow.delegate"]], "process-launcher")],
+	["pi_collaboration", policy([["process.exec"], ["workflow.delegate"]], "process-launcher")],
 	["improvement_loop", policy([["process.exec", "tests.execute"]], "process-launcher")],
 ]);
 
-const NON_CANONICAL_POLICY_TOOL_NAMES: ReadonlySet<string> = new Set([
-	"edit-diff",
-	"powershell",
-	"shell",
-	"tmux_dispatch",
-]);
+const NON_CANONICAL_POLICY_TOOL_NAMES: ReadonlySet<string> = new Set(["edit-diff", "powershell", "shell"]);
 
 /** Model-facing runtime tools whose authority is owned by this policy catalogue. Platform aliases
  * and the internal managed-process adapter stay out of child CLI profiles. */

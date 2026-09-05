@@ -13,6 +13,14 @@
 import { type TruncationOptions, type TruncationResult, truncateMiddle } from "@caupulican/pi-agent-core/truncate";
 import type { ArtifactStore } from "./context-artifacts.ts";
 
+/** Built-ins whose pack-time holder is the tool call id; shared activation and GC lifecycle. */
+export const PACKED_TOOL_OUTPUT_TOOLS: ReadonlySet<string> = new Set([
+	"grep",
+	"find",
+	"run_toolkit_script",
+	"webfetch",
+]);
+
 export interface PackToolOutputRequest {
 	toolName: string;
 	command?: string;

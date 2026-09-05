@@ -76,6 +76,8 @@ export {
 	encodeWorkerSessionAllowedPaths,
 	PI_WORKER_ALLOWED_PATHS_ENV,
 } from "./core/autonomy/worker-session-private-scope.ts";
+export { type CollaborationExtensionOptions, piCollaborationExtension } from "./core/collaboration/extension.ts";
+export { NativeProviderRegistry, type NativeProviderStrategy } from "./core/collaboration/native-provider.ts";
 export { mapToolNamesForPlatform } from "./core/default-tool-surface.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 // Extension system

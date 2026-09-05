@@ -96,7 +96,7 @@ goal record relies on.
 ## Session binding: `PI_WORKTREE_LANE` / `--worktree-lane`
 
 A session becomes lane-bound via the `PI_WORKTREE_LANE=<laneKey>` environment variable, or the
-`--worktree-lane <laneKey>` CLI flag (sugar over the same env contract — tmux panes launched by a
+`--worktree-lane <laneKey>` CLI flag (sugar over the same env contract — collaboration panes launched by a
 lane-first goal dispatch inherit it automatically). A lane-bound session:
 
 - gets the G8/G10 lane gate wrapped under its file-mutation tools (edit/write/bash);
@@ -106,11 +106,11 @@ lane-first goal dispatch inherit it automatically). A lane-bound session:
   that injects a source-labelled system notice when the epoch changes, so the session learns
   about staleness promptly instead of only at its next `status` call.
 
-A goal-bound tmux dispatch (`goal` tool's `dispatch_worker` with `dispatchTarget: "tmux"`, when
+A goal-bound collaboration dispatch (`goal` tool's `dispatch_worker` with `dispatchTarget: "collaboration"`, when
 `worktreeSync.enabled`) creates the lane first, then launches its `pi` worker with `--worktree-lane
 <laneKey>` and one extra system-prompt clause naming the lane doctrine (work only inside this
 lane's worktree; integrate exclusively via `worktree_sync land`; never touch main directly). A
-lane-creation refusal (e.g. `maxLanes` reached) aborts the dispatch cleanly before any tmux
+lane-creation refusal (e.g. `maxLanes` reached) aborts the dispatch cleanly before any native agent
 session is ever launched (`dispatchSkipReason: "worktree_create_failed"`).
 
 ## Capability adaptation
@@ -132,13 +132,13 @@ tool-call path:
 
 Additionally, the lean capability class (16k-32k context window) sheds the orchestration surface
 entirely: `goal`, `worktree_sync`, `improvement_loop`, `extensionify`, `skillify`, `model_fitness`,
-`context_scout`, and `tmux_agent_manager` are blocked for a lean-class session regardless of lane
+`context_scout`, and `pi_collaboration` are blocked for a lean-class session regardless of lane
 binding (`MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS`) -- `run_toolkit_script` and `task_steps` stay
 available by design.
 
 Two refusal points, one authority:
 
-- A goal→tmux dispatch (`tools/tmux-dispatch.ts`'s `dispatchTmuxWorker`) checks the DISPATCHING
+- A goal collaboration dispatch (`tools/collaboration-dispatch.ts`'s `dispatchCollaborationWorker`) checks the DISPATCHING
   session's own eligibility FIRST, before `createLaneWorktree` or any `fire_task` call --
   `dispatchSkipReason: "worker_capability_insufficient"`, zero lane/pane side effect on refusal. This
   is the parent's best-effort expectation only; it can race a model swap between dispatch and child
@@ -165,12 +165,12 @@ environment value a lane-bound process can set to shed the worker ceiling below.
 ### Forbidden-tool ceiling
 
 A worker session can never activate: the legacy composite `goal`, `secret_store`, `memory`, `delegate`,
-`improvement_loop`, `model_fitness`, `tmux_agent_manager`, or `context_scout`. This is enforced as the FIRST line of the tool registry's allow
+`improvement_loop`, `model_fitness`, `pi_collaboration`, `runtime_update`, `image_generate`, or `context_scout`. This is enforced as the FIRST line of the tool registry's allow
 predicate (`RuntimeBuilder.refreshToolRegistry`'s `isAllowedTool`) -- it wins over an allow-list,
 an exclude-list, or an active resource profile that names the tool explicitly. The legacy `goal`
 stays root-only because its composite action set embeds `dispatch_worker`; its non-dispatching
 `create_goal`/`get_goal`/`update_goal` lifecycle tools inherit normally. `delegate`,
-`tmux_agent_manager`, `context_scout`, and `model_fitness` launch agent/provider worker loops.
+`pi_collaboration`, `context_scout`, and `model_fitness` launch agent/provider worker loops.
 `memory` and `improvement_loop` mutate root-owned reflection state, while `secret_store` mutates
 machine credential/project bindings. Ordinary tools including `pipeline`, `ask_question`, `skill`,
 `extensionify`, `skillify`, and `run_toolkit_script` inherit when the orchestrator exposes them.
@@ -246,9 +246,9 @@ produces is its own session transcript -- that is the point of running it, not a
 - **`pi` children are hard-gated**: G8/G10 run in core code, wrapped under the file-mutation
   tools of any lane-bound `pi` session — a stale mutation or a direct write to main is refused
   structurally, not by prompt compliance.
-- **Foreign CLIs (agy/claude/codex/opencode/custom) are cooperative only**: their internal tool
+- **Foreign CLIs (agy/claude/codex/custom) are cooperative only**: their internal tool
   loop is that CLI's own responsibility; the harness cannot enforce G8/G10 inside a process it
-  does not control. Sync directives can still be pushed to a live foreign pane via the tmux
+  does not control. Sync directives can still be delivered to an idle foreign pane via the collaboration
   extension's existing `send_followup`, but compliance is not guaranteed.
 - **The land gate (G1–G7) is the backstop that cannot be evaded by either kind of worker**: no
   matter how a lane got dirty, stale, or ignored a notification, `land` re-derives freshness and

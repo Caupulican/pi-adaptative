@@ -17,8 +17,8 @@ export const MAX_GOAL_AUTO_CONTINUE_DELAY_MS = 60_000;
  * (`Requirement.boundAt` + this) before returning control to autonomous parent recovery instead of
  * waiting forever. A worker that is alive-but-hung past its deadline must not silently stall the goal loop.
  *
- * Deliberately generous relative to the tmux worker runtime's own default session deadline
- * (1200s / 20min, `tmux-agent-manager`'s `DEFAULT_DEADLINE_SECONDS`): 60 minutes gives a
+ * Deliberately generous relative to collaboration's default turn deadline
+ * (1200s / 20min): 60 minutes gives a
  * legitimately slow worker comfortable headroom above that deadline (plus the reconcile/orphan
  * detection that runs on top of it) before the goal loop requires inspection and a different approach.
  */

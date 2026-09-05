@@ -42,8 +42,7 @@ export interface WorkerToolAdapter {
 /** Root/session controls are never brokered into a leaf, even when a host registers factories. */
 export const WORKER_TOOL_ADAPTER_FORBIDDEN_NAMES: ReadonlySet<string> = new Set([
 	"delegate",
-	"tmux_dispatch",
-	"tmux_agent_manager",
+	"pi_collaboration",
 	"context_scout",
 	ROOT_MEMORY_TOOL_NAME,
 	WORKER_MEMORY_READ_TOOL_NAME,

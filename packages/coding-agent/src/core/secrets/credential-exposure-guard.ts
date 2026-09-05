@@ -3,11 +3,12 @@ import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type AgentTool, AgentToolExecutionError, type AgentToolResult } from "@caupulican/pi-agent-core";
 import type { TSchema } from "typebox";
+import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { parseShellSearchInvocationScope, type ShellContentSearchTool } from "../tools/search-command-guard.ts";
 import { tokenizeShellCommand } from "../tools/shell-command-parser.ts";
 
-const DIRECT_PATH_TOOLS = new Set(["read", "edit", "write", "ls"]);
+const DIRECT_PATH_TOOLS = new Set(["read", "edit", "write", "ls", "image_generate"]);
 const SHELL_INSPECTION_COMMANDS = new Set([
 	"cat",
 	"head",
@@ -292,11 +293,6 @@ function runProcessCredentialRisk(
 	return searchCredentialRisk(searchTool, args, false, cwd, boundary);
 }
 
-function directPathFromArgs(args: unknown): string | undefined {
-	if (!isRecord(args)) return undefined;
-	return typeof args.path === "string" ? args.path : undefined;
-}
-
 /** Stable model-facing refusal for direct inspection/mutation of credential material. */
 export function credentialToolBlockReason(
 	toolName: string,
@@ -306,8 +302,7 @@ export function credentialToolBlockReason(
 ): string | undefined {
 	if (toolName === "secret_store" || !isRecord(args)) return undefined;
 	if (DIRECT_PATH_TOOLS.has(toolName)) {
-		const path = directPathFromArgs(args);
-		if (path && isProtectedCredentialPath(path, cwd, boundary)) {
+		if (extractToolPathArguments(toolName, args).some((path) => isProtectedCredentialPath(path, cwd, boundary))) {
 			return "Credential file access is model-blind. Use secret_store migrate with this path, or activate an existing profile, without inspecting credential data.";
 		}
 	}

@@ -32,6 +32,7 @@ export interface ResearchLaneControllerDeps {
 	getSettingsManager(): SettingsManager;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	emit(event: AgentSessionEvent): void;
+	onContinuationActivity?(): void;
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
 	getGoalStateSnapshot(): GoalState | undefined;
 	getEvidenceBundleSnapshot(): EvidenceBundle | undefined;
@@ -85,6 +86,7 @@ export class ResearchLaneController {
 		if (this._timer !== undefined) {
 			clearTimeout(this._timer);
 			this._timer = undefined;
+			this.deps.onContinuationActivity?.();
 		}
 	}
 
@@ -127,8 +129,9 @@ export class ResearchLaneController {
 		this.clearTimer();
 		this._timer = setTimeout(() => {
 			this._timer = undefined;
-			void this.runScheduled();
+			void this.runScheduled().finally(() => this.deps.onContinuationActivity?.());
 		}, research.idleDelayMs);
+		this.deps.onContinuationActivity?.();
 		const timer = this._timer;
 		if (typeof timer === "object" && timer && "unref" in timer) {
 			const { unref } = timer as { unref?: () => void };
@@ -159,6 +162,7 @@ export class ResearchLaneController {
 		}
 
 		this._isRunning = true;
+		this.deps.onContinuationActivity?.();
 		this.seedHistory();
 		const startedRecord = this.lanes.start({ type: "research", goalId: demand.goalId });
 		this._persistedRunCount++;
@@ -268,6 +272,7 @@ export class ResearchLaneController {
 				this.deps.emit({ type: "warning", message: `Research lane payload cleanup failed: ${message}` });
 			}
 			this._isRunning = false;
+			this.deps.onContinuationActivity?.();
 			deregisterInFlight();
 		}
 	}

@@ -46,4 +46,17 @@ describe("api provider registry", () => {
 		unregisterApiProviders("extension-1");
 		expect(getApiProvider(api)).toBe(builtIn);
 	});
+
+	it("never resurrects a retired source hidden below another owner's override", () => {
+		registerApiProvider(provider());
+		const builtIn = getApiProvider(api);
+		registerApiProvider(provider(), "retired");
+		registerApiProvider(provider(), "retired");
+		registerApiProvider(provider(), "survivor");
+		const survivor = getApiProvider(api);
+		unregisterApiProviders("retired");
+		expect(getApiProvider(api)).toBe(survivor);
+		unregisterApiProviders("survivor");
+		expect(getApiProvider(api)).toBe(builtIn);
+	});
 });

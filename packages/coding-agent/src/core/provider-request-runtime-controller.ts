@@ -2,7 +2,7 @@ import type { Agent } from "@caupulican/pi-agent-core/agent";
 import { createApplicableAssistantUsageFinder } from "@caupulican/pi-agent-core/compaction/compaction";
 import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
 import { composeRequestSystemPrompt, narrowRequestMaxTokens } from "@caupulican/pi-agent-core/provider-request-planner";
-import type { ProviderRequestAdmissionContext } from "@caupulican/pi-agent-core/types";
+import type { AgentContext, ProviderRequestAdmissionContext } from "@caupulican/pi-agent-core/types";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import type { CompactionController } from "./compaction-controller.ts";
 import type { ProviderRequestContextController } from "./provider-request-context-controller.ts";
@@ -30,6 +30,7 @@ export interface ProviderRequestRuntimeControllerDeps {
 	 * turn's in-flight work completes, instead of letting a doomed request reach admission and throw.
 	 */
 	shouldStopGoalExecutionAfterTurn(): boolean;
+	shouldStopForRuntimeUpdate?(): boolean;
 }
 
 /** Installs and owns the one provider planning/admission hook generation on an Agent. */
@@ -50,6 +51,28 @@ export class ProviderRequestRuntimeController {
 
 	constructor(deps: ProviderRequestRuntimeControllerDeps) {
 		this.deps = deps;
+	}
+
+	/** Refresh only live runtime metadata; keep the loop's canonical message history. */
+	installTurnRefresh(getContext: () => AgentContext, flushHandoffs: () => void): void {
+		const agent = this.deps.agent;
+		const previousPrepareNextTurn = agent.prepareNextTurn?.bind(agent);
+		const previousBeforeSteeringPoll = agent.beforeSteeringPoll?.bind(agent);
+		agent.beforeSteeringPoll = async (signal) => {
+			await previousBeforeSteeringPoll?.(signal);
+			// Authoritative inbox refresh after async preparation and graceful-stop checks.
+			flushHandoffs();
+		};
+		agent.prepareNextTurn = async (signal) => {
+			const previous = previousPrepareNextTurn ? await previousPrepareNextTurn(signal) : undefined;
+			const snapshot = getContext();
+			return {
+				...previous,
+				context: { ...(previous?.context ?? snapshot), systemPrompt: snapshot.systemPrompt, tools: snapshot.tools },
+				model: previous?.model ?? agent.state.model,
+				thinkingLevel: previous?.thinkingLevel ?? agent.state.thinkingLevel,
+			};
+		};
 	}
 
 	private modelKey(model: Pick<Model<Api>, "provider" | "id">): string {
@@ -229,6 +252,7 @@ export class ProviderRequestRuntimeController {
 		};
 		this.installedShouldStopAfterTurn = async (signal) => {
 			if (this.deps.shouldStopGoalExecutionAfterTurn()) return true;
+			if (this.deps.shouldStopForRuntimeUpdate?.()) return true;
 			return (await previousShouldStopAfterTurn?.(signal)) ?? false;
 		};
 

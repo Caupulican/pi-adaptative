@@ -741,8 +741,7 @@ export class ModelRouterController {
 		const previousTurnTools = agent.state.tools;
 		const previousSystemPrompt = agent.state.systemPrompt;
 		// Swap bookkeeping: the exact references the swap below assigns, so the finally can
-		// restore ONLY what IT put there — never assigned when no swap happens (e.g. a full-class
-		// routed profile).
+		// restore ONLY what IT put there — never assigned when no tool restriction applies.
 		let swappedTools: typeof previousTurnTools | undefined;
 		let swappedSystemPrompt: typeof previousSystemPrompt | undefined;
 		const previousActiveModelRouterIntent = this._activeModelRouterIntent;
@@ -809,15 +808,18 @@ export class ModelRouterController {
 					contextWindow: routedModel.contextWindow,
 					mode: this.deps.getSettingsManager().getModelCapabilitySettings().mode,
 				});
-				if (routedProfile.class !== "full") {
-					const allowed = new Set(
-						filterToolNamesForCapability(
-							previousTurnTools.map((tool) => tool.name),
-							routedProfile,
-						),
-					);
-					swappedTools = previousTurnTools.filter((tool) => allowed.has(tool.name));
-					agent.state.tools = swappedTools;
+				const allowed = new Set(
+					filterToolNamesForCapability(
+						previousTurnTools.map((tool) => tool.name),
+						routedProfile,
+						routedModel,
+					),
+				);
+				if (allowed.size !== previousTurnTools.length) {
+					agent.state.tools = previousTurnTools.filter((tool) => allowed.has(tool.name));
+					// Agent owns a defensive copy on assignment. Fence against the installed array,
+					// not our input array, so restoration works without overwriting live tool changes.
+					swappedTools = agent.state.tools;
 				}
 			}
 			// The routed prompt follows the routed tool surface and keeps provider-neutral delegation
@@ -944,8 +946,7 @@ export class ModelRouterController {
 				agent.state.model = previousModel;
 				agent.state.thinkingLevel = previousThinkingLevel;
 				// Symmetric restore: undo tools/systemPrompt only if each is STILL the exact
-				// reference/string the swap above assigned (never assigned at all when the routed
-				// profile was full-class — then there is nothing to restore either). An extension calling
+				// reference/string installed by the swap (absent when no restriction applied). An extension calling
 				// setActiveToolsByName mid-turn reassigns both to its own values without touching the
 				// model — the model guard above still passes, but that live change is legitimate and must
 				// survive rather than being silently reverted to the stale pre-turn snapshot.

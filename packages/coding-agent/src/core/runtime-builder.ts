@@ -101,7 +101,7 @@ import { resolvePipelineDefinitionForRun } from "./pipelines/discover.ts";
 import { resolveCurrentProjectPipelineRun } from "./pipelines/run-state.ts";
 import { isPipelineRunActive, type PipelineRun } from "./pipelines/types.ts";
 import type { ProfileFilterReloadSnapshot } from "./profile-filter-controller.ts";
-import { describeInFlightWorkUnit, getInFlightWorkUnits } from "./reload-blockers.ts";
+import { assertReloadQuiescent } from "./reload-blockers.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { ScoutController } from "./scout-controller.ts";
@@ -134,12 +134,14 @@ import { runReflexInterpreterCompletion } from "./toolkit/reflex-interpreter.ts"
 import { executeToolkitScript } from "./toolkit/script-runner.ts";
 import { createAskQuestionToolDefinition } from "./tools/ask-question.ts";
 import { buildShellSessionContext } from "./tools/bash.ts";
+import { dispatchCollaborationWorker } from "./tools/collaboration-dispatch.ts";
 import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
 import { FileMutationIntentController } from "./tools/file-mutation-intent.ts";
 import { createFindTool } from "./tools/find.ts";
 import { createGoalLifecycleToolDefinitions, createGoalToolDefinition, type GoalToolInput } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
+import { createImageGenerateToolDefinition } from "./tools/image-generate.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import type { OutputReductionToolOptions } from "./tools/output-reduction.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
@@ -151,7 +153,6 @@ import { createSecretStoreToolDefinition } from "./tools/secret-store.ts";
 import { disposeShellExecutionSession } from "./tools/shell-execution-session.ts";
 import { createSkillVaultToolDefinition } from "./tools/skill.ts";
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
-import { dispatchTmuxWorker } from "./tools/tmux-dispatch.ts";
 import {
 	allToolNames,
 	createToolDefinitionWithRuntime,
@@ -367,6 +368,7 @@ export interface RuntimeBuilderDeps {
 	getToolArtifactStore(): ArtifactStore;
 	/** Session-owned slow-tool registry. Optional only for narrow RuntimeBuilder test/embedding seams. */
 	getToolTaskDependencies?(): ToolTaskDependencies;
+	getRuntimeUpdateTool?(): ToolDefinition | undefined;
 	/** Lazily resolve durable image storage only for a persisted/configured session. */
 	getSessionImageStore(): Pick<SessionImageStore, "retainContent"> | undefined;
 
@@ -430,7 +432,7 @@ export interface RuntimeBuilderDeps {
 	): string | undefined;
 	/** Whether the CURRENT session model may drive a worktree-sync lane worker (`AgentSession.
 	 * getLaneWorkerRefusal`) -- consulted BEFORE a goal→tmux dispatch so an ineligible model's
-	 * dispatch is refused before any lane/pane side effect (`tools/tmux-dispatch.ts`'s
+	 * dispatch is refused before any lane/pane side effect (`tools/collaboration-dispatch.ts`'s
 	 * `evaluateWorkerLaneRefusal`). `undefined` means eligible. */
 	getLaneWorkerRefusal(): LaneWorkerRefusal | undefined;
 
@@ -1000,6 +1002,7 @@ export class RuntimeBuilder {
 			grep: { artifactStore: toolArtifactStore },
 			find: { artifactStore: toolArtifactStore },
 			artifact_retrieve: { artifactStore: toolArtifactStore },
+			webfetch: { artifactStore: toolArtifactStore },
 			skill_audit: { getSkills: () => resourceLoader.getSkills().skills },
 			skillify: { getSkills: () => resourceLoader.getSkills().skills },
 			extensionify: {
@@ -1028,6 +1031,19 @@ export class RuntimeBuilder {
 			this._baseToolDefinitions.set("tool_task", createToolTaskToolDefinition(toolTaskDependencies));
 		}
 		if (!baseToolsOverride) {
+			if (toolAccess.allows("image_generate")) {
+				const definition = createImageGenerateToolDefinition(this.deps.getCwd(), {
+					getModel: () => this.deps.getAgent().state.model,
+					getOAuthToken: () => this.deps.getModelRegistry().authStorage.getOAuthApiKey("openai-codex"),
+					getImageStore: () => this.deps.getSessionImageStore(),
+					getMessages: () => this.deps.getAgent().state.messages,
+				});
+				this._baseToolDefinitions.set(definition.name, definition);
+			}
+			if (toolAccess.allows("runtime_update")) {
+				const definition = this.deps.getRuntimeUpdateTool?.();
+				if (definition) this._baseToolDefinitions.set(definition.name, definition);
+			}
 			if (toolAccess.allows("skill")) {
 				const definition = createSkillVaultToolDefinition(this.deps.getSkillVault());
 				this._baseToolDefinitions.set(definition.name, definition);
@@ -1109,11 +1125,9 @@ export class RuntimeBuilder {
 						const outcome = this.deps.startWorkerDelegation(createGoalWorkerDelegationRequest(args));
 						return outcome.started ? { laneId: outcome.record.laneId } : { skipReason: outcome.skipReason };
 					},
-					// dispatch_worker's tool-layer side effect for `dispatchTarget:"tmux"`: core structurally
-					// invokes the SAME tmux_agent_manager fire_task call the model itself would make (no
-					// extension change, no faked launch/laneId) -- see tmux-dispatch.ts's doc comment.
-					dispatchTmuxWorker: (args) =>
-						dispatchTmuxWorker(
+					// Goal dispatch uses the same admitted pi_collaboration fire_task path as a model call.
+					dispatchCollaborationWorker: (args) =>
+						dispatchCollaborationWorker(
 							{
 								getToolDefinition: (name) => this.getToolDefinition(name),
 								createExtensionContext: () => this.deps.getExtensionRunner().createContext(),
@@ -1417,6 +1431,21 @@ export class RuntimeBuilder {
 		return offBuildErrors;
 	}
 
+	/** A tool-authored exact path still passes the existing explicit import/profile boundary. */
+	async reloadExtension(extensionPath: string): Promise<void> {
+		this._assertReloadQuiescent("reload extension");
+		const path = resolveToCwd(extensionPath, this.deps.getCwd());
+		this._assertExtensionLoadAllowed(path, "explicit");
+		const alreadyGranted = this._explicitLiveExtensionPaths.has(path);
+		this._explicitLiveExtensionPaths.add(path);
+		try {
+			await this.reload();
+		} catch (error) {
+			if (!alreadyGranted) this._explicitLiveExtensionPaths.delete(path);
+			throw error;
+		}
+	}
+
 	reload(): Promise<void> {
 		if (this._reloadPromise) {
 			// State can change while a generation is being validated. Coalesce any number of
@@ -1458,17 +1487,7 @@ export class RuntimeBuilder {
 	 * (not a wait/poll) — callers retry via the same coalescing `reload()` already provides.
 	 */
 	private _assertReloadQuiescent(action: string): void {
-		if (this.deps.isStreaming()) {
-			throw new Error(`Cannot ${action} while the agent is streaming or a tool call is active`);
-		}
-		if (this.deps.isCompacting()) {
-			throw new Error(`Cannot ${action} while context compaction or branch summarization is active`);
-		}
-		const units = getInFlightWorkUnits(this.deps.getAgentDir());
-		if (units.length > 0) {
-			const summary = units.map(describeInFlightWorkUnit).join(", ");
-			throw new Error(`Cannot ${action} while background work is in flight: ${summary}`);
-		}
+		assertReloadQuiescent(this.deps.getAgentDir(), this.deps.isStreaming(), this.deps.isCompacting(), action);
 	}
 
 	private async _reloadOnce(): Promise<void> {
@@ -1483,6 +1502,7 @@ export class RuntimeBuilder {
 		const reloadErrors: string[] = [];
 		let newRunner: ExtensionRunner | undefined;
 		let offReloadErrors: (() => void) | undefined;
+		let previousShutdownStarted = false;
 		try {
 			await this.deps.getSettingsManager().reload();
 			// Re-derive the resource-profile tool filter from the freshly reloaded settings.
@@ -1547,14 +1567,9 @@ export class RuntimeBuilder {
 			if (reloadErrors.length > 0) {
 				throw new Error(`Extension reload failed doctor: ${reloadErrors.slice(0, 6).join("; ")}`);
 			}
+			previousShutdownStarted = previousRunner.hasHandlers("session_shutdown");
 			await emitSessionShutdownEvent(previousRunner, { type: "session_shutdown", reason: "reload" });
-			previousRunner.invalidate();
 			await this.deps.getResourceLoader().commitReload?.();
-			// Re-derive the memory subsystem from the reloaded settings/providers.
-			await this.deps.initializeMemory();
-			// This generation has fully committed (no rollback below this point), so any local
-			// runtime the host no longer routes to under the new configuration can be stopped now.
-			this.deps.reconcileLocalRuntimes?.();
 		} catch (error) {
 			offReloadErrors?.();
 			if (newRunner && newRunner !== previousRunner) {
@@ -1564,8 +1579,18 @@ export class RuntimeBuilder {
 			}
 			await this.deps.getResourceLoader().rollbackReload?.();
 			this._restoreReloadRuntimeSnapshot(snapshot);
+			// Restoring bindings alone cannot restart session-owned observers closed during shutdown.
+			// Earlier validation failures leave the previous lifecycle untouched and must not restart it.
+			if (previousShutdownStarted) await previousRunner.emit({ type: "session_start", reason: "reload" });
 			throw error;
 		}
+		// Accepted resource disposal is the commit boundary. Before it, the previous API must
+		// remain usable for rollback; afterward, restoring that disposed generation is invalid.
+		previousRunner.invalidate();
+		// Post-commit failures remain visible to the update repair loop, but retain the new
+		// generation so repair never runs through stale extension APIs or disposed resources.
+		await this.deps.initializeMemory();
+		this.deps.reconcileLocalRuntimes?.();
 	}
 
 	/**

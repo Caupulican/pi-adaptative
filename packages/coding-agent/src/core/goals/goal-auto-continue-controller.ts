@@ -19,6 +19,7 @@ export interface GoalAutoContinueControllerDeps {
 	waitForForegroundIdle(): Promise<void>;
 	markGoalToolUnavailable(): void;
 	emit(event: AgentSessionEvent): void;
+	onContinuationActivity?(): void;
 }
 
 /** Owns the single-flight goal continuation loop and its foreground-idle timer. */
@@ -44,6 +45,7 @@ export class GoalAutoContinueController {
 		if (this._timer !== undefined) {
 			clearTimeout(this._timer);
 			this._timer = undefined;
+			this.deps.onContinuationActivity?.();
 		}
 	}
 
@@ -62,8 +64,9 @@ export class GoalAutoContinueController {
 		this.clearTimer();
 		this._timer = setTimeout(() => {
 			this._timer = undefined;
-			void this.runScheduled();
+			void this.runScheduled().finally(() => this.deps.onContinuationActivity?.());
 		}, goalAutoContinueDelayMs);
+		this.deps.onContinuationActivity?.();
 		const timer = this._timer;
 		if (typeof timer === "object" && timer && "unref" in timer) {
 			const { unref } = timer as { unref?: () => void };
@@ -76,6 +79,7 @@ export class GoalAutoContinueController {
 		const initialGuard = this.unavailableResult(options);
 		if (initialGuard) return initialGuard;
 		this._isContinuing = true;
+		this.deps.onContinuationActivity?.();
 		try {
 			while (true) {
 				if (this.deps.isForegroundBusy()) await this.deps.waitForForegroundIdle();
@@ -91,6 +95,7 @@ export class GoalAutoContinueController {
 			}
 		} finally {
 			this._isContinuing = false;
+			this.deps.onContinuationActivity?.();
 		}
 	}
 

@@ -28,7 +28,9 @@ import type { FauxRequestEvent } from "@caupulican/pi-ai/faux";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "../../src/core/context-gc.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "../../src/core/default-tool-surface.ts";
-import { createHarness } from "../suite/harness.ts";
+import { createHarness, getMessageText } from "../suite/harness.ts";
+import { completedWorkerOutput } from "../worker-output-fixture.ts";
+import { createHostResponseScript } from "./host-response-script.ts";
 
 const TURNS = Number(process.env.PI_PROFILE_TURNS ?? 300);
 const OUT_DIR = process.env.PI_PROFILE_DIR ?? join(process.cwd(), "profiles-node");
@@ -293,6 +295,7 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 			...(SCENARIO === "tools" ? { initialActiveToolNames: [...DEFAULT_ACTIVE_TOOL_NAMES, "grep"] } : {}),
 		});
 		const readTarget = join(harness.tempDir, "read-target.txt");
+		const script = createHostResponseScript(harness.faux);
 		writeFileSync(readTarget, "x".repeat(2_000));
 		// Fixtures for the tools scenario: a large file to read, and a corpus for grep with many hits.
 		const largeTarget = join(harness.tempDir, "large-target.txt");
@@ -311,6 +314,7 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 		const bigOutputCommand = `node -e "for (let i = 0; i < 3000; i++) console.log('row ' + i + ' ' + 'z'.repeat(60))"`;
 		const smallOutputCommand = `node -e "console.log('ok')"`;
 		const delegateDurations: number[] = [];
+		const delegateStatuses = new Map<string, number>();
 
 		// Child-process pressure: how many processes the scenario spawns, tagged with the turn that
 		// spawned them. All the project's own callers (bash/grep/git tools) import `spawn` etc. as a
@@ -362,7 +366,7 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 			}
 		});
 		try {
-			harness.setResponses([
+			script.setResponses([
 				fauxAssistantMessage([fauxToolCall("create_goal", { objective: "Profile the host over a long session" })], {
 					stopReason: "toolUse",
 				}),
@@ -414,7 +418,7 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 					fauxAssistantMessage([fauxToolCall("task_steps", { action: "compact" })], { stopReason: "toolUse" }),
 				);
 				steps.push(fauxAssistantMessage(`Chunk done at ${turn}.`));
-				harness.setResponses(steps);
+				script.setResponses(steps);
 				// A worker's completion handoff can hold the foreground exactly when the next scripted
 				// prompt arrives. The scripted queue must stay aligned with THIS prompt, so wait the
 				// handoff out (bounded) instead of queuing behind it.
@@ -431,13 +435,36 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 					// One worker per DELEGATE_EVERY turns: it reads a file and files its claim. Its wall time
 					// is the `delegate` span the real corpus showed growing tenfold across a session.
 					for (let delegation = 0; delegation < CHUNK / DELEGATE_EVERY; delegation++) {
-						harness.setResponses([
-							fauxAssistantMessage([fauxToolCall("read", { path: readTarget })], { stopReason: "toolUse" }),
-							fauxAssistantMessage(`{"summary":"worker ${turn}-${delegation} done","status":"completed"}`),
-						]);
+						script.setResponses(
+							[
+								fauxAssistantMessage([fauxToolCall("read", { path: readTarget })], { stopReason: "toolUse" }),
+								(context) => {
+									const result = context.messages.at(-1);
+									expect(result).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
+									expect(getMessageText(result)).toContain("x".repeat(2_000));
+									return fauxAssistantMessage(completedWorkerOutput(`worker ${turn}-${delegation} done`));
+								},
+							],
+							true,
+						);
 						const startedAt = performance.now();
-						await harness.session.runWorkerDelegationOnce({ instructions: `Inspect the target at turn ${turn}` });
+						const run = await harness.session.runWorkerDelegationOnce({
+							instructions: `Inspect the target at turn ${turn}`,
+						});
 						delegateDurations.push(performance.now() - startedAt);
+						expect(run.started, run.skipReason).toBe(true);
+						expect(
+							run.outcome?.claim.status,
+							JSON.stringify({
+								reason: run.outcome?.reasonCode,
+								detail: run.outcome?.reasonDetail,
+								claim: run.outcome?.claim,
+							}),
+						).toBe("completed");
+						expect(run.outcome?.accepted, JSON.stringify(run.outcome?.acceptance)).toBe(true);
+						expect(run.record?.status).toBe("succeeded");
+						const status = run.record?.status ?? "missing";
+						delegateStatuses.set(status, (delegateStatuses.get(status) ?? 0) + 1);
 					}
 				}
 			}
@@ -484,7 +511,7 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 				}
 			}
 			log(
-				`turns=${TURNS} scenario=${SCENARIO} wall=${wallMs.toFixed(0)}ms entries=${entries.length} toolErrors=${errors}`,
+				`turns=${TURNS} scenario=${SCENARIO} wall=${wallMs.toFixed(0)}ms entries=${entries.length} toolErrors=${errors} summaryRequests=${script.getSummaryCount()}`,
 			);
 			log(`host pre-request ms by decile: ${deciles(snapshotGaps)}  (n=${snapshotGaps.length})`);
 			// The contract gate: per-request host work must not grow with history. The last decile's
@@ -500,6 +527,7 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 				log(`tool ${tool.padEnd(12)} n=${String(values.length).padStart(4)} ms by decile: ${deciles(values)}`);
 			}
 			if (delegateDurations.length > 0) {
+				log(`delegate terminal statuses: ${JSON.stringify(Object.fromEntries(delegateStatuses))}`);
 				log(
 					`tool ${"delegate-run".padEnd(12)} n=${String(delegateDurations.length).padStart(4)} ms by decile: ${deciles(delegateDurations)}`,
 				);
@@ -539,11 +567,18 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 			);
 			log(cacheReport.split("\n")[0] ?? "");
 
-			// A load generator, not a correctness test: a handful of scripted task-step misses across the
-			// periodic compact are realistic and exercise the failure-ledger path this profile measures, so
-			// the error count is reported, not asserted to zero. What must hold is that the run did real work.
+			// This is a load generator, not a general correctness or real-model summary-fidelity test.
+			// Its valid synthetic actions must nevertheless all execute: compaction cannot consume
+			// scripted foreground responses and silently remove work from the measured scenario.
+			expect(errors).toBe(0);
+			expect(turnsCompleted).toBe(1 + TURNS + Math.ceil(TURNS / CHUNK));
 			expect(entries.length).toBeGreaterThan(TURNS);
 			expect(byTool.size).toBeGreaterThan(0);
+			if (SCENARIO === "delegate") {
+				const expectedDelegations = Math.ceil(TURNS / CHUNK) * (CHUNK / DELEGATE_EVERY);
+				expect(delegateDurations).toHaveLength(expectedDelegations);
+				expect(Object.fromEntries(delegateStatuses)).toEqual({ succeeded: expectedDelegations });
+			}
 		} finally {
 			unsubscribePressure();
 			childProcessChannel.unsubscribe(onChildProcessSpawn);

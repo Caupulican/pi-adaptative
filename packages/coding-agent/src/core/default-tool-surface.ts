@@ -15,6 +15,8 @@ export const STABLE_SHELL_TOOL_NAME = "bash" as const;
 export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.platform): readonly string[] {
 	return [
 		"read",
+		"webfetch",
+		"image_generate",
 		"skill",
 		"skillify",
 		"skill_audit",
@@ -33,6 +35,7 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		"tool_task",
 		"run_toolkit_script",
 		"improvement_loop",
+		"runtime_update",
 	];
 }
 

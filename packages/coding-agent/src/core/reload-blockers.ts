@@ -270,6 +270,17 @@ export function describeInFlightWorkUnit(unit: InFlightWorkUnit): string {
 	return `${unit.kind}:${unit.label}`;
 }
 
+/** One quiescence predicate for extension mutation and in-place core restart. */
+export function assertReloadQuiescent(agentDir: string, streaming: boolean, compacting: boolean, action: string): void {
+	if (streaming) throw new Error(`Cannot ${action} while the agent is streaming or a tool call is active`);
+	if (compacting) throw new Error(`Cannot ${action} while context compaction or branch summarization is active`);
+	const units = getInFlightWorkUnits(agentDir);
+	if (units.length)
+		throw new Error(
+			`Cannot ${action} while background work is in flight: ${units.map(describeInFlightWorkUnit).join(", ")}`,
+		);
+}
+
 /**
  * Test-only escape hatch: clears every agentDir's registry so one test's leaked registration cannot
  * block another's reload gate or status text.

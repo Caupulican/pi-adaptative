@@ -1,0 +1,14 @@
+{
+  "name": "provider-prompt-smoke",
+  "description": "Real minimal interactive prompt smoke for native Claude, Agy, and Pi. Consumes provider/model tokens.",
+  "deadlineSeconds": 600,
+  "agents": [
+    { "provider": "claude", "name": "claude-prompt-smoke", "task": "Perform only the requested Claude native-session smoke check; do not edit files." },
+    { "provider": "agy", "name": "agy-prompt-smoke", "task": "Perform only the requested agy native-session smoke check; do not edit files." },
+    { "provider": "pi", "name": "pi-prompt-smoke", "task": "Perform only the requested Pi native-session smoke check; do not edit files." }
+  ],
+  "notes": [
+    "Use only when model-token/auth validation is intended.",
+    "The manager starts persistent native CLIs, waits for a stopped-work or question event, then reads bounded terminal evidence."
+  ]
+}

@@ -1,6 +1,8 @@
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	countFileLinesSync,
@@ -81,3 +83,21 @@ it.skipIf(process.platform === "win32")("rejects leaf symlinks through every pat
 	expect(() => countFileLinesSync(link, "Test state")).toThrow("not a regular file");
 	await expect(readBoundedTextFile(link, 64, "Test state")).rejects.toThrow("not a regular file");
 });
+
+it.skipIf(process.platform === "win32").each(["async", "text", "prefix", "lines"])(
+	"rejects a FIFO before %s reader acquisition can block the host",
+	(mode) => {
+		const file = fixtureFile("ordinary");
+		const pipe = join(file, "..", "reference.pipe");
+		execFileSync("mkfifo", [pipe]);
+		const probe = fileURLToPath(new URL("./fixtures/bounded-file-probe.mjs", import.meta.url));
+		const control = spawnSync(process.execPath, [probe, mode, file], { timeout: 3000, encoding: "utf8" });
+		expect(control.error).toBeUndefined();
+		expect(control.status).toBe(0);
+		expect(control.stdout).toBe("read");
+		const result = spawnSync(process.execPath, [probe, mode, pipe], { timeout: 3000, encoding: "utf8" });
+		expect(result.error).toBeUndefined();
+		expect(result.status).toBe(0);
+		expect(result.stdout).toMatch(/not a regular file/);
+	},
+);

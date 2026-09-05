@@ -37,9 +37,10 @@ session module under `packages/coding-agent/src/core`. Regenerate after adding o
 | `provider-request-context-controller.ts` | yes | (no header comment) |
 | `provider-request-runtime-controller.ts` | no | (no header comment) |
 | `reflection-controller.ts` | no | Root-session reflection cue + explicit learning-write controller. |
+| `runtime-update-controller.ts` | yes | (no header comment) |
 | `scout-controller.ts` | yes | (no header comment) |
 | `tool-gate-controller.ts` | no | Agent tool-call gate: model-router escalation, autonomy gating, extension tool hooks, and the untrusted-content output boundary. |
 | `tool-protocol-controller.ts` | no | (no header comment) |
 
-33 modules, 13 with a test file of the same name.
+34 modules, 14 with a test file of the same name.
 

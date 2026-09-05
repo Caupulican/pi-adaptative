@@ -4,11 +4,16 @@ import type { CapabilityEnvelope, WorkerClaim, WorkerClaimStatus, WorkerRequest 
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { isLaneTerminalStatus, type LaneRecord, type LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "../autonomy/session-lane-record.ts";
-import type { ManagedLaneDispatch, ManagedLaneEvent } from "../extensions/types.ts";
+import {
+	MAX_MANAGED_LANE_SUMMARY_BYTES,
+	type ManagedLaneDispatch,
+	type ManagedLaneEvent,
+} from "../extensions/types.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { validateProviderUsage } from "../orchestration/attempt-usage.ts";
 import type { ExecutionGrant } from "../orchestration/contracts.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
+import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import { getLatestWorkerClaimSnapshot } from "./session-worker-claim.ts";
 import {
@@ -33,6 +38,7 @@ export function resolveManagedLaneTerminalStatus(status: string | undefined): La
 			return "blocked";
 		case "dismissed":
 		case "cancelled":
+		case "stopped":
 			return "canceled";
 		default:
 			return "failed";
@@ -148,7 +154,7 @@ export class ManagedLaneController {
 	}
 
 	record(event: ManagedLaneEvent): LaneRecord | undefined {
-		if (this.deps.isDisposed()) return undefined;
+		if (this.deps.isDisposed()) throw new Error("Cannot record a managed lane after its owning session is disposed.");
 		this.ensureHydrated();
 		if (event.phase === "dispatch") {
 			const goal = this.deps.getGoalStateSnapshot();
@@ -183,25 +189,35 @@ export class ManagedLaneController {
 
 		const attempt = this.lifecycle.getManagedAttempt(event.laneId);
 		const handle = this.lifecycle.getManagedHandle(event.laneId);
-		if (!attempt || !handle || (attempt.status !== "leased" && attempt.status !== "running")) return undefined;
+		if (!attempt || !handle) throw new Error(`Unknown managed worker '${event.laneId}'.`);
+		if (event.dispatchSequence !== undefined && event.dispatchSequence !== attempt.dispatch.dispatchSequence)
+			throw new Error(`Managed worker '${event.laneId}' terminal sequence does not match its current dispatch.`);
+		if (attempt.status !== "leased" && attempt.status !== "running") return undefined;
 		let usage: Usage | undefined;
-		try {
-			usage = event.usage ? validateProviderUsage(event.usage, "managed lane usage") : undefined;
-		} catch (error) {
-			this.warn(
-				`Rejected terminal report for managed worker ${event.laneId}: ${error instanceof Error ? error.message : String(error)}`,
-			);
-			return undefined;
-		}
 		const resolvedStatus = resolveManagedLaneTerminalStatus(event.status);
-		const usageReportId = usage && this.deps.addSpawnedUsage ? `managed-worker:${handle.attemptId}` : undefined;
+		let usageReportId: string | undefined;
 		let claim: WorkerClaim;
 		try {
+			usage = event.usage ? validateProviderUsage(event.usage, "managed lane usage") : undefined;
+			usageReportId = usage && this.deps.addSpawnedUsage ? `managed-worker:${handle.attemptId}` : undefined;
+			const descriptor = Object.getOwnPropertyDescriptor(event, "summary");
+			if (descriptor && !("value" in descriptor))
+				throw new Error("Managed terminal summary must not be an accessor.");
+			const summary: unknown = descriptor?.value;
+			if (
+				summary !== undefined &&
+				(typeof summary !== "string" ||
+					summary.length > MAX_MANAGED_LANE_SUMMARY_BYTES ||
+					Buffer.byteLength(summary, "utf8") > MAX_MANAGED_LANE_SUMMARY_BYTES)
+			)
+				throw new Error(
+					`Managed terminal summary exceeds ${MAX_MANAGED_LANE_SUMMARY_BYTES} UTF-8 bytes or is not text.`,
+				);
 			claim = normalizeWorkerClaimForHost({
 				requestId: event.laneId,
 				terminalAttemptId: handle.attemptId,
 				status: mapManagedLaneTerminalStatus(resolvedStatus),
-				summary: `Managed worker lane ${event.laneId} reported terminal status "${resolvedStatus}".`,
+				summary: `Managed worker lane ${event.laneId} reported terminal status "${resolvedStatus}".${summary ? `\n${wrapUntrustedText(summary, `managed-worker:${event.laneId}`, { nonce: handle.attemptId })}` : ""}`,
 				changedFiles: event.changedFiles ?? [],
 				...(usageReportId ? { usageReportId } : {}),
 				createdAt: new Date().toISOString(),
@@ -210,7 +226,7 @@ export class ManagedLaneController {
 			this.warn(
 				`Rejected terminal report for managed worker ${event.laneId}: ${error instanceof Error ? error.message : String(error)}`,
 			);
-			return undefined;
+			throw error;
 		}
 		const review = reviewManagedLaneChangedFiles({
 			changedFiles: claim.changedFiles,
@@ -266,7 +282,7 @@ export class ManagedLaneController {
 				return record;
 			}
 			this.warn(`Managed worker ${event.laneId} terminal processing failed and remains retryable: ${message}`);
-			return undefined;
+			throw error;
 		} finally {
 			if (finalized) this.releaseRegistration(event.laneId);
 		}

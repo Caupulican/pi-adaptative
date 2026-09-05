@@ -6,7 +6,7 @@
  */
 
 export const DELEGATION_DECISION_RULE =
-	"Route adaptively: delegate independent research, implementation, tests, or specialist review when it improves speed or confidence; keep dependent, trivial, context-heavy, or interactive work local. Long work alone never mandates a team.";
+	"You must delegate bounded independent work when its speed or verification benefit outweighs coordination and context-transfer cost, regardless of provider or reasoning level. Evaluate this at Plan/Route and when new independent work appears; identify a concrete research, implementation, test, or specialist-review task. Keep trivial, tightly dependent, context-heavy, or interactive work local when delegation offers no net benefit. Long work alone never mandates a team.";
 
 /** Five named phases only; existing goal/task/delegate/evidence owners implement every phase. */
 export const WORK_LIFECYCLE_PHASES = ["Survey", "Contract", "Plan/Route", "Execute", "Prove/Deliver"] as const;

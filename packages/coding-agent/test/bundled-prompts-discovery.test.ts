@@ -69,6 +69,8 @@ describe("bundled prompts discovery", () => {
 			expect(prompt?.content).toContain("five failed repairs");
 			expect(prompt?.content).not.toContain("Only after the user confirms");
 			expect(prompt?.content).not.toContain("re-run until it passes");
+			expect(prompt?.content).toContain("Follow the session's PI DELEGATION policy");
+			expect(prompt?.content).not.toContain("delegation is never required");
 		}
 	});
 

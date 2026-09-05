@@ -5,6 +5,12 @@ import assert from "node:assert/strict";
 
 const rootPackage = JSON.parse(readFileSync("package.json", "utf8"));
 
+test("source CLI uses the same native TypeScript export condition as its test harness", () => {
+	const launcher = readFileSync("pi-test.sh", "utf8");
+	assert.match(launcher, /node --conditions=pi-source/);
+	assert.doesNotMatch(launcher, /node_modules\/\.bin\/tsx|--tsconfig/);
+});
+
 test("pins the stable TypeScript 7 compiler without the preview package", () => {
 	assert.equal(rootPackage.devDependencies.typescript, "7.0.2");
 	assert.equal(rootPackage.devDependencies["@typescript/native-preview"], undefined);

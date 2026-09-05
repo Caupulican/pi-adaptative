@@ -1,0 +1,15 @@
+{
+  "name": "full-provider-review",
+  "description": "Interactive native-provider review team: Pi lead, Claude reviewer, Agy validator, Agy reviewer. Consumes provider/model tokens.",
+  "deadlineSeconds": 1800,
+  "agents": [
+    { "provider": "pi", "name": "pi-lead", "task": "Synthesize review scope and evidence. Coordinate independent peers; do not modify files." },
+    { "provider": "claude", "name": "claude-reviewer", "task": "Review correctness, authority and security boundaries. Do not edit files; provide deterministic reproductions." },
+    { "provider": "agy", "name": "agy-validator", "task": "Run focused validation of acceptance criteria. Do not edit production files; report exact results and skipped probes." },
+    { "provider": "agy", "name": "agy-reviewer", "task": "Review performance, bounded retention, concurrency and shutdown behavior. Do not edit files; substantiate findings." }
+  ],
+  "notes": [
+    "Best for non-trivial review/QA where independent native CLIs help.",
+    "Keep the task objective bounded; inspect captured panes/result files before accepting PASS."
+  ]
+}

@@ -89,6 +89,20 @@ export class DurableCustomMessageTurnController {
 		return { completion };
 	}
 
+	/** Resume canonical history after a host handoff, retaining the ordinary goal budget lease. */
+	async continue(prepare: () => Promise<void>, goalId?: string): Promise<void> {
+		const submission = await this.deps.foreground.acquireSubmission();
+		let goalLease: GoalExecutionLease | undefined;
+		try {
+			goalLease = this.deps.goals.beginExecution(goalId);
+			await prepare();
+			await this.deps.foreground.runAgentContinuation(submission);
+		} finally {
+			this.deps.goals.endExecution(goalLease);
+			this.deps.foreground.releaseSubmission(submission);
+		}
+	}
+
 	private prepare<T>(message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">): {
 		appMessage: CustomMessage<T>;
 		acceptedPromise: Promise<void>;

@@ -455,10 +455,11 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		// Ultra is a UI reasoning label; supported GPT-5.6 variants receive max on the wire.
 		mergeThinkingLevelMap(model, { ultra: "max" });
 	}
-	if (model.provider === "openai-codex" && isOpenAiGpt6(model.id)) {
-		// Codex's GPT-6 Astra lists ultra as its own effort ("maximum reasoning with automatic task
-		// delegation"); the public API stops at max.
-		mergeThinkingLevelMap(model, { ultra: "ultra" });
+	if (model.provider === "openai-codex" && model.id === "gpt-6-astra") {
+		// Codex f1aac1e88: Ultra is local orchestration intent, not a wire effort.
+		// core/src/client.rs resolves it through the catalog's multi_agent_reasoning_effort:
+		// Astra selects xhigh; GPT-5.6 Sol/Terra have no override and fall back to max above.
+		mergeThinkingLevelMap(model, { ultra: "xhigh" });
 	}
 	if (model.provider === "openai" && model.id === "gpt-5.5") {
 		mergeThinkingLevelMap(model, { minimal: null });

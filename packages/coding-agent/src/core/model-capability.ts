@@ -77,7 +77,7 @@ export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = [
 	"skillify",
 	"model_fitness",
 	"context_scout",
-	"tmux_agent_manager",
+	"pi_collaboration",
 ];
 export const MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS: readonly string[] = [
 	"read",
@@ -185,8 +185,12 @@ export function deriveModelCapabilityProfile(args: {
 }
 
 /** Apply the profile's allow/block lists to a requested tool-name list, preserving order. */
-export function filterToolNamesForCapability(toolNames: readonly string[], profile: ModelCapabilityProfile): string[] {
-	let filtered = [...toolNames];
+export function filterToolNamesForCapability(
+	toolNames: readonly string[],
+	profile: ModelCapabilityProfile,
+	model?: { provider: string },
+): string[] {
+	let filtered = toolNames.filter((name) => name !== "image_generate" || model?.provider === "openai-codex");
 	if (profile.allowedToolNames !== undefined) {
 		const allowed = new Set(profile.allowedToolNames);
 		filtered = filtered.filter((name) => allowed.has(name));

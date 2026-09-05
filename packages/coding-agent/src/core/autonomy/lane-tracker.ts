@@ -41,7 +41,7 @@ export interface LaneRecord {
 	evidenceEntryId?: string;
 	/**
 	 * Worktree-sync lane key this lane record was correlated to at dispatch (set only for a
-	 * tmux-worker lane whose fire_task carried a `worktreeLane` -- see `tmux-dispatch.ts`'s
+	 * managed external lane whose fire_task carried a `worktreeLane` -- see `collaboration-dispatch.ts`'s
 	 * `createLaneWorktree`). Optional so every pre-existing record/caller keeps compiling and
 	 * behaving unchanged; `undefined` for a lane never bound to a worktree-sync lane.
 	 */

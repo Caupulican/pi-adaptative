@@ -7,6 +7,7 @@ import type {
 	StreamFunction,
 	StreamOptions,
 } from "./types.ts";
+import { SourceRegistry } from "./utils/source-registry.ts";
 
 export type ApiStreamFunction = (
 	model: Model<Api>,
@@ -32,13 +33,7 @@ interface ApiProviderInternal {
 	streamSimple: ApiStreamSimpleFunction;
 }
 
-type RegisteredApiProvider = {
-	provider: ApiProviderInternal;
-	sourceId?: string;
-	previous?: RegisteredApiProvider;
-};
-
-const apiProviderRegistry = new Map<string, RegisteredApiProvider>();
+const apiProviderRegistry = new SourceRegistry<ApiProviderInternal>();
 
 function wrapStream<TApi extends Api, TOptions extends StreamOptions>(
 	api: TApi,
@@ -68,47 +63,27 @@ export function registerApiProvider<TApi extends Api, TOptions extends StreamOpt
 	provider: ApiProvider<TApi, TOptions>,
 	sourceId?: string,
 ): void {
-	const previous = apiProviderRegistry.get(provider.api);
-	apiProviderRegistry.set(provider.api, {
-		provider: {
+	apiProviderRegistry.set(
+		provider.api,
+		{
 			api: provider.api,
 			stream: wrapStream(provider.api, provider.stream),
 			streamSimple: wrapStreamSimple(provider.api, provider.streamSimple),
 		},
 		sourceId,
-		previous,
-	});
+	);
 }
 
 export function getApiProvider(api: Api): ApiProviderInternal | undefined {
-	return apiProviderRegistry.get(api)?.provider;
+	return apiProviderRegistry.get(api);
 }
 
 export function getApiProviders(): ApiProviderInternal[] {
-	return Array.from(apiProviderRegistry.values(), (entry) => entry.provider);
-}
-
-function removeApiProviderSource(
-	entry: RegisteredApiProvider | undefined,
-	sourceId: string,
-): RegisteredApiProvider | undefined {
-	if (!entry) return undefined;
-	if (entry.sourceId === sourceId) return entry.previous;
-
-	const previous = removeApiProviderSource(entry.previous, sourceId);
-	if (previous === entry.previous) return entry;
-	return { ...entry, previous };
+	return apiProviderRegistry.values();
 }
 
 export function unregisterApiProviders(sourceId: string): void {
-	for (const [api, entry] of apiProviderRegistry.entries()) {
-		const replacement = removeApiProviderSource(entry, sourceId);
-		if (replacement) {
-			apiProviderRegistry.set(api, replacement);
-		} else {
-			apiProviderRegistry.delete(api);
-		}
-	}
+	apiProviderRegistry.removeSource(sourceId);
 }
 
 export function clearApiProviders(): void {

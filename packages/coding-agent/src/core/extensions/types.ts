@@ -1267,6 +1267,8 @@ interface ManagedLaneEventBase {
 	worktreeLaneKey?: string;
 }
 
+export const MAX_MANAGED_LANE_SUMMARY_BYTES = 8 * 1024;
+
 export type ManagedLaneEvent =
 	| (ManagedLaneEventBase & {
 			phase: "dispatch";
@@ -1274,7 +1276,11 @@ export type ManagedLaneEvent =
 	  })
 	| (ManagedLaneEventBase & {
 			phase: "terminal";
+			/** Exact dispatch turn for persistent agents; stale terminal reports are rejected before mutation. */
+			dispatchSequence?: number;
 			status?: string;
+			/** Untrusted terminal evidence or question; must fit MAX_MANAGED_LANE_SUMMARY_BYTES UTF-8 bytes. */
+			summary?: string;
 			reasonCode?: string;
 			changedFiles?: readonly string[];
 			/**
@@ -1477,7 +1483,9 @@ export interface ExtensionAPI {
 	 * HONEST TRUST BOUNDARY: this is a report, not a grant of in-process sandboxing — the host is the
 	 * lane-tracking SSOT and only ever records what the extension claims. Call once with
 	 * `phase: "dispatch"` when the out-of-process work starts, and exactly once more with
-	 * `phase: "terminal"` using the SAME `laneId` when it ends.
+	 * `phase: "terminal"` using the SAME `laneId` when it ends. Persistent agents also supply the
+	 * exact dispatchSequence. Failed validation or persistence throws: retain the terminal report
+	 * and retry it instead of acknowledging delivery. A normal return means accepted or already terminal.
 	 */
 	reportManagedLane(event: ManagedLaneEvent): void;
 

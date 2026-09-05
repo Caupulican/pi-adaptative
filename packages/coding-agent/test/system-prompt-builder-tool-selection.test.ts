@@ -67,6 +67,35 @@ const readHint: ToolSelectionHint = {
 };
 
 describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
+	it.each([false, true])("keeps delegation root-only with a custom prompt (child=%s)", (child) => {
+		const defaults = makeDeps();
+		const settingsManager = {
+			...defaults.getSettingsManager(),
+			getWorkerDelegationSettings: () => ({ enabled: true }),
+		} as SettingsManager;
+		const resourceLoader = {
+			...defaults.getResourceLoader(),
+			getSystemPrompt: () => "Custom instructions.",
+		} as ResourceLoader;
+		const builder = new SystemPromptBuilder(
+			makeDeps({
+				getSettingsManager: () => settingsManager,
+				getResourceLoader: () => resourceLoader,
+				isChildSession: () => child,
+			}),
+		);
+		const prompt = builder.rebuildSystemPrompt(["delegate"]);
+		expect(prompt).toContain("Custom instructions.");
+		expect(prompt.includes("PI DELEGATION")).toBe(!child);
+		if (!child) {
+			expect(prompt).toContain("You must delegate bounded independent work");
+			expect(prompt).toContain("Respect explicit user restrictions");
+			expect(prompt).toContain("Never bypass admission");
+		}
+		expect(builder.buildSystemPromptForToolNames(["read"])).not.toContain("PI DELEGATION");
+		expect(builder.rebuildSystemPrompt(["delegate"])).toBe(prompt);
+	});
+
 	it("gives a constrained root the current-session reflection contract without background lanes", () => {
 		const settingsManager = {
 			...makeDeps().getSettingsManager(),

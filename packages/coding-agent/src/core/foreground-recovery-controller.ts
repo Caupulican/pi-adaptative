@@ -42,6 +42,8 @@ export interface ForegroundRecoveryControllerDeps {
 	onSuccessfulAssistant(): void;
 	prepareRun(): Promise<void>;
 	afterRun(): Promise<void>;
+	/** Runs at an idle Agent boundary while foreground submission authority is still held. */
+	settleRuntimeUpdate?(signal?: AbortSignal): Promise<"continue" | "stop" | undefined>;
 	isCompacting?: () => boolean;
 }
 
@@ -59,6 +61,7 @@ export class ForegroundRecoveryController {
 	private nextSubmissionEpoch = 1;
 	private shutdownReason: Error | undefined;
 	private readonly idleWaiters = new Set<() => void>();
+	private readonly activityListeners = new Set<() => void>();
 	private readonly deps: ForegroundRecoveryControllerDeps;
 
 	constructor(deps: ForegroundRecoveryControllerDeps) {
@@ -125,6 +128,7 @@ export class ForegroundRecoveryController {
 			epoch: this.nextSubmissionEpoch++,
 		};
 		this.submissionLease = lease;
+		this.notifyActivity();
 		return lease;
 	}
 
@@ -138,6 +142,24 @@ export class ForegroundRecoveryController {
 	 */
 	getCurrentSubmissionEpoch(): number | undefined {
 		return this.submissionLease?.epoch;
+	}
+
+	/** Observe authority changes; consumers still await waitForIdle before declaring settlement. */
+	subscribeActivity(listener: () => void): () => void {
+		this.activityListeners.add(listener);
+		return () => {
+			this.activityListeners.delete(listener);
+		};
+	}
+
+	private notifyActivity(): void {
+		for (const listener of this.activityListeners) {
+			try {
+				listener();
+			} catch {
+				this.deps.emit({ type: "warning", message: "Foreground activity observer failed." });
+			}
+		}
 	}
 
 	/** Wait until foreground ownership can be acquired without a check-then-act gap. */
@@ -159,6 +181,7 @@ export class ForegroundRecoveryController {
 			throw new Error("Cannot release foreground submission authority owned by another caller");
 		}
 		this.submissionLease = undefined;
+		this.notifyActivity();
 		if (this.activeRuns === 0) {
 			this.resolveIdleWaiters();
 		}
@@ -223,7 +246,28 @@ export class ForegroundRecoveryController {
 			} else {
 				await this.deps.agent.continue();
 			}
-			while ((maxGoalLoopRounds === 0 || goalLoopRounds < maxGoalLoopRounds) && (await this.handlePostAgentRun())) {
+			while (true) {
+				const failed = this.lastAssistantMessage?.stopReason === "error" && !signal?.aborted;
+				if (failed) {
+					// A transport error is not an agent decision to abandon repair. Keep its existing
+					// retry/compaction owner, then settle a terminal failure through the update owner.
+					if (
+						(maxGoalLoopRounds !== 0 && goalLoopRounds >= maxGoalLoopRounds) ||
+						!(await this.handlePostAgentRun())
+					) {
+						await this.deps.settleRuntimeUpdate?.(signal);
+						break;
+					}
+					goalLoopRounds++;
+				} else {
+					const update = await this.deps.settleRuntimeUpdate?.(signal);
+					if (update === "stop") break;
+					if (update !== "continue") {
+						if (maxGoalLoopRounds !== 0 && goalLoopRounds >= maxGoalLoopRounds) break;
+						if (!(await this.handlePostAgentRun())) break;
+						goalLoopRounds++;
+					}
+				}
 				// Same gate before every further round. Post-run recovery awaits too (compaction, retry
 				// backoff), and an abort landing there has no run to reach either -- without this the
 				// next `continue()` would be a full provider turn on a cancelled submission. A retry the
@@ -234,7 +278,6 @@ export class ForegroundRecoveryController {
 					return;
 				}
 				await this.deps.agent.continue();
-				goalLoopRounds++;
 			}
 		} finally {
 			try {
@@ -251,6 +294,7 @@ export class ForegroundRecoveryController {
 
 	wakeIdleWaiters(): void {
 		this.resolveIdleWaiters();
+		this.notifyActivity();
 	}
 
 	async waitForIdle(): Promise<void> {
@@ -269,6 +313,7 @@ export class ForegroundRecoveryController {
 		this.shutdownReason ??= new Error("Session disposed before foreground submission authority was acquired");
 		for (const resolve of this.idleWaiters) resolve();
 		this.idleWaiters.clear();
+		this.activityListeners.clear();
 	}
 
 	private resolveIdleWaiters(): void {

@@ -1,5 +1,30 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced the terminal-specific collaboration extension with packaged `pi-collaboration` / `pi_collaboration` and a provider-neutral persistent-worker coordinator. Goal dispatch uses `dispatchTarget: "collaboration"`; no competing legacy tool alias remains.
+
+### Added
+
+- Native `webfetch` retrieves public HTTP(S) content as Markdown, text, or HTML with DNS-pinned public-address admission, redirect checks, streaming size limits, and Effect-managed cancellation, resource release, and one request deadline. A browser-style User-Agent has one bounded Pi-identity fallback for an explicit Cloudflare challenge. Large outputs use the shared artifact store and bounded preview.
+- Persistent interactive Pi, Codex, Claude and agy teams through Herdr, with pinned provisioning, login/readiness checks, distinct worker responsibilities, bounded peer mailboxes, authenticated exact-turn result claims, terminal/question handoffs, and exact-turn cleanup. Foreign native CLIs use the explicitly requested unrestricted permission flags; their tool grants and usage remain advisory.
+- Root-only `image_generate` on OpenAI Codex models uses stored ChatGPT OAuth for native generation and edits. References and responses are bounded, output is retained in the session image store, and uncertain paid requests are never automatically replayed.
+- `runtime_update` coordinates transactional extension reload and supervised core restart with durable repair-first continuation, fresh verification, immutable candidate snapshots, and bounded known-good rollback. It preserves the session transcript and does not resubmit the original task.
+
+### Changed
+
+- The root delegation policy now requires bounded independent work to be delegated when its speed or verification benefit exceeds coordination cost, at every reasoning level and on every provider with delegation enabled. User restrictions, host admission, and leaf-worker limits still apply; bundled authoring commands defer to this single policy. Usefulness remains model judgment, not a task-count heuristic or a guaranteed behavioral outcome. Ultra availability and wire-effort mappings are unchanged by this policy.
+
+### Fixed
+
+- Child sessions no longer receive root delegation instructions even if their supplied tool surface includes `delegate`.
+- Artifact retrieval preserves the original tool's untrusted-content boundary, including metadata, instead of treating saved web or delegated output as trusted local text.
+- Runtime provider refresh and reload rollback retire only registrations owned by that registry. Independent API/OAuth registrations survive; repeated owner updates replace their previous layer without retaining an unbounded chain.
+- Routed turns restore the installed tool surface after provider-specific filtering, while preserving deliberate extension changes. Bounded file readers reject known non-regular paths before opening them.
+- Failed reload commits retain usable extension APIs and reactivate stopped observers. Failures after resource commit retain the new generation for repair instead of restoring disposed resources.
+- Persistent native Pi and peer commands retain the stable current-harness launcher across runtime snapshot cleanup. Restored collaboration jobs verify native identities before draining queued peer work; missing servers produce bounded control notices without replaying tasks.
+- Native Pi task admission waits for explicit post-input readiness. Completion fencing compares native agent revisions, not Herdr's unversioned snapshot placeholder; stopped-state and exact-turn identity checks remain mandatory.
+
 ## [0.97.27] - 2026-09-03
 
 ### Changed

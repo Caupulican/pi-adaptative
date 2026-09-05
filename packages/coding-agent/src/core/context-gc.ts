@@ -7,6 +7,7 @@ import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction"
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { normalizePath } from "../utils/paths.ts";
 import { quantizeRecentBoundary, resolveRecentBoundaryStride } from "./context/prefix-stability.ts";
+import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
 import { boundedTextPreview } from "./text-preview.ts";
 import { writeFileAtomicSync } from "./util/atomic-file.ts";
 
@@ -208,9 +209,7 @@ export const DEFAULT_CONTEXT_GC_SETTINGS: NormalizedContextGcSettings = {
 		"python",
 		"powershell",
 		"rg",
-		"grep",
-		"find",
-		"run_toolkit_script",
+		...PACKED_TOOL_OUTPUT_TOOLS,
 		"ls",
 		"skill_open",
 		"automata_graph_status",

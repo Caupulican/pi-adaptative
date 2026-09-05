@@ -100,7 +100,7 @@ async function* highContextUsageEvents(): AsyncIterable<ResponseStreamEvent> {
 	} as unknown as ResponseStreamEvent;
 }
 
-describe("GPT-5.6 integration", () => {
+describe("GPT-5.6 and GPT-6 integration", () => {
 	it("publishes family capabilities and the eligible GPT-5.6 Ultra reasoning alias", () => {
 		const alias = getModel("openai", "gpt-5.6");
 		const directSol = getModel("openai", "gpt-5.6-sol");
@@ -177,7 +177,8 @@ describe("GPT-5.6 integration", () => {
 		});
 		expect(astra.cost).toEqual(direct.cost);
 		expect(getSupportedThinkingLevels(astra)).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
-		expect(astra.thinkingLevelMap?.ultra).toBe("ultra");
+		// Codex's Ultra is an orchestration mode; Astra's catalog pins its request effort to xhigh.
+		expect(astra.thinkingLevelMap?.ultra).toBe("xhigh");
 	});
 
 	it("sends direct GPT-5.6 pro reasoning, cache policy, safety identifier, and Ultra as max", async () => {
@@ -273,34 +274,40 @@ describe("GPT-5.6 integration", () => {
 		expect(capturedPayload).not.toHaveProperty("prompt_cache_options");
 	});
 
-	it("turns GPT-5.6 caching off with explicit mode and no breakpoints when retention is none", async () => {
-		let capturedPayload: Record<string, unknown> | undefined;
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () => completedSse()),
-		);
+	it.each(["gpt-5.6-sol", "gpt-6-astra"] as const)(
+		"turns %s caching off with explicit mode and no breakpoints when retention is none",
+		async (modelId) => {
+			let capturedPayload: Record<string, unknown> | undefined;
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => completedSse()),
+			);
 
-		await streamOpenAIResponses(
-			getModel("openai", "gpt-5.6-sol"),
-			{ messages: [{ role: "user", content: "Summarize this.", timestamp: Date.now() }] },
-			{
-				apiKey: "test-key",
-				sessionId: "session-gpt56",
-				cacheRetention: "none",
-				onPayload: (payload) => {
-					capturedPayload = payload as Record<string, unknown>;
+			await streamOpenAIResponses(
+				getModel("openai", modelId),
+				{ messages: [{ role: "user", content: "Summarize this.", timestamp: Date.now() }] },
+				{
+					apiKey: "test-key",
+					sessionId: "session-gpt56",
+					cacheRetention: "none",
+					onPayload: (payload) => {
+						capturedPayload = payload as Record<string, unknown>;
+					},
 				},
-			},
-		).result();
+			).result();
 
-		// Explicit mode without a breakpoint neither reads nor writes the cache, so a one-shot request
-		// (compaction summary, branch summary) pays no 1.25× cache-write charge.
-		expect(capturedPayload).toMatchObject({ prompt_cache_options: { mode: "explicit" } });
-		expect(capturedPayload?.prompt_cache_key).toBeUndefined();
-		expect(capturedPayload).not.toHaveProperty("prompt_cache_retention");
-	});
+			// Explicit mode without a breakpoint neither reads nor writes the cache, so a one-shot request
+			// (compaction summary, branch summary) pays no 1.25× cache-write charge.
+			expect(capturedPayload).toMatchObject({ prompt_cache_options: { mode: "explicit" } });
+			expect(capturedPayload?.prompt_cache_key).toBeUndefined();
+			expect(capturedPayload).not.toHaveProperty("prompt_cache_retention");
+		},
+	);
 
-	it("uses the ChatGPT Responses Lite contract for Codex GPT-5.6", async () => {
+	it.each([
+		["gpt-5.6-sol", "max"],
+		["gpt-6-astra", "xhigh"],
+	] as const)("uses the ChatGPT Responses Lite contract for Codex %s", async (modelId, wireEffort) => {
 		let requestBody: Record<string, unknown> | undefined;
 		let requestHeaders: Headers | undefined;
 		vi.stubGlobal(
@@ -312,11 +319,11 @@ describe("GPT-5.6 integration", () => {
 			}),
 		);
 
-		const result = await streamOpenAICodexResponses(
-			getModel("openai-codex", "gpt-5.6-sol"),
-			contextWithImageAndTool(),
-			{ apiKey: mockCodexToken(), transport: "sse", reasoningEffort: "ultra" },
-		).result();
+		const result = await streamOpenAICodexResponses(getModel("openai-codex", modelId), contextWithImageAndTool(), {
+			apiKey: mockCodexToken(),
+			transport: "sse",
+			reasoningEffort: "ultra",
+		}).result();
 
 		expect(result.stopReason).toBe("stop");
 		expect(requestHeaders?.get("x-openai-internal-codex-responses-lite")).toBe("true");
@@ -324,7 +331,8 @@ describe("GPT-5.6 integration", () => {
 		expect(requestBody).not.toHaveProperty("tools");
 		expect(requestBody).toMatchObject({
 			parallel_tool_calls: false,
-			reasoning: { effort: "max", summary: "auto", context: "all_turns" },
+			model: modelId,
+			reasoning: { effort: wireEffort, summary: "auto", context: "all_turns" },
 		});
 		const input = requestBody?.input;
 		if (!Array.isArray(input)) throw new Error("Expected Responses Lite input array");
@@ -428,68 +436,76 @@ describe("GPT-5.6 integration", () => {
 		});
 	});
 
-	it("marks each GPT-5.6 Responses Lite WebSocket request with client metadata", async () => {
-		let sentBody: Record<string, unknown> | undefined;
-		class MockWebSocket {
-			readonly readyState = 1;
-			private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
+	it.each([
+		["gpt-5.6-terra", "max", "max"],
+		["gpt-6-astra", "ultra", "xhigh"],
+		["gpt-6-astra", "max", "max"],
+	] as const)(
+		"marks each %s %s Responses Lite WebSocket request with client metadata",
+		async (modelId, effort, wireEffort) => {
+			let sentBody: Record<string, unknown> | undefined;
+			class MockWebSocket {
+				readonly readyState = 1;
+				private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
 
-			constructor() {
-				queueMicrotask(() => this.dispatch("open", {}));
-			}
+				constructor() {
+					queueMicrotask(() => this.dispatch("open", {}));
+				}
 
-			addEventListener(type: string, listener: (event: unknown) => void): void {
-				const listeners = this.listeners.get(type) ?? new Set<(event: unknown) => void>();
-				listeners.add(listener);
-				this.listeners.set(type, listeners);
-			}
+				addEventListener(type: string, listener: (event: unknown) => void): void {
+					const listeners = this.listeners.get(type) ?? new Set<(event: unknown) => void>();
+					listeners.add(listener);
+					this.listeners.set(type, listeners);
+				}
 
-			removeEventListener(type: string, listener: (event: unknown) => void): void {
-				this.listeners.get(type)?.delete(listener);
-			}
+				removeEventListener(type: string, listener: (event: unknown) => void): void {
+					this.listeners.get(type)?.delete(listener);
+				}
 
-			send(data: string): void {
-				sentBody = JSON.parse(data) as Record<string, unknown>;
-				queueMicrotask(() => {
-					this.dispatch("message", {
-						data: JSON.stringify({
-							type: "response.completed",
-							response: {
-								id: "resp_ws_gpt56",
-								status: "completed",
-								usage: {
-									input_tokens: 1,
-									output_tokens: 1,
-									total_tokens: 2,
-									input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+				send(data: string): void {
+					sentBody = JSON.parse(data) as Record<string, unknown>;
+					queueMicrotask(() => {
+						this.dispatch("message", {
+							data: JSON.stringify({
+								type: "response.completed",
+								response: {
+									id: "resp_ws_gpt56",
+									status: "completed",
+									usage: {
+										input_tokens: 1,
+										output_tokens: 1,
+										total_tokens: 2,
+										input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+									},
 								},
-							},
-						}),
+							}),
+						});
 					});
-				});
+				}
+
+				close(): void {}
+
+				private dispatch(type: string, event: unknown): void {
+					for (const listener of this.listeners.get(type) ?? []) listener(event);
+				}
 			}
+			vi.stubGlobal("WebSocket", MockWebSocket);
 
-			close(): void {}
+			const result = await streamOpenAICodexResponses(
+				getModel("openai-codex", modelId),
+				{ messages: [{ role: "user", content: "Plan this.", timestamp: Date.now() }] },
+				{ apiKey: mockCodexToken(), transport: "websocket", reasoningEffort: effort },
+			).result();
 
-			private dispatch(type: string, event: unknown): void {
-				for (const listener of this.listeners.get(type) ?? []) listener(event);
-			}
-		}
-		vi.stubGlobal("WebSocket", MockWebSocket);
-
-		const result = await streamOpenAICodexResponses(
-			getModel("openai-codex", "gpt-5.6-terra"),
-			{ messages: [{ role: "user", content: "Plan this.", timestamp: Date.now() }] },
-			{ apiKey: mockCodexToken(), transport: "websocket", reasoningEffort: "max" },
-		).result();
-
-		expect(result.stopReason).toBe("stop");
-		expect(sentBody).toMatchObject({
-			type: "response.create",
-			client_metadata: { ws_request_header_x_openai_internal_codex_responses_lite: "true" },
-			reasoning: { effort: "max", context: "all_turns" },
-		});
-	});
+			expect(result.stopReason).toBe("stop");
+			expect(sentBody).toMatchObject({
+				type: "response.create",
+				client_metadata: { ws_request_header_x_openai_internal_codex_responses_lite: "true" },
+				model: modelId,
+				reasoning: { effort: wireEffort, context: "all_turns" },
+			});
+		},
+	);
 
 	it("accounts for cache writes and GPT-5.6 long-context pricing", async () => {
 		const model = getModel("openai", "gpt-5.6-sol");

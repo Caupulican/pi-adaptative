@@ -36,6 +36,7 @@ export { loginXai, refreshXaiToken, xaiOAuthProvider } from "./xai.ts";
 // Provider Registry
 // ============================================================================
 
+import { SourceRegistry } from "../source-registry.ts";
 import { anthropicOAuthProvider } from "./anthropic.ts";
 import { githubCopilotOAuthProvider } from "./github-copilot.ts";
 import { kimiCodingOAuthProvider } from "./kimi-coding.ts";
@@ -53,9 +54,8 @@ const BUILT_IN_OAUTH_PROVIDERS: OAuthProviderInterface[] = [
 	openRouterOAuthProvider,
 ];
 
-const oauthProviderRegistry = new Map<string, OAuthProviderInterface>(
-	BUILT_IN_OAUTH_PROVIDERS.map((provider) => [provider.id, provider]),
-);
+const oauthProviderRegistry = new SourceRegistry<OAuthProviderInterface>();
+for (const provider of BUILT_IN_OAUTH_PROVIDERS) oauthProviderRegistry.set(provider.id, provider);
 
 /**
  * Get an OAuth provider by ID
@@ -67,8 +67,13 @@ export function getOAuthProvider(id: OAuthProviderId): OAuthProviderInterface | 
 /**
  * Register a custom OAuth provider
  */
-export function registerOAuthProvider(provider: OAuthProviderInterface): void {
-	oauthProviderRegistry.set(provider.id, provider);
+export function registerOAuthProvider(provider: OAuthProviderInterface, sourceId?: string): void {
+	oauthProviderRegistry.set(provider.id, provider, sourceId);
+}
+
+/** Retire one runtime owner's overrides without disturbing external registrations. */
+export function unregisterOAuthProviders(sourceId: string): void {
+	oauthProviderRegistry.removeSource(sourceId);
 }
 
 /**
@@ -78,12 +83,11 @@ export function registerOAuthProvider(provider: OAuthProviderInterface): void {
  * Custom providers are removed completely.
  */
 export function unregisterOAuthProvider(id: string): void {
+	oauthProviderRegistry.delete(id);
 	const builtInProvider = BUILT_IN_OAUTH_PROVIDERS.find((provider) => provider.id === id);
 	if (builtInProvider) {
 		oauthProviderRegistry.set(id, builtInProvider);
-		return;
 	}
-	oauthProviderRegistry.delete(id);
 }
 
 /**
@@ -100,7 +104,7 @@ export function resetOAuthProviders(): void {
  * Get all registered OAuth providers
  */
 export function getOAuthProviders(): OAuthProviderInterface[] {
-	return Array.from(oauthProviderRegistry.values());
+	return oauthProviderRegistry.values();
 }
 
 /**

@@ -92,8 +92,9 @@ const goalSchema = Type.Object(
 		),
 		reason: Type.Optional(Type.String({ description: "Reason for block_requirement or block_goal." })),
 		dispatchTarget: Type.Optional(
-			Type.Union([Type.Literal("in_process"), Type.Literal("tmux")], {
-				description: "Legacy target. Native is default; use tmux when the task benefits from a persistent pane.",
+			Type.Union([Type.Literal("in_process"), Type.Literal("collaboration")], {
+				description:
+					"Native is default; use collaboration when the task benefits from a persistent interactive session.",
 			}),
 		),
 	},
@@ -142,12 +143,12 @@ export interface GoalToolDetails {
 	error?: string;
 	state?: GoalState;
 	/** Set on 'dispatch_worker' when a worker lane actually started; mirrors the requirement's
-	 * new `boundLaneId`. The in-process route by default, or a real persistent tmux lane when
-	 * `dispatchTarget:"tmux"` was selected and routed -- see {@link GoalToolDependencies.dispatchTmuxWorker}. */
+	 * new `boundLaneId`. The in-process route by default, or a real persistent collaboration lane when
+	 * `dispatchTarget:"collaboration"` was selected and routed -- see {@link GoalToolDependencies.dispatchCollaborationWorker}. */
 	dispatchedLaneId?: string;
 	/** Set on 'dispatch_worker' when no worker was dispatched: a wired dependency declined (e.g. worker
-	 * delegation disabled, already at capacity, or an honest tmux skip reason -- see
-	 * {@link GoalToolDependencies.dispatchTmuxWorker}), or the indeterminate-binding guard refused a
+	 * delegation disabled, already at capacity, or an honest collaboration skip reason -- see
+	 * {@link GoalToolDependencies.dispatchCollaborationWorker}), or the indeterminate-binding guard refused a
 	 * re-dispatch against an already-bound requirement (`requirement_already_bound`/`bound_lane_indeterminate`).
 	 * The binding is recorded (or, for a guard refusal, left exactly as it was) with no NEW laneId. */
 	dispatchSkipReason?: string;
@@ -183,7 +184,7 @@ export interface GoalToolDependencies {
 	getWorkerClaimSnapshots?: () => readonly WorkerClaim[];
 	/**
 	 * Tool-layer side effect for a 'dispatch_worker' action when `dispatchTarget` is 'in_process'
-	 * (the default) or when {@link dispatchTmuxWorker} is not wired: dispatches a real in-process
+	 * (the default) or when {@link dispatchCollaborationWorker} is not wired: dispatches a real in-process
 	 * worker lane for the given requirement and returns the resulting laneId to bind onto it. When
 	 * the dependency is present but the underlying delegation starter declines (disabled, already at
 	 * capacity, etc.), return `{ skipReason }` instead of a laneId -- a real, non-silent skip that
@@ -196,14 +197,14 @@ export interface GoalToolDependencies {
 		instructions: string;
 	}) => { laneId?: string; skipReason?: string } | undefined;
 	/**
-	 * Tool-layer side effect for a 'dispatch_worker' action when `input.dispatchTarget === "tmux"`:
-	 * dispatches a REAL persistent tmux worker via the tmux_agent_manager extension's `fire_task`
-	 * action (core structurally invokes the same tool call the model would make; no extension change,
-	 * no faked launch or laneId -- see `tmux-dispatch.ts`'s `dispatchTmuxWorker`). Selected ONLY when
-	 * BOTH `input.dispatchTarget === "tmux"` AND this dependency is present; otherwise the EXISTING
+	 * Tool-layer side effect for a 'dispatch_worker' action when `input.dispatchTarget === "collaboration"`:
+	 * dispatches a REAL persistent collaboration worker via the pi_collaboration extension's `fire_task`
+	 * action (core invokes the same tool call the model would make; no faked launch or laneId -- see
+	 * `collaboration-dispatch.ts`'s `dispatchCollaborationWorker`). Selected ONLY when
+	 * BOTH `input.dispatchTarget === "collaboration"` AND this dependency is present; otherwise the EXISTING
 	 * {@link startWorkerDelegation} in-process path runs, byte-identical to before this field existed.
-	 * The honest skip-reason vocabulary this can return: `tmux_extension_not_loaded`,
-	 * `tmux_dispatch_failed`, `tmux_dispatch_incomplete`, `lane_correlation_failed`,
+	 * The honest skip-reason vocabulary this can return: `collaboration_extension_not_loaded`,
+	 * `collaboration_dispatch_failed`, `collaboration_dispatch_incomplete`, `lane_correlation_failed`,
 	 * `worktree_create_failed` (worktree-sync is enabled but the lane-first `create_lane` call was
 	 * refused -- e.g. max lanes reached -- so no fire_task call was ever attempted),
 	 * `worker_capability_insufficient` (the model is sub-full class, has an unknown context window,
@@ -212,7 +213,7 @@ export interface GoalToolDependencies {
 	 * only, refused before any lane/pane side effect -- the dispatched child still refuses
 	 * authoritatively at its own startup regardless).
 	 */
-	dispatchTmuxWorker?: (args: {
+	dispatchCollaborationWorker?: (args: {
 		requirementId: string;
 		instructions: string;
 	}) => Promise<{ laneId?: string; skipReason?: string }>;
@@ -247,10 +248,6 @@ export interface GoalToolDependencies {
 	 * so a still-running background handoff cannot verify as done.
 	 */
 	resolveToolEvidence?: (uri: string) => boolean | { verified: boolean; toolCallId?: string };
-}
-
-function allowsNativeTmuxFallback(reason: string | undefined): boolean {
-	return reason === "tmux_unavailable" || reason === "tmux_extension_not_loaded";
 }
 
 /**
@@ -578,29 +575,30 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 				}
 			}
 			if (action.action === "dispatch_worker" && !dispatchGuardRefused) {
-				const tmuxRequested = input.dispatchTarget === "tmux";
-				let useTmux = tmuxRequested && deps.dispatchTmuxWorker !== undefined;
-				let tmuxFallbackReason: string | undefined;
+				const collaborationRequested = input.dispatchTarget === "collaboration";
+				let useCollaboration = collaborationRequested && deps.dispatchCollaborationWorker !== undefined;
+				let collaborationFallbackReason: string | undefined;
 				let dispatched: { laneId?: string; skipReason?: string } | undefined;
-				if (useTmux) {
-					dispatched = await deps.dispatchTmuxWorker?.({
+				if (useCollaboration) {
+					dispatched = await deps.dispatchCollaborationWorker?.({
 						requirementId: action.requirementId,
 						instructions: action.instructions,
 					});
 					if (
 						!dispatched?.laneId &&
-						allowsNativeTmuxFallback(dispatched?.skipReason) &&
+						(dispatched?.skipReason === "collaboration_unavailable" ||
+							dispatched?.skipReason === "collaboration_extension_not_loaded") &&
 						deps.startWorkerDelegation
 					) {
-						tmuxFallbackReason = dispatched?.skipReason;
-						useTmux = false;
+						collaborationFallbackReason = dispatched?.skipReason;
+						useCollaboration = false;
 						dispatched = deps.startWorkerDelegation({
 							requirementId: action.requirementId,
 							instructions: action.instructions,
 						});
 					}
 				} else {
-					if (tmuxRequested) tmuxFallbackReason = "tmux_extension_not_loaded";
+					if (collaborationRequested) collaborationFallbackReason = "collaboration_extension_not_loaded";
 					dispatched = deps.startWorkerDelegation?.({
 						requirementId: action.requirementId,
 						instructions: action.instructions,
@@ -608,15 +606,15 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 				}
 				action = { ...action, laneId: dispatched?.laneId };
 				if (dispatched?.laneId) {
-					dispatchNote = tmuxFallbackReason
-						? `Tmux route returned ${tmuxFallbackReason}; dispatched native fallback worker lane '${dispatched.laneId}' for requirement '${action.requirementId}'.`
-						: useTmux
-							? `Dispatched tmux worker lane '${dispatched.laneId}' for requirement '${action.requirementId}'.`
+					dispatchNote = collaborationFallbackReason
+						? `Collaboration route returned ${collaborationFallbackReason}; dispatched native fallback worker lane '${dispatched.laneId}' for requirement '${action.requirementId}'.`
+						: useCollaboration
+							? `Dispatched collaboration worker lane '${dispatched.laneId}' for requirement '${action.requirementId}'.`
 							: `Dispatched in-process worker lane '${dispatched.laneId}' for requirement '${action.requirementId}' (native default).`;
 				} else {
-					const wired = useTmux ? deps.dispatchTmuxWorker : deps.startWorkerDelegation;
+					const wired = useCollaboration ? deps.dispatchCollaborationWorker : deps.startWorkerDelegation;
 					dispatchSkipReason = dispatched?.skipReason ?? (wired ? "declined" : "dependency_unwired");
-					dispatchNote = `${tmuxFallbackReason ? `Tmux route returned ${tmuxFallbackReason}; ` : ""}No worker was dispatched (${dispatchSkipReason}); requirement '${action.requirementId}' is recorded but not bound to a lane.`;
+					dispatchNote = `${collaborationFallbackReason ? `Collaboration route returned ${collaborationFallbackReason}; ` : ""}No worker was dispatched (${dispatchSkipReason}); requirement '${action.requirementId}' is recorded but not bound to a lane.`;
 				}
 			}
 

@@ -2,7 +2,7 @@
 
 `core/process-matrix` is a durable, restart-surviving record of every `pi` process on this
 machine and how they're related: a **master** (an interactive/direct session, or the root of a
-launch chain) and its **workers** (sessions launched with a known parent -- today, tmux-dispatched
+launch chain) and its **workers** (sessions launched with a known parent, including persistent collaboration
 agents). It answers one question reliably even across a crash: *if my parent is gone, what do I
 do?* -- and a companion question on resume: *did I leave orphaned children behind, and what should
 happen to them?*
@@ -108,7 +108,7 @@ Cross-process, like `PI_WORKTREE_LANE`/`--worktree-lane`:
 | `PI_TASK_REF` | `--task-ref <id>` | Pins the goal/task identity used to fence automatic recovery across process generations. |
 | `PI_WORKER_ALLOWED_PATHS` | launch-only | JSON array of absolute paths compiled once into a worker session's structural filesystem envelope. `[]` preserves full-machine scope; malformed or relative entries fail startup. Process tools remain an explicit host-trust boundary. |
 
-`tmux_agent_manager`'s `fire_task` sets the parent pid/session and logical agent ID automatically on
+`pi_collaboration`'s `fire_task` sets the parent pid/session and logical agent ID automatically on
 every `pi`-provider child it launches and always sets the worker path channel from the immutable
 launch profile. Goal-bound launches also set `PI_TASK_REF` from `goalId`, the
 same way lane-first dispatch threads `--worktree-lane` -- see `launch-profile.ts`'s
@@ -141,7 +141,7 @@ generation-fenced lifecycle/TTL maintenance described above.
 ## Foreign-CLI limitation
 
 Only a `pi`-provider child self-registers and watches -- a non-`pi` agent launched via
-`tmux_agent_manager` (a foreign CLI) has no way to be handed `--parent-pid`/`PI_PARENT_PID` and
+`pi_collaboration` (a foreign CLI) does not implement Pi's `--parent-pid`/`PI_PARENT_PID` protocol and
 act on it. Its managed lane and event watcher still provide durable lifecycle/audit records, but its
 internal tool and thinking controls remain owned by that external CLI. Pi-only profile overrides are
 rejected rather than represented as enforced across a boundary the host cannot structurally control.
@@ -149,7 +149,7 @@ rejected rather than represented as enforced across a boundary the host cannot s
 ## What this does not do
 
 - It never kills a process. Every termination is the process's own cooperative self-exit.
-- It does not re-attach a tmux pane or re-dispatch a lane when a foreign worker is found. Relaunch
+- It does not re-attach a terminal pane or re-dispatch a lane when a foreign worker is found. Relaunch
   is reserved for a dead worker with a complete persisted Pi resume context and exact session+task
   identity. Mismatched and foreign identities remain report-only.
 - Correctness never depends on a heartbeat or watcher tick arriving. Each master activation runs

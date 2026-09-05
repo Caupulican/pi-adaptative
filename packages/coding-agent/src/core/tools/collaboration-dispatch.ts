@@ -1,0 +1,151 @@
+import { collaborationLaneId } from "../collaboration/job-store.ts";
+import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+import type { LaneWorkerRefusal } from "../model-capability.ts";
+
+/**
+ * Dependencies for {@link dispatchCollaborationWorker}, injected from the construction site
+ * (`RuntimeBuilder`) so the adapter itself stays a small, unit-testable, faux-tool-driven module
+ * with no direct dependency on `AgentSession`/`ExtensionRunner`/`BackgroundLaneController`.
+ */
+export interface CollaborationDispatchDeps {
+	/** Look up a registered tool by name -- the SAME seam the model's own tool calls resolve
+	 * through (`AgentSession.getToolDefinition` -> `RuntimeBuilder.getToolDefinition`). `undefined`
+	 * when the collaboration extension is not loaded in this session -- an honest, non-fatal skip, not a
+	 * crash and not a silent no-op. */
+	getToolDefinition: (name: string) => ToolDefinition | undefined;
+	/** Build a fresh, non-turn-bound `ExtensionContext` for this call
+	 * (`ExtensionRunner.createContext()`) -- safe to invoke from the goal/idle path, outside any
+	 * live model turn. */
+	createExtensionContext: () => ExtensionContext;
+	/**
+	 * Confirm that the collaboration extension's caller-chosen lane id (reconstructed below from the
+	 * `fire_task` result's `details.job`) was durably registered by the host. The returned id is
+	 * identity-preserving and is the same value `Requirement.boundLaneId` uses.
+	 */
+	resolveManagedLaneId: (callerLaneId: string) => string | undefined;
+	/** Active goal id, threaded onto the `fire_task` call so the dispatched lane is goal-tagged
+	 * (`ManagedLaneEvent.goalId`) -- `undefined` when no goal is active (dispatch still proceeds;
+	 * the resulting lane is simply untagged). */
+	getGoalId: () => string | undefined;
+	/**
+	 * Worktree-sync lane-first dispatch (opt-in -- wired ONLY inside `runtime-builder.ts`'s
+	 * `worktreeSync.enabled` block, via the engine's `createLane`): when present, `dispatchCollaborationWorker`
+	 * creates a fresh worktree-sync lane for this requirement BEFORE issuing any `fire_task` call, so
+	 * a creation refusal aborts cleanly before any collaboration/pane side effect ever runs -- never a
+	 * half-made lane, never a fabricated worktree. On success the dispatched agent's `cwd` is the new
+	 * lane worktree and it carries `worktreeLane` (threaded to the collaboration extension's launch profile --
+	 * see `launch-profile.ts`'s `buildLaunchProfileFlags`). Absent dep -> existing byte-identical
+	 * `params.agents` (no `cwd`/`worktreeLane`), exactly as before this field existed.
+	 */
+	createLaneWorktree?: (args: {
+		goalId?: string;
+		requirementId: string;
+	}) => Promise<{ laneKey: string; worktreePath: string } | { skipReason: string }>;
+	/**
+	 * Lane-worker capability eligibility (opt-in -- wired only from `runtime-builder.ts`, backed by
+	 * `AgentSession.getLaneWorkerRefusal`): checked FIRST, before `createLaneWorktree`, so an
+	 * ineligible model's dispatch is refused before any lane/pane side effect ever runs. This is the
+	 * parent's best-effort check only -- the dispatched child session refuses authoritatively at its
+	 * own startup (main.ts) regardless of what the parent decides here. Absent dep -> no capability
+	 * check runs, byte-identical to before this field existed.
+	 */
+	evaluateWorkerLaneRefusal?: () => LaneWorkerRefusal | undefined;
+}
+
+interface FireTaskResultDetails {
+	job?: {
+		id?: string;
+		agents?: ReadonlyArray<{ id?: string }>;
+	};
+}
+
+interface CollaborationGuardResultDetails {
+	guard?: { allowed?: boolean };
+}
+
+/**
+ * Structurally dispatch ONE persistent collaboration worker agent for a single goal requirement, by
+ * invoking the SAME `pi_collaboration` `fire_task` tool call the model itself would make. Core
+ * -- not model discretion -- decides WHEN this fires (the goal tool's `dispatchTarget:"collaboration"`
+ * routing gates the call). The extension derives an immutable child profile from the parent's
+ * admitted worker surface and reserves it durably before launch; no separate approval handshake is
+ * involved. Any launch failure is surfaced through the existing `dispatchSkipReason` contract.
+ */
+export async function dispatchCollaborationWorker(
+	deps: CollaborationDispatchDeps,
+	args: { requirementId: string; instructions: string },
+): Promise<{ laneId?: string; skipReason?: string }> {
+	// Capability check FIRST -- before the tool-definition lookup and before createLaneWorktree --
+	// so an ineligible model's dispatch is refused with zero lane/pane/tool side effect. The coarse
+	// "worker_capability_insufficient" skip reason is the stable contract code on the goal tool's
+	// response; the granular reason (class/window/tool-calling) lives only in the refusal object
+	// itself, surfaced by the caller for logging (see model-capability.ts's formatLaneWorkerRefusal).
+	if (deps.evaluateWorkerLaneRefusal?.() !== undefined) {
+		return { skipReason: "worker_capability_insufficient" };
+	}
+	const toolDef = deps.getToolDefinition("pi_collaboration");
+	if (!toolDef) return { skipReason: "collaboration_extension_not_loaded" };
+
+	const goalId = deps.getGoalId();
+	const ctx = deps.createExtensionContext();
+	const toolCallId = `goal-dispatch:${goalId ?? "?"}:${args.requirementId}`;
+	try {
+		const guardResult = await toolDef.execute(`${toolCallId}:guard`, { action: "guard" }, ctx.signal, undefined, ctx);
+		const guard = (guardResult.details as CollaborationGuardResultDetails | undefined)?.guard;
+		if (guardResult.isError || guard?.allowed !== true) return { skipReason: "collaboration_unavailable" };
+	} catch {
+		// A guard does not launch workers. Backend unavailability may safely select the native route.
+		return { skipReason: "collaboration_unavailable" };
+	}
+
+	// Availability first, then lane-first: when worktree-sync is wired, create the lane only after
+	// collaboration's pure guard succeeds and BEFORE any fire_task call so a
+	// creation refusal (max lanes, invalid key, git error, ...) aborts cleanly with no collaboration/pane side
+	// effect ever having run. The specific engine refusal code is deliberately collapsed onto the one
+	// stable `worktree_create_failed` skip reason -- same narrow `{laneId?, skipReason?}` contract
+	// every other skip path here already uses; the engine's own detail lives in its audit log, not in
+	// this narrow return.
+	let laneWorktree: { laneKey: string; worktreePath: string } | undefined;
+	if (deps.createLaneWorktree) {
+		const created = await deps.createLaneWorktree({ goalId, requirementId: args.requirementId });
+		if ("skipReason" in created) return { skipReason: "worktree_create_failed" };
+		laneWorktree = created;
+	}
+
+	// Single-agent 1:1 mapping: a bare fire_task with no `agents` defaults to a THREE-agent
+	// team (pi/agy/codex -- `DEFAULT_AGENT_PROVIDERS`), which would mint three lanes for one
+	// requirement. A goal-bound dispatch must map to exactly one lane, so `agents` is always
+	// passed explicitly here.
+	const params = {
+		action: "fire_task",
+		task: args.instructions,
+		goalId,
+		agents: [
+			laneWorktree
+				? {
+						provider: "pi",
+						name: "goal-worker",
+						cwd: laneWorktree.worktreePath,
+						worktreeLane: laneWorktree.laneKey,
+					}
+				: { provider: "pi", name: "goal-worker" },
+		],
+	};
+	let result: Awaited<ReturnType<ToolDefinition["execute"]>>;
+	try {
+		result = await toolDef.execute(toolCallId, params, ctx.signal, undefined, ctx);
+	} catch {
+		return { skipReason: "collaboration_dispatch_failed" };
+	}
+	if (result.isError) return { skipReason: "collaboration_dispatch_failed" };
+
+	// The extension and this adapter use the same identity owner. Confirm that exactly one
+	// matching dispatch reached the host's managed-lane ledger before binding the requirement.
+	const job = (result.details as FireTaskResultDetails | undefined)?.job;
+	const primary = job?.agents?.[0];
+	if (!job?.id || !primary?.id || job.agents?.length !== 1) return { skipReason: "collaboration_dispatch_incomplete" };
+
+	const callerLaneId = collaborationLaneId(job.id, primary.id);
+	const registeredLaneId = deps.resolveManagedLaneId(callerLaneId);
+	return registeredLaneId === callerLaneId ? { laneId: callerLaneId } : { skipReason: "lane_correlation_failed" };
+}

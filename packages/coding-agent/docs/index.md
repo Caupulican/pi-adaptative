@@ -47,7 +47,10 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 ## Customization
 
 - [Extensions](extensions.md) - TypeScript modules for tools, commands, events, and custom UI.
-- [tmux agent manager](tmux-agent-manager.md) - bundled event-driven external-provider teams with parent wake handoffs.
+- [Persistent provider collaboration](pi-collaboration.md) - interactive native-provider teams with terminal/question handoffs.
+- [Runtime updates](runtime-updates.md) - autonomous hot reload, verified restart and bounded recovery.
+- [WebFetch](webfetch.md) - bounded public-web retrieval and HTML conversion.
+- [Subscription image generation](image-generation.md) - ChatGPT image generation and edits with durable local artifacts.
 - [Task worker presets](worker-profiles.md) - optional immutable session presets for root-managed leaf workers with host-owned execution grants.
 - [Skills](skills.md) - Agent Skills for reusable on-demand capabilities.
 - [Resource profiles & library](resources.md) - curate extensions, skills, and agents per project or situation; share a catalog; install and back up.

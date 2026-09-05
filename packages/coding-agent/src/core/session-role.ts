@@ -65,6 +65,8 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	"delegate",
 	"improvement_loop",
 	"model_fitness",
-	"tmux_agent_manager",
+	"pi_collaboration",
 	"context_scout",
+	"runtime_update",
+	"image_generate",
 ]);

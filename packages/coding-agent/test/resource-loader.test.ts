@@ -580,11 +580,11 @@ Content`,
 			await loader.reload();
 
 			const discoverablePaths = await loader.getDiscoverableExtensionPaths();
-			expect(
-				discoverablePaths.some((candidate) => candidate.includes(join("extensions", "tmux-agent-manager"))),
-			).toBe(true);
+			expect(discoverablePaths.some((candidate) => candidate.includes(join("extensions", "pi-collaboration")))).toBe(
+				true,
+			);
 			const loaded = loader.getExtensions().extensions;
-			expect(loaded.some((candidate) => candidate.path.includes(join("extensions", "tmux-agent-manager")))).toBe(
+			expect(loaded.some((candidate) => candidate.path.includes(join("extensions", "pi-collaboration")))).toBe(
 				false,
 			);
 			const tps = loaded.find((candidate) => candidate.path.includes(join("extensions", "tps")));
@@ -651,12 +651,12 @@ Content`,
 		});
 
 		it(
-			"should load the bundled tmux agent manager through an active resource profile",
+			"should load the bundled collaboration coordinator through an active resource profile",
 			async () => {
 				const settingsManager = SettingsManager.inMemory({
-					activeResourceProfile: "portable-tmux",
+					activeResourceProfile: "portable-collaboration",
 					resourceProfiles: {
-						"portable-tmux": { extensions: { allow: ["tmux-agent-manager"] } },
+						"portable-collaboration": { extensions: { allow: ["pi-collaboration"] } },
 					},
 				});
 				const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
@@ -664,9 +664,9 @@ Content`,
 
 				const extension = loader
 					.getExtensions()
-					.extensions.find((candidate) => candidate.path.includes(join("extensions", "tmux-agent-manager")));
+					.extensions.find((candidate) => candidate.path.includes(join("extensions", "pi-collaboration")));
 				expect(extension, JSON.stringify(loader.getExtensions().errors)).toBeDefined();
-				expect(extension?.tools.has("tmux_agent_manager")).toBe(true);
+				expect(extension?.tools.has("pi_collaboration")).toBe(true);
 				expect(loader.getExtensions().errors).toEqual([]);
 			},
 			loadedSuiteTimeout(60_000),
@@ -677,16 +677,16 @@ Content`,
 			async () => {
 				let disposed = false;
 				const settingsManager = SettingsManager.inMemory({
-					activeResourceProfile: "portable-tmux",
+					activeResourceProfile: "portable-collaboration",
 					resourceProfiles: {
-						"portable-tmux": { extensions: { allow: ["tmux-agent-manager"] } },
+						"portable-collaboration": { extensions: { allow: ["pi-collaboration"] } },
 					},
 				});
 				const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
 				await loader.reload();
 				const extension = loader
 					.getExtensions()
-					.extensions.find((candidate) => candidate.path.includes(join("extensions", "tmux-agent-manager")));
+					.extensions.find((candidate) => candidate.path.includes(join("extensions", "pi-collaboration")));
 				expect(extension).toBeDefined();
 				extension?.disposers.push(() => {
 					disposed = true;

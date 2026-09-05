@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { PI_PARENT_PID_ENV } from "../src/core/process-identity.ts";
-import { getSessionRole, isWorkerSession, setTerminalSessionMode } from "../src/core/session-role.ts";
+import {
+	getSessionRole,
+	isWorkerSession,
+	setTerminalSessionMode,
+	WORKER_FORBIDDEN_TOOLS,
+} from "../src/core/session-role.ts";
+import { envelopeHasToolCapability } from "../src/core/tool-capability-policy.ts";
 import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/runtime.ts";
 
 /**
@@ -9,6 +15,13 @@ import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/runtime.ts";
  * (and this test) never need to.
  */
 describe("getSessionRole / isWorkerSession", () => {
+	it("keeps persistent native launchers root-owned and requires both launch and delegation authority", () => {
+		expect(WORKER_FORBIDDEN_TOOLS.has("pi_collaboration")).toBe(true);
+		expect(envelopeHasToolCapability(["process.exec"], "pi_collaboration")).toBe(false);
+		expect(envelopeHasToolCapability(["workflow.delegate"], "pi_collaboration")).toBe(false);
+		expect(envelopeHasToolCapability(["process.exec", "workflow.delegate"], "pi_collaboration")).toBe(true);
+		expect(WORKER_FORBIDDEN_TOOLS.has("bash")).toBe(false);
+	});
 	it("a bound worktree-sync lane yields worker", () => {
 		const env = { [PI_WORKTREE_LANE_ENV]: "adhoc-1" };
 		expect(getSessionRole(env)).toBe("worker");

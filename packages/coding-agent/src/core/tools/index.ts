@@ -182,9 +182,18 @@ import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "
 import { createSkillAuditTool, createSkillAuditToolDefinition, type SkillAuditToolOptions } from "./skill-audit.ts";
 import { createSkillifyTool, createSkillifyToolDefinition, type SkillifyToolOptions } from "./skillify.ts";
 import { createToolDefinitionWithRuntime, type ToolDef, type ToolName } from "./tool-definition-factory.ts";
+import { createWebFetchTool, createWebFetchToolDefinition, type WebFetchOptions } from "./webfetch.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
+export { createImageGenerateTool, createImageGenerateToolDefinition } from "./image-generate.ts";
 export { allToolNames, type ToolDef, type ToolName } from "./tool-definition-factory.ts";
+export {
+	createWebFetchTool,
+	createWebFetchToolDefinition,
+	type WebFetchDetails,
+	type WebFetchInput,
+	type WebFetchOptions,
+} from "./webfetch.ts";
 
 export type Tool = AgentTool<any>;
 
@@ -201,6 +210,7 @@ export interface ToolsOptions {
 	skillify?: SkillifyToolOptions;
 	extensionify?: ExtensionifyToolOptions;
 	artifact_retrieve?: ArtifactRetrieveToolOptions;
+	webfetch?: WebFetchOptions;
 }
 
 function withSharedFileMutationIntents(options?: ToolsOptions): ToolsOptions {
@@ -253,6 +263,8 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createExtensionifyTool(cwd, options?.extensionify);
 		case "artifact_retrieve":
 			return createArtifactRetrieveTool(cwd, options?.artifact_retrieve);
+		case "webfetch":
+			return createWebFetchTool(cwd, options?.webfetch);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -303,6 +315,7 @@ export function createAllToolDefinitions(
 		skillify: createSkillifyToolDefinition(cwd, options?.skillify),
 		extensionify: createExtensionifyToolDefinition(cwd, options?.extensionify),
 		artifact_retrieve: createArtifactRetrieveToolDefinition(cwd, options?.artifact_retrieve),
+		webfetch: createWebFetchToolDefinition(cwd, options?.webfetch),
 	};
 }
 
@@ -351,5 +364,6 @@ export function createAllTools(
 		skillify: createSkillifyTool(cwd, options?.skillify),
 		extensionify: createExtensionifyTool(cwd, options?.extensionify),
 		artifact_retrieve: createArtifactRetrieveTool(cwd, options?.artifact_retrieve),
+		webfetch: createWebFetchTool(cwd, options?.webfetch),
 	};
 }

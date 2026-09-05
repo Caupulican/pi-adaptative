@@ -12,10 +12,9 @@ const bundledVirtualModules = readFileSync(
 	new URL("../src/core/extensions/bundled-virtual-modules.ts", import.meta.url),
 	"utf8",
 );
-const bundledTmuxRuntimeSources = [
-	"../src/bundled-resources/extensions/tmux-agent-manager/index.ts",
-	"../src/bundled-resources/extensions/tmux-agent-manager/launch-profile.ts",
-].map((path) => ({ path, source: readFileSync(new URL(path, import.meta.url), "utf8") }));
+const bundledCollaborationRuntimeSources = ["../src/bundled-resources/extensions/pi-collaboration/index.ts"].map(
+	(path) => ({ path, source: readFileSync(new URL(path, import.meta.url), "utf8") }),
+);
 const agentPackage = JSON.parse(readFileSync(new URL("../../agent/package.json", import.meta.url), "utf8")) as {
 	exports: Record<string, unknown>;
 };
@@ -121,7 +120,7 @@ describe("extension loader dependency boundary", () => {
 	});
 
 	it("keeps copied bundled extensions on the embedded package runtime boundary", () => {
-		const violations = bundledTmuxRuntimeSources.flatMap(({ path, source }) =>
+		const violations = bundledCollaborationRuntimeSources.flatMap(({ path, source }) =>
 			(source.match(/from[ \t]+"\.\.\/\.\.\/\.\.\/core\/[^"]+"/g) ?? []).map((statement) => ({
 				path,
 				statement,

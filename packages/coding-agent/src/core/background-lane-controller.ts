@@ -114,6 +114,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _workerNotifications: WorkerNotificationCoordinator | undefined;
 	/** Active event waits consume matching terminal edges before a redundant parent wake is admitted. */
 	private readonly _workerWaitConsumers = new Map<string, number>();
+	private readonly _continuationListeners = new Set<() => void>();
 	private readonly deps: BackgroundLaneControllerDeps;
 
 	/** Emit a warning without ever throwing — used from disposal-adjacent persistence where a
@@ -133,7 +134,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	constructor(deps: BackgroundLaneControllerDeps) {
 		this.deps = deps;
 		this._laneModels = new LaneModelResolver(deps);
-		this._research = new ResearchLaneController(deps, this._laneTracker, this._laneModels);
+		this._research = new ResearchLaneController(
+			{ ...deps, onContinuationActivity: () => this._notifyContinuationActivity() },
+			this._laneTracker,
+			this._laneModels,
+		);
 		this._fitness = new ModelFitnessController(deps, this._laneModels);
 		this._goalAutoContinue = new GoalAutoContinueController({
 			isDisposed: deps.isDisposed,
@@ -146,6 +151,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			waitForForegroundIdle: deps.waitForForegroundIdle,
 			markGoalToolUnavailable: deps.markGoalToolUnavailable,
 			emit: deps.emit,
+			onContinuationActivity: () => this._notifyContinuationActivity(),
 		});
 	}
 
@@ -414,6 +420,23 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	hasPendingIdleContinuation(): boolean {
 		return this._goalAutoContinue.hasPendingContinuation() || this._research.hasPendingContinuation();
+	}
+
+	subscribeIdleContinuationActivity(listener: () => void): () => void {
+		this._continuationListeners.add(listener);
+		return () => {
+			this._continuationListeners.delete(listener);
+		};
+	}
+
+	private _notifyContinuationActivity(): void {
+		for (const listener of this._continuationListeners) {
+			try {
+				listener();
+			} catch {
+				this._safeWarn("Idle continuation activity observer failed.");
+			}
+		}
 	}
 
 	scheduleResearchLaneFromIdle(): void {

@@ -288,11 +288,17 @@ export class SystemPromptBuilder {
 	}
 
 	private _buildDelegationPrompt(delegateActive: boolean): string | undefined {
-		if (!delegateActive || !this.deps.getSettingsManager().getWorkerDelegationSettings().enabled) {
+		if (
+			this.deps.isChildSession() ||
+			!delegateActive ||
+			!this.deps.getSettingsManager().getWorkerDelegationSettings().enabled
+		) {
 			return undefined;
 		}
 		return `PI DELEGATION
 - ${DELEGATION_DECISION_RULE}
+- For useful delegation, start or reuse a suitable idle worker before doing its task yourself. Give scope, expected evidence, and write ownership; do not duplicate running or queued work.
+- Respect explicit user restrictions and granted authority; do not ask for redundant permission. Never bypass admission or change settings to force a worker. If admission fails, use the reported reason to choose safe local progress or report a genuine blocker.
 - Continue parent work while workers run; wait only at a true dependency, then inspect status and handoffs event-driven.
 - Parent owns integration, verification, security and approval decisions, and writes unless authority explicitly grants worker writes.
 - Treat worker output as evidence, reconcile conflicts, and finish only after success criteria.

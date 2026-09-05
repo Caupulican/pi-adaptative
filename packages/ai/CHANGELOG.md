@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- Registered the native OpenAI Codex Images adapter for ChatGPT OAuth generation and editing, with fixed endpoint routing, bounded content validation, cancellation, and no API-key fallback or automatic request replay.
+
+### Fixed
+
+- Codex GPT-6 Astra `ultra` now sends `xhigh`, matching Codex's `multi_agent_reasoning_effort` override. Ultra is a local orchestration mode, not a literal wire effort; this corrects the 0.97.27 entry. Explicit `max` remains `max`, and GPT-5.6 Sol/Terra Ultra remains mapped to `max`. SSE and WebSocket regressions cover the distinction; selecting Ultra does not itself reproduce Codex's automatic delegation policy.
+- Codex authentication validates header-bound credentials before constructing headers, preventing malformed credential values from appearing in construction errors.
+
 ## [0.97.27] - 2026-09-03
 
 ### Added

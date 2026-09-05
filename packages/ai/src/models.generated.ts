@@ -9194,7 +9194,7 @@ export const MODELS = {
 			baseUrl: "https://chatgpt.com/backend-api",
 			reasoning: true,
 			defaultThinkingLevel: "low",
-			thinkingLevelMap: {"xhigh":"xhigh","max":"max","ultra":"ultra","minimal":null,"off":null},
+			thinkingLevelMap: {"xhigh":"xhigh","max":"max","ultra":"xhigh","minimal":null,"off":null},
 			openaiResponsesLite: true,
 			input: ["text", "image"],
 			cost: {

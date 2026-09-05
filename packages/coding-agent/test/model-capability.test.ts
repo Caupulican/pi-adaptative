@@ -32,7 +32,7 @@ const DEFAULT_ACTIVE = [
 	"skillify",
 	"model_fitness",
 	"context_scout",
-	"tmux_agent_manager",
+	"pi_collaboration",
 ];
 
 describe("deriveModelCapabilityProfile", () => {
@@ -113,6 +113,7 @@ describe("filterToolNamesForCapability", () => {
 		}
 		expect(filtered).toContain("read");
 		expect(filtered).toContain("edit");
+		expect(filtered).not.toContain("pi_collaboration");
 	});
 
 	it("monotonicity guard: run_toolkit_script and task_steps are NOT blocked for lean", () => {

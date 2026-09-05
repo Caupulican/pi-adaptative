@@ -10,6 +10,7 @@ import {
 } from "../context/artifact-retrieval.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { classifyToolTrust, wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -117,16 +118,14 @@ export function createArtifactRetrieveToolDefinition(
 				};
 			}
 
-			if (result.mode === "metadata") {
-				return {
-					content: [{ type: "text", text: formatMetadataText(result.ref) }],
-					details: { found: true, mode: "metadata" },
-				};
-			}
-
-			let text = result.slice;
-			if (result.truncation.truncated) {
+			let text = result.mode === "metadata" ? formatMetadataText(result.ref) : result.slice;
+			if (result.mode !== "metadata" && result.truncation.truncated) {
 				text += `\n\n[Showing ${result.mode} ${result.truncation.outputLines} of ${result.truncation.totalLines} lines. Full artifact: ${formatSize(result.ref.byteLength)}. Retrieve again with a different mode/maxLines for another slice.]`;
+			}
+			// Storage does not promote external evidence into trusted instructions. Use the same
+			// classifier as direct tool results; unknown provenance is not a trust grant.
+			if (!result.ref.toolName || classifyToolTrust(result.ref.toolName) === "untrusted") {
+				text = wrapUntrustedText(text, `artifact:${result.ref.toolName ?? "unknown"}`);
 			}
 			return {
 				content: [{ type: "text", text }],

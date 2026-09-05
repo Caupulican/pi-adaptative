@@ -2,11 +2,10 @@
  * Model registry - manages built-in and custom models, provides API key resolution.
  */
 
-import { registerApiProvider } from "@caupulican/pi-ai/api-registry";
+import { registerApiProvider, unregisterApiProviders } from "@caupulican/pi-ai/api-registry";
 import { getEnvAuthHeaders } from "@caupulican/pi-ai/env-api-keys";
 import { getModels, getProviders } from "@caupulican/pi-ai/models";
-import { type OAuthProviderInterface, registerOAuthProvider, resetOAuthProviders } from "@caupulican/pi-ai/oauth";
-import { resetApiProviders } from "@caupulican/pi-ai/register-builtins";
+import { type OAuthProviderInterface, registerOAuthProvider, unregisterOAuthProviders } from "@caupulican/pi-ai/oauth";
 import type {
 	AnthropicMessagesCompat,
 	Api,
@@ -409,11 +408,14 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 
 /** Clear the config value command cache. Exported for testing. */
 export const clearApiKeyCache = clearConfigValueCache;
+let nextModelRegistryId = 1;
 
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
 export class ModelRegistry {
+	private readonly integrationSourcePrefix = `model-registry:${nextModelRegistryId++}:`;
+	private readonly integrationSources = new Set<string>();
 	private models: Model<Api>[] = [];
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
 	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
@@ -445,9 +447,7 @@ export class ModelRegistry {
 		this.modelRequestHeaders.clear();
 		this.loadError = undefined;
 
-		// Ensure dynamic API/OAuth registrations are rebuilt from current provider state.
-		resetApiProviders();
-		resetOAuthProviders();
+		this.clearOwnedIntegrations();
 
 		this.loadModels();
 
@@ -977,8 +977,7 @@ export class ModelRegistry {
 		);
 		this.loadError = snapshot.loadError;
 
-		resetApiProviders();
-		resetOAuthProviders();
+		this.clearOwnedIntegrations();
 		for (const [providerName, config] of this.registeredProviders) {
 			this.registerProviderIntegrations(providerName, config);
 		}
@@ -1049,18 +1048,30 @@ export class ModelRegistry {
 		}
 	}
 
+	private clearOwnedIntegrations(): void {
+		for (const source of this.integrationSources) {
+			unregisterApiProviders(source);
+			unregisterOAuthProviders(source);
+		}
+		this.integrationSources.clear();
+	}
+
 	private registerProviderIntegrations(providerName: string, config: ProviderConfigInput): void {
+		const source = `${this.integrationSourcePrefix}${providerName}`;
+		if (config.oauth || config.streamSimple) this.integrationSources.add(source);
 		// Register OAuth provider if provided
 		if (config.oauth) {
+			unregisterOAuthProviders(source);
 			// Ensure the OAuth provider ID matches the provider name
 			const oauthProvider: OAuthProviderInterface = {
 				...config.oauth,
 				id: providerName,
 			};
-			registerOAuthProvider(oauthProvider);
+			registerOAuthProvider(oauthProvider, source);
 		}
 
 		if (config.streamSimple) {
+			unregisterApiProviders(source);
 			const streamSimple = config.streamSimple;
 			registerApiProvider(
 				{
@@ -1068,7 +1079,7 @@ export class ModelRegistry {
 					stream: (model, context, options) => streamSimple(model, context, options as SimpleStreamOptions),
 					streamSimple,
 				},
-				`provider:${providerName}`,
+				source,
 			);
 		}
 	}

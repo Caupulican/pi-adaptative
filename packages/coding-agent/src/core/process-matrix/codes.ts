@@ -8,7 +8,7 @@
  * The matrix tracks two roles:
  * - `master`: the top-level interactive/direct session (or the root of a launch chain).
  * - `worker`: a session launched with a known parent (`PI_PARENT_PID`/`--parent-pid`), e.g. a
- *   tmux-dispatched agent. A worker knows its parent's pid and winds down gracefully -- never
+ *   collaboration-dispatched agent. A worker knows its parent's pid and winds down gracefully -- never
  *   silently -- when that parent disappears.
  */
 

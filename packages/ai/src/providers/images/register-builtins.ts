@@ -1,5 +1,6 @@
 import { registerImagesApiProvider } from "../../images-api-registry.ts";
 import type { AssistantImages, ImagesContext, ImagesFunction, ImagesModel, ImagesOptions } from "../../types.ts";
+import { generateImagesOpenAICodex } from "./openai-codex.ts";
 import type { generateImagesOpenRouter as generateImagesOpenRouterFunction } from "./openrouter.ts";
 
 interface OpenRouterImagesProviderModule {
@@ -41,6 +42,7 @@ export const generateImagesOpenRouter: ImagesFunction<"openrouter-images", Image
 };
 
 export function registerBuiltInImagesApiProviders(): void {
+	registerImagesApiProvider({ api: "openai-codex-images", generateImages: generateImagesOpenAICodex });
 	registerImagesApiProvider({
 		api: "openrouter-images",
 		generateImages: generateImagesOpenRouter,

@@ -20,10 +20,14 @@ export function sameFileVersion(left: Stats, right: Stats): boolean {
 	);
 }
 
-function assertOpenedPathVersion(pathVersion: Stats, openedVersion: Stats, label: string): void {
-	if (!pathVersion.isFile() || pathVersion.isSymbolicLink()) {
+function assertRegularFile(version: Stats, label: string): void {
+	if (!version.isFile() || version.isSymbolicLink()) {
 		throw new Error(`${label} is not a regular file.`);
 	}
+}
+
+function assertOpenedPathVersion(pathVersion: Stats, openedVersion: Stats, label: string): void {
+	assertRegularFile(openedVersion, label);
 	if (!sameFileVersion(pathVersion, openedVersion)) {
 		throw new Error(`${label} changed while it was being opened.`);
 	}
@@ -47,6 +51,8 @@ function withStableFileDescriptorSync<T>(
 	read: (fileDescriptor: number, openedVersion: Stats) => T,
 ): T {
 	const pathBefore = lstatSync(filePath);
+	// Opening a FIFO can wait forever before fstat is reached. Reject non-files before acquisition.
+	assertRegularFile(pathBefore, label);
 	const fileDescriptor = openSync(filePath, "r");
 	try {
 		const openedBefore = fstatSync(fileDescriptor);
@@ -179,6 +185,7 @@ export function readBoundedDirectoryNamesSync(directoryPath: string, maxEntries:
 export async function readBoundedTextFile(filePath: string, maxBytes: number, label: string): Promise<string> {
 	validateByteLimit(maxBytes);
 	const pathBefore = await lstatAsync(filePath);
+	assertRegularFile(pathBefore, label);
 	const fileHandle = await openAsync(filePath, "r");
 	try {
 		const before = await fileHandle.stat();

@@ -65,6 +65,7 @@ import {
 import { latestUserPromptText, textContentPrefix } from "./context/message-text.ts";
 import { PathAliasRuntime } from "./context/path-alias-session.ts";
 import type { PathAliasTable } from "./context/path-alias-table.ts";
+import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
 import { applyContextGc, type ContextGcReport, type ContextGcResult } from "./context-gc.ts";
 import { runIsolatedTextCompletion } from "./isolated-text-completion.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
@@ -879,8 +880,7 @@ export class ContextPipeline {
 
 		let releasedAny = false;
 		for (const record of report.records) {
-			if (record.toolName !== "grep" && record.toolName !== "find" && record.toolName !== "run_toolkit_script")
-				continue;
+			if (!PACKED_TOOL_OUTPUT_TOOLS.has(record.toolName)) continue;
 			const artifactId = extractArtifactId(messages[record.messageIndex]);
 			if (!artifactId) continue;
 			if (store.removeReference(artifactId, record.toolCallId)) releasedAny = true;

@@ -18,4 +18,4 @@ Steps:
 6. Treat this explicit `/extensionify` request as authorization to write and activate the safe, scoped user-level extension described by the user. Do not ask for duplicate confirmation. Ask only if the extension would add credentials, arbitrary executable paths, package installation, network exposure, destructive behavior, settings changes, publishing, or broader authority than the request grants.
 7. Write `~/.pi/agent/extensions/<name>/index.ts`, load it when the current runtime supports safe loading, and report the path, smoke-test evidence, and registered tools/commands. Suggest `/reload` when needed; do not leave the task waiting for an approval already conveyed by the command invocation.
 
-This runs in the main session. Delegate only a bounded independent review when it materially improves confidence; delegation is never required for progress.
+This runs in the main session. Follow the session's PI DELEGATION policy for independent work; the parent owns integration and activation.

@@ -3,6 +3,7 @@ import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/nod
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ContextArtifactRef } from "./context/context-item.ts";
+import { publishHumanInputActivity } from "./human-input-activity.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 import { getActiveSessionBranchEntries, type SessionBranchEntrySource } from "./session-snapshot.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
@@ -539,20 +540,23 @@ export async function resolveHumanInput(options: ResolveHumanInputOptions): Prom
 	if (options.signal?.aborted) {
 		result = { answers: [], cancelled: true, reason: "interrupted", imageContents: [] };
 	} else {
-		result = persistPresentationImages(
-			normalizePresentationResult(
-				options.request,
-				await options.present(
-					{
-						requestId: options.request.requestId,
-						questions: options.request.questions,
-						acceptsImages: options.request.acceptsImages,
-					},
-					{ signal: options.signal },
-				),
-			),
-			options.getImageStore?.(),
+		const presentation = options.present(
+			{
+				requestId: options.request.requestId,
+				questions: options.request.questions,
+				acceptsImages: options.request.acceptsImages,
+			},
+			{ signal: options.signal },
 		);
+		publishHumanInputActivity(options.sessionManager, { phase: "waiting", request: options.request });
+		try {
+			result = persistPresentationImages(
+				normalizePresentationResult(options.request, await presentation),
+				options.getImageStore?.(),
+			);
+		} finally {
+			publishHumanInputActivity(options.sessionManager, { phase: "settled", request: options.request });
+		}
 	}
 	const answers = result.answers.map((answer) => externalizeAnswer(options.request, answer, options.artifactStore));
 	const snapshot: HumanInputSnapshot = {

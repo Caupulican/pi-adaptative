@@ -55,6 +55,7 @@ import type { BackgroundToolTaskController } from "./background-tool-task-contro
 import { BashExecutionController } from "./bash-execution-controller.ts";
 import type { BashResult } from "./bash-executor.ts";
 import { type CapabilityTierPolicy, capabilityTierPolicy, resolveCapabilityTier } from "./capability-tier.ts";
+import type { NativePiActivityPort } from "./collaboration/native-pi-activity.ts";
 import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
 import { CompactionSupport } from "./compaction-support.ts";
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
@@ -72,6 +73,7 @@ import type { MemoryProvider as ContextMemoryProvider } from "./context/memory-p
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import type { PathAliasTable } from "./context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "./context/path-alias-tool-wrap.ts";
+import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
 import type { ContextGcReport, ContextGcResult } from "./context-gc.ts";
 import { ContextPipeline } from "./context-pipeline.ts";
 import type { SessionCostSummary } from "./cost/cost-summary.ts";
@@ -168,6 +170,7 @@ import {
 import { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { RuntimeBuilder } from "./runtime-builder.ts";
+import { RuntimeUpdateController } from "./runtime-update-controller.ts";
 import type { CredentialManager } from "./secrets/credential-manager.ts";
 import { SessionAnalytics } from "./session-analytics.ts";
 import { SessionImageStore } from "./session-image-store.ts";
@@ -392,6 +395,7 @@ export class AgentSession {
 	 * owns the base/wrapped tool definitions, the live tool registry, and the per-tool prompt
 	 * snippet/guideline maps. The reload snapshot spans host/agent state reached through its deps. */
 	private readonly _runtimeBuilder: RuntimeBuilder;
+	readonly runtimeUpdates: RuntimeUpdateController;
 
 	/** Extension⇄session binding boundary (see extension-binding-controller.ts): `bindExtensions()`,
 	 * extension resource discovery, and `bindExtensionCore`'s translation of session identity into
@@ -792,6 +796,24 @@ export class AgentSession {
 			maxOutputTokens: () =>
 				Math.min(this.settingsManager.getMaxOutputTokens(), this.getCapabilityTierPolicy().maxOutputTokens),
 			shouldStopGoalExecutionAfterTurn: () => this._goals.hasExecutionLeaseCrossedBudgetLimit(),
+			shouldStopForRuntimeUpdate: () => this.runtimeUpdates.shouldStopAfterTurn(),
+		});
+		this.runtimeUpdates = new RuntimeUpdateController({
+			sessionManager: this.sessionManager,
+			getMessages: () => this.agent.state.messages,
+			isRoot: () => !this._isChildSession,
+			onStopped: () => this._goals.markTerminalToolFailureBlocked("runtime_update"),
+			resume: (prepare) => this._durableCustomMessageTurns.continue(prepare, this._goals.getOwnershipGoalId()),
+			reload: async (path) => {
+				await (path ? this._runtimeBuilder.reloadExtension(path) : this._runtimeBuilder.reload());
+				this._notifyExtensionsChanged();
+			},
+			appendNotice: (content) =>
+				this._sendCustomMessage(
+					{ customType: "runtime-update-notice", content, display: true },
+					undefined,
+					this._foregroundPromptLease,
+				),
 		});
 		this._toolRecoveryLogger = new ToolRecoveryLogger({
 			enabled: toolRepairSettings.logging,
@@ -808,6 +830,7 @@ export class AgentSession {
 			emit: (event) => this._emit(event),
 			checkCompaction: (message) => this._checkCompaction(message),
 			onSuccessfulAssistant: () => this._compaction.resetOverflowRecovery(),
+			settleRuntimeUpdate: (signal) => this.runtimeUpdates.settle(signal),
 			isCompacting: () => this._compaction.isCompacting,
 			prepareRun: async () => {
 				this.agent.state.systemPrompt = this._systemPromptBuilder.enforceSystemPromptBudget(this.systemPrompt);
@@ -951,6 +974,7 @@ export class AgentSession {
 				this._baseSystemPrompt = prompt;
 			},
 			getCustomTools: () => this._customTools,
+			getRuntimeUpdateTool: () => (this._isChildSession ? undefined : this.runtimeUpdates.createTool()),
 			getBaseToolsOverride: () => this._baseToolsOverride,
 			getRequestedActiveToolNames: () => this._requestedActiveToolNames,
 			setRequestedActiveToolNames: (names) => {
@@ -1218,7 +1242,10 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._providerRequestRuntime.install();
-		this._installAgentTurnRefresh();
+		this._providerRequestRuntime.installTurnRefresh(
+			() => this._createAgentContextSnapshot(),
+			() => this._terminalHandoffs.flushProviderBoundary(),
+		);
 
 		this._runtimeBuilder.buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -1366,31 +1393,6 @@ export class AgentSession {
 		const restored = this._skillCurator.restoreSkill(name);
 		if (restored) this._resourceLoader.refreshSkills?.();
 		return restored;
-	}
-
-	private _installAgentTurnRefresh(): void {
-		const previousPrepareNextTurn = this.agent.prepareNextTurn?.bind(this.agent);
-		const previousBeforeSteeringPoll = this.agent.beforeSteeringPoll?.bind(this.agent);
-		this.agent.beforeSteeringPoll = async (signal) => {
-			await previousBeforeSteeringPoll?.(signal);
-			// This is later than async turn preparation and the graceful-stop check, making it the
-			// authoritative last-moment inbox refresh before the queue is drained.
-			this._terminalHandoffs.flushProviderBoundary();
-		};
-		this.agent.prepareNextTurn = async (signal) => {
-			const previous = previousPrepareNextTurn ? await previousPrepareNextTurn(signal) : undefined;
-			const snapshot = this._createAgentContextSnapshot();
-			return {
-				...previous,
-				context: {
-					...(previous?.context ?? snapshot),
-					systemPrompt: snapshot.systemPrompt,
-					tools: snapshot.tools,
-				},
-				model: previous?.model ?? this.agent.state.model,
-				thinkingLevel: previous?.thinkingLevel ?? this.agent.state.thinkingLevel,
-			};
-		};
 	}
 
 	private _createAgentContextSnapshot(): AgentContext {
@@ -1794,6 +1796,7 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "agent_end") this.runtimeUpdates.noteRunEnd(this.agent.signal);
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -2229,25 +2232,19 @@ export class AgentSession {
 	getToolDefinition(name: string): ToolDefinition | undefined {
 		return this._runtimeBuilder.getToolDefinition(name);
 	}
+	get nativeActivity(): NativePiActivityPort {
+		return {
+			foreground: this._foregroundRecovery,
+			isSettled: () => isSessionSettled(this, this._backgroundLanes.hasPendingIdleContinuation()),
+			subscribePendingContinuation: (listener) => this._backgroundLanes.subscribeIdleContinuationActivity(listener),
+		};
+	}
 
 	/**
-	 * Set active tools by name.
-	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
-	 * Also rebuilds the system prompt to reflect the new tool set.
-	 * Changes take effect on the next agent turn.
-	 *
-	 * artifact_retrieve is auto-activated as a companion whenever an artifact-producing tool
-	 * (grep, find, run_toolkit_script, or ask_question) ends up in the resulting active set and artifact_retrieve
-	 * is registered (i.e. not excluded/
-	 * blocked/outside an allowlist -- the registry itself is built with that same filter,
-	 * so registry presence already tracks "allowed"). This is enforced here, not just in
-	 * the settings/profile refresh flow, because this method is a public, extension-
-	 * exposed activation path (`setActiveTools`) on its own: without this, grep/find could
-	 * end up active while still being handed an artifact store (gated on "allowed" in
-	 * `_buildRuntime`) with no active tool able to resolve the resulting
-	 * "Full output: artifact tool-output:<id>" handle.
-	 * Other tools, including tool_task, activate only when explicitly requested (or present in the
-	 * shared default request) and after surviving model-capability filtering.
+	 * Activate registered tools through model/provider availability and rebuild the prompt.
+	 * Retain the unfiltered request so model changes can restore it. Artifact-producing tools
+	 * activate their registered artifact_retrieve companion through this same public boundary;
+	 * other tools require the explicit/default request. Registry presence already encodes grants.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
 		// Model capability: small-window models get a reduced tool surface derived from the model's
@@ -2258,7 +2255,7 @@ export class AgentSession {
 		if (requested.includes("skill")) {
 			requested.push("skillify", "skill_audit");
 		}
-		const capabilityFiltered = filterToolNamesForCapability(requested, this.getModelCapabilityProfile());
+		const capabilityFiltered = filterToolNamesForCapability(requested, this.getModelCapabilityProfile(), this.model);
 
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
@@ -2276,9 +2273,7 @@ export class AgentSession {
 			addIfRegistered(name);
 		}
 		if (
-			validToolNames.includes("grep") ||
-			validToolNames.includes("find") ||
-			validToolNames.includes("run_toolkit_script") ||
+			validToolNames.some((name) => PACKED_TOOL_OUTPUT_TOOLS.has(name)) ||
 			validToolNames.includes("ask_question")
 		) {
 			addIfRegistered("artifact_retrieve");
@@ -3135,6 +3130,7 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
+		this.runtimeUpdates.cancel();
 		this.abortRetry();
 		this.agent.abort();
 		await this.agent.waitForIdle();

@@ -470,6 +470,24 @@ export class AuthStorage {
 		});
 	}
 
+	/** Stored OAuth only: never executes key commands or resolves runtime/env/fallback API keys. */
+	async getOAuthApiKey(providerId: string): Promise<string | undefined> {
+		const cred = this.data[providerId];
+		const provider = getOAuthProvider(providerId);
+		if (cred?.type !== "oauth" || !provider || this.loadError) return undefined;
+		if (Date.now() < cred.expires) return provider.getApiKey(cred);
+		try {
+			return (await this.refreshOAuthTokenWithLock(providerId))?.apiKey;
+		} catch (error) {
+			this.recordError(error);
+			this.reload();
+			const updated = this.data[providerId];
+			return !this.loadError && updated?.type === "oauth" && Date.now() < updated.expires
+				? provider.getApiKey(updated)
+				: undefined;
+		}
+	}
+
 	/**
 	 * Get API key for a provider.
 	 * Priority:
@@ -493,41 +511,7 @@ export class AuthStorage {
 		}
 
 		if (cred?.type === "oauth") {
-			const provider = getOAuthProvider(providerId);
-			if (!provider) {
-				// Unknown OAuth provider, can't get API key
-				return undefined;
-			}
-
-			// Check if token needs refresh
-			const needsRefresh = Date.now() >= cred.expires;
-
-			if (needsRefresh) {
-				// Use locked refresh to prevent race conditions
-				try {
-					const result = await this.refreshOAuthTokenWithLock(providerId);
-					if (result) {
-						return result.apiKey;
-					}
-				} catch (error) {
-					this.recordError(error);
-					// Refresh failed - re-read file to check if another instance succeeded
-					this.reload();
-					const updatedCred = this.data[providerId];
-
-					if (updatedCred?.type === "oauth" && Date.now() < updatedCred.expires) {
-						// Another instance refreshed successfully, use those credentials
-						return provider.getApiKey(updatedCred);
-					}
-
-					// Refresh truly failed - return undefined so model discovery skips this provider
-					// User can /login to re-authenticate (credentials preserved for retry)
-					return undefined;
-				}
-			} else {
-				// Token not expired, use current access token
-				return provider.getApiKey(cred);
-			}
+			return this.getOAuthApiKey(providerId);
 		}
 
 		// Fall back to environment variable

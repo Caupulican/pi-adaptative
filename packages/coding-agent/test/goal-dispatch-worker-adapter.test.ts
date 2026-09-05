@@ -157,19 +157,19 @@ describe("goal action 'dispatch_worker' (live adapter)", () => {
 });
 
 /**
- * `dispatchTarget:"tmux"` routing: an explicit persistent-worker opt-in that
- * defaults OFF. Selected ONLY when both `input.dispatchTarget === "tmux"` AND `dispatchTmuxWorker`
+ * `dispatchTarget:"collaboration"` routing: an explicit persistent-worker opt-in that
+ * defaults OFF. Selected ONLY when both `input.dispatchTarget === "collaboration"` AND `dispatchCollaborationWorker`
  * is wired; every other combination falls back to the EXISTING `startWorkerDelegation` in-process
  * path, byte-identical to before this field existed.
  */
 describe("goal action 'dispatch_worker' (dispatchTarget routing)", () => {
-	it("dispatchTarget:'tmux' with the dep wired routes to dispatchTmuxWorker, never startWorkerDelegation", async () => {
-		let tmuxCalls = 0;
+	it("dispatchTarget:'collaboration' with the dep wired routes to dispatchCollaborationWorker, never startWorkerDelegation", async () => {
+		let collaborationCalls = 0;
 		let inProcessCalls = 0;
 		const { run, getState } = createProducer({
-			dispatchTmuxWorker: async ({ requirementId }) => {
-				tmuxCalls++;
-				return { laneId: `tmux-worker-for-${requirementId}` };
+			dispatchCollaborationWorker: async ({ requirementId }) => {
+				collaborationCalls++;
+				return { laneId: `collaboration-worker-for-${requirementId}` };
 			},
 			startWorkerDelegation: () => {
 				inProcessCalls++;
@@ -183,21 +183,21 @@ describe("goal action 'dispatch_worker' (dispatchTarget routing)", () => {
 			action: "dispatch_worker",
 			requirementId: "r1",
 			instructions: "go do it",
-			dispatchTarget: "tmux",
+			dispatchTarget: "collaboration",
 		});
 
-		expect(tmuxCalls).toBe(1);
+		expect(collaborationCalls).toBe(1);
 		expect(inProcessCalls).toBe(0);
-		expect(result.details.dispatchedLaneId).toBe("tmux-worker-for-r1");
-		expect(getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBe("tmux-worker-for-r1");
-		expect(firstText(result.content)).toContain("Dispatched tmux worker lane 'tmux-worker-for-r1'");
+		expect(result.details.dispatchedLaneId).toBe("collaboration-worker-for-r1");
+		expect(getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBe("collaboration-worker-for-r1");
+		expect(firstText(result.content)).toContain("Dispatched collaboration worker lane 'collaboration-worker-for-r1'");
 	});
 
-	it("dispatchTarget omitted stays on the in-process path, byte-identical, even when dispatchTmuxWorker is wired", async () => {
-		let tmuxCalls = 0;
+	it("dispatchTarget omitted stays on the in-process path, byte-identical, even when dispatchCollaborationWorker is wired", async () => {
+		let collaborationCalls = 0;
 		const { run, getState } = createProducer({
-			dispatchTmuxWorker: async () => {
-				tmuxCalls++;
+			dispatchCollaborationWorker: async () => {
+				collaborationCalls++;
 				return { laneId: "should-not-be-used" };
 			},
 			startWorkerDelegation: ({ requirementId }) => ({ laneId: `lane-for-${requirementId}` }),
@@ -207,14 +207,14 @@ describe("goal action 'dispatch_worker' (dispatchTarget routing)", () => {
 		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
 		const result = await run({ action: "dispatch_worker", requirementId: "r1", instructions: "go do it" });
 
-		expect(tmuxCalls).toBe(0);
+		expect(collaborationCalls).toBe(0);
 		expect(result.details.dispatchedLaneId).toBe("lane-for-r1");
 		expect(getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBe("lane-for-r1");
 		expect(firstText(result.content)).toContain("Dispatched in-process worker lane 'lane-for-r1'");
 		expect(firstText(result.content)).toContain("native default");
 	});
 
-	it("dispatchTarget:'tmux' with the dep UNWIRED falls back to the in-process path (honest, not a silent tmux fake)", async () => {
+	it("dispatchTarget:'collaboration' with the dep UNWIRED falls back to the in-process path (honest, not a silent collaboration fake)", async () => {
 		let inProcessCalls = 0;
 		const { run } = createProducer({
 			startWorkerDelegation: ({ requirementId }) => {
@@ -229,41 +229,50 @@ describe("goal action 'dispatch_worker' (dispatchTarget routing)", () => {
 			action: "dispatch_worker",
 			requirementId: "r1",
 			instructions: "go do it",
-			dispatchTarget: "tmux",
+			dispatchTarget: "collaboration",
 		});
 
 		expect(inProcessCalls).toBe(1);
 		expect(result.details.dispatchedLaneId).toBe("lane-for-r1");
 	});
 
-	it("surfaces the tmux adapter's honest launch failures through dispatchSkipReason, with no laneId bound", async () => {
-		const { run, getState } = createProducer({
-			dispatchTmuxWorker: async () => ({ skipReason: "tmux_dispatch_failed" }),
-		});
-
-		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
-		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
-		const result = await run({
-			action: "dispatch_worker",
-			requirementId: "r1",
-			instructions: "go do it",
-			dispatchTarget: "tmux",
-		});
-
-		expect(result.details.applied).toBe(true);
-		expect(result.details.dispatchedLaneId).toBeUndefined();
-		expect(result.details.dispatchSkipReason).toBe("tmux_dispatch_failed");
-		expect(getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBeUndefined();
-		expect(firstText(result.content)).toContain("tmux_dispatch_failed");
-	});
-
-	it.each(["tmux_extension_not_loaded", "tmux_unavailable"])(
-		"falls back to the native worker when the explicit tmux route returns %s",
-		async (tmuxSkipReason) => {
+	it.each(["collaboration_dispatch_failed", "collaboration_dispatch_incomplete", "lane_correlation_failed"])(
+		"does not dispatch a fallback after ambiguous collaboration outcome %s",
+		async (skipReason) => {
 			let nativeCalls = 0;
-			const dispatchTmuxWorker = async () => ({ skipReason: tmuxSkipReason });
+			const { run, getState } = createProducer({
+				dispatchCollaborationWorker: async () => ({ skipReason }),
+				startWorkerDelegation: () => {
+					nativeCalls++;
+					return { laneId: "duplicate-must-not-launch" };
+				},
+			});
+
+			await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
+			await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
+			const result = await run({
+				action: "dispatch_worker",
+				requirementId: "r1",
+				instructions: "go do it",
+				dispatchTarget: "collaboration",
+			});
+
+			expect(result.details.applied).toBe(true);
+			expect(result.details.dispatchedLaneId).toBeUndefined();
+			expect(result.details.dispatchSkipReason).toBe(skipReason);
+			expect(getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBeUndefined();
+			expect(firstText(result.content)).toContain(skipReason);
+			expect(nativeCalls).toBe(0);
+		},
+	);
+
+	it.each(["collaboration_extension_not_loaded", "collaboration_unavailable"])(
+		"falls back to the native worker when the explicit collaboration route returns %s",
+		async (collaborationSkipReason) => {
+			let nativeCalls = 0;
+			const dispatchCollaborationWorker = async () => ({ skipReason: collaborationSkipReason });
 			const producer = createProducer({
-				dispatchTmuxWorker,
+				dispatchCollaborationWorker,
 				startWorkerDelegation: ({ requirementId }) => {
 					nativeCalls++;
 					return { laneId: `native-worker-for-${requirementId}` };
@@ -276,14 +285,14 @@ describe("goal action 'dispatch_worker' (dispatchTarget routing)", () => {
 				action: "dispatch_worker",
 				requirementId: "r1",
 				instructions: "go do it",
-				dispatchTarget: "tmux",
+				dispatchTarget: "collaboration",
 			});
 
 			expect(nativeCalls).toBe(1);
 			expect(result.details.dispatchSkipReason).toBeUndefined();
 			expect(result.details.dispatchedLaneId).toBe("native-worker-for-r1");
 			expect(producer.getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBe("native-worker-for-r1");
-			expect(firstText(result.content)).toContain(tmuxSkipReason);
+			expect(firstText(result.content)).toContain(collaborationSkipReason);
 			expect(firstText(result.content)).toContain("native fallback");
 		},
 	);

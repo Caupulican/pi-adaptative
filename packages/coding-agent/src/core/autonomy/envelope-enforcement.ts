@@ -13,7 +13,7 @@ import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
  */
 
 const PATH_ARGUMENT_KEYS = ["path", "file_path", "filePath", "cwd", "directory", "dir", "target"] as const;
-const PATH_LIST_ARGUMENT_KEYS = ["paths", "files"] as const;
+const PATH_LIST_ARGUMENT_KEYS = ["paths", "files", "referenced_image_paths"] as const;
 
 export function extractPathArguments(params: unknown): string[] {
 	if (!params || typeof params !== "object") return [];
@@ -27,7 +27,7 @@ export function extractPathArguments(params: unknown): string[] {
 		const value = record[key];
 		if (Array.isArray(value)) {
 			for (const entry of value) {
-				if (typeof entry === "string" && entry.trim()) found.push(entry.trim());
+				if (typeof entry === "string" && entry.trim()) found.push(entry);
 			}
 		}
 	}

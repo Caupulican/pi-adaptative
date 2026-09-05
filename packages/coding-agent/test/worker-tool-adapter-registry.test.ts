@@ -75,15 +75,18 @@ describe("worker tool adapter registry", () => {
 		);
 	});
 
-	it("permanently excludes root controls from broker registration", () => {
-		expect(() =>
-			new WorkerToolAdapterRegistry().register({
-				name: "delegate",
-				description: "must remain root-owned",
-				create: () => tool("delegate"),
-			}),
-		).toThrow("worker_tool_adapter_forbidden:delegate");
-	});
+	it.each(["delegate", "pi_collaboration"])(
+		"permanently excludes root control %s from broker registration",
+		(name) => {
+			expect(() =>
+				new WorkerToolAdapterRegistry().register({
+					name,
+					description: "must remain root-owned",
+					create: () => tool(name),
+				}),
+			).toThrow(`worker_tool_adapter_forbidden:${name}`);
+		},
+	);
 
 	it("adds registered adapters to the same lane UAC and keeps them out when not registered", async () => {
 		const registry = new WorkerToolAdapterRegistry().register({

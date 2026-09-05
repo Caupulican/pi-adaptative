@@ -136,6 +136,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"python",
 					"read",
 					"run_toolkit_script",
+					"runtime_update",
 					"secret_store",
 					"skill",
 					"skill_audit",
@@ -144,6 +145,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"tool_task",
 					"update_goal",
 					"write",
+					"webfetch",
 				].sort(),
 			);
 			// Ceilings are bloat guards. The aggregate ceiling is intentionally recalibrated to 4,500

@@ -1,0 +1,14 @@
+{
+  "name": "builder-validator",
+  "description": "Interactive implementation loop: Agy builder, Claude reviewer, Agy validator, Pi coordinator. Good default for scoped code work.",
+  "deadlineSeconds": 1500,
+  "agents": [
+    { "provider": "agy", "name": "builder", "task": "Own implementation edits and focused regression tests. Request peer review and validation; fix confirmed findings." },
+    { "provider": "claude", "name": "code-reviewer", "task": "Independently review correctness and failure handling. Do not edit files; send reproducible findings to the builder." },
+    { "provider": "agy", "name": "validator", "task": "Run focused deterministic validation and adversarial checks. Do not edit production files; send exact failing evidence to the builder." },
+    { "provider": "pi", "name": "coordinator", "task": "Check task coverage, dependency ordering and completion evidence. Coordinate peers without editing implementation files." }
+  ],
+  "notes": [
+    "Use for implementation/QA batches; never claim complete until result files and validation evidence are inspected."
+  ]
+}

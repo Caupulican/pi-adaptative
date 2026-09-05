@@ -12,10 +12,15 @@ import { applyTerminalSettings, ProcessTerminal, setKeybindings, TUI } from "@ca
 import chalk from "chalk";
 import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
 import { handleAuthCommand } from "./cli/auth-check.ts";
+import { runCollaborationPeer } from "./cli/collaboration-peer.ts";
+import { runCollaborationWorker } from "./cli/collaboration-worker.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { readPipedInput } from "./cli/piped-stdin.ts";
+import { initializeRuntimeChildChannel } from "./cli/runtime-channel.ts";
+import { applyRuntimeRestartArgs, bindInteractiveRuntimeRestart } from "./cli/runtime-restart.ts";
+import { superviseInteractiveRuntime } from "./cli/runtime-supervision.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { ENV_SESSION_DIR, expandTildePath, getAgentDir, VERSION } from "./config.ts";
 import {
@@ -30,6 +35,7 @@ import {
 } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
+import { SessionNativePiActivityRuntime } from "./core/collaboration/native-pi-runtime.ts";
 import { formatDoctorReport, runDoctor, runUpdatePreflight } from "./core/doctor.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
@@ -57,6 +63,7 @@ import {
 	PI_TASK_REF_ENV,
 	type ResumeWorkerLaunchOutcome,
 } from "./core/process-matrix/runtime.ts";
+import { getSelfLaunchTarget } from "./core/process-matrix/self-launch-target.ts";
 import { isReloadSessionProcessAlive } from "./core/reload-blockers.ts";
 import { parseResourceProfileInput } from "./core/resource-profile-blocks.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
@@ -78,6 +85,7 @@ import { getSessionRole, setTerminalSessionMode } from "./core/session-role.ts";
 import { SessionSupervisionRuntime } from "./core/session-supervision-runtime.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
+import { startCliPowerShellWarmStart } from "./core/tools/early-powershell-session.ts";
 import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
 import { getBoundWorktreeLaneKey, PI_WORKTREE_LANE_ENV } from "./core/worktree-sync/runtime.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
@@ -86,14 +94,6 @@ import { terminalCapabilityOverridesFromSettings } from "./modes/interactive/ter
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { getProcessWorkRun, getWorkRoot, PI_WORK_ROOT_ENV } from "./utils/work-directory.ts";
-
-function getSelfLaunchTarget(): { executable: string; argsPrefix: string[] } | undefined {
-	const executableName = process.execPath.split(/[\\/]/).at(-1)?.toLowerCase();
-	const isScriptRuntime = ["node", "node.exe", "bun", "bun.exe"].includes(executableName ?? "");
-	if (!isScriptRuntime) return { executable: process.execPath, argsPrefix: [] };
-	const cliPath = process.argv[1];
-	return cliPath && !cliPath.startsWith("-") ? { executable: process.execPath, argsPrefix: [cliPath] } : undefined;
-}
 
 async function launchResumableWorker(
 	payload: ResumablePayload,
@@ -655,6 +655,15 @@ export interface MainOptions {
 }
 
 export async function main(args: string[], options?: MainOptions) {
+	if (args[0] === "--collaboration-peer") {
+		console.log(JSON.stringify(await runCollaborationPeer(args.slice(1))));
+		return;
+	}
+	if (args[0] === "--collaboration-worker") {
+		await runCollaborationWorker(args.slice(1));
+		return;
+	}
+	const runtimeChannel = initializeRuntimeChildChannel();
 	resetTimings();
 	const workAgentDir = getAgentDir();
 	process.env[PI_WORK_ROOT_ENV] = getWorkRoot(workAgentDir);
@@ -697,6 +706,8 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	const parsed = parseArgs(args);
+	const runtimeRestart = runtimeChannel?.handoff;
+	if (runtimeRestart) applyRuntimeRestartArgs(parsed, runtimeRestart);
 	if (parsed.diagnostics.length > 0) {
 		for (const d of parsed.diagnostics) {
 			const color = d.type === "error" ? chalk.red : chalk.yellow;
@@ -730,7 +741,20 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY);
 	let hasHumanUI = appMode === "interactive" && getSessionRole() === "main";
+	if (
+		hasHumanUI &&
+		!parsed.help &&
+		parsed.listModels === undefined &&
+		!parsed.export &&
+		!options?.extensionFactories?.length &&
+		!isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK)
+	) {
+		if (await superviseInteractiveRuntime(args)) return;
+	}
 	const shouldTakeOverStdout = appMode !== "interactive";
+	if (!parsed.help && parsed.listModels === undefined && !parsed.export && !parsed.version) {
+		startCliPowerShellWarmStart({ cwd: process.cwd(), env: process.env });
+	}
 	if (shouldTakeOverStdout) {
 		takeOverStdout();
 	}
@@ -1036,6 +1060,10 @@ export async function main(args: string[], options?: MainOptions) {
 	});
 	time("createAgentSessionRuntime");
 	const { services, session, modelFallbackMessage } = runtime;
+	if (runtimeRestart && session.sessionId !== runtimeRestart.sessionId) {
+		await runtime.dispose();
+		throw new Error("Core restart resolved a different session; automatic continuation refused.");
+	}
 	const { settingsManager, modelRegistry, resourceLoader } = services;
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 	if (parsed.resume || parsed.continue || parsed.session !== undefined) {
@@ -1049,7 +1077,7 @@ export async function main(args: string[], options?: MainOptions) {
 	// window, an advertised native tool-call path, no graded /toolprobe demotion -- see
 	// model-capability.ts's evaluateLaneWorkerRefusal). This is the authoritative check regardless of
 	// how the lane binding arrived (--worktree-lane, PI_WORKTREE_LANE, or a launcher-set env): the
-	// goal->tmux dispatch's own pre-check (tools/tmux-dispatch.ts) is the parent's best-effort guess
+	// goal collaboration dispatch's own pre-check (tools/collaboration-dispatch.ts) is the parent's best-effort guess
 	// only and can race a model swap between dispatch and child startup. No silent unbinding -- an
 	// ineligible model exits before the lane gate or epoch watcher ever start.
 	const boundWorktreeLaneKey = getBoundWorktreeLaneKey();
@@ -1153,6 +1181,13 @@ export async function main(args: string[], options?: MainOptions) {
 		const { runRpcMode } = await import("./modes/rpc/rpc-mode.ts");
 		await runRpcMode(runtime);
 	} else if (appMode === "interactive") {
+		const nativePiRuntime = new SessionNativePiActivityRuntime({
+			deferInitialSettlement: true,
+			onError: (error) =>
+				console.error(chalk.yellow(`Collaboration activity signal failed: ${String(error).slice(0, 512)}`)),
+		});
+		runtime.registerSessionResource(nativePiRuntime);
+		await nativePiRuntime.start(session);
 		const { InteractiveMode } = await import("./modes/interactive/interactive-mode.ts");
 		const interactiveMode = new InteractiveMode(runtime, {
 			migratedProviders,
@@ -1161,8 +1196,12 @@ export async function main(args: string[], options?: MainOptions) {
 			initialImages,
 			initialMessages: parsed.messages,
 			verbose: parsed.verbose,
-			hasHumanAudience: hasHumanUI,
+			hasHumanAudience: hasHumanUI || nativePiRuntime.active,
 		});
+		if (nativePiRuntime.active) {
+			await interactiveMode.init();
+			await nativePiRuntime.activate();
+		}
 		if (startupBenchmark) {
 			await interactiveMode.init();
 			time("interactiveMode.init");
@@ -1180,6 +1219,27 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 
 		printTimings();
+		if (!options?.extensionFactories?.length) {
+			await bindInteractiveRuntimeRestart(runtime, () => {
+				interactiveMode.stop();
+				stopThemeWatcher();
+			});
+		}
+		if (runtimeRestart) {
+			await interactiveMode.init();
+			await session.runtimeUpdates.resumeRestart(
+				runtimeRestart.id,
+				runtimeRestart.disposition === "rollback"
+					? (runtimeRestart.error ?? "Candidate failed before verification.")
+					: undefined,
+			);
+		} else if (
+			session.runtimeUpdates.getState() &&
+			!["complete", "stopped"].includes(session.runtimeUpdates.getState()!.status)
+		) {
+			await interactiveMode.init();
+			await session.runtimeUpdates.resumeInterrupted();
+		}
 		await interactiveMode.run();
 	} else {
 		printTimings();

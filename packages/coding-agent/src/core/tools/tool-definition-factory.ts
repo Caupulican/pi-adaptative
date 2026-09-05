@@ -12,6 +12,7 @@ import { createPythonToolDefinition, type PythonToolOptions } from "./python.ts"
 import { createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import { createSkillAuditToolDefinition, type SkillAuditToolOptions } from "./skill-audit.ts";
 import { createSkillifyToolDefinition, type SkillifyToolOptions } from "./skillify.ts";
+import { createWebFetchToolDefinition, type WebFetchOptions } from "./webfetch.ts";
 import { createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
 // ToolDefinition callbacks are contravariant in their schema-derived parameter type. A registry
@@ -29,7 +30,8 @@ export type ToolName =
 	| "skill_audit"
 	| "skillify"
 	| "extensionify"
-	| "artifact_retrieve";
+	| "artifact_retrieve"
+	| "webfetch";
 
 export const allToolNames: ReadonlySet<ToolName> = new Set([
 	"read",
@@ -44,6 +46,7 @@ export const allToolNames: ReadonlySet<ToolName> = new Set([
 	"skillify",
 	"extensionify",
 	"artifact_retrieve",
+	"webfetch",
 ]);
 
 export interface ToolDefinitionOptions {
@@ -59,6 +62,7 @@ export interface ToolDefinitionOptions {
 	skillify?: SkillifyToolOptions;
 	extensionify: ExtensionifyRuntimeOptions;
 	artifact_retrieve?: ArtifactRetrieveToolOptions;
+	webfetch?: WebFetchOptions;
 }
 
 export function createToolDefinitionWithRuntime(
@@ -91,6 +95,8 @@ export function createToolDefinitionWithRuntime(
 			return createExtensionifyToolDefinitionWithRuntime(cwd, options.extensionify);
 		case "artifact_retrieve":
 			return createArtifactRetrieveToolDefinition(cwd, options.artifact_retrieve);
+		case "webfetch":
+			return createWebFetchToolDefinition(cwd, options.webfetch);
 	}
 }
 

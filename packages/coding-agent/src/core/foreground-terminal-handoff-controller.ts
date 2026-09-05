@@ -11,6 +11,8 @@ import { workerTerminalOutputArtifact } from "./delegation/worker-terminal-outpu
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import type { ArtifactContract, WorkerResultContract } from "./orchestration/contracts.ts";
+import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
+import { utf8PrefixByBytes } from "./util/bounded-value.ts";
 
 export type BackgroundActivitySummaryKind = "agent" | "task";
 export type BackgroundActivitySummaryStatus = "success" | "attention" | "failed" | "canceled";
@@ -120,6 +122,8 @@ interface PendingTerminalDelivery {
 }
 
 const MAX_DELIVERED_TERMINAL_IDENTITIES = 512;
+const ATTENTION_CLAIM_STATUSES: ReadonlySet<LaneTerminalStatus> = new Set(["blocked", "partial"]);
+const MAX_ATTENTION_CLAIM_SUMMARY_BYTES = 16 * 1024;
 
 export function buildForegroundWorkerTerminalHandoffContent(
 	records: readonly {
@@ -153,7 +157,12 @@ export function buildForegroundWorkerTerminalHandoffContent(
 			}
 			if (record.claim?.summary) {
 				lines.push(`  Claim Status: ${record.claim.status || record.status}`);
-				lines.push(`  Claim Summary: ${sanitize(record.claim.summary)}`);
+				const summary = ATTENTION_CLAIM_STATUSES.has(record.status)
+					? utf8PrefixByBytes(record.claim.summary, MAX_ATTENTION_CLAIM_SUMMARY_BYTES)
+					: sanitize(record.claim.summary);
+				lines.push(
+					`  Claim Summary (untrusted worker evidence):\n${wrapUntrustedText(summary, `worker-claim:${record.laneId}`)}`,
+				);
 				if (record.claim.changedFiles && record.claim.changedFiles.length > 0) {
 					lines.push(`  Changed Files: ${record.claim.changedFiles.map((f) => sanitize(f)).join(", ")}`);
 				}
@@ -375,7 +384,10 @@ export class ForegroundTerminalHandoffController {
 					? {
 							claim: {
 								status: claim.status,
-								summary: claim.summary.slice(0, 1000),
+								summary: utf8PrefixByBytes(
+									claim.summary,
+									ATTENTION_CLAIM_STATUSES.has(record.status) ? MAX_ATTENTION_CLAIM_SUMMARY_BYTES : 1000,
+								),
 								changedFiles: claim.changedFiles,
 								...(claim.blockers ? { blockers: claim.blockers } : {}),
 								...(claim.parentReviewRequired ? { parentReviewRequired: true } : {}),

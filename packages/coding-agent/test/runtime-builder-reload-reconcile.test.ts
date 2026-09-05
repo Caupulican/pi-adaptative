@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { Agent, AgentContext } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Model } from "@caupulican/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { capabilityTierPolicy } from "../src/core/capability-tier.ts";
 import { ExtensionRunner } from "../src/core/extensions/index.ts";
@@ -17,6 +17,7 @@ import type { ResourceProfileFilterSettings } from "../src/core/settings-manager
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { SkillVaultController } from "../src/core/skill-vault.ts";
 import type { LoadExtensionsResult, ResourceLoader } from "../src/index.ts";
+import { createTestResourceLoader } from "./suite/test-resources.ts";
 
 /**
  * RuntimeBuilder's reload path must call the optional `reconcileLocalRuntimes` hook
@@ -245,6 +246,39 @@ describe("RuntimeBuilder.reload — local-runtime reconcile hook", () => {
 		expect(reloadCount).toBe(1);
 		expect(getCalls()).toBe(0);
 	});
+
+	it.each(["initializeMemory", "reconcileLocalRuntimes"] as const)(
+		"does not roll back an accepted resource commit when %s fails afterward",
+		async (hook) => {
+			tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-committed-"));
+			const loader = createTestResourceLoader();
+			loader.reload = async () => {
+				const result = { extensions: [], errors: [], runtime: createExtensionRuntime() };
+				loader.getExtensions = () => result;
+			};
+			loader.commitReload = vi.fn(async () => {});
+			loader.rollbackReload = vi.fn(async () => {});
+			const { deps } = makeDeps(tempDir, loader);
+			const previousRunner = deps.getExtensionRunner();
+			const originalInitializeMemory = deps.initializeMemory;
+			const originalReconcileLocalRuntimes = deps.reconcileLocalRuntimes;
+			deps[hook] = () => {
+				throw new Error(`${hook} failed after commit`);
+			};
+			const runtimeBuilder = new RuntimeBuilder(deps);
+
+			await expect(runtimeBuilder.reload()).rejects.toThrow(`${hook} failed after commit`);
+
+			expect(loader.commitReload).toHaveBeenCalledTimes(1);
+			expect(loader.rollbackReload).not.toHaveBeenCalled();
+			expect(deps.getExtensionRunner()).not.toBe(previousRunner);
+			// A later repair reload must remain possible from the committed generation.
+			deps.initializeMemory = originalInitializeMemory;
+			deps.reconcileLocalRuntimes = originalReconcileLocalRuntimes;
+			await expect(runtimeBuilder.reload()).resolves.toBeUndefined();
+			expect(loader.commitReload).toHaveBeenCalledTimes(2);
+		},
+	);
 });
 
 describe("RuntimeBuilder.reconcileLoadedExtensions — import authority", () => {

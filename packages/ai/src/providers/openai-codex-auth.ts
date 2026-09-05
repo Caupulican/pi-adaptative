@@ -44,10 +44,19 @@ export function buildOpenAICodexHeaders(options: {
 	additional?: Record<string, string>;
 	userAgent?: string;
 }): Headers {
+	// Headers constructors include invalid values in thrown errors. Validate credential fields
+	// first so callers can safely report failures without accidentally logging bearer material.
+	if (!options.token || options.token.length > 64 * 1024 || /[^\x21-\x7e]/.test(options.token)) {
+		throw new Error("Invalid ChatGPT OAuth access token.");
+	}
+	const accountId = options.accountId ?? requireOpenAICodexAccountId(options.token);
+	if (!accountId || accountId.length > 1024 || /[^\x21-\x7e]/.test(accountId)) {
+		throw new Error("Invalid ChatGPT account identifier.");
+	}
 	const headers = new Headers(options.initial);
 	for (const [key, value] of Object.entries(options.additional ?? {})) headers.set(key, value);
 	headers.set("Authorization", `Bearer ${options.token}`);
-	headers.set("chatgpt-account-id", options.accountId ?? requireOpenAICodexAccountId(options.token));
+	headers.set("chatgpt-account-id", accountId);
 	headers.set("originator", "pi");
 	if (options.userAgent) headers.set("User-Agent", options.userAgent);
 	return headers;

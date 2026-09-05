@@ -11,9 +11,10 @@ import { join } from "node:path";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFileArtifactStore, isMissingArtifactMarker } from "../../src/core/context/context-artifacts.ts";
 import { getContextStoreDir } from "../../src/core/context/context-store-retention.ts";
+import { PublicWebClient } from "../../src/core/web/public-web-client.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 interface ToolDetailsLike {
@@ -44,48 +45,69 @@ describe("D2b-2: artifact reference release + cleanup tied to context-gc evictio
 	const harnesses: Harness[] = [];
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
 		}
 	});
 
-	it("releases the artifact reference and reclaims it once context-gc packs the grep result out of live context", async () => {
-		const harness = await createHarness({
-			initialActiveToolNames: ["read", "bash", "edit", "write", "context_audit", "goal", "grep"],
-		});
-		harnesses.push(harness);
-		bigGrepFile(harness);
+	it.each(["grep", "webfetch"])(
+		"releases the %s artifact once context-gc packs its result out of live context",
+		async (toolName) => {
+			vi.spyOn(PublicWebClient.prototype, "get").mockResolvedValue({
+				url: "https://example.com",
+				contentType: "text/plain",
+				text: "web evidence\n".repeat(10_000),
+				bytes: 130_000,
+			});
+			const harness = await createHarness({
+				initialActiveToolNames: ["read", "bash", "edit", "write", "context_audit", "goal", toolName],
+			});
+			harnesses.push(harness);
+			bigGrepFile(harness);
 
-		harness.setResponses([
-			fauxAssistantMessage([fauxToolCall("grep", { pattern: "needle", path: "big.txt", limit: 3000, context: 0 })], {
-				stopReason: "toolUse",
-			}),
-			fauxAssistantMessage("done"),
-		]);
-		await harness.session.prompt("search for needle occurrences");
+			harness.setResponses([
+				fauxAssistantMessage(
+					[
+						fauxToolCall(
+							toolName,
+							toolName === "grep"
+								? { pattern: "needle", path: "big.txt", limit: 3000, context: 0 }
+								: { url: "https://example.com" },
+						),
+					],
+					{
+						stopReason: "toolUse",
+					},
+				),
+				fauxAssistantMessage("done"),
+			]);
+			await harness.session.prompt("search for needle occurrences");
+			expect(harness.session.getActiveToolNames()).toContain("artifact_retrieve");
 
-		const artifactId = firstToolResultArtifactId(harness);
-		expect(artifactId).toBeDefined();
+			const artifactId = firstToolResultArtifactId(harness);
+			expect(artifactId).toBeDefined();
 
-		const artifactDir = sessionArtifactDir(harness);
-		const storeRightAfterPack = createFileArtifactStore({ baseDir: artifactDir });
-		expect(storeRightAfterPack.has(artifactId!)).toBe(true);
-		expect(storeRightAfterPack.referenceCount(artifactId!)).toBeGreaterThan(0);
+			const artifactDir = sessionArtifactDir(harness);
+			const storeRightAfterPack = createFileArtifactStore({ baseDir: artifactDir });
+			expect(storeRightAfterPack.has(artifactId!)).toBe(true);
+			expect(storeRightAfterPack.referenceCount(artifactId!)).toBeGreaterThan(0);
 
-		// Drive enough additional plain (non-tool) turns for the grep tool result to fall
-		// outside context-gc's preserveRecentMessages window (default 24), so context-gc's
-		// own per-turn packing pass actually evicts it from live context.
-		const plainResponses = Array.from({ length: 26 }, (_, i) => fauxAssistantMessage(`ok ${i}`));
-		harness.setResponses(plainResponses);
-		for (let i = 0; i < plainResponses.length; i++) {
-			await harness.session.prompt(`continue ${i}`);
-		}
+			// Drive enough additional plain (non-tool) turns for the grep tool result to fall
+			// outside context-gc's preserveRecentMessages window (default 24), so context-gc's
+			// own per-turn packing pass actually evicts it from live context.
+			const plainResponses = Array.from({ length: 26 }, (_, i) => fauxAssistantMessage(`ok ${i}`));
+			harness.setResponses(plainResponses);
+			for (let i = 0; i < plainResponses.length; i++) {
+				await harness.session.prompt(`continue ${i}`);
+			}
 
-		const storeAfterEviction = createFileArtifactStore({ baseDir: artifactDir });
-		expect(storeAfterEviction.has(artifactId!)).toBe(false);
-		const record = storeAfterEviction.read(artifactId!);
-		expect(isMissingArtifactMarker(record)).toBe(true);
-	});
+			const storeAfterEviction = createFileArtifactStore({ baseDir: artifactDir });
+			expect(storeAfterEviction.has(artifactId!)).toBe(false);
+			const record = storeAfterEviction.read(artifactId!);
+			expect(isMissingArtifactMarker(record)).toBe(true);
+		},
+	);
 
 	it("does not release or reclaim an artifact whose tool result is still within the recent-message window", async () => {
 		const harness = await createHarness({

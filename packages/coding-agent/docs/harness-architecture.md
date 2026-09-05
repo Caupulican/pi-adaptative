@@ -67,6 +67,21 @@ footprint must omit that extension at the resource layer, not merely block one o
 
 ## Child work contracts
 
+The root's `PI DELEGATION` policy requires delegation when a concrete independent task offers more
+speed or verification benefit than coordination and context-transfer cost. It applies at every
+reasoning level and across providers whenever delegation is enabled and the tool is active;
+it is not an Ultra-only switch. User restrictions remain binding. `DELEGATION_DECISION_RULE`
+owns the decision rule and `SystemPromptBuilder` delivers it, including with custom and routed
+prompts; bundled commands defer to that policy. Child sessions never receive this root policy.
+
+Usefulness remains a model judgment. The host does not infer independence from step counts,
+elapsed time, or keywords, nor issue a separate judging request on every turn. The policy directs
+the model to dispatch or reuse a suitable worker before doing that independent task itself,
+avoid duplicate queued/running work, and retain integration ownership. Deterministic enforcement
+starts at admission and covers authority, budgets, lifecycle, and acceptance below. Faux-provider
+tests prove policy delivery and worker execution, not universal real-model compliance. Ultra
+availability and provider-specific effort mappings remain model metadata concerns.
+
 The model-facing `delegate` start request exposes only top-level `model`, `thinkingLevel`, `path`,
 and `toolNames` overrides. An optional owner-authored orchestration profile supplies reusable
 defaults. Omitted fields inherit the live compatible foreground model, thinking level, classified

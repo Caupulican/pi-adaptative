@@ -42,6 +42,7 @@ const FD_DARWIN_X64_VERSION = "10.3.0";
 export const RG_VERSION = "15.2.0";
 export const JQ_VERSION = "1.8.2";
 export const UV_VERSION = "0.11.28";
+export const HERDR_VERSION = "0.8.2";
 const FFF_MANAGED_DIR = join(TOOLS_DIR, "fff-node");
 const FFF_MANAGED_PACKAGE_JSON = join(FFF_MANAGED_DIR, "package.json");
 
@@ -63,13 +64,36 @@ interface ToolConfig {
 	systemBinaryNames?: string[]; // Alternative system command names to try before downloading
 	tagPrefix: string; // Prefix for tags (e.g., "v" for v1.0.0, "" for 1.0.0)
 	getAssetName: (version: string, plat: string, architecture: string) => string | null;
-	downloadKind?: "archive" | "binary";
+	downloadKind?: "archive" | "binary" | ((plat: string) => "archive" | "binary");
+	installLayout?: (plat: string) => "binary" | "directory";
 	pinnedVersion: string;
 	getPinnedVersion?: (plat: string, architecture: string) => string | undefined;
 	sha256ByAsset?: Readonly<Record<string, string>>;
 }
 
-const TOOLS: Record<"bw" | "bws" | "fd" | "jq" | "jscpd" | "rg" | "uv", ToolConfig> = {
+const TOOLS: Record<"bw" | "bws" | "fd" | "herdr" | "jq" | "jscpd" | "rg" | "uv", ToolConfig> = {
+	herdr: {
+		name: "Herdr",
+		repo: "herdrdev/herdr",
+		binaryName: "herdr",
+		tagPrefix: "v",
+		pinnedVersion: HERDR_VERSION,
+		downloadKind: (plat) => (plat === "win32" ? "archive" : "binary"),
+		installLayout: (plat) => (plat === "win32" ? "directory" : "binary"),
+		getAssetName: (_version, plat, architecture) => {
+			if (architecture !== "arm64" && architecture !== "x64") return null;
+			if (plat === "win32") return architecture === "x64" ? "herdr-windows-x86_64.zip" : null;
+			if (plat !== "linux" && plat !== "darwin") return null;
+			return `herdr-${plat === "darwin" ? "macos" : "linux"}-${architecture === "arm64" ? "aarch64" : "x86_64"}`;
+		},
+		sha256ByAsset: {
+			"herdr-linux-aarch64": "f55610658e1c2e0d2aaef730b4b2ab885f7f8ba00285ab372bfb14f2e3d5b40d",
+			"herdr-linux-x86_64": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+			"herdr-macos-aarch64": "a5d4f4d504d8b309c91f811050559300faba31258425f53c50852fc96f6ae574",
+			"herdr-macos-x86_64": "ab50262c8190cd7aa9056d249d255c08c328c3e8716de9cfa29db4f131b8e2c1",
+			"herdr-windows-x86_64.zip": "0ab3d0fe1434d55757997542b978c771d642987bb15a7130f4160f0db38821d5",
+		},
+	},
 	bw: {
 		name: "Bitwarden CLI",
 		repo: "bitwarden/clients",
@@ -249,6 +273,25 @@ const TOOLS: Record<"bw" | "bws" | "fd" | "jq" | "jscpd" | "rg" | "uv", ToolConf
 
 export type ManagedToolName = keyof typeof TOOLS;
 
+export function getToolDownloadKind(tool: ManagedToolName, targetPlatform: string = platform()): "archive" | "binary" {
+	const kind = TOOLS[tool].downloadKind;
+	return typeof kind === "function" ? kind(targetPlatform) : (kind ?? "archive");
+}
+
+/** Directory layouts retain app-local runtimes alongside the executable instead of discarding them. */
+export function getManagedToolBinaryPath(
+	tool: ManagedToolName,
+	targetPlatform: string = platform(),
+	toolsDir: string = TOOLS_DIR,
+): string {
+	const config = TOOLS[tool];
+	const root =
+		config.installLayout?.(targetPlatform) === "directory"
+			? join(toolsDir, `${config.binaryName}-${config.pinnedVersion}`)
+			: toolsDir;
+	return join(root, config.binaryName + (targetPlatform === "win32" ? ".exe" : ""));
+}
+
 export type ManagedToolProvisionFailureCode =
 	| "offline"
 	| "unsupported_platform"
@@ -401,7 +444,7 @@ export function getToolPath(tool: ManagedToolName): string | null {
 	if (!config) return null;
 
 	// Check our tools directory first
-	const localPath = join(TOOLS_DIR, config.binaryName + (platform() === "win32" ? ".exe" : ""));
+	const localPath = getManagedToolBinaryPath(tool);
 	if (existsSync(localPath)) {
 		return localPath;
 	}
@@ -592,6 +635,13 @@ export function installStandaloneBinaryAsset(
 	if (targetPlatform !== "win32") chmodSync(binaryPath, 0o755);
 }
 
+/** Publish the verified archive's application directory together, without overwriting a live generation. */
+export function installToolArchiveDirectory(extractedBinary: string, binaryPath: string): void {
+	if (!statSync(extractedBinary).isFile()) throw new Error("Managed archive executable is not a regular file.");
+	mkdirSync(dirname(dirname(binaryPath)), { recursive: true });
+	renameSync(dirname(extractedBinary), dirname(binaryPath));
+}
+
 // Download and install a tool
 const toolDownloadPromises = new Map<ManagedToolName, Promise<string | undefined>>();
 
@@ -633,7 +683,7 @@ async function downloadTool(tool: ManagedToolName): Promise<string> {
 	const downloadWorkDir = getProcessWorkRun(getAgentDir(), "downloads", "tools").path;
 	const archivePath = join(downloadWorkDir, assetName);
 	const binaryExt = plat === "win32" ? ".exe" : "";
-	const binaryPath = join(TOOLS_DIR, config.binaryName + binaryExt);
+	const binaryPath = getManagedToolBinaryPath(tool, plat);
 
 	// Download and verify pinned artifacts before extraction.
 	await downloadFile(downloadUrl, archivePath);
@@ -645,7 +695,7 @@ async function downloadTool(tool: ManagedToolName): Promise<string> {
 		throw new Error(`SHA-256 verification failed for ${assetName}`);
 	}
 
-	if (config.downloadKind === "binary") {
+	if (getToolDownloadKind(tool, plat) === "binary") {
 		try {
 			installStandaloneBinaryAsset(archivePath, binaryPath, plat);
 		} finally {
@@ -683,7 +733,8 @@ async function downloadTool(tool: ManagedToolName): Promise<string> {
 		}
 
 		if (extractedBinary) {
-			renameSync(extractedBinary, binaryPath);
+			if (config.installLayout?.(plat) === "directory") installToolArchiveDirectory(extractedBinary, binaryPath);
+			else renameSync(extractedBinary, binaryPath);
 		} else {
 			throw new Error(`Binary not found in archive: expected ${binaryFileName} under ${extractDir}`);
 		}

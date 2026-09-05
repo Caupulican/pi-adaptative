@@ -59,6 +59,16 @@ floor), `packages/coding-agent/test/compact-goal-context.test.ts`, and
 already covered; the profiler's last decile of pre-request time may not exceed twice its first.
 Pinned by the long-session contract gate and `packages/agent/test/tool-failure-memory.test.ts`.
 
+**A profile measures executed work, not skipped or failed synthetic actions.** Valid scripted
+actions must execute with zero tool errors and the exact expected foreground action count. Each
+configured delegation must perform its assigned read, return a valid claim, be accepted, and reach
+the succeeded state. Summary requests use their own response path; consuming foreground or worker
+responses during compaction would silently remove work from the measurement. This strengthens the
+workload evidence without changing the cache or latency thresholds. Synthetic runs do not prove
+real-provider behavior or indefinite memory boundedness. Pinned by
+`packages/coding-agent/test/profiling/host-long-session.profile.test.ts` and
+`packages/coding-agent/test/profiling/host-response-script.test.ts`.
+
 **Every request carries an output cap.** `maxOutputTokens` narrows the model's registry limit, the
 capability tier narrows it further, a goal budget further still; nothing widens a model's limit.
 Why: one full-class model streamed a single sentence for twenty-three minutes against a 500,000
@@ -93,9 +103,14 @@ their bytes, compiler reports three quarters. Pinned by
 `packages/coding-agent/test/diagnostics-output-reducer.test.ts` and
 `packages/coding-agent/test/json-output-reducer.test.ts`.
 
-**The tool list never changes mid-session.** It sits before the messages in every prompt; any
-change re-prefills the whole conversation. Disclosure happens at session start per caller. Pinned
-by `packages/coding-agent/test/context-composition.test.ts` (schema token ceilings, only lowered).
+**The tool list stays stable between explicit runtime or provider transitions.** It sits before
+the messages in every prompt, so ordinary turns must not churn disclosed schemas. Explicit reload
+commits a new tool generation, and provider-specific tools follow the active model; those intentional
+transitions can invalidate the prompt cache and do not promise a cache hit. The root default surface
+now includes `runtime_update` and `webfetch` within the unchanged schema-token ceilings; this does not
+widen worker grants. Pinned by `packages/coding-agent/test/context-composition.test.ts` (schema token
+ceilings, only lowered), `packages/coding-agent/test/suite/runtime-update.test.ts`, and
+`packages/coding-agent/test/suite/image-generation-provider-surface.test.ts`.
 
 **A tool failure record resolves after two later calls of the same tool executed without
 retrying it; one later call keeps it.** Why: one corrective call may precede the retry a record
@@ -225,3 +240,4 @@ measurement gains no new surface.
 | 2026-09-03 | A skill lookup miss re-scans the roots once before refusing; search lists skills the loader could not index. |
 | 2026-09-03 | Refusal false positives: prefix globs, harness roots, variable targets and line-wise scripts pass the credential guard; timeouts are operation outcomes; evidence lands on blocked goals; unions validate on the named branch; the Windows shell engine covers the full coreutils surface, heredocs and nested shells. |
 | 2026-09-03 | Memory is scoped: the general MEMORY.md holds facts true in any task, each project has its own hot MEMORY.md under the agent home, the memory tool defaults to the project file, and workers cannot write project memory. |
+| 2026-09-04 | Tool-surface stability permits explicit reload/provider transitions without cache-hit promises; root defaults add runtime_update and webfetch without raising schema ceilings. Long-session profiles require exact successful work, isolate summary responses, and verify accepted worker completions without relaxing performance thresholds. |

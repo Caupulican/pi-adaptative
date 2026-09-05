@@ -41,7 +41,7 @@ describe("managed lane reload recovery (real BackgroundLaneController)", () => {
 		const blc = new BackgroundLaneController(buildLaneControllerDeps({ getSessionManager: () => sessionManager }));
 
 		blc.recordManagedLane({
-			laneId: "tmux:job1:agent1",
+			laneId: "collaboration:job1:agent1",
 			phase: "dispatch",
 			goalId: "g1",
 			dispatch: createTestManagedLaneDispatch(),
@@ -148,7 +148,7 @@ describe("goal.ts dispatch_worker indeterminate-binding guard (applies to both t
 			action: "dispatch_worker",
 			requirementId: "r1",
 			instructions: "go",
-			dispatchTarget: "tmux",
+			dispatchTarget: "collaboration",
 		});
 		expect(first.details.dispatchedLaneId).toBe("lane-1");
 
