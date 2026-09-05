@@ -265,6 +265,26 @@ function errorKeywords(errors: readonly TLocalizedValidationError[]): string[] {
 	return [...new Set(errors.map((error) => error.keyword))].sort();
 }
 
+function normalizeValidationErrors(errors: TLocalizedValidationError[]): TLocalizedValidationError[] {
+	// TypeBox reports a false-schema child and an additionalProperties parent for
+	// the same rejection. Keep the actionable parent, without hiding independent
+	// false schemas or errors from another schema branch at the same instance path.
+	const coveredFalseSchemas = new Set<string>();
+	for (const error of errors) {
+		if (error.keyword !== "additionalProperties") continue;
+		for (const property of error.params.additionalProperties) {
+			coveredFalseSchemas.add(
+				JSON.stringify([`${error.schemaPath}/additionalProperties`, `${error.instancePath}/${property}`]),
+			);
+		}
+	}
+	return errors.filter(
+		(error) =>
+			error.keyword !== "boolean" ||
+			!coveredFalseSchemas.has(JSON.stringify([error.schemaPath, error.instancePath])),
+	);
+}
+
 function literalValues(schema: unknown): unknown[] | undefined {
 	const record = asRecord(schema);
 	if (!record) {
@@ -546,7 +566,7 @@ export function validateToolArguments(
 	const branch = selectUnionBranch(tool.parameters, args);
 	const schema = branch ?? tool.parameters;
 	const branchValidator = branch ? getValidator(branch) : validator;
-	const validationErrors = [...branchValidator.Errors(args)] as TLocalizedValidationError[];
+	const validationErrors = normalizeValidationErrors([...branchValidator.Errors(args)]);
 	const repairIssues = analyzeToolArgumentErrors(toolCall.name, schema, args, validationErrors);
 	const failureModes = uniqueFailureModes(repairIssues.flatMap((issue) => issue.modes));
 	const repaired =

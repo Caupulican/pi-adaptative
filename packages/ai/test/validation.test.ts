@@ -370,6 +370,45 @@ describe("validateToolArguments", () => {
 		]);
 	});
 
+	it("retains independent false-schema and boolean-type errors beside forbidden properties", () => {
+		const tool: Tool = {
+			name: "strict",
+			description: "Strict tool",
+			parameters: {
+				type: "object",
+				properties: { denied: false, enabled: { type: "boolean" } },
+				additionalProperties: false,
+			} as Tool["parameters"],
+		};
+		const events: unknown[] = [];
+		expect(() =>
+			validateToolArguments(
+				tool,
+				{
+					type: "toolCall",
+					id: "independent-errors",
+					name: "strict",
+					arguments: { denied: 1, enabled: "invalid", extra: 2 },
+				},
+				{ telemetry: (event) => events.push(event) },
+			),
+		).toThrow(ToolArgumentValidationError);
+		expect(events).toMatchObject([
+			{
+				errorKeywords: ["additionalProperties", "boolean", "type"],
+				failureShape: [
+					{ path: "extra", keyword: "additionalProperties" },
+					{ path: "denied", keyword: "boolean" },
+					{ path: "enabled", keyword: "type" },
+				],
+			},
+		]);
+		const valid = { enabled: true };
+		expect(
+			validateToolArguments(tool, { type: "toolCall", id: "valid-control", name: "strict", arguments: valid }),
+		).toBe(valid);
+	});
+
 	it("caps oversized expected schema fragments without dropping failing paths", () => {
 		const tool: Tool = {
 			name: "select",

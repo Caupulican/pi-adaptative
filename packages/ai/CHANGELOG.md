@@ -8,6 +8,7 @@
 
 - Kept OpenAI Responses and Codex request service tiers on the shared supported-tier contract when upgrading the OpenAI SDK, preserving existing pricing behavior.
 - Preserved UUIDv7 compatibility with current browser crypto types and Anthropic OAuth test isolation with Vitest 5.
+- Deduplicated TypeBox's false-schema diagnostics for forbidden additional properties while retaining independent validation failures.
 
 ## [0.98.0] - 2026-09-05
 
