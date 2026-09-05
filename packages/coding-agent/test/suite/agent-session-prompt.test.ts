@@ -298,6 +298,7 @@ describe("AgentSession prompt characterization", () => {
 		]);
 		expect(harness.session.getActiveToolNames()).toEqual([
 			"read",
+			"webfetch",
 			"skill",
 			"skillify",
 			"skill_audit",
@@ -317,6 +318,7 @@ describe("AgentSession prompt characterization", () => {
 			"tool_task",
 			"run_toolkit_script",
 			"improvement_loop",
+			"runtime_update",
 			"artifact_retrieve",
 		]);
 

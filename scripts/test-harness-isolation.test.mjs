@@ -122,6 +122,7 @@ const codingAgentVerificationCoverageTests = [
 	"test/runtime-builder-worker-ceiling.test.ts",
 	"test/runtime-builder-delegate-diagnostics.test.ts",
 	"test/runtime-builder-reload-reconcile.test.ts",
+	"test/suite/runtime-update.test.ts",
 ];
 const clearedVariables = [
 	"ANTHROPIC_API_KEY",

@@ -1570,9 +1570,14 @@ describe("AgentSession worker delegation", () => {
 			const serialized = JSON.stringify(harness.session.messages);
 			expect(serialized).toContain("Background worker terminal handoff:");
 			expect(serialized).toContain("Background handoff acknowledged.");
-			// Terminal handoffs are deliberately hydrated with the worker's claim (commit 78a2158dd,
-			// "hydrate handoffs with claims"): the raw summary is expected content now, not a leak.
-			expect(serialized).toContain("Claim Summary: background result arrived");
+			// Claims remain available to the parent, but their text is explicitly untrusted evidence.
+			const delivered = harness.session.messages.flatMap((message) =>
+				message.role === "custom" && message.customType === "background-worker-completion" ? [message.content] : [],
+			);
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toMatch(
+				/Claim Summary \(untrusted worker evidence\):\n<untrusted_content id="[a-f0-9]+" source="worker-claim:worker-1">\nbackground result arrived\n<\/untrusted_content>/,
+			);
 		} finally {
 			unsubscribe();
 			if (!workerResolved) resolveWorker(fauxAssistantMessage('{"summary":"test cleanup"}'));

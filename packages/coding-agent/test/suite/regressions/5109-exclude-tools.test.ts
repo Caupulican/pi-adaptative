@@ -64,12 +64,14 @@ describe("regression #5109: exclude tools", () => {
 				"pipeline",
 				"python",
 				"run_toolkit_script",
+				"runtime_update",
 				"secret_store",
 				"skill",
 				"skill_audit",
 				"skillify",
 				"task_steps",
 				"update_goal",
+				"webfetch",
 				"write",
 			]);
 			expect(harness.session.systemPrompt).not.toContain("- read:");

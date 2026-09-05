@@ -92,6 +92,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"get_goal",
 			"goal",
 			"grep",
+			"image_generate",
 			"improvement_loop",
 			"ls",
 			"memory",
@@ -100,6 +101,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"python",
 			"read",
 			"run_toolkit_script",
+			"runtime_update",
 			"secret_store",
 			"skill",
 			"skill_audit",
@@ -107,6 +109,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"task_steps",
 			"tool_task",
 			"update_goal",
+			"webfetch",
 			"worktree_sync",
 			"write",
 		]);

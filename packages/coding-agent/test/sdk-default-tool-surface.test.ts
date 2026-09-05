@@ -13,6 +13,9 @@ import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
+// The request includes the ChatGPT-only tool; Anthropic's active surface must not expose it.
+const ANTHROPIC_DEFAULT_TOOL_NAMES = DEFAULT_ACTIVE_TOOL_NAMES.filter((name) => name !== "image_generate");
+
 describe("SDK default tool surface", () => {
 	let tempDir: string;
 	let agentDir: string;
@@ -43,7 +46,8 @@ describe("SDK default tool surface", () => {
 			sessionManager: SessionManager.inMemory(),
 		});
 		try {
-			expect(session.getActiveToolNames()).toEqual([...DEFAULT_ACTIVE_TOOL_NAMES, "artifact_retrieve"]);
+			expect(session.getActiveToolNames()).toEqual([...ANTHROPIC_DEFAULT_TOOL_NAMES, "artifact_retrieve"]);
+			expect(session.getActiveToolNames()).not.toContain("image_generate");
 			expect(session.getActiveToolNames()).toContain("skill");
 			expect(session.getActiveToolNames()).toContain("skillify");
 			expect(session.getActiveToolNames()).toContain("skill_audit");
@@ -190,7 +194,7 @@ describe("SDK default tool surface", () => {
 		try {
 			expect(reload).toHaveBeenCalledTimes(1);
 			expect(settingsManager.getActiveResourceProfileNames()).toEqual([]);
-			expect(session.getActiveToolNames()).toEqual([...DEFAULT_ACTIVE_TOOL_NAMES, "artifact_retrieve"]);
+			expect(session.getActiveToolNames()).toEqual([...ANTHROPIC_DEFAULT_TOOL_NAMES, "artifact_retrieve"]);
 		} finally {
 			await session.disposeAndWait();
 		}
@@ -216,7 +220,7 @@ describe("SDK default tool surface", () => {
 		});
 		try {
 			expect(settingsManager.getActiveResourceProfileNames()).toEqual([]);
-			expect(session.getActiveToolNames()).toEqual([...DEFAULT_ACTIVE_TOOL_NAMES, "artifact_retrieve"]);
+			expect(session.getActiveToolNames()).toEqual([...ANTHROPIC_DEFAULT_TOOL_NAMES, "artifact_retrieve"]);
 		} finally {
 			await session.disposeAndWait();
 		}

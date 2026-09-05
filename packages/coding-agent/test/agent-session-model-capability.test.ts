@@ -37,6 +37,7 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("full");
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
+				"webfetch",
 				"skill",
 				"skillify",
 				"skill_audit",
@@ -56,6 +57,7 @@ describe("model capability auto-detection", () => {
 				"tool_task",
 				"run_toolkit_script",
 				"improvement_loop",
+				"runtime_update",
 				"artifact_retrieve",
 			]);
 		} finally {
