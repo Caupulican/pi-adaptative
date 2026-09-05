@@ -45,6 +45,38 @@ describe("Workbench input boundary", () => {
 		expect(stripAnsi(view.render(110).join("\n"))).not.toContain("file effects");
 		controller.dispose();
 	});
+	it("folds failed execution on completion and does not expand new success for an old failure", () => {
+		const view = new WorkbenchComponent({
+			conversation: new Container(),
+			editor: new Container(),
+			dock: [],
+			viewportRows: () => 30,
+		});
+		const controller = new WorkbenchController(view, {
+			keybindings: new KeybindingsManager(),
+			isInteractive: () => true,
+			requestRender() {},
+			messages: () => [],
+			copy: async () => {},
+			notice() {},
+		});
+		controller.beginCycle();
+		controller.record(new Text("failure detail", 0, 0), true);
+		expect(stripAnsi(view.render(100).join("\n"))).toContain("failure detail");
+		controller.complete();
+		let text = stripAnsi(view.render(100).join("\n"));
+		expect(text).toContain("1 failure receipts");
+		expect(text).not.toContain("failure detail");
+		controller.beginCycle();
+		controller.record(new Text("successful verbose result", 0, 0), false);
+		controller.complete();
+		text = stripAnsi(view.render(100).join("\n"));
+		expect(text).toContain("1 failure receipts");
+		expect(text).not.toContain("successful verbose result");
+		controller.handleInput("\x1bo");
+		expect(stripAnsi(view.render(100).join("\n"))).toContain("successful verbose result");
+		controller.dispose();
+	});
 	it("copies canonical conversation beyond the visible window without opening tool payloads", async () => {
 		const messages: AgentMessage[] = Array.from({ length: 300 }, (_, i) => ({
 			role: "user",
@@ -110,6 +142,37 @@ describe("Workbench input boundary", () => {
 		expect(view.conversation.following).toBe(false);
 		controller.dispose();
 	});
+	it("routes wheel input by pane rectangle, including narrow stacked execution", () => {
+		const chat = new Container();
+		chat.addChild(new Text(Array.from({ length: 100 }, (_, i) => `chat ${i}`).join("\n"), 0, 0));
+		const view = new WorkbenchComponent({
+			conversation: chat,
+			editor: new Container(),
+			dock: [],
+			viewportRows: () => 40,
+		});
+		const controller = new WorkbenchController(view, {
+			keybindings: new KeybindingsManager(),
+			isInteractive: () => true,
+			requestRender() {},
+			messages: () => [],
+			copy: async () => {},
+			notice() {},
+		});
+		view.setInspector(["Work", "active"]);
+		controller.record(new Text(Array.from({ length: 40 }, (_, i) => `execution ${i}`).join("\n"), 0, 0), false);
+		view.render(110);
+		controller.handleInput("\x1b[<65;50;3M");
+		expect(stripAnsi(view.render(110).join("\n"))).toContain("execution 3");
+		expect(view.conversation.following).toBe(true);
+		view.render(40);
+		controller.handleInput("\x1b[<64;2;6M");
+		expect(stripAnsi(view.render(40).join("\n"))).toContain("execution 0");
+		expect(view.conversation.following).toBe(true);
+		controller.handleInput(`\x1b[<64;2;${view.conversationTop + 2}M`);
+		expect(view.conversation.following).toBe(false);
+		controller.dispose();
+	});
 	it("mouse selection pauses live text, copies selection and leaves the editor untouched", async () => {
 		const chat = new Container();
 		chat.addChild(new Text("hello world", 0, 0));
@@ -131,9 +194,11 @@ describe("Workbench input boundary", () => {
 			notice() {},
 		});
 		view.render(80);
-		controller.handleInput("\x1b[<0;1;2M");
-		controller.handleInput("\x1b[<32;6;2M");
-		controller.handleInput("\x1b[<0;6;2m");
+		controller.handleInput("\x1b[<0;1;2M"); // Left border must not select text.
+		expect(view.conversation.following).toBe(true);
+		controller.handleInput("\x1b[<0;2;2M");
+		controller.handleInput("\x1b[<32;7;2M");
+		controller.handleInput("\x1b[<0;7;2m");
 		await controller.copy(false);
 		expect(copies).toEqual(["hello"]);
 		expect(view.conversation.following).toBe(false);

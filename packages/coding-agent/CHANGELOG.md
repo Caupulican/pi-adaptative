@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Workbench windows now have visible titled borders and a compact, stable upper allocation: growing tool output no longer squeezes conversation. Work/team and execution scroll within their boundaries; completed failures fold without hiding their receipts. Narrow layouts retain all evidence, and native input, selection, cursor placement and scroll position survive small terminals and unrelated tool updates. See `docs/workbench.md`.
+- Standalone installs and `pi update self` report optional Herdr provisioning from the newly activated release, including already-installed and unavailable states, through the existing provisioner. `pi doctor` reports Herdr without making optional collaboration a required-tool failure.
+
 ## [0.98.0] - 2026-09-05
 
 ### Breaking Changes

@@ -30,6 +30,7 @@ function baseDeps(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
 		ensureFffNodePackage: vi.fn(async () => ({ FileFinder: {} }) as unknown),
 		getLastFffInstallOutcome: () => ({ status: "installed" }),
 		ensureTool: vi.fn(async (tool) => `/agent/bin/${tool}`),
+		provisionHerdr: vi.fn(async () => ({ path: "/agent/bin/herdr", globalPath: true })),
 		ensurePythonRuntime: vi.fn(async () => ({
 			status: "ready" as const,
 			uvPath: "/agent/bin/uv",
@@ -135,6 +136,54 @@ describe("runDoctor: fff-node (managed tool)", () => {
 
 		await runDoctor(deps, { silent: false });
 		expect(ensureFffNodePackage).toHaveBeenLastCalledWith(false);
+	});
+});
+
+describe("runDoctor: optional Herdr collaboration", () => {
+	it.each([true, false])(
+		"reports the authoritative provisioner's availability and PATH exposure (%s)",
+		async (globalPath) => {
+			const provisionHerdr = vi.fn(async () => ({ path: "/agent/bin/herdr", globalPath }));
+			const deps = baseDeps({ provisionHerdr });
+			const report = await runDoctor(deps, { silent: false });
+			expect(provisionHerdr).toHaveBeenCalledExactlyOnceWith({ silent: false });
+			expect(report.checks.find((check) => check.id === "herdr")).toMatchObject({
+				kind: "managed",
+				present: true,
+			});
+			expect(formatDoctorReport(report)).toContain("Herdr");
+			expect(formatDoctorReport(report)).toContain(globalPath ? "on PATH" : "not exposed on PATH");
+			// Negative control: Herdr must not bypass its provisioner via the generic tool adapter.
+			expect(deps.ensureTool).not.toHaveBeenCalledWith("herdr", expect.anything());
+		},
+	);
+
+	it("retains other results and reports a degraded optional feature when Herdr provisioning fails", async () => {
+		const deps = baseDeps({
+			provisionHerdr: vi.fn(async () => {
+				throw new Error("Herdr download denied");
+			}),
+		});
+		const report = await runDoctor(deps);
+		// Missing optional Herdr is a notice, not a required-tool failure/doctor exit-code change.
+		expect(report.checks.find((check) => check.id === "herdr")).toBeUndefined();
+		expect(report.notices?.find((notice) => notice.id === "herdr")?.detail).toContain("Herdr download denied");
+		expect(report.checks.every((check) => check.present)).toBe(true);
+		expect(report.checks.find((check) => check.id === "fff-node")?.present).toBe(true);
+		expect(formatDoctorReport(report)).toContain("Herdr download denied");
+		expect(formatDoctorReport(report)).toContain("Pi remains usable");
+	});
+
+	it("does not provision Herdr again from the old updater or on extension-only updates", async () => {
+		const deps = baseDeps();
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			await expect(runUpdatePreflight(deps)).resolves.toBeUndefined();
+			expect(deps.provisionHerdr).not.toHaveBeenCalled();
+			expect(deps.ensureFffNodePackage).toHaveBeenCalled();
+		} finally {
+			log.mockRestore();
+		}
 	});
 });
 
@@ -264,9 +313,17 @@ describe("runDoctor: python (uv-managed tool)", () => {
 });
 
 describe("runDoctor: overall report shape", () => {
-	it("includes exactly the six expected checks", async () => {
+	it("includes the six required checks plus available optional Herdr", async () => {
 		const report = await runDoctor(baseDeps());
-		expect(report.checks.map((c) => c.id).sort()).toEqual(["fff-node", "jq", "jscpd", "ollama", "python", "ripgrep"]);
+		expect(report.checks.map((c) => c.id).sort()).toEqual([
+			"fff-node",
+			"herdr",
+			"jq",
+			"jscpd",
+			"ollama",
+			"python",
+			"ripgrep",
+		]);
 	});
 
 	it("surfaces unexpected root entries as a bounded warning without changing tool checks", async () => {
@@ -282,7 +339,7 @@ describe("runDoctor: overall report shape", () => {
 			}),
 		);
 
-		expect(report.checks).toHaveLength(6);
+		expect(report.checks).toHaveLength(7);
 		expect(report.notices).toEqual([
 			expect.objectContaining({
 				id: "agent-directory-layout",

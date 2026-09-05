@@ -26,7 +26,7 @@ function escapeRegExp(value) {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function createFixture(root, assetName, version) {
+function createFixture(root, assetName, version, provisionFixture = false) {
 	const fixtureRoot = join(root, `fixture-${version}`);
 	const payloadRoot = join(fixtureRoot, "pi");
 	mkdirSync(join(payloadRoot, "docs"), { recursive: true });
@@ -34,7 +34,14 @@ function createFixture(root, assetName, version) {
 	const executable = join(payloadRoot, "pi");
 	writeFileSync(
 		executable,
-		`#!/bin/sh\nif [ "\${1:-}" = "--version" ]; then printf '%s\\n' '${version}'; else printf '%s\\n' 'fixture'; fi\n`,
+		provisionFixture ? `#!/bin/sh
+if [ "\${1:-}" = "--version" ]; then printf '%s\\n' '${version}'; exit 0; fi
+printf '%s|%s|%s\\n' "$0" "$*" "$PATH" >> "$PI_TEST_HERDR_LOG"
+[ "$#" = 1 ] && [ "$1" = "--provision-herdr" ] || exit 90
+[ "$(readlink "$PI_INSTALL_DIR/current")/pi" = "$0" ] || exit 91
+printf '%s\\n' '[OK] Herdr fixture available'
+exit "\${PI_TEST_HERDR_EXIT:-0}"
+` : `#!/bin/sh\nif [ "\${1:-}" = "--version" ]; then printf '%s\\n' '${version}'; else printf '%s\\n' 'fixture'; fi\n`,
 	);
 	chmodSync(executable, 0o755);
 	writeFileSync(join(payloadRoot, "docs", "retained.txt"), "retained release tree\n");
@@ -187,6 +194,59 @@ posixBehaviorTest("Linux x64 and arm64 installs retain the complete archive tree
 		const releaseEntries = readdirSync(join(installDir, "releases"));
 		assert.equal(releaseEntries.length, 2);
 	}
+});
+
+posixBehaviorTest("Herdr skips legacy and noncanonical verified versions without invoking the flag", (context) => {
+	for (const version of ["0.98.0", "0.10.2", "0.098.1", "0.98.1-rc.1", "9999999999.0.0"]) {
+		const harness = createHarness();
+		context.after(() => rmSync(harness.root, { recursive: true, force: true }));
+		const fixture = createFixture(harness.root, "pi-linux-x64.tar.gz", version, true);
+		const log = join(harness.root, "herdr.log");
+		const installDir = join(harness.root, "install");
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const result = runInstaller(harness, {
+				PI_VERSION: `v${version}`, PI_INSTALL_DIR: installDir, PI_BIN_DIR: join(harness.root, "installed-bin"),
+				PI_TEST_ARCHIVE: fixture.archivePath, PI_TEST_CHECKSUM: fixture.checksumPath, PI_TEST_HERDR_LOG: log,
+			});
+			assert.equal(result.status, 0, `${version}: ${result.stdout}\n${result.stderr}`);
+			assert.match(result.stdout, /Skipping Herdr.*0\.98\.1/u);
+			assert.equal(existsSync(log), false, `legacy flag invoked for ${version}`);
+			assert.equal(readlinkSync(join(installDir, "current")), join(installDir, "releases", `v${version}`));
+		}
+	}
+});
+
+for (const version of ["0.98.1", "1.2.3"]) posixBehaviorTest(`Herdr ${version} provisioning runs only from the verified active release on fresh/repeated installs and stays optional`, (context) => {
+	const harness = createHarness();
+	context.after(() => rmSync(harness.root, { recursive: true, force: true }));
+	const fixture = createFixture(harness.root, "pi-linux-x64.tar.gz", version, true);
+	const installDir = join(harness.root, "data", "pi");
+	const binDir = join(harness.root, "bin-installed");
+	const log = join(harness.root, "herdr.log");
+	const environment = {
+		PI_VERSION: `v${version}`, PI_INSTALL_DIR: installDir, PI_BIN_DIR: binDir,
+		PI_TEST_ARCHIVE: fixture.archivePath, PI_TEST_CHECKSUM: fixture.checksumPath,
+		PI_TEST_HERDR_LOG: log,
+	};
+	for (const exitCode of [0, 0, 9]) {
+		const result = runInstaller(harness, { ...environment, PI_TEST_HERDR_EXIT: String(exitCode) });
+		assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+		assert.match(result.stdout, /Herdr/u);
+		assert.equal(readlinkSync(join(installDir, "current")), join(installDir, "releases", `v${version}`));
+		if (exitCode) assert.match(`${result.stdout}\n${result.stderr}`, /Herdr.*(?:unavailable|failed).*Pi remains usable/iu);
+	}
+	const calls = readFileSync(log, "utf8").trim().split("\n");
+	assert.equal(calls.length, 3);
+	for (const call of calls) {
+		const [executable, args, path] = call.split("|");
+		assert.equal(executable, join(installDir, "releases", `v${version}`, "pi"));
+		assert.equal(args, "--provision-herdr");
+		assert.equal(path.split(":")[0], binDir);
+	}
+	// Negative control: failed verification never invokes optional provisioning.
+	const failed = runInstaller(harness, { ...environment, PI_TEST_NO_CHECKSUM: "1" });
+	assert.notEqual(failed.status, 0);
+	assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 3);
 });
 
 posixBehaviorTest("retention only removes managed release directories and preserves unknown version-looking data", (context) => {

@@ -115,6 +115,64 @@ describe("Workbench layout", () => {
 		const view = new WorkbenchComponent({ conversation, editor, dock: [status], viewportRows: () => 30 });
 		return { view, editor };
 	}
+	it("keeps active pane geometry stable as tool output grows and draws closed boundaries", () => {
+		const { view } = setup();
+		const output = new Rows(["short result"]);
+		view.setInspector(["Work", "active step"]);
+		view.setExecution(output);
+		const short = view.render(110).map(stripAnsi);
+		const top = view.conversationTop;
+		const height = view.conversationHeight;
+		output.lines = Array.from({ length: 100 }, (_, i) => `tool row ${i}`);
+		output.invalidate();
+		const long = view.render(110).map(stripAnsi);
+		expect(view.conversationTop).toBe(top);
+		expect(view.conversationHeight).toBe(height);
+		expect(height).toBeGreaterThanOrEqual(15);
+		for (const frame of [short, long]) {
+			expect(frame).toHaveLength(30);
+			expect(frame[0]).toMatch(/^┌.*Work.*┐┌.*Execution.*┐$/);
+			expect(frame[top - 1]).toMatch(/^┌.*Conversation.*┐$/);
+			expect(frame[top]).toMatch(/^│.*│$/);
+			expect(frame[top + height]).toMatch(/^└─+┘$/);
+			expect(frame.at(-1)).toMatch(/^└─+┘$/);
+		}
+	});
+	it("does not reserve empty panes and bounds geometry on narrow and short terminals", () => {
+		const { view } = setup();
+		const empty = view.render(110).map(stripAnsi);
+		expect(empty[0]).toContain("Conversation");
+		expect(empty.join("\n")).not.toContain("Execution");
+		view.setInspector(["Work", "active step"]);
+		view.setExecution(new Rows(Array.from({ length: 100 }, () => "output")));
+		for (const width of [1, 2, 3, 20, 60, 64, 110]) {
+			const lines = view.render(width);
+			expect(lines.length).toBeLessThanOrEqual(30);
+			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
+	});
+	it("scrolls upper panes independently without moving conversation or dock", () => {
+		const { view } = setup();
+		view.setInspector(Array.from({ length: 30 }, (_, i) => `work ${i}`));
+		view.setExecution(new Rows(Array.from({ length: 100 }, (_, i) => `tool ${i}`)));
+		const initial = view.render(110).map(stripAnsi);
+		const top = view.conversationTop;
+		expect(view.scrollUpper(50, 1, 3)).toBe(true);
+		let frame = view.render(110).map(stripAnsi);
+		expect(frame[1]).toContain("work 0");
+		expect(frame[1]).toContain("tool 3");
+		expect(frame.slice(top - 1)).toEqual(initial.slice(top - 1));
+		expect(view.conversation.following).toBe(true);
+		expect(view.scrollUpper(1, 1, 3)).toBe(true);
+		frame = view.render(110).map(stripAnsi);
+		expect(frame[1]).toContain("work 3");
+		expect(frame[1]).toContain("tool 3");
+		// Borders and the dock are not scroll targets.
+		expect(view.scrollUpper(0, 1, 3)).toBe(false);
+		expect(view.scrollUpper(1, 29, 3)).toBe(false);
+		view.setExecution(new Rows(["new result"]));
+		expect(view.render(110).map(stripAnsi)[1]).toContain("new result");
+	});
 	it("clears invisible hit targets when a large editor takes over the screen", () => {
 		const { view, editor } = setup();
 		view.render(110);
@@ -129,8 +187,10 @@ describe("Workbench layout", () => {
 		const lines = view.render(110).map(stripAnsi);
 		expect(lines).toHaveLength(30);
 		expect(lines[0]).toContain("Conversation");
-		expect(lines.at(-2)?.trimEnd()).toBe("status across the entire screen");
-		expect(lines.at(-1)?.trimEnd()).toBe("input across the entire screen");
+		expect(lines.at(-4)).toMatch(/^┌ Input \/ Status .*┐$/);
+		expect(lines.at(-3)).toMatch(/^│status across the entire screen\s*│$/);
+		expect(lines.at(-2)).toMatch(/^│input across the entire screen\s*│$/);
+		expect(lines.at(-1)).toMatch(/^└─+┘$/);
 		expect(view.children).toContain(editor);
 	});
 	it("uses a bounded upper area and gives conversation the released rows on completion", () => {
@@ -144,7 +204,7 @@ describe("Workbench layout", () => {
 		view.setExecution(undefined);
 		view.setInspector(["Work complete"]);
 		const done = view.render(110);
-		expect(done.findIndex((line) => stripAnsi(line).includes("Conversation"))).toBe(1);
+		expect(done.findIndex((line) => stripAnsi(line).includes("Conversation"))).toBe(3);
 		for (const width of [1, 20, 60, 110]) {
 			for (const line of view.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}

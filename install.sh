@@ -217,6 +217,26 @@ elif [ -e "$BIN_DIR/pi" ]; then
 	fail "refusing to replace an unowned pi launcher"
 fi
 
+# Provision only optional collaboration through the verified release's authoritative owner.
+# The command's PATH includes the launcher directory without editing shell profiles.
+provision_herdr() {
+	# Older CLIs accept unknown long flags as session/extension input. Never probe them.
+	# Only canonical stable versions with bounded integer components enable this feature.
+	if ! printf '%s\n' "$1" | awk -F. '
+		/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ {
+			if (length($1) <= 9 && length($2) <= 9 && length($3) <= 9)
+				supported = ($1 > 0 || $2 > 98 || ($2 == 98 && $3 >= 1))
+		}
+		END { exit(NR == 1 && supported ? 0 : 1) }
+	'; then
+		printf 'Skipping Herdr provisioning for Pi %s: requires a supported stable version >= 0.98.1; Pi remains usable.\n' "$1"
+		return
+	fi
+	if ! PATH="$BIN_DIR:$PATH" "$NEW_RELEASE/pi" --provision-herdr; then
+		printf '%s\n' 'Warning: Herdr provisioning failed; collaboration unavailable; Pi remains usable.' >&2
+	fi
+}
+
 mkdir -p "$RELEASES"
 NEW_RELEASE="$RELEASES/$RELEASE_TAG"
 if [ "$HAD_CURRENT" -eq 1 ] && [ "$OLD_CURRENT" = "$NEW_RELEASE" ] && [ -x "$NEW_RELEASE/pi" ]; then
@@ -226,6 +246,7 @@ if [ "$HAD_CURRENT" -eq 1 ] && [ "$OLD_CURRENT" = "$NEW_RELEASE" ] && [ -x "$NEW
 	fi
 	ensure_managed_release "$NEW_RELEASE"
 	printf 'Already installed %s at %s\n' "$STAGED_VERSION" "$NEW_RELEASE"
+	provision_herdr "$ACTIVE_VERSION"
 	printf 'Ensure %s is on PATH to invoke pi.\n' "$BIN_DIR"
 	exit 0
 fi
@@ -270,4 +291,5 @@ for CANDIDATE in "$RELEASES"/*; do
 done
 
 printf 'Installed %s to %s\n' "$STAGED_VERSION" "$NEW_RELEASE"
+provision_herdr "$STAGED_VERSION"
 printf 'Ensure %s is on PATH to invoke pi.\n' "$BIN_DIR"

@@ -2,12 +2,13 @@
 
 Human interactive sessions use a full-screen Workbench with the selected terminal theme, including Matrix. Unattended sessions retain their transcript layout.
 
-The upper band contains compact work/team state and current execution evidence. It takes only the rows its content needs, up to 18 rows, while reserving conversation space. At narrow widths it becomes a single column. Status, extension widgets and input span the full terminal below the conversation.
+Work/team, execution, conversation and the full-width input/status dock have visible titled borders. Active upper panes share a stable allocation of up to eight rows, further limited to about 30% of usable conversation/execution space. Tool-output growth does not move the conversation boundary. Empty panes disappear; folded receipts reclaim space. Narrow terminals stack the upper panes, or combine their summaries when there is insufficient height for separate windows. Status, extension widgets and input stay anchored below conversation. Extremely small terminals omit pane borders to preserve native input and its cursor; oversized dialogs retain their own complete layout.
 
-Successful execution folds to a receipt when the agent stops. A new cycle clears its old previews; failure receipts remain visible until session replacement. Completed work and teams collapse without deleting tasks, worker sessions or durable evidence. Long plans show up to six prioritized rows; use the existing work/team inspector for the complete state.
+Execution folds to a receipt when the agent stops, including failed execution. Failure counts remain visible, but an old failure does not keep a later successful preview expanded. A new cycle clears its old previews; failure receipts remain visible until session replacement. Completed work and teams collapse without deleting tasks, worker sessions or durable evidence. Long plans show up to six prioritized rows; use the existing work/team inspector for the complete state.
 
 ## Reading and copying
 
+- Mouse wheel inside a work/team or execution pane: scroll only that pane. Its title shows the visible row range when content overflows; borders are not scroll targets.
 - Mouse wheel inside conversation or `Alt+PageUp` / `Alt+PageDown`: scroll conversation without changing editor history.
 - Scrolling upward pauses following. Scrolling back to the final page, `Ctrl+End`, or **Latest** resumes it.
 - Drag to select conversation text. Selection freezes the displayed text while the model continues working. **Copy selection** or `Ctrl+X` copies it; tree-selector copying retains precedence.
@@ -30,4 +31,4 @@ Conversation rendering visits visible entries lazily, retains at most 2 MiB of d
 
 ## Verification
 
-Focused regressions cover lazy rendering, cache bounds, selection during streaming and resize, follow/reading transitions, narrow layouts, full-width input, overlay focus restoration, questions, silent workspace changes, overlapping observations and stale-session fencing. Headless terminal tests validate cursor placement and resize behavior. These do not substitute for visual and clipboard acceptance in each user's terminal emulator.
+Confirmed by the [layout regressions](../test/workbench.test.ts), [input regressions](../test/workbench-controller.test.ts), [narrow-pane and native-editor regressions](../test/workbench-pane-regressions.test.ts) and [headless terminal tests](../test/workbench-terminal.test.ts): closed borders, stable geometry across growing output, independent pane scrolling, border-adjusted selection, cursor placement, resize and overlay focus restoration. Adjacent tests cover lazy rendering, cache bounds, questions, silent workspace changes, overlapping observations and stale-session fencing. These do not substitute for visual and clipboard acceptance in each user's terminal emulator.

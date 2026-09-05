@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
@@ -35,17 +35,92 @@ function powershellPath(shell, value) {
 
 function powershellTempDirectory(shell) {
 	const tempPath = execFileSync(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$env:TEMP"], { encoding: "utf8" }).trim();
+	if (process.platform === "win32") return tempPath || tmpdir();
 	const drivePath = tempPath.match(/^([A-Za-z]):\\(.*)$/u);
 	if (drivePath) return `/mnt/${drivePath[1].toLowerCase()}/${drivePath[2].replaceAll("\\", "/")}`;
 	return tempPath || tmpdir();
 }
 
+let nativeFixtureCompiler;
+let nativeFixtureCompilerChecked = false;
+let sharedFixtureRoot;
+let sharedFixtureExecutable;
+
+function getNativeFixtureCompiler() {
+	if (!nativeFixtureCompilerChecked) {
+		nativeFixtureCompilerChecked = true;
+		const result = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"], { encoding: "utf8" });
+		if (result.error?.code === "ENOENT") return undefined;
+		assert.equal(result.status, 0, `native fixture compiler probe failed: ${result.error ?? ""}\n${result.stdout ?? ""}\n${result.stderr ?? ""}`);
+		nativeFixtureCompiler = "powershell.exe";
+	}
+	return nativeFixtureCompiler;
+}
+
+function fixturePowerShellExecutable() {
+	// Never substitute shell text for a Windows executable when the native compiler is absent.
+	return getNativeFixtureCompiler() ? powershellExecutable() : null;
+}
+
+function assertWindowsPe(executable) {
+	const bytes = readFileSync(executable);
+	assert.ok(bytes.length >= 64 && bytes.subarray(0, 2).toString("ascii") === "MZ", "fixture must be a Windows PE, not shell text");
+	const offset = bytes.readUInt32LE(60);
+	assert.ok(offset >= 64 && offset <= bytes.length - 4 && bytes.subarray(offset, offset + 4).equals(Buffer.from([80, 69, 0, 0])), "fixture must contain a valid PE signature");
+}
+
+test("Windows fixture validation rejects shell text and 16-bit headers before packaging or launch", (context) => {
+	const root = mkdtempSync(join(tmpdir(), "pi-fixture-header-"));
+	context.after(() => rmSync(root, { recursive: true, force: true }));
+	const file = join(root, "not-an-executable.bin");
+	writeFileSync(file, "#!/bin/sh\nexit 0\n");
+	assert.throws(() => assertWindowsPe(file), /Windows PE/u);
+	const legacy = Buffer.alloc(128);
+	legacy.write("MZ", 0, "ascii");
+	legacy.writeUInt32LE(64, 60);
+	legacy.write("NE", 64, "ascii");
+	writeFileSync(file, legacy);
+	assert.throws(() => assertWindowsPe(file), /PE signature/u);
+});
+
+function getSharedWindowsFixture() {
+	if (sharedFixtureExecutable) return sharedFixtureExecutable;
+	const compiler = getNativeFixtureCompiler();
+	assert.ok(compiler, "native Windows PowerShell is required to compile the real PE fixture");
+	sharedFixtureRoot = mkdtempSync(join(powershellTempDirectory(compiler), "pi-installer-pe-fixture-"));
+	const executable = join(sharedFixtureRoot, "pi-fixture.exe");
+	const code = `using System; using System.IO;
+public class PiFixture {
+ public static int Main(string[] args) {
+  string[] version = File.ReadAllLines(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pi.fixture"));
+  if (args.Length == 1 && args[0] == "--version") { Console.WriteLine(version[0]); return 0; }
+  string log = Environment.GetEnvironmentVariable("PI_TEST_HERDR_LOG");
+  if (!String.IsNullOrEmpty(log)) File.AppendAllText(log, typeof(PiFixture).Assembly.Location + "|" + String.Join(" ", args) + "|" + Environment.GetEnvironmentVariable("PATH") + "\\n");
+  if (args.Length != 1 || args[0] != "--provision-herdr") return 90;
+  string root = Environment.GetEnvironmentVariable("PI_INSTALL_DIR");
+  if (!String.IsNullOrEmpty(root) && File.ReadAllText(Path.Combine(root, "current.version")).Trim() != version[1]) return 91;
+  int status; Int32.TryParse(Environment.GetEnvironmentVariable("PI_TEST_HERDR_EXIT"), out status);
+  Console.WriteLine(status == 0 ? "[OK] Herdr fixture available" : "Herdr fixture download denied");
+  return status;
+ }
+}`;
+	const quote = (value) => `'${value.replaceAll("'", "''")}'`;
+	execFileSync(compiler, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `Add-Type -TypeDefinition ${quote(code)} -OutputAssembly ${quote(powershellPath(compiler, executable))} -OutputType ConsoleApplication`]);
+	assertWindowsPe(executable);
+	sharedFixtureExecutable = executable;
+	return executable;
+}
+
+after(() => { if (sharedFixtureRoot) rmSync(sharedFixtureRoot, { recursive: true, force: true }); });
+
 function createReleaseFixture(root, version, reportedVersion, checksum = true, shell) {
 	const fixture = join(root, `release-${version}`);
 	const payload = join(fixture, "payload");
 	mkdirSync(join(payload, "docs"), { recursive: true });
-	writeFileSync(join(payload, "pi.exe"), `#!/bin/sh\nif [ "\${1:-}" = "--version" ]; then printf '%s\\n' '${reportedVersion}'; else printf 'fixture\\n'; fi\n`);
+	copyFileSync(getSharedWindowsFixture(), join(payload, "pi.exe"));
 	chmodSync(join(payload, "pi.exe"), 0o755);
+	assertWindowsPe(join(payload, "pi.exe"));
+	writeFileSync(join(payload, "pi.fixture"), `${reportedVersion}\nv${version}\n`);
 	writeFileSync(join(payload, "docs", "retained.txt"), "complete release tree\n");
 	const archive = join(fixture, "pi-windows-x64.zip");
 	const quote = (value) => `'${value.replaceAll("'", "''")}'`;
@@ -201,9 +276,9 @@ test("checksum verification works in native Windows PowerShell without Get-FileH
 });
 
 test("offline Windows installer verifies, activates the complete tree, rolls back, and retains two releases", (context) => {
-	const shell = powershellExecutable();
+	const shell = fixturePowerShellExecutable();
 	if (!shell || process.platform === "win32") {
-		context.skip("offline Linux-hosted PowerShell harness is only run on this host");
+		context.skip("requires Linux-hosted PowerShell and the native Windows PE fixture compiler");
 		return;
 	}
 	const root = mkdtempSync(join(powershellTempDirectory(shell), "pi-windows-installer-"));
@@ -310,10 +385,75 @@ test("offline Windows installer verifies, activates the complete tree, rolls bac
 	assert.equal(existsSync(join(installRoot, "releases", "v1.2.5")), true);
 });
 
+test("Herdr native Windows skips legacy and noncanonical verified versions without invoking the flag", (context) => {
+	const shell = getNativeFixtureCompiler();
+	if (!shell) { context.skip("native Windows PowerShell is unavailable"); return; }
+	const root = mkdtempSync(join(powershellTempDirectory(shell), "pi-herdr-legacy-"));
+	context.after(() => rmSync(root, { recursive: true, force: true }));
+	const nativeInstaller = join(root, "install.ps1");
+	writeFileSync(nativeInstaller, installer);
+	for (const version of ["0.98.0", "0.10.2", "0.098.1", "0.98.1-rc.1", "9999999999.0.0"]) {
+		const fixture = createReleaseFixture(root, version, version, true, shell);
+		const installRoot = join(root, `install-${version}`);
+		const log = join(root, `herdr-${version}.log`);
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const result = runOfflineInstaller(shell, {
+				PI_VERSION: `v${version}`, PI_INSTALL_TEST_BASE_URL: powershellPath(shell, fixture),
+				PI_INSTALL_DIR: powershellPath(shell, installRoot), PI_BIN_DIR: powershellPath(shell, join(root, `bin-${version}`)),
+				PI_TEST_HERDR_LOG: powershellPath(shell, log),
+			}, powershellPath(shell, nativeInstaller));
+			assert.equal(result.status, 0, `${version}: ${result.stdout}\n${result.stderr}`);
+			assert.match(normalizePowerShellDiagnostic(result.stdout), /Skipping Herdr.*0\.98\.1/u);
+			assert.equal(existsSync(log), false, `legacy flag invoked for ${version}`);
+			assert.equal(readFileSync(join(installRoot, "current.version"), "utf8").trim(), `v${version}`);
+		}
+	}
+});
+
+for (const version of ["0.98.1", "1.2.3"]) test(`Herdr ${version} native Windows provisioning runs after activation on fresh/repeated installs and stays optional`, (context) => {
+	const shell = getNativeFixtureCompiler();
+	if (!shell) { context.skip("native Windows PowerShell is unavailable"); return; }
+	const root = mkdtempSync(join(powershellTempDirectory(shell), "pi-herdr installer-"));
+	context.after(() => rmSync(root, { recursive: true, force: true }));
+	const nativeInstaller = join(root, "install.ps1");
+	writeFileSync(nativeInstaller, installer);
+	const installRoot = join(root, "install");
+	const binRoot = join(root, "bin");
+	const log = join(root, "herdr.log");
+	const fixture = createReleaseFixture(root, version, version, true, shell);
+	const environment = {
+		PI_VERSION: `v${version}`, PI_INSTALL_TEST_BASE_URL: powershellPath(shell, fixture),
+		PI_INSTALL_DIR: powershellPath(shell, installRoot), PI_BIN_DIR: powershellPath(shell, binRoot),
+		PI_TEST_HERDR_LOG: powershellPath(shell, log),
+	};
+	for (const exitCode of [0, 0, 9]) {
+		const result = runOfflineInstaller(shell, { ...environment, PI_TEST_HERDR_EXIT: String(exitCode) }, powershellPath(shell, nativeInstaller));
+		assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+		assert.match(result.stdout, /Herdr/u);
+		assert.equal(readFileSync(join(installRoot, "current.version"), "utf8").trim(), `v${version}`);
+		if (exitCode) assert.match(normalizePowerShellDiagnostic(`${result.stdout}\n${result.stderr}`), /Herdr.*(?:unavailable|failed).*Pi remains usable/iu);
+	}
+	const calls = readFileSync(log, "utf8").trim().split("\n");
+	assert.equal(calls.length, 3);
+	// .NET Framework GetFullPath expands 8.3 TEMP aliases, as the installer does.
+	const canonicalRoot = execFileSync(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `[IO.Path]::GetFullPath('${powershellPath(shell, root).replaceAll("'", "''")}')`], { encoding: "utf8" }).trim();
+	for (const call of calls) {
+		const [executable, args, path] = call.split("|");
+		assert.equal(executable.toLowerCase(), `${canonicalRoot}\\install\\releases\\v${version}\\pi.exe`.toLowerCase());
+		assert.equal(args, "--provision-herdr");
+		assert.equal(path.split(";")[0], `${canonicalRoot}\\bin`);
+	}
+	// Negative control: failed verification must not invoke optional provisioning.
+	writeFileSync(join(fixture, "SHA256SUMS"), `${"0".repeat(64)}  pi-windows-x64.zip\n`);
+	const failed = runOfflineInstaller(shell, environment, powershellPath(shell, nativeInstaller));
+	assert.notEqual(failed.status, 0);
+	assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 3);
+});
+
 test("offline Windows installer retries transient release activation locks and fails closed when exhausted", (context) => {
-	const shell = powershellExecutable();
+	const shell = fixturePowerShellExecutable();
 	if (!shell || process.platform === "win32") {
-		context.skip("offline Linux-hosted PowerShell harness is only run on this host");
+		context.skip("requires Linux-hosted PowerShell and the native Windows PE fixture compiler");
 		return;
 	}
 	const root = mkdtempSync(join(powershellTempDirectory(shell), "pi-windows-activation-"));
@@ -367,9 +507,9 @@ test("offline Windows installer retries transient release activation locks and f
 });
 
 test("offline Windows installer fails closed when a partial activation target appears before rename", (context) => {
-	const shell = powershellExecutable();
+	const shell = fixturePowerShellExecutable();
 	if (!shell || process.platform === "win32") {
-		context.skip("offline Linux-hosted PowerShell harness is only run on this host");
+		context.skip("requires Linux-hosted PowerShell and the native Windows PE fixture compiler");
 		return;
 	}
 	const root = mkdtempSync(join(powershellTempDirectory(shell), "pi-windows-partial-activation-"));
@@ -410,9 +550,9 @@ test("offline Windows installer fails closed when a partial activation target ap
 });
 
 test("offline Windows installer bounds staging cleanup and preserves the primary failure", (context) => {
-	const shell = powershellExecutable();
+	const shell = fixturePowerShellExecutable();
 	if (!shell || process.platform === "win32") {
-		context.skip("offline Linux-hosted PowerShell harness is only run on this host");
+		context.skip("requires Linux-hosted PowerShell and the native Windows PE fixture compiler");
 		return;
 	}
 	const root = mkdtempSync(join(powershellTempDirectory(shell), "pi-windows-cleanup-"));

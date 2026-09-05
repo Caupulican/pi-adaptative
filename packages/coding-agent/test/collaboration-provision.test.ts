@@ -1,8 +1,59 @@
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { exposeHerdrOnPath } from "../src/core/collaboration/herdr-provision.ts";
+import { describe, expect, it, vi } from "vitest";
+import {
+	checkHerdrInstallation,
+	exposeHerdrOnPath,
+	provisionHerdr,
+	runHerdrProvisionCommand,
+} from "../src/core/collaboration/herdr-provision.ts";
+import { ensureToolWithDiagnostics } from "../src/utils/tools-manager.ts";
+
+vi.mock("../src/utils/tools-manager.ts", () => ({ ensureToolWithDiagnostics: vi.fn() }));
+
+describe("Herdr installation progress", () => {
+	it("uses the existing bounded download owner and makes explicit install progress visible", async () => {
+		const ensure = vi.mocked(ensureToolWithDiagnostics);
+		ensure.mockResolvedValue({ status: "unavailable", failureCode: "offline", message: "Offline mode enabled" });
+		await expect(provisionHerdr({ silent: false })).rejects.toThrow("offline");
+		expect(ensure).toHaveBeenLastCalledWith("herdr", false);
+		// Negative control: lazy runtime provisioning retains its silent default.
+		await expect(provisionHerdr()).rejects.toThrow("offline");
+		expect(ensure).toHaveBeenLastCalledWith("herdr", true);
+	});
+
+	it.each(["offline", "installation_failed", "unsupported_platform"] as const)(
+		"reports %s honestly without failing the optional installer command",
+		async (failureCode) => {
+			vi.mocked(ensureToolWithDiagnostics).mockResolvedValue({
+				status: "unavailable",
+				failureCode,
+				message: "bounded failure",
+			});
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			try {
+				await expect(runHerdrProvisionCommand()).resolves.toBeUndefined();
+				const text = log.mock.calls.flat().join("\n");
+				expect(text).toContain("[WARN] Herdr");
+				expect(text).toContain(failureCode);
+				expect(text).toContain("Pi remains usable");
+				expect(text).not.toContain("[OK]");
+			} finally {
+				log.mockRestore();
+			}
+		},
+	);
+
+	it("fresh/existing success reports availability, not an invented installation outcome", async () => {
+		const provision = vi.fn(async () => ({ path: "/managed/herdr", globalPath: false }));
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const result = await checkHerdrInstallation({ silent: false }, provision);
+			expect(result).toEqual({ present: true, detail: "/managed/herdr (managed binary; not exposed on PATH)" });
+		}
+		expect(provision).toHaveBeenCalledTimes(2);
+	});
+});
 
 describe("Herdr global command exposure", () => {
 	it("keeps the Windows runtime beside its executable and exposes only a command launcher", async () => {

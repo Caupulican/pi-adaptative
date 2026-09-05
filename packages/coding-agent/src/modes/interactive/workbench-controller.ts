@@ -79,7 +79,7 @@ export class WorkbenchController {
 	}
 
 	complete(): void {
-		this.expanded = this.failed > 0;
+		this.expanded = false;
 		this.updateExecution();
 	}
 
@@ -149,15 +149,19 @@ export class WorkbenchController {
 				this.failed ? "warning" : "muted",
 				`Execution · ${this.actionCount} actions${this.fileEffects ? ` · ${this.fileEffects} file effects` : ""}${this.failed ? ` · ${this.failed} failure receipts` : ""} · ${keyText("app.execution.toggle")} fold/expand`,
 			);
-		this.view.setExecution({
-			render: (width) => [
-				summary(),
-				...(this.expanded ? this.previews.slice(-1).flatMap((preview) => preview.render(width)) : []),
-			],
-			invalidate: () => {
-				for (const preview of this.previews) preview.invalidate();
+		this.view.setExecution(
+			{
+				render: (width) => [
+					summary(),
+					...(this.expanded ? this.previews.slice(-1).flatMap((preview) => preview.render(width)) : []),
+				],
+				invalidate: () => {
+					for (const preview of this.previews) preview.invalidate();
+				},
 			},
-		});
+			!this.expanded || !this.previews.length,
+			this.previews.at(-1),
+		);
 		this.ports.requestRender();
 	}
 
@@ -199,20 +203,29 @@ export class WorkbenchController {
 			const column = Number(mouse[2]) - 1;
 			const row = Number(mouse[3]) - 1;
 			const inside =
-				row >= this.view.conversationTop && row < this.view.conversationTop + this.view.conversationHeight;
-			if ((button === 64 || button === 65) && inside) conversation.scroll(button === 64 ? -3 : 3);
-			else if (button === 0 && mouse[4] === "M" && row === this.view.conversationTop - 1) {
+				row >= this.view.conversationTop &&
+				row < this.view.conversationTop + this.view.conversationHeight &&
+				column >= this.view.conversationLeft &&
+				column < this.view.conversationLeft + this.view.conversationWidth;
+			if (button === 64 || button === 65) {
+				const delta = button === 64 ? -3 : 3;
+				if (inside) conversation.scroll(delta);
+				else this.view.scrollUpper(column, row, delta);
+			} else if (button === 0 && mouse[4] === "M" && row === this.view.conversationTop - 1) {
 				const action = this.view.headerAction(column);
 				if (action === "latest") conversation.latest();
 				else if (action) void this.copy(action === "copyAll");
 			} else if (button === 0 && mouse[4] === "M" && inside) {
 				this.selecting = true;
-				conversation.select({ row: row - this.view.conversationTop, column }, true);
+				conversation.select(
+					{ row: row - this.view.conversationTop, column: column - this.view.conversationLeft },
+					true,
+				);
 			} else if (this.selecting && (button === 32 || mouse[4] === "m")) {
 				conversation.select(
 					{
 						row: Math.max(0, Math.min(this.view.conversationHeight - 1, row - this.view.conversationTop)),
-						column: Math.max(0, column),
+						column: Math.max(0, Math.min(this.view.conversationWidth, column - this.view.conversationLeft)),
 					},
 					false,
 				);

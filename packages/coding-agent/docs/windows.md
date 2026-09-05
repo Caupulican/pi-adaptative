@@ -100,6 +100,8 @@ Alternatively, download the matching archive from [Caupulican/pi-adaptative rele
 
 The archive is standalone and does not require Node.js or npm. Re-run the PowerShell installer to update safely; it verifies the archive and keeps the previous version available for rollback. Manual archive extraction is an advanced fallback only. To uninstall, remove the managed install directory; your settings, credentials, sessions, and installed pi packages under `%USERPROFILE%\.pi\agent\` are preserved.
 
+The installer also ensures optional [Herdr collaboration](herdr-installation.md) through the activated Pi executable and reports availability or a non-fatal warning. It does not start Herdr or install unrelated tools.
+
 ## Incident collection
 
 The Windows release archive includes `collect-pi-incident.ps1` beside `pi.exe`. Run it from native PowerShell on the machine and Windows account where the failure happened:

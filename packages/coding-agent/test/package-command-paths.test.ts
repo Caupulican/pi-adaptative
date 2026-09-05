@@ -210,6 +210,30 @@ describe("package commands", () => {
 		}
 	});
 
+	it.each(["linux", "win32"] as const)(
+		"routes self aliases through the Herdr-enabled %s installer, not a second download owner",
+		async (platform) => {
+			const runInstaller = vi.fn(async (_command: string, _args: string[]) => 0);
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			try {
+				for (const alias of ["self", "pi", "--self"]) {
+					await expect(handlePackageCommand(["update", alias], { platform, runInstaller })).resolves.toBe(true);
+				}
+				expect(runInstaller).toHaveBeenCalledTimes(3);
+				for (const [command, args] of runInstaller.mock.calls) {
+					expect(command).toBe(platform === "win32" ? "powershell.exe" : "sh");
+					expect(args.join(" ")).toContain(
+						`https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.${platform === "win32" ? "ps1" : "sh"}`,
+					);
+					expect(args.join(" ")).not.toContain("herdr");
+				}
+				expect(process.exitCode).toBeUndefined();
+			} finally {
+				log.mockRestore();
+			}
+		},
+	);
+
 	it("does not invoke the standalone installer for extension-only updates", async () => {
 		const runInstaller = vi.fn(async (_command: string, _args: string[]) => 0);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});

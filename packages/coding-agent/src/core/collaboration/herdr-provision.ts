@@ -70,9 +70,35 @@ export async function exposeHerdrOnPath(
 	return { path: executable, globalPath: false };
 }
 
-export async function provisionHerdr(): Promise<HerdrProvisionResult> {
-	const resolution = await ensureToolWithDiagnostics("herdr", true);
+export async function provisionHerdr(options: { silent?: boolean } = {}): Promise<HerdrProvisionResult> {
+	const resolution = await ensureToolWithDiagnostics("herdr", options.silent ?? true);
 	if (resolution.status !== "available")
 		throw new Error(`Herdr provisioning failed (${resolution.failureCode}): ${resolution.message}`);
 	return exposeHerdrOnPath(resolution.path);
+}
+
+/** Optional installer/doctor projection; runtime callers retain the strict provisionHerdr boundary. */
+export async function checkHerdrInstallation(
+	options: { silent?: boolean } = {},
+	provision: typeof provisionHerdr = provisionHerdr,
+): Promise<{ present: boolean; detail: string }> {
+	try {
+		const result = await provision(options);
+		return {
+			present: true,
+			detail: `${result.path} (${result.globalPath ? "on PATH" : "managed binary; not exposed on PATH"})`,
+		};
+	} catch (error) {
+		return {
+			present: false,
+			detail: `${error instanceof Error ? error.message : String(error)}; collaboration unavailable; Pi remains usable`,
+		};
+	}
+}
+
+/** Narrow post-install entry: never creates a session, starts Herdr, or provisions unrelated tools. */
+export async function runHerdrProvisionCommand(): Promise<void> {
+	console.log("Checking Herdr (optional collaboration)...");
+	const result = await checkHerdrInstallation({ silent: false });
+	console.log(`[${result.present ? "OK" : "WARN"}] Herdr -- ${result.detail}`);
 }

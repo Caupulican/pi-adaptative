@@ -385,6 +385,34 @@ function Prune-Releases([string]$ReleaseDir, [string]$CurrentVersion, [string]$P
     }
 }
 
+function Invoke-HerdrProvision([string]$Executable, [string]$BinDir, [string]$VerifiedVersion) {
+    # Unknown long flags start sessions on older CLIs. Use the already verified version, never a probe.
+    $supported = $false
+    if ($VerifiedVersion -match '\A(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\z') {
+        $major = [int]$Matches[1]
+        $minor = [int]$Matches[2]
+        $patch = [int]$Matches[3]
+        $supported = $major -gt 0 -or $minor -gt 98 -or ($minor -eq 98 -and $patch -ge 1)
+    }
+    if (-not $supported) {
+        Write-Output "Skipping Herdr provisioning for Pi ${VerifiedVersion}: requires a supported stable version >= 0.98.1; Pi remains usable."
+        return
+    }
+    # Only the activated release owns Herdr downloads; never run the general doctor here.
+    $previousPath = $env:PATH
+    $previousExitCode = $global:LASTEXITCODE
+    try {
+        $env:PATH = "$BinDir;$previousPath"
+        & $Executable --provision-herdr
+        if ($LASTEXITCODE -ne 0) { throw "provisioning command exited with code $LASTEXITCODE" }
+    } catch {
+        Write-Warning "Herdr provisioning failed: $($_.Exception.Message); collaboration unavailable; Pi remains usable."
+    } finally {
+        $env:PATH = $previousPath
+        $global:LASTEXITCODE = $previousExitCode
+    }
+}
+
 function Install-PiAdaptative {
     Assert-WindowsHost
     $architecture = Get-Architecture
@@ -460,6 +488,7 @@ function Install-PiAdaptative {
             try { Prune-Releases $releaseDir $version $previousVersion } catch { Write-Warning "Could not prune old Pi Adaptative releases: $($_.Exception.Message)" }
             [void](Ensure-UserPath $binDir)
             Write-Output "Pi Adaptative $version installed for Windows $architecture."
+            Invoke-HerdrProvision (Join-Path $targetDir "pi.exe") $binDir ($version.Substring(1))
             Write-Output "Open a new PowerShell window, then run: pi --version"
         } catch {
             $installError = $_

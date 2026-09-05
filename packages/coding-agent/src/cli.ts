@@ -28,6 +28,12 @@ const { configureHttpDispatcher } = await import("./core/http-dispatcher.ts");
 // Configure undici's global dispatcher before provider SDKs issue requests.
 // Runtime settings are applied once SettingsManager has loaded global/project settings.
 configureHttpDispatcher();
+// Installers use the activated release's sole Herdr provisioner, without loading sessions/settings.
+if (firstArg === "--provision-herdr" && cliArgs.length === 1) {
+	const { runHerdrProvisionCommand } = await import("./core/collaboration/herdr-provision.ts");
+	await runHerdrProvisionCommand();
+	process.exit(0);
+}
 if ((cliArgs.includes("--help") || cliArgs.includes("-h")) && !packageCommands.has(firstArg ?? "")) {
 	const [{ parseArgs, printHelp }, { takeOverStdout }] = await Promise.all([
 		import("./cli/args.ts"),

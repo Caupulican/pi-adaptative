@@ -9,6 +9,7 @@ import {
 	probeVersion,
 } from "../utils/tools-manager.ts";
 import { type AgentDirectoryLayoutReport, inspectAgentDirectoryLayout } from "./agent-directory-layout.ts";
+import { checkHerdrInstallation, provisionHerdr } from "./collaboration/herdr-provision.ts";
 import { OllamaRuntime } from "./models/local-runtime.ts";
 import { ensurePythonRuntime, type PythonRuntimeOutcome } from "./python-runtime.ts";
 
@@ -63,6 +64,7 @@ export interface DoctorDeps {
 	getLastFffInstallOutcome: () => FffInstallOutcome | undefined;
 	ensureTool: (tool: "jq" | "jscpd" | "rg", silent: boolean) => Promise<string | undefined>;
 	ensurePythonRuntime: (options: { silent: boolean }) => Promise<PythonRuntimeOutcome>;
+	provisionHerdr: typeof provisionHerdr;
 	/** Best-effort `<command> --version` probe; undefined if it can't be run. Used only to enrich a status line, never for presence detection. */
 	probeVersion: (command: string, versionArgs?: readonly string[]) => string | undefined;
 	ollamaRuntime: DoctorOllamaRuntime;
@@ -70,6 +72,8 @@ export interface DoctorDeps {
 }
 
 export interface RunDoctorOptions {
+	/** Self-installers already provision Herdr with the activated release; extension updates must not install it. */
+	includeHerdr?: boolean;
 	/**
 	 * Whether the fff-node managed install (if one is attempted) stays quiet.
 	 * Default true, matching runUpdatePreflight's existing background
@@ -85,6 +89,7 @@ const realDoctorDeps: DoctorDeps = {
 	getLastFffInstallOutcome,
 	ensureTool,
 	ensurePythonRuntime,
+	provisionHerdr,
 	probeVersion,
 	ollamaRuntime: new OllamaRuntime({ agentDir: getAgentDir() }),
 	inspectAgentDirectoryLayout: () => inspectAgentDirectoryLayout(getAgentDir()),
@@ -232,15 +237,23 @@ export async function runDoctor(
 	options: RunDoctorOptions = {},
 ): Promise<DoctorReport> {
 	const silent = options.silent ?? true;
-	const [fffNode, ripgrep, jq, jscpd, ollama, python] = await Promise.all([
+	const [fffNode, ripgrep, jq, jscpd, ollama, python, herdr] = await Promise.all([
 		checkFffNode(deps, silent),
 		checkManagedDataTool(deps, "rg", silent),
 		checkManagedDataTool(deps, "jq", silent),
 		checkManagedDataTool(deps, "jscpd", silent),
 		checkOllama(deps),
 		checkPython(deps, silent),
+		options.includeHerdr === false ? undefined : checkHerdrInstallation({ silent }, deps.provisionHerdr),
 	]);
-	return { checks: [fffNode, ripgrep, jq, jscpd, ollama, python], notices: checkAgentDirectoryLayout(deps) };
+	const checks: DoctorCheck[] = [fffNode, ripgrep, jq, jscpd, ollama, python];
+	const notices = checkAgentDirectoryLayout(deps);
+	if (herdr) {
+		const result = { id: "herdr", label: "Herdr (optional collaboration)", detail: herdr.detail };
+		if (herdr.present) checks.push({ ...result, kind: "managed", present: true });
+		else notices.push(result);
+	}
+	return { checks, notices };
 }
 
 export function formatDoctorReport(report: DoctorReport): string {
@@ -266,7 +279,9 @@ export function formatDoctorReport(report: DoctorReport): string {
  */
 export async function runUpdatePreflight(deps: DoctorDeps = realDoctorDeps): Promise<void> {
 	try {
-		const report = await runDoctor(deps);
+		// The standalone installer reports Herdr from the newly activated binary. Do not repeat
+		// that install from an older updater, or introduce it on extension-only/help commands.
+		const report = await runDoctor(deps, { includeHerdr: false });
 		console.log(`\n${formatDoctorReport(report)}\n`);
 	} catch (error) {
 		console.log(chalk.dim(`(environment check skipped: ${error instanceof Error ? error.message : String(error)})`));
