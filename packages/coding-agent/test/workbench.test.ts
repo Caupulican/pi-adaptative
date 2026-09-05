@@ -67,9 +67,9 @@ describe("Workbench conversation window", () => {
 	it("freezes a selected streaming response, copies only selected columns and preserves reading on release", () => {
 		const entry = new Rows(["hello world", "second line"]);
 		const window = new ConversationWindow(() => [entry]);
-		window.render(30, 3);
-		window.select({ row: 0, column: 6 }, true);
-		window.select({ row: 1, column: 6 }, false);
+		window.render(30, 3); // two rows anchored to the bottom, one empty row above
+		window.select({ row: 1, column: 6 }, true);
+		window.select({ row: 2, column: 6 }, false);
 		entry.lines = ["replacement", "more tokens"];
 		entry.invalidate();
 		expect(window.selectionText()).toBe("world\nsecond");
@@ -77,7 +77,16 @@ describe("Workbench conversation window", () => {
 		expect(window.following).toBe(false);
 		window.latest();
 		expect(window.selectionText()).toBeUndefined();
-		expect(window.render(30, 3)).toEqual(entry.lines);
+		expect(window.render(30, 3)).toEqual(["", ...entry.lines]);
+	});
+
+	it("anchors a short transcript to the bottom so the latest row sits next to the input", () => {
+		const entries = [new Rows(["first"]), new Rows(["second"])];
+		const window = new ConversationWindow(() => entries);
+		expect(window.render(30, 5)).toEqual(["", "", "", "first", "second"]);
+		entries.push(new Rows(["third"]));
+		expect(window.render(30, 5)).toEqual(["", "", "first", "second", "third"]);
+		expect(window.following).toBe(true);
 	});
 
 	it("resumes following when the entry it was anchored to is trimmed from live history", () => {
@@ -187,7 +196,8 @@ describe("Workbench layout", () => {
 			);
 			expect(frame[12]).toMatch(/^─+ ↕ work area.*─+$/);
 			expect(frame[13]).toMatch(/^ Conversation · Following latest .* Copy conversation {2}$/);
-			expect(frame[14]!.trimEnd()).toBe(" conversation body");
+			expect(frame[top + 11]!.trimEnd()).toBe(" conversation body");
+			expect(frame[top]).toBe("");
 			expect(frame.at(-4)).toMatch(/^─+$/);
 			expect(frame.at(-3)!.trimEnd()).toBe(" status across the entire screen");
 			expect(frame.at(-2)!.trimEnd()).toBe(" input across the entire screen");

@@ -16,6 +16,7 @@ The conversation viewport never emits the OSC 133 prompt-zone marks that the inl
 - Mouse wheel inside conversation or `Alt+PageUp` / `Alt+PageDown`: scroll conversation without changing editor history.
 - Scrolling upward pauses following; the conversation header then reads *Reading* and offers **Latest ↓**. Scrolling back to the final page, `Ctrl+End`, or **Latest ↓** resumes it.
 - Drag to select conversation text. A plain click only focuses the pane; the selection starts when the pointer moves, and only then does the displayed text freeze while the model continues working. `Ctrl+X` copies the selection (terminal-native selection copies on its own), and tree-selector copying retains precedence.
+- The conversation anchors to the bottom: the latest row sits directly above the status band, and a transcript shorter than the area leaves its empty rows above, never below.
 - Reading position anchors to the entry under the top row. When live-history trimming removes that entry, the conversation resumes following instead of jumping to the oldest retained rows.
 - An answer the verification gate withheld (the model claimed completion while a trusted verification was still failing) shows as an `Answer withheld` line in the conversation instead of leaving the screen unchanged.
 - **Copy conversation** or `Alt+C` copies user/assistant prose and answered `ask_question` interactions from the current session branch, including history outside the visible window. Routine tool output is excluded. Copies above 10 MiB are refused explicitly; use `/export` instead.

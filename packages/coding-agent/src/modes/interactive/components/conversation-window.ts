@@ -139,6 +139,9 @@ export class ConversationWindow {
 				offset = 0;
 			}
 		}
+		// A short transcript anchors to the bottom: the latest exchange sits next to the input, and
+		// the empty rows stay above it, so a new message never appears at the top of an empty area.
+		while (lines.length < this.height) lines.unshift("");
 		this.visible = lines;
 		return lines;
 	}

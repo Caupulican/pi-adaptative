@@ -3,6 +3,7 @@
 ### Fixed
 
 - A verification obligation the model kept answering around no longer produces an unbounded, invisible, paid loop: the agent loop now stops after three consecutive withheld tool-free answers with a `verification_handoff_stall` runaway stop, the session reports why, and each withheld answer shows as an `Answer withheld` line in the conversation (both layouts). The obligation stays active for the next prompt.
+- Workbench conversation: the transcript anchors to the bottom, so a new message appears next to the input with older messages above it instead of at the top of an empty area.
 - Workbench conversation: a plain click no longer freezes the displayed text (only a drag starts a selection), and reading position no longer jumps to the oldest retained rows when live-history trimming removes the anchored entry; it resumes following instead.
 - Workbench execution: every preview of the current cycle stays visible in order (up to twelve) with the cycle's counts in the title row, following the newest rows until the operator scrolls up. Previously only the latest preview showed.
 
