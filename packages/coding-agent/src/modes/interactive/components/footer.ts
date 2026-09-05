@@ -120,6 +120,8 @@ type FooterUsageSnapshot = {
 
 export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
+	/** One status row when the width allows (Workbench); otherwise the classic stacked rows. */
+	private compact = false;
 	private session: AgentSession;
 	private footerData: ReadonlyFooterDataProvider;
 	private usageSnapshot?: FooterUsageSnapshot;
@@ -134,6 +136,10 @@ export class FooterComponent implements Component {
 		this.session = session;
 		this.usageSnapshot = undefined;
 		this.cumulativeUsage = undefined;
+	}
+
+	setCompact(compact: boolean): void {
+		this.compact = compact;
 	}
 
 	setAutoCompactEnabled(enabled: boolean): void {
@@ -358,24 +364,20 @@ export class FooterComponent implements Component {
 		// that end with a reset, which would clear an outer dim wrapper. So we dim the parts
 		// before and after the colored section independently.
 		const dimStatsLeft = theme.fg("dim", statsLeft);
-		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
-		const badgeIndex = fastModeEnabled ? remainder.indexOf(FAST_MODE_BADGE) : -1;
-		const dimRemainder =
-			badgeIndex === -1
+		const dimTail = (remainder: string): string => {
+			const badgeIndex = fastModeEnabled ? remainder.indexOf(FAST_MODE_BADGE) : -1;
+			return badgeIndex === -1
 				? theme.fg("dim", remainder)
 				: theme.fg("dim", remainder.slice(0, badgeIndex)) +
-					theme.bg("selectedBg", theme.bold(theme.fg("accent", FAST_MODE_BADGE))) +
-					theme.fg("dim", remainder.slice(badgeIndex + FAST_MODE_BADGE.length));
+						theme.bg("selectedBg", theme.bold(theme.fg("accent", FAST_MODE_BADGE))) +
+						theme.fg("dim", remainder.slice(badgeIndex + FAST_MODE_BADGE.length));
+		};
 
-		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
-		const lines = [pwdLine, dimStatsLeft + dimRemainder];
-
-		// Add extension statuses on a single line. Learning-related statuses are
-		// folded into one compact chip so independent learning systems do not render
-		// brittle duplicates like "(learning) (learning) auto".
+		// Extension statuses share a single line. Learning-related statuses are folded into
+		// one compact chip so independent learning systems do not render brittle duplicates
+		// like "(learning) (learning) auto".
 		const extensionStatuses = this.footerData.getExtensionStatuses();
 		const autonomyStatus = this.footerData.getAutonomyStatus();
-
 		const statusParts: string[] = [];
 		if (autonomyStatus) {
 			const sanitizedAutonomyStatus = sanitizeStatusText(autonomyStatus);
@@ -389,9 +391,20 @@ export class FooterComponent implements Component {
 				statusParts.push(extLine);
 			}
 		}
+		const statusLine = statusParts.join(" ");
 
-		if (statusParts.length > 0) {
-			const statusLine = statusParts.join(" ");
+		if (this.compact) {
+			// Location, usage and extension status side by side, model on the right, one row.
+			const leftWidth = visibleWidth(pwd) + 2 + statsLeftWidth + (statusLine ? 2 + visibleWidth(statusLine) : 0);
+			if (leftWidth + minPadding + rightSideWidth <= width) {
+				const left = [theme.fg("dim", pwd), dimStatsLeft, statusLine].filter(Boolean).join("  ");
+				return [left + dimTail(" ".repeat(width - leftWidth - rightSideWidth) + rightSide)];
+			}
+		}
+
+		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
+		const lines = [pwdLine, dimStatsLeft + dimTail(statsLine.slice(statsLeft.length))];
+		if (statusLine) {
 			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
 		}
 

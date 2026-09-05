@@ -2,13 +2,14 @@
 import path from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { AssistantMessage } from "@caupulican/pi-ai";
-import type { Component, Container, EditorComponent, TUI } from "@caupulican/pi-tui";
+import type { Container, EditorComponent, TUI } from "@caupulican/pi-tui";
 import { APP_NAME } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import type { ActivityLaneComponent } from "./components/activity-lane.ts";
+import type { FooterComponent } from "./components/footer.ts";
 import { isConversationMessage } from "./components/question-conversation.ts";
 import { WorkbenchComponent } from "./components/workbench.ts";
 import type { ExtensionUiHost } from "./extension-ui-host.ts";
@@ -26,7 +27,7 @@ export interface InteractiveLayoutHost {
 	statusContainer: Container;
 	widgetContainerAbove: Container;
 	widgetContainerBelow: Container;
-	footer: Component;
+	footer: FooterComponent;
 	activityLane?: ActivityLaneComponent;
 	keybindings: KeybindingsManager;
 	extensionUiHost: Pick<ExtensionUiHost, "renderWidgets">;
@@ -41,6 +42,8 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		return;
 	}
 	host.extensionUiHost.renderWidgets();
+	// One status row when the width allows; the status band should use the width, not stack.
+	host.footer.setCompact(true);
 	const view = new WorkbenchComponent({
 		conversation: host.chatContainer,
 		editor: host.editorContainer,

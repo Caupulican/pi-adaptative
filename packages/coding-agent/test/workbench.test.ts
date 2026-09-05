@@ -147,7 +147,7 @@ describe("Workbench layout", () => {
 		output.invalidate();
 		const long = view.render(110).map(stripAnsi);
 		expect(view.conversationTop).toBe(top);
-		expect(view.conversationHeight).toBe(13);
+		expect(view.conversationHeight).toBe(12);
 		view.setExecution(undefined);
 		view.render(110);
 		expect(view.conversationTop).toBe(top);
@@ -172,6 +172,7 @@ describe("Workbench layout", () => {
 			expect(frame[12]).toMatch(/^─+ ↕ work area.*─+$/);
 			expect(frame[13]).toMatch(/^ Conversation · Following latest .* Copy conversation {2}$/);
 			expect(frame[14]!.trimEnd()).toBe(" conversation body");
+			expect(frame.at(-4)).toMatch(/^─+$/);
 			expect(frame.at(-3)!.trimEnd()).toBe(" status across the entire screen");
 			expect(frame.at(-2)!.trimEnd()).toBe(" input across the entire screen");
 			expect(frame.at(-1)).toMatch(/^ \/ commands/);
@@ -245,6 +246,7 @@ describe("Workbench layout", () => {
 		const lines = view.render(110).map(stripAnsi);
 		expect(lines).toHaveLength(30);
 		expect(lines[13]).toContain("Conversation");
+		expect(lines.at(-4)).toMatch(/^─+$/);
 		expect(lines.at(-3)!.trimEnd()).toBe(" status across the entire screen");
 		expect(lines.at(-2)!.trimEnd()).toBe(" input across the entire screen");
 		expect(lines.at(-1)).toMatch(/^ \/ commands/);

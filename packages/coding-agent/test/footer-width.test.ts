@@ -499,3 +499,25 @@ describe("footer metric layout", () => {
 		expect(statsLine).toContain("CH:80%");
 	});
 });
+
+describe("footer compact row (Workbench)", () => {
+	beforeAll(() => initTheme("dark"));
+	it("joins location, usage and extension status on one row when the width allows, and stacks otherwise", () => {
+		const session = createSession({
+			sessionName: "reload",
+			usage: { input: 12_345, output: 678, cacheRead: 4_000, cacheWrite: 0, cost: { total: 0.111 } },
+			dailyCost: 3.5,
+		});
+		const footer = new FooterComponent(session, createFooterData(2, new Map([["tps", "TPS 11.1 tok/s"]])));
+		footer.setCompact(true);
+		const wide = footer.render(220).map(stripAnsi);
+		expect(wide).toHaveLength(1);
+		expect(wide[0]).toMatch(/\(main\).*reload.*CURRENT.*TPS 11\.1 tok\/s\s+.*model/);
+		expect(visibleWidth(wide[0]!)).toBe(220);
+		const narrow = footer.render(60).map(stripAnsi);
+		expect(narrow.length).toBeGreaterThanOrEqual(2);
+		for (const line of narrow) expect(visibleWidth(line)).toBeLessThanOrEqual(60);
+		footer.setCompact(false);
+		expect(footer.render(220)).toHaveLength(3);
+	});
+});

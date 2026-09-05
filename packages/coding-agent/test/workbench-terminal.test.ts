@@ -54,7 +54,10 @@ describe("Workbench terminal rendering", () => {
 			expect(terminal.getViewport()[view.conversationTop - 1]).toMatch(
 				/^ Conversation · Following latest .* Copy conversation\s*$/,
 			);
-			expect(terminal.getViewport()[view.conversationTop + view.conversationHeight]).toContain("status at bottom");
+			expect(terminal.getViewport()[view.conversationTop + view.conversationHeight]).toMatch(/^─+$/);
+			expect(terminal.getViewport()[view.conversationTop + view.conversationHeight + 1]).toContain(
+				"status at bottom",
+			);
 			for (const line of terminal.getViewport()) expect(line).not.toMatch(/[┌┐└┘│]/);
 			view.setInspector([{ title: "Work plan", body: ["Work complete"] }]);
 			view.setExecution(undefined);

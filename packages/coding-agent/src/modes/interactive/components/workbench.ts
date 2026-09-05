@@ -388,13 +388,16 @@ export class WorkbenchComponent extends Container {
 		// Rows that already fit skip the grapheme scan; the width lookup is cached per string.
 		const gutter = (line: string) =>
 			line ? ` ${visibleWidth(line) <= inner ? line : truncateToWidth(line, inner, "")}` : "";
-		// Title strip, activity, divider, conversation header and three conversation rows stay.
-		const dockBudget = Math.max(0, total - editor.length - 8);
+		// Title strip, activity, divider, conversation header, three conversation rows and the
+		// status boundary stay.
+		const dockBudget = Math.max(0, total - editor.length - 9);
 		const above = this.options.dock.flatMap((component) => component.render(inner)).slice(-dockBudget);
 		const below = (this.options.dockBelow ?? [])
 			.flatMap((component) => component.render(inner))
 			.slice(0, Math.max(0, dockBudget - above.length));
+		// The status band opens with a rule so its boundary reads at a glance.
 		const dockRows = [
+			...(above.length ? [theme.fg("borderMuted", "─".repeat(columns))] : []),
 			...above.map((line) => surfaceRow(gutter(line), columns)),
 			...editor.map(gutter),
 			...below.map(gutter),
