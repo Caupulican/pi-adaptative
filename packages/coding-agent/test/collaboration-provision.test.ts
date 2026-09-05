@@ -6,7 +6,7 @@ import { exposeHerdrOnPath } from "../src/core/collaboration/herdr-provision.ts"
 
 describe("Herdr global command exposure", () => {
 	it("keeps the Windows runtime beside its executable and exposes only a command launcher", async () => {
-		const dir = await mkdtemp(join(tmpdir(), "pi-herdr-windows-path-"));
+		const dir = await realpath(await mkdtemp(join(tmpdir(), "pi-herdr-windows-path-")));
 		try {
 			const bin = join(dir, "bin");
 			await mkdir(bin);
@@ -27,7 +27,7 @@ describe("Herdr global command exposure", () => {
 		}
 	});
 	it("exposes an installed binary in an existing user PATH and never overwrites a foreign command", async () => {
-		const dir = await mkdtemp(join(tmpdir(), "pi-herdr-path-"));
+		const dir = await realpath(await mkdtemp(join(tmpdir(), "pi-herdr-path-")));
 		try {
 			const bin = join(dir, "bin");
 			await mkdir(bin);
@@ -53,7 +53,7 @@ describe("Herdr global command exposure", () => {
 		}
 	});
 	it("reports unavailable global exposure without editing shell profiles or unowned directories", async () => {
-		const dir = await mkdtemp(join(tmpdir(), "pi-herdr-path-"));
+		const dir = await realpath(await mkdtemp(join(tmpdir(), "pi-herdr-path-")));
 		try {
 			const managed = join(dir, "herdr");
 			await writeFile(managed, "owned");
