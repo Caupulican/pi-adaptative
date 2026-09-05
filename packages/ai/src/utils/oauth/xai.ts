@@ -14,7 +14,7 @@ const XAI_CLI_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 const XAI_CLI_PROXY_HEADERS = {
 	"X-XAI-Token-Auth": "xai-grok-cli",
 	"x-authenticateresponse": "authenticate-response",
-	"x-grok-client-version": "1.0.5",
+	"x-grok-client-version": "1.0.13",
 	"x-grok-client-identifier": "grok-shell",
 	"x-grok-client-mode": "headless",
 } as const;

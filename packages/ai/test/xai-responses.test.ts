@@ -160,7 +160,7 @@ describe("xAI Grok CLI subscription schema", () => {
 			headers: {
 				"X-XAI-Token-Auth": "xai-grok-cli",
 				"x-authenticateresponse": "authenticate-response",
-				"x-grok-client-version": "1.0.5",
+				"x-grok-client-version": "1.0.13",
 				"x-grok-client-identifier": "grok-shell",
 				"x-grok-client-mode": "headless",
 				"x-grok-model-override": "grok-4.6",
@@ -263,7 +263,7 @@ describe("xAI Grok CLI subscription schema", () => {
 		expect(headers.get("authorization")).toBe("Bearer oauth-access");
 		expect(headers.get("x-xai-token-auth")).toBe("xai-grok-cli");
 		expect(headers.get("x-authenticateresponse")).toBe("authenticate-response");
-		expect(headers.get("x-grok-client-version")).toBe("1.0.5");
+		expect(headers.get("x-grok-client-version")).toBe("1.0.13");
 		expect(headers.get("x-grok-client-identifier")).toBe("grok-shell");
 		expect(headers.get("x-grok-client-mode")).toBe("headless");
 		expect(headers.get("x-grok-model-override")).toBe("grok-4.6");
