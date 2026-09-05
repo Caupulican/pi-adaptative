@@ -38,6 +38,8 @@ export class WorkbenchController {
 	/** Evidence of the previous cycle stays on screen until the new cycle produces its own. */
 	private staleEvidence = false;
 	private selecting = false;
+	/** Left button went down inside the conversation; a drag from here selects, a plain click does not. */
+	private pressPoint?: { row: number; column: number };
 	private snapshot?: AgentsOverlaySnapshot;
 	private runState: WorkbenchRunState = "idle";
 	private workTitle?: string;
@@ -152,7 +154,7 @@ export class WorkbenchController {
 				preview = undefined;
 			},
 		});
-		if (this.previews.length > 3) this.previews.shift();
+		if (this.previews.length > MAX_PREVIEWS) this.previews.shift();
 		this.updateExecution();
 	}
 
@@ -163,7 +165,7 @@ export class WorkbenchController {
 		if (failed) this.failed++;
 		if (preview) {
 			this.previews.push(preview);
-			if (this.previews.length > 3) this.previews.shift();
+			if (this.previews.length > MAX_PREVIEWS) this.previews.shift();
 		}
 		this.updateExecution();
 	}
@@ -173,20 +175,22 @@ export class WorkbenchController {
 			this.view.setExecution(undefined);
 			return;
 		}
-		const summary = () =>
-			theme.fg(
-				this.failed ? "warning" : "muted",
-				`${this.actionCount} actions${this.fileEffects ? ` · ${this.fileEffects} file effects` : ""}${this.failed ? ` · ${this.failed} failure receipts` : ""}`,
-			);
+		// The cycle's evidence stays in order, newest last; the pane follows it until the operator scrolls.
+		const summary = theme.fg(
+			this.failed ? "warning" : "muted",
+			`${this.actionCount} actions${this.fileEffects ? ` · ${this.fileEffects} file effects` : ""}${this.failed ? ` · ${this.failed} failure receipts` : ""}`,
+		);
 		this.view.setExecution(
 			{
-				render: (width) => [summary(), ...this.previews.slice(-1).flatMap((preview) => preview.render(width))],
+				render: (width) =>
+					this.previews.flatMap((preview, index) => [...(index ? [""] : []), ...preview.render(width)]),
 				invalidate: () => {
 					for (const preview of this.previews) preview.invalidate();
 				},
 			},
 			!this.previews.length,
 			this.previews.at(-1),
+			summary,
 		);
 		this.ports.requestRender();
 	}
@@ -208,6 +212,7 @@ export class WorkbenchController {
 	handleInput(data: string): { consume: true } | undefined {
 		if (this.disposed || !this.ports.isInteractive()) {
 			this.selecting = false;
+			this.pressPoint = undefined;
 			return undefined;
 		}
 		const keys = this.ports.keybindings;
@@ -247,20 +252,24 @@ export class WorkbenchController {
 			} else if (button === 0 && mouse[4] === "M" && row === this.view.dividerRow) {
 				this.view.toggleUpper();
 			} else if (button === 0 && mouse[4] === "M" && inside) {
-				this.selecting = true;
-				conversation.select(
-					{ row: row - this.view.conversationTop, column: column - this.view.conversationLeft },
-					true,
-				);
-			} else if (this.selecting && (button === 32 || mouse[4] === "m")) {
-				conversation.select(
-					{
-						row: Math.max(0, Math.min(this.view.conversationHeight - 1, row - this.view.conversationTop)),
-						column: Math.max(0, Math.min(this.view.conversationWidth, column - this.view.conversationLeft)),
-					},
-					false,
-				);
-				if (mouse[4] === "m") this.selecting = false;
+				// A click only focuses the pane; the selection (and its frozen view) starts on drag.
+				this.pressPoint = { row: row - this.view.conversationTop, column: column - this.view.conversationLeft };
+				this.selecting = false;
+			} else if (this.pressPoint && (button === 32 || mouse[4] === "m")) {
+				const point = {
+					row: Math.max(0, Math.min(this.view.conversationHeight - 1, row - this.view.conversationTop)),
+					column: Math.max(0, Math.min(this.view.conversationWidth, column - this.view.conversationLeft)),
+				};
+				const moved = point.row !== this.pressPoint.row || point.column !== this.pressPoint.column;
+				if (!this.selecting && button === 32 && moved) {
+					conversation.select(this.pressPoint, true);
+					this.selecting = true;
+				}
+				if (this.selecting) conversation.select(point, false);
+				if (mouse[4] === "m") {
+					this.selecting = false;
+					this.pressPoint = undefined;
+				}
 			}
 			// Consume terminal mouse reports even outside the pane; never insert protocol bytes into input.
 		}
@@ -283,6 +292,7 @@ export class WorkbenchController {
 	}
 }
 
+const MAX_PREVIEWS = 12;
 const TEAM_SECTIONS = new Set(["Workers", "Background tools"]);
 const ACTIVE_WORKER = new Set<LaneRecord["status"]>(["queued", "running"]);
 

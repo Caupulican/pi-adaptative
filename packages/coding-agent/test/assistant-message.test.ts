@@ -2,6 +2,7 @@ import type { AssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, test } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -107,5 +108,20 @@ describe("AssistantMessageComponent", () => {
 		expect(rendered).toContain("Verified result");
 		expect(rendered).not.toContain('"action"');
 		expect(rendered).not.toContain("Continuing verification");
+	});
+});
+
+describe("AssistantMessageComponent withheld answers", () => {
+	test("says when the verification gate emptied a completion claim instead of rendering nothing", () => {
+		initTheme("dark");
+		const message = { ...createAssistantMessage([]), errorMessage: "verification_handoff_required" };
+		const component = new AssistantMessageComponent(message, true, undefined, { showCommentary: true });
+		const text = stripAnsi(component.render(100).join("\n"));
+		expect(text).toContain("Answer withheld");
+		expect(text).toContain("VERIFICATION_UNRESOLVED");
+		const plain = new AssistantMessageComponent(createAssistantMessage([]), true, undefined, {
+			showCommentary: true,
+		});
+		expect(stripAnsi(plain.render(100).join("\n")).trim()).toBe("");
 	});
 });

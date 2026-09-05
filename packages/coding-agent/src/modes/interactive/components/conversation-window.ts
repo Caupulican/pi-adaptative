@@ -109,6 +109,9 @@ export class ConversationWindow {
 		this.height = Math.max(0, height);
 		if (this.frozen) return this.highlight(this.frozen.slice(0, this.height));
 		const entries = this.entries();
+		// The anchored entry was trimmed from live history: the rows being read are gone, so follow
+		// the latest instead of jumping to whatever now sits first.
+		if (!this.tail && this.anchor && !entries.includes(this.anchor.component)) this.latest();
 		// Prune evicted transcript identities; cache capacity is byte-based as well.
 		const retained = new Set(entries);
 		for (const component of this.cache.keys()) if (!retained.has(component)) this.invalidate(component);
@@ -141,10 +144,14 @@ export class ConversationWindow {
 	}
 
 	scroll(delta: number): void {
+		const entries = this.entries();
+		if (this.anchor && !entries.includes(this.anchor.component)) {
+			this.latest();
+			return;
+		}
 		this.tail = false;
 		this.selection = undefined;
 		this.frozen = undefined;
-		const entries = this.entries();
 		let index = this.anchor ? entries.indexOf(this.anchor.component) : 0;
 		index = Math.max(0, index);
 		let row = (this.anchor?.row ?? 0) + delta;

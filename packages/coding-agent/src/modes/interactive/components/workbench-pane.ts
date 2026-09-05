@@ -47,9 +47,12 @@ export class WorkbenchPane {
 	private y = 0;
 	private width = 0;
 	private height = 0;
+	/** The operator scrolled away from the newest rows; a following pane stops following. */
+	private pinned = false;
 
 	reset(): void {
 		this.offset = 0;
+		this.pinned = false;
 		this.hide();
 	}
 
@@ -61,15 +64,27 @@ export class WorkbenchPane {
 	scrollAt(column: number, row: number, delta: number): boolean {
 		if (column < this.x || column >= this.x + this.width || row < this.y || row >= this.y + this.height) return false;
 		const step = Math.sign(delta) * Math.min(Math.abs(delta), this.height);
-		this.offset = Math.max(0, Math.min(Math.max(0, this.count - this.height), this.offset + step));
+		const end = Math.max(0, this.count - this.height);
+		this.offset = Math.max(0, Math.min(end, this.offset + step));
+		this.pinned = this.offset < end;
 		return true;
 	}
 
 	/**
 	 * One title row followed by `height - 1` content rows, all `width` cells wide with one-cell gutters.
 	 * The visible row range joins the meta when content overflows; only content rows accept wheel input.
+	 * A following pane keeps its newest rows visible until the operator scrolls up.
 	 */
-	render(title: string, meta: string, lines: string[], x: number, y: number, width: number, height: number): string[] {
+	render(
+		title: string,
+		meta: string,
+		lines: string[],
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		follow = false,
+	): string[] {
 		if (height <= 0 || width <= 0) {
 			this.hide();
 			return [];
@@ -79,7 +94,8 @@ export class WorkbenchPane {
 		this.width = Math.max(0, width - 2);
 		this.height = Math.max(0, height - 1);
 		this.count = lines.length;
-		this.offset = Math.min(this.offset, Math.max(0, lines.length - this.height));
+		const end = Math.max(0, lines.length - this.height);
+		this.offset = follow && !this.pinned ? end : Math.min(this.offset, end);
 		const range =
 			lines.length > this.height && this.height > 0
 				? `${this.offset + 1}-${Math.min(lines.length, this.offset + this.height)}/${lines.length} ↕`

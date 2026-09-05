@@ -1,3 +1,4 @@
+import { VERIFICATION_HANDOFF_REQUIRED_ERROR } from "@caupulican/pi-agent-core";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { Container, Markdown, type MarkdownTheme, Spacer, Text, VisibilityContainer } from "@caupulican/pi-tui";
 import { isAssistantDisplayText } from "../../../core/message-phase.ts";
@@ -134,8 +135,10 @@ export class AssistantMessageComponent extends Container {
 				(!this.hideThinkingBlock && c.type === "thinking" && c.thinking.trim()),
 		);
 		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
+		const withheld = message.stopReason === "stop" && message.errorMessage === VERIFICATION_HANDOFF_REQUIRED_ERROR;
 		this.visibleOutput =
-			hasVisibleContent || (!hasToolCalls && (message.stopReason === "aborted" || message.stopReason === "error"));
+			hasVisibleContent ||
+			(!hasToolCalls && (message.stopReason === "aborted" || message.stopReason === "error" || withheld));
 
 		if (hasVisibleContent) {
 			this.contentContainer.addChild(new Spacer(1));
@@ -214,6 +217,20 @@ export class AssistantMessageComponent extends Container {
 				const errorMsg = message.errorMessage || "Unknown error";
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), 1, 0));
+			} else if (withheld) {
+				// The gate emptied a completion claim: say so, or the operator sees a frozen screen
+				// while paid requests repeat.
+				this.contentContainer.addChild(new Spacer(1));
+				this.contentContainer.addChild(
+					new Text(
+						theme.fg(
+							"warning",
+							"Answer withheld: a verification obligation is still failing. The model must rerun that check or hand off with one VERIFICATION_UNRESOLVED line per id.",
+						),
+						1,
+						0,
+					),
+				);
 			}
 		}
 	}

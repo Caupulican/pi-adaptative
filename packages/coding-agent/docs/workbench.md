@@ -15,7 +15,9 @@ The conversation viewport never emits the OSC 133 prompt-zone marks that the inl
 - Mouse wheel inside an inspector or execution surface: scroll only that surface. Its title row shows the visible row range when content overflows; title rows and gutters are not scroll targets.
 - Mouse wheel inside conversation or `Alt+PageUp` / `Alt+PageDown`: scroll conversation without changing editor history.
 - Scrolling upward pauses following; the conversation header then reads *Reading* and offers **Latest ↓**. Scrolling back to the final page, `Ctrl+End`, or **Latest ↓** resumes it.
-- Drag to select conversation text. Selection freezes the displayed text while the model continues working; `Ctrl+X` copies it (terminal-native selection copies on its own), and tree-selector copying retains precedence.
+- Drag to select conversation text. A plain click only focuses the pane; the selection starts when the pointer moves, and only then does the displayed text freeze while the model continues working. `Ctrl+X` copies the selection (terminal-native selection copies on its own), and tree-selector copying retains precedence.
+- Reading position anchors to the entry under the top row. When live-history trimming removes that entry, the conversation resumes following instead of jumping to the oldest retained rows.
+- An answer the verification gate withheld (the model claimed completion while a trusted verification was still failing) shows as an `Answer withheld` line in the conversation instead of leaving the screen unchanged.
 - **Copy conversation** or `Alt+C` copies user/assistant prose and answered `ask_question` interactions from the current session branch, including history outside the visible window. Routine tool output is excluded. Copies above 10 MiB are refused explicitly; use `/export` instead.
 - `Alt+O`: collapse or expand the work area; `Alt+=` / `Alt+-`: resize it. `Ctrl+T`: open the complete action transcript, including images and full results.
 
@@ -31,7 +33,7 @@ After foreground `bash` or `python` tools finish, a read-only Git observation ca
 
 Observations are bounded to 128 dirty paths, 32 diff paths, 256 KiB per Git response, two seconds per Git command, and 64 KiB per small-file read. Larger files use metadata. Ignored files and changes outside the current working directory are not observed. Non-Git directories and budget failures produce a notice instead of a clean-workspace claim. File effects arriving after completion still update the folded receipt.
 
-Conversation rendering visits visible entries lazily, retains at most 2 MiB of derived row-cache text, and uses existing terminal line-diff rendering. Frame cost is bounded by the visible rows, not by history: rows that already fit their zone skip the grapheme scan, so a 224×50 frame stays under a millisecond with 2,000 transcript entries where the previous full-transcript layout needed about sixteen. Execution retains at most three bounded previews and displays the latest. No decorative animation timer or session-history scan runs per frame. Large individual visible messages still incur their renderer's normal cost.
+Conversation rendering visits visible entries lazily, retains at most 2 MiB of derived row-cache text, and uses existing terminal line-diff rendering. Frame cost is bounded by the visible rows, not by history: rows that already fit their zone skip the grapheme scan, so a 224×50 frame stays under a millisecond with 2,000 transcript entries where the previous full-transcript layout needed about sixteen. Execution retains up to twelve bounded previews per cycle, shows them in order with the cycle's action and file-effect counts in its title row, and follows the newest rows until the operator scrolls up; a new preview follows again. No decorative animation timer or session-history scan runs per frame. Large individual visible messages still incur their renderer's normal cost.
 
 ## Verification
 

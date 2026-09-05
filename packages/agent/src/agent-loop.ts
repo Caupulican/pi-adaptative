@@ -66,6 +66,7 @@ import {
 	DEFAULT_MAX_PROVIDER_TURNS,
 	DEFAULT_MAX_REPEATED_FAILURES,
 	DEFAULT_MAX_STALL_TURNS,
+	DEFAULT_MAX_VERIFICATION_HANDOFF_TURNS,
 } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
 import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
@@ -90,6 +91,8 @@ export interface AgentLoopContinuationState {
 	stallWindow: string[];
 	/** Optional for compatibility with continuation snapshots created before result-aware cycle detection. */
 	stagnantResultWindow?: string[];
+	/** Consecutive tool-free answers the verification gate withheld; optional for older snapshots. */
+	verificationHandoffTurns?: number;
 	toolFailureRecoveryGate: ToolFailureRecoveryGate;
 	/**
 	 * Shared holder for the two provider-request prefix high-water marks (see
@@ -132,6 +135,7 @@ export function createAgentLoopContinuationState(
 		providerTurns: 0,
 		stallWindow: [],
 		stagnantResultWindow: [],
+		verificationHandoffTurns: 0,
 		toolFailureRecoveryGate: new ToolFailureRecoveryGate(),
 		providerRequestPrefixState: {
 			// Seeded from the previous run: a run that starts at zero lets the context GC repack
@@ -634,6 +638,26 @@ async function runLoop(
 			if (verificationBlocksCompletion) hasMoreToolCalls = true;
 
 			await emit({ type: "turn_end", message, toolResults });
+
+			// A withheld tool-free answer is a full provider request that renders nothing. Count them
+			// consecutively; tool calls are progress and reset the count. The obligations stay active
+			// for the next prompt, so stopping here loses no verification state.
+			if (verificationBlocksCompletion && toolCalls.length === 0) {
+				const withheld = (continuationState.verificationHandoffTurns ?? 0) + 1;
+				continuationState.verificationHandoffTurns = withheld;
+				const handoffLimit = config.maxVerificationHandoffTurns ?? DEFAULT_MAX_VERIFICATION_HANDOFF_TURNS;
+				if (handoffLimit > 0 && withheld >= handoffLimit) {
+					config.onRunawayStop?.({
+						reason: "verification_handoff_stall",
+						signature: verificationObligations.getActiveIds().join(","),
+						repeats: withheld,
+					});
+					await emit({ type: "agent_end", messages: newMessages });
+					return;
+				}
+			} else if (toolCalls.length > 0) {
+				continuationState.verificationHandoffTurns = 0;
+			}
 
 			// One call failing identically N times ends the run, whatever else rode in its batches:
 			// keyed on the ledger's own count, not on batch or result-text repetition.

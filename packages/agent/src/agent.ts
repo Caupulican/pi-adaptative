@@ -173,6 +173,7 @@ export interface AgentOptions {
 	maxStallTurns?: number;
 	maxRepeatedFailures?: number;
 	maxProviderTurns?: number;
+	maxVerificationHandoffTurns?: number;
 	onRunawayStop?: AgentLoopConfig["onRunawayStop"];
 	toolExecution?: ToolExecutionMode;
 	toolConcurrency?: AgentLoopConfig["toolConcurrency"];
@@ -316,6 +317,8 @@ export class Agent {
 	public maxRepeatedFailures?: number;
 	/** Optional provider-request fuse for one logical prompt; disabled when omitted or zero. */
 	public maxProviderTurns?: number;
+	/** Verification-gate fuse: consecutive withheld tool-free answers before the run stops. */
+	public maxVerificationHandoffTurns?: number;
 	/** Observability hook fired once if a repeated-call or provider-turn guard trips. */
 	public onRunawayStop?: AgentLoopConfig["onRunawayStop"];
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
@@ -362,6 +365,7 @@ export class Agent {
 		this.maxStallTurns = options.maxStallTurns;
 		this.maxRepeatedFailures = options.maxRepeatedFailures;
 		this.maxProviderTurns = options.maxProviderTurns;
+		this.maxVerificationHandoffTurns = options.maxVerificationHandoffTurns;
 		this.onRunawayStop = options.onRunawayStop;
 		this.toolExecution = options.toolExecution ?? "parallel";
 		this.toolConcurrency = options.toolConcurrency;
@@ -644,6 +648,7 @@ export class Agent {
 			maxStallTurns: this.maxStallTurns,
 			maxRepeatedFailures: this.maxRepeatedFailures,
 			maxProviderTurns: this.maxProviderTurns,
+			maxVerificationHandoffTurns: this.maxVerificationHandoffTurns,
 			onRunawayStop: this.onRunawayStop,
 			toolExecution: this.toolExecution,
 			toolConcurrency: this.toolConcurrency,

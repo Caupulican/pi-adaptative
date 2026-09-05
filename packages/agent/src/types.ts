@@ -296,7 +296,11 @@ export interface AgentLoopTurnUpdate {
 	thinkingLevel?: ThinkingLevel;
 }
 
-export type AgentRunawayStopReason = "stagnant_tool_cycle" | "repeated_tool_call" | "provider_turn_limit";
+export type AgentRunawayStopReason =
+	| "stagnant_tool_cycle"
+	| "repeated_tool_call"
+	| "provider_turn_limit"
+	| "verification_handoff_stall";
 
 /** Semantic cause and evidence for a host-enforced runaway/cost stop. */
 export interface AgentRunawayStopInfo {
@@ -436,6 +440,12 @@ export const DEFAULT_MAX_STALL_TURNS = 12;
 export const DEFAULT_MAX_REPEATED_FAILURES = 6;
 /** Provider-turn fuse is opt-in; varied productive work has no implicit request-count ceiling. */
 export const DEFAULT_MAX_PROVIDER_TURNS = 0;
+/**
+ * Consecutive tool-free answers the verification gate withholds before the loop stops with
+ * `verification_handoff_stall`. Each withheld answer is a full provider request that renders
+ * nothing, so this bound is what keeps an unresolved obligation from becoming a silent paid loop.
+ */
+export const DEFAULT_MAX_VERIFICATION_HANDOFF_TURNS = 3;
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
@@ -642,6 +652,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * {@link DEFAULT_MAX_PROVIDER_TURNS}.
 	 */
 	maxProviderTurns?: number;
+
+	/**
+	 * Verification-gate fuse. While trusted verification obligations stay unresolved, the loop
+	 * withholds the model's tool-free answer and requests again; this many consecutive withheld
+	 * answers stop the run with `verification_handoff_stall` instead of another request. The
+	 * obligations stay active for the next prompt. `0` disables it. Default:
+	 * {@link DEFAULT_MAX_VERIFICATION_HANDOFF_TURNS}.
+	 */
+	maxVerificationHandoffTurns?: number;
 
 	/**
 	 * Observability hook fired once if either the repeated-call backstop or explicit provider-turn fuse trips,

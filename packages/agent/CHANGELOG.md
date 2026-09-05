@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `maxVerificationHandoffTurns` (default 3): while trusted verification obligations stay unresolved, the loop withholds the model's tool-free answer and requests again; this many consecutive withheld answers now stop the run with the new `verification_handoff_stall` runaway reason instead of another request. The obligations stay active for the next prompt. `0` disables the fuse.
+
 ## [0.98.2] - 2026-09-05
 
 ## [0.98.1] - 2026-09-05

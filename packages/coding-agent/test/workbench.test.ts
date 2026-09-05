@@ -80,6 +80,22 @@ describe("Workbench conversation window", () => {
 		expect(window.render(30, 3)).toEqual(entry.lines);
 	});
 
+	it("resumes following when the entry it was anchored to is trimmed from live history", () => {
+		const entries = Array.from({ length: 20 }, (_, i) => new Rows([`line ${i}`]));
+		const window = new ConversationWindow(() => entries);
+		window.render(80, 5);
+		window.scroll(-8);
+		expect(window.following).toBe(false);
+		expect(window.render(80, 5)[0]).toBe("line 7");
+		entries.splice(0, 10);
+		expect(window.render(80, 5)).toEqual(entries.slice(-5).map((entry) => entry.lines[0]));
+		expect(window.following).toBe(true);
+		window.scroll(-2);
+		entries.splice(0, 5);
+		window.scroll(-1);
+		expect(window.following).toBe(true);
+	});
+
 	it("never emits prompt-zone marks: a terminal may move to column 0 on one, which corrupts a framed row", () => {
 		const entry = new Rows(["\x1b]133;A\x07first", "middle", "\x1b]133;B\x07\x1b]133;C\x07last"]);
 		const window = new ConversationWindow(() => [entry]);
@@ -213,16 +229,20 @@ describe("Workbench layout", () => {
 		view.setExecution(new Rows(Array.from({ length: 100 }, (_, i) => `tool ${i}`)));
 		const initial = view.render(110).map(stripAnsi);
 		const top = view.conversationTop;
-		expect(view.scrollUpper(50, 3, 3)).toBe(true);
+		// Execution follows its newest rows; the inspector opens at its first rows.
+		expect(initial[3]).toContain("work 0");
+		expect(initial[11]).toContain("tool 99");
+		expect(view.scrollUpper(50, 3, -3)).toBe(true);
 		let frame = view.render(110).map(stripAnsi);
-		expect(frame[3]).toContain("work 0");
-		expect(frame[3]).toContain("tool 3");
+		expect(frame[11]).toContain("tool 96");
 		expect(frame.slice(top - 1)).toEqual(initial.slice(top - 1));
 		expect(view.conversation.following).toBe(true);
+		expect(view.scrollUpper(50, 3, 3)).toBe(true);
+		expect(view.render(110).map(stripAnsi)[11]).toContain("tool 99");
 		expect(view.scrollUpper(1, 3, 3)).toBe(true);
 		frame = view.render(110).map(stripAnsi);
 		expect(frame[3]).toContain("work 3");
-		expect(frame[3]).toContain("tool 3");
+		expect(frame[11]).toContain("tool 99");
 		// Gutters, pane titles, the title strip and the dock are not scroll targets.
 		expect(view.scrollUpper(0, 3, 3)).toBe(false);
 		expect(view.scrollUpper(1, 2, 3)).toBe(false);
@@ -230,6 +250,17 @@ describe("Workbench layout", () => {
 		expect(view.scrollUpper(1, 29, 3)).toBe(false);
 		view.setExecution(new Rows(["new result"]));
 		expect(view.render(110).map(stripAnsi)[3]).toContain("new result");
+		// New evidence with a growing tail stays followed until the operator scrolls up.
+		const growing = new Rows(Array.from({ length: 30 }, (_, i) => `grow ${i}`));
+		view.setExecution(growing);
+		expect(view.render(110).map(stripAnsi)[11]).toContain("grow 29");
+		growing.lines = Array.from({ length: 40 }, (_, i) => `grow ${i}`);
+		growing.invalidate();
+		expect(view.render(110).map(stripAnsi)[11]).toContain("grow 39");
+		expect(view.scrollUpper(50, 3, -3)).toBe(true);
+		growing.lines = Array.from({ length: 50 }, (_, i) => `grow ${i}`);
+		growing.invalidate();
+		expect(view.render(110).map(stripAnsi)[11]).toContain("grow 36");
 	});
 	it("clears invisible hit targets when a large editor takes over the screen", () => {
 		const { view, editor } = setup();
@@ -266,7 +297,7 @@ describe("Workbench layout", () => {
 		view.setInspector([{ title: "Work plan", meta: "3 / 3", body: ["Work complete"] }]);
 		const done = view.render(110);
 		expect(done.findIndex((line) => stripAnsi(line).includes("Conversation"))).toBe(13);
-		expect(stripAnsi(done.join("\n"))).toContain("diff 0");
+		expect(stripAnsi(done.join("\n"))).toContain("diff 49");
 		view.toggleUpper();
 		const collapsed = view.render(110).map(stripAnsi);
 		expect(collapsed[2]).toMatch(/▸ Work plan 3 \/ 3 · Execution/);

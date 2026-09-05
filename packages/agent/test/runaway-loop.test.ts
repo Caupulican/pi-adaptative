@@ -3131,3 +3131,95 @@ describe("repeated-failure guard on the ledger occurrence", () => {
 		expect(stops).toEqual([]);
 	});
 });
+
+/**
+ * Verification-gate fuse: while a trusted verification obligation stays failed, the loop withholds
+ * every tool-free answer and requests again. Each withheld answer is a paid request that renders
+ * nothing, so the run must stop after a bounded number of them instead of looping until the
+ * operator interrupts it. The obligation itself stays active for the next prompt.
+ */
+describe("verification handoff stall", () => {
+	const verifySchema = Type.Object({});
+	type VerificationDetails = { piVerification: { version: 1; id: string; status: "failed" } };
+	const failingVerification: AgentTool<typeof verifySchema, VerificationDetails> = {
+		name: "verify",
+		label: "Verify",
+		description: "Runs a verification that fails",
+		parameters: verifySchema,
+		async execute() {
+			return {
+				content: [{ type: "text", text: "1 test failed" }],
+				details: { piVerification: { version: 1, id: "shell-test-1", status: "failed" } },
+				isError: true,
+			};
+		},
+	};
+
+	function createStream(answer: () => AssistantMessage["content"]) {
+		let providerCalls = 0;
+		const streamFn: StreamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				providerCalls++;
+				if (providerCalls === 1) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage([{ type: "toolCall", id: "v1", name: "verify", arguments: {} }], "toolUse"),
+					});
+					return;
+				}
+				stream.push({ type: "done", reason: "stop", message: assistantMessage(answer(), "stop") });
+			});
+			return stream;
+		};
+		return { streamFn, calls: () => providerCalls };
+	}
+
+	it("stops after three consecutive withheld tool-free answers and keeps the obligation active", async () => {
+		const { streamFn, calls } = createStream(() => [{ type: "text", text: "All done; the change is complete." }]);
+		const stalls: Array<{ reason?: string; signature: string; repeats: number }> = [];
+		const agent = new Agent({
+			streamFn,
+			initialState: { model: createModel(), systemPrompt: "", tools: [failingVerification] },
+		});
+		agent.onRunawayStop = (info) => stalls.push(info);
+
+		await agent.prompt("start");
+
+		expect(calls()).toBe(4);
+		expect(stalls).toEqual([
+			expect.objectContaining({ reason: "verification_handoff_stall", repeats: 3, signature: "shell-test-1" }),
+		]);
+		const last = agent.state.messages.at(-1) as AssistantMessage;
+		expect(last.role).toBe("assistant");
+		expect(last.content).toEqual([]);
+		expect(last.errorMessage).toBe("verification_handoff_required");
+		const withheld = agent.state.messages.filter(
+			(message) => message.role === "assistant" && message.errorMessage === "verification_handoff_required",
+		);
+		expect(withheld).toHaveLength(3);
+	});
+
+	it("ends normally when the model hands off with one VERIFICATION_UNRESOLVED line per active id", async () => {
+		const { streamFn, calls } = createStream(() => [
+			{ type: "text", text: "VERIFICATION_UNRESOLVED shell-test-1: the fixture cannot run on this host" },
+		]);
+		const stalls: unknown[] = [];
+		const agent = new Agent({
+			streamFn,
+			initialState: { model: createModel(), systemPrompt: "", tools: [failingVerification] },
+		});
+		agent.onRunawayStop = (info) => stalls.push(info);
+
+		await agent.prompt("start");
+
+		expect(calls()).toBe(2);
+		expect(stalls).toEqual([]);
+		const last = agent.state.messages.at(-1) as AssistantMessage;
+		expect(last.errorMessage).toBeUndefined();
+		expect(last.content).toEqual([
+			{ type: "text", text: "VERIFICATION_UNRESOLVED shell-test-1: the fixture cannot run on this host" },
+		]);
+	});
+});

@@ -64,6 +64,7 @@ export class WorkbenchComponent extends Container {
 	private sections: WorkbenchSection[] = [];
 	private headlineState: WorkbenchHeadline = { state: "idle" };
 	private execution?: Component;
+	private executionMeta = EXECUTION_META;
 	private executionEvidence?: Component;
 	private displayedShell?: BashExecutionComponent;
 	private upperLimit = DEFAULT_UPPER_ROWS;
@@ -142,11 +143,17 @@ export class WorkbenchComponent extends Container {
 	setHeadline(headline: WorkbenchHeadline): void {
 		this.headlineState = headline;
 	}
-	setExecution(component: Component | undefined, compact = false, evidence = component): void {
+	setExecution(
+		component: Component | undefined,
+		compact = false,
+		evidence = component,
+		meta: string = EXECUTION_META,
+	): void {
 		if (evidence !== this.executionEvidence || compact !== this.executionCompact) this.executionPane.reset();
 		this.execution = component;
 		this.executionEvidence = evidence;
 		this.executionCompact = compact;
+		this.executionMeta = meta;
 	}
 	scrollUpper(column: number, row: number, delta: number): boolean {
 		return this.inspectorPane.scrollAt(column, row, delta) || this.executionPane.scrollAt(column, row, delta);
@@ -299,8 +306,14 @@ export class WorkbenchComponent extends Container {
 		if (visibleShell !== this.displayedShell) this.executionPane.reset();
 		this.displayedShell = visibleShell;
 		const executionSource = visibleShell ? visibleShell.getWorkbenchPreview() : this.execution;
-		const executionLines = (width: number): string[] =>
-			executionSource?.render(width) ?? [`  ${theme.fg("dim", "No file effects or command outcomes yet")}`];
+		const placeholder = `  ${theme.fg("dim", "No file effects or command outcomes yet")}`;
+		const executionLines = (width: number): string[] => {
+			const lines = executionSource?.render(width) ?? [];
+			return lines.length ? lines : [placeholder];
+		};
+		const executionMeta = visibleShell ? EXECUTION_META : this.executionMeta;
+		// A user shell opens at its command; the cycle's evidence follows its newest rows instead.
+		const follow = !visibleShell;
 		if (columns >= SIDE_BY_SIDE_MIN_COLUMNS) {
 			const leftWidth = Math.max(MIN_INSPECTOR_WIDTH, Math.floor(columns * this.inspectorFraction));
 			const rightX = leftWidth + 2;
@@ -317,12 +330,13 @@ export class WorkbenchComponent extends Container {
 			);
 			const right = this.executionPane.render(
 				"Execution",
-				EXECUTION_META,
+				executionMeta,
 				executionLines(rightWidth - 2),
 				rightX,
 				top,
 				rightWidth,
 				height,
+				follow,
 			);
 			return left.map((line, row) => `${line}  ${right[row]}`);
 		}
@@ -336,19 +350,20 @@ export class WorkbenchComponent extends Container {
 				labelRow(inspector.title, inspector.meta, width),
 				...inspector.lines,
 			];
-			return this.executionPane.render("Execution", EXECUTION_META, lines, 0, top, columns, height);
+			return this.executionPane.render("Execution", executionMeta, lines, 0, top, columns, height);
 		}
 		const executionHeight = Math.ceil((height - 1) / 2);
 		const inspectorHeight = height - 1 - executionHeight;
 		return [
 			...this.executionPane.render(
 				"Execution",
-				EXECUTION_META,
+				executionMeta,
 				executionLines(width),
 				0,
 				top,
 				columns,
 				executionHeight,
+				follow,
 			),
 			"",
 			...this.inspectorPane.render(

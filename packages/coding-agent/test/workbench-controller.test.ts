@@ -178,14 +178,15 @@ describe("Workbench input boundary", () => {
 		view.setInspector([{ title: "Work plan", body: ["active"] }]);
 		controller.record(new Text(Array.from({ length: 40 }, (_, i) => `execution ${i}`).join("\n"), 0, 0), false);
 		view.render(110);
-		controller.handleInput("\x1b[<65;50;4M");
+		expect(stripAnsi(view.render(110).join("\n"))).toContain("execution 39");
+		controller.handleInput("\x1b[<64;50;4M");
 		const scrolled = stripAnsi(view.render(110).join("\n"));
-		expect(scrolled).toContain("execution 3");
-		expect(scrolled).not.toContain("execution 0");
+		expect(scrolled).toContain("execution 36");
+		expect(scrolled).not.toContain("execution 39");
 		expect(view.conversation.following).toBe(true);
 		view.render(40);
 		controller.handleInput("\x1b[<64;2;6M");
-		expect(stripAnsi(view.render(40).join("\n"))).toContain("execution 0");
+		expect(stripAnsi(view.render(40).join("\n"))).not.toContain("execution 39");
 		expect(view.conversation.following).toBe(true);
 		controller.handleInput(`\x1b[<64;2;${view.conversationTop + 2}M`);
 		expect(view.conversation.following).toBe(false);
@@ -216,6 +217,11 @@ describe("Workbench input boundary", () => {
 		expect(view.conversationTop).toBe(10);
 		controller.handleInput("\x1b[<0;1;11M"); // The gutter must not select text.
 		expect(view.conversation.following).toBe(true);
+		// A click without a drag only focuses the pane: nothing freezes, following continues.
+		controller.handleInput("\x1b[<0;2;11M");
+		controller.handleInput("\x1b[<0;2;11m");
+		expect(view.conversation.following).toBe(true);
+		expect(view.conversation.selectionText()).toBeUndefined();
 		controller.handleInput("\x1b[<0;2;11M");
 		controller.handleInput("\x1b[<32;7;11M");
 		controller.handleInput("\x1b[<0;7;11m");

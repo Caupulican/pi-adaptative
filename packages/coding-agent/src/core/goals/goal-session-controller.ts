@@ -553,7 +553,9 @@ export class GoalSessionController {
 				? `provider_turn_limit: reached the explicit ${info.repeats}-request provider-turn limit`
 				: info.reason === "stagnant_tool_cycle"
 					? `stagnant_tool_cycle: repeated tool-call signature ${info.signature} ${info.repeats} times with identical results`
-					: `runaway_tool_loop: repeated tool-call signature ${info.signature} ${info.repeats} times without progress`;
+					: info.reason === "verification_handoff_stall"
+						? `verification_handoff_stall: ${info.repeats} consecutive tool-free answers were withheld while verification obligations ${info.signature} stayed unresolved`
+						: `runaway_tool_loop: repeated tool-call signature ${info.signature} ${info.repeats} times without progress`;
 		if (!this.stopActiveGoal("blocked", reason)) return false;
 		return this.resumeSystemBlockedGoal() !== undefined;
 	}

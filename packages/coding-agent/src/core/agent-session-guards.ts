@@ -73,7 +73,9 @@ export function handleRunawayStop(deps: SessionGuardDeps, info: AgentRunawayStop
 			? `the configured provider-turn limit of ${info.repeats} requests was reached`
 			: info.reason === "stagnant_tool_cycle"
 				? `the same tool-call cycle returned identical results ${info.repeats} times`
-				: `the model repeated the same tool call ${info.repeats} times in a row without making progress`;
+				: info.reason === "verification_handoff_stall"
+					? `${info.repeats} consecutive tool-free answers were withheld because verification obligations stayed unresolved (${info.signature}); ask the model to rerun the failed verification or to hand off with one VERIFICATION_UNRESOLVED line per id`
+					: `the model repeated the same tool call ${info.repeats} times in a row without making progress`;
 	deps.emitWarning(
 		`Bounded guard ended this run: ${cause}.${goalRecovered ? " The active goal remains scheduled; the next pass must use a different approach." : ""}`,
 	);
