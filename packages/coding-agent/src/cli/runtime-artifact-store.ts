@@ -75,7 +75,8 @@ export class RuntimeArtifactStore {
 				throw new Error("Runtime snapshot entry/depth limit exceeded.");
 			const stat = lstatSync(source);
 			if (stat.isSymbolicLink()) {
-				const resolved = realpathSync(source);
+				// Match fs/promises.realpath's native spelling (Windows 8.3 aliases differ otherwise).
+				const resolved = realpathSync.native(source);
 				const target = join(artifact, inside(resolved));
 				const type = lstatSync(resolved).isDirectory() ? "junction" : "file";
 				symlinkSync(

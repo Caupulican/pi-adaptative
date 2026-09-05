@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- Runtime snapshots resolve internal links with native canonical paths on Windows. Stable installed launchers recognize equivalent path aliases while rejecting foreign install roots.
+- Collaboration and worker-reservation watchers use the shared canonical-path boundary, preventing Windows native watcher crashes on short-path aliases while retaining event-driven handoffs.
 - Child sessions no longer receive root delegation instructions even if their supplied tool surface includes `delegate`.
 - Artifact retrieval preserves the original tool's untrusted-content boundary, including metadata, instead of treating saved web or delegated output as trusted local text.
 - Runtime provider refresh and reload rollback retire only registrations owned by that registry. Independent API/OAuth registrations survive; repeated owner updates replace their previous layer without retaining an unbounded chain.

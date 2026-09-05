@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { getAgentDir, getBundledResourcesDir } from "../../config.ts";
+import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import {
 	encodeWorkerSessionAllowedPaths,
@@ -263,9 +264,10 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		const changed = (file: string | Buffer | null) => {
 			if (binding?.store === store && (file === null || file.toString().endsWith(".json"))) refresh();
 		};
+		const watchDirectory = canonicalizeWatchDir(store.directory);
 		const watcher = options.watch
-			? options.watch(store.directory, changed)
-			: watch(store.directory, { persistent: false }, (_event, file) => changed(file));
+			? options.watch(watchDirectory, changed)
+			: watch(watchDirectory, { persistent: false }, (_event, file) => changed(file));
 		watcher.on("error", (error) => ctx.ui.notify(`Collaboration signal failed: ${error.message}`, "error"));
 		let reattaching: Promise<void> | undefined;
 		const recover = (): Promise<void> => {

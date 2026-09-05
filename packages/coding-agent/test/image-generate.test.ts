@@ -129,14 +129,22 @@ describe("image generation host boundary", () => {
 	});
 
 	it("keeps large originals out of provider context without losing the saved artifact", async () => {
-		const { controller, result } = setup();
+		const { controller, result, generateImages } = setup();
 		const bytes = Buffer.alloc(4 * 1024 * 1024);
 		Buffer.from(image.data, "base64").copy(bytes);
 		result.output = [{ ...image, data: bytes.toString("base64") }];
 		const generated = await controller.generate("large", { prompt: "A landscape" });
 		expect(generated.details.inline).toBe(false);
+		expect(generated.details.bytes).toBe(bytes.length);
 		expect(generated.content.every((item) => item.type === "text")).toBe(true);
-		expect(readFileSync(generated.details.path)).toEqual(bytes);
+		expect(generateImages).toHaveBeenCalledTimes(1);
+		// Generic deep equality expands millions of byte entries and can time out or exhaust
+		// the Windows worker heap. Native equality still checks every byte and the full length.
+		const saved = readFileSync(generated.details.path);
+		expect(saved.equals(bytes)).toBe(true);
+		expect(saved.equals(bytes.subarray(0, -1))).toBe(false);
+		bytes[bytes.length - 1] ^= 1;
+		expect(saved.equals(bytes)).toBe(false);
 	});
 
 	it("storage failure after completed generation cannot trigger another paid request", async () => {

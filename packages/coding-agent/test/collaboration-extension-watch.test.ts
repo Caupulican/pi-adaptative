@@ -1,8 +1,12 @@
 import { EventEmitter } from "node:events";
 import type * as fs from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { CollaborationControlHandoffs } from "../src/core/collaboration/control-handoffs.ts";
+import { piCollaborationExtension } from "../src/core/collaboration/extension.ts";
 import { collaborationFixture } from "./helpers/collaboration-fixture.ts";
+import { createDirectoryLink } from "./helpers/filesystem-links.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -59,3 +63,26 @@ it("ignores late watcher signals after disposal and after another generation bin
 	f.callbacks[1]("turn.json");
 	expect(f.sendMessage).toHaveBeenCalledTimes(2);
 });
+
+it.each([true, false])(
+	"canonicalizes the state watcher target before native registration (alias=%s)",
+	async (alias) => {
+		const f = await collaborationFixture();
+		cleanups.push(f.cleanup);
+		const canonical = join(realpathSync.native(f.root), "long state directory");
+		const linked = join(f.root, "state-alias");
+		mkdirSync(canonical);
+		if (alias) createDirectoryLink(canonical, linked);
+		const stateDirectory = join(alias ? linked : canonical, "jobs");
+		const watcher = Object.assign(new EventEmitter(), { close: vi.fn(), ref: () => watcher, unref: () => watcher });
+		const watch = vi.fn((_directory: string, _onChange: (file: string | Buffer | null) => void) => watcher);
+		piCollaborationExtension(f.api, { stateDirectory, watch, backend: async () => f.backend });
+		await f.start();
+		expect(watch).toHaveBeenCalledExactlyOnceWith(realpathSync.native(stateDirectory), expect.any(Function));
+		if (alias) expect(watch.mock.calls[0]?.[0]).not.toBe(stateDirectory);
+		watcher.emit("error", new Error("watch signal failed"));
+		expect(f.context.ui.notify).toHaveBeenCalledWith("Collaboration signal failed: watch signal failed", "error");
+		await f.shutdown();
+		expect(watcher.close).toHaveBeenCalledOnce();
+	},
+);

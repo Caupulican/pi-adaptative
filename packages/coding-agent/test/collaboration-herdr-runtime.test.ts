@@ -1,5 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createHerdrBackend } from "../src/core/collaboration/herdr-runtime.ts";
 
@@ -10,8 +11,9 @@ const ports = vi.hoisted(() => ({
 	kill: vi.fn(),
 	connect: vi.fn(),
 	write: vi.fn(),
+	realpath: vi.fn((path: string) => path),
 }));
-vi.mock("node:fs", () => ({ watch: ports.watch }));
+vi.mock("node:fs", () => ({ watch: ports.watch, realpathSync: { native: ports.realpath } }));
 vi.mock("node:fs/promises", () => ({ mkdir: vi.fn() }));
 vi.mock("../src/config.ts", () => ({ getAgentDir: () => "/state" }));
 vi.mock("../src/utils/child-process.ts", () => ({
@@ -43,6 +45,7 @@ beforeEach(() => {
 	ports.connect.mockRejectedValue(new Error("Socket unavailable"));
 	ports.terminal.mockImplementation(() => new Promise(() => {}));
 	ports.kill.mockResolvedValue("killed");
+	ports.realpath.mockImplementation((path: string) => path);
 });
 afterEach(() => vi.useRealTimers());
 
@@ -112,3 +115,24 @@ it("keeps an acknowledged live server detached without terminating it", async ()
 	expect(ports.kill).not.toHaveBeenCalled();
 	expect(f.watcher.close).toHaveBeenCalledOnce();
 });
+
+it.each([true, false])(
+	"canonicalizes readiness watcher paths without changing readiness or cleanup (alias=%s)",
+	async (alias) => {
+		const f = fixture();
+		const canonical = String.raw`C:\Users\Runner Administrator\herdr\sessions\named`;
+		ports.realpath.mockImplementation((path: string) => (alias ? canonical : path));
+		ports.connect
+			.mockRejectedValueOnce(new Error("Socket unavailable"))
+			.mockResolvedValue({ request: vi.fn(async () => ({ protocol: 20 })), close: vi.fn() });
+		await f.start();
+		const original =
+			process.platform === "win32"
+				? join(process.env.APPDATA ?? "/state", "herdr", "sessions", "named")
+				: "/state/named";
+		expect(ports.watch).toHaveBeenCalledExactlyOnceWith(alias ? canonical : original, expect.any(Function));
+		expect(f.child.unref).toHaveBeenCalledOnce();
+		expect(f.watcher.close).toHaveBeenCalledOnce();
+		expect(ports.kill).not.toHaveBeenCalled();
+	},
+);

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, type FSWatcher, mkdirSync, unlinkSync, watch } from "node:fs";
 import { basename, dirname } from "node:path";
+import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
 import { stateFile } from "../agent-paths.ts";
 import {
 	canonicalPathScopeIdentity,
@@ -430,17 +431,21 @@ export class WorkerWriteReservationStore {
 				listener();
 			});
 		};
-		const watcher = this.watchDirectory(directory, { persistent: false }, (_eventType, fileName) => {
-			// Node may omit a filename (notably on Windows), or provide a Buffer when the watcher is
-			// configured that way. An unknown filename is conservatively treated as a wake signal: the
-			// scheduler re-evaluates durable admission, so this cannot grant access by itself.
-			if (fileName === null) {
-				schedule();
-				return;
-			}
-			const normalizedName = Buffer.isBuffer(fileName) ? fileName.toString("utf-8") : fileName;
-			if (normalizedName === basename(filePath)) schedule();
-		});
+		const watcher = this.watchDirectory(
+			canonicalizeWatchDir(directory),
+			{ persistent: false },
+			(_eventType, fileName) => {
+				// Node may omit a filename (notably on Windows), or provide a Buffer when the watcher is
+				// configured that way. An unknown filename is conservatively treated as a wake signal: the
+				// scheduler re-evaluates durable admission, so this cannot grant access by itself.
+				if (fileName === null) {
+					schedule();
+					return;
+				}
+				const normalizedName = Buffer.isBuffer(fileName) ? fileName.toString("utf-8") : fileName;
+				if (normalizedName === basename(filePath)) schedule();
+			},
+		);
 		return () => {
 			listeners.delete(listener);
 			if (listeners.size === 0) availabilityListeners.delete(filePath);

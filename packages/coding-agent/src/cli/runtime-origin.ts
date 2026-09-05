@@ -45,9 +45,14 @@ export async function createStandaloneRuntimeOrigin(
 				const contents = await readBoundedTextFile(launcher, 8192, "Managed runtime launcher").catch(
 					() => undefined,
 				);
+				const declaredRoot = contents
+					?.match(/^set "PI_ADAPTATIVE_ROOT=([^"\r\n]+)"\r?$/m)?.[1]
+					.replaceAll("%%", "%");
 				if (
 					contents?.includes("REM PI_ADAPTATIVE_MANAGED_LAUNCHER") &&
-					contents.split(/\r?\n/).includes(`set "PI_ADAPTATIVE_ROOT=${installRoot.replaceAll("%", "%%")}"`)
+					declaredRoot &&
+					isAbsolute(declaredRoot) &&
+					(await realpath(declaredRoot).catch(() => undefined)) === installRoot
 				) {
 					stableTarget = { executable: launcher, argsPrefix: [] };
 					break;

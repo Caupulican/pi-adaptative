@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 const cliEntrypoint = readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8");
 const bunEntrypoint = readFileSync(new URL("../src/bun/cli.ts", import.meta.url), "utf8");
+const mainEntrypoint = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 
 describe("CLI entrypoint lifecycle", () => {
 	it("awaits main so a compiled RPC process retains ownership of its lifetime", () => {
@@ -12,14 +13,25 @@ describe("CLI entrypoint lifecycle", () => {
 
 	it("keeps finite version and help fast paths ahead of main startup", () => {
 		const mainImport = cliEntrypoint.indexOf('await import("./main.ts")');
-		const powerShellWarmStart = cliEntrypoint.indexOf("startCliPowerShellWarmStart({");
 		const httpDispatcherImport = cliEntrypoint.indexOf('await import("./core/http-dispatcher.ts")');
 		expect(mainImport).toBeGreaterThan(0);
 		expect(cliEntrypoint.indexOf('firstArg === "--version"')).toBeLessThan(mainImport);
 		expect(cliEntrypoint.indexOf('firstArg === "--version"')).toBeLessThan(httpDispatcherImport);
 		expect(cliEntrypoint.indexOf('cliArgs.includes("--help")')).toBeLessThan(mainImport);
-		expect(powerShellWarmStart).toBeGreaterThan(cliEntrypoint.indexOf('cliArgs.includes("--help")'));
-		expect(powerShellWarmStart).toBeLessThan(mainImport);
+		expect(cliEntrypoint).not.toContain("startCliPowerShellWarmStart(");
+	});
+
+	it("warms PowerShell only after supervisor delegation and before session construction", () => {
+		// The supervisor must not retain an unused shell while the terminal-owning child runs.
+		const supervisor = mainEntrypoint.indexOf("if (await superviseInteractiveRuntime(args)) return;");
+		const warmStart = mainEntrypoint.indexOf("startCliPowerShellWarmStart({");
+		const sessionConstruction = mainEntrypoint.indexOf("await createSessionManager(parsed,");
+		expect(supervisor).toBeGreaterThan(0);
+		expect(warmStart).toBeGreaterThan(supervisor);
+		expect(sessionConstruction).toBeGreaterThan(warmStart);
+		expect(mainEntrypoint).toMatch(
+			/if \(!parsed\.help && parsed\.listModels === undefined && !parsed\.export && !parsed\.version\) \{\s*startCliPowerShellWarmStart\(/,
+		);
 	});
 
 	it("prints compiled --version before bundled modules, Bedrock, or the full CLI graph", () => {

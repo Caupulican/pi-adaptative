@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { killTree } from "@caupulican/pi-agent-core/process-tree";
 import { getAgentDir } from "../../config.ts";
 import { spawnProcess, waitForChildProcess } from "../../utils/child-process.ts";
+import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
 import { getToolPath } from "../../utils/tools-manager.ts";
 import { writeFileAtomic } from "../util/atomic-file.ts";
 import { CollaborationBackendError } from "./backend.ts";
@@ -117,7 +118,7 @@ export async function createHerdrBackend(options: HerdrRuntimeOptions): Promise<
 			});
 	};
 	// Install before spawn; readiness is triggered by socket/session filesystem creation, not output polling.
-	const watcher = watch(sessionDir, probe);
+	const watcher = watch(canonicalizeWatchDir(sessionDir), probe);
 	watcher.on("error", (error) => rejectReady?.(error));
 	const child = spawnProcess(executable, ["--session", options.session, "server"], {
 		env,

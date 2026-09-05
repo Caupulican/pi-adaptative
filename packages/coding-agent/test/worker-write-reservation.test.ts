@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type WorkerWriteReservationLease,
@@ -306,4 +306,38 @@ describe("WorkerWriteReservationStore", () => {
 		expect(notifications).toEqual(["wake", "buffer"]);
 		expect(close).toHaveBeenCalled();
 	});
+
+	it.each([true, false])(
+		"canonicalizes availability watcher paths while retaining their lease identity (alias=%s)",
+		(alias) => {
+			const paths = fixture();
+			const canonical = join(realpathSync.native(paths.workspace), "long agent directory");
+			const linked = join(paths.workspace, "agent-alias");
+			mkdirSync(canonical);
+			if (alias) createDirectoryLink(canonical, linked);
+			const close = vi.fn();
+			const watchDirectory = vi.fn(
+				(
+					_directory: string,
+					_options: { persistent: boolean },
+					_listener: (event: string, file: string | Buffer | null) => void,
+				) => ({ close }) as never,
+			);
+			const store = new WorkerWriteReservationStore({ agentDir: alias ? linked : canonical, watchDirectory });
+			const lease = grantedLease(store.acquire(request(paths)));
+			const dispose = store.watchAvailability(request(paths).workspace, () => {});
+			try {
+				expect(watchDirectory).toHaveBeenCalledExactlyOnceWith(
+					realpathSync.native(dirname(lease.filePath)),
+					{ persistent: false },
+					expect.any(Function),
+				);
+				if (alias) expect(watchDirectory.mock.calls[0]?.[0]).not.toBe(dirname(lease.filePath));
+				expect(store.release(lease)).toEqual({ kind: "released" });
+			} finally {
+				dispose();
+			}
+			expect(close).toHaveBeenCalledOnce();
+		},
+	);
 });

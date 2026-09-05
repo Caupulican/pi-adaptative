@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -48,7 +48,7 @@ it.each(["linux", "win32"] as const)(
 		const store = new RuntimeArtifactStore(source.capture, artifacts);
 		const previous = await store.capture();
 		expect(source.stableTarget?.executable).toBe(
-			join(root, platform === "win32" ? "bin" : "current", platform === "win32" ? "pi.cmd" : "pi"),
+			join(await realpath(root), platform === "win32" ? "bin" : "current", platform === "win32" ? "pi.cmd" : "pi"),
 		);
 		await activate("v1.0.1");
 		const candidate = await store.capture();
@@ -82,4 +82,35 @@ it("does not pin an unproven Windows release and resolves only its owned custom-
 		executable: join(bin, "pi.cmd"),
 		argsPrefix: [],
 	});
+});
+
+it("recognizes the same Windows install through a path alias but rejects a different install", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-runtime-origin-alias-"));
+	roots.push(root);
+	const install = join(root, "install%name");
+	const alias = join(root, "alias");
+	const release = join(install, "releases", "v1.0.0");
+	const bin = join(root, "bin");
+	await mkdir(release, { recursive: true });
+	await mkdir(bin);
+	await symlink(install, alias, "junction");
+	await writeFile(join(release, ".pi-adaptative-managed"), "pi-adaptative-managed-release-v1\n");
+	const target = { executable: join(release, "pi.exe"), argsPrefix: [] };
+	const launcher = join(bin, "pi.cmd");
+	await writeFile(launcher, `REM PI_ADAPTATIVE_MANAGED_LAUNCHER\nset "PI_ADAPTATIVE_ROOT=${alias}"\n`);
+	expect((await createStandaloneRuntimeOrigin(release, target, "win32", { PI_BIN_DIR: bin })).stableTarget).toEqual({
+		executable: launcher,
+		argsPrefix: [],
+	});
+	await writeFile(
+		launcher,
+		`REM PI_ADAPTATIVE_MANAGED_LAUNCHER\nset "PI_ADAPTATIVE_ROOT=${install.replaceAll("%", "%%")}"\n`,
+	);
+	expect(
+		(await createStandaloneRuntimeOrigin(release, target, "win32", { PI_BIN_DIR: bin })).stableTarget?.executable,
+	).toBe(launcher);
+	await writeFile(launcher, `REM PI_ADAPTATIVE_MANAGED_LAUNCHER\nset "PI_ADAPTATIVE_ROOT=${root}"\n`);
+	expect(
+		(await createStandaloneRuntimeOrigin(release, target, "win32", { PI_BIN_DIR: bin })).stableTarget,
+	).toBeUndefined();
 });
