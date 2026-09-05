@@ -1539,7 +1539,7 @@ export class SessionManager {
 			closeSync(fd);
 		}
 		const entry = parseSessionEntryLine(buffer.subarray(0, bytesRead).toString("utf8"));
-		if (!entry || entry.type !== "message" || entry.id !== entryId) {
+		if (entry?.type !== "message" || entry.id !== entryId) {
 			throw new Error(`Compacted session payload ${entryId} could not be restored`);
 		}
 		return (entry.message as unknown as Record<string, unknown>)[property];
@@ -2012,7 +2012,7 @@ export class SessionManager {
 			throw new Error(`Assistant message is outside the active branch: ${assistantMessageEntryId}.`);
 		}
 		const assistant = this.byId.get(assistantMessageEntryId);
-		if (!assistant || assistant.type !== "message") {
+		if (assistant?.type !== "message") {
 			throw new Error(
 				`Foreground tool lifecycle identity requires an assistant message: ${assistantMessageEntryId}.`,
 			);
@@ -2038,7 +2038,7 @@ export class SessionManager {
 		}
 		for (const messageEntryId of entry.messageEntryIds) {
 			const messageEntry = this.byId.get(messageEntryId);
-			if (!messageEntry || messageEntry.type !== "message") {
+			if (messageEntry?.type !== "message") {
 				throw new Error(`Request snapshot references a non-message entry: ${messageEntryId}.`);
 			}
 			if (!cache.positions.has(messageEntryId)) {
@@ -2544,7 +2544,7 @@ export class SessionManager {
 	 */
 	releasePersistedMessagePayload(entryId: string): void {
 		const entry = this.byId.get(entryId);
-		if (!entry || entry.type !== "message") {
+		if (entry?.type !== "message") {
 			throw new TypeError(`Session entry ${entryId} is not a persisted message.`);
 		}
 		if (!this.persist || !this.flushed || !this.sessionFile) {

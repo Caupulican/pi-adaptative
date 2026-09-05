@@ -82,11 +82,11 @@ describe("streaming assistant text alias expansion", () => {
 
 		const chunk1 = textMessage("Reading p/mod");
 		apply(host, chunk1, { force: true });
-		expect((rendered.at(-1)?.content[0] as { text: string }).text).toBe("Reading p/mod");
+		expect(rendered.at(-1)?.content[0]).toEqual({ type: "text", text: "Reading p/mod" });
 
 		const chunk2 = textMessage("Reading p/module02.ts now");
 		apply(host, chunk2, { force: true });
-		expect((rendered.at(-1)?.content[0] as { text: string }).text).toBe("Reading src/core/module02.ts now");
+		expect(rendered.at(-1)?.content[0]).toEqual({ type: "text", text: "Reading src/core/module02.ts now" });
 
 		// No-writeback pin: `this.streamingMessage` is the exact object message_end would also hand
 		// to session history, and it still carries the literal, unexpanded alias.
@@ -100,7 +100,7 @@ describe("streaming assistant text alias expansion", () => {
 
 		apply(host, message, { force: true });
 
-		expect((rendered.at(-1)?.content[0] as { thinking: string }).thinking).toBe("checking src/core/module02.ts");
+		expect(rendered.at(-1)?.content[0]).toEqual({ type: "thinking", thinking: "checking src/core/module02.ts" });
 		expect((message.content[0] as { thinking: string }).thinking).toBe("checking p/module02.ts");
 	});
 

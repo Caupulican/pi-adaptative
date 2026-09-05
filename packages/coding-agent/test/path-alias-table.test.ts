@@ -86,7 +86,7 @@ describe("path alias table", () => {
 		const aliased = applyPathAliases("/repo", messages);
 		expect(aliased.legend).toBe("PATH ALIASES\np/grep.ts=packages/coding-agent/src/core/tools/grep.ts");
 		const rewritten = aliased.messages[0];
-		if (!rewritten || rewritten.role !== "toolResult") throw new Error("expected toolResult");
+		if (rewritten?.role !== "toolResult") throw new Error("expected toolResult");
 		const content = rewritten.content;
 		expect(Array.isArray(content) && content[0] && "text" in content[0] ? content[0].text : "").toBe(
 			"p/grep.ts:125:name",

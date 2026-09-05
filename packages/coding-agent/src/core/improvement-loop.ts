@@ -667,7 +667,7 @@ function requireActiveSandbox(
 	const sandbox = sandboxId
 		? state.sandboxes.find((candidate) => candidate.sandboxId === normalizeLoopId(sandboxId))
 		: state.activeSandbox;
-	if (!sandbox || sandbox.status !== "active") throw new Error(errorMessage);
+	if (sandbox?.status !== "active") throw new Error(errorMessage);
 	return sandbox;
 }
 

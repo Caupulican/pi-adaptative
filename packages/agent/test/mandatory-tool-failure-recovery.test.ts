@@ -31,7 +31,7 @@ import { createAgentToolFailureRecoveryAuthority } from "../src/types.ts";
  */
 function ledgerOf(context: Context | undefined): string {
 	const last = context?.messages.at(-1) as unknown as AgentMessage | undefined;
-	if (!last || last.role !== "custom" || last.customType !== TOOL_FAILURE_LEDGER_TRANSIENT_KIND) return "";
+	if (last?.role !== "custom" || last.customType !== TOOL_FAILURE_LEDGER_TRANSIENT_KIND) return "";
 	return typeof last.content === "string" ? last.content : "";
 }
 

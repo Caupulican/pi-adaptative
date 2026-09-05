@@ -319,7 +319,7 @@ export class WorkerLifecycle {
 		retry?: AttemptRetryState;
 	}): void {
 		const attempt = this.getActiveAttempt(args.laneId);
-		if (!attempt || !attempt.agentId || !attempt.lease) {
+		if (!attempt?.agentId || !attempt.lease) {
 			throw new Error(`Durable worker '${args.laneId}' has no live agent-bound attempt for suspension.`);
 		}
 		this.ledger.runtime.suspendBoundAttempt({

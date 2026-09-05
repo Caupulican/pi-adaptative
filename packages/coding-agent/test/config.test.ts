@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "vitest";
 import {
 	detectInstallMethod,
+	getPackageDependencyVersion,
 	getSelfUpdateUnavailableInstruction,
 	getStandaloneInstallerCommand,
 	getStandaloneInstallInstruction,
@@ -26,6 +27,13 @@ afterEach(() => {
 });
 
 describe("install method and self-update instructions", () => {
+	test("reads exact managed dependency pins from the package metadata and rejects absent or unpinned entries", () => {
+		expect(getPackageDependencyVersion("jscpd")).toMatch(/^5\.\d+\.\d+$/);
+		expect(getPackageDependencyVersion("@ff-labs/fff-node")).toMatch(/^\d+\.\d+\.\d+$/);
+		expect(() => getPackageDependencyVersion("not-a-pi-dependency")).toThrow("must pin");
+		expect(() => getPackageDependencyVersion("@caupulican/pi-agent-core")).toThrow("must pin");
+	});
+
 	test("never recommends the Linux installer on unsupported host platforms", () => {
 		expect(getStandaloneInstallInstruction("darwin")).toContain("support Linux and Windows");
 		expect(getStandaloneInstallInstruction("darwin")).not.toContain("install.sh");

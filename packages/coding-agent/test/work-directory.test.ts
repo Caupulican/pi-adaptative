@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { Dir, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	acquireWorkRun,
 	boundedWorkRetention,
@@ -19,10 +19,28 @@ function createAgentDir(): string {
 }
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 describe("work directory", () => {
+	it.each(["unowned", "hidden", "file"])("charges %s entries against the tenant enumeration budget", (kind) => {
+		const agentDir = createAgentDir();
+		const tenantDir = join(agentDir, "work", "logs", "bounded");
+		mkdirSync(tenantDir, { recursive: true });
+		for (let index = 0; index < 12; index++) {
+			const path = join(tenantDir, `${kind === "hidden" ? "." : ""}entry-${index}`);
+			if (kind === "file") writeFileSync(path, "unowned");
+			else mkdirSync(path);
+		}
+		const read = vi.spyOn(Dir.prototype, "readSync");
+		expect(pruneWorkTenant(agentDir, "logs", "bounded", { maxScannedRuns: 3 })).toEqual([]);
+		expect(read).toHaveBeenCalledTimes(3);
+		read.mockClear();
+		expect(pruneWorkTenant(agentDir, "logs", "bounded", { maxScannedRuns: 20 })).toEqual([]);
+		expect(read).toHaveBeenCalledTimes(13);
+	});
+
 	it("clamps delegated retention requests to the harness ceiling", () => {
 		expect(
 			boundedWorkRetention({

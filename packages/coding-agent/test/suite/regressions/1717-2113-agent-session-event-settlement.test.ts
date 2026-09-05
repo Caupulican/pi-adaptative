@@ -95,7 +95,7 @@ describe("regressions #1717/#2113: agent session event settlement", () => {
 			.map((entry) => entry.message)
 			.find((message) => message.role === "toolResult" && message.toolName === "large_details");
 		expect(toolResult?.role).toBe("toolResult");
-		if (!toolResult || toolResult.role !== "toolResult") throw new Error("Expected retained tool result");
+		if (toolResult?.role !== "toolResult") throw new Error("Expected retained tool result");
 		expect(toolResult.content).toEqual([{ type: "text", text: "small model-visible result" }]);
 		expect(toolResult.details).toMatchObject({
 			piToolResultDetailsTruncated: true,

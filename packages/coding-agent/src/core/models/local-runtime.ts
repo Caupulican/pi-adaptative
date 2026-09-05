@@ -113,7 +113,7 @@ export interface OllamaCreateModelInput {
 }
 
 /** Pinned ollama release for the managed installer below. Bump here when needed — one constant. */
-export const OLLAMA_PINNED_VERSION = "0.31.1";
+export const OLLAMA_PINNED_VERSION = "0.33.3";
 
 export type OllamaAssetKind = "tar-zst" | "tar-gz" | "zip";
 
@@ -195,9 +195,9 @@ const TRANSFORMERS_START_POLL_ATTEMPTS = 240;
 const TRANSFORMERS_RUNTIME_DIR_NAME = "hf-transformers";
 const TRANSFORMERS_VENV_DIR_NAME = "venv";
 const TRANSFORMERS_SERVER_RELATIVE_PATH = join("runtimes", "hf-transformers-openai-server.py");
-const TRANSFORMERS_PINNED_PACKAGES = ["transformers==5.13.0", "huggingface-hub==1.22.0", "safetensors==0.8.0"];
+const TRANSFORMERS_PINNED_PACKAGES = ["transformers==5.16.1", "huggingface-hub==1.30.0", "safetensors==0.8.0"];
 const TRANSFORMERS_REQUIRED_MODULES = ["torch", "transformers", "huggingface_hub", "safetensors"];
-const TORCH_PINNED_VERSION = "2.12.1";
+const TORCH_PINNED_VERSION = "2.14.0";
 
 function terminateManagedRuntimeProcess(child: ChildProcess): void {
 	const terminationController = new AbortController();

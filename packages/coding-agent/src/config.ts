@@ -269,6 +269,8 @@ export function getBundledExtensionsDir(): string {
 interface PackageJson {
 	name?: string;
 	version?: string;
+	dependencies?: Record<string, string>;
+	optionalDependencies?: Record<string, string>;
 	piConfig?: {
 		name?: string;
 		configDir?: string;
@@ -291,6 +293,15 @@ export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
 /** True only when installed package metadata supplied the runtime identity. */
 export const VERSION_SOURCE_AVAILABLE: boolean = typeof pkg.version === "string" && pkg.version.trim().length > 0;
 export const VERSION: string = VERSION_SOURCE_AVAILABLE ? (pkg.version as string) : "0.0.0";
+
+/** Managed npm tooling uses the exact dependency selected by this packaged installation. */
+export function getPackageDependencyVersion(name: string): string {
+	const version = pkg.optionalDependencies?.[name] ?? pkg.dependencies?.[name];
+	if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) {
+		throw new Error(`Pi package metadata must pin '${name}' to an exact version.`);
+	}
+	return version;
+}
 
 /**
  * Build a POSIX-valid environment-variable name from an app name and a suffix.

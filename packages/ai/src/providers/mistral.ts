@@ -257,7 +257,7 @@ export async function consumeChatStream(
 		finishTextOrThinkingBlock(stream, output, block, blockIndex());
 	};
 	const appendTextDelta = (textDelta: string) => {
-		if (!currentBlock || currentBlock.type !== "text") {
+		if (currentBlock?.type !== "text") {
 			finishCurrentBlock(currentBlock);
 			currentBlock = { type: "text", text: "" };
 			output.content.push(currentBlock);
@@ -310,7 +310,7 @@ export async function consumeChatStream(
 						.join("");
 					const thinkingDelta = sanitizeSurrogates(deltaText);
 					if (!thinkingDelta) continue;
-					if (!currentBlock || currentBlock.type !== "thinking") {
+					if (currentBlock?.type !== "thinking") {
 						finishCurrentBlock(currentBlock);
 						currentBlock = { type: "thinking", thinking: "" };
 						output.content.push(currentBlock);

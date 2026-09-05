@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Updated pinned Marked, Chalk, and headless xterm dependencies. The minimum Node.js version is now 24.20.0.
+
 ## [0.98.0] - 2026-09-05
 
 ### Added

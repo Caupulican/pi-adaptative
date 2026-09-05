@@ -91,34 +91,36 @@
 		"@caupulican/pi-agent-core": "^0.98.0",
 		"@caupulican/pi-ai": "^0.98.0",
 		"@caupulican/pi-tui": "^0.98.0",
+		"@effect/platform": "0.97.1",
+		"@effect/platform-node": "0.108.1",
 		"@silvia-odwyer/photon-node": "0.3.4",
-		"chalk": "5.6.2",
+		"chalk": "6.0.0",
 		"cross-spawn": "7.0.6",
-		"diff": "8.0.4",
+		"diff": "9.0.0",
 		"effect": "3.22.1",
 		"glob": "13.0.6",
-		"highlight.js": "10.7.3",
-		"hosted-git-info": "9.0.3",
+		"highlight.js": "11.12.0",
+		"hosted-git-info": "10.1.1",
 		"htmlparser2": "12.0.0",
-		"ignore": "7.0.5",
+		"ignore": "7.0.8",
 		"ipaddr.js": "2.5.0",
 		"jiti": "2.7.0",
-		"jscpd": "5.0.14",
-		"minimatch": "10.2.5",
+		"jscpd": "5.0.15",
+		"minimatch": "10.2.6",
 		"proper-lockfile": "4.1.2",
 		"turndown": "7.2.4",
-		"typebox": "1.1.38",
-		"undici": "8.9.0",
+		"typebox": "1.3.25",
+		"undici": "8.10.1",
 		"yaml": "2.9.0"
 	},
 	"overrides": {
-		"rimraf": "6.1.2",
+		"rimraf": "6.1.3",
 		"gaxios": {
-			"rimraf": "6.1.2"
+			"rimraf": "6.1.3"
 		}
 	},
 	"optionalDependencies": {
-		"@ff-labs/fff-node": "0.9.6",
+		"@ff-labs/fff-node": "0.10.6",
 		"@mariozechner/clipboard": "0.3.9"
 	},
 	"devDependencies": {
@@ -126,12 +128,12 @@
 		"@types/diff": "7.0.2",
 		"@types/hosted-git-info": "3.0.5",
 		"@types/ms": "2.1.0",
-		"@types/node": "24.12.4",
+		"@types/node": "24.13.3",
 		"@types/proper-lockfile": "4.1.4",
 		"@types/turndown": "5.0.6",
 		"shx": "0.4.0",
 		"typescript": "7.0.2",
-		"vitest": "4.1.10"
+		"vitest": "5.0.0"
 	},
 	"keywords": [
 		"coding-agent",
@@ -149,6 +151,6 @@
 		"directory": "packages/coding-agent"
 	},
 	"engines": {
-		"node": ">=24.18.0"
+		"node": ">=24.20.0"
 	}
 }

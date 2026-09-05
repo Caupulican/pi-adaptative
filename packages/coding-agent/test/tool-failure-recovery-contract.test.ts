@@ -147,7 +147,7 @@ describe("tool-owned failure recovery contracts", () => {
 		const writeAction = write.failureRecovery?.actions?.find(
 			(candidate) => candidate.kind === "repair" && candidate.targetKind === WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
 		);
-		if (!writeAction || writeAction.kind !== "repair") {
+		if (writeAction?.kind !== "repair") {
 			throw new Error("Expected matching shell/write workspace-mutation recovery contracts");
 		}
 		expect(writeAction.authority).toBe(target.authority);
@@ -196,7 +196,7 @@ describe("tool-owned failure recovery contracts", () => {
 		const action = write.failureRecovery?.actions?.find(
 			(candidate) => candidate.kind === "repair" && candidate.targetKind === FILE_EXISTS_RECOVERY_TARGET_KIND,
 		);
-		if (!action || action.kind !== "repair") throw new Error("Expected write file-exists repair action");
+		if (action?.kind !== "repair") throw new Error("Expected write file-exists repair action");
 
 		expect(target).toMatchObject({ kind: FILE_EXISTS_RECOVERY_TARGET_KIND, scope: join(cwd, "created.txt") });
 		expect(action.authority).toBe(target?.authority);

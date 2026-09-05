@@ -177,7 +177,7 @@ export class LaneTracker {
 
 	markRunning(laneId: string): LaneRecord | undefined {
 		const record = this._lanes.get(laneId);
-		if (!record || record.status !== "queued") return undefined;
+		if (record?.status !== "queued") return undefined;
 		const next = { ...record, status: "running" as const, startedAt: this._now() };
 		this._lanes.set(laneId, next);
 		return { ...next };

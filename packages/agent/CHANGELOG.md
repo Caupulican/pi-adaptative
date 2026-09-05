@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Updated pinned TypeBox, ignore, Node.js types, and Vitest dependencies. The minimum Node.js version is now 24.20.0.
+
 ## [0.98.0] - 2026-09-05
 
 ## [0.97.27] - 2026-09-03

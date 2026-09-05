@@ -4,12 +4,14 @@ See [AGENTS.md](https://github.com/earendil-works/pi-mono/blob/main/AGENTS.md) f
 
 ## Setup
 
-Development, CI, and published packages use Node.js 24.18.0 or newer, pinned in the repository's `.nvmrc` to the current LTS patch.
+Development and CI use Node.js 24.20.0 or newer, pinned in the repository's `.nvmrc` to the current LTS patch. Standalone binaries use the stable Bun version pinned in `.bun-version`. Direct npm dependencies use exact versions and the repository's two-day minimum release age.
+
+The clone scanner is pinned to jscpd 5.0.15, the newest version that passes the repository's scanner controls. Versions 5.0.16 through 5.1.2 report unrelated exported interfaces as clones. `check:clone-config` preserves that regression alongside controls that require real clones to remain detectable. Update this pin only when those controls pass; do not suppress the affected files or relax the release threshold.
 
 ```bash
 git clone https://github.com/earendil-works/pi-mono
 cd pi-mono
-npm install
+npm install --ignore-scripts
 npm run build
 ```
 
@@ -57,10 +59,11 @@ Never use `__dirname` directly for package assets.
 ## Testing
 
 ```bash
-./test.sh                         # Run non-LLM tests (no API keys needed)
-npm test                          # Run all tests
-npm test -- test/specific.test.ts # Run specific test
+./test.sh packages/coding-agent/test/specific.test.ts
+npm run check
 ```
+
+Run focused tests during development. The full non-e2e suite belongs to GitHub Actions; do not run the full suite locally as part of release preparation.
 
 ## Project Structure
 

@@ -911,8 +911,7 @@ export class DurableTaskRuntime {
 		if (attempt.status !== "suspended" || attempt.agentId !== agentId) {
 			throw new DurableTaskRuntimeError(`Attempt '${attemptId}' is not suspended for agent '${agentId}'.`);
 		}
-		if (!agent || agent.status !== "resuming")
-			throw new DurableTaskRuntimeError(`Agent '${agentId}' is not resuming.`);
+		if (agent?.status !== "resuming") throw new DurableTaskRuntimeError(`Agent '${agentId}' is not resuming.`);
 		this.assertRetryBackoffElapsed(attempt);
 		this.requireActiveObjectiveForAttempt(attempt);
 		const lease = this.issueLease(attempt, ownerId, ttlMs);

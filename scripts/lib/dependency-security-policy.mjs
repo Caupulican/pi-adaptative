@@ -9,10 +9,19 @@ export function validateRequiredSecurityOverrides(rootPackage, rootLockfile) {
 		}
 
 		const resolvedVersion = rootLockfile.packages?.[`node_modules/${name}`]?.version;
-		if (resolvedVersion !== requiredVersion) {
+		if (resolvedVersion === undefined) {
 			failures.push(
 				`package-lock.json: node_modules/${name} must resolve to ${requiredVersion}, found ${resolvedVersion ?? "missing"}`,
 			);
+		}
+	}
+	for (const [name, version] of Object.entries(rootPackage.overrides ?? {})) {
+		if (typeof version !== "string") continue;
+		for (const [path, entry] of Object.entries(rootLockfile.packages ?? {})) {
+			if (path !== `node_modules/${name}` && !path.endsWith(`/node_modules/${name}`)) continue;
+			if (entry.version !== version) {
+				failures.push(`package-lock.json: ${path} must resolve to ${version}, found ${entry.version ?? "missing"}`);
+			}
 		}
 	}
 	return failures;

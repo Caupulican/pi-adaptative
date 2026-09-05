@@ -151,7 +151,7 @@ export function enforcePromptPolicy(
 
 	for (const planItem of shadowReport.items) {
 		const message = messages[planItem.messageIndex];
-		if (!message || message.role !== "toolResult" || message.toolCallId !== planItem.toolCallId) {
+		if (message?.role !== "toolResult" || message.toolCallId !== planItem.toolCallId) {
 			items.push(skip(planItem, "message_mismatch"));
 			continue;
 		}

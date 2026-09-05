@@ -258,12 +258,7 @@ export class WorkerRecoveryCoordinator {
 	/** Keep an externally requested wake queued while the durable retry deadline is still retained. */
 	deferRetryIfNeeded(record: LaneRecord, request: WorkerDelegationRequest): boolean {
 		const attempt = this.options.lifecycle.getActiveAttempt(record.laneId);
-		if (
-			!attempt ||
-			attempt.status !== "suspended" ||
-			!attempt.retry ||
-			Date.parse(attempt.retry.notBefore) <= this.now()
-		) {
+		if (attempt?.status !== "suspended" || !attempt.retry || Date.parse(attempt.retry.notBefore) <= this.now()) {
 			return false;
 		}
 		this.enqueueOrDeferRetry(record, attempt, request, request.verificationOfTaskId !== undefined);
@@ -394,7 +389,7 @@ export class WorkerRecoveryCoordinator {
 			index -= 1;
 		}
 		const assistant = messages[index];
-		if (!assistant || assistant.role !== "assistant") return;
+		if (assistant?.role !== "assistant") return;
 		for (const content of assistant.content) {
 			if (content.type !== "toolCall" || completedToolCallIds.has(content.id)) continue;
 			conversation.appendMessage({
@@ -419,7 +414,7 @@ export class WorkerRecoveryCoordinator {
 		attemptId: string,
 	): { text: string; usage: Usage; stopReason: string } | undefined {
 		const last = conversation.getLastAttemptMessage(attemptId);
-		if (!last || last.role !== "assistant" || last.stopReason === "error" || last.stopReason === "aborted") {
+		if (last?.role !== "assistant" || last.stopReason === "error" || last.stopReason === "aborted") {
 			return undefined;
 		}
 		if (last.content.some((content) => content.type === "toolCall")) return undefined;

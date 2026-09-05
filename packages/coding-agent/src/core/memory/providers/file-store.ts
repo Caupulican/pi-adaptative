@@ -15,7 +15,7 @@ import {
 	type PiOkfType,
 	validateOkfMemoryDocumentInput,
 } from "../../context/okf-memory.ts";
-import type { ToolDefinition } from "../../extensions/types.ts";
+import type { AgentToolResult, ToolDefinition } from "../../extensions/types.ts";
 import {
 	hasInvisibleUnicode,
 	scanContextFileThreats,
@@ -178,6 +178,8 @@ export const FILE_STORE_MEMORY_SYSTEM_NOTE =
 	"[System Note: Below is a snapshot of persistent memory. Record verified reusable facts with the 'memory' tool by scope: target 'memory' = general facts true in any repo or task; target 'project' (the default) = facts true only for this project (paths, tickets, branches, build steps); target 'user' = preferences; target 'okf' = durable structured records (decisions, architecture, findings). A memory write that names a path, ticket key or branch belongs in 'project'. Never store transient noise.]";
 const FILE_STORE_MEMORY_TRIAGE_NOTE =
 	"[Memory triage: MEMORY.md (general) is over budget; move project-specific lines to target 'project' with memory replace/remove and keep the general lines. Never delete a line you did not move.]";
+const MEMORY_DRIFT_RECOVERY =
+	"Run memory list to inspect current, managed, and prompt revisions. Repeating a mutation cannot reconcile drift. The owner must review and preserve external edits, then restore the last managed revision before retrying. No owner command to accept external edits is available; do not edit managed-state metadata to bypass this guard.";
 /** Content that reads as project-specific: a ticket key, an absolute or drive path, or a branch. */
 const PROJECT_MARKER_RE = /\b[A-Z]{2,}-\d+\b|[A-Za-z]:[\\/]|(?:^|\s)\/[a-z][\w-]*\/|\bbranch\b/;
 
@@ -194,6 +196,19 @@ type ManagedMemoryStateRead =
 
 function contentDigest(content: string): string {
 	return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function memoryFailure(
+	error: string,
+	text: string,
+	details: Record<string, unknown> = {},
+): AgentToolResult<Record<string, unknown>> {
+	return {
+		content: [{ type: "text", text }],
+		details: { ...details, success: false, error },
+		isError: true,
+		errorKind: "operation_outcome",
+	};
 }
 
 function removeExactHotMemoryItem(existing: string, sourceText: string): string | undefined {
@@ -265,6 +280,44 @@ function reconcileManagedMemoryState(
 		};
 	}
 	return { recognized: false };
+}
+
+/** Caller holds the content-file lock. Inspection never commits a pending state or adopts drift. */
+async function inspectManagedMemoryFile(filePath: string, statePath: string) {
+	const currentOnDisk = await fs.readFile(filePath, "utf8");
+	const currentDigest = contentDigest(currentOnDisk);
+	const stateRead = await readManagedMemoryState(statePath);
+	const reconciled =
+		stateRead.status === "valid" ? reconcileManagedMemoryState(currentDigest, stateRead.state) : undefined;
+	return {
+		currentOnDisk,
+		managedState: reconciled?.recognized ? reconciled.state : undefined,
+		stateChanged: reconciled?.recognized === true && reconciled.changed,
+		revision: {
+			currentDigest,
+			stateStatus: stateRead.status,
+			managedDigest: stateRead.status === "valid" ? stateRead.state.committedDigest : undefined,
+			pendingDigest: stateRead.status === "valid" ? stateRead.state.pendingDigest : undefined,
+			drift: reconciled?.recognized !== true,
+		},
+	};
+}
+
+/** The single managed-content commit protocol; caller holds the content-file lock. */
+async function commitManagedMemoryContent(
+	filePath: string,
+	statePath: string,
+	managedState: ManagedMemoryState,
+	newContent: string,
+): Promise<void> {
+	const newDigest = contentDigest(newContent);
+	await writeManagedMemoryState(statePath, {
+		version: 1,
+		committedDigest: managedState.committedDigest,
+		pendingDigest: newDigest,
+	});
+	await writeFileAtomic(filePath, newContent, { mode: 0o600 });
+	await writeManagedMemoryState(statePath, { version: 1, committedDigest: newDigest });
 }
 
 function fitMemoryBlockToBudget(block: string, budget: MemoryPromptBudget | undefined): string {
@@ -522,29 +575,12 @@ export class FileStoreProvider implements MemoryProvider {
 	): Promise<{ success: boolean; error?: string }> {
 		try {
 			return await withFileLock(file.filePath, async () => {
-				const currentOnDisk = await fs.readFile(file.filePath, "utf8");
-				const currentDigest = contentDigest(currentOnDisk);
-				const stateRead = await readManagedMemoryState(file.statePath);
-				let managedState: ManagedMemoryState | undefined;
-				if (stateRead.status === "valid") {
-					const reconciled = reconcileManagedMemoryState(currentDigest, stateRead.state);
-					if (reconciled.recognized) {
-						managedState = reconciled.state;
-						if (reconciled.changed) await writeManagedMemoryState(file.statePath, reconciled.state);
-					}
-				}
+				const { currentOnDisk, managedState } = await inspectManagedMemoryFile(file.filePath, file.statePath);
 				if (!managedState) return { success: false, error: "Drift detected" };
 
 				const newContent = removeExactHotMemoryItem(currentOnDisk, sourceText);
 				if (newContent === undefined) return { success: false, error: "Exact hot-memory item was not found" };
-				const newDigest = contentDigest(newContent);
-				await writeManagedMemoryState(file.statePath, {
-					version: 1,
-					committedDigest: managedState.committedDigest,
-					pendingDigest: newDigest,
-				});
-				await writeFileAtomic(file.filePath, newContent, { mode: 0o600 });
-				await writeManagedMemoryState(file.statePath, { version: 1, committedDigest: newDigest });
+				await commitManagedMemoryContent(file.filePath, file.statePath, managedState, newContent);
 				if (file.target === "project") this.lastWrittenProjectMemory = newContent;
 				else this.lastWrittenMemory = newContent;
 				this.options.onDurableMemoryChanged?.();
@@ -676,37 +712,27 @@ export class FileStoreProvider implements MemoryProvider {
 					// in a memory note, so reject those too.
 					if ((action === "add" || action === "replace") && content !== undefined) {
 						if (hasInvisibleUnicode(content)) {
-							return {
-								content: [
-									{
-										type: "text",
-										text: "Error: memory write rejected — contains hidden/bidirectional control characters.",
-									},
-								],
-								details: { success: false, error: "Invisible unicode in memory write" },
-							};
+							return memoryFailure(
+								"Invisible unicode in memory write",
+								"Error: memory write rejected — contains hidden/bidirectional control characters.",
+							);
 						}
 						const threats = scanContextFileThreats(content, "strict");
 						if (threats.length > 0) {
-							return {
-								content: [
-									{
-										type: "text",
-										text: `Error: memory write rejected — potential injection/exfiltration detected (${threats.join(", ")}).`,
-									},
-								],
-								details: { success: false, error: "Threat in memory write" },
-							};
+							return memoryFailure(
+								"Threat in memory write",
+								`Error: memory write rejected — potential injection/exfiltration detected (${threats.join(", ")}).`,
+							);
 						}
 					}
 
 					if (target === "okf") {
 						if (action === "list") {
 							if (this.okfStore === undefined) {
-								return {
-									content: [{ type: "text", text: "Error: Memory provider is not initialized." }],
-									details: { success: false },
-								};
+								return memoryFailure(
+									"Memory provider is not initialized",
+									"Error: Memory provider is not initialized.",
+								);
 							}
 							const catalog = this.okfStore.list();
 							return {
@@ -715,15 +741,10 @@ export class FileStoreProvider implements MemoryProvider {
 							};
 						}
 						if (action !== "add" && action !== "remove") {
-							return {
-								content: [
-									{
-										type: "text",
-										text: "Error: structured OKF memory only supports action 'add' or 'remove'.",
-									},
-								],
-								details: { success: false, error: "Unsupported OKF action" },
-							};
+							return memoryFailure(
+								"Unsupported OKF action",
+								"Error: structured OKF memory only supports action 'add' or 'remove'.",
+							);
 						}
 						if (action === "remove") {
 							if (
@@ -732,10 +753,10 @@ export class FileStoreProvider implements MemoryProvider {
 								title === undefined ||
 								!PI_OKF_TYPES.includes(type as PiOkfType)
 							) {
-								return {
-									content: [{ type: "text", text: "Error: OKF removal requires a valid type and title." }],
-									details: { success: false, error: "Incomplete OKF removal" },
-								};
+								return memoryFailure(
+									"Incomplete OKF removal",
+									"Error: OKF removal requires a valid type and title.",
+								);
 							}
 							try {
 								const removed = await this.okfStore.remove(type as PiOkfType, title, expectedDigest);
@@ -753,10 +774,10 @@ export class FileStoreProvider implements MemoryProvider {
 								};
 							} catch (err) {
 								const error = String(err);
-								return {
-									content: [{ type: "text", text: `Error: Failed to remove structured OKF memory: ${error}` }],
-									details: { success: false, error: /ENOENT/.test(error) ? "not found" : error },
-								};
+								return memoryFailure(
+									/ENOENT/.test(error) ? "not found" : error,
+									`Error: Failed to remove structured OKF memory: ${error}`,
+								);
 							}
 						}
 						if (
@@ -768,21 +789,13 @@ export class FileStoreProvider implements MemoryProvider {
 							evidenceRefs === undefined ||
 							evidenceRefs.length === 0
 						) {
-							return {
-								content: [
-									{
-										type: "text",
-										text: "Error: structured OKF memory requires type, title, description, scope, content, and evidenceRefs.",
-									},
-								],
-								details: { success: false, error: "Incomplete OKF memory" },
-							};
+							return memoryFailure(
+								"Incomplete OKF memory",
+								"Error: structured OKF memory requires type, title, description, scope, content, and evidenceRefs.",
+							);
 						}
 						if (!PI_OKF_TYPES.includes(type as PiOkfType)) {
-							return {
-								content: [{ type: "text", text: `Error: unsupported OKF type '${type}'.` }],
-								details: { success: false, error: "Unsupported OKF type" },
-							};
+							return memoryFailure("Unsupported OKF type", `Error: unsupported OKF type '${type}'.`);
 						}
 						const validationErrors = validateOkfMemoryDocumentInput(
 							{
@@ -797,41 +810,26 @@ export class FileStoreProvider implements MemoryProvider {
 							{ projectOnly: true, requireEvidence: true },
 						);
 						if (validationErrors.length > 0) {
-							return {
-								content: [
-									{
-										type: "text",
-										text: `Error: Invalid structured OKF memory: ${validationErrors.join("; ")}`,
-									},
-								],
-								details: { success: false, error: "Invalid OKF memory" },
-							};
+							return memoryFailure(
+								"Invalid OKF memory",
+								`Error: Invalid structured OKF memory: ${validationErrors.join("; ")}`,
+							);
 						}
 						const okfText = [type, title, description, scope, content, ...(tags ?? []), ...evidenceRefs].join(
 							"\n",
 						);
 						if (hasInvisibleUnicode(okfText)) {
-							return {
-								content: [
-									{
-										type: "text",
-										text: "Error: OKF write rejected — contains hidden/bidirectional control characters.",
-									},
-								],
-								details: { success: false, error: "Invisible unicode in OKF write" },
-							};
+							return memoryFailure(
+								"Invisible unicode in OKF write",
+								"Error: OKF write rejected — contains hidden/bidirectional control characters.",
+							);
 						}
 						const threats = scanContextFileThreats(okfText, "strict");
 						if (threats.length > 0) {
-							return {
-								content: [
-									{
-										type: "text",
-										text: `Error: OKF write rejected — potential injection/exfiltration detected (${threats.join(", ")}).`,
-									},
-								],
-								details: { success: false, error: "Threat in OKF write" },
-							};
+							return memoryFailure(
+								"Threat in OKF write",
+								`Error: OKF write rejected — potential injection/exfiltration detected (${threats.join(", ")}).`,
+							);
 						}
 						try {
 							if (this.okfStore === undefined) throw new Error("Memory provider is not initialized.");
@@ -857,31 +855,61 @@ export class FileStoreProvider implements MemoryProvider {
 								details: { success: true, created: stored.created, digest: stored.digest },
 							};
 						} catch (err) {
-							return {
-								content: [
-									{ type: "text", text: `Error: Failed to write structured OKF memory: ${String(err)}` },
-								],
-								details: { success: false, error: String(err) },
-							};
+							return memoryFailure(String(err), `Error: Failed to write structured OKF memory: ${String(err)}`);
 						}
 					}
 					if (action === "list") {
 						const rows = [
-							["MEMORY.md (general)", this.lastWrittenMemory, FileStoreProvider.BUDGET_MEMORY],
 							[
+								"memory",
+								"MEMORY.md (general)",
+								this.memoryFilePath,
+								this.memoryStatePath,
+								FileStoreProvider.BUDGET_MEMORY,
+							],
+							[
+								"project",
 								`MEMORY.md (project ${basename(this.projectRoot) || this.projectKey})`,
-								this.lastWrittenProjectMemory,
+								this.projectMemoryFilePath,
+								this.projectMemoryStatePath,
 								FileStoreProvider.BUDGET_PROJECT,
 							],
-							["USER.md", this.lastWrittenUser, FileStoreProvider.BUDGET_USER],
+							["user", "USER.md", this.userFilePath, this.userStatePath, FileStoreProvider.BUDGET_USER],
 						] as const;
-						const text = rows
-							.map(
-								([label, body, budgetChars]) =>
-									`## ${label} (${body.length}/${budgetChars} chars)\n${body.trim() || "(empty)"}`,
-							)
-							.join("\n\n");
-						return { content: [{ type: "text", text }], details: { success: true } };
+						try {
+							const files = await Promise.all(
+								rows.map(async ([target, label, filePath, statePath, budgetChars]) =>
+									withFileLock(filePath, async () => {
+										const { currentOnDisk, revision } = await inspectManagedMemoryFile(filePath, statePath);
+										const prompt =
+											target === "memory"
+												? this.lastWrittenMemory
+												: target === "project"
+													? this.lastWrittenProjectMemory
+													: this.lastWrittenUser;
+										const promptDigest = contentDigest(prompt);
+										const revisionText = `Current revision: ${revision.currentDigest}; managed revision: ${revision.managedDigest ?? revision.stateStatus}; pending revision: ${revision.pendingDigest ?? "none"}; prompt snapshot: ${promptDigest}.`;
+										return {
+											text: `## ${label} (${currentOnDisk.length}/${budgetChars} chars)\n${revisionText}\n${revision.drift ? `Drift detected. ${MEMORY_DRIFT_RECOVERY}\n` : ""}${currentOnDisk.trim() || "(empty)"}`,
+											details: {
+												target,
+												path: filePath,
+												...revision,
+												promptDigest,
+												currentChars: currentOnDisk.length,
+												budgetChars,
+											},
+										};
+									}),
+								),
+							);
+							return {
+								content: [{ type: "text", text: files.map((file) => file.text).join("\n\n") }],
+								details: { success: true, files: files.map((file) => file.details) },
+							};
+						} catch (error) {
+							return memoryFailure(String(error), `Error: Failed to inspect current memory: ${String(error)}`);
+						}
 					}
 
 					const fileLabel =
@@ -919,30 +947,28 @@ export class FileStoreProvider implements MemoryProvider {
 
 					try {
 						return await withFileLock(filePath, async () => {
-							const currentOnDisk = await fs.readFile(filePath, "utf8");
-							const currentDigest = contentDigest(currentOnDisk);
-							const stateRead = await readManagedMemoryState(statePath);
-							let managedState: ManagedMemoryState | undefined;
-							if (stateRead.status === "valid") {
-								const reconciled = reconcileManagedMemoryState(currentDigest, stateRead.state);
-								if (reconciled.recognized) {
-									managedState = reconciled.state;
-									if (reconciled.changed) await writeManagedMemoryState(statePath, reconciled.state);
-								}
-							}
+							const { currentOnDisk, managedState, stateChanged, revision } = await inspectManagedMemoryFile(
+								filePath,
+								statePath,
+							);
 							if (!managedState) {
-								const backupPath = `${filePath}.bak.${Date.now()}`;
-								await writeFileAtomic(backupPath, currentOnDisk, { mode: 0o600 });
-								return {
-									content: [
-										{
-											type: "text",
-											text: `Error: Drift detected. The memory file has been modified out-of-band by an external process. A backup was created at ${backupPath}. Operation aborted.`,
-										},
-									],
-									details: { success: false, error: "Drift detected" },
-								};
+								// Same observed bytes reuse one backup; distinct revisions are preserved for owner review.
+								const backupPath = `${filePath}.bak.sha256-${revision.currentDigest}`;
+								try {
+									const backup = await fs.readFile(backupPath, "utf8");
+									if (backup !== currentOnDisk)
+										throw new Error(`Drift backup content conflicts at ${backupPath}.`);
+								} catch (error) {
+									if (!isMissingFileError(error)) throw error;
+									await writeFileAtomic(backupPath, currentOnDisk, { mode: 0o600 });
+								}
+								return memoryFailure(
+									"Drift detected",
+									`Error: Drift detected. Current memory does not match a managed revision (state: ${revision.stateStatus}). Current revision: ${revision.currentDigest}; managed revision: ${revision.managedDigest ?? "unavailable"}. Backup retained at ${backupPath}. Operation aborted. ${MEMORY_DRIFT_RECOVERY}`,
+									{ ...revision, backupPath },
+								);
 							}
+							if (stateChanged) await writeManagedMemoryState(statePath, managedState);
 
 							// A peer session's committed write is authoritative. Refresh this provider's prompt
 							// snapshot before applying the caller's mutation to that current content.
@@ -1022,31 +1048,16 @@ export class FileStoreProvider implements MemoryProvider {
 								newContent = currentOnDisk.replace(oldContent, "");
 							}
 
-							if (newContent.length > budget) {
-								// An error the loop can see: returned as plain text, the model looped four times
-								// trimming a line by a few characters each (measured live).
-								return {
-									content: [
-										{
-											type: "text",
-											text: `Error: Memory budget exceeded. ${fileLabel} limit is ${budget} characters. Current operation would result in ${newContent.length} characters. Remove or shorten an existing line first.`,
-										},
-									],
-									details: { success: false, error: "Memory budget exceeded" },
-									isError: true,
-									errorKind: "operation_outcome",
-								};
+							const overBudget = newContent.length > budget;
+							if (overBudget && newContent.length >= currentOnDisk.length) {
+								return memoryFailure(
+									"Memory budget exceeded",
+									`Error: Memory budget exceeded. ${fileLabel} limit is ${budget} characters. Current operation would result in ${newContent.length} characters. Remove or shorten an existing line first; already-over-budget content must strictly shrink on each repair.`,
+								);
 							}
 
 							if (newContent !== currentOnDisk) {
-								const newDigest = contentDigest(newContent);
-								await writeManagedMemoryState(statePath, {
-									version: 1,
-									committedDigest: managedState.committedDigest,
-									pendingDigest: newDigest,
-								});
-								await writeFileAtomic(filePath, newContent, { mode: 0o600 });
-								await writeManagedMemoryState(statePath, { version: 1, committedDigest: newDigest });
+								await commitManagedMemoryContent(filePath, statePath, managedState, newContent);
 							}
 
 							if (target === "memory") this.lastWrittenMemory = newContent;
@@ -1058,22 +1069,14 @@ export class FileStoreProvider implements MemoryProvider {
 								content: [
 									{
 										type: "text",
-										text: `Successfully updated ${fileLabel}.${projectHint}`,
+										text: `Successfully updated ${fileLabel}.${projectHint}${overBudget ? `\nMemory is still over budget (${newContent.length}/${budget} chars); continue removing or shortening migrated facts.` : ""}`,
 									},
 								],
-								details: { success: true },
+								details: { success: true, overBudget, currentChars: newContent.length, budgetChars: budget },
 							};
 						});
 					} catch (err) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: `Error: Failed to perform memory operation: ${String(err)}`,
-								},
-							],
-							details: { success: false, error: String(err) },
-						};
+						return memoryFailure(String(err), `Error: Failed to perform memory operation: ${String(err)}`);
 					}
 				},
 			},

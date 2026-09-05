@@ -76,6 +76,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 
 - [Windows](windows.md)
 - [Transient work directory](work-directory.md) - multi-tenant runtime output, leases, and retention.
+- [Storage lifecycle design](storage-lifecycle-design.md) - bounded maintenance, cleanup safety, database tradeoffs, and implementation/verification instructions.
 - [tmux](tmux.md)
 - [Terminal setup](terminal-setup.md)
 - [Shell aliases](shell-aliases.md)
@@ -83,4 +84,5 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 ## Development
 
 - [Development](development.md) - local setup, project structure, and debugging.
+- [Session recovery and stable-runtime review](session-recovery-2026-09-05.md) - fixes, dependency decisions, regression evidence, and remaining validation limits.
 - [Tool boundary performance roadmap](tool-boundary-performance-roadmap-2026-08-02.md) - evidence ledger for preflight, payload ownership, Python coordination, and remaining latency/memory work.

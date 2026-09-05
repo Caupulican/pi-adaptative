@@ -260,7 +260,7 @@ export class SessionAnalytics {
 		for (const entry of this.deps.getSessionManager().getEntries()) {
 			if (entry.type !== "custom" || entry.customType !== TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE) continue;
 			const record = entry.data as ToolArgumentValidationRecord | undefined;
-			if (!record || record.version !== 1) continue;
+			if (record?.version !== 1) continue;
 			consume(record, `legacy:${entry.id}`);
 		}
 		for (const record of this.readToolArgumentValidationSidecarRecords()) {

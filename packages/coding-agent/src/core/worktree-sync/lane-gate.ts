@@ -281,7 +281,7 @@ export class WorktreeLaneGate {
 
 		const deps = this.config.engineDeps();
 		const lane = await readLane(ctx.paths, this.config.laneKey);
-		if (!lane || lane.status !== "active") {
+		if (lane?.status !== "active") {
 			this._cachedAllowed = true;
 			return { allowed: true };
 		}

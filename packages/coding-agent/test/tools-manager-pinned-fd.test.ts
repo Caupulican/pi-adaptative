@@ -13,16 +13,16 @@ describe("managed fd release", () => {
 		expect(getPinnedToolAsset("fd", "win32", "x64")).toEqual({
 			version: FD_VERSION,
 			assetName: `fd-v${FD_VERSION}-x86_64-pc-windows-msvc.zip`,
-			expectedSha256: "b2816e506390a89941c63c9187d58a3cc10e9a55f2ef0685f9ea0eccaf7c98c8",
+			expectedSha256: "a227701b8551c35a9931d9f6da75503cf86d88e182d71fb849a70864c5d57cd7",
 		});
 		expect(getPinnedToolAsset("fd", "win32", "arm64")).toEqual({
 			version: FD_VERSION,
 			assetName: `fd-v${FD_VERSION}-aarch64-pc-windows-msvc.zip`,
-			expectedSha256: "4f9110c2d5b33a7f760bfa5510f4c113d828109f7277d421b1053a9943c0fc92",
+			expectedSha256: "a2bcddcfd259b05357a77bbc6cd671fdb30f63fd266a0e748305890a8c5ceaa6",
 		});
 	});
 
-	it("keeps every supported managed target checksum-gated, including the last Intel macOS release", () => {
+	it("keeps every supported managed target checksum-gated, at the same release on Intel macOS", () => {
 		for (const [targetPlatform, targetArchitecture] of [
 			["darwin", "arm64"],
 			["darwin", "x64"],
@@ -31,7 +31,10 @@ describe("managed fd release", () => {
 			["win32", "arm64"],
 			["win32", "x64"],
 		] as const) {
-			expect(getPinnedToolAsset("fd", targetPlatform, targetArchitecture)).not.toBeNull();
+			expect(getPinnedToolAsset("fd", targetPlatform, targetArchitecture)).toMatchObject({
+				version: "10.5.0",
+				expectedSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+			});
 		}
 	});
 

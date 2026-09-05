@@ -96,7 +96,7 @@ function readVerificationObligationSnapshot(details: unknown): string[] | undefi
 	const activeIds = ownDataValue(candidate, "activeIds");
 	if (!Array.isArray(activeIds) || !activeIds.every((id): id is string => typeof id === "string")) return undefined;
 	const canonicalIds = boundedCanonicalIds(activeIds);
-	if (!canonicalIds || !canonicalIds.every((id, index) => id === activeIds[index])) return undefined;
+	if (!canonicalIds?.every((id, index) => id === activeIds[index])) return undefined;
 	return canonicalIds;
 }
 

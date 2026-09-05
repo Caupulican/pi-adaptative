@@ -23,14 +23,24 @@ afterEach(async () => {
 
 describe("bundled jscpd", () => {
 	it("pins the Rust v5 package for every supported release target", () => {
-		expect(JSCPD_VERSION).toBe("5.0.14");
+		expect(JSCPD_VERSION).toMatch(/^5\.\d+\.\d+$/);
 		expect(resolveJscpdPlatformPackage("linux", "x64", "glibc")).toBe("jscpd-linux-x64-gnu");
 		expect(resolveJscpdPlatformPackage("linux", "x64", "musl")).toBe("jscpd-linux-x64-musl");
 		expect(resolveJscpdPlatformPackage("linux", "arm64", "glibc")).toBe("jscpd-linux-arm64-gnu");
+		expect(resolveJscpdPlatformPackage("linux", "arm64", "musl")).toBeUndefined();
 		expect(resolveJscpdPlatformPackage("darwin", "arm64")).toBe("jscpd-darwin-arm64");
 		expect(resolveJscpdPlatformPackage("darwin", "x64")).toBe("jscpd-darwin-x64");
 		expect(resolveJscpdPlatformPackage("win32", "x64")).toBe("jscpd-windows-x64-msvc");
 		expect(resolveJscpdPlatformPackage("win32", "arm64")).toBe("jscpd-windows-x64-msvc");
+	});
+
+	it.each([
+		["linux", "ia32"],
+		["win32", "ia32"],
+		["darwin", "riscv64"],
+		["freebsd", "x64"],
+	])("rejects unsupported native scanner target %s/%s", (targetPlatform, targetArchitecture) => {
+		expect(resolveJscpdPlatformPackage(targetPlatform, targetArchitecture)).toBeUndefined();
 	});
 
 	it("copies only into Pi managed storage and leaves the repository untouched", async () => {
@@ -72,7 +82,7 @@ describe("bundled jscpd", () => {
 				targetPlatform: "linux",
 				probeVersion: () => "cpd 4.0.0",
 			}),
-		).toThrow("requires bundled jscpd 5.0.14");
+		).toThrow(`requires bundled jscpd ${JSCPD_VERSION}`);
 		await expect(readFile(join(managedBin, "jscpd"))).rejects.toThrow();
 	});
 

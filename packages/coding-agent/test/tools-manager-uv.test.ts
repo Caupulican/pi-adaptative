@@ -23,7 +23,7 @@ describe("managed uv release", () => {
 		expect(getPinnedToolAsset("uv", "linux", "x64")).toEqual({
 			version: UV_VERSION,
 			assetName: "uv-x86_64-unknown-linux-musl.tar.gz",
-			expectedSha256: "f02146b371c35c287d860f003ece7345c86e358a3fd70a9b63700cd141ee7fb4",
+			expectedSha256: "aa4b1f8770910f7c7c543c7acc980e4270e52e70750c996acef813ea1c7c2912",
 		});
 		expect(getPinnedToolAsset("uv", "linux", "arm64")?.assetName).toBe("uv-aarch64-unknown-linux-musl.tar.gz");
 		expect(getPinnedToolAsset("uv", "darwin", "arm64")?.assetName).toBe("uv-aarch64-apple-darwin.tar.gz");

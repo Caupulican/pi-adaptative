@@ -86,4 +86,21 @@ with a small link to the generated index, and keeps future replace/remove operat
 those shards. The shards are written before the pointer, so retrying an interrupted migration reuses
 the same identities instead of losing or duplicating facts.
 
+The `memory` tool's `list` action reads the current general, project, and user files under their
+respective locks. It reports current, committed managed, pending-write, and session prompt-snapshot
+digests separately. Listing never accepts external edits, finalizes a pending write, or refreshes the
+prompt snapshot. A recognized peer write can differ from the session snapshot without being drift.
+
+Mutations refuse unrecognized revisions and return an error receipt with recovery guidance. Each
+distinct refused revision is preserved beside its memory file as `.bak.sha256-<digest>`; identical
+retries reuse that backup. Existing timestamped backups and distinct revisions remain available for
+owner review. The owner must preserve and review external edits, then restore exact managed bytes
+before retrying. There is currently no owner command for accepting an external revision; editing
+managed-state metadata is not a reconciliation workflow.
+
+General and project hot memory enforce limits of 1,200 and 2,200 characters. A file already above
+its limit can be repaired incrementally: each accepted operation must strictly reduce its size until
+it fits. Successful partial repairs report that the file is still over budget. Move facts to their
+appropriate project or structured OKF destination before removing them from general memory.
+
 `pi doctor` performs a bounded, read-only scan of the agent directory root. It stays silent for the canonical config, memory, resource, and storage entries above and warns about external or legacy root writers. The audit never relocates or deletes unknown data.

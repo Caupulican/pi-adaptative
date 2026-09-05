@@ -88,7 +88,7 @@ function createProducer(overrides: Partial<GoalToolDependencies> = {}) {
 
 function firstText(content: Array<{ type: string; text?: string }>): string {
 	const first = content[0];
-	if (!first || first.type !== "text" || typeof first.text !== "string") {
+	if (first?.type !== "text" || typeof first.text !== "string") {
 		throw new Error("expected text content");
 	}
 	return first.text;

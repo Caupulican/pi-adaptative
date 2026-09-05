@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Changed
+
+- Updated pinned provider SDKs, HTTP proxy agents, TypeBox, and Vitest dependencies. The minimum Node.js version is now 24.20.0.
+
+### Fixed
+
+- Kept OpenAI Responses and Codex request service tiers on the shared supported-tier contract when upgrading the OpenAI SDK, preserving existing pricing behavior.
+- Preserved UUIDv7 compatibility with current browser crypto types and Anthropic OAuth test isolation with Vitest 5.
+
 ## [0.98.0] - 2026-09-05
 
 ### Added

@@ -855,7 +855,7 @@ describe("WorkerLifecycle", () => {
 			verdict: "rejected",
 			reasonCode: "independent_verification_rejected:focused_checks_failed",
 		});
-		if (!recovery || recovery.action !== "reconcile") throw new Error("Expected reconciliation recovery");
+		if (recovery?.action !== "reconcile") throw new Error("Expected reconciliation recovery");
 		expect(lifecycle.reconcileVerification(recovery)).toMatchObject({
 			status: "failed",
 			reasonCode: "independent_verification_rejected:focused_checks_failed",
@@ -1075,7 +1075,7 @@ describe("WorkerLifecycle", () => {
 			verdict: "inconclusive",
 			reasonCode: "independent_verification_inconclusive:session_disposed",
 		});
-		if (!recovery || recovery.action !== "reconcile") throw new Error("Expected inconclusive recovery");
+		if (recovery?.action !== "reconcile") throw new Error("Expected inconclusive recovery");
 		expect(lifecycle.reconcileVerification(recovery)).toMatchObject({
 			status: "failed",
 			reasonCode: "independent_verification_inconclusive:session_disposed",

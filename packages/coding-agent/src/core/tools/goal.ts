@@ -125,7 +125,7 @@ const updateGoalSchema = Type.Object(
 	{
 		status: Type.Union([Type.Literal("active"), Type.Literal("complete"), Type.Literal("blocked")], {
 			description:
-				"Set active after concrete progress, complete after an evidence audit, or blocked after the same blocker persists for three turns.",
+				"active records progress only; it does not change lifecycle or resume a blocked goal. complete requires an evidence audit; blocked requires the same blocker for three turns.",
 		}),
 		reason: Type.Optional(
 			Type.String({ minLength: 1, description: "Required for blocked: the recurring external blocker." }),
@@ -700,7 +700,11 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 				action.action === "add_evidence"
 					? `Evidence '${action.evidenceId}' recorded (${action.kind === "user" ? "user-confirmed" : action.verified === true ? `verified${action.uri && action.uri !== input.uri?.trim() ? ` via toolCallId ${action.uri}` : ""}` : `unverified: ${unverifiedEvidenceReason(action.kind)}`}).`
 					: "";
-			const text = [`goal ${input.action} recorded.`, evidenceNote, summary, dispatchNote]
+			const receipt =
+				action.action === "progress"
+					? `Progress recorded; lifecycle unchanged (${nextState.status}).${nextState.status === "blocked" ? " Only the owner can resume it with /goal resume." : ""}`
+					: `goal ${input.action} recorded.`;
+			const text = [receipt, evidenceNote, summary, dispatchNote]
 				.filter((line): line is string => Boolean(line))
 				.join("\n");
 			return {
@@ -774,7 +778,7 @@ export function createGoalLifecycleToolDefinitions(goalTool: GoalToolDefinition)
 		name: GOAL_LIFECYCLE_TOOL_NAMES[2],
 		label: GOAL_LIFECYCLE_TOOL_NAMES[2],
 		description:
-			"Update the existing goal. Set active only after concrete, verifiable progress in the current turn. Mark complete only when current evidence proves the full objective is achieved and no required work remains. Mark blocked only when the same verified owner/approval boundary or capability impossibility persists for at least three consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; include the evidence and attempted approaches in reason. Never use blocked merely because work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
+			"Update the existing goal. active records progress only after concrete, verifiable progress in the current turn; it never changes lifecycle or resumes a blocked goal. Only the owner can resume it with /goal resume. Mark complete only when current evidence proves the full objective is achieved and no required work remains. Mark blocked only when the same verified owner/approval boundary or capability impossibility persists for at least three consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; include the evidence and attempted approaches in reason. Never use blocked merely because work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
 		promptSnippet: "Update goal; complete/block only with evidence.",
 		parameters: updateGoalSchema,
 		execute(toolCallId, input: Static<typeof updateGoalSchema>, signal, onUpdate, context) {

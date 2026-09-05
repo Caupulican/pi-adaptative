@@ -23,7 +23,7 @@ import { dirname, join } from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import { pathToFileURL } from "url";
-import { getAgentDir, getBinDir } from "../config.ts";
+import { getAgentDir, getBinDir, getPackageDependencyVersion } from "../config.ts";
 import { cacheDir as agentCacheDir, cacheFile } from "../core/agent-paths.ts";
 import { ensureManagedJscpd, JSCPD_VERSION } from "./bundled-jscpd.ts";
 import { spawnProcess, waitForChildProcessWithTermination } from "./child-process.ts";
@@ -34,14 +34,13 @@ const TOOLS_DIR = getBinDir();
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const COMMAND_PROBE_TIMEOUT_MS = 5_000;
 const ARCHIVE_EXTRACTION_TIMEOUT_MS = 5 * 60_000;
-const FFF_NODE_VERSION = "0.9.6";
-export const BITWARDEN_CLI_VERSION = "2026.7.0";
+export const FFF_NODE_VERSION = getPackageDependencyVersion("@ff-labs/fff-node");
+export const BITWARDEN_CLI_VERSION = "2026.8.0";
 export const BITWARDEN_SECRETS_MANAGER_CLI_VERSION = "2.1.0";
-export const FD_VERSION = "10.4.2";
-const FD_DARWIN_X64_VERSION = "10.3.0";
+export const FD_VERSION = "10.5.0";
 export const RG_VERSION = "15.2.0";
 export const JQ_VERSION = "1.8.2";
-export const UV_VERSION = "0.11.28";
+export const UV_VERSION = "0.12.9";
 export const HERDR_VERSION = "0.8.2";
 const FFF_MANAGED_DIR = join(TOOLS_DIR, "fff-node");
 const FFF_MANAGED_PACKAGE_JSON = join(FFF_MANAGED_DIR, "package.json");
@@ -67,7 +66,6 @@ interface ToolConfig {
 	downloadKind?: "archive" | "binary" | ((plat: string) => "archive" | "binary");
 	installLayout?: (plat: string) => "binary" | "directory";
 	pinnedVersion: string;
-	getPinnedVersion?: (plat: string, architecture: string) => string | undefined;
 	sha256ByAsset?: Readonly<Record<string, string>>;
 }
 
@@ -110,11 +108,11 @@ const TOOLS: Record<"bw" | "bws" | "fd" | "herdr" | "jq" | "jscpd" | "rg" | "uv"
 			return null;
 		},
 		sha256ByAsset: {
-			"bw-linux-2026.7.0.zip": "7a35145e205952f7434d2370da359543145ae0c45ba1af0fe9bdd99d40a00180",
-			"bw-linux-arm64-2026.7.0.zip": "e33ed05ca0fada9bd51b8bce76a230369bf0eefd5796a0a8e60699c977327fb5",
-			"bw-macos-2026.7.0.zip": "b37836d539798f5adeb8a907619ee8a55b6322549bb68669aa4b3a03d5bc0452",
-			"bw-macos-arm64-2026.7.0.zip": "61d5de8a279a9faf3637216f4fb02b506a1e4bb2817d1c64be0bd474466dd85a",
-			"bw-windows-2026.7.0.zip": "b0c22438607b789c6452dbd37ffd6be0e8a61e7a5c4e9ac57804d7ae5ed01b5b",
+			"bw-linux-2026.8.0.zip": "367f618e9fcccaac4980ec12c7bafd01df739b5f3cb1af31bc9045cf75eea1d6",
+			"bw-linux-arm64-2026.8.0.zip": "74d822a5dceda5896ed8fc07bc61925b29afd98d96a6a3e9e525ae556c3083a8",
+			"bw-macos-2026.8.0.zip": "c5d57f70d5394f8c348f6c3bf53683ad6d15e6acfe55e7c1e0a8f376482d8e71",
+			"bw-macos-arm64-2026.8.0.zip": "73414942357644605eefd3f4afaf0b41b71772ad6574e8e3c72e0b6d237104c8",
+			"bw-windows-2026.8.0.zip": "26a6bb9a88ca9eeaad9e59db1816dcceb3ce6cc80a30b33e1324b0642f4a0f32",
 		},
 	},
 	bws: {
@@ -148,8 +146,6 @@ const TOOLS: Record<"bw" | "bws" | "fd" | "herdr" | "jq" | "jscpd" | "rg" | "uv"
 		systemBinaryNames: ["fd", "fdfind"],
 		tagPrefix: "v",
 		pinnedVersion: FD_VERSION,
-		getPinnedVersion: (plat, architecture) =>
-			plat === "darwin" && architecture === "x64" ? FD_DARWIN_X64_VERSION : undefined,
 		getAssetName: (version, plat, architecture) => {
 			if (architecture !== "arm64" && architecture !== "x64") return null;
 			if (plat === "darwin") {
@@ -165,14 +161,14 @@ const TOOLS: Record<"bw" | "bws" | "fd" | "herdr" | "jq" | "jscpd" | "rg" | "uv"
 			return null;
 		},
 		sha256ByAsset: {
-			"fd-v10.3.0-x86_64-apple-darwin.tar.gz": "50d30f13fe3d5914b14c4fff5abcbd4d0cdab4b855970a6956f4f006c17117a3",
-			"fd-v10.4.2-aarch64-apple-darwin.tar.gz": "623dc0afc81b92e4d4606b380d7bc91916ba7b97814263e554d50923a39e480a",
-			"fd-v10.4.2-aarch64-pc-windows-msvc.zip": "4f9110c2d5b33a7f760bfa5510f4c113d828109f7277d421b1053a9943c0fc92",
-			"fd-v10.4.2-aarch64-unknown-linux-gnu.tar.gz":
-				"6c51f7c5446b3338b1e401ff15dc194c590bb2fa64fd43ff3278300f073adec5",
-			"fd-v10.4.2-x86_64-pc-windows-msvc.zip": "b2816e506390a89941c63c9187d58a3cc10e9a55f2ef0685f9ea0eccaf7c98c8",
-			"fd-v10.4.2-x86_64-unknown-linux-gnu.tar.gz":
-				"def59805cd14b5651b68990855f426ad087f3b96881296d963910431ba3143c8",
+			"fd-v10.5.0-x86_64-apple-darwin.tar.gz": "7e31028c62c6955877735d0406807aa484c2a5e6f86235a59e26c29c301da590",
+			"fd-v10.5.0-aarch64-apple-darwin.tar.gz": "b67e1836c468e42e411984b56e52fa7abec08c2bd22c867398e7cc134aac5e12",
+			"fd-v10.5.0-aarch64-pc-windows-msvc.zip": "a2bcddcfd259b05357a77bbc6cd671fdb30f63fd266a0e748305890a8c5ceaa6",
+			"fd-v10.5.0-aarch64-unknown-linux-gnu.tar.gz":
+				"c0ee43802e3313a317c5af2f4eabd6ba13eeedd595af9775f05e18a13ac4f52c",
+			"fd-v10.5.0-x86_64-pc-windows-msvc.zip": "a227701b8551c35a9931d9f6da75503cf86d88e182d71fb849a70864c5d57cd7",
+			"fd-v10.5.0-x86_64-unknown-linux-gnu.tar.gz":
+				"a1259cd129636efbc3fef123525c1b49e88fe5088c012630983c310e52fdfa95",
 		},
 	},
 	rg: {
@@ -261,12 +257,12 @@ const TOOLS: Record<"bw" | "bws" | "fd" | "herdr" | "jq" | "jscpd" | "rg" | "uv"
 			return null;
 		},
 		sha256ByAsset: {
-			"uv-aarch64-apple-darwin.tar.gz": "33540eb7c883ab857eff79bd5ac2aa31fe27b595abecb4a9c003a2c998447232",
-			"uv-aarch64-pc-windows-msvc.zip": "3248109afad3ec59baad299d324ff53de17e2d9a3b3e21580ffd26744b11e036",
-			"uv-aarch64-unknown-linux-musl.tar.gz": "da10cdfa7d92212b7acb62021a0fd61bcf8580c58c3632ec915d10c3a1a7906b",
-			"uv-x86_64-apple-darwin.tar.gz": "2ad79983127ffca7d77b77ce6a24278d7e4f7b817a1acf72fea5f8124b4aac5e",
-			"uv-x86_64-pc-windows-msvc.zip": "0a23463216d09c6a72ff80ef5dc5a795f07dc1575cb84d24596c2f124a441b7b",
-			"uv-x86_64-unknown-linux-musl.tar.gz": "f02146b371c35c287d860f003ece7345c86e358a3fd70a9b63700cd141ee7fb4",
+			"uv-aarch64-apple-darwin.tar.gz": "301f72afaf54060f92da7016cb0115bd077f43a9c8e39c1d8170a0bac80fd398",
+			"uv-aarch64-pc-windows-msvc.zip": "d3360363a3cb671f2c854f4ef48cf4a57fe8664f8ec6a248076d68b797a8acc0",
+			"uv-aarch64-unknown-linux-musl.tar.gz": "7eb9bf48516448c9db6a9e436d8e747ac9c8a9cac74717160a29918249b080a6",
+			"uv-x86_64-apple-darwin.tar.gz": "e1ca175824f1056589ce9908f7631879ebc3c36535b5e63dc06510beb370b4c1",
+			"uv-x86_64-pc-windows-msvc.zip": "ddbfcee1ac615a0499f6aa97b5ec8ebdf3ee4a7714a48055ec2ba0030e3cf810",
+			"uv-x86_64-unknown-linux-musl.tar.gz": "aa4b1f8770910f7c7c543c7acc980e4270e52e70750c996acef813ea1c7c2912",
 		},
 	},
 };
@@ -318,17 +314,13 @@ export interface PinnedToolAsset {
 	expectedSha256: string;
 }
 
-function getConfiguredPinnedVersion(config: ToolConfig, targetPlatform: string, targetArchitecture: string): string {
-	return config.getPinnedVersion?.(targetPlatform, targetArchitecture) ?? config.pinnedVersion;
-}
-
 export function getPinnedToolAsset(
 	tool: ManagedToolName,
 	targetPlatform: string = platform(),
 	targetArchitecture: string = arch(),
 ): PinnedToolAsset | null {
 	const config: ToolConfig = TOOLS[tool];
-	const version = getConfiguredPinnedVersion(config, targetPlatform, targetArchitecture);
+	const version = config.pinnedVersion;
 	if (!config.sha256ByAsset) return null;
 	const assetName = config.getAssetName(version, targetPlatform, targetArchitecture);
 	if (!assetName) return null;
@@ -668,7 +660,7 @@ async function downloadTool(tool: ManagedToolName): Promise<string> {
 	const architecture = arch();
 
 	// Pinned tools are reproducible and verified before installation.
-	const version = getConfiguredPinnedVersion(config, plat, architecture);
+	const version = config.pinnedVersion;
 
 	// Get asset name for this platform
 	const assetName = config.getAssetName(version, plat, architecture);

@@ -42,7 +42,7 @@ export async function launchResumablePiAgent(options: {
 	environment: NodeJS.ProcessEnv;
 }): Promise<ResumablePiAgentLaunchOutcome> {
 	const context = options.payload.agent.resumeContext;
-	if (!context || context.provider !== "pi") {
+	if (context?.provider !== "pi") {
 		return { started: false, reason: "Pi resume context is unavailable." };
 	}
 	const spec = buildPiResumeLaunchSpec(options.payload.agent, {

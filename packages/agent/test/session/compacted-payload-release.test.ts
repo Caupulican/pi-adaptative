@@ -57,7 +57,7 @@ describe("SessionManager compacted payload release", () => {
 
 		const entry = session.getEntry(toolResultId);
 		expect(entry?.type).toBe("message");
-		if (!entry || entry.type !== "message") return;
+		if (entry?.type !== "message") return;
 		const descriptor = Object.getOwnPropertyDescriptor(entry.message, "content");
 		expect(descriptor?.get).toBeTypeOf("function");
 		expect((entry.message as ToolResultMessage).content).toEqual([{ type: "text", text: payload }]);
@@ -90,7 +90,7 @@ describe("SessionManager compacted payload release", () => {
 		const reopened = SessionManager.open(sessionFile, dir, dir);
 		const entry = reopened.getEntry(toolResultId);
 		expect(entry?.type).toBe("message");
-		if (!entry || entry.type !== "message") return;
+		if (entry?.type !== "message") return;
 		expect(Object.getOwnPropertyDescriptor(entry.message, "content")?.get).toBeTypeOf("function");
 		expect((entry.message as ToolResultMessage).content).toEqual([{ type: "text", text: payload }]);
 
@@ -153,7 +153,7 @@ describe("SessionManager compacted payload release", () => {
 
 		const entry = session.getEntry(toolResultId);
 		expect(entry?.type).toBe("message");
-		if (!entry || entry.type !== "message") return;
+		if (entry?.type !== "message") return;
 		expect(Object.getOwnPropertyDescriptor(entry.message, "content")?.get).toBeUndefined();
 	});
 

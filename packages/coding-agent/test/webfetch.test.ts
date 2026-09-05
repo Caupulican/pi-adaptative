@@ -224,6 +224,14 @@ describe("WebFetch bounded public HTTP", () => {
 		await expect(f.client.get("https://example.com", "text/plain")).rejects.toThrow("injected body failure");
 		expect(f.close).toHaveBeenCalledOnce();
 	});
+	it("preserves an HTTP failure when transport cleanup also fails", async () => {
+		const failed = fixture([new Response("denied", { status: 404 })]);
+		failed.close.mockRejectedValue(new Error("cleanup failed"));
+		await expect(failed.client.get("https://example.com", "text/plain")).rejects.toThrow("HTTP 404");
+		const successful = fixture([new Response("ok")]);
+		successful.close.mockRejectedValue(new Error("cleanup failed"));
+		await expect(successful.client.get("https://example.com", "text/plain")).rejects.toThrow("cleanup failed");
+	});
 	it("detaches from stalled DNS at the deadline and never connects on late resolution", async () => {
 		vi.useFakeTimers();
 		const f = fixture([]);

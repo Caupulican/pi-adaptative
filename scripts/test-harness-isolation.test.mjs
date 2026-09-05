@@ -434,7 +434,11 @@ test("the live verification harness has a bounded per-file V8 coverage gate in L
 		packageJson.scripts["coverage:verification-harness"],
 		"npm run coverage:verification-harness --workspace=packages/agent && npm run coverage:verification-harness --workspace=packages/coding-agent",
 	);
-	assert.equal(packageJson.devDependencies["@vitest/coverage-v8"], "4.1.10");
+	const vitestVersion = packageJson.devDependencies.vitest;
+	assert.match(vitestVersion, /^\d+\.\d+\.\d+$/u, "the root Vitest dependency must be an exact stable pin");
+	assert.equal(packageJson.devDependencies["@vitest/coverage-v8"], vitestVersion);
+	assert.equal(agentPackageJson.devDependencies.vitest, vitestVersion);
+	assert.equal(codingAgentPackageJson.devDependencies.vitest, vitestVersion);
 	assert.match(packageJson.scripts["check:test-harness-isolation"], /scripts\/test-harness-isolation\.test\.mjs/u);
 	assert.equal(
 		agentPackageJson.scripts["coverage:verification-harness"],

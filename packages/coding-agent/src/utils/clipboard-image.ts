@@ -230,7 +230,7 @@ function readClipboardImageViaXclip(): ClipboardImage | null {
 }
 
 async function readClipboardImageViaNativeClipboard(): Promise<ClipboardImage | null> {
-	if (!clipboard || !clipboard.hasImage()) {
+	if (!clipboard?.hasImage()) {
 		return null;
 	}
 

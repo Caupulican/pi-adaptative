@@ -2,7 +2,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import * as Effect from "effect/Effect";
 import ipaddr from "ipaddr.js";
-import { Agent, fetch } from "undici";
+import { requestPublicWeb } from "./public-web-http.ts";
 
 export const MAX_WEB_RESPONSE_BYTES = 5 * 1024 * 1024;
 export const MAX_WEB_TIMEOUT_SECONDS = 120;
@@ -28,29 +28,9 @@ export interface PublicWebOperations {
 	}): Promise<{ response: WebResponse; close(): Promise<void> }>;
 }
 
-const nativeOperations: PublicWebOperations = {
+export const nativeOperations: PublicWebOperations = {
 	lookup: (hostname) => lookup(hostname, { all: true }),
-	async request({ url, address, headers, signal }) {
-		// A dedicated dispatcher prevents environment proxies or a second DNS lookup from bypassing
-		// the public-address decision. Provider traffic keeps its independent proxy configuration.
-		const dispatcher = new Agent({
-			connections: 1,
-			connect: {
-				autoSelectFamily: false,
-				lookup: (_hostname, options, callback) => {
-					if (options.all) callback(null, [address]);
-					else callback(null, address.address, address.family);
-				},
-			},
-		});
-		try {
-			const response = await fetch(url, { dispatcher, headers, signal, redirect: "manual", credentials: "omit" });
-			return { response, close: () => dispatcher.destroy() };
-		} catch (error) {
-			await dispatcher.destroy();
-			throw error;
-		}
-	},
+	request: requestPublicWeb,
 };
 
 function publicUrl(input: string): URL {
@@ -66,11 +46,7 @@ function assertPublicAddress(address: string): void {
 	const parsed = isIP(address) ? ipaddr.process(address) : undefined;
 	// ipaddr's default "unicast" also includes unallocated IPv6 space. Restrict IPv6 to
 	// the global-unicast allocation in addition to excluding its special-purpose subranges.
-	if (
-		!parsed ||
-		parsed.range() !== "unicast" ||
-		(parsed.kind() === "ipv6" && (parsed.toByteArray()[0] & 0xe0) !== 0x20)
-	) {
+	if (parsed?.range() !== "unicast" || (parsed.kind() === "ipv6" && (parsed.toByteArray()[0] & 0xe0) !== 0x20)) {
 		throw new Error("WebFetch permits public Internet addresses only");
 	}
 }
@@ -183,6 +159,7 @@ export class PublicWebClient {
 					"Accept-Language": "en-US,en;q=0.9",
 				},
 			});
+			let requestFailed = false;
 			try {
 				if (!challengeRetried && response.status === 403 && response.headers.get("cf-mitigated") === "challenge") {
 					challengeRetried = true;
@@ -219,9 +196,14 @@ export class PublicWebClient {
 					text: new TextDecoder(charset).decode(bytes),
 					bytes: bytes.byteLength,
 				};
+			} catch (error) {
+				requestFailed = true;
+				throw error;
 			} finally {
 				await response.body?.cancel().catch(() => {});
-				await close();
+				// A disposal error must not replace the HTTP/body failure that caused disposal.
+				if (requestFailed) await close().catch(() => {});
+				else await close();
 			}
 		}
 	}

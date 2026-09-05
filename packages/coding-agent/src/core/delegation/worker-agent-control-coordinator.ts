@@ -1107,7 +1107,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		scope: WorkerAgentControlScope = {},
 	): { started: boolean; record?: LaneRecord; skipReason?: string } {
 		const { attempt } = this.controlledAgentAttempt(agentId, scope);
-		if (!attempt || attempt.status !== "suspended") return { started: false, skipReason: "agent_not_suspended" };
+		if (attempt?.status !== "suspended") return { started: false, skipReason: "agent_not_suspended" };
 		const record = this.options.getLifecycle().getRecord(attempt.taskId);
 		if (!record) return { started: false, skipReason: "orchestration_projection_missing" };
 		try {
@@ -1976,7 +1976,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const source = this.requireKnownAgent(reply.senderAgentId);
 		const sourceMailbox = this.getMailbox(source.agentId);
 		const request = sourceMailbox.getMessage(reply.replyToMessageId);
-		if (!request || request.expectReply !== true || request.deliveredAt === undefined) {
+		if (request?.expectReply !== true || request.deliveredAt === undefined) {
 			throw new Error("Worker reply does not reference a delivered reply-expected message.");
 		}
 		if (request.senderAgentId !== target.agentId) {

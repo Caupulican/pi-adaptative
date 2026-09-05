@@ -66,7 +66,7 @@ describe("SessionManager lazy session payload loading", () => {
 		for (const entryId of entryIds) {
 			const entry = reopened.getEntry(entryId);
 			expect(entry?.type).toBe("message");
-			if (!entry || entry.type !== "message") continue;
+			if (entry?.type !== "message") continue;
 			expect(Object.getOwnPropertyDescriptor(entry.message, "content")?.get).toBeTypeOf("function");
 		}
 
@@ -98,7 +98,7 @@ describe("SessionManager lazy session payload loading", () => {
 
 		const entry = session.getEntry(entryId);
 		expect(entry?.type).toBe("message");
-		if (!entry || entry.type !== "message") return;
+		if (entry?.type !== "message") return;
 		expect(Object.getOwnPropertyDescriptor(entry.message, "content")?.get).toBeTypeOf("function");
 		let persistedBytes: number | undefined;
 		const entryIndex = session.getEntries().findIndex((candidate) => candidate.id === entryId);
@@ -126,7 +126,7 @@ describe("SessionManager lazy session payload loading", () => {
 
 		const entry = session.getEntry(entryId);
 		expect(entry?.type).toBe("message");
-		if (!entry || entry.type !== "message") return;
+		if (entry?.type !== "message") return;
 		const descriptor = Object.getOwnPropertyDescriptor(entry.message, "content");
 		expect(descriptor?.get).toBeUndefined();
 		expect(descriptor?.value).toBe(message.content);
@@ -159,7 +159,7 @@ describe("SessionManager lazy session payload loading", () => {
 		expect(() => session.releasePersistedMessagePayload(entryId)).toThrow(/not durably persisted/i);
 		const entry = session.getEntry(entryId);
 		expect(entry?.type).toBe("message");
-		if (!entry || entry.type !== "message") return;
+		if (entry?.type !== "message") return;
 		expect(Object.getOwnPropertyDescriptor(entry.message, "content")?.get).toBeUndefined();
 		expect((entry.message as ToolResultMessage).content).toEqual([{ type: "text", text: payload }]);
 	});
@@ -186,7 +186,7 @@ describe("SessionManager lazy session payload loading", () => {
 
 		const entry = session.getEntry(entryId);
 		expect(entry?.type).toBe("message");
-		if (!entry || entry.type !== "message") return;
+		if (entry?.type !== "message") return;
 		expect(Object.getOwnPropertyDescriptor(entry.message, "output")?.get).toBeTypeOf("function");
 		expect((entry.message as BashExecutionMessage).output).toBe(output);
 		expect(Object.getOwnPropertyDescriptor(entry.message, "output")?.get).toBeTypeOf("function");
@@ -197,7 +197,7 @@ describe("SessionManager lazy session payload loading", () => {
 		const reopened = SessionManager.open(sessionFile, dir, dir);
 		const reopenedEntry = reopened.getEntry(entryId);
 		expect(reopenedEntry?.type).toBe("message");
-		if (!reopenedEntry || reopenedEntry.type !== "message") return;
+		if (reopenedEntry?.type !== "message") return;
 		expect(Object.getOwnPropertyDescriptor(reopenedEntry.message, "output")?.get).toBeTypeOf("function");
 		expect((reopenedEntry.message as BashExecutionMessage).output).toBe(output);
 	});

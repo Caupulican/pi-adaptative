@@ -91,7 +91,7 @@ describe("goal/task custom-entry snapshot resolution survives compaction", () =>
 		const compactionId = compactSession(sessionManager);
 		const branch = sessionManager.getBranch();
 		const compactionEntry = branch.find((entry) => entry.id === compactionId);
-		if (!compactionEntry || compactionEntry.type !== "compaction") {
+		if (compactionEntry?.type !== "compaction") {
 			throw new Error("Expected the appended compaction entry");
 		}
 		const goalIndex = branch.findIndex((entry) => entry.id === goalEntryId);
@@ -150,7 +150,7 @@ describe("goal/task custom-entry snapshot resolution survives compaction", () =>
 		);
 		expect(projections).toHaveLength(1);
 		const projection = projections[0];
-		if (!projection || projection.role !== "custom" || typeof projection.content !== "string") {
+		if (projection?.role !== "custom" || typeof projection.content !== "string") {
 			throw new Error("Expected one textual compact goal projection");
 		}
 		// Offered again for the same state, the projection is byte-identical, which is what lets the

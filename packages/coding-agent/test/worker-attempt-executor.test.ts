@@ -265,7 +265,7 @@ describe("worker attempt executor", () => {
 			requestCaps.push((await invokeRequestPreflight(options))?.maxTokens);
 			const assistant = assistantToolRequest(60);
 			const toolCall = assistant.content.find((content) => content.type === "toolCall");
-			if (!toolCall || toolCall.type !== "toolCall" || !options.beforeToolCall) {
+			if (toolCall?.type !== "toolCall" || !options.beforeToolCall) {
 				throw new Error("Expected a worker tool gate.");
 			}
 			await options.onMessage?.(assistant);
@@ -327,7 +327,7 @@ describe("worker attempt executor", () => {
 				stopReason: "toolUse",
 			});
 			const toolCall = assistant.content.find((content) => content.type === "toolCall");
-			if (!toolCall || toolCall.type !== "toolCall") throw new Error("Expected an unknown tool request.");
+			if (toolCall?.type !== "toolCall") throw new Error("Expected an unknown tool request.");
 			const toolResult: Message = {
 				role: "toolResult",
 				toolCallId: toolCall.id,
@@ -384,7 +384,7 @@ describe("worker attempt executor", () => {
 				await invokeRequestPreflight(options);
 				const assistant = assistantToolRequest(20);
 				const toolCall = assistant.content.find((content) => content.type === "toolCall");
-				if (!toolCall || toolCall.type !== "toolCall" || !options.beforeToolCall) {
+				if (toolCall?.type !== "toolCall" || !options.beforeToolCall) {
 					throw new Error("Expected a worker tool gate.");
 				}
 				await options.onMessage?.(assistant);
@@ -450,7 +450,7 @@ describe("worker attempt executor", () => {
 			await invokeRequestPreflight(options);
 			const assistant = assistantToolRequest(20);
 			const toolCall = assistant.content.find((content) => content.type === "toolCall");
-			if (!toolCall || toolCall.type !== "toolCall" || !options.beforeToolCall) {
+			if (toolCall?.type !== "toolCall" || !options.beforeToolCall) {
 				throw new Error("Expected a worker tool gate.");
 			}
 			await options.onMessage?.(assistant);
@@ -566,7 +566,7 @@ describe("worker attempt executor", () => {
 			providerRequests++;
 			const assistant = assistantToolRequest(100);
 			const toolCall = assistant.content.find((content) => content.type === "toolCall");
-			if (!toolCall || toolCall.type !== "toolCall" || !options.beforeToolCall) {
+			if (toolCall?.type !== "toolCall" || !options.beforeToolCall) {
 				throw new Error("Expected a worker tool gate.");
 			}
 			await options.beforeToolCall(
@@ -604,7 +604,7 @@ describe("worker attempt executor", () => {
 				await invokeRequestPreflight(options);
 				const assistant = assistantToolRequest(37);
 				const toolCall = assistant.content.find((content) => content.type === "toolCall");
-				if (!toolCall || toolCall.type !== "toolCall" || !options.beforeToolCall) {
+				if (toolCall?.type !== "toolCall" || !options.beforeToolCall) {
 					throw new Error("Expected a worker tool gate.");
 				}
 				await options.beforeToolCall(
@@ -1044,7 +1044,7 @@ describe("worker attempt executor", () => {
 	it("rejects a later assistant turn that skipped its own provider preflight", async () => {
 		const partial = assistantToolRequest(0);
 		const toolCall = partial.content.find((content) => content.type === "toolCall");
-		if (!toolCall || toolCall.type !== "toolCall") throw new Error("Expected tool call.");
+		if (toolCall?.type !== "toolCall") throw new Error("Expected tool call.");
 		const toolResult: Message = {
 			role: "toolResult",
 			toolCallId: toolCall.id,
@@ -1221,7 +1221,7 @@ describe("worker attempt executor", () => {
 		try {
 			const partial = assistantToolRequest(0);
 			const toolCall = partial.content.find((content) => content.type === "toolCall");
-			if (!toolCall || toolCall.type !== "toolCall") throw new Error("Expected retry tool call.");
+			if (toolCall?.type !== "toolCall") throw new Error("Expected retry tool call.");
 			const toolResult: Message = {
 				role: "toolResult",
 				toolCallId: toolCall.id,
@@ -1394,7 +1394,7 @@ describe("worker attempt executor", () => {
 				},
 			};
 			const toolCall = partial.content.find((content) => content.type === "toolCall");
-			if (!toolCall || toolCall.type !== "toolCall") throw new Error("Expected retry tool call.");
+			if (toolCall?.type !== "toolCall") throw new Error("Expected retry tool call.");
 			const toolResult: Message = {
 				role: "toolResult",
 				toolCallId: toolCall.id,

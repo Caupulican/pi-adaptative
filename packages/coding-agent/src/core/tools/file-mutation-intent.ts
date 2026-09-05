@@ -409,7 +409,7 @@ export class FileMutationIntentController {
 		}
 
 		const current = await this.operations.inspect(lease.path, true);
-		if (!current || current.kind !== "file") {
+		if (current?.kind !== "file") {
 			throw new Error(`Could not edit file: ${lease.displayPath}. The target no longer exists after preflight.`);
 		}
 		if (!identitiesMatch(lease.identity, current.identity)) {
@@ -437,7 +437,7 @@ export class FileMutationIntentController {
 			throw new Error(`Could not refresh file identity for ${lease.displayPath}: only edit leases track one.`);
 		}
 		const current = await this.operations.inspect(lease.path, true);
-		if (!current || current.kind !== "file") {
+		if (current?.kind !== "file") {
 			throw new Error(`Could not edit file: ${lease.displayPath}. The target no longer exists after preflight.`);
 		}
 		lease.identity = current.identity;

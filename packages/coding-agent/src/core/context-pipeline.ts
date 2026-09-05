@@ -80,7 +80,7 @@ import { reportSpawnedUsage } from "./spawned-usage.ts";
 
 /** Read a packed artifact-producing tool result's `details.artifactId`, if present, without `any`. */
 function extractArtifactId(message: AgentMessage | undefined): string | undefined {
-	if (!message || message.role !== "toolResult") return undefined;
+	if (message?.role !== "toolResult") return undefined;
 	const details = (message as { details?: unknown }).details;
 	if (typeof details !== "object" || details === null) return undefined;
 	const artifactId = (details as { artifactId?: unknown }).artifactId;
@@ -560,7 +560,7 @@ export class ContextPipeline {
 			for (const item of shadowReport.items) {
 				if (!item.hasAvailableRetrievalPath) continue;
 				const message = messages[item.messageIndex];
-				if (!message || message.role !== "toolResult" || message.toolCallId !== item.toolCallId) continue;
+				if (message?.role !== "toolResult" || message.toolCallId !== item.toolCallId) continue;
 				if (message.isError) continue;
 				const details = message.details as
 					| { contextGc?: { packed?: unknown }; promptPolicy?: { enforced?: unknown } }

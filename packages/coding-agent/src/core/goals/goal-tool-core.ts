@@ -318,7 +318,7 @@ function toGoalEvent(
 			if (requirement.dependencies) {
 				const unsatisfied = requirement.dependencies.filter((depId) => {
 					const dep = state.requirements.find((r) => r.id === depId);
-					return !dep || dep.status !== "satisfied";
+					return dep?.status !== "satisfied";
 				});
 				if (unsatisfied.length > 0) {
 					return {

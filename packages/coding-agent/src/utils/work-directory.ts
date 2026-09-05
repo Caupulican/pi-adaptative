@@ -70,7 +70,7 @@ export interface WorkRetentionOptions {
 	maxTotalBytes?: number;
 	/** Fixed tenant-wide cap for recursive file entries inspected during one prune. */
 	maxScannedEntries?: number;
-	/** Fixed cap for run directories inspected during one prune. */
+	/** Fixed cap for tenant entries visited, including hidden, malformed, and unowned entries. */
 	maxScannedRuns?: number;
 	now?: number;
 }
@@ -406,14 +406,16 @@ export function pruneWorkTenant(
 	let handle: Dir | undefined;
 	try {
 		handle = opendirSync(tenantDir);
+		let scanned = 0;
 		while (true) {
-			const entry = handle.readSync();
-			if (!entry) break;
-			if (entry.name.startsWith(".")) continue;
-			if (runs.length >= maxScannedRuns) {
+			if (scanned >= maxScannedRuns) {
 				truncated = true;
 				break;
 			}
+			const entry = handle.readSync();
+			if (!entry) break;
+			scanned++;
+			if (entry.name.startsWith(".")) continue;
 			if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
 			const inspected = inspectRun(join(tenantDir, entry.name), category, tenant, entry.name, budget, unknownBytes);
 			if (inspected) runs.push(inspected);

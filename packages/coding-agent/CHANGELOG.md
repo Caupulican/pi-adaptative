@@ -1,9 +1,20 @@
 ## [Unreleased]
 
+### Changed
+
+- Updated the monorepo's exact dependency pins and development baseline to Node 24.20.0, with standalone Bun builds pinned to 1.4.2. Native FFF and clone-scanner provisioning derive their versions from the package manifest. jscpd advances to 5.0.15; newer versions remain rejected by deterministic scanner regressions.
+- Syntax highlighting uses highlight.js 11.12's supported exports and a regenerated grammar catalog, including a standalone runtime import regression.
+- Updated managed fd, uv, Bitwarden CLI, Ollama, Transformers, Hugging Face Hub, and PyTorch pins to verified stable releases. Refreshed all affected native archive checksums; Intel macOS fd uses the same release as other targets.
+
 ### Fixed
 
 - Workbench windows now have visible titled borders and a compact, stable upper allocation: growing tool output no longer squeezes conversation. Work/team and execution scroll within their boundaries; completed failures fold without hiding their receipts. Narrow layouts retain all evidence, and native input, selection, cursor placement and scroll position survive small terminals and unrelated tool updates. See `docs/workbench.md`.
 - Standalone installs and `pi update self` report optional Herdr provisioning from the newly activated release, including already-installed and unavailable states, through the existing provisioner. `pi doctor` reports Herdr without making optional collaboration a required-tool failure.
+- WebFetch uses one scoped Effect HTTP transport on Node and Bun, preserving validated DNS destinations, TLS identity, manual redirects, streamed decompression, cancellation, and cleanup. Disposal failures no longer replace the original HTTP or body failure.
+- Busy interactive sessions route explicit goal controls to the persisted goal owner. Progress updates explicitly report that they do not resume a paused goal.
+- Worker admission preserves setup and queue-denial details, and follow-up receipts report the actual control outcome instead of claiming rejected work was queued.
+- Memory listings reconcile external-edit digests under the existing lock; semantic failures set the tool error flag. Recovery reuses identical backups, preserves distinct conflicting revisions, and permits edits that shrink an already oversized memory file.
+- Work-directory pruning counts hidden, unowned, and non-directory entries against its scan budget instead of counting only accepted manifests.
 
 ## [0.98.0] - 2026-09-05
 

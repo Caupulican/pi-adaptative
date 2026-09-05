@@ -1711,22 +1711,32 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 										...messageOptions,
 										senderAgentId: caller.agentId,
 									});
+						const details = {
+							started: outcome.started,
+							action,
+							agentId,
+							messageId: outcome.messageId,
+							laneId: outcome.record?.laneId,
+							status: outcome.record?.status,
+							skipReason: outcome.skipReason,
+						};
+						const reason = outcome.skipReason?.slice(0, MAX_DELEGATE_ERROR_CHARS);
+						if (!outcome.messageId) {
+							return invalid(
+								`delegate follow_up was not accepted for ${agentId}: ${reason ?? "not_started"}`,
+								details,
+							);
+						}
+						const state = outcome.started ? "started" : outcome.steering ? "steering queued" : "not started";
+						const lane = outcome.record ? `; lane ${outcome.record.laneId} (${outcome.record.status})` : "";
 						return {
 							content: [
 								{
 									type: "text" as const,
-									text: `CAVEMAN MODE - MANDATORY: follow_up ${outcome.messageId} ${outcome.started ? "started" : "queued"} for ${agentId}. Worker completion uses delegate wait/wait_many or the owning parent terminal handoff. Never use inbox_wait for completion; inbox_wait observes explicit replies only.`,
+									text: `CAVEMAN MODE - MANDATORY: follow_up ${outcome.messageId} ${state} for ${agentId}${lane}${reason ? `; reason ${reason}` : ""}. An idle worker or an older task report does not prove this message completed. Worker completion uses delegate wait/wait_many or the owning parent terminal handoff. Never use inbox_wait for completion; inbox_wait observes explicit replies only.`,
 								},
 							],
-							details: {
-								started: outcome.started,
-								action,
-								agentId,
-								messageId: outcome.messageId,
-								laneId: outcome.record?.laneId,
-								status: outcome.record?.status,
-								skipReason: outcome.skipReason,
-							},
+							details,
 						};
 					}
 					if (action === "interrupt") {

@@ -431,7 +431,7 @@ export class CollaborationJobStore {
 			const receipt = job.mailbox.receipts.find(
 				(entry) => entry.senderId === message.senderId && entry.messageId === message.messageId,
 			);
-			if (!receipt || receipt.state !== "queued") throw new Error("Invalid collaboration peer receipt.");
+			if (receipt?.state !== "queued") throw new Error("Invalid collaboration peer receipt.");
 			const result = this.reserve(
 				job,
 				agentId,

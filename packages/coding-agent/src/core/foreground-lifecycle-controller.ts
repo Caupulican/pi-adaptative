@@ -466,7 +466,7 @@ export class ForegroundLifecycleController {
 		if (this.completedResultMessages.has(message)) return;
 		const result = message as ToolResultMessage;
 		const pending = this.pendingToolsByCall.get(this.callKey(result.toolCallId, result.toolName));
-		if (!pending || pending.size !== 1) return;
+		if (pending?.size !== 1) return;
 		const key = pending.values().next().value as string;
 		const identity = this.startedTools.get(key);
 		if (!identity) return;

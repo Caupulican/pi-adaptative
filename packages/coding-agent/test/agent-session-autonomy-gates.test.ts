@@ -159,7 +159,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 		const messages = harness.session.agent.state.messages;
 		const toolResultMsg = messages.find((m) => m.role === "toolResult");
 		expect(toolResultMsg).toBeDefined();
-		if (!toolResultMsg || toolResultMsg.role !== "toolResult") throw new Error("Expected blocked tool result");
+		if (toolResultMsg?.role !== "toolResult") throw new Error("Expected blocked tool result");
 		expect(toolResultMsg.isError).toBe(true);
 		const text = toolResultMsg.content
 			.filter((part): part is { type: "text"; text: string } => part.type === "text")
@@ -203,7 +203,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 		const messages = harness.session.agent.state.messages;
 		const toolResultMsg = messages.find((m) => m.role === "toolResult");
 		expect(toolResultMsg).toBeDefined();
-		if (!toolResultMsg || toolResultMsg.role !== "toolResult") throw new Error("Expected blocked tool result");
+		if (toolResultMsg?.role !== "toolResult") throw new Error("Expected blocked tool result");
 		expect(toolResultMsg.isError).toBe(true);
 		const text = toolResultMsg.content
 			.filter((part): part is { type: "text"; text: string } => part.type === "text")
@@ -243,7 +243,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 		const messages = harness.session.agent.state.messages;
 		const toolResultMsg = messages.find((m) => m.role === "toolResult");
 		expect(toolResultMsg).toBeDefined();
-		if (!toolResultMsg || toolResultMsg.role !== "toolResult") throw new Error("Expected blocked tool result");
+		if (toolResultMsg?.role !== "toolResult") throw new Error("Expected blocked tool result");
 		expect(toolResultMsg.isError).toBe(true);
 		const text = toolResultMsg.content
 			.filter((part): part is { type: "text"; text: string } => part.type === "text")
@@ -282,7 +282,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 		const messages = harness.session.agent.state.messages;
 		const toolResultMsg = messages.find((m) => m.role === "toolResult");
 		expect(toolResultMsg).toBeDefined();
-		if (!toolResultMsg || toolResultMsg.role !== "toolResult") throw new Error("Expected blocked tool result");
+		if (toolResultMsg?.role !== "toolResult") throw new Error("Expected blocked tool result");
 		expect(toolResultMsg.isError).toBe(true);
 
 		const text = toolResultMsg.content

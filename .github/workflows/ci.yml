@@ -46,7 +46,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24.18.0'
+          node-version-file: '.nvmrc'
           cache: npm
 
       - name: Install Linux system dependencies
@@ -71,7 +71,7 @@ jobs:
 
       - name: Verify native TypeScript test toolchain
         run: |
-          npm ls vite@8.2.1 vitest@4.1.10 --depth=0
+          npm ls vite@8.2.2 vitest@5.0.0 --depth=0
           node node_modules/vitest/vitest.mjs --version
           node node_modules/vite/bin/vite.js --version
 
@@ -167,7 +167,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24.18.0'
+          node-version-file: '.nvmrc'
           cache: npm
 
       - name: Install Linux system dependencies
@@ -186,7 +186,7 @@ jobs:
 
       - name: Verify native TypeScript test toolchain
         run: |
-          npm ls vite@8.2.1 vitest@4.1.10 --depth=0
+          npm ls vite@8.2.2 vitest@5.0.0 --depth=0
           node node_modules/vitest/vitest.mjs --version
           node node_modules/vite/bin/vite.js --version
 

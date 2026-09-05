@@ -6,7 +6,7 @@
 {"url":"https://example.com/docs","format":"markdown","timeout":30}
 ```
 
-`format` is `markdown` (default), `text`, or `html`. The total deadline defaults to 30 seconds and accepts positive values up to 120 seconds. It covers DNS, all redirects, the challenge retry, and response-body consumption. The Effect runtime owns this deadline, parent cancellation, and resource release; completion waits for the HTTP reader and dispatcher to close.
+`format` is `markdown` (default), `text`, or `html`. The total deadline defaults to 30 seconds and accepts positive values up to 120 seconds. It covers DNS, all redirects, the challenge retry, and response-body consumption. The Effect runtime owns this deadline, parent cancellation, and resource release; completion waits for the HTTP reader and transport to close.
 
 Requests initially send a browser-style User-Agent. A response with both HTTP 403 and `cf-mitigated: challenge` permits exactly one retry using Pi's own User-Agent. Ordinary 403 responses and repeated challenges are returned as errors. The retry revalidates DNS and shares the original deadline, redirect budget, and body limits. This is a compatibility fallback, not a CAPTCHA solver or authenticated browser; it cannot guarantee access through Cloudflare.
 
@@ -14,7 +14,9 @@ Requests initially send a browser-style User-Agent. A response with both HTTP 40
 
 Only public HTTP(S) destinations are admitted. Every DNS answer must be public, and the connection is pinned to a validated address while retaining the hostname for TLS verification and the Host header. Redirect destinations undergo the same checks; loops, more than five redirects, and HTTPS-to-HTTP downgrades are rejected. Credentials embedded in URLs are rejected. No cookies, authorization headers, browser state, or page subresource requests are carried along.
 
-WebFetch uses a dedicated direct dispatcher: environment proxies and the provider transport's global dispatcher cannot bypass destination checks. Networks requiring an outbound proxy are not supported by this tool. Local development endpoints, private networks, metadata endpoints, non-global address ranges, and authenticated browsing are intentionally outside its contract. HTTP URLs remain HTTP; the tool does not silently upgrade or downgrade their scheme.
+WebFetch uses an Effect HTTP service with a scoped native HTTP/HTTPS agent on both Node and Bun. The adapter pins DNS while retaining the original URL for Host and TLS verification. Environment proxies and the provider transport's global dispatcher cannot bypass destination checks. Networks requiring an outbound proxy are not supported by this tool. Local development endpoints, private networks, metadata endpoints, non-global address ranges, and authenticated browsing are intentionally outside its contract. HTTP URLs remain HTTP; the tool does not silently upgrade or downgrade their scheme.
+
+This follows [OpenCode's HTTP-service boundary](https://github.com/anomalyco/opencode/blob/69c172e8a7c0086887b1f93ed5a162f14b6aa0c5/packages/core/src/effect/app-node-platform.ts), with tool policy and bounded body reading owned separately. Pi uses the stable `@effect/platform-node` transport because Bun 1.4.2's native `fetch` ignores an empty proxy override, including inside a worker with a separate environment. That transport cannot enforce Pi's public-address policy. The native regression exercises a hostile environment proxy alongside a normal-fetch negative control.
 
 ## Content and retention
 
@@ -28,4 +30,4 @@ The session's standard untrusted-content fence applies to the result. Artifact r
 
 ## Verification
 
-Focused coverage lives in `test/webfetch.test.ts`, `test/webfetch-registration.test.ts`, `test/artifact-retrieve-tool.test.ts`, and `test/suite/agent-session-artifact-lifecycle.test.ts`. Tests use controlled transports and faux model responses, not paid provider calls.
+Focused coverage lives in `test/webfetch.test.ts`, `test/webfetch-native.test.ts`, `test/webfetch-registration.test.ts`, `test/artifact-retrieve-tool.test.ts`, and `test/suite/agent-session-artifact-lifecycle.test.ts`. The native contract also runs as a compiled Bun executable in binary CI. Tests use controlled transports and faux model responses, not paid provider calls.

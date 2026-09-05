@@ -578,7 +578,7 @@ export class BackgroundToolTaskController {
 
 	cancel(taskId: string): boolean {
 		const state = this.tasks.get(taskId);
-		if (!state || state.record.status !== "running") return false;
+		if (state?.record.status !== "running") return false;
 		state.cancellationRequested = true;
 		state.record = { ...state.record, cancellationRequested: true };
 		try {

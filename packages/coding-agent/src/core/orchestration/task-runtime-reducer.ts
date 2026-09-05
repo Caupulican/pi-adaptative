@@ -442,11 +442,11 @@ export function assertTaskAttemptBudgetForState(task: TaskRuntimeState, objectiv
 
 function refreshReadyTasks(state: TaskRuntimeProjection, objectiveId: string, at: string): void {
 	const objective = state.objectives[objectiveId];
-	if (!objective || objective.objective.status !== "active") return;
+	if (objective?.objective.status !== "active") return;
 	const mutableTasks = state.tasks as Record<string, TaskRuntimeState>;
 	for (const taskId of objective.taskIds) {
 		const current = mutableTasks[taskId];
-		if (!current || current.task.status !== "pending") continue;
+		if (current?.task.status !== "pending") continue;
 		if (taskDependencyReadiness(state, current).state === "ready") {
 			mutableTasks[taskId] = { ...current, task: { ...current.task, status: "ready", updatedAt: at } };
 		}
@@ -483,7 +483,7 @@ function applyAttemptQueued(state: TaskRuntimeProjection, payload: JsonObject, o
 		throw new DurableTaskRuntimeError(`Task '${taskId}' already owns active attempt '${active.attemptId}'.`);
 	}
 	const objective = objectives[task.task.objectiveId]?.objective;
-	if (!objective || objective.status !== "active") {
+	if (objective?.status !== "active") {
 		throw new DurableTaskRuntimeError(`Objective '${task.task.objectiveId}' is not active.`);
 	}
 	assertTaskAttemptBudgetForState(task, objective);
@@ -958,10 +958,10 @@ function applyAttemptResumed(
 	if (aggregateId !== lease.attemptId) {
 		throw new DurableTaskRuntimeError(`Attempt '${lease.attemptId}' resume does not match its aggregate.`);
 	}
-	if (!attempt || attempt.status !== "suspended" || attempt.agentId !== agentId) {
+	if (attempt?.status !== "suspended" || attempt.agentId !== agentId) {
 		throw new DurableTaskRuntimeError(`Attempt '${lease.attemptId}' is not suspended for agent '${agentId}'.`);
 	}
-	if (!agent || agent.status !== "resuming" || agent.activeAttemptId !== lease.attemptId) {
+	if (agent?.status !== "resuming" || agent.activeAttemptId !== lease.attemptId) {
 		throw new DurableTaskRuntimeError(`Agent '${agentId}' is not resuming attempt '${lease.attemptId}'.`);
 	}
 	assertAgentNotRetired(agent, "resume an attempt");
@@ -1230,12 +1230,7 @@ export function reduceOrchestrationEvent(
 			if (!agent) throw new DurableTaskRuntimeError(`Unknown agent '${agentId}'.`);
 			assertAgentNotRetired(agent, "request resume");
 			const attempt = attempts[attemptId];
-			if (
-				!attempt ||
-				attempt.status !== "suspended" ||
-				attempt.agentId !== agentId ||
-				agent.activeAttemptId !== attemptId
-			) {
+			if (attempt?.status !== "suspended" || attempt.agentId !== agentId || agent.activeAttemptId !== attemptId) {
 				throw new DurableTaskRuntimeError(`Agent '${agentId}' cannot resume suspended attempt '${attemptId}'.`);
 			}
 			if (agent.status === "resuming") break;

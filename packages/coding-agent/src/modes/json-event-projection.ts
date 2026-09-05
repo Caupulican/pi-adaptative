@@ -27,7 +27,7 @@ function projectAssistantEvent(event: AssistantMessageEvent): object {
 			return { type: event.type, contentIndex: event.contentIndex };
 		case "toolcall_start": {
 			const block = event.partial.content[event.contentIndex];
-			if (!block || block.type !== "toolCall") {
+			if (block?.type !== "toolCall") {
 				throw new Error(`toolcall_start content at index ${event.contentIndex} is not a tool call`);
 			}
 			return {

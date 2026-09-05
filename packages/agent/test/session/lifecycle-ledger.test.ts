@@ -432,7 +432,7 @@ describe("session lifecycle ledger", () => {
 		);
 		const starts = session.getEntries();
 		const start = starts.find((candidate) => candidate.id === startEntryId);
-		if (!start || start.type !== "foreground_tool_start") throw new Error("start fixture missing");
+		if (start?.type !== "foreground_tool_start") throw new Error("start fixture missing");
 		const duplicate = entry({ ...start, id: "duplicate-start", parentId: start.id });
 		const duplicateInspection = inspectSessionLifecycle([...starts, duplicate]);
 		expect(duplicateInspection.duplicateToolStarts).toHaveLength(1);

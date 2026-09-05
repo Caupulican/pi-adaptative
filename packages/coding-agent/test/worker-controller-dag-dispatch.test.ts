@@ -124,7 +124,7 @@ describe("worker controller dependency dispatch", () => {
 				}),
 			).toEqual({
 				started: false,
-				skipReason: "worker_not_started",
+				skipReason: "worker_dispatch_queue_full",
 			});
 			expect(enqueue).not.toHaveBeenCalled();
 			expect(controls._getWorkerLifecycle().getRecord(rejectedLaneId)).toMatchObject({
@@ -133,6 +133,62 @@ describe("worker controller dependency dispatch", () => {
 			});
 		} finally {
 			releaseFirst?.(fauxAssistantMessage('{"summary":"cleanup"}'));
+			harness.cleanup();
+		}
+	});
+
+	it("preserves preparation errors without admitting a worker or consuming its identity", async () => {
+		const harness = await createHarness();
+		try {
+			await harness.session.setModel({ ...harness.getModel(), baseUrl: "https://faux.invalid" });
+			const controls = controlsFor(harness.session);
+			const lifecycle = controls._getWorkerLifecycle();
+			const before = lifecycle.getTaskRuntimeSnapshot();
+			const laneId = lifecycle.getNextAvailableLaneIdCandidate();
+			const prepare = vi.spyOn(lifecycle, "prepare").mockImplementationOnce(() => {
+				throw new Error("injected dispatch persistence failure");
+			});
+			harness.setResponses([fauxAssistantMessage('{"summary":"negative control completed","status":"completed"}')]);
+
+			expect(controls.startWorkerDelegation({ instructions: "Report exact preparation diagnostics." })).toEqual({
+				started: false,
+				skipReason: "worker_start_error:injected dispatch persistence failure",
+			});
+			expect(lifecycle.getTaskRuntimeSnapshot()).toEqual(before);
+			expect(lifecycle.getNextAvailableLaneIdCandidate()).toBe(laneId);
+			expect(harness.getPendingResponseCount()).toBe(1);
+			prepare.mockRestore();
+			const accepted = controls.startWorkerDelegation({ instructions: "Negative control after storage recovers." });
+			expect(accepted).toMatchObject({ started: true, record: { laneId, status: "running" } });
+			await vi.waitFor(() => expect(lifecycle.getRecord(laneId)?.status).toBe("succeeded"));
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("publishes cancellation when unexpected setup failure follows durable preparation", async () => {
+		const harness = await createHarness();
+		try {
+			await harness.session.setModel({ ...harness.getModel(), baseUrl: "https://faux.invalid" });
+			const controls = controlsFor(harness.session);
+			const lifecycle = controls._getWorkerLifecycle();
+			const laneId = lifecycle.getNextAvailableLaneIdCandidate();
+			const bindGrant = vi.spyOn(lifecycle, "bindGrant").mockImplementationOnce(() => {
+				throw new Error("injected grant persistence failure");
+			});
+			const publish = vi.spyOn(controls._getWorkerController(), "publishTerminalRecord");
+			harness.setResponses([fauxAssistantMessage('{"summary":"must not execute"}')]);
+
+			expect(controls.startWorkerDelegation({ instructions: "Fail after durable preparation." })).toEqual({
+				started: false,
+				skipReason: "worker_start_error:injected grant persistence failure",
+			});
+			expect(lifecycle.getRecord(laneId)).toMatchObject({ status: "canceled", reasonCode: "worker_start_error" });
+			expect(publish).toHaveBeenCalledWith(expect.objectContaining({ laneId, status: "canceled" }));
+			expect(lifecycle.getTerminalNotification(laneId)).toMatchObject({ status: "pending" });
+			expect(harness.getPendingResponseCount()).toBe(1);
+			bindGrant.mockRestore();
+		} finally {
 			harness.cleanup();
 		}
 	});

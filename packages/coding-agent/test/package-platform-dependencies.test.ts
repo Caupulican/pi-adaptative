@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { FFF_NODE_VERSION } from "../src/utils/tools-manager.ts";
 
 describe("cross-platform package dependencies", () => {
 	it("keeps the platform-limited FFF native binding optional", async () => {
@@ -10,6 +11,8 @@ describe("cross-platform package dependencies", () => {
 		};
 
 		expect(packageJson.dependencies).not.toHaveProperty("@ff-labs/fff-node");
-		expect(packageJson.optionalDependencies).toMatchObject({ "@ff-labs/fff-node": "0.9.6" });
+		const pinnedVersion = packageJson.optionalDependencies?.["@ff-labs/fff-node"];
+		expect(pinnedVersion).toMatch(/^\d+\.\d+\.\d+$/);
+		expect(FFF_NODE_VERSION).toBe(pinnedVersion);
 	});
 });

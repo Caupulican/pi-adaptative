@@ -32,7 +32,7 @@ export function textContentPrefix(content: readonly unknown[], maxChars = Number
 export function latestUserPromptText(messages: readonly AgentMessage[], maxChars = Number.POSITIVE_INFINITY): string {
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
-		if (!message || message.role !== "user") continue;
+		if (message?.role !== "user") continue;
 		if (typeof message.content === "string") {
 			return message.content.length > maxChars ? message.content.slice(0, maxChars) : message.content;
 		}

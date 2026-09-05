@@ -1,207 +1,204 @@
 // GENERATED. Do not hand-edit.
-// Static per-language highlight.js module map, enabling register-on-first-use
-// instead of eagerly registering all languages via highlight.js/lib/index.js.
-// It also carries the alias table below, derived from highlight.js/lib/index.js's
-// registration data (including its alias-collision registration order).
-// Regenerate: re-derive from the installed highlight.js/lib/languages/*.js modules
-// and highlight.js/lib/index.js's registration order.
+// Static grammar factories and aliases from the installed highlight.js registration order.
+// Regenerate: node scripts/generate-highlight-languages.mjs
 
-import _1cLang from "highlight.js/lib/languages/1c.js";
-import abnfLang from "highlight.js/lib/languages/abnf.js";
-import accesslogLang from "highlight.js/lib/languages/accesslog.js";
-import actionscriptLang from "highlight.js/lib/languages/actionscript.js";
-import adaLang from "highlight.js/lib/languages/ada.js";
-import angelscriptLang from "highlight.js/lib/languages/angelscript.js";
-import apacheLang from "highlight.js/lib/languages/apache.js";
-import applescriptLang from "highlight.js/lib/languages/applescript.js";
-import arcadeLang from "highlight.js/lib/languages/arcade.js";
-import arduinoLang from "highlight.js/lib/languages/arduino.js";
-import armasmLang from "highlight.js/lib/languages/armasm.js";
-import asciidocLang from "highlight.js/lib/languages/asciidoc.js";
-import aspectjLang from "highlight.js/lib/languages/aspectj.js";
-import autohotkeyLang from "highlight.js/lib/languages/autohotkey.js";
-import autoitLang from "highlight.js/lib/languages/autoit.js";
-import avrasmLang from "highlight.js/lib/languages/avrasm.js";
-import awkLang from "highlight.js/lib/languages/awk.js";
-import axaptaLang from "highlight.js/lib/languages/axapta.js";
-import bashLang from "highlight.js/lib/languages/bash.js";
-import basicLang from "highlight.js/lib/languages/basic.js";
-import bnfLang from "highlight.js/lib/languages/bnf.js";
-import brainfuckLang from "highlight.js/lib/languages/brainfuck.js";
-import cLang from "highlight.js/lib/languages/c.js";
-import c_likeLang from "highlight.js/lib/languages/c-like.js";
-import calLang from "highlight.js/lib/languages/cal.js";
-import capnprotoLang from "highlight.js/lib/languages/capnproto.js";
-import ceylonLang from "highlight.js/lib/languages/ceylon.js";
-import cleanLang from "highlight.js/lib/languages/clean.js";
-import clojureLang from "highlight.js/lib/languages/clojure.js";
-import clojure_replLang from "highlight.js/lib/languages/clojure-repl.js";
-import cmakeLang from "highlight.js/lib/languages/cmake.js";
-import coffeescriptLang from "highlight.js/lib/languages/coffeescript.js";
-import coqLang from "highlight.js/lib/languages/coq.js";
-import cosLang from "highlight.js/lib/languages/cos.js";
-import cppLang from "highlight.js/lib/languages/cpp.js";
-import crmshLang from "highlight.js/lib/languages/crmsh.js";
-import crystalLang from "highlight.js/lib/languages/crystal.js";
-import csharpLang from "highlight.js/lib/languages/csharp.js";
-import cspLang from "highlight.js/lib/languages/csp.js";
-import cssLang from "highlight.js/lib/languages/css.js";
-import dLang from "highlight.js/lib/languages/d.js";
-import dartLang from "highlight.js/lib/languages/dart.js";
-import delphiLang from "highlight.js/lib/languages/delphi.js";
-import diffLang from "highlight.js/lib/languages/diff.js";
-import djangoLang from "highlight.js/lib/languages/django.js";
-import dnsLang from "highlight.js/lib/languages/dns.js";
-import dockerfileLang from "highlight.js/lib/languages/dockerfile.js";
-import dosLang from "highlight.js/lib/languages/dos.js";
-import dsconfigLang from "highlight.js/lib/languages/dsconfig.js";
-import dtsLang from "highlight.js/lib/languages/dts.js";
-import dustLang from "highlight.js/lib/languages/dust.js";
-import ebnfLang from "highlight.js/lib/languages/ebnf.js";
-import elixirLang from "highlight.js/lib/languages/elixir.js";
-import elmLang from "highlight.js/lib/languages/elm.js";
-import erbLang from "highlight.js/lib/languages/erb.js";
-import erlangLang from "highlight.js/lib/languages/erlang.js";
-import erlang_replLang from "highlight.js/lib/languages/erlang-repl.js";
-import excelLang from "highlight.js/lib/languages/excel.js";
-import fixLang from "highlight.js/lib/languages/fix.js";
-import flixLang from "highlight.js/lib/languages/flix.js";
-import fortranLang from "highlight.js/lib/languages/fortran.js";
-import fsharpLang from "highlight.js/lib/languages/fsharp.js";
-import gamsLang from "highlight.js/lib/languages/gams.js";
-import gaussLang from "highlight.js/lib/languages/gauss.js";
-import gcodeLang from "highlight.js/lib/languages/gcode.js";
-import gherkinLang from "highlight.js/lib/languages/gherkin.js";
-import glslLang from "highlight.js/lib/languages/glsl.js";
-import gmlLang from "highlight.js/lib/languages/gml.js";
-import goLang from "highlight.js/lib/languages/go.js";
-import goloLang from "highlight.js/lib/languages/golo.js";
-import gradleLang from "highlight.js/lib/languages/gradle.js";
-import groovyLang from "highlight.js/lib/languages/groovy.js";
-import hamlLang from "highlight.js/lib/languages/haml.js";
-import handlebarsLang from "highlight.js/lib/languages/handlebars.js";
-import haskellLang from "highlight.js/lib/languages/haskell.js";
-import haxeLang from "highlight.js/lib/languages/haxe.js";
-import hspLang from "highlight.js/lib/languages/hsp.js";
-import htmlbarsLang from "highlight.js/lib/languages/htmlbars.js";
-import httpLang from "highlight.js/lib/languages/http.js";
-import hyLang from "highlight.js/lib/languages/hy.js";
-import inform7Lang from "highlight.js/lib/languages/inform7.js";
-import iniLang from "highlight.js/lib/languages/ini.js";
-import irpf90Lang from "highlight.js/lib/languages/irpf90.js";
-import isblLang from "highlight.js/lib/languages/isbl.js";
-import javaLang from "highlight.js/lib/languages/java.js";
-import javascriptLang from "highlight.js/lib/languages/javascript.js";
-import jboss_cliLang from "highlight.js/lib/languages/jboss-cli.js";
-import jsonLang from "highlight.js/lib/languages/json.js";
-import juliaLang from "highlight.js/lib/languages/julia.js";
-import julia_replLang from "highlight.js/lib/languages/julia-repl.js";
-import kotlinLang from "highlight.js/lib/languages/kotlin.js";
-import lassoLang from "highlight.js/lib/languages/lasso.js";
-import latexLang from "highlight.js/lib/languages/latex.js";
-import ldifLang from "highlight.js/lib/languages/ldif.js";
-import leafLang from "highlight.js/lib/languages/leaf.js";
-import lessLang from "highlight.js/lib/languages/less.js";
-import lispLang from "highlight.js/lib/languages/lisp.js";
-import livecodeserverLang from "highlight.js/lib/languages/livecodeserver.js";
-import livescriptLang from "highlight.js/lib/languages/livescript.js";
-import llvmLang from "highlight.js/lib/languages/llvm.js";
-import lslLang from "highlight.js/lib/languages/lsl.js";
-import luaLang from "highlight.js/lib/languages/lua.js";
-import makefileLang from "highlight.js/lib/languages/makefile.js";
-import markdownLang from "highlight.js/lib/languages/markdown.js";
-import mathematicaLang from "highlight.js/lib/languages/mathematica.js";
-import matlabLang from "highlight.js/lib/languages/matlab.js";
-import maximaLang from "highlight.js/lib/languages/maxima.js";
-import melLang from "highlight.js/lib/languages/mel.js";
-import mercuryLang from "highlight.js/lib/languages/mercury.js";
-import mipsasmLang from "highlight.js/lib/languages/mipsasm.js";
-import mizarLang from "highlight.js/lib/languages/mizar.js";
-import mojoliciousLang from "highlight.js/lib/languages/mojolicious.js";
-import monkeyLang from "highlight.js/lib/languages/monkey.js";
-import moonscriptLang from "highlight.js/lib/languages/moonscript.js";
-import n1qlLang from "highlight.js/lib/languages/n1ql.js";
-import nginxLang from "highlight.js/lib/languages/nginx.js";
-import nimLang from "highlight.js/lib/languages/nim.js";
-import nixLang from "highlight.js/lib/languages/nix.js";
-import node_replLang from "highlight.js/lib/languages/node-repl.js";
-import nsisLang from "highlight.js/lib/languages/nsis.js";
-import objectivecLang from "highlight.js/lib/languages/objectivec.js";
-import ocamlLang from "highlight.js/lib/languages/ocaml.js";
-import openscadLang from "highlight.js/lib/languages/openscad.js";
-import oxygeneLang from "highlight.js/lib/languages/oxygene.js";
-import parser3Lang from "highlight.js/lib/languages/parser3.js";
-import perlLang from "highlight.js/lib/languages/perl.js";
-import pfLang from "highlight.js/lib/languages/pf.js";
-import pgsqlLang from "highlight.js/lib/languages/pgsql.js";
-import phpLang from "highlight.js/lib/languages/php.js";
-import php_templateLang from "highlight.js/lib/languages/php-template.js";
-import plaintextLang from "highlight.js/lib/languages/plaintext.js";
-import ponyLang from "highlight.js/lib/languages/pony.js";
-import powershellLang from "highlight.js/lib/languages/powershell.js";
-import processingLang from "highlight.js/lib/languages/processing.js";
-import profileLang from "highlight.js/lib/languages/profile.js";
-import prologLang from "highlight.js/lib/languages/prolog.js";
-import propertiesLang from "highlight.js/lib/languages/properties.js";
-import protobufLang from "highlight.js/lib/languages/protobuf.js";
-import puppetLang from "highlight.js/lib/languages/puppet.js";
-import purebasicLang from "highlight.js/lib/languages/purebasic.js";
-import pythonLang from "highlight.js/lib/languages/python.js";
-import python_replLang from "highlight.js/lib/languages/python-repl.js";
-import qLang from "highlight.js/lib/languages/q.js";
-import qmlLang from "highlight.js/lib/languages/qml.js";
-import rLang from "highlight.js/lib/languages/r.js";
-import reasonmlLang from "highlight.js/lib/languages/reasonml.js";
-import ribLang from "highlight.js/lib/languages/rib.js";
-import roboconfLang from "highlight.js/lib/languages/roboconf.js";
-import routerosLang from "highlight.js/lib/languages/routeros.js";
-import rslLang from "highlight.js/lib/languages/rsl.js";
-import rubyLang from "highlight.js/lib/languages/ruby.js";
-import ruleslanguageLang from "highlight.js/lib/languages/ruleslanguage.js";
-import rustLang from "highlight.js/lib/languages/rust.js";
-import sasLang from "highlight.js/lib/languages/sas.js";
-import scalaLang from "highlight.js/lib/languages/scala.js";
-import schemeLang from "highlight.js/lib/languages/scheme.js";
-import scilabLang from "highlight.js/lib/languages/scilab.js";
-import scssLang from "highlight.js/lib/languages/scss.js";
-import shellLang from "highlight.js/lib/languages/shell.js";
-import smaliLang from "highlight.js/lib/languages/smali.js";
-import smalltalkLang from "highlight.js/lib/languages/smalltalk.js";
-import smlLang from "highlight.js/lib/languages/sml.js";
-import sqfLang from "highlight.js/lib/languages/sqf.js";
-import sqlLang from "highlight.js/lib/languages/sql.js";
-import sql_moreLang from "highlight.js/lib/languages/sql_more.js";
-import stanLang from "highlight.js/lib/languages/stan.js";
-import stataLang from "highlight.js/lib/languages/stata.js";
-import step21Lang from "highlight.js/lib/languages/step21.js";
-import stylusLang from "highlight.js/lib/languages/stylus.js";
-import subunitLang from "highlight.js/lib/languages/subunit.js";
-import swiftLang from "highlight.js/lib/languages/swift.js";
-import taggerscriptLang from "highlight.js/lib/languages/taggerscript.js";
-import tapLang from "highlight.js/lib/languages/tap.js";
-import tclLang from "highlight.js/lib/languages/tcl.js";
-import thriftLang from "highlight.js/lib/languages/thrift.js";
-import tpLang from "highlight.js/lib/languages/tp.js";
-import twigLang from "highlight.js/lib/languages/twig.js";
-import typescriptLang from "highlight.js/lib/languages/typescript.js";
-import valaLang from "highlight.js/lib/languages/vala.js";
-import vbnetLang from "highlight.js/lib/languages/vbnet.js";
-import vbscriptLang from "highlight.js/lib/languages/vbscript.js";
-import vbscript_htmlLang from "highlight.js/lib/languages/vbscript-html.js";
-import verilogLang from "highlight.js/lib/languages/verilog.js";
-import vhdlLang from "highlight.js/lib/languages/vhdl.js";
-import vimLang from "highlight.js/lib/languages/vim.js";
-import x86asmLang from "highlight.js/lib/languages/x86asm.js";
-import xlLang from "highlight.js/lib/languages/xl.js";
-import xmlLang from "highlight.js/lib/languages/xml.js";
-import xqueryLang from "highlight.js/lib/languages/xquery.js";
-import yamlLang from "highlight.js/lib/languages/yaml.js";
-import zephirLang from "highlight.js/lib/languages/zephir.js";
+import type { LanguageFn } from "highlight.js";
+import _1cLang from "highlight.js/lib/languages/1c";
+import abnfLang from "highlight.js/lib/languages/abnf";
+import accesslogLang from "highlight.js/lib/languages/accesslog";
+import actionscriptLang from "highlight.js/lib/languages/actionscript";
+import adaLang from "highlight.js/lib/languages/ada";
+import angelscriptLang from "highlight.js/lib/languages/angelscript";
+import apacheLang from "highlight.js/lib/languages/apache";
+import applescriptLang from "highlight.js/lib/languages/applescript";
+import arcadeLang from "highlight.js/lib/languages/arcade";
+import arduinoLang from "highlight.js/lib/languages/arduino";
+import armasmLang from "highlight.js/lib/languages/armasm";
+import asciidocLang from "highlight.js/lib/languages/asciidoc";
+import aspectjLang from "highlight.js/lib/languages/aspectj";
+import autohotkeyLang from "highlight.js/lib/languages/autohotkey";
+import autoitLang from "highlight.js/lib/languages/autoit";
+import avrasmLang from "highlight.js/lib/languages/avrasm";
+import awkLang from "highlight.js/lib/languages/awk";
+import axaptaLang from "highlight.js/lib/languages/axapta";
+import bashLang from "highlight.js/lib/languages/bash";
+import basicLang from "highlight.js/lib/languages/basic";
+import bnfLang from "highlight.js/lib/languages/bnf";
+import brainfuckLang from "highlight.js/lib/languages/brainfuck";
+import cLang from "highlight.js/lib/languages/c";
+import calLang from "highlight.js/lib/languages/cal";
+import capnprotoLang from "highlight.js/lib/languages/capnproto";
+import ceylonLang from "highlight.js/lib/languages/ceylon";
+import cleanLang from "highlight.js/lib/languages/clean";
+import clojureLang from "highlight.js/lib/languages/clojure";
+import clojure_replLang from "highlight.js/lib/languages/clojure-repl";
+import cmakeLang from "highlight.js/lib/languages/cmake";
+import coffeescriptLang from "highlight.js/lib/languages/coffeescript";
+import coqLang from "highlight.js/lib/languages/coq";
+import cosLang from "highlight.js/lib/languages/cos";
+import cppLang from "highlight.js/lib/languages/cpp";
+import crmshLang from "highlight.js/lib/languages/crmsh";
+import crystalLang from "highlight.js/lib/languages/crystal";
+import csharpLang from "highlight.js/lib/languages/csharp";
+import cspLang from "highlight.js/lib/languages/csp";
+import cssLang from "highlight.js/lib/languages/css";
+import dLang from "highlight.js/lib/languages/d";
+import dartLang from "highlight.js/lib/languages/dart";
+import delphiLang from "highlight.js/lib/languages/delphi";
+import diffLang from "highlight.js/lib/languages/diff";
+import djangoLang from "highlight.js/lib/languages/django";
+import dnsLang from "highlight.js/lib/languages/dns";
+import dockerfileLang from "highlight.js/lib/languages/dockerfile";
+import dosLang from "highlight.js/lib/languages/dos";
+import dsconfigLang from "highlight.js/lib/languages/dsconfig";
+import dtsLang from "highlight.js/lib/languages/dts";
+import dustLang from "highlight.js/lib/languages/dust";
+import ebnfLang from "highlight.js/lib/languages/ebnf";
+import elixirLang from "highlight.js/lib/languages/elixir";
+import elmLang from "highlight.js/lib/languages/elm";
+import erbLang from "highlight.js/lib/languages/erb";
+import erlangLang from "highlight.js/lib/languages/erlang";
+import erlang_replLang from "highlight.js/lib/languages/erlang-repl";
+import excelLang from "highlight.js/lib/languages/excel";
+import fixLang from "highlight.js/lib/languages/fix";
+import flixLang from "highlight.js/lib/languages/flix";
+import fortranLang from "highlight.js/lib/languages/fortran";
+import freedesktopLang from "highlight.js/lib/languages/freedesktop";
+import fsharpLang from "highlight.js/lib/languages/fsharp";
+import gamsLang from "highlight.js/lib/languages/gams";
+import gaussLang from "highlight.js/lib/languages/gauss";
+import gcodeLang from "highlight.js/lib/languages/gcode";
+import gherkinLang from "highlight.js/lib/languages/gherkin";
+import glslLang from "highlight.js/lib/languages/glsl";
+import gmlLang from "highlight.js/lib/languages/gml";
+import goLang from "highlight.js/lib/languages/go";
+import goloLang from "highlight.js/lib/languages/golo";
+import gradleLang from "highlight.js/lib/languages/gradle";
+import graphqlLang from "highlight.js/lib/languages/graphql";
+import groovyLang from "highlight.js/lib/languages/groovy";
+import hamlLang from "highlight.js/lib/languages/haml";
+import handlebarsLang from "highlight.js/lib/languages/handlebars";
+import haskellLang from "highlight.js/lib/languages/haskell";
+import haxeLang from "highlight.js/lib/languages/haxe";
+import hspLang from "highlight.js/lib/languages/hsp";
+import httpLang from "highlight.js/lib/languages/http";
+import hyLang from "highlight.js/lib/languages/hy";
+import inform7Lang from "highlight.js/lib/languages/inform7";
+import iniLang from "highlight.js/lib/languages/ini";
+import irpf90Lang from "highlight.js/lib/languages/irpf90";
+import isblLang from "highlight.js/lib/languages/isbl";
+import javaLang from "highlight.js/lib/languages/java";
+import javascriptLang from "highlight.js/lib/languages/javascript";
+import jboss_cliLang from "highlight.js/lib/languages/jboss-cli";
+import jsonLang from "highlight.js/lib/languages/json";
+import juliaLang from "highlight.js/lib/languages/julia";
+import julia_replLang from "highlight.js/lib/languages/julia-repl";
+import kotlinLang from "highlight.js/lib/languages/kotlin";
+import lassoLang from "highlight.js/lib/languages/lasso";
+import latexLang from "highlight.js/lib/languages/latex";
+import ldifLang from "highlight.js/lib/languages/ldif";
+import leafLang from "highlight.js/lib/languages/leaf";
+import lessLang from "highlight.js/lib/languages/less";
+import lispLang from "highlight.js/lib/languages/lisp";
+import livecodeserverLang from "highlight.js/lib/languages/livecodeserver";
+import livescriptLang from "highlight.js/lib/languages/livescript";
+import llvmLang from "highlight.js/lib/languages/llvm";
+import lslLang from "highlight.js/lib/languages/lsl";
+import luaLang from "highlight.js/lib/languages/lua";
+import makefileLang from "highlight.js/lib/languages/makefile";
+import markdownLang from "highlight.js/lib/languages/markdown";
+import mathematicaLang from "highlight.js/lib/languages/mathematica";
+import matlabLang from "highlight.js/lib/languages/matlab";
+import maximaLang from "highlight.js/lib/languages/maxima";
+import melLang from "highlight.js/lib/languages/mel";
+import mercuryLang from "highlight.js/lib/languages/mercury";
+import mipsasmLang from "highlight.js/lib/languages/mipsasm";
+import mizarLang from "highlight.js/lib/languages/mizar";
+import mojoliciousLang from "highlight.js/lib/languages/mojolicious";
+import monkeyLang from "highlight.js/lib/languages/monkey";
+import moonscriptLang from "highlight.js/lib/languages/moonscript";
+import n1qlLang from "highlight.js/lib/languages/n1ql";
+import nestedtextLang from "highlight.js/lib/languages/nestedtext";
+import nginxLang from "highlight.js/lib/languages/nginx";
+import nimLang from "highlight.js/lib/languages/nim";
+import nixLang from "highlight.js/lib/languages/nix";
+import node_replLang from "highlight.js/lib/languages/node-repl";
+import nsisLang from "highlight.js/lib/languages/nsis";
+import objectivecLang from "highlight.js/lib/languages/objectivec";
+import ocamlLang from "highlight.js/lib/languages/ocaml";
+import openscadLang from "highlight.js/lib/languages/openscad";
+import oxygeneLang from "highlight.js/lib/languages/oxygene";
+import parser3Lang from "highlight.js/lib/languages/parser3";
+import perlLang from "highlight.js/lib/languages/perl";
+import pfLang from "highlight.js/lib/languages/pf";
+import pgsqlLang from "highlight.js/lib/languages/pgsql";
+import phpLang from "highlight.js/lib/languages/php";
+import php_templateLang from "highlight.js/lib/languages/php-template";
+import plaintextLang from "highlight.js/lib/languages/plaintext";
+import ponyLang from "highlight.js/lib/languages/pony";
+import powershellLang from "highlight.js/lib/languages/powershell";
+import processingLang from "highlight.js/lib/languages/processing";
+import profileLang from "highlight.js/lib/languages/profile";
+import prologLang from "highlight.js/lib/languages/prolog";
+import propertiesLang from "highlight.js/lib/languages/properties";
+import protobufLang from "highlight.js/lib/languages/protobuf";
+import puppetLang from "highlight.js/lib/languages/puppet";
+import purebasicLang from "highlight.js/lib/languages/purebasic";
+import pythonLang from "highlight.js/lib/languages/python";
+import python_replLang from "highlight.js/lib/languages/python-repl";
+import qLang from "highlight.js/lib/languages/q";
+import qmlLang from "highlight.js/lib/languages/qml";
+import rLang from "highlight.js/lib/languages/r";
+import reasonmlLang from "highlight.js/lib/languages/reasonml";
+import ribLang from "highlight.js/lib/languages/rib";
+import roboconfLang from "highlight.js/lib/languages/roboconf";
+import routerosLang from "highlight.js/lib/languages/routeros";
+import rslLang from "highlight.js/lib/languages/rsl";
+import rubyLang from "highlight.js/lib/languages/ruby";
+import ruleslanguageLang from "highlight.js/lib/languages/ruleslanguage";
+import rustLang from "highlight.js/lib/languages/rust";
+import sasLang from "highlight.js/lib/languages/sas";
+import scalaLang from "highlight.js/lib/languages/scala";
+import schemeLang from "highlight.js/lib/languages/scheme";
+import scilabLang from "highlight.js/lib/languages/scilab";
+import scssLang from "highlight.js/lib/languages/scss";
+import shellLang from "highlight.js/lib/languages/shell";
+import smaliLang from "highlight.js/lib/languages/smali";
+import smalltalkLang from "highlight.js/lib/languages/smalltalk";
+import smlLang from "highlight.js/lib/languages/sml";
+import sqfLang from "highlight.js/lib/languages/sqf";
+import sqlLang from "highlight.js/lib/languages/sql";
+import stanLang from "highlight.js/lib/languages/stan";
+import stataLang from "highlight.js/lib/languages/stata";
+import step21Lang from "highlight.js/lib/languages/step21";
+import stylusLang from "highlight.js/lib/languages/stylus";
+import subunitLang from "highlight.js/lib/languages/subunit";
+import swiftLang from "highlight.js/lib/languages/swift";
+import taggerscriptLang from "highlight.js/lib/languages/taggerscript";
+import tapLang from "highlight.js/lib/languages/tap";
+import tclLang from "highlight.js/lib/languages/tcl";
+import thriftLang from "highlight.js/lib/languages/thrift";
+import tpLang from "highlight.js/lib/languages/tp";
+import twigLang from "highlight.js/lib/languages/twig";
+import typescriptLang from "highlight.js/lib/languages/typescript";
+import valaLang from "highlight.js/lib/languages/vala";
+import vbnetLang from "highlight.js/lib/languages/vbnet";
+import vbscriptLang from "highlight.js/lib/languages/vbscript";
+import vbscript_htmlLang from "highlight.js/lib/languages/vbscript-html";
+import verilogLang from "highlight.js/lib/languages/verilog";
+import vhdlLang from "highlight.js/lib/languages/vhdl";
+import vimLang from "highlight.js/lib/languages/vim";
+import wasmLang from "highlight.js/lib/languages/wasm";
+import wrenLang from "highlight.js/lib/languages/wren";
+import x86asmLang from "highlight.js/lib/languages/x86asm";
+import xlLang from "highlight.js/lib/languages/xl";
+import xmlLang from "highlight.js/lib/languages/xml";
+import xqueryLang from "highlight.js/lib/languages/xquery";
+import yamlLang from "highlight.js/lib/languages/yaml";
+import zephirLang from "highlight.js/lib/languages/zephir";
 
-export type HighlightLanguageFn = (hljs: unknown) => unknown;
-
-// Canonical highlight.js language name -> language definition factory.
-export const HIGHLIGHT_LANGUAGE_MODULES: Record<string, HighlightLanguageFn> = {
+// Canonical names precede aliases; registration order determines alias collisions.
+export const HIGHLIGHT_LANGUAGE_MODULES: Record<string, LanguageFn> = {
 	"1c": _1cLang,
 	abnf: abnfLang,
 	accesslog: accesslogLang,
@@ -225,7 +222,6 @@ export const HIGHLIGHT_LANGUAGE_MODULES: Record<string, HighlightLanguageFn> = {
 	basic: basicLang,
 	bnf: bnfLang,
 	brainfuck: brainfuckLang,
-	"c-like": c_likeLang,
 	c: cLang,
 	cal: calLang,
 	capnproto: capnprotoLang,
@@ -266,6 +262,7 @@ export const HIGHLIGHT_LANGUAGE_MODULES: Record<string, HighlightLanguageFn> = {
 	fix: fixLang,
 	flix: flixLang,
 	fortran: fortranLang,
+	freedesktop: freedesktopLang,
 	fsharp: fsharpLang,
 	gams: gamsLang,
 	gauss: gaussLang,
@@ -276,13 +273,13 @@ export const HIGHLIGHT_LANGUAGE_MODULES: Record<string, HighlightLanguageFn> = {
 	go: goLang,
 	golo: goloLang,
 	gradle: gradleLang,
+	graphql: graphqlLang,
 	groovy: groovyLang,
 	haml: hamlLang,
 	handlebars: handlebarsLang,
 	haskell: haskellLang,
 	haxe: haxeLang,
 	hsp: hspLang,
-	htmlbars: htmlbarsLang,
 	http: httpLang,
 	hy: hyLang,
 	inform7: inform7Lang,
@@ -320,6 +317,7 @@ export const HIGHLIGHT_LANGUAGE_MODULES: Record<string, HighlightLanguageFn> = {
 	monkey: monkeyLang,
 	moonscript: moonscriptLang,
 	n1ql: n1qlLang,
+	nestedtext: nestedtextLang,
 	nginx: nginxLang,
 	nim: nimLang,
 	nix: nixLang,
@@ -366,7 +364,6 @@ export const HIGHLIGHT_LANGUAGE_MODULES: Record<string, HighlightLanguageFn> = {
 	smalltalk: smalltalkLang,
 	sml: smlLang,
 	sqf: sqfLang,
-	sql_more: sql_moreLang,
 	sql: sqlLang,
 	stan: stanLang,
 	stata: stataLang,
@@ -389,15 +386,14 @@ export const HIGHLIGHT_LANGUAGE_MODULES: Record<string, HighlightLanguageFn> = {
 	verilog: verilogLang,
 	vhdl: vhdlLang,
 	vim: vimLang,
+	wasm: wasmLang,
+	wren: wrenLang,
 	x86asm: x86asmLang,
 	xl: xlLang,
 	xquery: xqueryLang,
 	zephir: zephirLang,
 };
 
-// Alias name -> canonical highlight.js language name (mirrors the aliases each
-// language module registers internally; last registration wins, matching the
-// original highlight.js/lib/index.js registration order).
 export const HIGHLIGHT_LANGUAGE_ALIASES: Record<string, string> = {
 	as: "actionscript",
 	asc: "angelscript",
@@ -421,8 +417,17 @@ export const HIGHLIGHT_LANGUAGE_ALIASES: Record<string, string> = {
 	sh: "bash",
 	zsh: "bash",
 	bf: "brainfuck",
-	c: "c-like",
 	h: "c",
+	capnp: "capnproto",
+	icl: "clean",
+	dcl: "clean",
+	clj: "clojure",
+	edn: "clojure",
+	"cmake.in": "cmake",
+	coffee: "coffeescript",
+	cson: "coffeescript",
+	iced: "coffeescript",
+	cls: "cos",
 	cc: "cpp",
 	"c++": "cpp",
 	"h++": "cpp",
@@ -430,15 +435,6 @@ export const HIGHLIGHT_LANGUAGE_ALIASES: Record<string, string> = {
 	hh: "cpp",
 	hxx: "cpp",
 	cxx: "cpp",
-	capnp: "capnproto",
-	icl: "clean",
-	dcl: "clean",
-	clj: "clojure",
-	"cmake.in": "cmake",
-	coffee: "coffeescript",
-	cson: "coffeescript",
-	iced: "coffeescript",
-	cls: "cos",
 	crm: "crmsh",
 	pcmk: "crmsh",
 	cr: "crystal",
@@ -451,18 +447,17 @@ export const HIGHLIGHT_LANGUAGE_ALIASES: Record<string, string> = {
 	dfm: "delphi",
 	pas: "delphi",
 	pascal: "delphi",
-	freepascal: "delphi",
-	lazarus: "delphi",
-	lpr: "delphi",
-	lfm: "delphi",
 	patch: "diff",
 	jinja: "django",
 	bind: "dns",
 	zone: "dns",
 	docker: "dockerfile",
 	bat: "dos",
+	batch: "dos",
 	cmd: "dos",
 	dst: "dust",
+	ex: "elixir",
+	exs: "elixir",
 	rb: "ruby",
 	gemspec: "ruby",
 	podspec: "ruby",
@@ -473,15 +468,19 @@ export const HIGHLIGHT_LANGUAGE_ALIASES: Record<string, string> = {
 	xls: "excel",
 	f90: "fortran",
 	f95: "fortran",
+	desktop: "freedesktop",
+	systemd: "freedesktop",
 	fs: "fsharp",
+	"f#": "fsharp",
 	gms: "gams",
 	gss: "gauss",
 	nc: "gcode",
 	feature: "gherkin",
 	golang: "go",
-	hbs: "htmlbars",
-	"html.hbs": "htmlbars",
-	"html.handlebars": "htmlbars",
+	gql: "graphql",
+	hbs: "handlebars",
+	"html.hbs": "handlebars",
+	"html.handlebars": "handlebars",
 	htmlbars: "handlebars",
 	hs: "haskell",
 	hx: "haxe",
@@ -495,11 +494,17 @@ export const HIGHLIGHT_LANGUAGE_ALIASES: Record<string, string> = {
 	mjs: "javascript",
 	cjs: "javascript",
 	"wildfly-cli": "jboss-cli",
+	jsonc: "json",
+	json5: "json",
+	jldoctest: "julia-repl",
 	kt: "kotlin",
 	kts: "kotlin",
+	ktm: "kotlin",
+	ktx: "kotlin",
 	ls: "livescript",
 	lassoscript: "lasso",
 	tex: "latex",
+	pluto: "lua",
 	mk: "makefile",
 	mak: "makefile",
 	make: "makefile",
@@ -511,6 +516,7 @@ export const HIGHLIGHT_LANGUAGE_ALIASES: Record<string, string> = {
 	pl: "perl",
 	pm: "perl",
 	moon: "moonscript",
+	nt: "nestedtext",
 	nginxconf: "nginx",
 	nixos: "nix",
 	mm: "objectivec",
@@ -523,16 +529,13 @@ export const HIGHLIGHT_LANGUAGE_ALIASES: Record<string, string> = {
 	"pf.conf": "pf",
 	postgres: "pgsql",
 	postgresql: "pgsql",
-	php3: "php",
-	php4: "php",
-	php5: "php",
-	php6: "php",
-	php7: "php",
-	php8: "php",
 	text: "plaintext",
 	txt: "plaintext",
+	pwsh: "powershell",
 	ps: "powershell",
 	ps1: "powershell",
+	pde: "processing",
+	proto: "protobuf",
 	pp: "puppet",
 	pb: "purebasic",
 	pbi: "purebasic",
@@ -548,11 +551,11 @@ export const HIGHLIGHT_LANGUAGE_ALIASES: Record<string, string> = {
 	instances: "roboconf",
 	mikrotik: "routeros",
 	rs: "rust",
+	scm: "scheme",
 	sci: "scilab",
 	console: "shell",
+	shellsession: "shell",
 	st: "smalltalk",
-	mysql: "sql_more",
-	oracle: "sql_more",
 	stanfuncs: "stan",
 	do: "stata",
 	ado: "stata",
@@ -565,6 +568,8 @@ export const HIGHLIGHT_LANGUAGE_ALIASES: Record<string, string> = {
 	craftcms: "twig",
 	ts: "typescript",
 	tsx: "typescript",
+	mts: "typescript",
+	cts: "typescript",
 	vb: "vbnet",
 	vbs: "vbscript",
 	v: "verilog",
@@ -573,5 +578,6 @@ export const HIGHLIGHT_LANGUAGE_ALIASES: Record<string, string> = {
 	tao: "xl",
 	xpath: "xquery",
 	xq: "xquery",
+	xqm: "xquery",
 	zep: "zephir",
 };

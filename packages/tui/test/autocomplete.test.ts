@@ -171,38 +171,36 @@ describe("CombinedAutocompleteProvider", () => {
 		}
 	});
 
-	test(
-		"settles an fd walk immediately when its request is aborted",
-		{ skip: process.platform === "win32" },
-		async () => {
-			const rootDir = mkdtempSync(join(tmpdir(), "pi-autocomplete-abort-"));
-			let guard: ReturnType<typeof setTimeout> | undefined;
-			try {
-				const hangingFd = join(rootDir, "hanging-fd");
-				writeFileSync(
-					hangingFd,
-					'#!/usr/bin/env node\nprocess.on("SIGTERM", () => {});\nsetInterval(() => {}, 1_000);\n',
-				);
-				chmodSync(hangingFd, 0o755);
-				const provider = new CombinedAutocompleteProvider([], rootDir, hangingFd);
-				const controller = new AbortController();
-				const pending = provider.getSuggestions(["@"], 0, 1, { signal: controller.signal });
-				await new Promise((resolve) => setTimeout(resolve, 25));
-				controller.abort();
+	test("settles an fd walk immediately when its request is aborted", {
+		skip: process.platform === "win32",
+	}, async () => {
+		const rootDir = mkdtempSync(join(tmpdir(), "pi-autocomplete-abort-"));
+		let guard: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const hangingFd = join(rootDir, "hanging-fd");
+			writeFileSync(
+				hangingFd,
+				'#!/usr/bin/env node\nprocess.on("SIGTERM", () => {});\nsetInterval(() => {}, 1_000);\n',
+			);
+			chmodSync(hangingFd, 0o755);
+			const provider = new CombinedAutocompleteProvider([], rootDir, hangingFd);
+			const controller = new AbortController();
+			const pending = provider.getSuggestions(["@"], 0, 1, { signal: controller.signal });
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			controller.abort();
 
-				const result = await Promise.race([
-					pending,
-					new Promise<never>((_resolve, reject) => {
-						guard = setTimeout(() => reject(new Error("aborted fd autocomplete did not settle")), 1_000);
-					}),
-				]);
-				assert.strictEqual(result, null);
-			} finally {
-				if (guard) clearTimeout(guard);
-				rmSync(rootDir, { recursive: true, force: true });
-			}
-		},
-	);
+			const result = await Promise.race([
+				pending,
+				new Promise<never>((_resolve, reject) => {
+					guard = setTimeout(() => reject(new Error("aborted fd autocomplete did not settle")), 1_000);
+				}),
+			]);
+			assert.strictEqual(result, null);
+		} finally {
+			if (guard) clearTimeout(guard);
+			rmSync(rootDir, { recursive: true, force: true });
+		}
+	});
 
 	describe("fd @ file suggestions", { skip: !isFdInstalled }, () => {
 		let rootDir = "";

@@ -1359,9 +1359,18 @@ export class InteractiveMode {
 				if (!text) return;
 			}
 
-			// User input submitted while work is active is always steering. Treat
-			// slash/bang text as user steering text instead of executing commands that
-			// would interrupt the current stream or compaction.
+			if (
+				await sessionFlows.tryHandleGoalEditorSubmit(text, queueAsFollowUp, {
+					session: this.session,
+					editor: this.editor,
+					handleGoalCommand: (input) => this.handleGoalCommand(input),
+					showError: (message) => this.showError(message),
+				})
+			)
+				return;
+
+			// Other input submitted during work is steering. Slash/bang text must not execute
+			// commands that would interrupt the current stream or compaction.
 			if (this.session.isCompacting) {
 				const images = this.takeClipboardImagesForText(text);
 				this.queueCompactionMessage(text, queueAsFollowUp ? "followUp" : "steer", images);
@@ -1534,11 +1543,6 @@ export class InteractiveMode {
 			}
 			if (text === "/cost") {
 				this.handleUsageCommand();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/goal" || text.startsWith("/goal ")) {
-				await this.handleGoalCommand(text);
 				this.editor.setText("");
 				return;
 			}
@@ -3065,7 +3069,7 @@ export class InteractiveMode {
 		if (this.anthropicSubscriptionWarningShown) {
 			return;
 		}
-		if (!model || model.provider !== "anthropic") {
+		if (model?.provider !== "anthropic") {
 			return;
 		}
 

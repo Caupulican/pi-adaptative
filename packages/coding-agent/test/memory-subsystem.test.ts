@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -803,9 +804,8 @@ describe("Memory Subsystem - FileStoreProvider", () => {
 		const files = readFileSync(join(agentDir, "MEMORY.md"), "utf-8");
 		expect(files).toBe("Drift modification out-of-band!");
 
-		const dirContents = readdirSync(agentDir);
-		const hasBackup = dirContents.some((f) => /^MEMORY\.md\.bak\.\d+$/.test(f));
-		expect(hasBackup).toBe(true);
+		const digest = createHash("sha256").update(files, "utf8").digest("hex");
+		expect(readFileSync(join(agentDir, `MEMORY.md.bak.sha256-${digest}`), "utf8")).toBe(files);
 	});
 });
 

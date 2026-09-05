@@ -217,7 +217,7 @@ function callbackEvidencedCompletion(
 	}
 	const assistants = emittedMessages.filter((message): message is AssistantMessage => message.role === "assistant");
 	const finalMessage = emittedMessages.at(-1);
-	if (!finalMessage || finalMessage.role !== "assistant") {
+	if (finalMessage?.role !== "assistant") {
 		throw new WorkerCompletionProtocolError(
 			"Worker completion protocol did not durably emit an assistant as its terminal message.",
 		);

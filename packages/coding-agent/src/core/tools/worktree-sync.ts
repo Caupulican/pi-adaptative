@@ -180,7 +180,7 @@ export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): To
 				const context = await resolveRepoContext(engineDeps);
 				if ("code" in context) return respond([`[${context.code}] ${context.message}`], context);
 				const lane = await readLane(context.paths, laneKey!);
-				if (!lane || lane.status !== "active") {
+				if (lane?.status !== "active") {
 					const message = `active lane '${laneKey}' is not available`;
 					return respond([`[lane_not_found] ${message}`], { code: "lane_not_found", message });
 				}

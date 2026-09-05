@@ -731,8 +731,7 @@ async function startWorkerBranch(
 		// PID to a durable identity and proves that that exact session is still heartbeating.
 		if (!currentParentSessionId || !config.isProcessAlive(currentParentPid)) return false;
 		const parent = await store.readEntry(config.agentDir, buildEntryId("master", currentParentSessionId));
-		if (!parent || parent.role !== "master" || parent.agent.resumeContext.sessionId !== currentParentSessionId)
-			return false;
+		if (parent?.role !== "master" || parent.agent.resumeContext.sessionId !== currentParentSessionId) return false;
 		if (parent.pid !== currentParentPid || parent.status !== "running") return false;
 		const heartbeatAt = Date.parse(parent.heartbeatAt);
 		const maxAge = config.settings.heartbeatMs * 2 + config.settings.watcherPollMs;

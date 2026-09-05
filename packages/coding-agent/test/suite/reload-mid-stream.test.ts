@@ -48,7 +48,7 @@ describe("extension reload while the agent is streaming", () => {
 		const branchMessages = branch.filter((entry) => entry.type === "message").map((entry) => entry.message);
 		expect(branchMessages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
 		const toolResult = branchMessages.find((message) => message.role === "toolResult");
-		if (!toolResult || toolResult.role !== "toolResult") throw new Error("missing tool result");
+		if (toolResult?.role !== "toolResult") throw new Error("missing tool result");
 		expect(toolResult.isError).toBe(true);
 
 		// Every entry's parent must resolve inside the session tree.

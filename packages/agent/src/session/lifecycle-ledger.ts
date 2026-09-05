@@ -512,7 +512,7 @@ export function indexSessionLifecycle(entries: readonly SessionEntry[], leafId?:
 			const request = requestAtPosition[position];
 			const requestKey = requestCallKey(request?.requestId, entry.message.toolCallId);
 			const pendingCalls = pendingCallsByRequestAndCall.get(requestKey);
-			if (!pendingCalls || pendingCalls.length !== 1) {
+			if (pendingCalls?.length !== 1) {
 				if (pendingCalls && pendingCalls.length > 1) ambiguousResultEntryIds.push(entry.id);
 				else {
 					const completedCall = completedCallsByRequestAndCall.get(requestKey);

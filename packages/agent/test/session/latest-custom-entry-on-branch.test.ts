@@ -31,7 +31,7 @@ describe("SessionManager.getLatestCustomEntryOnBranch", () => {
 
 		const found = session.getLatestCustomEntryOnBranch("goal_state");
 		expect(found?.id).toBe(third);
-		expect((found?.data as { v: number }).v).toBe(3);
+		expect(found?.data).toEqual({ v: 3 });
 	});
 
 	it("ignores entries of a different customType", () => {
@@ -55,14 +55,14 @@ describe("SessionManager.getLatestCustomEntryOnBranch", () => {
 		// The leaf is now on branch B: only branch B's entry is visible.
 		const foundOnB = session.getLatestCustomEntryOnBranch("goal_state");
 		expect(foundOnB?.id).toBe(branchBEntry);
-		expect((foundOnB?.data as { branch: string }).branch).toBe("B");
+		expect(foundOnB?.data).toEqual({ branch: "B" });
 
 		// Switching the leaf back to branch A's own entry makes branch A's state visible again;
 		// branch B's entry (never an ancestor of branch A's leaf) is not seen.
 		session.branch(branchAEntry);
 		const foundOnA = session.getLatestCustomEntryOnBranch("goal_state");
 		expect(foundOnA?.id).toBe(branchAEntry);
-		expect((foundOnA?.data as { branch: string }).branch).toBe("A");
+		expect(foundOnA?.data).toEqual({ branch: "A" });
 	});
 
 	it("fromId resumes the walk from that entry (inclusive), skipping anything after it", () => {
@@ -73,7 +73,7 @@ describe("SessionManager.getLatestCustomEntryOnBranch", () => {
 		// Starting the walk explicitly at the first entry's id must not see the later "second" entry.
 		const found = session.getLatestCustomEntryOnBranch("goal_state", first);
 		expect(found?.id).toBe(first);
-		expect((found?.data as { v: string }).v).toBe("first");
+		expect(found?.data).toEqual({ v: "first" });
 	});
 
 	it("walking from a matching entry's parentId resumes the search one step further up the ancestry", () => {

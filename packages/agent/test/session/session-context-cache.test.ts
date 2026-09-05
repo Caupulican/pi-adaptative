@@ -203,7 +203,7 @@ describe("SessionManager context cache", () => {
 
 		const first = session.buildSessionContext();
 		const summary = first.messages.find((message) => message.role === "compactionSummary");
-		if (!summary || summary.role !== "compactionSummary") throw new Error("Expected compaction summary.");
+		if (summary?.role !== "compactionSummary") throw new Error("Expected compaction summary.");
 		summary.summary = "caller mutation";
 
 		expect(
@@ -214,7 +214,7 @@ describe("SessionManager context cache", () => {
 
 		session.appendCustomMessageEntry("canonical custom", "notice", false);
 		const custom = session.buildSessionContext().messages.find((message) => message.role === "custom");
-		if (!custom || custom.role !== "custom") throw new Error("Expected custom message.");
+		if (custom?.role !== "custom") throw new Error("Expected custom message.");
 		custom.customType = "caller mutation";
 		expect(session.buildSessionContext().messages.find((message) => message.role === "custom")).toMatchObject({
 			customType: "canonical custom",
@@ -222,7 +222,7 @@ describe("SessionManager context cache", () => {
 
 		session.branchWithSummary(session.getLeafId(), "canonical branch summary");
 		const branchSummary = session.buildSessionContext().messages.find((message) => message.role === "branchSummary");
-		if (!branchSummary || branchSummary.role !== "branchSummary") throw new Error("Expected branch summary.");
+		if (branchSummary?.role !== "branchSummary") throw new Error("Expected branch summary.");
 		branchSummary.summary = "caller mutation";
 		expect(session.buildSessionContext().messages.find((message) => message.role === "branchSummary")).toMatchObject({
 			summary: "canonical branch summary",

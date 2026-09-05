@@ -35,7 +35,7 @@ afterEach(() => {
 	vi.unstubAllEnvs();
 });
 
-// Verified against the real ollama/ollama GitHub release (v0.31.1) and its own install.sh, not
+// Verified against the real ollama/ollama GitHub release (v0.33.3) and its own install.sh, not
 // guessed: darwin ships a CLI .tgz (distinct from the Ollama.app/.dmg GUI installer), linux ships
 // .tar.zst, windows ships .zip.
 describe("resolveOllamaAsset", () => {
@@ -111,8 +111,9 @@ describe.skipIf(process.platform === "win32")("TransformersRuntime", () => {
 
 		await expect(runtime.installManaged()).resolves.toEqual({ ok: true });
 		expect(commands[0]).toEqual({ command: "python", args: ["--version"] });
-		expect(commands.some((entry) => entry.args.join(" ").includes("transformers==5.13.0"))).toBe(true);
-		expect(commands.some((entry) => entry.args.join(" ").includes("torch==2.12.1+cpu"))).toBe(true);
+		expect(commands.some((entry) => entry.args.join(" ").includes("transformers==5.16.1"))).toBe(true);
+		expect(commands.some((entry) => entry.args.join(" ").includes("huggingface-hub==1.30.0"))).toBe(true);
+		expect(commands.some((entry) => entry.args.join(" ").includes("torch==2.14.0+cpu"))).toBe(true);
 		expect(commands.some((entry) => entry.args.join(" ").includes("https://download.pytorch.org/whl/cpu"))).toBe(
 			true,
 		);
@@ -875,18 +876,23 @@ describe.skipIf(process.platform === "win32")("OllamaRuntime", () => {
 		it("reports ok and reports progress when download, extraction, and the post-extract check all succeed", async () => {
 			const agentDir = `${process.cwd()}/.scratch-runtime-test-install-3`;
 			const progress: string[] = [];
+			const fetchFn = vi.fn(async () => new Response(fakeBody() as never, { status: 200 }));
 			const runtime = new OllamaRuntime({
 				agentDir,
 				deps: {
 					platform: () => "linux",
 					arch: () => "x64",
-					fetchFn: (async () => new Response(fakeBody() as never, { status: 200 })) as unknown as typeof fetch,
+					fetchFn,
 					extractArchive: async () => ({ ok: true }),
 					existsFn: (path) => path === `${agentDir}/runtimes/ollama/bin/ollama`,
 				},
 			});
 			const result = await runtime.installManaged((status) => progress.push(status));
 			expect(result).toEqual({ ok: true });
+			expect(fetchFn).toHaveBeenCalledWith(
+				"https://github.com/ollama/ollama/releases/download/v0.33.3/ollama-linux-amd64.tar.zst",
+				undefined,
+			);
 			expect(progress.length).toBeGreaterThan(0);
 		});
 	});

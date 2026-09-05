@@ -393,6 +393,8 @@ export function directoryProfilesDir(agentDir: string): string {
 	return join(resourceDir("profiles", agentDir), "directories");
 }
 
+export type { AcquireWorkRunOptions, WorkRetentionOptions, WorkRunLease } from "../utils/work-directory.ts";
+
 /**
  * `work/` is a mature transient/scratch root with its own tenant/run/lease/retention machinery
  * (`utils/work-directory.ts`). The SSOT delegates to it wholesale instead of reimplementing -- these
@@ -400,18 +402,17 @@ export function directoryProfilesDir(agentDir: string): string {
  * module without duplicating `work-directory.ts`'s logic.
  */
 export {
-	getWorkRoot,
+	acquireWorkRun,
 	assertPortablePathSegment,
 	boundedWorkRetention,
-	getWorkTenantDir,
-	getWorkRunDir,
-	getProcessWorkRun,
-	hasActiveWorkRunLease,
-	acquireWorkRun,
 	createWorkRunId,
+	getProcessWorkRun,
+	getWorkRoot,
+	getWorkRunDir,
+	getWorkTenantDir,
+	hasActiveWorkRunLease,
 	pruneWorkTenant,
 };
-export type { AcquireWorkRunOptions, WorkRetentionOptions, WorkRunLease } from "../utils/work-directory.ts";
 
 /**
  * `work/reload-coordination` -- cross-process reload/live-op coordination state. Already correctly

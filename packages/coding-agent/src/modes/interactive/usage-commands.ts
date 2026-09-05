@@ -149,7 +149,7 @@ function showUsageMenu(host: UsageCommandHost, client: OpenAICodexUsageResetClie
 
 async function loadResetCredits(host: UsageCommandHost, client: OpenAICodexUsageResetClient): Promise<void> {
 	const model = host.session.model;
-	if (!model || model.provider !== "openai-codex" || !host.session.modelRegistry.isUsingOAuth(model)) {
+	if (model?.provider !== "openai-codex" || !host.session.modelRegistry.isUsingOAuth(model)) {
 		host.showError("Usage limit resets require an active OpenAI Codex subscription lane.");
 		return;
 	}

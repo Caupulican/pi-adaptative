@@ -248,7 +248,7 @@ function routeRemove(argv: readonly string[]): string | undefined {
 
 function routeCopyOrMove(argv: readonly string[], move: boolean): string | undefined {
 	const parsed = parseFlags(argv.slice(1), move ? new Set<string>() : new Set(["-r", "-R"]));
-	if (!parsed || parsed.operands.length !== 2) return undefined;
+	if (parsed?.operands.length !== 2) return undefined;
 	const [source, destination] = parsed.operands;
 	const recurse = !move && parsed.flags.size > 0 ? " -Recurse" : "";
 	const rejectDirectoryWithoutRecursion =

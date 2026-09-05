@@ -176,7 +176,7 @@ describe("compact active-goal context", () => {
 		);
 		const initial = injectCompactGoalContext([trigger], state);
 		const initialProjection = initial.at(-1);
-		if (!initialProjection || initialProjection.role !== "custom") throw new Error("Expected compact goal context");
+		if (initialProjection?.role !== "custom") throw new Error("Expected compact goal context");
 		expect(initialProjection.content).not.toContain("Hydrate missing state");
 		expect(initialProjection.content).not.toContain("get_goal");
 		expect(initialProjection.content).not.toContain("task_steps");
@@ -196,7 +196,7 @@ describe("compact active-goal context", () => {
 			state,
 		);
 		const failedProjection = afterFailedTaskStepsCall.at(-1);
-		if (!failedProjection || failedProjection.role !== "custom") throw new Error("Expected compact goal context");
+		if (failedProjection?.role !== "custom") throw new Error("Expected compact goal context");
 		expect(failedProjection.content).not.toContain("Hydrate missing state");
 
 		const afterSuccessfulTaskStepsCall = injectCompactGoalContext(
@@ -214,7 +214,7 @@ describe("compact active-goal context", () => {
 			state,
 		);
 		const hydratedProjection = afterSuccessfulTaskStepsCall.at(-1);
-		if (!hydratedProjection || hydratedProjection.role !== "custom") throw new Error("Expected compact goal context");
+		if (hydratedProjection?.role !== "custom") throw new Error("Expected compact goal context");
 		expect(hydratedProjection.content).not.toContain("Hydrate missing state");
 	});
 
@@ -240,7 +240,7 @@ describe("compact active-goal context", () => {
 		const projection = plan.transientMessages?.find(
 			(message) => message.role === "custom" && message.customType === ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE,
 		);
-		if (!projection || projection.role !== "custom") throw new Error("Expected compact goal context");
+		if (projection?.role !== "custom") throw new Error("Expected compact goal context");
 		expect(projection.content).toContain("Continue objective.");
 		// get_goal's toolResult above must not leak into the projection -- the compact block already
 		// contains everything get_goal would provide, and the now-removed hydration mechanism (see the

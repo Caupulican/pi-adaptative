@@ -760,6 +760,38 @@ function formatGoalStatus(snapshot: ReturnType<AgentSession["getGoalRuntimeSnaps
 	return `Goal: ${state.userGoal}\nStatus: ${state.status}${blockedReason}${tokenUsage}\nRequirements: open ${snapshot.continuation.openRequirementIds.length}, blocked ${snapshot.continuation.blockedRequirementIds.length}, satisfied ${snapshot.continuation.satisfiedRequirementIds.length}${requirementDetails}\nContinuation: ${snapshot.continuation.action}/${snapshot.continuation.reasonCode}\nControls: /goal edit | /goal pause | /goal resume | /goal reopen <requirement-id> | /goal complete | /goal clear | /goal override <text>`;
 }
 
+/**
+ * Direct editor controls that do not open a modal or launch another foreground turn.
+ * This is delivery policy only; handleGoalCommand owns their lifecycle validation and persistence.
+ */
+const IMMEDIATE_GOAL_CONTROL_PATTERN =
+	/^\/goal(?: +(?:status|resume|pause|complete|clear|close|cancel|reopen(?: +\S+)?))?$/;
+
+export interface GoalEditorSubmitHost {
+	readonly session: Pick<AgentSession, "isCompacting" | "isStreaming" | "isRetrying">;
+	readonly editor: Pick<EditorComponent, "setText">;
+	handleGoalCommand(text: string): Promise<void>;
+	showError(message: string): void;
+}
+
+/** Route owner controls before busy steering; explicit follow-ups stay literal while work is active. */
+export async function tryHandleGoalEditorSubmit(
+	text: string,
+	queueAsFollowUp: boolean,
+	host: GoalEditorSubmitHost,
+): Promise<boolean> {
+	if (text !== "/goal" && !text.startsWith("/goal ")) return false;
+	const workIsActive = host.session.isCompacting || host.session.isStreaming || host.session.isRetrying;
+	if (workIsActive && (queueAsFollowUp || !IMMEDIATE_GOAL_CONTROL_PATTERN.test(text))) return false;
+	host.editor.setText("");
+	try {
+		await host.handleGoalCommand(text);
+	} catch (error) {
+		host.showError(`Goal command failed: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	return true;
+}
+
 export async function handleGoalCommand(host: GoalCommandHost, text: string): Promise<void> {
 	const input = text.replace(/^\/goal\s*/, "").trim();
 	if (!input || input === "status") {
@@ -855,7 +887,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			return;
 		}
 		const requirement = current.requirements.find((candidate) => candidate.id === requirementId);
-		if (!requirement || requirement.status !== "blocked") {
+		if (requirement?.status !== "blocked") {
 			host.showError(
 				requirement
 					? `Requirement '${requirementId}' is ${requirement.status}; only blocked requirements can be reopened.`

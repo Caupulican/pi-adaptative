@@ -1,4 +1,4 @@
-import hljs from "highlight.js/lib/core.js";
+import hljs from "highlight.js/lib/core";
 import { HIGHLIGHT_LANGUAGE_ALIASES, HIGHLIGHT_LANGUAGE_MODULES } from "./highlight-js-languages.ts";
 import { decodeHtmlEntityAt } from "./html.ts";
 

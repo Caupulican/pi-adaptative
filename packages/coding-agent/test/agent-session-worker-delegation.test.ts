@@ -2096,7 +2096,7 @@ describe("AgentSession worker delegation", () => {
 				),
 			);
 			const partialAssistant = conversation.getProviderContext().messages.at(-1);
-			if (!partialAssistant || partialAssistant.role !== "assistant") throw new Error("Expected partial tool batch");
+			if (partialAssistant?.role !== "assistant") throw new Error("Expected partial tool batch");
 			const [first, second] = partialAssistant.content
 				.filter(
 					(content): content is Extract<(typeof partialAssistant.content)[number], { type: "toolCall" }> =>

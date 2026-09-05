@@ -22,7 +22,6 @@ if (typeof process !== "undefined" && (process.versions?.node || process.version
 	});
 }
 
-import { clampThinkingLevel } from "../models.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	Api,
@@ -58,7 +57,7 @@ import {
 	createOpenAIResponsesToolNameMap,
 	processResponsesStream,
 } from "./openai-responses-shared.ts";
-import { buildBaseOptions } from "./simple-options.ts";
+import { buildClampedSimpleOptions } from "./provider-runtime.ts";
 
 // ============================================================================
 // Configuration
@@ -99,7 +98,6 @@ const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 export interface OpenAICodexResponsesOptions extends StreamOptions {
 	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 	reasoningSummary?: "auto" | "concise" | "detailed" | "off" | "on" | null;
-	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	textVerbosity?: "low" | "medium" | "high";
 	toolChoice?: "auto" | "none" | "required";
 }
@@ -613,13 +611,7 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	const apiKey = options?.apiKey;
-	if (!apiKey) {
-		throw new Error(`No API key for provider: ${model.provider}`);
-	}
-
-	const base = buildBaseOptions(model, options, apiKey);
-	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
+	const { base, clampedReasoning } = buildClampedSimpleOptions(model, options);
 	const reasoningEffort = clampedReasoning === "off" ? "none" : clampedReasoning;
 
 	return streamOpenAICodexResponses(model, context, {

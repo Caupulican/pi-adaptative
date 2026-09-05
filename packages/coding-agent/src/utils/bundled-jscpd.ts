@@ -4,9 +4,9 @@ import { createRequire } from "node:module";
 import { arch, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { getBinDir } from "../config.ts";
+import { getBinDir, getPackageDependencyVersion } from "../config.ts";
 
-export const JSCPD_VERSION = "5.0.14";
+export const JSCPD_VERSION = getPackageDependencyVersion("jscpd");
 
 type ModuleRequire = ((id: string) => unknown) & { resolve?(id: string): string };
 

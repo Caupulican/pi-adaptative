@@ -121,7 +121,7 @@ describe("durable current-turn reflection cue state", () => {
 		const lastCueStateIndex = branch.findLastIndex(
 			(entry) => entry.type === "custom" && entry.customType === CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
 		);
-		if (!compaction || compaction.type !== "compaction") throw new Error("Expected compaction entry");
+		if (compaction?.type !== "compaction") throw new Error("Expected compaction entry");
 		expect(branch.findIndex((entry) => entry.id === compaction.firstKeptEntryId)).toBeGreaterThan(lastCueStateIndex);
 
 		const sessionFile = sessionManager.getSessionFile();

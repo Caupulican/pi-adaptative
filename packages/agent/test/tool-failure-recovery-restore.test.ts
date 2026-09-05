@@ -250,7 +250,7 @@ describe("tool-failure recovery restore", () => {
 		// The failing run is data, not a harness failure record: its own output reaches the model
 		// verbatim, and the agent can still see the exact command it sent.
 		const firstResult = events.find((event) => event.type === "message_end" && event.message.role === "toolResult");
-		if (!firstResult || firstResult.type !== "message_end" || firstResult.message.role !== "toolResult") {
+		if (firstResult?.type !== "message_end" || firstResult.message.role !== "toolResult") {
 			throw new Error("Expected a tool result");
 		}
 		expect(firstResult.message.errorKind).toBe("operation_outcome");
@@ -675,7 +675,7 @@ describe("tool-failure recovery restore", () => {
 			),
 		);
 		const failure = events.find((event) => event.type === "message_end" && event.message.role === "toolResult");
-		if (!failure || failure.type !== "message_end" || failure.message.role !== "toolResult") {
+		if (failure?.type !== "message_end" || failure.message.role !== "toolResult") {
 			throw new Error("Expected failed tool result");
 		}
 		const text = failure.message.content

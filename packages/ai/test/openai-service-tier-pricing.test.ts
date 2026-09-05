@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import type { OpenAICodexResponsesOptions } from "../src/providers/openai-codex-responses.ts";
+import type { OpenAIResponsesOptions } from "../src/providers/openai-responses.ts";
 import { applyOpenAIServiceTierPricing } from "../src/providers/openai-responses-shared.ts";
-import type { Usage } from "../src/types.ts";
+import type { StreamOptions, Usage } from "../src/types.ts";
 
 function usage(): Usage {
 	return {
@@ -14,6 +16,12 @@ function usage(): Usage {
 }
 
 describe("OpenAI service-tier pricing", () => {
+	it("keeps both request APIs on the provider-neutral tier contract", () => {
+		expectTypeOf<OpenAIResponsesOptions["serviceTier"]>().toEqualTypeOf<StreamOptions["serviceTier"]>();
+		expectTypeOf<OpenAICodexResponsesOptions["serviceTier"]>().toEqualTypeOf<StreamOptions["serviceTier"]>();
+		expectTypeOf<"ultrafast">().not.toExtend<StreamOptions["serviceTier"]>();
+	});
+
 	it.each([
 		["gpt-5.4", "flex", 0.5],
 		["gpt-5.4", "priority", 2],

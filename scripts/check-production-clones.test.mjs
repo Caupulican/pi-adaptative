@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -19,6 +20,85 @@ import { JSCPD_REPORT_MAX_AGE_MS, pruneTemporaryJscpdReports } from "./jscpd-rep
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const productionCandidates = discoverCloneCandidates(repositoryRoot);
+
+function scanFixture(context, files, crossFormats) {
+	const root = mkdtempSync(join(tmpdir(), "pi-clone-tokenization-"));
+	context.after(() => rmSync(root, { recursive: true, force: true }));
+	const source = join(root, "source");
+	const output = join(root, "report");
+	mkdirSync(source);
+	for (const [name, content] of Object.entries(files)) writeFileSync(join(source, name), content);
+	const args = [
+		join(repositoryRoot, "node_modules/jscpd/run-jscpd.js"),
+		source,
+		"--config",
+		join(repositoryRoot, ".jscpd.json"),
+		"--output",
+		output,
+		"--no-colors",
+		"--no-tips",
+	];
+	if (crossFormats) args.push("--cross-formats", CLONE_CROSS_FORMATS);
+	const result = spawnSync(process.execPath, args, { cwd: root, encoding: "utf8", timeout: 10_000 });
+	assert.ifError(result.error);
+	assert.equal(result.signal, null);
+	const report = JSON.parse(readFileSync(join(output, "jscpd-report.json"), "utf8"));
+	assert.equal(result.status, report.duplicates.length > 0 ? 1 : 0, `${result.stdout}${result.stderr}`);
+	return report;
+}
+
+test("cross-format type erasure never invents clones between unrelated exported declarations", (context) => {
+	// jscpd 5.0.16 through 5.1.2 leave orphaned `export` tokens after erasing
+	// interfaces. This behavioral gate keeps the latest working release (5.0.15)
+	// until an upgrade fixes the tokenizer; scanner sensitivity stays unchanged.
+	const files = {};
+	for (const label of ["alpha", "omega"]) {
+		files[`${label}.ts`] = Array.from({ length: 70 }, (_, index) =>
+			`export interface ${label}Shape${index} {\n  ${label}Field${index}: ${index % 2 === 0 ? "string" : "number"};\n}\n`,
+		).join("\n");
+	}
+	const raw = scanFixture(context, files, false);
+	assert.equal(raw.statistics.total.sources, 2);
+	assert.equal(raw.duplicates.length, 0, "unrelated type declarations are the negative control");
+	const cross = scanFixture(context, files, true);
+	assert.equal(cross.duplicates.length, 0, "erased exports must not become phantom runtime clones");
+});
+
+test("cross-format scans detect real JavaScript and typed TypeScript runtime clones", (context) => {
+	const source = `export function compute(items) {
+	const result = [];
+	for (const item of items) {
+		const weight = item * 7 + 3;
+		if (weight > 10) {
+			result.push(weight);
+		} else {
+			result.push(weight + 6);
+		}
+	}
+	return result.sort((a, b) => a - b);
+}
+`;
+	const files = {
+		"original.js": source,
+		"copy.ts": source.replace("items)", "items: number[]): number[]"),
+	};
+	assert.equal(scanFixture(context, files, false).duplicates.length, 0, "separate format pools cannot match");
+	const cross = scanFixture(context, files, true);
+	assert.equal(cross.statistics.total.sources, 2);
+	assert.equal(cross.duplicates.length, 1);
+	assert.ok(cross.duplicates[0].tokens >= CLONE_LIMITS.minTokens);
+	assert.ok(cross.duplicates[0].lines >= CLONE_LIMITS.minLines);
+});
+
+test("native TypeScript scans retain real type-only clones", (context) => {
+	const source = `export interface SharedContract {\n${Array.from({ length: 20 }, (_, index) => `  field${index}: string | number;`).join("\n")}\n}\n`;
+	const files = { "original.ts": source, "copy.ts": source };
+	const raw = scanFixture(context, files, false);
+	assert.equal(raw.statistics.total.sources, 2);
+	assert.equal(raw.duplicates.length, 1);
+	assert.ok(raw.duplicates[0].tokens >= CLONE_LIMITS.minTokens);
+	assert.equal(scanFixture(context, files, true).duplicates.length, 0, "type declarations have no runtime token sequence");
+});
 
 test("production clone scope covers every owned runtime language without broad exclusions", () => {
 	const paths = new Set(productionCandidates.map((candidate) => candidate.path));
@@ -115,6 +195,8 @@ test("jscpd configuration and root check keep the zero-clone gate enforceable", 
 	const config = JSON.parse(readFileSync(join(repositoryRoot, ".jscpd.json"), "utf8"));
 	const packageJson = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
 	const packageLock = JSON.parse(readFileSync(join(repositoryRoot, "package-lock.json"), "utf8"));
+	const runtimePackage = JSON.parse(readFileSync(join(repositoryRoot, "packages/coding-agent/package.json"), "utf8"));
+	const scannerVersion = runtimePackage.dependencies.jscpd;
 
 	assert.deepEqual(config, {
 		absolute: true,
@@ -131,10 +213,11 @@ test("jscpd configuration and root check keep the zero-clone gate enforceable", 
 	assert.equal(CLONE_CROSS_FORMATS, "js-ts");
 	assert.equal(packageJson.scripts["check:clone-config"], "node --test scripts/check-production-clones.test.mjs");
 	assert.equal(packageJson.scripts["check:clones"], "node scripts/check-production-clones.mjs");
-	assert.equal(packageJson.devDependencies.jscpd, "5.0.14");
-	assert.equal(packageLock.packages[""].devDependencies.jscpd, "5.0.14");
-	assert.equal(packageLock.packages["node_modules/jscpd"].version, "5.0.14");
-	assert.equal(packageLock.packages["node_modules/jscpd"].optionalDependencies["jscpd-windows-x64-msvc"], "5.0.14");
+	assert.match(scannerVersion, /^5\.\d+\.\d+$/);
+	assert.equal(packageJson.devDependencies.jscpd, scannerVersion);
+	assert.equal(packageLock.packages[""].devDependencies.jscpd, scannerVersion);
+	assert.equal(packageLock.packages["node_modules/jscpd"].version, scannerVersion);
+	assert.equal(packageLock.packages["node_modules/jscpd"].optionalDependencies["jscpd-windows-x64-msvc"], scannerVersion);
 	assert.deepEqual(packageLock.packages["node_modules/jscpd-windows-x64-msvc"].os, ["win32"]);
 	assert.deepEqual(packageLock.packages["node_modules/jscpd-windows-x64-msvc"].cpu, ["x64"]);
 	assert.match(packageJson.scripts.check, /npm run check:clone-config/);

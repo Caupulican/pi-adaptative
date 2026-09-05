@@ -459,6 +459,36 @@ describe("goal tool", () => {
 		expect(progressed.isError).not.toBe(true);
 		expect(getState()).toMatchObject({ status: "active", stallTurns: 0 });
 		expect(getState()?.progressRevision).toBe((beforeRevision ?? 0) + 1);
+		expect(progressed.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("Progress recorded; lifecycle unchanged (active)."),
+		});
+	});
+
+	it("reports progress on a blocked goal without claiming or granting owner resume authority", async () => {
+		const { tool, run, getState } = createHarness();
+		await run({ action: "start", goalId: "g1", userGoal: "Ship" });
+		for (let turn = 0; turn < 3; turn++) await run({ action: "no_progress" });
+		await run({ action: "block_goal", reason: "waiting for owner access" });
+		const [, get, update] = createGoalLifecycleToolDefinitions(tool);
+		const before = getState();
+
+		const progressed = await update.execute("call-progress", { status: "active" }, undefined, undefined, ctx);
+		const viewed = await get.execute("call-get", {}, undefined, undefined, ctx);
+
+		expect(progressed.isError).not.toBe(true);
+		expect(progressed.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("Progress recorded; lifecycle unchanged (blocked)."),
+		});
+		expect(progressed.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("Only the owner can resume it with /goal resume."),
+		});
+		expect(viewed.details).toMatchObject({ state: { status: "blocked", blockedReason: "waiting for owner access" } });
+		expect(getState()?.progressRevision).toBe((before?.progressRevision ?? 0) + 1);
+		expect(getState()?.events.some((event) => event.type === "resume_goal")).toBe(false);
+		expect(update.description).toContain("active records progress only");
 	});
 
 	it("rejects compact blocked updates before three stalled turns and preserves the supplied reason", async () => {

@@ -62,7 +62,15 @@ In the picker you can:
 When available, pi uses the `trash` CLI for deletion instead of permanently removing files.
 
 Use `/goal resume` when you want to resume the blocked goal in the current session without switching
-sessions.
+sessions. Submit it directly in the editor to apply the owner transition during streaming, retrying,
+or compaction. `/goal`, `/goal status`, `/goal pause`, `/goal complete`, `/goal cancel` (or `close`),
+`/goal clear`, and `/goal reopen <requirement-id>` also execute directly during work. Goal creation,
+override, editing, and other commands retain the normal busy-input behavior. An explicit `>>` prefix
+keeps the input as a queued follow-up, including `>> /goal resume`.
+
+The model's `update_goal(status="active")` records concrete progress only. Its receipt states the
+unchanged lifecycle; a blocked goal still requires the owner's `/goal resume` command. Recording
+progress does not grant the model permission to resume a stopped goal.
 
 An explicit goal stated in normal chat does not require `/goal`. Phrases such as `Set a persistent
 goal: ...`, `The goal is to ...`, `Keep working until this is complete: ...`, `this is a goal.

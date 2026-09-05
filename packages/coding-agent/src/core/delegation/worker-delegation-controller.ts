@@ -240,6 +240,10 @@ type QueuedWorkerAttemptOutcome =
 	| { started: false; skipReason: string }
 	| { started: true; record: LaneRecord; modelPinBypass?: WorkerRole };
 
+type PreparedWorkerRun = QueuedWorkerAttemptOutcome & {
+	completion?: Promise<WorkerDelegationRunOutcome>;
+};
+
 interface WorkerContextForkSource {
 	model: { provider: string; model: string };
 	messages: readonly AgentMessage[];
@@ -1460,7 +1464,7 @@ export class WorkerDelegationController {
 	private workerGoalDependencySkipReason(request: WorkerDelegationRequest): string | undefined {
 		if (request.verificationOfTaskId) return undefined;
 		const goal = this.deps.getGoalStateSnapshot();
-		if (!goal || !goal.requirements || goal.requirements.length === 0) return undefined;
+		if (!goal?.requirements || goal.requirements.length === 0) return undefined;
 
 		const reqIds = new Set<string>();
 		for (const id of request.taskContext?.requirementIds ?? []) {
@@ -1481,7 +1485,7 @@ export class WorkerDelegationController {
 				if (req?.dependencies && req.dependencies.length > 0) {
 					const unsatisfied = req.dependencies.some((depId) => {
 						const dep = goal.requirements.find((r) => r.id === depId);
-						return !dep || dep.status !== "satisfied";
+						return dep?.status !== "satisfied";
 					});
 					if (unsatisfied) return "goal_dependency_unsatisfied";
 				}
@@ -1832,28 +1836,9 @@ export class WorkerDelegationController {
 				drain: dependencyGated,
 			});
 		}
-		let startedRecord: LaneRecord | undefined;
-		const promise = this.runOnceWithAdmission(
-			request,
-			(record) => {
-				startedRecord = record;
-			},
-			undefined,
-			admission,
-			true,
-		);
-		if (!startedRecord) {
-			// Preparation is synchronous up to the first isolated completion await. A promise that
-			// rejected before producing a lane is still observed below, so it cannot become unhandled.
-			void promise.catch(() => undefined);
-			return { started: false, skipReason: "worker_not_started" };
-		}
-		this.scheduler.track(startedRecord.laneId, promise);
-		return {
-			started: true,
-			record: startedRecord,
-			...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}),
-		};
+		const { completion, ...outcome } = this.runOnceWithAdmission(request, undefined, undefined, admission, true);
+		if (outcome.started && completion) this.scheduler.track(outcome.record.laneId, completion);
+		return outcome;
 	}
 
 	async runOnce(
@@ -1861,16 +1846,49 @@ export class WorkerDelegationController {
 		onStarted?: (record: LaneRecord) => void,
 		existingRecord?: LaneRecord,
 	): Promise<WorkerDelegationRunOutcome> {
-		return this.runOnceWithAdmission(request, onStarted, existingRecord);
+		const { completion, ...outcome } = this.runOnceWithAdmission(request, onStarted, existingRecord);
+		return completion ?? outcome;
 	}
 
-	private async runOnceWithAdmission(
+	private runOnceWithAdmission(
 		request: WorkerDelegationRequest,
 		onStarted?: (record: LaneRecord) => void,
 		existingRecord?: LaneRecord,
 		preparedAdmission?: Extract<WorkerAdmission, { ok: true }>,
 		newWorkerAdmissionChecked = false,
-	): Promise<WorkerDelegationRunOutcome> {
+	): PreparedWorkerRun {
+		let preparedRecord = existingRecord;
+		try {
+			return this.prepareAndRunWorker(
+				request,
+				(record) => {
+					preparedRecord = record;
+				},
+				onStarted,
+				existingRecord,
+				preparedAdmission,
+				newWorkerAdmissionChecked,
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.safeWarn(`Worker setup failed: ${message}`);
+			if (preparedRecord) {
+				this.writeReservations.release(preparedRecord.laneId);
+				this.cancelAndPublish(this.lifecycle, preparedRecord.laneId, "worker_start_error");
+			}
+			return { started: false, skipReason: `worker_start_error:${message}` };
+		}
+	}
+
+	/** Admission and setup return their actual outcome before execution creates an async continuation. */
+	private prepareAndRunWorker(
+		request: WorkerDelegationRequest,
+		onPrepared: (record: LaneRecord) => void,
+		onStarted?: (record: LaneRecord) => void,
+		existingRecord?: LaneRecord,
+		preparedAdmission?: Extract<WorkerAdmission, { ok: true }>,
+		newWorkerAdmissionChecked = false,
+	): PreparedWorkerRun {
 		const pinnedContract = existingRecord
 			? this.getWorkerLifecycle().getActiveAttempt(existingRecord.laneId)?.dispatch.executionContract
 			: undefined;
@@ -1889,6 +1907,7 @@ export class WorkerDelegationController {
 		const laneCapability = this.laneCapabilityProfile(model);
 		const retentionPolicy = workerConversationRetentionPolicy(model, this.deps.getSettingsManager());
 		const prepared = this.prepareWorkerAttempt(request, admission, existingRecord);
+		onPrepared(prepared.record);
 		const { executionPlan, lifecycle } = prepared;
 		if (!prepared.attempt) return { started: false, skipReason: "orchestration_attempt_missing" };
 		if (prepared.attempt.status === "queued") {
@@ -2214,228 +2233,239 @@ export class WorkerDelegationController {
 				: undefined,
 			warn: (message) => this.safeWarn(message),
 		});
-		try {
-			// Register before the first execution await: disposal sees the live mutable ledger.
-			this.inFlightLedgers.set(startedRecord.laneId, {
-				changedFiles: executor.ledger.changedFiles,
-				getUsage: executor.ledger.getUsage,
-				request: workerRequest,
-				handle: durableHandle,
-				cwd: executionPlan.cwd,
-			});
-			leaseHeartbeat.start();
-			const executionResult = await executor.run();
-			// Stop the instant the run returns, before any post-run finalization (finalizeWorkerClaim,
-			// verifier dispatch, handoff persistence —~190 lines) can run: a tick landing in that
-			// window renews an attempt that has already reached a terminal status, throws, and would
-			// otherwise abort a lane whose work already succeeded. The `finally` below still calls
-			// stop() too (idempotent) to cover every other exit path (thrown errors, early returns).
-			leaseHeartbeat.stop();
-			leaseHeartbeat.assertHealthy();
-			const rawOutcome = executionResult.rawOutcome;
-			// Attempt ladder: a retryable bounded failure suspends and re-enqueues instead of
-			// terminalizing, resuming from the persisted transcript under a fresh fence.
-			if (rawOutcome.laneStatus === "failed" && !this.deps.isDisposed() && !workerSignal.aborted) {
-				const retry = this.recovery.scheduleAttemptRetry({
-					laneId: startedRecord.laneId,
-					agentId,
-					ownerId: this.agentControl.getProcessOwnerId(),
-					request: { ...request, profileId: admission.shipment.profile.profileId },
-					outcome: rawOutcome,
-					provider: modelBinding.provider,
-					...(grant.budget.maxAttempts !== undefined ? { maxAttempts: grant.budget.maxAttempts } : {}),
-				});
-				if (retry.scheduled) {
-					this.notifications.statusChanged();
-					return { started: true, record: retry.record };
-				}
-			}
-			const verificationRequired =
-				orchestrationProfile.requireIndependentVerification &&
-				orchestrationProfile.role !== "verifier" &&
-				rawOutcome.claim.status === "completed";
-			const outcome: WorkerRunOutcome = {
-				...(verificationRequired
-					? {
-							...rawOutcome,
-							accepted: false,
-							reasonCode: "independent_verification_required",
-							acceptance: {
-								outcome: "ask-user" as const,
-								gate: "independent_verification",
-								reasonCode: "independent_verification_required",
-								message: "The owner-authored profile requires an independent verifier before acceptance.",
-							},
-							claim: {
-								...rawOutcome.claim,
-								parentReviewRequired: true,
-								blockers: [
-									...(rawOutcome.claim.blockers ?? []),
-									"independent verification is required before acceptance",
-								],
-							},
-						}
-					: rawOutcome),
-				...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}),
-			};
-
-			// Never persist against a disposed session. When disposal raced this
-			// await, `abortInFlightLanes()`'s synchronous cutoff already completed this lane, persisted
-			// its durable lane record + bounded WorkerClaim, and consumed (deleted) the ledger —
-			// `.complete()` below is then a no-op (the lane is already terminal, so it returns
-			// undefined) and no double persistence or duplicate terminal notification can happen here.
-			if (this.deps.isDisposed()) {
-				const record = lifecycle.getRecord(startedRecord.laneId);
-				return { started: true, record, outcome };
-			}
-
-			const verificationSubject = request.verificationOfTaskId
-				? lifecycle.getTask(request.verificationOfTaskId)
-				: undefined;
-			const finalUsage = executionResult.usage;
-			const reportedUsage = providerUsageFromAttemptUsage(finalUsage);
-			let record = finalizeWorkerClaim(lifecycle, {
-				handle: durableHandle,
-				claim: outcome.claim,
-				accepted: outcome.accepted,
-				costUsd: finalUsage.costUsd,
-				reasonCode: outcome.reasonCode,
-				cwd: executionPlan.cwd,
-				inputTokens: finalUsage.inputTokens,
-				outputTokens: finalUsage.outputTokens,
-				totalTokens: reportedUsage.totalTokens,
-				wallClockMs: finalUsage.activeWallClockMs,
-				toolCalls: finalUsage.toolCalls,
-				verificationRequired,
-				verificationCriterionIds: verificationSubject?.task.acceptanceCriterionIds,
-				...(executionResult.outputArtifact ? { outputArtifact: executionResult.outputArtifact } : {}),
-				notify: !verificationRequired,
-			}).record;
+		const completion = (async (): Promise<WorkerDelegationRunOutcome> => {
 			try {
-				this.deps.saveWorkerClaimSnapshot(outcome.claim, workerRequest);
-			} catch (error) {
-				this.safeWarn(
-					`Failed to persist worker claim ${startedRecord.laneId}: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-			if (reportedUsage.cost.total > 0 || reportedUsage.totalTokens > 0) {
-				this.deps.addSpawnedUsage(reportedUsage, { label: "worker-delegation", reportId: usageReportId });
-			}
-
-			const terminalRecords: LaneRecord[] = [record];
-			if (request.verificationOfTaskId) {
-				const decision = outcome.accepted ? outcome.claim.verification : undefined;
-				const subject = lifecycle.reconcileVerification({
-					subjectTaskId: request.verificationOfTaskId,
-					verifierTaskId: startedRecord.laneId,
-					verifierAttemptId: durableHandle.attemptId,
-					verdict: decision?.verdict ?? "inconclusive",
-					reasonCode: decision
-						? decision.verdict === "accepted"
-							? "independent_verification_accepted"
-							: `independent_verification_rejected:${decision.reasonCodes.join(",")}`
-						: `independent_verification_inconclusive:${outcome.reasonCode}`,
+				// Register before the first execution await: disposal sees the live mutable ledger.
+				this.inFlightLedgers.set(startedRecord.laneId, {
+					changedFiles: executor.ledger.changedFiles,
+					getUsage: executor.ledger.getUsage,
+					request: workerRequest,
+					handle: durableHandle,
+					cwd: executionPlan.cwd,
 				});
-				terminalRecords.push(subject);
-			} else if (verificationRequired) {
-				const verifierStart = verifierShipment
-					? this.startInternal(
-							this.buildVerifierRequest({
-								subjectTaskId: startedRecord.laneId,
-								verifierProfileId: verifierShipment.profile.profileId,
-								summary: rawOutcome.claim.summary,
-								artifactUris: rawOutcome.claim.changedFiles,
-							}),
-							verifierWorkerExecutionContract(admission.executionContract),
-						)
-					: { started: false as const, skipReason: "independent_verifier_unavailable" };
-				if (verifierStart.started) {
-					// The durable verifier dispatch is now the terminal-work owner. The subject remains
-					// blocked and emits no compatibility terminal snapshot until reconciliation.
-					terminalRecords.length = 0;
-					this.scheduler.drain();
-				} else {
-					this.safeWarn(
-						`Independent verifier for ${startedRecord.laneId} did not start: ${verifierStart.skipReason}`,
-					);
-				}
-			}
-			// parent_review_required is a parent-agent verdict via terminal handoff, not an owner UI interrupt.
-			for (const terminalRecord of terminalRecords) {
-				this.publishTerminalRecord(terminalRecord);
-			}
-			if (request.verificationOfTaskId) {
-				record = lifecycle.getRecord(startedRecord.laneId) ?? record;
-			}
-			return { started: true, record, outcome };
-		} catch (error) {
-			const durableState = lifecycle.ledger.runtime.getSnapshot().attempts[durableHandle.attemptId];
-			if (durableState?.status === "suspended") {
-				// Disposal/reload fences agent-bound work before its aborted completion unwinds. Do not
-				// convert that resumable interruption into a terminal claim or cancellation.
-				return { started: true, record: lifecycle.getRecord(startedRecord.laneId) };
-			}
-			if (durableState?.status === "cancelled" && (laneAbortController.signal.aborted || this.deps.isDisposed())) {
-				return { started: true, record: lifecycle.getRecord(startedRecord.laneId) };
-			}
-			if (durableState?.status === "running" || durableState?.status === "leased") {
-				const failureClaim: WorkerClaim = {
-					requestId: startedRecord.laneId,
-					status: "failed",
-					summary: `Worker delegation failed: ${error instanceof Error ? error.message : String(error)}`,
-					changedFiles: [],
-					createdAt: new Date().toISOString(),
-				};
-				try {
-					const failureUsage = executor.checkpointUsage(
-						"Persisted cumulative usage while recording worker failure.",
-					);
-					const reportedUsage = providerUsageFromAttemptUsage(failureUsage);
-					finalizeWorkerClaim(lifecycle, {
-						handle: durableHandle,
-						claim: failureClaim,
-						accepted: false,
-						costUsd: failureUsage.costUsd,
-						cwd: executionPlan.cwd,
-						inputTokens: failureUsage.inputTokens,
-						outputTokens: failureUsage.outputTokens,
-						totalTokens: reportedUsage.totalTokens,
-						wallClockMs: failureUsage.activeWallClockMs,
-						toolCalls: failureUsage.toolCalls,
-						reasonCode: "worker_delegation_error",
+				leaseHeartbeat.start();
+				const executionResult = await executor.run();
+				// Stop the instant the run returns, before any post-run finalization (finalizeWorkerClaim,
+				// verifier dispatch, handoff persistence —~190 lines) can run: a tick landing in that
+				// window renews an attempt that has already reached a terminal status, throws, and would
+				// otherwise abort a lane whose work already succeeded. The `finally` below still calls
+				// stop() too (idempotent) to cover every other exit path (thrown errors, early returns).
+				leaseHeartbeat.stop();
+				leaseHeartbeat.assertHealthy();
+				const rawOutcome = executionResult.rawOutcome;
+				// Attempt ladder: a retryable bounded failure suspends and re-enqueues instead of
+				// terminalizing, resuming from the persisted transcript under a fresh fence.
+				if (rawOutcome.laneStatus === "failed" && !this.deps.isDisposed() && !workerSignal.aborted) {
+					const retry = this.recovery.scheduleAttemptRetry({
+						laneId: startedRecord.laneId,
+						agentId,
+						ownerId: this.agentControl.getProcessOwnerId(),
+						request: { ...request, profileId: admission.shipment.profile.profileId },
+						outcome: rawOutcome,
+						provider: modelBinding.provider,
+						...(grant.budget.maxAttempts !== undefined ? { maxAttempts: grant.budget.maxAttempts } : {}),
 					});
-				} catch (persistError) {
+					if (retry.scheduled) {
+						this.notifications.statusChanged();
+						return { started: true, record: retry.record };
+					}
+				}
+				const verificationRequired =
+					orchestrationProfile.requireIndependentVerification &&
+					orchestrationProfile.role !== "verifier" &&
+					rawOutcome.claim.status === "completed";
+				const outcome: WorkerRunOutcome = {
+					...(verificationRequired
+						? {
+								...rawOutcome,
+								accepted: false,
+								reasonCode: "independent_verification_required",
+								acceptance: {
+									outcome: "ask-user" as const,
+									gate: "independent_verification",
+									reasonCode: "independent_verification_required",
+									message: "The owner-authored profile requires an independent verifier before acceptance.",
+								},
+								claim: {
+									...rawOutcome.claim,
+									parentReviewRequired: true,
+									blockers: [
+										...(rawOutcome.claim.blockers ?? []),
+										"independent verification is required before acceptance",
+									],
+								},
+							}
+						: rawOutcome),
+					...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}),
+				};
+
+				// Never persist against a disposed session. When disposal raced this
+				// await, `abortInFlightLanes()`'s synchronous cutoff already completed this lane, persisted
+				// its durable lane record + bounded WorkerClaim, and consumed (deleted) the ledger —
+				// `.complete()` below is then a no-op (the lane is already terminal, so it returns
+				// undefined) and no double persistence or duplicate terminal notification can happen here.
+				if (this.deps.isDisposed()) {
+					const record = lifecycle.getRecord(startedRecord.laneId);
+					return { started: true, record, outcome };
+				}
+
+				const verificationSubject = request.verificationOfTaskId
+					? lifecycle.getTask(request.verificationOfTaskId)
+					: undefined;
+				const finalUsage = executionResult.usage;
+				const reportedUsage = providerUsageFromAttemptUsage(finalUsage);
+				let record = finalizeWorkerClaim(lifecycle, {
+					handle: durableHandle,
+					claim: outcome.claim,
+					accepted: outcome.accepted,
+					costUsd: finalUsage.costUsd,
+					reasonCode: outcome.reasonCode,
+					cwd: executionPlan.cwd,
+					inputTokens: finalUsage.inputTokens,
+					outputTokens: finalUsage.outputTokens,
+					totalTokens: reportedUsage.totalTokens,
+					wallClockMs: finalUsage.activeWallClockMs,
+					toolCalls: finalUsage.toolCalls,
+					verificationRequired,
+					verificationCriterionIds: verificationSubject?.task.acceptanceCriterionIds,
+					...(executionResult.outputArtifact ? { outputArtifact: executionResult.outputArtifact } : {}),
+					notify: !verificationRequired,
+				}).record;
+				try {
+					this.deps.saveWorkerClaimSnapshot(outcome.claim, workerRequest);
+				} catch (error) {
 					this.safeWarn(
-						`Failed to persist durable worker failure ${startedRecord.laneId}: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
+						`Failed to persist worker claim ${startedRecord.laneId}: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
-			}
-			let record = lifecycle.getRecord(startedRecord.laneId);
-			if (record?.status === "queued" || record?.status === "running") {
-				record = this.cancelAndPublish(lifecycle, startedRecord.laneId, "worker_delegation_error");
-			}
-			if (record && !this.deps.isDisposed()) this.publishTerminalRecord(record);
-			const message = error instanceof Error ? error.message : String(error);
-			this.deps.emit({ type: "warning", message: `Worker delegation failed: ${message}` });
-			return { started: true, record };
-		} finally {
-			leaseHeartbeat.stop();
-			this.writeReservations.release(startedRecord.laneId, durableHandle.attemptId, durableHandle.fencingToken);
-			this.yieldedCapacityAttemptIds.delete(durableHandle.attemptId);
-			this.yieldedWriteReservations.delete(durableHandle.attemptId);
-			this.inFlightLedgers.delete(startedRecord.laneId);
-			this.laneAbortControllers.delete(startedRecord.laneId);
-			try {
-				await toolSurface.dispose();
+				if (reportedUsage.cost.total > 0 || reportedUsage.totalTokens > 0) {
+					this.deps.addSpawnedUsage(reportedUsage, { label: "worker-delegation", reportId: usageReportId });
+				}
+
+				const terminalRecords: LaneRecord[] = [record];
+				if (request.verificationOfTaskId) {
+					const decision = outcome.accepted ? outcome.claim.verification : undefined;
+					const subject = lifecycle.reconcileVerification({
+						subjectTaskId: request.verificationOfTaskId,
+						verifierTaskId: startedRecord.laneId,
+						verifierAttemptId: durableHandle.attemptId,
+						verdict: decision?.verdict ?? "inconclusive",
+						reasonCode: decision
+							? decision.verdict === "accepted"
+								? "independent_verification_accepted"
+								: `independent_verification_rejected:${decision.reasonCodes.join(",")}`
+							: `independent_verification_inconclusive:${outcome.reasonCode}`,
+					});
+					terminalRecords.push(subject);
+				} else if (verificationRequired) {
+					const verifierStart = verifierShipment
+						? this.startInternal(
+								this.buildVerifierRequest({
+									subjectTaskId: startedRecord.laneId,
+									verifierProfileId: verifierShipment.profile.profileId,
+									summary: rawOutcome.claim.summary,
+									artifactUris: rawOutcome.claim.changedFiles,
+								}),
+								verifierWorkerExecutionContract(admission.executionContract),
+							)
+						: { started: false as const, skipReason: "independent_verifier_unavailable" };
+					if (verifierStart.started) {
+						// The durable verifier dispatch is now the terminal-work owner. The subject remains
+						// blocked and emits no compatibility terminal snapshot until reconciliation.
+						terminalRecords.length = 0;
+						this.scheduler.drain();
+					} else {
+						this.safeWarn(
+							`Independent verifier for ${startedRecord.laneId} did not start: ${verifierStart.skipReason}`,
+						);
+					}
+				}
+				// parent_review_required is a parent-agent verdict via terminal handoff, not an owner UI interrupt.
+				for (const terminalRecord of terminalRecords) {
+					this.publishTerminalRecord(terminalRecord);
+				}
+				if (request.verificationOfTaskId) {
+					record = lifecycle.getRecord(startedRecord.laneId) ?? record;
+				}
+				return { started: true, record, outcome };
 			} catch (error) {
-				this.safeWarn(
-					`Worker mutation payload cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				const durableState = lifecycle.ledger.runtime.getSnapshot().attempts[durableHandle.attemptId];
+				if (durableState?.status === "suspended") {
+					// Disposal/reload fences agent-bound work before its aborted completion unwinds. Do not
+					// convert that resumable interruption into a terminal claim or cancellation.
+					return { started: true, record: lifecycle.getRecord(startedRecord.laneId) };
+				}
+				if (
+					durableState?.status === "cancelled" &&
+					(laneAbortController.signal.aborted || this.deps.isDisposed())
+				) {
+					return { started: true, record: lifecycle.getRecord(startedRecord.laneId) };
+				}
+				if (durableState?.status === "running" || durableState?.status === "leased") {
+					const failureClaim: WorkerClaim = {
+						requestId: startedRecord.laneId,
+						status: "failed",
+						summary: `Worker delegation failed: ${error instanceof Error ? error.message : String(error)}`,
+						changedFiles: [],
+						createdAt: new Date().toISOString(),
+					};
+					try {
+						const failureUsage = executor.checkpointUsage(
+							"Persisted cumulative usage while recording worker failure.",
+						);
+						const reportedUsage = providerUsageFromAttemptUsage(failureUsage);
+						finalizeWorkerClaim(lifecycle, {
+							handle: durableHandle,
+							claim: failureClaim,
+							accepted: false,
+							costUsd: failureUsage.costUsd,
+							cwd: executionPlan.cwd,
+							inputTokens: failureUsage.inputTokens,
+							outputTokens: failureUsage.outputTokens,
+							totalTokens: reportedUsage.totalTokens,
+							wallClockMs: failureUsage.activeWallClockMs,
+							toolCalls: failureUsage.toolCalls,
+							reasonCode: "worker_delegation_error",
+						});
+					} catch (persistError) {
+						this.safeWarn(
+							`Failed to persist durable worker failure ${startedRecord.laneId}: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
+						);
+					}
+				}
+				let record = lifecycle.getRecord(startedRecord.laneId);
+				if (record?.status === "queued" || record?.status === "running") {
+					record = this.cancelAndPublish(lifecycle, startedRecord.laneId, "worker_delegation_error");
+				}
+				if (record && !this.deps.isDisposed()) this.publishTerminalRecord(record);
+				const message = error instanceof Error ? error.message : String(error);
+				this.deps.emit({ type: "warning", message: `Worker delegation failed: ${message}` });
+				return { started: true, record };
+			} finally {
+				leaseHeartbeat.stop();
+				this.writeReservations.release(startedRecord.laneId, durableHandle.attemptId, durableHandle.fencingToken);
+				this.yieldedCapacityAttemptIds.delete(durableHandle.attemptId);
+				this.yieldedWriteReservations.delete(durableHandle.attemptId);
+				this.inFlightLedgers.delete(startedRecord.laneId);
+				this.laneAbortControllers.delete(startedRecord.laneId);
+				try {
+					await toolSurface.dispose();
+				} catch (error) {
+					this.safeWarn(
+						`Worker mutation payload cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+				this.agentControl.signalStateChanged();
+				deregisterInFlight();
+				if (!this.deps.isDisposed()) this.scheduler.drain(true);
 			}
-			this.agentControl.signalStateChanged();
-			deregisterInFlight();
-			if (!this.deps.isDisposed()) this.scheduler.drain(true);
-		}
+		})();
+		return {
+			started: true,
+			record: startedRecord,
+			completion,
+			...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}),
+		};
 	}
 
 	/** Start every capacity-eligible queued worker at the owner session's foreground-idle boundary. */

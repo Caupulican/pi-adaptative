@@ -55,7 +55,7 @@ describe("tool result details retention on session load", () => {
 		const entry = manager
 			.getEntries()
 			.find((candidate) => candidate.type === "message" && candidate.message.role === "toolResult");
-		if (!entry || entry.type !== "message" || entry.message.role !== "toolResult") {
+		if (entry?.type !== "message" || entry.message.role !== "toolResult") {
 			throw new Error("toolResult entry missing after load");
 		}
 		return entry.message.details;

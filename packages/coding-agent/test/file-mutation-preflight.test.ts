@@ -564,7 +564,7 @@ describe("file mutation preflight", () => {
 
 		expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
 		const rejection = outcomes.find((outcome) => outcome.status === "rejected");
-		if (!rejection || rejection.status !== "rejected") throw new Error("Expected one same-batch edit to reject.");
+		if (rejection?.status !== "rejected") throw new Error("Expected one same-batch edit to reject.");
 		const message = rejection.reason instanceof Error ? rejection.reason.message : String(rejection.reason);
 		expect(message).toContain("produced by an earlier mutation in this run");
 		expect(message).toMatch(/could not find/i);

@@ -10,19 +10,19 @@ describe("managed Bitwarden CLI release", () => {
 		expect(getPinnedToolAsset("bw", "linux", "x64")).toEqual({
 			version: BITWARDEN_CLI_VERSION,
 			assetName: `bw-linux-${BITWARDEN_CLI_VERSION}.zip`,
-			expectedSha256: "7a35145e205952f7434d2370da359543145ae0c45ba1af0fe9bdd99d40a00180",
+			expectedSha256: "367f618e9fcccaac4980ec12c7bafd01df739b5f3cb1af31bc9045cf75eea1d6",
 		});
 		expect(getPinnedToolAsset("bw", "linux", "arm64")?.expectedSha256).toBe(
-			"e33ed05ca0fada9bd51b8bce76a230369bf0eefd5796a0a8e60699c977327fb5",
+			"74d822a5dceda5896ed8fc07bc61925b29afd98d96a6a3e9e525ae556c3083a8",
 		);
 		expect(getPinnedToolAsset("bw", "darwin", "x64")?.expectedSha256).toBe(
-			"b37836d539798f5adeb8a907619ee8a55b6322549bb68669aa4b3a03d5bc0452",
+			"c5d57f70d5394f8c348f6c3bf53683ad6d15e6acfe55e7c1e0a8f376482d8e71",
 		);
 		expect(getPinnedToolAsset("bw", "darwin", "arm64")?.expectedSha256).toBe(
-			"61d5de8a279a9faf3637216f4fb02b506a1e4bb2817d1c64be0bd474466dd85a",
+			"73414942357644605eefd3f4afaf0b41b71772ad6574e8e3c72e0b6d237104c8",
 		);
 		expect(getPinnedToolAsset("bw", "win32", "x64")?.expectedSha256).toBe(
-			"b0c22438607b789c6452dbd37ffd6be0e8a61e7a5c4e9ac57804d7ae5ed01b5b",
+			"26a6bb9a88ca9eeaad9e59db1816dcceb3ce6cc80a30b33e1324b0642f4a0f32",
 		);
 		for (const [targetPlatform, targetArchitecture] of [
 			["linux", "x64"],

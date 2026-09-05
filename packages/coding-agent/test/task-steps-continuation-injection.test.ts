@@ -50,7 +50,7 @@ describe("task_steps_context on continuation (internalContextType) turns", () =>
 				(message) => message.role === "custom" && message.customType === "task_steps_context",
 			);
 			expect(taskStepsMessage).toBeDefined();
-			if (!taskStepsMessage || taskStepsMessage.role !== "custom") throw new Error("Expected task_steps_context");
+			if (taskStepsMessage?.role !== "custom") throw new Error("Expected task_steps_context");
 			expect(taskStepsMessage.content as string).toContain("Investigate root cause");
 
 			// memory_context and pipeline_context stay gated on internalContextType -- this test would
@@ -84,7 +84,7 @@ describe("task_steps_context on continuation (internalContextType) turns", () =>
 				(message) => message.role === "custom" && message.customType === "task_steps_context",
 			);
 			expect(taskStepsMessage).toBeDefined();
-			if (!taskStepsMessage || taskStepsMessage.role !== "custom") throw new Error("Expected task_steps_context");
+			if (taskStepsMessage?.role !== "custom") throw new Error("Expected task_steps_context");
 			expect(taskStepsMessage.content as string).toContain("Write regression test");
 		} finally {
 			await harness.cleanup();

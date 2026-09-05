@@ -77,7 +77,7 @@ describe("goal-owned execution budget", () => {
 		const result = harness.session.messages.find(
 			(message) => message.role === "toolResult" && message.toolName === "goal",
 		);
-		if (!result || result.role !== "toolResult") throw new Error("Expected goal tool result");
+		if (result?.role !== "toolResult") throw new Error("Expected goal tool result");
 		expect(result.isError).not.toBe(true);
 	});
 
