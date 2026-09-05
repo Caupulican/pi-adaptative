@@ -10,7 +10,7 @@ import type * as selfLaunch from "../src/core/process-matrix/self-launch-target.
 const ports = vi.hoisted(() => ({ root: "", target: vi.fn(), capture: vi.fn(), launch: vi.fn(), release: vi.fn() }));
 vi.mock("../src/config.ts", () => ({
 	getAgentDir: () => ports.root,
-	getPackageDir: () => `${ports.root}/packages/coding-agent`,
+	getPackageDir: () => join(ports.root, "packages", "coding-agent"),
 	isBunBinary: false,
 }));
 vi.mock("../src/core/process-matrix/self-launch-target.ts", async (original) => ({
@@ -18,7 +18,7 @@ vi.mock("../src/core/process-matrix/self-launch-target.ts", async (original) => 
 	getSelfLaunchTarget: ports.target,
 }));
 vi.mock("../src/utils/work-directory.ts", () => ({
-	acquireWorkRun: () => ({ path: `${ports.root}/lease`, release: ports.release }),
+	acquireWorkRun: () => ({ path: join(ports.root, "lease"), release: ports.release }),
 }));
 vi.mock("../src/cli/runtime-child-process.ts", () => ({ launchRuntimeChild: ports.launch }));
 vi.mock("../src/cli/runtime-artifact-store.ts", () => ({
@@ -26,7 +26,10 @@ vi.mock("../src/cli/runtime-artifact-store.ts", () => ({
 		capture = ports.capture;
 		retire = async () => {};
 		target() {
-			return { executable: `${ports.root}/snapshot/node`, argsPrefix: [`${ports.root}/snapshot/cli.ts`] };
+			return {
+				executable: join(ports.root, "snapshot", "node"),
+				argsPrefix: [join(ports.root, "snapshot", "cli.ts")],
+			};
 		}
 	},
 }));
@@ -60,7 +63,7 @@ it("mints the stable source launcher before capture and passes it separately fro
 	}));
 	expect(await superviseInteractiveRuntime([])).toBe(true);
 	const [copied, , options] = ports.launch.mock.calls[0];
-	expect(copied.executable).toBe(`${ports.root}/snapshot/node`);
+	expect(copied.executable).toBe(join(ports.root, "snapshot", "node"));
 	const env = { [RUNTIME_SUPERVISOR_ENV]: options.env[RUNTIME_SUPERVISOR_ENV] };
 	expect(consumeRuntimeEnvelope(env, process.pid, true)?.stableTarget).toEqual({
 		executable: process.execPath,
