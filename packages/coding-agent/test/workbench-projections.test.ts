@@ -31,6 +31,7 @@ describe("Workbench evidence projections", () => {
 			conversation: chat,
 			editor: new Container(),
 			dock: [],
+			brand: "pi",
 			viewportRows: () => 25,
 		});
 		expect(stripAnsi(view.render(110).join("\n"))).toContain("Which layout?");

@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Fixed
+
+- The interactive Workbench no longer corrupts conversation rows in terminals that act on OSC 133 prompt marks (Herdr moves the cursor to column 0 on one): the conversation viewport strips the prompt-zone marks the inline transcript components emit, which have no scrollback to navigate on the alternate screen.
+
+### Changed
+
+- The Workbench follows the approved design: a title strip with the work's name and run state, the live activity line, a fixed work area (Work plan and Team blocks on the left, Execution on the right, placeholders when empty) that only the operator collapses (`Alt+O`, or a click on its divider) or resizes (`Alt+=` / `Alt+-`), the conversation with its follow state and copy chips, then a status band, the input, extension widgets and a key-hint row. Evidence stays on screen until the next cycle replaces it; tool output never moves the conversation boundary. Zones separate by surface tone and spacing; frames are gone. Themes may define `workbenchSurface`; it defaults to the custom-message background. Edit previews show their added/removed line counts.
+
 ## [0.98.1] - 2026-09-05
 
 ### Changed

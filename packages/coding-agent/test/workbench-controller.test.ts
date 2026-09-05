@@ -20,6 +20,7 @@ describe("Workbench input boundary", () => {
 			conversation: new Container(),
 			editor: new Container(),
 			dock: [],
+			brand: "pi",
 			viewportRows: () => 20,
 		});
 		const controller = new WorkbenchController(
@@ -40,16 +41,22 @@ describe("Workbench input boundary", () => {
 		await pending;
 		const text = stripAnsi(view.render(110).join("\n"));
 		expect(text).toContain("1 file effects");
-		expect(text).not.toContain("+change");
+		expect(text).toContain("+change");
+		// The next cycle keeps the last evidence on screen until it produces its own.
 		controller.beginCycle();
-		expect(stripAnsi(view.render(110).join("\n"))).not.toContain("file effects");
+		expect(stripAnsi(view.render(110).join("\n"))).toContain("1 file effects");
+		controller.record(new Text("fresh result", 0, 0), false);
+		const next = stripAnsi(view.render(110).join("\n"));
+		expect(next).toContain("fresh result");
+		expect(next).not.toContain("file effects");
 		controller.dispose();
 	});
-	it("folds failed execution on completion and does not expand new success for an old failure", () => {
+	it("keeps evidence after completion, retains failure receipts, and collapses only on request", () => {
 		const view = new WorkbenchComponent({
 			conversation: new Container(),
 			editor: new Container(),
 			dock: [],
+			brand: "pi",
 			viewportRows: () => 30,
 		});
 		const controller = new WorkbenchController(view, {
@@ -66,13 +73,19 @@ describe("Workbench input boundary", () => {
 		controller.complete();
 		let text = stripAnsi(view.render(100).join("\n"));
 		expect(text).toContain("1 failure receipts");
-		expect(text).not.toContain("failure detail");
+		expect(text).toContain("failure detail");
 		controller.beginCycle();
 		controller.record(new Text("successful verbose result", 0, 0), false);
 		controller.complete();
 		text = stripAnsi(view.render(100).join("\n"));
 		expect(text).toContain("1 failure receipts");
+		expect(text).toContain("successful verbose result");
+		expect(text).not.toContain("failure detail");
+		controller.handleInput("\x1bo");
+		text = stripAnsi(view.render(100).join("\n"));
+		expect(view.upperHeight).toBe(0);
 		expect(text).not.toContain("successful verbose result");
+		expect(text).toMatch(/▸ .*Execution/);
 		controller.handleInput("\x1bo");
 		expect(stripAnsi(view.render(100).join("\n"))).toContain("successful verbose result");
 		controller.dispose();
@@ -98,6 +111,7 @@ describe("Workbench input boundary", () => {
 			conversation: new Container(),
 			editor: new Container(),
 			dock: [],
+			brand: "pi",
 			viewportRows: () => 20,
 		});
 		const controller = new WorkbenchController(view, {
@@ -122,6 +136,7 @@ describe("Workbench input boundary", () => {
 			conversation: chat,
 			editor: new Container(),
 			dock: [],
+			brand: "pi",
 			viewportRows: () => 30,
 		});
 		let interactive = false;
@@ -149,6 +164,7 @@ describe("Workbench input boundary", () => {
 			conversation: chat,
 			editor: new Container(),
 			dock: [],
+			brand: "pi",
 			viewportRows: () => 40,
 		});
 		const controller = new WorkbenchController(view, {
@@ -159,11 +175,13 @@ describe("Workbench input boundary", () => {
 			copy: async () => {},
 			notice() {},
 		});
-		view.setInspector(["Work", "active"]);
+		view.setInspector([{ title: "Work plan", body: ["active"] }]);
 		controller.record(new Text(Array.from({ length: 40 }, (_, i) => `execution ${i}`).join("\n"), 0, 0), false);
 		view.render(110);
-		controller.handleInput("\x1b[<65;50;3M");
-		expect(stripAnsi(view.render(110).join("\n"))).toContain("execution 3");
+		controller.handleInput("\x1b[<65;50;4M");
+		const scrolled = stripAnsi(view.render(110).join("\n"));
+		expect(scrolled).toContain("execution 3");
+		expect(scrolled).not.toContain("execution 0");
 		expect(view.conversation.following).toBe(true);
 		view.render(40);
 		controller.handleInput("\x1b[<64;2;6M");
@@ -180,6 +198,7 @@ describe("Workbench input boundary", () => {
 			conversation: chat,
 			editor: new Container(),
 			dock: [],
+			brand: "pi",
 			viewportRows: () => 20,
 		});
 		const copies: string[] = [];
@@ -194,11 +213,12 @@ describe("Workbench input boundary", () => {
 			notice() {},
 		});
 		view.render(80);
-		controller.handleInput("\x1b[<0;1;2M"); // Left border must not select text.
+		expect(view.conversationTop).toBe(10);
+		controller.handleInput("\x1b[<0;1;11M"); // The gutter must not select text.
 		expect(view.conversation.following).toBe(true);
-		controller.handleInput("\x1b[<0;2;2M");
-		controller.handleInput("\x1b[<32;7;2M");
-		controller.handleInput("\x1b[<0;7;2m");
+		controller.handleInput("\x1b[<0;2;11M");
+		controller.handleInput("\x1b[<32;7;11M");
+		controller.handleInput("\x1b[<0;7;11m");
 		await controller.copy(false);
 		expect(copies).toEqual(["hello"]);
 		expect(view.conversation.following).toBe(false);

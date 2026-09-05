@@ -173,26 +173,15 @@ function renderRow(
 	return lines;
 }
 
-export function renderOrchestrationPanelLines(
+/** Rows, empty text, overflow count and notices without the title badge; Workbench panes title themselves. */
+export function renderOrchestrationPanelRows(
 	theme: Theme,
-	model: OrchestrationPanelModel,
+	model: Pick<OrchestrationPanelModel, "rows" | "emptyText" | "hiddenRowCount" | "notices" | "wrapRows">,
 	width: number,
 	expanded = false,
 ): string[] {
 	const safeWidth = Math.max(1, width);
-	const title = renderTitleBadge(theme, {
-		label: model.label,
-		action: model.action,
-		status: model.status ?? "info",
-	});
-	const summary = model.summary?.filter(Boolean).join(theme.fg("dim", " · ")) ?? "";
-	const lines = [summary ? `${title}  ${theme.fg("dim", summary)}` : title];
-	if (model.description) {
-		const descriptionLines = model.wrapRows
-			? wrapTextWithAnsi(model.description, Math.max(4, safeWidth - 2))
-			: [truncateToWidth(model.description, Math.max(4, safeWidth - 2), "…")];
-		for (const line of descriptionLines) lines.push(`  ${theme.fg("text", line)}`);
-	}
+	const lines: string[] = [];
 	const rows = model.rows ?? [];
 	if (rows.length > 0) {
 		let section: string | undefined;
@@ -213,6 +202,30 @@ export function renderOrchestrationPanelLines(
 		const style = NOTICE_STYLES[notice.status];
 		lines.push(`  ${theme.fg(style.color, style.icon)} ${theme.fg("dim", notice.text)}`);
 	}
+	return lines.map((line) => truncateToWidth(line, safeWidth, ""));
+}
+
+export function renderOrchestrationPanelLines(
+	theme: Theme,
+	model: OrchestrationPanelModel,
+	width: number,
+	expanded = false,
+): string[] {
+	const safeWidth = Math.max(1, width);
+	const title = renderTitleBadge(theme, {
+		label: model.label,
+		action: model.action,
+		status: model.status ?? "info",
+	});
+	const summary = model.summary?.filter(Boolean).join(theme.fg("dim", " · ")) ?? "";
+	const lines = [summary ? `${title}  ${theme.fg("dim", summary)}` : title];
+	if (model.description) {
+		const descriptionLines = model.wrapRows
+			? wrapTextWithAnsi(model.description, Math.max(4, safeWidth - 2))
+			: [truncateToWidth(model.description, Math.max(4, safeWidth - 2), "…")];
+		for (const line of descriptionLines) lines.push(`  ${theme.fg("text", line)}`);
+	}
+	lines.push(...renderOrchestrationPanelRows(theme, model, safeWidth, expanded));
 	return lines.map((line) => truncateToWidth(line, safeWidth, ""));
 }
 

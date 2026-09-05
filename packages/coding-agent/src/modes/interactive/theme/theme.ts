@@ -59,6 +59,8 @@ const ThemeJsonSchema = Type.Object({
 		toolPendingBg: ColorValueSchema,
 		toolSuccessBg: ColorValueSchema,
 		toolErrorBg: ColorValueSchema,
+		/** Surface tone under Workbench panes; optional, defaults to customMessageBg. */
+		workbenchSurface: Type.Optional(ColorValueSchema),
 		toolTitle: ColorValueSchema,
 		toolOutput: ColorValueSchema,
 		// Markdown (10 colors)
@@ -242,7 +244,8 @@ export type ThemeBg =
 	| "customMessageBg"
 	| "toolPendingBg"
 	| "toolSuccessBg"
-	| "toolErrorBg";
+	| "toolErrorBg"
+	| "workbenchSurface";
 
 type ColorMode = "truecolor" | "256color";
 
@@ -687,6 +690,7 @@ function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string
 		"toolPendingBg",
 		"toolSuccessBg",
 		"toolErrorBg",
+		"workbenchSurface",
 	]);
 	for (const [key, value] of Object.entries(resolvedColors)) {
 		if (bgColorKeys.has(key)) {
@@ -695,6 +699,8 @@ function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string
 			fgColors[key as ThemeColor] = value;
 		}
 	}
+	// Themes written before the Workbench keep loading; their surface tone is the soft message panel.
+	bgColors.workbenchSurface ??= bgColors.customMessageBg;
 	return new Theme(fgColors, bgColors, colorMode, {
 		name: themeJson.name,
 		sourcePath,

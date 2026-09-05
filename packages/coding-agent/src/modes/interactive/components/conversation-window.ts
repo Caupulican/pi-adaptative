@@ -1,6 +1,9 @@
 import { type Component, Container, sliceByColumn, truncateToWidth } from "@caupulican/pi-tui";
 import { stripAnsi } from "../../../utils/ansi.ts";
 
+/** OSC 133 prompt-zone marks emitted by the inline transcript components. */
+const PROMPT_ZONE_MARK = /\x1b\]133;[^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
 interface Anchor {
 	component: Component;
 	row: number;
@@ -81,11 +84,13 @@ export class ConversationWindow {
 		}
 		this.invalidate(component);
 		// Image protocol blocks cannot be split into terminal rows. Full transcript owns image display.
-		const lines = component
-			.render(this.width)
-			.map((line) =>
-				line.includes("\x1b_G") || line.includes("\x1b]1337;File=") ? "[Image — open transcript to view]" : line,
-			);
+		// Prompt-zone marks describe the inline transcript's line structure: a terminal may treat one as
+		// "a prompt starts here" and move the cursor to column 0, which corrupts a framed row. The
+		// alternate screen has no scrollback to navigate, so the viewport never emits them.
+		const lines = component.render(this.width).map((line) => {
+			const row = line.includes("\x1b]133;") ? line.replace(PROMPT_ZONE_MARK, "") : line;
+			return row.includes("\x1b_G") || row.includes("\x1b]1337;File=") ? "[Image — open transcript to view]" : row;
+		});
 		const bytes = lines.reduce((sum, line) => sum + line.length * 2, 0);
 		if (revision !== undefined && bytes <= this.byteLimit) {
 			while (this.bytes + bytes > this.byteLimit) {

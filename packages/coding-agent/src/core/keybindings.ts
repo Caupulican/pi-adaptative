@@ -38,6 +38,8 @@ export interface AppKeybindings {
 	"app.conversation.pageDown": true;
 	"app.conversation.latest": true;
 	"app.execution.toggle": true;
+	"app.workbench.grow": true;
+	"app.workbench.shrink": true;
 	"app.clipboard.pasteImage": true;
 	"app.transcript.open": true;
 	"app.transcript.scrollUp": true;
@@ -151,7 +153,9 @@ export const KEYBINDINGS = {
 	"app.conversation.pageUp": { defaultKeys: "alt+pageUp", description: "Scroll conversation up" },
 	"app.conversation.pageDown": { defaultKeys: "alt+pageDown", description: "Scroll conversation down" },
 	"app.conversation.latest": { defaultKeys: "ctrl+end", description: "Follow latest conversation" },
-	"app.execution.toggle": { defaultKeys: "alt+o", description: "Expand or fold current workbench execution" },
+	"app.execution.toggle": { defaultKeys: "alt+o", description: "Collapse or expand the workbench work area" },
+	"app.workbench.grow": { defaultKeys: "alt+=", description: "Give the workbench work area one more row" },
+	"app.workbench.shrink": { defaultKeys: "alt+-", description: "Take one row from the workbench work area" },
 	"app.clipboard.pasteImage": {
 		defaultKeys: defaultImagePasteKeys(),
 		description: "Paste image from clipboard",

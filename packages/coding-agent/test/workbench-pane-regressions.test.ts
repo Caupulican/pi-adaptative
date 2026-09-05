@@ -20,6 +20,7 @@ function setup(columns = 60, rows = 20) {
 		conversation: chat,
 		editor: dock,
 		dock: [new Text("status", 0, 0)],
+		brand: "pi",
 		viewportRows: () => terminal.rows,
 	});
 	const controller = new WorkbenchController(view, {
@@ -39,12 +40,19 @@ describe("Workbench review regressions", () => {
 	beforeAll(() => initTheme("dark"));
 	it("keeps all inspector evidence reachable in a combined narrow pane", () => {
 		const { view, controller } = setup();
-		view.setInspector(["Work", "failed verifier", "active step"]);
+		view.setInspector([{ title: "Work plan", body: ["failed verifier", "active step"] }]);
 		controller.record(new Text("execution result", 0, 0), false);
 		const seen: string[] = [];
 		for (let i = 0; i < 10; i++) {
-			seen.push(stripAnsi(view.render(60).slice(0, view.upperHeight).join("\n")));
-			view.scrollUpper(1, 1, 1);
+			seen.push(
+				stripAnsi(
+					view
+						.render(60)
+						.slice(view.upperTop, view.upperTop + view.upperHeight)
+						.join("\n"),
+				),
+			);
+			view.scrollUpper(1, view.upperTop + 1, 1);
 		}
 		expect(seen.join("\n")).toContain("failed verifier");
 		expect(seen.join("\n")).toContain("active step");
@@ -53,10 +61,17 @@ describe("Workbench review regressions", () => {
 	});
 	it("prioritizes a folded failure receipt over the work heading in a one-row combined pane", () => {
 		const { view, controller } = setup(60, 30);
-		view.setInspector(["Work"]);
+		view.setInspector([{ title: "Work plan", body: ["active step"] }]);
 		controller.record(new Text("failed output", 0, 0), true);
 		controller.complete();
-		expect(stripAnsi(view.render(60).slice(0, view.upperHeight).join("\n"))).toContain("1 failure receipts");
+		expect(
+			stripAnsi(
+				view
+					.render(60)
+					.slice(view.upperTop, view.upperTop + view.upperHeight)
+					.join("\n"),
+			),
+		).toContain("1 failure receipts");
 		controller.dispose();
 	});
 	it("never skips evidence rows when wheel increments exceed a one-row viewport", () => {
@@ -64,7 +79,7 @@ describe("Workbench review regressions", () => {
 		const lines = Array.from({ length: 5 }, (_, i) => `work${i}`);
 		const seen = new Set<string>();
 		for (let i = 0; i < 5; i++) {
-			seen.add(stripAnsi(pane.render("Work", lines, 0, 0, 30, 3)[1]!).trim());
+			seen.add(stripAnsi(pane.render("Work plan", "", lines, 0, 0, 30, 2)[1]!).trim());
 			pane.scrollAt(1, 1, 3);
 		}
 		for (const line of lines) expect([...seen].join("\n")).toContain(line);
@@ -73,11 +88,19 @@ describe("Workbench review regressions", () => {
 		const { view, controller } = setup(100, 40);
 		controller.record(new Text(Array.from({ length: 20 }, (_, i) => `diff${i}`).join("\n"), 0, 0), false);
 		view.render(100);
-		view.scrollUpper(1, 1, 3);
-		view.scrollUpper(1, 1, 3);
-		const before = view.render(100).map(stripAnsi).slice(1, view.upperHeight);
+		view.scrollUpper(50, view.upperTop + 1, 3);
+		view.scrollUpper(50, view.upperTop + 1, 3);
+		const before = view
+			.render(100)
+			.map(stripAnsi)
+			.slice(view.upperTop, view.upperTop + view.upperHeight);
 		controller.record(undefined, false);
-		expect(view.render(100).map(stripAnsi).slice(1, view.upperHeight)).toEqual(before);
+		expect(
+			view
+				.render(100)
+				.map(stripAnsi)
+				.slice(view.upperTop, view.upperTop + view.upperHeight),
+		).toEqual(before);
 		controller.record(new Text("new evidence", 0, 0), false);
 		expect(stripAnsi(view.render(100).join("\n"))).toContain("new evidence");
 		controller.dispose();
@@ -91,8 +114,8 @@ describe("Workbench review regressions", () => {
 			chat.addChild(shell);
 			const frame = stripAnsi(view.render(100).join("\n"));
 			expect(frame).toContain(command);
-			view.scrollUpper(1, 1, 3);
-			view.scrollUpper(1, 1, 3);
+			view.scrollUpper(1, view.upperTop + 1, 3);
+			view.scrollUpper(1, view.upperTop + 1, 3);
 		}
 		controller.dispose();
 	});

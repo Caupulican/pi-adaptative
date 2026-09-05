@@ -1,7 +1,9 @@
 /** Mounts the human Workbench or the deliberately unattended transcript; owns no session lifecycle. */
+import path from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { Component, Container, EditorComponent, TUI } from "@caupulican/pi-tui";
+import { APP_NAME } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
@@ -43,14 +45,11 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		conversation: host.chatContainer,
 		editor: host.editorContainer,
 		header: host.headerContainer,
-		dock: [
-			host.pendingMessagesContainer,
-			host.statusContainer,
-			host.widgetContainerAbove,
-			...(host.activityLane ? [host.activityLane] : []),
-			host.widgetContainerBelow,
-			host.footer,
-		],
+		activity: host.activityLane,
+		brand: APP_NAME,
+		title: () => host.session.sessionManager.getSessionName() || path.basename(host.session.sessionManager.getCwd()),
+		dock: [host.pendingMessagesContainer, host.statusContainer, host.widgetContainerAbove, host.footer],
+		dockBelow: [host.widgetContainerBelow],
 		viewportRows: () => host.ui.terminal.rows,
 	});
 	host.workbench = new WorkbenchController(view, {

@@ -6,7 +6,7 @@ import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 describe("Workbench terminal rendering", () => {
 	beforeAll(() => initTheme("dark"));
-	it("keeps pane boundaries and hardware cursor through completion, resize and overlay focus restoration", async () => {
+	it("keeps zone geometry and the hardware cursor through completion, resize and overlay focus restoration", async () => {
 		const terminal = new VirtualTerminal(110, 30);
 		terminal.write("\x1b[?1049h\x1b[H");
 		const ui = new TUI(terminal, true);
@@ -27,9 +27,13 @@ describe("Workbench terminal rendering", () => {
 			conversation: chat,
 			editor: editorContainer,
 			dock: [new Text("status at bottom", 0, 0)],
+			brand: "pi",
 			viewportRows: () => terminal.rows,
 		});
-		view.setInspector(["Work", "current step", "Team", "running verifier"]);
+		view.setInspector([
+			{ title: "Work plan", meta: "1 / 2", body: ["current step"] },
+			{ title: "Team", meta: "1 active", body: ["running verifier"] },
+		]);
 		view.setExecution(new Text("Edit file.ts\n-old\n+new", 0, 0));
 		ui.addChild(view);
 		ui.setFocus(editor);
@@ -42,17 +46,24 @@ describe("Workbench terminal rendering", () => {
 			view.setExecution(new Text(Array.from({ length: 200 }, (_, i) => `tool output ${i}`).join("\n"), 0, 0));
 			ui.requestRender();
 			await terminal.waitForRender();
-			expect(view.conversationTop).toBe(start);
-			expect(terminal.getViewport()[0]).toMatch(/^┌.*┐┌.*┐$/);
-			expect(terminal.getViewport()[start - 1]).toMatch(/^┌.*Conversation.*┐$/);
-			expect(terminal.getViewport()[start + view.conversationHeight]).toMatch(/^└─+┘$/);
-			expect(terminal.getViewport().at(-1)).toMatch(/^└─+┘$/);
-			view.setInspector(["Work complete"]);
+			expect(view.conversationTop).toBe(start); // evidence never moves the conversation
+			expect(terminal.getViewport()[0]).toMatch(/^ pi .*IDLE\s*$/);
+			expect(terminal.getViewport()[2]).toMatch(
+				/^ Work plan .*1 \/ 2 {4}Execution .*File effects and command outcomes( · \d+-\d+\/\d+ ↕)?\s*$/,
+			);
+			expect(terminal.getViewport()[view.conversationTop - 1]).toMatch(
+				/^ Conversation · Following latest .* Copy conversation\s*$/,
+			);
+			expect(terminal.getViewport()[view.conversationTop + view.conversationHeight]).toContain("status at bottom");
+			for (const line of terminal.getViewport()) expect(line).not.toMatch(/[┌┐└┘│]/);
+			view.setInspector([{ title: "Work plan", body: ["Work complete"] }]);
 			view.setExecution(undefined);
 			ui.requestRender();
 			await terminal.waitForRender();
-			expect(terminal.getViewport()[1]).toContain("Work complete");
-			expect(terminal.getViewport()[3]).toContain("Conversation");
+			expect(terminal.getViewport()[2]).toContain("Work plan");
+			expect(terminal.getViewport()[3]).toContain("Work complete");
+			expect(view.conversationTop).toBe(start);
+			expect(terminal.getViewport()[start - 1]).toContain("Conversation");
 			const overlay = ui.showOverlay(new Text("question dialog", 0, 0));
 			await terminal.waitForRender();
 			overlay.hide();
@@ -67,7 +78,6 @@ describe("Workbench terminal rendering", () => {
 				terminal.resize(columns!, rows!);
 				await terminal.waitForRender();
 				expect(terminal.getViewport().at(-2)).toContain("> promptx");
-				expect(terminal.getViewport().at(-1)).toMatch(/^└─+┘$/);
 				expect(terminal.getCursorPosition()).toEqual({ x: 10, y: rows! - 2 });
 				for (const line of terminal.getViewport()) expect(visibleWidth(line)).toBeLessThanOrEqual(columns!);
 			}

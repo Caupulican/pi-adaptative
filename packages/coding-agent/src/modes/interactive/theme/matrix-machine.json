@@ -41,6 +41,7 @@
 		"toolPendingBg": "panelSoft",
 		"toolSuccessBg": "panelGreen",
 		"toolErrorBg": "panelRed",
+		"workbenchSurface": "panel",
 		"toolTitle": "green",
 		"toolOutput": "muted",
 

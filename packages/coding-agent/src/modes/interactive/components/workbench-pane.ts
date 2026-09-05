@@ -1,32 +1,33 @@
 import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import { theme } from "../theme/theme.ts";
 
-const CELL_RESET = "\x1b[0m\x1b]8;;\x1b\\";
+const FULL_RESET = "\x1b[0m";
+const BG_RESET = "\x1b[49m";
 
-/** All pane borders consume cells inside, never outside, the allocated rectangle. */
-export function framePane(title: string, content: string[], width: number, height: number): string[] {
-	if (height <= 0) return [];
-	const inner = Math.max(0, width - 2);
-	const edge = (left: string, middle: string, right: string) =>
-		theme.fg("border", truncateToWidth(left + middle + right, width, ""));
-	const label = truncateToWidth(` ${title} `, inner, "");
-	const heading = edge("┌", label + "─".repeat(Math.max(0, inner - visibleWidth(label))), "┐");
-	if (height === 1) return [heading];
-	return [
-		heading,
-		...Array.from(
-			{ length: height - 2 },
-			(_, row) =>
-				theme.fg("border", "│") +
-				truncateToWidth(content[row] ?? "", inner, "", true) +
-				CELL_RESET +
-				theme.fg("border", "│"),
-		),
-		edge("└", "─".repeat(inner), "┘"),
-	].map((line) => truncateToWidth(line, width, ""));
+/** Paint the pane surface under one row. Inner resets re-open the surface; rows never exceed `width`. */
+export function surfaceRow(content: string, width: number): string {
+	if (width <= 0) return "";
+	const surface = theme.getBgAnsi("workbenchSurface");
+	const padded = truncateToWidth(content, width, "", true);
+	return `${surface}${padded
+		.split(FULL_RESET)
+		.join(FULL_RESET + surface)
+		.split(BG_RESET)
+		.join(BG_RESET + surface)}${BG_RESET}`;
 }
 
-/** Small current-evidence viewport. It owns scroll position, not task/history state. */
+/** Bold title on the left, muted meta right-aligned, exactly `width` cells. Meta yields before the title. */
+export function labelRow(title: string, meta: string, width: number): string {
+	if (width <= 0) return "";
+	const titleWidth = visibleWidth(title);
+	const metaWidth = visibleWidth(meta);
+	if (meta && titleWidth + 2 + metaWidth <= width) {
+		return `${theme.bold(theme.fg("text", title))}${" ".repeat(width - titleWidth - metaWidth)}${theme.fg("muted", meta)}`;
+	}
+	return truncateToWidth(theme.bold(theme.fg("text", title)), width, "…", true);
+}
+
+/** Small current-evidence viewport on a surface tone. It owns scroll position, not task/history state. */
 export class WorkbenchPane {
 	private offset = 0;
 	private count = 0;
@@ -52,17 +53,29 @@ export class WorkbenchPane {
 		return true;
 	}
 
-	render(title: string, lines: string[], x: number, y: number, width: number, height: number): string[] {
+	/**
+	 * One title row followed by `height - 1` content rows, all `width` cells wide with one-cell gutters.
+	 * The visible row range joins the meta when content overflows; only content rows accept wheel input.
+	 */
+	render(title: string, meta: string, lines: string[], x: number, y: number, width: number, height: number): string[] {
+		if (height <= 0 || width <= 0) {
+			this.hide();
+			return [];
+		}
 		this.x = x + 1;
 		this.y = y + 1;
 		this.width = Math.max(0, width - 2);
-		this.height = Math.max(0, height - 2);
+		this.height = Math.max(0, height - 1);
 		this.count = lines.length;
 		this.offset = Math.min(this.offset, Math.max(0, lines.length - this.height));
 		const range =
 			lines.length > this.height && this.height > 0
-				? ` · ${this.offset + 1}-${Math.min(lines.length, this.offset + this.height)}/${lines.length} ↕`
+				? `${this.offset + 1}-${Math.min(lines.length, this.offset + this.height)}/${lines.length} ↕`
 				: "";
-		return framePane(title + range, lines.slice(this.offset, this.offset + this.height), width, height);
+		const rows = [` ${labelRow(title, [meta, range].filter(Boolean).join(" · "), this.width)} `];
+		for (let row = 0; row < this.height; row++) {
+			rows.push(` ${truncateToWidth(lines[this.offset + row] ?? "", this.width, "", true)} `);
+		}
+		return rows.map((row) => surfaceRow(row, width));
 	}
 }

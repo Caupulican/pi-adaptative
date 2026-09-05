@@ -39,6 +39,17 @@ export function createWorkbenchToolPreview(name: string, args: unknown, result: 
 		.replace(/\r/g, "")
 		.split("\n", 40)
 		.join("\n");
+	let counts = "";
+	if (diff) {
+		let added = 0;
+		let removed = 0;
+		for (const line of bounded.split("\n")) {
+			if (line.startsWith("+") && !line.startsWith("+++")) added++;
+			else if (line.startsWith("-") && !line.startsWith("---")) removed++;
+		}
+		if (added || removed)
+			counts = `  ${theme.fg("toolDiffAdded", `+${added}`)} ${theme.fg("toolDiffRemoved", `−${removed}`)}`;
+	}
 	const label = sanitizeBinaryOutput(stripAnsi(`${name}${path ? ` · ${path}` : ""}`)).slice(0, 512);
 	const failed = result.isError;
 	const truncated = body.length > bounded.length + 1;
@@ -47,6 +58,7 @@ export function createWorkbenchToolPreview(name: string, args: unknown, result: 
 		render(width) {
 			component ??= new Text(
 				theme.fg(failed ? "error" : "accent", `${failed ? "Failed · " : ""}${label}`) +
+					counts +
 					(bounded.trim() ? `\n${diff ? renderDiff(bounded) : theme.fg("toolOutput", bounded.trimEnd())}` : "") +
 					(truncated ? theme.fg("dim", "\n… full result in transcript") : ""),
 				0,
