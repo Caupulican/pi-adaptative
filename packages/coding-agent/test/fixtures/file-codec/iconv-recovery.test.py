@@ -1,6 +1,9 @@
 """Synthetic codec and process fixtures; no user files, tools, or provider data."""
 import base64
+import builtins
 import codecs
+import ctypes
+import errno
 import io
 import json
 import os
@@ -86,8 +89,27 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result["text"], "é")
         self.assertEqual(self.calls, [])
 
+    def test_missing_ffi_does_not_disable_python_or_command_codecs(self):
+        with patch.dict(scope, {"ctypes": None}):
+            self.assertEqual(self.transform("decode", "target".encode("cp037"))["text"], "target")
+            self.assertEqual(module["transform"]({"operation": "decode", "source": "6Q==", "encoding": "cp1252"})["text"], "é")
+            with self.assertRaises(scope["CodecUnavailable"]):
+                scope["NativeIconv"]()
+
+    def test_helper_import_recovers_when_python_was_built_without_ffi(self):
+        original = builtins.__import__
+
+        def import_without_ffi(name, *args, **kwargs):
+            if name == "ctypes":
+                raise ImportError("synthetic absent FFI")
+            return original(name, *args, **kwargs)
+
+        with patch.object(builtins, "__import__", side_effect=import_without_ffi):
+            isolated = runpy.run_path(module["__file__"], run_name="minimal_python_fixture")
+            self.assertEqual(isolated["transform"]({"operation": "decode", "source": "6Q==", "encoding": "cp1252"})["text"], "é")
+
     def test_missing_iconv_and_unsafe_labels_do_not_guess(self):
-        with patch.object(scope["shutil"], "which", return_value=None):
+        with patch.object(scope["shutil"], "which", return_value=None), patch.dict(scope, {"NativeIconv": unittest.mock.Mock(side_effect=scope["CodecUnavailable"]("fixture unavailable"))}):
             with self.assertRaises(LookupError):
                 self.transform("decode", b"text")
         for encoding in ("X-FIXTURE//IGNORE", "X-FIXTURE//TRANSLIT", "-f", "X-FIXTURE\0", "X-FIXTURE;echo"):
@@ -117,6 +139,137 @@ class RecoveryTests(unittest.TestCase):
         with patch.dict(scope, {"run_iconv": substituted}):
             with self.assertRaises(ValueError):
                 self.transform("read_chunk", "é".encode("cp037"), final=True)
+
+
+class NativeTransportTests(unittest.TestCase):
+    def setUp(self):
+        self.steps = []
+        self.inputs = []
+        self.library = unittest.mock.Mock()
+        self.library.iconv_open.return_value = 7
+        self.library.iconv_close.return_value = 0
+        self.library.iconv.side_effect = self.convert_buffer
+        loaded = patch.object(ctypes, "CDLL", return_value=self.library)
+        self.load = loaded.start()
+        self.addCleanup(loaded.stop)
+        self.native = scope["NativeIconv"]()
+
+    def convert_buffer(self, descriptor, source, source_left, output, output_left):
+        self.assertEqual(descriptor, 7)
+        step = self.steps.pop(0)
+        if source is None:
+            self.inputs.append(None)
+        else:
+            pointer = ctypes.cast(source, ctypes.POINTER(ctypes.c_void_p)).contents
+            left = ctypes.cast(source_left, ctypes.POINTER(ctypes.c_size_t)).contents
+            self.inputs.append(ctypes.string_at(pointer.value, left.value))
+            consumed = step.get("consumed", left.value)
+            pointer.value += consumed
+            left.value -= consumed
+        pointer = ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents
+        left = ctypes.cast(output_left, ctypes.POINTER(ctypes.c_size_t)).contents
+        payload = step.get("output", b"")
+        self.assertLessEqual(len(payload), left.value)
+        ctypes.memmove(pointer.value, payload, len(payload))
+        pointer.value += len(payload)
+        left.value -= len(payload)
+        ctypes.set_errno(step.get("errno", 0))
+        return step.get("result", 0)
+
+    def test_binary_buffers_flush_and_native_abi(self):
+        self.steps = [{"output": b"a\0b"}, {"output": b"!"}]
+        self.assertEqual(self.native.convert("X-SOURCE", "X-TARGET", b"a\0b"), b"a\0b!")
+        self.assertEqual(self.inputs, [b"a\0b", None])
+        self.load.assert_called_once_with(None, use_errno=True)
+        self.library.iconv_open.assert_called_once_with(b"X-TARGET", b"X-SOURCE")
+        self.library.iconv_close.assert_called_once_with(7)
+        self.assertEqual(self.library.iconv.restype, ctypes.c_size_t)
+        self.assertEqual(self.library.iconv_open.restype, ctypes.c_void_p)
+        self.assertEqual(len(self.library.iconv.argtypes), 5)
+
+    def test_output_exhaustion_resumes_at_exact_source_pointer_and_flushes(self):
+        self.steps = [
+            {"output": b"first", "consumed": 1, "result": ctypes.c_size_t(-1).value, "errno": errno.E2BIG},
+            {"output": b"second"},
+            {"output": b"tail", "result": ctypes.c_size_t(-1).value, "errno": errno.E2BIG},
+            {},
+        ]
+        self.assertEqual(self.native.convert("a", "b", b"xy"), b"firstsecondtail")
+        self.assertEqual(self.inputs, [b"xy", b"y", None, None])
+        self.library.iconv_close.assert_called_once_with(7)
+
+    def test_input_and_output_bounds_close_only_admitted_descriptors(self):
+        with patch.dict(scope, {"MAX_ICONV_OUTPUT": 4}):
+            with self.assertRaises(ValueError):
+                self.native.convert("a", "b", b"12345")
+            self.library.iconv_open.assert_not_called()
+            self.steps = [{"output": b"12345"}]
+            with self.assertRaises(ValueError):
+                self.native.convert("a", "b", b"x")
+            self.library.iconv_close.assert_called_once_with(7)
+
+    def test_invalid_incomplete_and_nonreversible_results_never_return_bytes(self):
+        for result, error in ((ctypes.c_size_t(-1).value, errno.EILSEQ), (ctypes.c_size_t(-1).value, errno.EINVAL), (1, 0)):
+            with self.subTest(result=result, error=error):
+                self.library.iconv_close.reset_mock()
+                self.steps = [{"output": b"partial", "result": result, "errno": error}]
+                with self.assertRaises(ValueError):
+                    self.native.convert("a", "b", b"x")
+                self.library.iconv_close.assert_called_once_with(7)
+
+    def test_no_progress_does_not_loop(self):
+        self.steps = [{"consumed": 0, "result": ctypes.c_size_t(-1).value, "errno": errno.E2BIG}]
+        with self.assertRaises(ValueError):
+            self.native.convert("a", "b", b"x")
+        self.library.iconv.assert_called_once()
+        self.library.iconv_close.assert_called_once_with(7)
+
+    def test_open_failure_never_closes_an_invalid_descriptor(self):
+        self.library.iconv_open.return_value = ctypes.c_void_p(-1).value
+        with self.assertRaises(LookupError):
+            self.native.convert("a", "b", b"x")
+        self.library.iconv.assert_not_called()
+        self.library.iconv_close.assert_not_called()
+
+    def test_allocation_failure_closes_the_descriptor(self):
+        failure = MemoryError("synthetic allocation failure")
+        with patch.object(ctypes, "create_string_buffer", side_effect=failure):
+            with self.assertRaises(MemoryError) as caught:
+                self.native.convert("a", "b", b"x")
+        self.assertIs(caught.exception, failure)
+        self.library.iconv_close.assert_called_once_with(7)
+
+    def test_close_failure_cannot_replace_conversion_failure_or_claim_success(self):
+        failure = ValueError("synthetic conversion failure")
+        self.library.iconv_close.return_value = -1
+        self.library.iconv.side_effect = failure
+        with self.assertRaises(ValueError) as caught:
+            self.native.convert("a", "b", b"x")
+        self.assertIs(caught.exception, failure)
+        self.library.iconv.side_effect = self.convert_buffer
+        self.steps = [{"output": b"x"}, {}]
+        with self.assertRaisesRegex(ValueError, "close failed"):
+            self.native.convert("a", "b", b"x")
+
+    def test_deadline_closes_without_starting_another_conversion(self):
+        with patch.object(scope["time"], "monotonic", side_effect=[0, scope["ICONV_TIMEOUT"]]):
+            with self.assertRaisesRegex(ValueError, "deadline"):
+                self.native.convert("a", "b", b"x")
+        self.library.iconv.assert_not_called()
+        self.library.iconv_close.assert_called_once_with(7)
+
+    def test_missing_symbols_are_unavailable_not_guessed_library_paths(self):
+        self.load.return_value = object()
+        with self.assertRaises(scope["CodecUnavailable"]):
+            scope["NativeIconv"]()
+        self.assertTrue(all(call.args == (None,) for call in self.load.call_args_list))
+
+    def test_incomplete_success_and_invalid_counts_are_rejected(self):
+        for consumed in (0, -1):
+            self.steps = [{"consumed": consumed}]
+            with self.subTest(consumed=consumed), self.assertRaises(ValueError):
+                self.native.convert("a", "b", b"x")
+        self.assertEqual(self.library.iconv_close.call_count, 2)
 
 
 class ProcessTests(unittest.TestCase):
@@ -164,6 +317,35 @@ class ProcessTests(unittest.TestCase):
                 module["run_iconv"]("/synthetic tools/iconv", "X-FIXTURE", "UTF-8", b"input")
         self.assertIs(caught.exception, failure)
 
+
+if "--native-library" in sys.argv:
+    # Independent ABI probe: no executable lookup and no production adapter involved.
+    try:
+        library = ctypes.CDLL(None)
+        opened = library.iconv_open
+        closed = library.iconv_close
+        opened.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        opened.restype = ctypes.c_void_p
+        closed.argtypes = [ctypes.c_void_p]
+        closed.restype = ctypes.c_int
+        descriptor = opened(b"UTF-8", b"IBM1047")
+        available = descriptor != ctypes.c_void_p(-1).value
+        if available:
+            assert closed(descriptor) == 0
+    except (AttributeError, OSError, TypeError):
+        available = False
+    if available:
+        with patch.object(scope["shutil"], "which", return_value=None):
+            request = {"operation": "decode", "encoding": "IBM1047", "source": "o4GZh4WjDSU="}
+            assert module["transform"](request)["text"] == "target\r\n"
+            request.update(operation="splice", splices=[{"start": 0, "end": 6, "replacement": "changed"}])
+            assert base64.b64decode(module["transform"](request)["bytes"]) == bytes.fromhex("838881958785840d25")
+        native = scope["NativeIconv"]()
+        text = "é🙂" * 100_000
+        assert native.convert("UTF-8", "UTF-16LE", text.encode("utf-8")) == text.encode("utf-16-le")
+        assert native.convert("UTF-8", "UTF-16LE", b"") == b""
+    print(json.dumps({"available": available}))
+    sys.exit(0)
 
 suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
 result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2).run(suite)

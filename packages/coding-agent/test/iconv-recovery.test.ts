@@ -17,6 +17,26 @@ vi.mock("../src/core/python-runtime.ts", () => ({
 }));
 
 describe("packaged iconv recovery", () => {
+	it("recovers through loaded native iconv symbols when the command is missing", async (context) => {
+		const fixture = fileURLToPath(new URL("./fixtures/file-codec/iconv-recovery.test.py", import.meta.url));
+		const helper = fileURLToPath(new URL("../src/bundled-resources/runtimes/file-edit-codec.py", import.meta.url));
+		const result = await execCommand(
+			process.platform === "win32" ? "python" : "python3",
+			["-I", "-S", "-B", fixture, helper, "--native-library"],
+			process.cwd(),
+			{ timeout: 10_000, maxBuffer: 64 * 1024 },
+		);
+		expect(result, result.stderr).toMatchObject({
+			code: 0,
+			killed: false,
+			stdoutTruncated: false,
+			stderrTruncated: false,
+		});
+		if (JSON.parse(result.stdout).available === false)
+			context.skip("Loaded native iconv with IBM1047 is unavailable; mocked conformance remains mandatory.");
+		expect(JSON.parse(result.stdout)).toEqual({ available: true });
+	});
+
 	it("passes deterministic codec and process fixtures without a host iconv dependency", async () => {
 		const fixture = fileURLToPath(new URL("./fixtures/file-codec/iconv-recovery.test.py", import.meta.url));
 		const helper = fileURLToPath(new URL("../src/bundled-resources/runtimes/file-edit-codec.py", import.meta.url));
@@ -32,7 +52,7 @@ describe("packaged iconv recovery", () => {
 			stdoutTruncated: false,
 			stderrTruncated: false,
 		});
-		expect(JSON.parse(result.stdout)).toEqual({ passed: 13, tests: 13, skipped: 0 });
+		expect(JSON.parse(result.stdout)).toEqual({ passed: 26, tests: 26, skipped: 0 });
 	});
 
 	it("reads and edits IBM1047 bytes through the native installed converter", async (context) => {

@@ -109,6 +109,15 @@ conversion checks both decoded source bytes and replacement text, in addition to
 splice and final-result checks. A missing converter produces actionable availability guidance;
 there is no implicit installation or encoding guess. Python-supported codecs do not require iconv.
 
+If the command is absent, Python probes the already-loaded process image for `iconv_open`, `iconv`,
+and `iconv_close` through its optional ctypes FFI. It never searches guessed library filenames or
+installs a system package. This native adapter owns a fresh descriptor per conversion, drains
+bounded output buffers and final shift-state bytes, rejects non-reversible conversions, and closes
+descriptors on success or failure. Both adapters use the same source/replacement round-trip and
+byte-splice verification. The native loop checks the five-second deadline between calls; the
+outer 30-second helper deadline bounds a stuck native call. Missing FFI/symbols leave command and
+Python codecs usable. This is opportunistic native recovery, not all-platform converter provisioning.
+
 The current stateless helper protocol cannot serialize native iconv decoder state. Its fallback
 therefore retains source bytes until final decode, within the 16 MiB state bound, and verifies their
 round-trip even for reads. Larger iconv-only reads and noncanonical stateful representations still

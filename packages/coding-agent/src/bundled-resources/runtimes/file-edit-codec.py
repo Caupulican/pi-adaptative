@@ -8,6 +8,7 @@ requirements. BOM/encoding selection is shared. This helper never writes a file.
 """
 import base64
 import codecs
+import errno
 import json
 import os
 import re
@@ -15,6 +16,13 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
+
+try:
+    import ctypes
+except ImportError:
+    # Minimal Python builds may omit the native FFI; existing codecs/CLI still work.
+    ctypes = None
 
 MAX_PROTOCOL = 64 * 1024 * 1024
 MAX_SOURCE = 16 * 1024 * 1024
@@ -35,6 +43,79 @@ class EncodingEvidenceRequired(ValueError):
 
 class CodecUnavailable(LookupError):
     pass
+
+
+class NativeIconv:
+    """Use already-loaded POSIX iconv symbols, never search or guess a library path.
+
+    Each conversion owns one descriptor. Bounded output and progress checks cover
+    cooperative calls; the outer isolated-helper deadline also bounds a stuck C call.
+    """
+    def __init__(self):
+        if ctypes is None:
+            raise CodecUnavailable("native iconv FFI unavailable")
+        try:
+            library = ctypes.CDLL(None, use_errno=True)
+            self.open = library.iconv_open
+            self.convert_buffer = library.iconv
+            self.close = library.iconv_close
+        except (AttributeError, OSError, TypeError) as cause:
+            raise CodecUnavailable("native iconv unavailable") from cause
+        self.open.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        self.open.restype = ctypes.c_void_p
+        self.convert_buffer.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t),
+            ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t),
+        ]
+        self.convert_buffer.restype = ctypes.c_size_t
+        self.close.argtypes = [ctypes.c_void_p]
+        self.close.restype = ctypes.c_int
+
+    def convert(self, source_encoding, target_encoding, data):
+        if len(data) > MAX_ICONV_OUTPUT:
+            raise ValueError("iconv input bound")
+        deadline = time.monotonic() + ICONV_TIMEOUT
+        descriptor = self.open(target_encoding.encode("ascii"), source_encoding.encode("ascii"))
+        if descriptor == ctypes.c_void_p(-1).value:
+            raise LookupError("native iconv conversion unavailable")
+        try:
+            source = ctypes.create_string_buffer(data)
+            source_pointer = ctypes.c_void_p(ctypes.addressof(source))
+            source_left = ctypes.c_size_t(len(data))
+            converted = bytearray()
+            flush = False
+            while True:
+                if time.monotonic() >= deadline:
+                    raise ValueError("native iconv deadline")
+                capacity = min(64 * 1024, MAX_ICONV_OUTPUT - len(converted) + 1)
+                output = ctypes.create_string_buffer(capacity)
+                output_pointer = ctypes.c_void_p(ctypes.addressof(output))
+                output_left = ctypes.c_size_t(capacity)
+                before = source_left.value
+                result = self.convert_buffer(
+                    descriptor, None if flush else ctypes.byref(source_pointer),
+                    None if flush else ctypes.byref(source_left),
+                    ctypes.byref(output_pointer), ctypes.byref(output_left),
+                )
+                produced = capacity - output_left.value
+                if not 0 <= produced <= capacity or not 0 <= source_left.value <= before:
+                    raise ValueError("invalid native iconv counts")
+                if len(converted) + produced > MAX_ICONV_OUTPUT:
+                    raise ValueError("iconv output bound")
+                if produced:
+                    converted.extend(output.raw[:produced])
+                if result == ctypes.c_size_t(-1).value:
+                    if ctypes.get_errno() != errno.E2BIG or (produced == 0 and source_left.value == before):
+                        raise ValueError("native iconv conversion unverified")
+                elif result != 0 or source_left.value != 0:
+                    raise ValueError("native iconv conversion was not exact")
+                elif flush:
+                    return bytes(converted)
+                else:
+                    flush = True
+        finally:
+            if self.close(descriptor) != 0 and sys.exc_info()[0] is None:
+                raise ValueError("native iconv close failed")
 
 
 def run_iconv(executable, source_encoding, target_encoding, data):
@@ -113,25 +194,29 @@ class IconvCodec:
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}", name):
             raise LookupError("unsupported codec label")
         executable = shutil.which("iconv")
-        if not executable:
-            raise CodecUnavailable("iconv unavailable")
         self.name = name
-        self.executable = os.path.abspath(executable)
+        self.executable = os.path.abspath(executable) if executable else None
+        self.native = None if executable else NativeIconv()
+
+    def convert(self, source, target, data):
+        if self.native is not None:
+            return self.native.convert(source, target, data)
+        return run_iconv(self.executable, source, target, data)
 
     def encode(self, text, errors="strict"):
         if errors != "strict":
             raise ValueError("strict conversion required")
-        encoded = run_iconv(self.executable, "UTF-8", self.name, text.encode("utf-8", "strict"))
+        encoded = self.convert("UTF-8", self.name, text.encode("utf-8", "strict"))
         # Some platform implementations substitute even without a lossy flag.
-        if run_iconv(self.executable, self.name, "UTF-8", encoded).decode("utf-8", "strict") != text:
+        if self.convert(self.name, "UTF-8", encoded).decode("utf-8", "strict") != text:
             raise ValueError("iconv changed replacement text")
         return encoded, len(text)
 
     def decode(self, source, errors="strict"):
         if errors != "strict":
             raise ValueError("strict conversion required")
-        text = run_iconv(self.executable, self.name, "UTF-8", source).decode("utf-8", "strict")
-        if run_iconv(self.executable, "UTF-8", self.name, text.encode("utf-8", "strict")) != source:
+        text = self.convert(self.name, "UTF-8", source).decode("utf-8", "strict")
+        if self.convert("UTF-8", self.name, text.encode("utf-8", "strict")) != source:
             raise ValueError("iconv source roundtrip unverified")
         return text, len(source)
 

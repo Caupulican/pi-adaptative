@@ -29,6 +29,7 @@
 - Decoded BOM-marked and explicitly encoded source text before ordinary, outline, and large-file reads instead of substituting invalid UTF-8. Incremental codec state preserves split characters and stateful encodings; cancellation releases codec callers without waiting for shared Python provisioning.
 - Stopped custom Python backends from inheriting the operator environment. Python and credential CLI execution now share explicit environment merging and case-aware exclusions; queued Python calls retain detached backend snapshots and canceled environment lookups cannot advance to execution.
 - Loaded Python project output rules through the execution backend while retaining operator-global and explicit extra-file precedence. Filtered calls reload repaired rules; construction, `fullOutput`, and disabled filtering no longer read rule files. Cancellation and backend I/O failures stop execution without substituting local project rules.
+- Recovered missing iconv commands through already-loaded native iconv symbols when available. The isolated Python helper retains the same byte-preservation checks, bounds native output, flushes shift state, and closes conversion descriptors on failure without guessing library paths or installing system packages.
 
 ## [0.99.1] - 2026-09-06
 
