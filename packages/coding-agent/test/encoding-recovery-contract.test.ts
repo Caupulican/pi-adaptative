@@ -52,6 +52,7 @@ describe("encoding recovery contract", () => {
 			},
 			operations: {
 				getEnvironment: async () => ({ variables: {}, caseSensitive: true }),
+				readOutputRules: async () => [],
 				stat: async () => {
 					throw new Error("Fixture must not inspect a path");
 				},

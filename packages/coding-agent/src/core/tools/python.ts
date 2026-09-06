@@ -1,4 +1,4 @@
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { TruncationResult } from "@caupulican/pi-agent-core/node";
 import { Text } from "@caupulican/pi-tui";
@@ -21,13 +21,19 @@ import {
 	formatOutputReductionNotice,
 	type OutputReductionDetails,
 	type OutputReductionToolOptions,
+	type ReduceToolOutputOptions,
 	reduceToolOutput,
 	resolveOutputReductionLevel,
 } from "./output-reduction.ts";
 import "./output-reducers.ts";
 import { getAgentDir } from "../../config.ts";
 import { BUNDLED_OUTPUT_RULES } from "./output-rules.bundled.ts";
-import { createRuleOutputReducer, loadOutputRules } from "./output-rules.ts";
+import {
+	compileOutputRulesDocument,
+	createRuleOutputReducer,
+	loadOutputRules,
+	OUTPUT_RULES_FILE_NAME,
+} from "./output-rules.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 export const DEFAULT_PYTHON_TIMEOUT_SECONDS = 30;
@@ -126,6 +132,8 @@ export interface PythonOperations {
 	stat(path: string, signal?: AbortSignal): Promise<{ isDirectory(): boolean; isFile(): boolean }>;
 	/** Return the backend's complete base environment and its variable-name case policy. */
 	getEnvironment(cwd: string, signal?: AbortSignal): Promise<ExecutionEnvironment>;
+	/** Read a backend JSON rules document; preserve missing-path errors. Schema validation is shared. */
+	readOutputRules(path: string, signal?: AbortSignal): Promise<unknown>;
 	exec(request: PythonExecutionRequest): Promise<PythonExecutionResult>;
 }
 
@@ -178,6 +186,14 @@ function createLocalPythonOperations(): PythonOperations {
 	return {
 		stat: (path) => stat(path),
 		getEnvironment: async () => ({ variables: { ...process.env }, caseSensitive: process.platform !== "win32" }),
+		async readOutputRules(path, signal) {
+			const text = await readFile(path, { encoding: "utf8", signal });
+			try {
+				return JSON.parse(text);
+			} catch (cause) {
+				throw new Error(`${path}: invalid output rules JSON`, { cause });
+			}
+		},
 		async exec(request) {
 			if (request.signal?.aborted) throw new Error("Python execution aborted before start");
 			const child = spawnProcess(request.python, request.args, {
@@ -214,9 +230,12 @@ export function createPythonToolDefinition(
 		options.operations &&
 		(!options.resolveRuntime ||
 			typeof options.operations.stat !== "function" ||
-			typeof options.operations.getEnvironment !== "function")
+			typeof options.operations.getEnvironment !== "function" ||
+			typeof options.operations.readOutputRules !== "function")
 	)
-		throw new Error("Custom Python operations require backend stat, environment, and explicit runtime resolution.");
+		throw new Error(
+			"Custom Python operations require backend stat, environment, output-rule reads, and explicit runtime resolution.",
+		);
 	if (!options.operations && options.pathOptions?.flavor && options.pathOptions.flavor !== nativeFlavor)
 		throw new Error("Non-native Python path semantics require custom operations.");
 	const pathOptions = Object.freeze({
@@ -232,20 +251,6 @@ export function createPythonToolDefinition(
 	// Output reduction: on unless the operator turned it off (settings or PI_TOOL_FILTER_DISABLED=1).
 	const reductionEnabled = options.outputReduction?.enabled !== false && process.env.PI_TOOL_FILTER_DISABLED !== "1";
 	const reductionLevel = () => resolveOutputReductionLevel(options.outputReduction?.level);
-	const reductionOptions = reductionEnabled
-		? {
-				extraReducers: [
-					createRuleOutputReducer(
-						loadOutputRules({
-							cwd: baseCwd,
-							agentDir: options.outputReduction?.agentDir ?? getAgentDir(),
-							extraFiles: options.outputReduction?.rulesFiles,
-							bundled: BUNDLED_OUTPUT_RULES,
-						}),
-					),
-				],
-			}
-		: undefined;
 	return {
 		name: "python",
 		label: "python",
@@ -281,6 +286,32 @@ export function createPythonToolDefinition(
 			await inspectPythonPath(cwd, "cwd", operations, signal);
 			const scriptPath = hasScript ? resolvePythonToolPath(cwd, input.scriptPath as string, pathOptions) : undefined;
 			if (scriptPath !== undefined) await inspectPythonPath(scriptPath, "scriptPath", operations, signal);
+			const reduceStdout = input.fullOutput !== true && reductionEnabled;
+			let reductionOptions: ReduceToolOutputOptions | undefined;
+			if (reduceStdout) {
+				const projectPath = resolvePythonToolPath(baseCwd, `.pi/${OUTPUT_RULES_FILE_NAME}`, pathOptions);
+				const projectRules = await awaitPreflight(async () => {
+					try {
+						return compileOutputRulesDocument(await operations.readOutputRules(projectPath, signal), projectPath);
+					} catch (error) {
+						if (!isMissingPathError(error)) throw error;
+						return [];
+					}
+				}, signal);
+				signal?.throwIfAborted();
+				reductionOptions = {
+					extraReducers: [
+						createRuleOutputReducer(
+							loadOutputRules({
+								projectRules,
+								agentDir: options.outputReduction?.agentDir ?? getAgentDir(),
+								extraFiles: options.outputReduction?.rulesFiles,
+								bundled: BUNDLED_OUTPUT_RULES,
+							}),
+						),
+					],
+				};
+			}
 			const runtime = await awaitPreflight(resolveRuntime, signal);
 			signal?.throwIfAborted();
 			if (runtime.status !== "ready") throw new Error(runtime.reason);
@@ -310,7 +341,6 @@ export function createPythonToolDefinition(
 			};
 			const stdout = new OutputAccumulator({ ...accumulatorOptions, tempFilePrefix: "pi-python-stdout" });
 			const stderr = new OutputAccumulator({ ...accumulatorOptions, tempFilePrefix: "pi-python-stderr" });
-			const reduceStdout = input.fullOutput !== true && reductionEnabled;
 			const finishStreams = () => {
 				stdout.finish();
 				stderr.finish();

@@ -226,6 +226,8 @@ export function readOutputRulesFile(path: string): CompiledOutputRule[] {
 export interface LoadOutputRulesOptions {
 	/** Working directory; `.pi/output-filters.json` under it is the project file. */
 	cwd?: string;
+	/** Backend-loaded project rules, mutually exclusive with native cwd lookup. */
+	projectRules?: readonly CompiledOutputRule[];
 	/** Agent directory; `output-filters.json` in it is the user file. */
 	agentDir?: string;
 	/** Extra files (settings `toolOutput.rulesFile`), highest precedence. */
@@ -236,11 +238,14 @@ export interface LoadOutputRulesOptions {
 
 /** Load bundled + user + project (+ extra) rules; every file that exists must be valid. */
 export function loadOutputRules(options: LoadOutputRulesOptions): CompiledOutputRule[] {
+	if (options.cwd !== undefined && options.projectRules !== undefined)
+		throw new Error("Output rules require one project source, not both cwd and projectRules.");
 	const lists: Array<readonly CompiledOutputRule[]> = [options.bundled];
 	const candidates: string[] = [];
 	if (options.agentDir) candidates.push(join(options.agentDir, OUTPUT_RULES_FILE_NAME));
 	if (options.cwd) candidates.push(join(options.cwd, ".pi", OUTPUT_RULES_FILE_NAME));
 	for (const path of candidates) if (existsSync(path)) lists.push(readOutputRulesFile(path));
+	if (options.projectRules !== undefined) lists.push(options.projectRules);
 	for (const path of options.extraFiles ?? []) lists.push(readOutputRulesFile(path));
 	return mergeOutputRules(...lists);
 }

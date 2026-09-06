@@ -40,6 +40,7 @@ function operation(
 		exec: run,
 		stat: (path) => stat(path),
 		getEnvironment: async () => ({ variables: {}, caseSensitive: true }),
+		readOutputRules: async () => [],
 	};
 }
 

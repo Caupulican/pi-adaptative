@@ -89,6 +89,10 @@ describe("runOutputRuleTests / bundled rules", () => {
 });
 
 describe("loadOutputRules", () => {
+	it("rejects competing native and backend project sources", () => {
+		expect(() => loadOutputRules({ cwd: "/fixture", projectRules: [], bundled: [] })).toThrow(/one project source/);
+	});
+
 	it("merges bundled, user, project and extra files with later names winning", () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "pi-rules-agent-"));
 		const cwd = mkdtempSync(join(tmpdir(), "pi-rules-cwd-"));

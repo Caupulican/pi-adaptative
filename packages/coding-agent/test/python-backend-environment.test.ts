@@ -21,6 +21,7 @@ function fixture(environment: { variables: NodeJS.ProcessEnv; caseSensitive: boo
 		}),
 		operations: {
 			getEnvironment,
+			readOutputRules: async () => [],
 			stat: async () => ({ isDirectory: () => true, isFile: () => true }),
 			exec: async (request: PythonExecutionRequest) => {
 				requests.push(request);

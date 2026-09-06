@@ -4,7 +4,7 @@
 
 - Custom `FileMutationIntentOperations` must supply a shared `mutationQueue` backend identity resolver. Mutation serialization no longer probes the operator filesystem for custom backends.
 - Custom `EditOperations.writeFile` must accept `Buffer` as well as UTF-8 strings, preserving supplied bytes without transcoding.
-- Custom `PythonOperations` must supply backend `stat`, `getEnvironment` (variables and case policy), and an explicit runtime resolver. `resolvePythonToolPath` now takes path options instead of a platform string; custom execution paths retain literal leading `@` characters.
+- Custom `PythonOperations` must supply backend `stat`, `getEnvironment` (variables and case policy), `readOutputRules` (parsed JSON document), and an explicit runtime resolver. `resolvePythonToolPath` now takes path options instead of a platform string; custom execution paths retain literal leading `@` characters.
 
 ### Changed
 
@@ -28,6 +28,7 @@
 - Revalidated cached Python executable identities after relocation, replacement, permission loss, or deletion; concurrent callers join active refreshes and cannot mutate cached outcomes. Interpreter discovery preserves literal path whitespace and rejects truncated output instead of selecting a partial path.
 - Decoded BOM-marked and explicitly encoded source text before ordinary, outline, and large-file reads instead of substituting invalid UTF-8. Incremental codec state preserves split characters and stateful encodings; cancellation releases codec callers without waiting for shared Python provisioning.
 - Stopped custom Python backends from inheriting the operator environment. Python and credential CLI execution now share explicit environment merging and case-aware exclusions; queued Python calls retain detached backend snapshots and canceled environment lookups cannot advance to execution.
+- Loaded Python project output rules through the execution backend while retaining operator-global and explicit extra-file precedence. Filtered calls reload repaired rules; construction, `fullOutput`, and disabled filtering no longer read rule files. Cancellation and backend I/O failures stop execution without substituting local project rules.
 
 ## [0.99.1] - 2026-09-06
 
