@@ -51,6 +51,7 @@ describe("encoding recovery contract", () => {
 				throw new Error("Fixture must not resolve a runtime");
 			},
 			operations: {
+				getEnvironment: async () => ({ variables: {}, caseSensitive: true }),
 				stat: async () => {
 					throw new Error("Fixture must not inspect a path");
 				},

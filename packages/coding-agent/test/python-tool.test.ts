@@ -36,7 +36,11 @@ function operation(
 		request: PythonExecutionRequest,
 	) => Promise<{ exitCode: number | null; reason: "exited" | "aborted" | "timeout"; signal: string | null }>,
 ): PythonOperations {
-	return { exec: run, stat: (path) => stat(path) };
+	return {
+		exec: run,
+		stat: (path) => stat(path),
+		getEnvironment: async () => ({ variables: {}, caseSensitive: true }),
+	};
 }
 
 describe("native python tool", () => {

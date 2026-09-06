@@ -1,5 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
+import { composeExecutionEnvironment } from "../execution-environment.ts";
 
 const MAX_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024;
 const COMMAND_TIMEOUT_MS = 30_000;
@@ -49,12 +50,11 @@ export async function runCredentialCliCommand(
 	let outputLimitExceeded = false;
 	let child: ChildProcess;
 	try {
-		const environment = {
-			...process.env,
-			[request.authEnvironment.name]: request.authEnvironment.value,
-			NO_COLOR: "1",
-		};
-		for (const name of request.omitEnvironmentVariables ?? []) delete environment[name];
+		const environment = composeExecutionEnvironment(
+			{ variables: process.env, caseSensitive: process.platform !== "win32" },
+			[{ [request.authEnvironment.name]: request.authEnvironment.value, NO_COLOR: "1" }],
+			request.omitEnvironmentVariables,
+		);
 		child = spawnProcess(request.executable, request.args, {
 			env: environment,
 			stdio: ["pipe", "pipe", "pipe"],

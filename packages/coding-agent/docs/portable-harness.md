@@ -133,8 +133,17 @@ options instead of a platform string. Missing-path diagnostics retain their orig
 permission, I/O, and symlink-loop failures retain their original identity. Cancellation prevents
 later provisioning or execution; the shared read-only `awaitPreflight` owner releases a canceled
 caller without canceling shared runtime discovery or losing late rejection handling. This does
-not detach operations with file effects. Custom Python environment inheritance and project output-rule
-loading still use operator-side configuration; this stage does not establish complete backend isolation.
+not detach operations with file effects.
+
+`PythonOperations.getEnvironment(cwd, signal)` supplies complete backend variables and an explicit
+`caseSensitive` policy, independently of path syntax. Only the native adapter inherits `process.env`.
+Python detaches the returned environment before waiting for the mutation barrier; explicit credential
+additions are resolved at execution, followed by the existing Python settings and owner exclusions.
+Cancellation during lookup or credential activation prevents execution. `execution-environment.ts`
+owns composition for Python and credential CLI commands: later layers win, undefined removes a name,
+case-insensitive aliases share one entry, and exclusions apply last. It never normalizes values or
+prints invalid values in diagnostics. Custom Python project output-rule loading still uses
+operator-side configuration; this stage does not establish complete backend isolation or attachment fencing.
 
 Custom `EditOperations.writeFile` accepts strings or buffers and must preserve supplied buffers.
 Execution retains the original preflight/queue/stale checks and reads back encoded writes before

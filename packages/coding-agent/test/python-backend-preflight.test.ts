@@ -21,7 +21,7 @@ function backend(cwd: string, flavor: "posix" | "win32") {
 	});
 	const options = {
 		pathOptions: { flavor },
-		operations: { stat, exec },
+		operations: { stat, exec, getEnvironment: async () => ({ variables: {}, caseSensitive: flavor !== "win32" }) },
 		resolveRuntime,
 		outputReduction: { enabled: false },
 	};

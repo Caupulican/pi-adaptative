@@ -5,6 +5,7 @@ import { Text } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { type PathInputOptions, resolvePath } from "../../utils/paths.ts";
+import { composeExecutionEnvironment, type ExecutionEnvironment } from "../execution-environment.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { awaitPreflight } from "../preflight.ts";
 import { ensurePythonRuntime, type PythonRuntimeOutcome } from "../python-runtime.ts";
@@ -123,6 +124,8 @@ export interface PythonExecutionResult {
 export interface PythonOperations {
 	/** Inspect the executing backend, not the operator filesystem. Preserve filesystem error codes. */
 	stat(path: string, signal?: AbortSignal): Promise<{ isDirectory(): boolean; isFile(): boolean }>;
+	/** Return the backend's complete base environment and its variable-name case policy. */
+	getEnvironment(cwd: string, signal?: AbortSignal): Promise<ExecutionEnvironment>;
 	exec(request: PythonExecutionRequest): Promise<PythonExecutionResult>;
 }
 
@@ -174,6 +177,7 @@ function clampInteger(value: number | undefined, fallback: number, minimum: numb
 function createLocalPythonOperations(): PythonOperations {
 	return {
 		stat: (path) => stat(path),
+		getEnvironment: async () => ({ variables: { ...process.env }, caseSensitive: process.platform !== "win32" }),
 		async exec(request) {
 			if (request.signal?.aborted) throw new Error("Python execution aborted before start");
 			const child = spawnProcess(request.python, request.args, {
@@ -206,8 +210,13 @@ export function createPythonToolDefinition(
 	options: PythonToolOptions = {},
 ): ToolDefinition<typeof pythonSchema, PythonToolDetails> {
 	const nativeFlavor = process.platform === "win32" ? "win32" : "posix";
-	if (options.operations && (!options.resolveRuntime || typeof options.operations.stat !== "function"))
-		throw new Error("Custom Python operations require backend stat and explicit runtime resolution.");
+	if (
+		options.operations &&
+		(!options.resolveRuntime ||
+			typeof options.operations.stat !== "function" ||
+			typeof options.operations.getEnvironment !== "function")
+	)
+		throw new Error("Custom Python operations require backend stat, environment, and explicit runtime resolution.");
 	if (!options.operations && options.pathOptions?.flavor && options.pathOptions.flavor !== nativeFlavor)
 		throw new Error("Non-native Python path semantics require custom operations.");
 	const pathOptions = Object.freeze({
@@ -275,6 +284,13 @@ export function createPythonToolDefinition(
 			const runtime = await awaitPreflight(resolveRuntime, signal);
 			signal?.throwIfAborted();
 			if (runtime.status !== "ready") throw new Error(runtime.reason);
+			const backendEnvironment = await awaitPreflight(() => operations.getEnvironment(cwd, signal), signal);
+			signal?.throwIfAborted();
+			// Detach from mutable adapter state before waiting for the mutation barrier.
+			const baseEnvironment: ExecutionEnvironment = {
+				caseSensitive: backendEnvironment.caseSensitive,
+				variables: composeExecutionEnvironment(backendEnvironment, []),
+			};
 			const args = input.args ? [...input.args] : [];
 			const timeoutSeconds = clampInteger(
 				input.timeoutSeconds,
@@ -361,16 +377,21 @@ export function createPythonToolDefinition(
 			try {
 				execution = await withExclusiveMutationBarrier(() => {
 					signal?.throwIfAborted();
-					const environment: NodeJS.ProcessEnv = {
-						...process.env,
-						...options.environment?.(cwd),
-						PI_PYTHON_TOOL: "1",
-						PYTHONDONTWRITEBYTECODE: "1",
-						PYTHONIOENCODING: "utf-8",
-						PYTHONUNBUFFERED: "1",
-						PYTHONUTF8: "1",
-					};
-					for (const name of options.omitEnvironmentVariables ?? []) delete environment[name];
+					const environment = composeExecutionEnvironment(
+						baseEnvironment,
+						[
+							options.environment?.(cwd) ?? {},
+							{
+								PI_PYTHON_TOOL: "1",
+								PYTHONDONTWRITEBYTECODE: "1",
+								PYTHONIOENCODING: "utf-8",
+								PYTHONUNBUFFERED: "1",
+								PYTHONUTF8: "1",
+							},
+						],
+						options.omitEnvironmentVariables,
+					);
+					signal?.throwIfAborted();
 					return operations.exec({
 						python: runtime.pythonPath,
 						args: scriptPath ? ["-B", scriptPath, ...args] : ["-B", "-", ...args],
