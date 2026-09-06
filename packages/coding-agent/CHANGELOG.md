@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Restored SuperGrok subscription requests by advertising the memory tool with an object-root schema while preserving action-specific argument validation.
+
 ## [0.99.0] - 2026-09-06
 
 ### Added

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Advertised object-only tool schema unions with an explicit object type for subscription provider compatibility without changing branch validation.
+
 ## [0.99.0] - 2026-09-06
 
 ### Breaking Changes

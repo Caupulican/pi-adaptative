@@ -187,6 +187,16 @@ function projectSchemaNode(value: unknown): unknown {
 		}
 		projected[key] = child;
 	}
+	// Some providers require an explicit object kind even when every union branch already
+	// guarantees it. Retain the alternatives verbatim; never narrow mixed or untyped branches.
+	if (
+		projected.type === undefined &&
+		Array.isArray(projected.anyOf) &&
+		projected.anyOf.length > 0 &&
+		projected.anyOf.every((branch) => isRecord(branch) && branch.type === "object")
+	) {
+		projected.type = "object";
+	}
 	return compactRedundantEnumConstraints(compactDiscriminatedUnion(compactLiteralUnion(projected)));
 }
 

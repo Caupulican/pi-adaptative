@@ -60,6 +60,25 @@ const convertToLlm = (messages: AgentMessage[]): Message[] =>
 	messages.filter((message) => message.role !== "custom") as Message[];
 
 describe("provider tool projection", () => {
+	it("makes object-only unions explicit without narrowing mixed or unconstrained branches", () => {
+		const schema = Type.Union([
+			Type.Object({ path: Type.String() }, { additionalProperties: false }),
+			Type.Object({ ref: Type.String() }, { additionalProperties: false }),
+		]);
+		const projected = projectToolSchemaForProvider(schema) as typeof schema;
+		expect(projected).toMatchObject({ type: "object" });
+		const original = Compile(schema);
+		const output = Compile(projected);
+		for (const value of [null, [], 1, "text", {}, { path: "a" }, { ref: "b" }, { path: "a", ref: "b" }]) {
+			expect(output.Check(value)).toBe(original.Check(value));
+		}
+		for (const branch of [Type.String(), {}, true]) {
+			const mixed = { anyOf: [schema.anyOf[0], branch] };
+			expect(projectToolSchemaForProvider(mixed)).toEqual(mixed);
+		}
+		expect(projectToolSchemaForProvider({ anyOf: [] })).toEqual({ anyOf: [] });
+		expect(schema).not.toHaveProperty("type");
+	});
 	it("merges equivalent action branches only on the provider surface", () => {
 		const schema = Type.Union([
 			Type.Object(

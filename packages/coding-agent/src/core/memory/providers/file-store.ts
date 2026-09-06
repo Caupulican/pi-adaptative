@@ -128,9 +128,10 @@ const hotMemoryTarget = Type.Optional(
 );
 // Encode action requirements in the advertised schema so the shared tool preflight
 // classifies malformed calls as validation failures before invoking the storage adapter.
-const memorySchema = Type.Intersect([
-	memoryFields,
-	Type.Union([
+// Keep an explicit object root: subscription providers reject root-level intersections.
+const memorySchema = {
+	...memoryFields,
+	anyOf: [
 		Type.Object({ action: Type.Literal("list") }),
 		Type.Object({
 			action: Type.Literal("add"),
@@ -158,8 +159,8 @@ const memorySchema = Type.Intersect([
 			target: Type.Literal("okf"),
 			...Type.Required(Type.Pick(memoryFields, ["type", "title"])).properties,
 		}),
-	]),
-]);
+	],
+};
 
 type MemoryParams = Static<typeof memoryFields>;
 

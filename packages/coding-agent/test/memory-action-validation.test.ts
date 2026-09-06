@@ -1,3 +1,4 @@
+import { projectToolSchemaForProvider } from "@caupulican/pi-agent-core/provider-tool-projection";
 import { ToolArgumentValidationError, validateToolArguments } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { FileStoreProvider } from "../src/core/memory/providers/file-store.ts";
@@ -15,6 +16,13 @@ const okfAdd = {
 };
 
 describe("memory action preflight", () => {
+	it("advertises an object root after provider projection", () => {
+		expect(projectToolSchemaForProvider(tool.parameters)).toMatchObject({
+			type: "object",
+			properties: { action: expect.any(Object) },
+			required: ["action"],
+		});
+	});
 	it.each(["type", "title", "description", "scope", "content", "evidenceRefs"])(
 		"never invents the missing OKF %s field during deterministic repair",
 		(field) => {
@@ -31,6 +39,10 @@ describe("memory action preflight", () => {
 		{ action: "add", target: "okf", title: "Finding", type: "Debugging Finding" },
 		{ action: "replace", target: "okf", content: "corrected", oldContent: "old" },
 		{ action: "remove", target: "okf" },
+		{ action: "list", target: "invalid" },
+		{ ...okfAdd, evidenceRefs: [] },
+		{ ...okfAdd, tags: ["duplicate", "duplicate"] },
+		{ action: "remove", target: "okf", type: "Debugging Finding", title: "Finding", expectedDigest: "invalid" },
 	])("rejects incomplete or unsupported $target $action before execution", (args) => {
 		expect(() =>
 			validateToolArguments(
