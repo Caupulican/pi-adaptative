@@ -52,7 +52,7 @@ describe("packaged iconv recovery", () => {
 			stdoutTruncated: false,
 			stderrTruncated: false,
 		});
-		expect(JSON.parse(result.stdout)).toEqual({ passed: 26, tests: 26, skipped: 0 });
+		expect(JSON.parse(result.stdout)).toEqual({ passed: 31, tests: 31, skipped: 0 });
 	});
 
 	it("reads and edits IBM1047 bytes through the native installed converter", async (context) => {

@@ -1,4 +1,5 @@
-import { createFileCodecRunner, ENCODING_EVIDENCE_REQUIRED } from "./file-codec-runner.ts";
+import { ENCODING_EVIDENCE_REQUIRED } from "./file-codec-runner.ts";
+import { createFileCodecReadSession } from "./file-codec-stream.ts";
 
 const DECODE_CHUNK_BYTES = 1024 * 1024;
 
@@ -20,8 +21,8 @@ export async function* decodeTextChunks(
 	};
 	let selected = false;
 	let prefix: Buffer = Buffer.alloc(0);
-	let run: Awaited<ReturnType<typeof createFileCodecRunner>> | undefined;
-	let state: [string, number] | undefined;
+	let run: Awaited<ReturnType<typeof createFileCodecReadSession>> | undefined;
+	let decoded = false;
 	let selectedEncoding = encoding;
 	const decode = async (bytes: Buffer, final: boolean): Promise<string> => {
 		if (signal?.aborted) throw new Error("Encoding recovery aborted");
@@ -34,52 +35,38 @@ export async function* decodeTextChunks(
 					// BOM-marked input can recover; ambiguous input requires explicit evidence.
 				}
 			}
-			run = await createFileCodecRunner(signal);
+			run = await createFileCodecReadSession(signal);
 		}
 		if (!run) return decodeNative(bytes, final);
-		const result = await run({
-			operation: "read_chunk",
-			source: bytes.toString("base64"),
-			encoding: selectedEncoding,
-			state,
-			final,
-		});
-		if (
-			typeof result.text !== "string" ||
-			!result.text.isWellFormed() ||
-			!Array.isArray(result.state) ||
-			result.state.length !== 2 ||
-			typeof result.state[0] !== "string" ||
-			!Number.isSafeInteger(result.state[1]) ||
-			(state !== undefined && result.encoding !== selectedEncoding)
-		) {
+		const result = await run.decode(bytes, selectedEncoding, final);
+		if (decoded && result.encoding !== selectedEncoding) {
 			throw new Error("Invalid incremental encoding response");
 		}
-		const pending = Buffer.from(result.state[0], "base64");
-		if (pending.length > 16 * DECODE_CHUNK_BYTES || pending.toString("base64") !== result.state[0]) {
-			throw new Error("Invalid incremental encoding state");
-		}
-		state = [result.state[0], result.state[1]];
+		decoded = true;
 		selectedEncoding = result.encoding;
 		return result.text;
 	};
-	for await (const chunk of chunks) {
-		if (signal?.aborted) throw new Error("Encoding recovery aborted");
-		for (let start = 0; start < chunk.length; start += DECODE_CHUNK_BYTES) {
-			let bytes = chunk.subarray(start, start + DECODE_CHUNK_BYTES);
-			if (!selected) {
-				bytes = Buffer.concat([prefix, bytes]);
-				if (bytes.length < 4) {
-					prefix = bytes;
-					continue;
-				}
-				prefix = Buffer.alloc(0);
-			}
-			yield await decode(bytes, false);
+	try {
+		for await (const chunk of chunks) {
 			if (signal?.aborted) throw new Error("Encoding recovery aborted");
+			for (let start = 0; start < chunk.length; start += DECODE_CHUNK_BYTES) {
+				let bytes = chunk.subarray(start, start + DECODE_CHUNK_BYTES);
+				if (!selected) {
+					bytes = Buffer.concat([prefix, bytes]);
+					if (bytes.length < 4) {
+						prefix = bytes;
+						continue;
+					}
+					prefix = Buffer.alloc(0);
+				}
+				yield await decode(bytes, false);
+				if (signal?.aborted) throw new Error("Encoding recovery aborted");
+			}
 		}
+		yield await decode(prefix, true);
+	} finally {
+		await run?.close();
 	}
-	yield await decode(prefix, true);
 }
 
 export async function decodeReadText(source: Buffer, encoding?: string, signal?: AbortSignal): Promise<string> {

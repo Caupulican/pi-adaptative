@@ -53,9 +53,13 @@ valid text; malformed bytes never silently become replacement characters. Read-o
 decoding does not claim that a subsequent edit can preserve that encoding's byte boundaries.
 
 Encoded decoding splits input into approximately 1 MiB chunks (up to three extra prefix bytes),
-retaining at most 16 MiB of codec state. Each chunk and final flush uses an isolated helper process;
-this bounds codec payload memory but carries per-chunk startup cost. Caller cancellation detaches
-immediately from shared runtime provisioning without canceling other callers. Source iteration closes on early completion,
+retaining at most 16 MiB of codec state. Each read owns one isolated helper process; decoder state
+stays in that process instead of being serialized or restarted for every chunk. Requests are
+serialized and sequence-correlated, with 64 MiB frame bounds and a 30-second deadline per request.
+Final success requires a complete response and matching process exit. Malformed, stale, duplicated,
+or truncated frames and pipe errors terminate the session without exposing payloads or replaying
+requests. Caller cancellation detaches immediately from shared runtime provisioning without canceling
+other callers. The helper and source iteration close on early completion,
 cancellation, or decoding failure. No target path enters the helper. Custom text-producing
 `readLineSlice`/`countLines` adapters receive `encoding` and `signal` and are responsible for honoring
 them; custom `readFile` bytes go through the shared decoder. Image handling is unchanged.
@@ -118,9 +122,10 @@ byte-splice verification. The native loop checks the five-second deadline betwee
 outer 30-second helper deadline bounds a stuck native call. Missing FFI/symbols leave command and
 Python codecs usable. This is opportunistic native recovery, not all-platform converter provisioning.
 
-The current stateless helper protocol cannot serialize native iconv decoder state. Its fallback
-therefore retains source bytes until final decode, within the 16 MiB state bound, and verifies their
-round-trip even for reads. Larger iconv-only reads and noncanonical stateful representations still
+The current iconv adapter retains source bytes until final decode, within the 16 MiB state bound,
+and verifies their round-trip even for reads. The read helper now has a persistent lifecycle, but
+the iconv adapter does not yet maintain an incremental native descriptor or command stream.
+Larger iconv-only reads and noncanonical stateful representations still
 require further recovery work; Python-supported incremental reads are unchanged. Optional native
 converter tests identify unavailable hosts explicitly, while mocked converter conformance is mandatory.
 

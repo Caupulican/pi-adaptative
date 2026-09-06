@@ -4,28 +4,49 @@ import { execCommand } from "../exec.ts";
 import { awaitPreflight } from "../preflight.ts";
 import { ensurePythonRuntime } from "../python-runtime.ts";
 
-const MAX_PROTOCOL_UNITS = 64 * 1024 * 1024;
+export const MAX_FILE_CODEC_PROTOCOL_BYTES = 64 * 1024 * 1024;
+export const FILE_CODEC_TIMEOUT_MS = 30_000;
 
 export const ENCODING_EVIDENCE_REQUIRED =
 	"PI_FILE_ENCODING_CORRUPTION: Source encoding is unknown or malformed. Establish its encoding from authoritative project metadata or ask the user, then call read or edit with encoding. No file write was attempted.";
 
-/** One transport for the packaged, path-free codec. Consumers validate operation-specific fields. */
-export async function createFileCodecRunner(signal?: AbortSignal) {
+export async function resolveFileCodecLaunch(signal?: AbortSignal) {
 	if (signal?.aborted) throw new Error("Encoding recovery aborted");
 	const runtime = await awaitPreflight(() => ensurePythonRuntime({ silent: true }), signal);
 	if (runtime.status !== "ready") throw new Error(`Encoding recovery requires Python: ${runtime.reason}`);
 	const resources = getBundledResourcesDir();
+	return {
+		command: runtime.pythonPath,
+		args: ["-I", "-S", "-B", join(resources, "runtimes", "file-edit-codec.py")],
+		cwd: resources,
+	};
+}
+
+export function fileCodecRecoveryError(reason?: unknown): Error {
+	if (reason === "encoding_required") return new Error(ENCODING_EVIDENCE_REQUIRED);
+	if (reason === "codec_unavailable")
+		return new Error(
+			"PI_FILE_ENCODING_CORRUPTION: Python lacks the requested codec and iconv is unavailable. Make iconv available to Pi; only change the encoding name if authoritative metadata shows it was incorrect. No file write was attempted.",
+		);
+	return new Error(
+		"PI_FILE_ENCODING_CORRUPTION: Python codec recovery could not verify preservation. Check source encoding/BOM and replacement representability; no file write was attempted.",
+	);
+}
+
+/** One-shot edit transport. Read streams own a separate, explicitly closed process lifecycle. */
+export async function createFileCodecRunner(signal?: AbortSignal) {
+	const launch = await resolveFileCodecLaunch(signal);
 	return async (request: Record<string, unknown>) => {
 		if (signal?.aborted) throw new Error("Encoding recovery aborted");
 		const stdin = JSON.stringify(request);
-		if (Buffer.byteLength(stdin) > MAX_PROTOCOL_UNITS)
+		if (Buffer.byteLength(stdin) > MAX_FILE_CODEC_PROTOCOL_BYTES)
 			throw new Error("Encoding recovery request exceeds its bound.");
-		const result = await execCommand(
-			runtime.pythonPath,
-			["-I", "-S", "-B", join(resources, "runtimes", "file-edit-codec.py")],
-			resources,
-			{ stdin, signal, timeout: 30_000, maxBuffer: MAX_PROTOCOL_UNITS },
-		);
+		const result = await execCommand(launch.command, launch.args, launch.cwd, {
+			stdin,
+			signal,
+			timeout: FILE_CODEC_TIMEOUT_MS,
+			maxBuffer: MAX_FILE_CODEC_PROTOCOL_BYTES,
+		});
 		if (signal?.aborted) throw new Error("Encoding recovery aborted");
 		let response: unknown;
 		try {
@@ -35,16 +56,10 @@ export async function createFileCodecRunner(signal?: AbortSignal) {
 		}
 		const complete = !result.killed && !result.errorMessage && !result.stdoutTruncated && !result.stderrTruncated;
 		if (result.code === 1 && complete && response && typeof response === "object" && "error" in response) {
-			if (response.error === "encoding_required") throw new Error(ENCODING_EVIDENCE_REQUIRED);
-			if (response.error === "codec_unavailable")
-				throw new Error(
-					"PI_FILE_ENCODING_CORRUPTION: Python lacks the requested codec and iconv is unavailable. Make iconv available to Pi; only change the encoding name if authoritative metadata shows it was incorrect. No file write was attempted.",
-				);
+			throw fileCodecRecoveryError(response.error);
 		}
 		if (result.code !== 0 || !complete) {
-			throw new Error(
-				"PI_FILE_ENCODING_CORRUPTION: Python codec recovery could not verify preservation. Check source encoding/BOM and replacement representability; no file write was attempted.",
-			);
+			throw fileCodecRecoveryError();
 		}
 		if (
 			!response ||
@@ -58,7 +73,6 @@ export async function createFileCodecRunner(signal?: AbortSignal) {
 			encoding: response.encoding,
 			text: "text" in response ? response.text : undefined,
 			bytes: "bytes" in response ? response.bytes : undefined,
-			state: "state" in response ? response.state : undefined,
 		};
 	};
 }

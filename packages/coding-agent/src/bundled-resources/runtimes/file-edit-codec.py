@@ -182,12 +182,6 @@ class IconvDecoder(codecs.IncrementalDecoder):
     def getstate(self):
         return self.pending, 0
 
-    def setstate(self, state):
-        if state[1] != 0 or len(state[0]) > MAX_SOURCE:
-            raise ValueError("invalid iconv decoder state")
-        self.pending = state[0]
-
-
 class IconvCodec:
     def __init__(self, name):
         # Labels are data, not command options or iconv //IGNORE / //TRANSLIT directives.
@@ -245,39 +239,40 @@ def select_encoding(original, requested):
     return bom, encoding, original[len(bom):]
 
 
-def read_chunk(request, original):
-    state = request.get("state")
-    if state is None:
-        _, encoding, source = select_encoding(original, request.get("encoding"))
-    else:
-        encoding = lookup_codec(request["encoding"]).name
-        source = original
-    decoder = lookup_codec(encoding).incrementaldecoder(errors="strict")
-    if state is not None:
-        if not isinstance(state, list) or len(state) != 2 or type(state[1]) is not int:
-            raise ValueError("invalid decoder state")
-        pending = base64.b64decode(state[0], validate=True)
-        if len(pending) > MAX_SOURCE:
-            raise ValueError("decoder state bound")
-        decoder.setstate((pending, state[1]))
-    if type(request["final"]) is not bool:
-        raise ValueError("invalid final marker")
-    text = decoder.decode(source, final=request["final"])
-    if not isinstance(text, str) or "\0" in text:
-        raise ValueError("not text")
-    pending, flag = decoder.getstate()
-    if len(pending) > MAX_SOURCE:
-        raise ValueError("decoder state bound")
-    return {"text": text, "encoding": encoding,
-            "state": [base64.b64encode(pending).decode("ascii"), flag]}
-
-
-def transform(request):
+def read_source(request):
     original = base64.b64decode(request["source"], validate=True)
     if len(original) > MAX_SOURCE:
         raise ValueError("source bound")
-    if request["operation"] == "read_chunk":
-        return read_chunk(request, original)
+    return original
+
+
+class ReadStream:
+    """One read owns its decoder; opaque state never leaves this helper process."""
+    def __init__(self):
+        self.decoder = None
+        self.encoding = None
+        self.finished = False
+
+    def feed(self, request):
+        if self.finished or type(request["final"]) is not bool:
+            raise ValueError("invalid read lifecycle")
+        source = read_source(request)
+        if self.decoder is None:
+            _, self.encoding, source = select_encoding(source, request.get("encoding"))
+            self.decoder = lookup_codec(self.encoding).incrementaldecoder(errors="strict")
+        elif request.get("encoding") != self.encoding:
+            raise ValueError("changed read encoding")
+        text = self.decoder.decode(source, final=request["final"])
+        if not isinstance(text, str) or "\0" in text:
+            raise ValueError("not text")
+        if len(self.decoder.getstate()[0]) > MAX_SOURCE:
+            raise ValueError("decoder state bound")
+        self.finished = request["final"]
+        return {"text": text, "encoding": self.encoding}
+
+
+def transform(request):
+    original = read_source(request)
     bom, encoding, source = select_encoding(original, request.get("encoding"))
     codec = lookup_codec(encoding)
     text = codec.decode(source, "strict")[0]
@@ -339,7 +334,47 @@ def transform(request):
     return {"bytes": base64.b64encode(result).decode("ascii"), "encoding": encoding}
 
 
+def failure_reason(error):
+    # Never echo source bytes, replacement text, or a traceback into diagnostics.
+    if isinstance(error, EncodingEvidenceRequired):
+        return "encoding_required"
+    if isinstance(error, CodecUnavailable):
+        return "codec_unavailable"
+    return "preservation_unverified"
+
+
+def serve_read_stream():
+    reader = ReadStream()
+    sequence = 0
+    while not reader.finished:
+        final = False
+        try:
+            payload = sys.stdin.buffer.readline(MAX_PROTOCOL + 1)
+            if len(payload) > MAX_PROTOCOL or not payload.endswith(b"\n"):
+                raise ValueError("invalid read frame")
+            request = json.loads(payload)
+            final = request.get("final", False)
+            if type(request.get("sequence")) is not int or request["sequence"] != sequence:
+                raise ValueError("invalid read sequence")
+            result = reader.feed(request)
+            result.update(sequence=sequence, final=final)
+            output = json.dumps(result, ensure_ascii=True).encode("ascii") + b"\n"
+            if len(output) > MAX_PROTOCOL:
+                raise ValueError("read output bound")
+            sys.stdout.buffer.write(output)
+            sys.stdout.buffer.flush()
+            sequence += 1
+        except Exception as error:
+            output = {"sequence": sequence, "final": final, "error": failure_reason(error)}
+            sys.stdout.buffer.write(json.dumps(output).encode("ascii") + b"\n")
+            sys.stdout.buffer.flush()
+            return 1
+    return 0
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--read-stream"]:
+        sys.exit(serve_read_stream())
     try:
         payload = sys.stdin.buffer.read(MAX_PROTOCOL + 1)
         if len(payload) > MAX_PROTOCOL:
@@ -347,11 +382,5 @@ if __name__ == "__main__":
         result = transform(json.loads(payload))
         sys.stdout.buffer.write(json.dumps(result, ensure_ascii=True).encode("ascii"))
     except Exception as error:
-        # Never echo source bytes, replacement text, or a traceback into diagnostics.
-        reason = "preservation_unverified"
-        if isinstance(error, EncodingEvidenceRequired):
-            reason = "encoding_required"
-        elif isinstance(error, CodecUnavailable):
-            reason = "codec_unavailable"
-        sys.stdout.buffer.write(json.dumps({"error": reason}).encode("ascii"))
+        sys.stdout.buffer.write(json.dumps({"error": failure_reason(error)}).encode("ascii"))
         sys.exit(1)

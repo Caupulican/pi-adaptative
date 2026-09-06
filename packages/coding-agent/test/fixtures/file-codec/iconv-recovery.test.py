@@ -43,6 +43,9 @@ class RecoveryTests(unittest.TestCase):
             "source": base64.b64encode(source).decode("ascii"), **options,
         })
 
+    def read(self, reader, source, **options):
+        return reader.feed({"source": base64.b64encode(source).decode("ascii"), "encoding": "X-FIXTURE", **options})
+
     def test_decode_and_splice_preserve_mixed_endings_and_untouched_bytes(self):
         source = "café\r\ntarget\nlast\r".encode("cp037")
         self.assertEqual(self.transform("decode", source)["text"], "café\r\ntarget\nlast\r")
@@ -51,11 +54,14 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(self.calls)
 
     def test_incremental_read_retains_state_until_final_decode(self):
-        first = self.transform("read_chunk", "café\r".encode("cp037"), final=False)
-        second = self.transform("read_chunk", "\nlast".encode("cp037"), final=True, state=first["state"])
+        reader = scope["ReadStream"]()
+        first = self.read(reader, "café\r".encode("cp037"), final=False)
+        second = self.read(reader, "\nlast".encode("cp037"), final=True)
         self.assertEqual(first["text"], "")
         self.assertEqual(second["text"], "café\r\nlast")
-        self.assertEqual(second["state"], ["", 0])
+        self.assertNotIn("state", second)
+        with self.assertRaises(ValueError):
+            self.read(reader, b"", final=True)
 
     def test_unrepresentable_replacement_never_returns_bytes(self):
         with self.assertRaises(UnicodeEncodeError):
@@ -123,12 +129,14 @@ class RecoveryTests(unittest.TestCase):
             self.transform("decode", codecs.BOM_UTF16_LE + "target".encode("utf-16-le"))
         self.assertEqual(self.calls, [])
 
-    def test_pending_read_bytes_are_bounded_and_state_is_validated(self):
+    def test_pending_read_bytes_are_bounded_and_lifecycle_is_validated(self):
         with patch.dict(scope, {"MAX_SOURCE": 4}):
+            reader = scope["ReadStream"]()
+            self.read(reader, b"123", final=False)
             with self.assertRaises(ValueError):
-                self.transform("read_chunk", b"123", final=False, state=["MTIz", 0])
+                self.read(reader, b"123", final=False)
         with self.assertRaises(ValueError):
-            self.transform("read_chunk", b"", final=True, state=["", 1])
+            self.read(scope["ReadStream"](), b"", final=1)
 
     def test_lossy_decode_cannot_be_presented_as_a_successful_read(self):
         convert = scope["run_iconv"]
@@ -138,7 +146,56 @@ class RecoveryTests(unittest.TestCase):
 
         with patch.dict(scope, {"run_iconv": substituted}):
             with self.assertRaises(ValueError):
-                self.transform("read_chunk", "é".encode("cp037"), final=True)
+                self.read(scope["ReadStream"](), "é".encode("cp037"), final=True)
+
+
+class ReadProtocolTests(unittest.TestCase):
+    def serve(self, payload):
+        stdin = unittest.mock.Mock(buffer=io.BytesIO(payload))
+        stdout = unittest.mock.Mock(buffer=io.BytesIO())
+        with patch.object(scope["sys"], "stdin", stdin), patch.object(scope["sys"], "stdout", stdout):
+            code = scope["serve_read_stream"]()
+        return code, [json.loads(line) for line in stdout.buffer.getvalue().splitlines()]
+
+    def frame(self, sequence, source=b"", **options):
+        return json.dumps({
+            "sequence": sequence, "final": False, "encoding": "utf-16-le",
+            "source": base64.b64encode(source).decode("ascii"), **options,
+        }).encode("ascii") + b"\n"
+
+    def test_incomplete_character_state_survives_frames_without_serialization(self):
+        source = "café🙂\r\n".encode("utf-16-le")
+        code, frames = self.serve(self.frame(0, source[:9]) + self.frame(1, source[9:], final=True))
+        self.assertEqual(code, 0)
+        self.assertEqual([frame["sequence"] for frame in frames], [0, 1])
+        self.assertEqual([frame["final"] for frame in frames], [False, True])
+        self.assertEqual("".join(frame["text"] for frame in frames), "café🙂\r\n")
+        self.assertTrue(all("state" not in frame for frame in frames))
+
+    def test_malformed_truncated_and_wrong_sequence_frames_are_bounded_diagnostics(self):
+        for payload in (b"", b"FIXTURE_PRIVATE_TEXT\n", b"{}", b"[]\n", self.frame(1), self.frame(True)):
+            with self.subTest(payload=payload):
+                code, frames = self.serve(payload)
+                self.assertEqual(code, 1)
+                self.assertEqual(frames, [{"sequence": 0, "final": False, "error": "preservation_unverified"}])
+
+    def test_replay_and_changed_encoding_reject_after_a_valid_frame(self):
+        for second in (self.frame(0), self.frame(1, encoding="utf-8")):
+            code, frames = self.serve(self.frame(0, b"a\0") + second)
+            self.assertEqual(code, 1)
+            self.assertEqual(frames[0]["text"], "a")
+            self.assertEqual(frames[1], {"sequence": 1, "final": False, "error": "preservation_unverified"})
+
+    def test_partial_final_character_never_produces_success(self):
+        code, frames = self.serve(self.frame(0, b"a", final=True))
+        self.assertEqual(code, 1)
+        self.assertEqual(frames, [{"sequence": 0, "final": True, "error": "preservation_unverified"}])
+
+    def test_frame_size_is_enforced_before_decoding(self):
+        with patch.dict(scope, {"MAX_PROTOCOL": 16}):
+            code, frames = self.serve(self.frame(0, b"a\0", final=True))
+        self.assertEqual(code, 1)
+        self.assertEqual(frames, [{"sequence": 0, "final": False, "error": "preservation_unverified"}])
 
 
 class NativeTransportTests(unittest.TestCase):
