@@ -45,6 +45,22 @@ stops subsequent probes and reads. Missing-read recovery uses the same dialect a
 Custom operations still own filesystem authorization and symlink semantics. This migrates read
 lookup, not all mutation/search/rendering adapters or attachment-generation fencing.
 
+`file-text-decoder.ts` owns read-only byte decoding for whole-file reads and native streaming
+slices/counts. UTF-8 stays native and strict; BOM-marked Unicode and an explicit `encoding` use
+the same packaged codec transport and BOM-selection owner as edit recovery. Decoding happens
+before outline extraction, line counting, and slicing. Literal replacement characters remain
+valid text; malformed bytes never silently become replacement characters. Read-only stateful
+decoding does not claim that a subsequent edit can preserve that encoding's byte boundaries.
+
+Encoded decoding splits input into approximately 1 MiB chunks (up to three extra prefix bytes),
+retaining at most 16 MiB of codec state. Each chunk and final flush uses an isolated helper process;
+this bounds codec payload memory but carries per-chunk startup cost. The existing line accumulator
+can still retain a very long individual line. Caller cancellation detaches immediately from shared
+runtime provisioning without canceling other callers. Source iteration closes on early completion,
+cancellation, or decoding failure. No target path enters the helper. Custom text-producing
+`readLineSlice`/`countLines` adapters receive `encoding` and `signal` and are responsible for honoring
+them; custom `readFile` bytes go through the shared decoder. Image handling is unchanged.
+
 Mutation tools now share `FileMutationIntentController.pathOptions` for resolution, parent traversal,
 preflight, and recovery identity. Explicit backends use literal names; the native CLI input adapter
 retains its input conveniences. `FileMutationIntentOperations.mutationQueue` supplies canonical
@@ -59,7 +75,7 @@ Edit defaults to strict UTF-8; BOM-marked encodings recover automatically throug
 `file-edit-codec.py`. Known legacy/BOM-less sources can supply `encoding`; ambiguous bytes are
 never guessed. `decodeEditDocument` owns that decision for previews and execution. Python runs
 in isolated, no-site mode and receives bounded bytes over stdin, never target paths, shell commands,
-or model-authored programs. This is a fixed codec under edit authority, not implicit permission
+or model-authored programs. This is a fixed codec under the invoking read/edit authority, not implicit permission
 to invoke the general Python tool. Remote bytes stay bound to their original mutation backend.
 
 The existing match planner supplies source-coordinate splices. Untouched bytes and each original

@@ -1,5 +1,4 @@
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
-import { StringDecoder } from "node:string_decoder";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -31,6 +30,7 @@ import {
 	fileRecoveryTarget,
 	selectFileFailureRecoveryAuthority,
 } from "./file-failure-recovery.ts";
+import { decodeReadText, decodeTextChunks } from "./file-text-decoder.ts";
 import { resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { isPiSessionJsonlPath, projectPiSessionJsonlLine } from "./session-transcript-read.ts";
@@ -38,6 +38,12 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const readSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
+	encoding: Type.Optional(
+		Type.String({
+			description:
+				"Known source encoding for legacy or BOM-less text. BOM-marked Unicode recovers automatically; never guess an unknown encoding.",
+		}),
+	),
 	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
 	lineNumbers: Type.Optional(Type.Boolean({ description: "Include line numbers in the output" })),
@@ -93,13 +99,17 @@ export interface ReadOperations {
 	/**
 	 * Stream a slice of lines out of the file with bounded memory. Any region of an
 	 * arbitrarily large file stays reachable in batches via offset continuation.
+	 * Text-producing adapters must honor encoding/BOM and signal, never decode lossily.
 	 */
 	readLineSlice?: (absolutePath: string, options: LineSliceOptions) => Promise<LineSlice>;
-	/** Count lines by streaming (bounded memory); used to resolve tail reads on oversized files. */
-	countLines?: (absolutePath: string) => Promise<number>;
+	/** Count decoded lines using the same encoding and cancellation contract as readLineSlice. */
+	countLines?: (absolutePath: string, options?: { encoding?: string; signal?: AbortSignal }) => Promise<number>;
 }
 
 export interface LineSliceOptions {
+	/** Source encoding, shared by whole-file, outline, count, and sliced reads. */
+	encoding?: string;
+	signal?: AbortSignal;
 	/** 0-based line to start collecting at. */
 	startLine: number;
 	/** Maximum number of lines to collect. */
@@ -119,26 +129,28 @@ const SLICE_SCAN_CHUNK_BYTES = 1024 * 1024;
 async function scanLines(
 	absolutePath: string,
 	onLine: (text: string | undefined, index: number) => boolean,
+	options?: { encoding?: string; signal?: AbortSignal },
 ): Promise<void> {
 	const handle = await fsOpen(absolutePath, "r");
 	try {
-		const byteDecoder = new StringDecoder("utf8");
 		const lineDecoder = new StreamingLineDecoder(Number.MAX_SAFE_INTEGER, { lineEndings: "lf" });
-		const buffer = Buffer.allocUnsafe(SLICE_SCAN_CHUNK_BYTES);
+		async function* sourceChunks() {
+			const buffer = Buffer.allocUnsafe(SLICE_SCAN_CHUNK_BYTES);
+			while (!options?.signal?.aborted) {
+				const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+				if (bytesRead === 0) return;
+				yield buffer.subarray(0, bytesRead);
+			}
+			throw new Error("Operation aborted");
+		}
 		let index = 0;
 		let emittedAnyLine = false;
-		while (true) {
-			const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
-			if (bytesRead === 0) break;
-			const lines = lineDecoder.push(byteDecoder.write(buffer.subarray(0, bytesRead)));
+		for await (const text of decodeTextChunks(sourceChunks(), options?.encoding, options?.signal)) {
+			const lines = lineDecoder.push(text);
 			for (const line of lines) {
 				emittedAnyLine = true;
 				if (!onLine(line, index++)) return;
 			}
-		}
-		for (const line of lineDecoder.push(byteDecoder.end())) {
-			emittedAnyLine = true;
-			if (!onLine(line, index++)) return;
 		}
 		const finalLine = lineDecoder.finish();
 		if (finalLine !== undefined || !emittedAnyLine) {
@@ -153,26 +165,37 @@ async function readLocalLineSlice(absolutePath: string, options: LineSliceOption
 	const lines: { text: string; originalIndex: number }[] = [];
 	let collectedChars = 0;
 	let sawMore = false;
-	await scanLines(absolutePath, (text, index) => {
-		if (text === undefined) return false;
-		if (index < options.startLine) return true;
-		if (lines.length >= options.maxLines || collectedChars > options.maxChars) {
-			sawMore = true;
-			return false;
-		}
-		lines.push({ text, originalIndex: index + 1 });
-		collectedChars += text.length;
-		return true;
-	});
+	await scanLines(
+		absolutePath,
+		(text, index) => {
+			if (text === undefined) return false;
+			if (index < options.startLine) return true;
+			if (lines.length >= options.maxLines || collectedChars > options.maxChars) {
+				sawMore = true;
+				return false;
+			}
+			lines.push({ text, originalIndex: index + 1 });
+			collectedChars += text.length;
+			return true;
+		},
+		options,
+	);
 	return { lines, reachedEnd: !sawMore };
 }
 
-async function countLocalLines(absolutePath: string): Promise<number> {
+async function countLocalLines(
+	absolutePath: string,
+	options?: { encoding?: string; signal?: AbortSignal },
+): Promise<number> {
 	let count = 0;
-	await scanLines(absolutePath, () => {
-		count++;
-		return true;
-	});
+	await scanLines(
+		absolutePath,
+		() => {
+			count++;
+			return true;
+		},
+		options,
+	);
 	return count;
 }
 
@@ -412,6 +435,7 @@ export function createReadToolDefinition(
 			_toolCallId,
 			{
 				path,
+				encoding,
 				offset,
 				limit,
 				mode,
@@ -420,6 +444,7 @@ export function createReadToolDefinition(
 				filter,
 			}: {
 				path: string;
+				encoding?: string;
 				offset?: number;
 				limit?: number;
 				mode?: "outline";
@@ -511,11 +536,13 @@ export function createReadToolDefinition(
 													startLine: 0,
 													maxLines: OUTLINE_MAX_SOURCE_LINES,
 													maxChars: OUTLINE_MAX_SOURCE_CHARS,
+													encoding,
+													signal,
 												})
 											).lines
 												.map((item) => item.text)
 												.join("\n")
-										: (await ops.readFile(absolutePath)).toString("utf-8");
+										: await decodeReadText(await ops.readFile(absolutePath), encoding, signal);
 								const outline = buildCodeOutline(path, outlineText);
 								content = [{ type: "text", text: renderCodeOutline(path, outline) }];
 								details = {
@@ -541,7 +568,9 @@ export function createReadToolDefinition(
 									if (offset !== undefined) {
 										startLine = Math.max(0, offset - 1);
 									} else if (tail !== undefined) {
-										const counted = ops.countLines ? await ops.countLines(absolutePath) : undefined;
+										const counted = ops.countLines
+											? await ops.countLines(absolutePath, { encoding, signal })
+											: undefined;
 										if (counted !== undefined) {
 											totalFileLines = counted;
 											startLine = Math.max(0, counted - tail);
@@ -554,6 +583,8 @@ export function createReadToolDefinition(
 										startLine,
 										maxLines: userLimitedLines ?? DEFAULT_MAX_LINES,
 										maxChars: DEFAULT_MAX_BYTES * 4,
+										encoding,
+										signal,
 									});
 									if (slice.lines.length === 0 && startLine > 0) {
 										throw new Error(`Offset ${startLine + 1} is beyond end of file`);
@@ -562,7 +593,7 @@ export function createReadToolDefinition(
 									moreContentRemains = !slice.reachedEnd;
 								} else {
 									const buffer = await ops.readFile(absolutePath);
-									const textContent = buffer.toString("utf-8");
+									const textContent = await decodeReadText(buffer, encoding, signal);
 									textContentForJsonCheck = textContent;
 									const allLines = splitContentLines(textContent);
 									totalFileLines = allLines.length;

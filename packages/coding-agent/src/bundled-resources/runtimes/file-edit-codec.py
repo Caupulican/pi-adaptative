@@ -1,8 +1,10 @@
-"""Pure byte/text codec for managed edits. No target paths or executable input.
+"""Pure byte/text codec for managed reads and edits. No target paths or executable input.
 
 Matching and newline policy belong to the TypeScript edit planner. This helper
 validates its source-coordinate splices, preserves untouched source bytes, and
-encodes only replacements with the same strict codec. It never writes a file.
+encodes only replacements with the same strict codec. Read-only incremental
+decoding carries codec state between bounded chunks, without edit round-trip
+requirements. BOM/encoding selection is shared. This helper never writes a file.
 """
 import base64
 import codecs
@@ -24,12 +26,8 @@ class EncodingEvidenceRequired(ValueError):
     pass
 
 
-def transform(request):
-    original = base64.b64decode(request["source"], validate=True)
-    if len(original) > MAX_SOURCE:
-        raise ValueError("source bound")
+def select_encoding(original, requested):
     bom, detected = next(((b, c) for b, c in BOMS if original.startswith(b)), (b"", None))
-    requested = request.get("encoding")
     encoding = codecs.lookup(requested).name if requested else detected
     if not encoding:
         raise EncodingEvidenceRequired("explicit encoding required")
@@ -39,7 +37,43 @@ def transform(request):
         encoding = detected
     elif encoding in ("utf-16", "utf-32", "utf-8-sig"):
         raise ValueError("codec requires BOM or explicit byte order")
-    source = original[len(bom):]
+    return bom, encoding, original[len(bom):]
+
+
+def read_chunk(request, original):
+    state = request.get("state")
+    if state is None:
+        _, encoding, source = select_encoding(original, request.get("encoding"))
+    else:
+        encoding = codecs.lookup(request["encoding"]).name
+        source = original
+    decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
+    if state is not None:
+        if not isinstance(state, list) or len(state) != 2 or type(state[1]) is not int:
+            raise ValueError("invalid decoder state")
+        pending = base64.b64decode(state[0], validate=True)
+        if len(pending) > MAX_SOURCE:
+            raise ValueError("decoder state bound")
+        decoder.setstate((pending, state[1]))
+    if type(request["final"]) is not bool:
+        raise ValueError("invalid final marker")
+    text = decoder.decode(source, final=request["final"])
+    if not isinstance(text, str) or "\0" in text:
+        raise ValueError("not text")
+    pending, flag = decoder.getstate()
+    if len(pending) > MAX_SOURCE:
+        raise ValueError("decoder state bound")
+    return {"text": text, "encoding": encoding,
+            "state": [base64.b64encode(pending).decode("ascii"), flag]}
+
+
+def transform(request):
+    original = base64.b64decode(request["source"], validate=True)
+    if len(original) > MAX_SOURCE:
+        raise ValueError("source bound")
+    if request["operation"] == "read_chunk":
+        return read_chunk(request, original)
+    bom, encoding, source = select_encoding(original, request.get("encoding"))
     text = source.decode(encoding, errors="strict")
     if not isinstance(text, str) or "\0" in text or text.encode(encoding, errors="strict") != source:
         raise ValueError("source does not round-trip as text")
