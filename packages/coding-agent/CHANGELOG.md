@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Recovered explicitly named codecs missing from Python through an installed iconv, with bounded binary execution and independent round-trip verification. Missing converters produce actionable guidance; lossy conversions remain non-mutating. Iconv-only reads retain at most 16 MiB before final decoding.
 - Bound Python working-directory and script preflight to the selected backend and frozen path dialect. Preserved filesystem error identity and literal whitespace filenames; cancellation stops later provisioning or execution without abandoning shared runtime discovery.
 - Bounded oversized source-line retention and added lossless `read` character-window continuations without shell commands or split surrogate pairs. Session outline fallback now retains privacy projection, and oversized session records never expose partial raw payloads.
 - Bound write/edit preflight, parent traversal, queues, recovery targets, and edit previews to the selected backend path context. A stalled backend lookup no longer stalls unrelated backends.

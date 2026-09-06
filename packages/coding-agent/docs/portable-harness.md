@@ -98,8 +98,22 @@ span's sequences; added newlines use its last ending or the surrounding ending. 
 strict source round-trip equality and independently validates byte boundaries before splicing.
 Unrepresentable replacements, conflicting BOMs, malformed text, and stateful representations that
 cannot preserve those boundaries remain non-mutating failures with recovery guidance. Python is
-resolved by the existing runtime manager, not an assumed interpreter path or host `iconv` command.
+resolved by the existing runtime manager, not an assumed interpreter path.
 Recovery is bounded to 16 MiB sources/results, 64 MiB protocol input, and 30 seconds per codec call.
+
+When an explicitly named codec is absent from Python, the packaged helper discovers an installed
+`iconv` through the codec host's PATH and invokes its absolute path with binary pipes and no shell.
+It never sends target paths or enables discard/transliteration flags. Conversion has a five-second
+deadline and 64 MiB input/output bounds. Exit success is not preservation evidence: inverse
+conversion checks both decoded source bytes and replacement text, in addition to the shared
+splice and final-result checks. A missing converter produces actionable availability guidance;
+there is no implicit installation or encoding guess. Python-supported codecs do not require iconv.
+
+The current stateless helper protocol cannot serialize native iconv decoder state. Its fallback
+therefore retains source bytes until final decode, within the 16 MiB state bound, and verifies their
+round-trip even for reads. Larger iconv-only reads and noncanonical stateful representations still
+require further recovery work; Python-supported incremental reads are unchanged. Optional native
+converter tests identify unavailable hosts explicitly, while mocked converter conformance is mandatory.
 
 The shared Python runtime manager revalidates cached executable identity through its
 `inspectInterpreter` port. The native adapter checks fully qualified paths, regular-file status,

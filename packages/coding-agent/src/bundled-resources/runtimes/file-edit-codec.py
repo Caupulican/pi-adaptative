@@ -9,10 +9,17 @@ requirements. BOM/encoding selection is shared. This helper never writes a file.
 import base64
 import codecs
 import json
+import os
+import re
+import shutil
+import subprocess
 import sys
+import threading
 
 MAX_PROTOCOL = 64 * 1024 * 1024
 MAX_SOURCE = 16 * 1024 * 1024
+MAX_ICONV_OUTPUT = 4 * MAX_SOURCE
+ICONV_TIMEOUT = 5
 BOMS = (
     (codecs.BOM_UTF32_LE, "utf-32-le"),
     (codecs.BOM_UTF32_BE, "utf-32-be"),
@@ -26,9 +33,122 @@ class EncodingEvidenceRequired(ValueError):
     pass
 
 
+class CodecUnavailable(LookupError):
+    pass
+
+
+def run_iconv(executable, source_encoding, target_encoding, data):
+    """Bounded binary transport. No shell, target paths, lossy flags, or stderr payloads."""
+    if len(data) > MAX_ICONV_OUTPUT:
+        raise ValueError("iconv input bound")
+    child = subprocess.Popen(
+        [executable, "-f", source_encoding, "-t", target_encoding],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    failed = threading.Event()
+    timed_out = threading.Event()
+
+    def send():
+        try:
+            with child.stdin:
+                child.stdin.write(data)
+        except Exception:
+            failed.set()
+
+    def expire():
+        timed_out.set()
+        child.kill()
+
+    writer = threading.Thread(target=send, daemon=True)
+    timer = threading.Timer(ICONV_TIMEOUT, expire)
+    timer.start()
+    writer.start()
+    try:
+        output = child.stdout.read(MAX_ICONV_OUTPUT + 1)
+        if len(output) > MAX_ICONV_OUTPUT:
+            raise ValueError("iconv output bound")
+        code = child.wait()
+        writer.join()
+        if code != 0 or failed.is_set() or timed_out.is_set():
+            raise ValueError("iconv conversion unverified")
+        return output
+    finally:
+        timer.cancel()
+        child.kill()
+        child.wait()
+        writer.join()
+        timer.join()
+        child.stdout.close()
+
+
+class IconvDecoder(codecs.IncrementalDecoder):
+    """Opaque iconv state cannot be serialized; retain bounded bytes until final decode."""
+    def __init__(self, codec, errors):
+        super().__init__(errors)
+        self.codec = codec
+        self.pending = b""
+
+    def decode(self, source, final=False):
+        if len(self.pending) + len(source) > MAX_SOURCE:
+            raise ValueError("iconv read state bound")
+        self.pending += source
+        if not final:
+            return ""
+        text = self.codec.decode(self.pending, self.errors)[0]
+        self.pending = b""
+        return text
+
+    def getstate(self):
+        return self.pending, 0
+
+    def setstate(self, state):
+        if state[1] != 0 or len(state[0]) > MAX_SOURCE:
+            raise ValueError("invalid iconv decoder state")
+        self.pending = state[0]
+
+
+class IconvCodec:
+    def __init__(self, name):
+        # Labels are data, not command options or iconv //IGNORE / //TRANSLIT directives.
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}", name):
+            raise LookupError("unsupported codec label")
+        executable = shutil.which("iconv")
+        if not executable:
+            raise CodecUnavailable("iconv unavailable")
+        self.name = name
+        self.executable = os.path.abspath(executable)
+
+    def encode(self, text, errors="strict"):
+        if errors != "strict":
+            raise ValueError("strict conversion required")
+        encoded = run_iconv(self.executable, "UTF-8", self.name, text.encode("utf-8", "strict"))
+        # Some platform implementations substitute even without a lossy flag.
+        if run_iconv(self.executable, self.name, "UTF-8", encoded).decode("utf-8", "strict") != text:
+            raise ValueError("iconv changed replacement text")
+        return encoded, len(text)
+
+    def decode(self, source, errors="strict"):
+        if errors != "strict":
+            raise ValueError("strict conversion required")
+        text = run_iconv(self.executable, self.name, "UTF-8", source).decode("utf-8", "strict")
+        if run_iconv(self.executable, "UTF-8", self.name, text.encode("utf-8", "strict")) != source:
+            raise ValueError("iconv source roundtrip unverified")
+        return text, len(source)
+
+    def incrementaldecoder(self, errors="strict"):
+        return IconvDecoder(self, errors)
+
+
+def lookup_codec(name):
+    try:
+        return codecs.lookup(name)
+    except LookupError:
+        return IconvCodec(name)
+
+
 def select_encoding(original, requested):
     bom, detected = next(((b, c) for b, c in BOMS if original.startswith(b)), (b"", None))
-    encoding = codecs.lookup(requested).name if requested else detected
+    encoding = lookup_codec(requested).name if requested else detected
     if not encoding:
         raise EncodingEvidenceRequired("explicit encoding required")
     if detected:
@@ -45,9 +165,9 @@ def read_chunk(request, original):
     if state is None:
         _, encoding, source = select_encoding(original, request.get("encoding"))
     else:
-        encoding = codecs.lookup(request["encoding"]).name
+        encoding = lookup_codec(request["encoding"]).name
         source = original
-    decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
+    decoder = lookup_codec(encoding).incrementaldecoder(errors="strict")
     if state is not None:
         if not isinstance(state, list) or len(state) != 2 or type(state[1]) is not int:
             raise ValueError("invalid decoder state")
@@ -74,8 +194,9 @@ def transform(request):
     if request["operation"] == "read_chunk":
         return read_chunk(request, original)
     bom, encoding, source = select_encoding(original, request.get("encoding"))
-    text = source.decode(encoding, errors="strict")
-    if not isinstance(text, str) or "\0" in text or text.encode(encoding, errors="strict") != source:
+    codec = lookup_codec(encoding)
+    text = codec.decode(source, "strict")[0]
+    if not isinstance(text, str) or "\0" in text or codec.encode(text, "strict")[0] != source:
         raise ValueError("source does not round-trip as text")
     if request["operation"] == "decode":
         return {"text": text, "encoding": encoding}
@@ -109,38 +230,43 @@ def transform(request):
         start, end = boundaries[span["start"]], boundaries[span["end"]]
         untouched = text[char_cursor:start]
         removed = text[start:end]
-        prefix = untouched.encode(encoding, errors="strict")
-        old = removed.encode(encoding, errors="strict")
+        prefix = codec.encode(untouched, "strict")[0]
+        old = codec.encode(removed, "strict")[0]
         # Stateful/noncanonical representations cannot silently rewrite neighbors.
         if source[byte_cursor:byte_cursor + len(prefix) + len(old)] != prefix + old:
             raise ValueError("codec cannot preserve source span boundaries")
         replacement = span["replacement"]
         if not isinstance(replacement, str) or "\0" in replacement:
             raise ValueError("invalid replacement")
-        encoded = replacement.encode(encoding, errors="strict")
+        encoded = codec.encode(replacement, "strict")[0]
         output.extend((source[byte_cursor:byte_cursor + len(prefix)], encoded))
         expected.extend((untouched, replacement))
         byte_cursor += len(prefix) + len(old)
         char_cursor = end
     remainder = text[char_cursor:]
-    if remainder.encode(encoding, errors="strict") != source[byte_cursor:]:
+    if codec.encode(remainder, "strict")[0] != source[byte_cursor:]:
         raise ValueError("codec cannot preserve source suffix")
     output.append(source[byte_cursor:])
     expected.append(remainder)
     result = b"".join(output)
-    if len(result) > MAX_SOURCE or result[len(bom):].decode(encoding, errors="strict") != "".join(expected):
+    if len(result) > MAX_SOURCE or codec.decode(result[len(bom):], "strict")[0] != "".join(expected):
         raise ValueError("encoded edit verification failed")
     return {"bytes": base64.b64encode(result).decode("ascii"), "encoding": encoding}
 
 
-try:
-    payload = sys.stdin.buffer.read(MAX_PROTOCOL + 1)
-    if len(payload) > MAX_PROTOCOL:
-        raise ValueError("protocol bound")
-    result = transform(json.loads(payload))
-    sys.stdout.buffer.write(json.dumps(result, ensure_ascii=True).encode("ascii"))
-except Exception as error:
-    # Never echo source bytes, replacement text, or a traceback into diagnostics.
-    reason = "encoding_required" if isinstance(error, EncodingEvidenceRequired) else "preservation_unverified"
-    sys.stdout.buffer.write(json.dumps({"error": reason}).encode("ascii"))
-    sys.exit(1)
+if __name__ == "__main__":
+    try:
+        payload = sys.stdin.buffer.read(MAX_PROTOCOL + 1)
+        if len(payload) > MAX_PROTOCOL:
+            raise ValueError("protocol bound")
+        result = transform(json.loads(payload))
+        sys.stdout.buffer.write(json.dumps(result, ensure_ascii=True).encode("ascii"))
+    except Exception as error:
+        # Never echo source bytes, replacement text, or a traceback into diagnostics.
+        reason = "preservation_unverified"
+        if isinstance(error, EncodingEvidenceRequired):
+            reason = "encoding_required"
+        elif isinstance(error, CodecUnavailable):
+            reason = "codec_unavailable"
+        sys.stdout.buffer.write(json.dumps({"error": reason}).encode("ascii"))
+        sys.exit(1)

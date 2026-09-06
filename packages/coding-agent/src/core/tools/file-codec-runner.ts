@@ -34,15 +34,13 @@ export async function createFileCodecRunner(signal?: AbortSignal) {
 			/* A malformed/truncated response is never evidence. */
 		}
 		const complete = !result.killed && !result.errorMessage && !result.stdoutTruncated && !result.stderrTruncated;
-		if (
-			result.code === 1 &&
-			complete &&
-			response &&
-			typeof response === "object" &&
-			"error" in response &&
-			response.error === "encoding_required"
-		)
-			throw new Error(ENCODING_EVIDENCE_REQUIRED);
+		if (result.code === 1 && complete && response && typeof response === "object" && "error" in response) {
+			if (response.error === "encoding_required") throw new Error(ENCODING_EVIDENCE_REQUIRED);
+			if (response.error === "codec_unavailable")
+				throw new Error(
+					"PI_FILE_ENCODING_CORRUPTION: Python lacks the requested codec and iconv is unavailable. Make iconv available to Pi; only change the encoding name if authoritative metadata shows it was incorrect. No file write was attempted.",
+				);
+		}
 		if (result.code !== 0 || !complete) {
 			throw new Error(
 				"PI_FILE_ENCODING_CORRUPTION: Python codec recovery could not verify preservation. Check source encoding/BOM and replacement representability; no file write was attempted.",
