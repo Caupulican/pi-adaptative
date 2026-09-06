@@ -176,6 +176,25 @@ export interface TaskStepsToolDependencies {
 	now?: () => string;
 }
 
+const TASK_STEP_UPDATE_FIELDS = [
+	"content",
+	"activeForm",
+	"status",
+	"priority",
+	"owner",
+	"requirementIds",
+	"pipelineRunId",
+	"pipelineStageId",
+	"clearPipelineLink",
+	"note",
+	"evidence",
+] as const;
+
+/** True when the update names at least one field to change (an id alone changes nothing). */
+function hasTaskStepUpdateFields(input: TaskStepsToolInput): boolean {
+	return TASK_STEP_UPDATE_FIELDS.some((field) => (input as Record<string, unknown>)[field] !== undefined);
+}
+
 function toTaskStepUpdate(input: TaskStepsToolInput): TaskStepUpdate {
 	return {
 		content: input.content,
@@ -454,6 +473,14 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 						// the open steps) instead of duplicating that logic here.
 						const selector = input.id?.trim() || "current";
 						const selected = resolveTaskStepSelector(before.steps, selector, (note) => selectorNotes.push(note));
+						// An update that carries no field changes nothing; reporting it as "recorded" hid five
+						// status-less calls in a row until the stagnant-cycle guard ended the run (measured
+						// live). Refuse once and name the fields so the retry is right the first time.
+						if (!hasTaskStepUpdateFields(input)) {
+							throw new TaskStepsError(
+								`task_steps update for ${selected.id} carried no changes. Include status (pending, in_progress, blocked, completed, cancelled), note, evidence, content, activeForm, priority, owner, or requirementIds.`,
+							);
+						}
 						if (
 							input.pipelineRunId !== undefined ||
 							input.pipelineStageId !== undefined ||

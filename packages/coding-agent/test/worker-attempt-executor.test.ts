@@ -8,6 +8,7 @@ import { createWorkerAttemptExecutor } from "../src/core/delegation/worker-attem
 import { WorkerConversation, type WorkerTranscriptMessage } from "../src/core/delegation/worker-conversation-store.ts";
 import type { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { WorkerTreeBudgetCoordinator } from "../src/core/delegation/worker-tree-budget-coordinator.ts";
+import { DEFAULT_WORKER_MAX_OUTPUT_TOKENS } from "../src/core/model-capability.ts";
 import { CapabilityGateway, type SharedCapabilityBudget } from "../src/core/orchestration/capability-gateway.ts";
 import type { AttemptUsageSnapshot, ExecutionGrant } from "../src/core/orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../src/core/orchestration/delegation-ledger.ts";
@@ -228,6 +229,29 @@ turn context
 (none)`;
 
 describe("worker attempt executor", () => {
+	it("caps a worker turn at the model output limit, never the lane summary cap", async () => {
+		// Measured live (session 01a07461): the 2048-token lane cap cut two complete claim envelopes
+		// at stopReason "length" and the runner reported them as invalid JSON. With no declared model
+		// limit the worker default applies; the 128-token lane cap of this harness must not.
+		const requestCaps: Array<number | undefined> = [];
+		const harness = createExecutorHarness(async (options) => {
+			requestCaps.push((await invokeRequestPreflight(options))?.maxTokens);
+			const finalAssistant = fauxAssistantMessage('{"summary":"envelope fits","status":"completed"}');
+			await options.onMessage?.(finalAssistant);
+			return {
+				text: '{"summary":"envelope fits","status":"completed"}',
+				usage: ZERO_USAGE,
+				stopReason: "stop",
+				messages: [...(options.history ?? []), finalAssistant],
+			};
+		}, 40_000);
+
+		const result = await harness.executor.run();
+
+		expect(result.rawOutcome.accepted).toBe(true);
+		expect(requestCaps).toEqual([DEFAULT_WORKER_MAX_OUTPUT_TOKENS]);
+	});
+
 	it("threads final worker context into the isolated system prompt", async () => {
 		let capturedSystemPrompt = "";
 		const harness = createExecutorHarness(

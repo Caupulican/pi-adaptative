@@ -164,6 +164,49 @@ describe("resolveWorkerAuthority", () => {
 		});
 	});
 
+	it("normalizes catalog grep/find/ls onto bash when the parent surface has bash and not those tools", () => {
+		const resolution = resolveWorkerAuthority({
+			authority: { toolNames: ["read", "grep", "find", "ls"] },
+			foregroundModel: model,
+			foregroundToolNames: ["read", "bash", "edit", "write"],
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+
+		expect(resolution.ok).toBe(true);
+		if (!resolution.ok) return;
+		expect(resolution.shipment.profile.toolNames).toEqual(["read", "bash"]);
+	});
+
+	it("keeps first-class grep/find/ls when those tools are already on the parent surface", () => {
+		const resolution = resolveWorkerAuthority({
+			authority: { toolNames: ["read", "grep", "find", "ls"] },
+			foregroundModel: model,
+			foregroundToolNames: ["read", "grep", "find", "ls"],
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+
+		expect(resolution.ok).toBe(true);
+		if (!resolution.ok) return;
+		expect(resolution.shipment.profile.toolNames).toEqual(["read", "grep", "find", "ls"]);
+	});
+
+	it("still refuses grep/find/ls when the parent has neither those tools nor bash", () => {
+		const resolution = resolveWorkerAuthority({
+			authority: { toolNames: ["read", "grep", "find", "ls"] },
+			foregroundModel: model,
+			foregroundToolNames: ["read"],
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+
+		expect(resolution).toEqual({
+			ok: false,
+			reason: "orchestration_tool_unavailable:grep,find,ls",
+		});
+	});
+
 	it("preserves a base identity only when compiled content is unchanged", () => {
 		const alternateModel = { id: "m2", provider: "faux", reasoning: true } as Model<Api>;
 		const identityRegistry = {

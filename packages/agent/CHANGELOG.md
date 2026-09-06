@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- The output-repetition guard now catches an enumerated loop whose only change per repetition is its ordered-list marker (`2. ...`, `3. ...`, `513. ...`); one such response streamed 16.7k tokens for three minutes past the guard. Rows that differ only in their numbers (tables, timestamped logs) are still ordinary output.
+
 ## [0.98.4] - 2026-09-06
 
 ## [0.98.3] - 2026-09-05

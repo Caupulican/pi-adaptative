@@ -78,8 +78,13 @@ token limit. Pinned by `packages/coding-agent/test/agent-session-retry.test.ts`.
 
 **A slip the harness can absorb normalizes; only real ambiguity refuses, and the refusal names the
 rule.** Refusals per hundred assistant turns are the measure (`scripts/refusal-census.mjs`); the
-ceiling on the frontier tier is one. Pinned by
+ceiling on the frontier tier is one. Catalog `grep`/`find`/`ls` requested for a worker whose parent
+surface has `bash` and not those first-class tools normalize onto `bash`; a sibling such as `write`
+that is not on the parent surface still refuses and names the rule. An invented `sN-<slug>` or
+`sN-<uuid>` task-step selector names the one step carrying that number; a trailing numeric fragment
+(`s1-2`) still refuses. Pinned by
 `packages/coding-agent/test/delegate-exact-input-corrections.test.ts`,
+`packages/coding-agent/test/worker-authority-resolver.test.ts`,
 `packages/coding-agent/test/task-state.test.ts`,
 `packages/coding-agent/test/goal-tool-core.test.ts`,
 `packages/coding-agent/test/goal-evidence-verification.test.ts`, and
@@ -130,7 +135,9 @@ active record carries one pointer line (the constrained tier keeps the full text
 `packages/agent/test/tool-failure-memory.test.ts`.
 
 **A degenerate output loop ends before the cap.** The stream guard ends a response whose trailing
-window repeats the tier's number of times, classified as a runaway, never retried unchanged.
+window repeats the tier's number of times, classified as a runaway, never retried unchanged. The
+comparison collapses ordered-list markers, so an enumerated loop whose only change is its number
+is still a loop, while rows that differ only in their numbers are still output.
 Pinned by `packages/agent/test/reliability/stream-idle.test.ts`.
 
 **A tool-loop runaway is evidence.** A repeated tool call, a stagnant tool cycle, or the
@@ -241,3 +248,8 @@ measurement gains no new surface.
 | 2026-09-03 | Refusal false positives: prefix globs, harness roots, variable targets and line-wise scripts pass the credential guard; timeouts are operation outcomes; evidence lands on blocked goals; unions validate on the named branch; the Windows shell engine covers the full coreutils surface, heredocs and nested shells. |
 | 2026-09-03 | Memory is scoped: the general MEMORY.md holds facts true in any task, each project has its own hot MEMORY.md under the agent home, the memory tool defaults to the project file, and workers cannot write project memory. |
 | 2026-09-04 | Tool-surface stability permits explicit reload/provider transitions without cache-hit promises; root defaults add runtime_update and webfetch without raising schema ceilings. Long-session profiles require exact successful work, isolate summary responses, and verify accepted worker completions without relaxing performance thresholds. |
+| 2026-09-06 | Worker `grep`/`find`/`ls` on a bash-only parent surface normalize onto `bash`; real uninherited siblings still refuse. |
+| 2026-09-06 | Invented `sN-<slug>` task-step selectors normalize onto `step-N` when that id exists; trailing numeric fragments still refuse. |
+| 2026-09-06 | A worker turn is capped by the model's own output limit, never the 2048-token lane summary cap; a length stop before the claim envelope closes is `output_truncated`, not invalid JSON. |
+| 2026-09-06 | The output-repetition guard collapses ordered-list markers before comparing windows; an enumerated loop is a loop. |
+| 2026-09-06 | `task_steps update` with no field to change refuses and names the accepted fields; a no-op is never "recorded". |

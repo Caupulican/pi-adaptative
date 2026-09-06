@@ -453,13 +453,20 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				costUsd,
 			});
 		}
+		// A provider length stop is a truncation, not a format failure: the worker was cut off before
+		// its envelope could close (measured live: two complete envelopes cut at a 2048-token cap were
+		// reported as invalid JSON). Name the real cause so the parent re-runs with a tighter ask
+		// instead of blaming the worker's output format.
+		const truncated = completion.stopReason === "length";
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
 			claim: {
 				...completionBaseClaim,
 				status: "failed",
-				summary: "Worker output was not valid structured JSON.",
+				summary: truncated
+					? "Worker output was cut off at the provider output-token limit (stop reason 'length') before a valid claim envelope closed."
+					: "Worker output was not valid structured JSON.",
 				...(changedFilesOverflowed
 					? {
 							blockers: [
@@ -469,7 +476,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 					: {}),
 			},
 			laneStatus: "failed",
-			reasonCode: "unparseable_output",
+			reasonCode: truncated ? "output_truncated" : "unparseable_output",
 			costUsd,
 		});
 	}

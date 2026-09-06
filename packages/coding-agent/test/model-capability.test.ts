@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	DEFAULT_WORKER_MAX_OUTPUT_TOKENS,
 	deriveModelCapabilityProfile,
 	evaluateLaneWorkerRefusal,
 	filterToolNamesForCapability,
@@ -7,6 +8,7 @@ import {
 	LANE_WORKER_REFUSAL_PREFIX,
 	MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS,
 	MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS,
+	resolveWorkerOutputTokenCeiling,
 } from "../src/core/model-capability.ts";
 
 const DEFAULT_ACTIVE = [
@@ -83,6 +85,18 @@ describe("deriveModelCapabilityProfile", () => {
 			expect(Number.isNaN(profile.laneMaxOutputTokens)).toBe(false);
 			expect(profile.laneMaxOutputTokens).toBeGreaterThan(0);
 		}
+	});
+
+	it("caps worker turns at the model output limit, falling back to the worker default", () => {
+		expect(resolveWorkerOutputTokenCeiling({ maxTokens: 128_000 })).toBe(128_000);
+		expect(resolveWorkerOutputTokenCeiling({ maxTokens: 8_000 })).toBe(8_000);
+		expect(resolveWorkerOutputTokenCeiling({})).toBe(DEFAULT_WORKER_MAX_OUTPUT_TOKENS);
+		expect(resolveWorkerOutputTokenCeiling({ maxTokens: 0 })).toBe(DEFAULT_WORKER_MAX_OUTPUT_TOKENS);
+		expect(resolveWorkerOutputTokenCeiling({ maxTokens: Number.NaN })).toBe(DEFAULT_WORKER_MAX_OUTPUT_TOKENS);
+		// The lane summary cap never bounds a worker turn.
+		expect(DEFAULT_WORKER_MAX_OUTPUT_TOKENS).toBeGreaterThan(
+			deriveModelCapabilityProfile({ contextWindow: 200_000 }).laneMaxOutputTokens,
+		);
 	});
 
 	it("honors mode off and forced classes regardless of the window", () => {

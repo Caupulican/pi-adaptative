@@ -336,6 +336,56 @@ describe("runWorker", () => {
 		);
 	});
 
+	it("reports a length-stopped write-capable envelope as truncation, not as invalid JSON", async () => {
+		// Measured live (session 01a07461): two workers emitted complete envelopes, the provider cut
+		// them at the output cap, and the runner blamed their JSON. The cause must be named.
+		const truncated =
+			'{"summary":"architecture map: 34 controllers, 14 with own tests","status":"completed","findings":[{"summary":"cut off';
+		const outcome = await runWorker(
+			runnerOptions({
+				request: workerRequest({
+					envelope: {
+						id: "worker-env-truncated",
+						capabilities: ["filesystem.read", "filesystem.write"],
+						allowedPaths: ["src"],
+						maxEstimatedUsd: 0.5,
+						createdAt: "2026-07-01T00:00:00.000Z",
+					},
+				}),
+				applyActions: () => ({ changedFiles: [], refused: [], failed: [], inspectionRequired: [] }),
+				complete: async () => completionOf(truncated, 0.6, "length"),
+			}),
+		);
+
+		expect(outcome.claim.status).toBe("failed");
+		expect(outcome.claim.summary).toContain("output-token limit");
+		expect(outcome.claim.summary).toContain("stop reason 'length'");
+		expect(outcome.laneStatus).toBe("failed");
+		expect(outcome.reasonCode).toBe("output_truncated");
+		expect(outcome.costUsd).toBe(0.6);
+	});
+
+	it("still names invalid JSON when a write-capable worker stops normally without an envelope", async () => {
+		const outcome = await runWorker(
+			runnerOptions({
+				request: workerRequest({
+					envelope: {
+						id: "worker-env-prose",
+						capabilities: ["filesystem.read", "filesystem.write"],
+						allowedPaths: ["src"],
+						maxEstimatedUsd: 0.5,
+						createdAt: "2026-07-01T00:00:00.000Z",
+					},
+				}),
+				applyActions: () => ({ changedFiles: [], refused: [], failed: [], inspectionRequired: [] }),
+				complete: async () => completionOf("I looked around and wrote nothing down."),
+			}),
+		);
+
+		expect(outcome.claim.summary).toBe("Worker output was not valid structured JSON.");
+		expect(outcome.reasonCode).toBe("unparseable_output");
+	});
+
 	it("fails on a model error stop reason", async () => {
 		const outcome = await runWorker(
 			runnerOptions({ complete: async () => completionOf("irrelevant", 0.002, "error") }),

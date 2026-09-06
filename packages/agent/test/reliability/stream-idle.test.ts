@@ -129,6 +129,45 @@ describe("withStreamIdleWatchdog output repetition guard", () => {
 		expect(result.errorMessage).toMatch(/output runaway/);
 	});
 
+	it("catches an enumerated loop whose only change per repetition is the list number", async () => {
+		// Measured live: "2. `complete` for the step. Then re-check." ... "513. ..." ran for 16.7k tokens
+		// and three minutes because the number made every window differ by a character or two.
+		const fake = makeFakeStreamFn();
+		const wrapped = withStreamIdleWatchdog(fake.streamFn, {
+			...BOUNDS,
+			outputRepetitionRepeats: 4,
+			outputRepetitionWindowChars: 40,
+		});
+		const stream = await wrapped({} as never, {} as never, {});
+		let text = "";
+		const partial = () => ({
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text }],
+			api: "x",
+			provider: "x",
+			model: "x",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: 1,
+		});
+		fake.inner.push({ type: "start", partial: partial() });
+		for (let index = 2; index < 12; index++) {
+			const item = `${index}. \`complete\` for the salvage step, then re-check the evaluation facts. `;
+			text += item;
+			fake.inner.push({ type: "text_delta", contentIndex: 0, delta: item, partial: partial() });
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/output runaway/);
+	});
+
 	it("leaves ordinary long output alone", async () => {
 		const fake = makeFakeStreamFn();
 		const wrapped = withStreamIdleWatchdog(fake.streamFn, {

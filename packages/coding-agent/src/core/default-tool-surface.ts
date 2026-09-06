@@ -42,6 +42,10 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 /** Current-process default tool request. */
 export const DEFAULT_ACTIVE_TOOL_NAMES: readonly string[] = getDefaultActiveToolNames();
 
+/** First-class catalog search/list tools whose live default surface is the bash contract. */
+export const BASH_BACKED_CATALOG_TOOL_NAMES = ["grep", "find", "ls"] as const;
+const BASH_BACKED_CATALOG_TOOL_NAME_SET: ReadonlySet<string> = new Set(BASH_BACKED_CATALOG_TOOL_NAMES);
+
 /** Map legacy/platform-specific shell and tool alias names to stable agent contracts. */
 export function mapToolNamesForPlatform(
 	names: readonly string[],
@@ -58,6 +62,28 @@ export function mapToolNamesForPlatform(
 		} else if (["bash_tool", "shell", "sh", "terminal", "cmd"].includes(lower)) {
 			resolved = STABLE_SHELL_TOOL_NAME;
 		}
+		if (!mapped.includes(resolved)) mapped.push(resolved);
+	}
+	return mapped;
+}
+
+/**
+ * Map requested tool names onto an inherited surface. Catalog grep/find/ls stay first-class when
+ * that surface already has them; otherwise they collapse onto bash when bash is inherited. Other
+ * names are unchanged so a later admission check can still refuse a real privilege miss.
+ */
+export function mapToolNamesOntoSurface(
+	names: readonly string[],
+	surface: readonly string[],
+	platform: NodeJS.Platform = process.platform,
+): string[] {
+	const inherited = new Set(mapToolNamesForPlatform(surface, platform));
+	const mapped: string[] = [];
+	for (const name of mapToolNamesForPlatform(names, platform)) {
+		const resolved =
+			!inherited.has(name) && BASH_BACKED_CATALOG_TOOL_NAME_SET.has(name) && inherited.has(STABLE_SHELL_TOOL_NAME)
+				? STABLE_SHELL_TOOL_NAME
+				: name;
 		if (!mapped.includes(resolved)) mapped.push(resolved);
 	}
 	return mapped;

@@ -9,7 +9,6 @@ import type { WorkerAgentView } from "../src/core/delegation/worker-agent-contro
 import type { WorkerDelegationRequest } from "../src/core/delegation/worker-delegation-request.ts";
 import { DEFAULT_WORKER_FLEET_LIMITS } from "../src/core/delegation/worker-fleet-limits.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
-import { DEFAULT_LANE_MAX_OUTPUT_TOKENS } from "../src/core/model-capability.ts";
 import { ORCHESTRATION_SCHEMA_VERSION } from "../src/core/orchestration/contracts.ts";
 import { loadedSuiteTimeout } from "./loaded-suite-timeout.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
@@ -1168,7 +1167,8 @@ describe("leaf worker orchestration", () => {
 
 			expect(first.record?.status).toBe("succeeded");
 			expect(second.record?.status).toBe("succeeded");
-			expect(requestCaps).toEqual([DEFAULT_LANE_MAX_OUTPUT_TOKENS, DEFAULT_LANE_MAX_OUTPUT_TOKENS]);
+			// The worker ceiling is the model's own output limit (8 000 here), not the lane summary cap.
+			expect(requestCaps).toEqual([workerTokenBudget, workerTokenBudget]);
 		} finally {
 			await harness.cleanup();
 		}

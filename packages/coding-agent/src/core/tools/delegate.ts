@@ -994,9 +994,9 @@ function delegateStartSkipText(reason: string): string {
 		return "delegate not started: CAVEMAN MODE - MANDATORY: worker_agent_session_limit_reached is expected policy capacity, not harness instability. Reuse an idle worker returned by delegate list, or return the constraint to the user.";
 	}
 	if (reason.startsWith("orchestration_tool_unavailable:")) {
-		// Measured live: an orchestrator asked a worker for grep/find/ls, which exist in the catalog
-		// but were not in its own tool surface, lost the turn and armed the failure ledger. Say what
-		// the rule is so the retry is right the first time.
+		// Measured live: an orchestrator asked a worker for tools outside the live parent surface,
+		// lost the turn and armed the failure ledger. Catalog grep/find/ls on a bash-only parent
+		// normalize before this branch; remaining misses still name the inheritance rule.
 		return `delegate skipped: ${reason}. A worker's tools come from this session's own active tool set (the tools you can call); omit toolNames to inherit every compatible tool.`;
 	}
 	return `delegate skipped: ${reason}`;

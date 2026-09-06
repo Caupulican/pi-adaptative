@@ -380,4 +380,22 @@ describe("resolveTaskStepSelector ordinal prefixes", () => {
 			/Task step not found for selector: s9-anything\. Open steps: step-1/,
 		);
 	});
+
+	it("resolves an invented sN-slug selector to the one step carrying that number", () => {
+		const state = setTaskSteps(
+			createTaskStepsState("T0"),
+			[
+				{ content: "Normalize worker grep/find/ls onto bash" },
+				{ content: "Salvage unused worker claim envelopes as plain text even when write-capable" },
+			],
+			"T1",
+		);
+		const notes: string[] = [];
+		expect(resolveTaskStepSelector(state.steps, "s2-salvage-plain-text", (note) => notes.push(note)).id).toBe(
+			"step-2",
+		);
+		expect(notes).toEqual(['selector "s2-salvage-plain-text" resolved to step-2']);
+		expect(resolveTaskStepSelector(state.steps, "s1-normalizing-worker-grep").id).toBe("step-1");
+		expect(() => resolveTaskStepSelector(state.steps, "s1-2")).toThrow(/not found for selector: s1-2/);
+	});
 });

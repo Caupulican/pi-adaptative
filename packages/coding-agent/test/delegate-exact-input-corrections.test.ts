@@ -152,24 +152,24 @@ describe("delegate exact-action input corrections", () => {
 		expect(result.details).toMatchObject({ started: true, action: "wait_many", agentIds: ["worker-1", "worker-2"] });
 	});
 
-	it("names the tool-surface rule when a worker asks for tools outside the session's own", async () => {
+	it("names the tool-surface rule when a worker asks for a sibling tool outside the session's own", async () => {
 		const tool = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
 			resolveMessageReplayScope: fixedReplayScope,
-			startWorkerDelegation: () => ({ started: false, skipReason: "orchestration_tool_unavailable:grep,find,ls" }),
+			startWorkerDelegation: () => ({ started: false, skipReason: "orchestration_tool_unavailable:write" }),
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 			workerAgentControl: workerAgentControl(controlSpies()),
 		});
 		const result = await tool.execute(
 			"start-tools",
-			{ action: "start", task: "implement the export command", toolNames: ["read", "grep", "find", "ls"] },
+			{ action: "start", task: "implement the export command", toolNames: ["read", "write"] },
 			undefined,
 			undefined,
 			context,
 		);
 		expect(result.isError).toBe(true);
 		const text = delegateText(result);
-		expect(text).toContain("orchestration_tool_unavailable:grep,find,ls");
+		expect(text).toContain("orchestration_tool_unavailable:write");
 		expect(text).toContain("this session's own active tool set");
 		expect(text).toContain("omit toolNames");
 	});

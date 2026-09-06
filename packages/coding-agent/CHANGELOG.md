@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Fixed
+
+- Worker turns are capped by the model's own output limit instead of the 2048-token lane summary cap. Two workers that emitted complete claim envelopes were cut off at that cap, reported as invalid JSON, and their evidence was lost; a worker with no declared model limit now gets 16,384 tokens, still narrowed by the remaining attempt and tree token budgets.
+- A worker whose output stops at the provider length limit before its claim envelope closes is reported as `output_truncated` with a summary naming the limit, instead of "not valid structured JSON".
+- Worker `toolNames` naming catalog `grep`/`find`/`ls` normalize onto `bash` when the parent surface has `bash` and not those first-class tools; a sibling the parent does not have (such as `write`) still refuses and names the rule.
+- `task_steps` resolves an invented `sN-<slug>` selector (for example `s7-salvage-plain-text`) to the one step carrying that number; a trailing numeric fragment such as `s1-2` still refuses.
+- `task_steps update` with no field to change is refused with the list of accepted fields instead of being "recorded" as a no-op; five such calls in a row previously ran until the stagnant-cycle guard ended the turn.
+
 ## [0.98.4] - 2026-09-06
 
 ## [0.98.3] - 2026-09-05

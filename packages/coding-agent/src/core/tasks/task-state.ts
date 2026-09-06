@@ -401,11 +401,12 @@ export function addTaskStep(state: TaskStepsState, input: TaskStepInput, now: st
 }
 
 /**
- * Noise a model appends to an ordinal that cannot name another step: a parenthetical remark or a
- * uuid-like hex run (six or more hex chars with a letter). A short numeric fragment ("s1-1?") is
- * left to the refusal below, because it may name a different step.
+ * Noise a model appends to an ordinal that cannot name another step: a parenthetical remark, a
+ * uuid-like hex run (six or more hex chars with a letter), or a kebab/snake slug. A short numeric
+ * fragment ("s1-1?", "s1-2") is left to the refusal below, because it may name a different step.
+ * Measured live: `s7-salvage-plain-text` lost the turn instead of naming step-7.
  */
-const ORDINAL_NOISE_RE = /^[\s-]*(?:\([^)]*\)|[0-9a-f-]*[a-f][0-9a-f-]{5,})$/i;
+const ORDINAL_NOISE_RE = /^[\s-]*(?:\([^)]*\)|[0-9a-f-]*[a-f][0-9a-f-]{5,}|[a-z][\w-]*)$/i;
 
 export function resolveTaskStepSelector(
 	steps: readonly TaskStep[],

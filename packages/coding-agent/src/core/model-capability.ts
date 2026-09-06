@@ -97,11 +97,32 @@ export const MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS: readonly string[] = [...GOAL_L
 export const DEFAULT_LANE_MAX_OUTPUT_TOKENS = 2048;
 const MIN_LANE_MAX_OUTPUT_TOKENS = 256;
 
+/**
+ * Output cap for a worker's own provider turns when the model declares no usable limit. Matches the
+ * registry default for custom models; the lane summary cap is never the answer here.
+ */
+export const DEFAULT_WORKER_MAX_OUTPUT_TOKENS = 16_384;
+
 function laneOutputTokensForWindow(contextWindow: number | undefined): number {
 	if (contextWindow === undefined || contextWindow <= 0) return DEFAULT_LANE_MAX_OUTPUT_TOKENS;
 	// A lane completion may use at most an eighth of the window for output, floored so tiny
 	// windows still produce something parseable.
 	return Math.min(DEFAULT_LANE_MAX_OUTPUT_TOKENS, Math.max(MIN_LANE_MAX_OUTPUT_TOKENS, Math.floor(contextWindow / 8)));
+}
+
+/**
+ * Output cap for one worker agent turn: the model's own output limit. The lane cap above bounds
+ * one-shot summary completions (research, fitness, compaction); a worker turn carries a full claim
+ * envelope, file contents and tool arguments. Measured live (session 01a07461): two workers that
+ * emitted complete 7.7k-character envelopes were cut at the 2048-token lane cap, reported as
+ * "not valid structured JSON", and $1.26 of evidence was lost. Budget narrowing still applies
+ * downstream (remaining attempt and tree token budgets, then the model limit again at transport).
+ */
+export function resolveWorkerOutputTokenCeiling(model: { maxTokens?: number }): number {
+	const declared = model.maxTokens;
+	return typeof declared === "number" && Number.isSafeInteger(declared) && declared > 0
+		? declared
+		: DEFAULT_WORKER_MAX_OUTPUT_TOKENS;
 }
 
 function profileForClass(

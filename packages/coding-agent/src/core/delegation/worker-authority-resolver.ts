@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
-import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
+import { mapToolNamesForPlatform, mapToolNamesOntoSurface, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import {
 	ROOT_MEMORY_TOOL_NAME,
 	WORKER_MEMORY_READ_TOOL_NAME,
@@ -197,8 +197,12 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	if (baseForbiddenTool) {
 		return { ok: false, reason: `orchestration_tool_unavailable:${baseForbiddenTool}` };
 	}
-	const configuredToolNames = mapToolNamesForPlatform(
+	const inheritedSurfaceNames = input.base
+		? mapToolNamesForPlatform(input.base.profile.toolNames)
+		: inheritedForegroundToolNames;
+	const configuredToolNames = mapToolNamesOntoSurface(
 		input.authority?.toolNames ?? input.base?.profile.toolNames ?? inheritedForegroundToolNames,
+		inheritedSurfaceNames,
 	).filter((toolName) => !WORKER_ROOT_MEMORY_TOOL_NAMES.has(toolName));
 	const deniedForegroundTools = new Set(input.base ? [] : (input.foregroundEnvelope?.deniedTools ?? []));
 	const uniqueToolNames = [
@@ -214,9 +218,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		return { ok: false, reason: `orchestration_tool_unavailable:${unavailableTools.join(",")}` };
 	}
 	if (input.authority?.toolNames !== undefined) {
-		const inheritedSurface = new Set(
-			input.base ? mapToolNamesForPlatform(input.base.profile.toolNames) : inheritedForegroundToolNames,
-		);
+		const inheritedSurface = new Set(inheritedSurfaceNames);
 		const foregroundTools = input.foregroundToolNames ?? input.foregroundEnvelope?.allowedTools ?? DEFAULT_TOOL_NAMES;
 		const boundedMemoryReadInherited =
 			uniqueToolNames.includes(WORKER_MEMORY_READ_TOOL_NAME) &&

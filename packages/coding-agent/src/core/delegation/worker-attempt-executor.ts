@@ -16,7 +16,7 @@ import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts
 import type { WorkerRequest } from "../autonomy/contracts.ts";
 import type { LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
-import type { ModelCapabilityProfile } from "../model-capability.ts";
+import { type ModelCapabilityProfile, resolveWorkerOutputTokenCeiling } from "../model-capability.ts";
 import { attemptUsageFromGatewayUsage, EMPTY_ATTEMPT_USAGE } from "../orchestration/attempt-usage.ts";
 import { CapabilityGatewayDeniedError, type ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
 import type { ArtifactContract, AttemptUsageSnapshot, ExecutionGrant } from "../orchestration/contracts.ts";
@@ -296,6 +296,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		return usage;
 	};
 	const remainingAttemptTokens = (): number | undefined => options.toolSurface.gateway?.remainingAttemptTokenBudget();
+	// A worker turn is capped by the model's own output limit, never by the lane summary cap: a
+	// claim envelope with findings, or a write tool call carrying a file, does not fit 2048 tokens.
+	const workerOutputTokenCeiling = resolveWorkerOutputTokenCeiling(options.model);
 	const reserveProviderBudget = async (
 		requestedMaxTokens: number,
 		subject: string,
@@ -508,11 +511,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 						};
 						const providerTurn = new WorkerProviderTurnProtocol({
 							acquireReservation: () =>
-								reserveProviderBudget(
-									options.laneCapability.laneMaxOutputTokens,
-									"worker_provider_completion",
-									signal,
-								),
+								reserveProviderBudget(workerOutputTokenCeiling, "worker_provider_completion", signal),
 							signal,
 							onFailure: retainCallbackFailure,
 							...(options.toolSurface.gateway
@@ -563,10 +562,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 									messages: [],
 									model: options.model,
 									thinkingLevel: options.thinkingLevel,
-									maxTokens: Math.min(
-										options.laneCapability.laneMaxOutputTokens,
-										availableTokens ?? Number.POSITIVE_INFINITY,
-									),
+									maxTokens: Math.min(workerOutputTokenCeiling, availableTokens ?? Number.POSITIVE_INFINITY),
 									tools: options.toolSurface.tools,
 									requestPreflight: () => providerTurn.requestPreflight(),
 									beforeToolCall: async (context, toolSignal) => {

@@ -23,7 +23,7 @@ import {
 	type WorkerToolAdapterSources,
 } from "../autonomy/worker-tool-adapter-registry.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
-import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
+import { mapToolNamesForPlatform, mapToolNamesOntoSurface, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -987,9 +987,10 @@ export class WorkerDelegationController {
 			}
 		}
 		if (!pinnedContract && authority?.toolNames) {
-			const materializedTools = new Set(currentExecutionPlan.toolManifests.map((manifest) => manifest.toolName));
-			const missingTools = mapToolNamesForPlatform(authority.toolNames).filter(
-				(toolName) => !materializedTools.has(toolName),
+			const materializedTools = currentExecutionPlan.toolManifests.map((manifest) => manifest.toolName);
+			const materializedSet = new Set(materializedTools);
+			const missingTools = mapToolNamesOntoSurface(authority.toolNames, materializedTools).filter(
+				(toolName) => !materializedSet.has(toolName),
 			);
 			if (missingTools.length > 0) {
 				return { ok: false, skipReason: `orchestration_tool_unavailable:${[...new Set(missingTools)].join(",")}` };

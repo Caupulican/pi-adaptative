@@ -126,6 +126,9 @@ export type StreamIdleOptionsResolver = (...args: Parameters<StreamFn>) => Parti
 export const DEFAULT_OUTPUT_REPETITION_REPEATS = 6;
 export const DEFAULT_OUTPUT_REPETITION_WINDOW_CHARS = 200;
 
+/** An ordered-list marker: a number followed by "." or ")" and whitespace, not part of a word or version. */
+const ORDERED_LIST_MARKER_RE = /(?<![\w.])\d+[.)](?=\s)/g;
+
 function outputRepetition(message: AssistantMessage, opts: StreamIdleOptions): number | undefined {
 	const repeatsNeeded = opts.outputRepetitionRepeats ?? DEFAULT_OUTPUT_REPETITION_REPEATS;
 	const window = opts.outputRepetitionWindowChars ?? DEFAULT_OUTPUT_REPETITION_WINDOW_CHARS;
@@ -147,7 +150,12 @@ function outputRepetition(message: AssistantMessage, opts: StreamIdleOptions): n
 					: undefined;
 	if (text === undefined) return undefined;
 	if (text.length < window * repeatsNeeded) return undefined;
-	const recent = text.slice(-window * repeatsNeeded * 2);
+	// Compare with ordered-list markers collapsed: an enumerated loop ("2. retry the step",
+	// "3. retry the step", ... "513. retry the step") changes only its marker per repetition and
+	// slipped past an exact match for 16.7k tokens and three minutes (measured live). Only the
+	// marker is collapsed, never every digit: rows that differ in their numbers alone (a table, a
+	// log with timestamps) are ordinary output and must keep streaming.
+	const recent = text.slice(-window * repeatsNeeded * 2).replace(ORDERED_LIST_MARKER_RE, "#.");
 	const tail = recent.slice(-window);
 	let count = 0;
 	let from = 0;

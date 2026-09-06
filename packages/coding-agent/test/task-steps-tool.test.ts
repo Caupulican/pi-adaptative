@@ -55,6 +55,30 @@ describe("task_steps tool", () => {
 		expect(allContent.text).toContain("focused test passed");
 	});
 
+	it("refuses an update that names no field to change and lists the accepted fields", async () => {
+		// Measured live: five id-only updates were "recorded" as no-ops until the stagnant-cycle
+		// guard ended the run; the model believed status had been sent each time.
+		const harness = createHarness();
+		await execute(harness.tool, {
+			action: "set",
+			steps: [{ content: "Inspect", status: "in_progress" }, { content: "Implement" }],
+		});
+		const before = harness.getState();
+
+		const result = await execute(harness.tool, { action: "update", id: "step-1" });
+
+		expect(result.isError).toBe(true);
+		const content = result.content[0];
+		if (content?.type !== "text") throw new Error("Expected text task_steps result");
+		expect(content.text).toContain("update for step-1 carried no changes");
+		expect(content.text).toContain("status (pending, in_progress, blocked, completed, cancelled)");
+		expect(content.text).toContain("evidence");
+		expect(harness.getState()).toBe(before);
+
+		const applied = await execute(harness.tool, { action: "update", id: "step-1", status: "completed" });
+		expect(applied.details).toMatchObject({ action: "update", applied: true });
+	});
+
 	it("supports add, compact, and clear", async () => {
 		const harness = createHarness();
 		await execute(harness.tool, { action: "add", content: "One", status: "completed" });
