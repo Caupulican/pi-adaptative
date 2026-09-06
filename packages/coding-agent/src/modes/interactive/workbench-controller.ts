@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
-import { type Component, Text } from "@caupulican/pi-tui";
+import { type Component, isMouseSequence, parseMouseSequence, Text } from "@caupulican/pi-tui";
 import type { LaneRecord } from "../../core/autonomy/lane-tracker.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import { type OrchestrationPanelModel, renderOrchestrationPanelRows } from "../../core/tools/orchestration-panel.ts";
@@ -219,7 +219,7 @@ export class WorkbenchController {
 		const conversation = this.view.conversation;
 		if (this.view.conversationHeight === 0) {
 			this.selecting = false;
-			return data.startsWith("\x1b[<") ? { consume: true } : undefined;
+			return isMouseSequence(data) ? { consume: true } : undefined;
 		}
 		if (keys.matches(data, "app.conversation.pageUp"))
 			conversation.scroll(-Math.max(1, this.view.conversationHeight - 1));
@@ -231,42 +231,33 @@ export class WorkbenchController {
 		else if (keys.matches(data, "app.workbench.grow")) this.view.growUpper();
 		else if (keys.matches(data, "app.workbench.shrink")) this.view.shrinkUpper();
 		else {
-			const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data);
+			const mouse = parseMouseSequence(data);
 			if (!mouse) return undefined;
-			const button = Number(mouse[1]);
-			const column = Number(mouse[2]) - 1;
-			const row = Number(mouse[3]) - 1;
-			const inside =
-				row >= this.view.conversationTop &&
-				row < this.view.conversationTop + this.view.conversationHeight &&
-				column >= this.view.conversationLeft &&
-				column < this.view.conversationLeft + this.view.conversationWidth;
-			if (button === 64 || button === 65) {
-				const delta = button === 64 ? -3 : 3;
-				if (inside) conversation.scroll(delta);
+			const { button, action, column, row } = mouse;
+			const hit = this.view.hitTest(column, row);
+			if (action === "scroll") {
+				const delta = button === "wheelUp" ? -3 : 3;
+				if (hit === "conversation") conversation.scroll(delta);
 				else this.view.scrollUpper(column, row, delta);
-			} else if (button === 0 && mouse[4] === "M" && row === this.view.conversationTop - 1) {
-				const action = this.view.headerAction(column);
-				if (action === "latest") conversation.latest();
-				else if (action) void this.copy(action === "copyAll");
-			} else if (button === 0 && mouse[4] === "M" && row === this.view.dividerRow) {
+			} else if (action === "down" && button === "left" && hit === "conversationHeader") {
+				const headerAction = this.view.headerAction(column);
+				if (headerAction === "latest") conversation.latest();
+				else if (headerAction) void this.copy(headerAction === "copyAll");
+			} else if (action === "down" && button === "left" && hit === "divider") {
 				this.view.toggleUpper();
-			} else if (button === 0 && mouse[4] === "M" && inside) {
+			} else if (action === "down" && button === "left" && hit === "conversation") {
 				// A click only focuses the pane; the selection (and its frozen view) starts on drag.
 				this.pressPoint = { row: row - this.view.conversationTop, column: column - this.view.conversationLeft };
 				this.selecting = false;
-			} else if (this.pressPoint && (button === 32 || mouse[4] === "m")) {
-				const point = {
-					row: Math.max(0, Math.min(this.view.conversationHeight - 1, row - this.view.conversationTop)),
-					column: Math.max(0, Math.min(this.view.conversationWidth, column - this.view.conversationLeft)),
-				};
+			} else if (this.pressPoint && (action === "drag" || action === "up")) {
+				const point = this.view.toConversationPoint(column, row);
 				const moved = point.row !== this.pressPoint.row || point.column !== this.pressPoint.column;
-				if (!this.selecting && button === 32 && moved) {
+				if (!this.selecting && action === "drag" && moved) {
 					conversation.select(this.pressPoint, true);
 					this.selecting = true;
 				}
 				if (this.selecting) conversation.select(point, false);
-				if (mouse[4] === "m") {
+				if (action === "up") {
 					this.selecting = false;
 					this.pressPoint = undefined;
 				}

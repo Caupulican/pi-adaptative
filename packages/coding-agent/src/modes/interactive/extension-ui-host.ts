@@ -23,7 +23,16 @@ import type {
 	OverlayHandle,
 	OverlayOptions,
 } from "@caupulican/pi-tui";
-import { Container, Editor, firstNonWhitespaceCharacter, matchesKey, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import {
+	Container,
+	Editor,
+	firstNonWhitespaceCharacter,
+	matchesKey,
+	pasteIntoEditor,
+	Spacer,
+	Text,
+	type TUI,
+} from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type {
 	AutocompleteProviderFactory,
@@ -45,6 +54,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import type { FooterComponent } from "./components/footer.ts";
+import type { WorkbenchComponent } from "./components/workbench.ts";
 import type { EditorOverlayHost } from "./editor-overlay-host.ts";
 import {
 	getAvailableThemesWithPaths,
@@ -85,6 +95,7 @@ export interface ExtensionUiHostUi {
 
 	getEditor(): EditorComponent;
 	setEditor(editor: EditorComponent): void;
+	getWorkbenchView(): WorkbenchComponent | undefined;
 	getBuiltInHeader(): Component | undefined;
 	getAutocompleteProvider(): AutocompleteProvider | undefined;
 	getClipboardImageStore(): Pick<SessionImageStore, "write"> | undefined;
@@ -382,23 +393,10 @@ export class ExtensionUiHost {
 			this.customFooter.dispose();
 		}
 
-		// Remove current footer from UI
-		if (this.customFooter) {
-			this.ui.tui.removeChild(this.customFooter);
-		} else {
-			this.ui.tui.removeChild(this.ui.footer);
-		}
-
-		if (factory) {
-			// Create and add custom footer, passing the data provider
-			this.customFooter = factory(this.ui.tui, theme, this.ui.footerDataProvider);
-			this.ui.tui.addChild(this.customFooter);
-		} else {
-			// Restore built-in footer
-			this.customFooter = undefined;
-			this.ui.tui.addChild(this.ui.footer);
-		}
-
+		const previous = this.customFooter ?? this.ui.footer;
+		const next = factory ? factory(this.ui.tui, theme, this.ui.footerDataProvider) : this.ui.footer;
+		this.customFooter = factory ? next : undefined;
+		this.ui.getWorkbenchView()?.replaceDockComponent(previous, next);
 		this.ui.tui.requestRender();
 	}
 
@@ -486,7 +484,7 @@ export class ExtensionUiHost {
 			setHeader: (factory) => this.setExtensionHeader(factory),
 			setTitle: (title) => this.ui.tui.terminal.setTitle(title),
 			custom: (factory, options) => this.showExtensionCustom(factory, options),
-			pasteToEditor: (text) => this.ui.getEditor().handleInput(`\x1b[200~${text}\x1b[201~`),
+			pasteToEditor: (text) => pasteIntoEditor(this.ui.getEditor(), text),
 			setEditorText: (text) => this.ui.getEditor().setText(text),
 			getEditorText: () => this.ui.getEditor().getExpandedText?.() ?? this.ui.getEditor().getText(),
 			editor: (title, prefill) => this.showExtensionEditor(title, prefill),

@@ -1,4 +1,4 @@
-import { type Component, Container, sliceByColumn, truncateToWidth } from "@caupulican/pi-tui";
+import { type Component, Container, isImageLine, sliceByColumn, truncateToWidth } from "@caupulican/pi-tui";
 import { stripAnsi } from "../../../utils/ansi.ts";
 
 /** OSC 133 prompt-zone marks emitted by the inline transcript components. */
@@ -89,7 +89,7 @@ export class ConversationWindow {
 		// alternate screen has no scrollback to navigate, so the viewport never emits them.
 		const lines = component.render(this.width).map((line) => {
 			const row = line.includes("\x1b]133;") ? line.replace(PROMPT_ZONE_MARK, "") : line;
-			return row.includes("\x1b_G") || row.includes("\x1b]1337;File=") ? "[Image — open transcript to view]" : row;
+			return isImageLine(row) ? "[Image — open transcript to view]" : row;
 		});
 		const bytes = lines.reduce((sum, line) => sum + line.length * 2, 0);
 		if (revision !== undefined && bytes <= this.byteLimit) {

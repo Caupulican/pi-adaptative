@@ -11,7 +11,7 @@ import {
 } from "../editing-actions.ts";
 import { type EditorChangeSummary, firstNonWhitespaceCharacter } from "../editor-component.ts";
 import { getKeybindings } from "../keybindings.ts";
-import { decodePrintableKey, matchesKey } from "../keys.ts";
+import { decodePrintableKey, isLegacyMultilineNewline, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
 import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
@@ -729,14 +729,7 @@ export class Editor implements Component, Focusable {
 		}
 
 		// New line
-		if (
-			kb.matches(data, "tui.input.newLine") ||
-			(data.charCodeAt(0) === 10 && data.length > 1) ||
-			data === "\x1b\r" ||
-			data === "\x1b[13;2~" ||
-			(data.length > 1 && data.includes("\x1b") && data.includes("\r")) ||
-			(data === "\n" && data.length === 1)
-		) {
+		if (kb.matches(data, "tui.input.newLine") || isLegacyMultilineNewline(data)) {
 			if (this.shouldSubmitOnBackslashEnter(data, kb)) {
 				this[DELETE_CHARACTER_BACKWARD]();
 				this.submitValue();
@@ -1142,7 +1135,14 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
+	/** Direct paste ingestion without wrapping into terminal escape sequences. */
+	pasteText(text: string): void {
+		this.handlePaste(text);
+	}
+
 	private handlePaste(pastedText: string): void {
+		// Both terminal and direct paste end the pending character-jump command.
+		this.jumpMode = null;
 		if (this.onPaste?.(pastedText) === true || pastedText.length === 0) {
 			return;
 		}

@@ -1,4 +1,5 @@
 import { getKeybindings } from "../keybindings.ts";
+import { getCenteredVisibleRange } from "../list-window.ts";
 import type { Component } from "../tui.ts";
 import { truncateToWidth, visibleWidth } from "../utils.ts";
 
@@ -82,12 +83,11 @@ export class SelectList implements Component {
 
 		const primaryColumnWidth = this.getPrimaryColumnWidth();
 
-		// Calculate visible range with scrolling
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
+		const { startIndex, endIndex } = getCenteredVisibleRange(
+			this.selectedIndex,
+			this.filteredItems.length,
+			this.maxVisible,
 		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
 
 		// Render visible items
 		for (let i = startIndex; i < endIndex; i++) {

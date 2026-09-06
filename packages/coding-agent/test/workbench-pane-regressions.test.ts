@@ -1,4 +1,5 @@
 import { Container, CURSOR_MARKER, Editor, Text, TUI } from "@caupulican/pi-tui";
+import xterm from "@xterm/headless";
 import { beforeAll, describe, expect, it } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
@@ -38,6 +39,23 @@ function setup(columns = 60, rows = 20) {
 
 describe("Workbench review regressions", () => {
 	beforeAll(() => initTheme("dark"));
+	it.each(["short", "0123456789"])("contains pane styles when rendering %s content", async (content) => {
+		const terminal = new xterm.Terminal({ cols: 40, rows: 3, allowProposedApi: true });
+		try {
+			const left = new WorkbenchPane().render("left", "", [`\x1b[1;7;31m${content}\x1b[0m`], 0, 0, 10, 2)[1]!;
+			const right = new WorkbenchPane().render("right", "", ["RIGHT"], 12, 0, 10, 2)[1]!;
+			await new Promise<void>((resolve) => terminal.write(`${left}  ${right}`, resolve));
+			const row = terminal.buffer.active.getLine(0)!;
+			expect(row.getCell(1)!.isInverse()).not.toBe(0);
+			const neighbor = row.getCell(13)!;
+			expect(neighbor.getChars()).toBe("R");
+			expect(neighbor.isInverse()).toBe(0);
+			expect(neighbor.isBold()).toBe(0);
+			expect(neighbor.isFgDefault()).toBe(true);
+		} finally {
+			terminal.dispose();
+		}
+	});
 	it("keeps all inspector evidence reachable in a combined narrow pane", () => {
 		const { view, controller } = setup();
 		view.setInspector([{ title: "Work plan", body: ["failed verifier", "active step"] }]);

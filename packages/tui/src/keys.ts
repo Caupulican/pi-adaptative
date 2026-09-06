@@ -1407,3 +1407,10 @@ function decodeModifyOtherKeysPrintable(data: string): string | undefined {
 export function decodePrintableKey(data: string): string | undefined {
 	return decodeKittyPrintable(data) ?? decodeModifyOtherKeysPrintable(data);
 }
+
+/** Editor newline sequences that cannot be a single KeyId (legacy terminals, batched LF). */
+export function isLegacyMultilineNewline(data: string): boolean {
+	if (data === "\n" || data === "\x1b\r" || data === "\x1b[13;2~") return true;
+	if (data.charCodeAt(0) === 10 && data.length > 1) return true;
+	return data.length > 1 && data.includes("\x1b") && data.includes("\r");
+}

@@ -452,6 +452,7 @@ export class InteractiveMode {
 				widgetContainerAbove: this.widgetContainerAbove,
 				widgetContainerBelow: this.widgetContainerBelow,
 				getEditor: () => this.editor,
+				getWorkbenchView: () => this.workbench?.view,
 				setEditor: (editor) => {
 					const previousEditor = this.editor;
 					this.editor = editor;

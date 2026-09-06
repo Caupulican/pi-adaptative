@@ -1,5 +1,6 @@
 import { fuzzyFilter } from "../fuzzy.ts";
 import { getKeybindings } from "../keybindings.ts";
+import { getCenteredVisibleRange } from "../list-window.ts";
 import type { Component } from "../tui.ts";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 import { Input } from "./input.ts";
@@ -110,12 +111,11 @@ export class SettingsList implements Component {
 			return lines;
 		}
 
-		// Calculate visible range with scrolling
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), displayItems.length - this.maxVisible),
+		const { startIndex, endIndex } = getCenteredVisibleRange(
+			this.selectedIndex,
+			displayItems.length,
+			this.maxVisible,
 		);
-		const endIndex = Math.min(startIndex + this.maxVisible, displayItems.length);
 
 		// Calculate max label width for alignment
 		const maxLabelWidth = Math.min(30, Math.max(...this.items.map((item) => visibleWidth(item.label))));

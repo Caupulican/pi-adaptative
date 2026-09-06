@@ -11,6 +11,7 @@ import type { Terminal } from "./terminal.ts";
 import { deleteKittyImage, getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
 import {
 	extractSegments,
+	fitToWidth,
 	getAmbiguousWidthMode,
 	normalizeTerminalOutput,
 	setAmbiguousWidthMode,
@@ -1340,10 +1341,8 @@ export class TUI extends Container {
 	 * line each frame costs O(total scrollback) and makes rendering sluggish.
 	 */
 	private fitLineToWidth(line: string, width: number): string {
-		if (!isImageLine(line) && visibleWidth(line) > width) {
-			return sliceByColumn(line, 0, width, true);
-		}
-		return line;
+		if (isImageLine(line)) return line;
+		return fitToWidth(line, width);
 	}
 
 	private doRender(): void {

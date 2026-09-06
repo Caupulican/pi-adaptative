@@ -136,6 +136,17 @@ export class WorkbenchComponent extends Container {
 	get isCollapsed(): boolean {
 		return this.collapsed;
 	}
+
+	replaceDockComponent(current: Component, next: Component): void {
+		if (current === next) return;
+		const dockIndex = this.options.dock.indexOf(current);
+		if (dockIndex === -1) return;
+		this.options.dock[dockIndex] = next;
+		const childIndex = this.children.indexOf(current);
+		if (childIndex !== -1) this.children[childIndex] = next;
+		else this.addChild(next);
+		this.frameRevision++;
+	}
 	setInspector(sections: WorkbenchSection[]): void {
 		this.sections = sections;
 		if (!sections.length) this.inspectorPane.reset();
@@ -180,6 +191,34 @@ export class WorkbenchComponent extends Container {
 	}
 	headerAction(column: number): "latest" | "copyAll" | undefined {
 		return this.headerButtons.find((button) => column >= button.start && column < button.end)?.action;
+	}
+
+	hitTest(column: number, row: number): "conversation" | "conversationHeader" | "divider" | "upper" | "other" {
+		if (
+			row >= this.conversationTop &&
+			row < this.conversationTop + this.conversationHeight &&
+			column >= this.conversationLeft &&
+			column < this.conversationLeft + this.conversationWidth
+		) {
+			return "conversation";
+		}
+		if (row === this.conversationTop - 1) {
+			return "conversationHeader";
+		}
+		if (row === this.dividerRow) {
+			return "divider";
+		}
+		if (row >= this.upperTop && row < this.upperTop + this.upperHeight) {
+			return "upper";
+		}
+		return "other";
+	}
+
+	toConversationPoint(column: number, row: number): { row: number; column: number } {
+		return {
+			row: Math.max(0, Math.min(this.conversationHeight - 1, row - this.conversationTop)),
+			column: Math.max(0, Math.min(this.conversationWidth, column - this.conversationLeft)),
+		};
 	}
 
 	override invalidate(): void {

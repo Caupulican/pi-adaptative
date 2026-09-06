@@ -1,6 +1,28 @@
-const BRACKETED_PASTE_START = "\x1b[200~";
-const BRACKETED_PASTE_END = "\x1b[201~";
+export const BRACKETED_PASTE_START = "\x1b[200~";
+export const BRACKETED_PASTE_END = "\x1b[201~";
 const PASTE_CHUNK_GROUP_SIZE = 256;
+
+export function wrapBracketedPaste(content: string): string {
+	return `${BRACKETED_PASTE_START}${content}${BRACKETED_PASTE_END}`;
+}
+
+export type PasteableTarget = {
+	handleInput(data: string): void;
+	pasteText?(text: string): void;
+};
+
+/**
+ * Route paste content directly into an editor target. If the target provides
+ * a dedicated pasteText implementation, it is invoked directly; otherwise the
+ * text is wrapped in bracketed paste escape sequences for backward compatibility.
+ */
+export function pasteIntoEditor(editor: PasteableTarget, text: string): void {
+	if (typeof editor.pasteText === "function") {
+		editor.pasteText(text);
+	} else {
+		editor.handleInput(wrapBracketedPaste(text));
+	}
+}
 
 export type BracketedPasteResult =
 	| { kind: "unhandled"; data: string }

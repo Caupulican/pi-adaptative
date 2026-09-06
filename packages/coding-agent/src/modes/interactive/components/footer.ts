@@ -4,6 +4,7 @@ import type { AgentSession } from "../../../core/agent-session.ts";
 import { formatFooterCostParts } from "../../../core/cost/cost-summary.ts";
 import { getFastModeStatus } from "../../../core/fast-mode.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
+import { stripAnsi, stripAnsiExceptSgr } from "../../../utils/ansi.ts";
 import { theme } from "../theme/theme.ts";
 
 const FAST_MODE_BADGE = "[fast]";
@@ -18,10 +19,6 @@ function sanitizeStatusText(text: string): string {
 		.replace(/[\r\n\t]/g, " ")
 		.replace(/ +/g, " ")
 		.trim();
-}
-
-function stripAnsi(text: string): string {
-	return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
 function normalizeLearningPhase(phase: string): string {
@@ -70,7 +67,7 @@ function formatExtensionStatuses(statuses: ReadonlyMap<string, string>): string[
 			continue;
 		}
 
-		regularStatuses.push(text);
+		regularStatuses.push(stripAnsiExceptSgr(text));
 	}
 
 	if (!sawLearningStatus) return regularStatuses;

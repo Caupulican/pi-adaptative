@@ -153,7 +153,7 @@ class SingleLineAnswerEditor implements AskQuestionAnswerEditor {
 	}
 
 	insertTextAtCursor(text: string): void {
-		this.input.handleInput(`\x1b[200~${text}\x1b[201~`);
+		this.input.pasteText(text);
 	}
 
 	handleInput(data: string): void {

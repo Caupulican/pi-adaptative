@@ -354,6 +354,11 @@ export class Input implements Component, Focusable {
 		this.cursor = findWordForward(this.value, this.cursor);
 	}
 
+	/** Direct paste ingestion without wrapping into terminal escape sequences. */
+	pasteText(text: string): void {
+		this.handlePaste(text);
+	}
+
 	private handlePaste(pastedText: string): void {
 		this.lastAction = null;
 		this.pushUndo();

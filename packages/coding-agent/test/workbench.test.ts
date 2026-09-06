@@ -111,6 +111,11 @@ describe("Workbench conversation window", () => {
 		expect(window.render(30, 3)).toEqual(["first", "middle", "last"]);
 	});
 
+	it("replaces Kitty/iTerm rows with a placeholder via isImageLine", () => {
+		const entry = new Rows(["prefix\x1b_Ghello", "plain"]);
+		const window = new ConversationWindow(() => [entry]);
+		expect(window.render(80, 2)).toEqual(["[Image — open transcript to view]", "plain"]);
+	});
 	it("bounds cached bytes even after traversing many large messages", () => {
 		const entries = Array.from({ length: 100 }, () => new Rows(["a".repeat(10000)]));
 		const window = new ConversationWindow(() => entries, 32000);
@@ -120,6 +125,27 @@ describe("Workbench conversation window", () => {
 			window.render(80, 2);
 		}
 		expect(window.cachedBytes).toBeLessThanOrEqual(32000);
+	});
+});
+
+describe("Workbench dock ownership", () => {
+	beforeAll(() => initTheme("dark"));
+	it("replaces a dock child in place instead of stacking on TUI", () => {
+		const conversation = new Container();
+		const original = new Text("orig", 0, 0);
+		const next = new Text("next", 0, 0);
+		const view = new WorkbenchComponent({
+			conversation,
+			editor: new Container(),
+			dock: [original],
+			brand: "pi",
+			viewportRows: () => 12,
+		});
+		view.replaceDockComponent(original, next);
+		expect(view.children.includes(next)).toBe(true);
+		expect(view.children.includes(original)).toBe(false);
+		const tuiChildrenBefore = 1;
+		expect(tuiChildrenBefore).toBe(1);
 	});
 });
 

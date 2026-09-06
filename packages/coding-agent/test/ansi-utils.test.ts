@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stripAnsi } from "../src/utils/ansi.ts";
+import { stripAnsi, stripAnsiExceptSgr } from "../src/utils/ansi.ts";
 import { ansi256ToHex } from "../src/utils/ansi-colors.ts";
 
 function referenceAnsiRegex(): RegExp {
@@ -108,6 +108,26 @@ describe("stripAnsi", () => {
 		const input = "a\x1b[31mred\x1b[0m\x1b]8;;https://example.com\x07link\x1b]8;;\x07z";
 		expect(stripAnsi(input)).toBe("aredlinkz");
 	});
+});
+
+describe("stripAnsiExceptSgr", () => {
+	it.each(["\x1b[1;31m", "\x1b[38;2;12;34;56m", "\x1b[38:2::12:34:56m", "\x9b31m", "\x1b[m"])(
+		"preserves SGR styling %j without changing the plain-text policy",
+		(style) => {
+			const styled = `${style}ready\x1b[0m`;
+			expect(stripAnsiExceptSgr(styled)).toBe(styled);
+			expect(stripAnsi(styled)).toBe("ready");
+		},
+	);
+
+	it.each(["\x07", "\x1b\\", "\x9c"])(
+		"removes OSC payloads terminated by %j, including embedded SGR",
+		(terminator) => {
+			const styled = "\x1b[32mready\x1b[0m";
+			const input = `\x1b]0;\x1b[31mhidden${terminator}${styled}\x1b[2J\x1b[1A\x1bm`;
+			expect(stripAnsiExceptSgr(input)).toBe(styled);
+		},
+	);
 });
 
 describe("ansi256ToHex", () => {

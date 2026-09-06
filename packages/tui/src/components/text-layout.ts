@@ -1,4 +1,4 @@
-import { applyBackgroundToLine, visibleWidth } from "../utils.ts";
+import { applyBackgroundToLine, fitToWidth } from "../utils.ts";
 
 export interface PreparedTextBlock {
 	normalizedText: string;
@@ -131,8 +131,7 @@ export function frameTextLines(lines: readonly string[], options: TextFrameOptio
 			continue;
 		}
 
-		const paddingNeeded = Math.max(0, options.width - visibleWidth(lineWithMargins));
-		result.push(lineWithMargins + " ".repeat(paddingNeeded));
+		result.push(fitToWidth(lineWithMargins, options.width, true));
 	}
 
 	for (let index = 0; index < options.paddingY; index++) {

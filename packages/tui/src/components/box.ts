@@ -1,5 +1,5 @@
 import type { Component } from "../tui.ts";
-import { applyBackgroundToLine, visibleWidth } from "../utils.ts";
+import { applyBackgroundToLine, fitToWidth } from "../utils.ts";
 
 type RenderCache = {
 	childLines: string[];
@@ -131,13 +131,7 @@ export class Box implements Component {
 	}
 
 	private applyBg(line: string, width: number): string {
-		const visLen = visibleWidth(line);
-		const padNeeded = Math.max(0, width - visLen);
-		const padded = line + " ".repeat(padNeeded);
-
-		if (this.bgFn) {
-			return applyBackgroundToLine(padded, width, this.bgFn);
-		}
-		return padded;
+		if (this.bgFn) return applyBackgroundToLine(line, width, this.bgFn);
+		return fitToWidth(line, width, true);
 	}
 }

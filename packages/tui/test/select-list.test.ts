@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { SelectList } from "../src/components/select-list.ts";
+import { getCenteredVisibleRange } from "../src/list-window.ts";
 import { visibleWidth } from "../src/utils.ts";
 
 const testTheme = {
@@ -112,5 +113,15 @@ describe("SelectList", () => {
 
 		assert.ok(rendered[0].includes("…"));
 		assert.equal(visibleIndexOf(rendered[0], "first"), visibleIndexOf(rendered[1], "second"));
+	});
+
+	it("windows through the shared centered range owner", () => {
+		const items = Array.from({ length: 20 }, (_, i) => ({ value: String(i), label: `item-${i}` }));
+		const list = new SelectList(items, 8, testTheme);
+		list.setSelectedIndex(10);
+		const rendered = list.render(40);
+		const { startIndex, endIndex } = getCenteredVisibleRange(10, 20, 8);
+		assert.ok(rendered[0].includes(`item-${startIndex}`));
+		assert.ok(rendered[endIndex - startIndex - 1].includes(`item-${endIndex - 1}`));
 	});
 });

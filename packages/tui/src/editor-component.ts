@@ -32,6 +32,9 @@ export interface EditorComponent extends Component {
 	/** Handle raw terminal input (key presses, paste sequences, etc.) */
 	handleInput(data: string): void;
 
+	/** Direct paste ingestion without wrapping into terminal escape sequences. */
+	pasteText?(text: string): void;
+
 	// =========================================================================
 	// Callbacks (required)
 	// =========================================================================

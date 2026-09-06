@@ -199,6 +199,12 @@ export class KeybindingsManager {
 		return false;
 	}
 
+	firstMatch<K extends Keybinding>(data: string, keybindings: readonly K[]): K | undefined {
+		for (const keybinding of keybindings) {
+			if (this.matches(data, keybinding)) return keybinding;
+		}
+	}
+
 	getKeys(keybinding: Keybinding): KeyId[] {
 		return [...(this.keysById.get(keybinding) ?? [])];
 	}

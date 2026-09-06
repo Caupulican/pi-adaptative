@@ -10,7 +10,7 @@
  */
 
 import type { ImageContent } from "@caupulican/pi-ai";
-import type { EditorComponent, TUI } from "@caupulican/pi-tui";
+import { type EditorComponent, pasteIntoEditor, type TUI } from "@caupulican/pi-tui";
 import type { SessionImageStore } from "../../core/session-image-store.ts";
 import { readClipboardText } from "../../utils/clipboard.ts";
 import { readClipboardImage } from "../../utils/clipboard-image.ts";
@@ -36,7 +36,7 @@ export interface ClipboardQueueHost extends ClipboardQueueState {
 }
 
 export interface ClipboardInputHost extends ClipboardQueueHost {
-	readonly editor: Pick<EditorComponent, "handleInput" | "insertTextAtCursor">;
+	readonly editor: Pick<EditorComponent, "handleInput" | "insertTextAtCursor" | "pasteText">;
 	readonly ui: Pick<TUI, "requestRender">;
 	readonly autoResizeImages: boolean;
 	readonly blockImages: boolean;
@@ -85,7 +85,7 @@ export async function handleClipboardImagePaste(host: ClipboardInputHost): Promi
 		if (!image) {
 			const text = await readClipboardText();
 			if (text) {
-				host.editor.handleInput(`\x1b[200~${text}\x1b[201~`);
+				pasteIntoEditor(host.editor, text);
 				host.ui.requestRender();
 			}
 			return;

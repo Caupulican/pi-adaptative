@@ -44,6 +44,15 @@ function ansiRegex({ onlyFirst = false }: { onlyFirst?: boolean } = {}): RegExp 
 const regex = ansiRegex();
 
 export function stripAnsi(value: string): string {
+	return stripAnsiSequences(value, false);
+}
+
+/** Remove terminal commands while retaining SGR colors and text attributes for display. */
+export function stripAnsiExceptSgr(value: string): string {
+	return stripAnsiSequences(value, true);
+}
+
+function stripAnsiSequences(value: string, preserveSgr: boolean): string {
 	if (typeof value !== "string") {
 		throw new TypeError(`Expected a \`string\`, got \`${typeof value}\``);
 	}
@@ -56,5 +65,7 @@ export function stripAnsi(value: string): string {
 	// Even though the regex is global, we don't need to reset the `.lastIndex`
 	// because unlike `.exec()` and `.test()`, `.replace()` does it automatically
 	// and doing it manually has a performance penalty.
-	return value.replace(regex, "");
+	return preserveSgr
+		? value.replace(regex, (sequence) => (/^(?:\x1b\[|\x9b)[\d;:]*m$/.test(sequence) ? sequence : ""))
+		: value.replace(regex, "");
 }

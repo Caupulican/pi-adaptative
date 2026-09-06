@@ -1010,6 +1010,20 @@ export function truncateToWidth(
 	return finalizeTruncatedResult(scanned.text, scanned.width, ellipsis, ellipsisWidth, maxWidth, pad);
 }
 
+/** Clip or pad one terminal row to `width` cells, closing clipped styles without an ellipsis. */
+export function fitToWidth(text: string, width: number, pad: boolean = false): string {
+	if (width <= 0) return "";
+	const visible = visibleWidth(text);
+	if (visible === width) return text;
+	if (visible < width) return pad ? text + " ".repeat(width - visible) : text;
+	let clipped = sliceByColumn(text, 0, width, true);
+	// The slice may omit closing SGR codes; contain styles before padding or the next pane.
+	if (clipped.includes("\x1b")) clipped += "\x1b[0m";
+	if (!pad) return clipped;
+	const clippedWidth = visibleWidth(clipped);
+	return clippedWidth >= width ? clipped : clipped + " ".repeat(width - clippedWidth);
+}
+
 /**
  * Extract a range of visible columns from a line. Handles ANSI codes and wide chars.
  * @param strict - If true, exclude wide chars at boundary that would extend past the range

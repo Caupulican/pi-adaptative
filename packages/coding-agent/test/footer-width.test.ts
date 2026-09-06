@@ -520,4 +520,27 @@ describe("footer compact row (Workbench)", () => {
 		footer.setCompact(false);
 		expect(footer.render(220)).toHaveLength(3);
 	});
+
+	it("strips OSC sequences from extension status using shared stripAnsi", () => {
+		const session = createSession({ sessionName: "reload" });
+		const footer = new FooterComponent(session, createFooterData(1, new Map([["ext", "\x1b]133;A\x07hello"]])));
+		footer.setCompact(true);
+		const line = footer.render(220)[0] ?? "";
+		expect(line).not.toContain("\x1b]133");
+		expect(stripAnsi(line)).toContain("hello");
+	});
+
+	it.each([false, true])("preserves extension styling while removing terminal commands (compact=%s)", (compact) => {
+		const styled = theme.fg("success", "Ready") + theme.bold(" now");
+		const session = createSession({ sessionName: "reload" });
+		const status = `\x1b]133;A\x07${styled}\x1b[2J\x1b]0;title\x1b\\`;
+		const footer = new FooterComponent(session, createFooterData(1, new Map([["ext", status]])));
+		footer.setCompact(compact);
+		const line = footer.render(220).at(-1) ?? "";
+		expect(line).toContain(styled);
+		expect(line).not.toContain("\x1b]133");
+		expect(line).not.toContain("\x1b]0;");
+		expect(line).not.toContain("\x1b[2J");
+		expect(visibleWidth(line)).toBeLessThanOrEqual(220);
+	});
 });

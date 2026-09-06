@@ -1,4 +1,4 @@
-import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
+import { fitToWidth, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import { theme } from "../theme/theme.ts";
 
 const FULL_RESET = "\x1b[0m";
@@ -9,11 +9,7 @@ const BG_RESET = "\x1b[49m";
  * is the per-frame hot path: the width lookup is cached per string, the scan is not.
  */
 export function fitRow(content: string, width: number): string {
-	if (width <= 0) return "";
-	const visible = visibleWidth(content);
-	if (visible === width) return content;
-	if (visible < width) return content + " ".repeat(width - visible);
-	return truncateToWidth(content, width, "", true);
+	return fitToWidth(content, width, true);
 }
 
 /** Paint the pane surface under one row. Inner resets re-open the surface; rows never exceed `width`. */

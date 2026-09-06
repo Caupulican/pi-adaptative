@@ -1,7 +1,9 @@
 import {
+	type CenteredVisibleRange,
 	Container,
 	type Focusable,
 	fuzzyFilter,
+	getCenteredVisibleRange,
 	getKeybindings,
 	Input,
 	type SelectItem,
@@ -19,32 +21,10 @@ export const COMPACT_SELECTOR_LIST_LAYOUT: SelectListLayoutOptions = {
 	maxPrimaryColumnWidth: 32,
 };
 
-export interface SelectorVisibleRange {
-	startIndex: number;
-	endIndex: number;
-}
+export type SelectorVisibleRange = CenteredVisibleRange;
+export { getCenteredVisibleRange };
 
 type SelectorKeybindings = ReturnType<typeof getKeybindings>;
-
-export function getCenteredVisibleRange(
-	selectedIndex: number,
-	itemCount: number,
-	maxVisible: number,
-): SelectorVisibleRange {
-	const boundedCount = Math.max(0, itemCount);
-	const boundedVisible = Math.max(0, maxVisible);
-	if (boundedCount === 0 || boundedVisible === 0) return { startIndex: 0, endIndex: 0 };
-
-	const boundedIndex = Math.max(0, Math.min(selectedIndex, boundedCount - 1));
-	const startIndex = Math.max(
-		0,
-		Math.min(boundedIndex - Math.floor(boundedVisible / 2), boundedCount - boundedVisible),
-	);
-	return {
-		startIndex,
-		endIndex: Math.min(startIndex + boundedVisible, boundedCount),
-	};
-}
 
 export function advanceSelectorIndex(
 	selectedIndex: number,

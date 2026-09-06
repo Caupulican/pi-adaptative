@@ -8,6 +8,7 @@ export {
 	CombinedAutocompleteProvider,
 	type SlashCommand,
 } from "./autocomplete.ts";
+export { pasteIntoEditor, wrapBracketedPaste } from "./bracketed-paste.ts";
 // Components
 export { Box } from "./components/box.ts";
 export { CancellableLoader } from "./components/cancellable-loader.ts";
@@ -55,6 +56,7 @@ export {
 	isKeyRelease,
 	isKeyRepeat,
 	isKittyProtocolActive,
+	isLegacyMultilineNewline,
 	Key,
 	type KeyEventType,
 	type KeyId,
@@ -62,6 +64,15 @@ export {
 	parseKey,
 	setKittyProtocolActive,
 } from "./keys.ts";
+export { type CenteredVisibleRange, getCenteredVisibleRange } from "./list-window.ts";
+// Mouse input handling
+export {
+	isMouseSequence,
+	type MouseAction,
+	type MouseButton,
+	parseMouseSequence,
+	type TerminalMouseEvent,
+} from "./mouse.ts";
 // Input buffering for batch splitting
 export { StdinBuffer, type StdinBufferEventMap, type StdinBufferOptions } from "./stdin-buffer.ts";
 // Terminal interface and implementations
@@ -89,6 +100,7 @@ export {
 	type ImageProtocol,
 	type ImageRenderOptions,
 	imageFallback,
+	isImageLine,
 	renderImage,
 	resetCapabilitiesCache,
 	setCapabilities,
@@ -112,6 +124,7 @@ export {
 } from "./tui.ts";
 // Utilities
 export {
+	fitToWidth,
 	getAmbiguousWidthMode,
 	setAmbiguousWidthMode,
 	sliceByColumn,
