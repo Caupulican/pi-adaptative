@@ -15,6 +15,8 @@ const EXEC_KILL_GRACE_MS = 5_000;
  * Options for executing shell commands.
  */
 export interface ExecOptions {
+	/** Bounded caller-owned input, sent without shell interpolation. */
+	stdin?: string;
 	/** AbortSignal to cancel the command */
 	signal?: AbortSignal;
 	/** Timeout in milliseconds */
@@ -113,7 +115,7 @@ export async function execCommand(
 			cwd,
 			env: options?.env,
 			shell: false,
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: [options?.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
 			detached: process.platform !== "win32",
 		});
 
@@ -121,6 +123,10 @@ export async function execCommand(
 		proc.once("error", (err) => {
 			spawnError = err.message;
 		});
+		proc.stdin?.on("error", (err) => {
+			spawnError ??= err.message;
+		});
+		proc.stdin?.end(options?.stdin);
 
 		const maxBuffer =
 			options?.maxBuffer !== undefined && options.maxBuffer > 0 ? options.maxBuffer : DEFAULT_EXEC_MAX_BUFFER;

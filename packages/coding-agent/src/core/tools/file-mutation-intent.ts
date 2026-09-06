@@ -483,15 +483,15 @@ export class FileMutationIntentController {
 		lease.identity = current.identity;
 	}
 
-	rememberContent(sourcePath: string, content: string): FileContentReference {
-		const digest = createHash("sha256").update(content, "utf8").digest("hex");
+	rememberContent(sourcePath: string, content: string | Buffer): FileContentReference {
+		const digest = createHash("sha256").update(content).digest("hex");
 		return this.rememberContentDigest(sourcePath, digest, Buffer.byteLength(content, "utf8"));
 	}
 
 	/** True when this session's own earlier mutation produced exactly this content at this path. */
-	hasProducedContent(sourcePath: string, content: string): boolean {
+	hasProducedContent(sourcePath: string, content: string | Buffer): boolean {
 		this.pruneExpired();
-		const digest = createHash("sha256").update(content, "utf8").digest("hex");
+		const digest = createHash("sha256").update(content).digest("hex");
 		for (const record of this.contentReferences.values()) {
 			if (record.sourcePath === sourcePath && record.digest === digest) return true;
 		}

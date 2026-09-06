@@ -93,8 +93,9 @@ export function memoryFileBackend(flavor: "posix" | "win32") {
 		write: { createFile: create, mkdir: async (path: string) => mkdir(path) },
 		edit: {
 			readFile: async (path: string) => Buffer.from(read(path)),
-			writeFile: async (path: string, content: string) => {
+			writeFile: async (path: string, content: string | Buffer) => {
 				read(path);
+				if (Buffer.isBuffer(content)) throw new Error("This text fixture does not model encoded files");
 				put(path, content);
 			},
 		},

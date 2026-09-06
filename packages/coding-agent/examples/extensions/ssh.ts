@@ -70,7 +70,12 @@ function createRemoteReadOps(remote: string, remoteCwd: string, localCwd: string
 	};
 }
 
-async function writeRemoteContent(remote: string, path: string, content: string, exclusive: boolean): Promise<void> {
+async function writeRemoteContent(
+	remote: string,
+	path: string,
+	content: string | Buffer,
+	exclusive: boolean,
+): Promise<void> {
 	const noClobber = exclusive ? "set -o noclobber; " : "";
 	await sshExec(remote, `${noClobber}cat > ${shellQuote(path)}`, content);
 }

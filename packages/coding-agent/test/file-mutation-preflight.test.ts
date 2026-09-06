@@ -2,13 +2,22 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateToolArguments } from "@caupulican/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEditTool } from "../src/core/tools/edit.ts";
 import {
 	FileMutationIntentController,
 	localFileMutationIntentOperations,
 } from "../src/core/tools/file-mutation-intent.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
+
+vi.mock("../src/core/python-runtime.ts", () => ({
+	ensurePythonRuntime: async () => ({
+		status: "ready",
+		pythonPath: process.platform === "win32" ? "python" : "python3",
+		uvPath: "synthetic-unused",
+		pythonInstalled: false,
+	}),
+}));
 
 interface CompletedMutationDetails {
 	contentRef?: string;
@@ -709,15 +718,15 @@ describe("file mutation preflight", () => {
 		expect(accessCalls).toBe(3);
 	});
 
-	it("keeps invalid UTF-8 bytes unchanged on repeated semantic edit attempts", async () => {
+	it("keeps malformed encoded bytes unchanged on repeated semantic edit attempts", async () => {
 		const path = join(testDir, "corrupt.dat");
-		const originalBytes = Buffer.from([0xff, 0xfe, 0x80, 0xbf]);
+		const originalBytes = Buffer.from([0xff, 0xfe, 0x80]);
 		writeFileSync(path, originalBytes);
 		const tool = createEditTool(testDir);
 		const input = { path, edits: [{ oldText: "alpha", newText: "ALPHA" }] };
 
 		await expect(tool.execute("edit-corrupt", input)).rejects.toThrow(
-			/PI_FILE_ENCODING_CORRUPTION.*exact text replacement.*unsafe/is,
+			/PI_FILE_ENCODING_CORRUPTION.*could not verify preservation/is,
 		);
 		await expect(tool.execute("edit-corrupt-retry", input)).rejects.toThrow(/PI_FILE_ENCODING_CORRUPTION/is);
 		expect(readFileSync(path)).toEqual(originalBytes);

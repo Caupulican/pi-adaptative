@@ -3,6 +3,7 @@
 ### Breaking Changes
 
 - Custom `FileMutationIntentOperations` must supply a shared `mutationQueue` backend identity resolver. Mutation serialization no longer probes the operator filesystem for custom backends.
+- Custom `EditOperations.writeFile` must accept `Buffer` as well as UTF-8 strings, preserving supplied bytes without transcoding.
 
 ### Changed
 
@@ -19,6 +20,7 @@
 - Bound shell verification path semantics to the selected backend instead of guessing from the working-directory string.
 - Retained request-bound execution receipts through background notification and restart; unavailable or mismatched completions remain unknown rather than certifying success.
 - Replaced mixed-scope action/failure totals with cycle-local call counts, receipt-based outcome categories, and explicitly labeled retained error results. Background completion updates its original call; replay does not inflate counts, and narrow panes retain readable scoped labels.
+- Recovered BOM-marked and explicitly encoded text edits through a packaged, isolated Python codec. The shared planner preserves individual line endings; strict source round-trips, byte-splice validation, and backend readback precede verified success. Retarget payloads and exact-copy references retain encoding and bytes.
 
 ## [0.99.1] - 2026-09-06
 

@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createEditTool } from "../src/core/tools/edit.ts";
 import {
 	applyEditMatchPlanToSource,
@@ -9,6 +9,15 @@ import {
 	normalizeToLF,
 	planEditsToNormalizedContent,
 } from "../src/core/tools/edit-diff.ts";
+
+vi.mock("../src/core/python-runtime.ts", () => ({
+	ensurePythonRuntime: async () => ({
+		status: "ready",
+		pythonPath: process.platform === "win32" ? "python" : "python3",
+		uvPath: "synthetic-unused",
+		pythonInstalled: false,
+	}),
+}));
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -60,7 +69,7 @@ describe("edit byte preservation", () => {
 
 	it.each([
 		{ label: "BOM-less UTF-16LE", bytes: Buffer.from("target", "utf16le") },
-		{ label: "UTF-16 BOM", bytes: Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("target", "utf16le")]) },
+		{ label: "malformed UTF-16 BOM body", bytes: Buffer.from([0xff, 0xfe, 0x74]) },
 		{ label: "legacy or malformed UTF-8", bytes: Buffer.from([0x74, 0x61, 0x72, 0x67, 0x65, 0x74, 0xe9]) },
 	])("rejects unsupported bytes without rewriting them: $label", async ({ bytes }) => {
 		const { tool, path, cwd } = await fixture(bytes);

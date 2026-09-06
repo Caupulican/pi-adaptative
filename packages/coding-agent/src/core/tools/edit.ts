@@ -5,6 +5,7 @@ import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { decodeEditDocument } from "./edit-byte-codec.ts";
 import {
 	applyEditMatchPlanToSource,
 	computeEditsPlannedDiff,
@@ -17,9 +18,7 @@ import {
 	generateUnifiedPatch,
 	normalizeToLF,
 	planEditsToNormalizedContent,
-	splitBom,
 } from "./edit-diff.ts";
-import { decodeUtf8ForEdit } from "./file-encoding-policy.ts";
 import {
 	EDIT_RETARGET_RECOVERY_TARGET_KIND,
 	FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
@@ -69,10 +68,19 @@ const replaceEditSchema = Type.Object(
 );
 
 const editPathSchema = Type.String({ minLength: 1 });
+const editEncodingSchema = Type.Optional(
+	Type.String({
+		minLength: 1,
+		maxLength: 80,
+		description:
+			"Known source codec for legacy/BOM-less text, e.g. cp1252 or utf-16-le. Never guess. BOM-marked files recover automatically through Python; source encoding is preserved.",
+	}),
+);
 const editSchema = Type.Union([
 	Type.Object(
 		{
 			path: editPathSchema,
+			encoding: editEncodingSchema,
 			edits: Type.Array(replaceEditSchema, {
 				minItems: 1,
 			}),
@@ -82,6 +90,7 @@ const editSchema = Type.Union([
 	Type.Object(
 		{
 			path: editPathSchema,
+			encoding: editEncodingSchema,
 			payloadRef: Type.String({ minLength: 1 }),
 		},
 		{ additionalProperties: false },
@@ -99,6 +108,7 @@ type LegacyEditToolInput = {
 
 export interface EditToolDetails {
 	phase: "edited";
+	encodingRecovery?: { codec: "python"; encoding: string; verified: true };
 	contentRef?: string;
 	/** Display-oriented diff of the changes made */
 	diff?: string;
@@ -118,7 +128,7 @@ export interface EditOperations {
 	/** Read file contents as a Buffer */
 	readFile: (absolutePath: string) => Promise<Buffer>;
 	/** Write content to a file */
-	writeFile: (absolutePath: string, content: string) => Promise<void>;
+	writeFile: (absolutePath: string, content: string | Buffer) => Promise<void>;
 }
 
 const defaultEditOperations: EditOperations = {
@@ -184,9 +194,12 @@ function validateEdits(edits: unknown): Edit[] {
 
 function validateEditInput(
 	input: EditToolInput,
-): { path: string; edits: Edit[]; payloadRef?: undefined } | { path: string; edits?: undefined; payloadRef: string } {
-	if ("payloadRef" in input) return { path: input.path, payloadRef: input.payloadRef };
-	return { path: input.path, edits: validateEdits(input.edits) };
+): (
+	| { path: string; edits: Edit[]; payloadRef?: undefined }
+	| { path: string; edits?: undefined; payloadRef: string }
+) & { encoding?: string } {
+	if ("payloadRef" in input) return { path: input.path, payloadRef: input.payloadRef, encoding: input.encoding };
+	return { path: input.path, edits: validateEdits(input.edits), encoding: input.encoding };
 }
 
 type RenderableEditArgs = {
@@ -332,9 +345,7 @@ function formatEditResult(
 
 async function editPathFailureWithRetainedPayload(
 	error: FileMutationPreflightError,
-	validated:
-		| { path: string; edits: Edit[]; payloadRef?: undefined }
-		| { path: string; edits?: undefined; payloadRef: string },
+	validated: ReturnType<typeof validateEditInput>,
 	intentController: FileMutationIntentController,
 	signal?: AbortSignal,
 ): Promise<Error> {
@@ -347,7 +358,10 @@ async function editPathFailureWithRetainedPayload(
 	}
 
 	try {
-		const retained = await intentController.retainMutationPayload("edit", JSON.stringify(validated.edits));
+		const retained = await intentController.retainMutationPayload(
+			"edit",
+			JSON.stringify({ edits: validated.edits, encoding: validated.encoding }),
+		);
 		if (retained) {
 			return new Error(
 				`PI_FILE_MUTATION_RETARGET ${failureIdentity}: payloadRef ${retained.payloadRef}. Choose only a corrected path naming an existing file; the exact valid edit payload is retained for full revalidation.`,
@@ -464,7 +478,7 @@ export function createEditToolDefinition(
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit existing UTF-8 text in one call. Send path and all edits; after a path-only failure, reuse the returned payloadRef with only the corrected path. The harness preflights, revalidates, and stale-checks every exact replacement.",
+			"Edit existing text in one call, preserving source bytes and line endings. BOM-marked encodings recover through a managed Python codec; provide encoding for known legacy/BOM-less text. Send path and all edits; after a path-only failure, reuse payloadRef with the corrected path. Harness owns preflight and stale checks.",
 		promptSnippet: "Preflight existing files; apply exact, stale-safe edits",
 		promptGuidelines: [
 			"Call once per file with all its replacements; edits to different files may be emitted together in one message. Harness owns preparation/stale checks.",
@@ -518,6 +532,13 @@ export function createEditToolDefinition(
 				...(failureRecoveryAuthority
 					? [
 							{
+								kind: "correct" as const,
+								authority: failureRecoveryAuthority.contractAuthority,
+								targetKind: FILE_ENCODING_RECOVERY_TARGET_KIND,
+								instruction:
+									"Establish the source encoding, then call edit with encoding and the intended replacements. Its managed Python codec preserves BOM, individual newlines and untouched bytes; never guess the codec.",
+							},
+							{
 								kind: "repair" as const,
 								authority: failureRecoveryAuthority.contractAuthority,
 								targetKind: WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
@@ -556,14 +577,24 @@ export function createEditToolDefinition(
 
 				throwIfAborted();
 				let payloadRef: string | undefined;
+				let encoding = validated.encoding;
 				let edits: Edit[];
 				if (validated.edits !== undefined) {
 					edits = validated.edits;
 				} else {
 					payloadRef = validated.payloadRef;
-					edits = validateEdits(
-						JSON.parse(await intentController.readMutationPayload(payloadRef, "edit", signal)),
+					const retained: unknown = JSON.parse(
+						await intentController.readMutationPayload(payloadRef, "edit", signal),
 					);
+					if (!retained || typeof retained !== "object" || !("edits" in retained))
+						throw new Error("Invalid retained edit payload");
+					edits = validateEdits(retained.edits);
+					const retainedEncoding = "encoding" in retained ? retained.encoding : undefined;
+					if (retainedEncoding !== undefined && typeof retainedEncoding !== "string")
+						throw new Error("Invalid retained encoding");
+					if (encoding !== undefined && retainedEncoding !== undefined && encoding !== retainedEncoding)
+						throw new Error("Retarget cannot change the retained source encoding");
+					encoding ??= retainedEncoding;
 				}
 				let staleLeaseRefreshes = 0;
 				const confirmLeaseOrRefresh = async (): Promise<boolean> => {
@@ -595,7 +626,8 @@ export function createEditToolDefinition(
 					| {
 							baseContent: string;
 							newContent: string;
-							finalContent: string;
+							finalContent: string | Buffer;
+							encodingRecovery?: EditToolDetails["encodingRecovery"];
 							matchPlanReused: boolean;
 							diffResult: { diff: string; firstChangedLine: number | undefined };
 					  }
@@ -606,11 +638,14 @@ export function createEditToolDefinition(
 
 					// Read the file.
 					const buffer = await ops.readFile(absolutePath);
-					const rawContent = decodeUtf8ForEdit(buffer, path);
+					const {
+						text: content,
+						bom,
+						recovery: recovered,
+					} = await decodeEditDocument(buffer, path, encoding, signal);
 					throwIfAborted();
 
 					// Strip BOM before matching. The model will not include an invisible BOM in oldText.
-					const { bom, text: content } = splitBom(rawContent);
 					const normalizedContent = normalizeToLF(content);
 					const cachedForInput =
 						cachedMatchPlan?.absolutePath === absolutePath && editsMatch(cachedMatchPlan.edits, edits)
@@ -627,7 +662,7 @@ export function createEditToolDefinition(
 							: planEditsToNormalizedContent(normalizedContent, edits, path);
 						applied = applyEditMatchPlanToSource(content, plan, path);
 					} catch (error) {
-						throw error instanceof Error && intentController.hasProducedContent(absolutePath, rawContent)
+						throw error instanceof Error && intentController.hasProducedContent(absolutePath, buffer)
 							? new Error(
 									`The current content of ${path} was produced by an earlier mutation in this run; re-match oldText against it. ${error.message}`,
 								)
@@ -635,15 +670,33 @@ export function createEditToolDefinition(
 					}
 					throwIfAborted();
 
-					const finalContent = bom + applied.sourceContent;
+					const finalContent = recovered ? await recovered.encode(applied.splices) : bom + applied.sourceContent;
 					if (!(await confirmLeaseOrRefresh())) return undefined;
 					throwIfAborted();
-					await ops.writeFile(absolutePath, finalContent);
+					// Keep the verification witness private: an adapter may mutate the buffer it receives.
+					await ops.writeFile(
+						absolutePath,
+						Buffer.isBuffer(finalContent) ? Buffer.from(finalContent) : finalContent,
+					);
+					if (Buffer.isBuffer(finalContent) && !(await ops.readFile(absolutePath)).equals(finalContent)) {
+						throw new Error(
+							"Encoding recovery write verification failed; file outcome requires inspection before retry.",
+						);
+					}
 					throwIfAborted();
 					return {
 						baseContent: applied.baseContent,
 						newContent: applied.newContent,
 						finalContent,
+						...(recovered
+							? {
+									encodingRecovery: {
+										codec: "python" as const,
+										encoding: recovered.encoding,
+										verified: true as const,
+									},
+								}
+							: {}),
 						matchPlanReused,
 						diffResult:
 							matchPlanReused && cachedForInput
@@ -671,6 +724,7 @@ export function createEditToolDefinition(
 					],
 					details: {
 						phase: "edited" as const,
+						...(completedRound.encodingRecovery ? { encodingRecovery: completedRound.encodingRecovery } : {}),
 						contentRef: contentReference.contentRef,
 						diff: diffResult.diff,
 						patch,
@@ -694,10 +748,16 @@ export function createEditToolDefinition(
 			if (context.argsComplete && previewInput && !component.preview && !component.previewPending) {
 				component.previewPending = true;
 				const requestId = ++component.previewRequestId;
-				void computeEditsPlannedDiff(previewInput.path, previewInput.edits, cwd, {
-					resolvePath: (path, directory) => intentController.resolvePath(path, directory),
-					readFile: (path) => ops.readFile(path),
-				}).then((preview) => {
+				void computeEditsPlannedDiff(
+					previewInput.path,
+					previewInput.edits,
+					cwd,
+					{
+						resolvePath: (path, directory) => intentController.resolvePath(path, directory),
+						readFile: (path) => ops.readFile(path),
+					},
+					args.encoding,
+				).then((preview) => {
 					if (component.previewRequestId === requestId) {
 						if (!("error" in preview) && !options?.operations) {
 							cachedMatchPlan = {

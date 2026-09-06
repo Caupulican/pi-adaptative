@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	applyEncodingPreservation,
 	isConsistentlyCRLF,
@@ -9,6 +9,15 @@ import {
 	utf8ByteLength,
 } from "../src/core/tools/file-encoding-policy.ts";
 import { createEditTool, createWriteTool } from "../src/index.ts";
+
+vi.mock("../src/core/python-runtime.ts", () => ({
+	ensurePythonRuntime: async () => ({
+		status: "ready",
+		pythonPath: process.platform === "win32" ? "python" : "python3",
+		uvPath: "synthetic-unused",
+		pythonInstalled: false,
+	}),
+}));
 
 describe("File Encoding Policy - Unit Tests", () => {
 	describe("isValidUTF8", () => {
@@ -83,16 +92,18 @@ describe("File Encoding Policy - Tool Integration Tests", () => {
 		rmSync(testDir, { recursive: true, force: true });
 	});
 
-	it("edit tool should refuse non-UTF-8 files", async () => {
+	it("edit tool should preserve malformed encoded input without a lossy fallback", async () => {
 		const filePath = join(testDir, "binary.dat");
-		writeFileSync(filePath, Buffer.from([0xff, 0xfe, 0x80, 0xbf]));
+		const bytes = Buffer.from([0xff, 0xfe, 0x80]);
+		writeFileSync(filePath, bytes);
 
 		await expect(
 			editTool.execute("test-call-1", {
 				path: "binary.dat",
 				edits: [{ oldText: "test", newText: "best" }],
 			}),
-		).rejects.toThrow(/PI_FILE_ENCODING_CORRUPTION.*exact text replacement.*unsafe/is);
+		).rejects.toThrow(/PI_FILE_ENCODING_CORRUPTION.*could not verify preservation/is);
+		expect(readFileSync(filePath)).toEqual(bytes);
 	});
 
 	it("edit tool should preserve BOM", async () => {

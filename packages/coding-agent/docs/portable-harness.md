@@ -55,17 +55,31 @@ aliases and case policy. The SSH example resolves queue keys remotely; its older
 and the remaining search/process adapters still need migration. Edit previews use the execution
 backend and cwd, never the renderer's operator directory.
 
-The direct edit contract remains UTF-8 text, not automatic charset detection. Matching uses a
-normalized view, but application splices the original source: untouched bytes and each original
+Edit defaults to strict UTF-8; BOM-marked encodings recover automatically through the packaged
+`file-edit-codec.py`. Known legacy/BOM-less sources can supply `encoding`; ambiguous bytes are
+never guessed. `decodeEditDocument` owns that decision for previews and execution. Python runs
+in isolated, no-site mode and receives bounded bytes over stdin, never target paths, shell commands,
+or model-authored programs. This is a fixed codec under edit authority, not implicit permission
+to invoke the general Python tool. Remote bytes stay bound to their original mutation backend.
+
+The existing match planner supplies source-coordinate splices. Untouched bytes and each original
 line-ending sequence survive, including mixed CRLF/LF/CR. Replacement newlines reuse the matched
-span's newline sequence; additional newlines use its last ending or the surrounding ending.
-Unsupported or NUL-bearing input cannot enter this text writer. The encoding-failure target can
-select a loaded Python correction only when its declared backend authority matches. That correction
-requires binary I/O, an explicit strict codec, preservation of original encoding/BOM/newlines, and
-byte verification. It does not grant Python capability, transcode to UTF-8, or certify an arbitrary
-Python success as byte-preservation evidence. Recovery actions currently teach the next operation;
-managed encoding-edit execution and verified recovery receipts remain migration work. External
-writers can still race the final file identity check; this stage does not claim cross-process CAS.
+span's sequences; added newlines use its last ending or the surrounding ending. The codec requires
+strict source round-trip equality and independently validates byte boundaries before splicing.
+Unrepresentable replacements, conflicting BOMs, malformed text, and stateful representations that
+cannot preserve those boundaries remain non-mutating failures with recovery guidance. Python is
+resolved by the existing runtime manager, not an assumed interpreter path or host `iconv` command.
+Recovery is bounded to 16 MiB sources/results, 64 MiB protocol input, and 30 seconds per codec call.
+
+Custom `EditOperations.writeFile` accepts strings or buffers and must preserve supplied buffers.
+Execution retains the original preflight/queue/stale checks and reads back encoded writes before
+reporting `encodingRecovery.verified`. Retarget payloads retain the explicit codec; content references
+hash the actual encoded bytes. This is executor-level verification, not a new durable engine receipt
+immune to extension result rewriting. General Python recovery actions remain authority-matched
+guidance, not verification of arbitrary scripts. The existing writer is not crash-atomic and external
+writers can still race its last identity check; transactional replacement and durable encoding
+verification remain separate migration work. Native Windows/macOS runtime behavior is not established
+by Linux codec tests or a synthetic UNC backend.
 
 `TestVerificationOutput` owns bounded UTF-8 decoding and terminal settlement. Runner strategies
 parse Vitest summaries or Node TAP/spec summaries; shell classification declares every stage.

@@ -7,8 +7,7 @@ import { createHash } from "node:crypto";
 import * as Diff from "diff";
 import { constants } from "fs";
 import { access, readFile } from "fs/promises";
-import { stripBom } from "../../utils/text.ts";
-import { decodeUtf8ForEdit } from "./file-encoding-policy.ts";
+import { decodeEditDocument } from "./edit-byte-codec.ts";
 import { resolveToCwd } from "./path-utils.ts";
 
 export function detectLineEnding(content: string): "\r\n" | "\n" {
@@ -105,6 +104,12 @@ export interface EditMatchPlan {
 export interface AppliedEditsResult {
 	baseContent: string;
 	newContent: string;
+}
+
+export interface EditSourceSplice {
+	start: number;
+	end: number;
+	replacement: string;
 }
 
 /**
@@ -480,7 +485,7 @@ export function applyEditMatchPlanToSource(
 	source: string,
 	plan: EditMatchPlan,
 	path: string,
-): AppliedEditsResult & { sourceContent: string } {
+): AppliedEditsResult & { sourceContent: string; splices: EditSourceSplice[] } {
 	const applied = applyEditMatchPlan(normalizeToLF(source), plan, path);
 	const firstEnding = /\r\n|\r|\n/.exec(source)?.[0] ?? "\n";
 	let previousEnding = firstEnding;
@@ -488,6 +493,7 @@ export function applyEditMatchPlanToSource(
 	let normalizedIndex = 0;
 	let copiedThrough = 0;
 	const parts: string[] = [];
+	const splices: EditSourceSplice[] = [];
 	const advance = (target: number): number => {
 		while (normalizedIndex < target) {
 			const char = source[sourceIndex++];
@@ -509,11 +515,12 @@ export function applyEditMatchPlanToSource(
 		let endingIndex = 0;
 		const fallback = endings.at(-1) ?? nearbyEnding;
 		const replacement = edit.newText.replace(/\n/g, () => endings[endingIndex++] ?? fallback);
+		splices.push({ start, end, replacement });
 		parts.push(source.slice(copiedThrough, start), replacement);
 		copiedThrough = end;
 	}
 	parts.push(source.slice(copiedThrough));
-	return { ...applied, sourceContent: parts.join("") };
+	return { ...applied, sourceContent: parts.join(""), splices };
 }
 
 /** Generate a standard unified patch. */
@@ -689,22 +696,24 @@ export async function computeEditsPlannedDiff(
 	edits: Edit[],
 	cwd: string,
 	operations: EditPreviewOperations = localEditPreviewOperations,
+	encoding?: string,
 ): Promise<EditPlannedDiffResult | EditDiffError> {
 	try {
 		const absolutePath = operations.resolvePath(path, cwd);
-		let rawContent: string;
+		let document: Awaited<ReturnType<typeof decodeEditDocument>>;
 		try {
-			rawContent = decodeUtf8ForEdit(await operations.readFile(absolutePath), path);
+			document = await decodeEditDocument(await operations.readFile(absolutePath), path, encoding);
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error && "code" in error ? `Error code: ${error.code}` : String(error);
 			return { error: `Could not edit file: ${path}. ${errorMessage}.` };
 		}
 
-		// Strip BOM before matching (LLM won't include invisible BOM in oldText)
-		const content = stripBom(rawContent);
-		const normalizedContent = normalizeToLF(content);
+		const normalizedContent = normalizeToLF(document.text);
 		const plan = planEditsToNormalizedContent(normalizedContent, edits, path);
 		const { baseContent, newContent } = applyEditMatchPlan(normalizedContent, plan, path);
+		if (document.recovery) {
+			await document.recovery.encode(applyEditMatchPlanToSource(document.text, plan, path).splices);
+		}
 
 		// Generate the diff
 		return {
