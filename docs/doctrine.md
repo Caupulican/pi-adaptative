@@ -144,6 +144,16 @@ issues another provider request. This supersedes the old scheduler characterizat
 only one synthetic abort and discarded earlier evidence. Pinned by
 `packages/agent/test/tool-batch-settlement.test.ts` and `packages/agent/test/agent-loop.test.ts`.
 
+**Progress observation cannot change execution.** A listener throwing or rejecting cannot interrupt
+the tool body or erase its returned result. Admitted observations drain before finalization; late
+callbacks cannot emit after settlement. The engine retains only bounded delivery status, not raw
+listener diagnostics or delivered-update history. `piToolDeliveryFailure.operationCompleted` means
+the executor returned a result, not that its effects were successful; false leaves partial effects
+unknown. Foreground delivery failure stops after retaining results, and background completion
+carries the same marker and visible notice. Tools and hooks cannot manufacture that marker.
+Pinned by `packages/agent/test/tool-progress-delivery.test.ts` and
+`packages/agent/test/tool-progress-settlement.test.ts`.
+
 **Verification is a typed host receipt, not a claim in prose.** Goal test evidence must resolve
 to a passing receipt on the active branch; complete user quotations resolve only to user-role
 records. An unrelated successful command never clears a failed test. Literal argv and actual

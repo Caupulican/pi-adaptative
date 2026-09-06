@@ -43,6 +43,7 @@ import {
 	toolFailureCorrection,
 } from "./tool-failure-memory.ts";
 import { ToolFailureRecoveryGate, type ToolFailureRecoveryGateEffect } from "./tool-failure-recovery-gate.ts";
+import { ToolProgressDelivery } from "./tool-progress-delivery.ts";
 import { rejectNativeToolProtocolResidue, rejectToolCallsFromToolFreeResponse } from "./tool-protocol-residue.ts";
 import { ToolResultProgressTracker, toolResultBatchSignature } from "./tool-result-progress.ts";
 import type {
@@ -1172,6 +1173,7 @@ async function executeToolCallsSequential(
 		const { finalized, toolResultMessage } = await executeBarrierToolCall(execCtx, toolCall, index);
 		finalizedCalls.push(finalized);
 		messages.push(toolResultMessage);
+		if (finalized.deliveryFailure) throw finalized.deliveryFailure;
 
 		if (execCtx.signal?.aborted) {
 			break;
@@ -1256,6 +1258,7 @@ async function pooledExecuteToolCalls(
 		results[slot] = finalized;
 		drainGateApply();
 		await emitToolExecutionEnd(finalized, execCtx.emit);
+		if (finalized.deliveryFailure) throw finalized.deliveryFailure;
 	};
 
 	let next = 0;
@@ -1323,6 +1326,7 @@ async function executeToolCallsPartitioned(
 			const { finalized, toolResultMessage } = await executeBarrierToolCall(execCtx, group.call, group.index);
 			orderedFinalizedCalls.push(finalized);
 			messages.push(toolResultMessage);
+			if (finalized.deliveryFailure) throw finalized.deliveryFailure;
 			continue;
 		}
 		// Result-message artifacts for this group are only emitted once the whole group settles, in
@@ -1368,6 +1372,8 @@ type ImmediateToolCallOutcome = {
 
 type ExecutedToolCallOutcome = {
 	result: AgentToolResult<any>;
+	operationCompleted: boolean;
+	progressDeliveryFailed?: boolean;
 	isError: boolean;
 	errorClass?: string;
 	failureMessage?: string;
@@ -1380,6 +1386,7 @@ type FinalizedToolCallOutcome = {
 	toolCall: AgentToolCall;
 	result: AgentToolResult<any>;
 	isError: boolean;
+	deliveryFailure?: Error;
 	executionGateEffect?: ToolFailureRecoveryGateEffect;
 	/** Present only for an accepted handoff; sequential batches await it before their next body. */
 	backgroundCompletion?: Promise<FinalizedToolCallOutcome>;
@@ -2032,30 +2039,26 @@ async function executePreparedToolCall(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallOutcome> {
-	const updateEvents: Promise<void>[] = [];
-
+	const progress = new ToolProgressDelivery<AgentToolResult<unknown>>((partialResult) =>
+		emit({
+			type: "tool_execution_update",
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			args: prepared.toolCall.arguments,
+			partialResult,
+		}),
+	);
+	let executed: ExecutedToolCallOutcome;
 	try {
 		const result = await prepared.tool.execute(
 			prepared.toolCall.id,
 			prepared.args as never,
 			signal,
-			(partialResult) => {
-				updateEvents.push(
-					Promise.resolve(
-						emit({
-							type: "tool_execution_update",
-							toolCallId: prepared.toolCall.id,
-							toolName: prepared.toolCall.name,
-							args: prepared.toolCall.arguments,
-							partialResult,
-						}),
-					),
-				);
-			},
+			(partialResult) => progress.publish(partialResult),
 		);
-		await Promise.all(updateEvents);
-		return {
+		executed = {
 			result,
+			operationCompleted: true,
 			// Tool definitions can report an expected operation failure without
 			// throwing. Keep the returned result intact through afterToolCall so
 			// policy hooks can inspect its bounded diagnostics and metadata.
@@ -2065,11 +2068,11 @@ async function executePreparedToolCall(
 				: {}),
 		};
 	} catch (error) {
-		await Promise.all(updateEvents);
 		const message = error instanceof Error ? error.message : String(error);
 		const toolFailure = error instanceof AgentToolExecutionError ? error : undefined;
-		return {
+		executed = {
 			result: createErrorToolResult(message),
+			operationCompleted: false,
 			isError: true,
 			errorClass: error instanceof Error ? error.name : typeof error,
 			failureMessage: message,
@@ -2077,6 +2080,7 @@ async function executePreparedToolCall(
 			...(toolFailure ? { failureCode: toolFailure.failureCode, outputSignature: toolFailure.outputSignature } : {}),
 		};
 	}
+	return { ...executed, progressDeliveryFailed: await progress.finish() };
 }
 
 function repairTeachKey(toolName: string, note: string): string {
@@ -2244,15 +2248,33 @@ async function finalizeExecutedToolCall(
 
 	const repaired = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
 	let projectedDetails = repaired.result.details;
-	if (projectedDetails && typeof projectedDetails === "object" && "piVerification" in projectedDetails) {
+	if (
+		projectedDetails &&
+		typeof projectedDetails === "object" &&
+		("piVerification" in projectedDetails || "piToolDeliveryFailure" in projectedDetails)
+	) {
 		const descriptors = Object.getOwnPropertyDescriptors(projectedDetails);
 		delete descriptors.piVerification;
+		delete descriptors.piToolDeliveryFailure;
 		projectedDetails = Object.defineProperties({}, descriptors);
 	}
 	const resultWithVerification = {
 		...repaired.result,
 		details: verificationDetails ? { ...projectedDetails, ...verificationDetails } : projectedDetails,
 	};
+	if (executed.progressDeliveryFailed) {
+		resultWithVerification.details = {
+			...resultWithVerification.details,
+			piToolDeliveryFailure: { version: 1, phase: "progress", operationCompleted: executed.operationCompleted },
+		};
+		resultWithVerification.content = [
+			...resultWithVerification.content,
+			{
+				type: "text",
+				text: "[harness] Progress delivery failed. The operation result is retained; inspect it rather than rerunning the operation to recover progress updates.",
+			},
+		];
+	}
 	emitToolArgumentValidationTelemetry(
 		config,
 		prepared.validationEvent,
@@ -2264,6 +2286,7 @@ async function finalizeExecutedToolCall(
 		toolCall: prepared.toolCall,
 		result: resultWithVerification,
 		isError,
+		...(executed.progressDeliveryFailed ? { deliveryFailure: new Error("tool_progress_delivery_failed") } : {}),
 		executionGateEffect,
 	};
 }

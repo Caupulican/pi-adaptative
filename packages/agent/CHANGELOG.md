@@ -10,6 +10,7 @@
 - Resolved paths and file URLs using the selected execution dialect, honored the supplied home for base paths, and rejected ambiguous Windows drive-relative paths.
 - Retained executor-owned verification evidence through post-execution hook replacement, mutation, failure, and background handoff; hooks cannot manufacture passing verification receipts.
 - Drained started tool siblings after admission failure and preserved completed results through reservation cancellation and batch abort, without issuing another provider request.
+- Isolated progress-listener exceptions from tool execution, drained pending observations without retaining update history, and retained bounded delivery-failure evidence through foreground and background finalization.
 
 ## [0.99.1] - 2026-09-06
 

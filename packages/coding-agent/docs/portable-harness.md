@@ -61,7 +61,15 @@ Batch settlement owns results across reservation failures: dispatched siblings d
 parent terminals, completed results remain source-ordered and callback-consistent, and queued
 bodies are not started after failed admission. Cancellation ends the current batch without a
 doomed extra provider request. This applies to streaming and direct core-loop entry points;
-it does not yet establish complete attachment fencing or progress-observer fault isolation.
+it does not yet establish complete attachment fencing.
+
+Progress delivery has a separate lifecycle owner. Subscriber throws and rejections cannot escape
+into the tool body or erase a result. The owner drains admitted observations without retaining their
+history and closes late callbacks. Core finalization stamps `piToolDeliveryFailure` with a bounded
+phase and an executor-returned flag; no listener text, arguments, or paths enter that marker.
+Foreground delivery failure stops after preserving results; background completion retains the
+marker and a visible notice. Background durable receipt aggregation remains part of the reporting
+migration, not a claim established by the in-memory completion boundary.
 
 ## Public fixtures
 

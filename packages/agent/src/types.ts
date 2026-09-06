@@ -941,6 +941,11 @@ export interface AgentToolResult<T> {
 }
 
 /** Callback used by tools to stream partial execution updates. */
+/**
+ * Progress observation only: listener failures never throw into the tool body. The core drains
+ * admitted listener promises before finalization, records a bounded delivery failure separately
+ * from the operation result, and ignores callbacks invoked after the operation settled.
+ */
 export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
 
 const AGENT_TOOL_FAILURE_RECOVERY_AUTHORITY = Symbol("AgentToolFailureRecoveryAuthority");
