@@ -147,10 +147,11 @@ only one synthetic abort and discarded earlier evidence. Pinned by
 **Progress observation cannot change execution.** A listener throwing or rejecting cannot interrupt
 the tool body or erase its returned result. Admitted observations drain before finalization; late
 callbacks cannot emit after settlement. The engine retains only bounded delivery status, not raw
-listener diagnostics or delivered-update history. `piToolDeliveryFailure.operationCompleted` means
-the executor returned a result, not that its effects were successful; false leaves partial effects
-unknown. Foreground delivery failure stops after retaining results, and background completion
-carries the same marker and visible notice. Tools and hooks cannot manufacture that marker.
+listener diagnostics or delivered-update history. `piToolInvocation` separates execution state
+and operation status from progress/after-hook failure tags. A generic throw leaves effects unknown;
+an explicit operation-outcome exception is completed-negative. Foreground delivery failure stops
+after retaining results. Background persistence and notification retain request-bound execution
+facts; unavailable completion remains unknown. Tools and hooks cannot manufacture those facts.
 Pinned by `packages/agent/test/tool-progress-delivery.test.ts` and
 `packages/agent/test/tool-progress-settlement.test.ts`.
 

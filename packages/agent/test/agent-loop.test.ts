@@ -1405,7 +1405,18 @@ describe("agentLoop with AgentMessage", () => {
 			events.filter((event) => event.type === "message_end" && event.message.role === "toolResult"),
 		).toHaveLength(4);
 		expect(JSON.stringify(failedResults)).not.toContain("RAW_FAILURE_OUTPUT");
-		expect(JSON.stringify(failedResults).length).toBeLessThan(3_000);
+		// The existing 3KB failure payload budget is unchanged. Engine invocation evidence is now
+		// additional durable metadata, separately bounded rather than silently charged to diagnostics.
+		const failurePayloads = failedResults.map(({ details, ...message }) => {
+			const { piToolInvocation, ...failureDetails } = details;
+			expect(JSON.stringify(piToolInvocation).length).toBeLessThan(512);
+			return { ...message, details: failureDetails };
+		});
+		expect(JSON.stringify(failurePayloads).length).toBeLessThan(3_000);
+		expect(failedResults.map((result) => result.details.piToolInvocation.execution)).toEqual([
+			"unknown",
+			"not_started",
+		]);
 		expect(failedResults[1]?.content).toEqual([
 			expect.objectContaining({
 				type: "text",

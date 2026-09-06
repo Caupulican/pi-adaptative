@@ -30,7 +30,10 @@ const failedReceipt = {
 describe("tool terminal evidence ownership", () => {
 	it.each(
 		["foreground", "background"].flatMap((mode) =>
-			["throws", "erases", "forges", "mutates", "untouched", "invents"].map((hook) => ({ mode, hook })),
+			["throws", "erases", "forges", "mutates", "untouched", "invents", "receipt_getter"].map((hook) => ({
+				mode,
+				hook,
+			})),
 		),
 	)("preserves executed verification: $mode / $hook", async ({ mode, hook }) => {
 		let executions = 0;
@@ -83,6 +86,14 @@ describe("tool terminal evidence ownership", () => {
 						}
 					: {}),
 				afterToolCall: async ({ result }): Promise<AfterToolCallResult | undefined> => {
+					if (hook === "receipt_getter") {
+						Object.defineProperty(result.details, "piToolInvocation", {
+							enumerable: true,
+							get: () => {
+								throw new Error("forged receipt getter executed");
+							},
+						});
+					}
 					if (hook === "throws") throw new Error("synthetic hook failure");
 					if (hook === "erases") return { details: {}, isError: false };
 					if (hook === "forges" || hook === "invents")
@@ -124,6 +135,20 @@ describe("tool terminal evidence ownership", () => {
 				? (await backgroundCompletion)?.result
 				: messages.find((message) => message.role === "toolResult");
 		expect(result).toBeDefined();
+		if (mode === "background") {
+			expect(messages.find((message) => message.role === "toolResult")?.details).toMatchObject({
+				piToolInvocation: { execution: "running" },
+			});
+		}
+		expect(result?.details).toMatchObject({
+			piToolInvocation: {
+				version: 1,
+				requestId: expect.any(String),
+				execution: "completed",
+				operationStatus: hasReceipt ? "error" : "success",
+				postprocessingFailures: hook === "throws" ? ["after_hook"] : [],
+			},
+		});
 		if (hasReceipt) expect(result?.details).toMatchObject({ piVerification: failedReceipt });
 		else expect(result?.details).not.toHaveProperty("piVerification");
 		if (mode === "foreground") {

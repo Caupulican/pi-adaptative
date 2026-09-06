@@ -65,11 +65,19 @@ it does not yet establish complete attachment fencing.
 
 Progress delivery has a separate lifecycle owner. Subscriber throws and rejections cannot escape
 into the tool body or erase a result. The owner drains admitted observations without retaining their
-history and closes late callbacks. Core finalization stamps `piToolDeliveryFailure` with a bounded
-phase and an executor-returned flag; no listener text, arguments, or paths enter that marker.
-Foreground delivery failure stops after preserving results; background completion retains the
-marker and a visible notice. Background durable receipt aggregation remains part of the reporting
-migration, not a claim established by the in-memory completion boundary.
+history and closes late callbacks. Core finalization stamps `piToolInvocation`: request identity,
+execution state, completed operation status, and bounded progress/after-hook failure tags. No
+listener text, arguments, or paths enter that receipt. Rejection is `not_started`; a handoff is
+`running`; a generic exception leaves effects `unknown`; an explicit operation-outcome exception
+is completed-negative. Hook policy cannot rewrite those execution facts.
+
+Foreground delivery failure stops after preserving results. Background records retain the same
+validated receipt across notification and restart, bound to the admitted request and tool call.
+Lost or mismatched completions become unknown, never a successful rerun. Malformed latest durable
+records cannot resurrect older success. Legacy records without admission identity remain without
+strong execution evidence. Receipts add separately bounded durable metadata (under 512 serialized
+characters) alongside the existing failure-payload budget. Reporting aggregation and attachment
+fencing are still separate migration work.
 
 ## Public fixtures
 

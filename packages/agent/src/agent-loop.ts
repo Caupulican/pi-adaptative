@@ -43,6 +43,7 @@ import {
 	toolFailureCorrection,
 } from "./tool-failure-memory.ts";
 import { ToolFailureRecoveryGate, type ToolFailureRecoveryGateEffect } from "./tool-failure-recovery-gate.ts";
+import { stampToolInvocation } from "./tool-invocation-receipt.ts";
 import { ToolProgressDelivery } from "./tool-progress-delivery.ts";
 import { rejectNativeToolProtocolResidue, rejectToolCallsFromToolFreeResponse } from "./tool-protocol-residue.ts";
 import { ToolResultProgressTracker, toolResultBatchSignature } from "./tool-result-progress.ts";
@@ -1075,14 +1076,24 @@ async function prepareAndStartToolCall(
 		if (preparation.validationEvent?.outcome === "bounced") execCtx.validationBounced = true;
 		await emitToolExecutionStart(toolCall, execCtx.emit);
 		emitToolArgumentValidationTelemetry(execCtx.config, preparation.validationEvent, "not_run", "none");
+		const finalized = finalizeRejectedToolCall(
+			toolCall,
+			execCtx.context.tools?.find((tool) => tool.name === toolCall.name),
+			preparation,
+			execCtx.toolFailureMemory,
+		);
+		finalized.result = {
+			...finalized.result,
+			details: stampToolInvocation(finalized.result.details, {
+				version: 1,
+				requestId: execCtx.requestId,
+				execution: "not_started",
+				postprocessingFailures: [],
+			}),
+		};
 		return {
 			kind: "finalized",
-			finalized: finalizeRejectedToolCall(
-				toolCall,
-				execCtx.context.tools?.find((tool) => tool.name === toolCall.name),
-				preparation,
-				execCtx.toolFailureMemory,
-			),
+			finalized,
 		};
 	}
 	return { kind: "prepared", preparation };
@@ -2028,7 +2039,15 @@ async function executeAndFinalizePreparedToolCall(
 	executionAbort.detachForeground();
 	return {
 		toolCall: prepared.toolCall,
-		result: handoff.result,
+		result: {
+			...handoff.result,
+			details: stampToolInvocation(handoff.result.details, {
+				version: 1,
+				requestId,
+				execution: "running",
+				postprocessingFailures: [],
+			}),
+		},
 		isError: handoff.isError ?? handoff.result.isError === true,
 		backgroundCompletion: handedOffCompletion,
 	};
@@ -2072,7 +2091,7 @@ async function executePreparedToolCall(
 		const toolFailure = error instanceof AgentToolExecutionError ? error : undefined;
 		executed = {
 			result: createErrorToolResult(message),
-			operationCompleted: false,
+			operationCompleted: toolFailure?.errorKind === "operation_outcome",
 			isError: true,
 			errorClass: error instanceof Error ? error.name : typeof error,
 			failureMessage: message,
@@ -2135,6 +2154,7 @@ async function finalizeExecutedToolCall(
 	let failureCode = executed.failureCode;
 	let outputSignature = executed.outputSignature;
 	let errorKind = executed.errorKind;
+	let afterHookFailed = false;
 	let executionGateEffect: ToolFailureRecoveryGateEffect | undefined;
 
 	if (config.afterToolCall) {
@@ -2162,6 +2182,7 @@ async function finalizeExecutedToolCall(
 			}
 		} catch (error) {
 			// Report the hook failure while retaining the executor's independent verification receipt.
+			afterHookFailed = true;
 			failureMessage = error instanceof Error ? error.message : String(error);
 			errorClass = error instanceof Error ? error.name : typeof error;
 			failureCode = undefined;
@@ -2248,25 +2269,27 @@ async function finalizeExecutedToolCall(
 
 	const repaired = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
 	let projectedDetails = repaired.result.details;
-	if (
-		projectedDetails &&
-		typeof projectedDetails === "object" &&
-		("piVerification" in projectedDetails || "piToolDeliveryFailure" in projectedDetails)
-	) {
+	if (projectedDetails && typeof projectedDetails === "object" && "piVerification" in projectedDetails) {
 		const descriptors = Object.getOwnPropertyDescriptors(projectedDetails);
 		delete descriptors.piVerification;
-		delete descriptors.piToolDeliveryFailure;
 		projectedDetails = Object.defineProperties({}, descriptors);
 	}
+	const invocationDetails = stampToolInvocation(projectedDetails, {
+		version: 1,
+		requestId,
+		...(executed.operationCompleted
+			? { execution: "completed", operationStatus: executed.isError ? "error" : "success" }
+			: { execution: "unknown" }),
+		postprocessingFailures: [
+			...(executed.progressDeliveryFailed ? ["progress" as const] : []),
+			...(afterHookFailed ? ["after_hook" as const] : []),
+		],
+	});
 	const resultWithVerification = {
 		...repaired.result,
-		details: verificationDetails ? { ...projectedDetails, ...verificationDetails } : projectedDetails,
+		details: verificationDetails ? { ...invocationDetails, ...verificationDetails } : invocationDetails,
 	};
 	if (executed.progressDeliveryFailed) {
-		resultWithVerification.details = {
-			...resultWithVerification.details,
-			piToolDeliveryFailure: { version: 1, phase: "progress", operationCompleted: executed.operationCompleted },
-		};
 		resultWithVerification.content = [
 			...resultWithVerification.content,
 			{

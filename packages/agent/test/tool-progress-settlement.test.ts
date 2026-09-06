@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { runAgentLoop } from "../src/agent-loop.ts";
 import type { AgentEvent, AgentTool, BackgroundToolCallCompletion } from "../src/types.ts";
+import { AgentToolExecutionError } from "../src/types.ts";
 import { createEmptyUsage } from "../src/usage.ts";
 
 const model: Model<"openai-responses"> = {
@@ -23,7 +24,7 @@ describe("progress delivery is not operation execution", () => {
 	it.each(
 		["foreground", "background"].flatMap((mode) =>
 			["throw", "reject", "control"].flatMap((fault) =>
-				["returned", "threw"].map((operation) => ({ mode, fault, operation })),
+				["returned", "threw", "negative_outcome"].map((operation) => ({ mode, fault, operation })),
 			),
 		),
 	)("retains the executed result: $mode / $fault / $operation", async ({ mode, fault, operation }) => {
@@ -44,12 +45,19 @@ describe("progress delivery is not operation execution", () => {
 				if (mode === "background") await release.promise;
 				effects++;
 				if (operation === "threw") throw new Error("synthetic failure after mutation");
+				if (operation === "negative_outcome")
+					throw new AgentToolExecutionError(
+						"synthetic completed negative outcome",
+						"exit_1",
+						"fixture",
+						"operation_outcome",
+					);
 				return {
 					content: [{ type: "text", text: "committed" }],
 					details: {
 						committed: true,
 						// Tool-owned metadata cannot manufacture an engine delivery failure.
-						piToolDeliveryFailure: { version: 1, phase: "progress", operationCompleted: false },
+						piToolInvocation: { version: 1, execution: "not_started" },
 					},
 				};
 			},
@@ -61,7 +69,7 @@ describe("progress delivery is not operation execution", () => {
 				model,
 				afterToolCall: async ({ result }) => {
 					// A policy hook cannot invent or overwrite the final engine delivery status.
-					result.details.piToolDeliveryFailure = { version: 1, phase: "progress", operationCompleted: false };
+					result.details.piToolInvocation = { version: 1, execution: "not_started" };
 					return undefined;
 				},
 				convertToLlm: (messages) =>
@@ -116,15 +124,21 @@ describe("progress delivery is not operation execution", () => {
 		if (operation === "returned") {
 			expect(result?.details).toMatchObject({ committed: true });
 			expect(result?.content[0]).toEqual({ type: "text", text: "committed" });
-		} else {
+		} else if (operation === "threw") {
 			expect(JSON.stringify(result?.content)).toContain("synthetic failure after mutation");
+		} else {
+			expect(JSON.stringify(result?.content)).toContain("synthetic completed negative outcome");
 		}
 		expect(JSON.stringify(result)).not.toContain("private observer diagnostic");
-		if (fault === "control") expect(result?.details).not.toHaveProperty("piToolDeliveryFailure");
-		else
-			expect(result?.details).toMatchObject({
-				piToolDeliveryFailure: { version: 1, phase: "progress", operationCompleted: operation === "returned" },
-			});
+		expect(result?.details).toMatchObject({
+			piToolInvocation: {
+				version: 1,
+				requestId: expect.any(String),
+				execution: operation === "threw" ? "unknown" : "completed",
+				...(operation === "threw" ? {} : { operationStatus: operation === "returned" ? "success" : "error" }),
+				postprocessingFailures: fault === "control" ? [] : ["progress"],
+			},
+		});
 		expect(events.at(-1)?.type).toBe("agent_end");
 		expect(requests).toBe(mode === "foreground" && fault !== "control" ? 1 : 2);
 	});

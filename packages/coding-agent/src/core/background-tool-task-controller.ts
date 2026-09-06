@@ -1,7 +1,10 @@
-import type {
-	BackgroundToolCallCompletion,
-	BackgroundToolCallContext,
-	BackgroundToolCallHandoff,
+import {
+	type BackgroundToolCallCompletion,
+	type BackgroundToolCallContext,
+	type BackgroundToolCallHandoff,
+	decodeToolInvocationReceipt,
+	retainedToolInvocation,
+	type ToolInvocationReceipt,
 } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import {
@@ -59,6 +62,7 @@ const RECORD_KEYS = [
 	"cancellationRequested",
 	"terminalDelivery",
 	"piVerification",
+	"piToolInvocation",
 ] as const;
 
 export type BackgroundToolTaskStatus = "running" | "completed" | "failed" | "canceled";
@@ -113,6 +117,8 @@ export interface BackgroundToolTaskRecord {
 	terminalDelivery?: BackgroundToolTerminalDelivery;
 	/** Canonical tool-owned verification state, retained only after validation. */
 	piVerification?: BackgroundToolVerification;
+	/** Engine execution evidence; display failure and cancellation do not erase completed effects. */
+	piToolInvocation?: ToolInvocationReceipt;
 	/** Runtime-only receipt; never serialized into the durable task record. */
 	observedAt?: string;
 	/**
@@ -143,6 +149,7 @@ export interface BackgroundToolTerminalMessage {
 			toolName: string;
 			artifactId?: string;
 			piVerification?: BackgroundToolVerification;
+			piToolInvocation?: ToolInvocationReceipt;
 		}>;
 		piVerificationEvents: BackgroundToolVerification[];
 	};
@@ -223,6 +230,7 @@ export function createBackgroundToolTerminalMessage(
 				status: record.status,
 				toolName: record.toolName,
 				...(record.artifactId ? { artifactId: record.artifactId } : {}),
+				...(record.piToolInvocation ? { piToolInvocation: retainedToolInvocation(record) } : {}),
 				...(record.piVerification &&
 				record.piVerification.originTaskId === record.taskId &&
 				(record.piVerification.status !== "passed" || record.status === "completed")
@@ -380,6 +388,14 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 	}
 	const usage = value.usage === undefined ? undefined : cloneUsage(value.usage);
 	if (value.usage !== undefined && !usage) return undefined;
+	const invocation = retainedToolInvocation(value);
+	if (
+		(Object.hasOwn(value, "piToolInvocation") && !invocation) ||
+		(invocation &&
+			(invocation.execution === "not_started" ||
+				(value.status === "running") !== (invocation.execution === "running")))
+	)
+		return undefined;
 	const rawVerification = retainedToolVerification(value);
 	if (value.piVerification !== undefined && !rawVerification) return undefined;
 	const verification = rawVerification
@@ -405,6 +421,7 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 		...(value.cancellationRequested !== undefined ? { cancellationRequested: value.cancellationRequested } : {}),
 		...(value.terminalDelivery !== undefined ? { terminalDelivery: value.terminalDelivery } : {}),
 		...(verification ? { piVerification: verification } : {}),
+		...(invocation ? { piToolInvocation: invocation } : {}),
 	};
 }
 
@@ -449,6 +466,12 @@ export class BackgroundToolTaskController {
 		const startedAt = this.now().toISOString();
 		const goalId = this.deps.getGoalId?.();
 		const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
+		const invocation = decodeToolInvocationReceipt({
+			version: 1,
+			requestId: context.requestId,
+			execution: "running",
+			postprocessingFailures: [],
+		});
 		const record: BackgroundToolTaskRecord = {
 			sessionId,
 			taskId,
@@ -461,6 +484,7 @@ export class BackgroundToolTaskController {
 			elapsedBeforeHandoffMs: context.elapsedMs,
 			summary: `${context.toolCall.name} running in the background`,
 			output: "",
+			...(invocation ? { piToolInvocation: invocation } : {}),
 		};
 		const state = this.createState(record, context.cancel);
 		this.tasks.set(taskId, state);
@@ -636,6 +660,9 @@ export class BackgroundToolTaskController {
 			completion.result.usage,
 			true,
 			retainedToolVerification(completion.result.details),
+			completion.toolCall.id === state.record.toolCallId && completion.toolCall.name === state.record.toolName
+				? retainedToolInvocation(completion.result.details)
+				: undefined,
 		);
 	}
 
@@ -724,7 +751,20 @@ export class BackgroundToolTaskController {
 		usage: Usage | undefined,
 		notify: boolean,
 		verification?: VerificationRecord,
+		invocation?: ToolInvocationReceipt,
 	): void {
+		const admitted = state.record.piToolInvocation;
+		const terminalInvocation = admitted
+			? invocation?.requestId === admitted.requestId &&
+				(invocation.execution === "completed" || invocation.execution === "unknown")
+				? invocation
+				: decodeToolInvocationReceipt({
+						version: 1,
+						requestId: admitted.requestId,
+						execution: "unknown",
+						postprocessingFailures: [],
+					})
+			: undefined;
 		const packed = packToolOutput(
 			{
 				toolName: state.record.toolName,
@@ -750,6 +790,7 @@ export class BackgroundToolTaskController {
 			...(usage ? { usage } : {}),
 			...(state.cancellationRequested ? { cancellationRequested: true } : {}),
 			terminalDelivery: notify ? "pending" : "delivered",
+			...(terminalInvocation ? { piToolInvocation: terminalInvocation } : {}),
 			...(verification && (verification.status !== "passed" || status === "completed")
 				? { piVerification: { ...verification, originTaskId: state.record.taskId } }
 				: {}),

@@ -122,6 +122,11 @@ describe("tool batch terminal settlement", () => {
 		expect(results.map((message) => message.toolCallId)).toEqual(expected);
 		expect(effects.sort()).toEqual([...expected].sort());
 		expect(results.every((message) => !message.isError)).toBe(true);
+		for (const result of results) {
+			expect(result.details).toMatchObject({
+				piToolInvocation: { execution: "completed", operationStatus: "success", postprocessingFailures: [] },
+			});
+		}
 		expect(outcome.messages).toEqual(
 			events.flatMap((event) => (event.type === "message_end" ? [event.message] : [])),
 		);
