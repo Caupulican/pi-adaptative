@@ -108,6 +108,7 @@ The following evidence supersedes the implementation journal. Every confirmed de
 - TypeScript caught malformed test tables and one expected call used the wrong arity. Corrected fixtures preserve the intended product invariants.
 - The first goal timing change mutated admission revisions and failed deterministically. Time commits now occur only at response/end boundaries.
 - Earlier root runs with truncated output are not full review evidence. A later complete root run must cover the final tree and staged doctrine.
+- Windows CI exposed a simulated POSIX verification adapter using host-default Windows routing. The fixture now pins its backend and asserts both invocations executed; this is not evidence of a production receipt defect.
 
 ## Limits and release gate
 

@@ -36,6 +36,8 @@ describe("bash verification boundary", () => {
 		const corrected = join(root, "corrected");
 		let executions = 0;
 		const tool = createBashTool(root, {
+			// This adapter models a persistent POSIX shell; Windows routing owns a different cwd state.
+			platform: "linux",
 			operations: {
 				exec: async (_command, _cwd, options) => {
 					const first = executions++ === 0;
@@ -50,6 +52,7 @@ describe("bash verification boundary", () => {
 			command: `cd '${corrected.replaceAll("\\", "/").replaceAll("'", "'\\''")}' && ${command}`,
 			repairOf: verificationId(failed),
 		});
+		expect(executions).toBe(2);
 		expect(repaired.details?.piVerification).toMatchObject({
 			status: "passed",
 			outcome: "executed",
@@ -225,6 +228,7 @@ describe("bash verification boundary", () => {
 
 	it("does not certify a different execution directory selected by shell state such as CDPATH", async () => {
 		const tool = createBashTool("/workspace", {
+			platform: "linux",
 			operations: { exec: async () => ({ exitCode: 0, initialCwd: "/workspace", cwd: "/external/package" }) },
 		});
 		const result = await tool.execute("redirected-cd", { command: "cd package && npm test" });
