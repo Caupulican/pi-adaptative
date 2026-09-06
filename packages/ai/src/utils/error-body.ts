@@ -14,6 +14,8 @@
 // into the message, so providers can preserve it without double-printing.
 
 export const MAX_PROVIDER_ERROR_BODY_CHARS = 4000;
+/** Bounded depth for the `cause` chain behind a transport failure. */
+const MAX_CAUSE_DEPTH = 4;
 
 export interface NormalizedProviderError {
 	/** HTTP status code, when one could be extracted from the SDK error object. */
@@ -24,6 +26,13 @@ export interface NormalizedProviderError {
 	message: string;
 	/** True when `message` already contains the body (no separate body to add). */
 	messageCarriesBody: boolean;
+	/**
+	 * Transport reason behind a failure that never produced an HTTP response, read from the
+	 * `cause` chain (undici's `fetch failed` → `ECONNRESET: socket hang up`, Bun's `ConnectionClosed`,
+	 * DNS failures). SDKs collapse all of these into "Connection error.", which leaves a session
+	 * record that cannot distinguish a dropped proxy connection from a DNS outage.
+	 */
+	cause?: string;
 }
 
 type SdkErrorShape = Error & {
@@ -44,13 +53,51 @@ export function normalizeProviderError(error: unknown): NormalizedProviderError 
 	const status = extractStatus(sdkError);
 	const body = extractBody(sdkError);
 	const messageCarriesBody = body === undefined || error.message.includes(body);
+	const cause = status === undefined ? extractCauseChain(error) : undefined;
 
 	return {
 		status,
 		body,
 		message: error.message,
 		messageCarriesBody,
+		...(cause !== undefined ? { cause } : {}),
 	} satisfies NormalizedProviderError;
+}
+
+/**
+ * Walk `error.cause` (bounded) and join each distinct step as `CODE message`, oldest cause last.
+ * Returns `undefined` when there is no cause or it only repeats the top-level message.
+ */
+function extractCauseChain(error: Error): string | undefined {
+	const steps: string[] = [];
+	const seen = new Set<string>([error.message.trim()]);
+	let current: unknown = (error as { cause?: unknown }).cause;
+	for (let depth = 0; depth < MAX_CAUSE_DEPTH && current !== undefined && current !== null; depth++) {
+		const step = describeCause(current);
+		if (step && !seen.has(step)) {
+			steps.push(step);
+			seen.add(step);
+		}
+		current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
+	}
+	return steps.length > 0 ? steps.join(" → ") : undefined;
+}
+
+function describeCause(cause: unknown): string | undefined {
+	if (cause instanceof Error) {
+		const code = (cause as { code?: unknown }).code;
+		const message = cause.message.trim();
+		const text = typeof code === "string" && code && !message.includes(code) ? `${code} ${message}`.trim() : message;
+		return text ? truncateErrorText(text, 200) : undefined;
+	}
+	if (typeof cause === "string") return cause.trim() ? truncateErrorText(cause.trim(), 200) : undefined;
+	if (typeof cause === "object") {
+		const code = (cause as { code?: unknown }).code;
+		const message = (cause as { message?: unknown }).message;
+		const parts = [typeof code === "string" ? code : "", typeof message === "string" ? message : ""].filter(Boolean);
+		return parts.length ? truncateErrorText(parts.join(" "), 200) : undefined;
+	}
+	return undefined;
 }
 
 /**
@@ -110,9 +157,9 @@ function isNonEmptyObject(value: unknown): boolean {
  */
 export function formatProviderError(norm: NormalizedProviderError, prefix?: string): string {
 	if (norm.messageCarriesBody || norm.status === undefined || norm.body === undefined) {
-		return prefix !== undefined && norm.status !== undefined
-			? `${prefix} (${norm.status}): ${norm.message}`
-			: norm.message;
+		const message =
+			norm.cause && !norm.message.includes(norm.cause) ? `${norm.message} [${norm.cause}]` : norm.message;
+		return prefix !== undefined && norm.status !== undefined ? `${prefix} (${norm.status}): ${message}` : message;
 	}
 	return prefix !== undefined ? `${prefix} (${norm.status}): ${norm.body}` : `${norm.status}: ${norm.body}`;
 }

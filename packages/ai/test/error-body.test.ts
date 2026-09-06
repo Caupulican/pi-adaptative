@@ -131,6 +131,29 @@ describe("normalizeProviderError", () => {
 	});
 });
 
+describe("normalizeProviderError transport cause", () => {
+	it("keeps the socket-level reason behind an SDK connection error", () => {
+		const socket = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+		const fetchFailure = Object.assign(new TypeError("fetch failed"), { cause: socket });
+		const error = Object.assign(new Error("Connection error."), { cause: fetchFailure });
+
+		const norm = normalizeProviderError(error);
+
+		expect(norm.status).toBeUndefined();
+		expect(norm.cause).toBe("fetch failed → ECONNRESET socket hang up");
+		expect(formatProviderError(norm)).toBe("Connection error. [fetch failed → ECONNRESET socket hang up]");
+		expect(formatProviderError(norm, "xai")).toBe("Connection error. [fetch failed → ECONNRESET socket hang up]");
+	});
+
+	it("ignores causes for HTTP errors and errors without a cause", () => {
+		const httpError = Object.assign(new Error("502 Bad Gateway"), { status: 502, cause: new Error("upstream") });
+		expect(normalizeProviderError(httpError).cause).toBeUndefined();
+		const plain = normalizeProviderError(new Error("Connection error."));
+		expect(plain.cause).toBeUndefined();
+		expect(formatProviderError(plain)).toBe("Connection error.");
+	});
+});
+
 describe("formatProviderError", () => {
 	it("surfaces status and body without a prefix", () => {
 		const norm = normalizeProviderError(

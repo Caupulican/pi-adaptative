@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Provider failures that never produced an HTTP response now keep the transport reason from the SDK's `cause` chain (for example `Connection error. [fetch failed → ECONNRESET socket hang up]`), so a dropped proxy connection, a DNS failure and a timeout are distinguishable in the session record.
+
 ## [0.98.3] - 2026-09-05
 
 ### Changed
