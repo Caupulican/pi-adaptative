@@ -54,12 +54,26 @@ decoding does not claim that a subsequent edit can preserve that encoding's byte
 
 Encoded decoding splits input into approximately 1 MiB chunks (up to three extra prefix bytes),
 retaining at most 16 MiB of codec state. Each chunk and final flush uses an isolated helper process;
-this bounds codec payload memory but carries per-chunk startup cost. The existing line accumulator
-can still retain a very long individual line. Caller cancellation detaches immediately from shared
-runtime provisioning without canceling other callers. Source iteration closes on early completion,
+this bounds codec payload memory but carries per-chunk startup cost. Caller cancellation detaches
+immediately from shared runtime provisioning without canceling other callers. Source iteration closes on early completion,
 cancellation, or decoding failure. No target path enters the helper. Custom text-producing
 `readLineSlice`/`countLines` adapters receive `encoding` and `signal` and are responsible for honoring
 them; custom `readFile` bytes go through the shared decoder. Image handling is unchanged.
+
+The shared `StreamingLineDecoder` retains bounded windows while counting complete source lines.
+Native ordinary reads retain at most 51,203 UTF-16 units per line; line counting retains no
+line payload. `read` returns an unfiltered character window for an oversized first selected line.
+Continue using its `lineWindow.nextColumn` with the same path, encoding, and offset. Columns are
+1-based UTF-16 positions; boundaries expand to preserve complete surrogate pairs. Whole-file and
+streamed reads share the same window formatter. No target path is inserted into shell guidance.
+Custom text slice adapters must honor `startColumn`/`maxLineChars` and report retained windows'
+source coordinates; custom whole-file adapters remain responsible for their own I/O memory bounds.
+
+Pi session JSONL reads retain their label-only projection, including outline fallback. Raw character
+windows are unavailable for these protected records. Native projection retains at most 16 MiB
+UTF-16 units per record; larger records produce an explicit omission, never a raw prefix. Full
+structured projection of larger records remains unimplemented. Outlines omit oversized source
+lines with a read continuation and retain subsequent declaration line numbers.
 
 Mutation tools now share `FileMutationIntentController.pathOptions` for resolution, parent traversal,
 preflight, and recovery identity. Explicit backends use literal names; the native CLI input adapter

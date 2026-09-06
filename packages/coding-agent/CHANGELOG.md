@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Bounded oversized source-line retention and added lossless `read` character-window continuations without shell commands or split surrogate pairs. Session outline fallback now retains privacy projection, and oversized session records never expose partial raw payloads.
 - Bound write/edit preflight, parent traversal, queues, recovery targets, and edit previews to the selected backend path context. A stalled backend lookup no longer stalls unrelated backends.
 - Preserved mixed CRLF/LF/CR sequences and untouched Unicode bytes during text edits instead of normalizing the whole file. Previews and execution share strict UTF-8 validation; NUL-bearing or unsupported input routes to encoding-aware recovery, and malformed replacement Unicode is rejected before writing.
 - Declared Python encoding-recovery actions only for matching filesystem authorities; recovery requires binary I/O, an explicit strict codec, preservation of encoding/BOM/newlines, and byte verification.

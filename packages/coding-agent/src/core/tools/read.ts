@@ -8,7 +8,7 @@ import {
 } from "@caupulican/pi-agent-core/truncate";
 import type { AgentTool } from "@caupulican/pi-agent-core/types";
 import type { Api, ImageContent, Model, TextContent } from "@caupulican/pi-ai";
-import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
+import { StreamingLineDecoder, type StreamingLineRecord } from "@caupulican/pi-ai/streaming-lines";
 import { Text } from "@caupulican/pi-tui";
 import { constants } from "fs";
 import { access as fsAccess, open as fsOpen, readFile as fsReadFile, stat as fsStat } from "fs/promises";
@@ -32,6 +32,7 @@ import {
 } from "./file-failure-recovery.ts";
 import { decodeReadText, decodeTextChunks } from "./file-text-decoder.ts";
 import { resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
+import { type ReadLine, type ReadLineWindowDetails, readLineWindow } from "./read-line-window.ts";
 import { getTextOutput, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { isPiSessionJsonlPath, projectPiSessionJsonlLine } from "./session-transcript-read.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -45,6 +46,13 @@ const readSchema = Type.Object({
 		}),
 	),
 	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
+	column: Type.Optional(
+		Type.Integer({
+			minimum: 1,
+			description:
+				"Read a character window of one line, starting at this 1-based UTF-16 position. Use the returned nextColumn to continue; surrogate pairs stay intact. Use with offset, not tail, outline, or multiple-line limits.",
+		}),
+	),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
 	lineNumbers: Type.Optional(Type.Boolean({ description: "Include line numbers in the output" })),
 	tail: Type.Optional(Type.Number({ description: "Number of lines to read from the end of the file" })),
@@ -64,6 +72,7 @@ const readSchema = Type.Object({
 export type ReadToolInput = Static<typeof readSchema>;
 
 export interface ReadToolDetails {
+	lineWindow?: ReadLineWindowDetails;
 	truncation?: TruncationResult;
 	/** Present for `mode: "outline"`. */
 	outline?: { language: string; entries: number; totalLines: number; headFallback: boolean };
@@ -107,6 +116,10 @@ export interface ReadOperations {
 }
 
 export interface LineSliceOptions {
+	/** Zero-based UTF-16 window position. */
+	startColumn?: number;
+	/** Maximum retained units per source line. The native adapter caps this at 16 MiB units. */
+	maxLineChars?: number;
 	/** Source encoding, shared by whole-file, outline, count, and sliced reads. */
 	encoding?: string;
 	signal?: AbortSignal;
@@ -119,7 +132,7 @@ export interface LineSliceOptions {
 }
 
 export interface LineSlice {
-	lines: { text: string; originalIndex: number }[];
+	lines: ReadLine[];
 	/** True when the end of the file was reached while collecting. */
 	reachedEnd: boolean;
 }
@@ -128,12 +141,19 @@ const SLICE_SCAN_CHUNK_BYTES = 1024 * 1024;
 
 async function scanLines(
 	absolutePath: string,
-	onLine: (text: string | undefined, index: number) => boolean,
-	options?: { encoding?: string; signal?: AbortSignal },
+	onLine: (line: StreamingLineRecord, index: number) => boolean,
+	options?: { encoding?: string; signal?: AbortSignal; maxLineChars?: number; startColumn?: number },
 ): Promise<void> {
 	const handle = await fsOpen(absolutePath, "r");
 	try {
-		const lineDecoder = new StreamingLineDecoder(Number.MAX_SAFE_INTEGER, { lineEndings: "lf" });
+		const lineDecoder = new StreamingLineDecoder(
+			Math.min(options?.maxLineChars ?? DEFAULT_MAX_BYTES + 1, 16 * 1024 * 1024),
+			{
+				lineEndings: "lf",
+				overflow: "window",
+				startColumn: options?.startColumn,
+			},
+		);
 		async function* sourceChunks() {
 			const buffer = Buffer.allocUnsafe(SLICE_SCAN_CHUNK_BYTES);
 			while (!options?.signal?.aborted) {
@@ -146,15 +166,15 @@ async function scanLines(
 		let index = 0;
 		let emittedAnyLine = false;
 		for await (const text of decodeTextChunks(sourceChunks(), options?.encoding, options?.signal)) {
-			const lines = lineDecoder.push(text);
+			const lines = lineDecoder.pushRecords(text);
 			for (const line of lines) {
 				emittedAnyLine = true;
 				if (!onLine(line, index++)) return;
 			}
 		}
-		const finalLine = lineDecoder.finish();
+		const finalLine = lineDecoder.finishRecord();
 		if (finalLine !== undefined || !emittedAnyLine) {
-			onLine(finalLine ?? "", index);
+			onLine(finalLine ?? { text: "", startColumn: 0, totalChars: 0 }, index);
 		}
 	} finally {
 		await handle.close();
@@ -162,23 +182,27 @@ async function scanLines(
 }
 
 async function readLocalLineSlice(absolutePath: string, options: LineSliceOptions): Promise<LineSlice> {
-	const lines: { text: string; originalIndex: number }[] = [];
+	const lines: ReadLine[] = [];
 	let collectedChars = 0;
 	let sawMore = false;
 	await scanLines(
 		absolutePath,
-		(text, index) => {
-			if (text === undefined) return false;
+		(line, index) => {
 			if (index < options.startLine) return true;
 			if (lines.length >= options.maxLines || collectedChars > options.maxChars) {
 				sawMore = true;
 				return false;
 			}
-			lines.push({ text, originalIndex: index + 1 });
+			const { text, startColumn, totalChars } = line;
+			lines.push({
+				text,
+				originalIndex: index + 1,
+				...(startColumn > 0 || text.length < totalChars ? { window: { startColumn, totalChars } } : {}),
+			});
 			collectedChars += text.length;
 			return true;
 		},
-		options,
+		{ ...options, maxLineChars: options?.maxLineChars ?? Math.min(options.maxChars, DEFAULT_MAX_BYTES + 1) },
 	);
 	return { lines, reachedEnd: !sawMore };
 }
@@ -194,7 +218,7 @@ async function countLocalLines(
 			count++;
 			return true;
 		},
-		options,
+		{ ...options, maxLineChars: 0 },
 	);
 	return count;
 }
@@ -437,6 +461,7 @@ export function createReadToolDefinition(
 				path,
 				encoding,
 				offset,
+				column,
 				limit,
 				mode,
 				lineNumbers,
@@ -446,6 +471,7 @@ export function createReadToolDefinition(
 				path: string;
 				encoding?: string;
 				offset?: number;
+				column?: number;
 				limit?: number;
 				mode?: "outline";
 				lineNumbers?: boolean;
@@ -456,6 +482,18 @@ export function createReadToolDefinition(
 			_onUpdate?,
 			ctx?,
 		) {
+			if (
+				column !== undefined &&
+				(!Number.isSafeInteger(column) ||
+					column < 1 ||
+					mode !== undefined ||
+					tail !== undefined ||
+					(limit !== undefined && limit !== 1))
+			) {
+				throw new Error(
+					"column requires a positive integer and a single-line read using offset; omit outline/tail and use limit=1.",
+				);
+			}
 			return new Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }>(
 				(resolve, reject) => {
 					if (signal?.aborted) {
@@ -479,6 +517,11 @@ export function createReadToolDefinition(
 								signal,
 							);
 							if (aborted) return;
+							const projectSessionTranscript = isPiSessionJsonlPath(absolutePath, configuredSessionDirectory);
+							if (column !== undefined && projectSessionTranscript)
+								throw new Error(
+									"Session transcripts expose projected labels, not raw character windows. Use read with offset and limit, without column.",
+								);
 							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
 							let content: (TextContent | ImageContent)[];
 							let details: ReadToolDetails | undefined;
@@ -526,25 +569,30 @@ export function createReadToolDefinition(
 										{ type: "image", data: buffer.toString("base64"), mimeType },
 									];
 								}
-							} else if (mode === "outline") {
+							} else if (mode === "outline" && !projectSessionTranscript) {
 								// Orientation instead of paging: the declarations with their line numbers, so the
 								// next read is the range the model needs. Verbatim reads are untouched.
-								const outlineText =
+								const outlineSlice =
 									fileSize !== undefined && fileSize > maxTextReadBytes && ops.readLineSlice !== undefined
-										? (
-												await ops.readLineSlice(absolutePath, {
-													startLine: 0,
-													maxLines: OUTLINE_MAX_SOURCE_LINES,
-													maxChars: OUTLINE_MAX_SOURCE_CHARS,
-													encoding,
-													signal,
-												})
-											).lines
-												.map((item) => item.text)
-												.join("\n")
-										: await decodeReadText(await ops.readFile(absolutePath), encoding, signal);
+										? await ops.readLineSlice(absolutePath, {
+												startLine: 0,
+												maxLines: OUTLINE_MAX_SOURCE_LINES,
+												maxChars: OUTLINE_MAX_SOURCE_CHARS,
+												encoding,
+												signal,
+											})
+										: undefined;
+								const outlineText = outlineSlice
+									? outlineSlice.lines.map((item) => (item.window ? "" : item.text)).join("\n")
+									: await decodeReadText(await ops.readFile(absolutePath), encoding, signal);
 								const outline = buildCodeOutline(path, outlineText);
 								content = [{ type: "text", text: renderCodeOutline(path, outline) }];
+								const omittedLine = outlineSlice?.lines.find((item) => item.window);
+								if (omittedLine)
+									content.push({
+										type: "text",
+										text: `[Oversized source lines omitted from outline. Use read offset=${omittedLine.originalIndex} column=1 to inspect the first omitted line.]`,
+									});
 								details = {
 									outline: {
 										language: outline.language,
@@ -557,13 +605,14 @@ export function createReadToolDefinition(
 								// Read text content. Oversized files are streamed as line slices so
 								// any region stays reachable in batches without loading the whole file.
 								const useSlicedRead =
-									fileSize !== undefined && fileSize > maxTextReadBytes && ops.readLineSlice !== undefined;
+									ops.readLineSlice !== undefined &&
+									(column !== undefined || (fileSize !== undefined && fileSize > maxTextReadBytes));
 								let startLine = 0;
-								let userLimitedLines = limit;
+								let userLimitedLines = column !== undefined ? 1 : limit;
 								let totalFileLines: number | undefined;
 								let moreContentRemains = false;
 								let textContentForJsonCheck: string | undefined;
-								let slicedLines: { text: string; originalIndex: number }[];
+								let slicedLines: ReadLine[];
 								if (useSlicedRead && ops.readLineSlice) {
 									if (offset !== undefined) {
 										startLine = Math.max(0, offset - 1);
@@ -580,6 +629,8 @@ export function createReadToolDefinition(
 										}
 									}
 									const slice = await ops.readLineSlice(absolutePath, {
+										startColumn: column !== undefined ? column - 1 : undefined,
+										maxLineChars: projectSessionTranscript ? DEFAULT_MAX_TEXT_READ_BYTES : undefined,
 										startLine,
 										maxLines: userLimitedLines ?? DEFAULT_MAX_LINES,
 										maxChars: DEFAULT_MAX_BYTES * 4,
@@ -624,14 +675,31 @@ export function createReadToolDefinition(
 										userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length;
 								}
 								const startLineDisplay = startLine + 1;
-								const projectSessionTranscript = isPiSessionJsonlPath(absolutePath, configuredSessionDirectory);
 								if (projectSessionTranscript) {
 									slicedLines = slicedLines.map((item) => ({
-										text: projectPiSessionJsonlLine(item.text),
+										text: item.window
+											? "[Oversized session record omitted from bounded projection; raw payload withheld.]"
+											: projectPiSessionJsonlLine(item.text),
 										originalIndex: item.originalIndex,
 									}));
 								}
-								const firstSelectedLineText = slicedLines[0]?.text ?? "";
+								const firstSelectedLine = slicedLines[0];
+								if (
+									!projectSessionTranscript &&
+									firstSelectedLine &&
+									(column !== undefined ||
+										firstSelectedLine.window ||
+										Buffer.byteLength(firstSelectedLine.text) > DEFAULT_MAX_BYTES - 64)
+								) {
+									const window = readLineWindow(firstSelectedLine, column);
+									signal?.removeEventListener("abort", onAbort);
+									if (!aborted)
+										resolve({
+											content: [{ type: "text", text: window.text }],
+											details: { lineWindow: window.lineWindow },
+										});
+									return;
+								}
 
 								// Safe text filtering
 								let canFilter = !projectSessionTranscript;
@@ -719,10 +787,9 @@ export function createReadToolDefinition(
 										? String(totalFileLines)
 										: `a ${fileSize !== undefined ? formatSize(fileSize) : "large"} file`;
 								if (truncation.firstLineExceedsLimit) {
-									// First line alone exceeds the byte limit. Point the model at a bash fallback.
-									const firstLineSize = formatSize(Buffer.byteLength(firstSelectedLineText, "utf-8"));
-									outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
-									details = { truncation };
+									const window = readLineWindow(slicedLines[0]);
+									outputText = window.text;
+									details = { lineWindow: window.lineWindow };
 								} else if (truncation.truncated) {
 									// Truncation occurred. Build an actionable continuation notice.
 									const endLineDisplay = startLineDisplay + truncation.outputLines - 1;

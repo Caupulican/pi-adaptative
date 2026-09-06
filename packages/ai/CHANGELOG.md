@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved split CRLF delimiters across empty stream chunks and added bounded character-window records without losing oversized source-line counts.
+
 ## [0.99.1] - 2026-09-06
 
 ## [0.99.0] - 2026-09-06

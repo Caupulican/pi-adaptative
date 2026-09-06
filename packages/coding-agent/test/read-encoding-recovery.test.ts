@@ -43,6 +43,9 @@ describe("read encoding recovery", () => {
 				const tool = createReadTool(cwd, { maxTextReadBytes });
 				expect(textOf(await tool.execute("head", { path, limit: 1 }))).toContain("café🙂");
 				expect(textOf(await tool.execute("tail", { path, tail: 2, lineNumbers: true }))).toBe("2: second\n3: last");
+				const window = await tool.execute("window", { path, column: 6 });
+				expect(textOf(window)).toContain("🙂");
+				expect(window.details).toMatchObject({ lineWindow: { startColumn: 5, endColumn: 6, totalColumns: 6 } });
 				expect(await readFile(path)).toEqual(bytes);
 			},
 		);
