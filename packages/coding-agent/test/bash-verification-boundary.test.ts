@@ -30,7 +30,8 @@ describe("bash verification boundary", () => {
 		["Tests 1 failed (1)\n", false],
 		["runner interrupted without a summary\n", false],
 	] as const)("links a corrected invocation only to a proved setup failure: %s", async (initialOutput, clears) => {
-		const root = mkdtempSync(join(tmpdir(), "pi-bash-setup-repair-"));
+		// Windows tmpdir may use RUNNER~1; use the literal long path rather than an opaque tilde spelling.
+		const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-bash-setup-repair-")));
 		cleanupDirectories.push(root);
 		const wrong = join(root, "wrong");
 		const corrected = join(root, "corrected");
