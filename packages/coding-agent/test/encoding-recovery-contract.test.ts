@@ -47,7 +47,15 @@ describe("encoding recovery contract", () => {
 	it("does not infer recovery authority for custom Python operations", () => {
 		const python = createPythonTool(process.cwd(), {
 			outputReduction: { enabled: false },
-			operations: { exec: async () => ({ exitCode: 0, reason: "exited", signal: null }) },
+			resolveRuntime: async () => {
+				throw new Error("Fixture must not resolve a runtime");
+			},
+			operations: {
+				stat: async () => {
+					throw new Error("Fixture must not inspect a path");
+				},
+				exec: async () => ({ exitCode: 0, reason: "exited", signal: null }),
+			},
 		});
 		expect(python.failureRecovery?.actions ?? []).toEqual([]);
 	});

@@ -1,12 +1,14 @@
 import { stat } from "node:fs/promises";
-import { posix, win32 } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { TruncationResult } from "@caupulican/pi-agent-core/node";
 import { Text } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
+import { type PathInputOptions, resolvePath } from "../../utils/paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { awaitPreflight } from "../preflight.ts";
 import { ensurePythonRuntime, type PythonRuntimeOutcome } from "../python-runtime.ts";
+import { isMissingPathError } from "../util/filesystem-errors.ts";
 import {
 	FILE_ENCODING_RECOVERY_TARGET_KIND,
 	type FileFailureRecoveryAuthority,
@@ -43,7 +45,8 @@ const pythonSchema = Type.Object(
 		),
 		scriptPath: Type.Optional(
 			Type.String({
-				description: "Python script path. Relative paths resolve from cwd; one leading @ is ignored.",
+				description:
+					"Python script path relative to cwd. Native CLI input ignores one leading @; custom backends retain literal names.",
 				maxLength: 32_768,
 			}),
 		),
@@ -118,12 +121,16 @@ export interface PythonExecutionResult {
 }
 
 export interface PythonOperations {
+	/** Inspect the executing backend, not the operator filesystem. Preserve filesystem error codes. */
+	stat(path: string, signal?: AbortSignal): Promise<{ isDirectory(): boolean; isFile(): boolean }>;
 	exec(request: PythonExecutionRequest): Promise<PythonExecutionResult>;
 }
 
 export interface PythonToolOptions {
 	resolveRuntime?: () => Promise<PythonRuntimeOutcome>;
 	operations?: PythonOperations;
+	/** Selected backend syntax; a foreign dialect requires custom operations and runtime resolution. */
+	pathOptions?: Pick<PathInputOptions, "flavor">;
 	/** Explicit identity required to advertise encoding recovery on a custom execution backend. */
 	failureRecoveryAuthority?: FileFailureRecoveryAuthority;
 	/** Additional process environment resolved from the final execution cwd. */
@@ -136,34 +143,27 @@ export interface PythonToolOptions {
 	outputReduction?: OutputReductionToolOptions;
 }
 
-function stripAtPrefix(value: string): string {
-	return value.startsWith("@") ? value.slice(1) : value;
-}
-
 export function resolvePythonToolPath(
 	base: string,
 	requested: string,
-	platform: NodeJS.Platform = process.platform,
+	options: Pick<PathInputOptions, "flavor" | "stripAtPrefix"> = {},
 ): string {
-	return (platform === "win32" ? win32 : posix).resolve(base, stripAtPrefix(requested));
+	return resolvePath(requested, base, { expandTilde: false, stripAtPrefix: true, ...options });
 }
 
-async function resolveWorkingDirectory(baseCwd: string, requested?: string): Promise<string> {
-	const cwd = requested ? resolvePythonToolPath(baseCwd, requested) : baseCwd;
-	const entry = await stat(cwd).catch(() => {
-		throw new Error(`cwd does not exist: ${cwd}`);
+async function inspectPythonPath(
+	path: string,
+	kind: "cwd" | "scriptPath",
+	operations: PythonOperations,
+	signal?: AbortSignal,
+): Promise<void> {
+	const entry = await awaitPreflight(() => operations.stat(path, signal), signal).catch((error: unknown) => {
+		if (!isMissingPathError(error)) throw error;
+		throw new Error(`${kind} does not exist: ${path}`, { cause: error });
 	});
-	if (!entry.isDirectory()) throw new Error(`cwd is not a directory: ${cwd}`);
-	return cwd;
-}
-
-async function resolveScriptPath(cwd: string, requested: string): Promise<string> {
-	const scriptPath = resolvePythonToolPath(cwd, requested);
-	const entry = await stat(scriptPath).catch(() => {
-		throw new Error(`scriptPath does not exist: ${scriptPath}`);
-	});
-	if (!entry.isFile()) throw new Error(`scriptPath is not a file: ${scriptPath}`);
-	return scriptPath;
+	signal?.throwIfAborted();
+	if (kind === "cwd" ? !entry.isDirectory() : !entry.isFile())
+		throw new Error(`${kind} is not a ${kind === "cwd" ? "directory" : "file"}: ${path}`);
 }
 
 function clampInteger(value: number | undefined, fallback: number, minimum: number, maximum: number): number {
@@ -173,6 +173,7 @@ function clampInteger(value: number | undefined, fallback: number, minimum: numb
 
 function createLocalPythonOperations(): PythonOperations {
 	return {
+		stat: (path) => stat(path),
 		async exec(request) {
 			if (request.signal?.aborted) throw new Error("Python execution aborted before start");
 			const child = spawnProcess(request.python, request.args, {
@@ -204,6 +205,15 @@ export function createPythonToolDefinition(
 	baseCwd: string,
 	options: PythonToolOptions = {},
 ): ToolDefinition<typeof pythonSchema, PythonToolDetails> {
+	const nativeFlavor = process.platform === "win32" ? "win32" : "posix";
+	if (options.operations && (!options.resolveRuntime || typeof options.operations.stat !== "function"))
+		throw new Error("Custom Python operations require backend stat and explicit runtime resolution.");
+	if (!options.operations && options.pathOptions?.flavor && options.pathOptions.flavor !== nativeFlavor)
+		throw new Error("Non-native Python path semantics require custom operations.");
+	const pathOptions = Object.freeze({
+		flavor: options.pathOptions?.flavor ?? nativeFlavor,
+		stripAtPrefix: options.operations === undefined,
+	});
 	const resolveRuntime = options.resolveRuntime ?? (() => ensurePythonRuntime({ silent: true }));
 	const operations = options.operations ?? createLocalPythonOperations();
 	const recoveryAuthority = selectFileFailureRecoveryAuthority(
@@ -254,12 +264,16 @@ export function createPythonToolDefinition(
 				: [],
 		},
 		async execute(_toolCallId, input, signal) {
+			signal?.throwIfAborted();
 			const hasCode = typeof input.code === "string";
-			const hasScript = typeof input.scriptPath === "string" && input.scriptPath.trim().length > 0;
+			const hasScript = typeof input.scriptPath === "string" && input.scriptPath.length > 0;
 			if (hasCode === hasScript) throw new Error("Provide exactly one of code or scriptPath.");
-			const cwd = await resolveWorkingDirectory(baseCwd, input.cwd);
-			const scriptPath = hasScript ? await resolveScriptPath(cwd, input.scriptPath as string) : undefined;
-			const runtime = await resolveRuntime();
+			const cwd = resolvePythonToolPath(baseCwd, input.cwd ?? ".", pathOptions);
+			await inspectPythonPath(cwd, "cwd", operations, signal);
+			const scriptPath = hasScript ? resolvePythonToolPath(cwd, input.scriptPath as string, pathOptions) : undefined;
+			if (scriptPath !== undefined) await inspectPythonPath(scriptPath, "scriptPath", operations, signal);
+			const runtime = await awaitPreflight(resolveRuntime, signal);
+			signal?.throwIfAborted();
 			if (runtime.status !== "ready") throw new Error(runtime.reason);
 			const args = input.args ? [...input.args] : [];
 			const timeoutSeconds = clampInteger(
@@ -346,6 +360,7 @@ export function createPythonToolDefinition(
 			let execution: PythonExecutionResult;
 			try {
 				execution = await withExclusiveMutationBarrier(() => {
+					signal?.throwIfAborted();
 					const environment: NodeJS.ProcessEnv = {
 						...process.env,
 						...options.environment?.(cwd),

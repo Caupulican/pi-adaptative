@@ -108,9 +108,19 @@ discovery; an active refresh owns all concurrent callers. Returned outcomes are 
 The uv adapter retains `stdoutTruncated`; only complete path output can establish readiness.
 Its one terminal LF is framing, not part of the path; internal newlines, CR, Unicode whitespace,
 and trailing spaces stay literal. The entire candidate must pass backend inspection; there is no
-first-line fallback. Runtime provisioning still uses the native agent-directory layout. This does
-not migrate the general Python tool's custom working-directory adapter or close the race between
-the final interpreter identity observation and OS process creation.
+first-line fallback. Runtime provisioning still uses the native agent-directory layout. The race
+between the final interpreter identity observation and OS process creation remains backend-owned.
+
+The general Python tool now inspects working directories and scripts through `PythonOperations.stat`.
+Custom operations require explicit runtime resolution; `pathOptions.flavor` binds their lexical
+path dialect at construction. Custom names remain literal, including leading `@` and whitespace;
+the native CLI adapter retains its leading-`@` convenience. `resolvePythonToolPath` accepts path
+options instead of a platform string. Missing-path diagnostics retain their original cause, while
+permission, I/O, and symlink-loop failures retain their original identity. Cancellation prevents
+later provisioning or execution; the shared read-only `awaitPreflight` owner releases a canceled
+caller without canceling shared runtime discovery or losing late rejection handling. This does
+not detach operations with file effects. Custom Python environment inheritance and project output-rule
+loading still use operator-side configuration; this stage does not establish complete backend isolation.
 
 Custom `EditOperations.writeFile` accepts strings or buffers and must preserve supplied buffers.
 Execution retains the original preflight/queue/stale checks and reads back encoded writes before

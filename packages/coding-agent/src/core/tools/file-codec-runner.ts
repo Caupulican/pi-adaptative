@@ -1,7 +1,8 @@
 import { join } from "node:path";
 import { getBundledResourcesDir } from "../../config.ts";
 import { execCommand } from "../exec.ts";
-import { ensurePythonRuntime, type PythonRuntimeOutcome } from "../python-runtime.ts";
+import { awaitPreflight } from "../preflight.ts";
+import { ensurePythonRuntime } from "../python-runtime.ts";
 
 const MAX_PROTOCOL_UNITS = 64 * 1024 * 1024;
 
@@ -11,25 +12,7 @@ export const ENCODING_EVIDENCE_REQUIRED =
 /** One transport for the packaged, path-free codec. Consumers validate operation-specific fields. */
 export async function createFileCodecRunner(signal?: AbortSignal) {
 	if (signal?.aborted) throw new Error("Encoding recovery aborted");
-	const provisioning = ensurePythonRuntime({ silent: true });
-	const runtime = await new Promise<PythonRuntimeOutcome>((resolve, reject) => {
-		const onAbort = () => {
-			signal?.removeEventListener("abort", onAbort);
-			reject(new Error("Encoding recovery aborted"));
-		};
-		signal?.addEventListener("abort", onAbort, { once: true });
-		provisioning.then(
-			(outcome) => {
-				signal?.removeEventListener("abort", onAbort);
-				resolve(outcome);
-			},
-			(error: unknown) => {
-				signal?.removeEventListener("abort", onAbort);
-				reject(error);
-			},
-		);
-		if (signal?.aborted) onAbort();
-	});
+	const runtime = await awaitPreflight(() => ensurePythonRuntime({ silent: true }), signal);
 	if (runtime.status !== "ready") throw new Error(`Encoding recovery requires Python: ${runtime.reason}`);
 	const resources = getBundledResourcesDir();
 	return async (request: Record<string, unknown>) => {

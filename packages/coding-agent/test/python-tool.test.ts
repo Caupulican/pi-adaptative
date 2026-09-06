@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -36,7 +36,7 @@ function operation(
 		request: PythonExecutionRequest,
 	) => Promise<{ exitCode: number | null; reason: "exited" | "aborted" | "timeout"; signal: string | null }>,
 ): PythonOperations {
-	return { exec: run };
+	return { exec: run, stat: (path) => stat(path) };
 }
 
 describe("native python tool", () => {
@@ -109,7 +109,7 @@ describe("native python tool", () => {
 			tool.execute("script", { scriptPath: "missing.py" }, undefined, undefined, undefined as never),
 		).rejects.toThrow(/scriptPath does not exist/);
 
-		await tool.execute("ok", { scriptPath: "@script.py", args: ["x"] }, undefined, undefined, undefined as never);
+		await tool.execute("ok", { scriptPath: "script.py", args: ["x"] }, undefined, undefined, undefined as never);
 		expect(requests[0]).toMatchObject({ args: ["-B", script, "x"], stdin: undefined });
 	});
 
@@ -212,8 +212,11 @@ describe("native python tool", () => {
 	});
 
 	it("resolves path syntax using the target platform rules", () => {
-		expect(resolvePythonToolPath("C:\\repo", "scripts\\edit.py", "win32")).toBe("C:\\repo\\scripts\\edit.py");
-		expect(resolvePythonToolPath("/repo", "scripts/edit.py", "linux")).toBe("/repo/scripts/edit.py");
+		expect(resolvePythonToolPath("C:\\repo", "scripts\\edit.py", { flavor: "win32" })).toBe(
+			"C:\\repo\\scripts\\edit.py",
+		);
+		expect(resolvePythonToolPath("/repo", "scripts/edit.py", { flavor: "posix" })).toBe("/repo/scripts/edit.py");
+		expect(resolvePythonToolPath(process.cwd(), "@script.py")).toBe(join(process.cwd(), "script.py"));
 	});
 });
 

@@ -4,6 +4,7 @@
 
 - Custom `FileMutationIntentOperations` must supply a shared `mutationQueue` backend identity resolver. Mutation serialization no longer probes the operator filesystem for custom backends.
 - Custom `EditOperations.writeFile` must accept `Buffer` as well as UTF-8 strings, preserving supplied bytes without transcoding.
+- Custom `PythonOperations` must supply backend `stat` and an explicit runtime resolver. `resolvePythonToolPath` now takes path options instead of a platform string; custom execution paths retain literal leading `@` characters.
 
 ### Changed
 
@@ -11,6 +12,7 @@
 
 ### Fixed
 
+- Bound Python working-directory and script preflight to the selected backend and frozen path dialect. Preserved filesystem error identity and literal whitespace filenames; cancellation stops later provisioning or execution without abandoning shared runtime discovery.
 - Bounded oversized source-line retention and added lossless `read` character-window continuations without shell commands or split surrogate pairs. Session outline fallback now retains privacy projection, and oversized session records never expose partial raw payloads.
 - Bound write/edit preflight, parent traversal, queues, recovery targets, and edit previews to the selected backend path context. A stalled backend lookup no longer stalls unrelated backends.
 - Preserved mixed CRLF/LF/CR sequences and untouched Unicode bytes during text edits instead of normalizing the whole file. Previews and execution share strict UTF-8 validation; NUL-bearing or unsupported input routes to encoding-aware recovery, and malformed replacement Unicode is rejected before writing.
