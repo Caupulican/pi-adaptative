@@ -108,6 +108,7 @@ const codingAgentVerificationCoverageTests = [
 	"test/bash-silence-watchdog.test.ts",
 	"test/bash-executor-git-filter-spill.test.ts",
 	"test/background-tool-task-controller.test.ts",
+	"test/background-tool-invocation-receipt.test.ts",
 	"test/background-tool-verification-propagation.test.ts",
 	"test/background-tool-task-wait.test.ts",
 	"test/tool-task.test.ts",
