@@ -1,3 +1,5 @@
+import type { ToolInvocationObservation } from "@caupulican/pi-agent-core";
+
 /** Synthetic failure shapes only: no recorded transcript, user content, or runtime identifiers. */
 export const aliasReactivationFixture = {
 	cwd: "/fixture/repository",
@@ -18,6 +20,22 @@ export const verificationCwdFixture = {
 export const workbenchCounterFixture = {
 	firstCycle: [true, false],
 	secondCycle: [false],
-	firstSummary: "2 actions · 1 failure receipts",
-	secondSummary: "1 actions · 1 failure receipts",
+	firstSummary: "Cycle: 2 calls",
+	secondSummary: "Cycle: 1 calls",
 };
+
+export function workbenchToolObservation(toolCallId: string, isError = false): ToolInvocationObservation {
+	return {
+		toolCallId,
+		isError,
+		details: {
+			piToolInvocation: {
+				version: 1,
+				requestId: "fixture-request",
+				execution: "completed",
+				operationStatus: isError ? "error" : "success",
+				postprocessingFailures: [],
+			},
+		},
+	};
+}

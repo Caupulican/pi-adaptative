@@ -12,8 +12,10 @@ The focused tests cover:
 - Different-directory verification identities, an ordinary failure that cannot be erased by a
   different check, explicit setup-repair evidence, and a same-identity passing rerun. The Node
   shell-boundary regression now proves that only a classified setup failure can use that repair.
-- The existing workbench distinction between cycle-local actions and retained failure receipts.
-  Their quotient is not a session failure rate. This is a characterization, not approval of the label.
+- Workbench cycle-local calls and explicitly labeled retained error results. The original mixed-scope
+  label is now a regression: their quotient must never be presented as a failure rate. Receipt-based
+  reporting separately tests operation outcomes, unknown effects, postprocessing, delayed background
+  completion, and replay without copying incident records.
 
 Run the focused tests from `packages/coding-agent`:
 

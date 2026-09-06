@@ -10,6 +10,7 @@
 - Unified bounded test-output verification across Vitest and Node TAP/spec runners, recognized Node missing-file setup repairs, and rejected empty or incomplete runs without clearing unrelated failures.
 - Bound shell verification path semantics to the selected backend instead of guessing from the working-directory string.
 - Retained request-bound execution receipts through background notification and restart; unavailable or mismatched completions remain unknown rather than certifying success.
+- Replaced mixed-scope action/failure totals with cycle-local call counts, receipt-based outcome categories, and explicitly labeled retained error results. Background completion updates its original call; replay does not inflate counts, and narrow panes retain readable scoped labels.
 
 ## [0.99.1] - 2026-09-06
 

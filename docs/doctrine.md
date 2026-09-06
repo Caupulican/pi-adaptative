@@ -155,6 +155,14 @@ facts; unavailable completion remains unknown. Tools and hooks cannot manufactur
 Pinned by `packages/agent/test/tool-progress-delivery.test.ts` and
 `packages/agent/test/tool-progress-settlement.test.ts`.
 
+**Reporting dimensions keep their scope.** `ToolInvocationReport` owns receipt classification and
+replay reconciliation. A background terminal updates the original call and cycle, not a second
+action. Completed-negative operations, unknown effects, rejection, postprocessing faults, and raw
+error results remain distinct. The workbench labels cycle calls separately from retained error
+results; their quotient is never a failure rate. Bounded retention discloses saturation as partial,
+and missing or conflicting evidence never certifies success. Pinned by
+`packages/agent/test/tool-invocation-report.test.ts` and the workbench controller regressions.
+
 **Verification is a typed host receipt, not a claim in prose.** Goal test evidence must resolve
 to a passing receipt on the active branch; complete user quotations resolve only to user-role
 records. An unrelated successful command never clears a failed test. Literal argv and actual

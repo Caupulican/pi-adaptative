@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
 	BackgroundToolTaskController,
 	type BackgroundToolTaskRecord,
+	backgroundToolInvocationObservations,
 	createBackgroundToolTerminalMessage,
 } from "../src/core/background-tool-task-controller.ts";
 
@@ -67,6 +68,31 @@ function start(controller: BackgroundToolTaskController) {
 }
 
 describe("background invocation evidence", () => {
+	it("decodes only bounded terminal notification data without opening unrelated payloads or accessors", () => {
+		const record = { toolCallId: "fixture-call", status: "completed", piToolInvocation: receipt };
+		const message = { customType: "background-tool-completion", details: { records: [record] } };
+		expect(backgroundToolInvocationObservations(message)).toEqual([
+			{ toolCallId: "fixture-call", isError: false, details: record },
+		]);
+		expect(backgroundToolInvocationObservations({ ...message, customType: "unrelated" })).toEqual([]);
+		expect(
+			backgroundToolInvocationObservations({
+				...message,
+				details: { records: Array.from({ length: 9 }, () => record) },
+			}),
+		).toEqual([]);
+		const malicious = Object.defineProperty({}, "toolCallId", {
+			get: () => {
+				throw new Error("must not read getter");
+			},
+		});
+		expect(
+			backgroundToolInvocationObservations({
+				...message,
+				details: { records: [malicious, { ...record, status: "running" }] },
+			}),
+		).toEqual([]);
+	});
 	it.each(["completed", "unknown", "absent", "mismatched"] as const)(
 		"retains only bound evidence through notification and restart: %s",
 		async (mode) => {

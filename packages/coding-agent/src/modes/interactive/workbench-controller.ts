@@ -1,7 +1,8 @@
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import { type AgentMessage, type ToolInvocationObservation, ToolInvocationReport } from "@caupulican/pi-agent-core";
 import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
-import { type Component, isMouseSequence, parseMouseSequence, Text } from "@caupulican/pi-tui";
+import { type Component, isMouseSequence, parseMouseSequence, Text, wrapTextWithAnsi } from "@caupulican/pi-tui";
 import type { LaneRecord } from "../../core/autonomy/lane-tracker.ts";
+import { backgroundToolInvocationObservations } from "../../core/background-tool-task-controller.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import { type OrchestrationPanelModel, renderOrchestrationPanelRows } from "../../core/tools/orchestration-panel.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
@@ -32,8 +33,7 @@ export class WorkbenchController {
 	readonly view: WorkbenchComponent;
 	private readonly ports: WorkbenchPorts;
 	private previews: Component[] = [];
-	private failed = 0;
-	private actionCount = 0;
+	private readonly invocations = new ToolInvocationReport();
 	private fileEffects = 0;
 	/** Evidence of the previous cycle stays on screen until the new cycle produces its own. */
 	private staleEvidence = false;
@@ -60,8 +60,7 @@ export class WorkbenchController {
 		this.observationReady = undefined;
 		this.observationTurn++;
 		this.previews = [];
-		this.failed = 0;
-		this.actionCount = 0;
+		this.invocations.reset();
 		this.fileEffects = 0;
 		this.staleEvidence = false;
 		this.lastObservationNote = undefined;
@@ -104,7 +103,7 @@ export class WorkbenchController {
 		if (!this.staleEvidence) return;
 		this.staleEvidence = false;
 		this.previews = [];
-		this.actionCount = 0;
+		this.invocations.beginCycle();
 		this.fileEffects = 0;
 	}
 
@@ -158,11 +157,10 @@ export class WorkbenchController {
 		this.updateExecution();
 	}
 
-	record(preview: Component | undefined, failed: boolean): void {
+	record(preview: Component | undefined, observation: ToolInvocationObservation): void {
 		this.view.dismissUserShell();
 		this.beginEvidence();
-		this.actionCount++;
-		if (failed) this.failed++;
+		this.invocations.record(observation);
 		if (preview) {
 			this.previews.push(preview);
 			if (this.previews.length > MAX_PREVIEWS) this.previews.shift();
@@ -170,27 +168,50 @@ export class WorkbenchController {
 		this.updateExecution();
 	}
 
+	recordBackground(message: AgentMessage): void {
+		if (message.role !== "custom") return;
+		const observations = backgroundToolInvocationObservations(message);
+		for (const observation of observations) this.invocations.record(observation, "background");
+		if (observations.length) this.updateExecution();
+	}
+
 	private updateExecution(): void {
-		if (!this.previews.length && !this.failed) {
+		const { current, retained, partial } = this.invocations.snapshot();
+		if (!this.previews.length && !retained.calls && !partial) {
 			this.view.setExecution(undefined);
 			return;
 		}
 		// The cycle's evidence stays in order, newest last; the pane follows it until the operator scrolls.
-		const summary = theme.fg(
-			this.failed ? "warning" : "muted",
-			`${this.actionCount} actions${this.fileEffects ? ` · ${this.fileEffects} file effects` : ""}${this.failed ? ` · ${this.failed} failure receipts` : ""}`,
-		);
+		const details = [
+			...(current.notStarted ? [`${current.notStarted} not started`] : []),
+			...(current.running ? [`${current.running} running`] : []),
+			...(current.negative ? [`${current.negative} negative outcomes`] : []),
+			...(current.unknown ? [`${current.unknown} unknown effects`] : []),
+			...(current.unclassified ? [`${current.unclassified} unclassified`] : []),
+			...(current.postprocessing ? [`${current.postprocessing} postprocessing faults`] : []),
+			...(current.conflicts ? [`${current.conflicts} conflicting receipts`] : []),
+			...(this.fileEffects ? [`${this.fileEffects} file effects`] : []),
+			...(retained.errorResults ? [`retained: ${retained.errorResults} error results`] : []),
+		].join(" · ");
+		const summary = details
+			? theme.fg(retained.errorResults || current.postprocessing || current.conflicts ? "warning" : "muted", details)
+			: "";
 		this.view.setExecution(
 			{
-				render: (width) =>
-					this.previews.flatMap((preview, index) => [...(index ? [""] : []), ...preview.render(width)]),
+				render: (width) => [
+					...this.previews.flatMap((preview, index) => [...(index ? [""] : []), ...preview.render(width)]),
+					...(summary ? [...(this.previews.length ? [""] : []), ...wrapTextWithAnsi(summary, width)] : []),
+				],
 				invalidate: () => {
 					for (const preview of this.previews) preview.invalidate();
 				},
 			},
-			!this.previews.length,
+			false,
 			this.previews.at(-1),
-			summary,
+			theme.fg(
+				"muted",
+				`${partial ? "Partial cycle" : this.staleEvidence ? "Previous cycle" : "Cycle"}: ${current.calls} calls`,
+			),
 		);
 		this.ports.requestRender();
 	}

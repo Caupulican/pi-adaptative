@@ -76,8 +76,28 @@ validated receipt across notification and restart, bound to the admitted request
 Lost or mismatched completions become unknown, never a successful rerun. Malformed latest durable
 records cannot resurrect older success. Legacy records without admission identity remain without
 strong execution evidence. Receipts add separately bounded durable metadata (under 512 serialized
-characters) alongside the existing failure-payload budget. Reporting aggregation and attachment
-fencing are still separate migration work.
+characters) alongside the existing failure-payload budget. Attachment fencing remains separate
+migration work.
+
+## Reporting scope
+
+`ToolInvocationReport` is the single provider-neutral counter owner. It reconciles observations by
+request and tool-call identity, retains their original cycle, and separates not-started, running,
+completed-success, completed-negative, unknown-effects, and unclassified results. Postprocessing
+faults and display error results are independent dimensions, not additional failed calls. Conflicting
+terminal claims become unknown; late handoff placeholders never undo completed evidence.
+
+The workbench displays cycle-local calls and an explicitly labeled retained error-result count;
+their quotient is not a failure rate. Retained means observations since the report/UI reset, not
+every root and worker action in the durable session. A new cycle keeps the previous view labeled
+as previous until its first evidence arrives. Background terminals update the owning cycle even
+after a later cycle begins, and notification replay does not increase totals.
+
+Bookkeeping has a 256 KiB charged-retention budget, using bounded identities and fixed records,
+without storing output or arguments. If it saturates, counts are labeled partial and already-retained
+identities still reconcile; replay protection is never silently evicted. Missing historical receipts
+remain unclassified. No percentage or complete-session claim is derived from incomplete evidence.
+Native backend conformance and full attachment migration are not established by these reporting tests.
 
 ## Public fixtures
 

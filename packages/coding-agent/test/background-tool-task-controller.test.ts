@@ -815,7 +815,7 @@ describe("BackgroundToolTaskController", () => {
 		expect(message.content).toContain("Parent was not woken because the owning goal is no longer active");
 		expect(message.content).not.toContain("Parent woke");
 		expect(message.details.records).toEqual([
-			{ taskId: "tool-task-1", status: "completed", toolName: "slow", artifactId: "abc123" },
+			{ taskId: "tool-task-1", toolCallId: "call-1", status: "completed", toolName: "slow", artifactId: "abc123" },
 		]);
 	});
 

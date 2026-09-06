@@ -21,6 +21,7 @@ export * from "./tool-failure-memory.ts";
 // Shared model-facing recovery doctrine
 export * from "./tool-failure-recovery-protocol.ts";
 export * from "./tool-invocation-receipt.ts";
+export * from "./tool-invocation-report.ts";
 // Native tool-call markup that escaped as assistant text
 export * from "./tool-protocol-residue.ts";
 // Types

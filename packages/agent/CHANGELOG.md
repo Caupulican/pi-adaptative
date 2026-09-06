@@ -5,6 +5,7 @@
 - Explicit backend path and immutable workspace-attachment contexts with generation identities and portable resource references.
 - Validated verification evidence strength and a shared predicate distinguishing witnessed passing tests from command success.
 - Engine-owned invocation receipts distinguish admission rejection, running work, completed operation outcomes, unknown partial effects, and post-processing failures independently of hook policy. Receipts add bounded durable metadata alongside existing failure payload budgets.
+- Bounded receipt-derived reporting separates current-cycle observations from retained history, reconciles background handoffs and replay, and exposes missing or conflicting evidence without inventing execution outcomes.
 
 ### Fixed
 

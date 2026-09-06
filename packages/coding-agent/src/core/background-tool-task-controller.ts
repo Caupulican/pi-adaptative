@@ -2,8 +2,10 @@ import {
 	type BackgroundToolCallCompletion,
 	type BackgroundToolCallContext,
 	type BackgroundToolCallHandoff,
+	type CustomMessage,
 	decodeToolInvocationReceipt,
 	retainedToolInvocation,
+	type ToolInvocationObservation,
 	type ToolInvocationReceipt,
 } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -145,6 +147,7 @@ export interface BackgroundToolTerminalMessage {
 	details: {
 		records: Array<{
 			taskId: string;
+			toolCallId: string;
 			status: BackgroundToolTaskStatus;
 			toolName: string;
 			artifactId?: string;
@@ -227,6 +230,7 @@ export function createBackgroundToolTerminalMessage(
 		details: {
 			records: included.map((record) => ({
 				taskId: record.taskId,
+				toolCallId: record.toolCallId,
 				status: record.status,
 				toolName: record.toolName,
 				...(record.artifactId ? { artifactId: record.artifactId } : {}),
@@ -335,6 +339,26 @@ function cloneUsage(value: unknown): Usage | undefined {
 function ownDataValue(record: object, key: string): unknown {
 	const descriptor = Object.getOwnPropertyDescriptor(record, key);
 	return descriptor && "value" in descriptor ? descriptor.value : undefined;
+}
+
+/** Bounded projection for receipt consumers; never infer execution from rendered notification prose. */
+export function backgroundToolInvocationObservations(
+	message: Pick<CustomMessage, "customType" | "details">,
+): ToolInvocationObservation[] {
+	if (message.customType !== "background-tool-completion" || !isRecordObject(message.details)) return [];
+	const records = ownDataValue(message.details, "records");
+	if (!Array.isArray(records) || records.length > MAX_TERMINAL_HANDOFF_RECORDS) return [];
+	const observations: ToolInvocationObservation[] = [];
+	for (let index = 0; index < records.length; index++) {
+		const record = ownDataValue(records, String(index));
+		if (!isRecordObject(record)) continue;
+		const toolCallId = ownDataValue(record, "toolCallId");
+		const status = ownDataValue(record, "status");
+		if (typeof toolCallId !== "string" || (status !== "completed" && status !== "failed" && status !== "canceled"))
+			continue;
+		observations.push({ toolCallId, isError: status === "failed", details: record });
+	}
+	return observations;
 }
 
 /** Normalize the cross-package verification wire contract before durable persistence. */

@@ -6,6 +6,48 @@ import {
 } from "../src/modes/interactive/interactive-event-controller.ts";
 
 describe("interactive delegate worker events", () => {
+	it("passes invocation identity and evidence, not only a display error flag, to reporting", async () => {
+		const record = vi.fn();
+		const details = {
+			piToolInvocation: { version: 1, requestId: "fixture", execution: "unknown", postprocessingFailures: [] },
+		};
+		const host = {
+			isInitialized: true,
+			footer: { invalidate() {} },
+			ui: { requestRender() {} },
+			workbench: { record, afterTool: vi.fn() },
+			activeToolCalls: { getActive: () => undefined },
+		} as unknown as InteractiveEventHost;
+		await handleInteractiveEvent(host, {
+			type: "tool_execution_end",
+			toolName: "fixture",
+			toolCallId: "fixture-call",
+			isError: true,
+			result: { content: [], details },
+		});
+		expect(record).toHaveBeenCalledExactlyOnceWith(undefined, { toolCallId: "fixture-call", isError: true, details });
+	});
+
+	it("routes a background terminal custom message through the same report owner", async () => {
+		const recordBackground = vi.fn();
+		const message = {
+			role: "custom" as const,
+			customType: "background-tool-completion",
+			content: "fixture",
+			display: true,
+			timestamp: 0,
+			details: {},
+		};
+		const host = {
+			isInitialized: true,
+			footer: { invalidate() {} },
+			ui: { requestRender() {} },
+			workbench: { recordBackground },
+			addMessageToChat: vi.fn(),
+		} as unknown as InteractiveEventHost;
+		await handleInteractiveEvent(host, { type: "message_start", message });
+		expect(recordBackground).toHaveBeenCalledExactlyOnceWith(message);
+	});
 	it("attaches a tool synchronously even when workspace observation is pending", async () => {
 		let release: (() => void) | undefined;
 		const pending = new Promise<void>((resolve) => {

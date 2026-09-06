@@ -198,6 +198,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 
 		case "message_start":
 			if (event.message.role === "custom") {
+				host.workbench?.recordBackground(event.message);
 				host.addMessageToChat(event.message);
 				host.ui.requestRender();
 			} else if (event.message.role === "user") {
@@ -321,7 +322,11 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			if (["task_steps", "goal", "delegate"].includes(event.toolName)) {
 				host.refreshActivityLane();
 			}
-			host.workbench?.record(component?.getWorkbenchPreview(), event.isError);
+			host.workbench?.record(component?.getWorkbenchPreview(), {
+				toolCallId: event.toolCallId,
+				isError: event.isError,
+				details: event.result.details,
+			});
 			void host.workbench?.afterTool(event.toolName);
 			break;
 		}
