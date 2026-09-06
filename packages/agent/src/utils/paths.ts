@@ -60,7 +60,14 @@ export function normalizePath(input: string, options: PathInputOptions = {}): st
 
 export function resolvePath(input: string, baseDir: string = process.cwd(), options: PathInputOptions = {}): string {
 	const normalized = normalizePath(input, options);
-	const normalizedBaseDir = normalizePath(baseDir, { ...options, stripAtPrefix: false });
+	// Input cleanup is not authority to rename the supplied directory. File URLs and explicit
+	// home shortcuts still decode, but literal directory bytes (including trailing spaces) stay.
+	const normalizedBaseDir = normalizePath(baseDir, {
+		...options,
+		stripAtPrefix: false,
+		normalizeUnicodeSpaces: false,
+		trim: false,
+	});
 	const flavor = options.flavor ?? (process.platform === "win32" ? "win32" : "posix");
 	// Ambient defaults belong only to this native input adapter. Explicit backend contexts
 	// must already provide a fully qualified directory and never borrow the operator's drive.

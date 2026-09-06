@@ -19,6 +19,7 @@ import { keyHint, keyText } from "../../modes/interactive/components/keybinding-
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import { formatDimensionNote, resizeImage } from "../../utils/image-resize.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
+import type { PathInputOptions } from "../../utils/paths.ts";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
@@ -200,6 +201,8 @@ export interface ReadToolOptions {
 	autoResizeImages?: boolean;
 	/** Custom operations for file reading. Default: local filesystem */
 	operations?: ReadOperations;
+	/** Custom backend path dialect and home; omitted means native path semantics. */
+	pathOptions?: Pick<PathInputOptions, "flavor" | "homeDir">;
 	/** Shared backend identity for exact cross-tool recovery with custom operations. */
 	failureRecoveryAuthority?: FileFailureRecoveryAuthority;
 	/** Whole-file load budget for text reads; larger files stream line slices instead. Default 16 MiB. */
@@ -358,6 +361,14 @@ export function createReadToolDefinition(
 ): ToolDefinition<typeof readSchema, ReadToolDetails | undefined> {
 	const autoResizeImages = options?.autoResizeImages ?? true;
 	const ops = options?.operations ?? defaultReadOperations;
+	const pathOptions = Object.freeze({ ...options?.pathOptions, normalizeUnicodeSpaces: false, stripAtPrefix: false });
+	if (
+		!options?.operations &&
+		options?.pathOptions?.flavor &&
+		options.pathOptions.flavor !== (process.platform === "win32" ? "win32" : "posix")
+	) {
+		throw new Error("Non-native read path semantics require custom operations");
+	}
 	const failureRecoveryAuthority = selectFileFailureRecoveryAuthority(
 		options?.operations !== undefined,
 		options?.failureRecoveryAuthority,
@@ -375,7 +386,15 @@ export function createReadToolDefinition(
 		failureRecovery: {
 			getFailureTargets: (params, failure) =>
 				failure.failureCode === "file_not_found" && failureRecoveryAuthority
-					? [fileRecoveryTarget(failureRecoveryAuthority, FILE_EXISTS_RECOVERY_TARGET_KIND, params.path, cwd)]
+					? [
+							fileRecoveryTarget(
+								failureRecoveryAuthority,
+								FILE_EXISTS_RECOVERY_TARGET_KIND,
+								params.path,
+								cwd,
+								pathOptions,
+							),
+						]
 					: [],
 			actions: failureRecoveryAuthority
 				? [
@@ -427,10 +446,13 @@ export function createReadToolDefinition(
 
 					(async () => {
 						try {
-							const absolutePath = await resolveReadPathAsync(path, cwd);
-							if (aborted) return;
-							// Check if file exists and is readable.
-							await ops.access(absolutePath);
+							const absolutePath = await resolveReadPathAsync(
+								path,
+								cwd,
+								(candidate) => ops.access(candidate),
+								pathOptions,
+								signal,
+							);
 							if (aborted) return;
 							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
 							let content: (TextContent | ImageContent)[];

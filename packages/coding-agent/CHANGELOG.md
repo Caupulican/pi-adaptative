@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Resolved read candidates through the executing filesystem backend, preferred exact names before spelling conveniences, and bound missing-read recovery to the same explicit path dialect. Permission and I/O failures no longer trigger alternate-name probes.
 - Preserved path-alias expansion when the tool registry reactivates an original tool descriptor.
 - Unified bounded test-output verification across Vitest and Node TAP/spec runners, recognized Node missing-file setup repairs, and rejected empty or incomplete runs without clearing unrelated failures.
 - Bound shell verification path semantics to the selected backend instead of guessing from the working-directory string.

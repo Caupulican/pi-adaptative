@@ -3,6 +3,7 @@ import { constants, rmSync } from "node:fs";
 import { access, copyFile, lstat, mkdtemp, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { isMissingPathError } from "../util/filesystem-errors.ts";
 
 const DEFAULT_CONTENT_REFERENCE_LIMIT = 64;
 const DEFAULT_CONTENT_REFERENCE_TTL_MS = 60 * 60 * 1000;
@@ -122,15 +123,6 @@ export interface FileMutationIntentControllerOptions {
 	mutationPayloadByteLimit?: number;
 	mutationPayloadTtlMs?: number;
 	now?: () => number;
-}
-
-function isMissingPathError(error: unknown): boolean {
-	return (
-		typeof error === "object" &&
-		error !== null &&
-		"code" in error &&
-		(error.code === "ENOENT" || error.code === "ENOTDIR")
-	);
 }
 
 function errorCode(error: unknown): string | undefined {

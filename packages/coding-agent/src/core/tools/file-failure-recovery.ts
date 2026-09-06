@@ -5,6 +5,7 @@ import {
 	type AgentToolFailureRecoveryTarget,
 	createAgentToolFailureRecoveryAuthority,
 } from "@caupulican/pi-agent-core/types";
+import type { PathInputOptions } from "../../utils/paths.ts";
 import { resolveToCwd } from "./path-utils.ts";
 
 export const FILE_EXISTS_RECOVERY_TARGET_KIND = "filesystem.file.exists";
@@ -51,8 +52,13 @@ export function selectFileFailureRecoveryAuthority(
 	return explicitAuthority ?? (usesCustomOperations ? undefined : LOCAL_FILE_FAILURE_RECOVERY_AUTHORITY);
 }
 
-export function fileRecoveryScope(authority: FileFailureRecoveryAuthority, path: string, cwd: string): string {
-	return authority.getScope(resolveToCwd(path, cwd));
+export function fileRecoveryScope(
+	authority: FileFailureRecoveryAuthority,
+	path: string,
+	cwd: string,
+	options?: PathInputOptions,
+): string {
+	return authority.getScope(resolveToCwd(path, cwd, options));
 }
 
 export function fileRecoveryTarget(
@@ -60,11 +66,12 @@ export function fileRecoveryTarget(
 	kind: string,
 	path: string,
 	cwd: string,
+	options?: PathInputOptions,
 ): AgentToolFailureRecoveryTarget {
 	return {
 		authority: authority.contractAuthority,
 		kind,
-		scope: fileRecoveryScope(authority, path, cwd),
+		scope: fileRecoveryScope(authority, path, cwd, options),
 	};
 }
 

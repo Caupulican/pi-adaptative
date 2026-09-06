@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Preserved literal working-directory spaces and Unicode when applying cleanup to a relative path input.
 - Resolved paths and file URLs using the selected execution dialect, honored the supplied home for base paths, and rejected ambiguous Windows drive-relative paths.
 - Retained executor-owned verification evidence through post-execution hook replacement, mutation, failure, and background handoff; hooks cannot manufacture passing verification receipts.
 - Drained started tool siblings after admission failure and preserved completed results through reservation cancellation and batch abort, without issuing another provider request.

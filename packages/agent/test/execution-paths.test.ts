@@ -2,6 +2,27 @@ import { describe, expect, it } from "vitest";
 import { normalizePath, resolvePath } from "../src/utils/paths.ts";
 
 describe("execution backend path semantics", () => {
+	it.each([
+		{
+			flavor: "posix" as const,
+			cwd: "/fixture/work\u00a0space ",
+			expected: "/fixture/work\u00a0space /file name.txt",
+		},
+		{
+			flavor: "win32" as const,
+			cwd: "Q:\\fixture\\work\u00a0space ",
+			expected: "Q:\\fixture\\work\u00a0space \\file name.txt",
+		},
+	])("input cleanup must not rewrite the admitted $flavor working directory", ({ flavor, cwd, expected }) => {
+		expect(
+			resolvePath(" @file\u00a0name.txt ", cwd, {
+				flavor,
+				trim: true,
+				stripAtPrefix: true,
+				normalizeUnicodeSpaces: true,
+			}),
+		).toBe(expected);
+	});
 	it("resolves Windows paths independently of the host machine", () => {
 		expect(resolvePath("src/example.ts", "Q:\\fixture workspace", { flavor: "win32" })).toBe(
 			"Q:\\fixture workspace\\src\\example.ts",

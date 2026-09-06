@@ -35,6 +35,16 @@ of Windows path syntax is not evidence of native Windows process or filesystem b
 
 ## Verification evidence
 
+Read lookup now probes only the selected `ReadOperations.access` port. `ReadToolOptions.pathOptions`
+binds lexical dialect and home at construction; a non-native dialect requires custom operations.
+Exact input spelling wins before bounded screenshot/Unicode conveniences, and those conveniences
+never rewrite the admitted working directory. Candidate generation is lazy, so an unavailable
+fallback home cannot invalidate an existing literal filename. Only missing-path errors permit
+another candidate; permission, I/O, and symlink-loop failures retain their identity. Cancellation
+stops subsequent probes and reads. Missing-read recovery uses the same dialect and exact input.
+Custom operations still own filesystem authorization and symlink semantics. This migrates read
+lookup, not all mutation/search/rendering adapters or attachment-generation fencing.
+
 `TestVerificationOutput` owns bounded UTF-8 decoding and terminal settlement. Runner strategies
 parse Vitest summaries or Node TAP/spec summaries; shell classification declares every stage.
 An empty, skipped-only, malformed, missing, or incomplete summary is not a passing test run.

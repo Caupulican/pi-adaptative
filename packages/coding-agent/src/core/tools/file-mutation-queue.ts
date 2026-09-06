@@ -1,5 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
+import { isMissingPathError } from "../util/filesystem-errors.ts";
 
 const fileMutationQueues = new Map<string, Promise<void>>();
 let registrationQueue = Promise.resolve();
@@ -63,15 +64,6 @@ export function withExclusiveMutationBarrier<T>(fn: () => Promise<T>): Promise<T
 		() => undefined,
 	);
 	return run;
-}
-
-function isMissingPathError(error: unknown): boolean {
-	return (
-		typeof error === "object" &&
-		error !== null &&
-		"code" in error &&
-		(error.code === "ENOENT" || error.code === "ENOTDIR")
-	);
 }
 
 async function getMutationQueueKey(filePath: string): Promise<string> {
