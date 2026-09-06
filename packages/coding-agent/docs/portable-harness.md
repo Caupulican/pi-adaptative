@@ -71,6 +71,17 @@ cannot preserve those boundaries remain non-mutating failures with recovery guid
 resolved by the existing runtime manager, not an assumed interpreter path or host `iconv` command.
 Recovery is bounded to 16 MiB sources/results, 64 MiB protocol input, and 30 seconds per codec call.
 
+The shared Python runtime manager revalidates cached executable identity through its
+`inspectInterpreter` port. The native adapter checks fully qualified paths, regular-file status,
+POSIX execute permission, and stat identity. Removed or changed executables trigger fresh uv
+discovery; an active refresh owns all concurrent callers. Returned outcomes are frozen.
+The uv adapter retains `stdoutTruncated`; only complete path output can establish readiness.
+Its one terminal LF is framing, not part of the path; internal newlines, CR, Unicode whitespace,
+and trailing spaces stay literal. The entire candidate must pass backend inspection; there is no
+first-line fallback. Runtime provisioning still uses the native agent-directory layout. This does
+not migrate the general Python tool's custom working-directory adapter or close the race between
+the final interpreter identity observation and OS process creation.
+
 Custom `EditOperations.writeFile` accepts strings or buffers and must preserve supplied buffers.
 Execution retains the original preflight/queue/stale checks and reads back encoded writes before
 reporting `encodingRecovery.verified`. Retarget payloads retain the explicit codec; content references

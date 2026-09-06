@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { accessSync, constants, mkdirSync, statSync } from "node:fs";
+import { assertExecutionAbsolutePath } from "@caupulican/pi-agent-core/paths";
 import { getAgentDir } from "../config.ts";
 import { ensureTool } from "../utils/tools-manager.ts";
 import { cacheFile, runtimesDir } from "./agent-paths.ts";
@@ -22,6 +23,8 @@ export interface PythonRuntimeCommandResult {
 	stdout: string;
 	stderr: string;
 	killed: boolean;
+	/** Missing means unconfirmed output, never a usable interpreter-path observation. */
+	stdoutTruncated: boolean;
 }
 
 export interface PythonRuntimeDependencies {
@@ -29,7 +32,8 @@ export interface PythonRuntimeDependencies {
 	ensureUv: (silent: boolean) => Promise<string | undefined>;
 	isOffline: () => boolean;
 	makeDirectory: (path: string) => void;
-	pathExists: (path: string) => boolean;
+	/** Validate a literal absolute executable file and return its current opaque identity; undefined means unavailable. */
+	inspectInterpreter: (path: string) => string | undefined;
 	run: (
 		command: string,
 		args: string[],
@@ -39,7 +43,7 @@ export interface PythonRuntimeDependencies {
 	now: () => number;
 }
 
-export type PythonRuntimeOutcome =
+export type PythonRuntimeOutcome = Readonly<
 	| {
 			status: "ready";
 			uvPath: string;
@@ -49,7 +53,8 @@ export type PythonRuntimeOutcome =
 	| {
 			status: "offline" | "uv-unavailable" | "python-unavailable";
 			reason: string;
-	  };
+	  }
+>;
 
 export interface PythonRuntimeManager {
 	ensure(options?: { silent?: boolean; force?: boolean }): Promise<PythonRuntimeOutcome>;
@@ -66,17 +71,31 @@ function boundedDiagnostic(value: string): string {
 	return `…${trimmed.slice(-PYTHON_RUNTIME_DIAGNOSTIC_CHARS)}`;
 }
 
-function firstNonemptyLine(value: string): string | undefined {
-	return value
-		.split(/\r?\n/u)
-		.map((line) => line.trim())
-		.find(Boolean);
+/** uv writes one complete path followed by LF, including on Windows. Whitespace belongs to the path. */
+function interpreterPathOutput(value: string): string | undefined {
+	if (!value.endsWith("\n") || value.length > PYTHON_RUNTIME_COMMAND_BUFFER || value.includes("\0")) return undefined;
+	const path = value.slice(0, -1);
+	return path.length > 0 ? path : undefined;
+}
+
+/** Executable admission and fingerprinting for the native runtime adapter. */
+export function inspectPythonInterpreter(path: string): string | undefined {
+	try {
+		assertExecutionAbsolutePath(path, process.platform === "win32" ? "win32" : "posix");
+		const entry = statSync(path, { bigint: true });
+		if (!entry.isFile()) return undefined;
+		accessSync(path, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+		return [entry.dev, entry.ino, entry.mode, entry.size, entry.mtimeNs, entry.ctimeNs].join(":");
+	} catch {
+		return undefined;
+	}
 }
 
 export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): PythonRuntimeManager {
 	let inFlight: Promise<PythonRuntimeOutcome> | undefined;
 	let lastOutcome: PythonRuntimeOutcome | undefined;
 	let lastOutcomeAt = 0;
+	let lastInterpreterIdentity: string | undefined;
 
 	const ensureOnce = async (silent: boolean): Promise<PythonRuntimeOutcome> => {
 		const uvPath = await deps.ensureUv(silent);
@@ -102,16 +121,21 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 			});
 		const resolveFoundPython = (result: PythonRuntimeCommandResult): PythonRuntimeOutcome | undefined => {
 			if (result.code !== 0 || result.killed) return undefined;
-			const pythonPath = firstNonemptyLine(result.stdout);
+			const pythonPath = result.stdoutTruncated === false ? interpreterPathOutput(result.stdout) : undefined;
 			if (!pythonPath) {
-				return { status: "python-unavailable", reason: "uv reported success without a Python interpreter path." };
-			}
-			if (!deps.pathExists(pythonPath)) {
 				return {
 					status: "python-unavailable",
-					reason: `uv reported a Python path that does not exist: ${pythonPath}`,
+					reason: "uv reported success without a complete Python interpreter path.",
 				};
 			}
+			const identity = deps.inspectInterpreter(pythonPath);
+			if (identity === undefined) {
+				return {
+					status: "python-unavailable",
+					reason: `uv reported a Python path that is not an available executable file: ${pythonPath}`,
+				};
+			}
+			lastInterpreterIdentity = identity;
 			return { status: "ready", uvPath, pythonPath, pythonInstalled: false };
 		};
 
@@ -150,8 +174,12 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 
 	return {
 		ensure(options = {}) {
+			if (inFlight) return inFlight;
 			const force = options.force ?? false;
-			if (!force && lastOutcome?.status === "ready") return Promise.resolve(lastOutcome);
+			if (!force && lastOutcome?.status === "ready") {
+				const current = deps.inspectInterpreter(lastOutcome.pythonPath);
+				if (current !== undefined && current === lastInterpreterIdentity) return Promise.resolve(lastOutcome);
+			}
 			if (
 				!force &&
 				lastOutcome &&
@@ -160,10 +188,9 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 			) {
 				return Promise.resolve(lastOutcome);
 			}
-			if (inFlight) return inFlight;
 			inFlight = ensureOnce(options.silent ?? true)
 				.then((outcome) => {
-					lastOutcome = outcome;
+					lastOutcome = Object.freeze(outcome);
 					lastOutcomeAt = deps.now();
 					return outcome;
 				})
@@ -183,7 +210,7 @@ const realPythonRuntimeDependencies: PythonRuntimeDependencies = {
 	ensureUv: (silent) => ensureTool("uv", silent),
 	isOffline: () => isTruthyEnvFlag(process.env.PI_OFFLINE),
 	makeDirectory: (path) => mkdirSync(path, { recursive: true, mode: 0o700 }),
-	pathExists: existsSync,
+	inspectInterpreter: inspectPythonInterpreter,
 	run: async (command, args, cwd, options) => {
 		const result = await execCommand(command, args, cwd, {
 			env: options.env,
@@ -195,6 +222,7 @@ const realPythonRuntimeDependencies: PythonRuntimeDependencies = {
 			stdout: result.stdout,
 			stderr: result.stderr,
 			killed: result.killed,
+			stdoutTruncated: result.stdoutTruncated,
 		};
 	},
 	now: Date.now,

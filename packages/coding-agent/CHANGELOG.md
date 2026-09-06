@@ -21,6 +21,7 @@
 - Retained request-bound execution receipts through background notification and restart; unavailable or mismatched completions remain unknown rather than certifying success.
 - Replaced mixed-scope action/failure totals with cycle-local call counts, receipt-based outcome categories, and explicitly labeled retained error results. Background completion updates its original call; replay does not inflate counts, and narrow panes retain readable scoped labels.
 - Recovered BOM-marked and explicitly encoded text edits through a packaged, isolated Python codec. The shared planner preserves individual line endings; strict source round-trips, byte-splice validation, and backend readback precede verified success. Retarget payloads and exact-copy references retain encoding and bytes.
+- Revalidated cached Python executable identities after relocation, replacement, permission loss, or deletion; concurrent callers join active refreshes and cannot mutate cached outcomes. Interpreter discovery preserves literal path whitespace and rejects truncated output instead of selecting a partial path.
 
 ## [0.99.1] - 2026-09-06
 

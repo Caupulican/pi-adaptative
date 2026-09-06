@@ -12,7 +12,7 @@ function commandResult(
 	stderr = "",
 	overrides: Partial<PythonRuntimeCommandResult> = {},
 ): PythonRuntimeCommandResult {
-	return { code, stdout, stderr, killed: false, ...overrides };
+	return { code, stdout, stderr, killed: false, stdoutTruncated: false, ...overrides };
 }
 
 function createDeps(
@@ -24,7 +24,8 @@ function createDeps(
 		ensureUv: async () => "/agent/bin/uv",
 		isOffline: () => false,
 		makeDirectory: () => {},
-		pathExists: (path) => path === "/agent/runtimes/python/cpython-3.13/bin/python",
+		inspectInterpreter: (path) =>
+			path === "/agent/runtimes/python/cpython-3.13/bin/python" ? "fixture-identity" : undefined,
 		run,
 		now: () => 1_000,
 		...overrides,
@@ -32,6 +33,152 @@ function createDeps(
 }
 
 describe("uv-managed Python runtime", () => {
+	it.each([
+		"/fixture/space at end ",
+		"/fixture/Unicode\u00a0",
+		"/fixture/embedded\nnewline/python",
+		"/fixture/python\r",
+		"/fixture/python\n",
+		"Q:\\fixture\\python.exe",
+		"\\\\fixture-host\\share\\python.exe",
+	])("preserves the complete interpreter path %j", async (pythonPath) => {
+		const manager = createPythonRuntimeManager(
+			createDeps(async () => commandResult(0, `${pythonPath}\n`), {
+				inspectInterpreter: (path) => (path === pythonPath ? "fixture-identity" : undefined),
+			}),
+		);
+		await expect(manager.ensure()).resolves.toMatchObject({ status: "ready", pythonPath });
+	});
+
+	it("rediscovers a removed cached interpreter without requiring force", async () => {
+		let current = "/fixture/first/python";
+		let calls = 0;
+		const manager = createPythonRuntimeManager(
+			createDeps(
+				async () => {
+					calls++;
+					return commandResult(0, `${current}\n`);
+				},
+				{ inspectInterpreter: (path) => (path === current ? current : undefined) },
+			),
+		);
+		await expect(manager.ensure()).resolves.toMatchObject({ pythonPath: current });
+		current = "/fixture/relocated/python";
+		await expect(manager.ensure()).resolves.toMatchObject({ pythonPath: current });
+		expect(calls).toBe(2);
+	});
+
+	it("rediscovers a changed executable at the same path", async () => {
+		let identity = "original";
+		let calls = 0;
+		const manager = createPythonRuntimeManager(
+			createDeps(
+				async () => {
+					calls++;
+					return commandResult(0, "/fixture/python\n");
+				},
+				{ inspectInterpreter: () => identity },
+			),
+		);
+		await manager.ensure();
+		identity = "replacement";
+		await manager.ensure();
+		await manager.ensure();
+		expect(calls).toBe(2);
+	});
+
+	it.each([
+		commandResult(0, ""),
+		commandResult(0, "\n"),
+		commandResult(0, "/fixture/python"),
+		commandResult(0, "/fixture/python\0\n"),
+		commandResult(0, "/fixture/python\n", "", { stdoutTruncated: true }),
+	])("does not inspect or install from an incomplete path result: %j", async (result) => {
+		let inspections = 0;
+		let calls = 0;
+		const manager = createPythonRuntimeManager(
+			createDeps(
+				async () => {
+					calls++;
+					return result;
+				},
+				{
+					inspectInterpreter: () => {
+						inspections++;
+						return "identity";
+					},
+				},
+			),
+		);
+		await expect(manager.ensure()).resolves.toMatchObject({
+			status: "python-unavailable",
+			reason: expect.stringContaining("complete"),
+		});
+		expect(inspections).toBe(0);
+		expect(calls).toBe(1);
+	});
+
+	it("does not select the first existing path from extra stdout lines", async () => {
+		const inspected: string[] = [];
+		const manager = createPythonRuntimeManager(
+			createDeps(async () => commandResult(0, "/fixture/python\nextra output\n"), {
+				inspectInterpreter: (path) => {
+					inspected.push(path);
+					return path === "/fixture/python" ? "identity" : undefined;
+				},
+			}),
+		);
+		await expect(manager.ensure()).resolves.toMatchObject({ status: "python-unavailable" });
+		expect(inspected).toEqual(["/fixture/python\nextra output"]);
+	});
+
+	it("does not retain ready status when the executable vanishes offline", async () => {
+		let present = true;
+		const calls: string[] = [];
+		const manager = createPythonRuntimeManager(
+			createDeps(
+				async (_command, args) => {
+					calls.push(args[1]);
+					return present ? commandResult(0, "/fixture/python\n") : commandResult(1);
+				},
+				{ isOffline: () => true, inspectInterpreter: () => (present ? "identity" : undefined) },
+			),
+		);
+		await expect(manager.ensure()).resolves.toMatchObject({ status: "ready" });
+		present = false;
+		await expect(manager.ensure()).resolves.toMatchObject({ status: "offline" });
+		expect(calls).toEqual(["find", "find"]);
+	});
+
+	it("joins a forced refresh instead of returning the previous cached outcome", async () => {
+		const gate = Promise.withResolvers<void>();
+		let calls = 0;
+		const manager = createPythonRuntimeManager(
+			createDeps(async () => {
+				if (++calls === 2) await gate.promise;
+				return commandResult(0, "/agent/runtimes/python/cpython-3.13/bin/python\n");
+			}),
+		);
+		await manager.ensure();
+		const refresh = manager.ensure({ force: true });
+		const joined = manager.ensure();
+		const sameOperation = refresh === joined;
+		gate.resolve();
+		await Promise.all([refresh, joined]);
+		expect(sameOperation).toBe(true);
+		expect(calls).toBe(2);
+	});
+
+	it("does not let a consumer mutate the cached interpreter identity", async () => {
+		const manager = createPythonRuntimeManager(
+			createDeps(async () => commandResult(0, "/agent/runtimes/python/cpython-3.13/bin/python\n")),
+		);
+		const outcome = await manager.ensure();
+		Reflect.set(outcome, "pythonPath", "/fixture/unverified/python");
+		await expect(manager.ensure()).resolves.toMatchObject({
+			pythonPath: "/agent/runtimes/python/cpython-3.13/bin/python",
+		});
+	});
 	it("finds and caches an existing interpreter without installing", async () => {
 		const calls: string[][] = [];
 		let ensureCalls = 0;
@@ -159,11 +306,11 @@ describe("uv-managed Python runtime", () => {
 
 	it("rejects a successful uv result that does not name an existing interpreter", async () => {
 		const manager = createPythonRuntimeManager(
-			createDeps(async () => commandResult(0, "/missing/python\n"), { pathExists: () => false }),
+			createDeps(async () => commandResult(0, "/missing/python\n"), { inspectInterpreter: () => undefined }),
 		);
 		await expect(manager.ensure()).resolves.toEqual({
 			status: "python-unavailable",
-			reason: "uv reported a Python path that does not exist: /missing/python",
+			reason: "uv reported a Python path that is not an available executable file: /missing/python",
 		});
 	});
 });
