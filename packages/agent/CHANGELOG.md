@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Explicit backend path and immutable workspace-attachment contexts with generation identities and portable resource references.
+
+### Fixed
+
+- Resolved paths and file URLs using the selected execution dialect, honored the supplied home for base paths, and rejected ambiguous Windows drive-relative paths.
+
 ## [0.99.1] - 2026-09-06
 
 ### Fixed

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved path-alias expansion when the tool registry reactivates an original tool descriptor.
+
 ## [0.99.1] - 2026-09-06
 
 ### Fixed

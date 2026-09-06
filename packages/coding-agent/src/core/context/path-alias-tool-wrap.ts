@@ -46,7 +46,8 @@ export function wrapToolWithPathAliasExpansion(
 			return execute(toolCallId, expandParams(table, params) as typeof params, signal, onUpdate);
 		},
 	};
-	wrapped.add(tool);
+	// Only a descriptor that actually owns expansion is wrapped. The registry may reactivate
+	// the original descriptor repeatedly; marking that original would bypass expansion later.
 	wrapped.add(next);
 	return next;
 }

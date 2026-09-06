@@ -7,6 +7,7 @@ import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { WorkbenchController } from "../src/modes/interactive/workbench-controller.ts";
 import { WorkspaceObservation } from "../src/modes/interactive/workbench-workspace.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
+import { workbenchCounterFixture } from "./fixtures/session-failures.ts";
 
 describe("Workbench input boundary", () => {
 	beforeAll(() => initTheme("dark"));
@@ -68,16 +69,22 @@ describe("Workbench input boundary", () => {
 			notice() {},
 		});
 		controller.beginCycle();
-		controller.record(new Text("failure detail", 0, 0), true);
+		for (const failed of workbenchCounterFixture.firstCycle) {
+			controller.record(new Text(failed ? "failure detail" : "first-cycle success", 0, 0), failed);
+		}
 		expect(stripAnsi(view.render(100).join("\n"))).toContain("failure detail");
 		controller.complete();
 		let text = stripAnsi(view.render(100).join("\n"));
+		expect(text).toContain(workbenchCounterFixture.firstSummary);
 		expect(text).toContain("1 failure receipts");
 		expect(text).toContain("failure detail");
 		controller.beginCycle();
-		controller.record(new Text("successful verbose result", 0, 0), false);
+		for (const failed of workbenchCounterFixture.secondCycle) {
+			controller.record(new Text("successful verbose result", 0, 0), failed);
+		}
 		controller.complete();
 		text = stripAnsi(view.render(100).join("\n"));
+		expect(text).toContain(workbenchCounterFixture.secondSummary);
 		expect(text).toContain("1 failure receipts");
 		expect(text).toContain("successful verbose result");
 		expect(text).not.toContain("failure detail");

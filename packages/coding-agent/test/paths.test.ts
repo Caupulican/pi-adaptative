@@ -159,7 +159,8 @@ describe("resolvePath", () => {
 		const filePath = join(dir, "dir", "SKILL.md");
 		const pathname = pathToFileURL(filePath).pathname;
 		expect(pathname).toMatch(/^\/[A-Za-z]:/);
-		expect(resolvePath(pathname, "E:\\project")).toBe(resolve(pathname));
+		// Root-relative Windows spelling is bound to the supplied drive, never the test process's drive.
+		expect(resolvePath(pathname, "E:\\project")).toBe(resolve("E:\\project", pathname));
 	});
 });
 
