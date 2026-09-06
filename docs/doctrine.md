@@ -117,6 +117,13 @@ widen worker grants. Pinned by `packages/coding-agent/test/context-composition.t
 ceilings, only lowered), `packages/coding-agent/test/suite/runtime-update.test.ts`, and
 `packages/coding-agent/test/suite/image-generation-provider-surface.test.ts`.
 
+**Equivalent action branches compact only at the provider boundary.** Identical `anyOf` branches
+may share an enum discriminator when every other validation constraint matches. Exclusive unions
+remain intact; local validation retains the original branches and their actionable repair text.
+This preserves the schema budgets without weakening execution validation. Pinned by
+`packages/agent/test/provider-tool-projection.test.ts` and
+`packages/coding-agent/test/suite/regressions/delegate-action-preflight.test.ts`.
+
 **A tool failure record resolves after two later calls of the same tool executed without
 retrying it; one later call keeps it.** Why: one corrective call may precede the retry a record
 asks for; a record kept forever re-appended the trailing ledger on every request. Pinned by

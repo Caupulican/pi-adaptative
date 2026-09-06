@@ -898,13 +898,7 @@ describe("project-scoped hot memory", () => {
 			);
 			expect((hinted as any).details.success).toBe(true);
 			expect((hinted as any).content[0].text).toContain('consider target "project"');
-			const listed = await memoryTool.execute(
-				"g3",
-				{ action: "list", target: "memory" },
-				undefined,
-				undefined,
-				{} as any,
-			);
+			const listed = await memoryTool.execute("g3", { action: "list" }, undefined, undefined, {} as any);
 			const text = (listed as any).content[0].text as string;
 			expect(text).toContain("## MEMORY.md (general)");
 			expect(text).toContain("/1200 chars");

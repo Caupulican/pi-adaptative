@@ -8,6 +8,7 @@ import {
 } from "@caupulican/pi-ai";
 import { ToolArgumentValidationError, validateToolArguments } from "@caupulican/pi-ai/validation";
 import { Type } from "typebox";
+import { Compile } from "typebox/compile";
 import { describe, expect, it } from "vitest";
 import { startAgentProviderRequest } from "../src/agent-loop.ts";
 import { projectToolSchemaForProvider, projectToolsForProvider } from "../src/provider-tool-projection.ts";
@@ -59,6 +60,57 @@ const convertToLlm = (messages: AgentMessage[]): Message[] =>
 	messages.filter((message) => message.role !== "custom") as Message[];
 
 describe("provider tool projection", () => {
+	it("merges equivalent action branches only on the provider surface", () => {
+		const schema = Type.Union([
+			Type.Object(
+				{ action: Type.Literal("set"), count: Type.Integer({ minimum: 1 }) },
+				{ additionalProperties: false },
+			),
+			Type.Object(
+				{ action: Type.Literal("intake"), count: Type.Integer({ minimum: 1 }) },
+				{ additionalProperties: false },
+			),
+			Type.Object({ action: Type.Literal("clear") }, { additionalProperties: false }),
+			Type.Object({ action: Type.Literal("compact") }, { additionalProperties: false }),
+			Type.Object(
+				{ action: Type.Literal("limited"), count: Type.Integer({ minimum: 2 }) },
+				{ additionalProperties: false },
+			),
+		]);
+		const before = JSON.stringify(schema);
+		const projected = projectToolSchemaForProvider(schema) as typeof schema;
+		expect(projected.anyOf).toHaveLength(3);
+		expect(JSON.stringify(projected).length).toBeLessThan(before.length);
+		expect(JSON.stringify(schema)).toBe(before);
+		const originalValidator = Compile(schema);
+		const projectedValidator = Compile(projected);
+		for (const action of [undefined, "set", "intake", "clear", "compact", "limited", "unknown", null]) {
+			for (const count of [undefined, -1, 0, 1, 2, 1.5, "2", null]) {
+				for (const extra of [false, true]) {
+					const value = {
+						...(action === undefined ? {} : { action }),
+						...(count === undefined ? {} : { count }),
+						...(extra ? { extra: true } : {}),
+					};
+					expect(projectedValidator.Check(value), JSON.stringify(value)).toBe(originalValidator.Check(value));
+				}
+			}
+		}
+		expect(projectedValidator.Check({ action: "set", count: 1 })).toBe(true);
+		expect(projectedValidator.Check({ action: "limited", count: 1 })).toBe(false);
+	});
+
+	it("preserves exclusive unions and distinct branch requirements or discriminator constraints", () => {
+		const branches = [
+			{ properties: { action: { const: "a", type: "string" } }, required: ["action"] },
+			{ properties: { action: { const: "b", type: "string" } }, required: [] },
+			{ properties: { action: { const: "c", type: "string", pattern: "^c$" } }, required: ["action"] },
+		];
+		for (const schema of [{ anyOf: branches }, { oneOf: [branches[0], branches[0]] }]) {
+			expect(projectToolSchemaForProvider(schema)).toEqual(schema);
+		}
+	});
+
 	it("removes recurring schema prose while preserving the executable contract and source tool", () => {
 		const before = JSON.stringify(tool);
 		const [projected] = projectToolsForProvider([tool]);

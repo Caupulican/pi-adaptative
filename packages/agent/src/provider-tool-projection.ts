@@ -91,6 +91,53 @@ function compactLiteralUnion(projected: Record<string, unknown>): Record<string,
 	return compacted;
 }
 
+function compactDiscriminatedUnion(projected: Record<string, unknown>): Record<string, unknown> {
+	const branches = projected.anyOf;
+	if (!Array.isArray(branches) || branches.length < 2 || !branches.every(isRecord)) return projected;
+	const firstProperties = branches[0].properties;
+	if (!isRecord(firstProperties)) return projected;
+	for (const discriminator of Object.keys(firstProperties)) {
+		const groups = new Map<string, { branch: Record<string, unknown>; values: unknown[] }>();
+		let eligible = true;
+		for (const branch of branches) {
+			const properties = branch.properties;
+			const literal = isRecord(properties) ? properties[discriminator] : undefined;
+			if (
+				!isRecord(properties) ||
+				!isRecord(literal) ||
+				!Object.hasOwn(literal, "const") ||
+				!isJsonPrimitive(literal.const) ||
+				Object.keys(literal).some((key) => key !== "const" && key !== "type")
+			) {
+				eligible = false;
+				break;
+			}
+			const { const: value, ...constraints } = literal;
+			// Compare every other constraint exactly. Only anyOf permits folding overlapping
+			// branches; oneOf's exclusive-match semantics must remain untouched.
+			const shape = { ...branch, properties: { ...properties, [discriminator]: constraints } };
+			const key = JSON.stringify(shape);
+			const group = groups.get(key);
+			if (group) group.values.push(value);
+			else groups.set(key, { branch, values: [value] });
+		}
+		if (!eligible || groups.size === branches.length) continue;
+		return {
+			...projected,
+			anyOf: [...groups.values()].map(({ branch, values }) => {
+				if (values.length === 1) return branch;
+				const properties = branch.properties as Record<string, Record<string, unknown>>;
+				const { const: _value, ...constraints } = properties[discriminator];
+				return {
+					...branch,
+					properties: { ...properties, [discriminator]: { ...constraints, enum: [...new Set(values)] } },
+				};
+			}),
+		};
+	}
+	return projected;
+}
+
 function compactRedundantEnumConstraints(projected: Record<string, unknown>): Record<string, unknown> {
 	const values = projected.enum;
 	if (!Array.isArray(values) || values.length === 0 || !values.every(isJsonPrimitive)) return projected;
@@ -140,7 +187,7 @@ function projectSchemaNode(value: unknown): unknown {
 		}
 		projected[key] = child;
 	}
-	return compactRedundantEnumConstraints(compactLiteralUnion(projected));
+	return compactRedundantEnumConstraints(compactDiscriminatedUnion(compactLiteralUnion(projected)));
 }
 
 export function normalizeProviderToolDescription(description: string): string {

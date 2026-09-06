@@ -163,7 +163,10 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// (several skills load in one call, so a setup no longer costs one turn per skill); its
 			// 105-token ceiling preserves roughly 8% headroom (annotations are stripped at the
 			// provider boundary, so there is no prose to trim).
-			expect(report.toolSchemaTokens).toBeLessThanOrEqual(4_500);
+			expect(
+				report.toolSchemaTokens,
+				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),
+			).toBeLessThanOrEqual(4_500);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(105);
 			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);

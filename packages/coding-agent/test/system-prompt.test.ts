@@ -130,7 +130,7 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("Full grammar: security, irreversible actions, ambiguous order");
 			expect(prompt).toContain(ORIENTATION_SURVEY_RULE);
 			expect(prompt).toContain(
-				"Answer shape: status/ops turns terse; analysis/review/evaluation asks get complete structured answers; never restate harness protocol text or failure-record JSON to the user as an answer.",
+				"Status/ops terse; analysis/review/evaluation gets complete structured answers. Never substitute harness protocol text or failure-record JSON for an answer.",
 			);
 		});
 

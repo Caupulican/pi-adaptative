@@ -111,6 +111,14 @@ The following evidence supersedes the implementation journal. Every confirmed de
 
 ## Limits and release gate
 
+The first exact-candidate GitHub run (`34022232537`) rejected two outdated fixtures, a missing
+coverage-suite entry, and prompt/schema budget overruns. The fixtures now exercise unqualified
+memory listing and trusted oversized evidence. The setup-repair suite is included in its coverage
+gate, with an unknown-phase negative control; all obligation line/function thresholds pass.
+Equivalent action branches compact at the shared provider projection only, preserving authoritative
+local validation and repair text. Core prompt wording is shorter; the 3,200-byte, 4,500-token total,
+and 875-token delegate ceilings remain unchanged. New exact-SHA CI evidence is required.
+
 Final local review found and fixed a same-batch evidence-selection defect: an exact command
 citation could choose an earlier pass over a later failed call in the same assistant message.
 Both focused cases failed before `findLast` replaced `find`; explicit call-ID controls remained

@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Compacted equivalent action branches at the shared provider boundary while preserving local validation, repair instructions, and schema-token limits.
 - Preserved adapter-owned repair instructions through initial failure and replay, including results without diagnostic text.
 - Detected repeated unchanged tool results across reordered or shrinking batches while permitting changed results and bounding retained history.
 - Preserved setup-failure repair eligibility through compaction and required matching scope, provenance, and a newer executed pass before resolving an explicitly linked setup failure.

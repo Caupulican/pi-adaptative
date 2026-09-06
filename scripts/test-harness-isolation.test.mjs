@@ -81,6 +81,7 @@ const codingAgentVerificationCoverage = {
 };
 const agentVerificationCoverageTests = [
 	"test/verification-obligations.test.ts",
+	"test/verification-setup-repair.test.ts",
 	"test/agent-loop.test.ts",
 	"test/compaction/compaction.test.ts",
 	"test/compaction/applicable-usage-finder.test.ts",

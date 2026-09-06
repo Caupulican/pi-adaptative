@@ -337,6 +337,7 @@ describe("DelegationOrchestrationLedger", () => {
 			evidence: evidenceIds.map((id) => ({
 				id,
 				kind: "user",
+				verified: true,
 				summary: "x".repeat(2_500),
 				createdAt: "2026-07-23T00:01:00.000Z",
 			})),

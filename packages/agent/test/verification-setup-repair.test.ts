@@ -15,6 +15,18 @@ function receipt(fields: Record<string, unknown>): ToolResultMessage {
 }
 
 describe("verification setup repair", () => {
+	it("rejects unknown execution phases without dropping a valid receipt", () => {
+		expect(
+			retainedVerificationDetails({
+				piVerification: { version: 1, id: "check", status: "failed", outcome: "unknown" },
+			}),
+		).toBeUndefined();
+		expect(
+			retainedVerificationDetails({
+				piVerification: { version: 1, id: "check", status: "failed", outcome: "unconfirmed" },
+			})?.piVerification.outcome,
+		).toBe("unconfirmed");
+	});
 	it("exposes setup repair only while the host retains proof of an empty invocation", () => {
 		const tracker = new VerificationObligationTracker([
 			receipt({ id: "setup", status: "failed", outcome: "setup_failed", repairGroup: "scope-a" }),
