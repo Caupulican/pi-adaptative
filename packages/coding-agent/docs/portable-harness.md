@@ -51,6 +51,12 @@ Shell verification identity takes the backend's explicit path flavor. Custom bac
 Unqualified Windows contexts cannot borrow an operator's current drive. This is lexical context
 validation, not a filesystem authorization check or the full attachment lifecycle migration.
 
+The core finalizer captures executor-owned verification before calling post-execution hooks.
+That independent witness survives hook failure, replacement, in-place mutation, and background
+handoff. Hooks can still change ordinary display details and policy results, but cannot create
+or rewrite verification. This terminal-evidence boundary is a lifecycle migration substage;
+shared attachment fencing, restart recovery, and all-backend admission remain separate work.
+
 ## Public fixtures
 
 Use generated roots and synthetic records only. Do not copy session transcripts, prompts,

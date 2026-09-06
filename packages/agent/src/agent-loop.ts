@@ -2089,6 +2089,9 @@ async function finalizeExecutedToolCall(
 	signal: AbortSignal | undefined,
 ): Promise<FinalizedToolCallOutcome> {
 	let result = executed.result;
+	// Capture the executor's validated receipt before a hook can mutate or replace its details.
+	// Presentation/policy failures must not erase a completed check or invent a different pass.
+	const verificationDetails = retainedVerificationDetails(result.details);
 	let isError = executed.isError;
 	let failureMessage = executed.failureMessage ?? "";
 	let errorClass = executed.errorClass;
@@ -2121,7 +2124,7 @@ async function finalizeExecutedToolCall(
 				isError = afterResult.isError ?? isError;
 			}
 		} catch (error) {
-			// The hook itself failed, so nothing about the tool's own completed operation survives.
+			// Report the hook failure while retaining the executor's independent verification receipt.
 			failureMessage = error instanceof Error ? error.message : String(error);
 			errorClass = error instanceof Error ? error.name : typeof error;
 			failureCode = undefined;
@@ -2132,7 +2135,6 @@ async function finalizeExecutedToolCall(
 		}
 	}
 
-	const verificationDetails = retainedVerificationDetails(result.details);
 	if (isError) {
 		const usage = result.usage;
 		const failureOutput =
@@ -2208,9 +2210,15 @@ async function finalizeExecutedToolCall(
 	}
 
 	const repaired = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
+	let projectedDetails = repaired.result.details;
+	if (projectedDetails && typeof projectedDetails === "object" && "piVerification" in projectedDetails) {
+		const descriptors = Object.getOwnPropertyDescriptors(projectedDetails);
+		delete descriptors.piVerification;
+		projectedDetails = Object.defineProperties({}, descriptors);
+	}
 	const resultWithVerification = {
 		...repaired.result,
-		details: verificationDetails ? { ...repaired.result.details, ...verificationDetails } : repaired.result.details,
+		details: verificationDetails ? { ...projectedDetails, ...verificationDetails } : projectedDetails,
 	};
 	emitToolArgumentValidationTelemetry(
 		config,

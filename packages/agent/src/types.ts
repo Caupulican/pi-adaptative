@@ -182,6 +182,8 @@ export interface BeforeToolCallResult {
  *
  * Omitted fields keep the original executed tool result values.
  * There is no deep merge for `content` or `details`.
+ * Executor-owned `details.piVerification` is retained independently: hooks cannot create, replace,
+ * mutate, or erase the verification witness, even when the hook throws.
  */
 export interface AfterToolCallResult {
 	content?: (TextContent | ImageContent)[];

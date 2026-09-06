@@ -148,9 +148,13 @@ a test requirement. Verification path syntax comes from the executing backend, n
 drive or the operator's ambient directory. Only an explicitly linked, newer
 executed pass with matching host-derived scope can supersede an empty-test setup failure;
 executed or unknown failures cannot be downgraded into setup failures. Compaction retains those
-relationships. Historical receipts without that proof remain unresolved. Pinned by
+relationships. Historical receipts without that proof remain unresolved.
+The executor's receipt is captured before hooks and survives hook mutation, replacement, failure,
+and background handoff. A hook cannot turn an executed failure into a passing witness or invent
+a witness for an opaque result; ordinary content and policy overrides remain available. Pinned by
 `packages/coding-agent/test/goal-evidence-verification.test.ts`,
 `packages/coding-agent/test/bash-verification-boundary.test.ts`, and
+`packages/agent/test/tool-terminal-evidence.test.ts`,
 `packages/agent/test/verification-setup-repair.test.ts`,
 `packages/coding-agent/test/node-verification-boundary.test.ts`, and
 `packages/coding-agent/test/test-verification-output.test.ts`.
