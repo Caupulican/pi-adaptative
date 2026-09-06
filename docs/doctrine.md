@@ -136,6 +136,14 @@ and `packages/coding-agent/test/phone-filesystem-workflow.test.ts`.
 
 ## Guards
 
+**A failed admission cannot erase already-executed work.** The scheduler drains dispatched siblings
+before terminating after reservation failure or cancellation. Completed tool results remain in
+source order, agree with message callbacks, and precede the unsuccessful terminal signal. Calls
+whose bodies never started are not fabricated as successful results. A cancelled batch never
+issues another provider request. This supersedes the old scheduler characterization that returned
+only one synthetic abort and discarded earlier evidence. Pinned by
+`packages/agent/test/tool-batch-settlement.test.ts` and `packages/agent/test/agent-loop.test.ts`.
+
 **Verification is a typed host receipt, not a claim in prose.** Goal test evidence must resolve
 to a passing receipt on the active branch; complete user quotations resolve only to user-role
 records. An unrelated successful command never clears a failed test. Literal argv and actual

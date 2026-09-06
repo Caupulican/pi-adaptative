@@ -4741,7 +4741,8 @@ describe("agentLoopContinue with AgentMessage", () => {
  * Every assertion here is a fact about current code, not a spec for the new code: two are
  * documented as INTENDED to change (the mixed-batch poisoning in S0.4, updated by S2; the wave
  * barrier in S0.wave, replaced by S3's pool). Everything else is a guarantee the refactor must
- * preserve byte-for-byte.
+ * preserve byte-for-byte, except the result-loss bugs now superseded by the portable harness
+ * settlement contract in docs/doctrine.md (S0.3 reservation abort and S5.8 full-loop abort).
  */
 describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 	describe("S0.1 - sequential branch (today)", () => {
@@ -5196,7 +5197,7 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 			expect(executed).not.toContain("6");
 		});
 
-		it("sequential: an abort observed between reservePreparedToolCalls's two throwIfAborted checks throws, collapsing the WHOLE turn's result to one synthetic aborted message", async () => {
+		it("sequential: cancellation during a later reservation preserves earlier terminal evidence", async () => {
 			const schema = Type.Object({ value: Type.String() });
 			const executed: string[] = [];
 			const controller = new AbortController();
@@ -5257,15 +5258,19 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 			expect(executed).toEqual(["a"]);
 			expect(events.some((e) => e.type === "tool_execution_end" && e.toolCallId === "call-a")).toBe(true);
 
-			// ...but the final RESULT collapses to exactly one synthetic message. call-a's success is
-			// gone from the returned array even though it already happened and was already emitted.
+			// The final result must retain the operation that already happened, even though the
+			// next call's reservation observed cancellation before its body could start.
 			const finalMessages = await stream.result();
-			expect(finalMessages).toHaveLength(1);
-			expect(finalMessages[0]).toMatchObject({ role: "assistant", stopReason: "aborted" });
-			expect(finalMessages.some((m) => m.role === "toolResult")).toBe(false);
+			expect(finalMessages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
+			expect(finalMessages.filter((m) => m.role === "toolResult")).toMatchObject([
+				{ toolCallId: "call-a", isError: false },
+			]);
+			expect(finalMessages).toEqual(
+				events.flatMap((event) => (event.type === "message_end" ? [event.message] : [])),
+			);
 		});
 
-		it("parallel: the same reservePreparedToolCalls throw collapses the whole turn even after an entire prior WAVE already succeeded", async () => {
+		it("parallel: cancellation during a later reservation preserves the prior wave's terminal evidence", async () => {
 			const schema = Type.Object({ value: Type.String() });
 			const executed: string[] = [];
 			const controller = new AbortController();
@@ -5326,11 +5331,15 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 
 			// Wave 1 (calls 1-4) fully ran and succeeded.
 			expect(executed.sort()).toEqual(["1", "2", "3", "4"]);
-			// But the final result still collapses to exactly one synthetic aborted message.
+			// The aborted reservation cannot erase the prior wave's successful results.
 			const finalMessages = await stream.result();
-			expect(finalMessages).toHaveLength(1);
-			expect(finalMessages[0]).toMatchObject({ role: "assistant", stopReason: "aborted" });
-			expect(finalMessages.some((m) => m.role === "toolResult")).toBe(false);
+			expect(finalMessages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
+			expect(finalMessages.filter((m) => m.role === "toolResult").map((m) => m.toolCallId)).toEqual([
+				"call-1",
+				"call-2",
+				"call-3",
+				"call-4",
+			]);
 		});
 	});
 
@@ -6275,20 +6284,9 @@ describe("Phase 3 S5 - pool invariants, partition semantics, env matrix, full-lo
 	});
 
 	describe("S5.8 - MANDATORY full-loop abort regression (no maxProviderTurns escape hatch)", () => {
-		it("a graceful mid-batch abort (all three shapes) still collapses the WHOLE run to one synthetic aborted message, because the batch never sets terminate:true and runLoop attempts another (doomed) provider turn", async () => {
-			// This is the bug S0 discovered and the roadmap requires pinning (section 6, S5 item 8):
-			// `executeToolCallsPartitioned`/`pooledExecuteToolCalls` themselves behave gracefully on
-			// abort (verified below via the EVENT STREAM), but `runLoop` (agent-loop.ts) only skips
-			// the next provider turn when a batch sets `terminate: true`. An aborted-but-not-terminated
-			// batch therefore falls through to `hasMoreToolCalls = true`, `runLoop` starts another
-			// provider request, that request's own preflight throws on the already-aborted signal
-			// (provider-request-planner.ts), and the throw is never caught inside `runLoop` - it
-			// unwinds all the way to `streamAgentLoop`'s outer catch, which discards every message
-			// accumulated so far and replaces the ENTIRE result with one synthetic
-			// `{role:"assistant", stopReason:"aborted"}` message. Fixing that outer-loop gap is out of
-			// scope for Phase 3 S1-S6 (it lives in `runLoop`, not the scheduler); this test's job is
-			// only to make the current, actual behavior visible and pinned so a future change to
-			// `terminate` semantics or to the pool's abort timing cannot silently flip it unnoticed.
+		it("a graceful mid-batch abort preserves real results and terminals without another provider request", async () => {
+			// Supersedes the historical result-loss characterization: an aborted batch is settled
+			// inside runLoop, preserving its callback evidence instead of attempting a doomed request.
 			//
 			// Batch of 6, width 4 (default): calls 1-4 are the first refill and complete for REAL
 			// before any abort (shape c - already-dispatched work is always awaited and keeps its
@@ -6373,13 +6371,14 @@ describe("Phase 3 S5 - pool invariants, partition semantics, env matrix, full-lo
 				false,
 			);
 
-			// ...but the FINAL RESULT still collapses to exactly one synthetic message: the documented
-			// bug. Every real result the event stream just showed (including calls 1-4's successes)
-			// is gone from the returned array.
+			// The returned transcript and persisted callback evidence must agree exactly.
 			const finalMessages = await stream.result();
-			expect(finalMessages).toHaveLength(1);
-			expect(finalMessages[0]).toMatchObject({ role: "assistant", stopReason: "aborted" });
-			expect(finalMessages.some((message) => message.role === "toolResult")).toBe(false);
+			expect(finalMessages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
+			expect(finalMessages.filter((message) => message.role === "toolResult")).toHaveLength(5);
+			expect(finalMessages).toEqual(
+				events.flatMap((event) => (event.type === "message_end" ? [event.message] : [])),
+			);
+			expect(providerCall).toBe(1);
 		});
 	});
 });

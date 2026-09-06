@@ -595,6 +595,19 @@ async function runLoop(
 					newMessages.push(result);
 				}
 				verificationObligations.record(toolResults);
+				if (executedToolBatch.failure || signal?.aborted) {
+					const failure = createLoopFailureMessage(
+						executedToolBatch.failure?.cause ?? signal?.reason,
+						config,
+						signal?.aborted ?? false,
+					);
+					await emit({ type: "message_start", message: failure });
+					await emit({ type: "message_end", message: failure });
+					newMessages.push(failure);
+					await emit({ type: "turn_end", message: failure, toolResults });
+					await emit({ type: "agent_end", messages: newMessages });
+					return;
+				}
 				if (!previousSuccessfulTextProtocolResults) {
 					lastSuccessfulTextProtocolBatch =
 						textProtocolBatch &&
@@ -962,6 +975,8 @@ async function streamAssistantResponse(
 }
 
 interface ToolExecutionContext {
+	/** Results published by this batch survive a later admission or scheduling failure. */
+	messages: ToolResultMessage[];
 	context: AgentContext;
 	assistantMessage: AssistantMessage;
 	requestId: AgentRequestId;
@@ -995,6 +1010,7 @@ async function executeToolCalls(
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
 	const execCtx: ToolExecutionContext = {
+		messages: [],
 		context: currentContext,
 		assistantMessage,
 		requestId,
@@ -1008,17 +1024,22 @@ async function executeToolCalls(
 		signal,
 		emit,
 	};
-	const batch =
-		config.toolExecution === "sequential" || isToolParallelismDisabled()
-			? await executeToolCallsSequential(execCtx, toolCalls)
-			: await executeToolCallsPartitioned(execCtx, toolCalls);
-	if (!execCtx.validationBounced) resetValidationFailureTracker(validationFailureTracker);
-	return batch;
+	try {
+		const batch =
+			config.toolExecution === "sequential" || isToolParallelismDisabled()
+				? await executeToolCallsSequential(execCtx, toolCalls)
+				: await executeToolCallsPartitioned(execCtx, toolCalls);
+		if (!execCtx.validationBounced) resetValidationFailureTracker(validationFailureTracker);
+		return batch;
+	} catch (cause) {
+		return { messages: execCtx.messages, terminate: true, failure: { cause } };
+	}
 }
 
 type ExecutedToolCallBatch = {
 	messages: ToolResultMessage[];
 	terminate: boolean;
+	failure?: { cause: unknown };
 };
 
 type SuccessfulTextProtocolBatch = {
@@ -1145,7 +1166,7 @@ async function executeToolCallsSequential(
 	toolCalls: AgentToolCall[],
 ): Promise<ExecutedToolCallBatch> {
 	const finalizedCalls: FinalizedToolCallOutcome[] = [];
-	const messages: ToolResultMessage[] = [];
+	const messages = execCtx.messages;
 
 	for (const [index, toolCall] of toolCalls.entries()) {
 		const { finalized, toolResultMessage } = await executeBarrierToolCall(execCtx, toolCall, index);
@@ -1218,9 +1239,10 @@ async function pooledExecuteToolCalls(
 	execCtx: ToolExecutionContext,
 	entries: readonly { call: AgentToolCall; index: number }[],
 	width: number,
-): Promise<FinalizedToolCallOutcome[]> {
+): Promise<{ finalized: FinalizedToolCallOutcome[]; failure?: { cause: unknown } }> {
 	const results: (FinalizedToolCallOutcome | undefined)[] = new Array(entries.length);
 	const inFlight = new Map<number, Promise<void>>();
+	let failure: { cause: unknown } | undefined;
 	let nextToApply = 0;
 	const drainGateApply = (): void => {
 		while (nextToApply < results.length) {
@@ -1237,43 +1259,53 @@ async function pooledExecuteToolCalls(
 	};
 
 	let next = 0;
-	while (next < entries.length && !execCtx.signal?.aborted) {
-		const free = width - inFlight.size;
-		if (free <= 0) {
-			await Promise.race(inFlight.values());
-			continue;
-		}
-		const refillWave: PreparedToolCall[] = [];
-		const refillSlots: { slot: number; started: StartedToolCall }[] = [];
-		while (refillWave.length < free && next < entries.length && !execCtx.signal?.aborted) {
-			const entry = entries[next];
-			const slot = next;
-			next++;
-			const started = await prepareAndStartToolCall(execCtx, entry.call, entry.index);
-			if (started.kind === "finalized") {
-				// Immediate validation/policy/replay outcomes are never reserved (test :3622).
-				await settle(slot, started.finalized);
+	try {
+		while (next < entries.length && !execCtx.signal?.aborted && !failure) {
+			const free = width - inFlight.size;
+			if (free <= 0) {
+				await Promise.race(inFlight.values());
 				continue;
 			}
-			refillWave.push(started.preparation);
-			refillSlots.push({ slot, started });
+			const refillWave: PreparedToolCall[] = [];
+			const refillSlots: { slot: number; started: StartedToolCall }[] = [];
+			while (refillWave.length < free && next < entries.length && !execCtx.signal?.aborted) {
+				const entry = entries[next];
+				const slot = next;
+				next++;
+				const started = await prepareAndStartToolCall(execCtx, entry.call, entry.index);
+				if (started.kind === "finalized") {
+					// Immediate validation/policy/replay outcomes are never reserved (test :3622).
+					await settle(slot, started.finalized);
+					continue;
+				}
+				refillWave.push(started.preparation);
+				refillSlots.push({ slot, started });
+			}
+			if (refillSlots.length === 0) continue;
+			await reservePreparedToolCalls(execCtx, refillWave);
+			if (failure) break;
+			for (const { slot, started } of refillSlots) {
+				const running = finalizeStartedToolCall(execCtx, started)
+					.then((finalized) => settle(slot, finalized))
+					.catch((cause: unknown) => {
+						failure ??= { cause };
+					})
+					.finally(() => {
+						inFlight.delete(slot);
+					});
+				inFlight.set(slot, running);
+			}
 		}
-		if (refillSlots.length === 0) continue;
-		await reservePreparedToolCalls(execCtx, refillWave);
-		for (const { slot, started } of refillSlots) {
-			const running = finalizeStartedToolCall(execCtx, started).then((finalized) => {
-				inFlight.delete(slot);
-				return settle(slot, finalized);
-			});
-			inFlight.set(slot, running);
-		}
+	} catch (cause) {
+		failure ??= { cause };
+	} finally {
+		// Admission failure is not cancellation of siblings that already own effects. Drain every
+		// dispatched call before publishing results or allowing the parent loop to terminal.
+		await Promise.all(inFlight.values());
 	}
-	// In-flight work is always awaited, including on the abort path - an already-dispatched call
-	// keeps its real result.
-	await Promise.allSettled(inFlight.values());
 	// A call that never reached preparation (the abort path stopped refill-batch formation before
 	// reaching it) is simply absent from the result, not a placeholder.
-	return results.filter((entry): entry is FinalizedToolCallOutcome => entry !== undefined);
+	return { finalized: results.filter((entry): entry is FinalizedToolCallOutcome => entry !== undefined), failure };
 }
 
 async function executeToolCallsPartitioned(
@@ -1283,7 +1315,7 @@ async function executeToolCallsPartitioned(
 	const groups = partitionToolCalls(toolCalls, execCtx.context.tools);
 	const width = resolveToolConcurrency(execCtx.config);
 	const orderedFinalizedCalls: FinalizedToolCallOutcome[] = [];
-	const messages: ToolResultMessage[] = [];
+	const messages = execCtx.messages;
 
 	for (const group of groups) {
 		if (execCtx.signal?.aborted) break;
@@ -1298,13 +1330,14 @@ async function executeToolCallsPartitioned(
 		// in source order" contract (agent-loop.test.ts:3108). Groups themselves already run
 		// strictly in order (never overlapping), so deferring per-group instead of to the very end
 		// of the whole batch produces an identical observable event stream.
-		const finalizedEntries = await pooledExecuteToolCalls(execCtx, group.entries, width);
-		for (const finalized of finalizedEntries) {
+		const settled = await pooledExecuteToolCalls(execCtx, group.entries, width);
+		for (const finalized of settled.finalized) {
 			const toolResultMessage = createToolResultMessage(finalized);
 			await emitToolResultMessage(toolResultMessage, execCtx.emit);
 			orderedFinalizedCalls.push(finalized);
 			messages.push(toolResultMessage);
 		}
+		if (settled.failure) throw settled.failure.cause;
 	}
 
 	return { messages, terminate: shouldTerminateToolBatch(orderedFinalizedCalls) };

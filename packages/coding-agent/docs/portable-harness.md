@@ -57,6 +57,12 @@ handoff. Hooks can still change ordinary display details and policy results, but
 or rewrite verification. This terminal-evidence boundary is a lifecycle migration substage;
 shared attachment fencing, restart recovery, and all-backend admission remain separate work.
 
+Batch settlement owns results across reservation failures: dispatched siblings drain before the
+parent terminals, completed results remain source-ordered and callback-consistent, and queued
+bodies are not started after failed admission. Cancellation ends the current batch without a
+doomed extra provider request. This applies to streaming and direct core-loop entry points;
+it does not yet establish complete attachment fencing or progress-observer fault isolation.
+
 ## Public fixtures
 
 Use generated roots and synthetic records only. Do not copy session transcripts, prompts,
