@@ -14,7 +14,8 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(definition.description).toContain("persistent leaf workers");
 		expect(definition.description).toContain("start with agentId dispatches a new task onto an existing idle worker");
 		expect(definition.description).toContain("list reports every session worker through safe metadata");
-		expect(definition.description).toContain("transcript exposes bounded raw-entry pages");
+		expect(definition.description).toContain("transcript exposes bounded inspection pages");
+		expect(definition.description).toContain("omitting provider replay signatures");
 		expect(definition.description).toContain("omittedMessages");
 		expect(definition.description).toContain("page may be empty while nextCursor continues");
 		expect(definition.description).toContain("wait and wait_many are event-driven");

@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { tokenizeCommand, tokenizeShellCommand } from "../src/core/tools/shell-command-parser.ts";
 
 describe("shell command parser dialects", () => {
+	it("preserves empty quoted arguments and adjacent quoted fragments", () => {
+		expect(tokenizeCommand(`vitest --run '' "" 'a'"b"`)).toEqual(["vitest", "--run", "", "", "ab"]);
+		expect(tokenizeShellCommand(`vitest '' && npm test ""`)).toEqual([
+			{ kind: "arg", value: "vitest" },
+			{ kind: "arg", value: "" },
+			{ kind: "operator", value: "&&" },
+			{ kind: "arg", value: "npm" },
+			{ kind: "arg", value: "test" },
+			{ kind: "arg", value: "" },
+		]);
+		expect(tokenizeCommand("vitest   --run")).toEqual(["vitest", "--run"]);
+	});
 	it("keeps the stable Bash-like default while preserving Windows path separators", () => {
 		expect(tokenizeCommand("git add file\\ space.txt")).toEqual(["git", "add", "file space.txt"]);
 		expect(tokenizeCommand('rg -n needle "C:\\Users\\Example\\file with spaces.ts"')).toEqual([

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type AgentTool, AgentToolExecutionError, type AgentToolResult } from "@caupulican/pi-agent-core";
 import type { TSchema } from "typebox";
+import { getWorkTenantDir } from "../agent-paths.ts";
 import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { parseShellSearchInvocationScope, type ShellContentSearchTool } from "../tools/search-command-guard.ts";
@@ -52,6 +53,7 @@ function isHarnessOwnedSearchTarget(rawPath: string, cwd: string, boundary?: Cre
 		join(agentDir, "skills"),
 		join(agentDir, "sessions"),
 		join(agentDir, "memory"),
+		getWorkTenantDir(agentDir, "context", "sessions"),
 	];
 	if (roots.some((root) => isInside(root, target))) return true;
 	return target === join(agentDir, "MEMORY.md") || target === join(agentDir, "USER.md");
@@ -140,7 +142,7 @@ function shellCredentialRisk(
 			const searchTool: ShellContentSearchTool | undefined =
 				toolName === "rg" || toolName === "ripgrep" ? "rg" : toolName === "grep" ? "grep" : undefined;
 			if (searchTool) {
-				const searchRisk = searchCredentialRisk(searchTool, args, readsPipe, cwd, boundary);
+				const searchRisk = searchCredentialRisk(searchTool, args, readsPipe, cwd, boundary, true);
 				if (searchRisk) return searchRisk;
 				continue;
 			}
@@ -213,19 +215,11 @@ function isCredentialSafeGlob(glob: string): boolean {
 	return suffixes.length > 0 && suffixes.every((suffix) => suffix !== "env");
 }
 
-function isExistingRegularFile(rawPath: string, cwd: string): boolean {
+function isCredentialSafeExplicitFile(rawPath: string, cwd: string, allowMissing: boolean): boolean {
 	try {
 		return statSync(resolve(cwd, rawPath)).isFile();
 	} catch {
-		return false;
-	}
-}
-
-function isCredentialSafeExplicitFile(rawPath: string, cwd: string): boolean {
-	try {
-		return statSync(resolve(cwd, rawPath)).isFile();
-	} catch {
-		return isCredentialSafeGlob(rawPath);
+		return allowMissing && isCredentialSafeGlob(rawPath);
 	}
 }
 
@@ -234,9 +228,20 @@ function searchCredentialRisk(
 	args: readonly string[],
 	readsPipe: boolean,
 	cwd: string,
-	boundary?: CredentialExposureBoundary,
+	boundary: CredentialExposureBoundary | undefined,
+	allowShellVariables: boolean,
 ): "broad_search" | "credential_path" | undefined {
 	const scope = parseShellSearchInvocationScope(searchTool, [...args], readsPipe);
+	return contentSearchCredentialRisk(scope, cwd, boundary, true, allowShellVariables);
+}
+
+function contentSearchCredentialRisk(
+	scope: { targets: readonly string[]; positiveGlobs: readonly string[]; metaOnly: boolean; readsStdin: boolean },
+	cwd: string,
+	boundary: CredentialExposureBoundary | undefined,
+	commandLineOperands: boolean,
+	allowShellVariables: boolean,
+): "broad_search" | "credential_path" | undefined {
 	if (scope.targets.some((target) => target !== "-" && isProtectedCredentialPath(target, cwd, boundary))) {
 		return "credential_path";
 	}
@@ -246,10 +251,10 @@ function searchCredentialRisk(
 		scope.targets.length > 0 &&
 		scope.targets.every(
 			(target) =>
-				target === "-" ||
+				(commandLineOperands && target === "-") ||
 				// A shell variable names one file the lexical guard cannot resolve; it is not a directory scan.
-				/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/u.test(target) ||
-				isCredentialSafeExplicitFile(target, cwd) ||
+				(allowShellVariables && /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/u.test(target)) ||
+				isCredentialSafeExplicitFile(target, cwd, commandLineOperands) ||
 				isHarnessOwnedSearchTarget(target, cwd, boundary),
 		);
 	if (!scope.metaOnly && !scope.readsStdin && !hasSafeGlob && !hasOnlyExplicitFiles) return "broad_search";
@@ -290,7 +295,7 @@ function runProcessCredentialRisk(
 	const searchTool: ShellContentSearchTool | undefined =
 		executableName === "rg" || executableName === "ripgrep" ? "rg" : executableName === "grep" ? "grep" : undefined;
 	if (!searchTool) return undefined;
-	return searchCredentialRisk(searchTool, args, false, cwd, boundary);
+	return searchCredentialRisk(searchTool, args, false, cwd, boundary, false);
 }
 
 /** Stable model-facing refusal for direct inspection/mutation of credential material. */
@@ -309,13 +314,22 @@ export function credentialToolBlockReason(
 	if (toolName === "grep") {
 		const path = typeof args.path === "string" ? args.path : undefined;
 		const glob = typeof args.glob === "string" ? args.glob : undefined;
-		if (
-			(path && isProtectedCredentialPath(path, cwd, boundary)) ||
-			(glob && /(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(glob))
-		) {
+		const risk = contentSearchCredentialRisk(
+			{
+				targets: path ? [path] : [],
+				positiveGlobs: glob ? [glob] : [],
+				metaOnly: false,
+				readsStdin: false,
+			},
+			cwd,
+			boundary,
+			false,
+			false,
+		);
+		if (risk === "credential_path" || (glob && /(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(glob))) {
 			return "Credential dotenv files are model-blind. Use secret_store discover instead of searching their contents.";
 		}
-		if (!(path && isExistingRegularFile(path, cwd)) && !(glob && isCredentialSafeGlob(glob))) {
+		if (risk === "broad_search") {
 			return "Credential-safe grep requires one explicit regular file or a narrow non-dotenv file glob (for example *.ts). Refine the search instead of scanning a directory without a file filter.";
 		}
 	}
@@ -417,6 +431,13 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 ): AgentTool<TParameters, TDetails> {
 	return {
 		...tool,
+		failureRecovery: {
+			...tool.failureRecovery,
+			getFailureCorrection(params, failure) {
+				if (failure.failureCode === "credential_access_blocked") return failure.message;
+				return tool.failureRecovery?.getFailureCorrection?.(params, failure);
+			},
+		},
 		async execute(toolCallId, params, signal, onUpdate) {
 			const blockReason = credentialToolBlockReason(tool.name, params, cwd, boundary);
 			if (blockReason) {

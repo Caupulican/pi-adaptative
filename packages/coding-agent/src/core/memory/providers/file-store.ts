@@ -58,7 +58,7 @@ export function supersedeNearDuplicateLine(existing: string, content: string): s
 	return lines.join("\n");
 }
 
-const memorySchema = Type.Object({
+const memoryFields = Type.Object({
 	action: Type.Union([Type.Literal("add"), Type.Literal("replace"), Type.Literal("remove"), Type.Literal("list")], {
 		description: "Action to perform: add new content, replace existing content, or remove content",
 	}),
@@ -123,7 +123,45 @@ const memorySchema = Type.Object({
 	),
 });
 
-type MemoryParams = Static<typeof memorySchema>;
+const hotMemoryTarget = Type.Optional(
+	Type.Union([Type.Literal("memory"), Type.Literal("project"), Type.Literal("user")]),
+);
+// Encode action requirements in the advertised schema so the shared tool preflight
+// classifies malformed calls as validation failures before invoking the storage adapter.
+const memorySchema = Type.Intersect([
+	memoryFields,
+	Type.Union([
+		Type.Object({ action: Type.Literal("list") }),
+		Type.Object({
+			action: Type.Literal("add"),
+			target: hotMemoryTarget,
+			...Type.Required(Type.Pick(memoryFields, ["content"])).properties,
+		}),
+		Type.Object({
+			action: Type.Literal("replace"),
+			target: hotMemoryTarget,
+			...Type.Required(Type.Pick(memoryFields, ["content", "oldContent"])).properties,
+		}),
+		Type.Object({
+			action: Type.Literal("remove"),
+			target: hotMemoryTarget,
+			...Type.Required(Type.Pick(memoryFields, ["oldContent"])).properties,
+		}),
+		Type.Object({
+			action: Type.Literal("add"),
+			target: Type.Literal("okf"),
+			...Type.Required(Type.Pick(memoryFields, ["type", "title", "description", "scope", "content", "evidenceRefs"]))
+				.properties,
+		}),
+		Type.Object({
+			action: Type.Literal("remove"),
+			target: Type.Literal("okf"),
+			...Type.Required(Type.Pick(memoryFields, ["type", "title"])).properties,
+		}),
+	]),
+]);
+
+type MemoryParams = Static<typeof memoryFields>;
 
 export interface FileStoreProviderOptions {
 	onDurableMemoryChanged?: () => void;
@@ -878,30 +916,35 @@ export class FileStoreProvider implements MemoryProvider {
 						] as const;
 						try {
 							const files = await Promise.all(
-								rows.map(async ([target, label, filePath, statePath, budgetChars]) =>
-									withFileLock(filePath, async () => {
-										const { currentOnDisk, revision } = await inspectManagedMemoryFile(filePath, statePath);
-										const prompt =
-											target === "memory"
-												? this.lastWrittenMemory
-												: target === "project"
-													? this.lastWrittenProjectMemory
-													: this.lastWrittenUser;
-										const promptDigest = contentDigest(prompt);
-										const revisionText = `Current revision: ${revision.currentDigest}; managed revision: ${revision.managedDigest ?? revision.stateStatus}; pending revision: ${revision.pendingDigest ?? "none"}; prompt snapshot: ${promptDigest}.`;
-										return {
-											text: `## ${label} (${currentOnDisk.length}/${budgetChars} chars)\n${revisionText}\n${revision.drift ? `Drift detected. ${MEMORY_DRIFT_RECOVERY}\n` : ""}${currentOnDisk.trim() || "(empty)"}`,
-											details: {
-												target,
-												path: filePath,
-												...revision,
-												promptDigest,
-												currentChars: currentOnDisk.length,
-												budgetChars,
-											},
-										};
-									}),
-								),
+								rows
+									.filter(([scope]) => requestedTarget === undefined || scope === requestedTarget)
+									.map(async ([target, label, filePath, statePath, budgetChars]) =>
+										withFileLock(filePath, async () => {
+											const { currentOnDisk, revision } = await inspectManagedMemoryFile(
+												filePath,
+												statePath,
+											);
+											const prompt =
+												target === "memory"
+													? this.lastWrittenMemory
+													: target === "project"
+														? this.lastWrittenProjectMemory
+														: this.lastWrittenUser;
+											const promptDigest = contentDigest(prompt);
+											const revisionText = `Current revision: ${revision.currentDigest}; managed revision: ${revision.managedDigest ?? revision.stateStatus}; pending revision: ${revision.pendingDigest ?? "none"}; prompt snapshot: ${promptDigest}.`;
+											return {
+												text: `## ${label} (${currentOnDisk.length}/${budgetChars} chars)\n${revisionText}\n${revision.drift ? `Drift detected. ${MEMORY_DRIFT_RECOVERY}\n` : ""}${currentOnDisk.trim() || "(empty)"}`,
+												details: {
+													target,
+													path: filePath,
+													...revision,
+													promptDigest,
+													currentChars: currentOnDisk.length,
+													budgetChars,
+												},
+											};
+										}),
+									),
 							);
 							return {
 								content: [{ type: "text", text: files.map((file) => file.text).join("\n\n") }],

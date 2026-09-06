@@ -64,9 +64,13 @@ export type SkillLoadResult =
 	| { ok: true; state: "loaded_pending"; name: string; baseDir: string; pinned: boolean; evicted?: string[] }
 	| {
 			ok: false;
-			reason: "not_found" | "body_too_large" | "invalid_body" | "read_failed" | "pin_limit";
+			reason: "not_found" | "body_too_large" | "invalid_body" | "read_failed" | "pin_limit" | "capacity";
 			message: string;
 	  };
+
+export type SkillBatchLoadResult =
+	| { ok: true; results: Array<Extract<SkillLoadResult, { ok: true }>> }
+	| Exclude<SkillLoadResult, { ok: true }>;
 
 export type SkillReadResult =
 	| { ok: true; name: string; description: string; body: string }
@@ -136,10 +140,13 @@ function skillReadFailure(): SkillReadFailure {
 }
 
 /** Per-skill use is unobservable host-side (every loaded body rides every request), so eviction is honest FIFO by loadedAtMs: oldest unpinned first, oldest pinned only once no unpinned slot remains. */
-function evictionVictimName(slots: ReadonlyMap<string, SkillSlotState>, excludeName?: string): string | undefined {
+function evictionVictimName(
+	slots: ReadonlyMap<string, SkillSlotState>,
+	excludedNames?: ReadonlySet<string>,
+): string | undefined {
 	let victim: { name: string; pinned: boolean; loadedAtMs: number } | undefined;
 	for (const [name, slot] of slots) {
-		if (name === excludeName) continue;
+		if (excludedNames?.has(name)) continue;
 		if (
 			victim === undefined ||
 			(victim.pinned && !slot.pinned) ||
@@ -242,16 +249,29 @@ export class SkillVaultController {
 	}
 
 	load(name: string, requester: SkillVaultRequester, pin = false): SkillLoadResult {
+		const result = this.loadMany([name], requester, pin);
+		return result.ok ? result.results[0]! : result;
+	}
+
+	/** Admit the complete requested set before replacing any live slot. Single loads use this path too. */
+	loadMany(rawNames: readonly string[], requester: SkillVaultRequester, pin = false): SkillBatchLoadResult {
 		const now = this.now();
 		this.reconcile(now);
-		const skill = this.findEligible(name, requester);
-		if (!skill) return this.notFound(name);
+		const names = new Set(rawNames.map((name) => name.trim()).filter(Boolean));
+		if (names.size === 0) return { ok: false, reason: "not_found", message: "skill load requires an exact name" };
+		if (names.size > MAX_LOADED_SKILLS) {
+			return {
+				ok: false,
+				reason: "capacity",
+				message: `At most ${MAX_LOADED_SKILLS} skills can be loaded together; choose a smaller set.`,
+			};
+		}
 		if (pin) {
-			let pinnedCount = 0;
+			let pinnedCount = names.size;
 			for (const [slotName, slot] of this.slots) {
-				if (slotName !== skill.name && slot.pinned) pinnedCount++;
+				if (!names.has(slotName) && slot.pinned) pinnedCount++;
 			}
-			if (pinnedCount >= MAX_PINNED_SKILLS) {
+			if (pinnedCount > MAX_PINNED_SKILLS) {
 				return {
 					ok: false,
 					reason: "pin_limit",
@@ -260,27 +280,53 @@ export class SkillVaultController {
 			}
 		}
 		const maxBodyBytes = this.resolveMaxBodyBytes();
-		const bodyResult = this.readSkillBody(skill, maxBodyBytes, "load");
-		if (!bodyResult.ok) return bodyResult;
-		const { body, bodyBytes, file } = bodyResult;
+		const prepared = new Map<string, SkillSlotState>();
+		for (const name of names) {
+			const skill = this.findEligible(name, requester);
+			if (!skill) return this.notFound(name);
+			const bodyResult = this.readSkillBody(skill, maxBodyBytes, "load");
+			if (!bodyResult.ok) return bodyResult;
+			const { body, bodyBytes, file } = bodyResult;
+			prepared.set(name, {
+				state: "loaded_pending",
+				skill,
+				bodyBytes,
+				systemPromptSection: activeSkillContext(skill, body),
+				requester,
+				pinned: pin,
+				loadedAtMs: now,
+				fileDevice: file.dev,
+				fileInode: file.ino,
+				fileSize: file.size,
+				fileModifiedAtMs: file.mtimeMs,
+				fileChangedAtMs: file.ctimeMs,
+			});
+		}
+		const admissionLimit = Math.min(maxBodyBytes, this.resolveMaxBodyBytes());
+		if (aggregateBodyBytes(prepared) > admissionLimit) {
+			return {
+				ok: false,
+				reason: "capacity",
+				message: `Requested skill bodies exceed the shared ${admissionLimit}-byte budget; choose a smaller set.`,
+			};
+		}
+		// A rescan for a later member can revoke or replace an earlier member. Recheck the
+		// complete admission against one final resource snapshot before publishing any of it.
+		const skills = this.getSkills();
+		for (const slot of prepared.values()) {
+			if (this.reconcileSlot(slot, skills, admissionLimit, now) !== undefined) {
+				return {
+					ok: false,
+					reason: "read_failed",
+					message: "Skill resources changed during batch admission; retry the complete set.",
+				};
+			}
+		}
 		const next = new Map(this.slots);
-		next.set(skill.name, {
-			state: "loaded_pending",
-			skill,
-			bodyBytes,
-			systemPromptSection: activeSkillContext(skill, body),
-			requester,
-			pinned: pin,
-			loadedAtMs: now,
-			fileDevice: file.dev,
-			fileInode: file.ino,
-			fileSize: file.size,
-			fileModifiedAtMs: file.mtimeMs,
-			fileChangedAtMs: file.ctimeMs,
-		});
+		for (const [name, slot] of prepared) next.set(name, slot);
 		const evicted: string[] = [];
-		while (next.size > MAX_LOADED_SKILLS || aggregateBodyBytes(next) > maxBodyBytes) {
-			const victim = evictionVictimName(next, skill.name);
+		while (next.size > MAX_LOADED_SKILLS || aggregateBodyBytes(next) > admissionLimit) {
+			const victim = evictionVictimName(next, names);
 			if (!victim) break;
 			next.delete(victim);
 			evicted.push(victim);
@@ -288,11 +334,14 @@ export class SkillVaultController {
 		this.replaceState(next);
 		return {
 			ok: true,
-			state: "loaded_pending",
-			name: skill.name,
-			baseDir: skill.baseDir,
-			pinned: pin,
-			...(evicted.length > 0 ? { evicted } : {}),
+			results: [...prepared.values()].map((slot, index) => ({
+				ok: true,
+				state: "loaded_pending",
+				name: slot.skill.name,
+				baseDir: slot.skill.baseDir,
+				pinned: pin,
+				...(index === prepared.size - 1 && evicted.length > 0 ? { evicted } : {}),
+			})),
 		};
 	}
 

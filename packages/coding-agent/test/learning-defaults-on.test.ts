@@ -84,8 +84,9 @@ describe("self-adaptation defaults on", () => {
 		expect(controller.getEffectiveAutoLearnSettings().enabled).toBe(true);
 		expect(controller.isNativeReflectionEnabled()).toBe(true);
 		expect(session.systemPrompt).toContain(
-			"ROOT REFLECTION: decide and apply warranted durable learning in the current root provider turn only; never add a provider request or delegate reflection.",
+			"ROOT REFLECTION: decide and apply warranted durable learning only in the single host-scheduled reflection turn after completed work; do not schedule additional reflection turns or delegate it.",
 		);
+		expect(session.systemPrompt).not.toContain("never add a provider request");
 		expect(session.systemPrompt).not.toContain("learners may use");
 		await session.disposeAndWait();
 	});

@@ -21,16 +21,17 @@ function hasWindowsPathPrefix(value: string): boolean {
 	return /^[A-Za-z]:/u.test(value) || value.startsWith("\\\\");
 }
 
-function pushArgument(tokens: ShellToken[], current: string): string {
-	if (current.length > 0) tokens.push({ kind: "arg", value: current });
-	return "";
-}
-
 function tokenize(input: string, options: TokenizeOptions): ShellToken[] | null {
 	const tokens: ShellToken[] = [];
 	let current = "";
+	let argumentStarted = false;
 	let quote: "'" | '"' | undefined;
 	let escaped = false;
+	const pushArgument = () => {
+		if (argumentStarted || current.length > 0) tokens.push({ kind: "arg", value: current });
+		current = "";
+		argumentStarted = false;
+	};
 
 	for (let index = 0; index < input.length; index++) {
 		const char = input[index];
@@ -67,12 +68,13 @@ function tokenize(input: string, options: TokenizeOptions): ShellToken[] | null 
 			continue;
 		}
 		if (char === "'" || char === '"') {
+			argumentStarted = true;
 			quote = char;
 			continue;
 		}
 
 		if (options.operators && (char === "|" || char === "&" || char === ";" || char === "\n" || char === "\r")) {
-			current = pushArgument(tokens, current);
+			pushArgument();
 			if (char === "|" && input[index + 1] === "&") {
 				tokens.push({ kind: "pipe", value: "|&" });
 				index++;
@@ -92,8 +94,9 @@ function tokenize(input: string, options: TokenizeOptions): ShellToken[] | null 
 			if (char === ">" && /^\d+$/u.test(current)) {
 				fileDescriptor = current;
 				current = "";
+				argumentStarted = false;
 			} else {
-				current = pushArgument(tokens, current);
+				pushArgument();
 			}
 			let value = `${fileDescriptor}${char}`;
 			if (input[index + 1] === char) {
@@ -112,14 +115,14 @@ function tokenize(input: string, options: TokenizeOptions): ShellToken[] | null 
 		}
 
 		if (/\s/u.test(char)) {
-			current = pushArgument(tokens, current);
+			pushArgument();
 			continue;
 		}
 		current += char;
 	}
 
 	if (quote || escaped) return null;
-	pushArgument(tokens, current);
+	pushArgument();
 	return tokens;
 }
 

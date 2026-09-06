@@ -135,10 +135,8 @@ export class AssistantMessageComponent extends Container {
 				(!this.hideThinkingBlock && c.type === "thinking" && c.thinking.trim()),
 		);
 		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
-		const withheld = message.stopReason === "stop" && message.errorMessage === VERIFICATION_HANDOFF_REQUIRED_ERROR;
 		this.visibleOutput =
-			hasVisibleContent ||
-			(!hasToolCalls && (message.stopReason === "aborted" || message.stopReason === "error" || withheld));
+			hasVisibleContent || (!hasToolCalls && (message.stopReason === "aborted" || message.stopReason === "error"));
 
 		if (hasVisibleContent) {
 			this.contentContainer.addChild(new Spacer(1));
@@ -213,24 +211,22 @@ export class AssistantMessageComponent extends Container {
 					this.contentContainer.addChild(new Spacer(1));
 				}
 				this.contentContainer.addChild(new Text(theme.fg("error", abortMessage), 1, 0));
-			} else if (message.stopReason === "error") {
-				const errorMsg = message.errorMessage || "Unknown error";
-				this.contentContainer.addChild(new Spacer(1));
-				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), 1, 0));
-			} else if (withheld) {
-				// The gate emptied a completion claim: say so, or the operator sees a frozen screen
-				// while paid requests repeat.
+			} else if (message.stopReason === "error" && message.errorMessage === VERIFICATION_HANDOFF_REQUIRED_ERROR) {
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(
 					new Text(
 						theme.fg(
 							"warning",
-							"Answer withheld: a verification obligation is still failing. The model must rerun that check or hand off with one VERIFICATION_UNRESOLVED line per id.",
+							"Verification remains unresolved. This run has not passed its outstanding checks.",
 						),
 						1,
 						0,
 					),
 				);
+			} else if (message.stopReason === "error") {
+				const errorMsg = message.errorMessage || "Unknown error";
+				this.contentContainer.addChild(new Spacer(1));
+				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), 1, 0));
 			}
 		}
 	}

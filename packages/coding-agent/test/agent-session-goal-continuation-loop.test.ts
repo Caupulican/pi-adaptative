@@ -125,6 +125,7 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 				type: "add_evidence",
 				id: "evidence-1",
 				kind: "user",
+				verified: true,
 				summary: "Owner-accepted proof",
 				now: "T1",
 			});

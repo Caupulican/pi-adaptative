@@ -67,6 +67,38 @@ const readHint: ToolSelectionHint = {
 };
 
 describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
+	it.each(["full", "lean", "minimal"] as const)(
+		"preserves existing owner authorization in the %s profile",
+		(capabilityClass) => {
+			const defaults = makeDeps();
+			const settings = {
+				...defaults.getSettingsManager(),
+				getAutonomySettings: () => ({ mode: "full" }),
+				getAutoLearnSettings: () => ({ enabled: true }),
+				getSelfModificationSettings: () => ({ enabled: true, sourcePath: "/repo" }),
+			} as SettingsManager;
+			for (const customPrompt of [undefined, "Custom task instructions."]) {
+				const builder = new SystemPromptBuilder(
+					makeDeps({
+						getSettingsManager: () => settings,
+						getResourceLoader: () => ({ ...defaults.getResourceLoader(), getSystemPrompt: () => customPrompt }),
+						getModelCapabilityProfile: () => ({
+							...defaults.getModelCapabilityProfile(),
+							class: capabilityClass,
+						}),
+					}),
+				);
+				const prompt = builder.rebuildSystemPrompt(["read", "bash"]);
+				expect(prompt.split("Reuse explicit owner grants in scope.")).toHaveLength(2);
+				expect(prompt).toContain("Ask only if missing:");
+				expect(prompt).toContain("publish/push/tag/release");
+				expect(prompt).toContain("explicit human approval required");
+				expect(prompt).not.toContain("Always ask before publish");
+				expect(prompt).not.toContain("Hard stop for publish");
+			}
+		},
+	);
+
 	it.each([false, true])("keeps delegation root-only with a custom prompt (child=%s)", (child) => {
 		const defaults = makeDeps();
 		const settingsManager = {
@@ -96,7 +128,7 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		expect(builder.rebuildSystemPrompt(["delegate"])).toBe(prompt);
 	});
 
-	it("gives a constrained root the current-session reflection contract without background lanes", () => {
+	it("gives a constrained root the host-scheduled reflection contract without background lanes", () => {
 		const settingsManager = {
 			...makeDeps().getSettingsManager(),
 			getAutoLearnSettings: () => ({ enabled: true, reflectionReview: true }),
@@ -117,7 +149,8 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		).rebuildSystemPrompt(["read"]);
 
 		expect(prompt).toContain("ROOT REFLECTION");
-		expect(prompt).toContain("current root provider turn");
+		expect(prompt).toContain("single host-scheduled reflection turn after completed work");
+		expect(prompt).toContain("do not schedule additional reflection turns or delegate it");
 		expect(prompt).not.toContain("background learner");
 	});
 
@@ -306,7 +339,7 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		expect(prompt).toContain(criticalRule);
 		expect(prompt.match(new RegExp(duplicateRule, "g"))).toHaveLength(1);
 		expect(prompt).not.toContain("early-low-priority-63");
-		expect(prompt).toContain("Ask before destructive actions");
+		expect(prompt).toContain("Ask only if missing: destruction");
 		expect(prompt).toContain("explicit human approval required");
 	});
 

@@ -34,18 +34,17 @@ import {
 	createToolFailureMemoryTracker,
 	createToolFailureResult,
 	describeOperationOutcome,
-	getToolExecutionKey,
 	getUnresolvedToolFailure,
 	normalizeToolSignature,
 	readToolFailureOccurrence,
 	rememberToolFailure,
-	stableToolFailureEnvelopeText,
 	type ToolFailureContextMemory,
 	type ToolFailureMemoryTracker,
 	toolFailureCorrection,
 } from "./tool-failure-memory.ts";
 import { ToolFailureRecoveryGate, type ToolFailureRecoveryGateEffect } from "./tool-failure-recovery-gate.ts";
 import { rejectNativeToolProtocolResidue, rejectToolCallsFromToolFreeResponse } from "./tool-protocol-residue.ts";
+import { ToolResultProgressTracker, toolResultBatchSignature } from "./tool-result-progress.ts";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -66,7 +65,6 @@ import {
 	DEFAULT_MAX_PROVIDER_TURNS,
 	DEFAULT_MAX_REPEATED_FAILURES,
 	DEFAULT_MAX_STALL_TURNS,
-	DEFAULT_MAX_VERIFICATION_HANDOFF_TURNS,
 } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
 import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
@@ -91,8 +89,7 @@ export interface AgentLoopContinuationState {
 	stallWindow: string[];
 	/** Optional for compatibility with continuation snapshots created before result-aware cycle detection. */
 	stagnantResultWindow?: string[];
-	/** Consecutive tool-free answers the verification gate withheld; optional for older snapshots. */
-	verificationHandoffTurns?: number;
+	toolResultProgress?: ToolResultProgressTracker;
 	toolFailureRecoveryGate: ToolFailureRecoveryGate;
 	/**
 	 * Shared holder for the two provider-request prefix high-water marks (see
@@ -135,7 +132,7 @@ export function createAgentLoopContinuationState(
 		providerTurns: 0,
 		stallWindow: [],
 		stagnantResultWindow: [],
-		verificationHandoffTurns: 0,
+		toolResultProgress: new ToolResultProgressTracker(),
 		toolFailureRecoveryGate: new ToolFailureRecoveryGate(),
 		providerRequestPrefixState: {
 			// Seeded from the previous run: a run that starts at zero lets the context GC repack
@@ -354,23 +351,6 @@ function textProtocolBatchSignature(toolCalls: readonly AgentToolCall[]): string
 	);
 }
 
-/**
- * Hash only provider-visible result state; per-execution IDs/timestamps cannot hide a stagnant
- * cycle, and neither can the failure ledger's own occurrence stamp on an otherwise identical result.
- */
-function toolResultBatchSignature(toolResults: readonly ToolResultMessage[]): string {
-	return getToolExecutionKey(
-		"tool_result_batch",
-		toolResults.map((result) => ({
-			toolName: result.toolName,
-			content: result.content.map((block) =>
-				block.type === "text" ? { ...block, text: stableToolFailureEnvelopeText(block.text) } : block,
-			),
-			isError: result.isError,
-		})),
-	);
-}
-
 /** The most-repeated failure key among this turn's results, as the ledger counted it. */
 function mostRepeatedToolFailure(
 	toolResults: readonly ToolResultMessage[],
@@ -443,6 +423,8 @@ async function runLoop(
 	const stallLimit = config.maxStallTurns ?? DEFAULT_MAX_STALL_TURNS;
 	const providerTurnLimit = config.maxProviderTurns ?? DEFAULT_MAX_PROVIDER_TURNS;
 	const stallWindow = continuationState.stallWindow;
+	continuationState.toolResultProgress ??= new ToolResultProgressTracker();
+	const toolResultProgress = continuationState.toolResultProgress;
 	let stagnantResultWindow = continuationState.stagnantResultWindow;
 	if (stagnantResultWindow === undefined) {
 		stagnantResultWindow = [];
@@ -566,8 +548,6 @@ async function runLoop(
 				streamFn,
 				{
 					verificationObligations,
-					invalidVerificationTerminalStopReason:
-						providerTurnLimit > 0 && continuationState.providerTurns >= providerTurnLimit ? "error" : "stop",
 				},
 				previousAssistantForDegenerateCollapse,
 			);
@@ -585,7 +565,6 @@ async function runLoop(
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
-			let terminatingToolBatch = false;
 			hasMoreToolCalls = false;
 			if (toolCalls.length > 0) {
 				const textProtocolBatch = toolCalls.every((toolCall) => toolCall.source === "text-protocol");
@@ -609,7 +588,6 @@ async function runLoop(
 					emit,
 				);
 				toolResults.push(...executedToolBatch.messages);
-				terminatingToolBatch = executedToolBatch.terminate;
 				hasMoreToolCalls = !executedToolBatch.terminate;
 
 				for (const result of toolResults) {
@@ -632,32 +610,10 @@ async function runLoop(
 			} else {
 				lastSuccessfulTextProtocolBatch = undefined;
 			}
-			const verificationBlocksCompletion =
-				!verificationObligations.permitsTerminalMessage(message) ||
-				(terminatingToolBatch && verificationObligations.getActiveIds().length > 0);
+			const verificationBlocksCompletion = verificationObligations.getActiveIds().length > 0;
 			if (verificationBlocksCompletion) hasMoreToolCalls = true;
 
 			await emit({ type: "turn_end", message, toolResults });
-
-			// A withheld tool-free answer is a full provider request that renders nothing. Count them
-			// consecutively; tool calls are progress and reset the count. The obligations stay active
-			// for the next prompt, so stopping here loses no verification state.
-			if (verificationBlocksCompletion && toolCalls.length === 0) {
-				const withheld = (continuationState.verificationHandoffTurns ?? 0) + 1;
-				continuationState.verificationHandoffTurns = withheld;
-				const handoffLimit = config.maxVerificationHandoffTurns ?? DEFAULT_MAX_VERIFICATION_HANDOFF_TURNS;
-				if (handoffLimit > 0 && withheld >= handoffLimit) {
-					config.onRunawayStop?.({
-						reason: "verification_handoff_stall",
-						signature: verificationObligations.getActiveIds().join(","),
-						repeats: withheld,
-					});
-					await emit({ type: "agent_end", messages: newMessages });
-					return;
-				}
-			} else if (toolCalls.length > 0) {
-				continuationState.verificationHandoffTurns = 0;
-			}
 
 			// One call failing identically N times ends the run, whatever else rode in its batches:
 			// keyed on the ledger's own count, not on batch or result-text repetition.
@@ -696,7 +652,11 @@ async function runLoop(
 				if (stagnantResultWindow.length > STAGNANT_RESULT_REPEAT_LIMIT * STALL_WINDOW_PERIODS) {
 					stagnantResultWindow.shift();
 				}
-				if (repeatsToolCallPattern(stagnantResultWindow, STAGNANT_RESULT_REPEAT_LIMIT)) {
+				const unchangedBatches = toolResultProgress.observe(toolCalls, toolResults);
+				if (
+					repeatsToolCallPattern(stagnantResultWindow, STAGNANT_RESULT_REPEAT_LIMIT) ||
+					unchangedBatches >= STAGNANT_RESULT_REPEAT_LIMIT
+				) {
 					config.onRunawayStop?.({
 						reason: "stagnant_tool_cycle",
 						signature,
@@ -846,12 +806,7 @@ async function streamToollessClosingTurn(
 		streamFn,
 		{
 			rejectToolCalls: true,
-			...(verificationObligations
-				? {
-						verificationObligations,
-						invalidVerificationTerminalStopReason: "error" as const,
-					}
-				: {}),
+			verificationObligations,
 		},
 		previousAssistant,
 		{ allowToolFreeComparison: true },
@@ -887,7 +842,6 @@ type StartedAssistantResponse = {
 type AssistantResponsePolicy = {
 	rejectToolCalls?: boolean;
 	verificationObligations?: VerificationObligationTracker;
-	invalidVerificationTerminalStopReason?: "stop" | "error";
 };
 
 /**
@@ -985,10 +939,7 @@ async function streamAssistantResponse(
 		delete finalMessage.errorMessage;
 	}
 	if (policy?.verificationObligations) {
-		finalMessage = policy.verificationObligations.enforceTerminalMessage(
-			finalMessage,
-			policy.invalidVerificationTerminalStopReason ?? "error",
-		);
+		finalMessage = policy.verificationObligations.enforceTerminalMessage(finalMessage);
 	}
 	const comparisonMessage = finalMessage;
 	finalMessage = collapseDegenerateAssistantMessage(finalMessage, previousAssistant, collapseOptions);
@@ -2220,9 +2171,11 @@ async function finalizeExecutedToolCall(
 				{ failureCode: effectiveFailureCode, message: effectiveFailureMessage },
 				currentContext.tools ?? [],
 			);
-			const correction = assessment.policyGuidance
-				? `${assessment.policyGuidance} ${recoveryPlan.guidance}`
-				: recoveryPlan.guidance;
+			const correction =
+				recoveryPlan.correction ??
+				(assessment.policyGuidance
+					? `${assessment.policyGuidance} ${recoveryPlan.guidance}`
+					: recoveryPlan.guidance);
 			const record = rememberToolFailure(
 				toolFailureMemory,
 				prepared.toolCall.name,

@@ -8,7 +8,7 @@ import { getReadmePath } from "../config.ts";
 import { getExtensionDescription, getExtensionDisplayName } from "./extension-metadata.ts";
 import type { Extension } from "./extensions/types.ts";
 import { enforceModelCapabilitySystemPromptBudget, type ModelCapabilityProfile } from "./model-capability.ts";
-import { SKILL_VAULT_SYSTEM_RULE } from "./provider-prompt-contracts.ts";
+import { ORIENTATION_SURVEY_RULE, SKILL_VAULT_SYSTEM_RULE } from "./provider-prompt-contracts.ts";
 import type { Skill } from "./skills.ts";
 
 export interface BuildSystemPromptOptions {
@@ -36,6 +36,9 @@ export interface BuildSystemPromptOptions {
 
 const MODEL_BLIND_CREDENTIAL_AUTHORITY =
 	"Active secret_store: host gate authorizes model-blind activation/migration from named accessible sources; no duplicate confirmation.";
+
+const OWNER_AUTHORIZATION_RULE =
+	"Reuse explicit owner grants in scope. Ask only if missing: destruction, credentials/auth, publish/push/tag/release, broader scope.";
 
 const ULTRA_TERSE_OUTPUT_POLICY = `
 
@@ -66,7 +69,7 @@ OPERATING CONTRACT
 - Facts: memory; specialization: skills; behavior: source. Discard noise.
 - Implementation/verification work loads skill evidence-gated-tdd; architecture/performance design loads skill n-plus-2-architecture; their gates bind only while that work is active.
 - Explicit user instruction in current message overrides standing style (length/format/tone); security, untrusted-content, and authorization rules are never overridable.
-- Ask before broader scope, credential or authentication change/disclosure, destructive action, publication. Bound, source-label output; show paths.
+- ${OWNER_AUTHORIZATION_RULE} Bound, source-label output; show paths.
 - ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
 
 const PI_ADAPTATIVE_LEAN_CORE_SECTION = `
@@ -76,8 +79,8 @@ OPERATING CONTRACT
 - Complete current goal within scope, granted authority; keep progress, evidence concise.
 - Inspect relevant files and instructions before editing; make minimal coherent change, run focused checks.
 - Use active tools/schemas. On failure, follow error guidance. ${TOOL_FAILURE_RETRY_MODEL_RULE}
-- Emit independent calls in one message; order mutations; report real output, unresolved failures.
-- Ask before destructive actions, credential disclosure or provider authentication changes, publication, push/tag/release, scope expansion.
+- Emit independent calls in one message; order dependent/mutating/stateful calls; report real output, unresolved failures.
+- ${OWNER_AUTHORIZATION_RULE}
 - ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
 
 const PI_ADAPTATIVE_MINIMAL_CORE_SECTION = `
@@ -86,8 +89,8 @@ EXECUTION RULES
 
 - Work one scoped task. Inspect before editing, make small coherent change, run narrowest useful check.
 - Use listed tools/schemas. On failure, follow error guidance. ${TOOL_FAILURE_RETRY_MODEL_RULE}
-- Emit independent calls in one message; order mutations. Report actual results; never claim incomplete action.
-- Ask before destructive actions, credential disclosure or provider authentication changes, publication, push/tag/release, material scope change.
+- Emit independent calls in one message; order dependent/mutating/stateful calls. Report actual results; never claim incomplete action.
+- ${OWNER_AUTHORIZATION_RULE}
 - ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
 
 const PI_ADAPTATIVE_CHAT_CORE_SECTION = `
@@ -266,7 +269,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const skillVaultContract = activeTools.includes("skill") ? `\n\n${SKILL_VAULT_SYSTEM_RULE}` : "";
 	const pathAliasRule = capabilityClass === "chat" ? "" : PATH_ALIAS_PROMPT_RULE;
 	const styleContract = capabilityClass === "chat" ? "" : ULTRA_TERSE_OUTPUT_POLICY;
-	const operatingContract = `${coreSection}${skillVaultContract}${styleContract}${pathAliasRule}`;
+	const scopeContract = capabilityClass === "chat" ? "" : `\n- ${ORIENTATION_SURVEY_RULE}`;
+	const operatingContract = `${coreSection}${scopeContract}${skillVaultContract}${styleContract}${pathAliasRule}`;
 
 	if (customPrompt) {
 		let prompt = customPrompt;
@@ -308,13 +312,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const hasGrep = activeTools.includes("grep");
 	const hasFind = activeTools.includes("find");
 	const hasLs = activeTools.includes("ls");
-	const hasReadOnlyTools = hasRead || hasGrep || hasFind || hasLs;
 
 	// File exploration guidelines
 	if (!fullPrompt && !leanPrompt) {
 		if (hasBash) addGuideline("Use bash for bounded shell commands");
-		if (hasReadOnlyTools)
-			addGuideline("Emit independent reads in one message; keep mutations and dependent calls ordered");
 	} else if (hasBash && !hasGrep && !hasFind && !hasLs) {
 		addGuideline("Bash: ls, rg, find");
 	}
@@ -326,9 +327,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		}
 		if (hasPython) {
 			addGuideline("Python: bounded scripts/data, source edits via read/edit/write");
-		}
-		if (hasReadOnlyTools) {
-			addGuideline("Emit independent calls in one message; order dependent/mutating/stateful calls");
 		}
 	}
 

@@ -723,9 +723,7 @@ describe("tool failure memory", () => {
 			'"diagnostic":"Not executed: unchanged. The operation is readmitted after another tool succeeds or a new user turn."',
 		);
 		expect(text).not.toContain('"note":');
-		expect(text).toContain(
-			'"next_action":"Not executed: its last result is already above. Do corrective work or use a different operation. The operation is readmitted after another tool succeeds or a new user turn."',
-		);
+		expect(text).toContain('"next_action":"Use the contract guidance."');
 		expect(blocked.details.piToolFailureMemory.correction).toBe("Use the contract guidance.");
 	});
 
@@ -1179,6 +1177,33 @@ describe("tool failure memory", () => {
 		expect(nextRequest.messages).toEqual([]);
 		expect(nextRequest.ledger).toContain(payloadRef);
 		expect(nextRequest.ledger).not.toContain("GENERATED_CONTENT_MUST_NOT_SURVIVE");
+	});
+
+	it("retains an adapter correction as next_action", () => {
+		const repair =
+			"Credential-safe shell search requires a narrow non-dotenv file glob (for example -g '*.ts') or one explicit regular file. Refine the rg/grep command before retrying.";
+
+		const tracker = new Map();
+		const recorded = rememberToolFailure(
+			tracker,
+			"bash",
+			{ command: "rg TOKEN src" },
+			"failed",
+			"credential_access_blocked",
+			repair,
+			repair,
+		);
+		const text = createToolFailureResult(recorded).content[0];
+		if (text?.type !== "text") throw new Error("expected text record");
+		expect(text.text).toContain('"next_action":');
+		expect(text.text).toContain("-g '*.ts'");
+		expect(text.text).not.toContain("readmitted after another tool");
+	});
+
+	it("treats a globbed bash search as a different operation than the blocked one", () => {
+		expect(getToolExecutionKey("bash", { command: "rg TOKEN src" })).not.toBe(
+			getToolExecutionKey("bash", { command: "rg TOKEN src -g '*.ts'" }),
+		);
 	});
 
 	it("labels rejected-argument guidance as repair and execution guidance as next_action", () => {

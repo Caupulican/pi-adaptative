@@ -23,7 +23,6 @@
     "packages/coding-agent/test/phone-filesystem-workflow.test.ts",
     "packages/coding-agent/test/agent-session-runaway-escalation.test.ts",
     "packages/coding-agent/test/capability-tier.test.ts",
-    "packages/coding-agent/test/worker-authority-resolver.test.ts",
     "packages/coding-agent/test/native-worker-autonomy.test.ts",
     "packages/coding-agent/test/background-tool-task-controller.test.ts",
     "packages/coding-agent/test/tool-task.test.ts",

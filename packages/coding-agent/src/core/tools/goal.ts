@@ -6,7 +6,13 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { type GoalStateRevision, getGoalStateRevision } from "../goals/goal-lifecycle.ts";
-import { type GoalEvidenceKind, type GoalState, type GoalStatus, isGoalExecutionActive } from "../goals/goal-state.ts";
+import {
+	type GoalEvidenceKind,
+	type GoalEvidenceOutcome,
+	type GoalState,
+	type GoalStatus,
+	isGoalExecutionActive,
+} from "../goals/goal-state.ts";
 import {
 	applyGoalAction,
 	type GoalAction,
@@ -87,7 +93,7 @@ const goalSchema = Type.Object(
 		uri: Type.Optional(
 			Type.String({
 				description:
-					"Evidence locator that verifies it: file -> a path under cwd; tool or test -> the toolCallId of the call that produced it; worker -> a laneId. Only verified or user evidence can satisfy a requirement; finding never verifies.",
+					"Evidence locator: file -> path; tool or test -> producing toolCallId or exact command; worker -> laneId; user -> user-message entry id and summary quoting its complete text. Only host-verified evidence can satisfy a requirement; finding never verifies.",
 			}),
 		),
 		reason: Type.Optional(Type.String({ description: "Reason for block_requirement or block_goal." })),
@@ -154,6 +160,14 @@ export interface GoalToolDetails {
 	dispatchSkipReason?: string;
 }
 
+export type GoalToolEvidenceResolution =
+	| { verified: true; toolCallId: string; outcome: GoalEvidenceOutcome }
+	| { verified: false; reason: string };
+
+export type GoalUserEvidenceResolution =
+	| { verified: true; messageEntryId: string }
+	| { verified: false; reason: string };
+
 export interface GoalToolDependencies {
 	/** Read the latest persisted goal state for the active session. */
 	getGoalState: () => GoalState | undefined;
@@ -162,15 +176,9 @@ export interface GoalToolDependencies {
 	/** Clock injection for deterministic tests. */
 	now?: () => string;
 	/**
-	 * Check whether `toolCallId` exists in this session's records, for validating kind:"tool"
-	 * evidence refs at add_evidence time. When not wired, a "tool" ref cannot be proven and is
-	 * recorded as `verified: false` rather than assumed true.
-	 */
-	hasToolCallId?: (toolCallId: string) => boolean;
-	/**
 	 * Read the session's live worker lane records, for validating kind:"worker" evidence refs
 	 * (the `uri` is a laneId) at add_evidence time and refusing completion while goal-owned work is
-	 * queued or running. Read-defensive: when not wired -- exactly like `hasToolCallId` -- a "worker"
+	 * queued or running. Read-defensive: when not wired, a "worker"
 	 * ref cannot be proven and is recorded as `verified: false` rather than assumed true.
 	 */
 	getLaneRecords?: () => readonly LaneRecord[];
@@ -244,36 +252,40 @@ export interface GoalToolDependencies {
 	 */
 	getActiveVerificationIds?: () => readonly string[];
 	/**
-	 * Live tool-evidence check. When wired, kind:"tool" uses this instead of {@link hasToolCallId}
-	 * so a still-running background handoff cannot verify as done.
+	 * Resolve the producing call and its authoritative outcome on the active branch. Test evidence
+	 * additionally requires a trusted passing verification receipt; answered calls alone are not proof.
 	 */
-	resolveToolEvidence?: (uri: string) => boolean | { verified: boolean; toolCallId?: string };
+	resolveToolEvidence?: (uri: string, kind: "tool" | "test") => GoalToolEvidenceResolution;
+	/** Verify an exact user statement against the active branch, never from the model-selected kind. */
+	resolveUserEvidence?: (summary: string, uri?: string) => GoalUserEvidenceResolution;
 }
 
 /**
  * Validate an evidence ref's `uri` against session records ("tool") or the filesystem ("file").
- * Returns `undefined` for kinds/refs that carry nothing checkable (e.g. "user"/"finding"/"test",
+ * Returns `undefined` for kinds/refs that carry nothing checkable (e.g. "finding",
  * or a missing `uri`) -- absence of a ref is not the same as a ref that failed to verify.
  */
 async function resolveEvidenceVerified(
 	kind: GoalEvidenceKind,
 	uri: string | undefined,
+	summary: string,
 	deps: GoalToolDependencies,
-): Promise<{ verified: boolean | undefined; uri?: string }> {
+): Promise<{ verified: boolean | undefined; uri?: string; reason?: string; outcome?: GoalEvidenceOutcome }> {
+	if (kind === "user") {
+		const resolved = deps.resolveUserEvidence?.(summary, uri);
+		if (!resolved) return { verified: false, reason: "user-statement verification is unavailable" };
+		return resolved.verified
+			? { verified: true, uri: `user-message:${resolved.messageEntryId}` }
+			: { verified: false, reason: resolved.reason };
+	}
 	const trimmedUri = uri?.trim();
 	if (!trimmedUri) return { verified: undefined };
-	// A test run is proven by the tool call that ran it, exactly like any other tool evidence.
-	// Measured live: a model recorded its passing test run as kind "test" with a command string as
-	// the locator, which could never verify, then failed satisfy_requirement, complete and increment
-	// in a row without being told why. A locator that is the command text rather than the call id
-	// resolves to the call that ran it, and the record then carries the real id.
 	if (kind === "tool" || kind === "test") {
-		if (deps.resolveToolEvidence) {
-			const resolved = deps.resolveToolEvidence(trimmedUri);
-			if (typeof resolved === "boolean") return { verified: resolved };
-			return { verified: resolved.verified, ...(resolved.toolCallId ? { uri: resolved.toolCallId } : {}) };
-		}
-		return { verified: deps.hasToolCallId ? deps.hasToolCallId(trimmedUri) : false };
+		const resolved = deps.resolveToolEvidence?.(trimmedUri, kind);
+		if (!resolved) return { verified: false, reason: "session evidence verification is unavailable" };
+		return resolved.verified
+			? { verified: true, uri: resolved.toolCallId, outcome: resolved.outcome }
+			: { verified: false, reason: resolved.reason };
 	}
 	if (kind === "file") {
 		const cwd = deps.cwd?.() ?? process.cwd();
@@ -530,9 +542,16 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			}
 
 			let action: GoalAction = mapped;
+			let evidenceFailureReason: string | undefined;
 			if (action.action === "add_evidence") {
-				const resolved = await resolveEvidenceVerified(action.kind, action.uri, deps);
-				action = { ...action, verified: resolved.verified, ...(resolved.uri ? { uri: resolved.uri } : {}) };
+				const resolved = await resolveEvidenceVerified(action.kind, action.uri, action.summary, deps);
+				evidenceFailureReason = resolved.reason;
+				action = {
+					...action,
+					verified: resolved.verified,
+					outcome: resolved.outcome,
+					...(resolved.uri ? { uri: resolved.uri } : {}),
+				};
 			}
 			// Honest dispatch reporting: distinguish "dispatched" (laneId), "declined" (skipReason --
 			// the dependency IS wired but the underlying delegation starter refused, e.g. disabled or
@@ -696,10 +715,18 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			}
 
 			const summary = summarizeGoalState(nextState, { action, openTaskSteps: deps.getOpenTaskSteps?.() });
-			const evidenceNote =
-				action.action === "add_evidence"
-					? `Evidence '${action.evidenceId}' recorded (${action.kind === "user" ? "user-confirmed" : action.verified === true ? `verified${action.uri && action.uri !== input.uri?.trim() ? ` via toolCallId ${action.uri}` : ""}` : `unverified: ${unverifiedEvidenceReason(action.kind)}`}).`
-					: "";
+			let evidenceNote = "";
+			if (action.action === "add_evidence") {
+				let status = `unverified: ${evidenceFailureReason ?? unverifiedEvidenceReason(action.kind)}`;
+				if (action.verified === true) {
+					status =
+						action.kind === "user"
+							? `verified user statement via ${action.uri}`
+							: `verified${action.uri && action.uri !== input.uri?.trim() ? ` via toolCallId ${action.uri}` : ""}`;
+					if (action.outcome) status += `; operation ${action.outcome}`;
+				}
+				evidenceNote = `Evidence '${action.evidenceId}' recorded (${status}).`;
+			}
 			const receipt =
 				action.action === "progress"
 					? `Progress recorded; lifecycle unchanged (${nextState.status}).${nextState.status === "blocked" ? " Only the owner can resume it with /goal resume." : ""}`

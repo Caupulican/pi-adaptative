@@ -1,9 +1,70 @@
 import { describe, expect, it } from "vitest";
 import { cancelGoal, resumeGoal } from "../src/core/goals/goal-lifecycle.ts";
-import { createGoalState } from "../src/core/goals/goal-state.ts";
+import { createGoalState, parseGoalState, serializeGoalState } from "../src/core/goals/goal-state.ts";
 import { applyGoalAction, completeGoalManually, summarizeGoalState } from "../src/core/goals/goal-tool-core.ts";
 
 describe("applyGoalAction (goal producer core)", () => {
+	it.each([undefined, "failed", "canceled", "succeeded"] as const)(
+		"requires an explicit successful outcome for persisted test evidence (%s)",
+		(outcome) => {
+			let state = createGoalState({ goalId: "g1", userGoal: "Fix the harness", now: "T0" });
+			state = expectOk(
+				applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Tests pass" }, "T1"),
+			);
+			const revision = state.progressRevision ?? 0;
+			state = expectOk(
+				applyGoalAction(
+					state,
+					{
+						action: "add_evidence",
+						evidenceId: "test-proof",
+						kind: "test",
+						summary: "Old verified flag",
+						verified: true,
+						outcome,
+					},
+					"T2",
+				),
+			);
+			const restored = parseGoalState(serializeGoalState(state));
+			expect(restored?.evidence[0]?.outcome).toBe(outcome);
+			expect(restored?.progressRevision).toBe(revision + (outcome === "succeeded" ? 1 : 0));
+			const satisfied = applyGoalAction(
+				restored,
+				{ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["test-proof"] },
+				"T3",
+			);
+			expect(satisfied.ok).toBe(outcome === "succeeded");
+		},
+	);
+
+	it.each([undefined, false] as const)(
+		"does not trust legacy user evidence with verified=%s after restore",
+		(verified) => {
+			let state = createGoalState({ goalId: "g1", userGoal: "Fix the harness", now: "T0" });
+			state = expectOk(
+				applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Fix works" }, "T1"),
+			);
+			state = expectOk(
+				applyGoalAction(
+					state,
+					{ action: "add_evidence", evidenceId: "legacy-user", kind: "user", summary: "user confirmed", verified },
+					"T2",
+				),
+			);
+			state = expectOk(
+				applyGoalAction(
+					state,
+					{ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["legacy-user"] },
+					"T3",
+					{ requireVerifiedEvidenceForCompletion: false },
+				),
+			);
+			const restored = parseGoalState(serializeGoalState(state));
+			expect(applyGoalAction(restored, { action: "complete" }, "T4").ok).toBe(false);
+		},
+	);
+
 	it("satisfy_requirement with no cited evidence adopts the unused verified evidence, and refuses when there is none", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
 		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
@@ -95,7 +156,11 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(missingEvidence.ok).toBe(false);
 
 		state = expectOk(
-			applyGoalAction(state, { action: "add_evidence", evidenceId: "e1", kind: "user", summary: "confirmed" }, "T3"),
+			applyGoalAction(
+				state,
+				{ action: "add_evidence", evidenceId: "e1", kind: "user", verified: true, summary: "confirmed" },
+				"T3",
+			),
 		);
 		state = expectOk(
 			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] }, "T4"),
@@ -190,7 +255,7 @@ describe("applyGoalAction (goal producer core)", () => {
 		state = expectOk(
 			applyGoalAction(
 				state,
-				{ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "user confirmed" },
+				{ action: "add_evidence", evidenceId: "e1", kind: "user", verified: true, summary: "user confirmed" },
 				"T4",
 			),
 		);
@@ -336,7 +401,7 @@ describe("applyGoalAction (goal producer core)", () => {
 		state = expectOk(
 			applyGoalAction(
 				state,
-				{ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "owner confirmed" },
+				{ action: "add_evidence", evidenceId: "e1", kind: "user", verified: true, summary: "owner confirmed" },
 				"T2",
 			),
 		);
@@ -411,7 +476,13 @@ describe("applyGoalAction (goal producer core)", () => {
 			state = expectOk(
 				applyGoalAction(
 					state,
-					{ action: "add_evidence", evidenceId: "e-proof", kind: "user", summary: "owner confirmed" },
+					{
+						action: "add_evidence",
+						evidenceId: "e-proof",
+						kind: "user",
+						verified: true,
+						summary: "owner confirmed",
+					},
 					"T2",
 				),
 			);
@@ -469,7 +540,7 @@ describe("applyGoalAction (goal producer core)", () => {
 		state = expectOk(
 			applyGoalAction(
 				state,
-				{ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "owner confirmed" },
+				{ action: "add_evidence", evidenceId: "e1", kind: "user", verified: true, summary: "owner confirmed" },
 				"T3",
 			),
 		);
@@ -485,7 +556,7 @@ describe("applyGoalAction (goal producer core)", () => {
 		state = expectOk(
 			applyGoalAction(
 				state,
-				{ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "X confirmed" },
+				{ action: "add_evidence", evidenceId: "e1", kind: "user", verified: true, summary: "X confirmed" },
 				"T3",
 			),
 		);
@@ -517,7 +588,7 @@ describe("applyGoalAction (goal producer core)", () => {
 		state = expectOk(
 			applyGoalAction(
 				state,
-				{ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "owner confirmed" },
+				{ action: "add_evidence", evidenceId: "e1", kind: "user", verified: true, summary: "owner confirmed" },
 				"T2",
 			),
 		);

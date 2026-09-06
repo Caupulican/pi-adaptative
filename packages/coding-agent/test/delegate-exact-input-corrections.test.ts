@@ -1,3 +1,4 @@
+import { ToolArgumentValidationError, validateToolArguments } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 // Imported by path so the pipeline proof always reads THIS checkout's kernel, matching the drift
 // pin in `untrusted-envelope-failure-memory.test.ts`.
@@ -118,6 +119,152 @@ function toolWithSpies(spies: ReturnType<typeof controlSpies>, startWorkerDelega
 }
 
 describe("delegate exact-action input corrections", () => {
+	it("forwards a typed read-only request to fresh admission", async () => {
+		const start = vi.fn(() => ({ started: false, skipReason: "fixture" }));
+		const tool = toolWithSpies(controlSpies(), start);
+		const input = { action: "start", instructions: "Inspect only.", readOnly: true };
+		expect(
+			validateToolArguments(
+				tool,
+				{
+					type: "toolCall",
+					id: "read-only",
+					name: "delegate",
+					arguments: input,
+				},
+				{ repairEnabled: false },
+			),
+		).toEqual(input);
+		await tool.execute("read-only", input, undefined, undefined, context);
+		expect(start).toHaveBeenCalledWith(expect.objectContaining({ authority: { readOnly: true } }));
+	});
+	it.each([true, false])("rejects readOnly=%s changes when reusing a persistent worker", async (readOnly) => {
+		const startWorkerAgentTask = vi.fn(() => ({ started: true, steering: false as const, messageId: "turn-1" }));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
+			runWorkerDelegation: async () => ({ started: false }),
+			workerAgentControl: workerAgentControl({ startWorkerAgentTask }),
+		});
+		const result = await tool.execute(
+			"reuse",
+			{
+				action: "start",
+				agentId: "worker",
+				instructions: "Continue.",
+				readOnly,
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		expect(result).toMatchObject({ isError: true, details: { skipReason: "worker_reuse_overrides_forbidden" } });
+		expect(delegateText(result)).toContain("readOnly");
+		expect(startWorkerAgentTask).not.toHaveBeenCalled();
+	});
+	it.each([
+		{ action: "wait_many", agentIds: ["worker"] },
+		{ action: "wait_many", mode: "all" },
+		{ action: "retire", agentIds: ["worker"] },
+		{ action: "start" },
+		{ action: "transcript" },
+		{ action: "send", agentId: "worker" },
+		{ action: "broadcast", agentIds: ["worker"] },
+		{ action: "inbox_ack", messageId: "message-1" },
+	])("rejects missing action fields for $action before adapter execution", (args) => {
+		const tool = toolWithSpies(controlSpies());
+		expect(() =>
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "missing",
+				name: "delegate",
+				arguments: args,
+			}),
+		).toThrow(ToolArgumentValidationError);
+	});
+	it.each([
+		{ action: "wait_many", agentIds: ["worker"], mode: "all" },
+		{ action: "wait", agentIds: ["worker"] },
+		{ action: "wait", agentId: "worker" },
+		{ action: "retire", agentId: "worker" },
+		{ instructions: "Inspect the source." },
+		{ action: "start", task: "Inspect the source." },
+		{ action: "list" },
+		{ action: "send", agentId: "worker", message: "Evidence." },
+		{ action: "broadcast", agentIds: ["worker"], message: "Evidence." },
+		{ action: "inbox_ack", messageId: "message-1", ackToken: "token-1" },
+	])("retains valid $action calls including intentional plural wait", (args) => {
+		const tool = toolWithSpies(controlSpies());
+		expect(
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "valid",
+				name: "delegate",
+				arguments: args,
+			}),
+		).toEqual(args);
+	});
+	it("rejects conflicting review selectors before acknowledgement and accepts the exact lane", async () => {
+		const acknowledgeWorkerReview = vi.fn((requestId: string) => ({
+			ok: true as const,
+			requestId,
+			reviewedAt: "T1",
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false }),
+			status: { getLaneRecords: () => [], getWorkerClaimSnapshots: () => [], acknowledgeWorkerReview },
+		});
+		for (const selector of [{ agentId: "worker-other" }, { agentIds: ["worker-other"] }]) {
+			const rejected = await tool.execute(
+				"review-conflict",
+				{ action: "review", laneId: "lane-1", ...selector },
+				undefined,
+				undefined,
+				context,
+			);
+			expect(rejected.isError).toBe(true);
+			expect(delegateText(rejected)).toContain("laneId");
+		}
+		expect(acknowledgeWorkerReview).not.toHaveBeenCalled();
+		const accepted = await tool.execute(
+			"review-exact",
+			{ action: "review", laneId: "lane-1" },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(accepted.details).toMatchObject({ reviewed: true, laneId: "lane-1" });
+		expect(acknowledgeWorkerReview).toHaveBeenCalledExactlyOnceWith("lane-1");
+	});
+
+	it.each([
+		{ agentId: "worker-1" },
+		{ agentIds: ["worker-1", "worker-2"] },
+		{ laneId: "lane-1", agentId: "worker-1" },
+	])("rejects unsupported status selectors instead of reading the whole fleet: %j", async (selector) => {
+		const getLaneRecords = vi.fn(() => []);
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false }),
+			status: { getLaneRecords, getWorkerClaimSnapshots: () => [] },
+		});
+		const result = await tool.execute(
+			"scoped-status",
+			{ action: "status", ...selector },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(result.isError).toBe(true);
+		expect(delegateText(result)).toContain("laneId");
+		expect(result.details).toMatchObject({ started: false, skipReason: "action_field_forbidden" });
+		expect(getLaneRecords).not.toHaveBeenCalled();
+		const overview = await tool.execute("overview", { action: "status" }, undefined, undefined, context);
+		expect(overview.isError).not.toBe(true);
+		expect(getLaneRecords).toHaveBeenCalledTimes(1);
+	});
+
 	it("waits for every listed worker when wait is spelled with agentIds", async () => {
 		// Waiting is read-only, so the plural can only mean wait_many; refusing it cost a live run a
 		// turn and left the failure ledger riding every request afterwards.

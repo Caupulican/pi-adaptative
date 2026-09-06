@@ -751,6 +751,99 @@ describe("SkillVaultController", () => {
 
 		expect(status).toEqual({ idleTimeoutMs: expect.any(Number), slots: [] });
 	});
+	it.each([
+		{ names: ["alpha", "bravo", "charlie", "delta", "echo"], limit: 4096, pin: false },
+		{ names: ["alpha", "missing"], limit: 4096, pin: false },
+		{ names: ["alpha", "bravo", "charlie"], limit: 1024, pin: false },
+		{ names: ["alpha", "bravo"], limit: 4096, pin: true },
+	])("rejects an inadmissible batch atomically: $names, bytes=$limit, pin=$pin", async ({ names, limit, pin }) => {
+		const skills = createSkills([
+			{ name: "keeper", description: "Existing guidance", body: "KEEPER" },
+			...["alpha", "bravo", "charlie", "delta", "echo"].map((name) => ({
+				name,
+				description: name,
+				body: name[0].repeat(400),
+			})),
+		]);
+		const vault = new SkillVaultController({
+			getSkills: () => skills,
+			now: () => 1000,
+			getMaxBodyBytes: () => limit,
+		});
+		vault.load("keeper", "model", true);
+		vault.commitSystemPromptSection();
+		const before = vault.status();
+		const revision = vault.getContextRevision();
+		const tool = createSkillVaultToolDefinition(vault);
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const result = await tool.execute(
+				`batch-${attempt}`,
+				{ action: "load", names, pin },
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			expect(result.isError).toBe(true);
+			expect(JSON.stringify(result.content)).not.toContain("loaded_pending");
+			expect(vault.status()).toEqual(before);
+			expect(vault.getContextRevision()).toBe(revision);
+		}
+	});
+
+	it("commits one batch revision and reports only skills retained for the next request", async () => {
+		const skills = createSkills(
+			["keeper", "alpha", "bravo", "charlie"].map((name) => ({ name, description: name, body: `BODY ${name}` })),
+		);
+		const vault = new SkillVaultController({ getSkills: () => skills, now: () => 1000 });
+		vault.load("keeper", "model");
+		const revision = vault.getContextRevision();
+		const tool = createSkillVaultToolDefinition(vault);
+		const result = await tool.execute(
+			"batch",
+			{ action: "load", names: ["alpha", "bravo", "charlie"], name: " alpha " },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(result.isError).not.toBe(true);
+		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["alpha", "bravo", "charlie"]);
+		expect(vault.getContextRevision()).toBe(revision + 1);
+		const projected = vault.commitSystemPromptSection();
+		for (const name of ["alpha", "bravo", "charlie"]) expect(projected).toContain(`BODY ${name}`);
+		expect(projected).not.toContain("BODY keeper");
+		expect(JSON.stringify(result.content)).toContain("EVICTED: keeper");
+	});
+
+	it("rejects the whole batch when a later resource read fails", async () => {
+		const skills = createSkills(
+			["keeper", "alpha", "bravo"].map((name) => ({ name, description: name, body: `BODY ${name}` })),
+		);
+		const vault = new SkillVaultController({ getSkills: () => skills, now: () => 1000 });
+		vault.load("keeper", "model");
+		const before = vault.status();
+		const revision = vault.getContextRevision();
+		rmSync(skills.find((skill) => skill.name === "bravo")!.filePath);
+		expect(vault.loadMany(["alpha", "bravo"], "model")).toMatchObject({ ok: false, reason: "read_failed" });
+		expect(vault.status()).toEqual(before);
+		expect(vault.getContextRevision()).toBe(revision);
+	});
+
+	it("rejects a batch when a lookup rescan revokes an already prepared member", () => {
+		const available = createSkills(
+			["alpha", "bravo"].map((name) => ({ name, description: name, body: `BODY ${name}` })),
+		);
+		let skills = available.filter((skill) => skill.name === "alpha");
+		const vault = new SkillVaultController({
+			getSkills: () => skills,
+			refreshSkills: () => {
+				skills = available.filter((skill) => skill.name === "bravo");
+			},
+		});
+		expect(vault.loadMany(["alpha", "bravo"], "model")).toMatchObject({ ok: false, reason: "read_failed" });
+		expect(vault.status().slots).toEqual([]);
+		expect(vault.getContextRevision()).toBe(0);
+	});
+
 	it("loads every named skill in one call and reports each outcome", async () => {
 		const skills = createSkills([
 			{ name: "alpha", description: "Alpha guidance.", body: "a".repeat(200) },

@@ -12,6 +12,7 @@ import {
 	createGoalState,
 	type GoalEvent,
 	type GoalEvidenceKind,
+	type GoalEvidenceOutcome,
 	type GoalState,
 	isGoalExecutionActive,
 	isGoalUnfinishedStatus,
@@ -65,6 +66,7 @@ export type GoalAction =
 			 * only carries this value through into the recorded {@link GoalEvidenceRef}.
 			 */
 			verified?: boolean;
+			outcome?: GoalEvidenceOutcome;
 	  }
 	| { action: "progress" }
 	| { action: "no_progress" }
@@ -89,8 +91,8 @@ export type GoalActionResult = GoalActionSuccess | GoalActionFailure;
 export interface ApplyGoalActionOptions {
 	/**
 	 * Gate agent-facing 'complete' on every satisfied requirement being backed by
-	 * verified-ref evidence (kind 'tool'/'file' with `verified === true`) or kind 'user'
-	 * evidence. Defaults to `true` (on) when omitted — the conservative default. Manual
+	 * host-verified evidence, including user statements with checked provenance. Test evidence also
+	 * requires a successful outcome. Defaults to `true` (on) when omitted. Manual
 	 * completion ({@link completeGoalManually}) is never subject to this gate.
 	 */
 	requireVerifiedEvidenceForCompletion?: boolean;
@@ -358,6 +360,7 @@ function toGoalEvent(
 					summary,
 					uri: action.uri?.trim() || undefined,
 					verified: action.verified,
+					outcome: action.outcome,
 					now,
 				},
 			};

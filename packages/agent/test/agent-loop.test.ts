@@ -21,6 +21,7 @@ import { createAgentToolFailureRecoveryAuthority } from "../src/types.ts";
 import {
 	VERIFICATION_OBLIGATION_TRANSIENT_KIND,
 	VERIFICATION_OBLIGATIONS_CLEARED_TEXT,
+	VerificationObligationTracker,
 } from "../src/verification-obligations.ts";
 
 // Mock stream for testing - mimics MockAssistantStream
@@ -1699,33 +1700,31 @@ describe("agentLoop with AgentMessage", () => {
 									],
 									"toolUse",
 								)
-							: turn === 1 || turn === 3
-								? createAssistantMessage([{ type: "text", text: "done" }])
+							: turn === 1
+								? createAssistantMessage(
+										[
+											{
+												type: "toolCall",
+												id: "read-source",
+												name: "read",
+												arguments: { path: "src/changed.ts" },
+											},
+										],
+										"toolUse",
+									)
 								: turn === 2
 									? createAssistantMessage(
 											[
 												{
 													type: "toolCall",
-													id: "read-source",
-													name: "read",
-													arguments: { path: "src/changed.ts" },
+													id: "verify-passed",
+													name: "verify",
+													arguments: { status: "passed" },
 												},
 											],
 											"toolUse",
 										)
-									: turn === 4
-										? createAssistantMessage(
-												[
-													{
-														type: "toolCall",
-														id: "verify-passed",
-														name: "verify",
-														arguments: { status: "passed" },
-													},
-												],
-												"toolUse",
-											)
-										: createAssistantMessage([{ type: "text", text: "done" }]);
+									: createAssistantMessage([{ type: "text", text: "done" }]);
 					pushDone(response, message);
 				});
 				return response;
@@ -1748,19 +1747,19 @@ describe("agentLoop with AgentMessage", () => {
 			})),
 			toolResultIds: toolResults.map((result) => result.toolCallId),
 		}).toEqual({
-			providerCalls: 6,
+			providerCalls: 4,
 			verificationCalls: ["failed", "passed"],
 			readCalls: ["src/changed.ts"],
 			verificationPromptStates: [
 				{ active: false, id: false },
 				{ active: true, id: true },
 				{ active: true, id: true },
-				{ active: true, id: true },
-				{ active: true, id: true },
 				{ active: false, id: false },
 			],
 			toolResultIds: ["verify-failed", "read-source", "verify-passed"],
 		});
+		expect(new VerificationObligationTracker(await stream.result()).getActiveIds()).toEqual([]);
+		expect((await stream.result()).at(-1)).toMatchObject({ stopReason: "stop" });
 	});
 
 	it("does not let a terminating tool batch bypass an active verification obligation", async () => {
@@ -1842,7 +1841,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(assistantTexts).toContain(handoff);
 	});
 
-	it("permits terminal output only for an exact unresolved verification handoff", async () => {
+	it("preserves an explicit unresolved handoff without treating it as verification success", async () => {
 		const schema = Type.Object({});
 		const verificationId = "focused-suite";
 		const verify: AgentTool<typeof schema, { piVerification: { version: 1; id: string; status: "failed" } }> = {
@@ -1911,9 +1910,11 @@ describe("agentLoop with AgentMessage", () => {
 			secondPrompt: expect.stringContaining(`ACTIVE VERIFICATION FAILURES`),
 			assistantText: [handoff],
 		});
+		expect(new VerificationObligationTracker(await stream.result()).getActiveIds()).toEqual([verificationId]);
+		expect((await stream.result()).at(-1)).toMatchObject({ stopReason: "error" });
 	});
 
-	it("requires an unresolved handoff for every active verification id", async () => {
+	it("retains every active verification id when a handoff mentions only one", async () => {
 		const schema = Type.Object({ id: Type.String() });
 		const verify: AgentTool<typeof schema, { piVerification: { version: 1; id: string; status: "failed" } }> = {
 			name: "verify",
@@ -1928,7 +1929,7 @@ describe("agentLoop with AgentMessage", () => {
 				};
 			},
 		};
-		const handoff = "VERIFICATION_UNRESOLVED alpha: first blocker\nVERIFICATION_UNRESOLVED beta: second blocker";
+		const handoff = "The alpha check still fails and needs repair.";
 		let providerCalls = 0;
 		const stream = agentLoop(
 			[createUserMessage("verify both")],
@@ -1958,11 +1959,7 @@ describe("agentLoop with AgentMessage", () => {
 									],
 									"toolUse",
 								)
-							: turn === 1
-								? createAssistantMessage([{ type: "text", text: handoff }])
-								: createAssistantMessage([
-										{ type: "text", text: "VERIFICATION_UNRESOLVED alpha: fallback blocker" },
-									]);
+							: createAssistantMessage([{ type: "text", text: handoff }]);
 					pushDone(response, message);
 				});
 				return response;
@@ -1973,6 +1970,8 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		expect(providerCalls).toBe(2);
+		expect(new VerificationObligationTracker(await stream.result()).getActiveIds()).toEqual(["alpha", "beta"]);
+		expect((await stream.result()).at(-1)).toMatchObject({ stopReason: "error" });
 	});
 
 	it("restores active verification obligations from a compaction snapshot", async () => {
@@ -1999,10 +1998,9 @@ describe("agentLoop with AgentMessage", () => {
 			(_model, providerContext) => {
 				providerPrompts.push(obligationInstructionOf(providerContext));
 				const response = new MockAssistantStream();
-				const turn = providerCalls++;
+				providerCalls++;
 				queueMicrotask(() => {
-					const text =
-						turn === 0 ? "done" : `VERIFICATION_UNRESOLVED ${verificationId}: external owner must repair it`;
+					const text = "The check remains unresolved; an external owner must repair it.";
 					const message = createAssistantMessage([{ type: "text", text }]);
 					pushDone(response, message);
 				});
@@ -2013,7 +2011,12 @@ describe("agentLoop with AgentMessage", () => {
 			// consume
 		}
 
-		expect(providerCalls).toBe(2);
+		expect(providerCalls).toBe(1);
+		expect((await stream.result()).at(-1)).toMatchObject({
+			content: [{ type: "text", text: "The check remains unresolved; an external owner must repair it." }],
+			stopReason: "error",
+			errorMessage: "verification_handoff_required",
+		});
 		expect(providerPrompts[0]).toContain(`ACTIVE VERIFICATION FAILURES`);
 		expect(providerPrompts[0]).toContain(verificationId);
 	});
@@ -2049,10 +2052,9 @@ describe("agentLoop with AgentMessage", () => {
 			(_model, providerContext) => {
 				providerPrompts.push(obligationInstructionOf(providerContext));
 				const response = new MockAssistantStream();
-				const turn = providerCalls++;
+				providerCalls++;
 				queueMicrotask(() => {
-					const text =
-						turn === 0 ? "done" : `VERIFICATION_UNRESOLVED ${verificationId}: background owner is unavailable`;
+					const text = "Background verification remains unresolved; its owner is unavailable.";
 					const message = createAssistantMessage([{ type: "text", text }]);
 					pushDone(response, message);
 				});
@@ -2063,7 +2065,12 @@ describe("agentLoop with AgentMessage", () => {
 			// consume
 		}
 
-		expect(providerCalls).toBe(2);
+		expect(providerCalls).toBe(1);
+		expect((await stream.result()).at(-1)).toMatchObject({
+			content: [{ type: "text", text: "Background verification remains unresolved; its owner is unavailable." }],
+			stopReason: "error",
+			errorMessage: "verification_handoff_required",
+		});
 		expect(providerPrompts[0]).toContain(`ACTIVE VERIFICATION FAILURES`);
 		expect(providerPrompts[0]).toContain(verificationId);
 	});
@@ -2121,13 +2128,13 @@ describe("agentLoop with AgentMessage", () => {
 		);
 		expect(providerCalls).toBe(2);
 		expect(assistants.at(-1)).toMatchObject({
-			content: [],
+			content: [{ type: "text", text: "done" }],
 			stopReason: "error",
 			errorMessage: "verification_handoff_required",
 		});
 	});
 
-	it("requires a valid unresolved handoff from the runaway closing turn", async () => {
+	it("preserves the runaway closing turn while marking unresolved verification unsuccessful", async () => {
 		const schema = Type.Object({});
 		const providerPrompts: string[] = [];
 		const verify: AgentTool<typeof schema, { piVerification: { version: 1; id: string; status: "failed" } }> = {
@@ -2183,7 +2190,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(providerCalls).toBe(3);
 		expect(providerPrompts.at(-1)).toContain("ACTIVE VERIFICATION FAILURES");
 		expect(assistants.at(-1)).toMatchObject({
-			content: [],
+			content: [{ type: "text", text: "done" }],
 			stopReason: "error",
 			errorMessage: "verification_handoff_required",
 		});

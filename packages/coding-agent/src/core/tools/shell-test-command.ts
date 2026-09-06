@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { posix, win32 } from "node:path";
 import {
 	isChangeDirectoryInvocation,
 	parseShellCommandSequence,
@@ -129,8 +130,14 @@ export function isProjectableTestCommand(command: string): boolean {
 
 export interface ShellVerificationCommand {
 	kind: "test";
-	/** Stable, bounded identifier of one exact command in one working directory. */
+	/** Direct Vitest stages whose terminal summaries must confirm that tests executed. */
+	vitestStages?: number;
+	/** Stable, bounded identity of the verification argv, stages, and execution location. */
 	id: string;
+	/** Equivalent literal stages within a host-specified workspace; only setup failures may use it. */
+	repairGroup?: string;
+	/** Expected execution directory when the command can be canonicalized without shell evaluation. */
+	cwd?: string;
 }
 
 function isPipefailSetup(args: string[]): boolean {
@@ -180,12 +187,63 @@ function hasOnlyVerificationStages(sequence: ShellCommandSequence): boolean {
  * Arbitrary compounds remain opaque; an explicit pipefail test-to-tee pipeline is the sole output
  * pipeline admitted because its exit status remains the test's status before a following && stage.
  */
-export function classifyShellVerificationCommand(command: string, cwd: string): ShellVerificationCommand | undefined {
+export function classifyShellVerificationCommand(
+	command: string,
+	initialCwd: string,
+	workspaceRoot?: string,
+): ShellVerificationCommand | undefined {
 	const sequence = parseShellCommandSequence(command);
 	if (!sequence || !hasOnlyVerificationStages(sequence)) return undefined;
-
+	// The parser does not evaluate expansions or every shell escape. Preserve exact source for
+	// those shapes rather than allowing a quote/escape change to certify a different operation.
+	let identity: unknown = { version: 2, cwd: initialCwd, source: command };
+	let executionCwd: string | undefined;
+	let repairGroup: string | undefined;
+	const paths = /^[A-Za-z]:[\\/]|^\\\\/u.test(initialCwd) ? win32 : posix;
+	const leadingCd = isChangeDirectoryInvocation(sequence.invocations[0]) ? sequence.invocations[0][1] : undefined;
+	if (
+		paths.isAbsolute(initialCwd) &&
+		!/[\\$`~{}()*?[\]#!]/u.test(command) &&
+		!/[^\S \t\r\n]/u.test(command) &&
+		(leadingCd === undefined ||
+			(!leadingCd.startsWith("-") &&
+				!leadingCd.startsWith("//") &&
+				!(paths === win32 && /^[A-Za-z]:(?![\\/])/u.test(leadingCd))))
+	) {
+		executionCwd = leadingCd === undefined ? initialCwd : paths.resolve(initialCwd, leadingCd);
+		const stages = {
+			invocations: leadingCd === undefined ? sequence.invocations : sequence.invocations.slice(1),
+			connectors: leadingCd === undefined ? sequence.connectors : sequence.connectors.slice(1),
+		};
+		identity = {
+			version: 2,
+			cwd: executionCwd,
+			...stages,
+		};
+		if (workspaceRoot !== undefined && paths.isAbsolute(workspaceRoot)) {
+			const relative = paths.relative(workspaceRoot, executionCwd);
+			if (relative !== ".." && !relative.startsWith(`..${paths.sep}`) && !paths.isAbsolute(relative)) {
+				repairGroup = `shell-repair-${createHash("sha256")
+					.update(JSON.stringify({ version: 1, workspace: paths.normalize(workspaceRoot), ...stages }))
+					.digest("base64url")}`;
+			}
+		}
+	}
 	return {
 		kind: "test",
-		id: `shell-test-${createHash("sha256").update(cwd).update("\0").update(command).digest("base64url")}`,
+		vitestStages: sequence.invocations.filter((args) => {
+			const executable = executableStem(args[0] ?? "");
+			if (executable === "vitest") return true;
+			if (["npx", "pnpx", "bunx"].includes(executable))
+				return executableStem(firstNonOption(args, 1) ?? "") === "vitest";
+			if (executable === "npm" && args[1] === "exec") return firstNonOption(args, 2) === "vitest";
+			if (["pnpm", "yarn", "bun"].includes(executable)) {
+				return (args[1] === "exec" || args[1] === "dlx" ? firstNonOption(args, 2) : args[1]) === "vitest";
+			}
+			return executable === "node" && /(?:^|[\\/])node_modules[\\/]vitest[\\/]/u.test(firstNonOption(args, 1) ?? "");
+		}).length,
+		cwd: executionCwd,
+		...(repairGroup !== undefined ? { repairGroup } : {}),
+		id: `shell-test-${createHash("sha256").update(JSON.stringify(identity)).digest("base64url")}`,
 	};
 }

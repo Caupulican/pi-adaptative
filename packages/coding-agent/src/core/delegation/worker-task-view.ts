@@ -1,7 +1,13 @@
 import { Buffer } from "node:buffer";
-import type { AttemptStatus, OrchestrationTaskStatus, WorkerRole } from "../orchestration/contracts.ts";
+import type {
+	AttemptStatus,
+	HarnessCapability,
+	OrchestrationTaskStatus,
+	WorkerRole,
+} from "../orchestration/contracts.ts";
 import {
 	ATTEMPT_STATUSES,
+	isHarnessCapability,
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
 	MAX_ORCHESTRATION_DESCRIPTION_LENGTH,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
@@ -23,6 +29,8 @@ export const MAX_WORKER_TASK_VIEW_BYTES = 64 * 1024;
 
 export interface WorkerTaskAttemptView {
 	agentId?: string;
+	/** Bounded permission metadata from this attempt's bound grant, never the requested task prose. */
+	grantedCapabilities?: readonly HarnessCapability[];
 	status: AttemptStatus;
 	reasonCode?: string;
 	retry?: {
@@ -130,7 +138,7 @@ function latestExistingAttempt(snapshot: TaskRuntimeProjection, attemptIds: unkn
 	return undefined;
 }
 
-function projectAttempt(value: unknown): WorkerTaskAttemptView | undefined {
+function projectAttempt(value: unknown, taskId: string): WorkerTaskAttemptView | undefined {
 	if (!isPlainRecord(value) || !isListedValue(value.status, ATTEMPT_STATUSES)) return undefined;
 	const dispatch = isPlainRecord(value.dispatch) ? value.dispatch : undefined;
 	const agentId =
@@ -141,8 +149,26 @@ function projectAttempt(value: unknown): WorkerTaskAttemptView | undefined {
 	const retriesUsed = retry?.retriesUsed;
 	const notBefore = boundedString(retry?.notBefore, MAX_ORCHESTRATION_IDENTIFIER_LENGTH);
 	const validRetry = Number.isSafeInteger(retriesUsed) && Number(retriesUsed) > 0 && notBefore;
+	const grant = isPlainRecord(value.grant) ? value.grant : undefined;
+	const capabilities = grant?.capabilities;
+	const grantedCapabilities =
+		grant &&
+		typeof value.grantId === "string" &&
+		value.grantId.length > 0 &&
+		typeof value.attemptId === "string" &&
+		value.attemptId.length > 0 &&
+		value.taskId === taskId &&
+		grant.grantId === value.grantId &&
+		grant.attemptId === value.attemptId &&
+		grant.taskId === value.taskId &&
+		Array.isArray(capabilities) &&
+		capabilities.length <= MAX_ORCHESTRATION_COLLECTION_LENGTH &&
+		capabilities.every(isHarnessCapability)
+			? [...new Set(capabilities)]
+			: undefined;
 	return {
 		...(agentId ? { agentId } : {}),
+		...(grantedCapabilities ? { grantedCapabilities } : {}),
 		status: value.status,
 		...(reasonCode ? { reasonCode } : {}),
 		...(validRetry ? { retry: { retriesUsed: Number(retriesUsed), notBefore } } : {}),
@@ -159,7 +185,7 @@ function projectVerification(value: unknown): WorkerTaskView["verificationOutcom
 }
 
 function projectTask(snapshot: TaskRuntimeProjection, candidate: TaskViewCandidate): WorkerTaskView {
-	const attempt = projectAttempt(latestExistingAttempt(snapshot, candidate.attemptIds));
+	const attempt = projectAttempt(latestExistingAttempt(snapshot, candidate.attemptIds), candidate.taskId);
 	const verificationOutcome = projectVerification(candidate.verification);
 	return {
 		taskId: candidate.taskId,
@@ -247,8 +273,8 @@ function serializedSessionViewByteLength(totalTasks: number, taskCount: number, 
 
 /**
  * Derive a provider-neutral, bounded team-task read model from the durable runtime projection.
- * Every returned field is selected explicitly so execution authority and provider diagnostics
- * cannot cross this read boundary through object spread.
+ * Permission names are projected explicitly from a correlated grant. Grant handles, resource paths,
+ * credentials and provider diagnostics cannot cross this boundary through object spread.
  */
 export function projectWorkerTaskSessionView(snapshot: TaskRuntimeProjection): WorkerTaskSessionView {
 	let totalTasks = 0;

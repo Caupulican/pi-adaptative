@@ -50,6 +50,7 @@ import {
 	WorkerConversationOwnershipError,
 	type WorkerSessionFileHead,
 } from "./worker-conversation-revision.ts";
+import { projectWorkerTranscriptForInspection } from "./worker-transcript-projection.ts";
 
 const MAX_WORKER_CONVERSATION_METADATA_BYTES = 256 * 1024;
 const WORKER_CHANGED_FILE_CUSTOM_TYPE = "worker-changed-file";
@@ -64,6 +65,8 @@ interface WorkerConversationTranscriptPageOptions {
 	cursor?: number;
 	maxMessages?: number;
 	maxBytes?: number;
+	/** Removes replay-only signatures before the output budget; raw input remains bounded. */
+	projection?: "inspection";
 }
 
 interface WorkerConversationTranscriptPage {
@@ -995,9 +998,12 @@ export class WorkerConversation {
 						return;
 					}
 
+					const inputLimit =
+						options.projection === "inspection" ? MAX_WORKER_TRANSCRIPT_PAGE_BYTES : singleMessageByteLimit;
 					if (
-						(persistedBytes !== undefined && persistedBytes > singleMessageByteLimit) ||
-						boundedJsonBytes(message, singleMessageByteLimit) > singleMessageByteLimit
+						(persistedBytes !== undefined && persistedBytes > inputLimit) ||
+						((options.projection !== "inspection" || persistedBytes === undefined) &&
+							boundedJsonBytes(message, inputLimit) > inputLimit)
 					) {
 						consumedMessages += 1;
 						omittedMessages += 1;
@@ -1008,7 +1014,15 @@ export class WorkerConversation {
 					let clonedMessage: Message;
 					let messageBytes: number;
 					try {
-						clonedMessage = structuredClone(message);
+						const projected =
+							options.projection === "inspection" ? projectWorkerTranscriptForInspection(message) : message;
+						if (boundedJsonBytes(projected, singleMessageByteLimit) > singleMessageByteLimit) {
+							consumedMessages += 1;
+							omittedMessages += 1;
+							nextEntryCursor = entryIndex + 1;
+							return;
+						}
+						clonedMessage = structuredClone(projected);
 						const serializedMessage = JSON.stringify(clonedMessage);
 						messageBytes = Buffer.byteLength(serializedMessage, "utf8");
 					} catch {

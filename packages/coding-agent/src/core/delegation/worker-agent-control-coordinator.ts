@@ -260,6 +260,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				expectedLogicalAgentId: agent.agentId,
 			})
 			.getRawTranscriptPage({
+				projection: "inspection",
 				cursor,
 				maxMessages,
 				...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),

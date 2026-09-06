@@ -64,20 +64,37 @@ function isOkfPath(path: string): boolean {
 	return OKF_EXTENSIONS.some((extension) => path.endsWith(extension));
 }
 
-function walkFiles(rootDir: string, maxDocuments: number): string[] {
+function walkFiles(rootDir: string, maxDocuments: number, projectId?: string): string[] {
 	const files: string[] = [];
 	const pending = [rootDir];
-	let visitedDirectories = 0;
+	const visitedDirectories = new Set<string>();
 	try {
 		const root = lstatSync(rootDir);
 		if (!root.isDirectory() || root.isSymbolicLink()) return files;
 	} catch {
 		return files;
 	}
-	while (pending.length > 0 && files.length < maxDocuments && visitedDirectories < MAX_DIRECTORIES) {
+	// Reserve the bounded discovery budget for the selected workspace before global/foreign
+	// records consume it. Both directory components must be real directories, never symlinks.
+	if (projectId && projectId !== "." && projectId !== ".." && !/[\\/]/.test(projectId)) {
+		const projectsDir = join(rootDir, "projects");
+		const selectedDir = join(projectsDir, projectId.toLowerCase());
+		try {
+			if (
+				[projectsDir, selectedDir].every((path) => {
+					const entry = lstatSync(path);
+					return entry.isDirectory() && !entry.isSymbolicLink();
+				})
+			)
+				pending.push(selectedDir);
+		} catch {
+			// Missing project storage leaves ordinary bounded discovery available.
+		}
+	}
+	while (pending.length > 0 && files.length < maxDocuments && visitedDirectories.size < MAX_DIRECTORIES) {
 		const dir = pending.pop();
-		if (dir === undefined) continue;
-		visitedDirectories += 1;
+		if (dir === undefined || visitedDirectories.has(dir)) continue;
+		visitedDirectories.add(dir);
 		let directory: ReturnType<typeof opendirSync>;
 		try {
 			directory = opendirSync(dir);
@@ -145,7 +162,7 @@ export function loadOkfMemoryBundle(options: OkfMemoryProviderOptions): OkfMemor
 	const entries: OkfMemoryLoadEntry[] = [];
 	const diagnostics: Array<{ path: string; diagnostics: OkfMemoryDiagnostic[] }> = [];
 
-	for (const path of walkFiles(options.rootDir, maxDocuments)) {
+	for (const path of walkFiles(options.rootDir, maxDocuments, options.projectId)) {
 		let content: string;
 		try {
 			content = readBoundedTextFileSync(path, maxFileBytes, "OKF memory document");

@@ -7,7 +7,6 @@ import {
 	collectCitedRunningToolTaskIds,
 	createBackgroundToolTerminalMessage,
 	findBackgroundToolTask,
-	isCompletedBackgroundToolEvidence,
 } from "../src/core/background-tool-task-controller.ts";
 import { createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
 
@@ -70,6 +69,41 @@ function createHarness(sessionId: string) {
 }
 
 describe("BackgroundToolTaskController", () => {
+	it("retains canonical setup-repair evidence across completion, notification and restoration", async () => {
+		const { controller, persisted, notifications } = createHarness("session-repair");
+		const call = controlledContext();
+		controller.handoff(call.context);
+		const piVerification = {
+			version: 1,
+			id: "repaired",
+			status: "passed",
+			outcome: "executed",
+			repairGroup: "scope-a",
+			repairOf: "setup",
+		};
+		call.resolveCompletion({
+			toolCall: call.context.toolCall,
+			isError: false,
+			result: { content: [{ type: "text", text: "tests passed" }], details: { piVerification } },
+		});
+		const terminal = await controller.wait("tool-task-1");
+		await controller.waitForNotifications();
+		const expected = { ...piVerification, originTaskId: "tool-task-1" };
+		expect(terminal.piVerification).toEqual(expected);
+		expect(notifications[0]?.piVerification).toEqual(expected);
+		expect(createBackgroundToolTerminalMessage([terminal]).details.piVerificationEvents).toEqual([expected]);
+		const restored = new BackgroundToolTaskController({
+			getSessionId: () => "session-repair",
+			getArtifactStore: () => undefined,
+			loadPersistedRecordsNewestFirst: () => JSON.parse(JSON.stringify([...persisted].reverse())),
+			persist: () => {},
+			notifyTerminal: () => {},
+		});
+		expect(restored.list()[0]?.piVerification).toEqual(expected);
+		await restored.shutdown();
+		await controller.shutdown();
+	});
+
 	it("never hands off a call the tool declares a foreground wait", () => {
 		const persisted: BackgroundToolTaskRecord[] = [];
 		const controller = new BackgroundToolTaskController({
@@ -994,9 +1028,9 @@ describe("BackgroundToolTaskController", () => {
 
 		expect(findBackgroundToolTask(refs, " call-2 ")).toMatchObject({ taskId: "tool-task-2" });
 		expect(findBackgroundToolTask(refs, "   ")).toBeUndefined();
-		expect(isCompletedBackgroundToolEvidence(refs, "tool-task-2")).toBe(true);
-		expect(isCompletedBackgroundToolEvidence(refs, "call-3")).toBe(false);
-		expect(isCompletedBackgroundToolEvidence(refs, "tool-task-missing")).toBeUndefined();
+		expect(findBackgroundToolTask(refs, "tool-task-2")).toMatchObject({ status: "completed" });
+		expect(findBackgroundToolTask(refs, "call-3")).toMatchObject({ status: "failed" });
+		expect(findBackgroundToolTask(refs, "tool-task-missing")).toBeUndefined();
 		expect(
 			collectCitedRunningToolTaskIds({ records: refs, uris: ["call-1", "tool-task-1", "call-2", "nope"] }),
 		).toEqual(["tool-task-1"]);

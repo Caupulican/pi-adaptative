@@ -39,6 +39,86 @@ describe("Pi OKF memory provider", () => {
 	afterEach(() => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
+	it.each([undefined, "aaaaaaaaaaaaaaaa"])(
+		"prioritizes the selected project within the document bound (%s)",
+		(projectId) => {
+			const currentDir = join(tempDir, "projects", "aaaaaaaaaaaaaaaa");
+			const foreignDir = join(tempDir, "projects", "ffffffffffffffff");
+			mkdirSync(currentDir, { recursive: true });
+			mkdirSync(foreignDir, { recursive: true });
+			writeFileSync(
+				join(tempDir, "global.okf.md"),
+				okfDocument("Global index", "Global entry.", "Global body.", "User Preference", "global"),
+			);
+			writeFileSync(
+				join(currentDir, "current.okf.md"),
+				formatOkfMemoryDocument({
+					type: "Design Decision",
+					title: "Current project finding",
+					description: "Visible without walking the memory tree.",
+					scope: "project",
+					projectId: "aaaaaaaaaaaaaaaa",
+					body: "Project evidence.",
+					evidenceRefs: ["test:current-project"],
+				}),
+			);
+			writeFileSync(
+				join(foreignDir, "foreign.okf.md"),
+				formatOkfMemoryDocument({
+					type: "Design Decision",
+					title: "Foreign project finding",
+					description: "Different workspace.",
+					scope: "project",
+					projectId: "ffffffffffffffff",
+					body: "Foreign evidence.",
+					evidenceRefs: ["test:foreign-project"],
+				}),
+			);
+			const report = loadOkfMemoryBundle({ rootDir: tempDir, projectId, maxDocuments: 1 });
+			expect(report.entries.map((entry) => entry.parsed.item?.title)).toEqual([
+				projectId ? "Current project finding" : "Global index",
+			]);
+			if (projectId) {
+				const full = loadOkfMemoryBundle({ rootDir: tempDir, projectId, maxDocuments: 3 });
+				expect(full.entries.map((entry) => entry.parsed.item?.title)).toEqual([
+					"Current project finding",
+					"Global index",
+				]);
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32").each(["projects", "selected"])(
+		"does not prioritize a symlinked %s directory",
+		(boundary) => {
+			const outside = mkdtempSync(join(tmpdir(), "pi-okf-priority-outside-"));
+			try {
+				const projectId = "aaaaaaaaaaaaaaaa";
+				writeFileSync(
+					join(tempDir, "global.okf.md"),
+					okfDocument("Global", "Available fallback.", "Global body.", "User Preference", "global"),
+				);
+				const target = boundary === "projects" ? join(outside, projectId) : outside;
+				mkdirSync(target, { recursive: true });
+				writeFileSync(
+					join(target, "outside.okf.md"),
+					okfDocument("Outside", "Must remain excluded.", "Outside body.", "User Preference", "global"),
+				);
+				if (boundary === "projects") symlinkSync(outside, join(tempDir, "projects"), "dir");
+				else {
+					mkdirSync(join(tempDir, "projects"));
+					symlinkSync(outside, join(tempDir, "projects", projectId), "dir");
+				}
+				expect(
+					loadOkfMemoryBundle({ rootDir: tempDir, projectId, maxDocuments: 1 }).entries.map(
+						(entry) => entry.parsed.item?.title,
+					),
+				).toEqual(["Global"]);
+			} finally {
+				rmSync(outside, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("loads valid OKF files, reports invalid files, and summarizes available scopes/kinds", () => {
 		mkdirSync(join(tempDir, "nested"));

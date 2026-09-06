@@ -61,8 +61,8 @@ export interface GoalLoopControllerDeps {
 	/** Submit a continuation prompt through the session's own prompt path. */
 	prompt(text: string, options?: PromptOptions): Promise<"completed" | "interrupted">;
 	/**
-	 * Persist one submitted pass's turn and active-wall-clock contribution. Provider usage is charged
-	 * at each assistant response before another request can be admitted. Called once per
+	 * Report one submitted pass's turn and duration. The session execution owner persists active
+	 * time and provider usage; this report must not double-charge that time. Called once per
 	 * pass actually SUBMITTED (never for a no-op `continueGoalOnce` call).
 	 */
 	recordGoalContinuationPass(pass: {

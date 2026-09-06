@@ -11,6 +11,11 @@ import {
 	type TruncationResult,
 } from "@caupulican/pi-agent-core/truncate";
 import { type AgentTool, AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
+import {
+	MAX_VERIFICATION_ID_LENGTH,
+	VERIFICATION_ID_PATTERN,
+	type VerificationRecord,
+} from "@caupulican/pi-agent-core/verification-obligations";
 import { Container, Text, truncateToWidth } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
@@ -70,6 +75,7 @@ import {
 import { acquirePersistentShellSession } from "./shell-session.ts";
 import { classifyShellVerificationCommand } from "./shell-test-command.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { VitestVerificationOutput } from "./vitest-verification-output.ts";
 import { createWindowsShellEngineOperations, type WindowsShellEngineOptions } from "./windows-shell-engine.ts";
 import { getOrCreateWindowsShellState, mergeEffectiveEnv, resolveEffectiveCwd } from "./windows-shell-state.ts";
 
@@ -101,6 +107,14 @@ export function resolveCommandTimeoutSeconds(timeout: number | undefined): numbe
 
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Shell command to execute" }),
+	repairOf: Type.Optional(
+		Type.String({
+			maxLength: MAX_VERIFICATION_ID_LENGTH,
+			pattern: VERIFICATION_ID_PATTERN.source,
+			description:
+				"Active verification id whose empty-test setup error this corrected invocation repairs. The host requires matching test arguments within this workspace and an executed pass; actual test failures cannot be replaced this way.",
+		}),
+	),
 	timeout: Type.Optional(
 		Type.Number({
 			maximum: MAX_COMMAND_TIMEOUT_SECONDS,
@@ -136,11 +150,7 @@ export interface BashToolDetails {
 	outputProjection?: ShellOutputProjectionDetails;
 	/** Present when a family reducer produced the text; `rawPath` names the persisted raw output. */
 	outputReduction?: OutputReductionDetails;
-	piVerification?: {
-		version: 1;
-		id: string;
-		status: "failed" | "passed";
-	};
+	piVerification?: VerificationRecord;
 }
 
 /**
@@ -154,7 +164,8 @@ export interface BashOperations {
 	 * @param cwd Working directory
 	 * @param options Execution options
 	 * @returns Promise resolving to exit code (null if killed) plus, when the backend tracks it,
-	 * the shell-reported working directory after the command ran
+	 * the shell-reported working directory after the command ran. Stateful adapters must include
+	 * initialCwd (explicitly undefined when unavailable); other adapters execute in the supplied cwd.
 	 */
 	exec: (
 		command: string,
@@ -165,7 +176,7 @@ export interface BashOperations {
 			timeout?: number;
 			env?: NodeJS.ProcessEnv;
 		},
-	) => Promise<{ exitCode: number | null; cwd?: string }>;
+	) => Promise<{ exitCode: number | null; cwd?: string; initialCwd?: string }>;
 }
 
 function createLocalShellOperations(
@@ -251,7 +262,7 @@ function createLocalShellOperations(
 				if (signal?.aborted) throw new Error("aborted");
 				if (terminal.reason === "timeout") throw new Error(`timeout:${timeout}`);
 				if (silenceKilled) throw new Error(`silence:${silenceMs / 1000}`);
-				return { exitCode: terminal.code };
+				return { exitCode: terminal.code, initialCwd: cwd };
 			} finally {
 				silenceWatchdog?.disarm();
 				if (child.pid) untrackDetachedChildPid(child.pid);
@@ -708,12 +719,7 @@ function createShellToolDefinition(
 		},
 		async execute(
 			_toolCallId,
-			{
-				command,
-				timeout,
-				broadSearch,
-				fullOutput,
-			}: { command: string; timeout?: number; broadSearch?: typeof BROAD_SEARCH_OUTPUT_ROUTE; fullOutput?: boolean },
+			{ command, timeout, broadSearch, fullOutput, repairOf }: BashToolInput,
 			signal?: AbortSignal,
 			onUpdate?,
 			_ctx?,
@@ -743,6 +749,9 @@ function createShellToolDefinition(
 				maxPersistedBytes: routeBroadSearchOutput ? BROAD_SEARCH_MAX_PERSISTED_BYTES : undefined,
 				windowsCompatibleEncoding: routesWindowsContract,
 			});
+			const verificationOutput = classifyShellVerificationCommand(command, cwd)?.vitestStages
+				? new VitestVerificationOutput()
+				: undefined;
 			let updateTimer: NodeJS.Timeout | undefined;
 			let updateDirty = false;
 			let lastUpdateAt = 0;
@@ -812,6 +821,7 @@ function createShellToolDefinition(
 
 			const handleData = (data: Buffer) => {
 				output.append(data);
+				verificationOutput?.append(data);
 				if (outputProjector) {
 					try {
 						outputProjector.append(data);
@@ -957,16 +967,6 @@ function createShellToolDefinition(
 			};
 
 			const appendStatus = (text: string, status: string) => `${text ? `${text}\n\n` : ""}${status}`;
-			const withVerification = (
-				details: BashToolDetails | undefined,
-				status: "failed" | "passed",
-				effectiveCwd: string,
-			) => {
-				const verification = classifyShellVerificationCommand(command, effectiveCwd);
-				return verification
-					? { ...(details ?? {}), piVerification: { version: 1 as const, id: verification.id, status } }
-					: details;
-			};
 			// The shell ran the command to completion and is reporting the process's own status. That is
 			// the observation the caller asked for — a red test run, a search that matched nothing, a
 			// false predicate — so it is an operation outcome, never a failure of this tool.
@@ -988,7 +988,13 @@ function createShellToolDefinition(
 			const runInSession = async (
 				source: string,
 				onData: (data: Buffer) => void,
-			): Promise<{ exitCode: number | null; cwd?: string; spawnCwd: string }> => {
+			): Promise<{
+				exitCode: number | null;
+				cwd?: string;
+				spawnCwd: string;
+				initialCwd?: string;
+				verificationCommand?: string;
+			}> => {
 				let backendCommand = source;
 				let engineRoute = false;
 				let effectiveCwd = cwd;
@@ -1037,7 +1043,16 @@ function createShellToolDefinition(
 					}),
 				);
 				if (!routesWindowsContract && result.cwd) lastSessionCwd = result.cwd;
-				return { exitCode: result.exitCode, cwd: result.cwd, spawnCwd: spawnContext.cwd };
+				return {
+					exitCode: result.exitCode,
+					cwd: result.cwd,
+					spawnCwd: spawnContext.cwd,
+					// Per-command adapters run in the supplied cwd. Stateful adapters report their
+					// admission cwd explicitly; an unavailable report must not become a guessed cwd.
+					initialCwd: "initialCwd" in result ? result.initialCwd : spawnContext.cwd,
+					verificationCommand:
+						spawnContext.command === resolvedCommand && (engineRoute || !commandPrefix) ? source : undefined,
+				};
 			};
 			try {
 				// Classify on the resolved spawn context: a hook may adjust env or cwd (filters stay on,
@@ -1103,11 +1118,15 @@ function createShellToolDefinition(
 				let exitCode: number | null;
 				let sessionCwd: string | undefined;
 				let spawnCwd = cwd;
+				let initialCwd: string | undefined;
+				let verificationCommand: string | undefined;
 				try {
 					const result = await runInSession(command, handleData);
 					exitCode = result.exitCode;
 					sessionCwd = result.cwd;
 					spawnCwd = result.spawnCwd;
+					initialCwd = result.initialCwd;
+					verificationCommand = result.verificationCommand;
 				} catch (err) {
 					const snapshot = await finishOutput();
 					const { text } = formatOutput(snapshot, "");
@@ -1160,7 +1179,40 @@ function createShellToolDefinition(
 				const reportedCwd = routesWindowsContract
 					? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
 					: (sessionCwd ?? spawnCwd);
-				const verification = classifyShellVerificationCommand(command, reportedCwd);
+				const verification =
+					initialCwd === undefined || verificationCommand === undefined
+						? undefined
+						: classifyShellVerificationCommand(verificationCommand, initialCwd, cwd);
+				// CDPATH and other shell state can redirect a syntactically simple cd. A reported
+				// location must agree before the canonical identity can certify that project.
+				const actualVerificationCwd = routesWindowsContract ? reportedCwd : sessionCwd;
+				const verificationContextMatches =
+					verification?.cwd === undefined ||
+					actualVerificationCwd === undefined ||
+					verification.cwd === actualVerificationCwd;
+				const runnerOutcome =
+					verification && verificationContextMatches && verificationOutput
+						? verificationOutput.finish(verification.vitestStages ?? 0, exitCode)
+						: undefined;
+				const verificationDetails: BashToolDetails | undefined =
+					verification && verificationContextMatches
+						? {
+								...details,
+								piVerification: {
+									version: 1,
+									id: verification.id,
+									...(runnerOutcome !== undefined && verificationOutput
+										? { outcome: exitCode === null ? "unconfirmed" : verificationOutput.executionOutcome }
+										: {}),
+									...(verification.repairGroup !== undefined ? { repairGroup: verification.repairGroup } : {}),
+									...(repairOf !== undefined ? { repairOf } : {}),
+									status:
+										exitCode === 0 && (runnerOutcome === undefined || runnerOutcome === "passed")
+											? "passed"
+											: "failed",
+								},
+							}
+						: details;
 				if (exitCode === null) {
 					return {
 						content: [
@@ -1169,9 +1221,25 @@ function createShellToolDefinition(
 								text: appendStatus(outputText, `Command terminated without an exit code\ncwd: ${reportedCwd}`),
 							},
 						],
-						details: withVerification(details, "failed", reportedCwd),
+						details: verificationDetails,
 						isError: true,
 						errorKind: "tool_failure",
+					};
+				}
+				if (exitCode === 0 && runnerOutcome !== undefined && runnerOutcome !== "passed") {
+					return {
+						content: [
+							{
+								type: "text",
+								text: appendStatus(
+									outputText,
+									`Verification is ${runnerOutcome}: exit zero did not confirm completed passing tests. Inspect the runner output and rerun the intended tests.`,
+								),
+							},
+						],
+						details: verificationDetails,
+						isError: true,
+						errorKind: "operation_outcome",
 					};
 				}
 				if (exitCode !== 0 && exitCode !== null) {
@@ -1194,7 +1262,7 @@ function createShellToolDefinition(
 									text: appendStatus(outputText, `Command exited with code ${exitCode}\ncwd: ${reportedCwd}`),
 								},
 							],
-							details: withVerification(details, "failed", reportedCwd),
+							details: verificationDetails,
 							isError: true,
 							errorKind: "operation_outcome",
 						};
@@ -1203,7 +1271,7 @@ function createShellToolDefinition(
 				}
 				return {
 					content: [{ type: "text", text: outputText }],
-					details: withVerification(details, "passed", reportedCwd),
+					details: verificationDetails,
 				};
 			} finally {
 				clearUpdateTimer();

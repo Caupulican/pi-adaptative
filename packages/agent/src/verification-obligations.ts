@@ -4,8 +4,8 @@ import type { AgentMessage } from "./types.ts";
 const MAX_ACTIVE_VERIFICATION_OBLIGATIONS = 16;
 /** Custom terminal handoffs must remain bounded before parsing or retaining their individual records. */
 const MAX_VERIFICATION_EVENTS_PER_MESSAGE = MAX_ACTIVE_VERIFICATION_OBLIGATIONS;
-const MAX_VERIFICATION_ID_LENGTH = 128;
-const VERIFICATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+export const MAX_VERIFICATION_ID_LENGTH = 128;
+export const VERIFICATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 /** A durable bounded witness that more unresolved failures existed than individual slots can retain. */
 const VERIFICATION_OVERFLOW_ID = "_verification_overflow";
 export const VERIFICATION_HANDOFF_REQUIRED_ERROR = "verification_handoff_required";
@@ -16,17 +16,23 @@ export const VERIFICATION_OBLIGATION_TRANSIENT_KIND = "pi_verification_obligatio
 
 type VerificationStatus = "failed" | "passed";
 
-type VerificationRecord = {
+export type VerificationRecord = {
 	version: 1;
 	id: string;
 	status: VerificationStatus;
 	originTaskId?: string;
+	outcome?: "executed" | "setup_failed" | "unconfirmed";
+	/** Host-derived identity of equivalent requested checks within one workspace. */
+	repairGroup?: string;
+	/** Requested setup replacement; the tracker validates its scope, phase and ordering. */
+	repairOf?: string;
 };
 
 export type VerificationObligationSnapshotDetails = {
 	piVerificationObligations: {
 		version: 1;
 		activeIds: string[];
+		setupFailures?: Array<{ id: string; repairGroup: string }>;
 	};
 };
 
@@ -55,9 +61,25 @@ function readVerificationRecord(candidate: unknown): VerificationRecord | undefi
 	const id = ownDataValue(candidate, "id");
 	const status = ownDataValue(candidate, "status");
 	const originTaskId = ownDataValue(candidate, "originTaskId");
+	const outcome = ownDataValue(candidate, "outcome");
+	const repairGroup = ownDataValue(candidate, "repairGroup");
+	const repairOf = ownDataValue(candidate, "repairOf");
 	if (version !== 1 || !isVerificationId(id) || (status !== "failed" && status !== "passed")) return undefined;
 	if (originTaskId !== undefined && !isOriginTaskId(originTaskId)) return undefined;
-	return { version, id, status, ...(originTaskId !== undefined ? { originTaskId } : {}) };
+	if (outcome !== undefined && outcome !== "executed" && outcome !== "setup_failed" && outcome !== "unconfirmed")
+		return undefined;
+	if (status === "passed" && outcome !== undefined && outcome !== "executed") return undefined;
+	if (repairGroup !== undefined && !isVerificationId(repairGroup)) return undefined;
+	if (repairOf !== undefined && !isVerificationId(repairOf)) return undefined;
+	return {
+		version,
+		id,
+		status,
+		...(originTaskId !== undefined ? { originTaskId } : {}),
+		...(outcome !== undefined ? { outcome } : {}),
+		...(repairGroup !== undefined ? { repairGroup } : {}),
+		...(repairOf !== undefined ? { repairOf } : {}),
+	};
 }
 
 function readToolVerificationRecord(details: unknown): VerificationRecord | undefined {
@@ -88,7 +110,29 @@ function boundedCanonicalIds(activeIds: readonly string[]): string[] | undefined
 	return sortedIds;
 }
 
-function readVerificationObligationSnapshot(details: unknown): string[] | undefined {
+function canonicalSetupFailures(
+	value: unknown,
+	activeIds: readonly string[],
+): Array<{ id: string; repairGroup: string }> | undefined {
+	if (value === undefined) return [];
+	if (!Array.isArray(value) || value.length > activeIds.length) return undefined;
+	const seen = new Set<string>();
+	const records: Array<{ id: string; repairGroup: string }> = [];
+	for (const candidate of value) {
+		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+		const id = ownDataValue(candidate, "id");
+		const repairGroup = ownDataValue(candidate, "repairGroup");
+		if (!isVerificationId(id) || !isVerificationId(repairGroup) || !activeIds.includes(id) || seen.has(id))
+			return undefined;
+		seen.add(id);
+		records.push({ id, repairGroup });
+	}
+	return records.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+}
+
+function readVerificationObligationSnapshot(
+	details: unknown,
+): VerificationObligationSnapshotDetails["piVerificationObligations"] | undefined {
 	if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
 	const candidate = ownDataValue(details, "piVerificationObligations");
 	if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
@@ -97,7 +141,15 @@ function readVerificationObligationSnapshot(details: unknown): string[] | undefi
 	if (!Array.isArray(activeIds) || !activeIds.every((id): id is string => typeof id === "string")) return undefined;
 	const canonicalIds = boundedCanonicalIds(activeIds);
 	if (!canonicalIds?.every((id, index) => id === activeIds[index])) return undefined;
-	return canonicalIds;
+	const rawSetup = ownDataValue(candidate, "setupFailures");
+	const setupFailures = canonicalSetupFailures(rawSetup, canonicalIds);
+	if (!setupFailures) return undefined;
+	if (
+		Array.isArray(rawSetup) &&
+		!setupFailures.every((entry, index) => ownDataValue(rawSetup[index], "id") === entry.id)
+	)
+		return undefined;
+	return { version: 1, activeIds: canonicalIds, ...(setupFailures.length ? { setupFailures } : {}) };
 }
 
 function readVerificationEvents(details: unknown): VerificationRecord[] | typeof VERIFICATION_OVERFLOW_ID | undefined {
@@ -117,22 +169,37 @@ function readVerificationEvents(details: unknown): VerificationRecord[] | typeof
 /** Creates the one canonical, bounded compaction detail shape for active obligations. */
 export function createVerificationObligationSnapshotDetails(
 	activeIds: readonly string[],
+	setupFailures?: readonly { id: string; repairGroup: string }[],
 ): VerificationObligationSnapshotDetails | undefined {
 	const canonicalIds = boundedCanonicalIds(activeIds);
-	return canonicalIds ? { piVerificationObligations: { version: 1, activeIds: canonicalIds } } : undefined;
+	if (!canonicalIds) return undefined;
+	const canonicalSetup = canonicalSetupFailures(setupFailures, canonicalIds);
+	if (!canonicalSetup) return undefined;
+	return {
+		piVerificationObligations: {
+			version: 1,
+			activeIds: canonicalIds,
+			...(canonicalSetup.length ? { setupFailures: canonicalSetup } : {}),
+		},
+	};
 }
 
-function formatActiveVerificationFailures(ids: readonly string[]): string | undefined {
+function formatActiveVerificationFailures(
+	ids: readonly string[],
+	setupGroups: ReadonlyMap<string, string>,
+): string | undefined {
 	if (ids.length === 0) return undefined;
 	return [
 		"ACTIVE VERIFICATION FAILURES",
-		"Trusted verification obligations remain unresolved. Do not finish with a tool-free answer until the same id reports status passed.",
+		"Trusted verification obligations remain unresolved. A trusted pass for the same id resolves an obligation. An explicitly linked empty-test setup repair also requires matching test arguments within the same workspace and a later executed pass.",
 		"Analyze the red output and relevant changes, inspect and repair the authoritative owner, then rerun the same verification.",
 		"Unrelated successful tools do not clear an obligation. Completion claims are forbidden while any verification obligation remains active.",
 		`An active ${VERIFICATION_OVERFLOW_ID} means bounded history lost individual failure identities; tool passes never clear that overflow obligation.`,
-		"If external authority makes completion impossible, respond with exactly one line for every active id: VERIFICATION_UNRESOLVED <id>: <reason>. Include no other text.",
+		"If verification cannot be completed, explain the completed work, remaining failures, and next action in ordinary prose. The host retains unresolved status separately; no special answer format is required.",
 		"Active ids:",
-		...ids.map((id) => `- ${id}`),
+		...ids.map(
+			(id) => `- ${id}${setupGroups.has(id) ? ` (empty-test setup; corrected bash may set repairOf="${id}")` : ""}`,
+		),
 	].join("\n");
 }
 
@@ -145,7 +212,7 @@ function formatActiveVerificationFailures(ids: readonly string[]): string | unde
  */
 export const VERIFICATION_OBLIGATIONS_CLEARED_TEXT =
 	"ACTIVE VERIFICATION FAILURES\nAll verification obligations that were active earlier in this " +
-	"conversation have since resolved (a passing verification reported the same id). None are " +
+	"conversation have since resolved through trusted passing verification or validated setup repair. None are " +
 	"currently active; no id-specific completion format is required.";
 
 function rememberFailedVerification(activeIds: Map<string, true>, id: string): void {
@@ -174,6 +241,7 @@ function rememberFailedVerification(activeIds: Map<string, true>, id: string): v
  */
 export class VerificationObligationTracker {
 	private readonly activeIds = new Map<string, true>();
+	private readonly activeSetupGroups = new Map<string, string>();
 	/** First transcript position of each host-owned background placeholder. */
 	private readonly backgroundTaskRevisions = new Map<string, number>();
 	/** Revision of each retained active identity; omitted identities cannot be cleared by a stale pass. */
@@ -186,6 +254,7 @@ export class VerificationObligationTracker {
 
 	restore(messages: readonly AgentMessage[]): void {
 		this.activeIds.clear();
+		this.activeSetupGroups.clear();
 		this.activeRevisions.clear();
 		this.backgroundTaskRevisions.clear();
 		this.transcriptRevision = 0;
@@ -196,15 +265,18 @@ export class VerificationObligationTracker {
 		for (const message of messages) {
 			const revision = ++this.transcriptRevision;
 			if (message.role === "compactionSummary") {
-				const activeIds = readVerificationObligationSnapshot(message.details);
-				if (!activeIds) continue;
+				const snapshot = readVerificationObligationSnapshot(message.details);
+				if (!snapshot) continue;
 				this.activeIds.clear();
+				this.activeSetupGroups.clear();
 				this.activeRevisions.clear();
 				this.backgroundTaskRevisions.clear();
-				for (const id of activeIds) {
+				for (const id of snapshot.activeIds) {
 					this.activeIds.set(id, true);
 					this.activeRevisions.set(id, revision);
 				}
+				for (const record of snapshot.setupFailures ?? [])
+					this.activeSetupGroups.set(record.id, record.repairGroup);
 				continue;
 			}
 			const background = message.role === "toolResult" ? readBackgroundTaskId(message.details) : { present: false };
@@ -259,14 +331,39 @@ export class VerificationObligationTracker {
 		if (previousRevision !== undefined && revision < previousRevision) return;
 		if (record.status === "passed") {
 			if (!canClear) return;
+			const repairedRevision = record.repairOf === undefined ? undefined : this.activeRevisions.get(record.repairOf);
+			if (
+				record.repairOf !== undefined &&
+				record.outcome === "executed" &&
+				record.repairGroup !== undefined &&
+				this.activeSetupGroups.get(record.repairOf) === record.repairGroup &&
+				repairedRevision !== undefined &&
+				revision > repairedRevision
+			) {
+				this.activeIds.delete(record.repairOf);
+				this.activeRevisions.delete(record.repairOf);
+				this.activeSetupGroups.delete(record.repairOf);
+			}
 			this.activeIds.delete(record.id);
 			this.activeRevisions.delete(record.id);
+			this.activeSetupGroups.delete(record.id);
 			return;
 		}
+		const setupGroup =
+			record.outcome === "setup_failed" &&
+			record.repairGroup !== undefined &&
+			(!this.activeIds.has(record.id) || this.activeSetupGroups.get(record.id) === record.repairGroup)
+				? record.repairGroup
+				: undefined;
 		rememberFailedVerification(this.activeIds, record.id);
 		for (const id of this.activeRevisions.keys()) {
-			if (!this.activeIds.has(id)) this.activeRevisions.delete(id);
+			if (!this.activeIds.has(id)) {
+				this.activeRevisions.delete(id);
+				this.activeSetupGroups.delete(id);
+			}
 		}
+		if (setupGroup !== undefined && this.activeIds.has(record.id)) this.activeSetupGroups.set(record.id, setupGroup);
+		else this.activeSetupGroups.delete(record.id);
 		if (this.activeIds.has(record.id)) this.activeRevisions.set(record.id, revision);
 		if (this.activeIds.has(VERIFICATION_OVERFLOW_ID)) {
 			this.activeRevisions.set(VERIFICATION_OVERFLOW_ID, revision);
@@ -282,7 +379,7 @@ export class VerificationObligationTracker {
 	 * provider's cached prefix.
 	 */
 	requestInstruction(): string | undefined {
-		return formatActiveVerificationFailures(this.getActiveIds());
+		return formatActiveVerificationFailures(this.getActiveIds(), this.activeSetupGroups);
 	}
 
 	/**
@@ -302,48 +399,27 @@ export class VerificationObligationTracker {
 		return [...this.activeIds.keys()].sort();
 	}
 
-	permitsTerminalMessage(message: AssistantMessage): boolean {
-		if (this.activeIds.size === 0) return true;
-		const text = message.content
-			.filter(
-				(block): block is Extract<AssistantMessage["content"][number], { type: "text" }> => block.type === "text",
-			)
-			.map((block) => block.text)
-			.join("\n");
-		const lines = text.split("\n");
-		if (lines.length !== this.activeIds.size) return false;
-
-		const handoffIds = new Set<string>();
-		for (const line of lines) {
-			const handoff = /^VERIFICATION_UNRESOLVED ([^\s:]+):\s*\S[^\r\n]*$/.exec(line);
-			const id = handoff?.[1];
-			if (
-				!id ||
-				(!isVerificationId(id) && id !== VERIFICATION_OVERFLOW_ID) ||
-				!this.activeIds.has(id) ||
-				handoffIds.has(id)
-			) {
-				return false;
-			}
-			handoffIds.add(id);
-		}
-		return handoffIds.size === this.activeIds.size;
+	/** Capture both unresolved identities and the bounded proof permitting setup repair. */
+	createSnapshotDetails(): VerificationObligationSnapshotDetails | undefined {
+		return createVerificationObligationSnapshotDetails(
+			this.getActiveIds(),
+			[...this.activeSetupGroups].map(([id, repairGroup]) => ({ id, repairGroup })),
+		);
 	}
 
-	/** Removes an invalid tool-free completion without spending another provider request. */
-	enforceTerminalMessage(message: AssistantMessage, stopReason: "stop" | "error"): AssistantMessage {
+	/** Retains the model's handoff while preventing an unresolved run from reporting success. */
+	enforceTerminalMessage(message: AssistantMessage): AssistantMessage {
 		if (
 			message.stopReason === "error" ||
 			message.stopReason === "aborted" ||
 			message.content.some((block) => block.type === "toolCall") ||
-			this.permitsTerminalMessage(message)
+			this.activeIds.size === 0
 		) {
 			return message;
 		}
 		return {
 			...message,
-			content: [],
-			stopReason,
+			stopReason: "error",
 			errorMessage: VERIFICATION_HANDOFF_REQUIRED_ERROR,
 		};
 	}

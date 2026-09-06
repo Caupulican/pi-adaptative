@@ -368,6 +368,43 @@ describe("credential exposure guard", () => {
 
 describe("credential guard false positives measured live", () => {
 	const cwd = "/mnt/c/work";
+	it("treats variable-looking direct argv as literal paths while retaining shell variable searches", () => {
+		expect(credentialToolBlockReason("bash", { command: 'rg failure "$LOG"' }, cwd)).toBeUndefined();
+		expect(credentialToolBlockReason("run_process", { executable: "rg", args: ["failure", "$LOG"] }, cwd)).toContain(
+			"narrow non-dotenv",
+		);
+		expect(credentialToolBlockReason("grep", { pattern: "failure", path: "$LOG" }, cwd)).toContain(
+			"explicit regular file",
+		);
+	});
+
+	it.each(["bash", "run_process", "grep"])("shares receipt scope and protected-path precedence through %s", (tool) => {
+		const agentDir = "/home/owner/.pi/agent";
+		const receiptRoot = `${agentDir}/work/context/sessions`;
+		const boundary = { redactSensitiveText: (text: string) => text, agentDir };
+		const argsFor = (path: string) =>
+			tool === "bash"
+				? { command: `rg failure ${path}` }
+				: tool === "run_process"
+					? { executable: "rg", args: ["failure", path] }
+					: { pattern: "failure", path };
+		expect(credentialToolBlockReason(tool, argsFor(`${receiptRoot}/session`), cwd, boundary)).toBeUndefined();
+		for (const path of [
+			`${agentDir}/work`,
+			`${receiptRoot}-other`,
+			`${receiptRoot}/../private`,
+			`${receiptRoot}/.env`,
+		]) {
+			expect(credentialToolBlockReason(tool, argsFor(path), cwd, boundary)).toBeDefined();
+		}
+		expect(
+			credentialToolBlockReason(tool, argsFor(receiptRoot), cwd, {
+				...boundary,
+				protectedDirectories: [agentDir],
+			}),
+		).toBeDefined();
+	});
+
 	it("allows a literal-prefix glob, a multi-line script whose last line searches a variable, and the harness's own memory roots", () => {
 		const agentDir = "/home/owner/.pi/agent";
 		const boundary = { redactSensitiveText: (text: string) => text, agentDir };
@@ -402,6 +439,24 @@ describe("credential guard false positives measured live", () => {
 				boundary,
 			),
 		).toBeUndefined();
+	});
+
+	it("allows glob-free search of harness work/context/sessions receipts", () => {
+		const agentDir = "/home/owner/.pi/agent";
+		const boundary = { redactSensitiveText: (text: string) => text, agentDir };
+		expect(
+			credentialToolBlockReason(
+				"bash",
+				{
+					command: `rg -l "failure_key|MUST.:true" ${agentDir}/work/context/sessions/01a074d4`,
+				},
+				cwd,
+				boundary,
+			),
+		).toBeUndefined();
+		expect(credentialToolBlockReason("bash", { command: `rg TOKEN ${agentDir}/work` }, cwd, boundary)).toContain(
+			"narrow non-dotenv",
+		);
 	});
 
 	it("still refuses dotenv globs, credential paths, and a directory scan outside the harness home", () => {

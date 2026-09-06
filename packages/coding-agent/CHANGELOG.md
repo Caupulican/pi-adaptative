@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+### Added
+
+- Fresh `delegate start` requests can set `readOnly: true` to narrow inherited authority; status exposes validated granted capabilities for the selected attempt.
+- Bash accepts `repairOf` for host-proven empty-test setup failures, with scoped and ordered verification receipts.
+
+### Fixed
+
+- Required branch-local passing verification receipts for goal test evidence and actual user-role quotations for user evidence; arbitrary successful commands and unchecked claims cannot satisfy those gates.
+- Preserved useful partial handoffs when verification remains unresolved, without repeated provider requests or successful goal completion.
+- Canonicalized conservative literal verification commands using their actual initial working directory, preserved empty arguments, and refused certification when spawn hooks or directory resolution invalidate that context. Direct Vitest runs with zero tests, all-skipped tests, incomplete summaries, or reported errors no longer count as passing verification.
+- Accounted for goals created during foreground work and flushed usage and active time once at response boundaries.
+- Validated action-specific memory and delegation arguments before execution; unsupported status selectors now name the accepted selector instead of returning an unrelated fleet overview.
+- Kept actionable credential-search corrections on replay and aligned search scope across adapters while retaining protected-path checks.
+- Made skill batch loading atomic, honored explicit memory list targets, prioritized the selected project within bounded OKF discovery, and corrected sentence-boundary false positives in memory screening.
+- Projected bounded worker inspection transcripts without opaque replay signatures while preserving exact raw provider replay.
+- Kept orientation and requested review instructions proportional, reused explicit in-scope owner authorization, and prevented cancelled or unsuccessful turns from admitting reflection.
+
 ## [0.98.5] - 2026-09-06
 
 ### Fixed

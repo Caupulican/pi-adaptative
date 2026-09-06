@@ -1,4 +1,5 @@
 import { isPlainRecord } from "../util/value-guards.ts";
+import { isTrustedGoalEvidence } from "./goal-acceptance.ts";
 
 export type GoalStatus =
 	| "active"
@@ -10,6 +11,7 @@ export type GoalStatus =
 	| "cancelled";
 export type RequirementStatus = "open" | "satisfied" | "blocked";
 export type GoalEvidenceKind = "file" | "test" | "tool" | "user" | "finding" | "worker";
+export type GoalEvidenceOutcome = "succeeded" | "failed" | "canceled";
 
 export const MAX_GOAL_OBJECTIVE_LENGTH = 4_000;
 export const MAX_GOAL_EVENT_HISTORY = 128;
@@ -60,9 +62,9 @@ export interface GoalState {
 	 */
 	continuationTurnsUsed?: number;
 	/**
-	 * Observed cumulative ACTIVE wall-clock milliseconds spent running continuation passes for this goal —
-	 * the sum of each individual pass's own await duration, NOT wall-clock time elapsed between
-	 * passes or during idle gaps. Same backward-compat/undefined-as-0 note as `continuationTurnsUsed`.
+	 * Observed cumulative active milliseconds owned by foreground execution leases, including
+	 * continuation passes and work after mid-run goal creation. Idle gaps and unrelated work are
+	 * excluded. Same undefined-as-0 note as `continuationTurnsUsed`.
 	 */
 	continuationWallClockMs?: number;
 	/**
@@ -118,12 +120,12 @@ export interface GoalEvidenceRef {
 	summary: string;
 	uri?: string;
 	/**
-	 * Whether `uri` was checked against session records ("tool" evidence, a toolCallId) or the
-	 * filesystem ("file" evidence, a path) at add_evidence time. `true`/`false` only when the
-	 * ref was checkable; `undefined` when the evidence kind carries no checkable ref (e.g.
-	 * "user"/"finding"/"test", or a "tool"/"file" entry with no `uri`).
+	 * Whether the host checked the evidence's origin and kind-specific proof at add_evidence time.
+	 * A model-selected kind never grants trust, including "user". Undefined denotes an unchecked ref.
 	 */
 	verified?: boolean;
+	/** Host-observed operation outcome; verifying a failure receipt does not turn it into a success. */
+	outcome?: GoalEvidenceOutcome;
 	createdAt: string;
 }
 
@@ -154,6 +156,7 @@ export type GoalEvent =
 			uri?: string;
 			/** See {@link GoalEvidenceRef.verified}; computed by the tool layer before the event is applied. */
 			verified?: boolean;
+			outcome?: GoalEvidenceOutcome;
 			now: string;
 	  }
 	| { type: "progress"; now: string }
@@ -221,6 +224,15 @@ function hasOptionalBoolean(record: Record<string, unknown>, key: string): boole
 	return record[key] === undefined || typeof record[key] === "boolean";
 }
 
+function hasOptionalEvidenceOutcome(record: Record<string, unknown>): boolean {
+	return (
+		record.outcome === undefined ||
+		record.outcome === "succeeded" ||
+		record.outcome === "failed" ||
+		record.outcome === "canceled"
+	);
+}
+
 function hasOptionalFiniteNumber(record: Record<string, unknown>, key: string): boolean {
 	return record[key] === undefined || (typeof record[key] === "number" && Number.isFinite(record[key]));
 }
@@ -249,7 +261,8 @@ function isGoalEvidenceRef(value: unknown): value is GoalEvidenceRef {
 		typeof value.summary === "string" &&
 		typeof value.createdAt === "string" &&
 		hasOptionalString(value, "uri") &&
-		hasOptionalBoolean(value, "verified")
+		hasOptionalBoolean(value, "verified") &&
+		hasOptionalEvidenceOutcome(value)
 	);
 }
 
@@ -280,7 +293,8 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 				isGoalEvidenceKind(value.kind) &&
 				typeof value.summary === "string" &&
 				hasOptionalString(value, "uri") &&
-				hasOptionalBoolean(value, "verified")
+				hasOptionalBoolean(value, "verified") &&
+				hasOptionalEvidenceOutcome(value)
 			);
 		case "progress":
 		case "no_progress":
@@ -526,6 +540,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 				summary: event.summary,
 				uri: event.uri,
 				verified: event.verified,
+				outcome: event.outcome,
 				createdAt: existingIndex >= 0 ? newState.evidence[existingIndex].createdAt : event.now,
 			};
 			if (existingIndex >= 0) {
@@ -535,7 +550,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			} else {
 				newState.evidence = [...newState.evidence, newEvidence];
 			}
-			if (event.kind === "user" || event.verified === true) {
+			if (isTrustedGoalEvidence(newEvidence)) {
 				newState.progressRevision = (state.progressRevision ?? 0) + 1;
 			}
 			break;

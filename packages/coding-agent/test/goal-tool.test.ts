@@ -1,7 +1,9 @@
+import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { cancelPersistedGoal } from "../src/core/goals/goal-lifecycle.ts";
 import type { GoalState } from "../src/core/goals/goal-state.ts";
+import { resolveSessionUserEvidence } from "../src/core/goals/session-goal-evidence.ts";
 import {
 	createGoalLifecycleToolDefinitions,
 	createGoalToolDefinition,
@@ -12,6 +14,7 @@ import {
 const ctx = undefined as unknown as ExtensionContext;
 
 function createHarness(options: { getActiveVerificationIds?: () => readonly string[] } = {}) {
+	const sessionManager = SessionManager.inMemory();
 	let state: GoalState | undefined;
 	let counter = 0;
 	const saves: GoalState[] = [];
@@ -23,12 +26,13 @@ function createHarness(options: { getActiveVerificationIds?: () => readonly stri
 		},
 		now: () => `T${counter++}`,
 		getActiveVerificationIds: options.getActiveVerificationIds,
+		resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri),
 	});
 	const run = async (input: GoalToolInput) => {
 		const result = await tool.execute("call-1", input, undefined, undefined, ctx);
 		return { content: result.content, details: result.details as GoalToolDetails, isError: result.isError };
 	};
-	return { tool, run, saves, getState: () => state };
+	return { tool, run, saves, sessionManager, getState: () => state };
 }
 
 describe("goal tool", () => {
@@ -141,7 +145,10 @@ describe("goal tool", () => {
 				state = next;
 			},
 			now: () => "T0",
-			hasToolCallId: (toolCallId) => toolCallId === "call-npm-test",
+			resolveToolEvidence: (toolCallId, kind) =>
+				kind === "test" && toolCallId === "call-npm-test"
+					? { verified: true, toolCallId, outcome: "succeeded" }
+					: { verified: false, reason: "cite the producing call" },
 		});
 		const text = (result: Awaited<ReturnType<typeof tool.execute>>) =>
 			result.content[0]?.type === "text" ? result.content[0].text : "";
@@ -156,9 +163,7 @@ describe("goal tool", () => {
 			undefined,
 			ctx,
 		);
-		expect(text(guessed)).toContain(
-			"recorded (unverified: it cannot satisfy a requirement; set uri to the toolCallId",
-		);
+		expect(text(guessed)).toContain("recorded (unverified: cite the producing call)");
 		const proven = await tool.execute(
 			"call-ev-2",
 			{ action: "add_evidence", kind: "test", uri: "call-npm-test", summary: "9 passing" },
@@ -166,7 +171,7 @@ describe("goal tool", () => {
 			undefined,
 			ctx,
 		);
-		expect(text(proven)).toContain("recorded (verified)");
+		expect(text(proven)).toContain("recorded (verified; operation succeeded)");
 		const requirementId = state?.requirements[0]?.id ?? "";
 		const provenId = state?.evidence.find((entry) => entry.uri === "call-npm-test")?.id ?? "";
 		const satisfied = await tool.execute(
@@ -198,9 +203,10 @@ describe("goal tool", () => {
 	});
 
 	it("runs a full producer flow that ends with an active continuable goal", async () => {
-		const { run, getState } = createHarness();
+		const { run, getState, sessionManager } = createHarness();
 		await run({ action: "start", goalId: "g1", userGoal: "Ship feature" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Implement X" });
+		sessionManager.appendMessage({ role: "user", content: "owner confirmed X", timestamp: 1000 });
 		await run({ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "owner confirmed X" });
 		const satisfied = await run({ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] });
 		expect(satisfied.details.applied).toBe(true);

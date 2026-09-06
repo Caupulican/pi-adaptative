@@ -81,7 +81,7 @@ export class ReflectionTurnLifecycle {
 	 * turn: the reflection turn is itself internal, so its completion cannot buy another.
 	 */
 	startDueTurn(options?: PromptOptions): void {
-		if (options?.internalContextType || this.deps.isDisposed()) return;
+		if (options?.internalContextType || options?.signal?.aborted || this.deps.isDisposed()) return;
 		// An aborted run is the user asking for LESS work, not more; reflection waits for a turn that
 		// actually finished. The cue stays due and merges with whatever the next completed turn adds.
 		if (isInterruptedAssistantStopReason(this.deps.getLastAssistantStopReason())) return;

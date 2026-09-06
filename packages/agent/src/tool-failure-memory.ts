@@ -1688,9 +1688,7 @@ export function createRepeatedToolFailureResult(
 		evidence: undefined,
 		state: "rejected",
 		failureCode: "repeated_failed_operation",
-		...(retainedRecord.diagnostic
-			? { note: replayNotice }
-			: { diagnostic: replayNotice, correction: BLOCKED_REPLAY_CORRECTION }),
+		...(retainedRecord.diagnostic ? { note: replayNotice } : { diagnostic: replayNotice }),
 	});
 	return {
 		...blockedResult,

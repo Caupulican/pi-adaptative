@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `maxVerificationHandoffTurns` and the `verification_handoff_stall` runaway reason. Unresolved verification now preserves the assistant's handoff with `stopReason: "error"` and `errorMessage: "verification_handoff_required"`; callers should handle that status instead of configuring handoff retries.
+
+### Fixed
+
+- Preserved adapter-owned repair instructions through initial failure and replay, including results without diagnostic text.
+- Detected repeated unchanged tool results across reordered or shrinking batches while permitting changed results and bounding retained history.
+- Preserved setup-failure repair eligibility through compaction and required matching scope, provenance, and a newer executed pass before resolving an explicitly linked setup failure.
+
 ## [0.98.5] - 2026-09-06
 
 ### Fixed

@@ -252,9 +252,11 @@ process.stdin.on("data", (chunk) => {
 			const missing = await session.exec("first", process.cwd(), { onData: () => {} });
 			expect(missing.exitCode).toBe(5);
 			expect(missing.cwd).toBeUndefined();
+			expect(missing.initialCwd).toBe(process.cwd());
 			const empty = await session.exec("second", process.cwd(), { onData: () => {} });
 			expect(empty.exitCode).toBe(0);
 			expect(empty.cwd).toBeUndefined();
+			expect(empty.initialCwd).toBeUndefined();
 		} finally {
 			session.dispose();
 			rmSync(directory, { recursive: true, force: true });
@@ -309,7 +311,7 @@ process.stdin.on("data", (chunk) => {
 		try {
 			const chunks: Buffer[] = [];
 			const result = await session.exec("go", process.cwd(), { onData: (data) => chunks.push(data) });
-			expect(result).toEqual({ exitCode: 3, cwd: expectedCwd });
+			expect(result).toEqual({ exitCode: 3, initialCwd: process.cwd(), cwd: expectedCwd });
 			expect(Buffer.concat(chunks).toString("utf8")).toBe("head output\n");
 		} finally {
 			session.dispose();
@@ -373,10 +375,10 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 		const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-cwd-")));
 		try {
 			const result = await session.exec(`cd '${tempDir}' && false`, cwd, { onData: () => {} });
-			expect(result).toEqual({ exitCode: 1, cwd: tempDir });
+			expect(result).toEqual({ exitCode: 1, initialCwd: cwd, cwd: tempDir });
 			// An unchanged host cwd preserves the in-session cd; the report follows it.
 			const followUp = await session.exec("(exit 7)", cwd, { onData: () => {} });
-			expect(followUp).toEqual({ exitCode: 7, cwd: tempDir });
+			expect(followUp).toEqual({ exitCode: 7, initialCwd: tempDir, cwd: tempDir });
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -389,7 +391,7 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 		mkdirSync(colonDir);
 		try {
 			const result = await session.exec(`cd '${colonDir}' && (exit 4)`, cwd, { onData: () => {} });
-			expect(result).toEqual({ exitCode: 4, cwd: colonDir });
+			expect(result).toEqual({ exitCode: 4, initialCwd: cwd, cwd: colonDir });
 		} finally {
 			rmSync(base, { recursive: true, force: true });
 		}
@@ -399,7 +401,7 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 		const session = makeSession("bash");
 		const doomed = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-doomed-")));
 		const result = await session.exec(`cd '${doomed}' && rmdir '${doomed}' && false`, cwd, { onData: () => {} });
-		expect(result).toEqual({ exitCode: 1, cwd: doomed });
+		expect(result).toEqual({ exitCode: 1, initialCwd: cwd, cwd: doomed });
 	});
 
 	it("passes nonce-like fake sentinels through as data and still parses the real one", async () => {
@@ -412,7 +414,7 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 				cwd,
 				{ onData: (data) => chunks.push(data) },
 			);
-			expect(result).toEqual({ exitCode: 1, cwd: tempDir });
+			expect(result).toEqual({ exitCode: 1, initialCwd: cwd, cwd: tempDir });
 			expect(Buffer.concat(chunks).toString("utf8")).toContain("\x1e0123456789abcdef:999:/bogus\x1e");
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
@@ -487,6 +489,24 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 		]);
 		expect(first.output.trim()).toBe("first");
 		expect(second.output.trim()).toBe("second");
+	});
+
+	it("captures each queued command's starting cwd after earlier work and resets it after shell exit", async () => {
+		const session = makeSession("bash");
+		const target = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-admission-cwd-")));
+		try {
+			const [moved, queued] = await Promise.all([
+				session.exec(`cd '${target}'`, cwd, { onData: () => {} }),
+				session.exec("true", cwd, { onData: () => {} }),
+			]);
+			expect(moved).toEqual({ exitCode: 0, initialCwd: cwd, cwd: target });
+			expect(queued).toEqual({ exitCode: 0, initialCwd: target, cwd: target });
+			await session.exec("exit 0", cwd, { onData: () => {} });
+			const restarted = await session.exec("true", cwd, { onData: () => {} });
+			expect(restarted).toEqual({ exitCode: 0, initialCwd: cwd, cwd });
+		} finally {
+			rmSync(target, { recursive: true, force: true });
+		}
 	});
 
 	it("returns the same session for the same key and a fresh one after dispose", async () => {

@@ -22,10 +22,7 @@ import type {
 	ThinkingLevel,
 	ToolValidationEscalationEvent,
 } from "@caupulican/pi-agent-core/types";
-import {
-	createVerificationObligationSnapshotDetails,
-	VerificationObligationTracker,
-} from "@caupulican/pi-agent-core/verification-obligations";
+import { VerificationObligationTracker } from "@caupulican/pi-agent-core/verification-obligations";
 import type { Api, AssistantMessage, ImageContent, Message, Model, TextContent, Usage } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
@@ -1408,9 +1405,9 @@ export class AgentSession {
 		return new VerificationObligationTracker(this.agent.state.messages).getActiveIds();
 	}
 
-	/** Preserve validated active verification IDs inside the compaction checkpoint. */
+	/** Preserve active verification identities and setup-repair proof inside the compaction checkpoint. */
 	private _decorateCompactionDetails(details: unknown): unknown {
-		const snapshot = createVerificationObligationSnapshotDetails(this._getActiveVerificationIds());
+		const snapshot = new VerificationObligationTracker(this.agent.state.messages).createSnapshotDetails();
 		if (!snapshot) return details;
 		if (!details || typeof details !== "object" || Array.isArray(details)) return snapshot;
 		return { ...details, ...snapshot };

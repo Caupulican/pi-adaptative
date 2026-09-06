@@ -190,9 +190,9 @@ export class SystemPromptBuilder {
 				? "autonomy.mode=full grants autonomy/autoLearn tuning. Ask before credential disclosure, provider authentication changes, credential operations outside active user-plane secret_store grant, package-source changes, unrelated preferences."
 				: "Ask for explicit approval before changing global settings.";
 		if (profile.class !== "full") {
-			return `PI SELF-MODIFICATION: edit core only under ${sourceStatus}. Inspect first; preserve concurrent work; smallest auditable change; focused validation. ${settingsGate} Always ask before publish/push/tag/release.`;
+			return `PI SELF-MODIFICATION: edit core only under ${sourceStatus}. Inspect first; preserve concurrent work; smallest auditable change; focused validation. ${settingsGate} Publication requires owner authorization.`;
 		}
-		return `PI SELF-MODIFICATION: source=${sourceStatus}. Edit core/harness only there; never patch installed/generated output as source of truth. Restate scope; inspect source/docs; preserve concurrent changes; make the smallest auditable edit; run focused then proportionate checks; reload only after saved evidence. ${settingsGate} Always ask before publish/push/tag/release.`;
+		return `PI SELF-MODIFICATION: source=${sourceStatus}. Edit core/harness only there; never patch installed/generated output as source of truth. Restate scope; inspect source/docs; preserve concurrent changes; make the smallest auditable edit; run focused then proportionate checks; reload only after saved evidence. ${settingsGate} Publication requires owner authorization.`;
 	}
 
 	private _buildStaticMemoryPrompt(profile: ModelCapabilityProfile): string | undefined {
@@ -256,13 +256,13 @@ export class SystemPromptBuilder {
 		}
 
 		const reflectionContract = isCurrentSessionReflectionEnabled(autoLearn)
-			? "ROOT REFLECTION: decide and apply warranted durable learning in the current root provider turn only; never add a provider request or delegate reflection."
+			? "ROOT REFLECTION: decide and apply warranted durable learning only in the single host-scheduled reflection turn after completed work; do not schedule additional reflection turns or delegate it."
 			: "Root reflection is disabled.";
 		if (profile.class !== "full") {
 			return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Active task primary. Observations are evidence; bound changes. Approval: publish/push/tag/release, credential/authentication changes outside active secret_store authority, destructive deletion, broader authority.`;
 		}
 		if (autonomy.mode === "full") {
-			return `PI AUTONOMY full (standing): ${reflectionContract} Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; validation plus rollback evidence. Hard stop for publish/release/push/tag, credential disclosure/provider authentication/out-of-grant secret operations, destructive user-data deletion, exposed services, or more authority. Current-turn evidence is a cue, not proof; active task stays primary.`;
+			return `PI AUTONOMY full (standing): ${reflectionContract} Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; validation plus rollback evidence. Owner authorization required for publish/release/push/tag, credential disclosure/provider authentication/out-of-grant secret operations, destructive user-data deletion, exposed services, or more authority. Current-turn evidence is a cue, not proof; active task stays primary.`;
 		}
 		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Query memory and use bounded tools already available in this session. Auto-apply configured high-confidence memory and clean additive skill promotions; code/prompt/extension/settings changes need approval. Evidence is cue, never proof; active task primary.`;
 	}

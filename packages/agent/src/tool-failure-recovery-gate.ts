@@ -65,6 +65,7 @@ function readEnvelopeBound(args: unknown): number | undefined {
 export interface ToolFailureRecoveryPlan {
 	targets: readonly AgentToolFailureRecoveryTarget[];
 	guidance: string;
+	correction?: string;
 	evidence?: string;
 }
 
@@ -230,8 +231,15 @@ export class ToolFailureRecoveryGate {
 		const targets = readFailureTargets(failedTool, args, failure.failureCode);
 		const actions = readAvailableRecoveryActions(availableTools, targets);
 		const evidence = readFailureEvidence(failedTool, args, failure);
+		let correction: string | undefined;
+		try {
+			correction = sanitizeToolFailureEvidence(failedTool.failureRecovery?.getFailureCorrection?.(args, failure));
+		} catch {
+			// An unavailable adapter hint cannot suppress the host's admission guidance.
+		}
 		return {
 			targets,
+			...(correction ? { correction } : {}),
 			guidance: formatRecoveryGuidance(
 				actions,
 				this.transientRetryStanding(getToolExecutionKey(failedTool.name, args), failure.failureCode),

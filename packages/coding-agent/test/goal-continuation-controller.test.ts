@@ -508,6 +508,7 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 			type: "add_evidence",
 			id: "e1",
 			kind: "user",
+			verified: true,
 			summary: "owner confirmed",
 			now: "T1",
 		});

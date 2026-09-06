@@ -2,6 +2,7 @@ import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
+import { resolveSessionUserEvidence } from "../src/core/goals/session-goal-evidence.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { createGoalToolDefinition, type GoalToolInput } from "../src/core/tools/goal.ts";
 
@@ -21,6 +22,7 @@ function createProducer(sessionManager: SessionManager) {
 			appendGoalStateSnapshot(sessionManager, state);
 		},
 		now: () => `T${counter++}`,
+		resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri),
 	});
 	return (input: GoalToolInput) => tool.execute("call", input, undefined, undefined, ctx);
 }
@@ -49,8 +51,8 @@ describe("goal producer feeds the continuation consumer", () => {
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship feature" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Implement X" });
-		// Completion is evidence-gated: cite kind:"user" evidence (always counted as verified) so
-		// 'complete' actually succeeds instead of failing its evidence-backed-satisfaction check.
+		// The model must cite an actual user statement, not grant itself confirmation by selecting a kind.
+		sessionManager.appendMessage({ role: "user", content: "User confirmed X is done", timestamp: 1000 });
 		await run({ action: "add_evidence", evidenceId: "ev1", kind: "user", summary: "User confirmed X is done" });
 		await run({ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["ev1"] });
 		await run({ action: "complete" });

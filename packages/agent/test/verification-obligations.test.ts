@@ -1,5 +1,7 @@
+import { createAssistantMessageEventStream } from "@caupulican/pi-ai";
 import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/types";
 import { describe, expect, it } from "vitest";
+import { agentLoop } from "../src/agent-loop.ts";
 import type { AgentMessage } from "../src/types.ts";
 import {
 	createVerificationObligationSnapshotDetails,
@@ -73,28 +75,93 @@ function customMessage(details: unknown): AgentMessage {
 }
 
 describe("VerificationObligationTracker", () => {
-	it("requires exactly one unresolved handoff line for every active verification id", () => {
+	it("ends the actual loop after one retained partial handoff, without buying a grammar rewrite", async () => {
+		const failure = failedVerification("alpha");
+		const handoff = assistantText("The fix needs a fixture correction before verification can pass.");
+		let requests = 0;
+		const loop = agentLoop(
+			[{ role: "user", content: "Report the remaining work.", timestamp: 2 }],
+			{ messages: [failure], systemPrompt: "Test harness", tools: [] },
+			{
+				model: {
+					id: "mock",
+					name: "mock",
+					api: "openai-responses",
+					provider: "test",
+					baseUrl: "https://example.invalid",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 2048,
+				},
+				convertToLlm: (messages) =>
+					messages.filter(
+						(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+					),
+				maxProviderTurns: 4,
+			},
+			undefined,
+			() => {
+				requests++;
+				const stream = createAssistantMessageEventStream();
+				stream.push({ type: "done", reason: "stop", message: handoff });
+				stream.end();
+				return stream;
+			},
+		);
+		const messages = await loop.result();
+		expect(requests).toBe(1);
+		expect(messages.at(-1)).toMatchObject({
+			content: handoff.content,
+			stopReason: "error",
+			errorMessage: "verification_handoff_required",
+		});
+		expect(new VerificationObligationTracker([failure, ...messages]).getActiveIds()).toEqual(["alpha"]);
+	});
+	it("preserves a useful handoff while marking unresolved verification as an unsuccessful terminal", () => {
+		const tracker = new VerificationObligationTracker([failedVerification("alpha")]);
+		const message = assistantText(
+			"The parser fix is implemented. The regression still fails because the fixture is missing.",
+		);
+		const terminal = tracker.enforceTerminalMessage(message);
+		expect(terminal.content).toEqual(message.content);
+		expect(terminal.stopReason).toBe("error");
+		expect(terminal.errorMessage).toContain("verification_handoff_required");
+		expect(tracker.getActiveIds()).toEqual(["alpha"]);
+		tracker.record([passedVerification("alpha")]);
+		expect(tracker.enforceTerminalMessage(message)).toBe(message);
+	});
+	it("does not turn opaque-id prose into successful verification", () => {
+		const tracker = new VerificationObligationTracker([failedVerification("alpha")]);
+		const message = assistantText("VERIFICATION_UNRESOLVED alpha: environment unavailable");
+		expect(tracker.enforceTerminalMessage(message).stopReason).toBe("error");
+		expect(tracker.getActiveIds()).toEqual(["alpha"]);
+	});
+	it("projects unresolved identities without requiring a special handoff grammar", () => {
 		const tracker = new VerificationObligationTracker([failedVerification("alpha"), failedVerification("beta")]);
 		const prompt = tracker.appendSystemPrompt("base");
-		expect(prompt).toContain("exactly one line for every active id");
+		expect(prompt).toContain("no special answer format is required");
 		expect(prompt).toContain("Analyze the red output and relevant changes");
 		expect(prompt).toContain("inspect and repair the authoritative owner");
 		expect(prompt).toContain("rerun the same verification");
 		expect(prompt).toContain("Unrelated successful tools do not clear an obligation");
 		expect(prompt).toContain("Completion claims are forbidden while any verification obligation remains active");
 
-		expect(
-			tracker.permitsTerminalMessage(
-				assistantText("VERIFICATION_UNRESOLVED alpha: first blocker\nVERIFICATION_UNRESOLVED beta: second blocker"),
-			),
-		).toBe(true);
-		for (const invalid of [
+		for (const text of [
+			"The fix is incomplete; alpha and beta still fail.",
+			"Everything passed.",
+			"VERIFICATION_UNRESOLVED alpha: first blocker\nVERIFICATION_UNRESOLVED beta: second blocker",
 			"VERIFICATION_UNRESOLVED alpha: first blocker",
 			"VERIFICATION_UNRESOLVED alpha: first blocker\nVERIFICATION_UNRESOLVED alpha: duplicate blocker",
 			"VERIFICATION_UNRESOLVED alpha: first blocker\nVERIFICATION_UNRESOLVED beta: second blocker\nextra text",
 			"VERIFICATION_UNRESOLVED alpha: first blocker\nVERIFICATION_UNRESOLVED other: extra blocker",
 		]) {
-			expect(tracker.permitsTerminalMessage(assistantText(invalid))).toBe(false);
+			const message = assistantText(text);
+			const terminal = tracker.enforceTerminalMessage(message);
+			expect(terminal.content).toEqual(message.content);
+			expect(terminal.stopReason).toBe("error");
+			expect(tracker.getActiveIds()).toEqual(["alpha", "beta"]);
 		}
 	});
 
@@ -170,8 +237,9 @@ describe("VerificationObligationTracker", () => {
 		const restored = new VerificationObligationTracker([compactionSummary(snapshot)]);
 		expect(restored.getActiveIds()).toContain("_verification_overflow");
 		expect(
-			restored.permitsTerminalMessage(assistantText("VERIFICATION_UNRESOLVED check-01: a remaining failure")),
-		).toBe(false);
+			restored.enforceTerminalMessage(assistantText("VERIFICATION_UNRESOLVED check-01: a remaining failure"))
+				.stopReason,
+		).toBe("error");
 	});
 
 	it("never evicts the overflow witness itself, even once it is the oldest tracked entry", () => {

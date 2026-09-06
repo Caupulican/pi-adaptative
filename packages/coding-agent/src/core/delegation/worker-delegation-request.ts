@@ -42,6 +42,8 @@ export interface WorkerDelegationAuthorityRequest {
 	thinkingLevel?: OrchestrationThinkingLevel;
 	capabilities?: readonly HarnessCapability[];
 	toolNames?: readonly string[];
+	/** Narrow inherited authority to local reads; excludes arbitrary process and service execution. */
+	readOnly?: boolean;
 	/** One model-selectable workspace focus. The host derives cwd plus symmetric read/write scope. */
 	path?: string;
 	budget?: RiskBudget;
@@ -67,8 +69,13 @@ function uniqueStringArray(value: unknown, label: string, options: { maxEntries?
 /** Parse a caller authority request before it reaches admission or durable state. */
 export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDelegationAuthorityRequest {
 	if (!isPlainRecord(value)) throw new WorkerDelegationRequestError("Delegation authority must be an object.");
-	if (!hasOnlyKeys(value, ["role", "model", "thinkingLevel", "capabilities", "toolNames", "path", "budget"])) {
+	if (
+		!hasOnlyKeys(value, ["role", "model", "thinkingLevel", "capabilities", "toolNames", "readOnly", "path", "budget"])
+	) {
 		throw new WorkerDelegationRequestError("Delegation authority contains an unsupported field.");
+	}
+	if (value.readOnly !== undefined && typeof value.readOnly !== "boolean") {
+		throw new WorkerDelegationRequestError("Delegation authority readOnly must be a boolean.");
 	}
 	if (value.role !== undefined && !WORKER_ROLES.includes(value.role as WorkerRole)) {
 		throw new WorkerDelegationRequestError("Delegation authority role is invalid.");
@@ -129,6 +136,7 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 		...(value.thinkingLevel ? { thinkingLevel: value.thinkingLevel as OrchestrationThinkingLevel } : {}),
 		...(capabilities ? { capabilities } : {}),
 		...(toolNames ? { toolNames } : {}),
+		...(value.readOnly !== undefined ? { readOnly: value.readOnly } : {}),
 		...(workspacePath ? { path: workspacePath } : {}),
 		...(budget ? { budget } : {}),
 	};

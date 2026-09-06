@@ -4,6 +4,11 @@ import {
 	bindCompiledVerifierIdentity,
 	resolveWorkerAuthority,
 } from "../src/core/delegation/worker-authority-resolver.ts";
+import { parseWorkerDelegationAuthorityRequest } from "../src/core/delegation/worker-delegation-request.ts";
+import {
+	buildWorkerExecutionPlan,
+	compileWorkerExecutionGrant,
+} from "../src/core/delegation/worker-execution-policy.ts";
 import type { ResolvedWorkerProfile } from "../src/core/delegation/worker-profile-resolver.ts";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
@@ -15,6 +20,65 @@ const modelRegistry = {
 } as unknown as ModelRegistry;
 
 describe("resolveWorkerAuthority", () => {
+	it.each([true, false, undefined])("compiles readOnly=%s into the effective execution plan", (readOnly) => {
+		const resolution = resolveWorkerAuthority({
+			authority: { readOnly, path: "/repo" },
+			foregroundModel: model,
+			foregroundToolNames: ["read", "write", "bash"],
+			foregroundEnvelope: {
+				id: "parent",
+				capabilities: ["filesystem.read", "filesystem.write", "process.exec"],
+			},
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+		expect(resolution.ok).toBe(true);
+		if (!resolution.ok) throw new Error(resolution.reason);
+		const plan = buildWorkerExecutionPlan({
+			profile: resolution.shipment.profile,
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+			settings: { enabled: true, writeEnabled: true, maxUsd: 1, maxWallClockMs: 120_000, maxConcurrent: 4 },
+		});
+		expect(plan.writeEnabled).toBe(readOnly !== true);
+		expect(plan.processEnabled).toBe(readOnly !== true);
+		const compiled = compileWorkerExecutionGrant({
+			target: { objectiveId: "objective", taskId: "task", attemptId: "attempt" },
+			profile: resolution.shipment.profile,
+			plan,
+			resources: [],
+		});
+		expect(compiled.ok).toBe(true);
+		if (!compiled.ok) throw new Error(compiled.reasonCodes.join(","));
+		if (readOnly) {
+			expect(resolution.shipment.profile.capabilityCeiling).toEqual(["filesystem.read"]);
+			expect(plan.requiredCapabilities).toEqual(["filesystem.read"]);
+			expect(plan.toolManifests.map((entry) => entry.toolName)).toEqual(["read"]);
+			expect(plan.writePaths).toEqual([]);
+			expect(compiled.grant.capabilities).toEqual(["filesystem.read"]);
+			expect(compiled.grant.allowedTools).toEqual(["read"]);
+			expect(compiled.grant.writePaths).toEqual([]);
+		}
+	});
+	it("retains the read-only choice through request parsing and rejects malformed choices", () => {
+		expect(parseWorkerDelegationAuthorityRequest({ readOnly: true })).toEqual({ readOnly: true });
+		expect(parseWorkerDelegationAuthorityRequest({ readOnly: false })).toEqual({ readOnly: false });
+		for (const readOnly of ["true", "false", 1, null, []]) {
+			expect(() => parseWorkerDelegationAuthorityRequest({ readOnly })).toThrow("readOnly");
+		}
+	});
+	it.each(["write", "bash", "python"])("refuses an explicit %s override of read-only authority", (toolName) => {
+		expect(
+			resolveWorkerAuthority({
+				authority: { readOnly: true, toolNames: [toolName] },
+				foregroundModel: model,
+				foregroundToolNames: [toolName],
+				modelRegistry,
+				isModelExhausted: () => false,
+			}),
+		).toEqual({ ok: false, reason: `orchestration_tool_capability_missing:${toolName}` });
+	});
 	it("makes every adaptive worker a leaf even when an ordinary tool list is narrowed", () => {
 		const resolution = resolveWorkerAuthority({
 			authority: { toolNames: ["read", "bash"] },

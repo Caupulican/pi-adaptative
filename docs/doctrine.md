@@ -129,6 +129,38 @@ and `packages/coding-agent/test/phone-filesystem-workflow.test.ts`.
 
 ## Guards
 
+**Verification is a typed host receipt, not a claim in prose.** Goal test evidence must resolve
+to a passing receipt on the active branch; complete user quotations resolve only to user-role
+records. An unrelated successful command never clears a failed test. Literal argv and actual
+execution directory identify a check; opaque shell expressions retain their exact source.
+Direct Vitest output must confirm nonempty executed tests. Only an explicitly linked, newer
+executed pass with matching host-derived scope can supersede an empty-test setup failure;
+executed or unknown failures cannot be downgraded into setup failures. Compaction retains those
+relationships. Historical receipts without that proof remain unresolved. Pinned by
+`packages/coding-agent/test/goal-evidence-verification.test.ts`,
+`packages/coding-agent/test/bash-verification-boundary.test.ts`, and
+`packages/agent/test/verification-setup-repair.test.ts`.
+
+**An unresolved handoff remains readable and unsuccessful.** The host preserves the answer,
+retains the active obligations, and prevents successful goal completion. It does not erase prose
+or spend extra provider turns demanding opaque-ID grammar. Reflection cannot claim a cancelled
+submission or unsuccessful terminal turn. Pinned by
+`packages/coding-agent/test/suite/regressions/unresolved-verification-handoff.test.ts` and
+`packages/coding-agent/test/reflection-turn-lifecycle.test.ts`.
+
+**A repair survives first failure and replay.** The adapter supplies the bounded correction;
+the shared recovery path retains it independently of optional diagnostic text. Action-dependent
+required fields reject before execution and report the missing field. Pinned by
+`packages/agent/test/tool-failure-replay-correction.test.ts`,
+`packages/coding-agent/test/suite/regressions/credential-repair-projection.test.ts`, and
+`packages/coding-agent/test/suite/regressions/delegate-action-preflight.test.ts`.
+
+**Reordering unchanged results does not create progress.** A bounded history of matching
+operations and result signatures detects stagnant batches even when their order or membership
+changes. New operations and changed results reset the counter. Existing recovery admission and
+call fuses remain authoritative. Pinned by `packages/agent/test/tool-result-progress.test.ts`
+and `packages/agent/test/runaway-loop.test.ts`.
+
 **Protocols are mechanisms, prose points at them.** The readmission gate and the ledger resolution
 enforce the failure protocol; the protocol text lives once in the stable system prompt and an
 active record carries one pointer line (the constrained tier keeps the full text). Pinned by
@@ -152,8 +184,16 @@ Pinned by `packages/coding-agent/test/agent-session-runaway-escalation.test.ts` 
 
 **Workers deny by default and never exceed the parent's surface.** A worker's tools come from the
 parent's active tool set; root-only tools and nested delegation are refused with the rule named.
+Fresh admission can request `readOnly: true`, which removes write, process, network and service
+authority. Prose cannot narrow a grant. Persistent reuse retains its existing grant and rejects
+authority overrides. Status exposes only validated permission names bound to the selected
+attempt, never permission guesses or raw resource grants. Inspection pages omit opaque provider
+replay signatures before output sizing; raw replay remains exact and both input and output are
+bounded. Unsupported status selectors refuse instead of expanding the selection.
 Pinned by `packages/coding-agent/test/worker-authority-resolver.test.ts` and
-`packages/coding-agent/test/native-worker-autonomy.test.ts`.
+`packages/coding-agent/test/native-worker-autonomy.test.ts`,
+`packages/coding-agent/test/worker-task-view.test.ts`, and
+`packages/coding-agent/test/worker-transcript-inspection.test.ts`.
 
 **An explicit wait is never handed off.** A tool declares which calls are foreground waits; such a
 call blocks up to its own timeout. Pinned by
@@ -222,13 +262,31 @@ commands-text).
 `<agentDir>/memory/projects/<key>/MEMORY.md` (2,200 chars), keyed like OKF; `USER.md` stays
 global. The `memory` tool defaults to `project` inside a project, `memory` (general) stays
 explicit, a general write that names a path, ticket or branch gets a hint (never a silent
-reroute), `list` shows all three with their budgets, an over-budget general file puts a triage
+reroute), an unqualified `list` shows all three with their budgets while an explicit target
+selects only that file, an over-budget general file puts a triage
 note in the memory block (move project lines, never delete), and workers cannot write any project
 memory. Why: on both owner machines the single global file was full of ticket and build facts,
 refused writes four times in a row, and sent every project's facts to every other project's
 sessions. Pinned by `packages/coding-agent/test/memory-subsystem.test.ts` (project-scoped hot
 memory), `packages/coding-agent/test/file-store-memory-provider.test.ts` (project scope search)
 and `packages/coding-agent/test/lane-private-paths.test.ts`.
+
+**Memory and skill admission preserve ownership.** Bounded OKF discovery visits the selected
+project first without crossing symlink boundaries. External memory edits remain protected by
+revision checks. A skill batch validates its entire requested set before one commit; an accepted
+batch cannot evict a member of that same batch. Pinned by
+`packages/coding-agent/test/okf-memory-provider.test.ts`,
+`packages/coding-agent/test/memory-recovery.test.ts`, and
+`packages/coding-agent/test/skill-vault.test.ts`.
+
+**Goal accounting starts at ownership, and instructions scale to intent.** A goal created during
+a foreground run acquires that run's lease at creation; earlier unrelated usage stays outside it.
+Usage and active time flush once at response/end boundaries. Orientation, requested evaluation,
+and implementation have different workloads. Existing explicit in-scope authorization is reused.
+These contracts retain the 3,200-byte core prompt limit. Pinned by
+`packages/coding-agent/test/goal-execution-budget.test.ts`,
+`packages/coding-agent/test/agent-session-goal-continuation-loop.test.ts`, and
+`packages/coding-agent/test/system-prompt.test.ts`.
 
 **A feature earns its tokens or is gated by tier, never removed.** `scripts/feature-ledger.mjs`
 measures each subsystem's cost and benefit from session files; a subsystem without a benefit
@@ -238,6 +296,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-06 | Session-audit repairs strengthen receipt provenance, setup supersession, useful unsuccessful handoffs, goal attribution, structured repair, action validation, bounded progress detection, worker grants/inspection, scoped memory, atomic skill batches, and proportional instructions without raising prompt or scanner limits. |
 | 2026-09-02 | First edition: the invariants proven live on v0.97.24 and the ratchet model's gates. |
 | 2026-09-02 | The output-repetition guard also watches the string values of a streaming tool call's arguments (a live probe looped inside a step selector). |
 | 2026-09-02 | Demotion is evidence from tool-loop guards only; an output runaway ends the response without demoting. |

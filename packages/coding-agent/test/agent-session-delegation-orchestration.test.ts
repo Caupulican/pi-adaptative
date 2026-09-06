@@ -24,6 +24,8 @@ describe("AgentSession provider-neutral delegation orchestration", () => {
 			}
 			expect(harness.session.systemPrompt).toContain(DELEGATION_POLICY_HEADING);
 			expect(harness.session.systemPrompt).toContain(DELEGATION_DECISION_RULE);
+			expect(harness.session.systemPrompt).toContain("Orientation stays local unless a team is requested.");
+			expect(harness.session.systemPrompt).toContain("Scale phases to the requested outcome.");
 			expect(harness.session.systemPrompt).toContain(
 				"ceilings come only from host settings or an owner-authored profileId",
 			);

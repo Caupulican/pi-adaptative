@@ -2,6 +2,7 @@ import type { Component } from "@caupulican/pi-tui";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@caupulican/pi-tui";
 import { renderTitleBadge, type TitleBadgeStatus } from "../../modes/interactive/components/tool-title.ts";
 import type { Theme, ThemeColor } from "../../modes/interactive/theme/theme.ts";
+import { isTrustedGoalEvidence } from "../goals/goal-acceptance.ts";
 import type { GoalEvidenceRef, Requirement } from "../goals/goal-state.ts";
 import type { TaskStep } from "../tasks/task-state.ts";
 
@@ -102,14 +103,16 @@ export function goalRequirementPanelRow(requirement: Requirement): Orchestration
 }
 
 export function goalEvidencePanelRow(evidence: GoalEvidenceRef): OrchestrationPanelRow {
+	const trusted = isTrustedGoalEvidence(evidence);
 	return {
-		status: "reviewed",
+		status: trusted ? (evidence.outcome ?? "reviewed") : "info",
 		label: evidence.summary,
 		section: "Evidence",
 		meta: [
 			evidence.id,
 			evidence.kind,
-			evidence.verified === true ? "verified" : evidence.verified === false ? "unverified" : undefined,
+			trusted ? "verified" : "unverified",
+			evidence.outcome ? `operation ${evidence.outcome}` : undefined,
 		].filter((value): value is string => value !== undefined),
 		details: evidence.uri ? [`source: ${evidence.uri}`] : undefined,
 	};

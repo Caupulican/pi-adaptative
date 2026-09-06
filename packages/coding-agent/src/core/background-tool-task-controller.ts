@@ -4,6 +4,10 @@ import type {
 	BackgroundToolCallHandoff,
 } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import {
+	retainedVerificationDetails,
+	type VerificationRecord,
+} from "@caupulican/pi-agent-core/verification-obligations";
 import type { Usage } from "@caupulican/pi-ai";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "./context/tool-output-packer.ts";
@@ -37,9 +41,7 @@ const MAX_INLINE_OUTPUT_LINES = 400;
 /** Budgeted so a projected failure summary keeps its diagnostic instead of cutting it off. */
 const MAX_SUMMARY_CHARS = 320;
 const MAX_TERMINAL_HANDOFF_RECORDS = 8;
-const MAX_VERIFICATION_ID_LENGTH = 128;
 const TASK_ID_PATTERN = /^tool-task-([1-9]\d*)$/;
-const VERIFICATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const RECORD_KEYS = [
 	"sessionId",
 	"taskId",
@@ -62,13 +64,7 @@ const RECORD_KEYS = [
 export type BackgroundToolTaskStatus = "running" | "completed" | "failed" | "canceled";
 export type BackgroundToolTerminalDelivery = "pending" | "delivered";
 
-type ToolVerification = {
-	version: 1;
-	id: string;
-	status: "failed" | "passed";
-};
-
-type BackgroundToolVerification = ToolVerification & {
+type BackgroundToolVerification = VerificationRecord & {
 	/** Host-bound origin used to order delayed background observations in the foreground transcript. */
 	originTaskId: string;
 };
@@ -83,16 +79,6 @@ export function findBackgroundToolTask<T extends BackgroundToolTaskRef>(
 	const id = uri.trim();
 	if (!id) return undefined;
 	return records.find((record) => record.taskId === id || record.toolCallId === id);
-}
-
-/** True only when the cited background task finished successfully. Undefined when no task matches. */
-export function isCompletedBackgroundToolEvidence(
-	records: readonly BackgroundToolTaskRef[],
-	uri: string,
-): boolean | undefined {
-	const task = findBackgroundToolTask(records, uri);
-	if (!task) return undefined;
-	return task.status === "completed";
 }
 
 export function collectCitedRunningToolTaskIds(args: {
@@ -344,23 +330,8 @@ function ownDataValue(record: object, key: string): unknown {
 }
 
 /** Normalize the cross-package verification wire contract before durable persistence. */
-function retainedToolVerification(details: unknown): ToolVerification | undefined {
-	if (!isRecordObject(details)) return undefined;
-	const candidate = ownDataValue(details, "piVerification");
-	if (!isRecordObject(candidate)) return undefined;
-	const version = ownDataValue(candidate, "version");
-	const id = ownDataValue(candidate, "id");
-	const status = ownDataValue(candidate, "status");
-	if (
-		version !== 1 ||
-		typeof id !== "string" ||
-		id.length > MAX_VERIFICATION_ID_LENGTH ||
-		!VERIFICATION_ID_PATTERN.test(id) ||
-		(status !== "failed" && status !== "passed")
-	) {
-		return undefined;
-	}
-	return { version, id, status };
+function retainedToolVerification(details: unknown): VerificationRecord | undefined {
+	return retainedVerificationDetails(details)?.piVerification;
 }
 
 function retainedBackgroundToolVerification(details: unknown, taskId: string): BackgroundToolVerification | undefined {
@@ -752,7 +723,7 @@ export class BackgroundToolTaskController {
 		rawOutput: string,
 		usage: Usage | undefined,
 		notify: boolean,
-		verification?: ToolVerification,
+		verification?: VerificationRecord,
 	): void {
 		const packed = packToolOutput(
 			{

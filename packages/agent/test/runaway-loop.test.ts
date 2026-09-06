@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { type AssistantMessage, type AssistantMessageEvent, EventStream, type Message } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
@@ -14,6 +17,7 @@ import type {
 	StreamFn,
 } from "../src/types.ts";
 import { createAgentToolFailureRecoveryAuthority } from "../src/types.ts";
+import { VerificationObligationTracker } from "../src/verification-obligations.ts";
 
 /**
  * Runaway-loop backstop (cost guard, bug #23): a model wedged repeating the SAME tool call forever
@@ -2015,11 +2019,11 @@ describe("runaway-loop backstop", () => {
 		// Each successful repair genuinely moves the world, so each replay is genuinely admitted. That
 		// is correct per call and still unproductive in aggregate. The results of each cycle are
 		// identical once the ledger's occurrence stamp is ignored, so the stagnant-cycle detector
-		// ends the run after three complete two-operation cycles, before the call-only fuse at four.
-		expect(turns).toBe(6);
+		// ends the run after three unchanged batches following the two initially novel results.
+		expect(turns).toBe(5);
 		expect(deliveryTurns).toBe(1);
 		expect(targetExecutions).toBe(3);
-		expect(recoveryExecutions).toBe(3);
+		expect(recoveryExecutions).toBe(2);
 		expect(stalls).toMatchObject([{ reason: "stagnant_tool_cycle" }]);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
@@ -2791,7 +2795,84 @@ describe("runaway-loop backstop", () => {
 		expect(executions).toBe(2);
 	});
 
-	it("stops a repeated two-tool cycle after three unchanged result periods", async () => {
+	it.each([false, true])(
+		"tracks repeated read results across shrinking/reordered batches (files change=%s)",
+		async (changed) => {
+			const root = mkdtempSync(join(tmpdir(), "pi-stagnant-reads-"));
+			try {
+				const paths = ["alpha", "beta", "gamma"].map((name) => join(root, name));
+				for (const path of paths) writeFileSync(path, "original file revision");
+				const schema = Type.Object({ path: Type.String() });
+				const tool: AgentTool<typeof schema> = {
+					name: "read",
+					label: "Read",
+					description: "Read a file",
+					parameters: schema,
+					async execute(_id, args) {
+						return { content: [{ type: "text", text: readFileSync(args.path, "utf8") }], details: {} };
+					},
+				};
+				const batches = [[0, 1, 2], [1, 2], [0, 2], [2, 0, 1], [1], [2, 0], [0, 1, 2]];
+				let turns = 0;
+				const stops: Array<{ reason: string }> = [];
+				const streamFn: StreamFn = (_model, context) => {
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						if (completeMandatoryDelivery(stream, context)) return;
+						const batch = batches[turns++];
+						if (!batch) {
+							stream.push({
+								type: "done",
+								reason: "stop",
+								message: assistantMessage([{ type: "text", text: "Done." }], "stop"),
+							});
+							return;
+						}
+						if (changed) for (const path of paths) writeFileSync(path, `new file revision ${turns}`);
+						stream.push({
+							type: "done",
+							reason: "toolUse",
+							message: assistantMessage(
+								batch.map((index) => ({
+									type: "toolCall",
+									id: `read-${turns}-${index}`,
+									name: "read",
+									arguments: { path: paths[index] },
+								})),
+								"toolUse",
+							),
+						});
+					});
+					return stream;
+				};
+				await drain(
+					agentLoop(
+						[{ role: "user", content: "Inspect the files.", timestamp: 1 }],
+						{ systemPrompt: "", messages: [], tools: [tool] },
+						{
+							model: createModel(),
+							convertToLlm: identityConverter,
+							maxStallTurns: 12,
+							onRunawayStop: (info) => stops.push(info),
+						},
+						undefined,
+						streamFn,
+					),
+				);
+				if (changed) {
+					expect(stops).toEqual([]);
+					expect(turns).toBe(8);
+				} else {
+					expect(stops).toMatchObject([{ reason: "stagnant_tool_cycle" }]);
+					expect(turns).toBeLessThan(7);
+				}
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("stops a repeated two-tool cycle after three batches without new observable results", async () => {
 		const emptySchema = Type.Object({});
 		let executions = 0;
 		const goalStatusTool: AgentTool<typeof emptySchema> = {
@@ -2854,8 +2935,8 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
-		expect(executions).toBe(6);
-		expect(providerTurns).toBe(6);
+		expect(executions).toBe(5);
+		expect(providerTurns).toBe(5);
 		expect(deliveryTurns).toBe(1);
 		expect(stops).toMatchObject([{ reason: "stagnant_tool_cycle", repeats: 3 }]);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
@@ -3133,12 +3214,10 @@ describe("repeated-failure guard on the ledger occurrence", () => {
 });
 
 /**
- * Verification-gate fuse: while a trusted verification obligation stays failed, the loop withholds
- * every tool-free answer and requests again. Each withheld answer is a paid request that renders
- * nothing, so the run must stop after a bounded number of them instead of looping until the
- * operator interrupts it. The obligation itself stays active for the next prompt.
+ * A verification handoff preserves model prose and ends unsuccessfully after one response.
+ * The obligation stays active for the next prompt, without a grammar retry or runaway demotion.
  */
-describe("verification handoff stall", () => {
+describe("unresolved verification handoff", () => {
 	const verifySchema = Type.Object({});
 	type VerificationDetails = { piVerification: { version: 1; id: string; status: "failed" } };
 	const failingVerification: AgentTool<typeof verifySchema, VerificationDetails> = {
@@ -3176,7 +3255,7 @@ describe("verification handoff stall", () => {
 		return { streamFn, calls: () => providerCalls };
 	}
 
-	it("stops after three consecutive withheld tool-free answers and keeps the obligation active", async () => {
+	it("retains one completion claim with unsuccessful status and keeps the obligation active", async () => {
 		const { streamFn, calls } = createStream(() => [{ type: "text", text: "All done; the change is complete." }]);
 		const stalls: Array<{ reason?: string; signature: string; repeats: number }> = [];
 		const agent = new Agent({
@@ -3187,21 +3266,21 @@ describe("verification handoff stall", () => {
 
 		await agent.prompt("start");
 
-		expect(calls()).toBe(4);
-		expect(stalls).toEqual([
-			expect.objectContaining({ reason: "verification_handoff_stall", repeats: 3, signature: "shell-test-1" }),
-		]);
+		expect(calls()).toBe(2);
+		expect(stalls).toEqual([]);
 		const last = agent.state.messages.at(-1) as AssistantMessage;
 		expect(last.role).toBe("assistant");
-		expect(last.content).toEqual([]);
+		expect(last.content).toEqual([{ type: "text", text: "All done; the change is complete." }]);
+		expect(last.stopReason).toBe("error");
 		expect(last.errorMessage).toBe("verification_handoff_required");
-		const withheld = agent.state.messages.filter(
+		const handoffs = agent.state.messages.filter(
 			(message) => message.role === "assistant" && message.errorMessage === "verification_handoff_required",
 		);
-		expect(withheld).toHaveLength(3);
+		expect(handoffs).toHaveLength(1);
+		expect(new VerificationObligationTracker(agent.state.messages).getActiveIds()).toEqual(["shell-test-1"]);
 	});
 
-	it("ends normally when the model hands off with one VERIFICATION_UNRESOLVED line per active id", async () => {
+	it("keeps an opaque-id handoff unsuccessful without rewriting its prose", async () => {
 		const { streamFn, calls } = createStream(() => [
 			{ type: "text", text: "VERIFICATION_UNRESOLVED shell-test-1: the fixture cannot run on this host" },
 		]);
@@ -3217,7 +3296,9 @@ describe("verification handoff stall", () => {
 		expect(calls()).toBe(2);
 		expect(stalls).toEqual([]);
 		const last = agent.state.messages.at(-1) as AssistantMessage;
-		expect(last.errorMessage).toBeUndefined();
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toBe("verification_handoff_required");
+		expect(new VerificationObligationTracker(agent.state.messages).getActiveIds()).toEqual(["shell-test-1"]);
 		expect(last.content).toEqual([
 			{ type: "text", text: "VERIFICATION_UNRESOLVED shell-test-1: the fixture cannot run on this host" },
 		]);

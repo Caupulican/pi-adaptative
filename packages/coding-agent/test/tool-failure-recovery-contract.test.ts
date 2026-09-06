@@ -500,7 +500,7 @@ describe("tool-owned failure recovery contracts", () => {
 				exec: async (shellCommand, _cwd, options) => {
 					if (shellCommand === command) {
 						verificationRuns++;
-						options.onData(Buffer.from(verificationRuns === 1 ? "FAIL focused test\n" : "PASS focused test\n"));
+						options.onData(Buffer.from(verificationRuns === 1 ? "Tests 1 failed (1)\n" : "Tests 1 passed (1)\n"));
 						return { exitCode: verificationRuns === 1 ? 1 : 0 };
 					}
 					options.onData(Buffer.from("inspected current source\n"));

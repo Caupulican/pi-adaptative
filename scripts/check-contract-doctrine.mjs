@@ -14,6 +14,11 @@ import { readFileSync } from "node:fs";
 const manifest = JSON.parse(readFileSync(new URL("../contracts.json", import.meta.url), "utf8"));
 const contracts = new Set(manifest.contracts);
 const doctrine = manifest.doctrine;
+if (contracts.size !== manifest.contracts.length) {
+	const duplicates = [...new Set(manifest.contracts.filter((file, index) => manifest.contracts.indexOf(file) !== index))];
+	console.error(`check-contract-doctrine: duplicate contract registrations:\n  ${duplicates.join("\n  ")}`);
+	process.exit(1);
+}
 
 const rangeIndex = process.argv.indexOf("--range");
 const range = rangeIndex >= 0 ? process.argv[rangeIndex + 1] : undefined;

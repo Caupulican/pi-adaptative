@@ -451,6 +451,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 			type: "add_evidence",
 			id: "e1",
 			kind: "user",
+			verified: true,
 			summary: "owner confirmed",
 			now: "T2",
 		});

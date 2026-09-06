@@ -96,7 +96,11 @@ describe("goal<->task cross-visibility", () => {
 				applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Add rate limiting" }, "T1"),
 			);
 			state = expectOk(
-				applyGoalAction(state, { action: "add_evidence", evidenceId: "e1", kind: "user", summary: "done" }, "T2"),
+				applyGoalAction(
+					state,
+					{ action: "add_evidence", evidenceId: "e1", kind: "user", verified: true, summary: "done" },
+					"T2",
+				),
 			);
 			const satisfyAction = {
 				action: "satisfy_requirement",
@@ -170,7 +174,7 @@ describe("goal<->task cross-visibility", () => {
 			expect(buildGoalTaskCrossVisibilityNudges({ action: "progress" }, state, openTaskSteps)).toEqual([]);
 			expect(
 				buildGoalTaskCrossVisibilityNudges(
-					{ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "done" },
+					{ action: "add_evidence", evidenceId: "e1", kind: "user", verified: true, summary: "done" },
 					state,
 					openTaskSteps,
 				),
@@ -188,7 +192,7 @@ describe("goal<->task cross-visibility", () => {
 			state = expectOk(
 				applyGoalAction(
 					state,
-					{ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "confirmed" },
+					{ action: "add_evidence", evidenceId: "e1", kind: "user", verified: true, summary: "confirmed" },
 					"T3",
 				),
 			);

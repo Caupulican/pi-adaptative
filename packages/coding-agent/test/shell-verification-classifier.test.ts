@@ -1,8 +1,74 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { classifyShellVerificationCommand } from "../src/core/tools/shell-test-command.ts";
 
 describe("shell verification classifier", () => {
+	it("groups explicit setup corrections only within the host workspace and identical verification stages", () => {
+		const command = "npx vitest run test/focused.test.ts --pool=forks";
+		const original = classifyShellVerificationCommand(
+			command,
+			"/workspace/project/packages/wrong",
+			"/workspace/project",
+		);
+		const corrected = classifyShellVerificationCommand(
+			`cd packages/right && ${command}`,
+			"/workspace/project",
+			"/workspace/project",
+		);
+		expect(original?.repairGroup).toMatch(/^shell-repair-/);
+		expect(corrected?.repairGroup).toBe(original?.repairGroup);
+		expect(corrected?.id).not.toBe(original?.id);
+		for (const [source, initialCwd, workspace] of [
+			[command, "/workspace/other/packages/right", "/workspace/other"],
+			[`${command} --testNamePattern=other`, "/workspace/project", "/workspace/project"],
+			[`${command} --project=other`, "/workspace/project", "/workspace/project"],
+			[`${command} && npm run check`, "/workspace/project", "/workspace/project"],
+			[`${command} ''`, "/workspace/project", "/workspace/project"],
+		]) {
+			expect(classifyShellVerificationCommand(source, initialCwd, workspace)?.repairGroup).not.toBe(
+				original?.repairGroup,
+			);
+		}
+		for (const [source, initialCwd, workspace] of [
+			[command, "/workspace/project-sibling", "/workspace/project"],
+			[`cd ../external && ${command}`, "/workspace/project", "/workspace/project"],
+			["vitest run $TEST_FILTER", "/workspace/project", "/workspace/project"],
+			["NODE_ENV=test vitest run test/focused.test.ts", "/workspace/project", "/workspace/project"],
+		]) {
+			expect(classifyShellVerificationCommand(source, initialCwd, workspace)?.repairGroup).toBeUndefined();
+		}
+		expect(classifyShellVerificationCommand(command, "/workspace/project")?.repairGroup).toBeUndefined();
+	});
+
+	it("keeps drive-relative cd opaque because another drive's cwd is shell state", () => {
+		const opaque = classifyShellVerificationCommand("cd C:package && npm test", "D:/workspace");
+		expect(opaque).toBeDefined();
+		expect(opaque?.cwd).toBeUndefined();
+		const absolute = classifyShellVerificationCommand("cd C:/package && npm test", "D:/workspace");
+		expect(absolute?.cwd).toBe("C:\\package");
+		expect(opaque?.id).not.toBe(absolute?.id);
+	});
+	it("identifies equivalent reruns from their initial cwd and argument vector", () => {
+		const command = "npx vitest run test/tool-failure-memory.test.ts --pool=forks";
+		const direct = classifyShellVerificationCommand(command, "/workspace/project/packages/agent");
+		expect(direct).toBeDefined();
+		for (const [source, cwd] of [
+			[`cd packages/agent && ${command}`, "/workspace/project"],
+			[`cd /workspace/project/packages/agent && ${command}`, "/workspace/elsewhere"],
+			[`npx  vitest run 'test/tool-failure-memory.test.ts' --pool=forks`, "/workspace/project/packages/agent"],
+		]) {
+			expect(classifyShellVerificationCommand(source, cwd)?.id).toBe(direct?.id);
+		}
+		for (const [source, cwd] of [
+			[command, "/workspace/other-project/packages/agent"],
+			[`${command} --testNamePattern=other`, "/workspace/project/packages/agent"],
+			[`${command} ''`, "/workspace/project/packages/agent"],
+			[`${command} && npm run check`, "/workspace/project/packages/agent"],
+		]) {
+			const different = classifyShellVerificationCommand(source, cwd);
+			expect(different).toBeDefined();
+			expect(different?.id).not.toBe(direct?.id);
+		}
+	});
 	it.each([
 		"vitest --run test/focused.test.ts",
 		"jest test/focused.test.ts --runInBand",
@@ -33,14 +99,14 @@ describe("shell verification classifier", () => {
 		"npm test && npm run check",
 		"cd packages/agent && vitest --run test/tool-failure-memory.test.ts && npm run check",
 		"set -o pipefail; npm test | tee /tmp/focused-test.log && npm run check",
-	])("recognizes an all-verification chain under one exact aggregate id: %s", (command) => {
+	])("retains the complete all-verification chain under one aggregate id: %s", (command) => {
 		const cwd = "/workspace/project";
 		const classification = classifyShellVerificationCommand(command, cwd);
 
-		expect(classification).toEqual({
-			kind: "test",
-			id: `shell-test-${createHash("sha256").update(cwd).update("\0").update(command).digest("base64url")}`,
-		});
+		expect(classification).toMatchObject({ kind: "test", id: expect.any(String) });
+		expect(classifyShellVerificationCommand(command, cwd)?.id).toBe(classification?.id);
+		expect(classifyShellVerificationCommand("npm test", cwd)?.id).not.toBe(classification?.id);
+		expect(classifyShellVerificationCommand("npm run check", cwd)?.id).not.toBe(classification?.id);
 	});
 
 	it("keeps the verification id stable only for the exact command and working directory", () => {

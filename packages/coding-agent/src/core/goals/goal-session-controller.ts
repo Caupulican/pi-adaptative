@@ -74,7 +74,7 @@ const MIN_VIABLE_GOAL_TURN_OUTPUT_TOKENS = 1_000;
 
 const goalExecutionLeaseMarker: unique symbol = Symbol("goalExecutionLease");
 
-/** Identity-bound attribution for one goal-owned foreground execution. */
+/** Identity-bound attribution for one foreground execution; unbound until it owns a goal. */
 export interface GoalExecutionLease {
 	readonly goalId?: string;
 	readonly [goalExecutionLeaseMarker]: true;
@@ -87,7 +87,9 @@ interface MutableGoalExecutionLease extends GoalExecutionLease {
 	provisionalTokenBudget?: number;
 	pendingTokens: number;
 	pendingSpendUsd: number;
-	/** Set once this lease has admitted a provider request while its goal was still active. Lets a
+	/** Last persisted active-time boundary; absent until ordinary work creates its own goal. */
+	lastAccountedAtMs?: number;
+	/** Set once this lease admits a request before its goal stops (possibly before creation). Lets a
 	 * later admission on the SAME still-held lease recognize "the goal ended mid-turn" (drain the
 	 * in-flight turn's wrap-up response) instead of "a new turn is starting against a dead goal"
 	 * (which stays denied). */
@@ -153,6 +155,19 @@ export class GoalSessionController {
 			);
 		}
 		const entryId = appendGoalStateSnapshot(this.deps.getSessionManager(), state, current);
+		const lease = this.executionLease;
+		if (
+			lease &&
+			!lease.adoptNewGoal &&
+			lease.goalId === undefined &&
+			current?.goalId !== state.goalId &&
+			isGoalExecutionActive(state.status)
+		) {
+			// Ordinary work acquires ownership only at a new goal's durable creation boundary.
+			// Earlier responses and updates to an existing unrelated goal remain unattributed.
+			lease.goalId = state.goalId;
+			lease.lastAccountedAtMs = Date.now();
+		}
 		try {
 			this.deps.synchronizeGoalState(state);
 		} catch (error) {
@@ -224,6 +239,9 @@ export class GoalSessionController {
 		const goalId = this.startOwnerChatGoal(queued.text, messages);
 		if (!goalId) return;
 		this.setStartAuthority(queued.authority);
+		// A foreground lease may already own the goal just persisted above. Its caller retains
+		// responsibility for ending it; a queued message must not create or close a second lease.
+		if (this.getExecutionGoalId() === goalId) return;
 		const lease = this.beginExecution(goalId);
 		if (!lease) {
 			this.setStartAuthority(undefined);
@@ -280,7 +298,9 @@ export class GoalSessionController {
 		progressRevision: number;
 		stallTurns: number;
 	}): void {
-		this.persistContinuationPass(pass);
+		// The execution lease already persisted active time, including failed/interrupted turns.
+		// The loop owns pass/stall telemetry and must not charge the same interval again.
+		this.persistContinuationPass({ ...pass, wallClockMs: 0 });
 	}
 
 	private persistContinuationPass(
@@ -317,12 +337,11 @@ export class GoalSessionController {
 		this.saveState(updated, getGoalStateRevision(state));
 	}
 
-	/** Begin one foreground execution whose provider usage belongs to the specified active goal. */
+	/** Begin one foreground execution, binding immediately or when it creates a new goal. */
 	beginExecution(
 		goalId: string | undefined,
 		options: { adoptNewGoal?: boolean; provisionalTokenBudget?: number } = {},
 	): GoalExecutionLease | undefined {
-		if (!goalId && !options.adoptNewGoal) return undefined;
 		if (this.executionLease) throw new Error("Goal execution attribution is already active");
 		const state = this.getState();
 		if (goalId && (!state || state.goalId !== goalId || !isGoalExecutionActive(state.status))) return undefined;
@@ -336,6 +355,7 @@ export class GoalSessionController {
 				: {}),
 			pendingTokens: 0,
 			pendingSpendUsd: 0,
+			lastAccountedAtMs: goalId || options.adoptNewGoal ? Date.now() : undefined,
 			admittedWhileActive: false,
 		};
 		this.executionLease = lease;
@@ -345,7 +365,7 @@ export class GoalSessionController {
 	endExecution(lease: GoalExecutionLease | undefined): void {
 		if (!lease) return;
 		if (this.executionLease !== lease) throw new Error("Cannot end goal execution attribution owned by another run");
-		this.flushPendingExecutionUsage(this.executionLease);
+		this.flushPendingExecutionUsage(this.executionLease, true);
 		this.executionLease = undefined;
 	}
 
@@ -385,14 +405,14 @@ export class GoalSessionController {
 			totalTokens: Math.max(0, message.usage.totalTokens),
 		});
 		const spendUsd = Math.max(0, message.usage.cost.total);
-		if (tokens === 0 && spendUsd === 0) return;
 		const state = this.resolveExecutionState(lease);
 		if (!state) {
+			if (lease.goalId === undefined && !lease.adoptNewGoal) return;
 			lease.pendingTokens += tokens;
 			lease.pendingSpendUsd += spendUsd;
 			return;
 		}
-		this.chargeExecutionUsage(lease, state, tokens, spendUsd);
+		this.chargeExecutionUsage(lease, state, tokens + lease.pendingTokens, spendUsd + lease.pendingSpendUsd);
 	}
 
 	private chargeExecutionUsage(
@@ -401,15 +421,18 @@ export class GoalSessionController {
 		tokens: number,
 		spendUsd: number,
 	): void {
+		const observedAtMs = Date.now();
+		const accountedAtMs = Math.max(lease.lastAccountedAtMs ?? observedAtMs, observedAtMs);
 		const updated = applyGoalEvent(state, {
 			type: "record_continuation_budget",
 			turns: 0,
-			wallClockMs: 0,
+			wallClockMs: accountedAtMs - (lease.lastAccountedAtMs ?? accountedAtMs),
 			tokens,
 			spendUsd,
 			now: new Date().toISOString(),
 		});
 		this.saveState(updated, getGoalStateRevision(state));
+		lease.lastAccountedAtMs = accountedAtMs;
 		lease.pendingTokens = 0;
 		lease.pendingSpendUsd = 0;
 		if (
@@ -518,16 +541,24 @@ export class GoalSessionController {
 		return state;
 	}
 
-	private flushPendingExecutionUsage(lease: MutableGoalExecutionLease): void {
-		if (lease.pendingTokens === 0 && lease.pendingSpendUsd === 0) return;
+	private flushPendingExecutionUsage(lease: MutableGoalExecutionLease, includeTime = false): void {
+		const hasPendingUsage = lease.pendingTokens !== 0 || lease.pendingSpendUsd !== 0;
+		// Admission may flush new usage once, but elapsed time alone cannot mutate the request
+		// snapshot on every retry. Time commits at response/end boundaries instead.
+		if (
+			!hasPendingUsage &&
+			(!includeTime || lease.lastAccountedAtMs === undefined || Date.now() <= lease.lastAccountedAtMs)
+		)
+			return;
 		const state = this.resolveExecutionState(lease);
 		if (!state) {
-			// A speculative adopt-new-goal lease (lease.goalId still undefined) that never actually
-			// adopted a goal this turn has nowhere to attribute usage — that is normal, not a loss.
+			// Keep explicitly owned pre-goal usage across admission checks. If no goal is ever
+			// created, ending the lease discards that unattached buffer with the lease itself.
+			if (lease.goalId === undefined) return;
 			// A lease that WAS bound to a real goal but can no longer resolve it is a genuine loss of
 			// buffered spend; fail loudly instead of silently discarding it (matches the cursor-based
 			// accounting this replaced, which stopped the goal on `goal_usage_cursor_lost`).
-			if (lease.goalId !== undefined) {
+			if (hasPendingUsage) {
 				this.deps.emitWarning(
 					`Goal usage cursor is no longer resolvable for '${lease.goalId}'; ${lease.pendingTokens} pending tokens and $${lease.pendingSpendUsd.toFixed(6)} pending spend could not be attributed and were dropped.`,
 				);
@@ -553,9 +584,7 @@ export class GoalSessionController {
 				? `provider_turn_limit: reached the explicit ${info.repeats}-request provider-turn limit`
 				: info.reason === "stagnant_tool_cycle"
 					? `stagnant_tool_cycle: repeated tool-call signature ${info.signature} ${info.repeats} times with identical results`
-					: info.reason === "verification_handoff_stall"
-						? `verification_handoff_stall: ${info.repeats} consecutive tool-free answers were withheld while verification obligations ${info.signature} stayed unresolved`
-						: `runaway_tool_loop: repeated tool-call signature ${info.signature} ${info.repeats} times without progress`;
+					: `runaway_tool_loop: repeated tool-call signature ${info.signature} ${info.repeats} times without progress`;
 		if (!this.stopActiveGoal("blocked", reason)) return false;
 		return this.resumeSystemBlockedGoal() !== undefined;
 	}

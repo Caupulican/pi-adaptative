@@ -79,6 +79,14 @@ export interface ShellSessionExecOptions {
 	env?: NodeJS.ProcessEnv;
 }
 
+export interface ShellSessionExecutionResult {
+	exitCode: number | null;
+	/** Directory at admission, before the submitted command's own cd, captured under serialization. */
+	initialCwd?: string;
+	/** Shell-reported directory after the submitted command. */
+	cwd?: string;
+}
+
 export interface PersistentShellSessionOptions {
 	resolvePowerShellCandidates?: () => ShellConfig[];
 	spawn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess;
@@ -250,6 +258,7 @@ export class PersistentShellSession {
 	private readonly coordinator = new PersistentProcessCoordinator();
 	private childEnv: NodeJS.ProcessEnv | null = null;
 	private lastRequestedCwd: string | null = null;
+	private lastReportedCwd: string | undefined;
 	private activeExec: ActiveExec | null = null;
 	private rejectStartup: ((error: Error) => void) | null = null;
 	private disposed = false;
@@ -267,11 +276,7 @@ export class PersistentShellSession {
 	}
 
 	/** Serialized: one command at a time per session, later calls queue behind earlier ones. */
-	exec(
-		command: string,
-		cwd: string,
-		options: ShellSessionExecOptions,
-	): Promise<{ exitCode: number | null; cwd?: string }> {
+	exec(command: string, cwd: string, options: ShellSessionExecOptions): Promise<ShellSessionExecutionResult> {
 		return this.coordinator.runSerialized(() => this.execNow(command, cwd, options));
 	}
 
@@ -321,7 +326,7 @@ export class PersistentShellSession {
 		command: string,
 		cwd: string,
 		{ onData, signal, timeoutSeconds, silenceMs, env }: ShellSessionExecOptions,
-	): Promise<{ exitCode: number | null; cwd?: string }> {
+	): Promise<ShellSessionExecutionResult> {
 		if (this.disposed) throw new Error(`Shell session "${this.key}" is disposed`);
 		if (signal?.aborted) throw new Error("aborted");
 
@@ -344,6 +349,7 @@ export class PersistentShellSession {
 		if (!this.coordinator.child) await this.spawnChild(cwd, resolvedEnv);
 		if (this.lastRequestedCwd !== cwd) cdTo = cwd;
 		this.lastRequestedCwd = cwd;
+		const initialCwd = cdTo ?? this.lastReportedCwd;
 		let resolvedCommand = command;
 		if (this.kind === "powershell" && this.childEnv && !shallowEnvEquals(this.childEnv, resolvedEnv)) {
 			const environmentPrelude = buildPowerShellEnvironmentPrelude(this.childEnv, resolvedEnv);
@@ -367,7 +373,7 @@ export class PersistentShellSession {
 
 		this.coordinator.setLoopRef(true);
 		try {
-			return await new Promise<{ exitCode: number | null; cwd?: string }>((resolve, reject) => {
+			return await new Promise<ShellSessionExecutionResult>((resolve, reject) => {
 				let settled = false;
 				let stdoutPending: Buffer = Buffer.alloc(0);
 				let stderrPending: Buffer = Buffer.alloc(0);
@@ -415,7 +421,8 @@ export class PersistentShellSession {
 				const resolveWhenComplete = () => {
 					const exitCode = commandExitCode;
 					if (exitCode === undefined || !stderrBarrierSeen) return;
-					settle(() => resolve({ exitCode, cwd: commandCwd }));
+					this.lastReportedCwd = commandCwd;
+					settle(() => resolve({ exitCode, initialCwd, cwd: commandCwd }));
 				};
 				// Retain only a tail that could still be a sentinel in progress: a sentinel starts
 				// with "\n" + 0x1e + nonce, so anything whose suffix is inconsistent with that
@@ -481,7 +488,7 @@ export class PersistentShellSession {
 						// crashed: report its exit code like the per-command backend would.
 						emitStdoutPending(stdoutPending.length);
 						emitStderrPending(stderrPending.length);
-						settle(() => resolve({ exitCode: code }));
+						settle(() => resolve({ exitCode: code, initialCwd }));
 					},
 					fail: (error) => {
 						this.killChild();
@@ -533,6 +540,7 @@ export class PersistentShellSession {
 		}
 		this.childEnv = { ...spawnedEnv };
 		this.lastRequestedCwd = spawnedCwd;
+		this.lastReportedCwd = spawnedCwd;
 	}
 
 	private async spawnPowerShellChild(
@@ -671,6 +679,7 @@ export class PersistentShellSession {
 	private resetChildState(): void {
 		this.childEnv = null;
 		this.lastRequestedCwd = null;
+		this.lastReportedCwd = undefined;
 	}
 
 	private killChild(): void {

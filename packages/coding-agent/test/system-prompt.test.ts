@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { ORIENTATION_SURVEY_RULE } from "../src/core/provider-prompt-contracts.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 
@@ -28,6 +29,25 @@ describe("buildSystemPrompt", () => {
 	});
 
 	describe("default tools", () => {
+		test.each(["full", "lean", "minimal"] as const)(
+			"distinguishes orientation from requested evaluation in %s prompts",
+			(capabilityClass) => {
+				const prompt = buildSystemPrompt({
+					cwd: "/repo",
+					selectedTools: ["read", "grep"],
+					modelCapability: {
+						class: capabilityClass,
+						contextWindow: 32_768,
+						reasonCode: "test",
+						systemPromptMaxChars: 8_192,
+					},
+				});
+				expect(prompt).toContain("Orientation: local map, no unsolicited audit/team.");
+				expect(prompt).toContain("Requested review/evaluation: assess evidence and report findings.");
+				expect(prompt).not.toContain("evaluate-this-repo surveys");
+				expect(prompt.split(ORIENTATION_SURVEY_RULE)).toHaveLength(2);
+			},
+		);
 		test("emits independent tool calls together in one message across full, lean, and minimal capability classes", () => {
 			const fullPrompt = buildSystemPrompt({
 				selectedTools: ["read", "grep", "edit"],
@@ -88,6 +108,7 @@ describe("buildSystemPrompt", () => {
 			);
 			expect(prompt).not.toContain("N+2 ARCHITECTURE");
 			expect(prompt).not.toContain("EVIDENCE GATE");
+			expect(prompt).toContain(ORIENTATION_SURVEY_RULE);
 			expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(3_200);
 		});
 
@@ -107,6 +128,7 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("Never invent p/ tokens");
 			expect(prompt).toContain("Preserve numbers, units, code symbols, function/API names, commands, errors");
 			expect(prompt).toContain("Full grammar: security, irreversible actions, ambiguous order");
+			expect(prompt).toContain(ORIENTATION_SURVEY_RULE);
 			expect(prompt).toContain(
 				"Answer shape: status/ops turns terse; analysis/review/evaluation asks get complete structured answers; never restate harness protocol text or failure-record JSON to the user as an answer.",
 			);

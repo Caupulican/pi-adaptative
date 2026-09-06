@@ -16,8 +16,10 @@ const THREAT_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp; scope: Th
 	},
 	{
 		label: "secret exfiltration",
+		// Bind the action to its object within one clause. Dots inside versions, domains and
+		// paths are not sentence boundaries; an unrelated following sentence is not an order.
 		pattern:
-			/\b(?:reveal|print|dump|exfiltrate|send|upload)\b.{0,80}\b(?:secrets?|tokens?|api[_ -]?keys?|credentials?|environment variables?|\.env)\b/i,
+			/\b(?:reveal|print|dump|exfiltrate|send|upload)\b(?:(?![.!?;](?:\s|$)).){0,80}(?:\b(?:secrets?|tokens?|api[_ -]?keys?|credentials?|environment variables?)\b|(?<!\w)\.env\b)/i,
 		scope: "context",
 	},
 	{

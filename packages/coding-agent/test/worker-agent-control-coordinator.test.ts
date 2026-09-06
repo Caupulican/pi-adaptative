@@ -117,7 +117,12 @@ describe("WorkerAgentControlCoordinator", () => {
 				omittedMessages: 1,
 				serializedBytes: 2,
 			});
-			expect(getRawTranscriptPage).toHaveBeenCalledWith({ cursor: 100, maxMessages: 8, maxBytes: 12 * 1024 });
+			expect(getRawTranscriptPage).toHaveBeenCalledWith({
+				cursor: 100,
+				maxMessages: 8,
+				maxBytes: 12 * 1024,
+				projection: "inspection",
+			});
 			expect(() =>
 				coordinator.readWorkerAgentTranscript("paged-worker", {
 					maxMessages: MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES + 1,

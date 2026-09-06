@@ -2,9 +2,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
-import type { Message } from "@caupulican/pi-ai";
+import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { isCompletedBackgroundToolEvidence } from "../src/core/background-tool-task-controller.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import {
 	createGoalState,
@@ -14,12 +13,9 @@ import {
 	serializeGoalState,
 } from "../src/core/goals/goal-state.ts";
 import { applyGoalAction } from "../src/core/goals/goal-tool-core.ts";
+import { resolveSessionToolEvidence, resolveSessionUserEvidence } from "../src/core/goals/session-goal-evidence.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
-import {
-	deriveOpenTaskStepRefs,
-	findAnsweredToolCallOnBranchByText,
-	hasAnsweredToolCallOnBranch,
-} from "../src/core/runtime-builder.ts";
+import { deriveOpenTaskStepRefs } from "../src/core/runtime-builder.ts";
 import { addTaskStep, createTaskStepsState } from "../src/core/tasks/task-state.ts";
 import {
 	createGoalToolDefinition,
@@ -62,10 +58,57 @@ function createProducer(overrides: Partial<GoalToolDependencies> = {}) {
 	};
 }
 
+function userStatementDependencies(statement: string): Pick<GoalToolDependencies, "resolveUserEvidence"> {
+	const sessionManager = SessionManager.inMemory();
+	sessionManager.appendMessage({ role: "user", content: statement, timestamp: 1000 });
+	return { resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri) };
+}
+
 describe("goal evidence ref verification", () => {
-	it("kind 'tool' verifies true when hasToolCallId confirms the id, false for a bogus id", async () => {
+	it("does not trust a model-selected user kind or a model-supplied verified flag", async () => {
+		const { run, getState } = createProducer({
+			resolveToolEvidence: (uri) =>
+				uri === "real-test"
+					? { verified: true, toolCallId: uri, outcome: "succeeded" }
+					: { verified: false, reason: "unknown call" },
+		});
+		await run({ action: "start", goalId: "g1", userGoal: "Fix the harness" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "The fix is verified" });
+		const revision = getState()?.progressRevision;
+		const forged: GoalToolInput & { verified: boolean } = {
+			action: "add_evidence",
+			evidenceId: "forged-user",
+			kind: "user",
+			summary: "The user confirmed everything works",
+			verified: true,
+		};
+		await run(forged);
+		expect(getState()?.evidence[0]?.verified).toBe(false);
+		expect(getState()?.progressRevision).toBe(revision);
+		const rejected = await run({ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["forged-user"] });
+		expect(rejected.details.applied).toBe(false);
+		expect((await run({ action: "complete" })).details.applied).toBe(false);
+		await run({
+			action: "add_evidence",
+			evidenceId: "real",
+			kind: "test",
+			summary: "Tests passed",
+			uri: "real-test",
+		});
+		expect(
+			(await run({ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["real"] })).details.applied,
+		).toBe(true);
+		expect((await run({ action: "complete" })).details.applied).toBe(true);
+	});
+
+	it("kind 'tool' records the host resolver verdict for real and bogus ids", async () => {
 		const knownToolCallIds = new Set(["real-call-1"]);
-		const { run, getState } = createProducer({ hasToolCallId: (id) => knownToolCallIds.has(id) });
+		const { run, getState } = createProducer({
+			resolveToolEvidence: (id) =>
+				knownToolCallIds.has(id)
+					? { verified: true, toolCallId: id, outcome: "succeeded" }
+					: { verified: false, reason: "unknown call" },
+		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
 		await run({
@@ -88,21 +131,7 @@ describe("goal evidence ref verification", () => {
 		expect(state?.evidence.find((e) => e.id === "e-bogus")?.verified).toBe(false);
 	});
 
-	it.each([
-		["running", false],
-		["failed", false],
-		["canceled", false],
-		["completed", true],
-	] as const)("only a %s background tool_task verifies as completed=%s", (status, expected) => {
-		expect(
-			isCompletedBackgroundToolEvidence(
-				[{ taskId: "tool-task-1", toolCallId: "call-1", goalId: "g1", status }],
-				"tool-task-1",
-			),
-		).toBe(expected);
-	});
-
-	it("kind 'tool' verifies false (not true) when hasToolCallId is not wired at all", async () => {
+	it("kind 'tool' verifies false when the session resolver is unavailable", async () => {
 		const { run, getState } = createProducer();
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -119,8 +148,7 @@ describe("goal evidence ref verification", () => {
 
 	it("kind 'tool' stays unverified while the cited background tool_task is still running", async () => {
 		const { run, getState } = createProducer({
-			hasToolCallId: () => true,
-			resolveToolEvidence: () => false,
+			resolveToolEvidence: () => ({ verified: false, reason: "the task is running" }),
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -177,7 +205,7 @@ describe("goal evidence ref verification", () => {
 		expect(getState()?.evidence.find((e) => e.id === "e1")?.verified).toBe(false);
 	});
 
-	it("kind 'user'/'finding'/'test' or a missing uri leaves verified undefined (no checkable ref)", async () => {
+	it("an unproven user statement is false while a tool claim without a locator is unchecked", async () => {
 		const { run, getState } = createProducer();
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -185,7 +213,7 @@ describe("goal evidence ref verification", () => {
 		await run({ action: "add_evidence", evidenceId: "e-nouri", kind: "tool", summary: "no uri given" });
 
 		const state = getState();
-		expect(state?.evidence.find((e) => e.id === "e-user")?.verified).toBeUndefined();
+		expect(state?.evidence.find((e) => e.id === "e-user")?.verified).toBe(false);
 		expect(state?.evidence.find((e) => e.id === "e-nouri")?.verified).toBeUndefined();
 	});
 
@@ -220,7 +248,7 @@ describe("goal evidence ref verification", () => {
 	});
 
 	it("increment leaves an open requirement open until unused trusted evidence exists", async () => {
-		const { run, getState } = createProducer();
+		const { run, getState } = createProducer(userStatementDependencies("owner confirmed"));
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
@@ -238,7 +266,7 @@ describe("goal evidence ref verification", () => {
 	});
 
 	it("increment repairs a legacy satisfied requirement that lacks trusted evidence before completing", async () => {
-		const { run, getState } = createProducer();
+		const { run, getState } = createProducer(userStatementDependencies("owner confirmed"));
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
@@ -257,7 +285,7 @@ describe("goal evidence ref verification", () => {
 	});
 
 	it("reports evidence ids and trust status in the model-visible response", async () => {
-		const { run } = createProducer();
+		const { run } = createProducer(userStatementDependencies("confirmed"));
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
 		const result = await run({ action: "add_evidence", evidenceId: "e-user", kind: "user", summary: "confirmed" });
@@ -265,11 +293,16 @@ describe("goal evidence ref verification", () => {
 		const first = result.content[0];
 		expect(first?.type).toBe("text");
 		if (first?.type !== "text") return;
-		expect(first.text).toContain("Evidence 'e-user' recorded (user-confirmed)");
+		expect(first.text).toContain("Evidence 'e-user' recorded (verified user statement via user-message:");
 	});
 
 	it("allows 'complete' when a satisfied requirement is backed by verified 'tool' evidence", async () => {
-		const { run, getState } = createProducer({ hasToolCallId: (id) => id === "call-1" });
+		const { run, getState } = createProducer({
+			resolveToolEvidence: (id) =>
+				id === "call-1"
+					? { verified: true, toolCallId: id, outcome: "succeeded" }
+					: { verified: false, reason: "unknown call" },
+		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
@@ -281,8 +314,8 @@ describe("goal evidence ref verification", () => {
 		expect(getState()?.status).toBe("completed");
 	});
 
-	it("kind:'user' evidence always passes the completion gate, even though verified stays undefined", async () => {
-		const { run, getState } = createProducer();
+	it("a verified user statement can back completion", async () => {
+		const { run, getState } = createProducer(userStatementDependencies("user confirmed"));
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
@@ -290,7 +323,7 @@ describe("goal evidence ref verification", () => {
 		await run({ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] });
 
 		const state = getState();
-		expect(state?.evidence.find((e) => e.id === "e1")?.verified).toBeUndefined();
+		expect(state?.evidence.find((e) => e.id === "e1")?.verified).toBe(true);
 
 		const result = await run({ action: "complete" });
 		expect(result.details.applied).toBe(true);
@@ -372,57 +405,234 @@ describe("goal-state serialization round-trips the verified field", () => {
 	});
 });
 
-function toolResultMessage(toolCallId: string, timestamp: number): Message {
+describe("user evidence provenance", () => {
+	it("resolves a full user statement with or without its entry id, and preserves the canonical source", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const statement = "I tested the fix manually and confirm it works.";
+		const entryId = sessionManager.appendMessage({ role: "user", content: statement, timestamp: 1000 });
+		const { run, getState } = createProducer({
+			resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri),
+		});
+		await run({ action: "start", goalId: "g1", userGoal: "Fix the harness" });
+		for (const [index, uri] of [undefined, entryId, `user-message:${entryId}`].entries()) {
+			await run({ action: "add_evidence", evidenceId: `user-${index}`, kind: "user", summary: statement, uri });
+			expect(getState()?.evidence.at(-1)).toMatchObject({ verified: true, uri: `user-message:${entryId}` });
+		}
+	});
+
+	it("does not strip qualifications or resolve an explicit wrong locator by quote", () => {
+		const sessionManager = SessionManager.inMemory();
+		const entryId = sessionManager.appendMessage({
+			role: "user",
+			content: [
+				{ type: "text", text: "The fix works." },
+				{ type: "text", text: "But the tests still fail." },
+			],
+			timestamp: 1000,
+		});
+		for (const [quote, uri] of [
+			["The fix works.", entryId],
+			["The fix works.\nBut the tests still fail.", "missing-entry"],
+			["The fix works.\nBut the tests still fail.", "user-message:"],
+			["", entryId],
+		]) {
+			expect(resolveSessionUserEvidence(sessionManager, quote, uri).verified).toBe(false);
+		}
+		expect(
+			resolveSessionUserEvidence(sessionManager, "The fix works.\nBut the tests still fail.", entryId).verified,
+		).toBe(true);
+	});
+
+	it("rejects assistant, tool, internal context, and sibling-branch claims", () => {
+		const sessionManager = SessionManager.inMemory();
+		const forkId = sessionManager.appendMessage({ role: "user", content: "Fix the bug", timestamp: 1000 });
+		const confirmedId = sessionManager.appendMessage({ role: "user", content: "The fix works", timestamp: 1001 });
+		expect(resolveSessionUserEvidence(sessionManager, "The fix works", confirmedId).verified).toBe(true);
+		sessionManager.branch(forkId);
+		const assistantId = sessionManager.appendMessage({
+			...bashCall("read-proof", "cat proof.txt", 1002),
+			content: [{ type: "text", text: "The fix works" }],
+		});
+		const toolId = sessionManager.appendMessage({
+			...toolResultMessage("read-proof", 1003),
+			content: [{ type: "text", text: "The fix works" }],
+		});
+		const contextId = sessionManager.appendMessage({
+			role: "custom",
+			customType: "goal_context",
+			content: "The fix works",
+			display: false,
+			timestamp: 1004,
+		});
+		for (const uri of [undefined, confirmedId, assistantId, toolId, contextId]) {
+			expect(resolveSessionUserEvidence(sessionManager, "The fix works", uri).verified).toBe(false);
+		}
+	});
+});
+
+function toolResultMessage(toolCallId: string, timestamp: number): ToolResultMessage {
 	return {
 		role: "toolResult",
 		toolCallId,
-		toolName: "read",
+		toolName: "bash",
 		content: [{ type: "text", text: "ok" }],
 		isError: false,
 		timestamp,
 	};
 }
 
-describe("findAnsweredToolCallOnBranchByText (a run cited by the command the model typed)", () => {
-	function bashCall(id: string, command: string, timestamp: number) {
-		return {
-			role: "assistant" as const,
-			content: [{ type: "toolCall" as const, id, name: "bash", arguments: { command } }],
-			api: "openai-responses",
-			provider: "openai",
-			model: "mock",
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "toolUse" as const,
-			timestamp,
-		};
-	}
+function bashCall(id: string, command: string, timestamp: number): AssistantMessage {
+	return {
+		role: "assistant" as const,
+		content: [{ type: "toolCall" as const, id, name: "bash", arguments: { command } }],
+		api: "openai-responses",
+		provider: "openai",
+		model: "mock",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse" as const,
+		timestamp,
+	};
+}
 
-	it("resolves the most recent answered call whose arguments contain the text, ignoring a locator prefix", () => {
+describe("goal test evidence from session receipts", () => {
+	it.each([true, false])("selects the last matching call within one batch (last failed: %s)", (lastFailed) => {
 		const sessionManager = SessionManager.inMemory();
-		sessionManager.appendMessage(bashCall("run-1", "npm test", 1000) as never);
-		sessionManager.appendMessage(toolResultMessage("run-1", 1001));
-		sessionManager.appendMessage(bashCall("run-2", "npm test -- --grep store", 1002) as never);
-		sessionManager.appendMessage(toolResultMessage("run-2", 1003));
-		sessionManager.appendMessage(bashCall("run-3", "npm test", 1004) as never);
+		const first = bashCall("first", "npm test", 1000);
+		const last = bashCall("last", "npm test", 1000);
+		sessionManager.appendMessage({ ...first, content: [...first.content, ...last.content] });
+		for (const id of ["first", "last"]) {
+			const failed = id === "last" && lastFailed;
+			sessionManager.appendMessage({
+				...toolResultMessage(id, 1001),
+				isError: failed,
+				details: { piVerification: { version: 1, id: "unit-test", status: failed ? "failed" : "passed" } },
+			});
+		}
+		expect(resolveSessionToolEvidence(sessionManager, [], "first", "test").verified).toBe(true);
+		const resolved = resolveSessionToolEvidence(sessionManager, [], "command:npm test", "test");
+		expect(resolved.verified).toBe(!lastFailed);
+		if (resolved.verified) expect(resolved.toolCallId).toBe("last");
+	});
+	it("does not crash or manufacture a command match from malformed persisted arguments", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(bashCall("valid", "npm test", 1000));
+		sessionManager.appendMessage({
+			...toolResultMessage("valid", 1001),
+			details: { piVerification: { version: 1, id: "unit-test", status: "passed" } },
+		});
+		const malformed = bashCall("malformed", "npm test", 1002);
+		Object.defineProperty(malformed.content[0], "arguments", { value: null });
+		sessionManager.appendMessage(malformed);
+		expect(resolveSessionToolEvidence(sessionManager, [], "missing command", "test").verified).toBe(false);
+		expect(resolveSessionToolEvidence(sessionManager, [], "valid", "test").verified).toBe(true);
+	});
 
-		// run-3 never answered: not evidence of anything. run-2 is the most recent answered match.
-		expect(findAnsweredToolCallOnBranchByText(sessionManager, "command:npm test")).toBe("run-2");
-		expect(findAnsweredToolCallOnBranchByText(sessionManager, "npm test -- --grep store")).toBe("run-2");
-		expect(findAnsweredToolCallOnBranchByText(sessionManager, "pytest")).toBeUndefined();
-		expect(findAnsweredToolCallOnBranchByText(sessionManager, "np")).toBeUndefined();
+	it("preserves a failed operation as tool evidence without calling it a passing test", async () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(bashCall("failed-test", "npm test", 1000));
+		sessionManager.appendMessage({
+			...toolResultMessage("failed-test", 1001),
+			isError: true,
+			details: { piVerification: { version: 1, id: "regression-test", status: "failed" } },
+		});
+		const { run, getState } = createProducer({
+			resolveToolEvidence: (uri, kind) => resolveSessionToolEvidence(sessionManager, [], uri, kind),
+		});
+		await run({ action: "start", goalId: "g1", userGoal: "Reproduce the defect" });
+		const recorded = await run({
+			action: "add_evidence",
+			evidenceId: "repro",
+			kind: "tool",
+			summary: "Reproduced the failure",
+			uri: "failed-test",
+		});
+		expect(getState()?.evidence[0]).toMatchObject({ verified: true, outcome: "failed", uri: "failed-test" });
+		expect(recorded.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("operation failed") });
+		await run({
+			action: "add_evidence",
+			evidenceId: "not-a-pass",
+			kind: "test",
+			summary: "Tests pass",
+			uri: "failed-test",
+		});
+		expect(getState()?.evidence[1]?.verified).toBe(false);
+	});
+
+	it.each([
+		["diff-call", "git diff --stat test/regression.test.ts", false],
+		["test/regression.test.ts", "git diff --stat test/regression.test.ts", false],
+		["failed-call", "npm test", true],
+	] as const)("does not accept %s as a passed test", async (uri, command, isError) => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(bashCall("passed-call", "npm test -- test/control.test.ts", 1000));
+		sessionManager.appendMessage({
+			...toolResultMessage("passed-call", 1001),
+			toolName: "bash",
+			details: { piVerification: { version: 1, id: "control-test", status: "passed" } },
+		});
+		const citedCallId = isError ? "failed-call" : "diff-call";
+		sessionManager.appendMessage(bashCall(citedCallId, command, 1002));
+		sessionManager.appendMessage({
+			...toolResultMessage(citedCallId, 1003),
+			toolName: "bash",
+			isError,
+			...(isError ? { details: { piVerification: { version: 1, id: "failed-test", status: "failed" } } } : {}),
+		});
+		const { run, getState } = createProducer({
+			resolveToolEvidence: (locator, kind) => resolveSessionToolEvidence(sessionManager, [], locator, kind),
+		});
+		await run({ action: "start", goalId: "g1", userGoal: "Fix the regression" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Regression tests pass" });
+		await run({
+			action: "add_evidence",
+			evidenceId: "control",
+			kind: "test",
+			summary: "a real passing test",
+			uri: "passed-call",
+		});
+		expect(getState()?.evidence.find((evidence) => evidence.id === "control")?.verified).toBe(true);
+		await run({ action: "add_evidence", evidenceId: "bad", kind: "test", summary: "claims passing tests", uri });
+		expect(getState()?.evidence.find((evidence) => evidence.id === "bad")?.verified).toBe(false);
+		const rejected = await run({ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["bad"] });
+		expect(rejected.details.applied).toBe(false);
+		const accepted = await run({ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["control"] });
+		expect(accepted.details.applied).toBe(true);
+	});
+
+	it("resolves only exact commands and never falls back from an unanswered attempt", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(bashCall("run-1", "npm test", 1000));
+		sessionManager.appendMessage(toolResultMessage("run-1", 1001));
+		sessionManager.appendMessage(bashCall("run-2", "npm test -- --grep store", 1002));
+		sessionManager.appendMessage(toolResultMessage("run-2", 1003));
+		sessionManager.appendMessage(bashCall("run-3", "npm test", 1004));
+
+		// run-3 never answered. Its identical command must not select an earlier pass.
+		expect(resolveSessionToolEvidence(sessionManager, [], "command:npm test", "tool").verified).toBe(false);
+		expect(resolveSessionToolEvidence(sessionManager, [], "npm test -- --grep store", "tool")).toEqual({
+			verified: true,
+			toolCallId: "run-2",
+			outcome: "succeeded",
+		});
+		for (const locator of ["pytest", "np", "grep store", "NPM TEST -- --grep store"]) {
+			expect(resolveSessionToolEvidence(sessionManager, [], locator, "tool").verified).toBe(false);
+		}
 	});
 
 	it("through the wired path: test evidence cited by command text verifies and carries the call id", async () => {
 		const sessionManager = SessionManager.inMemory();
-		sessionManager.appendMessage(bashCall("run-1", "npm test", 1000) as never);
-		sessionManager.appendMessage(toolResultMessage("run-1", 1001));
+		sessionManager.appendMessage(bashCall("run-1", "npm test", 1000));
+		sessionManager.appendMessage({
+			...toolResultMessage("run-1", 1001),
+			details: { piVerification: { version: 1, id: "unit-test", status: "passed" } },
+		});
 		let state: GoalState | undefined;
 		const tool = createGoalToolDefinition({
 			getGoalState: () => state,
@@ -430,11 +640,7 @@ describe("findAnsweredToolCallOnBranchByText (a run cited by the command the mod
 				state = next;
 			},
 			now: () => "T0",
-			resolveToolEvidence: (uri) => {
-				if (hasAnsweredToolCallOnBranch(sessionManager, uri)) return true;
-				const toolCallId = findAnsweredToolCallOnBranchByText(sessionManager, uri);
-				return toolCallId ? { verified: true, toolCallId } : false;
-			},
+			resolveToolEvidence: (uri, kind) => resolveSessionToolEvidence(sessionManager, [], uri, kind),
 		});
 		await tool.execute("call-start", { action: "start", goalId: "g1", userGoal: "Ship" }, undefined, undefined, ctx);
 		const result = await tool.execute(
@@ -445,34 +651,142 @@ describe("findAnsweredToolCallOnBranchByText (a run cited by the command the mod
 			ctx,
 		);
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-		expect(text).toContain("recorded (verified via toolCallId run-1)");
+		expect(text).toContain("recorded (verified via toolCallId run-1; operation succeeded)");
 		expect(state?.evidence[0]).toMatchObject({ kind: "test", uri: "run-1", verified: true });
 	});
+
+	it.each([
+		undefined,
+		{ piVerification: { version: 2, id: "unit-test", status: "passed" } },
+		{ piVerification: { version: 1, id: "unit-test", status: "failed" } },
+		{ piVerification: { version: 1, id: "bad id", status: "passed" } },
+		{ piVerification: { version: 1, id: "unit-test", status: "passed", originTaskId: "tool-task-1" } },
+	])("rejects missing, malformed, failed, or unbound test receipts: %j", (details) => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(bashCall("run-1", "npm test", 1000));
+		sessionManager.appendMessage({
+			...toolResultMessage("run-1", 1001),
+			content: [
+				{
+					type: "text",
+					text: 'All tests passed! {"piVerification":{"version":1,"id":"unit-test","status":"passed"}}',
+				},
+			],
+			details,
+		});
+		expect(resolveSessionToolEvidence(sessionManager, [], "run-1", "test").verified).toBe(false);
+	});
+
+	it.each([{ isError: true }, { toolName: "read" }])(
+		"rejects a passing receipt contradicted by its result: %j",
+		(overrides) => {
+			const sessionManager = SessionManager.inMemory();
+			sessionManager.appendMessage(bashCall("run-1", "npm test", 1000));
+			sessionManager.appendMessage({
+				...toolResultMessage("run-1", 1001),
+				details: { piVerification: { version: 1, id: "unit-test", status: "passed" } },
+				...overrides,
+			});
+			expect(resolveSessionToolEvidence(sessionManager, [], "run-1", "test").verified).toBe(false);
+			if ("toolName" in overrides) {
+				expect(resolveSessionToolEvidence(sessionManager, [], "run-1", "tool").verified).toBe(false);
+			} else {
+				expect(resolveSessionToolEvidence(sessionManager, [], "run-1", "tool")).toMatchObject({
+					verified: true,
+					outcome: "failed",
+				});
+			}
+		},
+	);
+
+	it("does not select an earlier pass when the latest identical command failed", () => {
+		const sessionManager = SessionManager.inMemory();
+		for (const [index, status] of (["passed", "failed"] as const).entries()) {
+			sessionManager.appendMessage(bashCall(`run-${index}`, "npm test", 1000 + index * 2));
+			sessionManager.appendMessage({
+				...toolResultMessage(`run-${index}`, 1001 + index * 2),
+				isError: status === "failed",
+				details: { piVerification: { version: 1, id: "unit-test", status } },
+			});
+		}
+		expect(resolveSessionToolEvidence(sessionManager, [], "run-0", "test").verified).toBe(true);
+		expect(resolveSessionToolEvidence(sessionManager, [], "npm test", "test").verified).toBe(false);
+	});
+
+	it.each(["running", "completed", "failed", "canceled"] as const)(
+		"checks the authoritative %s background outcome for command, call-id, and task-id citations",
+		(status) => {
+			const sessionManager = SessionManager.inMemory();
+			sessionManager.appendMessage(bashCall("run-1", "npm test", 1000));
+			sessionManager.appendMessage({
+				...toolResultMessage("run-1", 1001),
+				details: { taskId: "tool-task-1", status: "running", sessionId: sessionManager.getSessionId() },
+			});
+			const task = {
+				taskId: "tool-task-1",
+				toolCallId: "run-1",
+				status,
+				piVerification: {
+					version: 1 as const,
+					id: "unit-test",
+					status: "passed" as const,
+					originTaskId: "tool-task-1",
+				},
+			};
+			for (const uri of ["run-1", "tool-task-1", "command:npm test"]) {
+				for (const kind of ["tool", "test"] as const) {
+					expect(resolveSessionToolEvidence(sessionManager, [task], uri, kind).verified).toBe(
+						kind === "test" ? status === "completed" : status !== "running",
+					);
+				}
+				expect(resolveSessionToolEvidence(sessionManager, [], uri, "tool").verified).toBe(false);
+			}
+			if (status === "completed") {
+				const withoutReceipt = { taskId: task.taskId, toolCallId: task.toolCallId, status };
+				expect(resolveSessionToolEvidence(sessionManager, [withoutReceipt], task.taskId, "tool").verified).toBe(
+					true,
+				);
+				expect(resolveSessionToolEvidence(sessionManager, [withoutReceipt], task.taskId, "test").verified).toBe(
+					false,
+				);
+				const wrongOrigin = { ...task, piVerification: { ...task.piVerification, originTaskId: "tool-task-2" } };
+				expect(resolveSessionToolEvidence(sessionManager, [wrongOrigin], task.taskId, "test").verified).toBe(false);
+			}
+			const emptyBranch = SessionManager.inMemory();
+			expect(resolveSessionToolEvidence(emptyBranch, [task], task.taskId, "test").verified).toBe(false);
+		},
+	);
 });
 
-describe("hasAnsweredToolCallOnBranch (production wiring, closes the runtime-builder handoff)", () => {
-	it("resolves true for a real toolResult on the active branch, false for an unknown id", () => {
+describe("branch-scoped goal tool evidence", () => {
+	it("requires a producing call and its successful result on the active branch", () => {
 		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(bashCall("real-call-1", "git status", 999));
 		sessionManager.appendMessage(toolResultMessage("real-call-1", 1000));
+		sessionManager.appendMessage(toolResultMessage("orphan-call", 1001));
 
-		expect(hasAnsweredToolCallOnBranch(sessionManager, "real-call-1")).toBe(true);
-		expect(hasAnsweredToolCallOnBranch(sessionManager, "fabricated-call")).toBe(false);
+		expect(resolveSessionToolEvidence(sessionManager, [], "real-call-1", "tool").verified).toBe(true);
+		expect(resolveSessionToolEvidence(sessionManager, [], "fabricated-call", "tool").verified).toBe(false);
+		expect(resolveSessionToolEvidence(sessionManager, [], "orphan-call", "tool").verified).toBe(false);
 	});
 
 	it("is branch-scoped: a toolResult recorded only on a sibling branch does not verify", () => {
 		const sessionManager = SessionManager.inMemory();
 		const forkPointId = sessionManager.appendMessage({ role: "user", content: "start", timestamp: 900 });
+		sessionManager.appendMessage(bashCall("branch-a-call", "git status", 999));
 		sessionManager.appendMessage(toolResultMessage("branch-a-call", 1000));
 		// Reset to the fork point and grow a DIFFERENT branch from there.
 		sessionManager.branch(forkPointId);
+		sessionManager.appendMessage(bashCall("branch-b-call", "git status", 1099));
 		sessionManager.appendMessage(toolResultMessage("branch-b-call", 1100));
 
-		expect(hasAnsweredToolCallOnBranch(sessionManager, "branch-b-call")).toBe(true);
-		expect(hasAnsweredToolCallOnBranch(sessionManager, "branch-a-call")).toBe(false);
+		expect(resolveSessionToolEvidence(sessionManager, [], "branch-b-call", "tool").verified).toBe(true);
+		expect(resolveSessionToolEvidence(sessionManager, [], "branch-a-call", "tool").verified).toBe(false);
 	});
 
 	it("through the wired path: the goal tool's kind:'tool' evidence verifies true for a real session tool call", async () => {
 		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(bashCall("real-call-1", "git status", 999));
 		sessionManager.appendMessage(toolResultMessage("real-call-1", 1000));
 
 		let counter = 0;
@@ -483,7 +797,7 @@ describe("hasAnsweredToolCallOnBranch (production wiring, closes the runtime-bui
 			},
 			now: () => `T${counter++}`,
 			// The exact function wired at runtime-builder.ts's createGoalToolDefinition call site.
-			hasToolCallId: (toolCallId) => hasAnsweredToolCallOnBranch(sessionManager, toolCallId),
+			resolveToolEvidence: (uri, kind) => resolveSessionToolEvidence(sessionManager, [], uri, kind),
 		});
 		const run = async (input: GoalToolInput) => {
 			const result = await tool.execute("call", input, undefined, undefined, ctx);
@@ -515,6 +829,7 @@ describe("hasAnsweredToolCallOnBranch (production wiring, closes the runtime-bui
 describe("goal⇄task cross-visibility nudge reaches the tool response text", () => {
 	it("names the referencing open task step in the response text after satisfy_requirement", async () => {
 		const { run } = createProducer({
+			...userStatementDependencies("user confirmed"),
 			getOpenTaskSteps: () => [{ id: "step-1", content: "Implement r1 in the UI" }],
 		});
 
@@ -530,7 +845,7 @@ describe("goal⇄task cross-visibility nudge reaches the tool response text", ()
 	});
 
 	it("emits no nudge when getOpenTaskSteps is not wired (backward compatible, no behavior change)", async () => {
-		const { run } = createProducer();
+		const { run } = createProducer(userStatementDependencies("user confirmed"));
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
@@ -564,7 +879,10 @@ describe("deriveOpenTaskStepRefs (production wiring, closes the runtime-builder 
 		taskSteps = addTaskStep(taskSteps, { content: "Cover r1" }, "T1");
 
 		// The exact function wired at runtime-builder.ts's createGoalToolDefinition call site.
-		const { run } = createProducer({ getOpenTaskSteps: () => deriveOpenTaskStepRefs(taskSteps) });
+		const { run } = createProducer({
+			...userStatementDependencies("user confirmed"),
+			getOpenTaskSteps: () => deriveOpenTaskStepRefs(taskSteps),
+		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });

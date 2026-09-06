@@ -1,6 +1,7 @@
 import { visibleWidth } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
+	goalEvidencePanelRow,
 	OrchestrationPanelComponent,
 	renderOrchestrationPanelLines,
 	renderOrchestrationToolResult,
@@ -11,6 +12,32 @@ import { stripAnsi } from "../src/utils/ansi.ts";
 describe("orchestration panel", () => {
 	beforeAll(() => {
 		initTheme("dark");
+	});
+
+	it("projects evidence trust separately from the recorded operation outcome", () => {
+		const receipt = { id: "e1", summary: "Recorded check", createdAt: "2026-09-06T00:00:00Z" };
+		const unchecked = goalEvidencePanelRow({ ...receipt, kind: "user" });
+		const legacyTest = goalEvidencePanelRow({ ...receipt, kind: "test", verified: true });
+		const failed = goalEvidencePanelRow({ ...receipt, kind: "tool", verified: true, outcome: "failed" });
+		const passed = goalEvidencePanelRow({ ...receipt, kind: "test", verified: true, outcome: "succeeded" });
+
+		expect(unchecked.status).toBe("info");
+		expect(legacyTest.status).toBe("info");
+		expect(legacyTest.meta).not.toContain("verified");
+		expect(failed.status).toBe("failed");
+		expect(passed.status).toBe("succeeded");
+		const text = stripAnsi(
+			renderOrchestrationPanelLines(
+				theme,
+				{
+					label: "goal",
+					rows: [failed, passed],
+				},
+				120,
+			).join("\n"),
+		);
+		expect(text).toContain("operation failed");
+		expect(text).toContain("operation succeeded");
 	});
 
 	it("renders task and worker state through one compact visual hierarchy", () => {

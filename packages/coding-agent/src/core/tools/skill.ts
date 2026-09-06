@@ -1,11 +1,13 @@
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
-import type {
-	SkillLoadResult,
-	SkillReadResult,
-	SkillSearchResult,
-	SkillVaultController,
-	SkillVaultStatus,
+import {
+	MAX_LOADED_SKILLS,
+	MAX_PINNED_SKILLS,
+	type SkillLoadResult,
+	type SkillReadResult,
+	type SkillSearchResult,
+	type SkillVaultController,
+	type SkillVaultStatus,
 } from "../skill-vault.ts";
 
 const skillSchema = Type.Object(
@@ -19,11 +21,13 @@ const skillSchema = Type.Object(
 		names: Type.Optional(
 			Type.Array(Type.String({ minLength: 1 }), {
 				minItems: 1,
-				maxItems: 8,
-				description: "several exact skill names to load in ONE call, in order; prefer this over one call per skill",
+				maxItems: MAX_LOADED_SKILLS,
+				description: "exact skill names to load together in ONE atomic call; the complete set must fit the vault",
 			}),
 		),
-		pin: Type.Optional(Type.Boolean({ description: "protect from eviction while loaded; max 2" })),
+		pin: Type.Optional(
+			Type.Boolean({ description: `prioritize retention while loaded; max ${MAX_PINNED_SKILLS} pinned skills` }),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -135,8 +139,7 @@ export function createSkillVaultToolDefinition(vault: SkillVaultController): Too
 	return {
 		name: "skill",
 		label: "Skill",
-		description:
-			"Skill vault, up to 3 concurrent skills under one byte budget. Specialist guidance useful: search, load exact name before work. Load may evict the oldest-loaded unpinned skill and reports it; pin protects up to 2 task-critical skills from eviction (they still expire idle). Host injects bodies transiently starting next request, expires idle; unload one name or all.",
+		description: `Skill vault, up to ${MAX_LOADED_SKILLS} concurrent skills under one byte budget. Search, then load exact names before work. A batch loads every requested skill or rejects without partial admission. Load may evict previously loaded skills and reports them, preferring the oldest unpinned. Pin prioritizes retention; pinned skills still expire idle. Host injects bodies starting next request; unload one name or all.`,
 		promptSnippet: "Search/load skill.",
 		parameters: skillSchema,
 		async execute(_toolCallId, input) {
@@ -157,32 +160,25 @@ export function createSkillVaultToolDefinition(vault: SkillVaultController): Too
 					};
 				}
 				case "load": {
-					const names = [...(input.names ?? []), ...(input.name ? [input.name] : [])]
-						.map((name) => name.trim())
-						.filter((name, index, all) => name.length > 0 && all.indexOf(name) === index);
-					if (names.length === 0) {
-						const result: SkillLoadResult = {
-							ok: false,
-							reason: "not_found",
-							message: "skill load requires an exact name",
-						};
+					const result = vault.loadMany(
+						[...(input.names ?? []), ...(input.name ? [input.name] : [])],
+						"model",
+						input.pin === true,
+					);
+					if (!result.ok) {
 						return {
 							content: [{ type: "text" as const, text: `skill load failed: ${result.message}` }],
 							details: { action: "load" as const, result },
 							isError: true,
 						};
 					}
-					// Several names load in order through the same vault call each; one round trip instead of
-					// one per skill, with every outcome reported.
-					const results = names.map((name) => vault.load(name, "model", input.pin === true));
-					const lines = results.map((result) =>
-						result.ok ? loadText(result) : `skill load failed: ${result.message}`,
-					);
+					const results = result.results;
+					const lines = results.map(loadText);
 					const last = results[results.length - 1]!;
 					return {
 						content: [{ type: "text" as const, text: lines.join("\n") }],
 						details: { action: "load" as const, result: last, ...(results.length > 1 ? { results } : {}) },
-						isError: results.some((result) => !result.ok),
+						isError: false,
 					};
 				}
 				case "unload": {

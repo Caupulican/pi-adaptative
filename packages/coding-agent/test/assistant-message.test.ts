@@ -111,14 +111,20 @@ describe("AssistantMessageComponent", () => {
 	});
 });
 
-describe("AssistantMessageComponent withheld answers", () => {
-	test("says when the verification gate emptied a completion claim instead of rendering nothing", () => {
+describe("AssistantMessageComponent unresolved verification", () => {
+	test("shows the retained handoff and a separate host status without requiring opaque-id prose", () => {
 		initTheme("dark");
-		const message = { ...createAssistantMessage([]), errorMessage: "verification_handoff_required" };
+		const message: AssistantMessage = {
+			...createAssistantMessage([{ type: "text", text: "The fixture still needs repair." }]),
+			stopReason: "error",
+			errorMessage: "verification_handoff_required",
+		};
 		const component = new AssistantMessageComponent(message, true, undefined, { showCommentary: true });
 		const text = stripAnsi(component.render(100).join("\n"));
-		expect(text).toContain("Answer withheld");
-		expect(text).toContain("VERIFICATION_UNRESOLVED");
+		expect(text).toContain("The fixture still needs repair.");
+		expect(text).toContain("Verification remains unresolved");
+		expect(text).not.toContain("Answer withheld");
+		expect(text).not.toContain("VERIFICATION_UNRESOLVED");
 		const plain = new AssistantMessageComponent(createAssistantMessage([]), true, undefined, {
 			showCommentary: true,
 		});

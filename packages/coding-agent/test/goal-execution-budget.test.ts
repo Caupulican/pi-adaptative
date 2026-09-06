@@ -74,6 +74,21 @@ describe("goal-owned execution budget", () => {
 			status: "active",
 		});
 		expect(harness.session.getGoalStateSnapshot()?.tokenBudget).toBeUndefined();
+		expect(
+			harness.session.messages.filter((message) => message.role === "assistant" && message.stopReason === "error"),
+		).toEqual([]);
+		expect(harness.session.getGoalStateSnapshot()?.tokensUsed).toBeGreaterThan(0);
+		const closing = harness.session.messages.filter((message) => message.role === "assistant").at(-1);
+		if (closing?.role !== "assistant") throw new Error("Expected closing response");
+		expect(harness.session.getGoalStateSnapshot()?.tokensUsed).toBe(
+			budgetedTokens({
+				inputTokens: closing.usage.input,
+				outputTokens: closing.usage.output,
+				cacheReadTokens: closing.usage.cacheRead,
+				cacheWriteTokens: closing.usage.cacheWrite,
+				totalTokens: closing.usage.totalTokens,
+			}),
+		);
 		const result = harness.session.messages.find(
 			(message) => message.role === "toolResult" && message.toolName === "goal",
 		);
@@ -326,6 +341,130 @@ describe("goal-owned execution budget", () => {
 		});
 		return { sessionManager, controller };
 	}
+
+	it.each([false, true])(
+		"attributes a newly persisted goal once, with explicit pre-goal attribution=%s",
+		(explicit) => {
+			const { controller } = makeGoalController();
+			const lease = controller.beginExecution(undefined, { adoptNewGoal: explicit });
+			const before = fauxAssistantMessage("before creation");
+			before.usage = {
+				input: 20,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 20,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.2 },
+			};
+			controller.recordExecutionUsage(before);
+			controller.saveState(createGoalState({ goalId: "mid-run", userGoal: "Do the admitted work", now: "T0" }));
+			const after = fauxAssistantMessage("after creation");
+			after.usage = {
+				input: 30,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 30,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.3 },
+			};
+			controller.recordExecutionUsage(after);
+			controller.admitProviderRequest();
+			controller.endExecution(lease);
+			expect(controller.getState()?.tokensUsed).toBe(explicit ? 50 : 30);
+			expect(controller.getState()?.continuationSpendUsd).toBeCloseTo(explicit ? 0.5 : 0.3);
+			expect(controller.getExecutionGoalId()).toBeUndefined();
+			controller.recordExecutionUsage(after);
+			expect(controller.getState()?.tokensUsed).toBe(explicit ? 50 : 30);
+		},
+	);
+
+	it("does not adopt a preexisting goal when ordinary work updates its state", () => {
+		const { controller } = makeGoalController();
+		const state = createGoalState({ goalId: "unrelated", userGoal: "Other work", now: "T0" });
+		controller.saveState(state);
+		const lease = controller.beginExecution(undefined);
+		controller.saveState(applyGoalEvent(state, { type: "no_progress", now: "T1" }));
+		const message = fauxAssistantMessage("unrelated foreground response");
+		message.usage.input = 50;
+		message.usage.totalTokens = 50;
+		controller.recordExecutionUsage(message);
+		controller.endExecution(lease);
+		expect(controller.getState()?.tokensUsed).toBe(0);
+	});
+
+	it.each([false, true])("counts only owned active time, with explicit pre-goal ownership=%s", (explicit) => {
+		let now = 1_000;
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			const { controller } = makeGoalController();
+			const lease = controller.beginExecution(undefined, { adoptNewGoal: explicit });
+			now = 2_000;
+			controller.admitProviderRequest();
+			controller.saveState(createGoalState({ goalId: "timed", userGoal: "Track active work", now: "T0" }));
+			now = 2_300;
+			const revisionBeforeAdmission = controller.getState()?.revision;
+			controller.admitProviderRequest();
+			expect(controller.getState()?.revision).toBe(revisionBeforeAdmission);
+			controller.recordExecutionUsage(fauxAssistantMessage("observed response"));
+			expect(controller.getState()?.continuationWallClockMs).toBe(explicit ? 1_300 : 300);
+			now = 2_500;
+			controller.endExecution(lease);
+			expect(controller.getState()?.continuationWallClockMs).toBe(explicit ? 1_500 : 500);
+			now = 9_000;
+			const unrelated = controller.beginExecution(undefined);
+			controller.admitProviderRequest();
+			now = 10_000;
+			controller.endExecution(unrelated);
+			expect(controller.getState()?.continuationWallClockMs).toBe(explicit ? 1_500 : 500);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it("retains explicit pre-goal usage across admission boundaries", () => {
+		const { controller } = makeGoalController();
+		const lease = controller.beginExecution(undefined, { adoptNewGoal: true, provisionalTokenBudget: 5_000 });
+		const response = fauxAssistantMessage("preparing the explicit goal");
+		response.usage.input = 100;
+		response.usage.totalTokens = 100;
+		controller.recordExecutionUsage(response);
+		expect(controller.admitProviderRequest()).toBe(4_900);
+		expect(controller.admitProviderRequest()).toBe(4_900);
+		controller.saveState(createGoalState({ goalId: "explicit-buffer", userGoal: "Keep the budget", now: "T0" }));
+		controller.endExecution(lease);
+		expect(controller.getState()?.tokensUsed).toBe(100);
+	});
+
+	it("records continuation active time once through the foreground lease", async () => {
+		const harness = await createHarness();
+		let now = 1_000;
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			const goal = createGoalState({ goalId: "timed-continuation", userGoal: "Track one pass", now: "T0" });
+			harness.session.saveGoalStateSnapshot(
+				applyGoalEvent(goal, {
+					type: "add_requirement",
+					id: "pending",
+					text: "Complete the task",
+					now: "T0",
+				}),
+			);
+			harness.setResponses([
+				() => {
+					now = 1_300;
+					return fauxAssistantMessage("Reviewed the evidence; implementation remains.");
+				},
+			]);
+			await harness.session.continueGoalLoop({ maxTurns: 1, maxStallTurns: 3 });
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				continuationWallClockMs: 300,
+				continuationTurnsUsed: 1,
+			});
+		} finally {
+			clock.mockRestore();
+			harness.cleanup();
+		}
+	});
 
 	function stopGoal(state: ReturnType<typeof createGoalState>, status: GoalStatus, now: string) {
 		return status === "paused"

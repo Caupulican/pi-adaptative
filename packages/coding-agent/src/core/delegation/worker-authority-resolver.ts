@@ -19,7 +19,11 @@ import {
 } from "../orchestration/contracts.ts";
 import { CLASSIFIED_LANE_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
 import { resolvePinnedOrchestrationModel } from "../orchestration/model-binding.ts";
-import { envelopeHasToolCapability, getToolCapabilityPolicy } from "../tool-capability-policy.ts";
+import {
+	envelopeHasToolCapability,
+	getToolCapabilityPolicy,
+	resolveCapabilityPathAccess,
+} from "../tool-capability-policy.ts";
 import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-request.ts";
 import { LEAF_WORKER_DELEGATION_LIMITS } from "./worker-fleet-limits.ts";
 import { resolveWorkerWorkspacePath } from "./worker-machine-scope.ts";
@@ -241,6 +245,16 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	);
 	capabilities.delete("workflow.delegate");
 	capabilities.delete("memory.mutate");
+	if (input.authority?.readOnly) {
+		for (const capability of capabilities) {
+			if (
+				resolveCapabilityPathAccess([capability]) !== "read" &&
+				capability !== "memory.query" &&
+				capability !== "settings.read"
+			)
+				capabilities.delete(capability);
+		}
+	}
 	const capabilityList = [...capabilities];
 	const toolNames: string[] = [];
 	for (const toolName of uniqueToolNames) {

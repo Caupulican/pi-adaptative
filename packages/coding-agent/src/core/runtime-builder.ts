@@ -55,7 +55,6 @@ import type { CapabilityEnvelope, WorkerClaim } from "./autonomy/contracts.ts";
 import { isPathWithinEnvelope, wrapToolWithEnvelopeScope } from "./autonomy/envelope-enforcement.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import { buildWorkerSessionPrivatePathEnvelope } from "./autonomy/worker-session-private-scope.ts";
-import { isCompletedBackgroundToolEvidence } from "./background-tool-task-controller.ts";
 import type { CapabilityTierPolicy } from "./capability-tier.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./context/memory-diagnostics.ts";
@@ -85,6 +84,7 @@ import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { OpenTaskStepRef } from "./goals/goal-tool-core.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
+import { resolveSessionToolEvidence, resolveSessionUserEvidence } from "./goals/session-goal-evidence.ts";
 import { createImprovementLoopTool } from "./improvement-loop.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryControllerReloadSnapshot } from "./memory-controller.ts";
@@ -170,56 +170,6 @@ import { buildWorktreeSyncEngineDeps, getBoundWorktreeLaneKey } from "./worktree
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;
 	sourceInfo: SourceInfo;
-}
-
-/**
- * Is `toolCallId` a real, answered tool call on `sessionManager`'s active branch? A
- * toolCallId is "real" iff a toolResult message on that branch responded to it -- the same
- * toolResult/toolCallId match `context-pipeline.ts`'s `_buildSessionEntryIdLookup` uses, and
- * branch-scoped (via `getBranch()`) so a sibling branch's tool calls never count. Exported (pure,
- * no `this`) so the goal tool's `hasToolCallId` wiring below is directly testable against a real
- * `SessionManager` without constructing the whole `RuntimeBuilder`.
- */
-export function hasAnsweredToolCallOnBranch(sessionManager: SessionManager, toolCallId: string): boolean {
-	return sessionManager
-		.getBranch()
-		.some(
-			(entry) =>
-				entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolCallId === toolCallId,
-		);
-}
-
-/**
- * The most recent answered tool call on the active branch whose arguments contain `text`: a model
- * cites a run by what it typed ("npm test", "command:npm test"), not by the call id it never sees
- * spelled out. Measured live, that citation could never verify and the goal stalled for three
- * turns. Exported (pure) so the goal tool's evidence wiring is directly testable.
- */
-export function findAnsweredToolCallOnBranchByText(sessionManager: SessionManager, text: string): string | undefined {
-	const needle = text
-		.replace(/^(?:command|cmd|run|shell|tool)\s*[:=]\s*/i, "")
-		.trim()
-		.toLocaleLowerCase();
-	if (needle.length < 3) return undefined;
-	const branch = sessionManager.getBranch();
-	const answered = new Set<string>();
-	for (const entry of branch) {
-		if (entry.type === "message" && entry.message.role === "toolResult") answered.add(entry.message.toolCallId);
-	}
-	for (let index = branch.length - 1; index >= 0; index--) {
-		const entry = branch[index];
-		if (entry?.type !== "message" || entry.message.role !== "assistant") continue;
-		for (const part of entry.message.content) {
-			if (part.type !== "toolCall" || !answered.has(part.id)) continue;
-			const args = part.arguments as Record<string, unknown> | undefined;
-			const haystack = Object.values(args ?? {})
-				.filter((value): value is string => typeof value === "string")
-				.join("\n")
-				.toLocaleLowerCase();
-			if (haystack.includes(needle)) return part.id;
-		}
-	}
-	return undefined;
 }
 
 /**
@@ -1097,21 +1047,15 @@ export class RuntimeBuilder {
 					saveGoalState: (state, expected) => {
 						this.deps.saveGoalStateSnapshot(state, expected);
 					},
-					// kind:"tool" evidence refs verify against real session records.
-					hasToolCallId: (toolCallId) => hasAnsweredToolCallOnBranch(this.deps.getSessionManager(), toolCallId),
-					resolveToolEvidence: (uri) => {
-						const completed = isCompletedBackgroundToolEvidence(
+					resolveToolEvidence: (uri, kind) =>
+						resolveSessionToolEvidence(
+							this.deps.getSessionManager(),
 							this.deps.getToolTaskDependencies?.().list() ?? [],
 							uri,
-						);
-						if (completed !== undefined) return completed;
-						const sessionManager = this.deps.getSessionManager();
-						if (hasAnsweredToolCallOnBranch(sessionManager, uri)) return true;
-						// Not a call id: the model cited the run by its command text. Resolve it to the call
-						// that ran it, so the record carries the real locator.
-						const toolCallId = findAnsweredToolCallOnBranchByText(sessionManager, uri);
-						return toolCallId ? { verified: true, toolCallId } : false;
-					},
+							kind,
+						),
+					resolveUserEvidence: (summary, uri) =>
+						resolveSessionUserEvidence(this.deps.getSessionManager(), summary, uri),
 					// kind:"worker" evidence refs verify against the SAME live lane/claim accessors the
 					// delegate action=status uses below -- live wiring (these were declared optional
 					// and read-defensive on the goal-tool deps type).

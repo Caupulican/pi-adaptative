@@ -6,11 +6,13 @@
  */
 
 export const DELEGATION_DECISION_RULE =
-	"You must delegate bounded independent work when its speed or verification benefit outweighs coordination and context-transfer cost, regardless of provider or reasoning level. Evaluate this at Plan/Route and when new independent work appears; identify a concrete research, implementation, test, or specialist-review task. Keep trivial, tightly dependent, context-heavy, or interactive work local when delegation offers no net benefit. Long work alone never mandates a team.";
+	"Orientation stays local unless a team is requested. For other work: You must delegate bounded independent work when its speed or verification benefit outweighs coordination and context-transfer cost, regardless of provider or reasoning level. Evaluate at Plan/Route and when independent work appears; name a concrete research, implementation, test, or review task. Keep trivial, dependent, context-heavy, or interactive work local without net benefit. Long work alone never mandates a team.";
+export const ORIENTATION_SURVEY_RULE =
+	"Orientation: local map, no unsolicited audit/team. Requested review/evaluation: assess evidence and report findings. Scale workflow to the request.";
 
 /** Five named phases only; existing goal/task/delegate/evidence owners implement every phase. */
 export const WORK_LIFECYCLE_PHASES = ["Survey", "Contract", "Plan/Route", "Execute", "Prove/Deliver"] as const;
-export const WORK_LIFECYCLE_SYSTEM_RULE = `${WORK_LIFECYCLE_PHASES.join(" → ")}. Bounded read-only survey first; contract is project-relative: POC/MVP proves requested capability, complete means full project integration across affected interfaces, callers, configuration, tests, documentation, compatibility/migration, and cleanup. Plan before mutation; scale solo/team routing, independent review, and verification to risk, uncertainty, urgency, reversibility, invariant sensitivity, test strength/cost, and cognitive load; loop until accepted. Local commit follows green checks; push/tag/release/publish stays owner-gated.`;
+export const WORK_LIFECYCLE_SYSTEM_RULE = `${WORK_LIFECYCLE_PHASES.join(" → ")}. Scale phases to the requested outcome. Bounded read-only survey first; contract is project-relative: POC/MVP proves requested capability, complete means full project integration across affected interfaces, callers, configuration, tests, documentation, compatibility/migration, and cleanup. Plan before mutation; scale solo/team routing, independent review, and verification to risk, uncertainty, urgency, reversibility, invariant sensitivity, test strength/cost, and cognitive load; loop until accepted. Local commit follows green checks; push/tag/release/publish stays owner-gated.`;
 export const CHAT_WORK_LIFECYCLE_SYSTEM_RULE = "Survey→Contract(scope)→Plan/Route→Execute→Prove/Deliver.";
 
 export const SUBAGENT_CORE_SYSTEM_PROMPT = [

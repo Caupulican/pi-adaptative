@@ -59,6 +59,40 @@ function snapshot(
 }
 
 describe("worker task session view", () => {
+	it.each(["valid", "missing", "foreign", "malformed", "oversized", "missing_identity", "foreign_task"])(
+		"projects only bounded, correlated granted capabilities (%s)",
+		(kind) => {
+			const attempt = {
+				attemptId: kind === "missing_identity" ? undefined : "attempt",
+				taskId: kind === "foreign_task" ? "other-task" : "task",
+				status: "running",
+				grantId: "grant",
+				grant:
+					kind === "missing"
+						? undefined
+						: {
+								grantId: "grant",
+								attemptId: kind === "missing_identity" ? undefined : kind === "foreign" ? "other" : "attempt",
+								taskId: kind === "foreign_task" ? "other-task" : "task",
+								capabilities:
+									kind === "malformed"
+										? ["filesystem.read", "invented"]
+										: kind === "oversized"
+											? Array(1000).fill("filesystem.read")
+											: ["filesystem.read", "process.exec", "filesystem.write"],
+								resources: ["SECRET_RESOURCE"],
+								readPaths: ["SECRET_PATH"],
+							},
+			} as unknown as AttemptRuntimeState;
+			const view = projectWorkerTaskSessionView(snapshot([taskState("task", {}, ["attempt"])], { attempt }));
+			if (kind === "valid") {
+				expect(view.tasks[0]?.latestAttempt).toMatchObject({
+					grantedCapabilities: ["filesystem.read", "process.exec", "filesystem.write"],
+				});
+			} else expect(view.tasks[0]?.latestAttempt).not.toHaveProperty("grantedCapabilities");
+			expect(JSON.stringify(view)).not.toContain("SECRET_");
+		},
+	);
 	it("projects only provider-neutral task and latest-attempt fields from the durable SSOT", () => {
 		const subject = taskState(
 			"subject",
