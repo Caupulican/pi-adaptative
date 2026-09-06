@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
@@ -291,7 +291,7 @@ describe("model capability auto-detection", () => {
 		}
 	});
 
-	it("keeps Windows lean model session system prompt within the 10240-char budget even with a long working directory", async () => {
+	it("keeps the native lean model session prompt within 10240 characters with a long working directory", async () => {
 		const longTempRoot = mkdtempSync(join(tmpdir(), "pi-windows-long-temp-root-runneradmin-appdata-local-temp-"));
 		const prevTemp = process.env.TEMP;
 		const prevTmp = process.env.TMP;
@@ -300,7 +300,8 @@ describe("model capability auto-detection", () => {
 		process.env.TMP = longTempRoot;
 		process.env.TMPDIR = longTempRoot;
 
-		const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+		// This harness performs native I/O. Windows CI exercises Windows paths; mocking only
+		// process.platform on Linux creates an invalid Windows context with POSIX directories.
 		let harness: Harness | undefined;
 		try {
 			try {
@@ -308,6 +309,7 @@ describe("model capability auto-detection", () => {
 					models: [{ id: "mid-model", contextWindow: 16_384 }],
 					settings: { researchLane: { enabled: true }, autonomy: { mode: "balanced" } },
 				});
+				expect(harness.tempDir.startsWith(longTempRoot)).toBe(true);
 				expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(10_240);
 				expect(harness.session.systemPrompt).toContain("Pi-Adaptative bounded coding agent");
 				expect(harness.session.systemPrompt).not.toContain("Current working directory:");
@@ -317,7 +319,6 @@ describe("model capability auto-detection", () => {
 				}
 			}
 		} finally {
-			platformSpy.mockRestore();
 			if (prevTemp === undefined) delete process.env.TEMP;
 			else process.env.TEMP = prevTemp;
 			if (prevTmp === undefined) delete process.env.TMP;

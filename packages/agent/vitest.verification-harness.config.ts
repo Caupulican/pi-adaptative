@@ -9,6 +9,7 @@ export default defineConfig({
 		execArgv: ["--conditions=pi-source", "--expose-gc"],
 		experimental: { viteModuleRunner: false },
 		include: [
+			"test/verification-evidence.test.ts",
 			"test/verification-obligations.test.ts",
 			"test/verification-setup-repair.test.ts",
 			"test/agent-loop.test.ts",
