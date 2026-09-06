@@ -13,6 +13,16 @@ export function isValidUTF8(buffer: Buffer): boolean {
 	}
 }
 
+/** The edit contract is UTF-8, not charset detection. Ambiguous NUL-bearing text may be BOM-less UTF-16. */
+export function decodeUtf8ForEdit(buffer: Buffer, path: string): string {
+	if (!isValidUTF8(buffer) || buffer.includes(0)) {
+		throw new Error(
+			`PI_FILE_ENCODING_CORRUPTION: ${path} contains invalid UTF-8 or NUL-bearing data; exact text replacement is unsafe. Use authorized encoding-aware recovery; no conversion was attempted.`,
+		);
+	}
+	return buffer.toString("utf-8");
+}
+
 /**
  * Returns true if the file consistently uses CRLF.
  * Consistently means it contains at least one CRLF, and no LF without a preceding CR.

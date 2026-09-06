@@ -10,6 +10,7 @@ import { resolveToCwd } from "./path-utils.ts";
 
 export const FILE_EXISTS_RECOVERY_TARGET_KIND = "filesystem.file.exists";
 export const FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND = "filesystem.file.current-text";
+export const FILE_ENCODING_RECOVERY_TARGET_KIND = "filesystem.file.encoding-preserved";
 export const WORKSPACE_MUTATED_RECOVERY_TARGET_KIND = "filesystem.workspace.mutated";
 export const WRITE_RETARGET_RECOVERY_TARGET_KIND = "filesystem.write.retarget";
 export const EDIT_RETARGET_RECOVERY_TARGET_KIND = "filesystem.edit.retarget";

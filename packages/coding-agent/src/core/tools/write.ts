@@ -1,5 +1,4 @@
 import { mkdir as fsMkdir, writeFile as fsWriteFile } from "node:fs/promises";
-import { dirname } from "node:path";
 import { type AgentTool, createAgentToolFailureRecoveryAuthority } from "@caupulican/pi-agent-core/types";
 import { Container, Text } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
@@ -18,8 +17,6 @@ import {
 	FileMutationIntentController,
 	FileMutationPreflightError,
 } from "./file-mutation-intent.ts";
-import { withFileMutationQueue } from "./file-mutation-queue.ts";
-import { resolveToCwd } from "./path-utils.ts";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -313,6 +310,7 @@ export function createWriteToolDefinition(
 		throw new Error("Custom write operations require a matching file mutation intent controller.");
 	}
 	const intentController = options?.intentController ?? new FileMutationIntentController();
+	intentController.assertOperationsDialect(options?.operations !== undefined);
 	const retargetRecoveryAuthority = createAgentToolFailureRecoveryAuthority();
 	return {
 		name: "write",
@@ -333,7 +331,7 @@ export function createWriteToolDefinition(
 							{
 								authority: retargetRecoveryAuthority,
 								kind: WRITE_RETARGET_RECOVERY_TARGET_KIND,
-								scope: resolveToCwd(params.path, cwd),
+								scope: intentController.resolvePath(params.path, cwd),
 							},
 						]
 					: [],
@@ -367,7 +365,7 @@ export function createWriteToolDefinition(
 		},
 		async execute(_toolCallId, input: WriteToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
 			const { path } = input;
-			const absolutePath = resolveToCwd(path, cwd);
+			const absolutePath = intentController.resolvePath(path, cwd);
 			const content = "content" in input && typeof input.content === "string" ? input.content : undefined;
 			const contentRef =
 				"contentRef" in input && typeof input.contentRef === "string" ? input.contentRef : undefined;
@@ -378,7 +376,7 @@ export function createWriteToolDefinition(
 			}
 			try {
 				const lease = await intentController.prepare("write", absolutePath, signal, path);
-				return await withFileMutationQueue(absolutePath, async () => {
+				return await intentController.withMutationQueue(absolutePath, async () => {
 					// Do not reject from an abort event listener here: that would release the
 					// mutation queue while an in-flight filesystem operation may still finish.
 					// Checking signal.aborted after each await observes the same aborts while
@@ -389,7 +387,7 @@ export function createWriteToolDefinition(
 
 					throwIfAborted();
 					await intentController.assertCurrent(lease, signal);
-					await ops.mkdir(dirname(absolutePath));
+					await ops.mkdir(intentController.parentPath(absolutePath));
 					throwIfAborted();
 
 					let contentReference: FileContentReference;

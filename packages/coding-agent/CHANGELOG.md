@@ -1,11 +1,18 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Custom `FileMutationIntentOperations` must supply a shared `mutationQueue` backend identity resolver. Mutation serialization no longer probes the operator filesystem for custom backends.
+
 ### Changed
 
 - Goal test evidence requires an explicit executed-test witness. Opaque commands and historical receipts without that witness remain ordinary tool evidence; run a supported direct runner to provide new test evidence.
 
 ### Fixed
 
+- Bound write/edit preflight, parent traversal, queues, recovery targets, and edit previews to the selected backend path context. A stalled backend lookup no longer stalls unrelated backends.
+- Preserved mixed CRLF/LF/CR sequences and untouched Unicode bytes during text edits instead of normalizing the whole file. Previews and execution share strict UTF-8 validation; NUL-bearing or unsupported input routes to encoding-aware recovery, and malformed replacement Unicode is rejected before writing.
+- Declared Python encoding-recovery actions only for matching filesystem authorities; recovery requires binary I/O, an explicit strict codec, preservation of encoding/BOM/newlines, and byte verification.
 - Resolved read candidates through the executing filesystem backend, preferred exact names before spelling conveniences, and bound missing-read recovery to the same explicit path dialect. Permission and I/O failures no longer trigger alternate-name probes.
 - Preserved path-alias expansion when the tool registry reactivates an original tool descriptor.
 - Unified bounded test-output verification across Vitest and Node TAP/spec runners, recognized Node missing-file setup repairs, and rejected empty or incomplete runs without clearing unrelated failures.

@@ -2,8 +2,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, rmSync } from "node:fs";
 import { access, copyFile, lstat, mkdtemp, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { assertExecutionAbsolutePath, executionPathApi, type PathInputOptions } from "@caupulican/pi-agent-core/paths";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
+import {
+	type FileMutationQueueBackend,
+	localFileMutationQueueBackend,
+	withFileMutationQueue,
+} from "./file-mutation-queue.ts";
+import { resolveToCwd } from "./path-utils.ts";
 
 const DEFAULT_CONTENT_REFERENCE_LIMIT = 64;
 const DEFAULT_CONTENT_REFERENCE_TTL_MS = 60 * 60 * 1000;
@@ -51,6 +58,8 @@ export interface FilePathInspection {
 }
 
 export interface FileMutationIntentOperations {
+	/** Canonical resource identities and serialization scope belong to this backend, never the operator filesystem. */
+	readonly mutationQueue: FileMutationQueueBackend;
 	inspect(path: string, followSymlinks: boolean): Promise<FilePathInspection | undefined>;
 	access(path: string, mode: number): Promise<void>;
 	copyFileExclusive(sourcePath: string, targetPath: string): Promise<void>;
@@ -117,6 +126,8 @@ interface MutationPayloadRecord {
 
 export interface FileMutationIntentControllerOptions {
 	operations?: FileMutationIntentOperations;
+	/** Explicit backends use literal input names; omitted retains the native CLI input adapter. */
+	pathOptions?: Pick<PathInputOptions, "flavor" | "homeDir">;
 	contentReferenceLimit?: number;
 	contentReferenceTtlMs?: number;
 	mutationPayloadLimit?: number;
@@ -282,6 +293,7 @@ async function removeLocalMutationPayloadOrFile(path: string): Promise<void> {
 }
 
 export const localFileMutationIntentOperations: FileMutationIntentOperations = {
+	mutationQueue: localFileMutationQueueBackend,
 	inspect: inspectLocalPath,
 	access,
 	copyFileExclusive: (sourcePath, targetPath) => copyFile(sourcePath, targetPath, constants.COPYFILE_EXCL),
@@ -297,6 +309,7 @@ export const localFileMutationIntentOperations: FileMutationIntentOperations = {
  * bytes remain owned by the filesystem.
  */
 export class FileMutationIntentController {
+	readonly pathOptions: Readonly<PathInputOptions>;
 	private readonly operations: FileMutationIntentOperations;
 	private readonly contentReferenceLimit: number;
 	private readonly contentReferenceTtlMs: number;
@@ -312,6 +325,15 @@ export class FileMutationIntentController {
 
 	constructor(options: FileMutationIntentControllerOptions = {}) {
 		this.operations = options.operations ?? localFileMutationIntentOperations;
+		this.pathOptions = Object.freeze({
+			...options.pathOptions,
+			normalizeUnicodeSpaces: options.pathOptions === undefined,
+			stripAtPrefix: options.pathOptions === undefined,
+		});
+		this.assertOperationsDialect(options.operations !== undefined);
+		if (!this.operations.mutationQueue || typeof this.operations.mutationQueue.resolveKey !== "function") {
+			throw new Error("File mutation operations require a backend mutation queue identity resolver.");
+		}
 		this.contentReferenceLimit = positiveBound(
 			options.contentReferenceLimit,
 			DEFAULT_CONTENT_REFERENCE_LIMIT,
@@ -340,6 +362,30 @@ export class FileMutationIntentController {
 		this.now = options.now ?? Date.now;
 	}
 
+	assertOperationsDialect(usesCustomOperations: boolean): void {
+		if (
+			!usesCustomOperations &&
+			this.pathOptions.flavor &&
+			this.pathOptions.flavor !== (process.platform === "win32" ? "win32" : "posix")
+		) {
+			throw new Error("Non-native mutation path semantics require custom operations.");
+		}
+	}
+
+	resolvePath(input: string, cwd: string): string {
+		return resolveToCwd(input, cwd, this.pathOptions);
+	}
+
+	parentPath(absolutePath: string): string {
+		return executionPathApi(this.pathOptions.flavor ?? (process.platform === "win32" ? "win32" : "posix")).dirname(
+			absolutePath,
+		);
+	}
+
+	withMutationQueue<T>(absolutePath: string, operation: () => Promise<T>): Promise<T> {
+		return withFileMutationQueue(absolutePath, operation, this.operations.mutationQueue);
+	}
+
 	async prepare(
 		kind: FileMutationKind,
 		path: string,
@@ -348,7 +394,9 @@ export class FileMutationIntentController {
 	): Promise<FileMutationLease> {
 		this.pruneExpired();
 		if (signal?.aborted) throw new Error("Operation aborted");
-		const absolutePath = resolve(path);
+		const flavor = this.pathOptions.flavor ?? (process.platform === "win32" ? "win32" : "posix");
+		const absolutePath = this.pathOptions.flavor === undefined ? resolve(path) : path;
+		assertExecutionAbsolutePath(absolutePath, flavor);
 		let identity: FilePathIdentity | undefined;
 		if (kind === "write") {
 			const existing = await this.operations.inspect(absolutePath, false);
@@ -640,7 +688,7 @@ export class FileMutationIntentController {
 	}
 
 	private async assertCreatableParent(path: string): Promise<void> {
-		let candidate = dirname(path);
+		let candidate = this.parentPath(path);
 		while (true) {
 			const inspection = await this.operations.inspect(candidate, true);
 			if (inspection) {
@@ -655,7 +703,7 @@ export class FileMutationIntentController {
 				}
 				return;
 			}
-			const parent = dirname(candidate);
+			const parent = this.parentPath(candidate);
 			if (parent === candidate) throw new Error(`No writable parent exists for ${path}.`);
 			candidate = parent;
 		}

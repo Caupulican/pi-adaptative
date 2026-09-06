@@ -92,9 +92,22 @@ function createRemoteEditOps(remote: string, remoteCwd: string, localCwd: string
 	};
 }
 
-function createRemoteIntentOps(remote: string, remoteCwd: string, localCwd: string): FileMutationIntentOperations {
+export function createRemoteIntentOps(
+	remote: string,
+	remoteCwd: string,
+	localCwd: string,
+	execute: (remote: string, command: string, stdin?: string | Buffer) => Promise<Buffer> = sshExec,
+): FileMutationIntentOperations {
 	const toRemote = (p: string) => p.replace(localCwd, remoteCwd);
 	return {
+		mutationQueue: {
+			async resolveKey(path) {
+				const output = (await execute(remote, `realpath -mz -- ${shellQuote(toRemote(path))}`)).toString("utf8");
+				if (!output.endsWith("\0") || output.slice(0, -1).includes("\0"))
+					throw new Error("Invalid remote mutation resource identity.");
+				return output.slice(0, -1);
+			},
+		},
 		async inspect(p, followSymlinks): Promise<FilePathInspection | undefined> {
 			const path = shellQuote(toRemote(p));
 			const kind = followSymlinks
@@ -103,7 +116,7 @@ function createRemoteIntentOps(remote: string, remoteCwd: string, localCwd: stri
 			const follow = followSymlinks ? "-L " : "";
 			try {
 				const output = (
-					await sshExec(
+					await execute(
 						remote,
 						`${kind}; stat ${follow}--printf ${shellQuote("%d\\t%i\\t%f\\t%s\\t%y\\t%z")} -- ${path}`,
 					)
@@ -134,35 +147,35 @@ function createRemoteIntentOps(remote: string, remoteCwd: string, localCwd: stri
 				mode & constants.R_OK ? `test -r ${path}` : undefined,
 				mode & constants.W_OK ? `test -w ${path}` : undefined,
 			].filter((check): check is string => check !== undefined);
-			return sshExec(remote, checks.length > 0 ? checks.join(" && ") : `test -e ${path}`).then(() => {});
+			return execute(remote, checks.length > 0 ? checks.join(" && ") : `test -e ${path}`).then(() => {});
 		},
 		copyFileExclusive(sourcePath, targetPath) {
-			return sshExec(
+			return execute(
 				remote,
 				`set -o noclobber; cat -- ${shellQuote(toRemote(sourcePath))} > ${shellQuote(toRemote(targetPath))}`,
 			).then(() => {});
 		},
 		async hashFile(p) {
-			const output = await sshExec(remote, `sha256sum -- ${shellQuote(toRemote(p))}`);
+			const output = await execute(remote, `sha256sum -- ${shellQuote(toRemote(p))}`);
 			const digest = output.toString("utf8").trim().split(/\s+/, 1)[0];
 			if (!digest || !/^[0-9a-f]{64}$/i.test(digest)) throw new Error(`Invalid remote sha256 for ${p}`);
 			return digest.toLowerCase();
 		},
 		readPayload: (p) =>
-			sshExec(remote, `cat -- ${shellQuote(toRemote(p))}`).then((output) => output.toString("utf8")),
-		removeFile: (p) => sshExec(remote, `rm -- ${shellQuote(toRemote(p))}`).then(() => {}),
+			execute(remote, `cat -- ${shellQuote(toRemote(p))}`).then((output) => output.toString("utf8")),
+		removeFile: (p) => execute(remote, `rm -- ${shellQuote(toRemote(p))}`).then(() => {}),
 		async stagePayload(content) {
-			const stagedPath = (await sshExec(remote, `umask 077; mktemp "\${TMPDIR:-/tmp}/pi-file-mutation.XXXXXXXXXX"`))
+			const stagedPath = (await execute(remote, `umask 077; mktemp "\${TMPDIR:-/tmp}/pi-file-mutation.XXXXXXXXXX"`))
 				.toString("utf8")
 				.trim();
 			if (!stagedPath.startsWith("/") || stagedPath.includes("\n")) {
 				throw new Error("Remote mktemp returned an invalid mutation payload path.");
 			}
 			try {
-				await sshExec(remote, `cat > ${shellQuote(stagedPath)}`, content);
+				await execute(remote, `cat > ${shellQuote(stagedPath)}`, content);
 				return stagedPath;
 			} catch (error) {
-				await sshExec(remote, `rm -f -- ${shellQuote(stagedPath)}`).catch(() => {});
+				await execute(remote, `rm -f -- ${shellQuote(stagedPath)}`).catch(() => {});
 				throw error;
 			}
 		},

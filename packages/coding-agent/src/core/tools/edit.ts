@@ -6,11 +6,8 @@ import { renderDiff } from "../../modes/interactive/components/diff.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import {
-	type AppliedEditsResult,
-	applyEditMatchPlan,
-	applyEditsToNormalizedContent,
+	applyEditMatchPlanToSource,
 	computeEditsPlannedDiff,
-	detectLineEnding,
 	digestNormalizedEditSource,
 	type Edit,
 	type EditDiffError,
@@ -19,13 +16,14 @@ import {
 	generateDiffString,
 	generateUnifiedPatch,
 	normalizeToLF,
-	restoreLineEndings,
+	planEditsToNormalizedContent,
 	splitBom,
 } from "./edit-diff.ts";
-import { isValidUTF8 } from "./file-encoding-policy.ts";
+import { decodeUtf8ForEdit } from "./file-encoding-policy.ts";
 import {
 	EDIT_RETARGET_RECOVERY_TARGET_KIND,
 	FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
+	FILE_ENCODING_RECOVERY_TARGET_KIND,
 	type FileFailureRecoveryAuthority,
 	fileRecoveryTarget,
 	selectFileFailureRecoveryAuthority,
@@ -37,8 +35,6 @@ import {
 	type FileMutationLease,
 	FileMutationPreflightError,
 } from "./file-mutation-intent.ts";
-import { withFileMutationQueue } from "./file-mutation-queue.ts";
-import { resolveToCwd } from "./path-utils.ts";
 import { renderToolPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -461,6 +457,7 @@ export function createEditToolDefinition(
 		throw new Error("Custom edit operations require a matching file mutation intent controller.");
 	}
 	const intentController = options?.intentController ?? new FileMutationIntentController();
+	intentController.assertOperationsDialect(options?.operations !== undefined);
 	const retargetRecoveryAuthority = createAgentToolFailureRecoveryAuthority();
 	let cachedMatchPlan: CachedEditMatchPlan | undefined;
 	return {
@@ -488,17 +485,23 @@ export function createEditToolDefinition(
 						{
 							authority: retargetRecoveryAuthority,
 							kind: EDIT_RETARGET_RECOVERY_TARGET_KIND,
-							scope: resolveToCwd(params.path, cwd),
+							scope: intentController.resolvePath(params.path, cwd),
 						},
 					];
 				}
-				if (failure.failureCode === "edit_old_text_not_found" && failureRecoveryAuthority) {
+				if (
+					(failure.failureCode === "edit_old_text_not_found" || failure.failureCode === "encoding_corruption") &&
+					failureRecoveryAuthority
+				) {
 					return [
 						fileRecoveryTarget(
 							failureRecoveryAuthority,
-							FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
+							failure.failureCode === "encoding_corruption"
+								? FILE_ENCODING_RECOVERY_TARGET_KIND
+								: FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
 							params.path,
 							cwd,
+							intentController.pathOptions,
 						),
 					];
 				}
@@ -528,7 +531,7 @@ export function createEditToolDefinition(
 		async execute(_toolCallId, input: EditToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
 			const validated = validateEditInput(input);
 			const { path } = validated;
-			const absolutePath = resolveToCwd(path, cwd);
+			const absolutePath = intentController.resolvePath(path, cwd);
 			let lease: FileMutationLease;
 			try {
 				lease = await intentController.prepare("edit", absolutePath, signal, path);
@@ -542,7 +545,7 @@ export function createEditToolDefinition(
 				throw error;
 			}
 
-			return withFileMutationQueue(absolutePath, async () => {
+			return intentController.withMutationQueue(absolutePath, async () => {
 				// Do not reject from an abort event listener here: that would release the
 				// mutation queue while an in-flight filesystem operation may still finish.
 				// Checking signal.aborted after each await observes the same aborts while
@@ -603,17 +606,11 @@ export function createEditToolDefinition(
 
 					// Read the file.
 					const buffer = await ops.readFile(absolutePath);
-					if (!isValidUTF8(buffer)) {
-						throw new Error(
-							`PI_FILE_ENCODING_CORRUPTION: ${path} is not valid UTF-8 text; exact text replacement is unsafe and could corrupt its bytes.`,
-						);
-					}
-					const rawContent = buffer.toString("utf-8");
+					const rawContent = decodeUtf8ForEdit(buffer, path);
 					throwIfAborted();
 
 					// Strip BOM before matching. The model will not include an invisible BOM in oldText.
 					const { bom, text: content } = splitBom(rawContent);
-					const originalEnding = detectLineEnding(content);
 					const normalizedContent = normalizeToLF(content);
 					const cachedForInput =
 						cachedMatchPlan?.absolutePath === absolutePath && editsMatch(cachedMatchPlan.edits, edits)
@@ -623,11 +620,12 @@ export function createEditToolDefinition(
 					const matchPlanReused =
 						cachedForInput !== undefined &&
 						cachedForInput.sourceDigest === digestNormalizedEditSource(normalizedContent);
-					let applied: AppliedEditsResult;
+					let applied: ReturnType<typeof applyEditMatchPlanToSource>;
 					try {
-						applied = matchPlanReused
-							? applyEditMatchPlan(normalizedContent, cachedForInput.plan, path)
-							: applyEditsToNormalizedContent(normalizedContent, edits, path);
+						const plan = matchPlanReused
+							? cachedForInput.plan
+							: planEditsToNormalizedContent(normalizedContent, edits, path);
+						applied = applyEditMatchPlanToSource(content, plan, path);
 					} catch (error) {
 						throw error instanceof Error && intentController.hasProducedContent(absolutePath, rawContent)
 							? new Error(
@@ -637,7 +635,7 @@ export function createEditToolDefinition(
 					}
 					throwIfAborted();
 
-					const finalContent = bom + restoreLineEndings(applied.newContent, originalEnding);
+					const finalContent = bom + applied.sourceContent;
 					if (!(await confirmLeaseOrRefresh())) return undefined;
 					throwIfAborted();
 					await ops.writeFile(absolutePath, finalContent);
@@ -696,11 +694,14 @@ export function createEditToolDefinition(
 			if (context.argsComplete && previewInput && !component.preview && !component.previewPending) {
 				component.previewPending = true;
 				const requestId = ++component.previewRequestId;
-				void computeEditsPlannedDiff(previewInput.path, previewInput.edits, context.cwd).then((preview) => {
+				void computeEditsPlannedDiff(previewInput.path, previewInput.edits, cwd, {
+					resolvePath: (path, directory) => intentController.resolvePath(path, directory),
+					readFile: (path) => ops.readFile(path),
+				}).then((preview) => {
 					if (component.previewRequestId === requestId) {
 						if (!("error" in preview) && !options?.operations) {
 							cachedMatchPlan = {
-								absolutePath: resolveToCwd(previewInput.path, context.cwd),
+								absolutePath: intentController.resolvePath(previewInput.path, cwd),
 								edits: snapshotEdits(previewInput.edits),
 								plan: preview.plan,
 								sourceDigest: preview.sourceDigest,

@@ -45,6 +45,28 @@ stops subsequent probes and reads. Missing-read recovery uses the same dialect a
 Custom operations still own filesystem authorization and symlink semantics. This migrates read
 lookup, not all mutation/search/rendering adapters or attachment-generation fencing.
 
+Mutation tools now share `FileMutationIntentController.pathOptions` for resolution, parent traversal,
+preflight, and recovery identity. Explicit backends use literal names; the native CLI input adapter
+retains its input conveniences. `FileMutationIntentOperations.mutationQueue` supplies canonical
+keys and backend identity: cooperating controllers must share that object. Queue registration is
+backend-scoped, so one stalled resolver cannot stall another backend. The existing conservative
+process-wide shell/mutation barrier remains shared. Custom keys must account for their backend's
+aliases and case policy. The SSH example resolves queue keys remotely; its older cwd substitution
+and the remaining search/process adapters still need migration. Edit previews use the execution
+backend and cwd, never the renderer's operator directory.
+
+The direct edit contract remains UTF-8 text, not automatic charset detection. Matching uses a
+normalized view, but application splices the original source: untouched bytes and each original
+line-ending sequence survive, including mixed CRLF/LF/CR. Replacement newlines reuse the matched
+span's newline sequence; additional newlines use its last ending or the surrounding ending.
+Unsupported or NUL-bearing input cannot enter this text writer. The encoding-failure target can
+select a loaded Python correction only when its declared backend authority matches. That correction
+requires binary I/O, an explicit strict codec, preservation of original encoding/BOM/newlines, and
+byte verification. It does not grant Python capability, transcode to UTF-8, or certify an arbitrary
+Python success as byte-preservation evidence. Recovery actions currently teach the next operation;
+managed encoding-edit execution and verified recovery receipts remain migration work. External
+writers can still race the final file identity check; this stage does not claim cross-process CAS.
+
 `TestVerificationOutput` owns bounded UTF-8 decoding and terminal settlement. Runner strategies
 parse Vitest summaries or Node TAP/spec summaries; shell classification declares every stage.
 An empty, skipped-only, malformed, missing, or incomplete summary is not a passing test run.

@@ -7,6 +7,11 @@ import { type Static, Type } from "typebox";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { ensurePythonRuntime, type PythonRuntimeOutcome } from "../python-runtime.ts";
+import {
+	FILE_ENCODING_RECOVERY_TARGET_KIND,
+	type FileFailureRecoveryAuthority,
+	selectFileFailureRecoveryAuthority,
+} from "./file-failure-recovery.ts";
 import { withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import {
@@ -119,6 +124,8 @@ export interface PythonOperations {
 export interface PythonToolOptions {
 	resolveRuntime?: () => Promise<PythonRuntimeOutcome>;
 	operations?: PythonOperations;
+	/** Explicit identity required to advertise encoding recovery on a custom execution backend. */
+	failureRecoveryAuthority?: FileFailureRecoveryAuthority;
 	/** Additional process environment resolved from the final execution cwd. */
 	environment?: (cwd: string) => NodeJS.ProcessEnv;
 	/** Owner-only variables that must never reach model-controlled Python. */
@@ -199,6 +206,10 @@ export function createPythonToolDefinition(
 ): ToolDefinition<typeof pythonSchema, PythonToolDetails> {
 	const resolveRuntime = options.resolveRuntime ?? (() => ensurePythonRuntime({ silent: true }));
 	const operations = options.operations ?? createLocalPythonOperations();
+	const recoveryAuthority = selectFileFailureRecoveryAuthority(
+		options.operations !== undefined,
+		options.failureRecoveryAuthority,
+	);
 	// Output reduction: on unless the operator turned it off (settings or PI_TOOL_FILTER_DISABLED=1).
 	const reductionEnabled = options.outputReduction?.enabled !== false && process.env.PI_TOOL_FILTER_DISABLED !== "1";
 	const reductionLevel = () => resolveOutputReductionLevel(options.outputReduction?.level);
@@ -229,6 +240,19 @@ export function createPythonToolDefinition(
 			"Explicit approval required: destructive deletion, publish/push/release, long-running services.",
 		],
 		parameters: pythonSchema,
+		failureRecovery: {
+			actions: recoveryAuthority
+				? [
+						{
+							kind: "correct",
+							authority: recoveryAuthority.contractAuthority,
+							targetKind: FILE_ENCODING_RECOVERY_TARGET_KIND,
+							instruction:
+								"Use binary I/O and an explicit strict codec; preserve encoding, BOM and each newline, verify unchanged bytes. Never retry the UTF-8 edit or use lossy conversion.",
+						},
+					]
+				: [],
+		},
 		async execute(_toolCallId, input, signal) {
 			const hasCode = typeof input.code === "string";
 			const hasScript = typeof input.scriptPath === "string" && input.scriptPath.trim().length > 0;

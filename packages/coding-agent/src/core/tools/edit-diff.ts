@@ -8,6 +8,7 @@ import * as Diff from "diff";
 import { constants } from "fs";
 import { access, readFile } from "fs/promises";
 import { stripBom } from "../../utils/text.ts";
+import { decodeUtf8ForEdit } from "./file-encoding-policy.ts";
 import { resolveToCwd } from "./path-utils.ts";
 
 export function detectLineEnding(content: string): "\r\n" | "\n" {
@@ -367,6 +368,11 @@ export function planEditsToNormalizedContent(normalizedContent: string, edits: E
 		const sourceEdit = edits[i];
 		const oldText = normalizeToLF(sourceEdit.oldText);
 		const newText = normalizeToLF(sourceEdit.newText);
+		if (!newText.isWellFormed() || newText.includes("\0")) {
+			throw new Error(
+				`Invalid replacement Unicode in ${path}; encoding-preserving text edits cannot insert malformed or NUL-bearing text.`,
+			);
+		}
 		if (oldText.length === 0) throw getEmptyOldTextError(path, i, edits.length);
 
 		const exactWindow = validateRange(
@@ -467,6 +473,47 @@ export function applyEditsToNormalizedContent(
 	path: string,
 ): AppliedEditsResult {
 	return applyEditMatchPlan(normalizedContent, planEditsToNormalizedContent(normalizedContent, edits, path), path);
+}
+
+/** Match in normalized text, but splice into the original source. Untouched line endings never pass through conversion. */
+export function applyEditMatchPlanToSource(
+	source: string,
+	plan: EditMatchPlan,
+	path: string,
+): AppliedEditsResult & { sourceContent: string } {
+	const applied = applyEditMatchPlan(normalizeToLF(source), plan, path);
+	const firstEnding = /\r\n|\r|\n/.exec(source)?.[0] ?? "\n";
+	let previousEnding = firstEnding;
+	let sourceIndex = 0;
+	let normalizedIndex = 0;
+	let copiedThrough = 0;
+	const parts: string[] = [];
+	const advance = (target: number): number => {
+		while (normalizedIndex < target) {
+			const char = source[sourceIndex++];
+			if (char === "\r") {
+				if (source[sourceIndex] === "\n") {
+					sourceIndex++;
+					previousEnding = "\r\n";
+				} else previousEnding = "\r";
+			} else if (char === "\n") previousEnding = "\n";
+			normalizedIndex++;
+		}
+		return sourceIndex;
+	};
+	for (const edit of plan.edits) {
+		const start = advance(edit.matchIndex);
+		const nearbyEnding = previousEnding;
+		const end = advance(edit.matchIndex + edit.matchLength);
+		const endings = source.slice(start, end).match(/\r\n|\r|\n/g) ?? [];
+		let endingIndex = 0;
+		const fallback = endings.at(-1) ?? nearbyEnding;
+		const replacement = edit.newText.replace(/\n/g, () => endings[endingIndex++] ?? fallback);
+		parts.push(source.slice(copiedThrough, start), replacement);
+		copiedThrough = end;
+	}
+	parts.push(source.slice(copiedThrough));
+	return { ...applied, sourceContent: parts.join("") };
 }
 
 /** Generate a standard unified patch. */
@@ -620,6 +667,19 @@ export interface EditPlannedDiffResult extends EditDiffResult {
 	sourceDigest: string;
 }
 
+export interface EditPreviewOperations {
+	resolvePath(path: string, cwd: string): string;
+	readFile(absolutePath: string): Promise<Buffer>;
+}
+
+const localEditPreviewOperations: EditPreviewOperations = {
+	resolvePath: resolveToCwd,
+	async readFile(path) {
+		await access(path, constants.R_OK);
+		return readFile(path);
+	},
+};
+
 /**
  * Compute the diff for one or more edit operations without applying them.
  * Used for preview rendering in the TUI before the tool executes.
@@ -628,20 +688,17 @@ export async function computeEditsPlannedDiff(
 	path: string,
 	edits: Edit[],
 	cwd: string,
+	operations: EditPreviewOperations = localEditPreviewOperations,
 ): Promise<EditPlannedDiffResult | EditDiffError> {
-	const absolutePath = resolveToCwd(path, cwd);
-
 	try {
-		// Check if file exists and is readable
+		const absolutePath = operations.resolvePath(path, cwd);
+		let rawContent: string;
 		try {
-			await access(absolutePath, constants.R_OK);
+			rawContent = decodeUtf8ForEdit(await operations.readFile(absolutePath), path);
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error && "code" in error ? `Error code: ${error.code}` : String(error);
 			return { error: `Could not edit file: ${path}. ${errorMessage}.` };
 		}
-
-		// Read the file
-		const rawContent = await readFile(absolutePath, "utf-8");
 
 		// Strip BOM before matching (LLM won't include invisible BOM in oldText)
 		const content = stripBom(rawContent);

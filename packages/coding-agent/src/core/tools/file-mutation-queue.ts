@@ -2,8 +2,16 @@ import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
 
-const fileMutationQueues = new Map<string, Promise<void>>();
-let registrationQueue = Promise.resolve();
+/** Share this object across cooperating controllers on one backend. Keys are backend-canonical identities. */
+export interface FileMutationQueueBackend {
+	resolveKey(filePath: string): Promise<string>;
+}
+
+interface BackendQueueState {
+	queues: Map<string, Promise<void>>;
+	registration: Promise<void>;
+}
+const backendQueues = new WeakMap<FileMutationQueueBackend, BackendQueueState>();
 
 // Readers-writer barrier shared by every file mutation (reader) and exclusive bash
 // run (writer). File tools stay parallel with each other on different files; bash
@@ -78,25 +86,41 @@ async function getMutationQueueKey(filePath: string): Promise<string> {
 	}
 }
 
+export const localFileMutationQueueBackend: FileMutationQueueBackend = Object.freeze({
+	resolveKey: getMutationQueueKey,
+});
+
 /**
  * Serialize file mutation operations targeting the same file.
  * Operations for different files still run in parallel.
  */
-export async function withFileMutationQueue<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
-	const registration = registrationQueue.then(async () => {
-		const key = await getMutationQueueKey(filePath);
-		const currentQueue = fileMutationQueues.get(key) ?? Promise.resolve();
+export async function withFileMutationQueue<T>(
+	filePath: string,
+	fn: () => Promise<T>,
+	backend: FileMutationQueueBackend = localFileMutationQueueBackend,
+): Promise<T> {
+	let state = backendQueues.get(backend);
+	if (!state) {
+		state = { queues: new Map(), registration: Promise.resolve() };
+		backendQueues.set(backend, state);
+	}
+	const queues = state.queues;
+	const registration = state.registration.then(async () => {
+		const key = await backend.resolveKey(filePath);
+		if (typeof key !== "string" || key.length === 0)
+			throw new Error("Mutation backend returned an invalid resource identity.");
+		const currentQueue = queues.get(key) ?? Promise.resolve();
 
 		let releaseNext!: () => void;
 		const nextQueue = new Promise<void>((resolveQueue) => {
 			releaseNext = resolveQueue;
 		});
 		const chainedQueue = currentQueue.then(() => nextQueue);
-		fileMutationQueues.set(key, chainedQueue);
+		queues.set(key, chainedQueue);
 
 		return { key, currentQueue, chainedQueue, releaseNext };
 	});
-	registrationQueue = registration.then(
+	state.registration = registration.then(
 		() => undefined,
 		() => undefined,
 	);
@@ -112,8 +136,8 @@ export async function withFileMutationQueue<T>(filePath: string, fn: () => Promi
 	} finally {
 		releaseReader();
 		releaseNext();
-		if (fileMutationQueues.get(key) === chainedQueue) {
-			fileMutationQueues.delete(key);
+		if (queues.get(key) === chainedQueue) {
+			queues.delete(key);
 		}
 	}
 }
