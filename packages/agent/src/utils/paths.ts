@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { type ExecutionPathFlavor, executionPathApi, resolveExecutionPath } from "../execution-paths.ts";
 
 export {
+	assertExecutionAbsolutePath,
 	createExecutionContext,
 	type ExecutionAttachment,
 	type ExecutionContext,

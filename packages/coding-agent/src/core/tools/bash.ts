@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import type { Agent } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { ExecutionPathFlavor } from "@caupulican/pi-agent-core/paths";
 import { createSilenceWatchdog } from "@caupulican/pi-agent-core/reliability";
 import {
 	DEFAULT_MAX_BYTES,
@@ -74,8 +75,8 @@ import {
 } from "./shell-output-projection.ts";
 import { acquirePersistentShellSession } from "./shell-session.ts";
 import { classifyShellVerificationCommand } from "./shell-test-command.ts";
+import { TestVerificationOutput } from "./test-verification-output.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { VitestVerificationOutput } from "./vitest-verification-output.ts";
 import { createWindowsShellEngineOperations, type WindowsShellEngineOptions } from "./windows-shell-engine.ts";
 import { getOrCreateWindowsShellState, mergeEffectiveEnv, resolveEffectiveCwd } from "./windows-shell-state.ts";
 
@@ -395,6 +396,8 @@ function resolveSpawnContext(
 }
 
 export interface BashToolOptions {
+	/** Backend path syntax; defaults to the selected platform contract, never inferred from a path. */
+	pathFlavor?: ExecutionPathFlavor;
 	/** Platform used to choose the default backend and contract router. Defaults to process.platform. */
 	platform?: NodeJS.Platform;
 	/** Custom operations for command execution. Default: local platform shell */
@@ -664,6 +667,7 @@ function createShellToolDefinition(
 	// a filtered run must happen where the shell is, not where the tool was created.
 	let lastSessionCwd: string | undefined;
 	const routesWindowsContract = contractPlatform === "win32";
+	const pathFlavor = options?.pathFlavor ?? (routesWindowsContract ? "win32" : "posix");
 	const pythonEngineEnabled = options?.windowsShellPythonEngine !== false;
 	const engineOperations = routesWindowsContract
 		? createWindowsShellEngineOperations(sessionKey, options?.windowsShellEngineOptions)
@@ -749,9 +753,8 @@ function createShellToolDefinition(
 				maxPersistedBytes: routeBroadSearchOutput ? BROAD_SEARCH_MAX_PERSISTED_BYTES : undefined,
 				windowsCompatibleEncoding: routesWindowsContract,
 			});
-			const verificationOutput = classifyShellVerificationCommand(command, cwd)?.vitestStages
-				? new VitestVerificationOutput()
-				: undefined;
+			const verificationRunners = classifyShellVerificationCommand(command, { cwd, flavor: pathFlavor })?.runners;
+			const verificationOutput = verificationRunners ? new TestVerificationOutput(verificationRunners) : undefined;
 			let updateTimer: NodeJS.Timeout | undefined;
 			let updateDirty = false;
 			let lastUpdateAt = 0;
@@ -1182,7 +1185,11 @@ function createShellToolDefinition(
 				const verification =
 					initialCwd === undefined || verificationCommand === undefined
 						? undefined
-						: classifyShellVerificationCommand(verificationCommand, initialCwd, cwd);
+						: classifyShellVerificationCommand(verificationCommand, {
+								cwd: initialCwd,
+								workspaceRoot: cwd,
+								flavor: pathFlavor,
+							});
 				// CDPATH and other shell state can redirect a syntactically simple cd. A reported
 				// location must agree before the canonical identity can certify that project.
 				const actualVerificationCwd = routesWindowsContract ? reportedCwd : sessionCwd;
@@ -1192,7 +1199,7 @@ function createShellToolDefinition(
 					verification.cwd === actualVerificationCwd;
 				const runnerOutcome =
 					verification && verificationContextMatches && verificationOutput
-						? verificationOutput.finish(verification.vitestStages ?? 0, exitCode)
+						? verificationOutput.finish(exitCode)
 						: undefined;
 				const verificationDetails: BashToolDetails | undefined =
 					verification && verificationContextMatches
@@ -1202,7 +1209,10 @@ function createShellToolDefinition(
 									version: 1,
 									id: verification.id,
 									...(runnerOutcome !== undefined && verificationOutput
-										? { outcome: exitCode === null ? "unconfirmed" : verificationOutput.executionOutcome }
+										? {
+												outcome: exitCode === null ? "unconfirmed" : verificationOutput.executionOutcome,
+												evidence: verificationOutput.evidence,
+											}
 										: {}),
 									...(verification.repairGroup !== undefined ? { repairGroup: verification.repairGroup } : {}),
 									...(repairOf !== undefined ? { repairOf } : {}),

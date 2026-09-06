@@ -1,5 +1,8 @@
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import { retainedVerificationDetails } from "@caupulican/pi-agent-core/verification-obligations";
+import {
+	isPassingTestVerification,
+	retainedVerificationDetails,
+} from "@caupulican/pi-agent-core/verification-obligations";
 import type { ToolCall } from "@caupulican/pi-ai";
 import { type BackgroundToolTaskRecord, findBackgroundToolTask } from "../background-tool-task-controller.ts";
 import type { GoalToolEvidenceResolution, GoalUserEvidenceResolution } from "../tools/goal.ts";
@@ -93,7 +96,7 @@ export function resolveSessionToolEvidence(
 		if (
 			kind === "test" &&
 			(background.status !== "completed" ||
-				verification?.status !== "passed" ||
+				!isPassingTestVerification(verification) ||
 				verification.originTaskId !== background.taskId)
 		) {
 			return { verified: false, reason: "the background task has no trusted passing verification receipt" };
@@ -120,7 +123,7 @@ export function resolveSessionToolEvidence(
 		const verification = retainedVerificationDetails(result.details)?.piVerification;
 		if (
 			kind === "test" &&
-			(result.isError || verification?.status !== "passed" || verification.originTaskId !== undefined)
+			(result.isError || !isPassingTestVerification(verification) || verification.originTaskId !== undefined)
 		) {
 			return { verified: false, reason: "the producing call has no trusted passing verification receipt" };
 		}

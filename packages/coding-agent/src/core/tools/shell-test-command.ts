@@ -1,11 +1,17 @@
 import { createHash } from "node:crypto";
-import { posix, win32 } from "node:path";
+import {
+	assertExecutionAbsolutePath,
+	type ExecutionPathFlavor,
+	executionPathApi,
+	resolveExecutionPath,
+} from "@caupulican/pi-agent-core/paths";
 import {
 	isChangeDirectoryInvocation,
 	parseShellCommandSequence,
 	type ShellCommandSequence,
 	tokenizeShellCommand,
 } from "./shell-command-parser.ts";
+import type { VerificationRunner } from "./test-verification-output.ts";
 
 const DIRECT_TEST_RUNNERS = new Set([
 	"ava",
@@ -130,8 +136,8 @@ export function isProjectableTestCommand(command: string): boolean {
 
 export interface ShellVerificationCommand {
 	kind: "test";
-	/** Direct Vitest stages whose terminal summaries must confirm that tests executed. */
-	vitestStages?: number;
+	/** Every stage has an explicit evidence strategy; opaque commands remain distinct from witnessed tests. */
+	runners: VerificationRunner[];
 	/** Stable, bounded identity of the verification argv, stages, and execution location. */
 	id: string;
 	/** Equivalent literal stages within a host-specified workspace; only setup failures may use it. */
@@ -189,17 +195,23 @@ function hasOnlyVerificationStages(sequence: ShellCommandSequence): boolean {
  */
 export function classifyShellVerificationCommand(
 	command: string,
-	initialCwd: string,
-	workspaceRoot?: string,
+	context: { cwd: string; workspaceRoot?: string; flavor: ExecutionPathFlavor },
 ): ShellVerificationCommand | undefined {
 	const sequence = parseShellCommandSequence(command);
 	if (!sequence || !hasOnlyVerificationStages(sequence)) return undefined;
+	const { cwd: initialCwd, workspaceRoot, flavor } = context;
+	try {
+		assertExecutionAbsolutePath(initialCwd, flavor);
+		if (workspaceRoot !== undefined) assertExecutionAbsolutePath(workspaceRoot, flavor);
+	} catch {
+		return undefined;
+	}
 	// The parser does not evaluate expansions or every shell escape. Preserve exact source for
 	// those shapes rather than allowing a quote/escape change to certify a different operation.
 	let identity: unknown = { version: 2, cwd: initialCwd, source: command };
 	let executionCwd: string | undefined;
 	let repairGroup: string | undefined;
-	const paths = /^[A-Za-z]:[\\/]|^\\\\/u.test(initialCwd) ? win32 : posix;
+	const paths = executionPathApi(flavor);
 	const leadingCd = isChangeDirectoryInvocation(sequence.invocations[0]) ? sequence.invocations[0][1] : undefined;
 	if (
 		paths.isAbsolute(initialCwd) &&
@@ -208,9 +220,9 @@ export function classifyShellVerificationCommand(
 		(leadingCd === undefined ||
 			(!leadingCd.startsWith("-") &&
 				!leadingCd.startsWith("//") &&
-				!(paths === win32 && /^[A-Za-z]:(?![\\/])/u.test(leadingCd))))
+				!(flavor === "win32" && /^[A-Za-z]:(?![\\/])/u.test(leadingCd))))
 	) {
-		executionCwd = leadingCd === undefined ? initialCwd : paths.resolve(initialCwd, leadingCd);
+		executionCwd = leadingCd === undefined ? initialCwd : resolveExecutionPath(leadingCd, initialCwd, flavor);
 		const stages = {
 			invocations: leadingCd === undefined ? sequence.invocations : sequence.invocations.slice(1),
 			connectors: leadingCd === undefined ? sequence.connectors : sequence.connectors.slice(1),
@@ -231,17 +243,27 @@ export function classifyShellVerificationCommand(
 	}
 	return {
 		kind: "test",
-		vitestStages: sequence.invocations.filter((args) => {
-			const executable = executableStem(args[0] ?? "");
-			if (executable === "vitest") return true;
-			if (["npx", "pnpx", "bunx"].includes(executable))
-				return executableStem(firstNonOption(args, 1) ?? "") === "vitest";
-			if (executable === "npm" && args[1] === "exec") return firstNonOption(args, 2) === "vitest";
-			if (["pnpm", "yarn", "bun"].includes(executable)) {
-				return (args[1] === "exec" || args[1] === "dlx" ? firstNonOption(args, 2) : args[1]) === "vitest";
-			}
-			return executable === "node" && /(?:^|[\\/])node_modules[\\/]vitest[\\/]/u.test(firstNonOption(args, 1) ?? "");
-		}).length,
+		runners: sequence.invocations
+			.filter((args) => isTestInvocation(args, true))
+			.map((args): VerificationRunner => {
+				const executable = executableStem(args[0] ?? "");
+				if (executable === "node" && args.slice(1).some((arg) => arg === "--test" || arg.startsWith("--test=")))
+					return "node-test";
+				if (executable === "vitest") return "vitest";
+				if (["npx", "pnpx", "bunx"].includes(executable))
+					return executableStem(firstNonOption(args, 1) ?? "") === "vitest" ? "vitest" : "command";
+				if (executable === "npm" && args[1] === "exec")
+					return firstNonOption(args, 2) === "vitest" ? "vitest" : "command";
+				if (["pnpm", "yarn", "bun"].includes(executable)) {
+					return (args[1] === "exec" || args[1] === "dlx" ? firstNonOption(args, 2) : args[1]) === "vitest"
+						? "vitest"
+						: "command";
+				}
+				return executable === "node" &&
+					/(?:^|[\\/])node_modules[\\/]vitest[\\/]/u.test(firstNonOption(args, 1) ?? "")
+					? "vitest"
+					: "command";
+			}),
 		cwd: executionCwd,
 		...(repairGroup !== undefined ? { repairGroup } : {}),
 		id: `shell-test-${createHash("sha256").update(JSON.stringify(identity)).digest("base64url")}`,

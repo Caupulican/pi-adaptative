@@ -83,8 +83,16 @@ describe("synthetic session failure fixtures", () => {
 
 function verificationRecords(): { failed: VerificationRecord; corrected: VerificationRecord } {
 	const fixture = verificationCwdFixture;
-	const initial = classifyShellVerificationCommand(fixture.command, fixture.incorrectCwd, fixture.workspaceRoot)!;
-	const corrected = classifyShellVerificationCommand(fixture.command, fixture.correctedCwd, fixture.workspaceRoot)!;
+	const initial = classifyShellVerificationCommand(fixture.command, {
+		cwd: fixture.incorrectCwd,
+		workspaceRoot: fixture.workspaceRoot,
+		flavor: "posix",
+	})!;
+	const corrected = classifyShellVerificationCommand(fixture.command, {
+		cwd: fixture.correctedCwd,
+		workspaceRoot: fixture.workspaceRoot,
+		flavor: "posix",
+	})!;
 	return {
 		failed: { version: 1, id: initial.id, status: "failed", repairGroup: initial.repairGroup },
 		corrected: {

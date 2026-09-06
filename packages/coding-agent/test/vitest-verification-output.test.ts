@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { VitestVerificationOutput } from "../src/core/tools/vitest-verification-output.ts";
+import { TestVerificationOutput } from "../src/core/tools/test-verification-output.ts";
 
 describe("Vitest verification output", () => {
 	it.each([
@@ -16,10 +16,10 @@ describe("Vitest verification output", () => {
 	] as const)(
 		"separates repairable setup from executed and unconfirmed checks, case %#",
 		(output, stages, expected) => {
-			const observer = new VitestVerificationOutput();
+			const observer = new TestVerificationOutput(Array.from({ length: stages }, () => "vitest"));
 			observer.append(Buffer.from(output));
 			expect(observer.executionOutcome).toBe("unconfirmed");
-			observer.finish(stages, 1);
+			observer.finish(1);
 			expect(observer.executionOutcome).toBe(expected);
 		},
 	);
@@ -39,50 +39,50 @@ describe("Vitest verification output", () => {
 		["test name mentions Tests 1 passed (1)", "unconfirmed"],
 		["Test Files 1 passed (1)", "unconfirmed"],
 	] as const)("interprets only complete summary evidence: %s", (output, expected) => {
-		const observer = new VitestVerificationOutput();
+		const observer = new TestVerificationOutput(["vitest"]);
 		const bytes = Buffer.from(`\u001b[32m${output}\u001b[0m`);
 		for (const byte of bytes) observer.append(Uint8Array.of(byte));
-		expect(observer.finish(1, 0)).toBe(expected);
-		expect(observer.finish(1, 0)).toBe(expected);
+		expect(observer.finish(0)).toBe(expected);
+		expect(observer.finish(0)).toBe(expected);
 	});
 
 	it("requires every declared stage and preserves an empty stage beside a successful one", () => {
-		const incomplete = new VitestVerificationOutput();
+		const incomplete = new TestVerificationOutput(["vitest", "vitest"]);
 		incomplete.append(Buffer.from("Tests 1 passed (1)\n"));
-		expect(incomplete.finish(2, 0)).toBe("unconfirmed");
-		const complete = new VitestVerificationOutput();
+		expect(incomplete.finish(0)).toBe("unconfirmed");
+		const complete = new TestVerificationOutput(["vitest", "vitest"]);
 		complete.append(Buffer.from("Tests 1 passed (1)\nTests 2 passed (2)\n"));
-		expect(complete.finish(2, 0)).toBe("passed");
-		const empty = new VitestVerificationOutput();
+		expect(complete.finish(0)).toBe("passed");
+		const empty = new TestVerificationOutput(["vitest", "vitest"]);
 		empty.append(Buffer.from("Tests 1 passed (1)\nNo test files found, exiting with code 0\n"));
-		expect(empty.finish(2, 0)).toBe("no_tests");
+		expect(empty.finish(0)).toBe("no_tests");
 	});
 
 	it.each(["No test files found, exiting with code 0", "Tests no tests"])(
 		"does not mistake a test's quoted diagnostic for an empty run: %s",
 		(notice) => {
-			const observer = new VitestVerificationOutput();
+			const observer = new TestVerificationOutput(["vitest"]);
 			observer.append(
 				Buffer.from(
 					`stdout | parser.test.ts > reproduces a missing-file diagnostic\n${notice}\nTests 1 passed (1)\n`,
 				),
 			);
-			expect(observer.finish(1, 0)).toBe("passed");
+			expect(observer.finish(0)).toBe("passed");
 		},
 	);
 
 	it.each([1, null])("does not certify a completed summary with exit %s", (exitCode) => {
-		const observer = new VitestVerificationOutput();
+		const observer = new TestVerificationOutput(["vitest"]);
 		observer.append(Buffer.from("Tests 1 passed (1)\n"));
-		expect(observer.finish(1, exitCode)).toBe("failed");
+		expect(observer.finish(exitCode)).toBe("failed");
 	});
 
 	it("fails closed on oversized or invalid text and rejects output after completion", () => {
 		for (const data of [Buffer.from("x".repeat(20_000)), Buffer.from([0xff])]) {
-			const observer = new VitestVerificationOutput();
+			const observer = new TestVerificationOutput(["vitest"]);
 			observer.append(data);
 			observer.append(Buffer.from("\nTests 1 passed (1)\n"));
-			expect(observer.finish(1, 0)).toBe("unconfirmed");
+			expect(observer.finish(0)).toBe("unconfirmed");
 			expect(() => observer.append(Buffer.from("late"))).toThrow("after verification output completes");
 		}
 	});

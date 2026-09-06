@@ -1,8 +1,14 @@
 ## [Unreleased]
 
+### Changed
+
+- Goal test evidence requires an explicit executed-test witness. Opaque commands and historical receipts without that witness remain ordinary tool evidence; run a supported direct runner to provide new test evidence.
+
 ### Fixed
 
 - Preserved path-alias expansion when the tool registry reactivates an original tool descriptor.
+- Unified bounded test-output verification across Vitest and Node TAP/spec runners, recognized Node missing-file setup repairs, and rejected empty or incomplete runs without clearing unrelated failures.
+- Bound shell verification path semantics to the selected backend instead of guessing from the working-directory string.
 
 ## [0.99.1] - 2026-09-06
 

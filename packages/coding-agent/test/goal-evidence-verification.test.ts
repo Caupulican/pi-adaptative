@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { VerificationRecord } from "@caupulican/pi-agent-core/verification-obligations";
 import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
@@ -501,7 +502,35 @@ function bashCall(id: string, command: string, timestamp: number): AssistantMess
 	};
 }
 
+const testWitness = { outcome: "executed", evidence: "tests" } as const;
+
 describe("goal test evidence from session receipts", () => {
+	it.each([undefined, "command", "tests", "unknown"])(
+		"requires an explicit executed test witness, not command success (%s)",
+		(evidence) => {
+			const session = SessionManager.inMemory();
+			session.appendMessage(bashCall("witness", "npm test", 1000));
+			const piVerification = {
+				version: 1 as const,
+				id: "unit-test",
+				status: "passed" as const,
+				outcome: "executed" as const,
+				evidence,
+			};
+			session.appendMessage({ ...toolResultMessage("witness", 1001), details: { piVerification } });
+			expect(resolveSessionToolEvidence(session, [], "witness", "test").verified).toBe(evidence === "tests");
+			expect(resolveSessionToolEvidence(session, [], "witness", "tool").verified).toBe(true);
+			const task = {
+				taskId: "task-1",
+				toolCallId: "witness",
+				status: "completed" as const,
+				piVerification: { ...piVerification, originTaskId: "task-1" } as VerificationRecord & {
+					originTaskId: string;
+				},
+			};
+			expect(resolveSessionToolEvidence(session, [task], "witness", "test").verified).toBe(evidence === "tests");
+		},
+	);
 	it.each([true, false])("selects the last matching call within one batch (last failed: %s)", (lastFailed) => {
 		const sessionManager = SessionManager.inMemory();
 		const first = bashCall("first", "npm test", 1000);
@@ -512,7 +541,9 @@ describe("goal test evidence from session receipts", () => {
 			sessionManager.appendMessage({
 				...toolResultMessage(id, 1001),
 				isError: failed,
-				details: { piVerification: { version: 1, id: "unit-test", status: failed ? "failed" : "passed" } },
+				details: {
+					piVerification: { ...testWitness, version: 1, id: "unit-test", status: failed ? "failed" : "passed" },
+				},
 			});
 		}
 		expect(resolveSessionToolEvidence(sessionManager, [], "first", "test").verified).toBe(true);
@@ -525,7 +556,7 @@ describe("goal test evidence from session receipts", () => {
 		sessionManager.appendMessage(bashCall("valid", "npm test", 1000));
 		sessionManager.appendMessage({
 			...toolResultMessage("valid", 1001),
-			details: { piVerification: { version: 1, id: "unit-test", status: "passed" } },
+			details: { piVerification: { ...testWitness, version: 1, id: "unit-test", status: "passed" } },
 		});
 		const malformed = bashCall("malformed", "npm test", 1002);
 		Object.defineProperty(malformed.content[0], "arguments", { value: null });
@@ -575,7 +606,7 @@ describe("goal test evidence from session receipts", () => {
 		sessionManager.appendMessage({
 			...toolResultMessage("passed-call", 1001),
 			toolName: "bash",
-			details: { piVerification: { version: 1, id: "control-test", status: "passed" } },
+			details: { piVerification: { ...testWitness, version: 1, id: "control-test", status: "passed" } },
 		});
 		const citedCallId = isError ? "failed-call" : "diff-call";
 		sessionManager.appendMessage(bashCall(citedCallId, command, 1002));
@@ -631,7 +662,7 @@ describe("goal test evidence from session receipts", () => {
 		sessionManager.appendMessage(bashCall("run-1", "npm test", 1000));
 		sessionManager.appendMessage({
 			...toolResultMessage("run-1", 1001),
-			details: { piVerification: { version: 1, id: "unit-test", status: "passed" } },
+			details: { piVerification: { ...testWitness, version: 1, id: "unit-test", status: "passed" } },
 		});
 		let state: GoalState | undefined;
 		const tool = createGoalToolDefinition({
@@ -684,7 +715,7 @@ describe("goal test evidence from session receipts", () => {
 			sessionManager.appendMessage(bashCall("run-1", "npm test", 1000));
 			sessionManager.appendMessage({
 				...toolResultMessage("run-1", 1001),
-				details: { piVerification: { version: 1, id: "unit-test", status: "passed" } },
+				details: { piVerification: { ...testWitness, version: 1, id: "unit-test", status: "passed" } },
 				...overrides,
 			});
 			expect(resolveSessionToolEvidence(sessionManager, [], "run-1", "test").verified).toBe(false);
@@ -706,7 +737,7 @@ describe("goal test evidence from session receipts", () => {
 			sessionManager.appendMessage({
 				...toolResultMessage(`run-${index}`, 1001 + index * 2),
 				isError: status === "failed",
-				details: { piVerification: { version: 1, id: "unit-test", status } },
+				details: { piVerification: { ...testWitness, version: 1, id: "unit-test", status } },
 			});
 		}
 		expect(resolveSessionToolEvidence(sessionManager, [], "run-0", "test").verified).toBe(true);
@@ -727,6 +758,7 @@ describe("goal test evidence from session receipts", () => {
 				toolCallId: "run-1",
 				status,
 				piVerification: {
+					...testWitness,
 					version: 1 as const,
 					id: "unit-test",
 					status: "passed" as const,

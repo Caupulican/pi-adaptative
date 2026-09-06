@@ -39,6 +39,7 @@ describe("bash verification boundary", () => {
 		const tool = createBashTool(root, {
 			// This adapter models a persistent POSIX shell; Windows routing owns a different cwd state.
 			platform: "linux",
+			pathFlavor: process.platform === "win32" ? "win32" : "posix",
 			operations: {
 				exec: async (_command, _cwd, options) => {
 					const first = executions++ === 0;

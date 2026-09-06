@@ -1,13 +1,9 @@
 import type { VerificationRecord } from "@caupulican/pi-agent-core/verification-obligations";
-import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
 import { stripAnsi } from "../../utils/ansi.ts";
+import type { TestVerificationOutcome, VerificationOutputParser } from "./test-verification-output.ts";
 
-export type VitestVerificationOutcome = "passed" | "failed" | "no_tests" | "unconfirmed";
-
-/** Observes raw output before display projection; retains bounded counts, never test payloads. */
-export class VitestVerificationOutput {
-	private readonly bytes = new TextDecoder("utf-8", { fatal: true });
-	private readonly lines = new StreamingLineDecoder(16 * 1024);
+/** Vitest summary syntax only; stream lifetime and evidence policy belong to TestVerificationOutput. */
+export class VitestVerificationParser implements VerificationOutputParser {
 	private summaries = 0;
 	private empty = false;
 	private noFilesNotice = false;
@@ -25,35 +21,8 @@ export class VitestVerificationOutput {
 		return "unconfirmed";
 	}
 
-	append(data: Uint8Array): void {
-		if (this.finished) throw new Error("Cannot append after verification output completes");
-		if (this.incomplete) return;
-		// Bound each decoder allocation even when a process emits one enormous chunk.
-		try {
-			for (let offset = 0; offset < data.length; offset += 16 * 1024) {
-				for (const line of this.lines.push(
-					this.bytes.decode(data.subarray(offset, offset + 16 * 1024), { stream: true }),
-				)) {
-					this.observe(line);
-				}
-			}
-		} catch {
-			// Oversized or undecodable output cannot provide a complete verification witness.
-			this.incomplete = true;
-		}
-	}
-
-	finish(expectedSummaries: number, exitCode: number | null): VitestVerificationOutcome {
+	finish(expectedSummaries: number, exitCode: number | null): TestVerificationOutcome {
 		this.expectedSummaries = expectedSummaries;
-		if (!this.finished && !this.incomplete) {
-			try {
-				for (const line of this.lines.push(this.bytes.decode())) this.observe(line);
-				const final = this.lines.finish();
-				if (final !== undefined) this.observe(final);
-			} catch {
-				this.incomplete = true;
-			}
-		}
 		this.finished = true;
 		if (this.failed) return "failed";
 		if (this.incomplete) return "unconfirmed";
@@ -63,7 +32,7 @@ export class VitestVerificationOutput {
 		return exitCode === 0 ? "passed" : "failed";
 	}
 
-	private observe(raw: string): void {
+	observe(raw: string): void {
 		const line = stripAnsi(raw).trim();
 		if (/^Errors\s+[1-9]\d* errors?$/u.test(line)) this.failed = true;
 		if (/^No test files found(?:,|$)/u.test(line)) this.noFilesNotice = true;
@@ -93,7 +62,7 @@ export class VitestVerificationOutput {
 		if (summary[1] === "Tests") {
 			if (executed > 0) this.executed = true;
 			if (executed === 0) this.empty = true;
-			this.summaries = Math.min(this.summaries + 1, 1_000);
+			this.summaries = Math.min(this.summaries + 1, 1_001);
 		}
 	}
 }

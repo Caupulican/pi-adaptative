@@ -33,6 +33,24 @@ commit. A completed foundation stage does not establish that all execution adapt
 No full test suite is run locally. Native-platform conformance belongs in CI; a Linux simulation
 of Windows path syntax is not evidence of native Windows process or filesystem behavior.
 
+## Verification evidence
+
+`TestVerificationOutput` owns bounded UTF-8 decoding and terminal settlement. Runner strategies
+parse Vitest summaries or Node TAP/spec summaries; shell classification declares every stage.
+An empty, skipped-only, malformed, missing, or incomplete summary is not a passing test run.
+Unknown runner formats remain unconfirmed; no parser borrows another runner's evidence.
+
+Receipts distinguish `evidence: tests` from `evidence: command`. Opaque commands still execute and
+retain their exit-status verification and ordinary goal-tool evidence. New goal test evidence
+requires an explicit executed-test witness; historical receipts without that witness are not
+upgraded. Call a directly supported runner to produce new test evidence. Existing unresolved
+obligations remain retained and can still be resolved by their matching check or validated setup repair.
+
+Shell verification identity takes the backend's explicit path flavor. Custom backends can supply
+`BashToolOptions.pathFlavor`; native adapters derive it from their selected platform contract.
+Unqualified Windows contexts cannot borrow an operator's current drive. This is lexical context
+validation, not a filesystem authorization check or the full attachment lifecycle migration.
+
 ## Public fixtures
 
 Use generated roots and synthetic records only. Do not copy session transcripts, prompts,

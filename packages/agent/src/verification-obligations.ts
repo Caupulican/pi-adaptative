@@ -22,6 +22,8 @@ export type VerificationRecord = {
 	status: VerificationStatus;
 	originTaskId?: string;
 	outcome?: "executed" | "setup_failed" | "unconfirmed";
+	/** Explicit strength of host evidence. Absence is not an executed-test witness. */
+	evidence?: "tests" | "command";
 	/** Host-derived identity of equivalent requested checks within one workspace. */
 	repairGroup?: string;
 	/** Requested setup replacement; the tracker validates its scope, phase and ordering. */
@@ -62,6 +64,7 @@ function readVerificationRecord(candidate: unknown): VerificationRecord | undefi
 	const status = ownDataValue(candidate, "status");
 	const originTaskId = ownDataValue(candidate, "originTaskId");
 	const outcome = ownDataValue(candidate, "outcome");
+	const evidence = ownDataValue(candidate, "evidence");
 	const repairGroup = ownDataValue(candidate, "repairGroup");
 	const repairOf = ownDataValue(candidate, "repairOf");
 	if (version !== 1 || !isVerificationId(id) || (status !== "failed" && status !== "passed")) return undefined;
@@ -69,6 +72,7 @@ function readVerificationRecord(candidate: unknown): VerificationRecord | undefi
 	if (outcome !== undefined && outcome !== "executed" && outcome !== "setup_failed" && outcome !== "unconfirmed")
 		return undefined;
 	if (status === "passed" && outcome !== undefined && outcome !== "executed") return undefined;
+	if (evidence !== undefined && evidence !== "tests" && evidence !== "command") return undefined;
 	if (repairGroup !== undefined && !isVerificationId(repairGroup)) return undefined;
 	if (repairOf !== undefined && !isVerificationId(repairOf)) return undefined;
 	return {
@@ -77,6 +81,7 @@ function readVerificationRecord(candidate: unknown): VerificationRecord | undefi
 		status,
 		...(originTaskId !== undefined ? { originTaskId } : {}),
 		...(outcome !== undefined ? { outcome } : {}),
+		...(evidence !== undefined ? { evidence } : {}),
 		...(repairGroup !== undefined ? { repairGroup } : {}),
 		...(repairOf !== undefined ? { repairOf } : {}),
 	};
@@ -423,6 +428,11 @@ export class VerificationObligationTracker {
 			errorMessage: VERIFICATION_HANDOFF_REQUIRED_ERROR,
 		};
 	}
+}
+
+/** Passing a command alone cannot establish that tests actually executed. */
+export function isPassingTestVerification(record: VerificationRecord | undefined): record is VerificationRecord {
+	return record?.status === "passed" && record.outcome === "executed" && record.evidence === "tests";
 }
 
 /** Preserve validated verification metadata when the normal failure projection replaces details. */

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { classifyShellVerificationCommand } from "../src/core/tools/shell-test-command.ts";
+import { classifyShellVerificationCommand as classifyWithContext } from "../src/core/tools/shell-test-command.ts";
+
+function classifyShellVerificationCommand(command: string, cwd: string, workspaceRoot?: string) {
+	return classifyWithContext(command, { cwd, workspaceRoot, flavor: "posix" });
+}
 
 describe("shell verification classifier", () => {
 	it("groups explicit setup corrections only within the host workspace and identical verification stages", () => {
@@ -40,12 +44,24 @@ describe("shell verification classifier", () => {
 	});
 
 	it("keeps drive-relative cd opaque because another drive's cwd is shell state", () => {
-		const opaque = classifyShellVerificationCommand("cd C:package && npm test", "D:/workspace");
+		const context = { cwd: "D:/workspace", flavor: "win32" as const };
+		const opaque = classifyWithContext("cd C:package && npm test", context);
 		expect(opaque).toBeDefined();
 		expect(opaque?.cwd).toBeUndefined();
-		const absolute = classifyShellVerificationCommand("cd C:/package && npm test", "D:/workspace");
+		const absolute = classifyWithContext("cd C:/package && npm test", context);
 		expect(absolute?.cwd).toBe("C:\\package");
 		expect(opaque?.id).not.toBe(absolute?.id);
+	});
+	it("uses explicit backend semantics and rejects ambiguous context without borrowing the host cwd", () => {
+		expect(classifyWithContext("cd /package && npm test", { cwd: "Q:/workspace", flavor: "win32" })?.cwd).toBe(
+			"Q:\\package",
+		);
+		expect(classifyWithContext("cd /package && npm test", { cwd: "/workspace", flavor: "posix" })?.cwd).toBe(
+			"/package",
+		);
+		for (const cwd of ["relative", "/root-without-drive", "Q:relative"]) {
+			expect(classifyWithContext("npm test", { cwd, flavor: "win32" })).toBeUndefined();
+		}
 	});
 	it("identifies equivalent reruns from their initial cwd and argument vector", () => {
 		const command = "npx vitest run test/tool-failure-memory.test.ts --pool=forks";

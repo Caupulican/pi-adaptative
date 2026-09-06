@@ -3,6 +3,7 @@
 ### Added
 
 - Explicit backend path and immutable workspace-attachment contexts with generation identities and portable resource references.
+- Validated verification evidence strength and a shared predicate distinguishing witnessed passing tests from command success.
 
 ### Fixed
 

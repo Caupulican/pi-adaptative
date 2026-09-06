@@ -140,13 +140,20 @@ and `packages/coding-agent/test/phone-filesystem-workflow.test.ts`.
 to a passing receipt on the active branch; complete user quotations resolve only to user-role
 records. An unrelated successful command never clears a failed test. Literal argv and actual
 execution directory identify a check; opaque shell expressions retain their exact source.
-Direct Vitest output must confirm nonempty executed tests. Only an explicitly linked, newer
+Direct Vitest and Node TAP/spec output must confirm nonempty executed tests through one bounded
+raw-output lifecycle. Goal test citations require explicit executed-test evidence; opaque command
+success and historical receipts without that witness remain ordinary tool evidence, not test proof.
+This closes the gap where a successful wrapper or a Node command that never ran tests could certify
+a test requirement. Verification path syntax comes from the executing backend, never a guessed
+drive or the operator's ambient directory. Only an explicitly linked, newer
 executed pass with matching host-derived scope can supersede an empty-test setup failure;
 executed or unknown failures cannot be downgraded into setup failures. Compaction retains those
 relationships. Historical receipts without that proof remain unresolved. Pinned by
 `packages/coding-agent/test/goal-evidence-verification.test.ts`,
 `packages/coding-agent/test/bash-verification-boundary.test.ts`, and
-`packages/agent/test/verification-setup-repair.test.ts`.
+`packages/agent/test/verification-setup-repair.test.ts`,
+`packages/coding-agent/test/node-verification-boundary.test.ts`, and
+`packages/coding-agent/test/test-verification-output.test.ts`.
 
 **An unresolved handoff remains readable and unsuccessful.** The host preserves the answer,
 retains the active obligations, and prevents successful goal completion. It does not erase prose
