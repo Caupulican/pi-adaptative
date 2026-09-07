@@ -22,13 +22,13 @@ export function extractPathArguments(params: unknown): string[] {
 	const found: string[] = [];
 	for (const key of PATH_ARGUMENT_KEYS) {
 		const value = record[key];
-		if (typeof value === "string" && value.trim()) found.push(value.trim());
+		if (typeof value === "string" && value.length > 0) found.push(value);
 	}
 	for (const key of PATH_LIST_ARGUMENT_KEYS) {
 		const value = record[key];
 		if (Array.isArray(value)) {
 			for (const entry of value) {
-				if (typeof entry === "string" && entry.trim()) found.push(entry);
+				if (typeof entry === "string" && entry.length > 0) found.push(entry);
 			}
 		}
 	}
@@ -45,7 +45,7 @@ export function extractToolPathArguments(toolName: string, params: unknown): str
 			for (const source of record.sources) {
 				if (!source || typeof source !== "object" || !("path" in source)) continue;
 				const sourcePath = source.path;
-				if (typeof sourcePath === "string" && sourcePath.trim()) paths.push(sourcePath.trim());
+				if (typeof sourcePath === "string" && sourcePath.length > 0) paths.push(sourcePath);
 			}
 		}
 		if (record.action === "discover" && paths.length === 0) paths.push(".");

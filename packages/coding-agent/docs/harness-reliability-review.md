@@ -544,5 +544,27 @@ The unstaged `npm run check` passed; the first commit gate then required the sch
 budget, without removing the contract test. All seven edited tracked files retain strict UTF-8 validity, BOM, newline-kind
 and final-newline signatures; three new files validate as UTF-8. No existing content was transcoded.
 
+Credential path classification now has one dialect-aware policy and a separate native filesystem adapter.
+Five initial failures reproduced Windows dotenv bypasses and literal filename whitespace loss. Three
+additional failures reproduced suffix-based permission after an explicit backend probe failed, unredacted
+probe errors, and execution after cancellation. The shared guard now encloses preflight in its redaction
+boundary and checks cancellation before and after it. ENOENT/ENOTDIR retain narrow missing-file recovery;
+EACCES does not, and an actual directory is not treated as a missing file. Explicit probes retain method
+receivers and never substitute native filesystem results. The older nested migration-path expectation
+was intentionally changed from trimming to literal bytes so permission and execution name the same file.
+All fixtures are synthetic; no credential files or private session contents are copied.
+
+This checkpoint passes 134 targeted tests across six files, including eighteen backend-path cases.
+The pagination checkpoint `32620aff26a3eb35c10ade9147e54936b7430e4b` passed nine GitHub jobs and failed
+Linux shard 4 in the natural-goal continuation fixture (active instead of completed). That entire ten-test
+file passes locally; the CI cause remains unproven. This path-policy stage does not finish general backend
+authorization: same-dialect remote namespaces still need explicit probe wiring through admission, and
+the synchronous policy port is not an asynchronous remote-filesystem adapter. No such guarantee is claimed.
+
+Repository checks pass, including all 34 standalone installer/binary regressions. Clone coverage accounts
+for 972 eligible / 981 owned sources and 941 files in the unchanged 50-token detection pass, with zero
+clones. Five edited tracked files retain strict UTF-8 validity, BOM, newline-kind, and final-newline
+signatures; three new files validate as UTF-8. No existing content was transcoded.
+
 Targeted regression success and a repository check are not release approval. Task-directory binding
 remains open. Exact-candidate remote CI and the documented release gates remain required.

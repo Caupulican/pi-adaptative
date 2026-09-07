@@ -109,7 +109,8 @@ describe("envelope path scope", () => {
 				action: "migrate",
 				sources: [{ path: " first.env " }, { path: "second.env" }],
 			}),
-		).toEqual(["first.env", "second.env"]);
+			// Filename whitespace is literal: policy must check the same target the executor receives.
+		).toEqual([" first.env ", "second.env"]);
 
 		let ran = 0;
 		const runCounter = { content: [{ type: "text", text: "ok" }] };
