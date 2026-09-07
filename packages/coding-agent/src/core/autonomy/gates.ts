@@ -79,6 +79,8 @@ export function evaluateToolGate(input: {
 	toolName: string;
 	args?: unknown;
 	cwd: string;
+	/** Authority roots remain relative to their granting session, not the selected task. */
+	scopeCwd?: string;
 	envelope?: CapabilityEnvelope;
 }): GateOutcome {
 	if (!input.envelope) {
@@ -138,13 +140,13 @@ export function evaluateToolGate(input: {
 	const pathAccess = resolveToolCallPathAccess(envelope.capabilities, input.toolName, input.args);
 	const paths = pathAccess === "none" ? [] : extractCandidatePaths(input.toolName, input.args);
 	for (const targetPath of paths) {
-		if (!isPathWithinEnvelope(envelope, targetPath, input.cwd)) {
+		if (!isPathWithinEnvelope(envelope, targetPath, input.cwd, input.scopeCwd)) {
 			let isDenied = false;
 			try {
 				const target = safeRealpathSync(path.resolve(input.cwd, targetPath));
 				isDenied = (envelope.deniedPaths ?? []).some((denied) => {
 					try {
-						return isPathWithinScope(target, safeRealpathSync(path.resolve(input.cwd, denied)));
+						return isPathWithinScope(target, safeRealpathSync(path.resolve(input.scopeCwd ?? input.cwd, denied)));
 					} catch {
 						return false;
 					}

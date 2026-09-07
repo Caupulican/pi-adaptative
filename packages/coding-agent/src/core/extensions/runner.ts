@@ -2,6 +2,7 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
+import type { ExecutionContext } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { measureJsonLength } from "@caupulican/pi-agent-core/provider-request-estimator";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
@@ -723,7 +724,7 @@ export class ExtensionRunner {
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
 	 */
-	createContext(): ExtensionContext {
+	createContext(executionContext?: ExecutionContext): ExtensionContext {
 		const runner = this;
 		const getModel = this.getModel;
 		return {
@@ -741,7 +742,11 @@ export class ExtensionRunner {
 			},
 			get cwd() {
 				runner.assertActive();
-				return runner.cwd;
+				return executionContext?.cwd ?? runner.cwd;
+			},
+			get executionContext() {
+				runner.assertActive();
+				return executionContext;
 			},
 			get sessionManager() {
 				runner.assertActive();
@@ -919,8 +924,11 @@ export class ExtensionRunner {
 		return modified ? currentMessage : undefined;
 	}
 
-	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
-		const ctx = this.createContext();
+	async emitToolResult(
+		event: ToolResultEvent,
+		executionContext?: ExecutionContext,
+	): Promise<ToolResultEventResult | undefined> {
+		const ctx = this.createContext(executionContext);
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
 
@@ -972,8 +980,11 @@ export class ExtensionRunner {
 		};
 	}
 
-	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
-		const ctx = this.createContext();
+	async emitToolCall(
+		event: ToolCallEvent,
+		executionContext?: ExecutionContext,
+	): Promise<ToolCallEventResult | undefined> {
+		const ctx = this.createContext(executionContext);
 		let result: ToolCallEventResult | undefined;
 		let firstError: unknown;
 

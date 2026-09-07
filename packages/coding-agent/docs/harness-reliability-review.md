@@ -93,9 +93,21 @@ An opaque binding identity in the engine receipt separates failure memory, retry
 and successful-result deduplication across directories and attachment generations. Text-protocol
 replay protection still applies within the same binding and refreshes after a changed binding really
 executes. Capturing the context is browser-safe; filesystem normalization remains in the path adapter.
-Seventeen synthetic engine regressions cover these boundaries. The coding-agent registry, policy
-adapters, persistent task controller, and model controls still need to be connected before enabling
-session-wide task pinning. An engine port alone does not provide that feature.
+Seventeen synthetic engine regressions cover these boundaries.
+
+The definition-first registry now preserves caller-supplied bindings. One execution decorator applies
+credential filtering, envelope checks, and extension identity observation to admitted executors as well
+as ordinary tools. It captures backend metadata before wrappers close over it and releases an acquired
+lease if decoration fails. Policy and extension hooks receive the admitted directory; concurrent hooks
+do not change the runner's ambient directory. Relative permission roots remain anchored to the granting
+session. Hooks may still edit arguments, but their final arguments are checked against the captured grant.
+
+Seventeen adapter regressions cover binding retention, guard composition, progress/result/error redaction,
+bound recovery, hook-edited paths, concurrent contexts, and stale runner access. Two use the real
+AgentSession registry with a faux provider and synthetic executors. This proves caller-supplied bindings
+survive the registry, not that the persistent task controller or model controls are connected. Those
+runtime connections remain necessary before enabling session-wide task pinning. Native filesystem guards
+are not remote-backend authorization adapters.
 
 The model must be able to start tasks in different directories and explicitly decide which tasks
 are pinned. Pinning is durable execution state, not a prompt note or a process-global `chdir`.
@@ -186,6 +198,11 @@ field or a prompt instruction. All execution paths must consume the binding befo
 - The subsequent engine-binding slice passes 314 targeted agent tests across 14 files and six
   coding-agent autonomy tests. This includes 17 binding regressions and seven new receipt decoder
   cases. The earlier counts overlap these suites and must not be added as distinct coverage.
+- The engine checkpoint `fbdbe077e2db625663504bec8a2ed8f2f5e25d37` passed all ten GitHub CI jobs.
+  The following registry/policy adapter slice passes 201 targeted coding-agent tests in 12 files,
+  including 17 new adapter cases. Repository checks pass with 962 eligible / 971 owned production
+  files accounted for and zero clones. Ten edited tracked files retain their BOM/newline conventions;
+  two new files validate as UTF-8. These edits do not transcode existing content.
 - Host npm configuration emits `globalignorefile` warnings. Local Node is 24.18.1, below the declared
   24.20.0 minimum. Successful checks on this host do not replace supported-runtime CI evidence.
 

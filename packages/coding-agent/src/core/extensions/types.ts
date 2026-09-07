@@ -11,9 +11,11 @@
 import type {
 	AgentMessage,
 	AgentToolFailureRecoveryContract,
+	AgentToolInvocation,
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	CustomMessage,
+	ExecutionContext,
 	ThinkingLevel,
 	ToolCallRepairInfo,
 	ToolExecutionMode,
@@ -323,6 +325,8 @@ export interface ExtensionContext {
 	mode: "tui" | "print" | "rpc";
 	/** Current working directory */
 	cwd: string;
+	/** Immutable host context for an admitted tool call; absent for non-tool events. */
+	readonly executionContext?: ExecutionContext;
 	/** Session manager (read-only) */
 	sessionManager: ReadonlySessionManager;
 	/** Model registry for API key resolution */
@@ -468,6 +472,12 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	prepareArguments?: (args: unknown) => Static<TParams>;
 	/** Explicit tool-owned failure targets, corrective actions, and exact recovery evidence. */
 	failureRecovery?: AgentToolFailureRecoveryContract<TParams>;
+	/** Host-owned invocation binding, preserved through the definition-first tool registry. */
+	bindInvocation?(
+		toolCallId: string,
+		params: Static<TParams>,
+		signal?: AbortSignal,
+	): Promise<AgentToolInvocation<TParams, TDetails>>;
 
 	/**
 	 * Per-tool execution mode override.

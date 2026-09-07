@@ -8,6 +8,7 @@ import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { parseShellSearchInvocationScope, type ShellContentSearchTool } from "../tools/search-command-guard.ts";
 import { tokenizeShellCommand } from "../tools/shell-command-parser.ts";
+import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 
 const DIRECT_PATH_TOOLS = new Set(["read", "edit", "write", "ls", "image_generate"]);
 const SHELL_INSPECTION_COMMANDS = new Set([
@@ -434,17 +435,17 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 	cwd: string,
 	boundary?: CredentialExposureBoundary,
 ): AgentTool<TParameters, TDetails> {
-	return {
-		...tool,
+	return wrapToolExecution(tool, (executor, executionContext) => ({
+		...executor,
 		failureRecovery: {
-			...tool.failureRecovery,
+			...executor.failureRecovery,
 			getFailureCorrection(params, failure) {
 				if (failure.failureCode === "credential_access_blocked") return failure.message;
-				return tool.failureRecovery?.getFailureCorrection?.(params, failure);
+				return executor.failureRecovery?.getFailureCorrection?.(params, failure);
 			},
 		},
 		async execute(toolCallId, params, signal, onUpdate) {
-			const blockReason = credentialToolBlockReason(tool.name, params, cwd, boundary);
+			const blockReason = credentialToolBlockReason(tool.name, params, executionContext?.cwd ?? cwd, boundary);
 			if (blockReason) {
 				throw new AgentToolExecutionError(
 					blockReason,
@@ -459,7 +460,7 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 					}
 				: undefined;
 			try {
-				return redactResult(await tool.execute(toolCallId, params, signal, safeUpdate), boundary);
+				return redactResult(await executor.execute(toolCallId, params, signal, safeUpdate), boundary);
 			} catch (error) {
 				if (error instanceof Error) {
 					const message = boundary
@@ -473,5 +474,5 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 				throw new Error("Credential-safe tool execution failed without retaining raw error output.");
 			}
 		},
-	};
+	}));
 }

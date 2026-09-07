@@ -1,4 +1,5 @@
 import type { TSchema } from "typebox";
+import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import type { ToolDefinition } from "./types.ts";
 
 const MAX_IDENTITY_CHARS = 256;
@@ -59,9 +60,8 @@ export function applyExtensionSessionHeal<TParams extends TSchema, TDetails>(
 	scope: ExtensionSessionScope,
 ): ToolDefinition<TParams, TDetails> {
 	const originalPrepare = definition.prepareArguments;
-	const originalExecute = definition.execute;
-	return {
-		...definition,
+	return wrapToolExecution(definition, (executor) => ({
+		...executor,
 		prepareArguments: (args) => {
 			const prepared = originalPrepare ? originalPrepare(args) : args;
 			return scope.prepare(ownerKey, definition.parameters, prepared) as ReturnType<
@@ -69,11 +69,11 @@ export function applyExtensionSessionHeal<TParams extends TSchema, TDetails>(
 			>;
 		},
 		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
-			const result = await originalExecute(toolCallId, params, signal, onUpdate, ctx);
+			const result = await executor.execute(toolCallId, params, signal, onUpdate, ctx);
 			scope.observeSuccess(ownerKey, definition.parameters, params, result.details);
 			return result;
 		},
-	};
+	}));
 }
 
 export function extensionScopeOwnerKey(source: { path: string; source: string; baseDir?: string }): string | undefined {

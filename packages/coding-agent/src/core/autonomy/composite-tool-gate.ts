@@ -1,5 +1,6 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { TSchema } from "typebox";
+import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { evaluateToolGate } from "./gates.ts";
 
@@ -46,16 +47,22 @@ export function wrapToolWithCapabilityEnvelopeGate<TParameters extends TSchema, 
 	envelope: CapabilityEnvelope | undefined,
 ): AgentTool<TParameters, TDetails> {
 	if (!envelope) return tool;
-	return {
-		...tool,
+	return wrapToolExecution(tool, (executor, executionContext) => ({
+		...executor,
 		async execute(toolCallId, params, signal, onUpdate) {
-			const outcome = evaluateToolGate({ toolName: tool.name, args: params, cwd, envelope });
+			const outcome = evaluateToolGate({
+				toolName: tool.name,
+				args: params,
+				cwd: executionContext?.cwd ?? cwd,
+				scopeCwd: cwd,
+				envelope,
+			});
 			if (outcome.outcome === "block" || outcome.outcome === "ask-user") {
 				throw new Error(
 					`Tool '${tool.name}' execution blocked by autonomy gate [${outcome.gate}]: ${outcome.message ?? "denied"} (${outcome.reasonCode})`,
 				);
 			}
-			return tool.execute(toolCallId, params, signal, onUpdate);
+			return executor.execute(toolCallId, params, signal, onUpdate);
 		},
-	};
+	}));
 }

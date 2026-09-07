@@ -39,47 +39,58 @@ export class ToolGateController {
 		this.deps = deps;
 	}
 
-	readonly beforeToolCall: BeforeToolCall = async ({ toolCall, args }) => {
+	readonly beforeToolCall: BeforeToolCall = async ({ toolCall, args, executionContext }) => {
 		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);
 		if (escalation) {
 			return escalation;
 		}
 
 		// Autonomy tool gating
-		const envelope = this.deps.getCapabilityEnvelope();
-		const gateResult = evaluateToolGate({
-			toolName: toolCall.name,
-			args,
-			cwd: this.deps.getCwd(),
-			envelope,
-		});
-
-		if (envelope) {
-			this.deps.recordGateOutcome(gateResult);
-		}
-
-		if (gateResult.outcome === "block" || gateResult.outcome === "ask-user") {
-			return {
-				block: true,
-				reason: `Tool execution blocked by autonomy gate [${gateResult.gate}]: ${gateResult.message} (${gateResult.reasonCode})`,
-			};
-		}
+		const envelope = structuredClone(this.deps.getCapabilityEnvelope());
+		const scopeCwd = this.deps.getCwd();
+		const evaluate = (): BeforeToolCallResult | undefined => {
+			const gateResult = evaluateToolGate({
+				toolName: toolCall.name,
+				args,
+				cwd: executionContext?.cwd ?? scopeCwd,
+				scopeCwd,
+				envelope,
+			});
+			if (envelope) this.deps.recordGateOutcome(gateResult);
+			if (gateResult.outcome === "block" || gateResult.outcome === "ask-user") {
+				return {
+					block: true,
+					reason: `Tool execution blocked by autonomy gate [${gateResult.gate}]: ${gateResult.message} (${gateResult.reasonCode})`,
+				};
+			}
+			return undefined;
+		};
+		const denied = evaluate();
+		if (denied) return denied;
 
 		const runner = this.deps.getExtensionRunner();
 		let extensionResult: BeforeToolCallResult | undefined;
 		if (runner.hasHandlers("tool_call")) {
 			try {
-				extensionResult = await runner.emitToolCall({
-					type: "tool_call",
-					toolName: toolCall.name,
-					toolCallId: toolCall.id,
-					input: args as Record<string, unknown>,
-				});
+				extensionResult = await runner.emitToolCall(
+					{
+						type: "tool_call",
+						toolName: toolCall.name,
+						toolCallId: toolCall.id,
+						input: args as Record<string, unknown>,
+					},
+					executionContext,
+				);
 			} catch (err) {
 				if (err instanceof Error) {
 					throw err;
 				}
 				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
+			}
+			// Hooks may edit arguments, but cannot move this call outside its admitted grant.
+			if (!extensionResult?.block) {
+				const deniedAfterHook = evaluate();
+				if (deniedAfterHook) return deniedAfterHook;
 			}
 		}
 		if (extensionResult) return extensionResult;
@@ -92,7 +103,7 @@ export class ToolGateController {
 		return undefined;
 	};
 
-	readonly afterToolCall: AfterToolCall = async ({ toolCall, args, result, isError }) => {
+	readonly afterToolCall: AfterToolCall = async ({ toolCall, args, result, isError, executionContext }) => {
 		const runner = this.deps.getExtensionRunner();
 		let content = result.content;
 		let details = result.details;
@@ -101,16 +112,19 @@ export class ToolGateController {
 		let resolvedIsError = isError;
 
 		if (runner.hasHandlers("tool_result")) {
-			const hookResult = await runner.emitToolResult({
-				type: "tool_result",
-				toolName: toolCall.name,
-				toolCallId: toolCall.id,
-				input: args as Record<string, unknown>,
-				content,
-				details,
-				isError,
-				usage,
-			});
+			const hookResult = await runner.emitToolResult(
+				{
+					type: "tool_result",
+					toolName: toolCall.name,
+					toolCallId: toolCall.id,
+					input: args as Record<string, unknown>,
+					content,
+					details,
+					isError,
+					usage,
+				},
+				executionContext,
+			);
 			if (hookResult) {
 				content = hookResult.content ?? content;
 				details = hookResult.details;

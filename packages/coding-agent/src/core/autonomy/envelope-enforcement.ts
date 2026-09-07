@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { resolveToolCallPathAccess } from "../tool-capability-policy.ts";
+import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
 
@@ -70,12 +71,17 @@ export function extractToolPathArguments(toolName: string, params: unknown): str
  * under an allowed root cannot smuggle a write outside the scope, and a shortcut into a
  * denied subtree is still denied. An unresolvable target fails closed.
  */
-export function isPathWithinEnvelope(envelope: CapabilityEnvelope, rawPath: string, cwd: string): boolean {
+export function isPathWithinEnvelope(
+	envelope: CapabilityEnvelope,
+	rawPath: string,
+	cwd: string,
+	scopeCwd = cwd,
+): boolean {
 	const lexicalTarget = resolve(cwd, rawPath);
 	const allowed = envelope.allowedPaths ?? [];
 	if (allowed.length > 0) {
 		const couldBeAllowed = allowed.some((root) => {
-			const lexicalRoot = resolve(cwd, root);
+			const lexicalRoot = resolve(scopeCwd, root);
 			if (isPathWithinScope(lexicalTarget, lexicalRoot)) return true;
 			try {
 				return isPathWithinScope(lexicalTarget, safeRealpathSync(lexicalRoot));
@@ -93,7 +99,7 @@ export function isPathWithinEnvelope(envelope: CapabilityEnvelope, rawPath: stri
 	}
 	for (const denied of envelope.deniedPaths ?? []) {
 		try {
-			if (isPathWithinScope(target, safeRealpathSync(resolve(cwd, denied)))) return false;
+			if (isPathWithinScope(target, safeRealpathSync(resolve(scopeCwd, denied)))) return false;
 		} catch {
 			// Mirror checkPathScope: an unresolvable deny root cannot match anything.
 		}
@@ -101,7 +107,7 @@ export function isPathWithinEnvelope(envelope: CapabilityEnvelope, rawPath: stri
 	if (allowed.length === 0) return true;
 	return allowed.some((root) => {
 		try {
-			return isPathWithinScope(target, safeRealpathSync(resolve(cwd, root)));
+			return isPathWithinScope(target, safeRealpathSync(resolve(scopeCwd, root)));
 		} catch {
 			return false;
 		}
@@ -129,35 +135,37 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 	envelope: CapabilityEnvelope,
 	cwd: string,
 ): T {
-	type Execute = T["execute"];
-	const execute = (...args: Parameters<Execute>): ReturnType<Execute> => {
-		const params = args[1];
-		const pathAccess = resolveToolCallPathAccess(envelope.capabilities, tool.name, params);
-		if (pathAccess !== "none") {
-			for (const rawPath of extractToolPathArguments(tool.name, params)) {
-				if (!isPathWithinEnvelope(envelope, rawPath, cwd)) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `envelope_path_denied: "${rawPath}" is outside envelope ${envelope.id}'s path scope. The tool was NOT run.`,
+	return wrapToolExecution(tool, (executor, executionContext) => {
+		type Execute = T["execute"];
+		const execute = (...args: Parameters<Execute>): ReturnType<Execute> => {
+			const params = args[1];
+			const pathAccess = resolveToolCallPathAccess(envelope.capabilities, tool.name, params);
+			if (pathAccess !== "none") {
+				for (const rawPath of extractToolPathArguments(tool.name, params)) {
+					if (!isPathWithinEnvelope(envelope, rawPath, executionContext?.cwd ?? cwd, cwd)) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `envelope_path_denied: "${rawPath}" is outside envelope ${envelope.id}'s path scope. The tool was NOT run.`,
+								},
+							],
+							details: {
+								outcome: "envelope_path_denied",
+								tool: tool.name,
+								path: rawPath,
+								envelopeId: envelope.id,
 							},
-						],
-						details: {
-							outcome: "envelope_path_denied",
-							tool: tool.name,
-							path: rawPath,
-							envelopeId: envelope.id,
-						},
-						isError: true,
-					} as ReturnType<Execute>;
+							isError: true,
+						} as ReturnType<Execute>;
+					}
 				}
 			}
-		}
-		return tool.execute(...args) as ReturnType<Execute>;
-	};
-	return {
-		...tool,
-		execute,
-	} as T;
+			return executor.execute(...args) as ReturnType<Execute>;
+		};
+		return {
+			...executor,
+			execute,
+		} as T;
+	});
 }

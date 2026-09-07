@@ -1,11 +1,12 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
+import type { TSchema } from "typebox";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 
 /** Wrap a ToolDefinition into an AgentTool for the core runtime. */
-export function wrapToolDefinition<TDetails = unknown>(
-	definition: ToolDefinition<any, TDetails>,
+export function wrapToolDefinition<TParameters extends TSchema, TDetails = unknown>(
+	definition: ToolDefinition<TParameters, TDetails>,
 	ctxFactory?: () => ExtensionContext,
-): AgentTool<any, TDetails> {
+): AgentTool<TParameters, TDetails> {
 	return {
 		name: definition.name,
 		label: definition.label,
@@ -14,6 +15,7 @@ export function wrapToolDefinition<TDetails = unknown>(
 		parameters: definition.parameters,
 		prepareArguments: definition.prepareArguments,
 		failureRecovery: definition.failureRecovery,
+		bindInvocation: definition.bindInvocation,
 		executionMode: definition.executionMode,
 		execute: (toolCallId, params, signal, onUpdate) =>
 			definition.execute(toolCallId, params, signal, onUpdate, ctxFactory?.() as ExtensionContext),
@@ -34,15 +36,18 @@ export function wrapToolDefinitions(
  * This keeps AgentSession's internal registry definition-first even when a caller
  * provides plain AgentTool overrides that do not include prompt metadata or renderers.
  */
-export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDefinition<any, unknown> {
+export function createToolDefinitionFromAgentTool<TParameters extends TSchema, TDetails>(
+	tool: AgentTool<TParameters, TDetails>,
+): ToolDefinition<TParameters, TDetails> {
 	return {
 		name: tool.name,
 		label: tool.label,
 		description: tool.description,
 		promptSnippet: tool.providerDescription,
-		parameters: tool.parameters as any,
+		parameters: tool.parameters,
 		prepareArguments: tool.prepareArguments,
 		failureRecovery: tool.failureRecovery,
+		bindInvocation: tool.bindInvocation,
 		executionMode: tool.executionMode,
 		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),
 	};
