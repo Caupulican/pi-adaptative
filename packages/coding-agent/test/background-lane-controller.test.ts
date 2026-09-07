@@ -601,49 +601,71 @@ describe("quiesce registry", () => {
 		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
 	});
 
-	it("deregisters a worker lane from the quiesce registry even when it throws", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-test-quiesce-worker-throw-"));
-		const model = { provider: "test", id: "test-model", contextWindow: 128_000 };
-		const settingsManager = SettingsManager.inMemory({
-			workerDelegation: { enabled: true, orchestrationProfile: "throw-worker", maxConcurrent: 3 },
-		});
-		saveTestWorkerOrchestrationProfile({
-			agentDir,
-			cwd: "/repo",
-			profile: createTestWorkerOrchestrationProfile({ profileId: "throw-worker", model }),
-		});
-		const controller = new BackgroundLaneController({
-			isDisposed: () => false,
-			getSessionId: () => "test-session",
-			getCwd: () => "/repo",
-			getAgentDir: () => agentDir,
-			getSessionManager: () =>
-				({
-					getEntries: () => [],
-					getLeafId: () => null,
-					getEntry: () => undefined,
-					buildSessionContext: () => ({ messages: [] }),
-					appendCustomEntry: () => "entry-1",
-				}) as unknown as SessionManager,
-			getSettingsManager: () => settingsManager,
-			getResourceLoader: () => createTestResourceLoader(),
-			getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,
-			getModel: () => model,
-			isModelExhausted: () => false,
-			isDelegateToolActive: () => true,
-			getCapabilityEnvelope: () => undefined,
-			getGoalStateSnapshot: () => undefined,
-			readMemoryForLane: async () => "",
-			// Throws inside the lane's try block, after registration — proves the finally still deregisters.
-			runIsolatedCompletion: () => Promise.reject(new Error("boom")),
-			emitAutonomyTelemetry: () => {},
-			emit: () => {},
-		} as never);
+	it.each(["existing", "missing"])(
+		"keeps the quiesce registry empty after a throwing worker with a %s directory",
+		async (directory) => {
+			const agentDir = mkdtempSync(join(tmpdir(), "pi-test-quiesce-worker-throw-"));
+			const cwd = directory === "existing" ? agentDir : join(agentDir, "missing");
+			const model = { provider: "test", id: "test-model", contextWindow: 128_000 };
+			const settingsManager = SettingsManager.inMemory({
+				workerDelegation: { enabled: true, orchestrationProfile: "throw-worker", maxConcurrent: 3 },
+			});
+			saveTestWorkerOrchestrationProfile({
+				agentDir,
+				cwd,
+				profile: createTestWorkerOrchestrationProfile({ profileId: "throw-worker", model }),
+			});
+			let registeredDuringExecution = false;
+			const runIsolatedCompletion = vi.fn(() => {
+				registeredDuringExecution = getInFlightWorkUnits(agentDir).length === 1;
+				return Promise.reject(new Error("boom"));
+			});
+			const controller = new BackgroundLaneController({
+				isDisposed: () => false,
+				getSessionId: () => "test-session",
+				getCwd: () => cwd,
+				getAgentDir: () => agentDir,
+				getSessionManager: () =>
+					({
+						getEntries: () => [],
+						getLeafId: () => null,
+						getEntry: () => undefined,
+						buildSessionContext: () => ({ messages: [] }),
+						appendCustomEntry: () => "entry-1",
+					}) as unknown as SessionManager,
+				getSettingsManager: () => settingsManager,
+				getResourceLoader: () => createTestResourceLoader(),
+				getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,
+				getModel: () => model,
+				isModelExhausted: () => false,
+				isDelegateToolActive: () => true,
+				getCapabilityEnvelope: () => undefined,
+				getGoalStateSnapshot: () => undefined,
+				readMemoryForLane: async () => "",
+				// Throws inside the lane's try block, after registration — proves the finally still deregisters.
+				runIsolatedCompletion,
+				emitAutonomyTelemetry: () => {},
+				emit: () => {},
+			} as never);
 
-		const outcome = await controller.runWorkerDelegationOnce({ instructions: "do something" });
-
-		expect(outcome.started).toBe(true);
-		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
-		rmSync(agentDir, { recursive: true, force: true });
-	});
+			try {
+				const outcome = await controller.runWorkerDelegationOnce({ instructions: "do something" });
+				if (directory === "existing") {
+					expect(outcome, JSON.stringify(outcome)).toMatchObject({ started: true });
+					expect(runIsolatedCompletion).toHaveBeenCalledOnce();
+					expect(registeredDuringExecution).toBe(true);
+				} else {
+					expect(outcome).toMatchObject({
+						started: false,
+						skipReason: expect.stringContaining("worker_directory_unavailable:"),
+					});
+					expect(runIsolatedCompletion).not.toHaveBeenCalled();
+				}
+				expect(getInFlightWorkUnits(agentDir)).toEqual([]);
+			} finally {
+				controller.abortInFlightLanes();
+				rmSync(agentDir, { recursive: true, force: true });
+			}
+		},
+	);
 });

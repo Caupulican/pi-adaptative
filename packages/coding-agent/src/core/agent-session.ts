@@ -180,6 +180,7 @@ import type { ResourceProfileFilterSettings, SettingsManager, SettingsScope } fr
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
+import { captureSessionTaskDirectoryContext } from "./tasks/task-directory-context.ts";
 import { formatTaskStepsContext, type TaskStepsState } from "./tasks/task-state.ts";
 import { ToolGateController } from "./tool-gate-controller.ts";
 import { type ToolProbeReport, type ToolProbeResult, ToolProtocolController } from "./tool-protocol-controller.ts";
@@ -780,6 +781,7 @@ export class AgentSession {
 			maybeDrainBrainCuration: () => this._maybeDrainBrainCuration(),
 			appendMemoryEvidence: (messages, report) => this._maybeAppendMemoryEvidenceBlock(messages, report),
 			previewReflectionCue: () => this._reflection.previewCurrentTurnCue(),
+			previewTaskDirectoryContext: () => captureSessionTaskDirectoryContext(this.sessionManager),
 			getGoalState: () => this.getGoalStateSnapshot(),
 			skillVault: this._skillVault,
 			applyPathAliases: (messages) => this._pipeline.applyPathAliases(messages),

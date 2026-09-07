@@ -208,9 +208,16 @@ guard path; an explicitly supplied backend retains its own executor, context, an
 cover directory replacement between provider dispatch and tool execution, read/write negative controls,
 credential refusal, cancellation before backend acquisition, and prototype-owned backend state.
 
+Saved directory context now projects from the branch journal before provider requests, independently
+of retained tool output. It uses the existing binding resolver and active checklist cursor; it creates
+no second registry or execution authority. The existing transient-record owner appends one record per
+change, including explicit clearing, without rewriting the system prompt or earlier records. Directory,
+task, session, and branch changes invalidate accepted plans. The projection is bounded to 16 KiB and
+omits whole catalogue rows or an oversized active path rather than exposing a partial executable path.
+Corrupt latest state emits a static diagnosis without resurrecting an older binding or its raw payload.
+
 This integration is not the completed portability contract. Delegated workers still need their own
-registry; persisted relative goal-evidence identity and child
-receipt identity need review, and model context projection must survive compaction.
+registry; persisted relative goal-evidence identity and child receipt identity need review.
 Native attachment IDs now retain a hash of the original device/file identity. Replacing a directory
 at its saved path or retargeting its junction requires explicit reattachment, including after runtime
 restart. Missing ambient roots leave status and reattachment available; a directory appearing later
@@ -459,6 +466,30 @@ with zero clones. Eight tracked files preserve strict UTF-8 validity, BOM, newli
 signatures; the new fixture is synthetic UTF-8. No existing content was transcoded. Historical path-only
 workers still have their explicitly documented weaker identity guarantee, and native metadata validation
 does not protect against an external filesystem swap after admission.
+
+The per-invocation checkpoint `a0c5ce04fa5a92dc53655fa6e66a4b7b8dcaaa81` passed eight GitHub jobs.
+Both shard-3 jobs failed the quiesce fixture before execution because its synthetic `/repo` did not
+exist. Local reproduction confirmed `worker_directory_unavailable:ENOENT`, not a cleanup regression.
+The fixture now uses a native temporary directory and proves registration during the throwing call
+and deregistration afterward. A missing-directory control proves refusal without calling the provider.
+
+The model-context slice passes 110 targeted tests across twelve files, including fifteen new cases.
+Removing only the session projection wiring independently reproduced missing directory context after
+a real compaction checkpoint and reload, with no old tool result left in provider history. Actual journal
+reopening, task changes, pinned-versus-inherited paths, stale acceptance, corrupt latest state, unchanged
+record deduplication, and multibyte bounds have synthetic controls. Initial fixture mistakes (a nonexistent
+message-replacement API, a branch API misuse, and comparing across reload's separate tool-surface refresh)
+were corrected; they are test-author failures, not additional production defects or private-session errors.
+The first repository check also caught two omitted timestamp/detail arguments in new message fixtures;
+those fixture calls now satisfy the declared API and the focused tests and TypeScript check pass.
+The clone audit accounts for 968 eligible / 977 owned sources, 937 in the unchanged 50-token detection
+pass, with zero clones under the existing 20,000-line / 2 MiB caps. Execution authority remains in the
+directory state/controller and journal adapter; projection does not perform filesystem admission.
+All six edited tracked files retain their strict UTF-8 validity, BOM, newline-kind and final-newline
+signatures; three new files are synthetic UTF-8. No existing content was transcoded.
+The full task_directory status response is still a bounded-state but potentially large snapshot, not a
+paged catalogue. This slice does not resolve backend fencing, pre-conversation persistence, or the other
+remaining portability reviews above.
 
 Targeted regression success and a repository check are not release approval. Task-directory binding
 remains open. Exact-candidate remote CI and the documented release gates remain required.

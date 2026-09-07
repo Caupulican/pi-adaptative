@@ -13,6 +13,11 @@ import { captureGoalContextProjection, injectCompactGoalContext } from "./goals/
 import type { GoalState } from "./goals/goal-state.ts";
 import type { CurrentTurnReflectionCuePlan } from "./reflection-controller.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
+import {
+	TASK_DIRECTORY_CONTEXT_CLEARED,
+	TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE,
+	type TaskDirectoryContextPlan,
+} from "./tasks/task-directory-context.ts";
 
 export interface ProviderRequestContextControllerDeps {
 	transformBase?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -39,6 +44,7 @@ export interface ProviderRequestContextControllerDeps {
 	maybeDrainBrainCuration(): void;
 	appendMemoryEvidence(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[];
 	previewReflectionCue?(): CurrentTurnReflectionCuePlan | undefined;
+	previewTaskDirectoryContext?(): TaskDirectoryContextPlan;
 	getGoalState(): GoalState | undefined;
 	skillVault: SkillVaultController;
 	applyPathAliases(messages: AgentMessage[]): {
@@ -136,9 +142,29 @@ export class ProviderRequestContextController {
 		const extensionPlan = await this.deps.transformExtensions(transformed);
 		const goalContextProjection = captureGoalContextProjection(extensionPlan.messages);
 		const reflectionCuePlan = this.deps.previewReflectionCue?.();
+		const directoryPlan = this.deps.previewTaskDirectoryContext?.();
+		const directoryContent =
+			directoryPlan?.content ??
+			(directoryPlan &&
+			extensionPlan.messages.some(
+				(message) => message.role === "custom" && message.customType === TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE,
+			)
+				? TASK_DIRECTORY_CONTEXT_CLEARED
+				: undefined);
 		const providerTransients = [
 			...extensionPlan.transientMessages,
 			...(reflectionCuePlan ? [reflectionCuePlan.message] : []),
+			...(directoryContent
+				? [
+						createCustomMessage(
+							TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE,
+							directoryContent,
+							false,
+							undefined,
+							deterministicTransientTimestamp(directoryContent),
+						),
+					]
+				: []),
 		];
 		const durableMessages = injectCompactGoalContext(extensionPlan.messages, undefined);
 		// `sentPrefixCount` indexes `messages` as received above; `durableMessages` is the same
@@ -181,6 +207,7 @@ export class ProviderRequestContextController {
 		const dependenciesCurrent = () =>
 			extensionPlan.isCurrent?.() !== false &&
 			reflectionCuePlan?.isCurrent() !== false &&
+			directoryPlan?.isCurrent() !== false &&
 			this.deps.skillVault.getContextRevision() === skillRevision &&
 			// The goal snapshot is one shared frozen value per journal position (session-goal-state.ts).
 			this.deps.getGoalState() === goalState;
