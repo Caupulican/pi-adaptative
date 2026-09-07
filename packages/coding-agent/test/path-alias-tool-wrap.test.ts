@@ -1,3 +1,4 @@
+import { join, resolve } from "node:path";
 import { createExecutionContext } from "@caupulican/pi-agent-core/paths";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
@@ -40,34 +41,36 @@ describe("path alias tool wrapper", () => {
 	it("anchors expansions to the legend root when the admitted directory differs from it", async () => {
 		// Live defect (Windows probe): after `task_directory select packages/coding-agent`, `p/…` expanded
 		// to a repo-relative path that the bound executor resolved against the pinned directory.
+		// The legend is host-owned, so the fixture uses host-absolute paths on every platform.
+		const root = resolve("/repo");
+		const hostTable = extendPathAliasTable(emptyPathAliasTable(root), [
+			"packages/coding-agent/src/core/tools/grep.ts",
+		]).table;
+		const pinned = join(root, "packages", "coding-agent");
+		const expected = join(pinned, "src", "core", "tools", "grep.ts");
 		const { tool, calls } = recordingTool();
 		const executionContext = createExecutionContext({
 			attachment: {
 				workspaceId: "coding-agent",
 				attachmentId: "coding-agent-v1",
-				root: "/repo/packages/coding-agent",
-				flavor: "posix",
-				caseSensitive: true,
+				root: pinned,
+				flavor: process.platform === "win32" ? "win32" : "posix",
+				caseSensitive: process.platform !== "win32",
 			},
-			cwd: "/repo/packages/coding-agent",
+			cwd: pinned,
 			sessionId: "alias-test",
 			generation: 2,
 		});
 		const wrapped = wrapToolWithPathAliasExpansion(
 			{ ...tool, bindInvocation: async () => ({ executionContext, execute: tool.execute, release: () => {} }) },
-			() => table,
+			() => hostTable,
 			new WeakSet(),
-			() => "/repo",
+			() => root,
 		);
 		const invocation = await wrapped.bindInvocation!("bound", { path: "p/grep.ts", code: "open('p/grep.ts')" });
 		await invocation.execute("bound", { path: "p/grep.ts", code: "open('p/grep.ts')" });
 		invocation.release();
-		expect(calls).toEqual([
-			{
-				path: "/repo/packages/coding-agent/src/core/tools/grep.ts",
-				code: "open('/repo/packages/coding-agent/src/core/tools/grep.ts')",
-			},
-		]);
+		expect(calls).toEqual([{ path: expected, code: `open('${expected}')` }]);
 	});
 
 	it.each(["p/grep.ts", "p/ghost.ts"])(
