@@ -148,7 +148,17 @@ Six synthetic workflow regressions cover selected-versus-ambient projects, inval
 cancellation forwarding, pin/select/reload/unpin, and compact goal completion behind an active pipeline.
 The first four independently reproduced wrong-project behavior before the runtime wiring change.
 
-This integration is not the completed portability contract. Delegated/background
+Background handoffs now retain an immutable admitted context and the engine's shared binding scope in
+their running journal record. Unknown terminals, cancellation, process loss, and restart keep that same
+scope without inventing completion. Completion accepts a receipt only when request and binding identities
+both match; scoped passing verification additionally requires a completed successful operation. One rule
+guards live retention, restoration, and terminal projection. A data-only core context decoder rejects
+accessors and malformed records; restored context is historical provenance, never renewed authority.
+Synthetic differential tests reproduce scope loss, foreign-scope acceptance, contradictory passing
+verification, and foreign-session admission. A real native AgentSession fixture verifies selected-project
+I/O and matching foreground/background receipt scopes through an event-driven manual handoff.
+
+This integration is not the completed portability contract. Delegated worker
 task creation still needs an end-to-end binding audit, persisted relative goal-evidence identity and child
 receipt identity need review, and model context
 projection must survive compaction.
@@ -286,6 +296,22 @@ a schema field or a prompt instruction. All execution paths must consume the bin
   965 eligible / 974 owned files with the unchanged 20,000-line / 2 MiB caps and zero clones. All five edited tracked
   files retain their valid UTF-8, BOM, newline-kind and final-newline signatures; the new fixture is
   UTF-8. No existing file was transcoded. Exact-checkpoint Windows CI is still required.
+- The workflow checkpoint `b314aa8fbd7013b61899f9cbe6617247acb8860d` passed six GitHub jobs and failed
+  four. Both platform failures reproduced locally: the remaining no-builtin-tools catalogue omitted
+  task_directory, and the natural-goal continuation test asserted immediately after fake timer drainage
+  while real filesystem admission was still pending. The test now awaits the real automatic continuation
+  promise, without invoking a second loop, polling, or changing production scheduling. Earlier catalogue,
+  image-accounting, and Windows path-alias fixtures passed in this run.
+- The background-binding checkpoint passes 183 targeted tests across twelve files (97 agent and
+  86 coding-agent). Eleven new background-receipt cases and twelve context-decoder cases accompany
+  the real native background-session fixture. Scope loss and mismatched/unknown execution evidence
+  failed before the fixes; the first decoder probe failed to load its not-yet-added export, which is
+  test-first scaffolding rather than proof of an existing defect. An additional accessor probe caught
+  unsafe restoration access before correction. The clone gate initially detected repeated wire-record
+  validation; both decoders now use one data-only wire-record owner. Coverage accounts for 966 eligible
+  / 975 owned production files, with zero clones at unchanged sensitivity. Ten edited tracked files
+  retain their UTF-8 validity, BOM and newline conventions; two new files validate as UTF-8. No existing
+  content was transcoded. Worker propagation and attachment identity are not proved by this checkpoint.
 - Host npm configuration emits `globalignorefile` warnings. Local Node is 24.18.1, below the declared
   24.20.0 minimum. Successful checks on this host do not replace supported-runtime CI evidence.
 

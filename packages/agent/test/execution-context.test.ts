@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { decodeExecutionContext } from "../src/execution-context.ts";
 import {
 	createExecutionContext,
 	type ExecutionContext,
@@ -17,6 +18,43 @@ function context(root = "/fixture/repository", attachmentId = "fixture-attachmen
 }
 
 describe("host-owned execution context", () => {
+	it("decodes a durable independent context without invoking data accessors", () => {
+		const raw = JSON.parse(JSON.stringify({ ...context(), taskId: "step-2" }));
+		const decoded = decodeExecutionContext(raw);
+		expect(decoded).toEqual(raw);
+		expect(Object.isFrozen(decoded)).toBe(true);
+		expect(Object.isFrozen(decoded?.attachment)).toBe(true);
+		raw.cwd = "/changed";
+		expect(decoded?.cwd).toBe("/fixture/repository/package");
+		const getter = Object.defineProperty({}, "attachment", {
+			get: () => {
+				throw new Error("must not execute");
+			},
+		});
+		expect(decodeExecutionContext(getter)).toBeUndefined();
+	});
+	it.each([
+		{ ...context(), extra: true },
+		{ ...context(), generation: "0" },
+		{ ...context(), cwd: 42 },
+		{ ...context(), taskId: null },
+		{ ...context(), attachment: { ...context().attachment, extra: true } },
+		{ ...context(), attachment: { ...context().attachment, flavor: "invalid" } },
+		{ ...context(), attachment: { ...context().attachment, root: null } },
+		{
+			...context(),
+			attachment: Object.defineProperty({}, "root", {
+				get: () => {
+					throw new Error("must not execute");
+				},
+			}),
+		},
+		Object.assign(Object.create({ inherited: true }), context()),
+		null,
+		[],
+	])("refuses malformed durable context %#", (raw) => {
+		expect(decodeExecutionContext(raw)).toBeUndefined();
+	});
 	it("retains task identity and separates replay scopes for tasks sharing a directory", () => {
 		const first = createExecutionContext({ ...context(), taskId: "first" });
 		const second = createExecutionContext({ ...first, taskId: "second" });

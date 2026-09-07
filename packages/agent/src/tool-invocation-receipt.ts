@@ -1,3 +1,5 @@
+import { readWireRecord } from "./wire-record.ts";
+
 /** Engine evidence, independent of hook policy, display status, and verification claims. */
 export type ToolInvocationReceipt = Readonly<{
 	version: 1;
@@ -22,25 +24,15 @@ const RECEIPT_KEYS = new Set([
 
 /** Strict bounded data-only wire decoder. It never upgrades missing historical evidence. */
 export function decodeToolInvocationReceipt(value: unknown): ToolInvocationReceipt | undefined {
-	if (!value || typeof value !== "object") return undefined;
-	const prototype = Object.getPrototypeOf(value);
-	if (prototype !== null && prototype !== Object.prototype) return undefined;
-	const keys = Reflect.ownKeys(value);
-	if (keys.length > RECEIPT_KEYS.size || keys.some((key) => typeof key !== "string" || !RECEIPT_KEYS.has(key)))
-		return undefined;
-	const descriptors = Object.getOwnPropertyDescriptors(value);
-	if (Object.values(descriptors).some((descriptor) => !("value" in descriptor))) return undefined;
-	const version = descriptors.version?.value;
-	const requestId = descriptors.requestId?.value;
-	const execution = descriptors.execution?.value;
-	const operationStatus = descriptors.operationStatus?.value;
-	const executionScope: unknown = descriptors.executionScope?.value;
+	const record = readWireRecord(value, RECEIPT_KEYS);
+	if (!record) return undefined;
+	const { version, requestId, execution, operationStatus, executionScope } = record;
 	if (
-		descriptors.executionScope &&
+		Object.hasOwn(record, "executionScope") &&
 		(typeof executionScope !== "string" || !/^context:[0-9a-f]{32}$/.test(executionScope))
 	)
 		return undefined;
-	const failures: unknown = descriptors.postprocessingFailures?.value;
+	const failures = record.postprocessingFailures;
 	if (
 		version !== 1 ||
 		typeof requestId !== "string" ||
@@ -69,7 +61,8 @@ export function decodeToolInvocationReceipt(value: unknown): ToolInvocationRecei
 		return Object.freeze({ ...base, execution, operationStatus });
 	}
 	if (execution !== "not_started" && execution !== "running" && execution !== "unknown") return undefined;
-	if (descriptors.operationStatus || (execution !== "unknown" && postprocessingFailures.length > 0)) return undefined;
+	if (Object.hasOwn(record, "operationStatus") || (execution !== "unknown" && postprocessingFailures.length > 0))
+		return undefined;
 	return Object.freeze({ ...base, execution });
 }
 

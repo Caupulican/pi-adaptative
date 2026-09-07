@@ -106,6 +106,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"skill",
 			"skill_audit",
 			"skillify",
+			"task_directory",
 			"task_steps",
 			"tool_task",
 			"update_goal",

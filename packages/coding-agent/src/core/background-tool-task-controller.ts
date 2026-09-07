@@ -3,7 +3,11 @@ import {
 	type BackgroundToolCallContext,
 	type BackgroundToolCallHandoff,
 	type CustomMessage,
+	captureExecutionContext,
+	decodeExecutionContext,
 	decodeToolInvocationReceipt,
+	type ExecutionContext,
+	executionContextScope,
 	retainedToolInvocation,
 	type ToolInvocationObservation,
 	type ToolInvocationReceipt,
@@ -65,6 +69,7 @@ const RECORD_KEYS = [
 	"terminalDelivery",
 	"piVerification",
 	"piToolInvocation",
+	"executionContext",
 ] as const;
 
 export type BackgroundToolTaskStatus = "running" | "completed" | "failed" | "canceled";
@@ -121,6 +126,8 @@ export interface BackgroundToolTaskRecord {
 	piVerification?: BackgroundToolVerification;
 	/** Engine execution evidence; display failure and cancellation do not erase completed effects. */
 	piToolInvocation?: ToolInvocationReceipt;
+	/** Immutable admitted context, retained as historical provenance, never as renewed authority. */
+	executionContext?: ExecutionContext;
 	/** Runtime-only receipt; never serialized into the durable task record. */
 	observedAt?: string;
 	/**
@@ -153,6 +160,7 @@ export interface BackgroundToolTerminalMessage {
 			artifactId?: string;
 			piVerification?: BackgroundToolVerification;
 			piToolInvocation?: ToolInvocationReceipt;
+			executionContext?: ExecutionContext;
 		}>;
 		piVerificationEvents: BackgroundToolVerification[];
 	};
@@ -216,6 +224,19 @@ export function createBackgroundToolTerminalMessage(
 	const included = records.slice(0, MAX_TERMINAL_HANDOFF_RECORDS);
 	const omitted = records.length - included.length;
 	const wakeParent = options?.wakeParent ?? true;
+	const projected = included.map((record) => {
+		const verification = retainedBackgroundToolVerification(record, record.taskId);
+		return {
+			taskId: record.taskId,
+			toolCallId: record.toolCallId,
+			status: record.status,
+			toolName: record.toolName,
+			...(record.artifactId ? { artifactId: record.artifactId } : {}),
+			...(record.piToolInvocation ? { piToolInvocation: retainedToolInvocation(record) } : {}),
+			...(record.executionContext ? { executionContext: record.executionContext } : {}),
+			...(verification ? { piVerification: verification } : {}),
+		};
+	});
 	return {
 		customType: "background-tool-completion",
 		content: [
@@ -228,26 +249,8 @@ export function createBackgroundToolTerminalMessage(
 		].join("\n"),
 		display: true,
 		details: {
-			records: included.map((record) => ({
-				taskId: record.taskId,
-				toolCallId: record.toolCallId,
-				status: record.status,
-				toolName: record.toolName,
-				...(record.artifactId ? { artifactId: record.artifactId } : {}),
-				...(record.piToolInvocation ? { piToolInvocation: retainedToolInvocation(record) } : {}),
-				...(record.piVerification &&
-				record.piVerification.originTaskId === record.taskId &&
-				(record.piVerification.status !== "passed" || record.status === "completed")
-					? { piVerification: { ...record.piVerification } }
-					: {}),
-			})),
-			piVerificationEvents: included.flatMap((record) =>
-				record.piVerification &&
-				record.piVerification.originTaskId === record.taskId &&
-				(record.piVerification.status !== "passed" || record.status === "completed")
-					? [{ ...record.piVerification }]
-					: [],
-			),
+			records: projected,
+			piVerificationEvents: projected.flatMap((record) => (record.piVerification ? [record.piVerification] : [])),
 		},
 	};
 }
@@ -366,11 +369,24 @@ function retainedToolVerification(details: unknown): VerificationRecord | undefi
 	return retainedVerificationDetails(details)?.piVerification;
 }
 
+function permitsPassingBackgroundVerification(status: unknown, invocation: ToolInvocationReceipt | undefined): boolean {
+	return (
+		status === "completed" &&
+		(!invocation?.executionScope ||
+			(invocation.execution === "completed" && invocation.operationStatus === "success"))
+	);
+}
+
 function retainedBackgroundToolVerification(details: unknown, taskId: string): BackgroundToolVerification | undefined {
 	const verification = retainedToolVerification(details);
 	if (!verification || !isRecordObject(details)) return undefined;
 	const candidate = ownDataValue(details, "piVerification");
 	if (!isRecordObject(candidate) || ownDataValue(candidate, "originTaskId") !== taskId) return undefined;
+	if (
+		verification.status === "passed" &&
+		!permitsPassingBackgroundVerification(ownDataValue(details, "status"), retainedToolInvocation(details))
+	)
+		return undefined;
 	return { ...verification, originTaskId: taskId };
 }
 
@@ -413,6 +429,14 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 	const usage = value.usage === undefined ? undefined : cloneUsage(value.usage);
 	if (value.usage !== undefined && !usage) return undefined;
 	const invocation = retainedToolInvocation(value);
+	const executionContext = decodeExecutionContext(ownDataValue(value, "executionContext"));
+	if (
+		Object.hasOwn(value, "executionContext") &&
+		(!executionContext ||
+			executionContext.sessionId !== value.sessionId ||
+			invocation?.executionScope !== executionContextScope(executionContext))
+	)
+		return undefined;
 	if (
 		(Object.hasOwn(value, "piToolInvocation") && !invocation) ||
 		(invocation &&
@@ -423,8 +447,7 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 	const rawVerification = retainedToolVerification(value);
 	if (value.piVerification !== undefined && !rawVerification) return undefined;
 	const verification = rawVerification
-		? rawVerification.status === "passed" &&
-			(!retainedBackgroundToolVerification(value, value.taskId) || value.status !== "completed")
+		? rawVerification.status === "passed" && !retainedBackgroundToolVerification(value, value.taskId)
 			? undefined
 			: { ...rawVerification, originTaskId: value.taskId }
 		: undefined;
@@ -446,6 +469,7 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 		...(value.terminalDelivery !== undefined ? { terminalDelivery: value.terminalDelivery } : {}),
 		...(verification ? { piVerification: verification } : {}),
 		...(invocation ? { piToolInvocation: invocation } : {}),
+		...(executionContext ? { executionContext } : {}),
 	};
 }
 
@@ -490,14 +514,19 @@ export class BackgroundToolTaskController {
 		const startedAt = this.now().toISOString();
 		const goalId = this.deps.getGoalId?.();
 		const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
+		const executionContext = context.executionContext ? captureExecutionContext(context.executionContext) : undefined;
+		if (executionContext && executionContext.sessionId !== sessionId)
+			throw new Error("Background execution context belongs to another session");
 		const invocation = decodeToolInvocationReceipt({
 			version: 1,
 			requestId: context.requestId,
 			execution: "running",
+			...(executionContext ? { executionScope: executionContextScope(executionContext) } : {}),
 			postprocessingFailures: [],
 		});
 		const record: BackgroundToolTaskRecord = {
 			sessionId,
+			...(executionContext ? { executionContext } : {}),
 			taskId,
 			toolCallId: context.toolCall.id,
 			toolName: context.toolCall.name,
@@ -780,11 +809,13 @@ export class BackgroundToolTaskController {
 		const admitted = state.record.piToolInvocation;
 		const terminalInvocation = admitted
 			? invocation?.requestId === admitted.requestId &&
+				invocation.executionScope === admitted.executionScope &&
 				(invocation.execution === "completed" || invocation.execution === "unknown")
 				? invocation
 				: decodeToolInvocationReceipt({
 						version: 1,
 						requestId: admitted.requestId,
+						...(admitted.executionScope ? { executionScope: admitted.executionScope } : {}),
 						execution: "unknown",
 						postprocessingFailures: [],
 					})
@@ -815,7 +846,8 @@ export class BackgroundToolTaskController {
 			...(state.cancellationRequested ? { cancellationRequested: true } : {}),
 			terminalDelivery: notify ? "pending" : "delivered",
 			...(terminalInvocation ? { piToolInvocation: terminalInvocation } : {}),
-			...(verification && (verification.status !== "passed" || status === "completed")
+			...(verification &&
+			(verification.status !== "passed" || permitsPassingBackgroundVerification(status, terminalInvocation))
 				? { piVerification: { ...verification, originTaskId: state.record.taskId } }
 				: {}),
 		};

@@ -1,5 +1,6 @@
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { GoalAutoContinueController } from "../src/core/goals/goal-auto-continue-controller.ts";
 import { createHarness, getUserTexts } from "./suite/harness.ts";
 
 describe("AgentSession natural-language goal admission", () => {
@@ -154,6 +155,7 @@ describe("AgentSession natural-language goal admission", () => {
 
 	it("feeds an admitted chat goal into the existing hidden continuation loop", async () => {
 		const harness = await createHarness();
+		const continuation = vi.spyOn(GoalAutoContinueController.prototype, "continueExclusive");
 		try {
 			harness.setResponses([
 				fauxAssistantMessage("initial turn settled"),
@@ -162,6 +164,10 @@ describe("AgentSession natural-language goal admission", () => {
 
 			await harness.session.prompt("Keep working until this is complete: prove chat goal continuation.");
 			await vi.runAllTimersAsync();
+			// Timer drainage starts continuation; native directory admission still awaits real filesystem I/O.
+			// Observe the actual automatic loop's terminal promise, without starting a second loop or polling.
+			expect(continuation).toHaveBeenCalledTimes(1);
+			await continuation.mock.results[0]?.value;
 
 			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
 				status: "completed",
@@ -172,6 +178,7 @@ describe("AgentSession natural-language goal admission", () => {
 			expect(getUserTexts(harness)).toEqual(["Keep working until this is complete: prove chat goal continuation."]);
 			expect(harness.getPendingResponseCount()).toBe(0);
 		} finally {
+			continuation.mockRestore();
 			harness.cleanup();
 		}
 	});

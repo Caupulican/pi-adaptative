@@ -1,3 +1,5 @@
+import { readWireRecord } from "./wire-record.ts";
+
 /** Backend syntax and immutable invocation identity, independent of Node or a local filesystem. */
 export type ExecutionPathFlavor = "posix" | "win32";
 
@@ -51,4 +53,44 @@ export function captureExecutionContext(input: ExecutionContext): ExecutionConte
 		generation: input.generation,
 		cwd: input.cwd,
 	});
+}
+
+const CONTEXT_FIELDS = new Set(["attachment", "sessionId", "taskId", "generation", "cwd"]);
+const ATTACHMENT_FIELDS = new Set(["workspaceId", "attachmentId", "root", "flavor", "caseSensitive"]);
+
+/** Decode journal/wire data without evaluating accessors or retaining caller-owned objects. */
+export function decodeExecutionContext(value: unknown): ExecutionContext | undefined {
+	try {
+		const record = readWireRecord(value, CONTEXT_FIELDS);
+		if (!record) return undefined;
+		const attachment = readWireRecord(record.attachment, ATTACHMENT_FIELDS);
+		if (
+			!attachment ||
+			typeof record.sessionId !== "string" ||
+			(record.taskId !== undefined && typeof record.taskId !== "string") ||
+			typeof record.generation !== "number" ||
+			typeof record.cwd !== "string" ||
+			typeof attachment.workspaceId !== "string" ||
+			typeof attachment.attachmentId !== "string" ||
+			typeof attachment.root !== "string" ||
+			(attachment.flavor !== "posix" && attachment.flavor !== "win32") ||
+			typeof attachment.caseSensitive !== "boolean"
+		)
+			return undefined;
+		return captureExecutionContext({
+			attachment: {
+				workspaceId: attachment.workspaceId,
+				attachmentId: attachment.attachmentId,
+				root: attachment.root,
+				flavor: attachment.flavor,
+				caseSensitive: attachment.caseSensitive,
+			},
+			sessionId: record.sessionId,
+			taskId: record.taskId,
+			generation: record.generation,
+			cwd: record.cwd,
+		});
+	} catch {
+		return undefined;
+	}
 }

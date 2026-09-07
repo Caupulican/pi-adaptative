@@ -10,6 +10,11 @@ export interface BoundToolInvocation<TParameters extends TSchema = TSchema, TDet
 	release(): void;
 }
 
+/** One binding identity for live admission, durable handoff, and recovery evidence. */
+export function executionContextScope(context: ExecutionContext): string {
+	return getToolExecutionKey("context", context);
+}
+
 /** The schema and scheduling identity stay registry-owned; only execution is host-bound. */
 export async function bindToolInvocation<TParameters extends TSchema, TDetails>(
 	tool: AgentTool<TParameters, TDetails>,
@@ -32,7 +37,7 @@ export async function bindToolInvocation<TParameters extends TSchema, TDetails>(
 		return {
 			tool: { ...tool, execute: invocation.execute, failureRecovery: invocation.failureRecovery },
 			executionContext,
-			executionScope: getToolExecutionKey("context", executionContext),
+			executionScope: executionContextScope(executionContext),
 			release,
 		};
 	} catch (error) {
