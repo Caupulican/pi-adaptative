@@ -133,8 +133,17 @@ selector made orphan bindings impossible to remove. The session regression repro
 the tool adapter fix. Suspected id reuse on checklist replacement was rejected after inspection: the task
 owner already keeps its next-step counter monotonic across replacement and clearing.
 
-This integration is not the completed portability contract. Composite tools and delegated/background
-task creation still need an end-to-end binding audit, and model context projection must survive compaction.
+Direct process and image-reference factories now construct their executors from the admitted context.
+Toolkit execution and context scouts consume the captured directory and forward the caller's cancellation
+signal. Scout file reads and citation checks resolve against that directory while permission roots remain
+anchored to the original granting session. Six synthetic composite regressions cover those routes, file-only
+grants with denied siblings, pre-cancelled admission, cancellation during execution, and lease retention
+until execution settles and the host releases admission. Image generation is mocked; no paid provider runs.
+The orchestration profile catalogue now accepts task_directory through its existing capability policy.
+
+This integration is not the completed portability contract. Workflow composites and delegated/background
+task creation still need an end-to-end binding audit, child receipt identity needs review, and model context
+projection must survive compaction.
 The current native host marker hashes platform and hostname; it detects differing hostnames, not identical
 hostnames or cloned machines. It must not be presented as a strong machine identity. Native Windows runtime
 integration still needs this stage's CI evidence. General backend fencing remains a release prerequisite.
@@ -241,6 +250,20 @@ a schema field or a prompt instruction. All execution paths must consume the bin
   965 eligible / 974 owned files, with zero clones at the unchanged 50-token sensitivity.
   Eleven tracked files preserve their UTF-8 validity, BOM and newline conventions; six new files
   validate as UTF-8. No existing file was transcoded.
+- The native checkpoint `499b35000dbfa2acea2e17489576a2f4814f4c13` failed six GitHub coding-agent
+  shards; both platform build/check jobs and both shard-2 jobs passed. Three expected-tool catalogues
+  omitted the intentional task_directory addition. Those failures reproduced locally. The schema guard
+  now accounts separately for its measured 330 tokens while retaining the original 4,500-token limit
+  for all existing tools. Windows shard 3 also reported EPERM during real-worktree fixture cleanup.
+  The targeted concurrent-land case passes locally on Linux; that does not resolve the Windows failure.
+- The composite checkpoint passes 106 targeted tests across 12 files, including six new synthetic
+  regressions. An initial scout fixture expected one line despite a trailing newline; the existing
+  citation counter explicitly includes the final empty line, so that expectation was corrected to two.
+  That test-author error was not a production line-counting defect.
+  Repository checks pass with 965 eligible / 974 owned production files accounted for and zero clones.
+  Nine tracked files retain their BOM/newline conventions and UTF-8 validity; the new fixture file
+  is UTF-8. No existing content was transcoded. The four edited production owners retain the existing
+  admission, capability, execution-wrapper, and cancellation paths rather than adding parallel engines.
 - Host npm configuration emits `globalignorefile` warnings. Local Node is 24.18.1, below the declared
   24.20.0 minimum. Successful checks on this host do not replace supported-runtime CI evidence.
 

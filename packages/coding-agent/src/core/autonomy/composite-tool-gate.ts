@@ -45,6 +45,7 @@ export function wrapToolWithCapabilityEnvelopeGate<TParameters extends TSchema, 
 	tool: AgentTool<TParameters, TDetails>,
 	cwd: string,
 	envelope: CapabilityEnvelope | undefined,
+	scopeCwd = cwd,
 ): AgentTool<TParameters, TDetails> {
 	if (!envelope) return tool;
 	return wrapToolExecution(tool, (executor, executionContext) => ({
@@ -54,7 +55,7 @@ export function wrapToolWithCapabilityEnvelopeGate<TParameters extends TSchema, 
 				toolName: tool.name,
 				args: params,
 				cwd: executionContext?.cwd ?? cwd,
-				scopeCwd: cwd,
+				scopeCwd,
 				envelope,
 			});
 			if (outcome.outcome === "block" || outcome.outcome === "ask-user") {

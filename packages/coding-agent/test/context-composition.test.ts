@@ -141,6 +141,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"skill",
 					"skill_audit",
 					"skillify",
+					"task_directory",
 					"task_steps",
 					"tool_task",
 					"update_goal",
@@ -148,9 +149,9 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"webfetch",
 				].sort(),
 			);
-			// Ceilings are bloat guards. The aggregate ceiling is intentionally recalibrated to 4,500
-			// after the action-discriminated task_steps schema raised the measured surface to 4,134;
-			// this preserves roughly 8.9% growth headroom without accepting the proposed 8,000-token slack.
+			// Ceilings are bloat guards. Persistent project routing deliberately adds task_directory
+			// (330 tokens) to the previous 4,500-token aggregate allowance. Account for that addition
+			// separately: the pre-existing tool surface keeps its original budget, not extra slack.
 			// Earlier ceilings were recalibrated after
 			// provider-tool-projection.ts stopped deleting `type` from enum-bearing schema
 			// properties (providers whose function-declaration schema requires `type` per property,
@@ -166,8 +167,10 @@ describe("AgentSession.getContextCompositionReport", () => {
 			expect(
 				report.toolSchemaTokens,
 				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),
-			).toBeLessThanOrEqual(4_500);
+			).toBeLessThanOrEqual(4_500 + 330);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
+			expect(toolTokens.get("task_directory")).toBeLessThanOrEqual(330);
+			expect(report.toolSchemaTokens - toolTokens.get("task_directory")!).toBeLessThanOrEqual(4_500);
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(105);
 			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);
 			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(1_200);

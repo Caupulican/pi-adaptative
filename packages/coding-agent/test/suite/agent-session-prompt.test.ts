@@ -311,6 +311,7 @@ describe("AgentSession prompt characterization", () => {
 			"get_goal",
 			"update_goal",
 			"task_steps",
+			"task_directory",
 			"pipeline",
 			"ask_question",
 			"secret_store",

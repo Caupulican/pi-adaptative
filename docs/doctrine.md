@@ -112,9 +112,15 @@ their bytes, compiler reports three quarters. Pinned by
 the messages in every prompt, so ordinary turns must not churn disclosed schemas. Explicit reload
 commits a new tool generation, and provider-specific tools follow the active model; those intentional
 transitions can invalidate the prompt cache and do not promise a cache hit. The root default surface
-now includes `runtime_update` and `webfetch` within the unchanged schema-token ceilings; this does not
-widen worker grants. Pinned by `packages/coding-agent/test/context-composition.test.ts` (schema token
-ceilings, only lowered), `packages/coding-agent/test/suite/runtime-update.test.ts`, and
+includes `runtime_update` and `webfetch` within their existing schema-token ceilings. Persistent
+multi-project control deliberately adds `task_directory`: its separate ceiling is 330 schema tokens,
+and every pre-existing tool together retains the 4,500-token aggregate limit. This explicitly replaces
+the old whole-surface 4,500-token ceiling with 4,830, not an allowance for unrelated schema growth.
+The addition addresses reproduced wrong-directory execution with durable model-controlled pins;
+directory changes do not churn schemas or widen worker grants. Pinned by
+`packages/coding-agent/test/context-composition.test.ts`,
+`packages/coding-agent/test/session-task-directories.test.ts`,
+`packages/coding-agent/test/suite/runtime-update.test.ts`, and
 `packages/coding-agent/test/suite/image-generation-provider-surface.test.ts`.
 
 **Equivalent action branches compact only at the provider boundary.** Identical `anyOf` branches
@@ -341,6 +347,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-07 | Persistent directory control earns a separate 330-token schema allowance; all pre-existing tools retain their combined 4,500-token ceiling. Explicit task pins address reproduced wrong-directory execution without widening grants or introducing per-turn schema churn. |
 | 2026-09-06 | Session-audit repairs strengthen receipt provenance, setup supersession, useful unsuccessful handoffs, goal attribution, structured repair, action validation, bounded progress detection, worker grants/inspection, scoped memory, atomic skill batches, and proportional instructions without raising prompt or scanner limits. |
 | 2026-09-02 | First edition: the invariants proven live on v0.97.24 and the ratchet model's gates. |
 | 2026-09-02 | The output-repetition guard also watches the string values of a streaming tool call's arguments (a live probe looped inside a step selector). |

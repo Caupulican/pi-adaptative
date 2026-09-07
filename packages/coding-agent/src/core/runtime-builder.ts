@@ -542,8 +542,10 @@ export class RuntimeBuilder {
 		query: string,
 		maxTurns: number | undefined,
 		artifactStore: ArtifactStore | undefined,
+		signal?: AbortSignal,
 	) {
-		const cwd = this.deps.getCwd();
+		const scopeCwd = this.deps.getCwd();
+		const cwd = this._taskDirectories.cwd;
 		const envelope = this.deps.getCapabilityEnvelope?.();
 		const childEnvelope = deriveCompositeChildEnvelope("context_scout", ["read", "grep", "find"], envelope);
 		const controller = new ScoutController({
@@ -557,16 +559,23 @@ export class RuntimeBuilder {
 				),
 			getCwd: () => cwd,
 			buildReadOnlyTools: (toolCwd) => {
-				const readTool = wrapToolWithCapabilityEnvelopeGate(createReadTool(toolCwd), toolCwd, childEnvelope);
+				const readTool = wrapToolWithCapabilityEnvelopeGate(
+					createReadTool(toolCwd),
+					toolCwd,
+					childEnvelope,
+					scopeCwd,
+				);
 				const grepTool = wrapToolWithCapabilityEnvelopeGate(
 					createGrepTool(toolCwd, { artifactStore }),
 					toolCwd,
 					childEnvelope,
+					scopeCwd,
 				);
 				const findTool = wrapToolWithCapabilityEnvelopeGate(
 					createFindTool(toolCwd, { artifactStore }),
 					toolCwd,
 					childEnvelope,
+					scopeCwd,
 				);
 				return [
 					wrapToolWithCredentialExposureGuard(readTool, toolCwd, this._credentialExposureBoundary),
@@ -575,16 +584,17 @@ export class RuntimeBuilder {
 				];
 			},
 			streamFn: this.deps.getAgent().streamFn,
+			signal,
 			fileExists: (path) => {
 				const target = resolveCwdPath(cwd, path);
-				if (childEnvelope && !isPathWithinEnvelope(childEnvelope, target, cwd)) {
+				if (childEnvelope && !isPathWithinEnvelope(childEnvelope, target, cwd, scopeCwd)) {
 					return false;
 				}
 				return existsSync(target);
 			},
 			countLines: (path) => {
 				const target = resolveCwdPath(cwd, path);
-				if (childEnvelope && !isPathWithinEnvelope(childEnvelope, target, cwd)) {
+				if (childEnvelope && !isPathWithinEnvelope(childEnvelope, target, cwd, scopeCwd)) {
 					return undefined;
 				}
 				return countFileLines(target);
@@ -1020,12 +1030,14 @@ export class RuntimeBuilder {
 				this._baseToolDefinitions.set(definition.name, definition);
 			}
 			if (toolAccess.allows("image_generate")) {
-				const definition = createImageGenerateToolDefinition(this.deps.getCwd(), {
-					getModel: () => this.deps.getAgent().state.model,
-					getOAuthToken: () => this.deps.getModelRegistry().authStorage.getOAuthApiKey("openai-codex"),
-					getImageStore: () => this.deps.getSessionImageStore(),
-					getMessages: () => this.deps.getAgent().state.messages,
-				});
+				const definition = this.bindNativeDefinition((cwd) =>
+					createImageGenerateToolDefinition(cwd, {
+						getModel: () => this.deps.getAgent().state.model,
+						getOAuthToken: () => this.deps.getModelRegistry().authStorage.getOAuthApiKey("openai-codex"),
+						getImageStore: () => this.deps.getSessionImageStore(),
+						getMessages: () => this.deps.getAgent().state.messages,
+					}),
+				);
 				this._baseToolDefinitions.set(definition.name, definition);
 			}
 			if (toolAccess.allows("runtime_update")) {
@@ -1039,13 +1051,16 @@ export class RuntimeBuilder {
 			if (toolAccess.allows("run_process")) {
 				const orchestrationProfile = this.deps.getOrchestrationProfile?.();
 				if (orchestrationProfile?.executionPolicy) {
+					const policy = orchestrationProfile.executionPolicy;
 					this._baseToolDefinitions.set(
 						"run_process",
-						createRunProcessToolDefinition(this.deps.getCwd(), {
-							policy: orchestrationProfile.executionPolicy,
-							maxWallClockMs: orchestrationProfile.budget.maxWallClockMs ?? 0,
-							environment: (cwd) => this._credentialManager.getEnvironmentForCwd(cwd) ?? {},
-						}),
+						this.bindNativeDefinition((cwd) =>
+							createRunProcessToolDefinition(cwd, {
+								policy,
+								maxWallClockMs: orchestrationProfile.budget.maxWallClockMs ?? 0,
+								environment: (toolCwd) => this._credentialManager.getEnvironmentForCwd(toolCwd) ?? {},
+							}),
+						),
 					);
 				}
 			}
@@ -1266,7 +1281,8 @@ export class RuntimeBuilder {
 			}
 			if (toolAccess.allows("context_scout") && settingsManager.getScoutSettings().enabled) {
 				const contextScoutToolDefinition = createContextScoutToolDefinition({
-					runScout: (input) => this._runContextScout(input.query, input.maxTurns, toolArtifactStore),
+					runScout: (input, signal) =>
+						this._runContextScout(input.query, input.maxTurns, toolArtifactStore, signal),
 				});
 				this._baseToolDefinitions.set(contextScoutToolDefinition.name, contextScoutToolDefinition);
 			}
@@ -1284,7 +1300,8 @@ export class RuntimeBuilder {
 			if (toolAccess.allows("run_toolkit_script")) {
 				const runToolkitScriptToolDefinition = createRunToolkitScriptToolDefinition({
 					getScripts: () => this.deps.getSettingsManager().getToolkitScripts(),
-					execute: (script, scriptArgs) => executeToolkitScript({ script, scriptArgs, cwd: this.deps.getCwd() }),
+					execute: (script, scriptArgs, signal) =>
+						executeToolkitScript({ script, scriptArgs, cwd: this._taskDirectories.cwd, signal }),
 					artifactStore: toolArtifactStore,
 					// Reflex brain (fitness-gated local model): resolves ambiguous requests into a
 					// registry pick. Best-effort — absent/unfit brain keeps the shortlist behavior.

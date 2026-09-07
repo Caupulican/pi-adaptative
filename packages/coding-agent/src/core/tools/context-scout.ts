@@ -21,7 +21,7 @@ export interface ContextScoutToolDetails {
 }
 
 export interface ContextScoutToolDependencies {
-	runScout(input: ContextScoutToolInput): Promise<ScoutRunResult>;
+	runScout(input: ContextScoutToolInput, signal?: AbortSignal): Promise<ScoutRunResult>;
 }
 
 export function createContextScoutToolDefinition(deps: ContextScoutToolDependencies): ToolDefinition {
@@ -33,8 +33,8 @@ export function createContextScoutToolDefinition(deps: ContextScoutToolDependenc
 		promptSnippet: "Delegate broad repository exploration to the read-only context_scout tool.",
 		promptGuidelines: [CONTEXT_SCOUT_GUIDANCE],
 		parameters: contextScoutSchema,
-		async execute(_toolCallId, input: ContextScoutToolInput) {
-			const result = await deps.runScout(input);
+		async execute(_toolCallId, input: ContextScoutToolInput, signal) {
+			const result = await deps.runScout(input, signal);
 			return {
 				content: [{ type: "text" as const, text: formatScoutResult(result) }],
 				details: { result },
