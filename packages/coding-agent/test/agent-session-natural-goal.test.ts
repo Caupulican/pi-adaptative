@@ -156,6 +156,9 @@ describe("AgentSession natural-language goal admission", () => {
 	it("feeds an admitted chat goal into the existing hidden continuation loop", async () => {
 		const harness = await createHarness();
 		const continuation = vi.spyOn(GoalAutoContinueController.prototype, "continueExclusive");
+		const executionStarted = Promise.withResolvers<void>();
+		const releaseExecution = Promise.withResolvers<void>();
+		let restoreBinding: (() => void) | undefined;
 		try {
 			harness.setResponses([
 				fauxAssistantMessage("initial turn settled"),
@@ -163,8 +166,29 @@ describe("AgentSession natural-language goal admission", () => {
 			]);
 
 			await harness.session.prompt("Keep working until this is complete: prove chat goal continuation.");
-			await vi.runAllTimersAsync();
-			// Timer drainage starts continuation; native directory admission still awaits real filesystem I/O.
+			const goalTool = harness.session.agent.state.tools.find((tool) => tool.name === "goal");
+			if (!goalTool?.bindInvocation) throw new Error("Expected native goal invocation binding");
+			const bind = goalTool.bindInvocation.bind(goalTool);
+			const binding = vi.spyOn(goalTool, "bindInvocation").mockImplementation(async (...args) => {
+				const invocation = await bind(...args);
+				return {
+					...invocation,
+					async execute(...executionArgs) {
+						executionStarted.resolve();
+						await releaseExecution.promise;
+						return invocation.execute(...executionArgs);
+					},
+				};
+			});
+			restoreBinding = () => binding.mockRestore();
+			// Fire only the idle-continuation timer. Draining every timer also fires auto-backgrounding
+			// while native I/O is pending, changing this into a different workflow on slower hosts.
+			await vi.advanceTimersByTimeAsync(0);
+			await executionStarted.promise;
+			expect(
+				harness.session.messages.filter((message) => message.role === "toolResult" && message.toolName === "goal"),
+			).toHaveLength(0);
+			releaseExecution.resolve();
 			// Observe the actual automatic loop's terminal promise, without starting a second loop or polling.
 			expect(continuation).toHaveBeenCalledTimes(1);
 			await continuation.mock.results[0]?.value;
@@ -178,8 +202,10 @@ describe("AgentSession natural-language goal admission", () => {
 			expect(getUserTexts(harness)).toEqual(["Keep working until this is complete: prove chat goal continuation."]);
 			expect(harness.getPendingResponseCount()).toBe(0);
 		} finally {
+			releaseExecution.resolve();
+			restoreBinding?.();
 			continuation.mockRestore();
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 

@@ -568,3 +568,12 @@ signatures; three new files validate as UTF-8. No existing content was transcode
 
 Targeted regression success and a repository check are not release approval. Task-directory binding
 remains open. Exact-candidate remote CI and the documented release gates remain required.
+
+The natural-goal continuation fixture now holds admitted execution behind an explicit promise gate.
+Running every fake timer after that gate is entered deterministically publishes a background tool result
+before the goal operation runs. The previous fixture therefore tested a different workflow whenever
+real filesystem I/O outlasted timer drainage. It now advances only the idle-continuation timer and awaits
+the actual execution and continuation promises; no production timer, timeout, or completion rule changes.
+All 30 targeted goal tests across four files pass, as does TypeScript. The first draft used a nonexistent
+test observation API; that test-author error was corrected before the independent handoff reproduction.
+This confirms a fixture timing defect, not a claim that the historical CI run captured its exact interleaving.
