@@ -42,13 +42,13 @@ describe("native task directory runtime", () => {
 		const original = join(root, "original");
 		const moved = join(root, "moved");
 		mkdirSync(original);
-		await runtime.change({ action: "register", attachment: runtime.createAttachment("project", original) });
+		await runtime.change({ action: "register", workspaceId: "project", path: original });
 		await runtime.change({ action: "select", workspaceId: "project" });
 		renameSync(original, moved);
 		const bound = runtime.bindTool(tool);
 		await expect(bound.bindInvocation!("missing", {})).rejects.toHaveProperty("code", "ENOENT");
 		expect(execute).not.toHaveBeenCalled();
-		await runtime.change({ action: "reattach", attachment: runtime.createAttachment("project", moved) });
+		await runtime.change({ action: "reattach", workspaceId: "project", path: moved });
 		const admitted = await bound.bindInvocation!("recovered", {});
 		expect(admitted.executionContext.cwd).toBe(moved);
 		await admitted.execute("recovered", {});
@@ -57,14 +57,14 @@ describe("native task directory runtime", () => {
 	});
 
 	it("fences a restored foreign attachment and repairs it through the same registry", async () => {
-		const initial = runtime.snapshot;
+		const initial = await runtime.getSnapshot();
 		session.appendCustomEntry(TASK_DIRECTORY_STATE_CUSTOM_TYPE, {
 			...initial,
 			workspaces: initial.workspaces.map((workspace) => ({ ...workspace, attachmentId: "foreign-host" })),
 		});
 		await expect(runtime.bindTool(tool).bindInvocation!("foreign", {})).rejects.toThrow("reattach");
 		expect(execute).not.toHaveBeenCalled();
-		await runtime.change({ action: "reattach", attachment: runtime.createAttachment("session", root) });
+		await runtime.change({ action: "reattach", workspaceId: "session", path: root });
 		const admitted = await runtime.bindTool(tool).bindInvocation!("repaired", {});
 		admitted.release();
 	});
@@ -72,9 +72,9 @@ describe("native task directory runtime", () => {
 	it("fences a replacement directory at the same saved path until explicit reattachment", async () => {
 		const project = join(root, "project");
 		mkdirSync(project);
-		await runtime.change({ action: "register", attachment: runtime.createAttachment("project", project) });
+		await runtime.change({ action: "register", workspaceId: "project", path: project });
 		await runtime.change({ action: "select", workspaceId: "project" });
-		const before = runtime.snapshot;
+		const before = await runtime.getSnapshot();
 		const bound = runtime.bindTool(tool);
 		// Ordinary content changes are not a change of directory identity.
 		writeFileSync(join(project, "fixture.txt"), "synthetic content\r\n");
@@ -84,8 +84,8 @@ describe("native task directory runtime", () => {
 		mkdirSync(project);
 		await expect(bound.bindInvocation!("replacement", {})).rejects.toThrow("reattach");
 		expect(execute).not.toHaveBeenCalled();
-		expect(runtime.snapshot).toEqual(before);
-		await runtime.change({ action: "reattach", attachment: runtime.createAttachment("project", project) });
+		expect(await runtime.getSnapshot()).toEqual(before);
+		await runtime.change({ action: "reattach", workspaceId: "project", path: project });
 		const repaired = await bound.bindInvocation!("repaired", {});
 		expect(repaired.executionContext.attachment.attachmentId).not.toBe(
 			unchanged.executionContext.attachment.attachmentId,
@@ -99,7 +99,7 @@ describe("native task directory runtime", () => {
 		const ambient = process.cwd();
 		const other = join(root, "other");
 		mkdirSync(other);
-		await runtime.change({ action: "register", attachment: runtime.createAttachment("other", other) });
+		await runtime.change({ action: "register", workspaceId: "other", path: other });
 		const entered = Promise.withResolvers<void>();
 		const finish = Promise.withResolvers<void>();
 		const seen: string[] = [];
@@ -134,9 +134,9 @@ describe("native task directory runtime", () => {
 	it("retains directory identity across runtime restart instead of trusting the new occupant", async () => {
 		const project = join(root, "persisted");
 		mkdirSync(project);
-		await runtime.change({ action: "register", attachment: runtime.createAttachment("project", project) });
+		await runtime.change({ action: "register", workspaceId: "project", path: project });
 		await runtime.change({ action: "select", workspaceId: "project" });
-		const saved = runtime.snapshot;
+		const saved = await runtime.getSnapshot();
 		await runtime.dispose();
 		runtime = new TaskDirectoryRuntime({
 			getCwd: () => root,
@@ -149,7 +149,7 @@ describe("native task directory runtime", () => {
 		renameSync(project, join(root, "previous"));
 		mkdirSync(project);
 		await expect(runtime.bindTool(tool).bindInvocation!("replaced", {})).rejects.toThrow("reattach");
-		expect(runtime.snapshot).toEqual(saved);
+		expect(await runtime.getSnapshot()).toEqual(saved);
 		expect(execute).not.toHaveBeenCalled();
 	});
 
@@ -161,7 +161,7 @@ describe("native task directory runtime", () => {
 		mkdirSync(second);
 		const kind = process.platform === "win32" ? "junction" : "dir";
 		symlinkSync(first, link, kind);
-		await runtime.change({ action: "register", attachment: runtime.createAttachment("linked", link) });
+		await runtime.change({ action: "register", workspaceId: "linked", path: link });
 		await runtime.change({ action: "select", workspaceId: "linked" });
 		const bound = runtime.bindTool(tool);
 		const control = await bound.bindInvocation!("same-target", {});
@@ -170,7 +170,7 @@ describe("native task directory runtime", () => {
 		symlinkSync(second, link, kind);
 		await expect(bound.bindInvocation!("retargeted", {})).rejects.toThrow("reattach");
 		expect(execute).not.toHaveBeenCalled();
-		await runtime.change({ action: "reattach", attachment: runtime.createAttachment("linked", link) });
+		await runtime.change({ action: "reattach", workspaceId: "linked", path: link });
 		const repaired = await bound.bindInvocation!("repaired", {});
 		repaired.release();
 	});
@@ -184,12 +184,12 @@ describe("native task directory runtime", () => {
 			getActiveTaskId: () => activeTaskId,
 			getEnvelopes: () => [],
 		});
-		expect(runtime.snapshot.workspaces[0]?.root).toBe(missing);
+		expect((await runtime.getSnapshot()).workspaces[0]?.root).toBe(missing);
 		const bound = runtime.bindTool(tool);
 		await expect(bound.bindInvocation!("missing", {})).rejects.toHaveProperty("code", "ENOENT");
 		mkdirSync(missing);
 		await expect(bound.bindInvocation!("appeared", {})).rejects.toThrow("reattach");
-		await runtime.change({ action: "reattach", attachment: runtime.createAttachment("session", missing) });
+		await runtime.change({ action: "reattach", workspaceId: "session", path: missing });
 		const repaired = await bound.bindInvocation!("repaired", {});
 		repaired.release();
 		expect(execute).not.toHaveBeenCalled();

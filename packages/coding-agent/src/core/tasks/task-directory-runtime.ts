@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import {
@@ -10,6 +10,7 @@ import {
 import type { TSchema } from "typebox";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { isPathWithinEnvelope } from "../autonomy/envelope-enforcement.ts";
+import { awaitPreflight } from "../preflight.ts";
 import { getToolCapabilityPolicy } from "../tool-capability-policy.ts";
 import { disposeShellExecutionSession, disposeShellExecutionSessionAndWait } from "../tools/shell-execution-session.ts";
 import { createNativeTaskDirectoryBackend } from "./native-task-directory-backend.ts";
@@ -26,14 +27,33 @@ export interface TaskDirectoryRuntimeOptions {
 	getEnvelopes(): readonly CapabilityEnvelope[];
 }
 
+export const TASK_DIRECTORY_INITIALIZATION_TIMEOUT_MS = 10_000;
+
+type NativeDirectoryCommand =
+	| Exclude<TaskDirectoryCommand, { action: "register" | "reattach" }>
+	| (({ action: "register" } | { action: "reattach" }) & { workspaceId: string; path: string });
+
+interface InitializedDirectory {
+	controller: TaskDirectoryController;
+	initialAttachment: ExecutionAttachment;
+	unavailable: string | undefined;
+}
+
+interface DirectoryScope {
+	session: SessionManager;
+	sessionId: string;
+	root: string;
+	abort: AbortController;
+	ready: Promise<InitializedDirectory>;
+}
+
 /** Native runtime adapter: one admission owner, no process-global chdir or competing task cursor. */
 export class TaskDirectoryRuntime {
 	private readonly options: TaskDirectoryRuntimeOptions;
 	private readonly contextStorage = new AsyncLocalStorage<ExecutionContext>();
 	private readonly backend = createNativeTaskDirectoryBackend();
 	private readonly shells = new TaskShellSessions(disposeShellExecutionSessionAndWait);
-	private controller: TaskDirectoryController | undefined;
-	private sessionId: string | undefined;
+	private scope: DirectoryScope | undefined;
 	private disposed = false;
 
 	constructor(options: TaskDirectoryRuntimeOptions) {
@@ -49,35 +69,54 @@ export class TaskDirectoryRuntime {
 	get activeTaskId(): string | undefined {
 		return this.options.getActiveTaskId();
 	}
-	get snapshot() {
-		return this.currentController().snapshot;
+	getSnapshot(signal?: AbortSignal) {
+		return this.withController(({ controller }) => controller.snapshot, signal);
 	}
-	get effectiveContext(): ExecutionContext {
-		return resolveTaskDirectoryContext(
-			this.snapshot,
-			this.activeTaskId,
-			this.options.getSessionManager().getSessionId(),
-			true,
-		);
+	getStatus(signal?: AbortSignal) {
+		return this.withController((initialized, scope) => {
+			const state = initialized.controller.snapshot;
+			const activeTaskId = this.activeTaskId;
+			let effective: ExecutionContext | undefined;
+			let unavailable: string | undefined;
+			try {
+				effective = resolveTaskDirectoryContext(state, activeTaskId, scope.sessionId, true);
+				if (effective.attachment.attachmentId === initialized.initialAttachment.attachmentId)
+					unavailable = initialized.unavailable;
+			} catch (error) {
+				unavailable = error instanceof Error ? error.message : String(error);
+			}
+			return { state, activeTaskId, effective, unavailable };
+		}, signal);
 	}
 
-	createAttachment(workspaceId: string, root: string, nonce?: string): ExecutionAttachment {
+	private attachment(workspaceId: string, root: string, attachmentId: string, sessionId: string): ExecutionAttachment {
 		return createExecutionContext({
 			attachment: {
 				workspaceId,
-				attachmentId: this.backend.createAttachmentId(root, nonce),
+				attachmentId,
 				root,
 				flavor: this.backend.flavor,
 				caseSensitive: this.backend.flavor !== "win32",
 			},
 			cwd: root,
-			sessionId: this.options.getSessionManager().getSessionId(),
+			sessionId,
 			generation: 0,
 		}).attachment;
 	}
 
-	change(command: TaskDirectoryCommand, signal?: AbortSignal) {
-		return this.currentController().change(command, signal);
+	change(input: NativeDirectoryCommand, signal?: AbortSignal) {
+		const command = structuredClone(input);
+		return this.withController((initialized, scope) => {
+			const combined = signal ? AbortSignal.any([signal, scope.abort.signal]) : scope.abort.signal;
+			let prepared: TaskDirectoryCommand;
+			if (command.action === "register" || command.action === "reattach") {
+				prepared = {
+					action: command.action,
+					attachment: this.attachment(command.workspaceId, command.path, randomUUID(), scope.sessionId),
+				};
+			} else prepared = command;
+			return initialized.controller.change(prepared, combined);
+		}, signal);
 	}
 
 	bindTool<TParameters extends TSchema, TDetails>(
@@ -89,7 +128,16 @@ export class TaskDirectoryRuntime {
 		return {
 			...tool,
 			bindInvocation: async (_id, _params, signal) => {
-				const lease = await this.currentController().admit(this.activeTaskId, signal, true);
+				const taskId = this.activeTaskId;
+				const lease = await this.withController(
+					({ controller }, scope) =>
+						controller.admit(
+							taskId,
+							signal ? AbortSignal.any([signal, scope.abort.signal]) : scope.abort.signal,
+							true,
+						),
+					signal,
+				);
 				let releaseShell: (() => void) | undefined;
 				try {
 					const context = lease.context;
@@ -138,25 +186,103 @@ export class TaskDirectoryRuntime {
 
 	async dispose(): Promise<void> {
 		this.disposed = true;
-		this.controller?.dispose();
+		this.retireScope();
 		await this.shells.dispose();
 	}
 
-	private currentController(): TaskDirectoryController {
+	private async withController<T>(
+		operation: (initialized: InitializedDirectory, scope: DirectoryScope) => T | Promise<T>,
+		signal?: AbortSignal,
+	): Promise<T> {
+		signal?.throwIfAborted();
 		if (this.disposed) throw new Error("Task directory runtime disposed");
 		const session = this.options.getSessionManager();
 		const sessionId = session.getSessionId();
-		if (this.controller && this.sessionId === sessionId) return this.controller;
-		this.controller?.dispose();
 		const root = this.options.getCwd();
-		const initialAttachment = this.createAttachment("session", root, "session");
-		this.controller = new TaskDirectoryController({
+		if (
+			this.scope &&
+			(this.scope.session !== session || this.scope.sessionId !== sessionId || this.scope.root !== root)
+		)
+			this.retireScope();
+		if (!this.scope) {
+			const abort = new AbortController();
+			const ready = this.initializeController(session, sessionId, root, abort.signal);
+			const scope = { session, sessionId, root, abort, ready };
+			this.scope = scope;
+			// Shared, read-only setup survives a single cancelled waiter; failed setup remains retryable.
+			void ready.catch(() => {
+				if (this.scope === scope) this.retireScope();
+			});
+		}
+		const scope = this.scope;
+		const initialized = await awaitPreflight(() => scope.ready, signal);
+		this.requireCurrentScope(scope);
+		return operation(initialized, scope);
+	}
+
+	private requireCurrentScope(scope: DirectoryScope): void {
+		if (this.scope !== scope) throw new Error("Task directory session changed during setup; refresh before retrying");
+		this.requireScopeHost(scope.session, scope.root);
+	}
+
+	private requireScopeHost(session: SessionManager, root: string): void {
+		if (this.disposed || this.options.getSessionManager() !== session || this.options.getCwd() !== root)
+			throw new Error("Task directory session changed during setup; refresh before retrying");
+	}
+
+	private retireScope(): void {
+		const scope = this.scope;
+		if (!scope) return;
+		this.scope = undefined;
+		scope.abort.abort(new Error("Task directory scope retired"));
+		void scope.ready.then(
+			({ controller }) => controller.dispose(),
+			() => {},
+		);
+	}
+
+	private async initializeController(
+		session: SessionManager,
+		sessionId: string,
+		root: string,
+		signal: AbortSignal,
+	): Promise<InitializedDirectory> {
+		const deadline = new AbortController();
+		const timer = setTimeout(
+			() => deadline.abort(new Error("Task directory setup timed out; reattach the workspace")),
+			TASK_DIRECTORY_INITIALIZATION_TIMEOUT_MS,
+		);
+		timer.unref();
+		let id: string;
+		let unavailable: string | undefined;
+		try {
+			const combined = AbortSignal.any([signal, deadline.signal]);
+			id = await awaitPreflight(() => this.backend.createAttachmentId(root, "session", combined), combined);
+		} catch (error) {
+			signal.throwIfAborted();
+			// This is an unavailable status marker, never an execution fallback. A later occupant
+			// cannot gain authority; explicit reattachment must capture its native identity.
+			id = randomUUID();
+			unavailable = error instanceof Error ? error.message : String(error);
+		} finally {
+			clearTimeout(timer);
+		}
+		signal.throwIfAborted();
+		const initialAttachment = this.attachment("session", root, id, sessionId);
+		const controller = new TaskDirectoryController({
 			sessionId,
 			initialAttachment,
-			store: createSessionTaskDirectoryStore(session),
+			store: createSessionTaskDirectoryStore(session, {
+				sessionId,
+				assertCurrent: () => {
+					signal.throwIfAborted();
+					this.requireScopeHost(session, root);
+				},
+			}),
+			captureAttachmentIdentity: (attachment, abort) =>
+				this.backend.createAttachmentId(attachment.root, undefined, abort),
 			validate: createTaskDirectoryValidator(this.backend, this.backend.validateAttachment),
 		});
-		this.sessionId = sessionId;
-		return this.controller;
+		return { controller, initialAttachment, unavailable };
 	}
 }

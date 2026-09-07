@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { type BigIntStats, statSync } from "node:fs";
+import type { BigIntStats } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { hostname } from "node:os";
 import type { ExecutionContext } from "@caupulican/pi-agent-core/paths";
+import { awaitPreflight } from "../preflight.ts";
 import type { TaskDirectoryBackend } from "./task-directory-validation.ts";
 
 function directoryIdentity(info: BigIntStats): string {
@@ -11,8 +12,13 @@ function directoryIdentity(info: BigIntStats): string {
 	return createHash("sha256").update(`${info.dev}:${info.ino}`).digest("hex").slice(0, 32);
 }
 
+function requireDirectory(info: { isDirectory(): boolean }): void {
+	if (!info.isDirectory())
+		throw Object.assign(new Error("Task working directory is not a directory"), { code: "ENOTDIR" });
+}
+
 interface NativeTaskDirectoryBackend extends TaskDirectoryBackend {
-	createAttachmentId(root: string, nonce?: string): string;
+	createAttachmentId(root: string, nonce?: string, signal?: AbortSignal): Promise<string>;
 	validateAttachment(context: ExecutionContext, resolved: ExecutionContext, signal?: AbortSignal): Promise<void>;
 }
 
@@ -21,11 +27,11 @@ export function createNativeTaskDirectoryBackend(): NativeTaskDirectoryBackend {
 	const hostPrefix = `native:${createHash("sha256").update(`${process.platform}\0${hostname()}`).digest("hex").slice(0, 32)}:`;
 	return {
 		flavor: process.platform === "win32" ? "win32" : "posix",
-		createAttachmentId(root, nonce = randomUUID()) {
-			const info = statSync(root, { bigint: true, throwIfNoEntry: false });
-			// A missing ambient root must not prevent status/reattach. It never gains authority if
-			// another directory later appears there: only an explicit attachment captures identity.
-			return info ? `${hostPrefix}${directoryIdentity(info)}:${nonce}` : `unattached:${nonce}`;
+		async createAttachmentId(root, nonce = randomUUID(), signal) {
+			const info = await awaitPreflight(() => stat(root, { bigint: true }), signal);
+			signal?.throwIfAborted();
+			requireDirectory(info);
+			return `${hostPrefix}${directoryIdentity(info)}:${nonce}`;
 		},
 		async validateAttachment(context, _resolved, signal) {
 			signal?.throwIfAborted();
@@ -44,8 +50,7 @@ export function createNativeTaskDirectoryBackend(): NativeTaskDirectoryBackend {
 			signal?.throwIfAborted();
 			const info = await stat(resolved);
 			signal?.throwIfAborted();
-			if (!info.isDirectory())
-				throw Object.assign(new Error("Task working directory is not a directory"), { code: "ENOTDIR" });
+			requireDirectory(info);
 			return resolved;
 		},
 	};

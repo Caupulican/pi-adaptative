@@ -166,6 +166,20 @@ fixtures independently reproduce those failures. Real AgentSession controls prov
 and credential refusal both release the original backend exactly once; guard failures do not fall back
 to the ambient executor. Ordinary and admitted class-based decorators also retain their receivers.
 
+Native identity capture is asynchronous and cancellable. Shared initialization has a ten-second
+deadline; timeout or inaccessible ambient roots leave an explicitly unavailable attachment and repair
+status, never a guessed execution target. One cancelled caller does not cancel another caller's shared
+setup. Late results after shutdown or session replacement cannot publish a binding. A restored selected
+project remains selected when the ambient identity probe fails. Cancellation ends the harness wait;
+it does not claim to cancel an in-flight kernel filesystem request.
+
+Attachment capture now runs inside the existing directory controller's serialized command reservation
+and journal compare-and-append. A queued select cannot overtake registration, and cancellation releases
+the reservation without publishing the late identity. Native construction also rejects file roots using
+the same directory-kind rule as resolution. The journal adapter captures its session identity and checks
+the host scope on reads and commits; resetting or replacing a SessionManager during validation cannot
+write the command into another session. Task cursors and command inputs are captured before setup waits.
+
 This integration is not the completed portability contract. Delegated worker
 task creation still needs an end-to-end binding audit, persisted relative goal-evidence identity and child
 receipt identity need review, and model context
@@ -336,8 +350,8 @@ a schema field or a prompt instruction. All execution paths must consume the bin
   Repository checks pass with 966 eligible / 975 owned files, all nine below-floor files accounted
   for, and zero clones at unchanged sensitivity. Five tracked files retain UTF-8 validity, BOM,
   newline-kind and final-newline signatures. No existing content was transcoded. Native identity
-  capture currently uses synchronous stat at attachment construction; slow network filesystems and
-  stronger machine identity still need portability review before release.
+  capture at this checkpoint still used synchronous stat; the asynchronous lifecycle stage below
+  replaces it. Stronger machine identity still needs portability review before release.
 - The receiver-preservation slice passes 129 targeted tests across eight files (83 agent, 46
   coding-agent), including eleven added cases. Seven independent red cases demonstrated lost
   receivers, a missing prototype release method, and dropped decorator execution. Admission refusal,
@@ -346,6 +360,17 @@ a schema field or a prompt instruction. All execution paths must consume the bin
   correcting that test-only type error did not change production policy. Repository checks pass with
   966 eligible / 975 owned files accounted for and zero clones. All six edited tracked files retain
   their UTF-8 validity, BOM, newline-kind and final-newline signatures; none were transcoded.
+- Both `7a6a6272caf8d2e9ce00c00f69d61d3b7e6ce544` (directory identity) and
+  `3dc3617eb75779059b937b3c4a72ab2e9bd779b4` (receiver preservation) passed all ten GitHub CI jobs.
+  The asynchronous setup slice passes 98 targeted tests across twelve files, including fifteen new
+  cases. The synchronous-I/O probe and stale-journal test failed independently before their fixes.
+  Six adversarial cases exposed gaps in the first asynchronous implementation: ordering, cancellation,
+  timeout, and final-validation session changes. Those failures, including the failed timeout fixture's
+  unhandled rejection, are resolved in the complete focused run. They are development findings, not
+  additions to the private-session failure count. File-root identity construction was independently
+  rejected before the shared directory-kind check. Repository checks pass with 966 eligible / 975
+  owned sources, all nine below-floor files accounted for, and zero clones. Nine tracked files retain
+  their UTF-8 validity, BOM and newline conventions; the new lifecycle fixture is synthetic UTF-8.
 - Host npm configuration emits `globalignorefile` warnings. Local Node is 24.18.1, below the declared
   24.20.0 minimum. Successful checks on this host do not replace supported-runtime CI evidence.
 

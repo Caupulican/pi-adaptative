@@ -1,4 +1,3 @@
-import type { ExecutionContext } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { TaskDirectoryRuntime } from "../tasks/task-directory-runtime.ts";
@@ -45,10 +44,7 @@ export function createTaskDirectoryToolDefinition(
 		executionMode: "sequential",
 		async execute(_id, input: Static<typeof schema>, signal) {
 			if (input.action === "register" || input.action === "reattach") {
-				await runtime.change(
-					{ action: input.action, attachment: runtime.createAttachment(input.workspaceId, input.path) },
-					signal,
-				);
+				await runtime.change(input, signal);
 			} else if (input.action === "select" || input.action === "forget") {
 				// A cleared/compacted checklist must not prevent removal of its saved binding by exact id.
 				await runtime.change(input, signal);
@@ -56,19 +52,12 @@ export function createTaskDirectoryToolDefinition(
 				const task = resolveTaskStepSelector(getSteps()?.steps ?? [], input.taskId);
 				await runtime.change({ ...input, taskId: task.id }, signal);
 			}
-			const state = runtime.snapshot;
-			let effective: ExecutionContext | undefined;
-			let unavailable: string | undefined;
-			try {
-				effective = runtime.effectiveContext;
-			} catch (error) {
-				unavailable = error instanceof Error ? error.message : String(error);
-			}
+			const { state, activeTaskId, effective, unavailable } = await runtime.getStatus(signal);
 			return {
 				content: [
 					{
 						type: "text",
-						text: JSON.stringify({ activeTaskId: runtime.activeTaskId, effective, unavailable, ...state }),
+						text: JSON.stringify({ activeTaskId, effective, unavailable, ...state }),
 					},
 				],
 				details: { state, effective, unavailable },

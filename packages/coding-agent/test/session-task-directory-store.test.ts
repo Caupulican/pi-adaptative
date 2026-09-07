@@ -21,6 +21,14 @@ function state() {
 }
 
 describe("session task directory store", () => {
+	it("does not let an old store write into a new session on the same manager", () => {
+		const session = SessionManager.inMemory("/fixture/project");
+		const store = createSessionTaskDirectoryStore(session);
+		session.newSession();
+		expect(() => store.commit(state(), null)).toThrow("session");
+		expect(session.getLatestCustomEntryOnBranch(TASK_DIRECTORY_STATE_CUSTOM_TYPE)).toBeUndefined();
+		expect(createSessionTaskDirectoryStore(session).read().state).toBeUndefined();
+	});
 	it("restores isolated branch-scoped bindings using the session journal", () => {
 		const session = SessionManager.inMemory("/fixture/project");
 		const store = createSessionTaskDirectoryStore(session);

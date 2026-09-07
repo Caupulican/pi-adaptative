@@ -26,6 +26,8 @@ export interface TaskDirectoryControllerOptions {
 	sessionId: string;
 	initialAttachment: ExecutionAttachment;
 	store: TaskDirectoryStore;
+	/** Native identity capture runs inside the same command reservation and journal compare-and-append. */
+	captureAttachmentIdentity?(attachment: ExecutionAttachment, signal: AbortSignal): Promise<string>;
 	/** Read-only backend directory existence and capability validation, including resolved links. */
 	validate(context: ExecutionContext, signal?: AbortSignal): Promise<void>;
 }
@@ -89,8 +91,20 @@ export class TaskDirectoryController {
 			this.changing = command;
 			const before = this.options.store.read();
 			const current = before.state ?? this.initial;
-			const next = transitionTaskDirectoryState(current, command);
+			let next = transitionTaskDirectoryState(current, command);
 			if (next === current) return current;
+			if (
+				(command.action === "register" || command.action === "reattach") &&
+				this.options.captureAttachmentIdentity
+			) {
+				const attachment = command.attachment;
+				const attachmentId = await awaitPreflight(
+					() => this.options.captureAttachmentIdentity!(attachment, combined),
+					combined,
+				);
+				combined.throwIfAborted();
+				next = transitionTaskDirectoryState(current, { ...command, attachment: { ...attachment, attachmentId } });
+			}
 			const contexts: ExecutionContext[] = [];
 			if (command.action === "register" || command.action === "reattach" || command.action === "select") {
 				const id = command.action === "select" ? command.workspaceId : command.attachment.workspaceId;

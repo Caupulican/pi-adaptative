@@ -9,9 +9,13 @@ export const TASK_DIRECTORY_STATE_CUSTOM_TYPE = "task_directory_state";
  * checklist snapshots, corrupt latest execution authority cannot fall back to an older valid record.
  */
 export function createSessionTaskDirectoryStore(
-	session: Pick<SessionManager, "getLatestCustomEntryOnBranch" | "appendCustomEntry">,
+	session: Pick<SessionManager, "getSessionId" | "getLatestCustomEntryOnBranch" | "appendCustomEntry">,
+	options: { sessionId?: string; assertCurrent?: () => void } = {},
 ): TaskDirectoryStore {
+	const sessionId = options.sessionId ?? session.getSessionId();
 	const read: TaskDirectoryStore["read"] = () => {
+		options.assertCurrent?.();
+		if (session.getSessionId() !== sessionId) throw new Error("Task directory store belongs to a previous session");
 		const entry = session.getLatestCustomEntryOnBranch(TASK_DIRECTORY_STATE_CUSTOM_TYPE);
 		return { state: entry ? restoreTaskDirectoryState(entry.data) : undefined, revisionId: entry?.id ?? null };
 	};
