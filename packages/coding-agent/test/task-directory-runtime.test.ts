@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
@@ -69,6 +69,32 @@ describe("native task directory runtime", () => {
 		admitted.release();
 	});
 
+	it("fences a replacement directory at the same saved path until explicit reattachment", async () => {
+		const project = join(root, "project");
+		mkdirSync(project);
+		await runtime.change({ action: "register", attachment: runtime.createAttachment("project", project) });
+		await runtime.change({ action: "select", workspaceId: "project" });
+		const before = runtime.snapshot;
+		const bound = runtime.bindTool(tool);
+		// Ordinary content changes are not a change of directory identity.
+		writeFileSync(join(project, "fixture.txt"), "synthetic content\r\n");
+		const unchanged = await bound.bindInvocation!("unchanged", {});
+		unchanged.release();
+		renameSync(project, join(root, "previous-project"));
+		mkdirSync(project);
+		await expect(bound.bindInvocation!("replacement", {})).rejects.toThrow("reattach");
+		expect(execute).not.toHaveBeenCalled();
+		expect(runtime.snapshot).toEqual(before);
+		await runtime.change({ action: "reattach", attachment: runtime.createAttachment("project", project) });
+		const repaired = await bound.bindInvocation!("repaired", {});
+		expect(repaired.executionContext.attachment.attachmentId).not.toBe(
+			unchanged.executionContext.attachment.attachmentId,
+		);
+		await repaired.execute("repaired", {});
+		repaired.release();
+		expect(execute).toHaveBeenCalledOnce();
+	});
+
 	it("keeps concurrent callbacks in their captured task context without process-global chdir", async () => {
 		const ambient = process.cwd();
 		const other = join(root, "other");
@@ -103,5 +129,69 @@ describe("native task directory runtime", () => {
 		expect(process.cwd()).toBe(ambient);
 		first.release();
 		second.release();
+	});
+
+	it("retains directory identity across runtime restart instead of trusting the new occupant", async () => {
+		const project = join(root, "persisted");
+		mkdirSync(project);
+		await runtime.change({ action: "register", attachment: runtime.createAttachment("project", project) });
+		await runtime.change({ action: "select", workspaceId: "project" });
+		const saved = runtime.snapshot;
+		await runtime.dispose();
+		runtime = new TaskDirectoryRuntime({
+			getCwd: () => root,
+			getSessionManager: () => session,
+			getActiveTaskId: () => activeTaskId,
+			getEnvelopes: () => [],
+		});
+		const control = await runtime.bindTool(tool).bindInvocation!("restored", {});
+		control.release();
+		renameSync(project, join(root, "previous"));
+		mkdirSync(project);
+		await expect(runtime.bindTool(tool).bindInvocation!("replaced", {})).rejects.toThrow("reattach");
+		expect(runtime.snapshot).toEqual(saved);
+		expect(execute).not.toHaveBeenCalled();
+	});
+
+	it("detects a retargeted directory link and allows explicit reattachment", async () => {
+		const first = join(root, "first");
+		const second = join(root, "second");
+		const link = join(root, "project-link");
+		mkdirSync(first);
+		mkdirSync(second);
+		const kind = process.platform === "win32" ? "junction" : "dir";
+		symlinkSync(first, link, kind);
+		await runtime.change({ action: "register", attachment: runtime.createAttachment("linked", link) });
+		await runtime.change({ action: "select", workspaceId: "linked" });
+		const bound = runtime.bindTool(tool);
+		const control = await bound.bindInvocation!("same-target", {});
+		control.release();
+		unlinkSync(link);
+		symlinkSync(second, link, kind);
+		await expect(bound.bindInvocation!("retargeted", {})).rejects.toThrow("reattach");
+		expect(execute).not.toHaveBeenCalled();
+		await runtime.change({ action: "reattach", attachment: runtime.createAttachment("linked", link) });
+		const repaired = await bound.bindInvocation!("repaired", {});
+		repaired.release();
+	});
+
+	it("keeps status and reattachment available when the ambient root is missing", async () => {
+		const missing = join(root, "missing");
+		await runtime.dispose();
+		runtime = new TaskDirectoryRuntime({
+			getCwd: () => missing,
+			getSessionManager: () => session,
+			getActiveTaskId: () => activeTaskId,
+			getEnvelopes: () => [],
+		});
+		expect(runtime.snapshot.workspaces[0]?.root).toBe(missing);
+		const bound = runtime.bindTool(tool);
+		await expect(bound.bindInvocation!("missing", {})).rejects.toHaveProperty("code", "ENOENT");
+		mkdirSync(missing);
+		await expect(bound.bindInvocation!("appeared", {})).rejects.toThrow("reattach");
+		await runtime.change({ action: "reattach", attachment: runtime.createAttachment("session", missing) });
+		const repaired = await bound.bindInvocation!("repaired", {});
+		repaired.release();
+		expect(execute).not.toHaveBeenCalled();
 	});
 });

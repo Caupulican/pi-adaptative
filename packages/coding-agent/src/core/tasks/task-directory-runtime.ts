@@ -1,6 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash, randomUUID } from "node:crypto";
-import { hostname } from "node:os";
+import { createHash } from "node:crypto";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import {
@@ -32,8 +31,6 @@ export class TaskDirectoryRuntime {
 	private readonly options: TaskDirectoryRuntimeOptions;
 	private readonly contextStorage = new AsyncLocalStorage<ExecutionContext>();
 	private readonly backend = createNativeTaskDirectoryBackend();
-	private readonly hostPrefix =
-		`native:${createHash("sha256").update(`${process.platform}\0${hostname()}`).digest("hex").slice(0, 32)}:`;
 	private readonly shells = new TaskShellSessions(disposeShellExecutionSessionAndWait);
 	private controller: TaskDirectoryController | undefined;
 	private sessionId: string | undefined;
@@ -64,11 +61,11 @@ export class TaskDirectoryRuntime {
 		);
 	}
 
-	createAttachment(workspaceId: string, root: string): ExecutionAttachment {
+	createAttachment(workspaceId: string, root: string, nonce?: string): ExecutionAttachment {
 		return createExecutionContext({
 			attachment: {
 				workspaceId,
-				attachmentId: `${this.hostPrefix}${randomUUID()}`,
+				attachmentId: this.backend.createAttachmentId(root, nonce),
 				root,
 				flavor: this.backend.flavor,
 				caseSensitive: this.backend.flavor !== "win32",
@@ -152,20 +149,12 @@ export class TaskDirectoryRuntime {
 		if (this.controller && this.sessionId === sessionId) return this.controller;
 		this.controller?.dispose();
 		const root = this.options.getCwd();
-		const initialAttachment = {
-			...this.createAttachment("session", root),
-			attachmentId: `${this.hostPrefix}session:${createHash("sha256").update(root).digest("hex").slice(0, 32)}`,
-		};
+		const initialAttachment = this.createAttachment("session", root, "session");
 		this.controller = new TaskDirectoryController({
 			sessionId,
 			initialAttachment,
 			store: createSessionTaskDirectoryStore(session),
-			validate: createTaskDirectoryValidator(this.backend, async (context) => {
-				if (!context.attachment.attachmentId.startsWith(this.hostPrefix))
-					throw new Error(
-						"Workspace attachment belongs to another host; use task_directory reattach before executing",
-					);
-			}),
+			validate: createTaskDirectoryValidator(this.backend, this.backend.validateAttachment),
 		});
 		this.sessionId = sessionId;
 		return this.controller;

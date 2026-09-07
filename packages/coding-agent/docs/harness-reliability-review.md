@@ -162,6 +162,14 @@ This integration is not the completed portability contract. Delegated worker
 task creation still needs an end-to-end binding audit, persisted relative goal-evidence identity and child
 receipt identity need review, and model context
 projection must survive compaction.
+Native attachment IDs now retain a hash of the original device/file identity. Replacing a directory
+at its saved path or retargeting its junction requires explicit reattachment, including after runtime
+restart. Missing ambient roots leave status and reattachment available; a directory appearing later
+does not silently become authorized. Identity excludes timestamps: Node can substitute mutable ctime
+for unavailable birthtime, and Darwin can change birthtime through timestamp updates. Mocked metadata
+proves this does not falsely fence an unchanged directory. This is a native metadata check, not a
+filesystem sandbox: inode reuse, backends without stable file IDs, and external swaps after admission
+are not covered by it.
 The current native host marker hashes platform and hostname; it detects differing hostnames, not identical
 hostnames or cloned machines. It must not be presented as a strong machine identity. Native Windows runtime
 integration still needs this stage's CI evidence. General backend fencing remains a release prerequisite.
@@ -312,6 +320,16 @@ a schema field or a prompt instruction. All execution paths must consume the bin
   / 975 owned production files, with zero clones at unchanged sensitivity. Ten edited tracked files
   retain their UTF-8 validity, BOM and newline conventions; two new files validate as UTF-8. No existing
   content was transcoded. Worker propagation and attachment identity are not proved by this checkpoint.
+- The background checkpoint `870123cf90f1769917552e3fea7bdbb4d7032f28` passed all ten Linux/Windows
+  GitHub CI jobs. The directory-identity slice then passed 58 targeted tests across nine files, with
+  eight new cases. The same-path replacement test failed on the previous runtime; the timestamp
+  control additionally rejected the first implementation's unstable birthtime fingerprint. Capture
+  and admission now share the native identity owner, not separate runtime and backend policies.
+  Repository checks pass with 966 eligible / 975 owned files, all nine below-floor files accounted
+  for, and zero clones at unchanged sensitivity. Five tracked files retain UTF-8 validity, BOM,
+  newline-kind and final-newline signatures. No existing content was transcoded. Native identity
+  capture currently uses synchronous stat at attachment construction; slow network filesystems and
+  stronger machine identity still need portability review before release.
 - Host npm configuration emits `globalignorefile` warnings. Local Node is 24.18.1, below the declared
   24.20.0 minimum. Successful checks on this host do not replace supported-runtime CI evidence.
 
