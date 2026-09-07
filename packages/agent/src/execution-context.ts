@@ -32,13 +32,21 @@ export interface ExecutionPathAuthority {
 	readonly harnessFiles?: readonly string[];
 }
 
+const MAX_REPORTED_PATH_CHARS = 200;
+
+/** The rejected spelling is part of the diagnostic: a bare syntax error hides which backend produced it. */
+function describeRejectedPath(value: string): string {
+	const shown = value.length > MAX_REPORTED_PATH_CHARS ? `${value.slice(0, MAX_REPORTED_PATH_CHARS)}…` : value;
+	return `received ${JSON.stringify(shown.replaceAll("\0", "\\0"))}`;
+}
+
 export function assertExecutionAbsolutePath(value: string, flavor: ExecutionPathFlavor): void {
 	if (flavor !== "posix" && flavor !== "win32") throw new Error("Unsupported execution path flavor");
 	if (value.includes("\0") || (flavor === "posix" && !value.startsWith("/"))) {
-		throw new Error("Execution context requires an absolute path without NUL bytes");
+		throw new Error(`Execution context requires an absolute path without NUL bytes; ${describeRejectedPath(value)}`);
 	}
 	if (flavor === "win32" && !/^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/u.test(value)) {
-		throw new Error("Windows execution context requires a drive or UNC share");
+		throw new Error(`Windows execution context requires a drive or UNC share; ${describeRejectedPath(value)}`);
 	}
 }
 

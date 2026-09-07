@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { Type } from "typebox";
@@ -37,6 +37,29 @@ describe("native task directory runtime", () => {
 	afterEach(async () => {
 		await runtime.dispose();
 		rmSync(root, { recursive: true, force: true });
+	});
+
+	it("admits a session started at the filesystem root without rewriting its spelling", async () => {
+		const driveRoot = parse(root).root;
+		const rootSession = SessionManager.inMemory(driveRoot);
+		const rootRuntime = new TaskDirectoryRuntime({
+			getCwd: () => driveRoot,
+			getSessionManager: () => rootSession,
+			getActiveTaskId: () => undefined,
+			getEnvelopes: () => [],
+		});
+		try {
+			const admitted = await rootRuntime.bindTool(tool).bindInvocation!("root", {});
+			expect(admitted.executionContext.cwd).toBe(driveRoot);
+			expect(admitted.executionContext.attachment.root).toBe(driveRoot);
+			await admitted.execute("root", {});
+			admitted.release();
+			const status = await rootRuntime.getStatus();
+			expect(status.unavailable).toBeUndefined();
+			expect(status.effective?.cwd).toBe(driveRoot);
+		} finally {
+			await rootRuntime.dispose();
+		}
 	});
 
 	it("requires explicit reattachment after a project moves instead of falling back to the ambient directory", async () => {

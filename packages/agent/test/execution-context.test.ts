@@ -96,6 +96,23 @@ describe("host-owned execution context", () => {
 	it.each(["relative", "", "\0"])("rejects invalid context root %j", (root) => {
 		expect(() => context(root)).toThrow();
 	});
+	it("names the rejected spelling so a backend canonicalization defect is diagnosable", () => {
+		expect(() => context("relative/spelling")).toThrow('received "relative/spelling"');
+		expect(() =>
+			createExecutionContext({
+				attachment: {
+					workspaceId: "w",
+					attachmentId: "a",
+					root: "Volume{4053d979-ece3-4e40-af81-1ebc2faade7b}\\",
+					flavor: "win32",
+					caseSensitive: false,
+				},
+				sessionId: "s",
+				generation: 0,
+				cwd: "D:\\",
+			}),
+		).toThrow(/drive or UNC share.*received "Volume\{4053d979/u);
+	});
 	it.each([-1, 0.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1])("rejects generation %s", (generation) => {
 		expect(() => createExecutionContext({ ...context(), generation })).toThrow();
 	});

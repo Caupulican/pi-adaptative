@@ -3,10 +3,13 @@ import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } 
 import type * as fsPromises from "node:fs/promises";
 import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { createExecutionContext } from "@caupulican/pi-agent-core/paths";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createNativeTaskDirectoryBackend } from "../src/core/tasks/native-task-directory-backend.ts";
+import {
+	createNativeTaskDirectoryBackend,
+	resolveNativeLinkTarget,
+} from "../src/core/tasks/native-task-directory-backend.ts";
 
 vi.mock("node:fs", async (importOriginal) => {
 	const original = await importOriginal<typeof fs>();
@@ -98,5 +101,45 @@ describe("native task directory backend", () => {
 		const error = Object.assign(new Error("synthetic filesystem failure"), { code });
 		vi.mocked(stat).mockRejectedValueOnce(error);
 		await expect(createNativeTaskDirectoryBackend().createAttachmentId("synthetic-root")).rejects.toThrow(error);
+	});
+});
+
+describe("native directory canonical spelling", () => {
+	it("keeps the filesystem root spelling and resolves symlink chains component by component", async () => {
+		const scratch = mkdtempSync(join(tmpdir(), "pi-directory-root-"));
+		try {
+			const backend = createNativeTaskDirectoryBackend();
+			const root = parse(scratch).root;
+			// A session started at a drive/filesystem root must admit: the root is its own canonical name.
+			expect(await backend.resolveDirectory(root)).toBe(root);
+			expect(await backend.canonicalPath(root)).toBe(root);
+			const target = join(scratch, "target");
+			const first = join(scratch, "first");
+			const second = join(scratch, "second");
+			mkdirSync(target);
+			symlinkSync(target, first, process.platform === "win32" ? "junction" : "dir");
+			symlinkSync(first, second, process.platform === "win32" ? "junction" : "dir");
+			const resolved = await backend.resolveDirectory(join(second, "."));
+			expect(resolved).toBe(await backend.resolveDirectory(target));
+			expect(parse(resolved).root).toBe(root);
+			expect(await backend.canonicalPath(join(scratch, "missing", "leaf"))).toBeUndefined();
+		} finally {
+			rmSync(scratch, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		["\\\\?\\D:\\Projects\\app", "D:\\Projects\\app"],
+		["\\\\?\\UNC\\server\\share\\app", "\\\\server\\share\\app"],
+		["\\\\?\\Volume{4053d979-ece3-4e40-af81-1ebc2faade7b}\\", "D:\\mount"],
+		["Volume{4053d979-ece3-4e40-af81-1ebc2faade7b}\\data", "D:\\mount"],
+		["..\\sibling", "D:\\sibling"],
+	])("spells a Windows link target %s as a DOS path or keeps the mount point itself", (target, expected) => {
+		expect(resolveNativeLinkTarget("D:\\mount", target, "win32")).toBe(expected);
+	});
+
+	it("spells a POSIX link target relative to the link's directory", () => {
+		expect(resolveNativeLinkTarget("/srv/link", "../data", "posix")).toBe("/data");
+		expect(resolveNativeLinkTarget("/srv/link", "/abs/data", "posix")).toBe("/abs/data");
 	});
 });

@@ -88,6 +88,17 @@ describe("task directory backend validation", () => {
 		await expect(validate(context())).rejects.toThrow("capability denied");
 	});
 
+	it("names a backend spelling that violates the declared syntax instead of a bare syntax error", async () => {
+		const input = context("D:\\", "D:\\", "win32");
+		const authorize = vi.fn(async () => {});
+		const validate = createTaskDirectoryValidator(
+			{ flavor: "win32", resolveDirectory: async () => "Volume{4053d979-ece3-4e40-af81-1ebc2faade7b}\\" },
+			authorize,
+		);
+		await expect(validate(input)).rejects.toThrow(/Volume\{4053d979/u);
+		expect(authorize).not.toHaveBeenCalled();
+	});
+
 	it("honors cancellation before backend access", async () => {
 		const resolveDirectory = vi.fn(async (path: string) => path);
 		const validate = createTaskDirectoryValidator({ flavor: "posix", resolveDirectory }, async () => {});
