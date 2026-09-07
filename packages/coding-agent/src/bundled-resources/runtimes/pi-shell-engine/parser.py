@@ -18,6 +18,7 @@ from nodes import (
     CommandList,
     DQ,
     ForCommand,
+    IfCommand,
     Lit,
     Pipeline,
     PipelineElement,
@@ -25,6 +26,8 @@ from nodes import (
     Redirect,
     SimpleCommand,
     Subshell,
+    UntilCommand,
+    WhileCommand,
     Word,
 )
 from tokens import Token
@@ -35,7 +38,9 @@ _EXTGLOB_RE = re.compile(r"[@!?*+]\(")
 _BRACE_EXPANSION_RE = re.compile(r"\{[^{}]*,[^{}]*\}")
 
 _JOB_CONTROL_WORDS = {"fg", "bg", "jobs", "wait", "disown"}
-_CONTROL_FLOW_WORDS = {"if", "while", "until", "case", "select"}
+# `if`/`while`/`until` are parsed as structured compound commands below; `case`/`select`
+# and function definitions remain refused — see UNSUPPORTED_CONSTRUCTS in errors.py.
+_CONTROL_FLOW_WORDS = {"case", "select"}
 _ARITHMETIC_WORDS = {"let"}
 _UNSUPPORTED_BUILTIN_WORDS = {"eval", "source", ".", "alias", "trap", "set", "shopt", "read", "declare", "local"}
 
@@ -216,6 +221,12 @@ class _Parser:
             return BraceGroup(body=body, redirects=redirects)
         if self.at_unquoted_word("for"):
             return self.parse_for_command()
+        if self.at_unquoted_word("if"):
+            return self.parse_if_command()
+        if self.at_unquoted_word("while"):
+            return self.parse_while_or_until_command("while")
+        if self.at_unquoted_word("until"):
+            return self.parse_while_or_until_command("until")
         if self.peek() is not None and self.peek().kind == "ARITH":
             raise UnsupportedConstruct(
                 "arithmetic-expansion",
@@ -327,6 +338,72 @@ class _Parser:
             )
         body = self._parse_for_body()
         return ForCommand(name=variable_name, items=items, body=body, redirects=self._parse_redirects())
+
+    def _parse_condition_list(self, keyword: str, stop_word: str) -> CommandList:
+        """A command list used as an `if`/`elif`/`while`/`until` condition or `if` body.
+
+        Stops at `stop_word` (a reserved word) without requiring an explicit `;`/newline
+        before it — `parse_command_list`'s `stop_words` already treats the reserved word
+        as a boundary, matching how `then`/`elif`/`else`/`fi`/`do`/`done` are recognized
+        only in command position.
+        """
+        body = self.parse_command_list(frozenset(), frozenset({stop_word}))
+        if not body.entries:
+            raise UnsupportedConstruct(
+                "malformed-syntax", f"A '{keyword}' command requires at least one command before '{stop_word}'."
+            )
+        return body
+
+    def parse_if_command(self) -> IfCommand:
+        self.advance()  # `if`
+        branches: list[tuple[CommandList, CommandList]] = []
+        condition = self._parse_condition_list("if", "then")
+        if not self.at_unquoted_word("then"):
+            raise UnsupportedConstruct("malformed-syntax", "An 'if' command is missing its 'then' keyword.")
+        self.advance()
+        body = self.parse_command_list(frozenset(), frozenset({"elif", "else", "fi"}))
+        if not body.entries:
+            raise UnsupportedConstruct("malformed-syntax", "An 'if' command requires at least one command in its body.")
+        branches.append((condition, body))
+        while self.at_unquoted_word("elif"):
+            self.advance()
+            elif_condition = self._parse_condition_list("elif", "then")
+            if not self.at_unquoted_word("then"):
+                raise UnsupportedConstruct("malformed-syntax", "An 'elif' clause is missing its 'then' keyword.")
+            self.advance()
+            elif_body = self.parse_command_list(frozenset(), frozenset({"elif", "else", "fi"}))
+            if not elif_body.entries:
+                raise UnsupportedConstruct(
+                    "malformed-syntax", "An 'elif' clause requires at least one command in its body."
+                )
+            branches.append((elif_condition, elif_body))
+        else_body: CommandList | None = None
+        if self.at_unquoted_word("else"):
+            self.advance()
+            else_body = self.parse_command_list(frozenset(), frozenset({"fi"}))
+            if not else_body.entries:
+                raise UnsupportedConstruct("malformed-syntax", "An 'else' clause requires at least one command.")
+        if not self.at_unquoted_word("fi"):
+            raise UnsupportedConstruct("malformed-syntax", "An 'if' command is missing its closing 'fi' keyword.")
+        self.advance()
+        return IfCommand(branches=branches, else_body=else_body, redirects=self._parse_redirects())
+
+    def parse_while_or_until_command(self, keyword: str) -> WhileCommand | UntilCommand:
+        self.advance()  # `while` or `until`
+        condition = self._parse_condition_list(keyword, "do")
+        if not self.at_unquoted_word("do"):
+            raise UnsupportedConstruct("malformed-syntax", f"A '{keyword}' loop is missing its 'do' keyword.")
+        self.advance()
+        body = self.parse_command_list(frozenset(), frozenset({"done"}))
+        if not self.at_unquoted_word("done"):
+            raise UnsupportedConstruct("malformed-syntax", f"A '{keyword}' loop is missing its closing 'done' keyword.")
+        if not body.entries:
+            raise UnsupportedConstruct("malformed-syntax", f"A '{keyword}' loop requires at least one command in its body.")
+        self.advance()
+        redirects = self._parse_redirects()
+        if keyword == "until":
+            return UntilCommand(condition=condition, body=body, redirects=redirects)
+        return WhileCommand(condition=condition, body=body, redirects=redirects)
 
     def _parse_redirects(self) -> list[Redirect]:
         redirects: list[Redirect] = []

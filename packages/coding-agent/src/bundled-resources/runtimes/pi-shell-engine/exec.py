@@ -518,6 +518,9 @@ def _dispatch_element(
         return _execute_brace_group(element, ctx, stdin_stream, stdout_stream, stderr_stream)
     if isinstance(element, (nodes.ForCommand, nodes.ArithmeticForCommand)):
         return _execute_for_command(element, ctx, stdin_stream, stdout_stream, stderr_stream)
+    if isinstance(element, (nodes.IfCommand, nodes.WhileCommand, nodes.UntilCommand)):
+        # Structured control flow shares the for-loop frame: same cwd/env scope, own redirects.
+        return _execute_for_command(element, ctx, stdin_stream, stdout_stream, stderr_stream)
     if isinstance(element, nodes.SimpleCommand):
         return _dispatch_simple_command(element, ctx, stdin_stream, stdout_stream, stderr_stream)
     raise UnsupportedConstruct("malformed-syntax", f"unrecognized pipeline element {type(element)!r}")
@@ -546,7 +549,15 @@ def _sub_ctx(
 
 
 def _execute_redirected_compound(
-    node: nodes.Subshell | nodes.BraceGroup | nodes.ForCommand | nodes.ArithmeticForCommand,
+    node: (
+        nodes.Subshell
+        | nodes.BraceGroup
+        | nodes.ForCommand
+        | nodes.ArithmeticForCommand
+        | nodes.IfCommand
+        | nodes.WhileCommand
+        | nodes.UntilCommand
+    ),
     ctx: ExecContext,
     stdin_stream,
     stdout_stream,
@@ -572,6 +583,11 @@ def _execute_redirected_compound(
             if isinstance(node, (nodes.ForCommand, nodes.ArithmeticForCommand)):
                 inner_ctx.loop_depth += 1
                 return _execute_loop(node, inner_ctx)
+            if isinstance(node, (nodes.WhileCommand, nodes.UntilCommand)):
+                inner_ctx.loop_depth += 1
+                return _execute_while_or_until(node, inner_ctx, until=isinstance(node, nodes.UntilCommand))
+            if isinstance(node, nodes.IfCommand):
+                return _run_if_branches(node, inner_ctx)
             return execute(node.body, inner_ctx)
         except ShellExit as exc:
             if isolated:
@@ -594,7 +610,13 @@ def _execute_brace_group(node: nodes.BraceGroup, ctx: ExecContext, stdin_stream,
 
 
 def _execute_for_command(
-    node: nodes.ForCommand | nodes.ArithmeticForCommand,
+    node: (
+        nodes.ForCommand
+        | nodes.ArithmeticForCommand
+        | nodes.IfCommand
+        | nodes.WhileCommand
+        | nodes.UntilCommand
+    ),
     ctx: ExecContext,
     stdin_stream,
     stdout_stream,
@@ -605,13 +627,28 @@ def _execute_for_command(
     )
 
 
-def _check_loop_budget(ctx: ExecContext, iteration: int) -> None:
+def _run_if_branches(node: nodes.IfCommand, ctx: ExecContext) -> int:
+    """The exit status of the LAST command in a branch's condition list decides whether that
+    branch's body runs; the first branch (`if`, then each `elif` in order) whose condition
+    exits 0 wins and its body's exit status becomes the `if` command's status. If no branch
+    matches, `else`'s body runs when present; otherwise the command exits 0 (bash semantics)."""
+    for condition, body in node.branches:
+        condition_code = execute(condition, ctx)
+        ctx.state.last_exit_code = condition_code
+        if condition_code == 0:
+            return execute(body, ctx)
+    if node.else_body is not None:
+        return execute(node.else_body, ctx)
+    return 0
+
+
+def _check_loop_budget(ctx: ExecContext, iteration: int, *, label: str = "for") -> None:
     if ctx.deadline is not None and time.monotonic() >= ctx.deadline:
         raise ShellExit(124)
     if iteration >= MAX_LOOP_ITERATIONS:
         _write_merged(
             _merged_sink(ctx),
-            f"for: iteration limit ({MAX_LOOP_ITERATIONS}) exceeded\n".encode("utf-8"),
+            f"{label}: iteration limit ({MAX_LOOP_ITERATIONS}) exceeded\n".encode("utf-8"),
             ctx,
         )
         raise ShellExit(124)
@@ -663,6 +700,23 @@ def _execute_loop(node: nodes.ForCommand | nodes.ArithmeticForCommand, ctx: Exec
     except ArithmeticError as exc:
         _write_merged(_merged_sink(ctx), f"bash: arithmetic: {exc}\n".encode("utf-8"), ctx)
         return 1
+
+
+def _execute_while_or_until(node: nodes.WhileCommand | nodes.UntilCommand, ctx: ExecContext, *, until: bool) -> int:
+    label = "until" if until else "while"
+    exit_code = 0
+    iteration = 0
+    while True:
+        _check_loop_budget(ctx, iteration, label=label)
+        iteration += 1
+        condition_code = execute(node.condition, ctx)
+        ctx.state.last_exit_code = condition_code
+        should_run = condition_code != 0 if until else condition_code == 0
+        if not should_run:
+            return exit_code
+        exit_code, action = _execute_loop_body(node.body, ctx)
+        if action == "break":
+            return exit_code
 
 
 def _dispatch_simple_command(

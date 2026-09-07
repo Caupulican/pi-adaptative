@@ -14,7 +14,16 @@ from context import BuiltinContext
 from errors import UnsupportedConstruct
 from paths import resolve_request_path
 
-_GREP_FLAGS = set("ivnclwFExhHoqsrRa")
+_GREP_FLAGS = set("ivnclwFExhHoqsrRaI")
+
+# GNU grep -I: treat a file as binary (and skip it) when its first 8 KiB contain a NUL
+# byte — the same heuristic GNU grep itself uses. Only file targets are checked (not
+# `(standard input)`), matching real grep behavior.
+_BINARY_SNIFF_BYTES = 8192
+
+
+def _looks_binary(data: bytes) -> bool:
+    return b"\x00" in data[:_BINARY_SNIFF_BYTES]
 _GREP_VALUE_FLAGS = {"A", "B", "C", "e", "m"}
 
 
@@ -137,6 +146,7 @@ def cmd_grep(ctx: BuiltinContext) -> int:
     quiet = "q" in flags
     suppress_errors = "s" in flags
     recursive = "r" in flags or "R" in flags
+    skip_binary = "I" in flags
     before = _context_count(valued, "B")
     after = _context_count(valued, "A")
     max_count = int(valued["m"]) if valued.get("m", "").isdigit() else None
@@ -259,6 +269,8 @@ def cmd_grep(ctx: BuiltinContext) -> int:
                 if not suppress_errors:
                     ctx.stdout.write(f"grep: {name}: {exc.strerror or exc}\n".encode("utf-8"))
                 any_error = True
+                continue
+            if skip_binary and _looks_binary(data):
                 continue
             process(name, read_lines(data))
     if out_lines:

@@ -594,7 +594,7 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 			["brace-expansion", "foo {a,b,c}"],
 			["exec-builtin", "exec foo"],
 			["function-definition", "name() { echo hi; }"],
-			["control-flow", "if true; then echo hi; fi"],
+			["control-flow", "case $x in a) echo a;; esac"],
 			["extended-glob", "foo @(a|b)"],
 			["unsupported-builtin", "eval foo"],
 			["unsupported-flag", "ls -Z"],
@@ -615,7 +615,7 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 
 		it("a control-flow refusal frame carries exit 2 and no partial output", () => {
 			withTmpDir((dir) => {
-				const { frame, stdout } = runEngine(python, "if true; then echo reached; fi", dir);
+				const { frame, stdout } = runEngine(python, "case $x in a) echo reached;; esac", dir);
 				expect(frame.exitCode).toBe(2);
 				expect(frame.unsupported?.construct).toBe("control-flow");
 				expect(stdout.length).toBeGreaterThan(0);

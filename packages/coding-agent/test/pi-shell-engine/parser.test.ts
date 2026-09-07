@@ -157,6 +157,50 @@ describe("pi-shell-engine tokenizer + parser", () => {
 			expect(element.body.entries).toHaveLength(1);
 		});
 
+		it("if command: single branch, no else", () => {
+			const ast = parseToDict(python, "if true; then echo yes; fi") as any;
+			const element = ast.entries[0].pipelines[0].elements[0];
+			expect(element._).toBe("IfCommand");
+			expect(element.branches).toHaveLength(1);
+			expect(element.branches[0][0].entries).toHaveLength(1);
+			expect(element.branches[0][1].entries).toHaveLength(1);
+			expect(element.else_body).toBeNull();
+		});
+
+		it("if command: elif chain and else, multi-line form", () => {
+			const command = ["if false", "then echo a", "elif true", "then echo b", "else echo c", "fi"].join("\n");
+			const ast = parseToDict(python, command) as any;
+			const element = ast.entries[0].pipelines[0].elements[0];
+			expect(element._).toBe("IfCommand");
+			expect(element.branches).toHaveLength(2);
+			expect(element.else_body.entries).toHaveLength(1);
+		});
+
+		it("if command: condition is a command list nested inside a for loop", () => {
+			const command = 'for d in a b; do if [ "$d" = "a" ]; then echo "$d"; fi; done';
+			const ast = parseToDict(python, command) as any;
+			const forNode = ast.entries[0].pipelines[0].elements[0];
+			expect(forNode._).toBe("ForCommand");
+			const ifNode = forNode.body.entries[0].pipelines[0].elements[0];
+			expect(ifNode._).toBe("IfCommand");
+		});
+
+		it("while loop: condition and body as command lists", () => {
+			const ast = parseToDict(python, "while true; do echo x; break; done") as any;
+			const element = ast.entries[0].pipelines[0].elements[0];
+			expect(element._).toBe("WhileCommand");
+			expect(element.condition.entries).toHaveLength(1);
+			expect(element.body.entries).toHaveLength(2);
+		});
+
+		it("until loop: condition and body as command lists", () => {
+			const ast = parseToDict(python, "until false; do echo x; done") as any;
+			const element = ast.entries[0].pipelines[0].elements[0];
+			expect(element._).toBe("UntilCommand");
+			expect(element.condition.entries).toHaveLength(1);
+			expect(element.body.entries).toHaveLength(1);
+		});
+
 		it.each([
 			[">", "echo a > out.txt"],
 			[">>", "echo a >> out.txt"],
@@ -315,7 +359,8 @@ describe("pi-shell-engine tokenizer + parser", () => {
 			["brace-expansion", "foo {a,b,c}"],
 			["exec-builtin", "exec foo"],
 			["function-definition", "name() { echo hi; }"],
-			["control-flow", "if true; then echo hi; fi"],
+			["control-flow", "case $x in a) echo a;; esac"],
+			["control-flow", "select x in a b; do echo $x; done"],
 			["extended-glob", "foo @(a|b)"],
 			["unsupported-builtin", "eval foo"],
 		])("construct id: %s", (construct, command) => {
@@ -373,6 +418,14 @@ print("tilde-user" in UNSUPPORTED_CONSTRUCTS)
 			["malformed-syntax", "for item in one; do echo one"],
 			["malformed-syntax", "for item in one; do done"],
 			["malformed-syntax", "for item in one; do; done"],
+			["malformed-syntax", "if true; echo hi; fi"],
+			["malformed-syntax", "if ; then echo hi; fi"],
+			["malformed-syntax", "if true; then fi"],
+			["malformed-syntax", "if true; then echo hi"],
+			["malformed-syntax", "while true; echo x; done"],
+			["malformed-syntax", "while true; do done"],
+			["malformed-syntax", "while true; do echo x"],
+			["malformed-syntax", "until false; do done"],
 		])("construct id: %s (architect amendment §1.6)", (construct, command) => {
 			const refusal = parseRefusal(python, command);
 			expect(refusal.code).toBe("unsupported");

@@ -93,8 +93,8 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 		}
 	});
 
-	it("(d) word-list and arithmetic for loops execute with printf and loop control", async () => {
-		const sessionKey = freshSessionKey("refusal");
+	it("(d) word-list/arithmetic for loops, if/elif/else, and while loops execute with printf and loop control", async () => {
+		const sessionKey = freshSessionKey("control-flow");
 		try {
 			const tool = createBashToolDefinition(process.cwd(), { sessionKey });
 			const result = await tool.execute(
@@ -123,9 +123,40 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 			if (arithmeticContent?.type !== "text") throw new Error("expected text output");
 			expect(arithmeticContent.text.trim()).toBe("[0]\n[2]\n[3]");
 
-			await expect(
-				tool.execute("call-d", { command: "if true; then echo hi; fi" }, undefined, undefined, undefined as never),
-			).rejects.toThrow(/control-flow|not supported|if\/while/i);
+			const ifResult = await tool.execute(
+				"call-d-if",
+				{ command: "if true; then echo hi; fi" },
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			const ifContent = ifResult.content[0];
+			if (ifContent?.type !== "text") throw new Error("expected text output");
+			expect(ifContent.text.trim()).toBe("hi");
+
+			const forIf = await tool.execute(
+				"call-d-for-if",
+				{ command: `for d in a b; do if [ "$d" = "b" ]; then echo "$d"; fi; done` },
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			const forIfContent = forIf.content[0];
+			if (forIfContent?.type !== "text") throw new Error("expected text output");
+			expect(forIfContent.text.trim()).toBe("b");
+
+			const whileBreak = await tool.execute(
+				"call-d-while",
+				{
+					command: `s=""; while true; do test "\${#s}" = 3 && break; printf '[%s]\\n' "\${#s}"; s="\${s}x"; done`,
+				},
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			const whileBreakContent = whileBreak.content[0];
+			if (whileBreakContent?.type !== "text") throw new Error("expected text output");
+			expect(whileBreakContent.text.trim()).toBe("[0]\n[1]\n[2]");
 		} finally {
 			await disposeShellExecutionSessionAndWait(sessionKey);
 		}

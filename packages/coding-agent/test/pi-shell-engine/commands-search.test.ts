@@ -379,4 +379,44 @@ describe("grep coreutils surface the sessions used", () => {
 		if (upper.refused) throw new Error("refused");
 		expect(upper.stdout).toBe("sub/c.txt:foo deep\n");
 	});
+
+	it("-I skips binary files (a NUL in the first 8 KiB) while still matching text files, combined with -RInE", () => {
+		const dir = withTmpFiles({ "readme.py": "def match_target():\n    return 1\n" });
+		// A "binary" file: NUL byte in the first 8 KiB, like GNU grep's own -I heuristic.
+		writeFileSync(join(dir, "blob.py"), Buffer.from("match_target\x00binary payload"));
+		const withoutI = runBuiltin(python as string, "search.cmd_grep", {
+			argv: ["grep", "-RnE", "match_target", ".", "--include=*.py"],
+			cwd: dir,
+		});
+		if (withoutI.refused) throw new Error("refused");
+		const withoutILines = withoutI.stdout.split("\n").filter(Boolean).sort();
+		expect(withoutILines).toHaveLength(2);
+		expect(withoutILines[0].startsWith("blob.py:1:match_target")).toBe(true);
+		expect(withoutILines[1]).toBe("readme.py:1:def match_target():");
+
+		const withISkipping = runBuiltin(python as string, "search.cmd_grep", {
+			argv: ["grep", "-RInE", "match_target", ".", "--include=*.py"],
+			cwd: dir,
+		});
+		if (withISkipping.refused) throw new Error("refused");
+		expect(withISkipping.stdout.split("\n").filter(Boolean)).toEqual(["readme.py:1:def match_target():"]);
+	});
+
+	it("-I applied directly to a binary file target yields no match instead of garbled output", () => {
+		const dir = withTmpFiles({});
+		writeFileSync(join(dir, "blob.bin"), Buffer.from("needle\x00tail"));
+		const r = runBuiltin(python as string, "search.cmd_grep", {
+			argv: ["grep", "-I", "needle", "blob.bin"],
+			cwd: dir,
+		});
+		if (r.refused) throw new Error("refused");
+		expect(r.stdout).toBe("");
+		expect(r.exitCode).toBe(1);
+	});
+
+	it("an unknown flag combined with -I is still refused (parses -I as a real flag, not silently accepted)", () => {
+		const r = runBuiltin(python as string, "search.cmd_grep", { argv: ["grep", "-IZ", "foo"] }) as Refusal;
+		expect(r.refused).toBe(true);
+		expect(r.construct).toBe("unsupported-flag");
+	});
 });

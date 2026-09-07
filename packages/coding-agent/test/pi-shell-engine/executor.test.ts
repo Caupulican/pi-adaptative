@@ -641,6 +641,117 @@ describe("pi-shell-engine main.py ParamExpansionError handling (architect fix #1
 		expect(frame.exitCode).toBe(0);
 	});
 
+	describe("if/elif/else (multi-line and one-line ';' forms)", () => {
+		it("runs the then-branch when the condition exits 0", () => {
+			const { stdout, frame } = runMain("if true; then printf yes; fi", tmpdir());
+			expect(stdout).toBe("yes");
+			expect(frame.exitCode).toBe(0);
+			expect(frame.unsupported).toBeNull();
+		});
+
+		it("runs the else-branch when the condition exits non-zero", () => {
+			const { stdout, frame } = runMain("if false; then printf yes; else printf no; fi", tmpdir());
+			expect(stdout).toBe("no");
+			expect(frame.exitCode).toBe(0);
+		});
+
+		it("picks the first matching elif and skips the rest", () => {
+			const command =
+				"if false; then printf a; elif true; then printf b; elif true; then printf c; else printf d; fi";
+			const { stdout, frame } = runMain(command, tmpdir());
+			expect(stdout).toBe("b");
+			expect(frame.exitCode).toBe(0);
+		});
+
+		it("exits 0 with no output when nothing matches and there is no else", () => {
+			const { stdout, frame } = runMain("if false; then printf unreachable; fi; printf done", tmpdir());
+			expect(stdout).toBe("done");
+			expect(frame.exitCode).toBe(0);
+		});
+
+		it("uses the exit status of the last command in a multi-command condition", () => {
+			const { stdout, frame } = runMain("if true; false; then printf yes; else printf no; fi", tmpdir());
+			expect(stdout).toBe("no");
+			expect(frame.exitCode).toBe(0);
+		});
+
+		it("accepts the multi-line form with newlines in place of ';'", () => {
+			const command = ["if false", "then", "  printf a", "else", "  printf b", "fi"].join("\n");
+			const { stdout, frame } = runMain(command, tmpdir());
+			expect(stdout).toBe("b");
+			expect(frame.exitCode).toBe(0);
+		});
+
+		it("nests inside a for loop and reads the loop variable in its condition", () => {
+			const command = 'for d in a b c; do if test "$d" = "b"; then printf "[%s]" "$d"; fi; done';
+			const { stdout, frame } = runMain(command, tmpdir());
+			expect(stdout).toBe("[b]");
+			expect(frame.exitCode).toBe(0);
+		});
+
+		it("propagates break/continue raised from inside an if body to the enclosing loop", () => {
+			const command = 'for d in a b c; do if test "$d" = "b"; then continue; fi; printf "%s" "$d"; done';
+			const { stdout, frame } = runMain(command, tmpdir());
+			expect(stdout).toBe("ac");
+			expect(frame.exitCode).toBe(0);
+		});
+	});
+
+	describe("while / until loops", () => {
+		it("runs a while loop until its condition exits non-zero", () => {
+			const command = 's=""; while test "${#s}" -lt 3; do printf "%s" "${#s}"; s="${s}x"; done';
+			const { stdout, frame } = runMain(command, tmpdir());
+			expect(stdout).toBe("012");
+			expect(frame.exitCode).toBe(0);
+			expect(frame.unsupported).toBeNull();
+		});
+
+		it("runs an until loop until its condition exits 0", () => {
+			const command = 's=""; until test "${#s}" -ge 3; do printf "%s" "${#s}"; s="${s}x"; done';
+			const { stdout, frame } = runMain(command, tmpdir());
+			expect(stdout).toBe("012");
+			expect(frame.exitCode).toBe(0);
+		});
+
+		it("honors break inside a while loop", () => {
+			const command = 's=""; while true; do test "${#s}" = 2 && break; printf "%s" "${#s}"; s="${s}x"; done';
+			const { stdout, frame } = runMain(command, tmpdir());
+			expect(stdout).toBe("01");
+			expect(frame.exitCode).toBe(0);
+		});
+
+		it("honors continue inside an until loop", () => {
+			const command =
+				's=""; until test "${#s}" -ge 4; do s="${s}x"; test "${#s}" = 2 && continue; printf "%s" "${#s}"; done';
+			const { stdout, frame } = runMain(command, tmpdir());
+			expect(stdout).toBe("134");
+			expect(frame.exitCode).toBe(0);
+		});
+
+		it("runs zero iterations when the while condition is false from the start", () => {
+			const { stdout, frame } = runMain("while false; do printf unreachable; done; printf done", tmpdir());
+			expect(stdout).toBe("done");
+			expect(frame.exitCode).toBe(0);
+		});
+
+		it("bounds a runaway while loop at the request deadline instead of hanging forever", () => {
+			const { frame } = runMain("while true; do true; done", tmpdir(), {
+				engineTimeoutMs: 20,
+				processTimeoutMs: 5_000,
+			});
+			expect(frame.exitCode).toBe(124);
+			expect(frame.unsupported).toBeNull();
+		});
+
+		it("nests a while loop inside a for loop", () => {
+			const command =
+				'for outer in a b; do s=""; while test "${#s}" -lt 2; do printf "%s%s" "$outer" "${#s}"; s="${s}x"; done; done';
+			const { stdout, frame } = runMain(command, tmpdir());
+			expect(stdout).toBe("a0a1b0b1");
+			expect(frame.exitCode).toBe(0);
+		});
+	});
+
 	describe("pipeline stages through the REAL builtin registry (architect G1/G2 fix)", () => {
 		it("a three-stage builtin pipeline pipes bytes correctly and exits 0", () => {
 			const { stdout, stderr, frame } = runMain('printf "%s\\n" one two three | grep t | sort -r', tmpdir());

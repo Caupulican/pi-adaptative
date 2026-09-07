@@ -116,7 +116,49 @@ class ArithmeticForCommand:
     redirects: list["Redirect"]
 
 
-PipelineElement = SimpleCommand | Subshell | BraceGroup | ForCommand | ArithmeticForCommand
+@dataclass
+class IfCommand:
+    """``if/elif/.../else/fi`` chain.
+
+    ``branches`` is an ordered list of ``(condition, body)`` pairs — ``if`` first, then
+    each ``elif`` in source order. The exit status of the LAST command in a branch's
+    condition list decides whether that branch's body runs; the first branch whose
+    condition exits 0 wins and no later branch (elif or else) is evaluated.
+    """
+
+    branches: list[tuple["CommandList", "CommandList"]]
+    else_body: "CommandList | None"
+    redirects: list["Redirect"]
+
+
+@dataclass
+class WhileCommand:
+    """``while condition; do body; done`` — body runs while condition exits 0."""
+
+    condition: "CommandList"
+    body: "CommandList"
+    redirects: list["Redirect"]
+
+
+@dataclass
+class UntilCommand:
+    """``until condition; do body; done`` — body runs while condition exits non-zero."""
+
+    condition: "CommandList"
+    body: "CommandList"
+    redirects: list["Redirect"]
+
+
+PipelineElement = (
+    SimpleCommand
+    | Subshell
+    | BraceGroup
+    | ForCommand
+    | ArithmeticForCommand
+    | IfCommand
+    | WhileCommand
+    | UntilCommand
+)
 
 
 @dataclass
