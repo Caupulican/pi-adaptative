@@ -211,4 +211,48 @@ describe("backend-owned credential paths", () => {
 		expect(test.execute).not.toHaveBeenCalled();
 		expect(test.release).toHaveBeenCalledOnce();
 	});
+
+	it.each([
+		{ name: "run_process", params: { executable: "printf", args: ["x:y"] } },
+		{ name: "run_process", params: { executable: "rg", args: ["x:y", "source.ts"] } },
+		{ name: "python", params: { code: "print('x:y'); open('source.ts').read()" } },
+		{ name: "powershell", params: { command: "Get-Content source.ts | Select-String 'x:y'" } },
+	])("does not turn opaque $name text into a drive-relative file request", async ({ name, params }) => {
+		const test = fixture(
+			"win32",
+			"D:\\synthetic\\project",
+			{
+				redactSensitiveText: (text) => text,
+				getPathProbe: () => ({ canonicalPath: () => undefined, isFile: () => true }),
+			},
+			name,
+		);
+		await test.run(params);
+		expect(test.execute).toHaveBeenCalledOnce();
+	});
+
+	it.each(["D:.env.local", "D:private.json", "D:private\\file.txt"])(
+		"retains conservative credential screening for opaque %s",
+		async (path) => {
+			const test = fixture(
+				"win32",
+				"D:\\synthetic\\project",
+				{
+					redactSensitiveText: (text) => text,
+					protectedFiles: ["D:\\synthetic\\project\\private.json"],
+					protectedDirectories: ["D:\\synthetic\\project\\private"],
+					getPathProbe: () => ({ canonicalPath: () => undefined, isFile: () => true }),
+				},
+				"run_process",
+			);
+			await expect(test.run({ executable: "cat", args: [path] })).rejects.toThrow("credential files");
+			expect(test.execute).not.toHaveBeenCalled();
+		},
+	);
+
+	it("still rejects ambiguous direct file requests", async () => {
+		const test = fixture("win32", "D:\\synthetic\\project");
+		await expect(test.run({ path: "D:source.ts" })).rejects.toThrow("drive-relative");
+		expect(test.execute).not.toHaveBeenCalled();
+	});
 });

@@ -70,6 +70,30 @@ export class CredentialPathPolicy {
 		return candidates;
 	}
 
+	private hasCredentialFilename(path: string): boolean {
+		const name = this.paths.basename(path);
+		const comparable = this.caseSensitive ? name : name.toLowerCase();
+		return comparable === ".env" || comparable.startsWith(".env.") || comparable.endsWith(".env");
+	}
+
+	/** Opaque argv/code literals are not declared file requests. Never invent a drive cwd for them. */
+	isProtectedToken(token: string): boolean {
+		const root = this.paths.parse(token).root;
+		if (this.flavor !== "win32" || !root.endsWith(":") || this.paths.isAbsolute(token))
+			return this.isProtected(token);
+		// With no drive cwd, only lexical evidence is available. Known credential filenames and
+		// protected-directory components remain conservative refusals, never filesystem grants.
+		const name = this.paths.basename(token);
+		const components = this.paths.normalize(token.slice(root.length)).split(this.paths.sep);
+		return (
+			this.hasCredentialFilename(token) ||
+			(this.protection?.protectedFiles ?? []).some((file) => this.samePath(this.paths.basename(file), name)) ||
+			(this.protection?.protectedDirectories ?? []).some((directory) =>
+				components.some((component) => this.samePath(component, this.paths.basename(directory))),
+			)
+		);
+	}
+
 	isProtected(rawPath: string): boolean {
 		const candidates = this.candidates(resolveExecutionPath(rawPath, this.cwd, this.flavor));
 		const roots = (values: readonly string[] | undefined) =>
@@ -95,9 +119,7 @@ export class CredentialPathPolicy {
 				directories.some((root) => this.isInside(root, candidate))
 			)
 				return true;
-			const name = this.paths.basename(candidate);
-			const comparable = this.caseSensitive ? name : name.toLowerCase();
-			return comparable === ".env" || comparable.startsWith(".env.") || comparable.endsWith(".env");
+			return this.hasCredentialFilename(candidate);
 		});
 	}
 

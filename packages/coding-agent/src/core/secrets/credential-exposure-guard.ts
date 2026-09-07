@@ -100,7 +100,7 @@ function shellCredentialRisk(
 			}
 			for (const token of args) {
 				if (!token || token.startsWith("-") || token === ".") continue;
-				if (paths.isProtected(token)) return "credential_path";
+				if (paths.isProtectedToken(token)) return "credential_path";
 			}
 		}
 		return undefined;
@@ -222,7 +222,7 @@ function pythonInspectsCredentialPath(code: string, paths: CredentialPathPolicy)
 		// guard, not authorization for arbitrary Python or dynamically constructed paths.
 		if (/^\s+(?:not\s+)?in\b/u.test(code.slice(match.index + match[0].length))) continue;
 		const candidate = match[2]?.replace(/\\([\\"'])/g, "$1");
-		if (candidate && paths.isProtected(candidate)) return true;
+		if (candidate && paths.isProtectedToken(candidate)) return true;
 	}
 	return false;
 }
@@ -238,7 +238,7 @@ function runProcessCredentialRisk(
 	paths: CredentialPathPolicy,
 ): "broad_search" | "credential_path" | "process_environment" | undefined {
 	if (paths.isProtected(executable)) return "credential_path";
-	if (args.some((argument) => paths.isProtected(argument))) return "credential_path";
+	if (args.some((argument) => paths.isProtectedToken(argument))) return "credential_path";
 
 	const executableName = paths.executableName(executable);
 	if (executableName === "jq") {

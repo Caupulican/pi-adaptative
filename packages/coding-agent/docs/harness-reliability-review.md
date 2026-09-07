@@ -577,3 +577,17 @@ the actual execution and continuation promises; no production timer, timeout, or
 All 30 targeted goal tests across four files pass, as does TypeScript. The first draft used a nonexistent
 test observation API; that test-author error was corrected before the independent handoff reproduction.
 This confirms a fixture timing defect, not a claim that the historical CI run captured its exact interleaving.
+
+The credential checkpoint `6bcef83a25765ca8ba914f9f6dbb1541dd693d28` passed all ten Linux/Windows CI
+jobs. A further synthetic negative control then found an introduced portability regression: opaque
+Windows process arguments and Python/shell literals such as `x:y` were passed to strict drive-relative
+file resolution. Four tool-route tests independently reproduced the false refusal. The policy now
+distinguishes opaque token screening from declared file requests, without inventing a per-drive cwd
+or substituting native probes. Dotenv names, known protected filenames, and protected-directory
+components remain conservative refusals when the drive cwd is unknown. Direct file requests remain
+strict. Three additional red assertions concerned the refusal message, not a credential-access bypass.
+All 77 targeted tests across three files pass, including eight added controls. Arbitrary process/code
+path construction remains outside this lexical screening boundary; it is not an OS sandbox.
+Repository checks pass with the same 972 eligible / 981 owned sources, 941 detection-pass files,
+and zero clones. All five edited files retain strict UTF-8 validity, BOM, newline-kind and final-newline
+signatures. The independent synthetic command-text probe also passes after the policy correction.

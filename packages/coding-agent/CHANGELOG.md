@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Kept opaque Windows command/code text such as `x:y` out of strict drive-relative file admission. Direct file requests remain strict, and ambiguous tokens retain conservative credential filename and directory screening.
 - Classified credential paths using the admitted backend's path dialect and case policy, preserved literal filename whitespace, and isolated explicit backend probes from native fallback. Probe failures are redacted and cancellation prevents execution; missing-file search recovery remains available.
 - Paged task-directory status and command receipts within a byte limit, preserving complete paths and rejecting stale cursors after workspace, task, session, or branch changes.
 - Retained resolved file-evidence locators and distinct identities across workspace changes. Literal filename bytes, backend ownership, cancellation, and concurrent goal replacement remain protected during verification.
