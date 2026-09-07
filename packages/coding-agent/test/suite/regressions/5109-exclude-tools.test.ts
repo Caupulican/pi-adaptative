@@ -69,6 +69,7 @@ describe("regression #5109: exclude tools", () => {
 				"skill",
 				"skill_audit",
 				"skillify",
+				"task_directory",
 				"task_steps",
 				"update_goal",
 				"webfetch",

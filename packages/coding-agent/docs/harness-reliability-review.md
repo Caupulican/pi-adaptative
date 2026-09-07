@@ -141,8 +141,16 @@ grants with denied siblings, pre-cancelled admission, cancellation during execut
 until execution settles and the host releases admission. Image generation is mocked; no paid provider runs.
 The orchestration profile catalogue now accepts task_directory through its existing capability policy.
 
-This integration is not the completed portability contract. Workflow composites and delegated/background
-task creation still need an end-to-end binding audit, child receipt identity needs review, and model context
+Workflow pipeline discovery, checklist-stage validation, goal file verification and completion gates,
+and worktree engine construction now consume the same admitted directory. Goal and checklist commands
+capture admission explicitly even though their capability policy classifies them as control-plane tools.
+Six synthetic workflow regressions cover selected-versus-ambient projects, invalid stage rejection,
+cancellation forwarding, pin/select/reload/unpin, and compact goal completion behind an active pipeline.
+The first four independently reproduced wrong-project behavior before the runtime wiring change.
+
+This integration is not the completed portability contract. Delegated/background
+task creation still needs an end-to-end binding audit, persisted relative goal-evidence identity and child
+receipt identity need review, and model context
 projection must survive compaction.
 The current native host marker hashes platform and hostname; it detects differing hostnames, not identical
 hostnames or cloned machines. It must not be presented as a strong machine identity. Native Windows runtime
@@ -264,6 +272,20 @@ a schema field or a prompt instruction. All execution paths must consume the bin
   Nine tracked files retain their BOM/newline conventions and UTF-8 validity; the new fixture file
   is UTF-8. No existing content was transcoded. The four edited production owners retain the existing
   admission, capability, execution-wrapper, and cancellation paths rather than adding parallel engines.
+- The composite checkpoint `5680bba66dea2f05e874071e1b0ef77e688fd94a` passed five GitHub jobs and
+  failed five. The failures were one more stale expected-tool catalogue, an image-accounting test
+  whose whole-request ceiling included the enlarged tool schema, and a Windows short-path/long-path
+  comparison in the process fixture. The first two reproduced locally; the process fixture now
+  compares canonical native directory identities without removing the short-path input. Image cost
+  is measured against an otherwise identical text-only request, with both under-counting and base64
+  character-counting rejected. No production estimator behavior changed. The earlier Windows
+  worktree-cleanup EPERM did not recur; this is not a confirmed repair of that intermittent failure.
+- The workflow checkpoint passes 150 targeted tests across nine files, including six new workflow
+  regressions. Workflow construction reuses the existing admission owner and goal/pipeline reducers;
+  it does not introduce another task cursor or cwd state. The clone coverage audit accounts for
+  965 eligible / 974 owned files with the unchanged 20,000-line / 2 MiB caps and zero clones. All five edited tracked
+  files retain their valid UTF-8, BOM, newline-kind and final-newline signatures; the new fixture is
+  UTF-8. No existing file was transcoded. Exact-checkpoint Windows CI is still required.
 - Host npm configuration emits `globalignorefile` warnings. Local Node is 24.18.1, below the declared
   24.20.0 minimum. Successful checks on this host do not replace supported-runtime CI evidence.
 

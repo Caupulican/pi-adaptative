@@ -193,7 +193,10 @@ describe("composite tools consume admitted task context", () => {
 				[
 					fauxToolCall(
 						"run_process",
-						{ executable: process.execPath, args: ["-e", "console.log(process.cwd())"] },
+						{
+							executable: process.execPath,
+							args: ["-e", "console.log(require('node:fs').realpathSync.native(process.cwd()))"],
+						},
 						{ id: "process" },
 					),
 				],

@@ -1084,7 +1084,7 @@ export class RuntimeBuilder {
 					: undefined;
 			const worktreeSyncEngineDeps = () =>
 				buildWorktreeSyncEngineDeps({
-					cwd: this.deps.getCwd(),
+					cwd: this._taskDirectories.cwd,
 					agentDir: this.deps.getAgentDir(),
 					settingsManager: this.deps.getSettingsManager(),
 					sessionId: this.deps.getSessionManager().getSessionId(),
@@ -1149,13 +1149,16 @@ export class RuntimeBuilder {
 							},
 							args,
 						),
-					cwd: () => this.deps.getCwd(),
+					cwd: () => this._taskDirectories.cwd,
 					// Reuses the already branch-scoped getTaskStepsStateSnapshot dep -- no new
 					// SessionManager access needed for the cross-visibility nudge.
 					getOpenTaskSteps: () => deriveOpenTaskStepRefs(this.deps.getTaskStepsStateSnapshot()),
 					getBackgroundToolTasks: () => this.deps.getToolTaskDependencies?.().list() ?? [],
 					getActivePipeline: () => {
-						const run = resolveCurrentProjectPipelineRun(this.deps.getCwd(), this.deps.getPipelineRunSnapshot());
+						const run = resolveCurrentProjectPipelineRun(
+							this._taskDirectories.cwd,
+							this.deps.getPipelineRunSnapshot(),
+						);
 						if (!run || !isPipelineRunActive(run)) return undefined;
 						return {
 							runId: run.runId,
@@ -1166,11 +1169,17 @@ export class RuntimeBuilder {
 					},
 				});
 				if (toolAccess.allows(LEGACY_GOAL_TOOL_NAME)) {
-					this._baseToolDefinitions.set(goalToolDefinition.name, goalToolDefinition);
+					this._baseToolDefinitions.set(
+						goalToolDefinition.name,
+						this.bindNativeDefinition(() => goalToolDefinition),
+					);
 				}
 				for (const definition of createGoalLifecycleToolDefinitions(goalToolDefinition)) {
 					if (toolAccess.allows(definition.name)) {
-						this._baseToolDefinitions.set(definition.name, definition);
+						this._baseToolDefinitions.set(
+							definition.name,
+							this.bindNativeDefinition(() => definition),
+						);
 					}
 				}
 			}
@@ -1181,23 +1190,29 @@ export class RuntimeBuilder {
 						this.deps.saveTaskStepsStateSnapshot(state);
 					},
 					getActivePipelineScope: () => {
-						const run = resolveCurrentProjectPipelineRun(this.deps.getCwd(), this.deps.getPipelineRunSnapshot());
+						const run = resolveCurrentProjectPipelineRun(
+							this._taskDirectories.cwd,
+							this.deps.getPipelineRunSnapshot(),
+						);
 						if (!run || !isPipelineRunActive(run)) return undefined;
 						const definition = resolvePipelineDefinitionForRun(
 							{
 								agentPipelinesDir: resourceDir("pipelines", this.deps.getAgentDir()),
-								cwd: this.deps.getCwd(),
+								cwd: this._taskDirectories.cwd,
 							},
 							run,
 						);
 						return { runId: run.runId, stageIds: definition?.stages.map((stage) => stage.id) ?? [] };
 					},
 				});
-				this._baseToolDefinitions.set(taskStepsToolDefinition.name, taskStepsToolDefinition);
+				this._baseToolDefinitions.set(
+					taskStepsToolDefinition.name,
+					this.bindNativeDefinition(() => taskStepsToolDefinition),
+				);
 			}
 			if (toolAccess.allows("pipeline")) {
 				const pipelineToolDefinition = createPipelineToolDefinition({
-					cwd: () => this.deps.getCwd(),
+					cwd: () => this._taskDirectories.cwd,
 					agentPipelinesDir: () => resourceDir("pipelines", this.deps.getAgentDir()),
 					getPipelineRun: () => this.deps.getPipelineRunSnapshot(),
 					savePipelineRun: (run) => {

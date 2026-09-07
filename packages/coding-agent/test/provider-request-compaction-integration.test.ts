@@ -131,6 +131,26 @@ describe("provider request compaction integration", () => {
 			};
 		};
 		const admissions: ProviderRequestCompactionInput[] = [];
+		let textOnlyTokens = 0;
+		const admit = harness.agent.admitProviderRequest!.bind(harness.agent);
+		harness.agent.admitProviderRequest = async (request, signal) => {
+			// Measure the same request without its image blocks. Schema growth and native path
+			// spelling belong to the envelope budget, not this image-accounting invariant.
+			const textOnly = {
+				...request,
+				context: {
+					...request.context,
+					messages: request.context.messages.map((message) =>
+						message.role === "user" && Array.isArray(message.content)
+							? { ...message, content: message.content.filter((block) => block.type !== "image") }
+							: message,
+					),
+				},
+			};
+			await admit(textOnly, signal);
+			textOnlyTokens = admissions.pop()!.requestTokens;
+			return admit(request, signal);
+		};
 		vi.spyOn(internals._compaction, "admitProviderRequest").mockImplementation(async (input) => {
 			admissions.push(input);
 			return { action: "send" };
@@ -144,8 +164,11 @@ describe("provider request compaction integration", () => {
 		await harness.agent.prompt("inspect every image", images);
 
 		expect(admissions).toHaveLength(1);
-		expect(admissions[0]?.requestTokens).toBeLessThan(20_000);
-		expect(admissions[0]?.requestTokens).toBeGreaterThan(9_000);
+		const imageTokens = admissions[0]!.requestTokens - textOnlyTokens;
+		// Nine images cost 1,200 semantic tokens each plus bounded block metadata, not
+		// 733,500 tokens of base64 text. Both under-counting and character-counting fail.
+		expect(imageTokens).toBeGreaterThanOrEqual(9 * 1_200);
+		expect(imageTokens).toBeLessThan(9 * 1_220);
 		expect(
 			harness.faux.contexts[0]?.messages.flatMap((message) =>
 				Array.isArray(message.content) ? message.content.filter((block) => block.type === "image") : [],
