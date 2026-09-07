@@ -12,6 +12,7 @@ import { parseShellSearchInvocationScope, type ShellContentSearchTool } from "..
 import { type ShellToken, tokenizeShellCommand } from "../tools/shell-command-parser.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
+import { mockCredentialContent, mockProtectedSearchLines } from "./credential-content-mock.ts";
 import type { CredentialPathPolicy, CredentialPathProbe, CredentialPathProtection } from "./credential-path-policy.ts";
 import { createCredentialPathPolicy } from "./native-credential-path-probe.ts";
 
@@ -46,6 +47,19 @@ export interface CredentialExposureBoundary extends CredentialPathProtection {
 	redactSensitiveText(text: string): string;
 	/** Explicit backend facts; errors never substitute native filesystem results. */
 	getPathProbe?(context?: ExecutionContext): CredentialPathProbe;
+}
+
+/**
+ * `mock`: the operation runs and its output passes the credential mock stream (values replaced,
+ * keys and structure kept). `deny`: the operation is refused before it runs — an authority
+ * boundary (a worker lane kept out of owner-private files), not a visibility policy.
+ */
+export type CredentialExposureMode = "mock" | "deny";
+
+export interface CredentialExposureAssessment {
+	/** `search`: only lines attributed to protected files are mocked; `content`: the whole output is. */
+	kind: "none" | "search" | "content";
+	reason?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -585,6 +599,27 @@ export function credentialToolBlockReason(
 	}
 }
 
+function assessmentFromReason(reason: string | undefined): CredentialExposureAssessment {
+	if (reason === undefined) return { kind: "none" };
+	const search =
+		reason === CREDENTIAL_BLOCK_REASONS.shellSearchRequired || reason === CREDENTIAL_BLOCK_REASONS.grepFileRequired;
+	return { kind: search ? "search" : "content", reason };
+}
+
+export async function assessCredentialExposureAsync(
+	toolName: string,
+	args: unknown,
+	cwd: string,
+	boundary?: CredentialExposureBoundary,
+	executionContext?: ExecutionContext,
+	pathAuthority?: ExecutionPathAuthority,
+	signal?: AbortSignal,
+): Promise<CredentialExposureAssessment> {
+	return assessmentFromReason(
+		await credentialToolBlockReasonAsync(toolName, args, cwd, boundary, executionContext, pathAuthority, signal),
+	);
+}
+
 export async function credentialToolBlockReasonAsync(
 	toolName: string,
 	args: unknown,
@@ -658,8 +693,20 @@ export async function credentialToolBlockReasonAsync(
 	return undefined;
 }
 
-function redactResult<T>(result: AgentToolResult<T>, boundary?: CredentialExposureBoundary): AgentToolResult<T> {
-	const redact = (text: string) => (boundary ? boundary.redactSensitiveText(text) : redactKnownSecrets(text));
+/** Known values first (exact), then the shape-preserving mock, which also covers secret-shaped text. */
+function createOutputRedactor(
+	boundary: CredentialExposureBoundary | undefined,
+	mock: (text: string) => string,
+): (text: string) => string {
+	return (text) => mock(boundary ? boundary.redactSensitiveText(text) : text);
+}
+
+function redactResult<T>(
+	result: AgentToolResult<T>,
+	boundary?: CredentialExposureBoundary,
+	mock: (text: string) => string = redactKnownSecrets,
+): AgentToolResult<T> {
+	const redact = createOutputRedactor(boundary, mock);
 	const budget = { nodes: 0 };
 	return {
 		...result,
@@ -695,11 +742,37 @@ function redactStructuredDetails(
 	);
 }
 
-/** Apply the same path refusal and output redaction to foreground, extension, scout, and lane tools. */
+function createExposureMock(
+	assessment: CredentialExposureAssessment,
+	cwd: string,
+	boundary: CredentialExposureBoundary | undefined,
+	executionContext: ExecutionContext | undefined,
+	pathAuthority: ExecutionPathAuthority | undefined,
+): (text: string) => string {
+	if (assessment.kind === "content") return mockCredentialContent;
+	if (assessment.kind === "search") {
+		const paths = createCredentialPathPolicy(
+			cwd,
+			boundary,
+			executionContext,
+			boundary?.getPathProbe?.(executionContext),
+			pathAuthority,
+		);
+		return (text) => mockProtectedSearchLines(text, (path) => paths.isProtected(path));
+	}
+	return redactKnownSecrets;
+}
+
+/**
+ * Apply the same credential assessment and output mock stream to foreground, extension, scout, and
+ * lane tools. The default is the fail-closed authority contract; the owner runtime opts into the
+ * mock stream explicitly, so a caller that forgets the mode never widens visibility by accident.
+ */
 export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema, TDetails>(
 	tool: AgentTool<TParameters, TDetails>,
 	cwd: string,
 	boundary?: CredentialExposureBoundary,
+	mode: CredentialExposureMode = "deny",
 ): AgentTool<TParameters, TDetails> {
 	return wrapToolExecution(tool, (executor, executionContext, pathAuthority) => ({
 		...executor,
@@ -711,14 +784,15 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 			},
 		},
 		async execute(toolCallId, params, signal, onUpdate) {
+			let mock: (text: string) => string = redactKnownSecrets;
 			const safeUpdate = onUpdate
 				? (partial: AgentToolResult<TDetails>) => {
-						onUpdate(redactResult(partial, boundary));
+						onUpdate(redactResult(partial, boundary, mock));
 					}
 				: undefined;
 			try {
 				signal?.throwIfAborted();
-				const blockReason = await credentialToolBlockReasonAsync(
+				const assessment = await assessCredentialExposureAsync(
 					tool.name,
 					params,
 					cwd,
@@ -727,16 +801,17 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 					pathAuthority,
 					signal,
 				);
-				if (blockReason) {
+				if (assessment.reason && mode === "deny") {
 					throw new AgentToolExecutionError(
-						blockReason,
+						assessment.reason,
 						"credential_access_blocked",
 						"credential-access-blocked",
 						"tool_failure",
 					);
 				}
+				mock = createExposureMock(assessment, cwd, boundary, executionContext, pathAuthority);
 				signal?.throwIfAborted();
-				return redactResult(await executor.execute(toolCallId, params, signal, safeUpdate), boundary);
+				return redactResult(await executor.execute(toolCallId, params, signal, safeUpdate), boundary, mock);
 			} catch (error) {
 				if (error instanceof Error) {
 					const message = boundary

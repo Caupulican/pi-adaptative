@@ -309,6 +309,68 @@ describe("credential exposure guard", () => {
 		expect(execute).not.toHaveBeenCalled();
 	});
 
+	it("mock mode runs a broad search and mocks only the lines attributed to credential files", async () => {
+		// Live friction: every session lost a turn to "Credential-safe shell search requires a narrow
+		// non-dotenv file glob" on plain `rg pattern <dir>` searches.
+		const root = mkdtempSync(join(tmpdir(), "pi-secret-mock-search-"));
+		tempDirs.push(root);
+		writeFileSync(join(root, ".env"), "TOKEN=abc123\n");
+		const output = [
+			"src/app.ts:3:const token = readToken();",
+			".env:1:TOKEN=abc123",
+			`${join(root, ".env")}:1:TOKEN=abc123`,
+			"README.md:9:Bearer abcdefghijklmnop is documented",
+		].join("\n");
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: output }], details: { output } }));
+		const tool: AgentTool<typeof testSchema> = {
+			name: "bash",
+			label: "bash",
+			description: "test bash",
+			parameters: testSchema,
+			execute,
+		};
+		const guarded = wrapToolWithCredentialExposureGuard(tool, root, { redactSensitiveText: (text) => text }, "mock");
+		const result = await guarded.execute("call", { command: "rg TOKEN ." });
+		expect(execute).toHaveBeenCalledOnce();
+		const expected = [
+			"src/app.ts:3:const token = readToken();",
+			".env:1:TOKEN=<mocked:TOKEN>",
+			`${join(root, ".env")}:1:TOKEN=<mocked:TOKEN>`,
+			"README.md:9:[REDACTED] is documented",
+		].join("\n");
+		expect(result.content).toEqual([{ type: "text", text: expected }]);
+		expect(result.details).toEqual({ output: expected });
+	});
+
+	it("mock mode returns credential file content with keys kept and values mocked, while deny still refuses", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-secret-mock-content-"));
+		tempDirs.push(root);
+		const dotenv = join(root, ".env");
+		writeFileSync(dotenv, "TOKEN=abc123\n");
+		const execute = vi.fn(async () => ({
+			content: [{ type: "text" as const, text: "TOKEN=abc123\nMODE=dev\n# note" }],
+			details: {},
+		}));
+		const tool: AgentTool<typeof testSchema> = {
+			name: "read",
+			label: "read",
+			description: "test read",
+			parameters: testSchema,
+			execute,
+		};
+		const boundary = {
+			redactSensitiveText: (text: string) => text.split("abc123").join("[REDACTED_SECRET]"),
+		};
+		const mocked = await wrapToolWithCredentialExposureGuard(tool, root, boundary, "mock").execute("call", {
+			path: dotenv,
+		});
+		expect(mocked.content).toEqual([{ type: "text", text: "TOKEN=<mocked:TOKEN>\nMODE=<mocked:MODE>\n# note" }]);
+		await expect(
+			wrapToolWithCredentialExposureGuard(tool, root, boundary, "deny").execute("call", { path: dotenv }),
+		).rejects.toMatchObject({ failureCode: "credential_access_blocked" });
+		expect(execute).toHaveBeenCalledOnce();
+	});
+
 	it("preserves classified tool errors while redacting their messages", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-secret-classified-error-"));
 		tempDirs.push(root);

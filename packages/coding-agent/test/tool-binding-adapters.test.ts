@@ -476,10 +476,21 @@ describe("invocation binding across registry and policy adapters", () => {
 					fauxAssistantMessage([fauxToolCall("read", { path })], { stopReason: "toolUse" }),
 					fauxAssistantMessage("fixture done"),
 				]);
+				// The owner session keeps the capability: a credential read runs and its values are mocked.
+				if (path === ".env") {
+					execute.mockResolvedValueOnce({
+						content: [{ type: "text", text: "TOKEN=abc123\nMODE=dev" }],
+						details: {},
+					});
+				}
 				await harness.session.prompt("Exercise the synthetic bound reader");
 				const result = harness.session.agent.state.messages.find((message) => message.role === "toolResult");
-				expect(result).toMatchObject({ isError: path === ".env" });
-				expect(execute).toHaveBeenCalledTimes(path === ".env" ? 0 : 1);
+				expect(result).toMatchObject({ isError: false });
+				expect(execute).toHaveBeenCalledTimes(1);
+				if (result?.role === "toolResult") {
+					const text = result.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+					expect(text).toBe(path === ".env" ? "TOKEN=<mocked:TOKEN>\nMODE=<mocked:MODE>" : "bound");
+				}
 				expect(fallback).not.toHaveBeenCalled();
 				expect(release).toHaveBeenCalledOnce();
 			} finally {

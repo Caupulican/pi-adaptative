@@ -182,7 +182,8 @@ function createLaneTools(
 			if (!materialized.ok) throw new Error(materialized.reason);
 			tool = materialized.tool;
 		}
-		return [wrapToolWithCredentialExposureGuard(bindTool ? bindTool(tool) : tool, cwd, privatePathBoundary)];
+		// A lane's private-path boundary is authority, not visibility: it denies before running.
+		return [wrapToolWithCredentialExposureGuard(bindTool ? bindTool(tool) : tool, cwd, privatePathBoundary, "deny")];
 	});
 }
 

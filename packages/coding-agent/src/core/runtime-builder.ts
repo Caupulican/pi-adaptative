@@ -108,6 +108,7 @@ import { ScoutController } from "./scout-controller.ts";
 import { BitwardenCredentialStorageRouter } from "./secrets/bitwarden-credential-storage-router.ts";
 import {
 	type CredentialExposureBoundary,
+	type CredentialExposureMode,
 	wrapToolWithCredentialExposureGuard,
 } from "./secrets/credential-exposure-guard.ts";
 import {
@@ -542,6 +543,11 @@ export class RuntimeBuilder {
 		};
 	}
 
+	/** Owner sessions see mocked values; a worker lane is kept out of owner-private files entirely. */
+	private credentialExposureMode(): CredentialExposureMode {
+		return isWorkerSession() ? "deny" : "mock";
+	}
+
 	private async _runContextScout(
 		query: string,
 		maxTurns: number | undefined,
@@ -552,6 +558,7 @@ export class RuntimeBuilder {
 		const cwd = this._taskDirectories.cwd;
 		const envelope = this.deps.getCapabilityEnvelope?.();
 		const childEnvelope = deriveCompositeChildEnvelope("context_scout", ["read", "grep", "find"], envelope);
+		const exposureMode = this.credentialExposureMode();
 		const controller = new ScoutController({
 			resolveScoutModel: async () =>
 				resolveScoutModel(
@@ -582,9 +589,9 @@ export class RuntimeBuilder {
 					scopeCwd,
 				);
 				return [
-					wrapToolWithCredentialExposureGuard(readTool, toolCwd, this._credentialExposureBoundary),
-					wrapToolWithCredentialExposureGuard(grepTool, toolCwd, this._credentialExposureBoundary),
-					wrapToolWithCredentialExposureGuard(findTool, toolCwd, this._credentialExposureBoundary),
+					wrapToolWithCredentialExposureGuard(readTool, toolCwd, this._credentialExposureBoundary, exposureMode),
+					wrapToolWithCredentialExposureGuard(grepTool, toolCwd, this._credentialExposureBoundary, exposureMode),
+					wrapToolWithCredentialExposureGuard(findTool, toolCwd, this._credentialExposureBoundary, exposureMode),
 				];
 			},
 			streamFn: this.deps.getAgent().streamFn,
@@ -748,6 +755,7 @@ export class RuntimeBuilder {
 				bound,
 				this.deps.getCwd(),
 				this._credentialExposureBoundary,
+				this.credentialExposureMode(),
 			);
 			const scoped = this._workerSessionPrivatePathEnvelope
 				? wrapToolWithEnvelopeScope(guarded, this._workerSessionPrivatePathEnvelope, this.deps.getCwd())
