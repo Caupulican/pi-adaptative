@@ -16,6 +16,7 @@ import type {
 	Usage,
 } from "@caupulican/pi-ai";
 import type { Static, TSchema } from "typebox";
+import type { ExecutionContext } from "./execution-context.ts";
 import type { ToolFailureContextMemory } from "./tool-failure-memory.ts";
 
 /**
@@ -199,6 +200,8 @@ export interface AfterToolCallResult {
 
 /** Context passed to `beforeToolCall`. */
 export interface BeforeToolCallContext {
+	/** Immutable host binding captured before policy admission; absent for context-free tools. */
+	executionContext?: ExecutionContext;
 	/** Opaque identity of the accepted provider request that produced this call. */
 	requestId?: AgentRequestId;
 	/** The assistant message that requested the tool call. */
@@ -213,6 +216,8 @@ export interface BeforeToolCallContext {
 
 /** Context passed to `afterToolCall`. */
 export interface AfterToolCallContext {
+	/** The same binding used at admission, retained through detached completion. */
+	executionContext?: ExecutionContext;
 	/** Opaque identity of the accepted provider request that produced this call. */
 	requestId?: AgentRequestId;
 	/** The assistant message that requested the tool call. */
@@ -1025,6 +1030,15 @@ export interface AgentToolFailureRecoveryContract<TParameters extends TSchema> {
 	actions?: readonly AgentToolFailureRecoveryAction[];
 }
 
+/** A host-owned executor and recovery contract admitted against one execution context. */
+export interface AgentToolInvocation<TParameters extends TSchema = TSchema, TDetails = unknown> {
+	readonly executionContext: ExecutionContext;
+	readonly execute: AgentTool<TParameters, TDetails>["execute"];
+	readonly failureRecovery?: AgentToolFailureRecoveryContract<TParameters>;
+	/** Synchronous, infallible release. The core calls it once, after rejection or real finalization. */
+	release(): void;
+}
+
 /** Tool definition used by the agent runtime. */
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
 	/** Human-readable label for UI display. */
@@ -1038,6 +1052,16 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	prepareArguments?: (args: unknown) => Static<TParameters>;
 	/** Explicit failure-recovery authority; the agent loop never infers recovery from argument text. */
 	failureRecovery?: AgentToolFailureRecoveryContract<TParameters>;
+	/**
+	 * Acquire the executor's immutable host context after argument validation, before policy checks.
+	 * Must perform no operation effects. On rejection, the host cleans up resources it acquired.
+	 * A returned invocation remains leased through background execution and after-tool policy.
+	 */
+	bindInvocation?: (
+		toolCallId: string,
+		params: Static<TParameters>,
+		signal?: AbortSignal,
+	) => Promise<AgentToolInvocation<TParameters, TDetails>>;
 	/**
 	 * Execute the tool call. Throw for exceptional execution failures, or return
 	 * `{ isError: true }` with bounded diagnostic content for an expected

@@ -8,22 +8,22 @@ import { describe, expect, it } from "vitest";
 import { createHarness } from "./suite/harness.ts";
 
 const readParameters = Type.Object({ path: Type.String() });
-const readTool: AgentTool<typeof readParameters> = {
+const readTool = {
 	name: "read",
 	label: "Read",
 	description: "Read a file",
 	parameters: readParameters,
 	execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
-};
+} satisfies AgentTool<typeof readParameters>;
 
 const bashParameters = Type.Object({ command: Type.String() });
-const bashTool: AgentTool<typeof bashParameters> = {
+const bashTool = {
 	name: "bash",
 	label: "Bash",
 	description: "Run a shell command",
 	parameters: bashParameters,
 	execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
-};
+} satisfies AgentTool<typeof bashParameters>;
 
 describe("AgentSession - Autonomy Gates Harness", () => {
 	it("executes tools normally when no capability envelope is present", async () => {

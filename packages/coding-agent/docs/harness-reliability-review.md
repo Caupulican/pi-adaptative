@@ -83,6 +83,20 @@ Shell persistence already exists per agent. It is not a task-directory contract:
 one directory while file tools and the session still use another. Increasing reminders to use `cd`
 does not close that ownership gap.
 
+The agent engine now admits a host-supplied `bindInvocation` after argument validation and before
+policy/retry checks. The resulting immutable execution context reaches policy, durable reservation,
+and after-tool/background hooks. Prepared leases release on rejection or scheduling failure;
+executing leases remain held through the actual operation and asynchronous after-hook, even when a
+foreground placeholder has already returned. Ordinary context-free tools retain their existing path.
+
+An opaque binding identity in the engine receipt separates failure memory, retry admission, replay,
+and successful-result deduplication across directories and attachment generations. Text-protocol
+replay protection still applies within the same binding and refreshes after a changed binding really
+executes. Capturing the context is browser-safe; filesystem normalization remains in the path adapter.
+Seventeen synthetic engine regressions cover these boundaries. The coding-agent registry, policy
+adapters, persistent task controller, and model controls still need to be connected before enabling
+session-wide task pinning. An engine port alone does not provide that feature.
+
 The model must be able to start tasks in different directories and explicitly decide which tasks
 are pinned. Pinning is durable execution state, not a prompt note or a process-global `chdir`.
 
@@ -166,6 +180,12 @@ field or a prompt instruction. All execution paths must consume the binding befo
   retained cwd in the native shell, the real Python engine, the Bash adapter, and the Git filter. The
   last case was independently checked with the filter fix removed: ordinary pinned commands passed
   while filtered Git read the wrong synthetic repository. Native Windows execution still requires CI.
+- The shell checkpoint and its Windows path-alias fixture correction passed all ten Linux/Windows
+  jobs in GitHub CI at commit `3315193082e8f233451855b17c1f5613e9b0981f`. The assertions compare native
+  directory identity without removing short-name inputs from the tests.
+- The subsequent engine-binding slice passes 314 targeted agent tests across 14 files and six
+  coding-agent autonomy tests. This includes 17 binding regressions and seven new receipt decoder
+  cases. The earlier counts overlap these suites and must not be added as distinct coverage.
 - Host npm configuration emits `globalignorefile` warnings. Local Node is 24.18.1, below the declared
   24.20.0 minimum. Successful checks on this host do not replace supported-runtime CI evidence.
 

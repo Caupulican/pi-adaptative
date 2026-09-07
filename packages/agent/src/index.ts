@@ -2,6 +2,8 @@
 export * from "./agent.ts";
 // Loop functions
 export * from "./agent-loop.ts";
+// Portable host execution bindings; filesystem resolution remains in the paths adapter.
+export * from "./execution-context.ts";
 // Custom message types + LLM transformer
 export * from "./messages.ts";
 // Complete provider-request budgeting without serializing a duplicate payload.

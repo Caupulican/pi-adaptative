@@ -43,7 +43,8 @@ import {
 	toolFailureCorrection,
 } from "./tool-failure-memory.ts";
 import { ToolFailureRecoveryGate, type ToolFailureRecoveryGateEffect } from "./tool-failure-recovery-gate.ts";
-import { stampToolInvocation } from "./tool-invocation-receipt.ts";
+import { type BoundToolInvocation, bindToolInvocation } from "./tool-invocation-binding.ts";
+import { retainedToolInvocation, stampToolInvocation } from "./tool-invocation-receipt.ts";
 import { ToolProgressDelivery } from "./tool-progress-delivery.ts";
 import { rejectNativeToolProtocolResidue, rejectToolCallsFromToolFreeResponse } from "./tool-protocol-residue.ts";
 import { ToolResultProgressTracker, toolResultBatchSignature } from "./tool-result-progress.ts";
@@ -610,7 +611,7 @@ async function runLoop(
 					await emit({ type: "agent_end", messages: newMessages });
 					return;
 				}
-				if (!previousSuccessfulTextProtocolResults) {
+				if (!previousSuccessfulTextProtocolResults || toolResults.every((result) => !result.isError)) {
 					lastSuccessfulTextProtocolBatch =
 						textProtocolBatch &&
 						toolResults.length === toolCalls.length &&
@@ -977,6 +978,8 @@ async function streamAssistantResponse(
 }
 
 interface ToolExecutionContext {
+	/** Prepared leases not yet transferred to their real execution's completion. */
+	pendingBindings: Set<() => void>;
 	/** Results published by this batch survive a later admission or scheduling failure. */
 	messages: ToolResultMessage[];
 	context: AgentContext;
@@ -1012,6 +1015,7 @@ async function executeToolCalls(
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
 	const execCtx: ToolExecutionContext = {
+		pendingBindings: new Set(),
 		messages: [],
 		context: currentContext,
 		assistantMessage,
@@ -1035,6 +1039,8 @@ async function executeToolCalls(
 		return batch;
 	} catch (cause) {
 		return { messages: execCtx.messages, terminate: true, failure: { cause } };
+	} finally {
+		for (const release of execCtx.pendingBindings) release();
 	}
 }
 
@@ -1059,19 +1065,22 @@ async function prepareAndStartToolCall(
 	toolCall: AgentToolCall,
 	index: number,
 ): Promise<StartedToolCall> {
-	const preparation = execCtx.previousSuccessfulResults
-		? createRepeatedSuccessfulToolCallOutcome(execCtx.previousSuccessfulResults[index])
-		: await prepareToolCall(
-				execCtx.context,
-				execCtx.assistantMessage,
-				toolCall,
-				execCtx.config,
-				execCtx.validationFailureTracker,
-				execCtx.toolFailureMemory,
-				execCtx.toolFailureRecoveryGate,
-				execCtx.signal,
-				execCtx.requestId,
-			);
+	const preparation =
+		execCtx.previousSuccessfulResults &&
+		!execCtx.context.tools?.find((tool) => tool.name === toolCall.name)?.bindInvocation
+			? createRepeatedSuccessfulToolCallOutcome(execCtx.previousSuccessfulResults[index])
+			: await prepareToolCall(
+					execCtx.context,
+					execCtx.assistantMessage,
+					toolCall,
+					execCtx.config,
+					execCtx.validationFailureTracker,
+					execCtx.toolFailureMemory,
+					execCtx.toolFailureRecoveryGate,
+					execCtx.signal,
+					execCtx.requestId,
+					execCtx.previousSuccessfulResults?.[index],
+				);
 	if (preparation.kind === "immediate") {
 		if (preparation.validationEvent?.outcome === "bounced") execCtx.validationBounced = true;
 		await emitToolExecutionStart(toolCall, execCtx.emit);
@@ -1087,6 +1096,7 @@ async function prepareAndStartToolCall(
 			details: stampToolInvocation(finalized.result.details, {
 				version: 1,
 				requestId: execCtx.requestId,
+				...(preparation.executionScope ? { executionScope: preparation.executionScope } : {}),
 				execution: "not_started",
 				postprocessingFailures: [],
 			}),
@@ -1096,6 +1106,7 @@ async function prepareAndStartToolCall(
 			finalized,
 		};
 	}
+	if (preparation.binding) execCtx.pendingBindings.add(preparation.binding.release);
 	return { kind: "prepared", preparation };
 }
 
@@ -1104,6 +1115,7 @@ async function finalizeStartedToolCall(
 	started: StartedToolCall,
 ): Promise<FinalizedToolCallOutcome> {
 	if (started.kind === "finalized") return started.finalized;
+	if (started.preparation.binding) execCtx.pendingBindings.delete(started.preparation.binding.release);
 	return executeAndFinalizePreparedToolCall(
 		execCtx.context,
 		execCtx.assistantMessage,
@@ -1133,6 +1145,7 @@ async function reservePreparedToolCalls(
 			toolCall: prepared.toolCall,
 			args: prepared.args,
 			context: execCtx.context,
+			executionContext: prepared.binding?.executionContext,
 		}));
 		await execCtx.config.onToolCallStart(calls, execCtx.signal);
 	}
@@ -1359,6 +1372,7 @@ async function executeToolCallsPartitioned(
 }
 
 type PreparedToolCall = {
+	binding?: BoundToolInvocation;
 	kind: "prepared";
 	toolCall: AgentToolCall;
 	tool: AgentTool<any>;
@@ -1367,6 +1381,7 @@ type PreparedToolCall = {
 };
 
 type ImmediateToolCallOutcome = {
+	executionScope?: string;
 	kind: "immediate";
 	result: AgentToolResult<any>;
 	isError: boolean;
@@ -1690,8 +1705,9 @@ async function prepareToolCall(
 	toolFailureRecoveryGate: ToolFailureRecoveryGate,
 	signal: AbortSignal | undefined,
 	requestId: AgentRequestId,
+	previousSuccessfulResult?: ToolResultMessage,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
-	const tool = currentContext.tools?.find((candidate) => candidate.name === toolCall.name);
+	let tool = currentContext.tools?.find((candidate) => candidate.name === toolCall.name);
 	if (!tool) {
 		const available = truncateProviderValidationFeedback(
 			(currentContext.tools ?? [])
@@ -1749,6 +1765,8 @@ async function prepareToolCall(
 	}
 
 	let validationEvent: ToolArgumentValidationTelemetryEvent | undefined;
+	let binding: BoundToolInvocation | undefined;
+	let admitted = false;
 	try {
 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
 		const validatedArgs = validateToolArguments(tool, preparedToolCall, {
@@ -1766,8 +1784,31 @@ async function prepareToolCall(
 			toolCall.rawArguments ??= toolCall.arguments;
 			toolCall.arguments = validatedArgs;
 		}
-		const unresolvedRecord = getUnresolvedToolFailure(toolFailureMemory, toolCall.name, validatedArgs);
-		const admission = toolFailureRecoveryGate.admit(tool, validatedArgs, unresolvedRecord, currentContext.messages);
+		if (tool.bindInvocation) binding = await bindToolInvocation(tool, toolCall.id, validatedArgs, signal);
+		if (binding) tool = binding.tool;
+		if (
+			binding &&
+			previousSuccessfulResult &&
+			retainedToolInvocation(previousSuccessfulResult.details)?.executionScope === binding.executionScope
+		) {
+			return {
+				...createRepeatedSuccessfulToolCallOutcome(previousSuccessfulResult),
+				executionScope: binding.executionScope,
+			};
+		}
+		const unresolvedRecord = getUnresolvedToolFailure(
+			toolFailureMemory,
+			toolCall.name,
+			validatedArgs,
+			binding?.executionScope,
+		);
+		const admission = toolFailureRecoveryGate.admit(
+			tool,
+			validatedArgs,
+			unresolvedRecord,
+			currentContext.messages,
+			binding?.executionScope,
+		);
 		if (admission.kind === "blocked") {
 			const result = createRepeatedToolFailureResult(admission.record, admission.envelopeOnlyChange);
 			const memoryRecord = result.details.piToolFailureMemory;
@@ -1781,6 +1822,7 @@ async function prepareToolCall(
 				correction: memoryRecord.correction,
 				diagnostic: memoryRecord.diagnostic,
 				repeatedToolFailure: true,
+				executionScope: binding?.executionScope,
 				validationEvent: createValidationBounceTelemetry(config, toolCall, "repeated_failed_operation"),
 			};
 		}
@@ -1792,11 +1834,12 @@ async function prepareToolCall(
 					toolCall,
 					args: validatedArgs,
 					context: currentContext,
+					executionContext: binding?.executionContext,
 				},
 				signal,
 			);
 			if (signal?.aborted) {
-				return createAbortedToolCallOutcome(validationEvent);
+				return { ...createAbortedToolCallOutcome(validationEvent), executionScope: binding?.executionScope };
 			}
 			if (beforeResult?.block) {
 				const reason = beforeResult.reason || "Tool execution was blocked";
@@ -1809,6 +1852,7 @@ async function prepareToolCall(
 					isError: true,
 					phase: "policy",
 					failureCode: "blocked",
+					executionScope: binding?.executionScope,
 					correction: "Choose an allowed approach or request the required authority before retrying.",
 					diagnostic: reason,
 					validationEvent,
@@ -1816,10 +1860,12 @@ async function prepareToolCall(
 			}
 		}
 		if (signal?.aborted) {
-			return createAbortedToolCallOutcome(validationEvent);
+			return { ...createAbortedToolCallOutcome(validationEvent), executionScope: binding?.executionScope };
 		}
+		admitted = true;
 		return {
 			kind: "prepared",
+			binding,
 			toolCall,
 			tool,
 			args: validatedArgs,
@@ -1837,6 +1883,7 @@ async function prepareToolCall(
 			isError: true,
 			phase: isToolArgumentValidationError(error) ? "validation" : "preflight",
 			failureCode: isToolArgumentValidationError(error) ? "invalid_arguments" : "preflight_error",
+			executionScope: binding?.executionScope,
 			correction: isToolArgumentValidationError(error)
 				? [validationFailureCorrection(validationEvent, toolCall.name), parserDiagnostic]
 						.filter((part): part is string => part !== undefined)
@@ -1846,6 +1893,8 @@ async function prepareToolCall(
 			...(validationFailure?.providerFeedback ? { providerFeedback: validationFailure.providerFeedback } : {}),
 			validationEvent,
 		};
+	} finally {
+		if (!admitted) binding?.release();
 	}
 }
 
@@ -1878,6 +1927,7 @@ function finalizeRejectedToolCall(
 				.map((block) => block.text)
 				.join("\n"),
 		},
+		outcome.executionScope,
 	);
 	const failureResult = createToolFailureResult(record, outcome.result.terminate);
 	const result = outcome.providerFeedback
@@ -1953,47 +2003,35 @@ async function executeAndFinalizePreparedToolCall(
 	emit: AgentEventSink,
 ): Promise<FinalizedToolCallOutcome> {
 	const backgroundDelay = getBackgroundToolCallDelay(config);
-	if (
-		!config.handoffToolCall ||
-		(backgroundDelay === undefined && config.subscribeToolCallHandoffRequest === undefined)
-	) {
-		const executed = await executePreparedToolCall(prepared, foregroundSignal, emit);
-		return finalizeExecutedToolCall(
-			currentContext,
-			assistantMessage,
-			prepared,
-			requestId,
-			executed,
-			config,
-			repairTeachTracker,
-			toolFailureMemory,
-			toolFailureRecoveryGate,
-			foregroundSignal,
-		);
-	}
-
-	const executionAbort = createLinkedToolAbort(foregroundSignal);
+	const canHandoff =
+		config.handoffToolCall && (backgroundDelay !== undefined || config.subscribeToolCallHandoffRequest !== undefined);
+	const executionAbort = canHandoff ? createLinkedToolAbort(foregroundSignal) : undefined;
+	const executionSignal = executionAbort?.signal ?? foregroundSignal;
 	const startedAt = Date.now();
 	let emitForegroundUpdates = true;
 	const completion = (async (): Promise<FinalizedToolCallOutcome> => {
-		const executed = await executePreparedToolCall(prepared, executionAbort.signal, (event) => {
-			if (emitForegroundUpdates) return emit(event);
-		});
-		const finalized = await finalizeExecutedToolCall(
-			currentContext,
-			assistantMessage,
-			prepared,
-			requestId,
-			executed,
-			config,
-			repairTeachTracker,
-			toolFailureMemory,
-			toolFailureRecoveryGate,
-			executionAbort.signal,
-		);
-		return finalized;
+		try {
+			const executed = await executePreparedToolCall(prepared, executionSignal, (event) => {
+				if (emitForegroundUpdates) return emit(event);
+			});
+			return await finalizeExecutedToolCall(
+				currentContext,
+				assistantMessage,
+				prepared,
+				requestId,
+				executed,
+				config,
+				repairTeachTracker,
+				toolFailureMemory,
+				toolFailureRecoveryGate,
+				executionSignal,
+			);
+		} finally {
+			prepared.binding?.release();
+			executionAbort?.detachForeground();
+		}
 	})();
-	completion.then(executionAbort.detachForeground, executionAbort.detachForeground);
+	if (!executionAbort || !config.handoffToolCall) return completion;
 
 	let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
 	const triggers: Array<Promise<{ kind: "deadline" | "manual" }>> = [];
@@ -2044,6 +2082,7 @@ async function executeAndFinalizePreparedToolCall(
 			toolCall: prepared.toolCall,
 			args: prepared.args,
 			context: currentContext,
+			executionContext: prepared.binding?.executionContext,
 			elapsedMs: Math.max(0, Date.now() - startedAt),
 			completion: handedOffCompletion,
 			cancel: executionAbort.cancel,
@@ -2064,6 +2103,7 @@ async function executeAndFinalizePreparedToolCall(
 				version: 1,
 				requestId,
 				execution: "running",
+				...(prepared.binding ? { executionScope: prepared.binding.executionScope } : {}),
 				postprocessingFailures: [],
 			}),
 		},
@@ -2187,6 +2227,7 @@ async function finalizeExecutedToolCall(
 					result,
 					isError,
 					context: currentContext,
+					executionContext: prepared.binding?.executionContext,
 				},
 				signal,
 			);
@@ -2226,7 +2267,7 @@ async function finalizeExecutedToolCall(
 			// agent asked for. Nothing here is a mistake, so no failure record is remembered and the
 			// tool's own output stands exactly as written. The governor still notes that repeating
 			// this identical operation cannot say anything new until something else changes.
-			clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args);
+			clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args, prepared.binding?.executionScope);
 			result = { ...result, errorKind: "operation_outcome", usage };
 			executionGateEffect = {
 				kind: "unproductive",
@@ -2236,6 +2277,7 @@ async function finalizeExecutedToolCall(
 					prepared.args,
 					effectiveFailureCode,
 					assessment.diagnostic,
+					prepared.binding?.executionScope,
 				),
 				args: prepared.args,
 			};
@@ -2245,6 +2287,7 @@ async function finalizeExecutedToolCall(
 				prepared.args,
 				{ failureCode: effectiveFailureCode, message: effectiveFailureMessage },
 				currentContext.tools ?? [],
+				prepared.binding?.executionScope,
 			);
 			const correction =
 				recoveryPlan.correction ??
@@ -2262,6 +2305,7 @@ async function finalizeExecutedToolCall(
 				assessment.phase,
 				recoveryPlan.evidence ?? assessment.evidence,
 				{ output: failureOutput, outputSignature },
+				prepared.binding?.executionScope,
 			);
 			executionGateEffect = {
 				kind: "unproductive",
@@ -2272,10 +2316,11 @@ async function finalizeExecutedToolCall(
 			result = { ...createToolFailureResult(record, result.terminate), usage };
 		}
 	} else {
-		clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args);
+		clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args, prepared.binding?.executionScope);
 		if (!executed.isError) {
 			executionGateEffect = {
 				kind: "success",
+				executionScope: prepared.binding?.executionScope,
 				tool: prepared.tool,
 				args: prepared.args,
 			};
@@ -2287,6 +2332,7 @@ async function finalizeExecutedToolCall(
 	const invocationDetails = stampToolInvocation(projectedDetails, {
 		version: 1,
 		requestId,
+		...(prepared.binding ? { executionScope: prepared.binding.executionScope } : {}),
 		...(executed.operationCompleted
 			? { execution: "completed", operationStatus: executed.isError ? "error" : "success" }
 			: { execution: "unknown" }),

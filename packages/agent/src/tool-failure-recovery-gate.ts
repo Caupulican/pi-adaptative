@@ -3,6 +3,7 @@ import {
 	getToolExecutionKey,
 	getToolExecutionKeyHashParts,
 	getToolFailureRecordExecutionKey,
+	getToolFailureRecordExecutionScope,
 	getToolFailureRecordRawKey,
 	getToolRawOperationKey,
 	isPromptScopedFailureCode,
@@ -12,7 +13,7 @@ import {
 	type ToolFailureMemoryRecord,
 } from "./tool-failure-memory.ts";
 import { TOOL_FAILURE_READMISSION_RULE } from "./tool-failure-recovery-protocol.ts";
-import { isSuccessfulOperationWithHookFailure } from "./tool-invocation-receipt.ts";
+import { isSuccessfulOperationWithHookFailure, retainedToolInvocation } from "./tool-invocation-receipt.ts";
 import type {
 	AgentMessage,
 	AgentTool,
@@ -77,7 +78,7 @@ export type ToolFailureRecoveryGateEffect =
 			record: ToolFailureMemoryRecord;
 			args: unknown;
 	  }
-	| { kind: "success"; tool: AgentTool<any>; args: unknown };
+	| { kind: "success"; tool: AgentTool<any>; args: unknown; executionScope?: string };
 
 export type ToolFailureRecoveryAdmission =
 	| { kind: "allowed" }
@@ -228,6 +229,7 @@ export class ToolFailureRecoveryGate {
 		args: unknown,
 		failure: AgentToolFailureEvidenceContext,
 		availableTools: readonly AgentTool<any>[],
+		executionScope?: string,
 	): ToolFailureRecoveryPlan {
 		const targets = readFailureTargets(failedTool, args, failure.failureCode);
 		const actions = readAvailableRecoveryActions(availableTools, targets);
@@ -243,7 +245,10 @@ export class ToolFailureRecoveryGate {
 			...(correction ? { correction } : {}),
 			guidance: formatRecoveryGuidance(
 				actions,
-				this.transientRetryStanding(getToolExecutionKey(failedTool.name, args), failure.failureCode),
+				this.transientRetryStanding(
+					getToolExecutionKey(failedTool.name, args, executionScope),
+					failure.failureCode,
+				),
 			),
 			...(evidence ? { evidence } : {}),
 		};
@@ -268,9 +273,10 @@ export class ToolFailureRecoveryGate {
 		args: unknown,
 		record: ToolFailureMemoryRecord | undefined,
 		messages: readonly AgentMessage[] = this.transcriptMessages,
+		executionScope?: string,
 	): ToolFailureRecoveryAdmission {
 		this.trackTranscript(messages);
-		const executionKey = getToolExecutionKey(tool.name, args);
+		const executionKey = getToolExecutionKey(tool.name, args, executionScope);
 		if (this.resolvedBeforeTranscriptCommit.has(executionKey)) return { kind: "allowed" };
 		let state = this.getHotState(executionKey);
 		if (!state && this.seenUnproductiveExecutions.mightContain(executionKey)) {
@@ -300,7 +306,7 @@ export class ToolFailureRecoveryGate {
 		// operation for this purpose even though execution identity omits it. Refusing the corrected
 		// call here would refuse the exact repair the harness demanded.
 		const storedRawKey = getToolFailureRecordRawKey(state.record);
-		const incomingRawKey = getToolRawOperationKey(tool.name, args);
+		const incomingRawKey = getToolRawOperationKey(tool.name, args, executionScope);
 		const rawArgumentsDiffer = storedRawKey !== undefined && storedRawKey !== incomingRawKey;
 		if (state.record.phase === "validation" && rawArgumentsDiffer) {
 			this.statesByExecutionKey.delete(executionKey);
@@ -332,14 +338,14 @@ export class ToolFailureRecoveryGate {
 	apply(effect: ToolFailureRecoveryGateEffect | undefined): void {
 		if (!effect) return;
 		if (effect.kind === "success") {
-			this.observeSuccess(effect.tool, effect.args);
+			this.observeSuccess(effect.tool, effect.args, effect.executionScope);
 			return;
 		}
 		this.observeUnproductive(effect.record, effect.args);
 	}
 
 	private observeUnproductive(record: ToolFailureMemoryRecord, args: unknown): void {
-		const executionKey = getToolExecutionKey(record.tool, args);
+		const executionKey = getToolExecutionKey(record.tool, args, getToolFailureRecordExecutionScope(record));
 		this.resolvedBeforeTranscriptCommit.delete(executionKey);
 		this.seenUnproductiveExecutions.add(executionKey);
 		const previous = this.statesByExecutionKey.get(executionKey);
@@ -361,8 +367,8 @@ export class ToolFailureRecoveryGate {
 		});
 	}
 
-	private observeSuccess(tool: AgentTool<any>, args: unknown): void {
-		const executionKey = getToolExecutionKey(tool.name, args);
+	private observeSuccess(tool: AgentTool<any>, args: unknown, executionScope?: string): void {
+		const executionKey = getToolExecutionKey(tool.name, args, executionScope);
 		// Tool results are appended to the transcript after the current execution batch completes.
 		// Until then the last persisted failure is stale authority: remember the exact success so a
 		// later sequential call in this same batch cannot resurrect that failure from the transcript.
@@ -459,7 +465,11 @@ function walkTranscript(messages: readonly AgentMessage[], visit: (event: Transc
 		const call = callsById.get(message.toolCallId);
 		if (!call) continue;
 		callsById.delete(message.toolCallId);
-		const executionKey = getToolExecutionKey(call.name, call.args);
+		const executionKey = getToolExecutionKey(
+			call.name,
+			call.args,
+			retainedToolInvocation(message.details)?.executionScope,
+		);
 		if (!message.isError || isSuccessfulOperationWithHookFailure(message.details)) {
 			worldCursor++;
 			visit({ kind: "resolved", executionKey, worldCursor });

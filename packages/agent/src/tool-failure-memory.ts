@@ -9,7 +9,11 @@ import {
 	mandatoryToolFailureRecoveryMetadata,
 	TOOL_FAILURE_READMISSION_RULE,
 } from "./tool-failure-recovery-protocol.ts";
-import { isSuccessfulOperationWithHookFailure } from "./tool-invocation-receipt.ts";
+import {
+	isSuccessfulOperationWithHookFailure,
+	retainedToolInvocation,
+	stampToolInvocation,
+} from "./tool-invocation-receipt.ts";
 import type { AgentMessage, AgentToolCall, AgentToolResult } from "./types.ts";
 import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
 
@@ -43,6 +47,7 @@ const TOOL_FAILURE_EXECUTION_KEY = Symbol("ToolFailureExecutionKey");
  * Process-internal and never serialized, like its execution-key sibling.
  */
 const TOOL_FAILURE_RAW_KEY = Symbol("ToolFailureRawKey");
+const TOOL_FAILURE_EXECUTION_SCOPE = Symbol("ToolFailureExecutionScope");
 const MAX_OPERATION_CHARS = 240;
 const MAX_FAILURE_CODE_CHARS = 48;
 const MAX_DIAGNOSTIC_CHARS = 240;
@@ -69,6 +74,7 @@ export interface ToolFailureMemoryRecord {
 	readonly [TOOL_FAILURE_EXECUTION_KEY]?: string;
 	/** Envelope-retaining identity; process-internal and omitted from serialized failure memory. */
 	readonly [TOOL_FAILURE_RAW_KEY]?: string;
+	readonly [TOOL_FAILURE_EXECUTION_SCOPE]?: string;
 	tool: string;
 	operation: string;
 	occurrence: number;
@@ -115,6 +121,7 @@ export type ToolFailureResultDetails = ToolFailureMemoryDetails | ToolFailureDir
 export type ToolFailureMemoryTracker = Map<string, ToolFailureMemoryRecord>;
 
 interface ToolOperationIdentity {
+	executionScope?: string;
 	failureKey: string;
 	executionKey: string;
 	rawKey: string;
@@ -457,7 +464,13 @@ export function normalizeToolSignature(pairs: Array<[string, unknown]>): string 
 	);
 }
 
-function toolOperationKey(tool: string, args: unknown, normalizeVolatile: boolean, retainEnvelope = false): string {
+function toolOperationKey(
+	tool: string,
+	args: unknown,
+	normalizeVolatile: boolean,
+	retainEnvelope = false,
+	executionScope?: string,
+): string {
 	const identityArgs = retainEnvelope ? args : omitOperationEnvelopeFields(args);
 	const boundedTool = truncate(tool, MAX_TOOL_NAME_CHARS);
 	const hash = createSignatureHash();
@@ -468,15 +481,18 @@ function toolOperationKey(tool: string, args: unknown, normalizeVolatile: boolea
 	updateStructuredHash(hash, tool, active, 2, updateHashString);
 	updateStructuredHash(hash, identityArgs, active, 2, updateHashString);
 	updateHashRange(hash, "];];");
+	// A binding identity is exact even when volatile model argument values are normalized.
+	if (executionScope !== undefined) updateExactHashString(hash, executionScope);
 	const signature = renderSignatureHash(hash);
 	return `${boundedTool}:${signature}`;
 }
 
-function operationIdentity(tool: string, args: unknown): ToolOperationIdentity {
+function operationIdentity(tool: string, args: unknown, executionScope?: string): ToolOperationIdentity {
 	return {
-		failureKey: toolOperationKey(tool, args, true),
-		executionKey: toolOperationKey(tool, args, false),
-		rawKey: getToolRawOperationKey(tool, args),
+		executionScope,
+		failureKey: toolOperationKey(tool, args, true, false, executionScope),
+		executionKey: toolOperationKey(tool, args, false, false, executionScope),
+		rawKey: getToolRawOperationKey(tool, args, executionScope),
 		tool: truncate(tool, MAX_TOOL_NAME_CHARS),
 		operation: boundedJsonPreview(args, MAX_OPERATION_CHARS),
 	};
@@ -500,20 +516,20 @@ function operationIdentity(tool: string, args: unknown): ToolOperationIdentity {
  */
 const callIdentityMemo = new WeakMap<AgentToolCall, ToolOperationIdentity>();
 
-function memoizedOperationIdentity(call: AgentToolCall): ToolOperationIdentity {
+function memoizedOperationIdentity(call: AgentToolCall, executionScope?: string): ToolOperationIdentity {
 	const cached = callIdentityMemo.get(call);
-	if (cached) return cached;
-	const identity = operationIdentity(call.name, call.arguments);
+	if (cached && cached.executionScope === executionScope) return cached;
+	const identity = operationIdentity(call.name, call.arguments, executionScope);
 	callIdentityMemo.set(call, identity);
 	return identity;
 }
 
-function getToolFailureKey(tool: string, args: unknown): string {
-	return toolOperationKey(tool, args, true);
+function getToolFailureKey(tool: string, args: unknown, executionScope?: string): string {
+	return toolOperationKey(tool, args, true, false, executionScope);
 }
 
-export function getToolExecutionKey(tool: string, args: unknown): string {
-	return toolOperationKey(tool, args, false);
+export function getToolExecutionKey(tool: string, args: unknown, executionScope?: string): string {
+	return toolOperationKey(tool, args, false, false, executionScope);
 }
 
 /**
@@ -522,8 +538,8 @@ export function getToolExecutionKey(tool: string, args: unknown): string {
  * identity. Compared solely against another raw key to answer "did the model actually change the
  * arguments it sent" — never used as a map key, and never a substitute for execution identity.
  */
-export function getToolRawOperationKey(tool: string, args: unknown): string {
-	return toolOperationKey(tool, args, true, true);
+export function getToolRawOperationKey(tool: string, args: unknown, executionScope?: string): string {
+	return toolOperationKey(tool, args, true, true, executionScope);
 }
 
 /** Read the four hash words already encoded by this module's exact execution-key owner. */
@@ -549,12 +565,17 @@ export function getToolFailureRecordRawKey(record: ToolFailureMemoryRecord): str
 	return record[TOOL_FAILURE_RAW_KEY];
 }
 
+export function getToolFailureRecordExecutionScope(record: ToolFailureMemoryRecord): string | undefined {
+	return record[TOOL_FAILURE_EXECUTION_SCOPE];
+}
+
 export function getUnresolvedToolFailure(
 	tracker: ToolFailureMemoryTracker,
 	tool: string,
 	args: unknown,
+	executionScope?: string,
 ): ToolFailureMemoryRecord | undefined {
-	return tracker.get(getToolFailureKey(tool, args));
+	return tracker.get(getToolFailureKey(tool, args, executionScope));
 }
 
 export function readVisibleToolFailureCode(result: ToolResultMessage): string | undefined {
@@ -576,8 +597,9 @@ export function restoreToolFailureRecord(
 	tool: string,
 	args: unknown,
 ): ToolFailureMemoryRecord {
-	const executionKey = getToolExecutionKey(tool, args);
-	const rawKey = getToolRawOperationKey(tool, args);
+	const executionScope = retainedToolInvocation(result.details)?.executionScope;
+	const executionKey = getToolExecutionKey(tool, args, executionScope);
+	const rawKey = getToolRawOperationKey(tool, args, executionScope);
 	const persisted = readFailureRecord(result.details);
 	if (persisted) {
 		return {
@@ -586,7 +608,7 @@ export function restoreToolFailureRecord(
 			[TOOL_FAILURE_RAW_KEY]: getToolFailureRecordRawKey(persisted) ?? rawKey,
 		};
 	}
-	const identity = operationIdentity(tool, args);
+	const identity = operationIdentity(tool, args, executionScope);
 	// A completed operation that reported a negative status keeps its own raw output, so there is no
 	// harness record to read back. Recover its terminal status from that output rather than flattening
 	// every such result to a generic `tool_error`.
@@ -596,6 +618,7 @@ export function restoreToolFailureRecord(
 		failureKey: identity.failureKey,
 		[TOOL_FAILURE_EXECUTION_KEY]: executionKey,
 		[TOOL_FAILURE_RAW_KEY]: rawKey,
+		...(executionScope ? { [TOOL_FAILURE_EXECUTION_SCOPE]: executionScope } : {}),
 		tool: identity.tool,
 		operation: identity.operation,
 		occurrence: 1,
@@ -634,7 +657,11 @@ export function forEachPairedToolResult(
 			visit({
 				tool: call.name,
 				args: call.args,
-				executionKey: getToolExecutionKey(call.name, call.args),
+				executionKey: getToolExecutionKey(
+					call.name,
+					call.args,
+					retainedToolInvocation(message.details)?.executionScope,
+				),
 				result: message,
 			}) === false
 		) {
@@ -940,8 +967,10 @@ function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefine
 		? candidate.phase
 		: inferToolFailurePhase(candidate.state, candidate.failureCode);
 	const candidateExecutionKey: unknown = Reflect.get(candidate, TOOL_FAILURE_EXECUTION_KEY);
+	const executionScope = retainedToolInvocation(details)?.executionScope;
 	return {
 		version: TOOL_FAILURE_MEMORY_VERSION,
+		...(executionScope ? { [TOOL_FAILURE_EXECUTION_SCOPE]: executionScope } : {}),
 		failureKey: truncate(candidate.failureKey, MAX_TOOL_NAME_CHARS + 1 + TOOL_SIGNATURE_HEX_CHARS),
 		...(typeof candidateExecutionKey === "string"
 			? {
@@ -1204,10 +1233,11 @@ function foldToolFailureContext(
 		const call = callById.get(message.toolCallId);
 		callById.delete(message.toolCallId);
 		const textPayload = firstText(message);
+		const executionScope = retainedToolInvocation(message.details)?.executionScope;
 		if (message.errorKind === "operation_outcome" || isSuccessfulOperationWithHookFailure(message.details)) {
 			// The tool executed and reported an outcome: a successful call of the tool as far as the
 			// ledger is concerned, whatever the outcome says about the operation itself.
-			if (call) resolveToolFailures(fold, memoizedOperationIdentity(call));
+			if (call) resolveToolFailures(fold, memoizedOperationIdentity(call, executionScope));
 			continue;
 		}
 		const isHarnessFailure = message.isError === true || textPayload.startsWith("[harness] ");
@@ -1238,9 +1268,11 @@ function foldToolFailureContext(
 			if (retained) {
 				failureKey = retained.failureKey;
 				executionKey = call
-					? memoizedOperationIdentity(call).executionKey
+					? memoizedOperationIdentity(call, executionScope).executionKey
 					: getToolFailureRecordExecutionKey(retained);
-				rawKey = call ? memoizedOperationIdentity(call).rawKey : getToolFailureRecordRawKey(retained);
+				rawKey = call
+					? memoizedOperationIdentity(call, executionScope).rawKey
+					: getToolFailureRecordRawKey(retained);
 				tool = retained.tool;
 				operation = retained.operation;
 			} else {
@@ -1250,8 +1282,8 @@ function foldToolFailureContext(
 				// the toolCallId it once had) has no call object to memoize against and stays uncached - it
 				// is not the repeated-rescan path this memo exists for.
 				const identity = call
-					? memoizedOperationIdentity(call)
-					: operationIdentity(message.toolName, { toolCallId: message.toolCallId });
+					? memoizedOperationIdentity(call, executionScope)
+					: operationIdentity(message.toolName, { toolCallId: message.toolCallId }, executionScope);
 				failureKey = identity.failureKey;
 				executionKey = identity.executionKey;
 				rawKey = identity.rawKey;
@@ -1265,6 +1297,7 @@ function foldToolFailureContext(
 			);
 			const record: ToolFailureMemoryRecord = {
 				version: TOOL_FAILURE_MEMORY_VERSION,
+				...(executionScope ? { [TOOL_FAILURE_EXECUTION_SCOPE]: executionScope } : {}),
 				failureKey,
 				...(executionKey ? { [TOOL_FAILURE_EXECUTION_KEY]: executionKey } : {}),
 				...(rawKey ? { [TOOL_FAILURE_RAW_KEY]: rawKey } : {}),
@@ -1303,7 +1336,7 @@ function foldToolFailureContext(
 			const callIndex = callMessageIndexById.get(call.id) ?? index;
 			// The hot path: every successful result re-derives this on every request. See
 			// memoizedOperationIdentity's doc comment.
-			const identity = memoizedOperationIdentity(call);
+			const identity = memoizedOperationIdentity(call, executionScope);
 			const opKey = identity.failureKey;
 			resolveToolFailures(fold, identity);
 			const previousOperation = latestSuccessfulByOpKey.get(opKey);
@@ -1316,7 +1349,7 @@ function foldToolFailureContext(
 
 			const textPayload = firstText(message);
 			if (textPayload.length >= 64) {
-				const payloadKey = `payload:${fastTextSignature(textPayload)}`;
+				const payloadKey = `payload:${executionScope ?? ""}:${fastTextSignature(textPayload)}`;
 				const previousPayload = latestSuccessfulByPayloadKey.get(payloadKey);
 				if (previousPayload && (omittedCallIds.has(previousPayload.callId) || erasable(previousPayload.index))) {
 					omittedCallIds.add(previousPayload.callId);
@@ -1355,7 +1388,11 @@ function resolveToolFailures(fold: FailureFoldState, identity: ToolOperationIden
 			fold.active.delete(failureKey);
 			continue;
 		}
-		if (failure.record.tool !== identity.tool) continue;
+		if (
+			failure.record.tool !== identity.tool ||
+			getToolFailureRecordExecutionScope(failure.record) !== identity.executionScope
+		)
+			continue;
 		failure.laterCalls += 1;
 		if (failure.laterCalls < LATER_CALLS_THAT_RESOLVE) continue;
 		fold.active.delete(failureKey);
@@ -1402,10 +1439,12 @@ function buildFailureContextAnalysis(
 			}
 			let replacement = boundedMessages.get(message);
 			if (!replacement) {
+				const details: ToolFailureMemoryDetails = { piToolFailureMemory: bounded };
+				const receipt = retainedToolInvocation(message.details);
 				replacement = {
 					...message,
 					content: [{ type: "text", text: `[harness] ${formatRecordJson(bounded, false)}` }],
-					details: { piToolFailureMemory: bounded } satisfies ToolFailureMemoryDetails,
+					details: receipt ? stampToolInvocation(details, receipt) : details,
 				};
 				boundedMessages.set(message, replacement);
 			}
@@ -1522,6 +1561,7 @@ export function rememberToolFailure(
 	phase: ToolFailurePhase = inferToolFailurePhase(state, failureCode),
 	evidence?: string,
 	outputIdentity?: ToolFailureOutputIdentity,
+	executionScope?: string,
 ): ToolFailureMemoryRecord {
 	let kindCount = 1;
 	for (const previous of tracker.values()) {
@@ -1535,13 +1575,14 @@ export function rememberToolFailure(
 			if (previous.tool === tool && previous.failureCode === failureCode) tracker.delete(failureKey);
 		}
 	}
-	const identity = isDiscard ? undefined : operationIdentity(tool, args);
+	const identity = isDiscard ? undefined : operationIdentity(tool, args, executionScope);
 	const previous = identity ? tracker.get(identity.failureKey) : undefined;
 	const record: ToolFailureMemoryRecord = {
 		version: TOOL_FAILURE_MEMORY_VERSION,
 		failureKey: identity ? identity.failureKey : `directive:${boundedFailureCode(failureCode)}`,
-		[TOOL_FAILURE_EXECUTION_KEY]: identity ? identity.executionKey : getToolExecutionKey(tool, args),
-		[TOOL_FAILURE_RAW_KEY]: identity ? identity.rawKey : getToolRawOperationKey(tool, args),
+		[TOOL_FAILURE_EXECUTION_KEY]: identity ? identity.executionKey : getToolExecutionKey(tool, args, executionScope),
+		[TOOL_FAILURE_RAW_KEY]: identity ? identity.rawKey : getToolRawOperationKey(tool, args, executionScope),
+		...(executionScope ? { [TOOL_FAILURE_EXECUTION_SCOPE]: executionScope } : {}),
 		tool: identity ? identity.tool : truncate(tool, MAX_TOOL_NAME_CHARS),
 		operation: identity ? identity.operation : "[discarded]",
 		occurrence: isDiscard ? 1 : (previous?.occurrence ?? 0) + 1,
@@ -1583,12 +1624,14 @@ export function describeOperationOutcome(
 	args: unknown,
 	failureCode: string,
 	diagnostic: string | undefined,
+	executionScope?: string,
 ): ToolFailureMemoryRecord {
-	const identity = operationIdentity(tool, args);
+	const identity = operationIdentity(tool, args, executionScope);
 	return {
 		version: TOOL_FAILURE_MEMORY_VERSION,
 		failureKey: identity.failureKey,
 		[TOOL_FAILURE_EXECUTION_KEY]: identity.executionKey,
+		...(executionScope ? { [TOOL_FAILURE_EXECUTION_SCOPE]: executionScope } : {}),
 		tool: identity.tool,
 		operation: identity.operation,
 		occurrence: 1,
@@ -1600,11 +1643,16 @@ export function describeOperationOutcome(
 	};
 }
 
-export function clearToolFailure(tracker: ToolFailureMemoryTracker, tool: string, args: unknown): void {
-	const failureKey = getToolFailureKey(tool, args);
+export function clearToolFailure(
+	tracker: ToolFailureMemoryTracker,
+	tool: string,
+	args: unknown,
+	executionScope?: string,
+): void {
+	const failureKey = getToolFailureKey(tool, args, executionScope);
 	const record = tracker.get(failureKey);
 	const executionKey = record ? getToolFailureRecordExecutionKey(record) : undefined;
-	if (!executionKey || executionKey === getToolExecutionKey(tool, args)) tracker.delete(failureKey);
+	if (!executionKey || executionKey === getToolExecutionKey(tool, args, executionScope)) tracker.delete(failureKey);
 }
 
 function failureGuidance(record: ToolFailureMemoryRecord): { repair: string } | { next_action: string } {

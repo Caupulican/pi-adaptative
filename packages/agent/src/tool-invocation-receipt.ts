@@ -2,6 +2,8 @@
 export type ToolInvocationReceipt = Readonly<{
 	version: 1;
 	requestId: string;
+	/** Opaque exact binding identity, never provider-supplied arguments or a raw local path. */
+	executionScope?: string;
 	postprocessingFailures: readonly ("progress" | "after_hook")[];
 }> &
 	(
@@ -9,7 +11,14 @@ export type ToolInvocationReceipt = Readonly<{
 		| Readonly<{ execution: "completed"; operationStatus: "success" | "error" }>
 	);
 
-const RECEIPT_KEYS = new Set(["version", "requestId", "execution", "operationStatus", "postprocessingFailures"]);
+const RECEIPT_KEYS = new Set([
+	"version",
+	"requestId",
+	"execution",
+	"operationStatus",
+	"postprocessingFailures",
+	"executionScope",
+]);
 
 /** Strict bounded data-only wire decoder. It never upgrades missing historical evidence. */
 export function decodeToolInvocationReceipt(value: unknown): ToolInvocationReceipt | undefined {
@@ -25,6 +34,12 @@ export function decodeToolInvocationReceipt(value: unknown): ToolInvocationRecei
 	const requestId = descriptors.requestId?.value;
 	const execution = descriptors.execution?.value;
 	const operationStatus = descriptors.operationStatus?.value;
+	const executionScope: unknown = descriptors.executionScope?.value;
+	if (
+		descriptors.executionScope &&
+		(typeof executionScope !== "string" || !/^context:[0-9a-f]{32}$/.test(executionScope))
+	)
+		return undefined;
 	const failures: unknown = descriptors.postprocessingFailures?.value;
 	if (
 		version !== 1 ||
@@ -43,7 +58,12 @@ export function decodeToolInvocationReceipt(value: unknown): ToolInvocationRecei
 		if ((item !== "progress" && item !== "after_hook") || postprocessingFailures.includes(item)) return undefined;
 		postprocessingFailures.push(item);
 	}
-	const base = { version: 1 as const, requestId, postprocessingFailures: Object.freeze(postprocessingFailures) };
+	const base = {
+		version: 1 as const,
+		requestId,
+		postprocessingFailures: Object.freeze(postprocessingFailures),
+		...(typeof executionScope === "string" ? { executionScope } : {}),
+	};
 	if (execution === "completed") {
 		if (operationStatus !== "success" && operationStatus !== "error") return undefined;
 		return Object.freeze({ ...base, execution, operationStatus });

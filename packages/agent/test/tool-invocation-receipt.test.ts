@@ -15,6 +15,19 @@ const receipt = {
 } as const;
 
 describe("invocation receipt wire boundary", () => {
+	it("round-trips a bounded execution scope without retaining directory text", () => {
+		const candidate = { ...receipt, requestId: "x".repeat(256), executionScope: `context:${"a".repeat(32)}` };
+		expect(decodeToolInvocationReceipt(JSON.parse(JSON.stringify(candidate)))).toEqual(candidate);
+		expect(JSON.stringify(candidate).length).toBeLessThan(512);
+	});
+
+	it.each([undefined, "", "context:short", `context:${"a".repeat(33)}`, "D:\\private project", 1])(
+		"rejects an explicitly invalid execution scope %#",
+		(executionScope) => {
+			expect(decodeToolInvocationReceipt({ ...receipt, executionScope })).toBeUndefined();
+		},
+	);
+
 	it.each([
 		{ candidate: receipt, expected: true },
 		{ candidate: { ...receipt, operationStatus: "error" }, expected: false },
