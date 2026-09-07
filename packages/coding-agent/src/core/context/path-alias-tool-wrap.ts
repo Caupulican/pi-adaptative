@@ -40,13 +40,20 @@ export function wrapToolWithPathAliasExpansion(
 	const next = wrapToolExecution(tool, (executor, context) => ({
 		...executor,
 		prepareArguments: (args) => {
-			const expanded = expandParams(getTable(), args);
+			const expanded = expandParams(getTable(), args, context?.cwd);
 			return prepareArguments ? prepareArguments(expanded) : expanded;
 		},
 		execute: (toolCallId, params, signal, onUpdate) => {
 			const table = getTable();
-			assertNoUnmintedAliases(table, params, context?.cwd ?? getCwd());
-			return executor.execute(toolCallId, expandParams(table, params) as typeof params, signal, onUpdate);
+			const executionCwd = context?.cwd ?? getCwd();
+			assertNoUnmintedAliases(table, params, executionCwd);
+			// An admitted directory resolves relative paths itself; expansions stay anchored to the legend.
+			return executor.execute(
+				toolCallId,
+				expandParams(table, params, executionCwd) as typeof params,
+				signal,
+				onUpdate,
+			);
 		},
 	}));
 	// Only a descriptor that actually owns expansion is wrapped. The registry may reactivate

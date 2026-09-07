@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import { isAbsolute, resolve } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { formatPathRelativeToCwdOrAbsolute, resolvePath } from "../../utils/paths.ts";
 
@@ -661,10 +662,23 @@ function compileExpander(table: PathAliasTable): Map<string, string> {
 	return byId;
 }
 
-export function expandText(table: PathAliasTable, text: string): string {
+/**
+ * Entry paths are relative to the legend's own root (`table.cwd`). An executor admitted into a
+ * different directory must receive them anchored to that root, or a repo-relative expansion is
+ * re-resolved against the pinned directory and names a file that does not exist.
+ */
+function anchoredPath(table: PathAliasTable, path: string, anchor: string | undefined): string {
+	if (anchor === undefined || anchor === table.cwd || isAbsolute(path)) return path;
+	return resolve(table.cwd, path);
+}
+
+export function expandText(table: PathAliasTable, text: string, anchor?: string): string {
 	if (table.entries.length === 0) return text;
 	const byId = compileExpander(table);
-	return text.replace(STANDALONE_TOKEN_RE, (token) => byId.get(token) ?? token);
+	return text.replace(STANDALONE_TOKEN_RE, (token) => {
+		const path = byId.get(token);
+		return path === undefined ? token : anchoredPath(table, path, anchor);
+	});
 }
 
 /**
@@ -748,13 +762,14 @@ export function collectUnknownAliasTokens(table: PathAliasTable, params: unknown
 	return unknown;
 }
 
-export function expandParams(table: PathAliasTable, params: unknown): unknown {
-	if (typeof params === "string") return expandText(table, params);
-	if (Array.isArray(params)) return params.map((entry) => expandParams(table, entry));
+/** `anchor` is the directory the executor resolves relative paths against; see {@link expandText}. */
+export function expandParams(table: PathAliasTable, params: unknown, anchor?: string): unknown {
+	if (typeof params === "string") return expandText(table, params, anchor);
+	if (Array.isArray(params)) return params.map((entry) => expandParams(table, entry, anchor));
 	if (params && typeof params === "object") {
 		const next: Record<string, unknown> = {};
 		for (const [key, value] of Object.entries(params)) {
-			next[key] = expandParams(table, value);
+			next[key] = expandParams(table, value, anchor);
 		}
 		return next;
 	}

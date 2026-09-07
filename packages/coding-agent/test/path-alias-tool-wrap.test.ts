@@ -37,6 +37,39 @@ describe("path alias tool wrapper", () => {
 		});
 	});
 
+	it("anchors expansions to the legend root when the admitted directory differs from it", async () => {
+		// Live defect (Windows probe): after `task_directory select packages/coding-agent`, `p/…` expanded
+		// to a repo-relative path that the bound executor resolved against the pinned directory.
+		const { tool, calls } = recordingTool();
+		const executionContext = createExecutionContext({
+			attachment: {
+				workspaceId: "coding-agent",
+				attachmentId: "coding-agent-v1",
+				root: "/repo/packages/coding-agent",
+				flavor: "posix",
+				caseSensitive: true,
+			},
+			cwd: "/repo/packages/coding-agent",
+			sessionId: "alias-test",
+			generation: 2,
+		});
+		const wrapped = wrapToolWithPathAliasExpansion(
+			{ ...tool, bindInvocation: async () => ({ executionContext, execute: tool.execute, release: () => {} }) },
+			() => table,
+			new WeakSet(),
+			() => "/repo",
+		);
+		const invocation = await wrapped.bindInvocation!("bound", { path: "p/grep.ts", code: "open('p/grep.ts')" });
+		await invocation.execute("bound", { path: "p/grep.ts", code: "open('p/grep.ts')" });
+		invocation.release();
+		expect(calls).toEqual([
+			{
+				path: "/repo/packages/coding-agent/src/core/tools/grep.ts",
+				code: "open('/repo/packages/coding-agent/src/core/tools/grep.ts')",
+			},
+		]);
+	});
+
 	it.each(["p/grep.ts", "p/ghost.ts"])(
 		"decorates the admitted executor for %s and retains its release owner",
 		async (path) => {
