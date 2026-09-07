@@ -108,7 +108,8 @@ function resolveAuthorityPathSync(
 	authority: ExecutionPathAuthority | undefined,
 	flavor: ExecutionPathFlavor,
 ): string | undefined {
-	if (!authority) return safeRealpathSync(path);
+	const nativeFlavor: ExecutionPathFlavor = process.platform === "win32" ? "win32" : "posix";
+	if (!authority) return flavor === nativeFlavor ? safeRealpathSync(path) : path;
 	if (authority.safeRealpath) {
 		const res = authority.safeRealpath(path);
 		if (typeof res === "string") return res;
@@ -130,7 +131,8 @@ async function resolveAuthorityPathAsync(
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
 	signal?.throwIfAborted();
-	if (!authority) return safeRealpathSync(path);
+	const nativeFlavor: ExecutionPathFlavor = process.platform === "win32" ? "win32" : "posix";
+	if (!authority) return flavor === nativeFlavor ? safeRealpathSync(path) : path;
 	if (authority.safeRealpath) return await authority.safeRealpath(path, signal);
 	const direct = await authority.canonicalPath(path, signal);
 	signal?.throwIfAborted();
