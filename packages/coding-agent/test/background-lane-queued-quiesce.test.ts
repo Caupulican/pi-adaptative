@@ -28,7 +28,7 @@ function createAgentDir(label: string): string {
  */
 function buildQueuingDeps(
 	agentDir: string,
-	options: { local?: boolean; maxConcurrent?: number } = {},
+	options: { local?: boolean; maxConcurrent?: number; onRun?: () => void } = {},
 ): BackgroundLaneControllerDeps {
 	const local = options.local ?? true;
 	const model = {
@@ -46,7 +46,7 @@ function buildQueuingDeps(
 	});
 	saveTestWorkerOrchestrationProfile({
 		agentDir,
-		cwd: "/repo",
+		cwd: agentDir,
 		profile: createTestWorkerOrchestrationProfile({ profileId: "local-worker", model }),
 	});
 	const sessionManager = {
@@ -57,7 +57,7 @@ function buildQueuingDeps(
 	return {
 		isDisposed: () => false,
 		getSessionId: () => "test-session",
-		getCwd: () => "/repo",
+		getCwd: () => agentDir,
 		getAgentDir: () => agentDir,
 		getSessionManager: () => sessionManager,
 		getSettingsManager: () => settingsManager,
@@ -75,7 +75,10 @@ function buildQueuingDeps(
 		getGoalStateSnapshot: () => undefined,
 		readMemoryForLane: async () => "",
 		// Never resolves: once drained, the running worker stays suspended for the whole test.
-		runIsolatedCompletion: () => new Promise(() => {}),
+		runIsolatedCompletion: () => {
+			options.onRun?.();
+			return new Promise(() => {});
+		},
 		saveWorkerClaimSnapshot: () => "entry-2",
 		addSpawnedUsage: () => undefined,
 		emitAutonomyTelemetry: () => {},
@@ -92,11 +95,11 @@ afterEach(() => {
 });
 
 describe("queued-worker quiesce visibility", () => {
-	it("registers a queued worker in the reload-gate quiesce registry at ENQUEUE, before it ever runs", () => {
+	it("registers a queued worker in the reload-gate quiesce registry at ENQUEUE, before it ever runs", async () => {
 		const agentDir = createAgentDir("quiesce-queued-enqueue");
 		const controller = new BackgroundLaneController(buildQueuingDeps(agentDir));
 
-		const started = controller.startWorkerDelegation({ instructions: "queued work" });
+		const started = await controller.startWorkerDelegation({ instructions: "queued work" });
 		expect(started.started).toBe(true);
 
 		const units = getInFlightWorkUnits(agentDir);
@@ -105,30 +108,32 @@ describe("queued-worker quiesce visibility", () => {
 		expect(units[0]?.label).toMatch(/^worker-queued:/);
 	});
 
-	it("deregisters the queued registration exactly once at the running handoff, with no gap and no double count", () => {
+	it("deregisters the queued registration exactly once at the running handoff, with no gap and no double count", async () => {
 		const agentDir = createAgentDir("quiesce-queued-handoff");
-		const controller = new BackgroundLaneController(buildQueuingDeps(agentDir));
+		const running = Promise.withResolvers<void>();
+		const controller = new BackgroundLaneController(buildQueuingDeps(agentDir, { onRun: running.resolve }));
 
-		const started = controller.startWorkerDelegation({ instructions: "queued work" });
+		const started = await controller.startWorkerDelegation({ instructions: "queued work" });
 		expect(started.started).toBe(true);
 		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
 
-		// The handoff is fully synchronous -- runWorkerDelegationOnce registers its own "running"
-		// unit before its first `await`, and no `await` separates the queued deregister (inside
-		// drainQueuedWorkerDelegations) from that call. So immediately after this returns, the
-		// registry holds exactly the RUNNING unit -- never zero, never two.
+		// Directory preflight retains the queued blocker; the validated handoff exchanges it
+		// synchronously for the running blocker. Neither phase may disappear from quiesce.
 		controller.drainQueuedWorkerDelegations();
+		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
+		await running.promise;
 
 		const units = getInFlightWorkUnits(agentDir);
 		expect(units).toHaveLength(1);
 		expect(units[0]?.label).toMatch(/^worker:/);
+		controller.abortInFlightLanes();
 	});
 
-	it("deregisters the queued registration exactly once on disposal cancellation (never started)", () => {
+	it("deregisters the queued registration exactly once on disposal cancellation (never started)", async () => {
 		const agentDir = createAgentDir("quiesce-queued-cancel");
 		const controller = new BackgroundLaneController(buildQueuingDeps(agentDir));
 
-		const started = controller.startWorkerDelegation({ instructions: "queued work" });
+		const started = await controller.startWorkerDelegation({ instructions: "queued work" });
 		expect(started.started).toBe(true);
 		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
 
@@ -137,11 +142,11 @@ describe("queued-worker quiesce visibility", () => {
 		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
 	});
 
-	it("never double-deregisters: draining an already-canceled queue is a no-op on the registry", () => {
+	it("never double-deregisters: draining an already-canceled queue is a no-op on the registry", async () => {
 		const agentDir = createAgentDir("quiesce-queued-cancel-then-drain");
 		const controller = new BackgroundLaneController(buildQueuingDeps(agentDir));
 
-		controller.startWorkerDelegation({ instructions: "queued work" });
+		await controller.startWorkerDelegation({ instructions: "queued work" });
 		controller.abortInFlightLanes();
 		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
 
@@ -151,12 +156,12 @@ describe("queued-worker quiesce visibility", () => {
 		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
 	});
 
-	it("queues a remote worker at the global concurrency ceiling instead of rejecting it", () => {
+	it("queues a remote worker at the global concurrency ceiling instead of rejecting it", async () => {
 		const agentDir = createAgentDir("quiesce-remote-capacity");
 		const controller = new BackgroundLaneController(buildQueuingDeps(agentDir, { local: false, maxConcurrent: 1 }));
 
-		const first = controller.startWorkerDelegation({ instructions: "first remote worker" });
-		const second = controller.startWorkerDelegation({ instructions: "second remote worker" });
+		const first = await controller.startWorkerDelegation({ instructions: "first remote worker" });
+		const second = await controller.startWorkerDelegation({ instructions: "second remote worker" });
 
 		expect(first).toMatchObject({ started: true, record: { status: "running" } });
 		expect(second).toMatchObject({ started: true, record: { status: "queued" } });
@@ -168,11 +173,12 @@ describe("queued-worker quiesce visibility", () => {
 		controller.abortInFlightLanes();
 	});
 
-	it("rebuilds the scheduler queue from the durable dispatch after a process restart", () => {
+	it("rebuilds the scheduler queue from the durable dispatch after a process restart", async () => {
 		const agentDir = createAgentDir("quiesce-durable-recovery");
-		const deps = buildQueuingDeps(agentDir);
+		const running = Promise.withResolvers<void>();
+		const deps = buildQueuingDeps(agentDir, { onRun: running.resolve });
 		const first = new BackgroundLaneController(deps);
-		const started = first.startWorkerDelegation({ instructions: "survive restart" });
+		const started = await first.startWorkerDelegation({ instructions: "survive restart" });
 		expect(started).toMatchObject({ started: true, record: { status: "queued" } });
 
 		// A real process restart drops the in-memory quiesce registry and controller instance while
@@ -190,6 +196,8 @@ describe("queued-worker quiesce visibility", () => {
 		]);
 
 		reopened.drainQueuedWorkerDelegations();
+		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
+		await running.promise;
 		expect(reopened.getLaneRecords()[0]?.status).toBe("running");
 		expect(getInFlightWorkUnits(agentDir)).toEqual([
 			expect.objectContaining({ label: expect.stringMatching(/^worker:/) }),

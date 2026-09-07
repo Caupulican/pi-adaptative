@@ -136,7 +136,7 @@ describe("delegate exact-action input corrections", () => {
 			),
 		).toEqual(input);
 		await tool.execute("read-only", input, undefined, undefined, context);
-		expect(start).toHaveBeenCalledWith(expect.objectContaining({ authority: { readOnly: true } }));
+		expect(start).toHaveBeenCalledWith(expect.objectContaining({ authority: { readOnly: true } }), undefined);
 	});
 	it.each([true, false])("rejects readOnly=%s changes when reusing a persistent worker", async (readOnly) => {
 		const startWorkerAgentTask = vi.fn(() => ({ started: true, steering: false as const, messageId: "turn-1" }));
@@ -499,7 +499,7 @@ describe("delegate exact-action input corrections", () => {
 			context,
 		);
 
-		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "Audit the failing lane" });
+		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "Audit the failing lane" }, undefined);
 		expect(result.details).toMatchObject({ started: true });
 	});
 

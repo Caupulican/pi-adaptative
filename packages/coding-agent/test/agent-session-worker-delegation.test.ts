@@ -9,6 +9,7 @@ import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker
 import { WorkerActionJournal } from "../src/core/delegation/worker-action-journal.ts";
 import { resolveWorkerAuthority } from "../src/core/delegation/worker-authority-resolver.ts";
 import { WorkerConversation, WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
+import { WorkerDirectoryAdmission } from "../src/core/delegation/worker-directory-admission.ts";
 import {
 	buildWorkerExecutionPlan,
 	compileWorkerExecutionGrant,
@@ -25,6 +26,7 @@ import { OrchestrationProfileStore } from "../src/core/orchestration/profile-sto
 import { createWorkerExecutionContract } from "../src/core/orchestration/worker-execution-contract.ts";
 import { createWorkerResultContract } from "../src/core/orchestration/worker-result-adapter.ts";
 import { createTestExecutionGrant, createTestWorkerExecutionAuthority } from "./orchestration-profile-fixture.ts";
+import { setConcurrentResponses } from "./suite/concurrent-responses.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 import { createTestResourceLoader } from "./suite/test-resources.ts";
 
@@ -314,10 +316,19 @@ describe("AgentSession worker delegation", () => {
 					"global",
 				);
 			}
-			harness.setResponses([() => first, () => second]);
+			const bothStarted = Promise.withResolvers<void>();
+			let starts = 0;
+			setConcurrentResponses(
+				harness,
+				[first, second].map((response) => () => {
+					if (++starts === 2) bothStarted.resolve();
+					return response;
+				}),
+			);
 
 			const firstRun = harness.session.runWorkerDelegationOnce({ instructions: "First", profileId: "worker-a" });
 			const secondRun = harness.session.runWorkerDelegationOnce({ instructions: "Second", profileId: "worker-b" });
+			await bothStarted.promise;
 			expect(
 				harness.session
 					.getLaneRecords()
@@ -727,8 +738,10 @@ describe("AgentSession worker delegation", () => {
 		const runIsolatedCompletion = harness.session.runIsolatedCompletion.bind(harness.session);
 		vi.useFakeTimers();
 		let providerExecutions = 0;
+		const firstExecution = Promise.withResolvers<void>();
 		const completion = vi.spyOn(harness.session, "runIsolatedCompletion").mockImplementation((options) => {
 			providerExecutions += 1;
+			firstExecution.resolve();
 			if (providerExecutions <= 3) {
 				return Promise.reject(new Error("503 service unavailable; retry after 2s"));
 			}
@@ -738,6 +751,7 @@ describe("AgentSession worker delegation", () => {
 			harness.setResponses([fauxAssistantMessage('{"summary":"retry recovered","status":"completed"}')]);
 
 			const runPromise = harness.session.runWorkerDelegationOnce({ instructions: "Retry one transient outage." });
+			await firstExecution.promise;
 			await vi.advanceTimersByTimeAsync(0);
 			for (let retry = providerExecutions; retry < 3; retry++) await vi.advanceTimersToNextTimerAsync();
 			expect(providerExecutions).toBe(3);
@@ -852,7 +866,7 @@ describe("AgentSession worker delegation", () => {
 			const initial = await harness.session.runWorkerDelegationOnce({ instructions: "Start a durable worker" });
 			if (!initial.started || !initial.record) throw new Error("Expected the initial worker turn to complete.");
 
-			harness.setResponses([() => heldFollowUp]);
+			setConcurrentResponses(harness, [() => heldFollowUp]);
 			const controls = (
 				harness.session as unknown as {
 					_backgroundLanes: {
@@ -876,7 +890,7 @@ describe("AgentSession worker delegation", () => {
 				}).getTaskRuntimeSnapshot();
 				const attemptId = snapshot.tasks[followUp.record!.laneId]?.attemptIds.at(-1);
 				const attempt = attemptId ? snapshot.attempts[attemptId] : undefined;
-				expect(attempt?.status).toBe("running");
+				expect(attempt?.status, JSON.stringify(harness.eventsOfType("warning"))).toBe("running");
 				activeOwner = attempt?.lease?.ownerId ?? "";
 			});
 			expect(activeOwner).toMatch(/^pi-worker:\d+:/);
@@ -1140,20 +1154,27 @@ describe("AgentSession worker delegation", () => {
 			const controls = (
 				harness.session as unknown as {
 					_backgroundLanes: {
-						startWorkerDelegation(request: { instructions: string; authority?: { path?: string } }): {
+						startWorkerDelegation(request: { instructions: string; authority?: { path?: string } }): Promise<{
 							started: boolean;
 							skipReason?: string;
-						};
+						}>;
 					};
 				}
 			)._backgroundLanes;
 			const workspace = join(harness.tempDir, "src");
 			expect(
-				controls.startWorkerDelegation({ instructions: "First scoped write", authority: { path: workspace } })
-					.started,
+				(
+					await controls.startWorkerDelegation({
+						instructions: "First scoped write",
+						authority: { path: workspace },
+					})
+				).started,
 			).toBe(true);
 			expect(
-				controls.startWorkerDelegation({ instructions: "Second scoped write", authority: { path: workspace } }),
+				await controls.startWorkerDelegation({
+					instructions: "Second scoped write",
+					authority: { path: workspace },
+				}),
 			).toMatchObject({
 				started: true,
 			});
@@ -1354,18 +1375,23 @@ describe("AgentSession worker delegation", () => {
 			if (terminalLaneIds.size === 2) signalAllTerminal();
 		});
 		try {
-			harness.setResponses([
-				fauxAssistantMessage(
-					[
-						fauxToolCall("delegate", { instructions: "Scout first" }),
-						fauxToolCall("delegate", { instructions: "Scout second" }),
-					],
-					{ stopReason: "toolUse" },
-				),
-				fauxAssistantMessage("Delegations started."),
-				fauxAssistantMessage('{"summary":"first worker done","status":"completed"}'),
-				fauxAssistantMessage('{"summary":"second worker done","status":"completed"}'),
-			]);
+			const remainingWorkers = setConcurrentResponses(
+				harness,
+				[
+					fauxAssistantMessage('{"summary":"first worker done","status":"completed"}'),
+					fauxAssistantMessage('{"summary":"second worker done","status":"completed"}'),
+				],
+				[
+					fauxAssistantMessage(
+						[
+							fauxToolCall("delegate", { instructions: "Scout first" }),
+							fauxToolCall("delegate", { instructions: "Scout second" }),
+						],
+						{ stopReason: "toolUse" },
+					),
+					fauxAssistantMessage("Delegations started."),
+				],
+			);
 
 			await harness.session.prompt("Delegate both scouts", { autoContinueGoal: false });
 			await allTerminal;
@@ -1376,7 +1402,7 @@ describe("AgentSession worker delegation", () => {
 				"second worker done",
 			]);
 			expect(workerLaneRecords(harness).map((record) => record.status)).toEqual(["succeeded", "succeeded"]);
-			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(remainingWorkers()).toBe(0);
 		} finally {
 			unsubscribe();
 			harness.cleanup();
@@ -1438,18 +1464,20 @@ describe("AgentSession worker delegation", () => {
 					? firstWorkerResponse
 					: fauxAssistantMessage('{"summary":"second worker done","status":"completed"}');
 			};
-			harness.setResponses([
-				fauxAssistantMessage(
-					[
-						fauxToolCall("delegate", { instructions: "First queued-profile worker" }),
-						fauxToolCall("delegate", { instructions: "Second queued-profile worker" }),
-					],
-					{ stopReason: "toolUse" },
-				),
-				routeResponse,
-				routeResponse,
-				routeResponse,
-			]);
+			setConcurrentResponses(
+				harness,
+				[routeResponse, routeResponse],
+				[
+					fauxAssistantMessage(
+						[
+							fauxToolCall("delegate", { instructions: "First queued-profile worker" }),
+							fauxToolCall("delegate", { instructions: "Second queued-profile worker" }),
+						],
+						{ stopReason: "toolUse" },
+					),
+					routeResponse,
+				],
+			);
 
 			await harness.session.prompt("Delegate both workers", { autoContinueGoal: false });
 			await queued;
@@ -1503,10 +1531,7 @@ describe("AgentSession worker delegation", () => {
 				resolve(message);
 			};
 		});
-		const routeResponse: FauxResponseFactory = (context) =>
-			context.systemPrompt?.includes("Autonomous leaf worker")
-				? workerResponse
-				: fauxAssistantMessage("Foreground remained responsive.");
+		const workerStarted = Promise.withResolvers<void>();
 		let resolveTerminal!: () => void;
 		let resolveHandoff!: () => void;
 		let resolveWakeReply!: () => void;
@@ -1542,16 +1567,25 @@ describe("AgentSession worker delegation", () => {
 			}
 		});
 		try {
-			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Wait for the background result" })], {
-					stopReason: "toolUse",
-				}),
-				routeResponse,
-				routeResponse,
-				fauxAssistantMessage("Background handoff acknowledged."),
-			]);
+			setConcurrentResponses(
+				harness,
+				[
+					() => {
+						workerStarted.resolve();
+						return workerResponse;
+					},
+				],
+				[
+					fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Wait for the background result" })], {
+						stopReason: "toolUse",
+					}),
+					fauxAssistantMessage("Foreground remained responsive."),
+					fauxAssistantMessage("Background handoff acknowledged."),
+				],
+			);
 
 			await harness.session.prompt("Start one background worker", { autoContinueGoal: false });
+			await workerStarted.promise;
 			expect(
 				harness.session
 					.getLaneRecords()
@@ -1607,10 +1641,6 @@ describe("AgentSession worker delegation", () => {
 		const wakeStarted = new Promise<void>((resolve) => {
 			signalWakeStarted = resolve;
 		});
-		const routeResponse: FauxResponseFactory = (context) =>
-			context.systemPrompt?.includes("Autonomous leaf worker")
-				? workerResponse
-				: fauxAssistantMessage("Foreground remained responsive.");
 		const heldForegroundResponse: FauxResponseFactory = () => {
 			signalForegroundStarted();
 			return foregroundResponse;
@@ -1643,15 +1673,18 @@ describe("AgentSession worker delegation", () => {
 			}
 		});
 		try {
-			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Wait for the durable result" })], {
-					stopReason: "toolUse",
-				}),
-				routeResponse,
-				routeResponse,
-				heldForegroundResponse,
-				heldWakeResponse,
-			]);
+			setConcurrentResponses(
+				harness,
+				[() => workerResponse],
+				[
+					fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Wait for the durable result" })], {
+						stopReason: "toolUse",
+					}),
+					fauxAssistantMessage("Foreground remained responsive."),
+					heldForegroundResponse,
+					heldWakeResponse,
+				],
+			);
 
 			await harness.session.prompt("Start one durable background worker", { autoContinueGoal: false });
 			const foregroundRun = harness.session.prompt("Keep the foreground occupied", { autoContinueGoal: false });
@@ -1814,18 +1847,28 @@ describe("AgentSession worker delegation", () => {
 				agentDir: harness.tempDir,
 				sessionId: harness.session.sessionId,
 			});
-			const executionContract = createWorkerExecutionContract({
-				worker: {
-					profile: implementationProfile,
-					modelBinding: implementationProfile.modelPolicy.candidates[0]!,
-					authority: createTestWorkerExecutionAuthority(implementationProfile, harness.tempDir),
-				},
-				verifier: {
-					profile: verifierProfile,
-					modelBinding: verifierProfile.modelPolicy.candidates[0]!,
-					authority: createTestWorkerExecutionAuthority(verifierProfile, harness.tempDir),
-				},
-			});
+			const executionContract = await new WorkerDirectoryAdmission().capture(
+				createWorkerExecutionContract({
+					worker: {
+						profile: implementationProfile,
+						modelBinding: implementationProfile.modelPolicy.candidates[0]!,
+						authority: {
+							...createTestWorkerExecutionAuthority(implementationProfile, harness.tempDir),
+							cwd: harness.tempDir,
+						},
+					},
+					verifier: {
+						profile: verifierProfile,
+						modelBinding: verifierProfile.modelPolicy.candidates[0]!,
+						authority: {
+							...createTestWorkerExecutionAuthority(verifierProfile, harness.tempDir),
+							cwd: harness.tempDir,
+						},
+					},
+				}),
+				harness.session.sessionId,
+				new AbortController().signal,
+			);
 			const prepared = lifecycle.prepare({
 				instructions: "Implement before restart",
 				executionContract,
@@ -1909,115 +1952,124 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
-	it("recovers an interrupted active worker with a fresh fence and delivers one terminal handoff", async () => {
-		const profile = workerProfile("faux-1");
-		const harness = await createHarness({
-			settings: {
-				workerDelegation: {
-					enabled: true,
-					maxUsd: profile.budget.maxCostUsd,
-					maxWallClockMs: profile.budget.maxWallClockMs,
+	it.each([false, true])(
+		"recovers an interrupted active worker with a fresh fence and one handoff (legacy=%s)",
+		async (legacy) => {
+			const profile = workerProfile("faux-1");
+			const harness = await createHarness({
+				settings: {
+					workerDelegation: {
+						enabled: true,
+						maxUsd: profile.budget.maxCostUsd,
+						maxWallClockMs: profile.budget.maxWallClockMs,
+					},
 				},
-			},
-			workerOrchestrationProfile: profile,
-		});
-		try {
-			const interrupted = new WorkerLifecycle({
-				agentDir: harness.tempDir,
-				sessionId: harness.session.sessionId,
+				workerOrchestrationProfile: profile,
 			});
-			const executionContract = createWorkerExecutionContract({
-				worker: {
-					profile,
-					modelBinding: profile.modelPolicy.candidates[0]!,
-					authority: createTestWorkerExecutionAuthority(profile, harness.tempDir),
-				},
-			});
-			const prepared = interrupted.prepare({
-				instructions: "Complete after the owner process restarts",
-				executionContract,
-				requiredCapabilities: [],
-			});
-			const task = interrupted.getTask(prepared.attempt.taskId);
-			if (!task) throw new Error("Expected interrupted durable task");
-			interrupted.bindGrant(prepared.attempt.attemptId, {
-				...createTestExecutionGrant({
-					objectiveId: task.task.objectiveId,
-					taskId: prepared.attempt.taskId,
-					attemptId: prepared.attempt.attemptId,
-					role: task.task.role,
-				}),
-				capabilities: ["filesystem.read"],
-				allowedTools: ["read"],
-				readPaths: [harness.tempDir],
-				deniedPaths: getPrivateLaneDeniedPaths(harness.tempDir, harness.tempDir),
-				budget: { ...profile.budget },
-			});
-			const staleHandle = interrupted.start(prepared.record.laneId, profile.leaseTtlMs);
-
-			harness.setResponses([
-				fauxAssistantMessage("Owner recovery boundary reached."),
-				fauxAssistantMessage('{"summary":"recovered worker completed","status":"completed","findings":[]}'),
-				fauxAssistantMessage("Recovered handoff acknowledged."),
-			]);
-			expect(harness.session.getLaneRecords()).toEqual(
-				expect.arrayContaining([expect.objectContaining({ laneId: prepared.record.laneId, status: "queued" })]),
-			);
-			const recoveredBeforeRun = interrupted.getTaskRuntimeSnapshot();
-			expect(task.attemptIds).toHaveLength(1);
-			expect(recoveredBeforeRun.tasks[prepared.record.laneId]?.attemptIds).toHaveLength(2);
-			expect(recoveredBeforeRun.attempts[prepared.attempt.attemptId]?.status).toBe("expired");
-			expect(
-				recoveredBeforeRun.tasks[prepared.record.laneId]?.attemptIds
-					.map((attemptId) => recoveredBeforeRun.attempts[attemptId])
-					.at(-1)?.dispatch.executionContract,
-			).toEqual(executionContract);
-
-			await harness.session.prompt("Resume interrupted durable work", { autoContinueGoal: false });
-			await vi.waitFor(() => {
-				expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1);
-				expect(
-					harness.session.getLaneRecords().find((record) => record.laneId === prepared.record.laneId),
-				).toMatchObject({ status: "succeeded" });
-			});
-
-			expect(() =>
-				interrupted.finish(
-					createWorkerResultContract({
-						handle: staleHandle,
-						claim: {
-							requestId: prepared.record.laneId,
-							status: "completed",
-							summary: "stale worker attempted completion",
-							changedFiles: [],
-						},
-						accepted: true,
-						cwd: harness.tempDir,
-						wallClockMs: 10,
-						toolCalls: 0,
+			try {
+				const interrupted = new WorkerLifecycle({
+					agentDir: harness.tempDir,
+					sessionId: harness.session.sessionId,
+				});
+				let executionContract = createWorkerExecutionContract({
+					worker: {
+						profile,
+						modelBinding: profile.modelPolicy.candidates[0]!,
+						authority: { ...createTestWorkerExecutionAuthority(profile, harness.tempDir), cwd: harness.tempDir },
+					},
+				});
+				if (!legacy)
+					executionContract = await new WorkerDirectoryAdmission().capture(
+						executionContract,
+						harness.session.sessionId,
+						new AbortController().signal,
+					);
+				const prepared = interrupted.prepare({
+					instructions: "Complete after the owner process restarts",
+					executionContract,
+					requiredCapabilities: [],
+				});
+				const task = interrupted.getTask(prepared.attempt.taskId);
+				if (!task) throw new Error("Expected interrupted durable task");
+				interrupted.bindGrant(prepared.attempt.attemptId, {
+					...createTestExecutionGrant({
+						objectiveId: task.task.objectiveId,
+						taskId: prepared.attempt.taskId,
+						attemptId: prepared.attempt.attemptId,
+						role: task.task.role,
 					}),
-				),
-			).toThrow();
+					capabilities: ["filesystem.read"],
+					allowedTools: ["read"],
+					readPaths: [harness.tempDir],
+					deniedPaths: getPrivateLaneDeniedPaths(harness.tempDir, harness.tempDir),
+					budget: { ...profile.budget },
+				});
+				const staleHandle = interrupted.start(prepared.record.laneId, profile.leaseTtlMs);
 
-			const eventStore = new OrchestrationEventStore({
-				agentDir: harness.tempDir,
-				sessionId: harness.session.sessionId,
-			});
-			await vi.waitFor(() => {
-				expect(eventStore.readAll().filter((event) => event.type === "notification.delivered")).toHaveLength(1);
-			});
-			expect(eventStore.readAll().filter((event) => event.type === "notification.enqueued")).toHaveLength(1);
-			expect(
-				harness.sessionManager
-					.getEntries()
-					.filter(
-						(entry) => entry.type === "custom_message" && entry.customType === "background-worker-completion",
+				harness.setResponses([
+					fauxAssistantMessage("Owner recovery boundary reached."),
+					fauxAssistantMessage('{"summary":"recovered worker completed","status":"completed","findings":[]}'),
+					fauxAssistantMessage("Recovered handoff acknowledged."),
+				]);
+				expect(harness.session.getLaneRecords()).toEqual(
+					expect.arrayContaining([expect.objectContaining({ laneId: prepared.record.laneId, status: "queued" })]),
+				);
+				const recoveredBeforeRun = interrupted.getTaskRuntimeSnapshot();
+				expect(task.attemptIds).toHaveLength(1);
+				expect(recoveredBeforeRun.tasks[prepared.record.laneId]?.attemptIds).toHaveLength(2);
+				expect(recoveredBeforeRun.attempts[prepared.attempt.attemptId]?.status).toBe("expired");
+				expect(
+					recoveredBeforeRun.tasks[prepared.record.laneId]?.attemptIds
+						.map((attemptId) => recoveredBeforeRun.attempts[attemptId])
+						.at(-1)?.dispatch.executionContract,
+				).toEqual(executionContract);
+
+				await harness.session.prompt("Resume interrupted durable work", { autoContinueGoal: false });
+				await vi.waitFor(() => {
+					expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1);
+					expect(
+						harness.session.getLaneRecords().find((record) => record.laneId === prepared.record.laneId),
+					).toMatchObject({ status: "succeeded" });
+				});
+
+				expect(() =>
+					interrupted.finish(
+						createWorkerResultContract({
+							handle: staleHandle,
+							claim: {
+								requestId: prepared.record.laneId,
+								status: "completed",
+								summary: "stale worker attempted completion",
+								changedFiles: [],
+							},
+							accepted: true,
+							cwd: harness.tempDir,
+							wallClockMs: 10,
+							toolCalls: 0,
+						}),
 					),
-			).toHaveLength(1);
-		} finally {
-			harness.cleanup();
-		}
-	});
+				).toThrow();
+
+				const eventStore = new OrchestrationEventStore({
+					agentDir: harness.tempDir,
+					sessionId: harness.session.sessionId,
+				});
+				await vi.waitFor(() => {
+					expect(eventStore.readAll().filter((event) => event.type === "notification.delivered")).toHaveLength(1);
+				});
+				expect(eventStore.readAll().filter((event) => event.type === "notification.enqueued")).toHaveLength(1);
+				expect(
+					harness.sessionManager
+						.getEntries()
+						.filter(
+							(entry) => entry.type === "custom_message" && entry.customType === "background-worker-completion",
+						),
+				).toHaveLength(1);
+			} finally {
+				harness.cleanup();
+			}
+		},
+	);
 
 	it("recovery marks only unmatched calls in an interrupted tool batch as unknown", async () => {
 		const profile = workerProfile("faux-1");
@@ -2040,13 +2092,17 @@ describe("AgentSession worker delegation", () => {
 				memoryEnabled: harness.settingsManager.getMemoryRetrievalSettings().enabled,
 			});
 			const interrupted = new WorkerLifecycle({ agentDir: harness.tempDir, sessionId: harness.session.sessionId });
-			const executionContract = createWorkerExecutionContract({
-				worker: {
-					profile,
-					modelBinding: profile.modelPolicy.candidates[0]!,
-					authority: workerExecutionAuthorityFromPlan(executionPlan),
-				},
-			});
+			const executionContract = await new WorkerDirectoryAdmission().capture(
+				createWorkerExecutionContract({
+					worker: {
+						profile,
+						modelBinding: profile.modelPolicy.candidates[0]!,
+						authority: workerExecutionAuthorityFromPlan(executionPlan),
+					},
+				}),
+				harness.session.sessionId,
+				new AbortController().signal,
+			);
 			const prepared = interrupted.prepare({
 				instructions: "Resume a partial tool batch",
 				executionContract,

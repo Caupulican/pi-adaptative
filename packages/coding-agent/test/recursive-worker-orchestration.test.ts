@@ -12,6 +12,7 @@ import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { ORCHESTRATION_SCHEMA_VERSION } from "../src/core/orchestration/contracts.ts";
 import { loadedSuiteTimeout } from "./loaded-suite-timeout.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
+import { setConcurrentResponses } from "./suite/concurrent-responses.ts";
 import { createHarness } from "./suite/harness.ts";
 import { createTestResourceLoader } from "./suite/test-resources.ts";
 
@@ -29,7 +30,7 @@ interface AgentTranscriptPage {
 interface AgentTreeControl {
 	startWorkerDelegation(
 		request: WorkerDelegationRequest,
-	): { started: false; skipReason: string } | { started: true; record: { laneId: string } };
+	): Promise<{ started: false; skipReason: string } | { started: true; record: { laneId: string } }>;
 	listWorkerAgents(): WorkerAgentView[];
 	readWorkerAgentTranscript(agentId: string, options?: { cursor?: number; maxMessages?: number }): AgentTranscriptPage;
 	startWorkerAgentTask(
@@ -751,7 +752,7 @@ describe("leaf worker orchestration", () => {
 				profileId: alternate.profileId,
 			});
 
-			expect(run.started).toBe(true);
+			expect(run).toMatchObject({ started: true });
 			expect(run.record?.profileId).toMatch(/^adaptive-/);
 			expect(run.record?.profileId).not.toBe(alternate.profileId);
 		} finally {
@@ -1043,9 +1044,9 @@ describe("leaf worker orchestration", () => {
 				fauxAssistantMessage('{"summary":"must not execute","status":"completed"}'),
 			]);
 			const control = treeControl(harness.session);
-			const root = control.startWorkerDelegation({ instructions: "Create the explicit root." });
+			const root = await control.startWorkerDelegation({ instructions: "Create the explicit root." });
 			if (!root.started) throw new Error(`Explicit root rejected: ${root.skipReason}`);
-			const child = control.startWorkerDelegation({
+			const child = await control.startWorkerDelegation({
 				instructions: "Attempt an explicitly configured child.",
 				parentAgentId: root.record.laneId,
 				forkTurns: "none",
@@ -1152,7 +1153,7 @@ describe("leaf worker orchestration", () => {
 		const harness = await createHarness({ workerOrchestrationProfile: profile });
 		try {
 			const requestCaps: Array<number | undefined> = [];
-			harness.setResponses([
+			setConcurrentResponses(harness, [
 				(_context, options) => {
 					requestCaps.push(options?.maxTokens);
 					return fauxAssistantMessage('{"summary":"first leaf complete","status":"completed"}');
@@ -1166,7 +1167,7 @@ describe("leaf worker orchestration", () => {
 			const second = await harness.session.runWorkerDelegationOnce({ instructions: "Run the second leaf." });
 
 			expect(first.record?.status).toBe("succeeded");
-			expect(second.record?.status).toBe("succeeded");
+			expect(second.record).toMatchObject({ status: "succeeded" });
 			// The worker ceiling is the model's own output limit (8 000 here), not the lane summary cap.
 			expect(requestCaps).toEqual([workerTokenBudget, workerTokenBudget]);
 		} finally {

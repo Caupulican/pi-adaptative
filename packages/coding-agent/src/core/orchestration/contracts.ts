@@ -1,3 +1,4 @@
+import type { ExecutionContext } from "@caupulican/pi-agent-core/paths";
 import { DEFAULT_MAX_BYTES } from "@caupulican/pi-agent-core/truncate";
 import type { JsonObject, JsonValue } from "../autonomy/contracts.ts";
 import { HARNESS_CAPABILITIES, type HarnessCapability } from "../capability-contract.ts";
@@ -295,6 +296,8 @@ export interface WorkerProfileExecutionContract {
 	profile: OrchestrationProfile;
 	modelBinding: OrchestrationModelBinding;
 	authority: WorkerExecutionAuthorityContract;
+	/** Native directory identity captured before fresh dispatch; absent only on historical contracts. */
+	executionContext?: ExecutionContext;
 	/** Metadata-only resources fixed at admission; their content remains lazy and non-durable. */
 	resourcePointers: readonly ResourcePointer[];
 	/** Resolved resource-profile identity text. Other worker resources are represented by profile tools. */

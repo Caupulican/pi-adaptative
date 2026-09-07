@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Captured native worker and verifier directory identity before dispatch and revalidated queued and resumed work before execution. Asynchronous validation retains reload blockers and rechecks capacity; mailbox recovery no longer re-enqueues the attempt being started. Historical workers retain explicitly diagnosed path-only recovery.
 - Sync CLI path lookup no longer treats permission or I/O errors as a missing-name spelling fallback.
 - Distinguished Python membership-test search text from credential paths while retaining direct and assigned credential-read protections.
 - Returned actionable codec-unavailable recovery guidance when native iconv rejects an unsupported encoding, without reclassifying resource failures or changing source bytes.

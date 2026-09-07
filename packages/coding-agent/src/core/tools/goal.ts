@@ -200,10 +200,16 @@ export interface GoalToolDependencies {
 	 * dep, or the dep returning `undefined`), which records the binding attempt structurally with no
 	 * laneId (a no-op).
 	 */
-	startWorkerDelegation?: (args: {
-		requirementId: string;
-		instructions: string;
-	}) => { laneId?: string; skipReason?: string } | undefined;
+	startWorkerDelegation?: (
+		args: {
+			requirementId: string;
+			instructions: string;
+		},
+		signal?: AbortSignal,
+	) =>
+		| { laneId?: string; skipReason?: string }
+		| undefined
+		| Promise<{ laneId?: string; skipReason?: string } | undefined>;
 	/**
 	 * Tool-layer side effect for a 'dispatch_worker' action when `input.dispatchTarget === "collaboration"`:
 	 * dispatches a REAL persistent collaboration worker via the pi_collaboration extension's `fire_task`
@@ -498,6 +504,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 		async execute(
 			_toolCallId,
 			input: GoalToolInput,
+			signal,
 		): Promise<{
 			content: Array<{ type: "text"; text: string }>;
 			details: GoalToolDetails;
@@ -611,17 +618,23 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					) {
 						collaborationFallbackReason = dispatched?.skipReason;
 						useCollaboration = false;
-						dispatched = deps.startWorkerDelegation({
-							requirementId: action.requirementId,
-							instructions: action.instructions,
-						});
+						dispatched = await deps.startWorkerDelegation(
+							{
+								requirementId: action.requirementId,
+								instructions: action.instructions,
+							},
+							signal,
+						);
 					}
 				} else {
 					if (collaborationRequested) collaborationFallbackReason = "collaboration_extension_not_loaded";
-					dispatched = deps.startWorkerDelegation?.({
-						requirementId: action.requirementId,
-						instructions: action.instructions,
-					});
+					dispatched = await deps.startWorkerDelegation?.(
+						{
+							requirementId: action.requirementId,
+							instructions: action.instructions,
+						},
+						signal,
+					);
 				}
 				action = { ...action, laneId: dispatched?.laneId };
 				if (dispatched?.laneId) {

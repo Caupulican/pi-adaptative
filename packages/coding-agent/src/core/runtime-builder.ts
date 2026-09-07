@@ -356,7 +356,11 @@ export interface RuntimeBuilderDeps {
 	/** Non-blocking worker-delegation starter for the delegate tool. */
 	startWorkerDelegation(
 		request: WorkerDelegationRequest,
-	): { started: false; skipReason: string } | { started: true; record: LaneRecord };
+		signal?: AbortSignal,
+	):
+		| { started: false; skipReason: string }
+		| { started: true; record: LaneRecord }
+		| Promise<{ started: false; skipReason: string } | { started: true; record: LaneRecord }>;
 	workerAgentControl?: WorkerAgentControlPort & Partial<TaskProfileWriterPort>;
 	getOrchestrationProfileCatalog(): Array<{ profileId: string; role: string; description: string }>;
 	getWorkerLaneRecords(): LaneRecord[];
@@ -1118,11 +1122,14 @@ export class RuntimeBuilder {
 					// real in-process worker lane through the SAME starter the delegate tool uses (below),
 					// adapted from its `{started:true;record}|{started:false;skipReason}` shape onto this
 					// tool's narrower `{laneId}|{skipReason}` shape.
-					startWorkerDelegation: (args) => {
-						const outcome = this.deps.startWorkerDelegation({
-							...createGoalWorkerDelegationRequest(args),
-							executionContext: this._taskDirectories.executionContext,
-						});
+					startWorkerDelegation: async (args, signal) => {
+						const outcome = await this.deps.startWorkerDelegation(
+							{
+								...createGoalWorkerDelegationRequest(args),
+								executionContext: this._taskDirectories.executionContext,
+							},
+							signal,
+						);
 						return outcome.started ? { laneId: outcome.record.laneId } : { skipReason: outcome.skipReason };
 					},
 					// Goal dispatch uses the same admitted pi_collaboration fire_task path as a model call.
@@ -1271,7 +1278,7 @@ export class RuntimeBuilder {
 					},
 					startWorkerDelegation: (args, signal) =>
 						this._taskDirectories.withContext(
-							(executionContext) => this.deps.startWorkerDelegation({ ...args, executionContext }),
+							(executionContext) => this.deps.startWorkerDelegation({ ...args, executionContext }, signal),
 							signal,
 						),
 					runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),

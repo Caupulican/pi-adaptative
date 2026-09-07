@@ -258,6 +258,20 @@ the grant anchor could silently add a new share. Pinned by
 `packages/coding-agent/test/worker-execution-policy.test.ts`, and
 `packages/coding-agent/test/session-worker-directories.test.ts`.
 
+**Queue validation cannot substitute a directory or start an attempt twice.** Fresh worker and
+verifier contracts capture native directory identity before durable dispatch. Queued and resumed
+execution revalidates that identity with bounded cancellation before provider execution; capacity
+and authority are checked again after asynchronous validation. Queue ownership and reload blockers
+remain live during that wait, and canceled or replaced queue entries reject late probe results.
+Mailbox recovery runs before queue ownership transfers, so it cannot rediscover and re-enqueue
+the attempt being started. Historical contracts retain explicitly admitted path-only recovery with
+a diagnostic: identity never recorded cannot be reconstructed, and that limitation cannot bypass
+a saved binding. Synthetic foreground and worker response scripts are independent of scheduling
+order. Pinned by `packages/coding-agent/test/worker-directory-admission.test.ts`,
+`packages/coding-agent/test/worker-dispatch-preflight.test.ts`,
+`packages/coding-agent/test/session-worker-directories.test.ts`, and
+`packages/coding-agent/test/agent-session-worker-delegation.test.ts`.
+
 **An explicit wait is never handed off.** A tool declares which calls are foreground waits; such a
 call blocks up to its own timeout. Pinned by
 `packages/coding-agent/test/background-tool-task-controller.test.ts` and
@@ -359,6 +373,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-07 | Worker and verifier identity survives queued dispatch and resume; asynchronous probes retain queue ownership, recheck policy, and reject stale completions. Mailbox recovery precedes the start transition. Historical path-only recovery remains explicit and cannot bypass a saved identity. |
 | 2026-09-07 | Fresh workers capture admitted task cwd; explicit relative intent uses that directory while configured presets and default permission roots retain their original anchors. Queueing and foreground selection cannot retarget admitted work. |
 | 2026-09-07 | Persistent directory control earns a separate 330-token schema allowance; all pre-existing tools retain their combined 4,500-token ceiling. Explicit task pins address reproduced wrong-directory execution without widening grants or introducing per-turn schema churn. |
 | 2026-09-06 | Session-audit repairs strengthen receipt provenance, setup supersession, useful unsuccessful handoffs, goal attribution, structured repair, action validation, bounded progress detection, worker grants/inspection, scoped memory, atomic skill batches, and proportional instructions without raising prompt or scanner limits. |

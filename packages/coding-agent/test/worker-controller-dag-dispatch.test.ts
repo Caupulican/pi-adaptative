@@ -8,12 +8,13 @@ import type { WorkerDispatchScheduler } from "../src/core/delegation/worker-disp
 import { DEFAULT_WORKER_FLEET_LIMITS } from "../src/core/delegation/worker-fleet-limits.ts";
 import type { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
+import { setConcurrentResponses } from "./suite/concurrent-responses.ts";
 import { createHarness } from "./suite/harness.ts";
 
 type DagControls = {
 	startWorkerDelegation(
 		request: WorkerDelegationRequest,
-	): { started: false; skipReason: string } | { started: true; record: LaneRecord };
+	): Promise<{ started: false; skipReason: string } | { started: true; record: LaneRecord }>;
 	cancelWorkerAgent(agentId: string, reasonCode?: string): LaneRecord | undefined;
 	_getWorkerLifecycle(): WorkerLifecycle;
 	_getWorkerController(): {
@@ -101,7 +102,7 @@ describe("worker controller dependency dispatch", () => {
 			]);
 			const controls = controlsFor(harness.session);
 			const workspace = `${harness.tempDir}/src`;
-			const first = controls.startWorkerDelegation({
+			const first = await controls.startWorkerDelegation({
 				instructions: "Hold the first scoped write reservation.",
 				authority: { path: workspace },
 			});
@@ -118,7 +119,7 @@ describe("worker controller dependency dispatch", () => {
 			const enqueue = vi.spyOn(scheduler, "enqueue");
 			const rejectedLaneId = controls._getWorkerLifecycle().getNextAvailableLaneIdCandidate();
 			expect(
-				controls.startWorkerDelegation({
+				await controls.startWorkerDelegation({
 					instructions: "Contend for the same scoped write.",
 					authority: { path: workspace },
 				}),
@@ -150,7 +151,9 @@ describe("worker controller dependency dispatch", () => {
 			});
 			harness.setResponses([fauxAssistantMessage('{"summary":"negative control completed","status":"completed"}')]);
 
-			expect(controls.startWorkerDelegation({ instructions: "Report exact preparation diagnostics." })).toEqual({
+			expect(
+				await controls.startWorkerDelegation({ instructions: "Report exact preparation diagnostics." }),
+			).toEqual({
 				started: false,
 				skipReason: "worker_start_error:injected dispatch persistence failure",
 			});
@@ -158,7 +161,9 @@ describe("worker controller dependency dispatch", () => {
 			expect(lifecycle.getNextAvailableLaneIdCandidate()).toBe(laneId);
 			expect(harness.getPendingResponseCount()).toBe(1);
 			prepare.mockRestore();
-			const accepted = controls.startWorkerDelegation({ instructions: "Negative control after storage recovers." });
+			const accepted = await controls.startWorkerDelegation({
+				instructions: "Negative control after storage recovers.",
+			});
 			expect(accepted).toMatchObject({ started: true, record: { laneId, status: "running" } });
 			await vi.waitFor(() => expect(lifecycle.getRecord(laneId)?.status).toBe("succeeded"));
 		} finally {
@@ -179,7 +184,7 @@ describe("worker controller dependency dispatch", () => {
 			const publish = vi.spyOn(controls._getWorkerController(), "publishTerminalRecord");
 			harness.setResponses([fauxAssistantMessage('{"summary":"must not execute"}')]);
 
-			expect(controls.startWorkerDelegation({ instructions: "Fail after durable preparation." })).toEqual({
+			expect(await controls.startWorkerDelegation({ instructions: "Fail after durable preparation." })).toEqual({
 				started: false,
 				skipReason: "worker_start_error:injected grant persistence failure",
 			});
@@ -206,7 +211,7 @@ describe("worker controller dependency dispatch", () => {
 		let providerCalls = 0;
 		try {
 			await harness.session.setModel({ ...harness.getModel(), baseUrl: "https://faux.invalid" });
-			harness.setResponses([
+			setConcurrentResponses(harness, [
 				() => {
 					providerCalls += 1;
 					return prerequisiteResponse;
@@ -217,7 +222,7 @@ describe("worker controller dependency dispatch", () => {
 				},
 			]);
 			const controls = controlsFor(harness.session);
-			const prerequisite = controls.startWorkerDelegation({ instructions: "Produce the prerequisite." });
+			const prerequisite = await controls.startWorkerDelegation({ instructions: "Produce the prerequisite." });
 			if (!prerequisite.started) throw new Error(prerequisite.skipReason);
 			const dependent = await harness.session.runWorkerDelegationOnce(
 				dependencyRequest("Consume the prerequisite.", prerequisite.record.laneId),
@@ -270,7 +275,9 @@ describe("worker controller dependency dispatch", () => {
 			runtime.failTask("failed-input", "test_dependency_failed");
 			harness.setResponses([fauxAssistantMessage('{"summary":"must not execute"}')]);
 
-			const dependent = controls.startWorkerDelegation(dependencyRequest("Must be cancelled.", "failed-input"));
+			const dependent = await controls.startWorkerDelegation(
+				dependencyRequest("Must be cancelled.", "failed-input"),
+			);
 			if (!dependent.started) throw new Error(dependent.skipReason);
 
 			const snapshot = lifecycle.getTaskRuntimeSnapshot();
@@ -314,7 +321,7 @@ describe("worker controller dependency dispatch", () => {
 				throw new Error("simulated publication observer failure");
 			});
 
-			const dependent = controls.startWorkerDelegation(
+			const dependent = await controls.startWorkerDelegation(
 				dependencyRequest("Cancel only after the durable write succeeds.", "failed-cancel-input"),
 			);
 			if (!dependent.started) throw new Error(dependent.skipReason);
@@ -345,13 +352,13 @@ describe("worker controller dependency dispatch", () => {
 			await harness.session.setModel({ ...harness.getModel(), baseUrl: "https://faux.invalid" });
 			harness.setResponses([() => rootResponse]);
 			const controls = controlsFor(harness.session);
-			const root = controls.startWorkerDelegation({ instructions: "Root prerequisite." });
+			const root = await controls.startWorkerDelegation({ instructions: "Root prerequisite." });
 			if (!root.started) throw new Error(root.skipReason);
 			const middleRequest = dependencyRequest("Middle dependent.", root.record.laneId);
-			const middle = controls.startWorkerDelegation(middleRequest);
+			const middle = await controls.startWorkerDelegation(middleRequest);
 			if (!middle.started) throw new Error(middle.skipReason);
 			const outerRequest = dependencyRequest("Outer dependent.", middle.record.laneId);
-			const outer = controls.startWorkerDelegation(outerRequest);
+			const outer = await controls.startWorkerDelegation(outerRequest);
 			if (!outer.started) throw new Error(outer.skipReason);
 
 			const scheduler = controls._getWorkerController().scheduler;

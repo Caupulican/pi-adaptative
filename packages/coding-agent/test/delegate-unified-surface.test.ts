@@ -273,9 +273,7 @@ describe("unified delegate model surface", () => {
 			skipReason: "action_field_forbidden",
 		});
 		expect(startWorkerDelegation).toHaveBeenCalledTimes(1);
-		expect(startWorkerDelegation).toHaveBeenCalledWith({
-			instructions: "Run an unbudgeted verification",
-		});
+		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "Run an unbudgeted verification" }, undefined);
 	});
 
 	it("rejects a bypassed profile budget before the profile writer", async () => {

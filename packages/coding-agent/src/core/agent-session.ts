@@ -1027,7 +1027,7 @@ export class AgentSession {
 			getPipelineRunSnapshot: () => this.getPipelineRunSnapshot(),
 			savePipelineRunSnapshot: (run) => this.savePipelineRunSnapshot(run),
 			getContextGcReport: (messages) => this.getContextGcReport(messages),
-			startWorkerDelegation: (request) => this._backgroundLanes.startWorkerDelegation(request),
+			startWorkerDelegation: (request, signal) => this._backgroundLanes.startWorkerDelegation(request, signal),
 			workerAgentControl: this._backgroundLanes,
 			getOrchestrationProfileCatalog: () => this._backgroundLanes.getOrchestrationProfileCatalog(),
 			getWorkerLaneRecords: () => this._backgroundLanes.getLaneRecords(),

@@ -83,6 +83,7 @@ import {
 	WorkerConversationStore,
 } from "./worker-conversation-store.ts";
 import { parseWorkerDelegationAuthorityRequest, type WorkerDelegationRequest } from "./worker-delegation-request.ts";
+import { WorkerDirectoryAdmission } from "./worker-directory-admission.ts";
 import { type WorkerDispatchAdmission, WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import {
 	buildWorkerExecutionPlan,
@@ -202,6 +203,8 @@ export interface WorkerDelegationControllerDeps {
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 }
 
+const WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS = 10_000;
+
 type WorkerAdmission =
 	| {
 			ok: true;
@@ -261,6 +264,7 @@ function workerContextModelIdentity(modelRef: string | undefined): { provider: s
 export class WorkerDelegationController {
 	private readonly deps: WorkerDelegationControllerDeps;
 	private readonly workerAbort = new AbortController();
+	private readonly directories = new WorkerDirectoryAdmission();
 	private readonly lifecycle: WorkerLifecycle;
 	private profileResolver: WorkerProfileResolver | undefined;
 	private taskProfileStore: SessionTaskProfileStore | undefined;
@@ -307,8 +311,12 @@ export class WorkerDelegationController {
 			agentDir: this.deps.getAgentDir?.() ?? "",
 			isDisposed: () => this.deps.isDisposed(),
 			admit: (request, record) => this.workerDispatchAdmission(request, record),
+			preflight: async (_request, record) => {
+				const reasonCode = await this.validateWorkerDirectory(record);
+				return reasonCode ? { action: "cancel", reasonCode } : { action: "start" };
+			},
 			getRecord: (laneId) => this.getWorkerLifecycle().getRecord(laneId),
-			run: (request, record) => this.runOnce(request, undefined, record),
+			run: (request, record) => this.runOnce(request, undefined, record, true),
 			cancel: (laneId, reasonCode) => this.cancelScheduledWorker(laneId, reasonCode),
 			warn: (message) => this.safeWarn(message),
 		});
@@ -1808,17 +1816,59 @@ export class WorkerDelegationController {
 		};
 	}
 
-	start(
+	async start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
+		const capturedRequest = structuredClone(request);
+		const admission = await this.admitWorkerDirectory(capturedRequest, signal);
+		return admission.ok
+			? this.startInternal(capturedRequest, undefined, admission)
+			: { started: false, skipReason: admission.skipReason };
+	}
+
+	private async admitWorkerDirectory(
 		request: WorkerDelegationRequest,
-	): { started: false; skipReason: string } | { started: true; record: LaneRecord; modelPinBypass?: WorkerRole } {
-		return this.startInternal(request);
+		signal?: AbortSignal,
+	): Promise<WorkerAdmission> {
+		const sessionId = this.deps.getSessionId();
+		const admission = this.admitNewWorkerRequest(request);
+		if (!admission.ok) return admission;
+		const boundedSignal = AbortSignal.any([
+			this.workerAbort.signal,
+			AbortSignal.timeout(WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS),
+			...(signal ? [signal] : []),
+		]);
+		try {
+			if (request.executionContext) await this.directories.validateContext(request.executionContext, boundedSignal);
+			const executionContract = await this.directories.capture(
+				admission.executionContract,
+				sessionId,
+				boundedSignal,
+			);
+			boundedSignal.throwIfAborted();
+			if (this.deps.isDisposed() || sessionId !== this.deps.getSessionId())
+				return { ok: false, skipReason: "worker_directory_session_changed" };
+			// Recheck live capacity and authority after asynchronous filesystem admission. The
+			// captured contract pins execution identity; current policy may only narrow its grant.
+			const current = this.admitNewWorkerRequest(
+				{ ...request, profileId: executionContract.worker.profile.profileId },
+				executionContract,
+			);
+			return current.ok
+				? { ...current, ...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}) }
+				: current;
+		} catch (error) {
+			return {
+				ok: false,
+				skipReason: `worker_directory_unavailable:${error instanceof Error ? error.message : String(error)}`,
+			};
+		}
 	}
 
 	private startInternal(
 		request: WorkerDelegationRequest,
 		pinnedContract?: WorkerExecutionContract,
+		preparedAdmission?: Extract<WorkerAdmission, { ok: true }>,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord; modelPinBypass?: WorkerRole } {
-		const admission = this.admitNewWorkerRequest(request, pinnedContract);
+		const admission = preparedAdmission ?? this.admitNewWorkerRequest(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
 		const { settings, shipment } = admission;
 
@@ -1826,7 +1876,7 @@ export class WorkerDelegationController {
 		const contendsWithLocalForeground =
 			foreground !== undefined && isLocalExecutionModel(foreground) && isLocalExecutionModel(shipment.model);
 		const dependencyGated = (request.taskContext?.dependsOnTaskIds.length ?? 0) > 0;
-		if (dependencyGated || contendsWithLocalForeground || !this.hasWorkerCapacity(settings)) {
+		if (!preparedAdmission || dependencyGated || contendsWithLocalForeground || !this.hasWorkerCapacity(settings)) {
 			// A mandatory verifier is the continuation of an already admitted implementation, not a
 			// new owner request. Reserve its queue admission so a burst of ordinary work cannot strand
 			// the subject behind `independent_verification_required` with no terminal handoff.
@@ -1847,7 +1897,7 @@ export class WorkerDelegationController {
 				return { started: false, skipReason: "orchestration_ledger_error" };
 			}
 			return this.queuePreparedWorkerAttempt(prepared, request, admission, {
-				drain: dependencyGated,
+				drain: dependencyGated || !contendsWithLocalForeground,
 			});
 		}
 		const { completion, ...outcome } = this.runOnceWithAdmission(request, undefined, undefined, admission, true);
@@ -1859,9 +1909,72 @@ export class WorkerDelegationController {
 		request: WorkerDelegationRequest,
 		onStarted?: (record: LaneRecord) => void,
 		existingRecord?: LaneRecord,
+		directoryValidated = false,
 	): Promise<WorkerDelegationRunOutcome> {
-		const { completion, ...outcome } = this.runOnceWithAdmission(request, onStarted, existingRecord);
+		request = structuredClone(request);
+		let admission: Extract<WorkerAdmission, { ok: true }> | undefined;
+		if (existingRecord) {
+			if (!directoryValidated) {
+				const deregister = registerInFlightWork(
+					this.deps.getAgentDir(),
+					"lane",
+					`worker-preflight:${existingRecord.laneId}`,
+				);
+				let reasonCode: string | undefined;
+				try {
+					reasonCode = await this.validateWorkerDirectory(existingRecord);
+				} finally {
+					deregister();
+				}
+				if (reasonCode) {
+					if (!this.deps.isDisposed()) this.cancelAndPublish(this.lifecycle, existingRecord.laneId, reasonCode);
+					return { started: false, skipReason: reasonCode };
+				}
+			}
+		} else {
+			const prepared = await this.admitWorkerDirectory(request);
+			if (!prepared.ok) return { started: false, skipReason: prepared.skipReason };
+			admission = prepared;
+		}
+		const { completion, ...outcome } = this.runOnceWithAdmission(
+			request,
+			onStarted,
+			existingRecord,
+			admission,
+			!existingRecord,
+		);
 		return completion ?? outcome;
+	}
+
+	private async validateWorkerDirectory(record: LaneRecord): Promise<string | undefined> {
+		const sessionId = this.deps.getSessionId();
+		try {
+			// Reconcile while the scheduler still owns the queued entry. Reconciling after its
+			// removal can rediscover this mailbox turn and enqueue a second start of the same attempt.
+			this.recovery.recover();
+			const attempt = this.getWorkerLifecycle().getActiveAttempt(record.laneId);
+			const contract = attempt?.dispatch.executionContract;
+			let legacyCwd: string | undefined;
+			if (attempt && contract && !contract.worker.executionContext) {
+				const admission = this.resolveWorkerAdmission(this.recovery.recoveredRequest(attempt), contract);
+				if (!admission.ok) return admission.skipReason;
+				legacyCwd = admission.executionPlan.cwd;
+				this.safeWarn(
+					"Recovering a legacy worker with path-only directory validation: its original physical identity was not recorded. Fresh dispatches capture directory identity.",
+				);
+			}
+			await this.directories.validateWorker(
+				contract,
+				AbortSignal.any([this.workerAbort.signal, AbortSignal.timeout(WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS)]),
+				legacyCwd,
+			);
+			return this.deps.isDisposed() || sessionId !== this.deps.getSessionId()
+				? "worker_directory_session_changed"
+				: undefined;
+		} catch (error) {
+			this.safeWarn(`Worker directory unavailable: ${error instanceof Error ? error.message : String(error)}`);
+			return "worker_directory_unavailable";
+		}
 	}
 
 	private runOnceWithAdmission(
@@ -1912,7 +2025,6 @@ export class WorkerDelegationController {
 				? preparedAdmission
 				: this.admitNewWorkerRequest(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
-		if (existingRecord && !request.verificationOfTaskId) this.recovery.recover();
 		const { instructions, settings, verifierShipment } = admission;
 		const { model, modelBinding, profile: orchestrationProfile, soul } = admission.shipment;
 		if (!this.hasWorkerCapacity(settings)) {

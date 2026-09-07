@@ -64,7 +64,7 @@ describe("background lane disposal persistence", () => {
 		});
 		saveTestWorkerOrchestrationProfile({
 			agentDir,
-			cwd: "/repo",
+			cwd: agentDir,
 			profile: createTestWorkerOrchestrationProfile({
 				profileId: "disposal-worker",
 				model,
@@ -76,11 +76,12 @@ describe("background lane disposal persistence", () => {
 
 		let disposed = false;
 		let capturedAfterToolCall: FakeIsolatedCompletionOptions["afterToolCall"];
+		const running = Promise.withResolvers<void>();
 
 		const controller = new BackgroundLaneController({
 			isDisposed: () => disposed,
 			getSessionId: () => "test-session",
-			getCwd: () => "/repo",
+			getCwd: () => agentDir,
 			getAgentDir: () => agentDir,
 			getSessionManager: () => sessionManager,
 			getSettingsManager: () => settingsManager,
@@ -98,6 +99,7 @@ describe("background lane disposal persistence", () => {
 			// abortInFlightLanes() runs while a delegation is genuinely mid-flight.
 			runIsolatedCompletion: (opts: FakeIsolatedCompletionOptions) => {
 				capturedAfterToolCall = opts.afterToolCall;
+				running.resolve();
 				return new Promise(() => {});
 			},
 			saveWorkerClaimSnapshot: (claim: WorkerClaim, request?: WorkerRequest) =>
@@ -109,10 +111,7 @@ describe("background lane disposal persistence", () => {
 		} as never);
 
 		const runPromise = controller.runWorkerDelegationOnce({ instructions: "write a note to disk" });
-		// Let the synchronous setup (through the awaited `runIsolatedCompletion` call) settle.
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
+		await running.promise;
 
 		expect(capturedAfterToolCall).toBeDefined();
 		// Simulate a real file mutation the worker already applied before dispose interrupts it —
@@ -157,7 +156,7 @@ describe("background lane disposal persistence", () => {
 		rmSync(agentDir, { recursive: true, force: true });
 	});
 
-	it("persists a durable canceled lane record for a queued (never-started) worker, with no fabricated worker-result (no ledger exists for a lane that never ran)", () => {
+	it("persists a durable canceled lane record for a queued (never-started) worker, with no fabricated worker-result (no ledger exists for a lane that never ran)", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "pi-test-disposal-queued-"));
 		const model = {
 			provider: "ollama",
@@ -170,7 +169,7 @@ describe("background lane disposal persistence", () => {
 		});
 		saveTestWorkerOrchestrationProfile({
 			agentDir,
-			cwd: "/repo",
+			cwd: agentDir,
 			profile: createTestWorkerOrchestrationProfile({ profileId: "queued-worker", model }),
 		});
 		const { sessionManager, entries, getAppendCount } = makeTrackedSessionManager();
@@ -178,7 +177,7 @@ describe("background lane disposal persistence", () => {
 		const controller = new BackgroundLaneController({
 			isDisposed: () => false,
 			getSessionId: () => "test-session",
-			getCwd: () => "/repo",
+			getCwd: () => agentDir,
 			getAgentDir: () => agentDir,
 			getSessionManager: () => sessionManager,
 			getSettingsManager: () => settingsManager,
@@ -196,7 +195,7 @@ describe("background lane disposal persistence", () => {
 			emitAutonomyTelemetry: () => {},
 			emit: () => {},
 		} as never);
-		const started = controller.startWorkerDelegation({ instructions: "queued work" });
+		const started = await controller.startWorkerDelegation({ instructions: "queued work" });
 		expect(started).toMatchObject({ started: true, record: { status: "queued" } });
 
 		controller.abortInFlightLanes();

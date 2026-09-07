@@ -189,10 +189,20 @@ authority rather than inheriting a later foreground selection. Status and cancel
 working foreground directory. The host callback holds and releases the existing admission lease, and
 checks cancellation immediately before dispatch, including cancellation after validation has completed.
 
+Fresh worker contracts now capture the physical identity of the effective worker directory and any
+independently pinned verifier directory before durable dispatch. Queue and resume validation retains
+that identity, including when an explicit worker path selected a child of the foreground workspace.
+Canceled or replaced queue entries reject late probes, and capacity is checked again after the wait.
+Reload blockers remain owned while validation is pending. Recovery reconciles mailbox turns before
+the scheduler releases their queue entry; doing it afterward reproduced a second start of the same
+attempt and canceled the live worker. Historical contracts retain their existing, explicitly admitted
+path-based recovery with a warning; no physical identity can be reconstructed retrospectively, and
+legacy recovery cannot bypass an identity already recorded. Synthetic foreground and worker response
+scripts are isolated so background notifications cannot consume another execution's test evidence.
+
 This integration is not the completed portability contract. Delegated workers still need their own
-registry and physical-attachment fencing across execution and restart; persisted relative goal-evidence identity and child
-receipt identity need review, and model context
-projection must survive compaction.
+registry and per-invocation attachment fencing; persisted relative goal-evidence identity and child
+receipt identity need review, and model context projection must survive compaction.
 Native attachment IDs now retain a hash of the original device/file identity. Replacing a directory
 at its saved path or retargeting its junction requires explicit reattachment, including after runtime
 restart. Missing ambient roots leave status and reattachment available; a directory appearing later
@@ -404,6 +414,24 @@ a schema field or a prompt instruction. All execution paths must consume the bin
   and grant owners; it does not create a second worker cwd registry.
   The staged contract gate required an accompanying doctrine update; the worker path-anchor rule
   is now stated there without removing the contract test or bypassing the gate.
+- The worker-cwd checkpoint `235c6cf5d0a1dce38ac69e0559a71fd364a1752b` passed seven GitHub jobs
+  and failed three shards on stale delegate callback assertions. Those assertions now include the
+  optional cancellation argument. The early shard failures did not verify the earlier Windows
+  iconv and shell-release cases, which remain unresolved remote evidence.
+- Worker identity admission passes 299 targeted tests across eighteen files, including thirteen new
+  cases. Two synthetic directory-replacement tests failed before native capture/revalidation; they
+  now prove rejection without consuming a worker provider response. Verifier identity, persistence,
+  cancellation, strict contract decoding, late/replayed probes, and retained reload blockers have
+  focused controls. Adjacent testing reproduced and repaired the mailbox duplicate-start race.
+  Other failures were stale synchronous-start assertions and shared faux-response ordering, not
+  evidence of wrong worker cwd; scoped response fixtures preserve the original output assertions.
+  Both identity-bound and historical path-only restart recovery pass, with the latter's limitation
+  explicit and unable to override a recorded identity. Repository checks pass with 967 eligible /
+  976 owned production files, all nine below-floor files accounted for, 936 files in the unchanged
+  50-token detection pass, and zero clones. Nineteen edited tracked files preserve strict UTF-8
+  validity, BOM, newline-kind and final-newline signatures; four new files are synthetic UTF-8.
+  No existing content was transcoded. Capture and validation reuse the native directory backend;
+  durable authority remains in the existing worker contract rather than a parallel cwd registry.
 - Host npm configuration emits `globalignorefile` warnings. Local Node is 24.18.1, below the declared
   24.20.0 minimum. Successful checks on this host do not replace supported-runtime CI evidence.
 

@@ -475,8 +475,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Start a durable leaf worker with inherited, preset, or model-selected authority. */
 	startWorkerDelegation(
 		request: WorkerDelegationRequest,
-	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
-		return this._getWorkerController().start(request);
+		signal?: AbortSignal,
+	): Promise<{ started: false; skipReason: string } | { started: true; record: LaneRecord }> {
+		return this._getWorkerController().start(request, signal);
 	}
 
 	/** Durable logical-worker controls. Each checks UAC before materializing worker state. */

@@ -1,5 +1,6 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { decodeExecutionContext, type ExecutionContext } from "@caupulican/pi-agent-core";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import { parseBoundedStringArray } from "./bounded-string-array.ts";
 import {
@@ -201,7 +202,15 @@ function parseAuthority(
 function parseProfileContract(value: unknown, label: string): WorkerProfileExecutionContract {
 	if (
 		!isPlainRecord(value) ||
-		!hasOnlyKeys(value, ["schemaVersion", "profile", "modelBinding", "authority", "resourcePointers", "soul"]) ||
+		!hasOnlyKeys(value, [
+			"schemaVersion",
+			"profile",
+			"modelBinding",
+			"authority",
+			"executionContext",
+			"resourcePointers",
+			"soul",
+		]) ||
 		value.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION
 	) {
 		throw new WorkerExecutionContractError(`${label} is invalid.`);
@@ -225,12 +234,20 @@ function parseProfileContract(value: unknown, label: string): WorkerProfileExecu
 		throw new WorkerExecutionContractError(`${label} soul is invalid.`);
 	}
 	const authority = parseAuthority(value.authority, profile, label);
+	const executionContext =
+		value.executionContext === undefined ? undefined : decodeExecutionContext(value.executionContext);
+	if (value.executionContext !== undefined && (!executionContext || executionContext.cwd !== authority.cwd)) {
+		throw new WorkerExecutionContractError(
+			`${label} directory binding is invalid or differs from its authority cwd.`,
+		);
+	}
 	const resourcePointers = parseResourcePointers(value.resourcePointers ?? [], label);
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		profile,
 		modelBinding,
 		authority,
+		...(executionContext ? { executionContext } : {}),
 		resourcePointers,
 		...(typeof value.soul === "string" ? { soul: value.soul } : {}),
 	};
@@ -274,6 +291,7 @@ function snapshotResolvedProfile(source: {
 	profile: OrchestrationProfile;
 	modelBinding: OrchestrationModelBinding;
 	authority: WorkerExecutionAuthorityContract;
+	executionContext?: ExecutionContext;
 	resourcePointers?: readonly ResourcePointer[];
 	soul?: string;
 }): WorkerProfileExecutionContract {
@@ -282,6 +300,7 @@ function snapshotResolvedProfile(source: {
 		profile: snapshotProfile(source.profile),
 		modelBinding: structuredClone(source.modelBinding),
 		authority: structuredClone(source.authority),
+		...(source.executionContext ? { executionContext: structuredClone(source.executionContext) } : {}),
 		resourcePointers: structuredClone(source.resourcePointers ?? []),
 		...(source.soul ? { soul: source.soul } : {}),
 	};
@@ -292,6 +311,7 @@ export function createWorkerExecutionContract(args: {
 		profile: OrchestrationProfile;
 		modelBinding: OrchestrationModelBinding;
 		authority: WorkerExecutionAuthorityContract;
+		executionContext?: ExecutionContext;
 		resourcePointers?: readonly ResourcePointer[];
 		soul?: string;
 	};
@@ -299,6 +319,7 @@ export function createWorkerExecutionContract(args: {
 		profile: OrchestrationProfile;
 		modelBinding: OrchestrationModelBinding;
 		authority: WorkerExecutionAuthorityContract;
+		executionContext?: ExecutionContext;
 		resourcePointers?: readonly ResourcePointer[];
 		soul?: string;
 	};

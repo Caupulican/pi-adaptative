@@ -15,6 +15,11 @@ export interface WorkerDispatchSchedulerOptions {
 	registerInFlightWork?: typeof registerInFlightWork;
 	isDisposed(): boolean;
 	admit(request: WorkerDelegationRequest, record: LaneRecord): WorkerDispatchAdmission;
+	/** Read-only asynchronous validation; queue ownership stays live until it settles. */
+	preflight?(
+		request: WorkerDelegationRequest,
+		record: LaneRecord,
+	): Promise<Exclude<WorkerDispatchAdmission, { action: "wait" }>>;
 	getRecord(laneId: string): LaneRecord | undefined;
 	run(request: WorkerDelegationRequest, record: LaneRecord): Promise<WorkerDelegationRunOutcome>;
 	cancel(laneId: string, reasonCode: string): void;
@@ -35,6 +40,8 @@ export class WorkerDispatchScheduler {
 	private readonly queued = new Map<string, WorkerDelegationRequest>();
 	private readonly queuedDeregisters = new Map<string, () => void>();
 	private readonly running = new Map<string, Promise<WorkerDelegationRunOutcome>>();
+	private readonly preflights = new Map<string, symbol>();
+	private readonly validated = new Set<string>();
 	private readonly pendingCancellations = new Map<string, PendingCancellation>();
 	private readonly reservationBlocked = new Set<string>();
 	private readonly queueCapacityListeners = new Set<() => void>();
@@ -189,6 +196,10 @@ export class WorkerDispatchScheduler {
 			this.removePendingCancellation(laneId);
 			return;
 		}
+		this.redrainBestEffort(laneId);
+	}
+
+	private redrainBestEffort(laneId: string): void {
 		try {
 			this.drain();
 		} catch (error) {
@@ -204,6 +215,33 @@ export class WorkerDispatchScheduler {
 		} catch {
 			// Diagnostics cannot retain a completed promise in the running set.
 		}
+	}
+
+	private beginPreflight(request: WorkerDelegationRequest, record: LaneRecord): void {
+		const laneId = record.laneId;
+		if (this.preflights.has(laneId)) return;
+		const token = Symbol();
+		this.preflights.set(laneId, token);
+		void (async () => {
+			let result: Exclude<WorkerDispatchAdmission, { action: "wait" }>;
+			try {
+				result = await this.options.preflight!(request, record);
+			} catch (error) {
+				this.warnBestEffort(
+					`Worker ${laneId} preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				result = { action: "cancel", reasonCode: "worker_preflight_error" };
+			}
+			if (this.preflights.get(laneId) !== token) return;
+			this.preflights.delete(laneId);
+			if (this.options.isDisposed() || !this.queued.has(laneId)) return;
+			if (result.action === "cancel") {
+				if (this.cancelBestEffort(laneId, result.reasonCode)) this.removeQueued(laneId);
+				return;
+			}
+			this.validated.add(laneId);
+			this.redrainBestEffort(laneId);
+		})();
 	}
 
 	drain(reservationAvailable = false): void {
@@ -231,6 +269,7 @@ export class WorkerDispatchScheduler {
 					}
 					const admission = this.options.admit(request, record);
 					if (admission.action === "wait") {
+						this.validated.delete(laneId);
 						if (admission.reason === "write_reservation") this.reservationBlocked.add(laneId);
 						else this.reservationBlocked.delete(laneId);
 						continue;
@@ -244,6 +283,10 @@ export class WorkerDispatchScheduler {
 						// Cancellation can synchronously block another queued task that appeared earlier.
 						// Re-evaluate the bounded queue until that dependency cascade reaches a fixed point.
 						this.redrainRequested = true;
+						continue;
+					}
+					if (this.options.preflight && !this.validated.has(laneId)) {
+						this.beginPreflight(request, record);
 						continue;
 					}
 					this.reservationBlocked.delete(laneId);
@@ -288,6 +331,8 @@ export class WorkerDispatchScheduler {
 	}
 
 	private removeQueued(laneId: string): void {
+		this.preflights.delete(laneId);
+		this.validated.delete(laneId);
 		const removed = this.queued.delete(laneId);
 		this.reservationBlocked.delete(laneId);
 		const deregister = this.queuedDeregisters.get(laneId);
