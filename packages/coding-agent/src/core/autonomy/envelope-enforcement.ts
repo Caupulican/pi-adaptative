@@ -1,5 +1,6 @@
 import type { ExecutionPathAuthority } from "@caupulican/pi-agent-core";
 import { type ExecutionPathFlavor, executionPathApi, resolveExecutionPath } from "@caupulican/pi-agent-core/paths";
+import { awaitPreflight, requireSynchronousPreflight } from "../preflight.ts";
 import { resolveToolCallPathAccess } from "../tool-capability-policy.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
@@ -111,24 +112,15 @@ function resolveAuthorityPathSync(
 	const nativeFlavor: ExecutionPathFlavor = process.platform === "win32" ? "win32" : "posix";
 	if (!authority) return flavor === nativeFlavor ? safeRealpathSync(path) : path;
 	if (authority.safeRealpath) {
-		const res = authority.safeRealpath(path);
+		const res = requireSynchronousPreflight(authority.safeRealpath(path));
 		if (typeof res === "string") return res;
-		if (res && typeof (res as Promise<unknown>).then === "function") {
-			throw new Error("Cannot synchronously resolve path with an asynchronous authority");
-		}
 	}
-	const direct = authority.canonicalPath(path);
+	const direct = requireSynchronousPreflight(authority.canonicalPath(path));
 	if (typeof direct === "string") return direct;
-	if (direct && typeof (direct as Promise<unknown>).then === "function") {
-		throw new Error("Cannot synchronously resolve path with an asynchronous authority");
-	}
 	const pathApi = executionPathApi(flavor);
 	for (const hop of collectParentHops(path, flavor)) {
-		const canon = authority.canonicalPath(hop.parent);
+		const canon = requireSynchronousPreflight(authority.canonicalPath(hop.parent));
 		if (typeof canon === "string") return pathApi.join(canon, ...hop.parts);
-		if (canon && typeof (canon as Promise<unknown>).then === "function") {
-			throw new Error("Cannot synchronously resolve path with an asynchronous authority");
-		}
 	}
 	return path;
 }
@@ -139,20 +131,22 @@ async function resolveAuthorityPathAsync(
 	flavor: ExecutionPathFlavor,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	signal?.throwIfAborted();
-	const nativeFlavor: ExecutionPathFlavor = process.platform === "win32" ? "win32" : "posix";
-	if (!authority) return flavor === nativeFlavor ? safeRealpathSync(path) : path;
-	if (authority.safeRealpath) return await authority.safeRealpath(path, signal);
-	const direct = await authority.canonicalPath(path, signal);
-	signal?.throwIfAborted();
-	if (typeof direct === "string") return direct;
-	const pathApi = executionPathApi(flavor);
-	for (const hop of collectParentHops(path, flavor)) {
+	return awaitPreflight(async () => {
 		signal?.throwIfAborted();
-		const canon = await authority.canonicalPath(hop.parent, signal);
-		if (typeof canon === "string") return pathApi.join(canon, ...hop.parts);
-	}
-	return path;
+		const nativeFlavor: ExecutionPathFlavor = process.platform === "win32" ? "win32" : "posix";
+		if (!authority) return flavor === nativeFlavor ? safeRealpathSync(path) : path;
+		if (authority.safeRealpath) return await authority.safeRealpath(path, signal);
+		const direct = await authority.canonicalPath(path, signal);
+		signal?.throwIfAborted();
+		if (typeof direct === "string") return direct;
+		const pathApi = executionPathApi(flavor);
+		for (const hop of collectParentHops(path, flavor)) {
+			signal?.throwIfAborted();
+			const canon = await authority.canonicalPath(hop.parent, signal);
+			if (typeof canon === "string") return pathApi.join(canon, ...hop.parts);
+		}
+		return path;
+	}, signal);
 }
 
 function matchesEnvelopeCandidate(
@@ -181,25 +175,50 @@ function initEnvelopeContext(envelope: CapabilityEnvelope, rawPath: string, opti
 	};
 }
 
-function checkScopeCandidateSync(
+interface PathResolutionFact {
+	resolved?: string;
+	unavailable?: boolean;
+}
+
+function* matchesAllowedScope(
 	target: string,
-	candidates: readonly string[],
-	options: AssessPathEnvelopeOptions,
-	scopeCwd: string,
-	flavor: ExecutionPathFlavor,
-	caseSensitive: boolean,
-): boolean {
-	return candidates.some((candidate) => {
-		let resolved: string | undefined;
-		try {
-			resolved = resolveAuthorityPathSync(
-				resolveExecutionPath(candidate, scopeCwd, flavor),
-				options.pathAuthority,
-				flavor,
-			);
-		} catch {}
-		return matchesEnvelopeCandidate(target, candidate, scopeCwd, flavor, caseSensitive, resolved);
-	});
+	context: ReturnType<typeof initEnvelopeContext>,
+): Generator<string, boolean, PathResolutionFact> {
+	for (const root of context.allowed) {
+		const { resolved } = yield resolveExecutionPath(root, context.scopeCwd, context.flavor);
+		if (matchesEnvelopeCandidate(target, root, context.scopeCwd, context.flavor, context.caseSensitive, resolved)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/** One authorization policy; adapters supply facts without owning allow/deny decisions. */
+function* assessEnvelopeScope(
+	ctx: ReturnType<typeof initEnvelopeContext>,
+): Generator<string, PathEnvelopeAssessment, PathResolutionFact> {
+	if (ctx.allowed.length > 0 && !(yield* matchesAllowedScope(ctx.lexicalTarget, ctx))) {
+		return { allowed: false, reasonCode: "path_outside_allowed_roots" };
+	}
+
+	const { resolved: target } = yield ctx.lexicalTarget;
+	if (!target) return { allowed: false, reasonCode: "path_outside_allowed_roots" };
+
+	for (const denied of ctx.denied) {
+		const { resolved, unavailable } = yield resolveExecutionPath(denied, ctx.scopeCwd, ctx.flavor);
+		if (
+			unavailable ||
+			matchesEnvelopeCandidate(target, denied, ctx.scopeCwd, ctx.flavor, ctx.caseSensitive, resolved)
+		) {
+			return { allowed: false, reasonCode: "path_denied", target };
+		}
+	}
+
+	if (ctx.allowed.length === 0 || (yield* matchesAllowedScope(target, ctx))) {
+		return { allowed: true, target };
+	}
+
+	return { allowed: false, reasonCode: "path_outside_allowed_roots", target };
 }
 
 export function assessPathWithinEnvelopeSync(
@@ -207,46 +226,19 @@ export function assessPathWithinEnvelopeSync(
 	rawPath: string,
 	options: AssessPathEnvelopeOptions,
 ): PathEnvelopeAssessment {
-	const ctx = initEnvelopeContext(envelope, rawPath, options);
-	if (
-		ctx.allowed.length > 0 &&
-		!checkScopeCandidateSync(ctx.lexicalTarget, ctx.allowed, options, ctx.scopeCwd, ctx.flavor, ctx.caseSensitive)
-	) {
-		return { allowed: false, reasonCode: "path_outside_allowed_roots" };
-	}
-
-	let target: string | undefined;
-	try {
-		target = resolveAuthorityPathSync(ctx.lexicalTarget, options.pathAuthority, ctx.flavor);
-	} catch {
-		return { allowed: false, reasonCode: "path_outside_allowed_roots" };
-	}
-	if (!target) return { allowed: false, reasonCode: "path_outside_allowed_roots" };
-
-	for (const denied of ctx.denied) {
-		let resolved: string | undefined;
+	const context = initEnvelopeContext(envelope, rawPath, options);
+	const assessment = assessEnvelopeScope(context);
+	let step = assessment.next();
+	while (!step.done) {
+		let fact: PathResolutionFact;
 		try {
-			resolved = resolveAuthorityPathSync(
-				resolveExecutionPath(denied, ctx.scopeCwd, ctx.flavor),
-				options.pathAuthority,
-				ctx.flavor,
-			);
+			fact = { resolved: resolveAuthorityPathSync(step.value, options.pathAuthority, context.flavor) };
 		} catch {
-			return { allowed: false, reasonCode: "path_denied", target };
+			fact = { unavailable: true };
 		}
-		if (matchesEnvelopeCandidate(target, denied, ctx.scopeCwd, ctx.flavor, ctx.caseSensitive, resolved)) {
-			return { allowed: false, reasonCode: "path_denied", target };
-		}
+		step = assessment.next(fact);
 	}
-
-	if (
-		ctx.allowed.length === 0 ||
-		checkScopeCandidateSync(target, ctx.allowed, options, ctx.scopeCwd, ctx.flavor, ctx.caseSensitive)
-	) {
-		return { allowed: true, target };
-	}
-
-	return { allowed: false, reasonCode: "path_outside_allowed_roots", target };
+	return step.value;
 }
 
 export async function assessPathWithinEnvelopeAsync(
@@ -254,82 +246,27 @@ export async function assessPathWithinEnvelopeAsync(
 	rawPath: string,
 	options: AssessPathEnvelopeOptions,
 ): Promise<PathEnvelopeAssessment> {
-	options.signal?.throwIfAborted();
-	const flavor = inferFlavor(options.cwd, options.pathAuthority);
-	const caseSensitive = inferCaseSensitive(flavor, options.pathAuthority);
-	const scopeCwd = options.scopeCwd ?? options.cwd;
-	const lexicalTarget = resolveExecutionPath(rawPath, options.cwd, flavor);
-	const allowed = envelope.allowedPaths ?? [];
-
-	if (allowed.length > 0) {
-		let candidateAllowed = false;
-		for (const root of allowed) {
-			let resolved: string | undefined;
-			try {
-				resolved = await resolveAuthorityPathAsync(
-					resolveExecutionPath(root, scopeCwd, flavor),
-					options.pathAuthority,
-					flavor,
-					options.signal,
-				);
-			} catch (error) {
-				if (options.signal?.aborted) throw error;
-			}
-			if (matchesEnvelopeCandidate(lexicalTarget, root, scopeCwd, flavor, caseSensitive, resolved)) {
-				candidateAllowed = true;
-				break;
-			}
-		}
-		if (!candidateAllowed) {
-			return { allowed: false, reasonCode: "path_outside_allowed_roots" };
-		}
-	}
-
-	let target: string | undefined;
-	try {
-		target = await resolveAuthorityPathAsync(lexicalTarget, options.pathAuthority, flavor, options.signal);
-	} catch (error) {
-		if (options.signal?.aborted) throw error;
-		return { allowed: false, reasonCode: "path_outside_allowed_roots" };
-	}
-	if (!target) return { allowed: false, reasonCode: "path_outside_allowed_roots" };
-
-	for (const denied of envelope.deniedPaths ?? []) {
+	const context = initEnvelopeContext(envelope, rawPath, options);
+	const policy = assessEnvelopeScope(context);
+	let request = policy.next();
+	while (!request.done) {
 		let resolved: string | undefined;
+		let unavailable = false;
 		try {
 			resolved = await resolveAuthorityPathAsync(
-				resolveExecutionPath(denied, scopeCwd, flavor),
+				request.value,
 				options.pathAuthority,
-				flavor,
+				context.flavor,
 				options.signal,
 			);
 		} catch (error) {
 			if (options.signal?.aborted) throw error;
-			return { allowed: false, reasonCode: "path_denied", target };
+			unavailable = true;
 		}
-		if (matchesEnvelopeCandidate(target, denied, scopeCwd, flavor, caseSensitive, resolved)) {
-			return { allowed: false, reasonCode: "path_denied", target };
-		}
+		options.signal?.throwIfAborted();
+		request = policy.next({ resolved, unavailable });
 	}
-
-	if (allowed.length === 0) return { allowed: true, target };
-
-	for (const root of allowed) {
-		let resolved: string | undefined;
-		try {
-			resolved = await resolveAuthorityPathAsync(
-				resolveExecutionPath(root, scopeCwd, flavor),
-				options.pathAuthority,
-				flavor,
-				options.signal,
-			);
-		} catch {}
-		if (matchesEnvelopeCandidate(target, root, scopeCwd, flavor, caseSensitive, resolved)) {
-			return { allowed: true, target };
-		}
-	}
-
-	return { allowed: false, reasonCode: "path_outside_allowed_roots", target };
+	return request.value;
 }
 
 /**
@@ -393,6 +330,7 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 		const execute = (...args: Parameters<Execute>): ReturnType<Execute> => {
 			const params = args[1];
 			const signal = args[2] as AbortSignal | undefined;
+			signal?.throwIfAborted();
 			const pathAccess = resolveToolCallPathAccess(envelope.capabilities, tool.name, params);
 			if (pathAccess !== "none") {
 				const paths = extractToolPathArguments(tool.name, params);
@@ -425,6 +363,7 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 					}
 				}
 			}
+			signal?.throwIfAborted();
 			return executor.execute(...args) as ReturnType<Execute>;
 		};
 		return {

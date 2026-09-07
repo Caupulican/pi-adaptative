@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Prevented late path-authorization cancellation from reaching composite tool execution, including backends that ignore cancellation signals.
+- Retained rejection handling when synchronous path checks refuse asynchronous backend facts.
+- Shared dialect-aware containment between credential and envelope checks, preserving case-sensitive Windows sibling directories.
+
 ## [0.99.4] - 2026-09-07
 
 ### Fixed

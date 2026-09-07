@@ -25,3 +25,13 @@ export function awaitPreflight<T>(operation: () => Promise<T>, signal?: AbortSig
 		if (signal.aborted) onAbort();
 	});
 }
+
+/** Refuse async facts in a sync caller, retaining settlement ownership of read-only probes. */
+export function requireSynchronousPreflight<T>(value: T | Promise<T>): T {
+	if (value !== null && typeof value === "object" && "then" in value && typeof value.then === "function") {
+		// The probe has already started. Observe even a late rejection; its outcome cannot authorize this call.
+		void Promise.resolve(value).catch(() => {});
+		throw new Error("Cannot synchronously resolve path with an asynchronous authority");
+	}
+	return value as T;
+}

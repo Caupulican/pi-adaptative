@@ -4,6 +4,8 @@ import {
 	executionPathApi,
 	resolveExecutionPath,
 } from "@caupulican/pi-agent-core/paths";
+import { isPathWithinScopeWithDialect } from "../autonomy/path-scope.ts";
+import { requireSynchronousPreflight } from "../preflight.ts";
 
 export interface CredentialPathProtection {
 	protectedFiles?: readonly string[];
@@ -53,19 +55,12 @@ export class CredentialPathPolicy {
 	}
 
 	private isInside(root: string, target: string): boolean {
-		const relative = this.paths.relative(
-			this.caseSensitive ? root : root.toLowerCase(),
-			this.caseSensitive ? target : target.toLowerCase(),
-		);
-		return (
-			relative === "" ||
-			(!relative.startsWith(`..${this.paths.sep}`) && relative !== ".." && !this.paths.isAbsolute(relative))
-		);
+		return isPathWithinScopeWithDialect(target, root, this.flavor, this.caseSensitive);
 	}
 
 	private candidates(path: string): string[] {
 		const candidates = [path];
-		const canonical = this.probe.canonicalPath(path);
+		const canonical = requireSynchronousPreflight(this.probe.canonicalPath(path));
 		if (typeof canonical === "string" && canonical !== path) candidates.push(canonical);
 		return candidates;
 	}
@@ -182,7 +177,9 @@ export class CredentialPathPolicy {
 	}
 
 	isFile(rawPath: string): boolean | undefined {
-		const result = this.probe.isFile(resolveExecutionPath(rawPath, this.cwd, this.flavor));
+		const result = requireSynchronousPreflight(
+			this.probe.isFile(resolveExecutionPath(rawPath, this.cwd, this.flavor)),
+		);
 		return typeof result === "boolean" ? result : undefined;
 	}
 

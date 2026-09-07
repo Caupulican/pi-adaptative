@@ -1,7 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import { awaitPreflight } from "../src/core/preflight.ts";
+import { awaitPreflight, requireSynchronousPreflight } from "../src/core/preflight.ts";
 
 describe("read-only preflight cancellation", () => {
+	it("preserves synchronous facts and observes refused promises through settlement", async () => {
+		for (const value of [undefined, false, true, "synthetic/path"]) {
+			expect(requireSynchronousPreflight(value)).toBe(value);
+		}
+		expect(() => requireSynchronousPreflight(Promise.resolve("late value"))).toThrow("asynchronous authority");
+		const late = Promise.withResolvers<string>();
+		expect(() => requireSynchronousPreflight(late.promise)).toThrow("asynchronous authority");
+		late.reject(new Error("Synthetic late rejection"));
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	});
+
 	it("does not start preflight for an already canceled caller", () => {
 		const controller = new AbortController();
 		const reason = new Error("fixture cancellation");

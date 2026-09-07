@@ -60,6 +60,7 @@ export function wrapToolWithCapabilityEnvelopeGate<TParameters extends TSchema, 
 				pathAuthority,
 				signal,
 			});
+			signal?.throwIfAborted();
 			if (outcome.outcome === "block" || outcome.outcome === "ask-user") {
 				throw new Error(
 					`Tool '${tool.name}' execution blocked by autonomy gate [${outcome.gate}]: ${outcome.message ?? "denied"} (${outcome.reasonCode})`,
