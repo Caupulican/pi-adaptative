@@ -495,9 +495,9 @@ pass, with zero clones under the existing 20,000-line / 2 MiB caps. Execution au
 directory state/controller and journal adapter; projection does not perform filesystem admission.
 All six edited tracked files retain their strict UTF-8 validity, BOM, newline-kind and final-newline
 signatures; three new files are synthetic UTF-8. No existing content was transcoded.
-The full task_directory status response is still a bounded-state but potentially large snapshot, not a
-paged catalogue. This slice does not resolve backend fencing, pre-conversation persistence, or the other
-remaining portability reviews above.
+At this checkpoint, task_directory status was still a bounded-state but potentially large snapshot;
+the status-pagination slice below replaces that projection. Model-context projection alone does not
+resolve backend fencing, pre-conversation persistence, or the other portability reviews above.
 
 The model-context checkpoint `a2a7f216b817d6b49a11973fcf78b74b45ec9853` passed eight GitHub jobs.
 The Linux model-contract matrix consumed a worker response from a foreground handoff; its isolated
@@ -520,6 +520,29 @@ The combined focused run passes 178 tests in eight files, and all thirteen real-
 tests pass separately on Linux. `npm run check` passes. Seven edited tracked files preserve strict
 UTF-8 validity, BOM, newline-kind and final-newline signatures; two new files validate as UTF-8. No
 existing content was transcoded. These local results do not resolve the native Windows cleanup failure.
+
+Task-directory status now uses one whole-row pagination owner for both status and mutation responses.
+The original maximum-size multibyte fixture reproduced a 1,970,171-byte response. Pages preserve full
+paths and fit within 128 KiB in both text and details. The initial 64 KiB design failed an independently
+generated JSON-escaped path control; 128 KiB accommodates the full active context plus a maximum-sized
+row without truncation. Normal small registries remain a single response. Cursor identity covers the
+entire snapshot, active task, and session, so even another branch with the same numerical revision is
+rejected. A repeated cursor on unchanged state remains read-only and deterministic. The cursor schema
+measures 340 tokens; its 350-token ceiling changes only this new tool's allowance, retaining the original
+4,500-token bound for the pre-existing tool surface. No execution or persistence authority moves into
+the presentation owner.
+
+The file-evidence checkpoint `8c57b3f6ed9dcf8b5e1f1acdde8cf06f2efe18a7` passed all ten Linux/Windows
+GitHub CI jobs. The corrected model-matrix and worker-shell fixtures passed on both platforms. Worktree
+cleanup EPERM did not recur; its root cause remains unproven, so this is not a claim of permanent repair.
+The subsequent pagination slice passes 53 targeted tests across seven files, including thirteen new
+status cases. Its clone gate accounts for 970 eligible / 979 owned production sources and 939 files in
+the unchanged 50-token detection pass, with zero clones. User-facing task-directory documentation now
+describes native controls, persistence, custom-backend boundaries, and recovery limitations.
+The unstaged `npm run check` passed; the first commit gate then required the schema-budget change in
+`docs/doctrine.md`. The doctrine now records the measured cursor cost and unchanged existing-tool
+budget, without removing the contract test. All seven edited tracked files retain strict UTF-8 validity, BOM, newline-kind
+and final-newline signatures; three new files validate as UTF-8. No existing content was transcoded.
 
 Targeted regression success and a repository check are not release approval. Task-directory binding
 remains open. Exact-candidate remote CI and the documented release gates remain required.

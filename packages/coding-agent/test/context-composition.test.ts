@@ -150,7 +150,8 @@ describe("AgentSession.getContextCompositionReport", () => {
 				].sort(),
 			);
 			// Ceilings are bloat guards. Persistent project routing deliberately adds task_directory
-			// (330 tokens) to the previous 4,500-token aggregate allowance. Account for that addition
+			// (340 measured tokens, 350 ceiling including the bounded status cursor) to the previous
+			// 4,500-token aggregate allowance. Account for that addition
 			// separately: the pre-existing tool surface keeps its original budget, not extra slack.
 			// Earlier ceilings were recalibrated after
 			// provider-tool-projection.ts stopped deleting `type` from enum-bearing schema
@@ -167,9 +168,9 @@ describe("AgentSession.getContextCompositionReport", () => {
 			expect(
 				report.toolSchemaTokens,
 				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),
-			).toBeLessThanOrEqual(4_500 + 330);
+			).toBeLessThanOrEqual(4_500 + 350);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
-			expect(toolTokens.get("task_directory")).toBeLessThanOrEqual(330);
+			expect(toolTokens.get("task_directory")).toBeLessThanOrEqual(350);
 			expect(report.toolSchemaTokens - toolTokens.get("task_directory")!).toBeLessThanOrEqual(4_500);
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(105);
 			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);

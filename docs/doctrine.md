@@ -113,13 +113,19 @@ the messages in every prompt, so ordinary turns must not churn disclosed schemas
 commits a new tool generation, and provider-specific tools follow the active model; those intentional
 transitions can invalidate the prompt cache and do not promise a cache hit. The root default surface
 includes `runtime_update` and `webfetch` within their existing schema-token ceilings. Persistent
-multi-project control deliberately adds `task_directory`: its separate ceiling is 330 schema tokens,
+multi-project control deliberately adds `task_directory`: its separate ceiling is 350 schema tokens,
 and every pre-existing tool together retains the 4,500-token aggregate limit. This explicitly replaces
-the old whole-surface 4,500-token ceiling with 4,830, not an allowance for unrelated schema growth.
+the old whole-surface 4,500-token ceiling with 4,850, not an allowance for unrelated schema growth.
+The bounded status cursor brings this tool to 340 measured tokens: every status or mutation response
+pages whole rows within 128 KiB instead of returning the reproduced 1,970,171-byte registry. The byte
+budget retains a complete maximum-size JSON-escaped active path and a full row. Cursors identify the
+snapshot, task and session; changed state requires restarting the listing, while unchanged replay is
+read-only. This moves only the new tool's prior 330-token ceiling, not the existing-tool budget.
 The addition addresses reproduced wrong-directory execution with durable model-controlled pins;
 directory changes do not churn schemas or widen worker grants. Pinned by
 `packages/coding-agent/test/context-composition.test.ts`,
 `packages/coding-agent/test/session-task-directories.test.ts`,
+`packages/coding-agent/test/task-directory-status.test.ts`,
 `packages/coding-agent/test/suite/runtime-update.test.ts`, and
 `packages/coding-agent/test/suite/image-generation-provider-surface.test.ts`.
 
@@ -373,6 +379,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-07 | Whole-row task-directory status pagination replaces megabyte-scale responses, preserves complete escaped paths, and rejects stale cursors. Its measured 340-token schema receives a 350-token ceiling; the pre-existing 4,500-token aggregate remains unchanged. |
 | 2026-09-07 | Worker and verifier identity survives queued dispatch and resume; asynchronous probes retain queue ownership, recheck policy, and reject stale completions. Mailbox recovery precedes the start transition. Historical path-only recovery remains explicit and cannot bypass a saved identity. |
 | 2026-09-07 | Fresh workers capture admitted task cwd; explicit relative intent uses that directory while configured presets and default permission roots retain their original anchors. Queueing and foreground selection cannot retarget admitted work. |
 | 2026-09-07 | Persistent directory control earns a separate 330-token schema allowance; all pre-existing tools retain their combined 4,500-token ceiling. Explicit task pins address reproduced wrong-directory execution without widening grants or introducing per-turn schema churn. |

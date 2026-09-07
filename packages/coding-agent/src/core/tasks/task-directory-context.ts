@@ -34,7 +34,7 @@ export function formatTaskDirectoryContext(
 	};
 	const header = "TASK DIRECTORY CONTEXT\n";
 	const footer =
-		"\nSaved intent, not filesystem validation. task_steps selects the active task; unpinned tasks follow workspace selection. Use task_directory status for full state; admission validates the directory before execution.";
+		"\nSaved intent, not filesystem validation. task_steps selects the active task; unpinned tasks follow workspace selection. Use task_directory status to page through full state; admission validates the directory before execution.";
 	const render = () => header + JSON.stringify(projection) + footer;
 	// Never turn a truncated path into an executable-looking path. Very large paths are omitted explicitly.
 	if (Buffer.byteLength(render()) > MAX_TASK_DIRECTORY_CONTEXT_BYTES) {

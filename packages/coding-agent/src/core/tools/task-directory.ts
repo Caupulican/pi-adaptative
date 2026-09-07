@@ -1,12 +1,16 @@
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { TaskDirectoryRuntime } from "../tasks/task-directory-runtime.ts";
+import { projectTaskDirectoryStatus } from "../tasks/task-directory-status.ts";
 import { resolveTaskStepSelector, type TaskStepsState } from "../tasks/task-state.ts";
 
 const identity = Type.String({ minLength: 1, maxLength: 200 });
 const path = Type.String({ minLength: 1, maxLength: 4096 });
 const schema = Type.Union([
-	Type.Object({ action: Type.Literal("status") }, { additionalProperties: false }),
+	Type.Object(
+		{ action: Type.Literal("status"), cursor: Type.Optional(Type.String({ maxLength: 68 })) },
+		{ additionalProperties: false },
+	),
 	Type.Object(
 		{ action: Type.Union([Type.Literal("register"), Type.Literal("reattach")]), workspaceId: identity, path },
 		{ additionalProperties: false },
@@ -34,7 +38,7 @@ export function createTaskDirectoryToolDefinition(
 		name: "task_directory",
 		label: "Task directory",
 		description:
-			"Manage persistent working directories. Register a workspace with an absolute native path, select the workspace followed by unpinned tasks, and bind a task_steps id with explicit pinned true/false. Use task_steps to activate a task. Reattach a moved or foreign-host workspace explicitly. Status shows the effective context. A directory binding never expands file authority.",
+			"Manage persistent working directories. Register an absolute native path, select the workspace followed by unpinned tasks, and bind a task_steps id with explicit pinned true/false. Use task_steps to activate a task. Reattach moved or foreign-host workspaces explicitly. Status pages show effective context; pass nextCursor as cursor to continue. A binding never expands file authority.",
 		promptSnippet: "Register/select workspaces and explicitly pin or unpin task working directories.",
 		promptGuidelines: [
 			"Use task_directory to retain project directories; do not rely on shell cd between calls.",
@@ -52,15 +56,18 @@ export function createTaskDirectoryToolDefinition(
 				const task = resolveTaskStepSelector(getSteps()?.steps ?? [], input.taskId);
 				await runtime.change({ ...input, taskId: task.id }, signal);
 			}
-			const { state, activeTaskId, effective, unavailable } = await runtime.getStatus(signal);
+			const page = projectTaskDirectoryStatus(
+				await runtime.getStatus(signal),
+				input.action === "status" ? input.cursor : undefined,
+			);
 			return {
 				content: [
 					{
 						type: "text",
-						text: JSON.stringify({ activeTaskId, effective, unavailable, ...state }),
+						text: JSON.stringify(page),
 					},
 				],
-				details: { state, effective, unavailable },
+				details: page,
 			};
 		},
 	};
