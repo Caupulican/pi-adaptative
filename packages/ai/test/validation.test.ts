@@ -508,4 +508,70 @@ describe("discriminated unions", () => {
 		expect(message).not.toContain("expected object");
 		expect(message).not.toContain('"set"');
 	});
+
+	it("reports the missing discriminator as a property-level required error, not the branch object", () => {
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "tool-empty",
+			name: "task_steps",
+			arguments: {},
+		};
+		const events: unknown[] = [];
+		let message = "";
+		try {
+			validateToolArguments(taskSteps, toolCall, { telemetry: (event) => events.push(event) });
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+
+		expect(message).toContain('action: required, one of "set", "list", "update"');
+		expect(message).not.toMatch(/action:[^\n]*object/);
+
+		expect(events).toMatchObject([
+			{
+				outcome: "bounced",
+				failureShape: expect.arrayContaining([
+					{
+						path: "action",
+						expectedType: 'one of "set", "list", "update"',
+						receivedType: "missing",
+						keyword: "required",
+					},
+				]),
+			},
+		]);
+	});
+
+	it("reports a missing non-discriminator property with its own expected type, not the branch object", () => {
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "tool-set-missing-steps",
+			name: "task_steps",
+			arguments: { action: "set" },
+		};
+		const events: unknown[] = [];
+		let message = "";
+		try {
+			validateToolArguments(taskSteps, toolCall, { telemetry: (event) => events.push(event) });
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+
+		expect(message).toContain("steps: required, expected array");
+		expect(message).not.toMatch(/steps: [^;]*object/);
+
+		expect(events).toMatchObject([
+			{
+				outcome: "bounced",
+				failureShape: [
+					{
+						path: "steps",
+						expectedType: "array",
+						receivedType: "missing",
+						keyword: "required",
+					},
+				],
+			},
+		]);
+	});
 });

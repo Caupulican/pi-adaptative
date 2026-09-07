@@ -8,7 +8,7 @@ import {
 	type ToolRepairModeName,
 } from "./tool-repair/registry.ts";
 import { repairToolArguments } from "./tool-repair/repairer.ts";
-import { formatValidationPath } from "./validation-path.ts";
+import { formatValidationPath, instancePathBase } from "./validation-path.ts";
 
 const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
 const EXPECTED_FRAGMENT_MAX_LENGTH = 320;
@@ -160,25 +160,30 @@ function schemaAtPath(schema: unknown, pathSegments: readonly string[]): unknown
 	return current;
 }
 
-function schemaAtValidationError(schema: unknown, error: TLocalizedValidationError): unknown {
-	const pointer = error.schemaPath;
-	if (!pointer.startsWith("#/")) return schemaAtPath(schema, validationPathSegments(error));
+const MISSING_POINTER_TARGET = Symbol("missing-pointer-target");
+
+/** Walk a `#/…` JSON pointer through a schema; a segment that does not resolve yields the sentinel. */
+function schemaAtPointer(schema: unknown, pointer: string): unknown {
 	let current: unknown = schema;
 	for (const encodedSegment of pointer.slice(2).split("/")) {
 		const segment = encodedSegment.replace(/~1/g, "/").replace(/~0/g, "~");
 		if (Array.isArray(current)) {
 			const index = Number(segment);
-			if (!Number.isInteger(index) || index < 0 || index >= current.length) {
-				return schemaAtPath(schema, validationPathSegments(error));
-			}
+			if (!Number.isInteger(index) || index < 0 || index >= current.length) return MISSING_POINTER_TARGET;
 			current = current[index];
 			continue;
 		}
 		const record = asRecord(current);
-		if (!record || !(segment in record)) return schemaAtPath(schema, validationPathSegments(error));
+		if (!record || !(segment in record)) return MISSING_POINTER_TARGET;
 		current = record[segment];
 	}
 	return current;
+}
+
+function schemaAtValidationError(schema: unknown, error: TLocalizedValidationError): unknown {
+	const pointer = error.schemaPath;
+	const target = pointer.startsWith("#/") ? schemaAtPointer(schema, pointer) : MISSING_POINTER_TARGET;
+	return target === MISSING_POINTER_TARGET ? schemaAtPath(schema, validationPathSegments(error)) : target;
 }
 
 function receivedValueAtPath(args: unknown, pathSegments: readonly string[]): unknown {
@@ -214,14 +219,22 @@ function receivedTypeOf(value: unknown): string {
 	return typeof value;
 }
 
+/** Joins literal/enum values for display, without the "literal"/"one of" wrapper. */
+function formatAllowedValueList(values: unknown[]): string {
+	return values.map((value) => formatCompactJson(value, RECEIVED_VALUE_MAX_LENGTH)).join(", ");
+}
+
+/** The "expected type" label for a schema known to allow only specific literal values. */
+function formatAllowedValuesTypeLabel(values: unknown[]): string {
+	const allowed = formatAllowedValueList(values);
+	return values.length === 1 ? `literal ${allowed}` : `one of ${allowed}`;
+}
+
 function expectedTypeOf(schema: unknown): string {
 	const record = asRecord(schema);
 	if (!record) return "unknown";
 	const values = literalValues(record);
-	if (values?.length) {
-		const allowed = values.map((value) => formatCompactJson(value, RECEIVED_VALUE_MAX_LENGTH)).join(", ");
-		return values.length === 1 ? `literal ${allowed}` : `one of ${allowed}`;
-	}
+	if (values?.length) return formatAllowedValuesTypeLabel(values);
 	if (Array.isArray(record.type)) return record.type.filter((type) => typeof type === "string").join("|") || "unknown";
 	if (typeof record.type === "string") return record.type;
 	if (record.properties !== undefined) return "object";
@@ -234,6 +247,111 @@ function expectedTypeOf(schema: unknown): string {
 	return "unknown";
 }
 
+/** Same label as `expectedTypeOf`, but sourced directly from a schema fragment with no validator error. */
+function expectedTypeFromSchema(schema: unknown): string {
+	const values = literalValues(schema);
+	return values?.length ? formatAllowedValuesTypeLabel(values) : expectedTypeOf(schema);
+}
+
+/**
+ * The object/branch schema a `required` error was raised against, resolved by walking its
+ * `schemaPath` JSON pointer only (never falling back to instance-path/property resolution like
+ * `schemaAtValidationError` does). A `required` error's schemaPath always names the schema that
+ * declares the `required` array - `#` for a single object schema, `#/anyOf/N` for one alternative
+ * of a union - so this always lands on the object whose `properties` map holds the missing key,
+ * regardless of whether the caller already narrowed to one branch (schemaPath "#") or is still
+ * looking at the whole union (schemaPath "#/anyOf/N").
+ */
+function requiredObjectSchema(schema: unknown, error: TLocalizedValidationError): Record<string, unknown> | undefined {
+	const pointer = error.schemaPath;
+	if (pointer === "#" || !pointer.startsWith("#/")) return asRecord(schema);
+	const target = schemaAtPointer(schema, pointer);
+	return asRecord(target === MISSING_POINTER_TARGET ? schema : target);
+}
+
+/** The property names a `required` validation error is missing, in schema-declared order. */
+function requiredMissingProperties(error: TLocalizedValidationError): string[] {
+	if (error.keyword !== "required") return [];
+	const requiredProperties = asRecord(error.params)?.requiredProperties;
+	return Array.isArray(requiredProperties)
+		? requiredProperties.filter((name): name is string => typeof name === "string")
+		: [];
+}
+
+function dedupeSchemas(schemas: readonly unknown[]): unknown[] {
+	const seen = new Set<string>();
+	const result: unknown[] = [];
+	for (const schema of schemas) {
+		const key = JSON.stringify(schema);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		result.push(schema);
+	}
+	return result;
+}
+
+/**
+ * Expands `required` validator errors into one entry per missing property, resolved against that
+ * property's OWN schema (never the parent branch/object schema a bare `required` error points at -
+ * that produced "expected object" guidance for a missing discriminator instead of the property's
+ * real expected type). When several anyOf/oneOf branches are each missing the same property at the
+ * same instance path (e.g. every branch of a discriminated union requires the discriminator), their
+ * property schemas are combined into one synthetic `anyOf` so the existing literal/type aggregation
+ * (`expectedTypeFromSchema`) reports the union of allowed values once, deduplicated.
+ */
+function requiredFailureEntries(
+	errors: readonly TLocalizedValidationError[],
+	schema: unknown,
+): Array<{ path: string; schema: unknown }> {
+	const order: string[] = [];
+	const schemasByPath = new Map<string, unknown[]>();
+	for (const error of errors) {
+		const missingProperties = requiredMissingProperties(error);
+		if (missingProperties.length === 0) continue;
+		const objectSchema = requiredObjectSchema(schema, error);
+		const objectProperties = asRecord(objectSchema?.properties);
+		const basePath = instancePathBase(error);
+		for (const property of missingProperties) {
+			const path = basePath ? `${basePath}.${property}` : property;
+			let schemas = schemasByPath.get(path);
+			if (!schemas) {
+				schemas = [];
+				schemasByPath.set(path, schemas);
+				order.push(path);
+			}
+			const propertySchema = objectProperties?.[property];
+			if (propertySchema !== undefined) schemas.push(propertySchema);
+		}
+	}
+	return order.map((path) => {
+		const schemas = schemasByPath.get(path) ?? [];
+		return { path, schema: schemas.length <= 1 ? schemas[0] : { anyOf: dedupeSchemas(schemas) } };
+	});
+}
+
+/** Human-readable guidance for a missing required property, resolved from its own schema. */
+function requiredGuidance(schema: unknown): string {
+	const values = literalValues(schema);
+	if (values?.length) {
+		const allowed = formatAllowedValueList(values);
+		return values.length === 1 ? `required, must equal ${allowed}` : `required, one of ${allowed}`;
+	}
+	const expectedType = expectedTypeOf(schema);
+	return expectedType === "unknown" ? "required" : `required, expected ${expectedType}`;
+}
+
+/** Appends `entry` unless an identical (path, expectedType, receivedType, keyword) tuple was already pushed. */
+function pushUniqueFailureShapeEntry(
+	shape: ToolArgumentFailureShapeEntry[],
+	seen: Set<string>,
+	entry: ToolArgumentFailureShapeEntry,
+): void {
+	const key = `${entry.path}\0${entry.expectedType}\0${entry.receivedType}\0${entry.keyword}`;
+	if (seen.has(key)) return;
+	seen.add(key);
+	shape.push(entry);
+}
+
 function formatFailureShape(
 	errors: readonly TLocalizedValidationError[],
 	args: unknown,
@@ -241,22 +359,28 @@ function formatFailureShape(
 ): ToolArgumentFailureShapeEntry[] {
 	const seen = new Set<string>();
 	const shape: ToolArgumentFailureShapeEntry[] = [];
+	for (const { path, schema: propertySchema } of requiredFailureEntries(errors, schema)) {
+		const pathSegments = path.split(".");
+		pushUniqueFailureShapeEntry(shape, seen, {
+			path,
+			expectedType: expectedTypeFromSchema(propertySchema),
+			receivedType: receivedTypeOf(receivedValueAtPath(args, pathSegments)),
+			keyword: "required",
+		});
+	}
 	for (const error of errors) {
+		if (error.keyword === "required") continue;
 		const path = formatValidationPath(error);
 		const pathSegments = path === "root" ? [] : path.split(".");
 		const expectedSchema = schemaAtValidationError(schema, error);
 		const value = receivedValueAtPath(args, pathSegments);
-		const entry = {
+		pushUniqueFailureShapeEntry(shape, seen, {
 			path,
 			expectedType:
 				error.keyword === "additionalProperties" ? "forbidden" : expectedFailureType(error, expectedSchema),
 			receivedType: receivedTypeOf(value),
 			keyword: error.keyword,
-		};
-		const key = `${entry.path}\0${entry.expectedType}\0${entry.receivedType}\0${entry.keyword}`;
-		if (seen.has(key)) continue;
-		seen.add(key);
-		shape.push(entry);
+		});
 	}
 	return shape;
 }
@@ -453,17 +577,13 @@ function valuesFromValidationError(error: TLocalizedValidationError, schema: unk
 
 function expectedFailureType(error: TLocalizedValidationError, schema: unknown): string {
 	const values = valuesFromValidationError(error, schema);
-	if (values?.length) {
-		const allowed = values.map((value) => formatCompactJson(value, RECEIVED_VALUE_MAX_LENGTH)).join(", ");
-		return values.length === 1 ? `literal ${allowed}` : `one of ${allowed}`;
-	}
-	return expectedTypeOf(schema);
+	return values?.length ? formatAllowedValuesTypeLabel(values) : expectedTypeOf(schema);
 }
 
 function validationGuidance(error: TLocalizedValidationError, schema: unknown): string {
 	const values = valuesFromValidationError(error, schema);
 	if (values?.length) {
-		const allowed = values.map((value) => formatCompactJson(value, RECEIVED_VALUE_MAX_LENGTH)).join(", ");
+		const allowed = formatAllowedValueList(values);
 		return `${values.length === 1 ? `must equal ${allowed}` : `must be one of ${allowed}`}; Allowed values: ${allowed}`;
 	}
 	const expectedType = expectedTypeOf(schema);
@@ -476,25 +596,36 @@ function validationGuidance(error: TLocalizedValidationError, schema: unknown): 
 	return error.message;
 }
 
+function formatFailureLine(
+	path: string,
+	pathSegments: readonly string[],
+	guidance: string,
+	args: unknown,
+	expectedSchema: unknown,
+): string {
+	const expectedFragment = formatCompactJson(compactSchemaFragment(expectedSchema), EXPECTED_FRAGMENT_MAX_LENGTH);
+	const example = minimalExample(expectedSchema);
+	const received = formatCompactJson(receivedValueAtPath(args, pathSegments), RECEIVED_VALUE_MAX_LENGTH);
+	const exampleText =
+		example === undefined ? "" : `; Example: ${formatCompactJson(example, RECEIVED_VALUE_MAX_LENGTH)}`;
+	return `  - ${path}: ${guidance}; Expected schema: ${expectedFragment}${exampleText}; Received: ${received}`;
+}
+
 function formatValidationErrors(errors: readonly TLocalizedValidationError[], args: unknown, schema: unknown): string {
-	return (
-		errors
-			.map((error) => {
-				const path = formatValidationPath(error);
-				const pathSegments = validationPathSegments(error);
-				const expectedSchema = schemaAtValidationError(schema, error);
-				const expectedFragment = formatCompactJson(
-					compactSchemaFragment(expectedSchema),
-					EXPECTED_FRAGMENT_MAX_LENGTH,
-				);
-				const example = minimalExample(expectedSchema);
-				const received = formatCompactJson(receivedValueAtPath(args, pathSegments), RECEIVED_VALUE_MAX_LENGTH);
-				const exampleText =
-					example === undefined ? "" : `; Example: ${formatCompactJson(example, RECEIVED_VALUE_MAX_LENGTH)}`;
-				return `  - ${path}: ${validationGuidance(error, expectedSchema)}; Expected schema: ${expectedFragment}${exampleText}; Received: ${received}`;
-			})
-			.join("\n") || "Unknown validation error"
-	);
+	const lines: string[] = [];
+	for (const { path, schema: propertySchema } of requiredFailureEntries(errors, schema)) {
+		lines.push(formatFailureLine(path, path.split("."), requiredGuidance(propertySchema), args, propertySchema));
+	}
+	for (const error of errors) {
+		if (error.keyword === "required") continue;
+		const path = formatValidationPath(error);
+		const pathSegments = validationPathSegments(error);
+		const expectedSchema = schemaAtValidationError(schema, error);
+		lines.push(
+			formatFailureLine(path, pathSegments, validationGuidance(error, expectedSchema), args, expectedSchema),
+		);
+	}
+	return lines.join("\n") || "Unknown validation error";
 }
 
 function validationFailureSignature(errors: readonly TLocalizedValidationError[]): string {

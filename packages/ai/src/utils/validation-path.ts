@@ -1,8 +1,13 @@
 import type { TLocalizedValidationError } from "typebox/error";
 
+/** The dotted path of the error's `instancePath`, without any per-keyword property suffix. */
+export function instancePathBase(error: TLocalizedValidationError): string {
+	return error.instancePath.replace(/^\//, "").replace(/\//g, ".");
+}
+
 /** Format a TypeBox validation location consistently across package boundaries. */
 export function formatValidationPath(error: TLocalizedValidationError): string {
-	const basePath = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
+	const basePath = instancePathBase(error);
 	if (error.keyword === "required") {
 		const requiredProperties = (error.params as { requiredProperties?: string[] }).requiredProperties;
 		const requiredProperty = requiredProperties?.[0];
