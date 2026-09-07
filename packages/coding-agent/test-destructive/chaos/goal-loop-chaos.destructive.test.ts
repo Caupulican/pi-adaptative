@@ -97,7 +97,12 @@ describe("destructive/chaos: budgeted goal loop against ChaosProvider (INV-L1)",
 					settled = true;
 				});
 
-			await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+			const STEP_MS = 5_000;
+			let elapsedMs = 0;
+			while (!settled && elapsedMs < DEADLINE_MS) {
+				await vi.advanceTimersByTimeAsync(STEP_MS);
+				elapsedMs += STEP_MS;
+			}
 			if (!settled) {
 				throw reproError("The chaos goal loop did not settle within its virtual-time deadline.", repro);
 			}
@@ -126,7 +131,11 @@ describe("destructive/chaos: budgeted goal loop against ChaosProvider (INV-L1)",
 				.finally(() => {
 					probeSettled = true;
 				});
-			await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+			let probeElapsedMs = 0;
+			while (!probeSettled && probeElapsedMs < DEADLINE_MS) {
+				await vi.advanceTimersByTimeAsync(STEP_MS);
+				probeElapsedMs += STEP_MS;
+			}
 			if (!probeSettled) {
 				throw reproError("Post-run probe prompt did not settle: the continuation lease looks leaked.", repro);
 			}
