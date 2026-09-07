@@ -1,7 +1,48 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ToolProgressDelivery } from "../src/tool-progress-delivery.ts";
 
 describe("tool progress delivery lifecycle", () => {
+	afterEach(() => vi.useRealTimers());
+
+	it("bounds an unresponsive observer without accepting late progress or leaking its rejection", async () => {
+		vi.useFakeTimers();
+		const observer = Promise.withResolvers<void>();
+		const seen: number[] = [];
+		const delivery = new ToolProgressDelivery<number>((value) => {
+			seen.push(value);
+			return observer.promise;
+		});
+		delivery.publish(1);
+		let settled = false;
+		const finishing = delivery.finish().then((failed) => {
+			settled = true;
+			return failed;
+		});
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(settled).toBe(true);
+		expect(await finishing).toBe(true);
+		delivery.publish(2);
+		observer.reject(new Error("late private diagnostic"));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(await delivery.finish()).toBe(true);
+		expect(seen).toEqual([1]);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("clears the drain watchdog when an observer settles within the bound", async () => {
+		vi.useFakeTimers();
+		const observer = Promise.withResolvers<void>();
+		const delivery = new ToolProgressDelivery(() => observer.promise);
+		delivery.publish(undefined);
+		const first = delivery.finish();
+		const second = delivery.finish();
+		await vi.advanceTimersByTimeAsync(999);
+		observer.resolve();
+		expect(await first).toBe(false);
+		expect(await second).toBe(false);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
 	it("awaits every admitted observer and closes against late callbacks", async () => {
 		const first = Promise.withResolvers<void>();
 		const second = Promise.withResolvers<void>();

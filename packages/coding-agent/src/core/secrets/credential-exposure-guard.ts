@@ -265,6 +265,11 @@ function pythonInspectsCredentialPath(code: string, cwd: string, boundary?: Cred
 	if (!PYTHON_INSPECTION_RE.test(code)) return false;
 	QUOTED_TEXT_RE.lastIndex = 0;
 	for (const match of code.matchAll(QUOTED_TEXT_RE)) {
+		// A literal used as the left operand of membership is search data, not a filename.
+		// Keep inspecting every other literal: assignments, Path/open operands, and the source
+		// being searched still pass through the protected-path check. This remains a lexical
+		// guard, not authorization for arbitrary Python or dynamically constructed paths.
+		if (/^\s+(?:not\s+)?in\b/u.test(code.slice(match.index + match[0].length))) continue;
 		const candidate = match[2]?.replace(/\\([\\"'])/g, "$1");
 		if (candidate && isProtectedCredentialPath(candidate, cwd, boundary)) return true;
 	}

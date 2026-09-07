@@ -51,6 +51,10 @@ export class BracketedPasteBuffer {
 	private closingMarkerPrefix = "";
 	private active = false;
 
+	get isActive(): boolean {
+		return this.active;
+	}
+
 	consume(input: string): BracketedPasteResult {
 		if (!this.active) {
 			const startIndex = input.indexOf(BRACKETED_PASTE_START);
@@ -74,10 +78,18 @@ export class BracketedPasteBuffer {
 	flushPending(): string | undefined {
 		if (!this.active) return undefined;
 		this.appendContent(this.closingMarkerPrefix);
-		this.closingMarkerPrefix = "";
+		const content = this.drainPending();
+		this.reset();
+		return content;
+	}
+
+	/** Release collected text without treating an idle gap as a closing delimiter. */
+	drainPending(): string | undefined {
+		if (!this.active) return undefined;
 		this.flushChunkGroup();
 		const content = this.groups.join("");
-		this.reset();
+		this.groups.length = 0;
+		// Retain the at-most-five-byte marker prefix until it completes or becomes literal text.
 		return content;
 	}
 
@@ -92,8 +104,7 @@ export class BracketedPasteBuffer {
 		const endIndex = candidate.indexOf(BRACKETED_PASTE_END);
 		if (endIndex !== -1) {
 			this.appendContent(candidate.slice(0, endIndex));
-			this.flushChunkGroup();
-			const content = this.groups.join("");
+			const content = this.drainPending() ?? "";
 			const remainder = candidate.slice(endIndex + BRACKETED_PASTE_END.length);
 			this.reset();
 			return { kind: "complete", content, remainder };

@@ -1,8 +1,14 @@
-import { mkdtempSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import type * as fs from "node:fs";
+import { accessSync, constants, mkdtempSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { expandPath, resolveReadPath, resolveToCwd } from "../src/core/tools/path-utils.ts";
+
+vi.mock("node:fs", async (importOriginal) => {
+	const original = await importOriginal<typeof fs>();
+	return { ...original, accessSync: vi.fn(original.accessSync) };
+});
 
 describe("path-utils", () => {
 	describe("expandPath", () => {
@@ -56,6 +62,7 @@ describe("path-utils", () => {
 		});
 
 		afterEach(() => {
+			vi.mocked(accessSync).mockReset();
 			// Clean up temp files and directory
 			try {
 				const files = readdirSync(tempDir);
@@ -169,6 +176,28 @@ describe("path-utils", () => {
 
 			// This works because tryMacOSScreenshotPath() uses case-insensitive matching
 			expect(result).toBe(join(tempDir, macosName));
+		});
+
+		it.each(["EACCES", "EIO", "ELOOP"])("preserves %s without probing an alternate spelling", (code) => {
+			const error = Object.assign(new Error("synthetic access failure"), { code });
+			vi.mocked(accessSync).mockImplementation(() => {
+				throw error;
+			});
+			expect(() => resolveReadPath("file\u00a0name.txt", tempDir)).toThrow(error);
+			expect(accessSync).toHaveBeenCalledExactlyOnceWith(join(tempDir, "file\u00a0name.txt"), constants.F_OK);
+		});
+
+		it.each(["ENOENT", "ENOTDIR"])("permits alternate spelling after %s", (code) => {
+			const exact = join(tempDir, "file\u00a0name.txt");
+			const alternate = join(tempDir, "file name.txt");
+			vi.mocked(accessSync).mockImplementation((path) => {
+				if (path !== alternate) throw Object.assign(new Error("synthetic missing resource"), { code });
+			});
+			expect(resolveReadPath("file\u00a0name.txt", tempDir)).toBe(alternate);
+			expect(vi.mocked(accessSync).mock.calls).toEqual([
+				[exact, constants.F_OK],
+				[alternate, constants.F_OK],
+			]);
 		});
 	});
 });

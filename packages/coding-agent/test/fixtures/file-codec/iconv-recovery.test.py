@@ -288,6 +288,16 @@ class NativeTransportTests(unittest.TestCase):
         self.library.iconv.assert_not_called()
         self.library.iconv_close.assert_not_called()
 
+    def test_unsupported_native_codec_has_availability_guidance_not_data_loss_guidance(self):
+        self.library.iconv_open.return_value = ctypes.c_void_p(-1).value
+        for code, reason in ((errno.EINVAL, "codec_unavailable"), (errno.EMFILE, "preservation_unverified")):
+            with self.subTest(errno=code), patch.object(ctypes, "get_errno", return_value=code):
+                with self.assertRaises(LookupError) as caught:
+                    self.native.convert("X-FIXTURE", "UTF-8", b"synthetic")
+                self.assertEqual(module["failure_reason"](caught.exception), reason)
+        self.library.iconv.assert_not_called()
+        self.library.iconv_close.assert_not_called()
+
     def test_allocation_failure_closes_the_descriptor(self):
         failure = MemoryError("synthetic allocation failure")
         with patch.object(ctypes, "create_string_buffer", side_effect=failure):

@@ -217,13 +217,13 @@ class PersistentWindowsShellEngineSession {
 	private async execNow(
 		command: string,
 		cwd: string,
-		{ onData, signal, timeout, env }: Parameters<BashOperations["exec"]>[2],
+		{ onData, signal, timeout, env, forceCwd }: Parameters<BashOperations["exec"]>[2],
 	): Promise<{ exitCode: number | null }> {
 		if (this.disposed) throw new Error(`Windows shell engine session "${this.key}" is disposed`);
 		if (signal?.aborted) throw new Error("aborted");
 
 		const state = this.getState(this.key);
-		const effectiveCwd = resolveEffectiveCwd(state, cwd);
+		const effectiveCwd = resolveEffectiveCwd(state, cwd, forceCwd);
 		const effectiveEnv = mergeEffectiveEnv(state, env ?? getShellEnv());
 		const child = await this.ensureChild(effectiveEnv);
 		if (this.disposed) {

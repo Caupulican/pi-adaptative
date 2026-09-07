@@ -9,15 +9,6 @@ function tryCurlyQuoteVariant(filePath: string): string {
 	return filePath.replace(/'/g, "\u2019");
 }
 
-function fileExists(filePath: string): boolean {
-	try {
-		accessSync(filePath, constants.F_OK);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
 export async function pathExists(filePath: string): Promise<boolean> {
 	try {
 		await access(filePath, constants.F_OK);
@@ -63,7 +54,12 @@ function* readPathCandidates(filePath: string, cwd: string, options: PathInputOp
 
 export function resolveReadPath(filePath: string, cwd: string): string {
 	for (const candidate of readPathCandidates(filePath, cwd)) {
-		if (fileExists(candidate)) return candidate;
+		try {
+			accessSync(candidate, constants.F_OK);
+			return candidate;
+		} catch (error) {
+			if (!isMissingPathError(error)) throw error;
+		}
 	}
 	return resolveToCwd(filePath, cwd);
 }

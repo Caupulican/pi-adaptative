@@ -1,4 +1,5 @@
 import { type ChildProcess, type SpawnOptions, spawn, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -73,6 +74,38 @@ describe("persistent Windows shell engine coordinator", () => {
 			expect(runtimeResolutionCount).toBe(1);
 		} finally {
 			await disposeShellExecutionSessionAndWait(sessionKey);
+		}
+	});
+
+	it("restores an explicitly pinned cwd inside serialization without losing exported variables", async () => {
+		const scratch = mkdtempSync(join(tmpdir(), "pi-engine-pin-"));
+		const root = realpathSync(scratch);
+		mkdirSync(join(root, "child"));
+		const sessionKey = "pinned-engine-fixture";
+		const ops = createWindowsShellEngineOperations(sessionKey, {
+			resolveRuntime: async () => ({
+				status: "ready",
+				uvPath: "/unused/uv",
+				pythonPath: python,
+				pythonInstalled: false,
+			}),
+			engineScriptPath: ENGINE_MAIN,
+		});
+		const run = async (command: string, forceCwd = false) => {
+			const chunks: Buffer[] = [];
+			const options = { onData: (data: Buffer) => chunks.push(data), timeout: 10, forceCwd };
+			const result = await ops.exec(command, root, options);
+			return { ...result, text: Buffer.concat(chunks).toString("utf8").trim().replace(/\\/g, "/") };
+		};
+		try {
+			expect((await run("export PI_FIXTURE_PIN_VALUE=kept; cd child")).exitCode).toBe(0);
+			expect((await run("pwd")).text).toBe(join(root, "child").replace(/\\/g, "/"));
+			const pinned = await run("pwd; printf '%s' \"$PI_FIXTURE_PIN_VALUE\"", true);
+			expect(pinned.exitCode).toBe(0);
+			expect(pinned.text).toBe(`${root.replace(/\\/g, "/")}\nkept`);
+		} finally {
+			await disposeShellExecutionSessionAndWait(sessionKey);
+			rmSync(scratch, { recursive: true, force: true });
 		}
 	});
 });

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Framed paste drains idle text after 500ms without returning to keyboard mode. Delayed Enter bytes and split closing markers remain paste until an actual closing marker or explicit terminal reset, preventing slow paste tails from submitting input.
+
 ## [0.99.2] - 2026-09-06
 
 ## [0.99.1] - 2026-09-06

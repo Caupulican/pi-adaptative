@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Fixed
+
+- Kept stamped invocation receipts non-writable after restoring executor verification, without invoking hook getters.
+- Dropped host `piVerification` from running handoff placeholders so a pass cannot be published before completion.
+- Retained operation output after after-hook throws, and kept successful execution out of failure memory and retry gates after transcript restoration; the receipt still records `after_hook`.
+- Bounded final progress draining to one second so a stalled subscriber cannot prevent foreground or background operation settlement.
+- Bounded and escaped malformed tool-name diagnostics, and routed repeated unknown names through the existing validation escalation without guessing executable commands.
+
 ## [0.99.2] - 2026-09-06
 
 ### Added

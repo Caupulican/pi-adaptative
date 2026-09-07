@@ -176,6 +176,8 @@ export interface BashOperations {
 			signal?: AbortSignal;
 			timeout?: number;
 			env?: NodeJS.ProcessEnv;
+			/** Host-owned directory pin; stateful backends must re-enter cwd under their execution lock. */
+			forceCwd?: boolean;
 		},
 	) => Promise<{ exitCode: number | null; cwd?: string; initialCwd?: string }>;
 }
@@ -189,7 +191,7 @@ function createLocalShellOperations(
 	const sessionKey = options?.sessionKey;
 	if (sessionKey !== undefined && !options?.shellPath) {
 		return {
-			exec: async (command, cwd, { onData, signal, timeout, env }) => {
+			exec: async (command, cwd, { onData, signal, timeout, env, forceCwd }) => {
 				try {
 					await fsAccess(cwd, constants.F_OK);
 				} catch {
@@ -203,6 +205,7 @@ function createLocalShellOperations(
 					onData,
 					signal,
 					env,
+					forceCwd,
 					timeoutSeconds: hasWallClock ? timeout : undefined,
 					silenceMs: !hasWallClock && silenceMs > 0 ? silenceMs : undefined,
 				});
@@ -325,7 +328,7 @@ export function createLocalPlatformShellOperations(
 				// tier — reads the SAME session state so a `cd`/`export` in one call is observed
 				// by the very next call regardless of which tier runs it.
 				const state = getOrCreateWindowsShellState(engineSessionKey);
-				resolvedCwd = resolveEffectiveCwd(state, cwd);
+				resolvedCwd = resolveEffectiveCwd(state, cwd, execOptions.forceCwd);
 				resolvedExecOptions = { ...execOptions, env: mergeEffectiveEnv(state, execOptions.env ?? getShellEnv()) };
 				if (route.kind === "python-engine") {
 					// The engine owns the state transition and resolves the original host cwd
@@ -422,6 +425,8 @@ export interface BashToolOptions {
 	 * tool instances (subagents) auto-generate their own key and stay isolated.
 	 */
 	sessionKey?: string;
+	/** Host-owned task pin. Each invocation starts in cwd; command-local cd remains available. */
+	forceCwd?: boolean;
 	/** Route complex/state-mutating Bash constructs and portable builtins to the Python engine on Windows. Default: true. */
 	windowsShellPythonEngine?: boolean;
 	/** Test/embedding hook: overrides the engine tier's runtime/spawn/state resolution. */
@@ -689,9 +694,11 @@ function createShellToolDefinition(
 			});
 		});
 	}
-	const contractDescription = routesWindowsContract
-		? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (starts at the project working directory; current directory and environment variables persist across calls, including across the PowerShell and Python engine tiers; a failed command reports its effective cwd on a final `cwd:` line). On Windows, a deterministic router converts simple commands directly to PowerShell and routes word-list and arithmetic for loops, break/continue, portable builtins such as printf, pipelines, redirection, expansion, chaining, and state-mutating commands (cd/export/unset) through a bundled Python engine that implements the supported Bash grammar; named unsupported constructs (job control, process substitution, heredocs, nested shells, and similar) fail closed instead of being guessed."
-		: "Execute a Bash command in a persistent per-agent shell session that starts at the project working directory: `cd` and environment variables persist across calls, a failed command reports its effective cwd on a final `cwd:` line, and a timed-out or aborted command resets the session.";
+	const contractDescription = options?.forceCwd
+		? "Execute a command in a persistent shell with a host-pinned working directory. Each invocation starts in the pinned directory; cd inside a command remains available and exported variables persist across calls."
+		: routesWindowsContract
+			? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (starts at the project working directory; current directory and environment variables persist across calls, including across the PowerShell and Python engine tiers; a failed command reports its effective cwd on a final `cwd:` line). On Windows, a deterministic router converts simple commands directly to PowerShell and routes word-list and arithmetic for loops, break/continue, portable builtins such as printf, pipelines, redirection, expansion, chaining, and state-mutating commands (cd/export/unset) through a bundled Python engine that implements the supported Bash grammar; named unsupported constructs (job control, process substitution, heredocs, nested shells, and similar) fail closed instead of being guessed."
+			: "Execute a Bash command in a persistent per-agent shell session that starts at the project working directory: `cd` and environment variables persist across calls, a failed command reports its effective cwd on a final `cwd:` line, and a timed-out or aborted command resets the session.";
 	return {
 		name: toolName,
 		label: toolName,
@@ -1009,7 +1016,7 @@ function createShellToolDefinition(
 					// The engine is the sole state mutator (D4); every Windows call — engine or PS
 					// tier — reads the SAME session state so a `cd`/`export` in one call is observed
 					// by the very next call regardless of which tier runs it.
-					effectiveCwd = resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd);
+					effectiveCwd = resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd, options?.forceCwd);
 				}
 				// The engine executes the RAW Bash source unchanged: an arbitrary PowerShell
 				// commandPrefix would not parse as Bash grammar.
@@ -1043,6 +1050,7 @@ function createShellToolDefinition(
 						signal,
 						timeout: effectiveTimeoutSeconds,
 						env: spawnContext.env,
+						forceCwd: options?.forceCwd,
 					}),
 				);
 				if (!routesWindowsContract && result.cwd) lastSessionCwd = result.cwd;
@@ -1066,9 +1074,11 @@ function createShellToolDefinition(
 				if (filterContext && filterContext.command === command) {
 					const classification = classifyGitCommand(command, filterContext.env);
 					if (classification.eligible && classification.subcommand) {
-						let gitCwd = routesWindowsContract
-							? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
-							: (lastSessionCwd ?? filterContext.cwd);
+						let gitCwd = options?.forceCwd
+							? filterContext.cwd
+							: routesWindowsContract
+								? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
+								: (lastSessionCwd ?? filterContext.cwd);
 						if (classification.cwdPrefix !== undefined) {
 							// `cd <path> && git …`: the shell would leave the session in <path>, so the cd is
 							// replayed into the session first and the filtered run happens where it landed.

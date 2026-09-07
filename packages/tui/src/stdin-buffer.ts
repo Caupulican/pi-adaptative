@@ -18,10 +18,9 @@
  */
 
 import { EventEmitter } from "events";
-import { BracketedPasteBuffer } from "./bracketed-paste.ts";
+import { BRACKETED_PASTE_START, BracketedPasteBuffer } from "./bracketed-paste.ts";
 
 const ESC = "\x1b";
-const BRACKETED_PASTE_START = "\x1b[200~";
 
 /**
  * Check if a string is a complete escape sequence or needs more data
@@ -261,6 +260,12 @@ export type StdinBufferOptions = {
 	 */
 	timeout?: number;
 	/**
+	 * Idle gap before collected paste text is emitted without ending paste mode.
+	 * Only a closing marker or explicit clear/reset returns input to keyboard handling.
+	 * Default: 500ms.
+	 */
+	pasteIdleTimeoutMs?: number;
+	/**
 	 * Treat one plain-text chunk containing an embedded newline as an atomic paste.
 	 * Windows consoles do not all emit bracketed-paste markers even when requested.
 	 */
@@ -281,8 +286,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	private timeout: ReturnType<typeof setTimeout> | null = null;
 	private pasteTimeout: ReturnType<typeof setTimeout> | null = null;
 	private readonly timeoutMs: number;
+	private readonly pasteIdleTimeoutMs: number;
 	private readonly detectUnframedPaste: boolean;
-	private pasteMode: boolean = false;
 	private framedPaste = new BracketedPasteBuffer();
 	private pendingPrePasteRemainder: string = "";
 	private pendingKittyPrintableCodepoint: number | undefined;
@@ -290,6 +295,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	constructor(options: StdinBufferOptions = {}) {
 		super();
 		this.timeoutMs = options.timeout ?? 10;
+		this.pasteIdleTimeoutMs = options.pasteIdleTimeoutMs ?? 500;
 		this.detectUnframedPaste = options.detectUnframedPaste ?? false;
 	}
 
@@ -320,7 +326,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		// paste. Escape-bearing chunks remain on the sequence parser path.
 		if (
 			this.detectUnframedPaste &&
-			!this.pasteMode &&
+			!this.framedPaste.isActive &&
 			this.buffer.length === 0 &&
 			str.length > 1 &&
 			!str.includes(ESC) &&
@@ -331,13 +337,13 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			return;
 		}
 
-		if (str.length === 0 && this.buffer.length === 0) {
-			this.emitDataSequence("");
+		if (this.framedPaste.isActive) {
+			if (str.length > 0) this.consumeFramedPaste(str, false);
 			return;
 		}
 
-		if (this.pasteMode) {
-			this.consumeFramedPaste(str, false);
+		if (str.length === 0 && this.buffer.length === 0) {
+			this.emitDataSequence("");
 			return;
 		}
 
@@ -361,7 +367,6 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			this.pendingKittyPrintableCodepoint = undefined;
 			const pasteContent = this.buffer.slice(startIndex + BRACKETED_PASTE_START.length);
 			this.buffer = "";
-			this.pasteMode = true;
 			this.consumeFramedPaste(pasteContent, true);
 			return;
 		}
@@ -406,15 +411,9 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}
 		this.pasteTimeout = setTimeout(() => {
 			this.pasteTimeout = null;
-			if (!this.pasteMode) return;
-			const pastedContent = this.framedPaste.flushPending() ?? "";
-			const remaining = this.pendingPrePasteRemainder;
-			this.closePasteMode();
-			this.emit("paste", pastedContent);
-			if (remaining.length > 0) {
-				this.process(remaining);
-			}
-		}, this.timeoutMs);
+			const pastedContent = this.framedPaste.drainPending();
+			if (pastedContent) this.emit("paste", pastedContent);
+		}, this.pasteIdleTimeoutMs);
 	}
 
 	private closePasteMode(): void {
@@ -422,7 +421,6 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			clearTimeout(this.pasteTimeout);
 			this.pasteTimeout = null;
 		}
-		this.pasteMode = false;
 		this.framedPaste.clear();
 		this.pendingPrePasteRemainder = "";
 		this.pendingKittyPrintableCodepoint = undefined;
@@ -460,15 +458,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			clearTimeout(this.timeout);
 			this.timeout = null;
 		}
-		if (this.pasteTimeout) {
-			clearTimeout(this.pasteTimeout);
-			this.pasteTimeout = null;
-		}
 		this.buffer = "";
-		this.pasteMode = false;
-		this.framedPaste.clear();
-		this.pendingPrePasteRemainder = "";
-		this.pendingKittyPrintableCodepoint = undefined;
+		this.closePasteMode();
 	}
 
 	getBuffer(): string {

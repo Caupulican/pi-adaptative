@@ -208,11 +208,20 @@ it does not yet establish complete attachment fencing.
 
 Progress delivery has a separate lifecycle owner. Subscriber throws and rejections cannot escape
 into the tool body or erase a result. The owner drains admitted observations without retaining their
-history and closes late callbacks. Core finalization stamps `piToolInvocation`: request identity,
+history and closes late callbacks. Final draining has a one-second bound: a stalled observer records
+a delivery failure without preventing operation settlement. Core finalization stamps `piToolInvocation`: request identity,
 execution state, completed operation status, and bounded progress/after-hook failure tags. No
 listener text, arguments, or paths enter that receipt. Rejection is `not_started`; a handoff is
 `running`; a generic exception leaves effects `unknown`; an explicit operation-outcome exception
-is completed-negative. Hook policy cannot rewrite those execution facts.
+is completed-negative. Hook policy cannot rewrite those execution facts. Running handoff placeholders
+drop host `piVerification`; passing evidence is published only with a completed operation. An after-hook
+throw retains the operation output with a bounded presentation warning. A witnessed successful operation
+with that hook failure stays out of retry gates and failure memory, including after transcript restoration.
+
+Unknown tool names are admission failures, never executable instructions. Their diagnostics are bounded
+and prompt-escaped; repeated unknown names share the existing validation-escalation episode even when
+the invented name changes. A clean tool turn resets that episode. Recovery lists available names and
+requires a new structured call rather than guessing a command from malformed text.
 
 Foreground delivery failure stops after preserving results. Background records retain the same
 validated receipt across notification and restart, bound to the admitted request and tool call.

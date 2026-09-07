@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	decodeToolInvocationReceipt,
+	isSuccessfulOperationWithHookFailure,
 	retainedToolInvocation,
 	stampToolInvocation,
 } from "../src/tool-invocation-receipt.ts";
@@ -14,6 +15,17 @@ const receipt = {
 } as const;
 
 describe("invocation receipt wire boundary", () => {
+	it.each([
+		{ candidate: receipt, expected: true },
+		{ candidate: { ...receipt, operationStatus: "error" }, expected: false },
+		{ candidate: { ...receipt, execution: "unknown", operationStatus: undefined }, expected: false },
+		{ candidate: { ...receipt, postprocessingFailures: [] }, expected: false },
+		{ candidate: { ...receipt, postprocessingFailures: ["progress"] }, expected: false },
+		{ candidate: undefined, expected: false },
+	])("only completed success plus an after-hook failure bypasses failure recovery %#", ({ candidate, expected }) => {
+		expect(isSuccessfulOperationWithHookFailure({ piToolInvocation: candidate })).toBe(expected);
+	});
+
 	it("retains independent immutable evidence without retaining the input", () => {
 		const input = JSON.parse(JSON.stringify(receipt));
 		const decoded = decodeToolInvocationReceipt(input);

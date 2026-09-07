@@ -368,6 +368,27 @@ describe("credential exposure guard", () => {
 
 describe("credential guard false positives measured live", () => {
 	const cwd = "/mnt/c/work";
+	it.each(["process.env", ".env", "private/settings.json"])(
+		"does not mistake a literal membership search for opening %s",
+		(needle) => {
+			const boundary = { redactSensitiveText: (text: string) => text, protectedDirectories: [join(cwd, "private")] };
+			for (const operator of ["in", "not in"]) {
+				const code = `from pathlib import Path\ntext = Path("src/config.ts").read_text()\nprint(${JSON.stringify(needle)} ${operator} text)`;
+				expect(credentialToolBlockReason("python", { code }, cwd, boundary)).toBeUndefined();
+			}
+		},
+	);
+
+	it.each([
+		'open(".env").read()',
+		'from pathlib import Path\nprint(Path(".env").read_text())',
+		'path = ".env"\nprint(open(path).read())',
+		'print(open(".env" if ".env" in names else "safe.txt").read())',
+		'needle = ".env"\nprint(needle in open(needle).read())',
+	])("retains credential-path refusals around membership expressions: %s", (code) => {
+		expect(credentialToolBlockReason("python", { code }, cwd)).toContain("blocked");
+	});
+
 	it("treats variable-looking direct argv as literal paths while retaining shell variable searches", () => {
 		expect(credentialToolBlockReason("bash", { command: 'rg failure "$LOG"' }, cwd)).toBeUndefined();
 		expect(credentialToolBlockReason("run_process", { executable: "rg", args: ["failure", "$LOG"] }, cwd)).toContain(

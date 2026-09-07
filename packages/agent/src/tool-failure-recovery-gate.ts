@@ -12,6 +12,7 @@ import {
 	type ToolFailureMemoryRecord,
 } from "./tool-failure-memory.ts";
 import { TOOL_FAILURE_READMISSION_RULE } from "./tool-failure-recovery-protocol.ts";
+import { isSuccessfulOperationWithHookFailure } from "./tool-invocation-receipt.ts";
 import type {
 	AgentMessage,
 	AgentTool,
@@ -459,7 +460,7 @@ function walkTranscript(messages: readonly AgentMessage[], visit: (event: Transc
 		if (!call) continue;
 		callsById.delete(message.toolCallId);
 		const executionKey = getToolExecutionKey(call.name, call.args);
-		if (!message.isError) {
+		if (!message.isError || isSuccessfulOperationWithHookFailure(message.details)) {
 			worldCursor++;
 			visit({ kind: "resolved", executionKey, worldCursor });
 			continue;

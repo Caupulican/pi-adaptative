@@ -77,6 +77,8 @@ export interface ShellSessionExecOptions {
 	/** Output-silence bound in ms; when set, silence kills the session and throws `silence:<s>`. */
 	silenceMs?: number;
 	env?: NodeJS.ProcessEnv;
+	/** Host-owned task pin: re-enter cwd for this invocation without discarding shell environment. */
+	forceCwd?: boolean;
 }
 
 export interface ShellSessionExecutionResult {
@@ -325,7 +327,7 @@ export class PersistentShellSession {
 	private async execNow(
 		command: string,
 		cwd: string,
-		{ onData, signal, timeoutSeconds, silenceMs, env }: ShellSessionExecOptions,
+		{ onData, signal, timeoutSeconds, silenceMs, env, forceCwd }: ShellSessionExecOptions,
 	): Promise<ShellSessionExecutionResult> {
 		if (this.disposed) throw new Error(`Shell session "${this.key}" is disposed`);
 		if (signal?.aborted) throw new Error("aborted");
@@ -343,11 +345,11 @@ export class PersistentShellSession {
 			this.killChild();
 		}
 
-		// Re-enter the host-requested cwd only when it CHANGES between calls; an unchanged
-		// request preserves the agent's own in-session `cd` (that persistence is the feature).
+		// Unpinned calls retain shell-local cd. A task pin restores its directory under the same
+		// serialization as command execution, without resetting the process or its environment.
 		let cdTo: string | null = null;
 		if (!this.coordinator.child) await this.spawnChild(cwd, resolvedEnv);
-		if (this.lastRequestedCwd !== cwd) cdTo = cwd;
+		if (forceCwd || this.lastRequestedCwd !== cwd) cdTo = cwd;
 		this.lastRequestedCwd = cwd;
 		const initialCwd = cdTo ?? this.lastReportedCwd;
 		let resolvedCommand = command;

@@ -1693,13 +1693,32 @@ async function prepareToolCall(
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
 	const tool = currentContext.tools?.find((candidate) => candidate.name === toolCall.name);
 	if (!tool) {
+		const available = truncateProviderValidationFeedback(
+			(currentContext.tools ?? [])
+				.slice(0, 8)
+				.map((candidate) => JSON.stringify(candidate.name))
+				.join(", "),
+			240,
+		);
+		const correction = `Choose an exact name from the currently available tool list; put instructions and parameters in its JSON arguments object. Available tools (preview): ${available || "none"}.`;
+		// Invented names vary on every retry; they are one protocol failure class, not independent
+		// tool-schema episodes. Use the existing escalation owner so changing the bad name cannot
+		// bypass recovery. Never infer an executable command from prose embedded in a tool name.
+		const handling = recordValidationBounce(
+			"unknown_tool",
+			"unknown_tool",
+			correction,
+			config,
+			validationFailureTracker,
+		);
 		return {
 			kind: "immediate",
 			result: createErrorToolResult(`Tool ${toolCall.name} not found`),
 			isError: true,
 			phase: "validation",
 			failureCode: "unknown_tool",
-			correction: "Choose a tool from the currently available tool list.",
+			correction,
+			...(handling.providerFeedback ? { providerFeedback: handling.providerFeedback } : {}),
 			validationEvent: createValidationBounceTelemetry(config, toolCall, "unknown_tool"),
 		};
 	}
@@ -2041,7 +2060,7 @@ async function executeAndFinalizePreparedToolCall(
 		toolCall: prepared.toolCall,
 		result: {
 			...handoff.result,
-			details: stampToolInvocation(handoff.result.details, {
+			details: stampToolInvocation(detailsWithoutVerification(handoff.result.details), {
 				version: 1,
 				requestId,
 				execution: "running",
@@ -2149,11 +2168,11 @@ async function finalizeExecutedToolCall(
 	// Presentation/policy failures must not erase a completed check or invent a different pass.
 	const verificationDetails = retainedVerificationDetails(result.details);
 	let isError = executed.isError;
-	let failureMessage = executed.failureMessage ?? "";
-	let errorClass = executed.errorClass;
-	let failureCode = executed.failureCode;
-	let outputSignature = executed.outputSignature;
-	let errorKind = executed.errorKind;
+	const failureMessage = executed.failureMessage ?? "";
+	const errorClass = executed.errorClass;
+	const failureCode = executed.failureCode;
+	const outputSignature = executed.outputSignature;
+	const errorKind = executed.errorKind;
 	let afterHookFailed = false;
 	let executionGateEffect: ToolFailureRecoveryGateEffect | undefined;
 
@@ -2180,20 +2199,16 @@ async function finalizeExecutedToolCall(
 				};
 				isError = afterResult.isError ?? isError;
 			}
-		} catch (error) {
-			// Report the hook failure while retaining the executor's independent verification receipt.
+		} catch {
+			// A failed projection is not a new operation outcome. Keep the executor's content,
+			// failure identity, usage and verification; disclose the hook failure separately below.
 			afterHookFailed = true;
-			failureMessage = error instanceof Error ? error.message : String(error);
-			errorClass = error instanceof Error ? error.name : typeof error;
-			failureCode = undefined;
-			outputSignature = undefined;
-			errorKind = "tool_failure";
-			result = { ...createErrorToolResult(failureMessage), usage: result.usage };
+			result = executed.result;
 			isError = true;
 		}
 	}
 
-	if (isError) {
+	if (afterHookFailed ? executed.isError : isError) {
 		const usage = result.usage;
 		const failureOutput =
 			failureMessage ||
@@ -2268,12 +2283,7 @@ async function finalizeExecutedToolCall(
 	}
 
 	const repaired = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
-	let projectedDetails = repaired.result.details;
-	if (projectedDetails && typeof projectedDetails === "object" && "piVerification" in projectedDetails) {
-		const descriptors = Object.getOwnPropertyDescriptors(projectedDetails);
-		delete descriptors.piVerification;
-		projectedDetails = Object.defineProperties({}, descriptors);
-	}
+	const projectedDetails = detailsWithoutVerification(repaired.result.details);
 	const invocationDetails = stampToolInvocation(projectedDetails, {
 		version: 1,
 		requestId,
@@ -2285,10 +2295,27 @@ async function finalizeExecutedToolCall(
 			...(afterHookFailed ? ["after_hook" as const] : []),
 		],
 	});
+	if (verificationDetails) {
+		Object.defineProperty(invocationDetails, "piVerification", {
+			value: verificationDetails.piVerification,
+			enumerable: true,
+			writable: false,
+			configurable: false,
+		});
+	}
 	const resultWithVerification = {
 		...repaired.result,
-		details: verificationDetails ? { ...invocationDetails, ...verificationDetails } : invocationDetails,
+		details: invocationDetails,
 	};
+	if (afterHookFailed) {
+		resultWithVerification.content = [
+			...resultWithVerification.content,
+			{
+				type: "text",
+				text: "[harness] After-tool hook failed. The operation result is retained; do not rerun the operation to recover its presentation.",
+			},
+		];
+	}
 	if (executed.progressDeliveryFailed) {
 		resultWithVerification.content = [
 			...resultWithVerification.content,
@@ -2312,6 +2339,13 @@ async function finalizeExecutedToolCall(
 		...(executed.progressDeliveryFailed ? { deliveryFailure: new Error("tool_progress_delivery_failed") } : {}),
 		executionGateEffect,
 	};
+}
+
+function detailsWithoutVerification(details: unknown): unknown {
+	if (!details || typeof details !== "object" || !("piVerification" in details)) return details;
+	const descriptors: PropertyDescriptorMap = Object.getOwnPropertyDescriptors(details);
+	delete descriptors.piVerification;
+	return Object.defineProperties({}, descriptors);
 }
 
 function createErrorToolResult(message: string): AgentToolResult<any> {

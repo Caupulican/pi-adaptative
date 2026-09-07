@@ -1,7 +1,7 @@
 import { AssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
 import type { Model } from "@caupulican/pi-ai/types";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runAgentLoop } from "../src/agent-loop.ts";
 import type { AgentEvent, AgentTool, BackgroundToolCallCompletion } from "../src/types.ts";
 import { AgentToolExecutionError } from "../src/types.ts";
@@ -21,13 +21,15 @@ const model: Model<"openai-responses"> = {
 };
 
 describe("progress delivery is not operation execution", () => {
+	afterEach(() => vi.useRealTimers());
 	it.each(
 		["foreground", "background"].flatMap((mode) =>
-			["throw", "reject", "control"].flatMap((fault) =>
+			["throw", "reject", "hang", "control"].flatMap((fault) =>
 				["returned", "threw", "negative_outcome"].map((operation) => ({ mode, fault, operation })),
 			),
 		),
 	)("retains the executed result: $mode / $fault / $operation", async ({ mode, fault, operation }) => {
+		if (fault === "hang") vi.useFakeTimers();
 		let effects = 0;
 		let requests = 0;
 		let observed = 0;
@@ -62,7 +64,7 @@ describe("progress delivery is not operation execution", () => {
 				};
 			},
 		};
-		const messages = await runAgentLoop(
+		const running = runAgentLoop(
 			[{ role: "user", content: "Run fixture", timestamp: 0 }],
 			{ systemPrompt: "Fixture", messages: [], tools: [tool] },
 			{
@@ -94,6 +96,7 @@ describe("progress delivery is not operation execution", () => {
 				observed++;
 				if (fault === "throw") throw new Error("private observer diagnostic must not become operation output");
 				if (fault === "reject") return Promise.reject(new Error("synthetic delivery failure"));
+				if (fault === "hang") return new Promise<void>(() => {});
 			},
 			undefined,
 			() => {
@@ -118,6 +121,8 @@ describe("progress delivery is not operation execution", () => {
 				return response;
 			},
 		);
+		if (fault === "hang") await vi.advanceTimersByTimeAsync(1_000);
+		const messages = await running;
 		const result = mode === "background" ? (await background)?.result : messages.find((m) => m.role === "toolResult");
 		expect(effects).toBe(1);
 		expect(observed).toBe(1);

@@ -14,7 +14,7 @@ describe("StdinBuffer", () => {
 	let emittedSequences: string[];
 
 	beforeEach(() => {
-		buffer = new StdinBuffer({ timeout: 10 });
+		buffer = new StdinBuffer({ timeout: 10, pasteIdleTimeoutMs: 10 });
 
 		// Collect emitted sequences
 		emittedSequences = [];
@@ -373,7 +373,7 @@ describe("StdinBuffer", () => {
 		let emittedPaste: string[] = [];
 
 		beforeEach(() => {
-			buffer = new StdinBuffer({ timeout: 10 });
+			buffer = new StdinBuffer({ timeout: 10, pasteIdleTimeoutMs: 10 });
 
 			// Collect emitted sequences
 			emittedSequences = [];
@@ -448,16 +448,31 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedSequences, []);
 		});
 
-		it("should flush unterminated bracketed paste and resume normal input", async () => {
+		it("flushes idle paste text but requires explicit reset before normal input", async () => {
 			processInput("\x1b[200~unterminated");
 			assert.deepStrictEqual(emittedPaste, []);
 			assert.deepStrictEqual(emittedSequences, []);
 
 			await wait(15);
+			buffer.clear();
 			processInput("x");
 
 			assert.deepStrictEqual(emittedPaste, ["unterminated"]);
 			assert.deepStrictEqual(emittedSequences, ["x"]);
+		});
+
+		it("keeps a slow framed paste together across the key-sequence timeout", async () => {
+			const slow = new StdinBuffer({ timeout: 10, pasteIdleTimeoutMs: 50 });
+			const paste: string[] = [];
+			const keys: string[] = [];
+			slow.on("paste", (text) => paste.push(text));
+			slow.on("data", (sequence) => keys.push(sequence));
+			slow.process("\x1b[200~hello");
+			await wait(20);
+			slow.process(" world\x1b[201~");
+			assert.deepStrictEqual(paste, ["hello world"]);
+			assert.deepStrictEqual(keys, []);
+			slow.destroy();
 		});
 	});
 

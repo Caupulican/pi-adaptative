@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Added
+
+- Added a host-controlled shell directory pin that restores cwd under serialized execution without clearing exported variables, including the Windows Python engine and filtered Git commands.
+
+### Fixed
+
+- Sync CLI path lookup no longer treats permission or I/O errors as a missing-name spelling fallback.
+- Distinguished Python membership-test search text from credential paths while retaining direct and assigned credential-read protections.
+- Returned actionable codec-unavailable recovery guidance when native iconv rejects an unsupported encoding, without reclassifying resource failures or changing source bytes.
+
 ## [0.99.2] - 2026-09-06
 
 ### Breaking Changes

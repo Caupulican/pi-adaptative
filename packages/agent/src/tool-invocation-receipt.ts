@@ -58,6 +58,16 @@ export function retainedToolInvocation(details: unknown): ToolInvocationReceipt 
 	return decodeToolInvocationReceipt(Object.getOwnPropertyDescriptor(details, "piToolInvocation")?.value);
 }
 
+/** A thrown after-hook may mark presentation as erroneous without undoing a successful operation. */
+export function isSuccessfulOperationWithHookFailure(details: unknown): boolean {
+	const receipt = retainedToolInvocation(details);
+	return (
+		receipt?.execution === "completed" &&
+		receipt.operationStatus === "success" &&
+		receipt.postprocessingFailures.includes("after_hook")
+	);
+}
+
 /** Called only by the engine after all tool/hook projections. Never invokes a forged receipt getter. */
 export function stampToolInvocation(details: unknown, receipt: ToolInvocationReceipt): Record<string, unknown> {
 	const validated = decodeToolInvocationReceipt(receipt);

@@ -30,14 +30,13 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 	const images: ImageContent[] = [];
 
 	for (const fileArg of fileArgs) {
-		// Expand and resolve path (handles ~ expansion and macOS screenshot Unicode spaces)
-		const absolutePath = resolve(resolveReadPath(fileArg, process.cwd()));
-
-		// Check if file exists
+		let absolutePath: string;
 		try {
+			absolutePath = resolve(resolveReadPath(fileArg, process.cwd()));
 			await access(absolutePath);
-		} catch {
-			console.error(chalk.red(`Error: File not found: ${absolutePath}`));
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			console.error(chalk.red(`Error: ${reason}`));
 			process.exit(1);
 		}
 

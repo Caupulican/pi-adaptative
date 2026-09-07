@@ -77,6 +77,8 @@ class NativeIconv:
         deadline = time.monotonic() + ICONV_TIMEOUT
         descriptor = self.open(target_encoding.encode("ascii"), source_encoding.encode("ascii"))
         if descriptor == ctypes.c_void_p(-1).value:
+            if ctypes.get_errno() == errno.EINVAL:
+                raise CodecUnavailable("native iconv codec unavailable")
             raise LookupError("native iconv conversion unavailable")
         try:
             source = ctypes.create_string_buffer(data)

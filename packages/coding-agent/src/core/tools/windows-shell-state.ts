@@ -53,8 +53,8 @@ export function applyEngineFrame(state: WindowsShellState, frame: EngineFrameSta
  * at least one `cd`, otherwise the host-requested cwd. Both tiers call this with the SAME session
  * state so a `cd` in the engine is observed by the very next PS-tier call.
  */
-export function resolveEffectiveCwd(state: WindowsShellState, requestedCwd: string): string {
-	if (state.hostCwd !== requestedCwd) {
+export function resolveEffectiveCwd(state: WindowsShellState, requestedCwd: string, forceCwd = false): string {
+	if (forceCwd || state.hostCwd !== requestedCwd) {
 		state.hostCwd = requestedCwd;
 		state.cwd = requestedCwd;
 	}
