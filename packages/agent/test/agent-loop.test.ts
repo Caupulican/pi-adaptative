@@ -2959,6 +2959,84 @@ describe("agentLoop with AgentMessage", () => {
 		expect(validationEvents[0]?.errorKeywords).toEqual(["unknown_tool"]);
 	});
 
+	it("names the declared tool an invented name begins with and previews the closest names", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		let executed = false;
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "task_steps",
+			label: "Task steps",
+			description: "Task steps tool",
+			parameters: toolSchema,
+			async execute() {
+				executed = true;
+				return {
+					content: [{ type: "text", text: "should not run" }],
+					details: {},
+				};
+			},
+		};
+		const validationEvents: Parameters<NonNullable<AgentLoopConfig["onToolArgumentValidation"]>>[0][] = [];
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			onToolArgumentValidation: (event) => validationEvents.push(event),
+		};
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({
+					type: "done",
+					reason: callIndex++ === 0 ? "toolUse" : "stop",
+					message:
+						callIndex === 1
+							? createAssistantMessage(
+									[
+										{
+											type: "toolCall",
+											id: "phone-unknown",
+											name: "task_steps vis-à-vis goal-8ea72fd8? Wait I need to use task_steps set with plan.",
+											arguments: {},
+										},
+									],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]),
+				});
+			});
+			return stream;
+		};
+
+		const stream = agentLoop(
+			[createUserMessage("call a tool")],
+			{
+				systemPrompt: "",
+				messages: [],
+				tools: [{ ...tool, name: "echo" }, { ...tool, name: "read" }, { ...tool, name: "task_state" }, tool],
+			},
+			config,
+			undefined,
+			streamFn,
+		);
+		for await (const _ of stream) {
+			// consume
+		}
+		const result = await stream.result();
+		const toolResult = result.find((message) => message.role === "toolResult");
+		const failureText =
+			toolResult?.role === "toolResult"
+				? toolResult.content.find((block) => block.type === "text")?.text
+				: undefined;
+
+		expect(executed).toBe(false);
+		expect(failureText).toContain('"failure_code":"unknown_tool"');
+		expect(failureText).toContain('"phase":"validation"');
+		expect(failureText).toContain('The name begins with \\"task_steps\\": call task_steps exactly');
+		expect(failureText).toContain('"mistake_kind":"unknown_tool"');
+		expect(failureText).toMatch(/Available tools \(preview\): \\"task_steps\\", \\"task_state\\"/u);
+		expect(validationEvents[0]?.errorKeywords).toEqual(["unknown_tool"]);
+	});
+
 	it("preserves preflight identity and diagnostics without blaming valid arguments", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		let executed = false;

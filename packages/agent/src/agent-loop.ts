@@ -1695,6 +1695,44 @@ function providerMalformedCallEnrichment(tool: AgentTool, parserDetail: string):
 	return `${parserDetail}\n\n${formatToolValidationEnrichment(tool)}`;
 }
 
+const MAX_UNKNOWN_TOOL_PREVIEW = 8;
+
+/**
+ * An invented name usually starts with the tool the model meant (`task_steps vis-à-vis …`,
+ * `write_path_D_/…`): name that tool first, then preview the closest declared names rather than
+ * the first few in registration order. The name is never used to infer an executable command.
+ */
+function unknownToolCorrection(attempted: string, tools: readonly AgentTool[]): string {
+	const intended = tools
+		.filter((candidate) => {
+			if (!attempted.startsWith(candidate.name)) return false;
+			const next = attempted[candidate.name.length];
+			return next === undefined || !/[A-Za-z0-9]/u.test(next);
+		})
+		.sort((left, right) => right.name.length - left.name.length)[0];
+	const lowered = attempted.toLowerCase();
+	const ranked = [...tools].sort((left, right) => {
+		const score = (name: string): number => {
+			const candidate = name.toLowerCase();
+			if (lowered.startsWith(candidate)) return 3;
+			if (lowered.includes(candidate)) return 2;
+			return candidate.slice(0, 3) === lowered.slice(0, 3) ? 1 : 0;
+		};
+		return score(right.name) - score(left.name);
+	});
+	const available = truncateProviderValidationFeedback(
+		ranked
+			.slice(0, MAX_UNKNOWN_TOOL_PREVIEW)
+			.map((candidate) => JSON.stringify(candidate.name))
+			.join(", "),
+		240,
+	);
+	const lead = intended
+		? `The name begins with ${JSON.stringify(intended.name)}: call ${intended.name} exactly and put every parameter in its JSON arguments object, never in the name.`
+		: "Choose an exact name from the currently available tool list; put instructions and parameters in its JSON arguments object.";
+	return `${lead} Available tools (preview): ${available || "none"}.`;
+}
+
 async function prepareToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -1709,14 +1747,7 @@ async function prepareToolCall(
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
 	let tool = currentContext.tools?.find((candidate) => candidate.name === toolCall.name);
 	if (!tool) {
-		const available = truncateProviderValidationFeedback(
-			(currentContext.tools ?? [])
-				.slice(0, 8)
-				.map((candidate) => JSON.stringify(candidate.name))
-				.join(", "),
-			240,
-		);
-		const correction = `Choose an exact name from the currently available tool list; put instructions and parameters in its JSON arguments object. Available tools (preview): ${available || "none"}.`;
+		const correction = unknownToolCorrection(toolCall.name, currentContext.tools ?? []);
 		// Invented names vary on every retry; they are one protocol failure class, not independent
 		// tool-schema episodes. Use the existing escalation owner so changing the bad name cannot
 		// bypass recovery. Never infer an executable command from prose embedded in a tool name.

@@ -1242,7 +1242,11 @@ function foldToolFailureContext(
 		}
 		const isHarnessFailure = message.isError === true || textPayload.startsWith("[harness] ");
 		if (isHarnessFailure) {
-			const toolName = truncate(call?.name ?? message.toolName, MAX_TOOL_NAME_CHARS);
+			const retained = readFailureRecord(message.details);
+			const toolName =
+				retained?.failureCode === UNKNOWN_TOOL_KIND
+					? UNKNOWN_TOOL_KIND
+					: truncate(call?.name ?? message.toolName, MAX_TOOL_NAME_CHARS);
 			const kindCount = (kindMistakesMap.get(toolName) ?? 0) + 1;
 			kindMistakesMap.set(toolName, kindCount);
 
@@ -1257,7 +1261,6 @@ function foldToolFailureContext(
 				else omittedResults.add(message);
 				continue;
 			}
-			const retained = readFailureRecord(message.details);
 			const state = retained?.state ?? "failed";
 			const assessment = retained ? undefined : assessToolFailure(textPayload, state);
 			let failureKey: string;
@@ -1273,7 +1276,8 @@ function foldToolFailureContext(
 				rawKey = call
 					? memoizedOperationIdentity(call, executionScope).rawKey
 					: getToolFailureRecordRawKey(retained);
-				tool = retained.tool;
+				// A record written before invented names were classified still carries the invented text.
+				tool = retained.failureCode === UNKNOWN_TOOL_KIND ? UNKNOWN_TOOL_KIND : retained.tool;
 				operation = retained.operation;
 			} else {
 				// Equivalent to `operationIdentity(call?.name ?? message.toolName, call?.arguments ?? {...})`:
@@ -1550,10 +1554,22 @@ export function createToolFailureMemoryTracker(
 	return new Map(activeFailureRecords(state.active).map((record) => [record.failureKey, record]));
 }
 
+const UNKNOWN_TOOL_KIND = "unknown_tool";
+const MAX_ATTEMPTED_NAME_CHARS = 96;
+
+/**
+ * An invented tool name is one protocol mistake kind, whatever the model typed. Keying the ledger
+ * by the invented text would give every retry its own tool, its own count, and a header that
+ * quotes the model's prose back at it.
+ */
+function unknownToolDiagnostic(attemptedName: string): string {
+	return `Unknown tool name ${JSON.stringify(truncate(attemptedName, MAX_ATTEMPTED_NAME_CHARS))}.`;
+}
+
 export function rememberToolFailure(
 	tracker: ToolFailureMemoryTracker,
-	tool: string,
-	args: unknown,
+	attemptedTool: string,
+	attemptedArgs: unknown,
 	state: ToolFailureState,
 	failureCode: string,
 	correction: string,
@@ -1563,6 +1579,10 @@ export function rememberToolFailure(
 	outputIdentity?: ToolFailureOutputIdentity,
 	executionScope?: string,
 ): ToolFailureMemoryRecord {
+	const unknownTool = failureCode === UNKNOWN_TOOL_KIND;
+	const tool = unknownTool ? UNKNOWN_TOOL_KIND : attemptedTool;
+	const args = unknownTool ? { attemptedName: attemptedTool, arguments: attemptedArgs } : attemptedArgs;
+	if (unknownTool && diagnostic === undefined) diagnostic = unknownToolDiagnostic(attemptedTool);
 	let kindCount = 1;
 	for (const previous of tracker.values()) {
 		if (previous.tool === tool) {
