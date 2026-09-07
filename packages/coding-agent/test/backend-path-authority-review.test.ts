@@ -201,10 +201,17 @@ describe("backend path authority review regressions", () => {
 			try {
 				writeFileSync(join(scratch, ".env"), "SYNTHETIC_FIXTURE=not-a-secret\n");
 				symlinkSync(join(scratch, ".env"), join(scratch, "alias.txt"));
+				const platformFlavor: "win32" | "posix" = process.platform === "win32" ? "win32" : "posix";
 				const nativeContext = {
 					...context,
 					cwd: scratch,
-					attachment: { ...context.attachment, attachmentId: "native:review-fixture", root: scratch },
+					attachment: {
+						...context.attachment,
+						attachmentId: "native:review-fixture",
+						root: scratch,
+						flavor: platformFlavor,
+						caseSensitive: platformFlavor === "posix",
+					},
 				};
 				const args = { command: "cat alias.txt" };
 				expect(await credentialToolBlockReasonAsync("bash", args, scratch, boundary, nativeContext)).toBeTruthy();
@@ -270,7 +277,17 @@ describe("backend path authority review regressions", () => {
 					allowedPaths: [scratch],
 					deniedPaths: [join(scratch, "private")],
 				};
-				const nativeContext = { ...context, cwd: scratch, attachment: { ...context.attachment, root: scratch } };
+				const platformFlavor: "win32" | "posix" = process.platform === "win32" ? "win32" : "posix";
+				const nativeContext = {
+					...context,
+					cwd: scratch,
+					attachment: {
+						...context.attachment,
+						root: scratch,
+						flavor: platformFlavor,
+						caseSensitive: platformFlavor === "posix",
+					},
+				};
 				let executed = 0;
 				const execute = async (..._args: unknown[]) => {
 					executed++;
