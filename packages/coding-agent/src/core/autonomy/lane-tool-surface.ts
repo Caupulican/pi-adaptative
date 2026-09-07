@@ -93,6 +93,8 @@ export interface LaneToolSurfaceOptions {
 	sharedBudget?: SharedCapabilityBudget;
 	/** Host-owned fresh factories for worker-safe foreground/extension tools. */
 	workerToolAdapters?: WorkerToolAdapterRegistry;
+	/** Host-owned immutable task binding, installed before execution guards. */
+	bindTool?: (tool: AgentTool) => AgentTool;
 }
 
 function strictLaneProfilePatterns(profile: NormalizedProfile | undefined): {
@@ -123,6 +125,7 @@ function createLaneTools(
 	shellSessionKey?: string,
 	shellOutputDirectory?: string,
 	workerToolAdapters?: WorkerToolAdapterRegistry,
+	bindTool?: (tool: AgentTool) => AgentTool,
 ): AgentTool[] {
 	const factories = new Map<string, () => AgentTool>([
 		["read", () => createReadTool(cwd)],
@@ -142,6 +145,7 @@ function createLaneTools(
 		factories.set(STABLE_SHELL_TOOL_NAME, () =>
 			createBashTool(cwd, {
 				sessionKey: shellSessionKey,
+				forceCwd: true,
 				prewarmWindowsShell: true,
 				...(shellOutputDirectory ? { outputDirectory: shellOutputDirectory } : {}),
 			}),
@@ -170,11 +174,15 @@ function createLaneTools(
 	}
 	return names.flatMap((name) => {
 		const factory = factories.get(name);
-		if (factory) return [wrapToolWithCredentialExposureGuard(factory(), cwd, privatePathBoundary)];
-		if (!workerToolAdapters) return [];
-		const materialized = workerToolAdapters.materialize(name, { cwd, credentialBoundary: privatePathBoundary });
-		if (!materialized.ok) throw new Error(materialized.reason);
-		return [wrapToolWithCredentialExposureGuard(materialized.tool, cwd, privatePathBoundary)];
+		let tool: AgentTool;
+		if (factory) tool = factory();
+		else {
+			if (!workerToolAdapters) return [];
+			const materialized = workerToolAdapters.materialize(name, { cwd, credentialBoundary: privatePathBoundary });
+			if (!materialized.ok) throw new Error(materialized.reason);
+			tool = materialized.tool;
+		}
+		return [wrapToolWithCredentialExposureGuard(bindTool ? bindTool(tool) : tool, cwd, privatePathBoundary)];
 	});
 }
 
@@ -285,6 +293,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			options.shellSessionKey,
 			options.shellOutputDirectory,
 			options.workerToolAdapters,
+			options.bindTool,
 		),
 		dispose: async () => {
 			if (options.shellSessionKey) disposeShellExecutionSession(options.shellSessionKey);

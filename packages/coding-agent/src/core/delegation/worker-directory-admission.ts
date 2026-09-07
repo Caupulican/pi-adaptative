@@ -1,3 +1,4 @@
+import type { AgentTool } from "@caupulican/pi-agent-core";
 import { createExecutionContext, type ExecutionContext } from "@caupulican/pi-agent-core/paths";
 import type { WorkerExecutionContract, WorkerProfileExecutionContract } from "../orchestration/contracts.ts";
 import { parseWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
@@ -5,10 +6,35 @@ import { awaitPreflight } from "../preflight.ts";
 import { createNativeTaskDirectoryBackend } from "../tasks/native-task-directory-backend.ts";
 import { createTaskDirectoryValidator } from "../tasks/task-directory-validation.ts";
 
+export const WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS = 10_000;
+
 /** Captures native worker directory identity before durable dispatch and checks the saved identity on execution. */
 export class WorkerDirectoryAdmission {
 	private readonly backend = createNativeTaskDirectoryBackend();
 	private readonly validate = createTaskDirectoryValidator(this.backend, this.backend.validateAttachment);
+
+	/** Fixed task binding: validate before each call, while the core owns invocation receipt identity. */
+	bindTool(tool: AgentTool, input: ExecutionContext): AgentTool {
+		const executionContext = createExecutionContext(input);
+		return {
+			...tool,
+			execute: tool.execute.bind(tool),
+			bindInvocation: async (id, args, signal) => {
+				const deadline = AbortSignal.timeout(WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS);
+				await this.validateContext(executionContext, signal ? AbortSignal.any([signal, deadline]) : deadline);
+				signal?.throwIfAborted();
+				// A host-supplied backend still owns its executor, context, and lease. Do not replace
+				// them with the native directory metadata or acquire the backend lease twice.
+				if (tool.bindInvocation) return tool.bindInvocation(id, args, signal);
+				return {
+					executionContext,
+					execute: tool.execute.bind(tool),
+					failureRecovery: tool.failureRecovery,
+					release() {},
+				};
+			},
+		};
+	}
 
 	async capture(
 		contract: WorkerExecutionContract,

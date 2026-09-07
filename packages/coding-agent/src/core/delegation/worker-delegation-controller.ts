@@ -83,7 +83,7 @@ import {
 	WorkerConversationStore,
 } from "./worker-conversation-store.ts";
 import { parseWorkerDelegationAuthorityRequest, type WorkerDelegationRequest } from "./worker-delegation-request.ts";
-import { WorkerDirectoryAdmission } from "./worker-directory-admission.ts";
+import { WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS, WorkerDirectoryAdmission } from "./worker-directory-admission.ts";
 import { type WorkerDispatchAdmission, WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import {
 	buildWorkerExecutionPlan,
@@ -202,8 +202,6 @@ export interface WorkerDelegationControllerDeps {
 	): string | undefined;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 }
-
-const WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS = 10_000;
 
 type WorkerAdmission =
 	| {
@@ -2222,8 +2220,16 @@ export class WorkerDelegationController {
 		const workerToolAdapters: WorkerToolAdapterRegistry | undefined =
 			Object.keys(adapterSources).length > 0 ? createWorkerToolAdapterRegistry(adapterSources) : undefined;
 		if (shellSessionKey) this.shellSessionKeys.add(shellSessionKey);
+		const executionContext = immutableWorker.executionContext
+			? {
+					...immutableWorker.executionContext,
+					sessionId: conversation.getResumeContext().sessionId,
+					taskId: startedRecord.laneId,
+				}
+			: undefined;
 		const toolSurface = createLaneToolSurface({
 			cwd: executionPlan.cwd,
+			...(executionContext ? { bindTool: (tool) => this.directories.bindTool(tool, executionContext) } : {}),
 			deniedPaths: executionPlan.deniedPaths,
 			readMemory: executionPlan.readMemory ? (query) => this.deps.readMemoryForLane(query) : undefined,
 			writeEnabled: executionPlan.writeEnabled,

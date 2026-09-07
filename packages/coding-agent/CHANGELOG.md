@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Revalidated native worker directory identity before every tool invocation and retained task-scoped execution receipts. Worker shell calls restore their assigned cwd without clearing persistent environment state; credential guards and custom backend leases remain intact.
 - Captured native worker and verifier directory identity before dispatch and revalidated queued and resumed work before execution. Asynchronous validation retains reload blockers and rechecks capacity; mailbox recovery no longer re-enqueues the attempt being started. Historical workers retain explicitly diagnosed path-only recovery.
 - Sync CLI path lookup no longer treats permission or I/O errors as a missing-name spelling fallback.
 - Distinguished Python membership-test search text from credential paths while retaining direct and assigned credential-read protections.

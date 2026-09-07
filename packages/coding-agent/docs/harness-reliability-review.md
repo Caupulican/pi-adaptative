@@ -200,8 +200,16 @@ path-based recovery with a warning; no physical identity can be reconstructed re
 legacy recovery cannot bypass an identity already recorded. Synthetic foreground and worker response
 scripts are isolated so background notifications cannot consume another execution's test evidence.
 
+Every tool on a freshly identity-bound native worker now revalidates that attachment before invocation,
+using the same native admission owner as dispatch. Receipts carry the durable worker conversation and
+current task identity, not the foreground session identity. Shell calls restore the assigned directory
+without discarding persistent environment state. Native and adapter factories share one binding/credential
+guard path; an explicitly supplied backend retains its own executor, context, and lease. Synthetic controls
+cover directory replacement between provider dispatch and tool execution, read/write negative controls,
+credential refusal, cancellation before backend acquisition, and prototype-owned backend state.
+
 This integration is not the completed portability contract. Delegated workers still need their own
-registry and per-invocation attachment fencing; persisted relative goal-evidence identity and child
+registry; persisted relative goal-evidence identity and child
 receipt identity need review, and model context projection must survive compaction.
 Native attachment IDs now retain a hash of the original device/file identity. Replacing a directory
 at its saved path or retargeting its junction requires explicit reattachment, including after runtime
@@ -432,8 +440,25 @@ a schema field or a prompt instruction. All execution paths must consume the bin
   validity, BOM, newline-kind and final-newline signatures; four new files are synthetic UTF-8.
   No existing content was transcoded. Capture and validation reuse the native directory backend;
   durable authority remains in the existing worker contract rather than a parallel cwd registry.
+- The identity checkpoint `c1cd3beeb6bb70386af68ebc344d1225133b30f8` passed eight GitHub jobs;
+  both shard-3 jobs failed the mandatory-verifier model-pin fixture. It read the verifier agent id
+  before asynchronous directory admission completed. The failure reproduced locally; the fixture
+  now observes the verifier provider-start event and isolates foreground handoff responses, retaining
+  the model-pin assertions. Earlier Windows iconv and shell-release probes passed in this run; that
+  does not establish that their earlier intermittent failures are permanently repaired.
 - Host npm configuration emits `globalignorefile` warnings. Local Node is 24.18.1, below the declared
   24.20.0 minimum. Successful checks on this host do not replace supported-runtime CI evidence.
+
+The per-invocation worker slice passes 213 targeted tests across thirteen files, including eleven new
+cases. Independent red controls reproduced shell-local cwd leakage and a read from a substituted
+directory. The first write fixture incorrectly attempted an existing-file overwrite; the mutation-intent
+gate correctly rejected it, so the fixture now tests a new file and asserts no replacement-directory
+mutation. Successful controls also prove the exact worker conversation/task receipt scope. Repository
+clone coverage remains 967 eligible / 976 owned files, 936 in the unchanged 50-token detection pass,
+with zero clones. Eight tracked files preserve strict UTF-8 validity, BOM, newline-kind and final-newline
+signatures; the new fixture is synthetic UTF-8. No existing content was transcoded. Historical path-only
+workers still have their explicitly documented weaker identity guarantee, and native metadata validation
+does not protect against an external filesystem swap after admission.
 
 Targeted regression success and a repository check are not release approval. Task-directory binding
 remains open. Exact-candidate remote CI and the documented release gates remain required.

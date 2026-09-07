@@ -12,6 +12,7 @@ import {
 import { compileWorkerModelPinPolicy, resolveWorkerModelPin } from "../src/core/orchestration/worker-model-pins.ts";
 import { InMemorySettingsStorage, SettingsManager } from "../src/core/settings-manager.ts";
 import { createDelegateToolDefinition } from "../src/core/tools/delegate.ts";
+import { setConcurrentResponses } from "./suite/concurrent-responses.ts";
 import { createHarness } from "./suite/harness.ts";
 
 const foreground = { id: "foreground", provider: "faux", reasoning: true } as Model<Api>;
@@ -570,14 +571,16 @@ describe("worker model pin lifecycle", () => {
 			additionalOrchestrationProfiles: [verifierProfile],
 		});
 		const observedModelIds: string[] = [];
+		const verifierStarted = Promise.withResolvers<void>();
 		try {
-			harness.setResponses([
+			setConcurrentResponses(harness, [
 				(_context, _options, _state, model) => {
 					observedModelIds.push(model.id);
 					return fauxAssistantMessage('{"summary":"implemented","status":"completed","findings":[]}');
 				},
 				(_context, _options, _state, model) => {
 					observedModelIds.push(model.id);
+					verifierStarted.resolve();
 					return fauxAssistantMessage(
 						'{"summary":"verified","status":"completed","verdict":"accepted","reasonCodes":["passed"],"findings":[]}',
 					);
@@ -603,6 +606,9 @@ describe("worker model pin lifecycle", () => {
 			const control = getBackgroundControl(harness.session);
 			const implWait = await control.waitForWorkerAgent(initialLaneId);
 			expect(implWait.timedOut).toBe(false);
+			// Implementation completion queues verification; async directory admission must
+			// finish before the verifier has an agent identity. Observe its provider event.
+			await verifierStarted.promise;
 
 			const lifecycle = new WorkerLifecycle({
 				agentDir: harness.tempDir,

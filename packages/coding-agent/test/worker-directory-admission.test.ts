@@ -1,13 +1,16 @@
 import { mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import type { AgentTool } from "@caupulican/pi-agent-core";
+import { Type } from "typebox";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkerDirectoryAdmission } from "../src/core/delegation/worker-directory-admission.ts";
 import {
 	createWorkerExecutionContract,
 	parseWorkerExecutionContract,
 	verifierWorkerExecutionContract,
 } from "../src/core/orchestration/worker-execution-contract.ts";
+import { wrapToolWithCredentialExposureGuard } from "../src/core/secrets/credential-exposure-guard.ts";
 import {
 	createTestWorkerExecutionAuthority,
 	createTestWorkerOrchestrationProfile,
@@ -38,6 +41,124 @@ async function fixture() {
 }
 
 describe("worker directory admission", () => {
+	it("captures immutable per-task context and retains the native executor receiver and recovery", async () => {
+		const { source, admission, signal } = await fixture();
+		const captured = await admission.capture(source, "synthetic-session", signal);
+		const context = { ...captured.worker.executionContext!, taskId: "first-task" };
+		const tool: AgentTool = {
+			name: "read",
+			label: "read",
+			description: "synthetic receiver",
+			parameters: Type.Object({}),
+			failureRecovery: { getFailureCorrection: () => "synthetic correction" },
+			async execute() {
+				expect(this).toBe(tool);
+				return { content: [{ type: "text", text: "fixture" }], details: {} };
+			},
+		};
+		const first = admission.bindTool(tool, context);
+		context.taskId = "second-task";
+		const second = admission.bindTool(tool, context);
+		for (const [bound, taskId] of [
+			[first, "first-task"],
+			[second, "second-task"],
+		] as const) {
+			const binding = await bound.bindInvocation!("call", {}, signal);
+			expect(binding.executionContext.taskId).toBe(taskId);
+			expect(binding.failureRecovery).toBe(tool.failureRecovery);
+			await binding.execute("call", {});
+			binding.release();
+		}
+	});
+
+	it.each([false, true])("keeps credential checks around admitted native execution (blocked=%s)", async (blocked) => {
+		const { cwd, source, admission, signal } = await fixture();
+		const captured = await admission.capture(source, "synthetic-session", signal);
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "fixture" }], details: {} }));
+		const tool: AgentTool = {
+			name: "read",
+			label: "read",
+			description: "synthetic read",
+			parameters: Type.Object({ path: Type.String() }),
+			execute,
+		};
+		const guarded = wrapToolWithCredentialExposureGuard(
+			admission.bindTool(tool, captured.worker.executionContext!),
+			cwd,
+			{
+				redactSensitiveText: (text) => text,
+				protectedFiles: [join(cwd, "private.json")],
+			},
+		);
+		const args = { path: blocked ? "private.json" : "public.txt" };
+		const binding = await guarded.bindInvocation!("call", args, signal);
+		try {
+			if (blocked) await expect(binding.execute("call", args)).rejects.toThrow("model-blind");
+			else await binding.execute("call", args);
+			expect(execute).toHaveBeenCalledTimes(blocked ? 0 : 1);
+		} finally {
+			binding.release();
+		}
+	});
+
+	it.each(["unchanged", "replaced", "cancelled"])(
+		"preserves backend lease ownership after native admission: %s",
+		async (state) => {
+			const { cwd, source, admission, signal } = await fixture();
+			const captured = await admission.capture(source, "synthetic-session", signal);
+			const backendContext = { ...captured.worker.executionContext!, sessionId: "backend-session", generation: 4 };
+			const released = vi.fn();
+			class BackendInvocation {
+				#context = backendContext;
+				get executionContext() {
+					return this.#context;
+				}
+				async execute() {
+					return { content: [{ type: "text" as const, text: this.#context.sessionId }], details: {} };
+				}
+				release() {
+					expect(this.#context).toBe(backendContext);
+					released();
+				}
+			}
+			const acquire = vi.fn(() => new BackendInvocation());
+			const fallback = vi.fn(async () => ({ content: [], details: {} }));
+			const tool: AgentTool = {
+				name: "read",
+				label: "read",
+				description: "synthetic backend",
+				parameters: Type.Object({}),
+				execute: fallback,
+				async bindInvocation() {
+					expect(this).toBe(tool);
+					return acquire();
+				},
+			};
+			const bound = admission.bindTool(tool, captured.worker.executionContext!);
+			const controller = new AbortController();
+			if (state === "replaced") {
+				await rename(cwd, `${cwd}-original`);
+				await mkdir(cwd);
+			}
+			if (state === "cancelled") controller.abort(new Error("synthetic cancellation"));
+			if (state !== "unchanged") {
+				await expect(bound.bindInvocation!("call", {}, controller.signal)).rejects.toThrow(
+					state === "replaced" ? "identity changed" : "synthetic cancellation",
+				);
+				expect(acquire).not.toHaveBeenCalled();
+				expect(released).not.toHaveBeenCalled();
+			} else {
+				const binding = await bound.bindInvocation!("call", {}, controller.signal);
+				expect(binding.executionContext).toBe(backendContext);
+				expect(await binding.execute("call", {})).toMatchObject({ content: [{ text: "backend-session" }] });
+				binding.release();
+				expect(acquire).toHaveBeenCalledOnce();
+				expect(released).toHaveBeenCalledOnce();
+			}
+			expect(fallback).not.toHaveBeenCalled();
+		},
+	);
+
 	it("preserves explicitly admitted legacy recovery without silently weakening a recorded binding", async () => {
 		const { cwd, source, admission, signal } = await fixture();
 		await expect(admission.validateWorker(source, signal)).rejects.toThrow("identity is unavailable");

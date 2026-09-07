@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AgentContext } from "@caupulican/pi-agent-core";
@@ -104,6 +104,31 @@ describe("classified lane tool surface", () => {
 			expect(replacement).not.toBe(ownedSession);
 		} finally {
 			disposePersistentShellSession(shellSessionKey);
+		}
+	});
+
+	it("starts every worker shell call in its assigned directory after a shell-local cd", async () => {
+		const shellSessionKey = `lane-pin-${Math.random().toString(36).slice(2)}`;
+		const surface = createLaneToolSurface({
+			cwd,
+			profile: profile({ tools: { allow: ["bash"] } }),
+			shellSessionKey,
+		});
+		const shell = surface.tools.find((tool) => tool.name === "bash")!;
+		try {
+			const moved = await shell.execute("move", { command: "cd src" });
+			expect(moved.isError).not.toBe(true);
+			const location = await shell.execute("where", {
+				command: process.platform === "win32" ? "(Get-Location).Path" : "pwd",
+			});
+			expect(location.isError).not.toBe(true);
+			const output = location.content
+				.filter((part) => part.type === "text")
+				.map((part) => part.text)
+				.join("\n");
+			expect(realpathSync.native(output.trim())).toBe(realpathSync.native(cwd));
+		} finally {
+			await surface.dispose();
 		}
 	});
 
