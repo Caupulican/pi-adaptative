@@ -21,28 +21,44 @@ export class SessionNativePiActivityRuntime implements AgentSessionRuntimeResour
 		return this.handle !== undefined;
 	}
 
+	/**
+	 * A collaboration host that cannot be reached is a status-signal failure, not a session failure:
+	 * the failure is reported through `onError` and the session keeps running standalone. Nothing is
+	 * retried silently; the next session replacement attaches again.
+	 */
 	start(session: AgentSession): Promise<void> {
 		const generation = ++this.generation;
 		return this.replace(async () => {
 			const port = session.nativeActivity;
-			const handle = await attachNativePiActivity(
-				{
-					...port,
-					isSettled: () => this.activated && port.isSettled(),
-					sessionManager: session.sessionManager,
-					subscribe: (listener) => session.subscribe(listener),
-				},
-				this.options,
-			);
+			let handle: NativePiActivity | undefined;
 			try {
+				handle = await attachNativePiActivity(
+					{
+						...port,
+						isSettled: () => this.activated && port.isSettled(),
+						sessionManager: session.sessionManager,
+						subscribe: (listener) => session.subscribe(listener),
+					},
+					this.options,
+				);
 				await handle?.flush();
-				if (generation === this.generation) this.handle = handle;
-				else await handle?.dispose();
 			} catch (error) {
 				await handle?.dispose().catch(() => {});
-				throw error;
+				this.report(error);
+				return;
 			}
+			if (generation === this.generation) this.handle = handle;
+			else await handle?.dispose();
 		});
+	}
+
+	private report(error: unknown): void {
+		const failure = error instanceof Error ? error : new Error(String(error));
+		try {
+			this.options?.onError?.(failure);
+		} catch {
+			/* Status telemetry cannot abort startup. */
+		}
 	}
 
 	/** Initial idle must follow UI/input binding, never just process startup. */

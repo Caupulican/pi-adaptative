@@ -6,6 +6,27 @@ import { SessionNativePiActivityRuntime } from "../src/core/collaboration/native
 const mocks = vi.hoisted(() => ({ attach: vi.fn() }));
 vi.mock("../src/core/collaboration/native-pi-activity.ts", () => ({ attachNativePiActivity: mocks.attach }));
 describe("native Pi session replacement", () => {
+	it("reports a failed Herdr attachment and keeps the session standalone instead of aborting startup", async () => {
+		// Live defect: `CollaborationBackendError: Herdr connection failed before submission` escaped
+		// main.ts and killed pi inside a Herdr pane.
+		const failure = new Error("Herdr connection failed before submission.");
+		mocks.attach.mockRejectedValueOnce(failure);
+		const onError = vi.fn();
+		const runtime = new SessionNativePiActivityRuntime({ deferInitialSettlement: true, onError });
+		const session = { nativeActivity: {}, sessionManager: {}, subscribe: vi.fn() } as unknown as AgentSession;
+		await expect(runtime.start(session)).resolves.toBeUndefined();
+		expect(runtime.active).toBe(false);
+		expect(onError).toHaveBeenCalledWith(failure);
+		await expect(runtime.activate()).resolves.toBeUndefined();
+		// A later session replacement attaches normally once the host is reachable again.
+		const handle = { refresh: vi.fn(), flush: vi.fn(async () => {}), dispose: vi.fn(async () => {}) };
+		mocks.attach.mockResolvedValueOnce(handle);
+		await runtime.start(session);
+		expect(runtime.active).toBe(true);
+		await runtime.stop();
+		expect(handle.dispose).toHaveBeenCalledOnce();
+	});
+
 	it("serializes release before replacement and waits for a startup already in flight during stop", async () => {
 		let attached: ((handle: NativePiActivity) => void) | undefined;
 		mocks.attach.mockImplementationOnce(
@@ -67,9 +88,12 @@ describe("native Pi session replacement", () => {
 			dispose: vi.fn(async () => {}),
 		};
 		mocks.attach.mockResolvedValueOnce(handle);
-		const runtime = new SessionNativePiActivityRuntime();
+		const onError = vi.fn();
+		const runtime = new SessionNativePiActivityRuntime({ onError });
 		const session = { nativeActivity: {}, sessionManager: {}, subscribe: vi.fn() } as unknown as AgentSession;
-		await expect(runtime.start(session)).rejects.toThrow("lost acknowledgement");
+		// A lost acknowledgement is reported and released; it never aborts the session it decorates.
+		await expect(runtime.start(session)).resolves.toBeUndefined();
+		expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: "lost acknowledgement" }));
 		expect(runtime.active).toBe(false);
 		expect(handle.dispose).toHaveBeenCalledOnce();
 		await runtime.stop();
