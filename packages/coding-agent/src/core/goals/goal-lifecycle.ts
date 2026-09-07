@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
 	applyGoalEvent,
 	type GoalState,
@@ -15,6 +16,28 @@ export interface GoalStateRevision {
 
 export function getGoalStateRevision(state: GoalState): GoalStateRevision {
 	return { goalId: state.goalId, revision: state.revision ?? 0 };
+}
+
+/** Rebase a pending evidence observation only across proven evidence-only journal additions. */
+export function resolveGoalEvidenceCommitState(
+	observed: GoalState | undefined,
+	current: GoalState | undefined,
+): GoalState | undefined {
+	if (observed === current) return current;
+	if (observed && current && observed.goalId === current.goalId) {
+		const added = (current.revision ?? 0) - (observed.revision ?? 0);
+		if (added >= 0 && added <= current.events.length) {
+			let replayed = observed;
+			for (let index = current.events.length - added; index < current.events.length; index++) {
+				const event = current.events[index];
+				if (event.type !== "add_evidence") break;
+				replayed = applyGoalEvent(replayed, event);
+			}
+			// Replay also proves ancestry: an equal id/revision on a replaced branch is insufficient.
+			if (isDeepStrictEqual(replayed, current)) return current;
+		}
+	}
+	throw new Error("Goal state changed concurrently during evidence verification. Retry against the latest state.");
 }
 
 const AUTO_RESUMABLE_SYSTEM_STOP_REASON_PREFIXES = [

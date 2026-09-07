@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
+import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { collectUnknownAliasTokensInPathParams, expandParams, type PathAliasTable } from "./path-alias-table.ts";
 
 const MAX_REPORTED_UNKNOWN_TOKENS = 3;
@@ -35,17 +36,19 @@ export function wrapToolWithPathAliasExpansion(
 	getCwd: () => string,
 ): AgentTool {
 	if (wrapped.has(tool)) return tool;
-	const execute = tool.execute.bind(tool);
 	const prepareArguments = tool.prepareArguments?.bind(tool);
-	const next: AgentTool = {
-		...tool,
-		prepareArguments: prepareArguments ? (args) => prepareArguments(expandParams(getTable(), args)) : undefined,
+	const next = wrapToolExecution(tool, (executor, context) => ({
+		...executor,
+		prepareArguments: (args) => {
+			const expanded = expandParams(getTable(), args);
+			return prepareArguments ? prepareArguments(expanded) : expanded;
+		},
 		execute: (toolCallId, params, signal, onUpdate) => {
 			const table = getTable();
-			assertNoUnmintedAliases(table, params, getCwd());
-			return execute(toolCallId, expandParams(table, params) as typeof params, signal, onUpdate);
+			assertNoUnmintedAliases(table, params, context?.cwd ?? getCwd());
+			return executor.execute(toolCallId, expandParams(table, params) as typeof params, signal, onUpdate);
 		},
-	};
+	}));
 	// Only a descriptor that actually owns expansion is wrapped. The registry may reactivate
 	// the original descriptor repeatedly; marking that original would bypass expansion later.
 	wrapped.add(next);

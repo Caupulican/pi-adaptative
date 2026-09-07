@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved concurrent goal evidence additions and forwarded revision checks through the session runtime to prevent lost records and stale goal overwrites.
+- Expanded path aliases before tool admission and in bound executors, preventing valid aliases from failing as missing files.
+- Canonicalized native task directories component by component in the backend's own syntax, so a Windows session whose root the native realpath spells outside the drive/UNC namespace (volume mounts, mapped drives, drive roots) admits every tool instead of rejecting all of them at preflight; the path assertion now names the rejected spelling.
+- Treated line breaks as command separators in the Windows shell contract router; multi-line bash commands route to the shell engine instead of running the first command with every later line as its arguments.
+- Added `if`/`elif`/`else`, `while`, and `until` to the bundled Windows shell engine and `grep -I` binary skipping.
+- Reported a failed Herdr collaboration attachment through the activity error channel and kept the session standalone instead of aborting startup.
+- Classified invented tool names as one `unknown_tool` mistake kind in the failure ledger, and named the declared tool an invented name begins with in the correction.
+- Reported missing discriminated-union arguments (for example `task_steps` without `action`) as `required, one of …` instead of `expected object`.
+
+### Changed
+
+- Credential exposure for owner sessions is now a mock stream instead of a hard block: broad searches, credential file reads, and process-environment inspection run, and their output keeps keys and structure while every secret value is replaced with a `<mocked:NAME>` placeholder. Worker lanes keep the fail-closed authority boundary.
+
 ## [0.99.5] - 2026-09-07
 
 ### Fixed

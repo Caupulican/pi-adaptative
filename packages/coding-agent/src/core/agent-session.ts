@@ -1021,7 +1021,7 @@ export class AgentSession {
 			restoreMemoryReloadSnapshot: (snapshot) => this._memory.restoreReloadSnapshot(snapshot),
 			initializeMemory: () => this._memory.initialize(),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
-			saveGoalStateSnapshot: (state) => this.saveGoalStateSnapshot(state),
+			saveGoalStateSnapshot: (state, expected) => this.saveGoalStateSnapshot(state, expected),
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
 			authorizeGoalStartFromTool: (input) => this._goals.authorizeStartFromTool(input),
 			getTaskStepsStateSnapshot: () => this.getTaskStepsStateSnapshot(),

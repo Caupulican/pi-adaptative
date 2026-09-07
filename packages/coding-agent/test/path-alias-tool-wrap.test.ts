@@ -1,5 +1,6 @@
+import { createExecutionContext } from "@caupulican/pi-agent-core/paths";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { emptyPathAliasTable, extendPathAliasTable } from "../src/core/context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../src/core/context/path-alias-tool-wrap.ts";
 
@@ -23,6 +24,61 @@ function recordingTool() {
 }
 
 describe("path alias tool wrapper", () => {
+	it("expands aliases before admission even without an existing argument preparer", () => {
+		const { tool } = recordingTool();
+		const wrapped = wrapToolWithPathAliasExpansion(
+			tool,
+			() => table,
+			new WeakSet(),
+			() => "/repo",
+		);
+		expect(wrapped.prepareArguments?.({ path: "p/grep.ts" })).toEqual({
+			path: "packages/coding-agent/src/core/tools/grep.ts",
+		});
+	});
+
+	it.each(["p/grep.ts", "p/ghost.ts"])(
+		"decorates the admitted executor for %s and retains its release owner",
+		async (path) => {
+			const { tool, calls } = recordingTool();
+			const boundExecute = vi.fn(tool.execute);
+			const release = vi.fn();
+			const executionContext = createExecutionContext({
+				attachment: {
+					workspaceId: "repo",
+					attachmentId: "repo-v1",
+					root: "/repo",
+					flavor: "posix",
+					caseSensitive: true,
+				},
+				cwd: "/repo",
+				sessionId: "alias-test",
+				generation: 0,
+			});
+			const bindInvocation = vi.fn(async () => ({ executionContext, execute: boundExecute, release }));
+			const wrapped = wrapToolWithPathAliasExpansion(
+				{ ...tool, bindInvocation },
+				() => table,
+				new WeakSet(),
+				() => "/repo",
+			);
+			const invocation = await wrapped.bindInvocation!("bound", { path });
+			try {
+				if (path === "p/ghost.ts") {
+					expect(() => invocation.execute("bound", { path })).toThrow("Unminted path alias");
+					expect(boundExecute).not.toHaveBeenCalled();
+				} else {
+					await invocation.execute("bound", { path });
+					expect(calls).toEqual([{ path: "packages/coding-agent/src/core/tools/grep.ts" }]);
+				}
+			} finally {
+				invocation.release();
+			}
+			expect(bindInvocation).toHaveBeenCalledTimes(1);
+			expect(release).toHaveBeenCalledTimes(1);
+		},
+	);
+
 	it("never refuses an alias-shaped token inside code or command text", async () => {
 		const { tool, calls } = recordingTool();
 		const wrapped = wrapToolWithPathAliasExpansion(

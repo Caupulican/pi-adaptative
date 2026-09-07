@@ -5,7 +5,11 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { type GoalFileEvidenceResolver, resolveNativeGoalFileEvidence } from "../goals/file-evidence.ts";
-import { type GoalStateRevision, getGoalStateRevision } from "../goals/goal-lifecycle.ts";
+import {
+	type GoalStateRevision,
+	getGoalStateRevision,
+	resolveGoalEvidenceCommitState,
+} from "../goals/goal-lifecycle.ts";
 import {
 	type GoalEvidenceKind,
 	type GoalEvidenceOutcome,
@@ -658,9 +662,11 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 				}
 			}
 
-			// The existing compare-and-append host must check the state from BEFORE asynchronous
-			// evidence lookup. Reading a replacement goal here would attach the old proof to it.
-			const current = action.action === "add_evidence" ? evidenceState : deps.getGoalState();
+			// Parallel evidence may extend the same goal while verification waits. Rebase only across
+			// those additions; replacements and other transitions still invalidate the observation.
+			const latest = deps.getGoalState();
+			const current =
+				action.action === "add_evidence" ? resolveGoalEvidenceCommitState(evidenceState, latest) : latest;
 			let nextState: GoalState;
 			if (action.action === "dispatch_worker" && dispatchGuardRefused) {
 				// Short-circuit: the guard refused before any dispatch attempt -- never call
