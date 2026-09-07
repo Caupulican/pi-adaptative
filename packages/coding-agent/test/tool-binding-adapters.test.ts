@@ -34,6 +34,20 @@ describe("invocation binding across registry and policy adapters", () => {
 	const fallback = vi.fn<AgentTool<typeof parameters>["execute"]>();
 	const execute = vi.fn<AgentTool<typeof parameters>["execute"]>();
 	const release = vi.fn();
+	class PrototypeInvocation {
+		#context = executionContext;
+		get executionContext() {
+			return this.#context;
+		}
+		async execute() {
+			expect(this.#context).toBe(executionContext);
+			return execute("fixture", { path: "fixture.txt" });
+		}
+		release() {
+			expect(this.#context).toBe(executionContext);
+			release();
+		}
+	}
 
 	beforeEach(() => {
 		root = mkdtempSync(join(tmpdir(), "pi-binding-adapters-"));
@@ -99,6 +113,82 @@ describe("invocation binding across registry and policy adapters", () => {
 		expect(execute).toHaveBeenCalledOnce();
 		expect(fallback).not.toHaveBeenCalled();
 		expect(release).toHaveBeenCalledOnce();
+	});
+
+	it.each(["to-definition", "from-definition", "execution-wrapper"])(
+		"preserves the binding factory receiver through %s",
+		async (boundary) => {
+			const definition = createToolDefinitionFromAgentTool(tool);
+			tool.bindInvocation = async function () {
+				expect(this).toBe(tool);
+				return { executionContext, execute, release };
+			};
+			definition.bindInvocation = async function () {
+				expect(this).toBe(definition);
+				return { executionContext, execute, release };
+			};
+			const wrapped =
+				boundary === "to-definition"
+					? createToolDefinitionFromAgentTool(tool)
+					: boundary === "from-definition"
+						? wrapToolDefinition(definition)
+						: wrapToolExecution(tool, (executor) => executor);
+			const binding = await wrapped.bindInvocation!("receiver", { path: "fixture.txt" });
+			await binding.execute("receiver", { path: "fixture.txt" });
+			binding.release();
+			expect(execute).toHaveBeenCalledOnce();
+			expect(release).toHaveBeenCalledOnce();
+		},
+	);
+
+	it.each([false, true])("retains prototype lease methods through nested guards; execute=%s", async (run) => {
+		tool.bindInvocation = async () => new PrototypeInvocation();
+		const wrapped = wrapToolWithEnvelopeScope(
+			wrapToolWithCredentialExposureGuard(tool, ambient, { redactSensitiveText: (text) => text }),
+			{ id: "fixture", capabilities: ["filesystem.read"], allowedPaths: [executionContext.cwd] },
+			ambient,
+		);
+		const binding = await wrapped.bindInvocation!("prototype", { path: "fixture.txt" });
+		if (run) await binding.execute("prototype", { path: "fixture.txt" });
+		binding.release();
+		expect(execute).toHaveBeenCalledTimes(run ? 1 : 0);
+		expect(release).toHaveBeenCalledOnce();
+		expect(fallback).not.toHaveBeenCalled();
+	});
+
+	it("retains decorator receivers for ordinary and admitted execution", async () => {
+		const wrapped = wrapToolExecution(
+			tool,
+			(executor) =>
+				new (class {
+					name = executor.name;
+					label = executor.label;
+					description = executor.description;
+					parameters = executor.parameters;
+					#executor = executor;
+					execute(...args: Parameters<typeof executor.execute>) {
+						return this.#executor.execute(...args);
+					}
+				})(),
+		);
+		await wrapped.execute("ordinary", { path: "fixture.txt" });
+		const binding = await wrapped.bindInvocation!("bound", { path: "fixture.txt" });
+		await binding.execute("bound", { path: "fixture.txt" });
+		binding.release();
+		expect(fallback).toHaveBeenCalledOnce();
+		expect(execute).toHaveBeenCalledOnce();
+		expect(release).toHaveBeenCalledOnce();
+	});
+
+	it("releases a prototype-owned lease when decoration fails", async () => {
+		tool.bindInvocation = async () => new PrototypeInvocation();
+		const wrapped = wrapToolExecution(tool, (executor, context) => {
+			if (context) throw new Error("synthetic decoration failure");
+			return executor;
+		});
+		await expect(wrapped.bindInvocation!("rejected", { path: "fixture.txt" })).rejects.toThrow("decoration failure");
+		expect(release).toHaveBeenCalledOnce();
+		expect(execute).not.toHaveBeenCalled();
 	});
 
 	it("keeps ordinary tools unbound as a negative control", async () => {
@@ -366,9 +456,15 @@ describe("invocation binding across registry and policy adapters", () => {
 		binding.release();
 	});
 
-	it.each(["source.ts", ".env"])(
-		"runs the definition-first AgentSession registry with the bound %s call",
-		async (path) => {
+	it.each([
+		["source.ts", false],
+		[".env", false],
+		["source.ts", true],
+		[".env", true],
+	] as const)(
+		"runs the definition-first AgentSession registry with the bound %s call; prototype=%s",
+		async (path, prototype) => {
+			if (prototype) tool.bindInvocation = async () => new PrototypeInvocation();
 			const harness = await createHarness({ tools: [tool], settings: { modelCapability: { mode: "off" } } });
 			try {
 				harness.session.capabilityEnvelope = {

@@ -35,7 +35,7 @@ export async function bindToolInvocation<TParameters extends TSchema, TDetails>(
 		signal?.throwIfAborted();
 		const executionContext = captureExecutionContext(invocation.executionContext);
 		return {
-			tool: { ...tool, execute: invocation.execute, failureRecovery: invocation.failureRecovery },
+			tool: { ...tool, execute: invocation.execute.bind(invocation), failureRecovery: invocation.failureRecovery },
 			executionContext,
 			executionScope: executionContextScope(executionContext),
 			release,

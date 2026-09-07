@@ -20,15 +20,16 @@ export function wrapToolExecution<T extends ExecutableTool>(
 	if (!bind) return wrapped;
 	return {
 		...wrapped,
+		execute: wrapped.execute.bind(wrapped),
 		bindInvocation: async (...args: Parameters<NonNullable<T["bindInvocation"]>>) => {
-			const invocation = await bind(...args);
+			const invocation = await bind.call(tool, ...args);
 			try {
 				const executionContext = captureExecutionContext(invocation.executionContext);
 				// Only executor-owned fields change. Never let invocation metadata replace the registry schema or name.
 				const bound = decorate(
 					{
 						...tool,
-						execute: invocation.execute,
+						execute: invocation.execute.bind(invocation),
 						failureRecovery: invocation.failureRecovery,
 						bindInvocation: undefined,
 					} as T,
@@ -37,7 +38,9 @@ export function wrapToolExecution<T extends ExecutableTool>(
 				return {
 					...invocation,
 					executionContext,
-					execute: bound.execute,
+					execute: bound.execute.bind(bound),
+					// Prototype methods are not enumerable; the original lease remains the owner.
+					release: () => invocation.release(),
 					...("failureRecovery" in bound ? { failureRecovery: bound.failureRecovery } : {}),
 				};
 			} catch (error) {

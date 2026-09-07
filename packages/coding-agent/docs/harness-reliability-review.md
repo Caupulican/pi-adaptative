@@ -158,6 +158,14 @@ Synthetic differential tests reproduce scope loss, foreign-scope acceptance, con
 verification, and foreign-session admission. A real native AgentSession fixture verifies selected-project
 I/O and matching foreground/background receipt scopes through an event-driven manual handoff.
 
+Binding adapters now preserve method receivers, including prototype-defined execution and lease
+release. Previously, copying methods onto another object broke private backend state, and object
+spreading silently omitted a prototype release method. The engine, definition bridges, and shared
+execution decorator retain the original owners without acquiring another lease. Synthetic class-based
+fixtures independently reproduce those failures. Real AgentSession controls prove allowed execution
+and credential refusal both release the original backend exactly once; guard failures do not fall back
+to the ambient executor. Ordinary and admitted class-based decorators also retain their receivers.
+
 This integration is not the completed portability contract. Delegated worker
 task creation still needs an end-to-end binding audit, persisted relative goal-evidence identity and child
 receipt identity need review, and model context
@@ -330,6 +338,14 @@ a schema field or a prompt instruction. All execution paths must consume the bin
   newline-kind and final-newline signatures. No existing content was transcoded. Native identity
   capture currently uses synchronous stat at attachment construction; slow network filesystems and
   stronger machine identity still need portability review before release.
+- The receiver-preservation slice passes 129 targeted tests across eight files (83 agent, 46
+  coding-agent), including eleven added cases. Seven independent red cases demonstrated lost
+  receivers, a missing prototype release method, and dropped decorator execution. Admission refusal,
+  failed decoration, nested guards, and real session controls retain the existing authority boundary.
+  The initial core fixture used a synchronous policy callback where the contract requires a promise;
+  correcting that test-only type error did not change production policy. Repository checks pass with
+  966 eligible / 975 owned files accounted for and zero clones. All six edited tracked files retain
+  their UTF-8 validity, BOM, newline-kind and final-newline signatures; none were transcoded.
 - Host npm configuration emits `globalignorefile` warnings. Local Node is 24.18.1, below the declared
   24.20.0 minimum. Successful checks on this host do not replace supported-runtime CI evidence.
 

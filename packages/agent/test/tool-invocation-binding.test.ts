@@ -130,6 +130,29 @@ async function run(
 }
 
 describe("core tool invocation binding", () => {
+	it.each([false, true])("preserves invocation method receivers; blocked=%s", async (blocked) => {
+		const { tool, context, events } = fixture();
+		class Invocation {
+			#context = context;
+			get executionContext() {
+				return this.#context;
+			}
+			async execute() {
+				events.push(this.#context.cwd);
+				return result();
+			}
+			release() {
+				events.push(`released:${this.#context.cwd}`);
+			}
+		}
+		tool.bindInvocation = async () => new Invocation();
+		const messages = await run(tool, {
+			beforeToolCall: async () => (blocked ? { block: true, reason: "fixture refusal" } : undefined),
+		});
+		expect(messages.find((item) => item.role === "toolResult")).toMatchObject({ isError: blocked });
+		expect(events).toEqual(blocked ? [`released:${context.cwd}`] : [context.cwd, `released:${context.cwd}`]);
+	});
+
 	it.each(["rejected", "invalid_context", "cancelled"])(
 		"does not fall back to ambient execution after binding %s",
 		async (failure) => {
