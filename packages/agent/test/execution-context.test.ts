@@ -5,6 +5,7 @@ import {
 	resolveExecutionPath,
 	resolveExecutionResource,
 } from "../src/execution-paths.ts";
+import { getToolExecutionKey } from "../src/tool-failure-memory.ts";
 
 function context(root = "/fixture/repository", attachmentId = "fixture-attachment"): ExecutionContext {
 	return createExecutionContext({
@@ -16,6 +17,16 @@ function context(root = "/fixture/repository", attachmentId = "fixture-attachmen
 }
 
 describe("host-owned execution context", () => {
+	it("retains task identity and separates replay scopes for tasks sharing a directory", () => {
+		const first = createExecutionContext({ ...context(), taskId: "first" });
+		const second = createExecutionContext({ ...first, taskId: "second" });
+		expect(first.taskId).toBe("first");
+		expect(getToolExecutionKey("context", first)).not.toBe(getToolExecutionKey("context", second));
+		expect(getToolExecutionKey("context", first)).toBe(getToolExecutionKey("context", createExecutionContext(first)));
+		for (const taskId of ["", "x".repeat(257), "bad\nidentity"]) {
+			expect(() => createExecutionContext({ ...context(), taskId })).toThrow("identity");
+		}
+	});
 	it("freezes an independent attachment snapshot", () => {
 		const source = { ...context(), attachment: { ...context().attachment } };
 		const snapshot = createExecutionContext(source);

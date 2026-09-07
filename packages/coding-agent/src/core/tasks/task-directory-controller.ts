@@ -36,7 +36,7 @@ export interface TaskDirectoryLease {
 }
 
 interface HeldDirectory {
-	taskId: string;
+	taskId: string | undefined;
 	context: ExecutionContext;
 }
 
@@ -126,7 +126,8 @@ export class TaskDirectoryController {
 		}
 	}
 
-	async admit(taskId: string, signal?: AbortSignal): Promise<TaskDirectoryLease> {
+	/** Unconfigured tasks may explicitly inherit selection; validation failures never fall back. */
+	async admit(taskId: string | undefined, signal?: AbortSignal, inheritUnbound = false): Promise<TaskDirectoryLease> {
 		const combined = signal ? AbortSignal.any([signal, this.shutdown.signal]) : this.shutdown.signal;
 		combined.throwIfAborted();
 		let held: HeldDirectory;
@@ -134,7 +135,12 @@ export class TaskDirectoryController {
 		for (;;) {
 			const snapshot = this.options.store.read();
 			revisionId = snapshot.revisionId;
-			const context = resolveTaskDirectoryContext(snapshot.state ?? this.initial, taskId, this.options.sessionId);
+			const context = resolveTaskDirectoryContext(
+				snapshot.state ?? this.initial,
+				taskId,
+				this.options.sessionId,
+				inheritUnbound,
+			);
 			held = { taskId, context };
 			if (![...this.pendingChanges].some((command) => affectsLease(command, held))) break;
 			await this.waitForChange(combined);

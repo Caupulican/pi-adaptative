@@ -67,6 +67,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["delegate", DELEGATE_POLICY],
 	["model_fitness", policy([["research.execute"]], "control-plane")],
 	["task_steps", policy([["workflow.plan", "memory.mutate"]], "control-plane")],
+	["task_directory", policy([["workflow.plan", "memory.mutate"]], "control-plane")],
 	["pipeline", policy([["workflow.plan"], ["filesystem.write", "worktree.mutate"]], ["control-plane", "path-scope"])],
 	["tool_task", policy([["process.exec", "workflow.delegate"]], "control-plane")],
 	["worktree_sync", policy([["worktree.mutate", "filesystem.write"]], "path-scope")],

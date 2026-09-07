@@ -24,6 +24,13 @@ const second: ExecutionAttachment = {
 };
 
 describe("task directory state", () => {
+	it("explicitly admits an unconfigured task at the selected workspace without inventing a pin", () => {
+		const state = createTaskDirectoryState(first);
+		const context = resolveTaskDirectoryContext(state, "new-task", "session", true);
+		expect(context).toMatchObject({ cwd: first.root, taskId: "new-task" });
+		expect(state.bindings).toEqual([]);
+		expect(resolveTaskDirectoryContext(state, undefined, "session").cwd).toBe(first.root);
+	});
 	it("keeps pins stable while unpinned tasks follow workspace selection", () => {
 		let state = createTaskDirectoryState(first);
 		state = transitionTaskDirectoryState(state, { action: "register", attachment: second });

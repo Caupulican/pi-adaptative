@@ -12,6 +12,8 @@ export interface ExecutionAttachment {
 export interface ExecutionContext {
 	readonly attachment: ExecutionAttachment;
 	readonly sessionId: string;
+	/** Optional host task identity; distinct tasks never share invocation/recovery identity by accident. */
+	readonly taskId?: string;
 	readonly generation: number;
 	readonly cwd: string;
 }
@@ -28,7 +30,12 @@ export function assertExecutionAbsolutePath(value: string, flavor: ExecutionPath
 
 /** Capture an already backend-resolved context without consulting the operator's filesystem. */
 export function captureExecutionContext(input: ExecutionContext): ExecutionContext {
-	for (const identity of [input.sessionId, input.attachment.workspaceId, input.attachment.attachmentId]) {
+	for (const identity of [
+		input.sessionId,
+		input.attachment.workspaceId,
+		input.attachment.attachmentId,
+		...(input.taskId === undefined ? [] : [input.taskId]),
+	]) {
 		if (!identity || identity.length > 256 || /[\u0000-\u001f\u007f]/u.test(identity)) {
 			throw new Error("Execution identity must be bounded nonempty text");
 		}
@@ -40,6 +47,7 @@ export function captureExecutionContext(input: ExecutionContext): ExecutionConte
 	return Object.freeze({
 		attachment: Object.freeze({ ...input.attachment }),
 		sessionId: input.sessionId,
+		...(input.taskId === undefined ? {} : { taskId: input.taskId }),
 		generation: input.generation,
 		cwd: input.cwd,
 	});

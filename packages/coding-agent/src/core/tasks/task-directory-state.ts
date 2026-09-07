@@ -85,17 +85,21 @@ export function createTaskDirectoryState(attachment: ExecutionAttachment): TaskD
 
 export function resolveTaskDirectoryContext(
 	state: TaskDirectoryState,
-	taskId: string,
+	taskId: string | undefined,
 	sessionId: string,
+	inheritUnbound = false,
 ): ExecutionContext {
+	if (taskId !== undefined) requireTaskIdentity(taskId);
 	const binding = state.bindings.find((candidate) => candidate.taskId === taskId);
-	if (!binding) throw new Error(`Task has no directory binding: ${JSON.stringify(taskId)}`);
-	return directoryContext(
-		workspace(state, binding.workspaceId ?? state.selectedWorkspaceId),
-		binding.path,
+	if (taskId !== undefined && !binding && !inheritUnbound)
+		throw new Error(`Task has no directory binding: ${JSON.stringify(taskId)}`);
+	const context = directoryContext(
+		workspace(state, binding?.workspaceId ?? state.selectedWorkspaceId),
+		binding?.path ?? ".",
 		sessionId,
 		state.revision,
 	);
+	return createExecutionContext({ ...context, ...(taskId === undefined ? {} : { taskId }) });
 }
 
 /** Pure transition; no process-global cwd, filesystem, shell session, or persistence side effects. */

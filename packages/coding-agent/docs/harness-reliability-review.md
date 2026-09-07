@@ -67,17 +67,17 @@ The session adapter uses the existing branch-scoped journal with compare-and-app
 snapshot restoration. The backend validation port resolves directories and links before an explicit
 host authorization callback; a native filesystem adapter preserves missing/permission errors.
 
-These five focused suites have 40 passing tests, including actual journal reopening, cancellation,
-reattachment waiting for all leases, synthetic Windows/UNC paths, and native symlink controls. They are
-not yet connected to production tool admission or model-facing controls; task-directory execution is
-not available from this foundation alone. Journal custom entries before the first assistant/lifecycle
+The foundation's five focused suites have 40 passing tests, including actual journal reopening,
+cancellation, reattachment waiting for all leases, synthetic Windows/UNC paths, and native symlink controls.
+The native runtime integration described below connects this owner to core tools and model controls.
+Journal custom entries before the first assistant/lifecycle
 record are deferred by SessionManager, so pre-conversation setup still needs an explicit durability
 contract. Filesystem validation is not an OS sandbox or an atomic defense against external link swaps.
 
 The shell adapters now accept a host-controlled `forceCwd` option. Persistent shell execution restores
 the directory under its existing lock, while the Windows engine uses the same state owner to reset cwd
 without clearing environment deltas. The Bash tool propagates this option and keeps direct Git filtering
-in the pinned directory. Model-facing task selection and session-wide tool wiring remain outstanding.
+in the pinned directory. The native runtime now supplies this option for admitted model shell calls.
 
 Shell persistence already exists per agent. It is not a task-directory contract: a shell can retain
 one directory while file tools and the session still use another. Increasing reminders to use `cd`
@@ -104,10 +104,40 @@ session. Hooks may still edit arguments, but their final arguments are checked a
 
 Seventeen adapter regressions cover binding retention, guard composition, progress/result/error redaction,
 bound recovery, hook-edited paths, concurrent contexts, and stale runner access. Two use the real
-AgentSession registry with a faux provider and synthetic executors. This proves caller-supplied bindings
-survive the registry, not that the persistent task controller or model controls are connected. Those
-runtime connections remain necessary before enabling session-wide task pinning. Native filesystem guards
-are not remote-backend authorization adapters.
+AgentSession registry with a faux provider and synthetic executors. This adapter checkpoint proved
+caller-supplied bindings survive the registry. Native filesystem guards are not remote-backend
+authorization adapters.
+
+The native runtime now exposes `task_directory` for workspace registration/selection, explicit task
+pin/unpin, status, and reattachment. The active `task_steps` item is the only task cursor. Task and
+directory commands form sequential admission barriers, so a later read in the same assistant batch
+uses the newly selected context. Tasks without an explicit pin inherit selection without a hidden
+durable binding. The captured task identity also separates replay scopes for tasks sharing a directory.
+
+Core native tool factories bind before decorators. Regression tests independently reproduced and fixed
+an extension override being replaced by the native factory and a lane mutation guard being bypassed by
+the rebuilt executor. SDK-supplied tools keep their explicit backend contract. Extension execute callbacks
+receive an asynchronous invocation-local context; neither concurrent calls nor hooks change process cwd.
+Native file tools retain their existing concrete-resource permission gate, including file-only grants;
+process admission additionally checks its cwd. Directory metadata does not expand those grants.
+
+Native shells are keyed by session, task, and attachment, with bounded idle eviction and terminal-close
+ownership. Failed retirement stays owned and retryable; active leases cannot be evicted. Real faux-provider
+session tests cover two-project task switching, same-batch ordering, runtime reload, shell-local `cd`,
+and edits preserving BOM and mixed line endings. Separate native tests cover missing-root refusal,
+explicit reattachment, foreign attachment markers, and concurrent callback isolation. These are synthetic
+fixtures, not copied session data.
+
+An archived checklist step can still have its binding forgotten by exact id; requiring a live checklist
+selector made orphan bindings impossible to remove. The session regression reproduced that failure before
+the tool adapter fix. Suspected id reuse on checklist replacement was rejected after inspection: the task
+owner already keeps its next-step counter monotonic across replacement and clearing.
+
+This integration is not the completed portability contract. Composite tools and delegated/background
+task creation still need an end-to-end binding audit, and model context projection must survive compaction.
+The current native host marker hashes platform and hostname; it detects differing hostnames, not identical
+hostnames or cloned machines. It must not be presented as a strong machine identity. Native Windows runtime
+integration still needs this stage's CI evidence. General backend fencing remains a release prerequisite.
 
 The model must be able to start tasks in different directories and explicitly decide which tasks
 are pinned. Pinning is durable execution state, not a prompt note or a process-global `chdir`.
@@ -153,8 +183,8 @@ are pinned. Pinning is durable execution state, not a prompt note or a process-g
    task directory without replaying a completed mutation.
 
 Implement in separately verified stages: binding/persistence and reducers; admission and tool adapters;
-then model-facing actions and status projection. Do not advertise the feature after only adding a schema
-field or a prompt instruction. All execution paths must consume the binding before the feature is enabled.
+then model-facing actions and status projection. Do not advertise the completed feature after only adding
+a schema field or a prompt instruction. All execution paths must consume the binding before release.
 
 ## Open decisions and limits
 
@@ -203,6 +233,14 @@ field or a prompt instruction. All execution paths must consume the binding befo
   including 17 new adapter cases. Repository checks pass with 962 eligible / 971 owned production
   files accounted for and zero clones. Ten edited tracked files retain their BOM/newline conventions;
   two new files validate as UTF-8. These edits do not transcode existing content.
+- The registry/policy checkpoint `a7aaca284f186752d383595c41761646b6595e97` also passed all ten
+  GitHub CI jobs. This is evidence for that exact checkpoint, not for uncommitted native integration.
+- Native runtime integration passes 104 targeted coding-agent tests in 17 files and 34 targeted
+  agent tests in two files. The ownership audit reproduced duplicate registry guard construction,
+  then consolidated it without changing extension override order. The clone gate accounts for
+  965 eligible / 974 owned files, with zero clones at the unchanged 50-token sensitivity.
+  Eleven tracked files preserve their UTF-8 validity, BOM and newline conventions; six new files
+  validate as UTF-8. No existing file was transcoded.
 - Host npm configuration emits `globalignorefile` warnings. Local Node is 24.18.1, below the declared
   24.20.0 minimum. Successful checks on this host do not replace supported-runtime CI evidence.
 

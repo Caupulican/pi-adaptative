@@ -27,6 +27,7 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		LEGACY_GOAL_TOOL_NAME,
 		...GOAL_LIFECYCLE_TOOL_NAMES,
 		"task_steps",
+		"task_directory",
 		"pipeline",
 		"ask_question",
 		"secret_store",

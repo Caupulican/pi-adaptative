@@ -127,8 +127,10 @@ import {
 } from "./settings-manager.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
 import type { TaskStepsState } from "./tasks/task-state.ts";
+import { getToolCapabilityPolicy } from "./tool-capability-policy.ts";
 import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
 import { runReflexInterpreterCompletion } from "./toolkit/reflex-interpreter.ts";
 import { executeToolkitScript } from "./toolkit/script-runner.ts";
@@ -152,6 +154,7 @@ import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script
 import { createSecretStoreToolDefinition } from "./tools/secret-store.ts";
 import { disposeShellExecutionSession } from "./tools/shell-execution-session.ts";
 import { createSkillVaultToolDefinition } from "./tools/skill.ts";
+import { createTaskDirectoryToolDefinition } from "./tools/task-directory.ts";
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
 import {
 	allToolNames,
@@ -159,7 +162,8 @@ import {
 	type ToolDef,
 	type ToolDefinitionOptions,
 } from "./tools/tool-definition-factory.ts";
-import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
+import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/tool-definition-wrapper.ts";
+import { wrapToolExecution } from "./tools/tool-execution-wrapper.ts";
 import { createToolTaskToolDefinition, type ToolTaskDependencies } from "./tools/tool-task.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
 import { countFileLinesSync } from "./util/bounded-file.ts";
@@ -440,6 +444,7 @@ export class RuntimeBuilder {
 	private readonly _credentialDiscoveryRoots: readonly string[];
 	private readonly _fileMutationIntents: FileMutationIntentController;
 	private readonly _workerSessionPrivatePathEnvelope: CapabilityEnvelope | undefined;
+	private readonly _taskDirectories: TaskDirectoryRuntime;
 
 	private readonly deps: RuntimeBuilderDeps;
 
@@ -448,6 +453,16 @@ export class RuntimeBuilder {
 		this._workerSessionPrivatePathEnvelope = isWorkerSession()
 			? buildWorkerSessionPrivatePathEnvelope(deps.getCwd(), deps.getAgentDir())
 			: undefined;
+		this._taskDirectories = new TaskDirectoryRuntime({
+			getSessionManager: () => deps.getSessionManager(),
+			getCwd: () => deps.getCwd(),
+			getActiveTaskId: () =>
+				deps.getTaskStepsStateSnapshot()?.steps.find((step) => step.status === "in_progress")?.id,
+			getEnvelopes: () =>
+				[deps.getCapabilityEnvelope?.(), this._workerSessionPrivatePathEnvelope].filter(
+					(envelope): envelope is CapabilityEnvelope => envelope !== undefined,
+				),
+		});
 		this._credentialBootstrapFiles = getMachineCredentialBootstrapFiles(deps.getAgentDir());
 		this._credentialDiscoveryRoots = getMachineCredentialDiscoveryRoots(deps.getAgentDir());
 		this._credentialManager = new CredentialManager({
@@ -460,6 +475,7 @@ export class RuntimeBuilder {
 				return discoverMachineCredentialSession({ candidateFiles: this._credentialBootstrapFiles, signal });
 			},
 			onEnvironmentChanged: () => {
+				this._taskDirectories.invalidateShells();
 				const sessionKey = deps.getShellSessionKey();
 				disposeShellExecutionSession(sessionKey);
 			},
@@ -622,9 +638,9 @@ export class RuntimeBuilder {
 	}
 
 	/** Release session-owned mutation payload leases retained by the write/edit tool pair. */
-	dispose(): Promise<void> {
+	async dispose(): Promise<void> {
 		this._credentialManager.lock();
-		return this._fileMutationIntents.dispose();
+		await Promise.all([this._fileMutationIntents.dispose(), this._taskDirectories.dispose()]);
 	}
 
 	refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
@@ -690,7 +706,8 @@ export class RuntimeBuilder {
 				.filter((entry): entry is readonly [string, string[]] => entry !== undefined),
 		);
 		const runner = this.deps.getExtensionRunner();
-		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner);
+		const getExecutionContext = () => this._taskDirectories.executionContext;
+		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner, getExecutionContext);
 		const wrappedBuiltInTools = wrapRegisteredTools(
 			Array.from(this._baseToolDefinitions.values())
 				.filter((definition) => isAllowedTool(definition.name))
@@ -699,24 +716,22 @@ export class RuntimeBuilder {
 					sourceInfo: createSyntheticSourceInfo(`<builtin:${definition.name}>`, { source: "builtin" }),
 				})),
 			runner,
+			getExecutionContext,
 		);
-
-		const toolRegistry = new Map(
-			wrappedBuiltInTools.map((tool) => {
-				const guarded = wrapToolWithCredentialExposureGuard(
-					tool,
-					this.deps.getCwd(),
-					this._credentialExposureBoundary,
-				);
-				const scoped = this._workerSessionPrivatePathEnvelope
-					? wrapToolWithEnvelopeScope(guarded, this._workerSessionPrivatePathEnvelope, this.deps.getCwd())
-					: guarded;
-				return [scoped.name, scoped] as const;
-			}),
-		);
-		for (const tool of wrappedExtensionTools as AgentTool[]) {
+		const toolRegistry = new Map<string, AgentTool>();
+		// Both sources cross the same binding/guard boundary; later extension entries still override built-ins.
+		for (const tool of [...wrappedBuiltInTools, ...wrappedExtensionTools]) {
+			let bound = tool;
+			if (tool.name === "task_steps") bound = { ...tool, executionMode: "sequential" };
+			// SDK overrides may own remote or virtual backends. Only their explicit binder can admit them.
+			else if (!this.deps.getBaseToolsOverride()) {
+				const policy = getToolCapabilityPolicy(tool.name);
+				if (!policy || policy.enforcements.some((kind) => kind === "path-scope" || kind === "process-launcher")) {
+					bound = this._taskDirectories.bindTool(tool);
+				}
+			}
 			const guarded = wrapToolWithCredentialExposureGuard(
-				tool,
+				bound,
 				this.deps.getCwd(),
 				this._credentialExposureBoundary,
 			);
@@ -892,6 +907,15 @@ export class RuntimeBuilder {
 		this.deps.getContextUsage();
 	}
 
+	/** Bind native factories before decorators, so reload snapshots and guards own the same executor. */
+	private bindNativeDefinition(create: (cwd: string, shellKey?: string) => ToolDef): ToolDef {
+		const definition = create(this.deps.getCwd());
+		const tool = this._taskDirectories.bindTool(wrapToolDefinition(definition), (context, shellKey) =>
+			wrapToolDefinition(create(context.cwd, shellKey), () => this.deps.getExtensionRunner().createContext(context)),
+		);
+		return { ...definition, bindInvocation: tool.bindInvocation };
+	}
+
 	buildRuntime(options: {
 		activeToolNames?: string[];
 		flagValues?: Map<string, boolean | string>;
@@ -974,13 +998,27 @@ export class RuntimeBuilder {
 			: new Map(
 					[...allToolNames]
 						.filter((name) => toolAccess.allows(name))
-						.map((name) => [name, createToolDefinitionWithRuntime(name, this.deps.getCwd(), toolOptions)]),
+						.map((name) => [
+							name,
+							this.bindNativeDefinition((cwd, shellKey) =>
+								createToolDefinitionWithRuntime(name, cwd, {
+									...toolOptions,
+									bash: { ...toolOptions.bash, ...(shellKey ? { sessionKey: shellKey, forceCwd: true } : {}) },
+								}),
+							),
+						]),
 				);
 		const toolTaskDependencies = this.deps.getToolTaskDependencies?.();
 		if (toolTaskDependencies && toolAccess.allows("tool_task")) {
 			this._baseToolDefinitions.set("tool_task", createToolTaskToolDefinition(toolTaskDependencies));
 		}
 		if (!baseToolsOverride) {
+			if (toolAccess.allows("task_directory")) {
+				const definition = createTaskDirectoryToolDefinition(this._taskDirectories, () =>
+					this.deps.getTaskStepsStateSnapshot(),
+				);
+				this._baseToolDefinitions.set(definition.name, definition);
+			}
 			if (toolAccess.allows("image_generate")) {
 				const definition = createImageGenerateToolDefinition(this.deps.getCwd(), {
 					getModel: () => this.deps.getAgent().state.model,
@@ -1294,27 +1332,34 @@ export class RuntimeBuilder {
 					for (const gatedToolName of ["edit", "write", "bash"]) {
 						const original = this._baseToolDefinitions.get(gatedToolName);
 						if (!original) continue;
-						this._baseToolDefinitions.set(gatedToolName, {
-							...original,
-							execute: async (toolCallId, params, signal, onUpdate, ctx) => {
-								const bashCommand =
-									gatedToolName === "bash" ? (params as { command?: string } | undefined)?.command : undefined;
-								const rawPath =
-									gatedToolName === "edit" || gatedToolName === "write"
-										? (params as { path?: string } | undefined)?.path
-										: undefined;
-								const targetPath =
-									rawPath !== undefined ? resolveToCwd(rawPath, this.deps.getCwd()) : undefined;
-								const check = await laneGate.checkMutation(gatedToolName, bashCommand, targetPath);
-								if (!check.allowed) {
-									return {
-										content: [{ type: "text" as const, text: check.message }],
-										details: { code: check.code } as never,
-									};
-								}
-								return original.execute(toolCallId, params, signal, onUpdate, ctx);
-							},
-						});
+						this._baseToolDefinitions.set(
+							gatedToolName,
+							wrapToolExecution(original, (executor, context) => ({
+								...executor,
+								execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+									const bashCommand =
+										gatedToolName === "bash"
+											? (params as { command?: string } | undefined)?.command
+											: undefined;
+									const rawPath =
+										gatedToolName === "edit" || gatedToolName === "write"
+											? (params as { path?: string } | undefined)?.path
+											: undefined;
+									const targetPath =
+										rawPath !== undefined
+											? resolveToCwd(rawPath, context?.cwd ?? this.deps.getCwd())
+											: undefined;
+									const check = await laneGate.checkMutation(gatedToolName, bashCommand, targetPath);
+									if (!check.allowed) {
+										return {
+											content: [{ type: "text" as const, text: check.message }],
+											details: { code: check.code } as never,
+										};
+									}
+									return executor.execute(toolCallId, params, signal, onUpdate, ctx);
+								},
+							})),
+						);
 					}
 				}
 			}

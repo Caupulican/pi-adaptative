@@ -35,6 +35,19 @@ function fixture(validate: (context: ExecutionContext, signal?: AbortSignal) => 
 }
 
 describe("task directory admission", () => {
+	it("waits for an implicitly inherited task lease before its first explicit pin", async () => {
+		const { controller, commit } = fixture();
+		const inherited = await controller.admit("unconfigured", undefined, true);
+		const pin = controller.change({ action: "bind", taskId: "unconfigured", pinned: true, path: "src" });
+		await setImmediate();
+		expect(commit).not.toHaveBeenCalled();
+		expect(controller.waiterCount).toBe(1);
+		inherited.release();
+		await pin;
+		const pinned = await controller.admit("unconfigured");
+		expect(pinned.context.cwd).toBe("/fixture/project/src");
+		pinned.release();
+	});
 	it("persists a validated binding and admits its immutable directory", async () => {
 		const validate = vi.fn(async () => {});
 		const { controller, commit } = fixture(validate);
