@@ -1,6 +1,8 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
@@ -13,6 +15,7 @@ import {
 } from "../src/core/secrets/credential-exposure-guard.ts";
 import { createNativeTaskDirectoryBackend } from "../src/core/tasks/native-task-directory-backend.ts";
 import { ToolGateController } from "../src/core/tool-gate-controller.ts";
+import { FILE_SYMLINK_TESTS_SUPPORTED } from "./helpers/filesystem-links.ts";
 
 const root = "/synthetic/project";
 const context = {
@@ -191,32 +194,35 @@ describe("backend path authority review regressions", () => {
 		).toBeUndefined();
 	});
 
-	it("real native backend: shell must block a synthetic symlink into a dotenv file", async () => {
-		const scratch = mkdtempSync("/tmp/pi-review-alias-");
-		try {
-			writeFileSync(`${scratch}/.env`, "SYNTHETIC_FIXTURE=not-a-secret\n");
-			symlinkSync(`${scratch}/.env`, `${scratch}/alias.txt`);
-			const nativeContext = {
-				...context,
-				cwd: scratch,
-				attachment: { ...context.attachment, attachmentId: "native:review-fixture", root: scratch },
-			};
-			const args = { command: "cat alias.txt" };
-			expect(await credentialToolBlockReasonAsync("bash", args, scratch, boundary, nativeContext)).toBeTruthy();
-			expect(
-				await credentialToolBlockReasonAsync(
-					"bash",
-					args,
-					scratch,
-					boundary,
-					nativeContext,
-					createNativeTaskDirectoryBackend(),
-				),
-			).toBeTruthy();
-		} finally {
-			rmSync(scratch, { recursive: true });
-		}
-	});
+	it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)(
+		"real native backend: shell must block a synthetic symlink into a dotenv file",
+		async () => {
+			const scratch = mkdtempSync(join(tmpdir(), "pi-review-alias-"));
+			try {
+				writeFileSync(join(scratch, ".env"), "SYNTHETIC_FIXTURE=not-a-secret\n");
+				symlinkSync(join(scratch, ".env"), join(scratch, "alias.txt"));
+				const nativeContext = {
+					...context,
+					cwd: scratch,
+					attachment: { ...context.attachment, attachmentId: "native:review-fixture", root: scratch },
+				};
+				const args = { command: "cat alias.txt" };
+				expect(await credentialToolBlockReasonAsync("bash", args, scratch, boundary, nativeContext)).toBeTruthy();
+				expect(
+					await credentialToolBlockReasonAsync(
+						"bash",
+						args,
+						scratch,
+						boundary,
+						nativeContext,
+						createNativeTaskDirectoryBackend(),
+					),
+				).toBeTruthy();
+			} finally {
+				rmSync(scratch, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("native file-kind probe must not flatten EACCES into missing-file recovery", async () => {
 		const originalStat = fsPromises.stat;
@@ -251,51 +257,54 @@ describe("backend path authority review regressions", () => {
 		);
 	});
 
-	it("real native envelope wrapper must not follow a symlink into a denied directory", async () => {
-		const scratch = mkdtempSync("/tmp/pi-review-envelope-");
-		try {
-			mkdirSync(`${scratch}/private`);
-			writeFileSync(`${scratch}/private/key.txt`, "synthetic\n");
-			symlinkSync(`${scratch}/private/key.txt`, `${scratch}/alias.txt`);
-			const grant: CapabilityEnvelope = {
-				...envelope,
-				allowedPaths: [scratch],
-				deniedPaths: [`${scratch}/private`],
-			};
-			const nativeContext = { ...context, cwd: scratch, attachment: { ...context.attachment, root: scratch } };
-			let executed = 0;
-			const execute = async (..._args: unknown[]) => {
-				executed++;
-				return { content: [], details: {} };
-			};
-			const control = wrapToolWithEnvelopeScope({ name: "read", execute }, grant, scratch);
-			await (control.execute as (...args: unknown[]) => Promise<unknown>)("control", { path: "alias.txt" });
-			expect(executed).toBe(0);
-			const scoped = wrapToolWithEnvelopeScope(
-				{
-					name: "read",
-					execute,
-					bindInvocation: async (..._args: unknown[]) => ({
-						executionContext: nativeContext,
-						pathAuthority: createNativeTaskDirectoryBackend(),
-						execute,
-						release() {},
-					}),
-				},
-				grant,
-				scratch,
-			);
-			const invocation = await scoped.bindInvocation!("review-call", { path: "alias.txt" });
+	it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)(
+		"real native envelope wrapper must not follow a symlink into a denied directory",
+		async () => {
+			const scratch = mkdtempSync(join(tmpdir(), "pi-review-envelope-"));
 			try {
-				await invocation.execute("review-call", { path: "alias.txt" });
+				mkdirSync(join(scratch, "private"));
+				writeFileSync(join(scratch, "private", "key.txt"), "synthetic\n");
+				symlinkSync(join(scratch, "private", "key.txt"), join(scratch, "alias.txt"));
+				const grant: CapabilityEnvelope = {
+					...envelope,
+					allowedPaths: [scratch],
+					deniedPaths: [join(scratch, "private")],
+				};
+				const nativeContext = { ...context, cwd: scratch, attachment: { ...context.attachment, root: scratch } };
+				let executed = 0;
+				const execute = async (..._args: unknown[]) => {
+					executed++;
+					return { content: [], details: {} };
+				};
+				const control = wrapToolWithEnvelopeScope({ name: "read", execute }, grant, scratch);
+				await (control.execute as (...args: unknown[]) => Promise<unknown>)("control", { path: "alias.txt" });
+				expect(executed).toBe(0);
+				const scoped = wrapToolWithEnvelopeScope(
+					{
+						name: "read",
+						execute,
+						bindInvocation: async (..._args: unknown[]) => ({
+							executionContext: nativeContext,
+							pathAuthority: createNativeTaskDirectoryBackend(),
+							execute,
+							release() {},
+						}),
+					},
+					grant,
+					scratch,
+				);
+				const invocation = await scoped.bindInvocation!("review-call", { path: "alias.txt" });
+				try {
+					await invocation.execute("review-call", { path: "alias.txt" });
+				} finally {
+					invocation.release();
+				}
+				expect(executed).toBe(0);
 			} finally {
-				invocation.release();
+				rmSync(scratch, { recursive: true, force: true });
 			}
-			expect(executed).toBe(0);
-		} finally {
-			rmSync(scratch, { recursive: true });
-		}
-	});
+		},
+	);
 
 	it("foreground backend preflight must settle when the caller cancels", async () => {
 		const abort = new AbortController();
