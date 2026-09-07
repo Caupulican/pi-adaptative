@@ -29,7 +29,11 @@ export function createCredentialPathPolicy(
 			harnessFiles: pathAuthority.harnessFiles,
 		};
 	}
-	const native = explicitProbe === undefined && pathAuthority === undefined && context === undefined;
+	const native =
+		explicitProbe === undefined &&
+		pathAuthority === undefined &&
+		flavor === nativeFlavor &&
+		(context === undefined || context.attachment.attachmentId.startsWith("native:"));
 	if (!probe && native) {
 		const homeDir = homedir();
 		const agentDir = resolve(protection?.agentDir ?? join(homeDir, ".pi", "agent"));

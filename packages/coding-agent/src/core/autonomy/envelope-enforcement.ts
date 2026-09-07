@@ -78,8 +78,9 @@ export interface AssessPathEnvelopeOptions {
 
 function inferFlavor(cwd: string, authority?: ExecutionPathAuthority): ExecutionPathFlavor {
 	if (authority?.flavor) return authority.flavor;
-	if (cwd.includes("\\") || /^[A-Za-z]:/u.test(cwd) || process.platform === "win32") return "win32";
-	return "posix";
+	if (cwd.startsWith("/") && !cwd.startsWith("//")) return "posix";
+	if (cwd.includes("\\") || /^[A-Za-z]:/u.test(cwd) || cwd.startsWith("//")) return "win32";
+	return process.platform === "win32" ? "win32" : "posix";
 }
 
 function inferCaseSensitive(flavor: ExecutionPathFlavor, authority?: ExecutionPathAuthority): boolean {
