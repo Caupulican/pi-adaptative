@@ -7,7 +7,7 @@ import {
 	type Model,
 } from "@caupulican/pi-ai";
 import { ToolArgumentValidationError, validateToolArguments } from "@caupulican/pi-ai/validation";
-import { Type } from "typebox";
+import { type TSchema, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import { describe, expect, it } from "vitest";
 import { startAgentProviderRequest } from "../src/agent-loop.ts";
@@ -59,6 +59,65 @@ function model(): Model<"openai-responses"> {
 const convertToLlm = (messages: AgentMessage[]): Message[] =>
 	messages.filter((message) => message.role !== "custom") as Message[];
 
+describe("root discriminated union projection", () => {
+	function unionTool(parameters: TSchema) {
+		return projectToolsForProvider([
+			{
+				name: "task_steps",
+				label: "Task steps",
+				description: "Plan steps.",
+				parameters,
+				async execute() {
+					return { content: [{ type: "text", text: "ok" }], details: {} };
+				},
+			} as AgentTool,
+		])[0];
+	}
+
+	it("flattens a root object union into one object with the discriminator enum and per-action requirements", () => {
+		// Live defect: grok-4.6 fused branch actions into invented names (`task_steps_vis-_-vis_set`) for
+		// every tool whose wire schema was a root-level anyOf, while every flat-schema tool worked.
+		const projected = unionTool(
+			Type.Union([
+				Type.Object(
+					{ action: Type.Literal("set"), steps: Type.Array(Type.String({ minLength: 1 })) },
+					{ additionalProperties: false },
+				),
+				Type.Object(
+					{ action: Type.Literal("update"), id: Type.String(), status: Type.Optional(Type.String()) },
+					{ additionalProperties: false },
+				),
+				Type.Object({ action: Type.Literal("list") }, { additionalProperties: false }),
+				Type.Object({ action: Type.Literal("clear"), id: Type.Number() }, { additionalProperties: false }),
+			]),
+		);
+		expect(projected.parameters).toEqual({
+			type: "object",
+			properties: {
+				action: { type: "string", enum: ["set", "update", "list", "clear"] },
+				steps: { type: "array", items: { type: "string", minLength: 1 } },
+				id: { anyOf: [{ type: "string" }, { type: "number" }] },
+				status: { type: "string" },
+			},
+			required: ["action"],
+		});
+		expect(projected.description).toBe(
+			'Plan steps. Arguments by action: "set" requires steps; "update" requires id, accepts status; "list" takes no other arguments; "clear" requires id.',
+		);
+	});
+
+	it("leaves a root union without a shared string discriminator untouched", () => {
+		const projected = unionTool(
+			Type.Union([
+				Type.Object({ path: Type.String() }, { additionalProperties: false }),
+				Type.Object({ url: Type.String() }, { additionalProperties: false }),
+			]),
+		);
+		expect(projected.parameters).toMatchObject({ type: "object", anyOf: [{}, {}] });
+		expect(projected.description).toBe("Plan steps.");
+	});
+});
+
 describe("provider tool projection", () => {
 	it("makes object-only unions explicit without narrowing mixed or unconstrained branches", () => {
 		const schema = Type.Union([
@@ -79,7 +138,7 @@ describe("provider tool projection", () => {
 		expect(projectToolSchemaForProvider({ anyOf: [] })).toEqual({ anyOf: [] });
 		expect(schema).not.toHaveProperty("type");
 	});
-	it("merges equivalent action branches only on the provider surface", () => {
+	it("projects an action union to one flat provider object and keeps validation on the full union", () => {
 		const schema = Type.Union([
 			Type.Object(
 				{ action: Type.Literal("set"), count: Type.Integer({ minimum: 1 }) },
@@ -97,26 +156,28 @@ describe("provider tool projection", () => {
 			),
 		]);
 		const before = JSON.stringify(schema);
-		const projected = projectToolSchemaForProvider(schema) as typeof schema;
-		expect(projected.anyOf).toHaveLength(3);
-		expect(JSON.stringify(projected).length).toBeLessThan(before.length);
+		const projected = projectToolSchemaForProvider(schema) as Record<string, unknown>;
 		expect(JSON.stringify(schema)).toBe(before);
+		// The wire shape is one object: every action as an enum, merged properties, shared requirements.
+		expect(projected).toEqual({
+			type: "object",
+			properties: {
+				action: { type: "string", enum: ["set", "intake", "clear", "compact", "limited"] },
+				count: {
+					anyOf: [
+						{ type: "integer", minimum: 1 },
+						{ type: "integer", minimum: 2 },
+					],
+				},
+			},
+			required: ["action"],
+		});
+		expect(JSON.stringify(projected).length).toBeLessThan(before.length);
+		// Per-branch constraints stay with the authoritative schema the harness validates against.
 		const originalValidator = Compile(schema);
-		const projectedValidator = Compile(projected);
-		for (const action of [undefined, "set", "intake", "clear", "compact", "limited", "unknown", null]) {
-			for (const count of [undefined, -1, 0, 1, 2, 1.5, "2", null]) {
-				for (const extra of [false, true]) {
-					const value = {
-						...(action === undefined ? {} : { action }),
-						...(count === undefined ? {} : { count }),
-						...(extra ? { extra: true } : {}),
-					};
-					expect(projectedValidator.Check(value), JSON.stringify(value)).toBe(originalValidator.Check(value));
-				}
-			}
-		}
-		expect(projectedValidator.Check({ action: "set", count: 1 })).toBe(true);
-		expect(projectedValidator.Check({ action: "limited", count: 1 })).toBe(false);
+		expect(originalValidator.Check({ action: "limited", count: 1 })).toBe(false);
+		expect(originalValidator.Check({ action: "set", count: 1 })).toBe(true);
+		expect(Compile(projected as never).Check({ action: "set", count: 1 })).toBe(true);
 	});
 
 	it("preserves exclusive unions and distinct branch requirements or discriminator constraints", () => {

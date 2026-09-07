@@ -200,12 +200,113 @@ function projectSchemaNode(value: unknown): unknown {
 	return compactRedundantEnumConstraints(compactDiscriminatedUnion(compactLiteralUnion(projected)));
 }
 
+interface DiscriminatedBranch {
+	values: string[];
+	properties: Record<string, unknown>;
+	required: string[];
+}
+
+function branchDiscriminatorValues(branch: Record<string, unknown>, key: string): string[] | undefined {
+	const properties = branch.properties;
+	const literal = isRecord(properties) ? properties[key] : undefined;
+	if (!isRecord(literal) || literal.type !== "string") return undefined;
+	if (typeof literal.const === "string") return [literal.const];
+	if (Array.isArray(literal.enum) && literal.enum.every((value) => typeof value === "string")) {
+		return literal.enum as string[];
+	}
+	return undefined;
+}
+
+function readDiscriminatedBranches(
+	branches: readonly Record<string, unknown>[],
+): { discriminator: string; branches: DiscriminatedBranch[] } | undefined {
+	const firstProperties = branches[0]?.properties;
+	if (!isRecord(firstProperties)) return undefined;
+	for (const discriminator of Object.keys(firstProperties)) {
+		const read: DiscriminatedBranch[] = [];
+		for (const branch of branches) {
+			const values = branch.type === "object" ? branchDiscriminatorValues(branch, discriminator) : undefined;
+			if (!values || !isRecord(branch.properties)) break;
+			read.push({
+				values,
+				properties: branch.properties,
+				required: Array.isArray(branch.required)
+					? branch.required.filter((name): name is string => typeof name === "string")
+					: [],
+			});
+		}
+		if (read.length === branches.length) return { discriminator, branches: read };
+	}
+	return undefined;
+}
+
+/**
+ * Providers that speak the OpenAI function-calling dialect expect one flat object schema per
+ * function. A root-level `anyOf` of action branches is read by some models as separate functions
+ * (`task_steps` × `set`), which surfaces as invented tool names. The wire schema therefore becomes
+ * one object: the discriminator carries every action as an enum, every branch property is merged
+ * (differing shapes become a property-level anyOf), and only properties required by every branch
+ * stay required. Per-action requirements travel in the description; validation keeps the full union.
+ */
+function flattenRootDiscriminatedUnion(projected: Record<string, unknown>): {
+	schema: Record<string, unknown>;
+	guidance?: string;
+} {
+	const branches = projected.anyOf;
+	if (!Array.isArray(branches) || branches.length < 2 || !branches.every(isRecord)) return { schema: projected };
+	const read = readDiscriminatedBranches(branches);
+	if (!read) return { schema: projected };
+	const { discriminator } = read;
+	const values: string[] = [];
+	const shapes = new Map<string, { schemas: unknown[]; identities: Set<string> }>();
+	let sharedRequired: Set<string> | undefined;
+	const guidance: string[] = [];
+	for (const branch of read.branches) {
+		for (const value of branch.values) if (!values.includes(value)) values.push(value);
+		for (const key of Object.keys(branch.properties)) {
+			if (key === discriminator) continue;
+			const shape = shapes.get(key) ?? { schemas: [], identities: new Set<string>() };
+			const identity = JSON.stringify(branch.properties[key]);
+			if (!shape.identities.has(identity)) {
+				shape.identities.add(identity);
+				shape.schemas.push(branch.properties[key]);
+			}
+			shapes.set(key, shape);
+		}
+		const required = branch.required.filter((name) => name !== discriminator);
+		sharedRequired = sharedRequired
+			? new Set(required.filter((name) => sharedRequired?.has(name)))
+			: new Set(required);
+		const optional = Object.keys(branch.properties).filter((key) => key !== discriminator && !required.includes(key));
+		const label = branch.values.map((value) => JSON.stringify(value)).join(" | ");
+		const parts = [
+			...(required.length > 0 ? [`requires ${required.join(", ")}`] : []),
+			...(optional.length > 0 ? [`accepts ${optional.join(", ")}`] : []),
+		];
+		guidance.push(`${label} ${parts.length > 0 ? parts.join(", ") : "takes no other arguments"}`);
+	}
+	const properties = createProviderRecord();
+	properties[discriminator] = { type: "string", enum: values };
+	for (const [key, shape] of shapes) {
+		properties[key] = shape.schemas.length === 1 ? shape.schemas[0] : { anyOf: shape.schemas };
+	}
+	const schema = createProviderRecord();
+	for (const key of Object.keys(projected)) {
+		if (key !== "anyOf" && key !== "type" && key !== "properties" && key !== "required") schema[key] = projected[key];
+	}
+	schema.type = "object";
+	schema.properties = properties;
+	schema.required = [discriminator, ...(sharedRequired ?? [])];
+	return { schema, guidance: `Arguments by ${discriminator}: ${guidance.join("; ")}.` };
+}
+
 export function normalizeProviderToolDescription(description: string): string {
 	return description.replace(/\s+/g, " ").trim();
 }
 
 export function projectToolSchemaForProvider(schema: unknown): unknown {
-	return projectSchemaNode(schema);
+	const projected = projectSchemaNode(schema);
+	return isRecord(projected) ? flattenRootDiscriminatedUnion(projected).schema : projected;
 }
 
 /**
@@ -221,14 +322,19 @@ const projectedTools = new WeakMap<Tool, Tool>();
 function projectToolForProvider(tool: Tool): Tool {
 	const cached = projectedTools.get(tool);
 	if (cached) return cached;
+	const projectedSchema = projectSchemaNode(tool.parameters);
+	const root: { schema: unknown; guidance?: string } = isRecord(projectedSchema)
+		? flattenRootDiscriminatedUnion(projectedSchema)
+		: { schema: projectedSchema };
+	const description = normalizeProviderToolDescription(
+		"providerDescription" in tool && typeof tool.providerDescription === "string"
+			? tool.providerDescription
+			: tool.description,
+	);
 	const projected: Tool = {
 		name: tool.name,
-		description: normalizeProviderToolDescription(
-			"providerDescription" in tool && typeof tool.providerDescription === "string"
-				? tool.providerDescription
-				: tool.description,
-		),
-		parameters: projectSchemaNode(tool.parameters) as TSchema,
+		description: root.guidance ? `${description} ${root.guidance}` : description,
+		parameters: root.schema as TSchema,
 	};
 	projectedTools.set(tool, projected);
 	return projected;
