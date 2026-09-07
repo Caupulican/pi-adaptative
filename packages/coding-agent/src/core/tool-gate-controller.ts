@@ -39,7 +39,8 @@ export class ToolGateController {
 		this.deps = deps;
 	}
 
-	readonly beforeToolCall: BeforeToolCall = async ({ toolCall, args, executionContext, pathAuthority }) => {
+	readonly beforeToolCall: BeforeToolCall = async ({ toolCall, args, executionContext, pathAuthority }, signal) => {
+		signal?.throwIfAborted();
 		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);
 		if (escalation) {
 			return escalation;
@@ -49,6 +50,7 @@ export class ToolGateController {
 		const envelope = structuredClone(this.deps.getCapabilityEnvelope());
 		const scopeCwd = this.deps.getCwd();
 		const evaluate = async (currentArgs: unknown = args): Promise<BeforeToolCallResult | undefined> => {
+			signal?.throwIfAborted();
 			const gateResult = await evaluateToolGateAsync({
 				toolName: toolCall.name,
 				args: currentArgs,
@@ -56,6 +58,7 @@ export class ToolGateController {
 				scopeCwd,
 				envelope,
 				pathAuthority,
+				signal,
 			});
 			if (envelope) this.deps.recordGateOutcome(gateResult);
 			if (gateResult.outcome === "block" || gateResult.outcome === "ask-user") {

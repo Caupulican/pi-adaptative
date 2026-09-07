@@ -110,7 +110,22 @@ export function isPathWithinScopeWithDialect(
 	const pathApi = executionPathApi(flavor);
 	const target = caseSensitive ? pathApi.resolve(targetPath) : pathApi.resolve(targetPath).toLowerCase();
 	const root = caseSensitive ? pathApi.resolve(scopeRoot) : pathApi.resolve(scopeRoot).toLowerCase();
-	return isRelativeContained(pathApi.relative(root, target), pathApi.sep, pathApi.isAbsolute);
+	const relative = pathApi.relative(root, target);
+	if (!isRelativeContained(relative, pathApi.sep, pathApi.isAbsolute)) return false;
+	if (caseSensitive && flavor === "win32") {
+		const rootParsed = pathApi.parse(root);
+		const targetParsed = pathApi.parse(target);
+		if (rootParsed.root.toLowerCase() !== targetParsed.root.toLowerCase()) return false;
+		const rootTail = root.slice(rootParsed.root.length);
+		const targetTail = target.slice(targetParsed.root.length);
+		const rootSegments = rootTail ? rootTail.split(pathApi.sep) : [];
+		const targetSegments = targetTail ? targetTail.split(pathApi.sep) : [];
+		if (rootSegments.length > targetSegments.length) return false;
+		for (let i = 0; i < rootSegments.length; i++) {
+			if (rootSegments[i] !== targetSegments[i]) return false;
+		}
+	}
+	return true;
 }
 
 /** True when either scope contains the other, including an exact match. */

@@ -85,11 +85,7 @@ export class CredentialPathPolicy {
 		return comparable === ".env" || comparable.startsWith(".env.") || comparable.endsWith(".env");
 	}
 
-	/** Opaque argv/code literals are not declared file requests. Never invent a drive cwd for them. */
-	isProtectedToken(token: string): boolean {
-		const root = this.paths.parse(token).root;
-		if (this.flavor !== "win32" || !root.endsWith(":") || this.paths.isAbsolute(token))
-			return this.isProtected(token);
+	private isLexicallyProtectedToken(token: string, root: string): boolean {
 		// With no drive cwd, only lexical evidence is available. Known credential filenames and
 		// protected-directory components remain conservative refusals, never filesystem grants.
 		const name = this.paths.basename(token);
@@ -101,6 +97,22 @@ export class CredentialPathPolicy {
 				components.some((component) => this.samePath(component, this.paths.basename(directory))),
 			)
 		);
+	}
+
+	/** Opaque argv/code literals are not declared file requests. Never invent a drive cwd for them. */
+	isProtectedToken(token: string): boolean {
+		const root = this.paths.parse(token).root;
+		if (this.flavor !== "win32" || !root.endsWith(":") || this.paths.isAbsolute(token))
+			return this.isProtected(token);
+		return this.isLexicallyProtectedToken(token, root);
+	}
+
+	async isProtectedTokenAsync(token: string, signal?: AbortSignal): Promise<boolean> {
+		signal?.throwIfAborted();
+		const root = this.paths.parse(token).root;
+		if (this.flavor !== "win32" || !root.endsWith(":") || this.paths.isAbsolute(token))
+			return this.isProtectedAsync(token, signal);
+		return this.isLexicallyProtectedToken(token, root);
 	}
 
 	isProtected(rawPath: string): boolean {

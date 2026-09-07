@@ -113,13 +113,22 @@ function resolveAuthorityPathSync(
 	if (authority.safeRealpath) {
 		const res = authority.safeRealpath(path);
 		if (typeof res === "string") return res;
+		if (res && typeof (res as Promise<unknown>).then === "function") {
+			throw new Error("Cannot synchronously resolve path with an asynchronous authority");
+		}
 	}
 	const direct = authority.canonicalPath(path);
 	if (typeof direct === "string") return direct;
+	if (direct && typeof (direct as Promise<unknown>).then === "function") {
+		throw new Error("Cannot synchronously resolve path with an asynchronous authority");
+	}
 	const pathApi = executionPathApi(flavor);
 	for (const hop of collectParentHops(path, flavor)) {
 		const canon = authority.canonicalPath(hop.parent);
 		if (typeof canon === "string") return pathApi.join(canon, ...hop.parts);
+		if (canon && typeof (canon as Promise<unknown>).then === "function") {
+			throw new Error("Cannot synchronously resolve path with an asynchronous authority");
+		}
 	}
 	return path;
 }
@@ -214,8 +223,20 @@ export function assessPathWithinEnvelopeSync(
 	}
 	if (!target) return { allowed: false, reasonCode: "path_outside_allowed_roots" };
 
-	if (checkScopeCandidateSync(target, ctx.denied, options, ctx.scopeCwd, ctx.flavor, ctx.caseSensitive)) {
-		return { allowed: false, reasonCode: "path_denied", target };
+	for (const denied of ctx.denied) {
+		let resolved: string | undefined;
+		try {
+			resolved = resolveAuthorityPathSync(
+				resolveExecutionPath(denied, ctx.scopeCwd, ctx.flavor),
+				options.pathAuthority,
+				ctx.flavor,
+			);
+		} catch {
+			return { allowed: false, reasonCode: "path_denied", target };
+		}
+		if (matchesEnvelopeCandidate(target, denied, ctx.scopeCwd, ctx.flavor, ctx.caseSensitive, resolved)) {
+			return { allowed: false, reasonCode: "path_denied", target };
+		}
 	}
 
 	if (
@@ -251,7 +272,9 @@ export async function assessPathWithinEnvelopeAsync(
 					flavor,
 					options.signal,
 				);
-			} catch {}
+			} catch (error) {
+				if (options.signal?.aborted) throw error;
+			}
 			if (matchesEnvelopeCandidate(lexicalTarget, root, scopeCwd, flavor, caseSensitive, resolved)) {
 				candidateAllowed = true;
 				break;
@@ -265,7 +288,8 @@ export async function assessPathWithinEnvelopeAsync(
 	let target: string | undefined;
 	try {
 		target = await resolveAuthorityPathAsync(lexicalTarget, options.pathAuthority, flavor, options.signal);
-	} catch {
+	} catch (error) {
+		if (options.signal?.aborted) throw error;
 		return { allowed: false, reasonCode: "path_outside_allowed_roots" };
 	}
 	if (!target) return { allowed: false, reasonCode: "path_outside_allowed_roots" };
@@ -279,7 +303,10 @@ export async function assessPathWithinEnvelopeAsync(
 				flavor,
 				options.signal,
 			);
-		} catch {}
+		} catch (error) {
+			if (options.signal?.aborted) throw error;
+			return { allowed: false, reasonCode: "path_denied", target };
+		}
 		if (matchesEnvelopeCandidate(target, denied, scopeCwd, flavor, caseSensitive, resolved)) {
 			return { allowed: false, reasonCode: "path_denied", target };
 		}
@@ -347,32 +374,54 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 ): T {
 	return wrapToolExecution(tool, (executor, executionContext, pathAuthority) => {
 		type Execute = T["execute"];
+		const denialBlock = (rawPath: string) => ({
+			content: [
+				{
+					type: "text",
+					text: `envelope_path_denied: "${rawPath}" is outside envelope ${envelope.id}'s path scope. The tool was NOT run.`,
+				},
+			],
+			details: {
+				outcome: "envelope_path_denied",
+				tool: tool.name,
+				path: rawPath,
+				envelopeId: envelope.id,
+			},
+			isError: true,
+		});
+
 		const execute = (...args: Parameters<Execute>): ReturnType<Execute> => {
 			const params = args[1];
+			const signal = args[2] as AbortSignal | undefined;
 			const pathAccess = resolveToolCallPathAccess(envelope.capabilities, tool.name, params);
 			if (pathAccess !== "none") {
-				for (const rawPath of extractToolPathArguments(tool.name, params)) {
+				const paths = extractToolPathArguments(tool.name, params);
+				if (pathAuthority) {
+					return (async () => {
+						signal?.throwIfAborted();
+						for (const rawPath of paths) {
+							const assessment = await assessPathWithinEnvelopeAsync(envelope, rawPath, {
+								cwd: executionContext?.cwd ?? cwd,
+								scopeCwd: cwd,
+								pathAuthority,
+								signal,
+							});
+							if (!assessment.allowed) {
+								return denialBlock(rawPath);
+							}
+						}
+						signal?.throwIfAborted();
+						return await executor.execute(...args);
+					})() as ReturnType<Execute>;
+				}
+
+				for (const rawPath of paths) {
 					const assessment = assessPathWithinEnvelopeSync(envelope, rawPath, {
 						cwd: executionContext?.cwd ?? cwd,
 						scopeCwd: cwd,
-						pathAuthority,
 					});
 					if (!assessment.allowed) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: `envelope_path_denied: "${rawPath}" is outside envelope ${envelope.id}'s path scope. The tool was NOT run.`,
-								},
-							],
-							details: {
-								outcome: "envelope_path_denied",
-								tool: tool.name,
-								path: rawPath,
-								envelopeId: envelope.id,
-							},
-							isError: true,
-						} as ReturnType<Execute>;
+						return denialBlock(rawPath) as ReturnType<Execute>;
 					}
 				}
 			}

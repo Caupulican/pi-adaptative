@@ -142,6 +142,20 @@ function hasProtectedArgumentToken(args: readonly string[], paths: CredentialPat
 	);
 }
 
+async function hasProtectedArgumentTokenAsync(
+	args: readonly string[],
+	paths: CredentialPathPolicy,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	for (const token of args) {
+		signal?.throwIfAborted();
+		if (token && !token.startsWith("-") && token !== "." && (await paths.isProtectedTokenAsync(token, signal))) {
+			return true;
+		}
+	}
+	return false;
+}
+
 interface ParsedInvocationCommand {
 	args: string[];
 	searchTool?: ShellContentSearchTool;
@@ -359,6 +373,22 @@ function pythonInspectsCredentialPath(code: string, paths: CredentialPathPolicy)
 	return false;
 }
 
+async function pythonInspectsCredentialPathAsync(
+	code: string,
+	paths: CredentialPathPolicy,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	if (!PYTHON_INSPECTION_RE.test(code)) return false;
+	QUOTED_TEXT_RE.lastIndex = 0;
+	for (const match of code.matchAll(QUOTED_TEXT_RE)) {
+		signal?.throwIfAborted();
+		if (/^\s+(?:not\s+)?in\b/u.test(code.slice(match.index + match[0].length))) continue;
+		const candidate = match[2]?.replace(/\\([\\"'])/g, "$1");
+		if (candidate && (await paths.isProtectedTokenAsync(candidate, signal))) return true;
+	}
+	return false;
+}
+
 async function shellCredentialRiskAsync(
 	command: string,
 	paths: CredentialPathPolicy,
@@ -393,7 +423,7 @@ async function shellCredentialRiskAsync(
 				if (searchRisk) return searchRisk;
 				continue;
 			}
-			if (hasProtectedArgumentToken(cmd.args, paths)) return "credential_path";
+			if (await hasProtectedArgumentTokenAsync(cmd.args, paths, signal)) return "credential_path";
 		}
 	}
 	return undefined;
@@ -423,7 +453,7 @@ async function runProcessCredentialRiskAsync(
 	if (await paths.isProtectedAsync(executable, signal)) return "credential_path";
 	for (const argument of args) {
 		signal?.throwIfAborted();
-		if (paths.isProtectedToken(argument)) return "credential_path";
+		if (await paths.isProtectedTokenAsync(argument, signal)) return "credential_path";
 	}
 
 	const inspected = inspectToolCredentialRisk(paths.executableName(executable), args);
@@ -619,7 +649,7 @@ export async function credentialToolBlockReasonAsync(
 		const scriptPath = typeof args.scriptPath === "string" ? args.scriptPath : undefined;
 		if (
 			PYTHON_SECRET_READ_RE.test(code) ||
-			pythonInspectsCredentialPath(code, paths) ||
+			(await pythonInspectsCredentialPathAsync(code, paths, signal)) ||
 			(scriptPath !== undefined && (await paths.isProtectedAsync(scriptPath, signal)))
 		) {
 			return CREDENTIAL_BLOCK_REASONS.pythonInspectionBlocked;

@@ -7,6 +7,7 @@ import type { ExecutionContext, ExecutionPathAuthority } from "@caupulican/pi-ag
 import { getWorkTenantDir } from "../agent-paths.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { awaitPreflight } from "../preflight.ts";
+import { isMissingPathError } from "../util/filesystem-errors.ts";
 import type { TaskDirectoryBackend } from "./task-directory-validation.ts";
 
 function directoryIdentity(info: BigIntStats): string {
@@ -46,8 +47,10 @@ export function createNativeTaskDirectoryBackend(agentDir?: string): NativeTaskD
 			signal?.throwIfAborted();
 			try {
 				return await realpath(path);
-			} catch {
-				return undefined;
+			} catch (error) {
+				if (signal?.aborted) throw error;
+				if (isMissingPathError(error)) return undefined;
+				throw error;
 			}
 		},
 		async isFile(path: string, signal?: AbortSignal): Promise<boolean | undefined> {
@@ -55,8 +58,10 @@ export function createNativeTaskDirectoryBackend(agentDir?: string): NativeTaskD
 			try {
 				const info = await stat(path);
 				return info.isFile();
-			} catch {
-				return undefined;
+			} catch (error) {
+				if (signal?.aborted) throw error;
+				if (isMissingPathError(error)) return undefined;
+				throw error;
 			}
 		},
 		async safeRealpath(path: string, signal?: AbortSignal): Promise<string> {

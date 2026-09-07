@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Fixed
+
+- Awaited asynchronous canonicalization and token protection in shell, Python, and process credential screening and capability envelope enforcement.
+- Failed closed on unresolvable denied roots and rethrown non-missing I/O errors during path and credential preflight.
+- Enforced segment case sensitivity on Windows dialect backends when case sensitivity is enabled.
+- Propagated cancellation signals to foreground gate authorization and backend preflight probes.
+
 ## [0.99.3] - 2026-09-07
 
 ### Added
