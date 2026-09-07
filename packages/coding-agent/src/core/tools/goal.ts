@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { stat as fsStat } from "node:fs/promises";
 import { type Static, Type } from "typebox";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { type GoalFileEvidenceResolver, resolveNativeGoalFileEvidence } from "../goals/file-evidence.ts";
 import { type GoalStateRevision, getGoalStateRevision } from "../goals/goal-lifecycle.ts";
 import {
 	type GoalEvidenceKind,
@@ -21,6 +21,7 @@ import {
 	summarizeGoalState,
 } from "../goals/goal-tool-core.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
+import { awaitPreflight } from "../preflight.ts";
 import {
 	emptyOrchestrationCall,
 	goalEvidencePanelRow,
@@ -28,7 +29,6 @@ import {
 	type OrchestrationPanelModel,
 	renderOrchestrationToolResult,
 } from "./orchestration-panel.ts";
-import { resolveToCwd } from "./path-utils.ts";
 
 const goalSchema = Type.Object(
 	{
@@ -233,6 +233,8 @@ export interface GoalToolDependencies {
 	}) => Promise<{ laneId?: string; skipReason?: string }>;
 	/** Working directory for resolving kind:"file" evidence ref paths. Defaults to `process.cwd()`. */
 	cwd?: () => string;
+	/** Non-native file evidence never falls back to the operator's filesystem or directory. */
+	resolveFileEvidence?: GoalFileEvidenceResolver;
 	/**
 	 * Gate agent-facing 'complete' on verified/user evidence backing. Defaults to `true` (on)
 	 * when omitted -- the conservative default; set to a function returning `false` to opt out.
@@ -276,7 +278,17 @@ async function resolveEvidenceVerified(
 	uri: string | undefined,
 	summary: string,
 	deps: GoalToolDependencies,
+	signal?: AbortSignal,
 ): Promise<{ verified: boolean | undefined; uri?: string; reason?: string; outcome?: GoalEvidenceOutcome }> {
+	if (kind === "file" && uri) {
+		return awaitPreflight(
+			() =>
+				deps.resolveFileEvidence
+					? deps.resolveFileEvidence(uri, signal)
+					: resolveNativeGoalFileEvidence(uri, deps.cwd?.() ?? process.cwd(), signal),
+			signal,
+		);
+	}
 	if (kind === "user") {
 		const resolved = deps.resolveUserEvidence?.(summary, uri);
 		if (!resolved) return { verified: false, reason: "user-statement verification is unavailable" };
@@ -292,15 +304,6 @@ async function resolveEvidenceVerified(
 		return resolved.verified
 			? { verified: true, uri: resolved.toolCallId, outcome: resolved.outcome }
 			: { verified: false, reason: resolved.reason };
-	}
-	if (kind === "file") {
-		const cwd = deps.cwd?.() ?? process.cwd();
-		try {
-			const stats = await fsStat(resolveToCwd(trimmedUri, cwd));
-			return { verified: stats.isFile() };
-		} catch {
-			return { verified: false };
-		}
 	}
 	if (kind === "worker") {
 		if (!deps.getLaneRecords || !deps.getWorkerClaimSnapshots) return { verified: false };
@@ -389,13 +392,7 @@ function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 			const kind: GoalEvidenceKind = input.kind;
 			return {
 				action: "add_evidence",
-				evidenceId:
-					input.evidenceId ??
-					generatedGoalRecordId("ev", {
-						kind,
-						summary: input.summary?.trim() ?? "",
-						uri: input.uri?.trim() ?? "",
-					}),
+				evidenceId: input.evidenceId ?? "",
 				kind,
 				summary: input.summary ?? "",
 				uri: input.uri,
@@ -549,15 +546,26 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			}
 
 			let action: GoalAction = mapped;
+			const evidenceState = action.action === "add_evidence" ? deps.getGoalState() : undefined;
 			let evidenceFailureReason: string | undefined;
 			if (action.action === "add_evidence") {
-				const resolved = await resolveEvidenceVerified(action.kind, action.uri, action.summary, deps);
+				signal?.throwIfAborted();
+				const resolved = await resolveEvidenceVerified(action.kind, action.uri, action.summary, deps, signal);
+				signal?.throwIfAborted();
 				evidenceFailureReason = resolved.reason;
+				const uri = resolved.uri ?? action.uri;
 				action = {
 					...action,
+					evidenceId:
+						input.evidenceId ??
+						generatedGoalRecordId("ev", {
+							kind: action.kind,
+							summary: action.summary.trim(),
+							uri: action.kind === "file" ? (uri ?? "") : (uri?.trim() ?? ""),
+						}),
 					verified: resolved.verified,
 					outcome: resolved.outcome,
-					...(resolved.uri ? { uri: resolved.uri } : {}),
+					uri,
 				};
 			}
 			// Honest dispatch reporting: distinguish "dispatched" (laneId), "declined" (skipReason --
@@ -650,7 +658,9 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 				}
 			}
 
-			const current = deps.getGoalState();
+			// The existing compare-and-append host must check the state from BEFORE asynchronous
+			// evidence lookup. Reading a replacement goal here would attach the old proof to it.
+			const current = action.action === "add_evidence" ? evidenceState : deps.getGoalState();
 			let nextState: GoalState;
 			if (action.action === "dispatch_worker" && dispatchGuardRefused) {
 				// Short-circuit: the guard refused before any dispatch attempt -- never call
@@ -735,7 +745,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					status =
 						action.kind === "user"
 							? `verified user statement via ${action.uri}`
-							: `verified${action.uri && action.uri !== input.uri?.trim() ? ` via toolCallId ${action.uri}` : ""}`;
+							: `verified${action.uri && action.uri !== input.uri?.trim() ? ` via ${action.kind === "file" ? "file" : "toolCallId"} ${action.uri}` : ""}`;
 					if (action.outcome) status += `; operation ${action.outcome}`;
 				}
 				evidenceNote = `Evidence '${action.evidenceId}' recorded (${status}).`;

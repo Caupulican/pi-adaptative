@@ -334,6 +334,8 @@ function toGoalEvent(
 		case "add_evidence": {
 			const id = action.evidenceId.trim();
 			const summary = action.summary.trim();
+			// File locators are backend-resolved paths; trailing whitespace can be a filename byte.
+			const uri = action.kind === "file" ? action.uri : action.uri?.trim();
 			if (!id) return { ok: false, error: "add_evidence requires a non-empty evidenceId." };
 			if (!summary) return { ok: false, error: "add_evidence requires a non-empty summary." };
 			if (id.length > MAX_GOAL_ID_LENGTH) {
@@ -342,7 +344,7 @@ function toGoalEvent(
 			if (summary.length > MAX_GOAL_LEDGER_TEXT_LENGTH) {
 				return { ok: false, error: `evidence summary must be at most ${MAX_GOAL_LEDGER_TEXT_LENGTH} characters.` };
 			}
-			if ((action.uri?.trim().length ?? 0) > MAX_GOAL_URI_LENGTH) {
+			if ((uri?.length ?? 0) > MAX_GOAL_URI_LENGTH) {
 				return { ok: false, error: `evidence uri must be at most ${MAX_GOAL_URI_LENGTH} characters.` };
 			}
 			if (state.evidence.length >= MAX_GOAL_EVIDENCE) {
@@ -358,7 +360,7 @@ function toGoalEvent(
 					id,
 					kind: action.kind,
 					summary,
-					uri: action.uri?.trim() || undefined,
+					uri: uri || undefined,
 					verified: action.verified,
 					outcome: action.outcome,
 					now,

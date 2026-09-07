@@ -2,8 +2,10 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createGoalState } from "../src/core/goals/goal-state.ts";
+import type { GoalFileEvidenceResolution } from "../src/core/goals/file-evidence.ts";
+import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
+import { createGoalToolDefinition } from "../src/core/tools/goal.ts";
 import { createPipelineToolDefinition, type PipelineToolDetails } from "../src/core/tools/pipeline.ts";
 import type * as worktreeEngine from "../src/core/worktree-sync/git-engine.ts";
 import { createHarness, getMessageText, type Harness } from "./suite/harness.ts";
@@ -60,6 +62,56 @@ function definition(cwd: string, marker: string) {
 
 describe("workflow tools share the admitted project", () => {
 	afterEach(() => vi.clearAllMocks());
+
+	it.each(["unchanged", "replaced", "revised"])(
+		"commits pending file evidence only against its original %s goal snapshot",
+		async (change) => {
+			const { harness } = await projectHarness();
+			const initial = createGoalState({ goalId: "original-goal", userGoal: "Inspect original project", now: "T0" });
+			appendGoalStateSnapshot(harness.sessionManager, initial);
+			const pending = Promise.withResolvers<GoalFileEvidenceResolution>();
+			const started = Promise.withResolvers<void>();
+			const tool = createGoalToolDefinition({
+				getGoalState: () => harness.session.getGoalStateSnapshot(),
+				saveGoalState: (state, expected) => {
+					harness.session.saveGoalStateSnapshot(state, expected);
+				},
+				resolveFileEvidence: () => {
+					started.resolve();
+					return pending.promise;
+				},
+			});
+			const result = tool.execute(
+				"pending-file",
+				{ action: "add_evidence", kind: "file", summary: "Original project proof", uri: "result.txt" },
+				undefined,
+				undefined,
+				harness.session.extensionRunner.createContext(),
+			);
+			const rejected = change === "unchanged" ? undefined : expect(result).rejects.toThrow("changed concurrently");
+			await started.promise;
+			if (change !== "unchanged") {
+				const next =
+					change === "replaced"
+						? createGoalState({ goalId: "replacement-goal", userGoal: "Inspect different project", now: "T1" })
+						: applyGoalEvent(initial, { type: "progress", now: "T1" });
+				harness.session.saveGoalStateSnapshot(next);
+			}
+			const before = harness.session.getGoalStateSnapshot();
+			pending.resolve({ verified: true, uri: "backend://original-project/result.txt" });
+			if (rejected) {
+				await rejected;
+				expect(harness.session.getGoalStateSnapshot()).toBe(before);
+				expect(before?.evidence).toEqual([]);
+			} else {
+				expect((await result).isError).not.toBe(true);
+				expect(harness.session.getGoalStateSnapshot()?.evidence[0]).toMatchObject({
+					uri: "backend://original-project/result.txt",
+					verified: true,
+				});
+			}
+		},
+	);
 
 	it("discovers and starts the selected project's pipeline without writing to the ambient project", async () => {
 		const { harness, project } = await projectHarness();
@@ -192,5 +244,29 @@ describe("workflow tools share the admitted project", () => {
 		const state = getLatestGoalStateSnapshot(harness.sessionManager)!;
 		expect(state.evidence.find((entry) => entry.id === "selected")?.verified).toBe(true);
 		expect(state.evidence.find((entry) => entry.id === "ambient")?.verified).toBe(false);
+		expect(state.evidence.find((entry) => entry.id === "selected")?.uri).toBe(join(project, "selected.txt"));
+		expect((await call(harness, "task_directory", { action: "select", workspaceId: "session" })).isError).toBe(false);
+		await harness.session.reload();
+		expect(getLatestGoalStateSnapshot(harness.sessionManager)?.evidence).toEqual(state.evidence);
+	});
+
+	it("retains separate native goal evidence for the same relative file in two workspaces", async () => {
+		const { harness, project } = await projectHarness();
+		appendGoalStateSnapshot(
+			harness.sessionManager,
+			createGoalState({ goalId: "fixture-goal", userGoal: "Inspect both projects", now: "T0" }),
+		);
+		for (const cwd of [project, harness.tempDir]) writeFileSync(join(cwd, "result.txt"), "SYNTHETIC_RESULT\n");
+		const params = { action: "add_evidence", kind: "file", summary: "Synthetic result", uri: "result.txt" };
+		expect((await call(harness, "goal", params)).isError).toBe(false);
+		expect((await call(harness, "task_directory", { action: "select", workspaceId: "session" })).isError).toBe(false);
+		const second = await call(harness, "goal", params);
+		expect(second.isError, getMessageText(second)).toBe(false);
+		const entries = getLatestGoalStateSnapshot(harness.sessionManager)?.evidence;
+		expect(entries?.map((entry) => entry.uri)).toEqual([
+			join(project, "result.txt"),
+			join(harness.tempDir, "result.txt"),
+		]);
+		expect(new Set(entries?.map((entry) => entry.id)).size).toBe(2);
 	});
 });

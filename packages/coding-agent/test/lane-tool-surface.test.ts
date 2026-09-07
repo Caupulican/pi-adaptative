@@ -119,7 +119,7 @@ describe("classified lane tool surface", () => {
 			const moved = await shell.execute("move", { command: "cd src" });
 			expect(moved.isError).not.toBe(true);
 			const location = await shell.execute("where", {
-				command: process.platform === "win32" ? "(Get-Location).Path" : "pwd",
+				command: "pwd",
 			});
 			expect(location.isError).not.toBe(true);
 			const output = location.content

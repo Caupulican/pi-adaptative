@@ -216,8 +216,16 @@ task, session, and branch changes invalidate accepted plans. The projection is b
 omits whole catalogue rows or an oversized active path rather than exposing a partial executable path.
 Corrupt latest state emits a static diagnosis without resurrecting an older binding or its raw payload.
 
-This integration is not the completed portability contract. Delegated workers still need their own
-registry; persisted relative goal-evidence identity and child receipt identity need review.
+New file evidence retains its resolved native or explicit backend locator. Generated identities use
+that locator, so equal relative filenames in two projects do not collide. Native resolution reuses
+the exact-first read-path owner; literal leading at-signs and Unicode whitespace remain filename bytes.
+An explicit backend resolver never falls back to the operator filesystem. Cancellation cannot append
+late evidence, and asynchronous verification commits against its original goal revision through the
+existing compare-and-append owner. This records existence at observation time, not current file content
+or renewed authority; historical relative records cannot be retroactively assigned a proven origin.
+
+This integration is not the completed portability contract. Delegated worker directory controls and
+child receipt identity still need review.
 Native attachment IDs now retain a hash of the original device/file identity. Replacing a directory
 at its saved path or retargeting its junction requires explicit reattachment, including after runtime
 restart. Missing ambient roots leave status and reattachment available; a directory appearing later
@@ -490,6 +498,28 @@ signatures; three new files are synthetic UTF-8. No existing content was transco
 The full task_directory status response is still a bounded-state but potentially large snapshot, not a
 paged catalogue. This slice does not resolve backend fencing, pre-conversation persistence, or the other
 remaining portability reviews above.
+
+The model-context checkpoint `a2a7f216b817d6b49a11973fcf78b74b45ec9853` passed eight GitHub jobs.
+The Linux model-contract matrix consumed a worker response from a foreground handoff; its isolated
+response fixture now passes all six cases. The Windows lane-shell fixture sent PowerShell syntax to
+the Bash-compatible engine; it now uses the shared `pwd` command. The corrected fixtures and Windows
+engine controls pass 43 targeted tests across three files locally. Windows shard 3 also reported
+worktree fixture cleanup EPERM again; its root cause remains unproven and is not concealed by these fixes.
+
+File-evidence provenance passes 135 targeted tests across five files, including eleven new isolated
+cases and four additional real-session cases. Five initial red cases independently reproduced lost
+source paths, colliding project evidence, filename rewriting, and post-cancellation mutation. Two more
+red controls reproduced stale verification attaching to a replaced or revised goal; the unchanged-goal
+negative control passes. Backend failure, delayed completion, literal trailing whitespace, URI bounds,
+serialization, selected-directory changes, and journal reload use synthetic fixtures only. Native
+existence checks share read-path resolution; state persistence retains the existing goal revision gate.
+The clone audit accounts for 969 eligible / 978 owned sources and 938 files in the unchanged 50-token
+detection pass, with zero clones under the existing size caps. Historical evidence is not migrated or
+re-certified, and no file-content freshness guarantee is added.
+The combined focused run passes 178 tests in eight files, and all thirteen real-worktree integration
+tests pass separately on Linux. `npm run check` passes. Seven edited tracked files preserve strict
+UTF-8 validity, BOM, newline-kind and final-newline signatures; two new files validate as UTF-8. No
+existing content was transcoded. These local results do not resolve the native Windows cleanup failure.
 
 Targeted regression success and a repository check are not release approval. Task-directory binding
 remains open. Exact-candidate remote CI and the documented release gates remain required.

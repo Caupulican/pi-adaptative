@@ -12,6 +12,7 @@ import { MIN_VIABLE_WORKER_TOKEN_BUDGET } from "../src/core/delegation/worker-au
 import { resolveModelToolProtocol } from "../src/core/model-tool-protocol.ts";
 import type { OrchestrationThinkingLevel } from "../src/core/orchestration/contracts.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
+import { setConcurrentResponses } from "./suite/concurrent-responses.ts";
 import { createHarness } from "./suite/harness.ts";
 import { completedWorkerOutput } from "./worker-output-fixture.ts";
 
@@ -193,7 +194,7 @@ describe("provider-neutral model contract matrix", () => {
 							textProtocolPrimer: boolean;
 					  }
 					| undefined;
-				harness.setResponses([
+				setConcurrentResponses(harness, [
 					(context, options, _state, selectedModel) => {
 						observed = {
 							api: selectedModel.api,
@@ -209,7 +210,7 @@ describe("provider-neutral model contract matrix", () => {
 
 				const run = await harness.session.runWorkerDelegationOnce({ instructions: "Exercise the provider matrix" });
 
-				expect(run.record?.status).toBe("succeeded");
+				expect(run.record?.status, JSON.stringify(run)).toBe("succeeded");
 				expect(run.outcome?.claim).toMatchObject({
 					status: "completed",
 					summary: "provider-neutral worker completed",
@@ -223,7 +224,7 @@ describe("provider-neutral model contract matrix", () => {
 					textProtocolPrimer: entry.expectedTextProtocol === true,
 				});
 			} finally {
-				harness.cleanup();
+				await harness.cleanup();
 			}
 		},
 	);
