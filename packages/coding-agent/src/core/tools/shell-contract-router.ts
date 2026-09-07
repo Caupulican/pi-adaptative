@@ -42,6 +42,8 @@ const BLOCKED_NESTED_SHELLS = new Set([
 ]);
 const UNSUPPORTED_OPERATOR_MESSAGE =
 	"Unsupported Bash construct on Windows. Use one simple command per call; pipelines, redirection, command substitution, variable expansion, shell chaining, and nested shells are not translated.";
+const COMMAND_LIST_MESSAGE =
+	"Multi-line command lists require the Windows Python shell engine. The PowerShell floor runs one simple command per call; a line break is a command separator, never argument whitespace.";
 
 function tokenizePortableCommand(command: string): TokenizeResult {
 	const argv: string[] = [];
@@ -123,11 +125,14 @@ function tokenizePortableCommand(command: string): TokenizeResult {
 			tokenStarted = true;
 			continue;
 		}
+		// A line break separates commands. Folding it into whitespace would hand every later line to
+		// the first command as arguments, which is exactly what the engine-owned command list prevents.
+		if (character === "\n" || character === "\r") return { ok: false, error: COMMAND_LIST_MESSAGE };
 		if (/\s/u.test(character)) {
 			finishToken();
 			continue;
 		}
-		if ("|><&;\n\r$`(){}*?[]".includes(character) || character === "#" || (character === "~" && token === "")) {
+		if ("|><&;$`(){}*?[]".includes(character) || character === "#" || (character === "~" && token === "")) {
 			return { ok: false, error: UNSUPPORTED_OPERATOR_MESSAGE };
 		}
 		token += character;

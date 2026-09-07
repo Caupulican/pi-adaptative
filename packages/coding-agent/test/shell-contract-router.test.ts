@@ -9,6 +9,29 @@ describe("stable Bash-like shell contract router", () => {
 		});
 	});
 
+	it.each([
+		'git -C "D:/BuildPrj" fetch --all --prune\nprintf \'\\n===status===\\n\'\ngit -C "D:/BuildPrj" status -sb',
+		"git status --porcelain\r\necho done",
+		"ls\n",
+	])("never folds a multi-line command into one argv; the engine owns command lists %#", (command) => {
+		// Live defect: the PowerShell floor ran `git fetch` with every following line as arguments
+		// ("error: unknown switch `C'", "fatal: Invalid path '/n===README==='").
+		const floor = routeShellContract(command, "win32", { pythonEngine: false });
+		if (command === "ls\n") {
+			// A trailing line break is not a command list; the simple command keeps its lowest route.
+			expect(routeShellContract(command, "win32", { pythonEngine: true })).toMatchObject({ kind: "powershell" });
+			expect(floor).toMatchObject({ kind: "powershell", argv: ["ls"] });
+			return;
+		}
+		expect(routeShellContract(command, "win32", { pythonEngine: true })).toEqual({
+			kind: "python-engine",
+			command,
+		});
+		expect(floor).toMatchObject({ kind: "unsupported" });
+		if (floor.kind !== "unsupported") throw new Error("Expected the floor to refuse a command list");
+		expect(floor.error).toMatch(/one simple command per call/u);
+	});
+
 	it("translates quoted external argv to a deterministic PowerShell invocation", () => {
 		const route = routeShellContract("git commit -m 'fix user''s bug'", "win32");
 		expect(route).toMatchObject({ kind: "powershell", argv: ["git", "commit", "-m", "fix users bug"] });
