@@ -10,7 +10,8 @@
 - Reported a failed Herdr collaboration attachment through the activity error channel and kept the session standalone instead of aborting startup.
 - Classified invented tool names as one `unknown_tool` mistake kind in the failure ledger, and named the declared tool an invented name begins with in the correction.
 - Reported missing discriminated-union arguments (for example `task_steps` without `action`) as `required, one of …` instead of `expected object`.
-- Projected root-level action unions (`task_steps`, `task_directory`) to one flat provider object with the action enum, merged properties, and per-action requirements in the description; models on the OpenAI function-calling dialect read a root `anyOf` as separate functions and invented names such as `task_steps_vis-_-vis_set` on every call.
+- Projected root-level object unions (`task_steps`, `task_directory`, `write`) to one flat provider object with the discriminator enum, merged properties, and per-branch argument sets in the description; models on the OpenAI function-calling dialect read a root `anyOf` as separate functions or answered with empty arguments, which surfaced as invented names such as `task_steps_vis-_-vis_set` and repeated `write {}` bounces on every call.
+- Anchored path alias expansions to the legend's own root when the admitted directory differs from it, so `p/…` aliases keep working after `task_directory select` instead of resolving under the pinned directory.
 
 ### Changed
 

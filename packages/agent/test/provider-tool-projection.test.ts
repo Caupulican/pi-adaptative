@@ -106,31 +106,53 @@ describe("root discriminated union projection", () => {
 		);
 	});
 
-	it("leaves a root union without a shared string discriminator untouched", () => {
+	it("flattens a root object union without a literal discriminator and lists its argument sets", () => {
+		// Live defect (Windows probe): `write` is `{path, content} | {path, contentRef}`; on the wire as a
+		// root anyOf the model sent `{}` six times in a row.
 		const projected = unionTool(
 			Type.Union([
-				Type.Object({ path: Type.String() }, { additionalProperties: false }),
-				Type.Object({ url: Type.String() }, { additionalProperties: false }),
+				Type.Object({ path: Type.String(), content: Type.String() }, { additionalProperties: false }),
+				Type.Object(
+					{ path: Type.String(), contentRef: Type.String(), append: Type.Optional(Type.Boolean()) },
+					{ additionalProperties: false },
+				),
 			]),
 		);
-		expect(projected.parameters).toMatchObject({ type: "object", anyOf: [{}, {}] });
+		expect(projected.parameters).toEqual({
+			type: "object",
+			properties: {
+				path: { type: "string" },
+				content: { type: "string" },
+				contentRef: { type: "string" },
+				append: { type: "boolean" },
+			},
+			required: ["path"],
+		});
+		expect(projected.description).toBe(
+			"Plan steps. Accepted argument sets: path, content; path, contentRef (accepts append).",
+		);
+	});
+
+	it("leaves a root union whose branches are not all objects untouched", () => {
+		const projected = unionTool(
+			Type.Union([Type.Object({ path: Type.String() }, { additionalProperties: false }), Type.String()]),
+		);
+		expect(projected.parameters).toMatchObject({ anyOf: [{ type: "object" }, { type: "string" }] });
 		expect(projected.description).toBe("Plan steps.");
 	});
 });
 
 describe("provider tool projection", () => {
-	it("makes object-only unions explicit without narrowing mixed or unconstrained branches", () => {
+	it("flattens object-only unions to one object without narrowing mixed or unconstrained branches", () => {
 		const schema = Type.Union([
 			Type.Object({ path: Type.String() }, { additionalProperties: false }),
 			Type.Object({ ref: Type.String() }, { additionalProperties: false }),
 		]);
-		const projected = projectToolSchemaForProvider(schema) as typeof schema;
-		expect(projected).toMatchObject({ type: "object" });
-		const original = Compile(schema);
-		const output = Compile(projected);
-		for (const value of [null, [], 1, "text", {}, { path: "a" }, { ref: "b" }, { path: "a", ref: "b" }]) {
-			expect(output.Check(value)).toBe(original.Check(value));
-		}
+		const projected = projectToolSchemaForProvider(schema);
+		expect(projected).toEqual({
+			type: "object",
+			properties: { path: { type: "string" }, ref: { type: "string" } },
+		});
 		for (const branch of [Type.String(), {}, true]) {
 			const mixed = { anyOf: [schema.anyOf[0], branch] };
 			expect(projectToolSchemaForProvider(mixed)).toEqual(mixed);

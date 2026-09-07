@@ -200,7 +200,8 @@ function projectSchemaNode(value: unknown): unknown {
 	return compactRedundantEnumConstraints(compactDiscriminatedUnion(compactLiteralUnion(projected)));
 }
 
-interface DiscriminatedBranch {
+interface UnionBranch {
+	/** Discriminator literals for this branch; empty when the union has no literal discriminator. */
 	values: string[];
 	properties: Record<string, unknown>;
 	required: string[];
@@ -217,44 +218,58 @@ function branchDiscriminatorValues(branch: Record<string, unknown>, key: string)
 	return undefined;
 }
 
-function readDiscriminatedBranches(
+function branchRequired(branch: Record<string, unknown>): string[] {
+	return Array.isArray(branch.required)
+		? branch.required.filter((name): name is string => typeof name === "string")
+		: [];
+}
+
+/** Every branch an object with properties; a shared string-literal key, when one exists, is the discriminator. */
+function readObjectUnion(
 	branches: readonly Record<string, unknown>[],
-): { discriminator: string; branches: DiscriminatedBranch[] } | undefined {
+): { discriminator?: string; branches: UnionBranch[] } | undefined {
+	if (!branches.every((branch) => branch.type === "object" && isRecord(branch.properties))) return undefined;
 	const firstProperties = branches[0]?.properties;
-	if (!isRecord(firstProperties)) return undefined;
-	for (const discriminator of Object.keys(firstProperties)) {
-		const read: DiscriminatedBranch[] = [];
-		for (const branch of branches) {
-			const values = branch.type === "object" ? branchDiscriminatorValues(branch, discriminator) : undefined;
-			if (!values || !isRecord(branch.properties)) break;
-			read.push({
-				values,
-				properties: branch.properties,
-				required: Array.isArray(branch.required)
-					? branch.required.filter((name): name is string => typeof name === "string")
-					: [],
-			});
+	if (isRecord(firstProperties)) {
+		for (const discriminator of Object.keys(firstProperties)) {
+			const read: UnionBranch[] = [];
+			for (const branch of branches) {
+				const values = branchDiscriminatorValues(branch, discriminator);
+				if (!values) break;
+				read.push({
+					values,
+					properties: branch.properties as Record<string, unknown>,
+					required: branchRequired(branch),
+				});
+			}
+			if (read.length === branches.length) return { discriminator, branches: read };
 		}
-		if (read.length === branches.length) return { discriminator, branches: read };
 	}
-	return undefined;
+	return {
+		branches: branches.map((branch) => ({
+			values: [],
+			properties: branch.properties as Record<string, unknown>,
+			required: branchRequired(branch),
+		})),
+	};
 }
 
 /**
  * Providers that speak the OpenAI function-calling dialect expect one flat object schema per
- * function. A root-level `anyOf` of action branches is read by some models as separate functions
- * (`task_steps` × `set`), which surfaces as invented tool names. The wire schema therefore becomes
- * one object: the discriminator carries every action as an enum, every branch property is merged
+ * function. A root-level `anyOf` of object branches is read by some models as separate functions
+ * (`task_steps` × `set`) or answered with empty arguments (`write`), which surfaces as invented
+ * tool names and repeated validation bounces. The wire schema therefore becomes one object: a
+ * literal discriminator carries every action as an enum, every branch property is merged
  * (differing shapes become a property-level anyOf), and only properties required by every branch
- * stay required. Per-action requirements travel in the description; validation keeps the full union.
+ * stay required. Per-branch requirements travel in the description; validation keeps the union.
  */
-function flattenRootDiscriminatedUnion(projected: Record<string, unknown>): {
+function flattenRootObjectUnion(projected: Record<string, unknown>): {
 	schema: Record<string, unknown>;
 	guidance?: string;
 } {
 	const branches = projected.anyOf;
 	if (!Array.isArray(branches) || branches.length < 2 || !branches.every(isRecord)) return { schema: projected };
-	const read = readDiscriminatedBranches(branches);
+	const read = readObjectUnion(branches);
 	if (!read) return { schema: projected };
 	const { discriminator } = read;
 	const values: string[] = [];
@@ -278,15 +293,20 @@ function flattenRootDiscriminatedUnion(projected: Record<string, unknown>): {
 			? new Set(required.filter((name) => sharedRequired?.has(name)))
 			: new Set(required);
 		const optional = Object.keys(branch.properties).filter((key) => key !== discriminator && !required.includes(key));
-		const label = branch.values.map((value) => JSON.stringify(value)).join(" | ");
-		const parts = [
-			...(required.length > 0 ? [`requires ${required.join(", ")}`] : []),
-			...(optional.length > 0 ? [`accepts ${optional.join(", ")}`] : []),
-		];
-		guidance.push(`${label} ${parts.length > 0 ? parts.join(", ") : "takes no other arguments"}`);
+		if (discriminator) {
+			const label = branch.values.map((value) => JSON.stringify(value)).join(" | ");
+			const parts = [
+				...(required.length > 0 ? [`requires ${required.join(", ")}`] : []),
+				...(optional.length > 0 ? [`accepts ${optional.join(", ")}`] : []),
+			];
+			guidance.push(`${label} ${parts.length > 0 ? parts.join(", ") : "takes no other arguments"}`);
+		} else {
+			const head = required.length > 0 ? required.join(", ") : "no required arguments";
+			guidance.push(optional.length > 0 ? `${head} (accepts ${optional.join(", ")})` : head);
+		}
 	}
 	const properties = createProviderRecord();
-	properties[discriminator] = { type: "string", enum: values };
+	if (discriminator) properties[discriminator] = { type: "string", enum: values };
 	for (const [key, shape] of shapes) {
 		properties[key] = shape.schemas.length === 1 ? shape.schemas[0] : { anyOf: shape.schemas };
 	}
@@ -296,8 +316,14 @@ function flattenRootDiscriminatedUnion(projected: Record<string, unknown>): {
 	}
 	schema.type = "object";
 	schema.properties = properties;
-	schema.required = [discriminator, ...(sharedRequired ?? [])];
-	return { schema, guidance: `Arguments by ${discriminator}: ${guidance.join("; ")}.` };
+	const required = [...(discriminator ? [discriminator] : []), ...(sharedRequired ?? [])];
+	if (required.length > 0) schema.required = required;
+	return {
+		schema,
+		guidance: discriminator
+			? `Arguments by ${discriminator}: ${guidance.join("; ")}.`
+			: `Accepted argument sets: ${guidance.join("; ")}.`,
+	};
 }
 
 export function normalizeProviderToolDescription(description: string): string {
@@ -306,7 +332,7 @@ export function normalizeProviderToolDescription(description: string): string {
 
 export function projectToolSchemaForProvider(schema: unknown): unknown {
 	const projected = projectSchemaNode(schema);
-	return isRecord(projected) ? flattenRootDiscriminatedUnion(projected).schema : projected;
+	return isRecord(projected) ? flattenRootObjectUnion(projected).schema : projected;
 }
 
 /**
@@ -324,7 +350,7 @@ function projectToolForProvider(tool: Tool): Tool {
 	if (cached) return cached;
 	const projectedSchema = projectSchemaNode(tool.parameters);
 	const root: { schema: unknown; guidance?: string } = isRecord(projectedSchema)
-		? flattenRootDiscriminatedUnion(projectedSchema)
+		? flattenRootObjectUnion(projectedSchema)
 		: { schema: projectedSchema };
 	const description = normalizeProviderToolDescription(
 		"providerDescription" in tool && typeof tool.providerDescription === "string"
