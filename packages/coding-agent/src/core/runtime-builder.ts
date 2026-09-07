@@ -1119,7 +1119,10 @@ export class RuntimeBuilder {
 					// adapted from its `{started:true;record}|{started:false;skipReason}` shape onto this
 					// tool's narrower `{laneId}|{skipReason}` shape.
 					startWorkerDelegation: (args) => {
-						const outcome = this.deps.startWorkerDelegation(createGoalWorkerDelegationRequest(args));
+						const outcome = this.deps.startWorkerDelegation({
+							...createGoalWorkerDelegationRequest(args),
+							executionContext: this._taskDirectories.executionContext,
+						});
 						return outcome.started ? { laneId: outcome.record.laneId } : { skipReason: outcome.skipReason };
 					},
 					// Goal dispatch uses the same admitted pi_collaboration fire_task path as a model call.
@@ -1266,7 +1269,11 @@ export class RuntimeBuilder {
 							branchId: sessionManager.getLeafId() ?? sessionManager.getSessionId(),
 						};
 					},
-					startWorkerDelegation: (args) => this.deps.startWorkerDelegation(args),
+					startWorkerDelegation: (args, signal) =>
+						this._taskDirectories.withContext(
+							(executionContext) => this.deps.startWorkerDelegation({ ...args, executionContext }),
+							signal,
+						),
 					runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),
 					orchestrationProfiles: this.deps.getOrchestrationProfileCatalog(),
 					workerModelPinPolicy: settingsManager.getWorkerModelPinPolicy(),

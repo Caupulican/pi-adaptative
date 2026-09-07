@@ -6,6 +6,7 @@ import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TASK_DIRECTORY_STATE_CUSTOM_TYPE } from "../src/core/tasks/session-task-directory-store.ts";
+import { TaskDirectoryController } from "../src/core/tasks/task-directory-controller.ts";
 import { TaskDirectoryRuntime } from "../src/core/tasks/task-directory-runtime.ts";
 
 describe("native task directory runtime", () => {
@@ -129,6 +130,66 @@ describe("native task directory runtime", () => {
 		expect(process.cwd()).toBe(ambient);
 		first.release();
 		second.release();
+	});
+
+	it("captures host callbacks in their task context and releases failed admission leases", async () => {
+		const other = join(root, "host-other");
+		mkdirSync(other);
+		await runtime.change({ action: "register", workspaceId: "other", path: other });
+		const entered = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		activeTaskId = "host-first";
+		const first = runtime.withContext(async (context) => {
+			expect(context).toMatchObject({ cwd: root, taskId: "host-first" });
+			entered.resolve();
+			await finish.promise;
+			expect(runtime.executionContext).toBe(context);
+			throw new Error("synthetic dispatch failure");
+		});
+		const rejected = expect(first).rejects.toThrow("synthetic dispatch failure");
+		await entered.promise;
+		await runtime.change({ action: "select", workspaceId: "other" });
+		activeTaskId = "host-second";
+		await runtime.withContext((context) => {
+			expect(context).toMatchObject({ cwd: other, taskId: "host-second" });
+			expect(runtime.cwd).toBe(other);
+		});
+		finish.resolve();
+		await rejected;
+		expect(runtime.executionContext).toBeUndefined();
+		// Reattachment waits for held leases; completing it proves the failure released its lease.
+		await runtime.change({ action: "reattach", workspaceId: "session", path: root });
+	});
+
+	it("does not enter a cancelled host callback and permits a subsequent admission", async () => {
+		const callback = vi.fn();
+		await expect(runtime.withContext(callback, AbortSignal.abort(new Error("cancelled")))).rejects.toThrow(
+			"cancelled",
+		);
+		expect(callback).not.toHaveBeenCalled();
+		await runtime.withContext(callback);
+		expect(callback).toHaveBeenCalledOnce();
+	});
+
+	it("releases a host lease if cancellation wins between validation and dispatch", async () => {
+		const abort = new AbortController();
+		const admit = TaskDirectoryController.prototype.admit;
+		const spy = vi.spyOn(TaskDirectoryController.prototype, "admit").mockImplementationOnce(async function (
+			this: TaskDirectoryController,
+			...args
+		) {
+			const lease = await admit.apply(this, args);
+			abort.abort(new Error("cancelled after validation"));
+			return lease;
+		});
+		const callback = vi.fn();
+		try {
+			await expect(runtime.withContext(callback, abort.signal)).rejects.toThrow("cancelled after validation");
+			expect(callback).not.toHaveBeenCalled();
+			await runtime.change({ action: "reattach", workspaceId: "session", path: root });
+		} finally {
+			spy.mockRestore();
+		}
 	});
 
 	it("retains directory identity across runtime restart instead of trusting the new occupant", async () => {

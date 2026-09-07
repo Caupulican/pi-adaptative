@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
@@ -20,6 +21,37 @@ const modelRegistry = {
 } as unknown as ModelRegistry;
 
 describe("resolveWorkerAuthority", () => {
+	it.each([undefined, "child"])(
+		"anchors preset paths to configuration and explicit paths to task cwd (%s)",
+		(path) => {
+			const base: ResolvedWorkerProfile = {
+				model,
+				modelBinding: { provider: model.provider, modelId: model.id, thinkingLevel: "off" },
+				profile: {
+					...createTestWorkerOrchestrationProfile({
+						profileId: "directory-preset",
+						model,
+						toolNames: ["read"],
+						capabilityCeiling: ["filesystem.read"],
+					}),
+					workspacePath: "preset",
+				},
+				resourcePointers: [],
+			};
+			const resolution = resolveWorkerAuthority({
+				base,
+				authority: path ? { path } : undefined,
+				cwd: resolve("/launch"),
+				executionCwd: resolve("/selected"),
+				modelRegistry,
+				isModelExhausted: () => false,
+			});
+			expect(resolution.ok).toBe(true);
+			if (!resolution.ok) throw new Error(resolution.reason);
+			expect(resolution.shipment.profile.workspacePath).toBe(resolve(path ? "/selected/child" : "/launch/preset"));
+		},
+	);
+
 	it.each([true, false, undefined])("compiles readOnly=%s into the effective execution plan", (readOnly) => {
 		const resolution = resolveWorkerAuthority({
 			authority: { readOnly, path: "/repo" },

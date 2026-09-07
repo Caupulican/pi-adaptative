@@ -72,6 +72,8 @@ export interface WorkerAuthorityResolutionInput {
 	foregroundToolNames?: readonly string[];
 	foregroundEnvelope?: CapabilityEnvelope;
 	cwd?: string;
+	/** Caller task cwd for explicit relative path intent; preset paths remain anchored to cwd. */
+	executionCwd?: string;
 	modelRegistry: ModelRegistry;
 	isModelExhausted(model: Model<Api>): boolean;
 }
@@ -275,7 +277,10 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	const delegationLimits = structuredClone(LEAF_WORKER_DELEGATION_LIMITS);
 	const requestedWorkspacePath = input.authority?.path ?? input.base?.profile.workspacePath;
 	const workspacePath = requestedWorkspacePath
-		? resolveWorkerWorkspacePath(input.cwd ?? process.cwd(), requestedWorkspacePath)
+		? resolveWorkerWorkspacePath(
+				(input.authority?.path ? input.executionCwd : undefined) ?? input.cwd ?? process.cwd(),
+				requestedWorkspacePath,
+			)
 		: undefined;
 	const now = new Date().toISOString();
 	const descriptor = {

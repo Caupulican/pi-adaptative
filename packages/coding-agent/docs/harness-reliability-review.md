@@ -180,8 +180,17 @@ the same directory-kind rule as resolution. The journal adapter captures its ses
 the host scope on reads and commits; resetting or replacing a SessionManager during validation cannot
 write the command into another session. Task cursors and command inputs are captured before setup waits.
 
-This integration is not the completed portability contract. Delegated worker
-task creation still needs an end-to-end binding audit, persisted relative goal-evidence identity and child
+Fresh native delegate and goal dispatch now capture the calling task's admitted directory before
+creating a durable worker execution plan. A queued worker retains that cwd after foreground selection
+changes. Explicit relative worker paths resolve against the captured task directory; configured preset
+paths remain anchored to their configuration scope. Selecting a directory does not change the worker's
+existing machine-wide or explicitly restricted grant. Reused and recovered workers retain their admitted
+authority rather than inheriting a later foreground selection. Status and cancellation do not require a
+working foreground directory. The host callback holds and releases the existing admission lease, and
+checks cancellation immediately before dispatch, including cancellation after validation has completed.
+
+This integration is not the completed portability contract. Delegated workers still need their own
+registry and physical-attachment fencing across execution and restart; persisted relative goal-evidence identity and child
 receipt identity need review, and model context
 projection must survive compaction.
 Native attachment IDs now retain a hash of the original device/file identity. Replacing a directory
@@ -371,6 +380,30 @@ a schema field or a prompt instruction. All execution paths must consume the bin
   rejected before the shared directory-kind check. Repository checks pass with 966 eligible / 975
   owned sources, all nine below-floor files accounted for, and zero clones. Nine tracked files retain
   their UTF-8 validity, BOM and newline conventions; the new lifecycle fixture is synthetic UTF-8.
+- The asynchronous checkpoint `eeb8189707251743c880b14c8883f1fd4bf22e2b` passed nine GitHub jobs but
+  failed Windows shard 1: native iconv discovery exceeded the fixture's ten-second process limit.
+  The failed-job rerun stopped earlier at a different failure: the Bash command-error fixture timed
+  out, shell terminal release then exceeded five seconds, and cleanup reported EPERM. That rerun did
+  not reach iconv; it neither reproduces nor resolves the first failure. Local iconv controls pass.
+  No timeouts were raised and no Windows probe was skipped to conceal these incomplete results.
+- Fresh worker-directory dispatch passes 227 targeted tests across fourteen files, including sixteen
+  new cases. Three initial session cases independently reproduced ambient-cwd dispatch and silent
+  missing-directory fallback. Pinning, queued execution, goal dispatch, malformed/foreign context,
+  permission-scope controls, asynchronous starters, and lease release are covered by synthetic fixtures.
+  A later cancellation probe caught dispatch after validation despite an already-aborted signal;
+  the host callback now checks that final boundary. Four exact callback assertions were updated for
+  the optional cancellation argument; the first gate also caught a missing test-mock receiver type.
+  Synthetic Windows controls caught implicit authority re-anchoring when selection moved to a UNC
+  share; default scope enumeration now remains anchored to the granting session. Explicit profile
+  restrictions still select their own scope. The isolated Bash command-error case also passes locally
+  on Linux; that is not proof that the Windows terminal-release failure is repaired.
+  Repository checks pass with 966 eligible / 975 owned production files accounted for, unchanged
+  scanner limits, and zero clones. The thirteen edited tracked files preserve UTF-8 validity, BOM,
+  newline-kind and final-newline signatures; the new session fixture is synthetic UTF-8. No existing
+  content was transcoded. Worker capture reuses the directory controller and existing execution-plan
+  and grant owners; it does not create a second worker cwd registry.
+  The staged contract gate required an accompanying doctrine update; the worker path-anchor rule
+  is now stated there without removing the contract test or bypassing the gate.
 - Host npm configuration emits `globalignorefile` warnings. Local Node is 24.18.1, below the declared
   24.20.0 minimum. Successful checks on this host do not replace supported-runtime CI evidence.
 

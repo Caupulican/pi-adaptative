@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import { type AgentMessage, decodeExecutionContext } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import { getProcessWorkRun } from "../agent-paths.ts";
@@ -628,7 +628,7 @@ export class WorkerDelegationController {
 	}
 
 	private resolveWorkerAuthority(
-		input: Pick<WorkerAuthorityResolutionInput, "authority" | "base" | "modelPin"> & {
+		input: Pick<WorkerAuthorityResolutionInput, "authority" | "base" | "modelPin" | "executionCwd"> & {
 			foregroundModel?: Model<Api>;
 		},
 	): WorkerAuthorityResolution {
@@ -852,6 +852,16 @@ export class WorkerDelegationController {
 		}
 		const parentAttempt = parentAgent ? this.lifecycle.getLatestAgentAttempt(parentAgent.agentId) : undefined;
 		const parentContract = parentAttempt?.dispatch.executionContract;
+		const executionContext =
+			request.executionContext === undefined ? undefined : decodeExecutionContext(request.executionContext);
+		if (
+			request.executionContext !== undefined &&
+			(!executionContext || executionContext.sessionId !== this.deps.getSessionId())
+		) {
+			return { ok: false, skipReason: "worker_execution_context_invalid" };
+		}
+		const executionCwd =
+			pinnedContract?.worker.authority.cwd ?? parentContract?.worker.authority.cwd ?? executionContext?.cwd;
 		if (parentAgent && !parentContract) {
 			return { ok: false, skipReason: "orchestration_parent_authority_missing" };
 		}
@@ -907,6 +917,7 @@ export class WorkerDelegationController {
 			? { ok: true as const, shipment: baseShipment! }
 			: this.resolveWorkerAuthority({
 					authority,
+					executionCwd,
 					...(baseShipment ? { base: baseShipment } : {}),
 					...(modelPin ? { modelPin: modelPin.binding } : {}),
 				});
@@ -970,7 +981,7 @@ export class WorkerDelegationController {
 				: shipment.resourcePointers.map((pointer) => pointer.id),
 		);
 		if (!selectedResources.ok) return { ok: false, skipReason: selectedResources.reason };
-		const currentExecutionPlan = this.buildWorkerExecutionPlan(shipment.profile, settings);
+		const currentExecutionPlan = this.buildWorkerExecutionPlan(shipment.profile, settings, executionCwd);
 		const explicitlySelectedProfile =
 			!pinnedContract &&
 			(request.profileId !== undefined || (!parentContract && settings.orchestrationProfile !== undefined));
@@ -1007,7 +1018,7 @@ export class WorkerDelegationController {
 			? narrowWorkerExecutionPlan(inheritedAuthority, currentExecutionPlan)
 			: currentExecutionPlan;
 		const verifierExecutionPlan = verifierShipment
-			? this.buildWorkerExecutionPlan(verifierShipment.profile, settings)
+			? this.buildWorkerExecutionPlan(verifierShipment.profile, settings, executionCwd)
 			: undefined;
 		if (!pinnedContract && verifierShipment && verifierExecutionPlan) {
 			verifierShipment = bindCompiledToolSurface(
@@ -1558,11 +1569,13 @@ export class WorkerDelegationController {
 	private buildWorkerExecutionPlan(
 		profile: OrchestrationProfile,
 		settings: ResolvedWorkerDelegationSettings,
+		executionCwd?: string,
 	): WorkerExecutionPlan {
 		return buildWorkerExecutionPlan({
 			profile,
 			settings,
 			cwd: this.deps.getCwd(),
+			executionCwd,
 			deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
 			foregroundMaxCostUsd: this.deps.getCapabilityEnvelope()?.maxEstimatedUsd,
 			memoryEnabled: this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,

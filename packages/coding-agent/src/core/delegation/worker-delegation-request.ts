@@ -1,3 +1,4 @@
+import type { ExecutionContext } from "@caupulican/pi-agent-core";
 import { parseBoundedStringArray } from "../orchestration/bounded-string-array.ts";
 import {
 	type HarnessCapability,
@@ -145,6 +146,8 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 /** A profile is an optional preset; authority is compiled and persisted by the host. */
 export interface WorkerDelegationRequest {
 	instructions: string;
+	/** Host-admitted task context for a fresh dispatch; never exposed in the model schema. */
+	executionContext?: ExecutionContext;
 	profileId?: string;
 	authority?: WorkerDelegationAuthorityRequest;
 	/** Tool-facing immutable birth-context selection for a newly admitted logical worker. */

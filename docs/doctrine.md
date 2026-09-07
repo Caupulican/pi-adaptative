@@ -246,6 +246,18 @@ Pinned by `packages/coding-agent/test/worker-authority-resolver.test.ts` and
 `packages/coding-agent/test/worker-task-view.test.ts`, and
 `packages/coding-agent/test/worker-transcript-inspection.test.ts`.
 
+**A fresh worker captures the task directory without re-anchoring authority.** Native delegate and
+goal dispatch inherit the caller's admitted task cwd before queueing. An explicit relative worker
+path resolves from that cwd; a configured relative preset remains anchored to its configuration
+scope. Default permission roots remain anchored to the granting session, including when task
+selection moves to a UNC share. Queued and reused workers keep their admitted cwd, and unavailable
+foreground directories cannot block status or cancellation. Why: resolving every fresh request from
+the launch directory dispatched work into the wrong project; treating the execution directory as
+the grant anchor could silently add a new share. Pinned by
+`packages/coding-agent/test/worker-authority-resolver.test.ts`,
+`packages/coding-agent/test/worker-execution-policy.test.ts`, and
+`packages/coding-agent/test/session-worker-directories.test.ts`.
+
 **An explicit wait is never handed off.** A tool declares which calls are foreground waits; such a
 call blocks up to its own timeout. Pinned by
 `packages/coding-agent/test/background-tool-task-controller.test.ts` and
@@ -347,6 +359,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-07 | Fresh workers capture admitted task cwd; explicit relative intent uses that directory while configured presets and default permission roots retain their original anchors. Queueing and foreground selection cannot retarget admitted work. |
 | 2026-09-07 | Persistent directory control earns a separate 330-token schema allowance; all pre-existing tools retain their combined 4,500-token ceiling. Explicit task pins address reproduced wrong-directory execution without widening grants or introducing per-turn schema churn. |
 | 2026-09-06 | Session-audit repairs strengthen receipt provenance, setup supersession, useful unsuccessful handoffs, goal attribution, structured repair, action validation, bounded progress detection, worker grants/inspection, scoped memory, atomic skill batches, and proportional instructions without raising prompt or scanner limits. |
 | 2026-09-02 | First edition: the invariants proven live on v0.97.24 and the ratchet model's gates. |

@@ -130,15 +130,18 @@ describe("delegate logical-agent controls", () => {
 			context,
 		);
 
-		expect(startWorkerDelegation).toHaveBeenCalledWith({
-			instructions: "consume both",
-			taskContext: {
-				requirementIds: [],
-				dependsOnTaskIds: ["prerequisite-a", "prerequisite-b"],
-				acceptanceCriterionIds: [],
-				resourcePointerIds: [],
+		expect(startWorkerDelegation).toHaveBeenCalledWith(
+			{
+				instructions: "consume both",
+				taskContext: {
+					requirementIds: [],
+					dependsOnTaskIds: ["prerequisite-a", "prerequisite-b"],
+					acceptanceCriterionIds: [],
+					resourcePointerIds: [],
+				},
 			},
-		});
+			undefined,
+		);
 		expect(startWorkerAgentTask).toHaveBeenCalledWith(
 			"worker-1",
 			"consume one",
@@ -174,7 +177,7 @@ describe("delegate logical-agent controls", () => {
 			undefined,
 			context,
 		);
-		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "inherit one", forkTurns: "1" });
+		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "inherit one", forkTurns: "1" }, undefined);
 		type DelegateStartOverride = Pick<
 			DelegateToolInput,
 			"model" | "path" | "toolNames" | "profileId" | "forkTurns"
@@ -454,6 +457,46 @@ describe("delegate logical-agent controls", () => {
 		},
 	);
 
+	it("awaits asynchronous directory admission and forwards cancellation only for fresh starts", async () => {
+		const ready = Promise.withResolvers<{
+			started: true;
+			record: { laneId: string; type: "worker"; status: "queued" };
+		}>();
+		const entered = Promise.withResolvers<void>();
+		const startWorkerDelegation = vi.fn(() => {
+			entered.resolve();
+			return ready.promise;
+		});
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			startWorkerDelegation,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+		const abort = new AbortController();
+		let settled = false;
+		const running = tool
+			.execute("async", { instructions: "Capture directory" }, abort.signal, undefined, context)
+			.then((result) => {
+				settled = true;
+				return result;
+			});
+		await entered.promise;
+		expect(settled).toBe(false);
+		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "Capture directory" }, abort.signal);
+		ready.resolve({ started: true, record: { laneId: "async-lane", type: "worker", status: "queued" } });
+		expect((await running).details).toMatchObject({ started: true, laneId: "async-lane" });
+		abort.abort();
+		const cancelled = await tool.execute(
+			"cancelled",
+			{ instructions: "Must not dispatch" },
+			abort.signal,
+			undefined,
+			context,
+		);
+		expect(cancelled.isError).toBe(true);
+		expect(startWorkerDelegation).toHaveBeenCalledOnce();
+	});
+
 	it("uses one flat action schema and returns the stable agent id with the initial task lane", async () => {
 		const startWorkerDelegation = vi.fn(() => ({
 			started: true as const,
@@ -466,7 +509,7 @@ describe("delegate logical-agent controls", () => {
 		});
 
 		const result = await tool.execute("call", { instructions: "Inspect the failure" }, undefined, undefined, context);
-		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "Inspect the failure" });
+		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "Inspect the failure" }, undefined);
 		expect(result.details).toMatchObject({ started: true, agentId: "lane-1", laneId: "lane-1" });
 		expect(JSON.stringify(tool.parameters)).not.toContain("oneOf");
 	});
@@ -497,15 +540,18 @@ describe("delegate logical-agent controls", () => {
 			context,
 		);
 
-		expect(startWorkerDelegation).toHaveBeenCalledWith({
-			instructions: "Use the strongest useful local tools.",
-			authority: {
-				model,
-				thinkingLevel: "high",
-				path: "../sibling-project",
-				toolNames: ["read", "bash"],
+		expect(startWorkerDelegation).toHaveBeenCalledWith(
+			{
+				instructions: "Use the strongest useful local tools.",
+				authority: {
+					model,
+					thinkingLevel: "high",
+					path: "../sibling-project",
+					toolNames: ["read", "bash"],
+				},
 			},
-		});
+			undefined,
+		);
 	});
 
 	it("bounds the owner profile catalog injected into the model prompt while retaining its total", () => {

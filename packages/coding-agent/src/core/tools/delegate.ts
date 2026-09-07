@@ -619,10 +619,15 @@ export type DelegateToolDetails = (
 
 export type DelegateCaller = { kind: "session_root" } | { kind: "worker"; agentId: string };
 
+type DelegateStartOutcome =
+	| { started: false; skipReason: string }
+	| { started: true; record: LaneRecord; modelPinBypass?: string };
+
 export interface DelegateToolDependencies {
 	startWorkerDelegation?: (
 		args: WorkerDelegationRequest,
-	) => { started: false; skipReason: string } | { started: true; record: LaneRecord; modelPinBypass?: string };
+		signal?: AbortSignal,
+	) => DelegateStartOutcome | Promise<DelegateStartOutcome>;
 	runWorkerDelegation: (args: WorkerDelegationRequest) => Promise<DelegateRunOutcome>;
 	orchestrationProfiles?: readonly { profileId: string; role: string; description: string }[];
 	/** Active owner settings only; omitted/absent preserves the existing lean prompt verbatim. */
@@ -2045,7 +2050,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						: {}),
 				};
 				if (deps.startWorkerDelegation) {
-					const started = deps.startWorkerDelegation(request);
+					signal?.throwIfAborted();
+					const started = await deps.startWorkerDelegation(request, signal);
 					if (!started.started) {
 						return {
 							content: [{ type: "text" as const, text: delegateStartSkipText(started.skipReason) }],

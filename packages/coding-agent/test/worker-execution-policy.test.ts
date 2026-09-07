@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	buildWorkerExecutionPlan,
 	compileManagedProcessExecutionGrant,
@@ -22,6 +22,58 @@ function settings(overrides: Partial<ResolvedWorkerDelegationSettings> = {}): Re
 }
 
 describe("buildWorkerExecutionPlan", () => {
+	it.each(["C:\\selected", "\\\\fixture-host\\share\\project"])(
+		"does not add a Windows authority root by selecting %s",
+		(executionCwd) => {
+			vi.stubGlobal("process", { ...process, platform: "win32" });
+			try {
+				const cwd = "C:\\launch";
+				const existingRoots = workerMachinePathRoots(cwd);
+				const plan = buildWorkerExecutionPlan({
+					profile: createTestWorkerOrchestrationProfile({
+						profileId: "scope-anchor",
+						model: { provider: "test", id: "model" },
+						capabilityCeiling: ["filesystem.read"],
+						toolNames: ["read"],
+					}),
+					cwd,
+					executionCwd,
+					deniedPaths: [],
+					memoryEnabled: false,
+					settings: settings(),
+				});
+				expect(plan.cwd).toBe(executionCwd);
+				expect(plan.readPaths).toEqual(existingRoots);
+			} finally {
+				vi.unstubAllGlobals();
+			}
+		},
+	);
+
+	it("separates task cwd from profile authority and retains admitted cwd during narrowing", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "task-directory",
+			model: { provider: "test", id: "model" },
+			capabilityCeiling: ["filesystem.read"],
+			toolNames: ["read"],
+		});
+		const options = { profile, settings: settings(), cwd: resolve("/launch"), deniedPaths: [], memoryEnabled: false };
+		const admitted = buildWorkerExecutionPlan({ ...options, executionCwd: resolve("/selected") });
+		const current = buildWorkerExecutionPlan({ ...options, executionCwd: resolve("/other") });
+		expect(admitted.cwd).toBe(resolve("/selected"));
+		expect(admitted.readPaths).toEqual(workerMachinePathRoots(options.cwd));
+		const narrowed = narrowWorkerExecutionPlan(workerExecutionAuthorityFromPlan(admitted), current);
+		expect(narrowed.cwd).toBe(admitted.cwd);
+		expect(narrowed.readPaths).toEqual(admitted.readPaths);
+		const focused = buildWorkerExecutionPlan({
+			...options,
+			profile: { ...profile, workspacePath: "preset" },
+			executionCwd: resolve("/selected"),
+		});
+		expect(focused.cwd).toBe(resolve("/launch/preset"));
+		expect(focused.readPaths).toEqual([focused.cwd]);
+	});
+
 	it("does not add recursive orchestration when the task profile omits delegation", () => {
 		const profile = createTestWorkerOrchestrationProfile({
 			profileId: "recursive-by-default",

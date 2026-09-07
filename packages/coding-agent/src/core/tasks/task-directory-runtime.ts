@@ -119,6 +119,26 @@ export class TaskDirectoryRuntime {
 		}, signal);
 	}
 
+	/** Hold the selected task attachment while a host workflow captures its durable execution plan. */
+	async withContext<T>(operation: (context: ExecutionContext) => T | Promise<T>, signal?: AbortSignal): Promise<T> {
+		const lease = await this.admit(signal);
+		try {
+			signal?.throwIfAborted();
+			return await this.contextStorage.run(lease.context, () => operation(lease.context));
+		} finally {
+			lease.release();
+		}
+	}
+
+	private admit(signal?: AbortSignal) {
+		const taskId = this.activeTaskId;
+		return this.withController(
+			({ controller }, scope) =>
+				controller.admit(taskId, signal ? AbortSignal.any([signal, scope.abort.signal]) : scope.abort.signal, true),
+			signal,
+		);
+	}
+
 	bindTool<TParameters extends TSchema, TDetails>(
 		tool: AgentTool<TParameters, TDetails>,
 		create?: (context: ExecutionContext, shellKey: string) => AgentTool<TParameters, TDetails>,
@@ -128,16 +148,7 @@ export class TaskDirectoryRuntime {
 		return {
 			...tool,
 			bindInvocation: async (_id, _params, signal) => {
-				const taskId = this.activeTaskId;
-				const lease = await this.withController(
-					({ controller }, scope) =>
-						controller.admit(
-							taskId,
-							signal ? AbortSignal.any([signal, scope.abort.signal]) : scope.abort.signal,
-							true,
-						),
-					signal,
-				);
+				const lease = await this.admit(signal);
 				let releaseShell: (() => void) | undefined;
 				try {
 					const context = lease.context;

@@ -112,6 +112,8 @@ export function buildWorkerExecutionPlan(args: {
 	settings: ResolvedWorkerDelegationSettings;
 	cwd: string;
 	deniedPaths: readonly string[];
+	/** Fresh caller task cwd. Does not re-anchor profile paths or change an admitted grant. */
+	executionCwd?: string;
 	foregroundMaxCostUsd?: number;
 	memoryEnabled: boolean;
 	workerToolAdapterNames?: readonly string[];
@@ -119,8 +121,8 @@ export function buildWorkerExecutionPlan(args: {
 	const parentCwd = resolveWorkerWorkspacePath(args.cwd, args.cwd);
 	const cwd = args.profile.workspacePath
 		? resolveWorkerWorkspacePath(parentCwd, args.profile.workspacePath)
-		: parentCwd;
-	const pathScopes = args.profile.workspacePath ? [cwd] : workerMachinePathRoots(cwd);
+		: resolveWorkerWorkspacePath(parentCwd, args.executionCwd ?? parentCwd);
+	const pathScopes = args.profile.workspacePath ? [cwd] : workerMachinePathRoots(parentCwd);
 	const profileToolNames = new Set(
 		mapToolNamesForPlatform(args.profile.toolNames).filter((name) => !WORKER_ROOT_MEMORY_TOOL_NAMES.has(name)),
 	);
