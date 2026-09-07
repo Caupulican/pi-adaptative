@@ -591,3 +591,14 @@ path construction remains outside this lexical screening boundary; it is not an 
 Repository checks pass with the same 972 eligible / 981 owned sources, 941 detection-pass files,
 and zero clones. All five edited files retain strict UTF-8 validity, BOM, newline-kind and final-newline
 signatures. The independent synthetic command-text probe also passes after the policy correction.
+
+Executing backend authorization now propagates through immutable invocation contexts and tool bindings.
+Synthetic regressions independently prove all seven concrete gaps:
+1. Native credential path probing is bypassed when explicit backend authority is provided, eliminating host fallback across identical path spellings.
+2. Asynchronous backend probing supports cancellation and preserves single lease release.
+3. Invocation-owned backend propagation carries through tool execution wrappers without second lease acquisition or receiver loss.
+4. Capability envelope assessment (`assessPathWithinEnvelopeSync` and `assessPathWithinEnvelopeAsync`) uses backend path authority, dialect, and case policy.
+5. Autonomy tool gate evaluation (`evaluateToolGate` and `evaluateToolGateAsync`) relies on backend authority for denial classification without native resolution fallback.
+6. `ToolGateController` passes the complete executing-backend path authority to capability checks.
+7. Existing tool wrappers preserve execution contexts, method receivers, and error redactions.
+All 162 targeted tests pass across seven suites; `npm run check` passes with zero clones.

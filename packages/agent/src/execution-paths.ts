@@ -10,6 +10,7 @@ export {
 	assertExecutionAbsolutePath,
 	type ExecutionAttachment,
 	type ExecutionContext,
+	type ExecutionPathAuthority,
 	type ExecutionPathFlavor,
 } from "./execution-context.ts";
 

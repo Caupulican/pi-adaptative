@@ -1,4 +1,4 @@
-import { captureExecutionContext, type ExecutionContext } from "@caupulican/pi-agent-core";
+import { captureExecutionContext, type ExecutionContext, type ExecutionPathAuthority } from "@caupulican/pi-agent-core";
 
 interface ExecutableTool {
 	execute: (...args: never[]) => unknown;
@@ -6,6 +6,7 @@ interface ExecutableTool {
 		executionContext: ExecutionContext;
 		execute: (...args: never[]) => unknown;
 		failureRecovery?: unknown;
+		pathAuthority?: ExecutionPathAuthority;
 		release(): void;
 	}>;
 }
@@ -13,7 +14,7 @@ interface ExecutableTool {
 /** Apply a tool decorator to both direct and admitted execution, without acquiring a second lease. */
 export function wrapToolExecution<T extends ExecutableTool>(
 	tool: T,
-	decorate: (executor: T, executionContext?: ExecutionContext) => T,
+	decorate: (executor: T, executionContext?: ExecutionContext, pathAuthority?: ExecutionPathAuthority) => T,
 ): T {
 	const wrapped = decorate(tool);
 	const bind = tool.bindInvocation;
@@ -34,6 +35,7 @@ export function wrapToolExecution<T extends ExecutableTool>(
 						bindInvocation: undefined,
 					} as T,
 					executionContext,
+					invocation.pathAuthority,
 				);
 				return {
 					...invocation,
@@ -42,6 +44,7 @@ export function wrapToolExecution<T extends ExecutableTool>(
 					// Prototype methods are not enumerable; the original lease remains the owner.
 					release: () => invocation.release(),
 					...("failureRecovery" in bound ? { failureRecovery: bound.failureRecovery } : {}),
+					...(invocation.pathAuthority ? { pathAuthority: invocation.pathAuthority } : {}),
 				};
 			} catch (error) {
 				invocation.release();

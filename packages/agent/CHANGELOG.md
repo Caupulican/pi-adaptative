@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added `ExecutionPathAuthority` to live execution context contracts for executing-backend path authority propagation.
+
 ### Fixed
 
 - Kept stamped invocation receipts non-writable after restoring executor verification, without invoking hook getters.

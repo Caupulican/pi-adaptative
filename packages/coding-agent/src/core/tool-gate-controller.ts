@@ -11,7 +11,7 @@
 
 import type { Agent, BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
-import { evaluateToolGate } from "./autonomy/gates.ts";
+import { evaluateToolGateAsync } from "./autonomy/gates.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
@@ -39,7 +39,7 @@ export class ToolGateController {
 		this.deps = deps;
 	}
 
-	readonly beforeToolCall: BeforeToolCall = async ({ toolCall, args, executionContext }) => {
+	readonly beforeToolCall: BeforeToolCall = async ({ toolCall, args, executionContext, pathAuthority }) => {
 		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);
 		if (escalation) {
 			return escalation;
@@ -48,13 +48,14 @@ export class ToolGateController {
 		// Autonomy tool gating
 		const envelope = structuredClone(this.deps.getCapabilityEnvelope());
 		const scopeCwd = this.deps.getCwd();
-		const evaluate = (): BeforeToolCallResult | undefined => {
-			const gateResult = evaluateToolGate({
+		const evaluate = async (currentArgs: unknown = args): Promise<BeforeToolCallResult | undefined> => {
+			const gateResult = await evaluateToolGateAsync({
 				toolName: toolCall.name,
-				args,
+				args: currentArgs,
 				cwd: executionContext?.cwd ?? scopeCwd,
 				scopeCwd,
 				envelope,
+				pathAuthority,
 			});
 			if (envelope) this.deps.recordGateOutcome(gateResult);
 			if (gateResult.outcome === "block" || gateResult.outcome === "ask-user") {
@@ -65,7 +66,7 @@ export class ToolGateController {
 			}
 			return undefined;
 		};
-		const denied = evaluate();
+		const denied = await evaluate();
 		if (denied) return denied;
 
 		const runner = this.deps.getExtensionRunner();
@@ -89,7 +90,8 @@ export class ToolGateController {
 			}
 			// Hooks may edit arguments, but cannot move this call outside its admitted grant.
 			if (!extensionResult?.block) {
-				const deniedAfterHook = evaluate();
+				const hookArgs = (extensionResult as { args?: unknown })?.args ?? args;
+				const deniedAfterHook = await evaluate(hookArgs);
 				if (deniedAfterHook) return deniedAfterHook;
 			}
 		}

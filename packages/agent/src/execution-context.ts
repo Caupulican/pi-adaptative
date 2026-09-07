@@ -20,6 +20,18 @@ export interface ExecutionContext {
 	readonly cwd: string;
 }
 
+/** Live filesystem capabilities for an executing backend. Not serialized to journal data. */
+export interface ExecutionPathAuthority {
+	readonly flavor?: ExecutionPathFlavor;
+	readonly caseSensitive?: boolean;
+	canonicalPath(path: string, signal?: AbortSignal): Promise<string | undefined> | string | undefined;
+	isFile?(path: string, signal?: AbortSignal): Promise<boolean | undefined> | boolean | undefined;
+	safeRealpath?(path: string, signal?: AbortSignal): Promise<string> | string;
+	readonly homeDir?: string;
+	readonly harnessRoots?: readonly string[];
+	readonly harnessFiles?: readonly string[];
+}
+
 export function assertExecutionAbsolutePath(value: string, flavor: ExecutionPathFlavor): void {
 	if (flavor !== "posix" && flavor !== "win32") throw new Error("Unsupported execution path flavor");
 	if (value.includes("\0") || (flavor === "posix" && !value.startsWith("/"))) {

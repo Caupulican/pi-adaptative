@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { type ExecutionPathFlavor, executionPathApi } from "@caupulican/pi-agent-core/paths";
 import type { PathScope, PathScopeDecision } from "./contracts.ts";
 
 // Bounds the symlink-following recursion in resolveSafely: a chain of dangling links is finite
@@ -85,15 +86,31 @@ export function canonicalPathScopeIdentity(value: string): string {
  * This deliberately does not resolve symlinks — callers that authorize filesystem access must first
  * use {@link safeRealpathSync}.
  */
+function isRelativeContained(relativePath: string, sep: string, isAbsolute: (path: string) => boolean): boolean {
+	return (
+		relativePath === "" ||
+		(!relativePath.startsWith(`..${sep}`) && relativePath !== ".." && !isAbsolute(relativePath))
+	);
+}
+
 export function isPathWithinScope(targetPath: string, scopeRoot: string): boolean {
 	const pathApi = lexicalPathApi(targetPath, scopeRoot);
 	const target = canonicalPathScopeIdentityWithApi(targetPath, pathApi);
 	const root = canonicalPathScopeIdentityWithApi(scopeRoot, pathApi);
-	const relativePath = pathApi.relative(root, target);
-	return (
-		relativePath === "" ||
-		(!relativePath.startsWith(`..${pathApi.sep}`) && relativePath !== ".." && !pathApi.isAbsolute(relativePath))
-	);
+	return isRelativeContained(pathApi.relative(root, target), pathApi.sep, pathApi.isAbsolute);
+}
+
+/** Explicit dialect and case-policy containment check for backend execution. */
+export function isPathWithinScopeWithDialect(
+	targetPath: string,
+	scopeRoot: string,
+	flavor: ExecutionPathFlavor,
+	caseSensitive: boolean,
+): boolean {
+	const pathApi = executionPathApi(flavor);
+	const target = caseSensitive ? pathApi.resolve(targetPath) : pathApi.resolve(targetPath).toLowerCase();
+	const root = caseSensitive ? pathApi.resolve(scopeRoot) : pathApi.resolve(scopeRoot).toLowerCase();
+	return isRelativeContained(pathApi.relative(root, target), pathApi.sep, pathApi.isAbsolute);
 }
 
 /** True when either scope contains the other, including an exact match. */

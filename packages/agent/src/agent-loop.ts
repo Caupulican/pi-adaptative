@@ -1835,6 +1835,7 @@ async function prepareToolCall(
 					args: validatedArgs,
 					context: currentContext,
 					executionContext: binding?.executionContext,
+					pathAuthority: binding?.pathAuthority,
 				},
 				signal,
 			);

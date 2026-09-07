@@ -1,5 +1,6 @@
 import type { Static, TSchema } from "typebox";
 import { captureExecutionContext, type ExecutionContext } from "./execution-context.ts";
+import type { ExecutionPathAuthority } from "./execution-paths.ts";
 import { getToolExecutionKey } from "./tool-failure-memory.ts";
 import type { AgentTool } from "./types.ts";
 
@@ -7,6 +8,7 @@ export interface BoundToolInvocation<TParameters extends TSchema = TSchema, TDet
 	readonly tool: AgentTool<TParameters, TDetails>;
 	readonly executionContext: ExecutionContext;
 	readonly executionScope: string;
+	readonly pathAuthority?: ExecutionPathAuthority;
 	release(): void;
 }
 
@@ -38,6 +40,7 @@ export async function bindToolInvocation<TParameters extends TSchema, TDetails>(
 			tool: { ...tool, execute: invocation.execute.bind(invocation), failureRecovery: invocation.failureRecovery },
 			executionContext,
 			executionScope: executionContextScope(executionContext),
+			pathAuthority: invocation.pathAuthority,
 			release,
 		};
 	} catch (error) {

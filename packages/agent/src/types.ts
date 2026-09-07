@@ -16,7 +16,10 @@ import type {
 	Usage,
 } from "@caupulican/pi-ai";
 import type { Static, TSchema } from "typebox";
-import type { ExecutionContext } from "./execution-context.ts";
+import type { ExecutionContext, ExecutionPathAuthority } from "./execution-context.ts";
+
+export type { ExecutionPathAuthority } from "./execution-context.ts";
+
 import type { ToolFailureContextMemory } from "./tool-failure-memory.ts";
 
 /**
@@ -202,6 +205,8 @@ export interface AfterToolCallResult {
 export interface BeforeToolCallContext {
 	/** Immutable host binding captured before policy admission; absent for context-free tools. */
 	executionContext?: ExecutionContext;
+	/** Live backend filesystem capabilities for an executing backend; not serialized to journal data. */
+	pathAuthority?: ExecutionPathAuthority;
 	/** Opaque identity of the accepted provider request that produced this call. */
 	requestId?: AgentRequestId;
 	/** The assistant message that requested the tool call. */
@@ -1035,6 +1040,8 @@ export interface AgentToolInvocation<TParameters extends TSchema = TSchema, TDet
 	readonly executionContext: ExecutionContext;
 	readonly execute: AgentTool<TParameters, TDetails>["execute"];
 	readonly failureRecovery?: AgentToolFailureRecoveryContract<TParameters>;
+	/** Live backend filesystem capabilities for an executing backend; not serialized to journal data. */
+	readonly pathAuthority?: ExecutionPathAuthority;
 	/** Synchronous, infallible release. The core calls it once, after rejection or real finalization. */
 	release(): void;
 }

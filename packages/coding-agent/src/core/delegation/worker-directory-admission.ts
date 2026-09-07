@@ -30,6 +30,7 @@ export class WorkerDirectoryAdmission {
 					executionContext,
 					execute: tool.execute.bind(tool),
 					failureRecovery: tool.failureRecovery,
+					pathAuthority: this.backend,
 					release() {},
 				};
 			},

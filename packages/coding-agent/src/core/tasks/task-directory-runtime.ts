@@ -174,6 +174,7 @@ export class TaskDirectoryRuntime {
 					return {
 						executionContext: context,
 						failureRecovery: executor.failureRecovery,
+						pathAuthority: this.backend,
 						release: () => {
 							releaseShell?.();
 							lease.release();

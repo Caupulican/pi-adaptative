@@ -2,7 +2,7 @@ import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { TSchema } from "typebox";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
-import { evaluateToolGate } from "./gates.ts";
+import { evaluateToolGateAsync } from "./gates.ts";
 
 function copyEnvelope(
 	envelope: CapabilityEnvelope,
@@ -48,15 +48,17 @@ export function wrapToolWithCapabilityEnvelopeGate<TParameters extends TSchema, 
 	scopeCwd = cwd,
 ): AgentTool<TParameters, TDetails> {
 	if (!envelope) return tool;
-	return wrapToolExecution(tool, (executor, executionContext) => ({
+	return wrapToolExecution(tool, (executor, executionContext, pathAuthority) => ({
 		...executor,
 		async execute(toolCallId, params, signal, onUpdate) {
-			const outcome = evaluateToolGate({
+			const outcome = await evaluateToolGateAsync({
 				toolName: tool.name,
 				args: params,
 				cwd: executionContext?.cwd ?? cwd,
 				scopeCwd,
 				envelope,
+				pathAuthority,
+				signal,
 			});
 			if (outcome.outcome === "block" || outcome.outcome === "ask-user") {
 				throw new Error(

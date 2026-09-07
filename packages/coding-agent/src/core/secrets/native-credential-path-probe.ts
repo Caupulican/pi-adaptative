@@ -1,7 +1,7 @@
 import { realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import type { ExecutionContext } from "@caupulican/pi-agent-core";
+import type { ExecutionContext, ExecutionPathAuthority } from "@caupulican/pi-agent-core";
 import { getWorkTenantDir } from "../agent-paths.ts";
 import {
 	CredentialPathPolicy,
@@ -15,11 +15,21 @@ export function createCredentialPathPolicy(
 	protection?: CredentialPathProtection,
 	context?: ExecutionContext,
 	explicitProbe?: CredentialPathProbe,
+	pathAuthority?: ExecutionPathAuthority,
 ): CredentialPathPolicy {
 	const nativeFlavor = process.platform === "win32" ? "win32" : "posix";
-	const flavor = context?.attachment.flavor ?? nativeFlavor;
-	const native = explicitProbe === undefined && flavor === nativeFlavor;
+	const flavor = context?.attachment.flavor ?? pathAuthority?.flavor ?? nativeFlavor;
 	let probe = explicitProbe;
+	if (!probe && pathAuthority) {
+		probe = {
+			canonicalPath: (path, signal) => pathAuthority.canonicalPath(path, signal),
+			isFile: pathAuthority.isFile ? (path, signal) => pathAuthority.isFile!(path, signal) : () => undefined,
+			homeDir: pathAuthority.homeDir,
+			harnessRoots: pathAuthority.harnessRoots,
+			harnessFiles: pathAuthority.harnessFiles,
+		};
+	}
+	const native = explicitProbe === undefined && pathAuthority === undefined && context === undefined;
 	if (!probe && native) {
 		const homeDir = homedir();
 		const agentDir = resolve(protection?.agentDir ?? join(homeDir, ".pi", "agent"));
@@ -47,7 +57,7 @@ export function createCredentialPathPolicy(
 	return new CredentialPathPolicy({
 		cwd: context?.cwd ?? resolve(cwd),
 		flavor,
-		caseSensitive: context?.attachment.caseSensitive ?? nativeFlavor !== "win32",
+		caseSensitive: context?.attachment.caseSensitive ?? pathAuthority?.caseSensitive ?? flavor !== "win32",
 		protection,
 		protectionCwd: native ? process.cwd() : undefined,
 		probe: probe ?? { canonicalPath: () => undefined, isFile: () => undefined },

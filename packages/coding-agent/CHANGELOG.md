@@ -3,9 +3,11 @@
 ### Added
 
 - Added a host-controlled shell directory pin that restores cwd under serialized execution without clearing exported variables, including the Windows Python engine and filtered Git commands.
+- Integrated executing-backend path authority across task directory runtime, autonomy tool gates, capability envelopes, credential exposure guards, and worker directory admission.
 
 ### Fixed
 
+- Evaluated capability envelopes and tool gates against invocation-owned backend filesystem facts and dialect without native host fallback.
 - Kept opaque Windows command/code text such as `x:y` out of strict drive-relative file admission. Direct file requests remain strict, and ambiguous tokens retain conservative credential filename and directory screening.
 - Classified credential paths using the admitted backend's path dialect and case policy, preserved literal filename whitespace, and isolated explicit backend probes from native fallback. Probe failures are redacted and cancellation prevents execution; missing-file search recovery remains available.
 - Paged task-directory status and command receipts within a byte limit, preserving complete paths and rejecting stale cursors after workspace, task, session, or branch changes.

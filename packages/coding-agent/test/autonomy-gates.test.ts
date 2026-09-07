@@ -12,6 +12,7 @@ import type { CapabilityEnvelope, GateOutcome, GateOutcomeKind } from "../src/co
 import {
 	combineGateOutcomes,
 	evaluateToolGate,
+	evaluateToolGateAsync,
 	extractCandidatePaths,
 	fallbackGateOutcome,
 } from "../src/core/autonomy/gates.ts";
@@ -728,6 +729,73 @@ describe("Autonomy Gates", () => {
 				allowedTools: ["read"],
 			});
 			expect(childEnvelope?.allowedTools).toEqual([]);
+		});
+
+		it("evaluates path authority with explicit Windows dialect and case-insensitive policy", async () => {
+			class WindowsAuthority {
+				readonly flavor = "win32" as const;
+				readonly caseSensitive = false;
+				canonicalPath(p: string) {
+					return p;
+				}
+			}
+
+			const envelope: CapabilityEnvelope = {
+				...baseEnvelope,
+				capabilities: ["filesystem.read"],
+				allowedPaths: ["D:\\project\\src"],
+				deniedPaths: ["D:\\project\\src\\SECRET"],
+			};
+
+			const allowed = await evaluateToolGateAsync({
+				toolName: "read",
+				args: { path: "D:\\project\\SRC\\Main.ts" },
+				cwd: "D:\\project",
+				envelope,
+				pathAuthority: new WindowsAuthority(),
+			});
+			expect(allowed.outcome).toBe("allow");
+
+			const denied = await evaluateToolGateAsync({
+				toolName: "read",
+				args: { path: "D:\\project\\src\\secret\\Key.pem" },
+				cwd: "D:\\project",
+				envelope,
+				pathAuthority: new WindowsAuthority(),
+			});
+			expect(denied.outcome).toBe("block");
+			expect(denied.reasonCode).toBe("path_denied");
+
+			const outside = await evaluateToolGateAsync({
+				toolName: "read",
+				args: { path: "D:\\other\\file.txt" },
+				cwd: "D:\\project",
+				envelope,
+				pathAuthority: new WindowsAuthority(),
+			});
+			expect(outside.outcome).toBe("block");
+			expect(outside.reasonCode).toBe("path_outside_allowed_roots");
+		});
+
+		it("respects cancellation in evaluateToolGateAsync without evaluating paths", async () => {
+			const abort = new AbortController();
+			abort.abort(new Error("pre-aborted"));
+
+			const envelope: CapabilityEnvelope = {
+				...baseEnvelope,
+				capabilities: ["filesystem.read"],
+				allowedPaths: ["/repo/src"],
+			};
+
+			await expect(
+				evaluateToolGateAsync({
+					toolName: "read",
+					args: { path: "/repo/src/index.ts" },
+					cwd: "/repo",
+					envelope,
+					signal: abort.signal,
+				}),
+			).rejects.toThrow("pre-aborted");
 		});
 	});
 });

@@ -255,4 +255,370 @@ describe("backend-owned credential paths", () => {
 		await expect(test.run({ path: "D:source.ts" })).rejects.toThrow("drive-relative");
 		expect(test.execute).not.toHaveBeenCalled();
 	});
+
+	it("proves backend mismatch: uses invocation-owned backend authority without native fallback", async () => {
+		const native = vi.spyOn(realpathSync, "native");
+		const flavor = process.platform === "win32" ? "win32" : "posix";
+		const root = flavor === "win32" ? "D:\\synthetic\\project" : "/synthetic/project";
+		const separator = flavor === "win32" ? "\\" : "/";
+		class FakeBackendAuthority {
+			#aliases = new Map([[`${root}${separator}alias.ts`, `${root}${separator}.env.local`]]);
+			canonicalPath(path: string) {
+				return this.#aliases.get(path);
+			}
+			isFile() {
+				return true;
+			}
+		}
+		const authority = new FakeBackendAuthority();
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "Synthetic" }], details: {} }));
+		const release = vi.fn();
+		const context = captureExecutionContext({
+			sessionId: "synthetic-session",
+			generation: 1,
+			cwd: root,
+			attachment: {
+				workspaceId: "synthetic",
+				attachmentId: "custom-backend-id",
+				root,
+				flavor,
+				caseSensitive: flavor === "posix",
+			},
+		});
+		const tool: AgentTool<typeof parameters> = {
+			name: "read",
+			label: "Read",
+			description: "Synthetic reader",
+			parameters,
+			execute,
+			bindInvocation: async () => ({
+				executionContext: context,
+				execute,
+				release,
+				pathAuthority: authority,
+			}),
+		};
+		const guarded = wrapToolWithCredentialExposureGuard(tool, "/synthetic/operator", {
+			redactSensitiveText: (text) => text,
+		});
+		const binding = await guarded.bindInvocation!("call", { path: "alias.ts" });
+		try {
+			await expect(binding.execute("call", { path: "alias.ts" })).rejects.toThrow("model-blind");
+		} finally {
+			binding.release();
+		}
+		expect(execute).not.toHaveBeenCalled();
+		expect(native).not.toHaveBeenCalled();
+		expect(release).toHaveBeenCalledOnce();
+
+		const allowedBinding = await guarded.bindInvocation!("call", { path: "source.ts" });
+		try {
+			await allowedBinding.execute("call", { path: "source.ts" });
+		} finally {
+			allowedBinding.release();
+		}
+		expect(execute).toHaveBeenCalledOnce();
+		expect(native).not.toHaveBeenCalled();
+		expect(release).toHaveBeenCalledTimes(2);
+	});
+
+	it("distinguishes identical POSIX path strings across different backends", async () => {
+		const native = vi.spyOn(realpathSync, "native");
+		const root = "/synthetic/shared";
+		const target = `${root}/config.json`;
+
+		class DeniedBackendAuthority {
+			readonly flavor = "posix" as const;
+			readonly caseSensitive = true;
+			canonicalPath(path: string) {
+				return path === target ? `${root}/.env` : undefined;
+			}
+			isFile() {
+				return true;
+			}
+		}
+
+		class AllowedBackendAuthority {
+			readonly flavor = "posix" as const;
+			readonly caseSensitive = true;
+			canonicalPath(path: string) {
+				return path === target ? `${root}/config.default.json` : undefined;
+			}
+			isFile() {
+				return true;
+			}
+		}
+
+		const makeTool = (authority: unknown) => {
+			const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ok" }], details: {} }));
+			const release = vi.fn();
+			const context = captureExecutionContext({
+				sessionId: "shared-path-session",
+				generation: 1,
+				cwd: root,
+				attachment: {
+					workspaceId: "shared",
+					attachmentId: "backend-id",
+					root,
+					flavor: "posix",
+					caseSensitive: true,
+				},
+			});
+			const tool: AgentTool<typeof parameters> = {
+				name: "read",
+				label: "Read",
+				description: "Reader",
+				parameters,
+				execute,
+				bindInvocation: async () => ({
+					executionContext: context,
+					execute,
+					release,
+					pathAuthority: authority as any,
+				}),
+			};
+			return {
+				guarded: wrapToolWithCredentialExposureGuard(tool, "/operator", { redactSensitiveText: (t) => t }),
+				execute,
+				release,
+			};
+		};
+
+		const backendA = makeTool(new DeniedBackendAuthority());
+		const bindingA = await backendA.guarded.bindInvocation!("call", { path: "config.json" });
+		try {
+			await expect(bindingA.execute("call", { path: "config.json" })).rejects.toThrow("model-blind");
+		} finally {
+			bindingA.release();
+		}
+		expect(backendA.execute).not.toHaveBeenCalled();
+		expect(backendA.release).toHaveBeenCalledOnce();
+
+		const backendB = makeTool(new AllowedBackendAuthority());
+		const bindingB = await backendB.guarded.bindInvocation!("call", { path: "config.json" });
+		try {
+			await bindingB.execute("call", { path: "config.json" });
+		} finally {
+			bindingB.release();
+		}
+		expect(backendB.execute).toHaveBeenCalledOnce();
+		expect(backendB.release).toHaveBeenCalledOnce();
+		expect(native).not.toHaveBeenCalled();
+	});
+
+	it("distinguishes identical Windows path strings across different backends", async () => {
+		const native = vi.spyOn(realpathSync, "native");
+		const root = "C:\\synthetic\\shared";
+		const target = `${root}\\Config.DAT`;
+
+		class DeniedWinBackend {
+			readonly flavor = "win32" as const;
+			readonly caseSensitive = false;
+			canonicalPath(path: string) {
+				return path.toLowerCase() === target.toLowerCase() ? `${root}\\.env.local` : undefined;
+			}
+			isFile() {
+				return true;
+			}
+		}
+
+		class AllowedWinBackend {
+			readonly flavor = "win32" as const;
+			readonly caseSensitive = false;
+			canonicalPath(path: string) {
+				return path.toLowerCase() === target.toLowerCase() ? `${root}\\Config.default.dat` : undefined;
+			}
+			isFile() {
+				return true;
+			}
+		}
+
+		const makeTool = (authority: unknown) => {
+			const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ok" }], details: {} }));
+			const release = vi.fn();
+			const context = captureExecutionContext({
+				sessionId: "win-session",
+				generation: 1,
+				cwd: root,
+				attachment: {
+					workspaceId: "shared",
+					attachmentId: "win-backend-id",
+					root,
+					flavor: "win32",
+					caseSensitive: false,
+				},
+			});
+			const tool: AgentTool<typeof parameters> = {
+				name: "read",
+				label: "Read",
+				description: "Reader",
+				parameters,
+				execute,
+				bindInvocation: async () => ({
+					executionContext: context,
+					execute,
+					release,
+					pathAuthority: authority as any,
+				}),
+			};
+			return {
+				guarded: wrapToolWithCredentialExposureGuard(tool, "C:\\operator", { redactSensitiveText: (t) => t }),
+				execute,
+				release,
+			};
+		};
+
+		const backend1 = makeTool(new DeniedWinBackend());
+		const binding1 = await backend1.guarded.bindInvocation!("call", { path: "config.dat" });
+		try {
+			await expect(binding1.execute("call", { path: "config.dat" })).rejects.toThrow("model-blind");
+		} finally {
+			binding1.release();
+		}
+		expect(backend1.execute).not.toHaveBeenCalled();
+		expect(backend1.release).toHaveBeenCalledOnce();
+
+		const backend2 = makeTool(new AllowedWinBackend());
+		const binding2 = await backend2.guarded.bindInvocation!("call", { path: "config.dat" });
+		try {
+			await binding2.execute("call", { path: "config.dat" });
+		} finally {
+			binding2.release();
+		}
+		expect(backend2.execute).toHaveBeenCalledOnce();
+		expect(backend2.release).toHaveBeenCalledOnce();
+		expect(native).not.toHaveBeenCalled();
+	});
+
+	it("handles UNC share paths on Windows backend without host fallback", async () => {
+		const native = vi.spyOn(realpathSync, "native");
+		const root = "\\\\server\\share\\synthetic\\project";
+		const test = fixture("win32", root);
+		await expect(test.run({ path: "\\\\server\\share\\synthetic\\project\\.env" })).rejects.toThrow("model-blind");
+		expect(test.execute).not.toHaveBeenCalled();
+		expect(native).not.toHaveBeenCalled();
+
+		await test.run({ path: "\\\\server\\share\\synthetic\\project\\code.ts" });
+		expect(test.execute).toHaveBeenCalledOnce();
+		expect(native).not.toHaveBeenCalled();
+	});
+
+	it("forwards cancellation during asynchronous authority probing and releases lease once", async () => {
+		const native = vi.spyOn(realpathSync, "native");
+		const root = "/synthetic/async";
+		const abort = new AbortController();
+
+		class AsyncAuthority {
+			readonly flavor = "posix" as const;
+			readonly caseSensitive = true;
+			async canonicalPath(_path: string, signal?: AbortSignal) {
+				signal?.throwIfAborted();
+				abort.abort(new Error("aborted during async probe"));
+				signal?.throwIfAborted();
+				return undefined;
+			}
+			async isFile(_path: string, signal?: AbortSignal) {
+				signal?.throwIfAborted();
+				return true;
+			}
+		}
+
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "never" }], details: {} }));
+		const release = vi.fn();
+		const context = captureExecutionContext({
+			sessionId: "async-session",
+			generation: 1,
+			cwd: root,
+			attachment: {
+				workspaceId: "async",
+				attachmentId: "async-backend",
+				root,
+				flavor: "posix",
+				caseSensitive: true,
+			},
+		});
+		const tool: AgentTool<typeof parameters> = {
+			name: "read",
+			label: "Read",
+			description: "Reader",
+			parameters,
+			execute,
+			bindInvocation: async () => ({
+				executionContext: context,
+				execute,
+				release,
+				pathAuthority: new AsyncAuthority(),
+			}),
+		};
+		const guarded = wrapToolWithCredentialExposureGuard(tool, "/operator", { redactSensitiveText: (t) => t });
+		const binding = await guarded.bindInvocation!("call", { path: "source.ts" });
+		try {
+			await expect(binding.execute("call", { path: "source.ts" }, abort.signal)).rejects.toThrow(
+				"aborted during async probe",
+			);
+		} finally {
+			binding.release();
+		}
+		expect(execute).not.toHaveBeenCalled();
+		expect(native).not.toHaveBeenCalled();
+		expect(release).toHaveBeenCalledOnce();
+	});
+
+	it("redacts backend errors and never falls back to host filesystem", async () => {
+		const native = vi.spyOn(realpathSync, "native");
+		const root = "/synthetic/error-backend";
+
+		class BrokenAuthority {
+			readonly flavor = "posix" as const;
+			readonly caseSensitive = true;
+			canonicalPath(): string | undefined {
+				throw new Error("SECRET_TOKEN_54321: connection reset by peer");
+			}
+			isFile() {
+				return true;
+			}
+		}
+
+		const execute = vi.fn();
+		const release = vi.fn();
+		const context = captureExecutionContext({
+			sessionId: "error-session",
+			generation: 1,
+			cwd: root,
+			attachment: {
+				workspaceId: "err",
+				attachmentId: "err-backend",
+				root,
+				flavor: "posix",
+				caseSensitive: true,
+			},
+		});
+		const tool: AgentTool<typeof parameters> = {
+			name: "read",
+			label: "Read",
+			description: "Reader",
+			parameters,
+			execute,
+			bindInvocation: async () => ({
+				executionContext: context,
+				execute,
+				release,
+				pathAuthority: new BrokenAuthority(),
+			}),
+		};
+		const guarded = wrapToolWithCredentialExposureGuard(tool, "/operator", {
+			redactSensitiveText: (t) => t.replace(/SECRET_TOKEN_\d+/g, "[REDACTED]"),
+		});
+		const binding = await guarded.bindInvocation!("call", { path: "source.ts" });
+		try {
+			const errorPromise = binding.execute("call", { path: "source.ts" });
+			await expect(errorPromise).rejects.toThrow("[REDACTED]");
+			await expect(errorPromise).rejects.not.toThrow("SECRET_TOKEN_54321");
+		} finally {
+			binding.release();
+		}
+		expect(execute).not.toHaveBeenCalled();
+		expect(native).not.toHaveBeenCalled();
+		expect(release).toHaveBeenCalledOnce();
+	});
 });

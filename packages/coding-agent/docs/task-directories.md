@@ -39,8 +39,11 @@ execution contract; reusing a worker does not silently adopt a later foreground 
 Native file, Python, shell, process, and workflow tools consume the admitted directory. A shell-local
 `cd` can affect that command but does not rewrite the task binding: the next task shell invocation
 starts in the assigned directory while preserving its exported environment state. Selection does not
-change the original permission grant. Custom SDK backends retain their own explicit binding and path
-adapter; this native directory tool does not retarget a remote filesystem implicitly.
+change the original permission grant. Executing-backend path authority propagates through tool invocation
+bindings, so capability envelope enforcement, autonomy gates, and credential exposure guards evaluate
+against the admitted backend's filesystem facts and path dialect rather than ambient host filesystem probes.
+Custom SDK backends retain their own explicit binding and path adapter; this native directory tool does
+not retarget a remote filesystem implicitly.
 
 Bindings survive session resume, branch restoration, and compaction. Saved context is also projected
 back to model requests, so the model need not reconstruct it from old tool output. These are session

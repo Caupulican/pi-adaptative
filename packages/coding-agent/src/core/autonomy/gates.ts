@@ -1,4 +1,4 @@
-import path from "node:path";
+import type { ExecutionPathAuthority } from "@caupulican/pi-agent-core";
 import {
 	resolveToolCallCapabilities,
 	resolveToolCallPathAccess,
@@ -6,8 +6,12 @@ import {
 } from "../tool-capability-policy.ts";
 import { describeCapabilityRequirementForTool, hasCapabilityPolicyForTool } from "./approval-gate.ts";
 import type { CapabilityEnvelope, GateOutcome, GateOutcomeKind } from "./contracts.ts";
-import { extractToolPathArguments, isPathWithinEnvelope } from "./envelope-enforcement.ts";
-import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
+import {
+	assessPathWithinEnvelopeAsync,
+	assessPathWithinEnvelopeSync,
+	extractToolPathArguments,
+	type PathEnvelopeAssessment,
+} from "./envelope-enforcement.ts";
 import { assessOperationRisk } from "./risk-assessment.ts";
 
 function isGateOutcomeKind(value: unknown): value is GateOutcomeKind {
@@ -75,52 +79,68 @@ export function extractCandidatePaths(toolName: string, args: unknown): string[]
 	return toolUsesPathScope(toolName) ? extractToolPathArguments(toolName, args) : [];
 }
 
-export function evaluateToolGate(input: {
+export interface EvaluateToolGateInput {
 	toolName: string;
 	args?: unknown;
 	cwd: string;
 	/** Authority roots remain relative to their granting session, not the selected task. */
 	scopeCwd?: string;
 	envelope?: CapabilityEnvelope;
-}): GateOutcome {
+	pathAuthority?: ExecutionPathAuthority;
+	signal?: AbortSignal;
+}
+
+function checkEnvelopeAndToolCapabilities(input: EvaluateToolGateInput): {
+	earlyOutcome?: GateOutcome;
+	paths: string[];
+} {
+	input.signal?.throwIfAborted();
 	if (!input.envelope) {
 		return {
-			outcome: "allow",
-			gate: "tool_gate",
-			reasonCode: "no_envelope",
-			message: "No envelope active, preserving existing session behavior.",
+			earlyOutcome: {
+				outcome: "allow",
+				gate: "tool_gate",
+				reasonCode: "no_envelope",
+				message: "No envelope active, preserving existing session behavior.",
+			},
+			paths: [],
 		};
 	}
 
 	const envelope = input.envelope;
-
-	// 1. Tool allow/deny list overrides
 	if (envelope.deniedTools?.includes(input.toolName)) {
 		return {
-			outcome: "block",
-			gate: "tool_gate",
-			reasonCode: "tool_denied",
-			message: `Tool '${input.toolName}' is explicitly denied.`,
+			earlyOutcome: {
+				outcome: "block",
+				gate: "tool_gate",
+				reasonCode: "tool_denied",
+				message: `Tool '${input.toolName}' is explicitly denied.`,
+			},
+			paths: [],
 		};
 	}
 
 	if (envelope.allowedTools && !envelope.allowedTools.includes(input.toolName)) {
 		return {
-			outcome: "block",
-			gate: "tool_gate",
-			reasonCode: "tool_not_allowed",
-			message: `Tool '${input.toolName}' is not in the allowed tools list.`,
+			earlyOutcome: {
+				outcome: "block",
+				gate: "tool_gate",
+				reasonCode: "tool_not_allowed",
+				message: `Tool '${input.toolName}' is not in the allowed tools list.`,
+			},
+			paths: [],
 		};
 	}
 
-	// 2. Capability checks. Resolve the selected alternatives once so action-sensitive path
-	// enforcement cannot disagree with capability admission.
 	if (!hasCapabilityPolicyForTool(input.toolName)) {
 		return {
-			outcome: "block",
-			gate: "tool_gate",
-			reasonCode: "unknown_tool_capability",
-			message: `Tool '${input.toolName}' has no capability policy in the active envelope.`,
+			earlyOutcome: {
+				outcome: "block",
+				gate: "tool_gate",
+				reasonCode: "unknown_tool_capability",
+				message: `Tool '${input.toolName}' has no capability policy in the active envelope.`,
+			},
+			paths: [],
 		};
 	}
 
@@ -128,48 +148,34 @@ export function evaluateToolGate(input: {
 	if (!callCapabilities) {
 		const requirement = describeCapabilityRequirementForTool(input.toolName, input.args);
 		return {
-			outcome: "block",
-			gate: "tool_gate",
-			reasonCode: "missing_capability",
-			message: `Tool '${input.toolName}' requires ${requirement || "a classified capability"}, which is missing from the active envelope.`,
+			earlyOutcome: {
+				outcome: "block",
+				gate: "tool_gate",
+				reasonCode: "missing_capability",
+				message: `Tool '${input.toolName}' requires ${requirement || "a classified capability"}, which is missing from the active envelope.`,
+			},
+			paths: [],
 		};
 	}
 
-	// 3. Path scope containment for caller-controlled paths. A workflow.plan pipeline read is a
-	// fixed-root control-plane operation; selecting filesystem.read instead keeps the path gate.
 	const pathAccess = resolveToolCallPathAccess(envelope.capabilities, input.toolName, input.args);
 	const paths = pathAccess === "none" ? [] : extractCandidatePaths(input.toolName, input.args);
-	for (const targetPath of paths) {
-		if (!isPathWithinEnvelope(envelope, targetPath, input.cwd, input.scopeCwd)) {
-			let isDenied = false;
-			try {
-				const target = safeRealpathSync(path.resolve(input.cwd, targetPath));
-				isDenied = (envelope.deniedPaths ?? []).some((denied) => {
-					try {
-						return isPathWithinScope(target, safeRealpathSync(path.resolve(input.scopeCwd ?? input.cwd, denied)));
-					} catch {
-						return false;
-					}
-				});
-			} catch {}
+	return { paths };
+}
 
-			if (isDenied) {
-				return {
-					outcome: "block",
-					gate: "path_scope",
-					reasonCode: "path_denied",
-					message: `Path '${targetPath}' is explicitly denied.`,
-				};
-			}
-			return {
-				outcome: "block",
-				gate: "path_scope",
-				reasonCode: "path_outside_allowed_roots",
-				message: `Path '${targetPath}' is outside all allowed roots.`,
-			};
-		}
-	}
+function pathBlockOutcome(targetPath: string, reasonCode: "path_denied" | "path_outside_allowed_roots"): GateOutcome {
+	return {
+		outcome: "block",
+		gate: "path_scope",
+		reasonCode,
+		message:
+			reasonCode === "path_denied"
+				? `Path '${targetPath}' is explicitly denied.`
+				: `Path '${targetPath}' is outside all allowed roots.`,
+	};
+}
 
+function finalizeGateOutcome(input: EvaluateToolGateInput, paths: string[], envelope: CapabilityEnvelope): GateOutcome {
 	let command = "";
 	if (
 		input.toolName === "bash" ||
@@ -198,7 +204,7 @@ export function evaluateToolGate(input: {
 
 	if (riskResult.requiresApproval) {
 		return {
-			outcome: "ask-user", // or block, prompt says: ask-user/block
+			outcome: "ask-user",
 			gate: "risk_assessment",
 			reasonCode: riskResult.reasonCode,
 			message: `Operation requires approval: ${riskResult.reasons.join(", ")}`,
@@ -220,4 +226,55 @@ export function evaluateToolGate(input: {
 		reasonCode: "allowed_by_envelope",
 		message: "Operation allowed by current capability envelope.",
 	};
+}
+
+function checkPathAssessments(
+	paths: readonly string[],
+	assess: (path: string) => PathEnvelopeAssessment,
+): GateOutcome | undefined {
+	for (const path of paths) {
+		const res = assess(path);
+		if (!res.allowed) {
+			return pathBlockOutcome(path, res.reasonCode ?? "path_outside_allowed_roots");
+		}
+	}
+	return undefined;
+}
+
+export function evaluateToolGate(input: EvaluateToolGateInput): GateOutcome {
+	const checked = checkEnvelopeAndToolCapabilities(input);
+	if (checked.earlyOutcome) return checked.earlyOutcome;
+	const envelope = input.envelope!;
+
+	const blocked = checkPathAssessments(checked.paths, (targetPath) =>
+		assessPathWithinEnvelopeSync(envelope, targetPath, {
+			cwd: input.cwd,
+			scopeCwd: input.scopeCwd,
+			pathAuthority: input.pathAuthority,
+			signal: input.signal,
+		}),
+	);
+	if (blocked) return blocked;
+
+	return finalizeGateOutcome(input, checked.paths, envelope);
+}
+
+export async function evaluateToolGateAsync(input: EvaluateToolGateInput): Promise<GateOutcome> {
+	const checked = checkEnvelopeAndToolCapabilities(input);
+	if (checked.earlyOutcome) return checked.earlyOutcome;
+	const envelope = input.envelope!;
+
+	for (const targetPath of checked.paths) {
+		const assessment = await assessPathWithinEnvelopeAsync(envelope, targetPath, {
+			cwd: input.cwd,
+			scopeCwd: input.scopeCwd,
+			pathAuthority: input.pathAuthority,
+			signal: input.signal,
+		});
+		if (!assessment.allowed) {
+			return pathBlockOutcome(targetPath, assessment.reasonCode ?? "path_outside_allowed_roots");
+		}
+	}
+
+	return finalizeGateOutcome(input, checked.paths, envelope);
 }

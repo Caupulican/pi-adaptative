@@ -7,6 +7,7 @@ export {
 	createExecutionContext,
 	type ExecutionAttachment,
 	type ExecutionContext,
+	type ExecutionPathAuthority,
 	type ExecutionPathFlavor,
 	type ExecutionResourceReference,
 	executionPathApi,

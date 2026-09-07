@@ -14,8 +14,8 @@ export interface CredentialPathProtection {
 
 /** Read-only backend facts. Unknown is not proof of a regular file or a native filesystem grant. */
 export interface CredentialPathProbe {
-	canonicalPath(path: string): string | undefined;
-	isFile(path: string): boolean | undefined;
+	canonicalPath(path: string, signal?: AbortSignal): Promise<string | undefined> | string | undefined;
+	isFile(path: string, signal?: AbortSignal): Promise<boolean | undefined> | boolean | undefined;
 	readonly homeDir?: string;
 	readonly harnessRoots?: readonly string[];
 	readonly harnessFiles?: readonly string[];
@@ -66,6 +66,15 @@ export class CredentialPathPolicy {
 	private candidates(path: string): string[] {
 		const candidates = [path];
 		const canonical = this.probe.canonicalPath(path);
+		if (typeof canonical === "string" && canonical !== path) candidates.push(canonical);
+		return candidates;
+	}
+
+	private async candidatesAsync(path: string, signal?: AbortSignal): Promise<string[]> {
+		signal?.throwIfAborted();
+		const candidates = [path];
+		const canonical = await this.probe.canonicalPath(path, signal);
+		signal?.throwIfAborted();
 		if (canonical !== undefined && canonical !== path) candidates.push(canonical);
 		return candidates;
 	}
@@ -113,6 +122,43 @@ export class CredentialPathPolicy {
 			});
 		const files = roots(this.protection?.protectedFiles);
 		const directories = roots(this.protection?.protectedDirectories);
+		return this.matchesProtectionCriteria(candidates, files, directories);
+	}
+
+	async isProtectedAsync(rawPath: string, signal?: AbortSignal): Promise<boolean> {
+		signal?.throwIfAborted();
+		const resolvedTarget = resolveExecutionPath(rawPath, this.cwd, this.flavor);
+		const candidates = await this.candidatesAsync(resolvedTarget, signal);
+		const roots = async (values: readonly string[] | undefined) => {
+			const collected: string[] = [];
+			for (const path of values ?? []) {
+				signal?.throwIfAborted();
+				if (this.protectionCwd === undefined) {
+					try {
+						assertExecutionAbsolutePath(path, this.flavor);
+					} catch {
+						continue;
+					}
+				}
+				const resolved =
+					this.protectionCwd === undefined
+						? this.paths.normalize(path)
+						: resolveExecutionPath(path, this.protectionCwd, this.flavor);
+				const cands = await this.candidatesAsync(resolved, signal);
+				collected.push(...cands);
+			}
+			return collected;
+		};
+		const files = await roots(this.protection?.protectedFiles);
+		const directories = await roots(this.protection?.protectedDirectories);
+		return this.matchesProtectionCriteria(candidates, files, directories);
+	}
+
+	private matchesProtectionCriteria(
+		candidates: readonly string[],
+		files: readonly string[],
+		directories: readonly string[],
+	): boolean {
 		return candidates.some((candidate) => {
 			if (
 				files.some((file) => this.samePath(file, candidate)) ||
@@ -124,7 +170,16 @@ export class CredentialPathPolicy {
 	}
 
 	isFile(rawPath: string): boolean | undefined {
-		return this.probe.isFile(resolveExecutionPath(rawPath, this.cwd, this.flavor));
+		const result = this.probe.isFile(resolveExecutionPath(rawPath, this.cwd, this.flavor));
+		return typeof result === "boolean" ? result : undefined;
+	}
+
+	async isFileAsync(rawPath: string, signal?: AbortSignal): Promise<boolean | undefined> {
+		signal?.throwIfAborted();
+		const resolved = resolveExecutionPath(rawPath, this.cwd, this.flavor);
+		const result = await this.probe.isFile(resolved, signal);
+		signal?.throwIfAborted();
+		return typeof result === "boolean" ? result : undefined;
 	}
 
 	isHarnessOwnedSearchTarget(rawPath: string): boolean {
