@@ -43,9 +43,10 @@ describe("Bash tool directory pin", () => {
 				.replace(/\\/g, "/");
 		try {
 			const moved = await tool.execute("move", { command: "cd child; pwd" });
-			expect(text(moved)).toBe(join(root, "child").replace(/\\/g, "/"));
+			// Compare directory identity without discarding short-name inputs on Windows.
+			expect(realpathSync.native(text(moved))).toBe(realpathSync.native(join(root, "child")));
 			const next = await tool.execute("next", { command: "pwd" });
-			expect(text(next)).toBe(root.replace(/\\/g, "/"));
+			expect(realpathSync.native(text(next))).toBe(realpathSync.native(root));
 		} finally {
 			await disposeShellExecutionSessionAndWait(sessionKey);
 			rmSync(scratch, { recursive: true, force: true });

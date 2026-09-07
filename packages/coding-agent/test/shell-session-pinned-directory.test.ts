@@ -27,16 +27,19 @@ describe("pinned persistent shell directory", () => {
 			);
 			expect(moved.exitCode).toBe(0);
 			const unpinned = await run(windows ? "(Get-Location).Path" : "pwd");
-			expect(unpinned.text).toBe(child);
+			// Windows shells may expand a short-name alias supplied by the temp directory.
+			expect(realpathSync.native(unpinned.text)).toBe(realpathSync.native(child));
 			const pinned = await run(
 				windows ? "(Get-Location).Path; $env:PI_FIXTURE_PIN_VALUE" : "pwd; printf '%s' \"$PI_FIXTURE_PIN_VALUE\"",
 				true,
 			);
 			expect(pinned.exitCode).toBe(0);
 			expect(pinned.initialCwd).toBe(root);
-			expect(pinned.text.replace(/\r/g, "")).toBe(`${root}\nkept`);
+			const [pinnedPath, ...retainedValues] = pinned.text.split(/\r?\n/);
+			expect(realpathSync.native(pinnedPath)).toBe(realpathSync.native(root));
+			expect(retainedValues).toEqual(["kept"]);
 			const again = await run(windows ? "(Get-Location).Path" : "pwd");
-			expect(again.text).toBe(root);
+			expect(realpathSync.native(again.text)).toBe(realpathSync.native(root));
 		} finally {
 			session.dispose();
 			await session.terminalPromise;
