@@ -160,6 +160,25 @@ function completePowerShellStatus(code: string): string {
 	return `if (Test-Path -LiteralPath 'Function:\\${POWERSHELL_STATUS_FUNCTION}') { ${POWERSHELL_STATUS_FUNCTION} ${code} } else { exit ${code} }`;
 }
 
+/**
+ * Models trained on Linux write `/c/Program Files/...` (Git Bash) and `/mnt/c/...` (WSL) for
+ * Windows drives. Neither form means anything to PowerShell or to a Windows executable, so a token
+ * that starts with such a drive root is rewritten to `C:/...`. Forward slashes are kept: every
+ * Windows API and PowerShell accept them, and the rest of the token stays byte-identical. `/c`
+ * alone (a `cmd /c` switch) and `/usr/bin` never match.
+ */
+const POSIX_DRIVE_ROOT = /^\/(?:mnt\/)?([A-Za-z])\/(.*)$/u;
+
+export function translatePosixDrivePath(token: string): string {
+	const match = POSIX_DRIVE_ROOT.exec(token);
+	if (!match) return token;
+	return `${match[1].toUpperCase()}:/${match[2]}`;
+}
+
+function translatePosixDrivePaths(argv: readonly string[]): string[] {
+	return argv.map(translatePosixDrivePath);
+}
+
 function externalCommand(argv: readonly string[]): string {
 	const invocation = `& ${argv.map(quotePowerShell).join(" ")}`;
 	return `$global:LASTEXITCODE = $null\n${invocation}\n$__pi_external_succeeded = $?\n$__pi_external_code = if ($null -ne $global:LASTEXITCODE) { [int]$global:LASTEXITCODE } elseif ($__pi_external_succeeded) { 0 } else { 1 }\n${completePowerShellStatus("$__pi_external_code")}`;
@@ -340,7 +359,9 @@ export function routeShellContract(
 		return { kind: "unsupported", error: tokenized.error ?? UNSUPPORTED_OPERATOR_MESSAGE };
 	}
 
-	const argv = tokenized.argv;
+	// The floor receives argv, never the raw string, so drive-root translation belongs here; the
+	// engine receives the raw command and applies the same rule in its own path resolver.
+	const argv = translatePosixDrivePaths(tokenized.argv);
 	const commandName = argv[0].toLowerCase();
 
 	// Inline env assignments (`NAME=value [cmd]`) are a state-mutating/expansion form the engine

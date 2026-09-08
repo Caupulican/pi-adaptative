@@ -16,6 +16,7 @@ from errors import UnsupportedConstruct
 
 if TYPE_CHECKING:
     from context import BuiltinContext
+from paths import resolve_request_path
 
 
 def _read_stdin(ctx: "BuiltinContext") -> bytes:
@@ -23,9 +24,7 @@ def _read_stdin(ctx: "BuiltinContext") -> bytes:
 
 
 def _resolve_path(ctx: "BuiltinContext", path: str) -> str:
-    if os.path.isabs(path):
-        return path
-    return os.path.join(ctx.cwd, path)
+    return resolve_request_path(ctx.cwd, path)
 
 
 def _split_flags_and_operands(

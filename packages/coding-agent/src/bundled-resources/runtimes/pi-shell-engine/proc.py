@@ -12,6 +12,7 @@ import subprocess
 import time
 from typing import BinaryIO
 
+from paths import translate_posix_drive_path
 from state import ShellState
 
 TIMEOUT_EXIT_CODE = 124
@@ -83,6 +84,9 @@ def spawn_external(
 
     Raises FileNotFoundError if argv[0] does not resolve.
     """
+    # A Linux-trained model's `/c/Program Files/.../tool.exe` and its `/mnt/d/repo` arguments
+    # mean `C:/...` here; translate every drive-rooted token before resolution and spawn.
+    argv = [translate_posix_drive_path(token) for token in argv]
     resolved = resolve_external(argv[0], state.env, state.cwd)
     if resolved is None:
         raise FileNotFoundError(argv[0])

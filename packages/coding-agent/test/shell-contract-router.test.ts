@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { routeShellContract } from "../src/core/tools/shell-contract-router.ts";
+import { routeShellContract, translatePosixDrivePath } from "../src/core/tools/shell-contract-router.ts";
 
 describe("stable Bash-like shell contract router", () => {
 	it("passes commands through unchanged outside Windows", () => {
@@ -30,6 +30,31 @@ describe("stable Bash-like shell contract router", () => {
 		expect(floor).toMatchObject({ kind: "unsupported" });
 		if (floor.kind !== "unsupported") throw new Error("Expected the floor to refuse a command list");
 		expect(floor.error).toMatch(/one simple command per call/u);
+	});
+
+	it("rewrites Git-Bash and WSL drive roots onto Windows drives before the floor sees them", () => {
+		expect(translatePosixDrivePath("/c/Program Files (x86)/tool.exe")).toBe("C:/Program Files (x86)/tool.exe");
+		expect(translatePosixDrivePath("/mnt/d/repo/file.txt")).toBe("D:/repo/file.txt");
+		expect(translatePosixDrivePath("/c")).toBe("/c");
+		expect(translatePosixDrivePath("/usr/bin/env")).toBe("/usr/bin/env");
+		expect(translatePosixDrivePath("D:/already")).toBe("D:/already");
+
+		const listing = routeShellContract('ls "/c/Program Files"', "win32", { pythonEngine: false });
+		expect(listing).toMatchObject({ kind: "powershell", argv: ["ls", "C:/Program Files"] });
+		const vstest = routeShellContract(
+			'"/c/Program Files (x86)/Microsoft Visual Studio/vstest.console.exe" "D:/x/t.dll" /Tests:Foo',
+			"win32",
+			{ pythonEngine: false },
+		);
+		expect(vstest).toMatchObject({
+			kind: "powershell",
+			argv: ["C:/Program Files (x86)/Microsoft Visual Studio/vstest.console.exe", "D:/x/t.dll", "/Tests:Foo"],
+		});
+		expect((vstest as { command: string }).command).toContain(
+			"C:/Program Files (x86)/Microsoft Visual Studio/vstest.console.exe",
+		);
+		const cmdSwitch = routeShellContract("cmd /c dir", "win32", { pythonEngine: false });
+		expect(cmdSwitch).toMatchObject({ kind: "unsupported" });
 	});
 
 	it("translates quoted external argv to a deterministic PowerShell invocation", () => {

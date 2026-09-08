@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from paths import resolve_request_path
 
 
 class ShellEnvironment(dict[str, str]):
@@ -83,8 +84,7 @@ class ShellState:
 
     def chdir(self, path: str) -> None:
         """Validate `path` exists and is a directory, then update cwd + OLDPWD."""
-        target = path if os.path.isabs(path) else os.path.join(self.cwd, path)
-        target = os.path.normpath(target)
+        target = resolve_request_path(self.cwd, path)
         if not os.path.isdir(target):
             raise FileNotFoundError(target)
         self.env["OLDPWD"] = self.cwd

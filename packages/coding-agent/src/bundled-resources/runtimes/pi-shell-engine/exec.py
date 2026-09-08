@@ -22,6 +22,7 @@ import tokens as tokens_module
 from context import RUNNER_BUILTINS, STATE_BUILTINS, BuiltinContext, ExecContext
 from errors import ArithmeticExpansionError, LoopBreak, LoopContinue, LoopControl, ShellExit, UnsupportedConstruct
 from state import ShellState
+from paths import resolve_request_path
 
 DEVNULL = os.devnull
 MAX_LOOP_ITERATIONS = 1_000_000
@@ -65,10 +66,8 @@ def _redirect_target_path(redirect: nodes.Redirect, ctx: ExecContext) -> str:
         raise UnsupportedConstruct("malformed-syntax", "redirect target expanded to multiple words (ambiguous redirect)")
     path = parts[0]
     if path == "/dev/null":
-        path = DEVNULL
-    if not os.path.isabs(path):
-        path = os.path.join(ctx.state.cwd, path)
-    return path
+        return DEVNULL
+    return resolve_request_path(ctx.state.cwd, path)
 
 
 def _heredoc_body(redirect: nodes.Redirect, ctx: ExecContext, *, here_string: bool) -> bytes:
