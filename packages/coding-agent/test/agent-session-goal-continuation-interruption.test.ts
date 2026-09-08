@@ -45,6 +45,37 @@ describe("goal continuation interruption containment", () => {
 		});
 	});
 
+	it("blocks the goal with the provider's reason after an errored turn instead of leaving it active", async () => {
+		const harness = await createHarness();
+		seedOpenGoal(harness);
+		harness.settingsManager.setAutonomySettings({ goalAutoContinue: false });
+		harness.setResponses(
+			Array.from({ length: 20 }, () =>
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					errorMessage: "Request timed out. [getaddrinfo ETIMEOUT cli-chat-proxy.grok.com]",
+				}),
+			),
+		);
+
+		const result = await harness.session.continueGoalLoop({
+			maxTurns: 20,
+			maxStallTurns: 20,
+			maxWallClockMinutes: 0,
+		});
+
+		expect(result).toMatchObject({ stopReason: "turn_errored", turnsSubmitted: 1 });
+		expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+			status: "blocked",
+			blockedReason: expect.stringContaining("getaddrinfo ETIMEOUT cli-chat-proxy.grok.com"),
+		});
+		expect(result.finalSnapshot.continuation).toMatchObject({
+			action: "ask-user",
+			reasonCode: "goal_blocked",
+			message: expect.stringContaining("getaddrinfo ETIMEOUT"),
+		});
+	});
+
 	it("continues across successful provider turns as a negative control", async () => {
 		const harness = await createHarness();
 		seedOpenGoal(harness);

@@ -329,7 +329,19 @@ export interface GoalContinuationOnceResult {
 	snapshot: GoalRuntimeSnapshot;
 	prompt?: GoalContinuationPrompt;
 	/** Terminal outcome of the submitted provider turn; absent when no prompt was submitted. */
-	turnOutcome?: "completed" | "interrupted";
+	turnOutcome?: GoalContinuationTurnOutcome["outcome"];
+	/** Provider error text when `turnOutcome` is `errored`. */
+	turnError?: string;
+}
+
+/**
+ * How a submitted continuation turn ended. `interrupted` is an owner abort and leaves the goal
+ * untouched; `errored` is the provider failing after the loop's own retries, which the goal must
+ * record instead of staying silently `active` until someone reopens the session.
+ */
+export interface GoalContinuationTurnOutcome {
+	outcome: "completed" | "interrupted" | "errored";
+	errorMessage?: string;
 }
 
 /** Provider aborts and terminal errors must never drive another autonomous continuation request. */
@@ -346,7 +358,8 @@ export type GoalContinuationLoopStopReason =
 	| "session_disposed"
 	| "goal_tool_unavailable"
 	| "worker_in_flight"
-	| "turn_interrupted";
+	| "turn_interrupted"
+	| "turn_errored";
 
 export interface GoalContinuationLoopOptions extends GoalContinuationOnceOptions {
 	/** Explicit per-invocation turn limit; 0 means unbounded. */

@@ -120,7 +120,7 @@ export class GoalAutoContinueController {
 				maxStallTurns,
 				maxWallClockMinutes: goalContinueMaxWallClockMinutes,
 			});
-			if (result.stopReason === "turn_interrupted") return;
+			if (result.stopReason === "turn_interrupted" || result.stopReason === "turn_errored") return;
 			if (!this.deps.isDisposed()) {
 				const nextSnapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
 				if (nextSnapshot.continuation.action === "continue") {

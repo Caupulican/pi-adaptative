@@ -147,7 +147,9 @@ export function evaluateGoalContinuation(args: {
 			...baseDecision,
 			action: "ask-user",
 			reasonCode: "goal_blocked",
-			message: "The goal is explicitly blocked.",
+			message: state.blockedReason
+				? `The goal is blocked: ${state.blockedReason}`
+				: "The goal is explicitly blocked.",
 		};
 	}
 

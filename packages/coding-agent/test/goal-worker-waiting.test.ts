@@ -271,7 +271,7 @@ describe("GoalLoopController neither stalls nor races while a bound worker is in
 			getGoalRuntimeSnapshot: () => makeSnapshot("waiting", "worker_in_flight"),
 			prompt: async (text) => {
 				promptCalls.push(text);
-				return "completed";
+				return { outcome: "completed" as const };
 			},
 			recordGoalContinuationPass: (pass) => recorded.push(pass),
 			recordGoalContinuationFailure: () => {},
@@ -294,7 +294,7 @@ describe("GoalLoopController neither stalls nor races while a bound worker is in
 				waiting ? makeSnapshot("waiting", "worker_in_flight") : makeSnapshot("continue", "goal_active"),
 			prompt: async (text) => {
 				promptCalls.push(text);
-				return "completed";
+				return { outcome: "completed" as const };
 			},
 			recordGoalContinuationPass: () => {},
 			recordGoalContinuationFailure: () => {},
@@ -337,7 +337,7 @@ describe("worker-spend accounting stays advisory (goal-loop-controller)", () => 
 			}),
 			prompt: async (text) => {
 				promptCalls.push(text);
-				return "completed";
+				return { outcome: "completed" as const };
 			},
 			recordGoalContinuationPass: () => {},
 			recordGoalContinuationFailure: () => {},
@@ -368,7 +368,7 @@ describe("worker-spend accounting stays advisory (goal-loop-controller)", () => 
 					satisfiedRequirementIds: [],
 				},
 			}),
-			prompt: async () => "completed",
+			prompt: async () => ({ outcome: "completed" as const }),
 			recordGoalContinuationPass: () => {},
 			recordGoalContinuationFailure: () => {},
 			markGoalBudgetLimited: () => {},

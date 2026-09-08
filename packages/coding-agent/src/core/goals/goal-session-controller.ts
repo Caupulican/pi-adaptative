@@ -8,6 +8,7 @@ import {
 	type GoalContinuationLoopResult,
 	type GoalContinuationOnceOptions,
 	type GoalContinuationOnceResult,
+	type GoalContinuationTurnOutcome,
 	isInterruptedAssistantStopReason,
 	type PromptOptions,
 } from "../agent-session-contracts.ts";
@@ -105,6 +106,17 @@ interface QueuedOwnerChatGoal {
  * Owns durable goal state, exact continuation accounting, and the raw continuation loop. The
  * AgentSession facade supplies process collaborators but no longer implements goal lifecycle rules.
  */
+/** Classified reasons that mean the provider, not the harness, ended the turn. */
+const PROVIDER_FAILURE_REASONS: ReadonlySet<string> = new Set([
+	"overloaded",
+	"rate_limit",
+	"server_error",
+	"network",
+	"stream_stall",
+	"auth",
+	"billing_or_quota",
+]);
+
 export class GoalSessionController {
 	private readonly deps: GoalSessionControllerDeps;
 	private readonly loop: GoalLoopController;
@@ -128,20 +140,32 @@ export class GoalSessionController {
 		});
 	}
 
-	private getContinuationTurnOutcome(firstTurnEntryIndex: number): "completed" | "interrupted" {
+	private getContinuationTurnOutcome(firstTurnEntryIndex: number): GoalContinuationTurnOutcome {
 		const sessionManager = this.deps.getSessionManager();
 		const endIndex = sessionManager.getEntryCount();
 		let nextIndex = firstTurnEntryIndex;
-		let lastAssistantStopReason: AssistantMessage["stopReason"] | undefined;
+		let lastAssistant: Pick<AssistantMessage, "stopReason" | "errorMessage"> | undefined;
 		while (nextIndex < endIndex) {
 			const visitCount = Math.min(MAX_SESSION_ENTRY_VISIT_COUNT, endIndex - nextIndex);
 			nextIndex = sessionManager.visitEntries(nextIndex, visitCount, (entry) => {
 				if (entry.type === "message" && entry.message.role === "assistant") {
-					lastAssistantStopReason = entry.message.stopReason;
+					lastAssistant = { stopReason: entry.message.stopReason, errorMessage: entry.message.errorMessage };
 				}
 			});
 		}
-		return isInterruptedAssistantStopReason(lastAssistantStopReason) ? "interrupted" : "completed";
+		if (lastAssistant?.stopReason === "error" && lastAssistant.errorMessage) {
+			// Only a provider failure blocks the goal. Harness-owned error stops (a verification
+			// handoff, protocol residue, an output runaway) carry their own handling and must keep
+			// the goal resumable exactly as before.
+			const classified = classifyFailure({
+				message: lastAssistant.errorMessage,
+				provider: this.deps.getModelProvider(),
+			});
+			if (PROVIDER_FAILURE_REASONS.has(classified.reason)) {
+				return { outcome: "errored", errorMessage: lastAssistant.errorMessage };
+			}
+		}
+		return { outcome: isInterruptedAssistantStopReason(lastAssistant?.stopReason) ? "interrupted" : "completed" };
 	}
 
 	saveState(state: GoalState, expected?: GoalStateRevision): string {

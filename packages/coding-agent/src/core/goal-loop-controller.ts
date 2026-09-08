@@ -20,6 +20,7 @@ import type {
 	GoalContinuationLoopStopReason,
 	GoalContinuationOnceOptions,
 	GoalContinuationOnceResult,
+	GoalContinuationTurnOutcome,
 	PromptOptions,
 } from "./agent-session-contracts.ts";
 import {
@@ -59,7 +60,7 @@ export interface GoalLoopControllerDeps {
 	/** Read the current goal runtime snapshot (continuation decision + goal state) fresh each pass. */
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot;
 	/** Submit a continuation prompt through the session's own prompt path. */
-	prompt(text: string, options?: PromptOptions): Promise<"completed" | "interrupted">;
+	prompt(text: string, options?: PromptOptions): Promise<GoalContinuationTurnOutcome>;
 	/**
 	 * Report one submitted pass's turn and duration. The session execution owner persists active
 	 * time and provider usage; this report must not double-charge that time. Called once per
@@ -101,7 +102,13 @@ export class GoalLoopController {
 			goalExecutionId: snapshot.goalState?.goalId,
 		});
 
-		return { submitted: true, snapshot, prompt, turnOutcome };
+		return {
+			submitted: true,
+			snapshot,
+			prompt,
+			turnOutcome: turnOutcome.outcome,
+			...(turnOutcome.errorMessage ? { turnError: turnOutcome.errorMessage } : {}),
+		};
 	}
 
 	async continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
@@ -181,7 +188,16 @@ export class GoalLoopController {
 				return { turnsSubmitted, stopReason: "goal_budget_exhausted", finalSnapshot: afterSnapshot };
 			}
 			if (afterSnapshot.continuation.action !== "continue") {
+				// An earlier handler (protocol residue, budget, owner pause) already terminalized the
+				// goal during the turn; its decision owns the stop reason, errored turn or not.
 				return { turnsSubmitted, stopReason: nonContinueStopReason(afterSnapshot), finalSnapshot: afterSnapshot };
+			}
+			if (result.turnOutcome === "errored") {
+				// The provider failed after the session's own retry ladder and nothing else stopped the
+				// goal. Leaving it `active` here meant a silent stop: nothing on screen, and an automatic
+				// resume on the next reopen. Record the failure so the state says blocked and names why.
+				this.deps.recordGoalContinuationFailure(new Error(result.turnError ?? "provider turn ended in error"));
+				return { turnsSubmitted, stopReason: "turn_errored", finalSnapshot: snapshot() };
 			}
 			if (result.turnOutcome === "interrupted") {
 				return { turnsSubmitted, stopReason: "turn_interrupted", finalSnapshot: afterSnapshot };
