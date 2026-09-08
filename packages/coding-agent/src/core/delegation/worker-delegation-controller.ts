@@ -1414,7 +1414,14 @@ export class WorkerDelegationController {
 		const authority =
 			this.getWorkerLifecycle().getActiveAttempt(laneId)?.dispatch.executionContract?.worker.authority;
 		if (!authority) return undefined;
-		return { toolNames: [...authority.toolNames], capabilities: [...authority.capabilities] };
+		return {
+			toolNames: [...authority.toolNames],
+			capabilities: [...authority.capabilities],
+			budget: {
+				...(authority.budget.maxWallClockMs ? { maxWallClockMs: authority.budget.maxWallClockMs } : {}),
+				...(authority.budget.maxCostUsd ? { maxCostUsd: authority.budget.maxCostUsd } : {}),
+			},
+		};
 	}
 
 	private workerProjectionHeadroomSkipReason(

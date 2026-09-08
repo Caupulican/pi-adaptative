@@ -20,7 +20,11 @@ describe("runBoundedCompletion", () => {
 				}),
 		});
 		expect(outcome.completion).toBeUndefined();
-		expect(outcome.failure).toEqual({ status: "timeout", reasonCode: "wall_clock_exceeded" });
+		expect(outcome.failure).toEqual({
+			status: "timeout",
+			reasonCode: "wall_clock_exceeded",
+			detail: "wall-clock cap 10 ms reached",
+		});
 	});
 
 	it("returns at the wall-clock bound when the executor never settles or observes abort", async () => {
@@ -38,7 +42,7 @@ describe("runBoundedCompletion", () => {
 			await vi.advanceTimersByTimeAsync(10);
 
 			expect(await pending).toEqual({
-				failure: { status: "timeout", reasonCode: "wall_clock_exceeded" },
+				failure: { status: "timeout", reasonCode: "wall_clock_exceeded", detail: "wall-clock cap 10 ms reached" },
 			});
 			expect(executionSignal?.aborted).toBe(true);
 		} finally {
@@ -79,7 +83,11 @@ describe("runBoundedCompletion", () => {
 			});
 
 			await vi.advanceTimersByTimeAsync(10);
-			expect((await pending).failure).toEqual({ status: "timeout", reasonCode: "wall_clock_exceeded" });
+			expect((await pending).failure).toEqual({
+				status: "timeout",
+				reasonCode: "wall_clock_exceeded",
+				detail: "wall-clock cap 10 ms reached",
+			});
 
 			rejectLate(new Error("late executor failure"));
 			await Promise.resolve();

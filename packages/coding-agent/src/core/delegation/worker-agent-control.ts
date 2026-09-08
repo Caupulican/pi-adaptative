@@ -225,6 +225,8 @@ export interface WorkerAgentBroadcastResult {
 export interface WorkerGrantSummary {
 	toolNames: readonly string[];
 	capabilities: readonly string[];
+	/** Budget caps the host will enforce; absent or 0 means unbounded. */
+	budget?: { maxWallClockMs?: number; maxCostUsd?: number };
 }
 
 export interface WorkerAgentView {

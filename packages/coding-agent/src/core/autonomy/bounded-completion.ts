@@ -57,12 +57,29 @@ type ExecutorSettlement = { kind: "completion"; completion: BoundedCompletion } 
 
 const MAX_HOST_TIMER_DELAY_MS = 2_147_483_647;
 
+/** Human-readable wall-clock cap for the timeout detail: `120 s`, `1.5 s`, `45 min`. */
+export function formatWallClockCap(maxWallClockMs: number): string {
+	if (maxWallClockMs < 1000) return `${maxWallClockMs} ms`;
+	if (maxWallClockMs >= 60_000 && maxWallClockMs % 60_000 === 0) return `${maxWallClockMs / 60_000} min`;
+	const seconds = maxWallClockMs / 1000;
+	return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)} s`;
+}
+
 function abortFailure(args: {
 	externalSignal?: AbortSignal;
 	timeoutSignal: AbortSignal;
+	maxWallClockMs: number;
 }): BoundedCompletionOutcome["failure"] {
 	if (args.externalSignal?.aborted) return { status: "canceled", reasonCode: "external_abort" };
-	if (args.timeoutSignal.aborted) return { status: "timeout", reasonCode: "wall_clock_exceeded" };
+	if (args.timeoutSignal.aborted) {
+		// A bare reason code told nobody how long the budget was; two live workers died at an
+		// owner-configured 120 s and the parent replanned instead of raising the cap.
+		return {
+			status: "timeout",
+			reasonCode: "wall_clock_exceeded",
+			detail: `wall-clock cap ${formatWallClockCap(args.maxWallClockMs)} reached`,
+		};
+	}
 	return { status: "failed", reasonCode: "completion_error" };
 }
 
@@ -142,7 +159,11 @@ export async function runBoundedCompletion(args: {
 			}
 			return {
 				...(settled?.kind === "completion" ? { completion: settled.completion } : {}),
-				failure: abortFailure({ externalSignal: args.signal, timeoutSignal: timeoutController.signal }),
+				failure: abortFailure({
+					externalSignal: args.signal,
+					timeoutSignal: timeoutController.signal,
+					maxWallClockMs: args.maxWallClockMs,
+				}),
 			};
 		}
 
@@ -150,7 +171,11 @@ export async function runBoundedCompletion(args: {
 			return {
 				failure:
 					args.signal?.aborted || timeoutController.signal.aborted
-						? abortFailure({ externalSignal: args.signal, timeoutSignal: timeoutController.signal })
+						? abortFailure({
+								externalSignal: args.signal,
+								timeoutSignal: timeoutController.signal,
+								maxWallClockMs: args.maxWallClockMs,
+							})
 						: executorFailure(winner.error),
 			};
 		}
@@ -159,7 +184,11 @@ export async function runBoundedCompletion(args: {
 		if (args.signal?.aborted || timeoutController.signal.aborted) {
 			return {
 				completion,
-				failure: abortFailure({ externalSignal: args.signal, timeoutSignal: timeoutController.signal }),
+				failure: abortFailure({
+					externalSignal: args.signal,
+					timeoutSignal: timeoutController.signal,
+					maxWallClockMs: args.maxWallClockMs,
+				}),
 			};
 		}
 		return { completion };

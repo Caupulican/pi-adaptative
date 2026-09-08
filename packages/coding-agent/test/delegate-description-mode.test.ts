@@ -259,7 +259,11 @@ describe("delegate tool description varies by wiring mode", () => {
 			}),
 			describeWorkerGrant: (laneId) =>
 				laneId === "worker-1"
-					? { toolNames: ["read", "skill"], capabilities: ["filesystem.read", "skill.read"] }
+					? {
+							toolNames: ["read", "skill"],
+							capabilities: ["filesystem.read", "skill.read"],
+							budget: { maxWallClockMs: 120_000 },
+						}
 					: undefined,
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 		});
@@ -277,7 +281,7 @@ describe("delegate tool description varies by wiring mode", () => {
 			.map((content) => content.text)
 			.join("\n");
 		expect(text).toContain(
-			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; effective model xai/grok-4.6, thinking medium; tools: read, skill; capabilities: filesystem.read, skill.read; waiting: write_reservation: /repo held by session other (since 2026-09-08T08:14:26.000Z); the owning parent will receive its terminal handoff",
+			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; effective model xai/grok-4.6, thinking medium; tools: read, skill; capabilities: filesystem.read, skill.read; budget: wall clock 2 min, usd unbounded; waiting: write_reservation: /repo held by session other (since 2026-09-08T08:14:26.000Z); the owning parent will receive its terminal handoff",
 		);
 	});
 

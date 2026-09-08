@@ -357,6 +357,10 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				}`
 			: `Worker did not complete: ${bounded.failure.reasonCode}${
 					bounded.failure.detail ? ` — ${bounded.failure.detail}` : ""
+				}${
+					bounded.failure.reasonCode === "wall_clock_exceeded"
+						? " (the cap is workerDelegation.maxWallClockMs; raise it or narrow the task)"
+						: ""
 				}`;
 		return finishOutcome({
 			request: options.request,

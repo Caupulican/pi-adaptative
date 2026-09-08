@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { type Static, Type } from "typebox";
+import { formatWallClockCap } from "../autonomy/bounded-completion.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { SessionRootReply } from "../delegation/session-root-mailbox.ts";
 import {
@@ -666,6 +667,7 @@ function describeStartedWorker(record: LaneRecord, grant: WorkerGrantSummary | u
 		parts.push(
 			`tools: ${grant.toolNames.length > 0 ? grant.toolNames.join(", ") : "none"}`,
 			`capabilities: ${grant.capabilities.length > 0 ? grant.capabilities.join(", ") : "none"}`,
+			`budget: wall clock ${grant.budget?.maxWallClockMs ? formatWallClockCap(grant.budget.maxWallClockMs) : "unbounded"}, usd ${grant.budget?.maxCostUsd ? grant.budget.maxCostUsd.toFixed(2) : "unbounded"}`,
 		);
 	}
 	if (record.status === "queued" && record.waitReason) parts.push(`waiting: ${record.waitReason}`);
