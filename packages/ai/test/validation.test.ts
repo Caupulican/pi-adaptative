@@ -243,13 +243,15 @@ describe("validateToolArguments", () => {
 
 		expect(thrown).toBeInstanceOf(ToolArgumentValidationError);
 		const message = (thrown as ToolArgumentValidationError).message;
-		expect(message).toContain('scope: must equal "project"; Allowed values: "project"');
+		// One line for the failed discriminator decision, listing every branch literal.
+		expect(message).toContain('scope: must be one of "project", "user"; Allowed values: "project", "user"');
+		expect(message).not.toContain("must equal");
 		expect(message).not.toContain("scope: expected string, received string");
 		expect(events).toMatchObject([
 			{
-				failureShape: expect.arrayContaining([
-					{ path: "scope", expectedType: 'literal "project"', receivedType: "string", keyword: "const" },
-				]),
+				failureShape: [
+					{ path: "scope", expectedType: 'one of "project", "user"', receivedType: "string", keyword: "enum" },
+				],
 			},
 		]);
 		// Negative control: the first discriminated branch remains a usable valid example.
@@ -526,6 +528,12 @@ describe("discriminated unions", () => {
 
 		expect(message).toContain('action: required, one of "set", "list", "update"');
 		expect(message).not.toMatch(/action:[^\n]*object/);
+		// Branch-contingent requirements and the union shell's false "expected object" are not reported:
+		// the only decision that failed is the discriminator.
+		expect(message).not.toContain("steps:");
+		expect(message).not.toContain("id:");
+		expect(message).not.toContain("root:");
+		expect(message.split("\n").filter((line) => line.startsWith("  - "))).toHaveLength(1);
 
 		expect(events).toMatchObject([
 			{
@@ -540,6 +548,70 @@ describe("discriminated unions", () => {
 				]),
 			},
 		]);
+	});
+
+	function failureMessage(tool: Tool, args: unknown): string {
+		try {
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "union-diagnostics",
+				name: tool.name,
+				arguments: args as Record<string, unknown>,
+			});
+		} catch (error) {
+			return error instanceof Error ? error.message : String(error);
+		}
+		return "";
+	}
+
+	it("reports an unknown discriminator once with every branch literal, never one line per branch", () => {
+		const message = failureMessage(taskSteps, { action: "nope" });
+		expect(message).toContain('action: must be one of "set", "list", "update"');
+		expect(message).not.toContain("must equal");
+		expect(message).not.toContain("steps:");
+		expect(message).not.toContain("root:");
+		expect(message.split("\n").filter((line) => line.startsWith("  - "))).toHaveLength(1);
+	});
+
+	it("reports a non-object union argument as one root line instead of one per branch", () => {
+		const message = failureMessage(taskSteps, "str");
+		expect(message.match(/root: expected object/g)).toHaveLength(1);
+	});
+
+	it("consolidates a nested union at its own instance path", () => {
+		const route: Tool = {
+			name: "route",
+			description: "route",
+			parameters: Type.Object({
+				target: Type.Union([
+					Type.Object({ kind: Type.Literal("a"), x: Type.String() }),
+					Type.Object({ kind: Type.Literal("b"), y: Type.Number() }),
+				]),
+			}),
+		};
+		const missing = failureMessage(route, { target: {} });
+		expect(missing).toContain('target.kind: required, one of "a", "b"');
+		expect(missing.split("\n").filter((line) => line.startsWith("  - "))).toHaveLength(1);
+		const unknown = failureMessage(route, { target: { kind: "z" } });
+		expect(unknown).toContain('target.kind: must be one of "a", "b"');
+		expect(unknown.split("\n").filter((line) => line.startsWith("  - "))).toHaveLength(1);
+		const scalar = failureMessage(route, { target: 3 });
+		expect(scalar.match(/target: expected object/g)).toHaveLength(1);
+	});
+
+	it("keeps each branch's requirements and drops the union shell for a union without a discriminator", () => {
+		const write: Tool = {
+			name: "write",
+			description: "write",
+			parameters: Type.Union([
+				Type.Object({ path: Type.String(), content: Type.String() }),
+				Type.Object({ path: Type.String(), contentRef: Type.String() }),
+			]),
+		};
+		const message = failureMessage(write, { path: "a" });
+		expect(message).toContain("content: required, expected string");
+		expect(message).toContain("contentRef: required, expected string");
+		expect(message).not.toContain("root:");
 	});
 
 	it("reports a missing non-discriminator property with its own expected type, not the branch object", () => {

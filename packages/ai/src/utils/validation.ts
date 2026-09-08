@@ -155,6 +155,20 @@ function schemaAtPath(schema: unknown, pathSegments: readonly string[]): unknown
 			continue;
 		}
 
+		// A union of object schemas has no `properties` of its own: the path continues through
+		// every alternative that declares the segment, merged so literal aggregation sees them all.
+		const alternatives = schemaAlternatives(record);
+		if (alternatives.length > 0) {
+			const resolved = dedupeSchemas(
+				alternatives
+					.filter((alternative) => asRecord(asRecord(alternative)?.properties)?.[segment] !== undefined)
+					.map((alternative) => asRecord(asRecord(alternative)?.properties)?.[segment]),
+			);
+			if (resolved.length === 0) return current;
+			current = resolved.length === 1 ? resolved[0] : { anyOf: resolved };
+			continue;
+		}
+
 		return current;
 	}
 	return current;
@@ -183,7 +197,11 @@ function schemaAtPointer(schema: unknown, pointer: string): unknown {
 function schemaAtValidationError(schema: unknown, error: TLocalizedValidationError): unknown {
 	const pointer = error.schemaPath;
 	const target = pointer.startsWith("#/") ? schemaAtPointer(schema, pointer) : MISSING_POINTER_TARGET;
-	return target === MISSING_POINTER_TARGET ? schemaAtPath(schema, validationPathSegments(error)) : target;
+	// A pointer that resolves to the `anyOf` array itself (or any non-schema value) names no
+	// schema; the instance path walk does, including through union alternatives.
+	return target === MISSING_POINTER_TARGET || asRecord(target) === undefined
+		? schemaAtPath(schema, validationPathSegments(error))
+		: target;
 }
 
 function receivedValueAtPath(args: unknown, pathSegments: readonly string[]): unknown {
@@ -445,27 +463,116 @@ export function selectUnionBranch(schema: unknown, args: unknown): Record<string
 	const root = asRecord(schema);
 	const record = asRecord(args);
 	if (!root || !record) return undefined;
-	const alternatives = schemaAlternatives(root).map(asRecord);
+	const discriminators = unionDiscriminators(root);
+	if (!discriminators) return undefined;
+	for (const { key, alternatives } of discriminators) {
+		const matches = alternatives.filter((alternative) => alternative.value === record[key]);
+		if (matches.length === 1) return matches[0]?.schema;
+	}
+	return undefined;
+}
+
+interface UnionDiscriminator {
+	key: string;
+	/** Every alternative paired with the literal it declares for `key`, in schema order. */
+	alternatives: Array<{ value: unknown; schema: Record<string, unknown> }>;
+}
+
+/**
+ * The properties every alternative of an object union pins to a single literal - the keys a caller
+ * chooses a branch with. Undefined unless the schema is a union of at least two object schemas.
+ */
+function unionDiscriminators(schema: Record<string, unknown>): UnionDiscriminator[] | undefined {
+	const alternatives = schemaAlternatives(schema).map(asRecord);
 	if (alternatives.length < 2 || alternatives.some((alternative) => !alternative)) return undefined;
 	const literalKeys = alternatives.map((alternative) => {
 		const properties = asRecord(alternative?.properties);
-		if (!properties) return new Map<string, unknown>();
 		const keys = new Map<string, unknown>();
-		for (const [key, property] of Object.entries(properties)) {
+		for (const [key, property] of Object.entries(properties ?? {})) {
 			const values = literalValues(property);
 			if (values && values.length === 1) keys.set(key, values[0]);
 		}
 		return keys;
 	});
 	const shared = [...(literalKeys[0]?.keys() ?? [])].filter((key) => literalKeys.every((keys) => keys.has(key)));
-	for (const key of shared) {
-		const matches = alternatives.filter((alternative, index) => {
-			void alternative;
-			return literalKeys[index]?.get(key) === record[key];
-		});
-		if (matches.length === 1) return matches[0] ?? undefined;
+	return shared.map((key) => ({
+		key,
+		alternatives: alternatives.map((alternative, index) => ({
+			value: literalKeys[index]?.get(key),
+			schema: alternative as Record<string, unknown>,
+		})),
+	}));
+}
+
+/**
+ * Reports a failed union through the decision that failed instead of the sum of every branch's
+ * complaints. TypeBox emits one error per alternative plus the union's own "must match a schema
+ * in anyOf"; read literally that told a model calling `task_steps {}` that `steps` AND `id` were
+ * required, that `action` had to equal each literal in turn, and that `{}` was "not an object".
+ * For each union error whose branches also reported:
+ * - a non-object value keeps only the union line (its expected type is the union's), dropping the
+ *   per-branch "must be object" repeats;
+ * - an object missing the discriminator keeps only that property's `required` error (narrowed to
+ *   the discriminator, aggregated across branches into "required, one of …");
+ * - an object whose discriminator matches no branch keeps one `enum` error at the discriminator
+ *   listing every branch literal;
+ * - a union without a discriminator keeps the branch errors and drops the union shell, which
+ *   carried no information of its own.
+ * Nested unions are handled the same way at their own instance path.
+ */
+function consolidateUnionErrors(
+	errors: readonly TLocalizedValidationError[],
+	schema: unknown,
+	args: unknown,
+): TLocalizedValidationError[] {
+	const unions = errors.filter((error) => error.keyword === "anyOf" || error.keyword === "oneOf");
+	if (unions.length === 0) return [...errors];
+	const rewrite = new Map<TLocalizedValidationError, TLocalizedValidationError[]>();
+	for (const union of unions) {
+		const branchPrefix = `${union.schemaPath}/${union.keyword}/`;
+		const children = errors.filter((error) => error.schemaPath.startsWith(branchPrefix));
+		if (children.length === 0) continue;
+		const unionSchema = asRecord(union.schemaPath === "#" ? schema : schemaAtPointer(schema, union.schemaPath));
+		const pathSegments = instancePathBase(union) ? instancePathBase(union).split(".") : [];
+		const received = asRecord(receivedValueAtPath(args, pathSegments));
+		if (!received) {
+			for (const child of children) {
+				if (child.instancePath === union.instancePath && child.keyword === "type") rewrite.set(child, []);
+			}
+			continue;
+		}
+		rewrite.set(union, []);
+		const discriminator = unionSchema ? unionDiscriminators(unionSchema)?.[0] : undefined;
+		if (!discriminator) continue;
+		if (!(discriminator.key in received)) {
+			for (const child of children) {
+				const narrowed =
+					child.keyword === "required" && requiredMissingProperties(child).includes(discriminator.key)
+						? [{ ...child, params: { requiredProperties: [discriminator.key] } } as TLocalizedValidationError]
+						: [];
+				rewrite.set(child, narrowed);
+			}
+			continue;
+		}
+		const keyPath = `${union.instancePath}/${discriminator.key}`;
+		const literalErrors = children.filter(
+			(child) => child.instancePath === keyPath && (child.keyword === "const" || child.keyword === "enum"),
+		);
+		const first = literalErrors[0];
+		if (!first) continue;
+		const allowedValues = dedupeSchemas(discriminator.alternatives.map((alternative) => alternative.value));
+		for (const child of children) rewrite.set(child, []);
+		rewrite.set(first, [
+			{
+				...first,
+				keyword: "enum",
+				schemaPath: `${union.schemaPath}/${union.keyword}`,
+				params: { allowedValues },
+				message: `must be one of ${formatAllowedValueList(allowedValues)}`,
+			} as TLocalizedValidationError,
+		]);
 	}
-	return undefined;
+	return errors.flatMap((error) => rewrite.get(error) ?? [error]);
 }
 
 function schemaAlternatives(schema: Record<string, unknown>): unknown[] {
@@ -722,25 +829,28 @@ export function validateToolArguments(
 		return repaired.args;
 	}
 
+	// Repairs walk the raw validator errors (a branch's `type` error is what a repair keys on);
+	// everything the model or telemetry reads speaks about the union decision that failed.
+	const reportedErrors = consolidateUnionErrors(validationErrors, schema, toolCall.arguments);
 	emitToolArgumentValidationTelemetry(options, {
 		outcome: "bounced",
 		tool: toolCall.name,
 		source: toolCall.source,
 		failureModes,
 		repairsApplied: [],
-		failureShape: formatFailureShape(validationErrors, toolCall.arguments, schema),
-		errorKeywords: errorKeywords(validationErrors),
+		failureShape: formatFailureShape(reportedErrors, toolCall.arguments, schema),
+		errorKeywords: errorKeywords(reportedErrors),
 	});
 
 	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${formatValidationErrors(
-		validationErrors,
+		reportedErrors,
 		toolCall.arguments,
 		schema,
 	)}\n\nReceived arguments:\n${truncateText(JSON.stringify(toolCall.arguments, null, 2), 2000)}`;
 
 	throw new ToolArgumentValidationError(errorMessage, {
 		toolName: toolCall.name,
-		signature: validationFailureSignature(validationErrors),
+		signature: validationFailureSignature(reportedErrors),
 		enrichment: formatToolValidationEnrichment(tool),
 	});
 }
