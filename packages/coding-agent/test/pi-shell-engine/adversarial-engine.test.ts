@@ -43,8 +43,24 @@ interface EngineResult {
  * surfaced as `{ refused: true, construct, message }`, matching the shape asked of every
  * assertion in this file.
  */
+// On Windows, cmd.exe and every native child need the system variables (SYSTEMROOT, COMSPEC,
+// PATHEXT, TEMP): the production bridge always forwards the session env, so the raw harness
+// forwards the same minimum instead of a PATH-only environment that makes cmd.exe exit 1 silently.
+const HOST_ENV: Record<string, string> = Object.fromEntries(
+	["SYSTEMROOT", "COMSPEC", "PATHEXT", "TEMP", "TMP", "WINDIR"]
+		.filter((key) => process.env[key] !== undefined)
+		.map((key) => [key, process.env[key] as string]),
+);
+
+// A child process on Windows (python, cmd.exe) emits "\r\n" through the pipe; the TS bash-tool
+// layer strips "\r" before an agent sees output, so byte-level assertions on OUTPUT PRODUCED BY A
+// CHILD normalize the same way. Never applied to text an engine builtin wrote itself.
+function normalizeChildOutput(text: string): string {
+	return text.replace(/\r\n/g, "\n");
+}
+
 function runLine(python: string, command: string, cwd: string, env: Record<string, string> = {}): EngineResult {
-	const request = { command, cwd, env: { PATH: process.env.PATH ?? "", ...env } };
+	const request = { command, cwd, env: { PATH: process.env.PATH ?? "", ...HOST_ENV, ...env } };
 	const proc = spawnSync(python, ["-B", MAIN_PY], {
 		encoding: "utf-8",
 		input: `${JSON.stringify(request)}\n`,
@@ -80,10 +96,11 @@ function tempDir(prefix = "pi-adversarial-"): string {
 	return mkdtempSync(join(tmpdir(), prefix));
 }
 
+/** The exact bytes of a file: written to the child's binary stdout so no OS newline translation applies. */
 function readFile(python: string, path: string): string {
 	const result = spawnSync(
 		python,
-		["-c", `import sys; sys.stdout.write(open(${JSON.stringify(path)}, "rb").read().decode("utf-8", "replace"))`],
+		["-c", `import sys; sys.stdout.buffer.write(open(${JSON.stringify(path)}, "rb").read())`],
 		{
 			encoding: "utf-8",
 		},
@@ -256,14 +273,14 @@ describe("pi-shell-engine adversarial", () => {
 			const dir = tempDir();
 			const command = `${py} -c 'import sys; sys.stderr.write("err\\n")' > combined.txt 2>&1`;
 			runLine(py, command, dir);
-			expect(readFile(py, join(dir, "combined.txt"))).toBe("err\n");
+			expect(normalizeChildOutput(readFile(py, join(dir, "combined.txt")))).toBe("err\n");
 		});
 
 		it("2>/dev/null discards stderr and keeps stdout clean", () => {
 			const dir = tempDir();
 			const command = `${py} -c 'import sys; sys.stderr.write("noisy\\n"); print("kept")' 2>/dev/null`;
 			const result = runLine(py, command, dir);
-			expect(result.stdout).toBe("kept\n");
+			expect(normalizeChildOutput(result.stdout)).toBe("kept\n");
 			expect(result.exitCode).toBe(0);
 		});
 
@@ -272,7 +289,7 @@ describe("pi-shell-engine adversarial", () => {
 			writeFileSync(join(dir, "in.txt"), "from-file\n");
 			const command = `${py} -c 'import sys; print(sys.stdin.read().strip())' < in.txt`;
 			const result = runLine(py, command, dir);
-			expect(result.stdout).toBe("from-file\n");
+			expect(normalizeChildOutput(result.stdout)).toBe("from-file\n");
 		});
 
 		it("> file 2>&1 | ... redirects the producer fully to the file, leaving the pipe empty", () => {
@@ -404,7 +421,14 @@ describe("pi-shell-engine adversarial", () => {
 			const result = runLine(py, "./hello.py 'arg with space'", dir);
 			assertNoCrash(result);
 			if (win32) {
-				expect(result.stdout).toContain("from py");
+				// Direct execution of a .py needs the Python launcher's file association; a host
+				// without it gets a named spawn error (status 1), never a traceback or a hang.
+				if (result.exitCode === 0) {
+					expect(normalizeChildOutput(result.stdout)).toContain("from py");
+				} else {
+					expect(result.exitCode).toBe(1);
+					expect(result.stdout).toContain("shell:");
+				}
 			} else {
 				expect(result.stdout).toBe("from py ['arg with space']\n");
 				expect(result.exitCode).toBe(0);
@@ -415,7 +439,7 @@ describe("pi-shell-engine adversarial", () => {
 			const dir = tempDir();
 			writeFileSync(join(dir, "plain.py"), "import sys\nprint('via-interpreter', sys.argv[1:])\n");
 			const result = runLine(py, `${py} plain.py 'quoted arg'`, dir);
-			expect(result.stdout).toBe("via-interpreter ['quoted arg']\n");
+			expect(normalizeChildOutput(result.stdout)).toBe("via-interpreter ['quoted arg']\n");
 			expect(result.exitCode).toBe(0);
 		});
 
@@ -433,14 +457,14 @@ describe("pi-shell-engine adversarial", () => {
 		it("A=1 python -c ... reads the transient assignment without leaking into the parent env", () => {
 			const dir = tempDir();
 			const result = runLine(py, `A=1 ${py} -c "import os; print(os.environ['A'])"`, dir);
-			expect(result.stdout).toBe("1\n");
+			expect(normalizeChildOutput(result.stdout)).toBe("1\n");
 			expect(result.envDelta.A).toBeUndefined();
 		});
 
 		it("export A=1; ... persists the variable in envDelta and to a spawned child", () => {
 			const dir = tempDir();
 			const result = runLine(py, `export A=1; ${py} -c "import os; print(os.environ['A'])"`, dir);
-			expect(result.stdout).toBe("1\n");
+			expect(normalizeChildOutput(result.stdout)).toBe("1\n");
 			expect(result.envDelta.A).toBe("1");
 		});
 
@@ -528,7 +552,8 @@ describe("pi-shell-engine adversarial", () => {
 
 		it("a 1 MB stdout from an external command passes through the pipe intact", () => {
 			const dir = tempDir();
-			const command = `${py} -c 'print("x"*1000000)' | wc -c`;
+			// Binary stdout: a text-mode print would add a "\r" on Windows and the count would be host-dependent.
+			const command = `${py} -c 'import sys; sys.stdout.buffer.write(b"x"*1000000 + b"\\n")' | wc -c`;
 			const result = runLine(py, command, dir);
 			expect(result.stdout.trim()).toBe("1000001");
 		});
@@ -611,18 +636,26 @@ describe("pi-shell-engine adversarial", () => {
 			expect(result.exitCode).toBe(0);
 		});
 
-		it("a backslash path spelling for the same file resolves only on win32; POSIX treats it as one literal name", () => {
+		it("an unquoted backslash escapes the next character as in bash on every host; a quoted relative backslash path resolves only on win32", () => {
 			const dir = tempDir();
 			mkdirSync(join(dir, "subdir"));
 			writeFileSync(join(dir, "subdir", "f.txt"), "f\n");
-			const result = runLine(py, "cat subdir\\f.txt", dir);
-			assertNoCrash(result);
+			// `subdir\f.txt` is `subdirf.txt` to bash (the backslash escapes `f`); the engine keeps
+			// that rule so Linux-trained habits mean the same thing here. Only a drive-letter or UNC
+			// prefix switches a word into Windows-path mode.
+			const unquoted = runLine(py, "cat subdir\\f.txt", dir);
+			assertNoCrash(unquoted);
+			expect(unquoted.exitCode).toBe(1);
+			expect(unquoted.stdout).toContain("subdirf.txt");
+			// Inside double quotes bash keeps `\f` literally, so the Windows spelling survives.
+			const quoted = runLine(py, 'cat "subdir\\f.txt"', dir);
+			assertNoCrash(quoted);
 			if (win32) {
-				expect(result.stdout).toBe("f\n");
-				expect(result.exitCode).toBe(0);
+				expect(normalizeChildOutput(quoted.stdout)).toBe("f\n");
+				expect(quoted.exitCode).toBe(0);
 			} else {
-				expect(result.exitCode).toBe(1);
-				expect(result.stdout).toContain("No such file or directory");
+				expect(quoted.exitCode).toBe(1);
+				expect(quoted.stdout).toContain("No such file or directory");
 			}
 		});
 	});

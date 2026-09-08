@@ -53,7 +53,11 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 		try {
 			const cases = ["it's a test", 'say "hi" now', "$HOME", "%PATH%", "a & b", "a | b", "a < b", "a > b", "日本語"];
 			for (const value of cases) {
-				const result = await tool.execute(randomUUID(), { command: `echo '${value.replaceAll("'", "''")}'` });
+				// Bash quoting: an apostrophe cannot sit inside single quotes ('it''s' is two adjacent
+				// strings, "its"), so that value travels double-quoted; the rest stay single-quoted so
+				// `$HOME` reaches PowerShell literally.
+				const quoted = value.includes("'") ? `"${value}"` : `'${value}'`;
+				const result = await tool.execute(randomUUID(), { command: `echo ${quoted}` });
 				expect(textOf(result).trim()).toBe(value);
 			}
 		} finally {
@@ -102,7 +106,9 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 		const sessionKey = `floor-utf8-${randomUUID()}`;
 		const tool = createFloorTool(root, sessionKey);
 		try {
-			const result = await tool.execute("utf8", { command: `${python} -c "print('日本語')"` });
+			// The floor never overrides a native program's code page (documented: [Console]::OutputEncoding
+			// is left alone), so the child chooses UTF-8 itself; the assertion is on the floor's decoder.
+			const result = await tool.execute("utf8", { command: `${python} -X utf8 -c "print('日本語')"` });
 			expect(textOf(result).trim()).toBe("日本語");
 		} finally {
 			await disposeShellExecutionSessionAndWait(sessionKey);
@@ -137,7 +143,10 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 			const result = await tool.execute("cmd-script", {
 				command: `'${scriptPath.replace(/\\/g, "/")}' 'has a space and "quotes"'`,
 			});
-			expect(textOf(result).trim()).toBe('has a space and "quotes"');
+			// cmd.exe's %* keeps the quotes the argument arrived with (only %~1 strips them): the
+			// argument reached the script intact, wrapped the way Windows quotes a space-bearing
+			// value with embedded quotes.
+			expect(textOf(result).trim()).toBe('"has a space and "quotes""');
 		} finally {
 			await disposeShellExecutionSessionAndWait(sessionKey);
 			rmSync(scratch, { recursive: true, force: true });
@@ -195,15 +204,17 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 		}
 	});
 
-	it("fails clearly instead of hanging on the cmd builtin dir, which has no standalone executable", async () => {
+	it("lists the directory for dir through PowerShell's alias instead of hanging on the cmd builtin", async () => {
 		const scratch = mkdtempSync(join(tmpdir(), "pi-floor-dirbuiltin-"));
 		const root = realpathSync(scratch);
+		writeFileSync(join(root, "marker-file.txt"), "x");
 		const sessionKey = `floor-dirbuiltin-${randomUUID()}`;
 		const tool = createFloorTool(root, sessionKey);
 		try {
-			// `dir` is a cmd.exe builtin, not a file on PATH; PowerShell's `&` invocation of it must
-			// report a command-not-found style failure, not hang the persistent session.
-			await expect(tool.execute("dir-builtin", { command: "dir" })).rejects.toThrow();
+			// `dir` has no executable on PATH (it is a cmd.exe builtin), but PowerShell resolves
+			// `& 'dir'` to its Get-ChildItem alias: the floor returns a listing and never hangs.
+			const result = await tool.execute("dir-builtin", { command: "dir" });
+			expect(textOf(result)).toContain("marker-file.txt");
 		} finally {
 			await disposeShellExecutionSessionAndWait(sessionKey);
 			rmSync(scratch, { recursive: true, force: true });

@@ -127,7 +127,8 @@ def build_argv(
     if lower.endswith(".bat") or lower.endswith(".cmd"):
         return ["cmd", "/c", resolved_path, *argv[1:]]
     if lower.endswith(".ps1") and (powershell_path or os.name == "nt"):
-        host = powershell_path or "powershell.exe"
+        # PowerShell 7 is the only supported host; Windows PowerShell 5.1 is never a fallback.
+        host = powershell_path or ("pwsh.exe" if os.name == "nt" else "pwsh")
         return [host, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", resolved_path, *argv[1:]]
     return [resolved_path, *argv[1:]]
 
