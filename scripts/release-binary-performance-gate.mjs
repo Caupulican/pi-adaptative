@@ -6,7 +6,11 @@ import { fileURLToPath } from "node:url";
 import { requireFlagValue } from "./flag-value-args.mjs";
 
 const DEFAULT_BUDGETS = Object.freeze({
-	coldShellMedianMs: 250,
+	// Owner decision 2026-09-08: 500 ms is the accepted ceiling for the first shell command on a
+	// release binary. The session now warms the Windows shell engine during startup (measured on a
+	// Windows host through this same RPC protocol: 38 ms median), so this is headroom for runner
+	// variance, not cover for a known regression.
+	coldShellMedianMs: 500,
 	coldShellP95Ms: 500,
 	firstShellReadyMedianMs: 1_750,
 	firstShellReadyP95Ms: 3_000,

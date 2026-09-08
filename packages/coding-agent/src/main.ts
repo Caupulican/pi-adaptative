@@ -1064,6 +1064,9 @@ export async function main(args: string[], options?: MainOptions) {
 		await runtime.dispose();
 		throw new Error("Core restart resolved a different session; automatic continuation refused.");
 	}
+	// This session will run commands: warm its shell alongside the rest of startup so the first one
+	// does not pay the Windows engine's coordinator start (every Windows bash call runs on it).
+	void session.prewarmShell();
 	const { settingsManager, modelRegistry, resourceLoader } = services;
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 	if (parsed.resume || parsed.continue || parsed.session !== undefined) {

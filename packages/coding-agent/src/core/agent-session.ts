@@ -3434,6 +3434,15 @@ export class AgentSession {
 	// Bash Execution
 	// =========================================================================
 
+	/**
+	 * Warm this session's shell so the first command does not pay its startup. A long-lived mode
+	 * (interactive, RPC) calls this once the session is running; a short-lived or embedded caller
+	 * that may never run a command leaves it alone.
+	 */
+	prewarmShell(): Promise<void> {
+		return this._bash.prewarmShell();
+	}
+
 	async executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,

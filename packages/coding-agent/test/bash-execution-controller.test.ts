@@ -48,6 +48,15 @@ function makeController(): BashExecutionController {
 }
 
 describe("BashExecutionController", () => {
+	it("warms the session's Windows shell on demand and stays silent off Windows or with the engine disabled", async () => {
+		const controller = makeController();
+		// A long-lived mode calls this once at startup; every platform must resolve silently so a
+		// session never depends on the shell being reachable to finish starting.
+		await expect(controller.prewarmShell("linux")).resolves.toBeUndefined();
+		await expect(controller.prewarmShell("darwin")).resolves.toBeUndefined();
+		await expect(controller.prewarmShell("win32")).resolves.toBeUndefined();
+	});
+
 	it("shares active project credentials with owner shell commands but withholds BW_SESSION", async () => {
 		process.env.BW_SESSION = "owner-control-plane-key";
 		const controller = new BashExecutionController({

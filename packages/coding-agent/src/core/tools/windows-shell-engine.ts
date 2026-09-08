@@ -233,6 +233,26 @@ class PersistentWindowsShellEngineSession {
 		return this.coordinator.runSerialized(() => this.execNow(command, cwd, options));
 	}
 
+	/**
+	 * Start the coordinator (and resolve the GNU tools directory) before any command needs it.
+	 * The engine is the executor for every Windows bash call, so without this the FIRST command of
+	 * a session pays the Python start; warming it here moves that cost into session startup.
+	 * Serialized with commands so a command issued meanwhile waits for this same child instead of
+	 * spawning a second one, and silent: a real failure is raised by the first command, which
+	 * retries the whole resolution and reports the actionable runtime error.
+	 */
+	prewarm(env?: NodeJS.ProcessEnv): Promise<void> {
+		return this.coordinator.runSerialized(async () => {
+			if (this.disposed || this.coordinator.child) return;
+			try {
+				if (this.gnuToolsDir === undefined) this.gnuToolsDir = this.resolveGnuToolsDir();
+				await this.ensureChild(mergeEffectiveEnv(this.getState(this.key), env ?? getShellEnv()));
+			} catch {
+				// The first real command retries and surfaces the complete failure.
+			}
+		});
+	}
+
 	get terminalPromise(): Promise<void> {
 		return this.coordinator.terminalPromise;
 	}
@@ -510,16 +530,22 @@ export function disposeWindowsShellEngineSession(key: string): Promise<void> {
 	return session.terminalPromise;
 }
 
+/** The engine tier: a bash backend plus the prewarm that starts its coordinator ahead of use. */
+export interface WindowsShellEngineOperations extends BashOperations {
+	prewarm(env?: NodeJS.ProcessEnv): Promise<void>;
+}
+
 /** Create the Python-engine tier for one bash-tool session. */
 export function createWindowsShellEngineOperations(
 	sessionKey: string,
 	options: WindowsShellEngineOptions = {},
-): BashOperations {
+): WindowsShellEngineOperations {
 	return {
 		// Resolve through the registry for every command. Session teardown (for example after
 		// credential/environment changes) deletes only this tenant's entry; an already-built tool
 		// then lazily acquires a fresh coordinator instead of retaining the disposed instance.
 		exec: (command, cwd, execOptions) =>
 			acquireWindowsShellEngineSession(sessionKey, options).exec(command, cwd, execOptions),
+		prewarm: (env) => acquireWindowsShellEngineSession(sessionKey, options).prewarm(env),
 	};
 }

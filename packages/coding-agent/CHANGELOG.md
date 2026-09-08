@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Windows sessions warm the shell engine's coordinator while the session starts, instead of paying its Python start on the first command. Engine-first routing had made the engine the executor for every Windows bash call while the prewarm still warmed the PowerShell floor, by then only a fallback; the release binaries measured 338 ms for that first command against 2.2 ms warm. Measured on a Windows host through the RPC protocol the release benchmark uses: 38 ms median. The release gate's cold-shell ceiling is 500 ms.
+
+
 ## [0.99.12] - 2026-09-08
 
 ### Added

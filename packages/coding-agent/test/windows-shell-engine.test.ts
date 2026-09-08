@@ -875,6 +875,51 @@ describe("windows shell engine operations", () => {
 		);
 	});
 
+	it("prewarms the coordinator so the first command does not pay the Python start, and reuses that child", async () => {
+		const requests: unknown[] = [];
+		let spawnCount = 0;
+		const spawn = fakeSpawn(({ stderr, request }) => {
+			requests.push(request);
+			stderr.emit("data", frameBytes({ exitCode: 0, cwd: "/old/dir", envDelta: {}, unsupported: null }));
+		});
+		// `fakeSpawn` ignores its arguments; the counter only records that a process was started.
+		const countingSpawn = () => {
+			spawnCount += 1;
+			return spawn();
+		};
+		const ops = createWindowsShellEngineOperations("engine-prewarm-session", {
+			resolveRuntime: async () => READY_RUNTIME,
+			engineScriptPath: "/fake/main.py",
+			spawn: countingSpawn,
+		});
+
+		await ops.prewarm();
+		expect(spawnCount, "the coordinator is running before any command").toBe(1);
+		expect(requests, "prewarm sends no request of its own").toEqual([]);
+
+		await collectOutput((onData) => ops.exec("echo hi", "/old/dir", { onData }));
+		expect(spawnCount, "the first command reuses the warmed coordinator").toBe(1);
+		expect(requests).toHaveLength(1);
+
+		// Warming again is a no-op, and warming a disposed session never starts a process.
+		await ops.prewarm();
+		expect(spawnCount).toBe(1);
+		void disposeWindowsShellEngineSession("engine-prewarm-session");
+	});
+
+	it("never throws from prewarm when the Python runtime is unavailable; the first command reports it", async () => {
+		const ops = createWindowsShellEngineOperations("engine-prewarm-degraded-session", {
+			resolveRuntime: async () => ({ status: "python-unavailable", reason: "Simulated: no Python." }),
+			engineScriptPath: "/fake/main.py",
+			spawn: fakeSpawn(() => {}),
+		});
+
+		await expect(ops.prewarm()).resolves.toBeUndefined();
+		await expect(collectOutput((onData) => ops.exec("echo hi", "/old/dir", { onData }))).rejects.toThrow(
+			/Windows shell engine \(Python\) is unavailable: Simulated: no Python\./u,
+		);
+	});
+
 	it("carries the GNU tools directory in every request frame, resolved once per session", async () => {
 		const requests: Array<{ gnuToolsDir?: string }> = [];
 		let resolutions = 0;

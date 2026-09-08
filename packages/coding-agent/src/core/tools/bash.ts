@@ -722,22 +722,30 @@ function createShellToolDefinition(
 	const engineOperations = routesWindowsContract
 		? createWindowsShellEngineOperations(sessionKey, options?.windowsShellEngineOptions)
 		: undefined;
+	// Warm the tier that will actually run commands. With the engine on it is the engine (every
+	// Windows bash call routes there, and its Python coordinator would otherwise start on the
+	// user's first command); with the engine off it is the PowerShell floor, as before.
 	if (
 		options?.prewarmWindowsShell === true &&
 		process.platform === "win32" &&
 		routesWindowsContract &&
-		backendShell === "powershell" &&
-		options.operations === undefined &&
-		options.shellPath === undefined
+		options.operations === undefined
 	) {
-		const session = acquirePersistentShellSession(sessionKey, backendShell);
-		setImmediate(() => {
-			const context = resolveSpawnContext("", cwd, spawnHook, options?.getShellSessionContext);
-			context.env = mergeEffectiveEnv(getOrCreateWindowsShellState(sessionKey), context.env);
-			void session.prewarm(context.cwd, context.env).catch(() => {
-				// The first real command retries and surfaces the complete candidate failure.
+		if (pythonEngineEnabled && engineOperations) {
+			setImmediate(() => {
+				const context = resolveSpawnContext("", cwd, spawnHook, options?.getShellSessionContext);
+				void engineOperations.prewarm(context.env);
 			});
-		});
+		} else if (backendShell === "powershell" && options.shellPath === undefined) {
+			const session = acquirePersistentShellSession(sessionKey, backendShell);
+			setImmediate(() => {
+				const context = resolveSpawnContext("", cwd, spawnHook, options?.getShellSessionContext);
+				context.env = mergeEffectiveEnv(getOrCreateWindowsShellState(sessionKey), context.env);
+				void session.prewarm(context.cwd, context.env).catch(() => {
+					// The first real command retries and surfaces the complete candidate failure.
+				});
+			});
+		}
 	}
 	const contractDescription = options?.forceCwd
 		? "Execute a command in a persistent shell with a host-pinned working directory. Each invocation starts in the pinned directory; cd inside a command remains available and exported variables persist across calls."

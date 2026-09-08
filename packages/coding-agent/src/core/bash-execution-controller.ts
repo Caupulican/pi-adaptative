@@ -21,6 +21,7 @@ import {
 	resolveCommandTimeoutSeconds,
 } from "./tools/bash.ts";
 import { prepareManagedShellEnvironment } from "./tools/managed-shell-preparation.ts";
+import { createWindowsShellEngineOperations } from "./tools/windows-shell-engine.ts";
 
 export interface BashExecutionControllerDeps {
 	getAgent(): Agent;
@@ -59,6 +60,26 @@ export class BashExecutionController {
 	constructor(deps: BashExecutionControllerDeps) {
 		this.deps = deps;
 		this.shellSessionKey = deps.getShellSessionKey?.() ?? `bash-controller:${randomUUID()}`;
+	}
+
+	/**
+	 * Start the session's Windows shell engine before anything asks it to run a command. Every
+	 * Windows bash call runs on the engine, so without this the first command of a session pays its
+	 * Python coordinator start. Silent and platform-gated: off Windows, with the engine disabled, or
+	 * before settings exist there is nothing to warm, and a real failure is raised by the first
+	 * command, which retries the whole resolution and reports the actionable runtime error.
+	 */
+	async prewarmShell(platform: NodeJS.Platform = process.platform): Promise<void> {
+		if (platform !== "win32") return;
+		try {
+			const windowsShell = this.deps.getSettingsManager().getWindowsShellSettings();
+			if (!windowsShell.pythonEngine) return;
+			await createWindowsShellEngineOperations(this.shellSessionKey, {
+				gnuToolsDir: windowsShell.gnuToolsDir,
+			}).prewarm();
+		} catch {
+			// The first command retries and surfaces the complete failure.
+		}
 	}
 
 	async executeBash(
