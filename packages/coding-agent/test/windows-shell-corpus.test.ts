@@ -213,80 +213,88 @@ describe("Windows shell corpus wall", () => {
 	});
 
 	const python = resolvePython();
-	it.skipIf(!python)("parses every shape and executes every harness-owned shape with the real GNU tools", () => {
-		if (!python) return;
-		const gnuToolsDir = resolveWallGnuToolsDir();
-		// The wall's execution leg needs real GNU tools: Git for Windows on Windows, coreutils on Linux.
-		expect(gnuToolsDir, "GNU tools directory (Git for Windows usr/bin or /usr/bin)").not.toBeNull();
-		const scratch = mkdtempSync(join(tmpdir(), "pi-corpus-wall-"));
-		// Four levels deep so a shape's `cd ..` chains stay inside the sandbox.
-		const work = join(scratch, "a", "b", "c", "work");
-		mkdirSync(work, { recursive: true });
-		const forward = work.replaceAll("\\", "/");
-		const sandbox = {
-			work,
-			windows: forward,
-			windowsBackslash: work.replaceAll("/", "\\"),
-			gitBash: process.platform === "win32" ? `/${forward[0].toLowerCase()}${forward.slice(2)}` : forward,
-			wsl: process.platform === "win32" ? `/mnt/${forward[0].toLowerCase()}${forward.slice(2)}` : forward,
-			programFiles: join(forward, "Program Files"),
-		};
-		const payloadPath = join(scratch, "payload.json");
-		const resultsPath = join(scratch, "results.json");
-		writeFileSync(
-			payloadPath,
-			JSON.stringify({ shapes: fixture.shapes, roots: fixture.roots, sandbox, gnuToolsDir }),
-		);
-		try {
-			const run = spawnSync(python, ["-B", "-c", REPLAY, payloadPath, resultsPath], {
-				encoding: "utf-8",
-				maxBuffer: 256 * 1024 * 1024,
-				timeout: 15 * 60_000,
-			});
-			expect(run.status, `replay crashed: ${run.stderr}`).toBe(0);
-			const results = JSON.parse(readFileSync(resultsPath, "utf-8")) as ReplayEntry[];
-			const byId = new Map(fixture.shapes.map((shape) => [shape.id, shape]));
-			const defects: string[] = [];
-			let owned = 0;
-			let refusedByDesign = 0;
-			for (const entry of results) {
-				const shape = byId.get(entry.id);
-				if (!shape) throw new Error(`replay reported an unknown shape ${entry.id}`);
-				if (entry.crash) {
-					defects.push(`${entry.id} crashed:\n${entry.crash}\n  ${shape.command}`);
-					continue;
-				}
-				if (shape.expect !== "ok") {
-					refusedByDesign += 1;
-					if (entry.refusal?.construct !== shape.expect.construct) {
-						const got = entry.refusal
-							? `[${entry.refusal.construct}] ${entry.refusal.message}`
-							: "an accepted parse";
-						defects.push(
-							`${entry.id} expected the named refusal [${shape.expect.construct}] but got ${got}\n  ${shape.command}`,
-						);
+	// One Python process replays every shape (about 25 s alone, longer beside a parallel suite run);
+	// the vitest timeout matches the replay's own 15-minute spawn bound instead of the 30 s default.
+	it.skipIf(!python)(
+		"parses every shape and executes every harness-owned shape with the real GNU tools",
+		() => {
+			if (!python) return;
+			const gnuToolsDir = resolveWallGnuToolsDir();
+			// The wall's execution leg needs real GNU tools: Git for Windows on Windows, coreutils on Linux.
+			expect(gnuToolsDir, "GNU tools directory (Git for Windows usr/bin or /usr/bin)").not.toBeNull();
+			const scratch = mkdtempSync(join(tmpdir(), "pi-corpus-wall-"));
+			// Four levels deep so a shape's `cd ..` chains stay inside the sandbox.
+			const work = join(scratch, "a", "b", "c", "work");
+			mkdirSync(work, { recursive: true });
+			const forward = work.replaceAll("\\", "/");
+			const sandbox = {
+				work,
+				windows: forward,
+				windowsBackslash: work.replaceAll("/", "\\"),
+				gitBash: process.platform === "win32" ? `/${forward[0].toLowerCase()}${forward.slice(2)}` : forward,
+				wsl: process.platform === "win32" ? `/mnt/${forward[0].toLowerCase()}${forward.slice(2)}` : forward,
+				programFiles: join(forward, "Program Files"),
+			};
+			const payloadPath = join(scratch, "payload.json");
+			const resultsPath = join(scratch, "results.json");
+			writeFileSync(
+				payloadPath,
+				JSON.stringify({ shapes: fixture.shapes, roots: fixture.roots, sandbox, gnuToolsDir }),
+			);
+			try {
+				const run = spawnSync(python, ["-B", "-c", REPLAY, payloadPath, resultsPath], {
+					encoding: "utf-8",
+					maxBuffer: 256 * 1024 * 1024,
+					timeout: 15 * 60_000,
+				});
+				expect(run.status, `replay crashed: ${run.stderr}`).toBe(0);
+				const results = JSON.parse(readFileSync(resultsPath, "utf-8")) as ReplayEntry[];
+				const byId = new Map(fixture.shapes.map((shape) => [shape.id, shape]));
+				const defects: string[] = [];
+				let owned = 0;
+				let refusedByDesign = 0;
+				for (const entry of results) {
+					const shape = byId.get(entry.id);
+					if (!shape) throw new Error(`replay reported an unknown shape ${entry.id}`);
+					if (entry.crash) {
+						defects.push(`${entry.id} crashed:\n${entry.crash}\n  ${shape.command}`);
+						continue;
 					}
-					continue;
+					if (shape.expect !== "ok") {
+						refusedByDesign += 1;
+						if (entry.refusal?.construct !== shape.expect.construct) {
+							const got = entry.refusal
+								? `[${entry.refusal.construct}] ${entry.refusal.message}`
+								: "an accepted parse";
+							defects.push(
+								`${entry.id} expected the named refusal [${shape.expect.construct}] but got ${got}\n  ${shape.command}`,
+							);
+						}
+						continue;
+					}
+					if (entry.refusal) {
+						defects.push(
+							`${entry.id} refused [${entry.refusal.construct}] ${entry.refusal.message}\n  ${shape.command}`,
+						);
+						continue;
+					}
+					if (!entry.owned) continue;
+					owned += 1;
+					const output = entry.output ?? "";
+					const notFound = /^([^\s:]+): command not found$/mu.exec(output);
+					if (notFound)
+						defects.push(`${entry.id} lost a harness-owned command: ${notFound[0]}\n  ${shape.command}`);
+					if (/Traceback \(most recent call last\)/u.test(output))
+						defects.push(`${entry.id} traceback:\n${output}`);
 				}
-				if (entry.refusal) {
-					defects.push(
-						`${entry.id} refused [${entry.refusal.construct}] ${entry.refusal.message}\n  ${shape.command}`,
-					);
-					continue;
-				}
-				if (!entry.owned) continue;
-				owned += 1;
-				const output = entry.output ?? "";
-				const notFound = /^([^\s:]+): command not found$/mu.exec(output);
-				if (notFound) defects.push(`${entry.id} lost a harness-owned command: ${notFound[0]}\n  ${shape.command}`);
-				if (/Traceback \(most recent call last\)/u.test(output)) defects.push(`${entry.id} traceback:\n${output}`);
+				expect(owned).toBeGreaterThan(300);
+				// The refusal budget for supported families is zero; only dialect mistakes are refused.
+				expect(refusedByDesign).toBeLessThanOrEqual(20);
+				expect(defects, `${defects.length} defect(s) in the corpus wall`).toEqual([]);
+			} finally {
+				rmSync(scratch, { recursive: true, force: true });
 			}
-			expect(owned).toBeGreaterThan(300);
-			// The refusal budget for supported families is zero; only dialect mistakes are refused.
-			expect(refusedByDesign).toBeLessThanOrEqual(20);
-			expect(defects, `${defects.length} defect(s) in the corpus wall`).toEqual([]);
-		} finally {
-			rmSync(scratch, { recursive: true, force: true });
-		}
-	});
+		},
+		16 * 60_000,
+	);
 });
