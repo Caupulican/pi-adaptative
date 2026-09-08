@@ -124,6 +124,7 @@ import {
 	workerTreeCanAdmitAttempt,
 } from "./worker-tree-budget-coordinator.ts";
 import {
+	formatWorkerWriteReservationBlock,
 	WorkerWriteReservationCoordinator,
 	type WorkerWriteReservationWaitYield,
 } from "./worker-write-reservation-coordinator.ts";
@@ -461,12 +462,12 @@ export class WorkerDelegationController {
 
 	getRecords(): LaneRecord[] {
 		if (this.deps.isDelegateToolActive?.()) this.recovery.recover();
-		return this.lifecycle.getRecords();
+		return this.withWaitReasons(this.lifecycle.getRecords());
 	}
 
 	/** Process-local worker records for the shared terminal notifier; never triggers durable recovery. */
 	getLoadedRecords(): LaneRecord[] {
-		return this.lifecycle.getRecords();
+		return this.withWaitReasons(this.lifecycle.getRecords());
 	}
 
 	markNotificationsDelivered(notificationIds: readonly string[]): void {
@@ -1369,6 +1370,7 @@ export class WorkerDelegationController {
 				return {
 					action: "wait",
 					reason: readiness.reasonCode === "objective_paused" ? "objective" : "dependencies",
+					detail: readiness.reasonCode,
 				};
 			}
 			if (readiness.state === "blocked") return { action: "cancel", reasonCode: readiness.reasonCode };
@@ -1376,10 +1378,34 @@ export class WorkerDelegationController {
 		const contract = attempt.dispatch.executionContract;
 		const admission = this.resolveWorkerAdmission(request, contract);
 		if (!admission.ok) return { action: "cancel", reasonCode: admission.skipReason };
-		if (!this.hasWorkerCapacity(admission.settings)) return { action: "wait", reason: "capacity" };
+		if (!this.hasWorkerCapacity(admission.settings)) {
+			return {
+				action: "wait",
+				reason: "capacity",
+				detail: `${this.getWorkerLifecycle().getRunningCount()} running of ${admission.settings.maxConcurrent} allowed`,
+			};
+		}
 		const reservation = this.writeReservations.acquire(record.laneId, attempt, admission.executionPlan);
 		if (reservation.kind === "denied") return { action: "cancel", reasonCode: reservation.reasonCode };
-		return reservation.kind === "granted" ? { action: "start" } : { action: "wait", reason: "write_reservation" };
+		if (reservation.kind === "granted") return { action: "start" };
+		return {
+			action: "wait",
+			reason: "write_reservation",
+			...(reservation.detail ? { detail: formatWorkerWriteReservationBlock(reservation.detail) } : {}),
+		};
+	}
+
+	/** Attach this generation's dispatch wait state to queued records; durable records never carry it. */
+	private withWaitReasons(records: LaneRecord[]): LaneRecord[] {
+		return records.map((record) => {
+			if (record.status !== "queued") return record;
+			const wait = this.scheduler.getWaitState(record.laneId);
+			if (!wait) return record;
+			return {
+				...record,
+				waitReason: `${wait.reason}${wait.detail ? `: ${wait.detail}` : ""} (since ${wait.since})`,
+			};
+		});
 	}
 
 	private workerProjectionHeadroomSkipReason(

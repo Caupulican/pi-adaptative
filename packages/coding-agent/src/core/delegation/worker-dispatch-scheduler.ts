@@ -4,10 +4,20 @@ import { registerInFlightWork } from "../reload-blockers.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { workerQueueHasCapacity } from "./worker-fleet-limits.ts";
 
+export type WorkerDispatchWaitReason = "capacity" | "dependencies" | "objective" | "write_reservation";
+
 export type WorkerDispatchAdmission =
 	| { action: "start" }
-	| { action: "wait"; reason?: "capacity" | "dependencies" | "objective" | "write_reservation" }
+	| { action: "wait"; reason?: WorkerDispatchWaitReason; detail?: string }
 	| { action: "cancel"; reasonCode: string };
+
+/** Process-local explanation of why a queued lane has not been dispatched yet. */
+export interface WorkerDispatchWaitState {
+	reason: WorkerDispatchWaitReason | "unspecified";
+	detail?: string;
+	/** ISO time the current reason was first observed; reset when the reason or detail changes. */
+	since: string;
+}
 
 export interface WorkerDispatchSchedulerOptions {
 	agentDir: string;
@@ -44,6 +54,7 @@ export class WorkerDispatchScheduler {
 	private readonly validated = new Set<string>();
 	private readonly pendingCancellations = new Map<string, PendingCancellation>();
 	private readonly reservationBlocked = new Set<string>();
+	private readonly waitStates = new Map<string, WorkerDispatchWaitState>();
 	private readonly queueCapacityListeners = new Set<() => void>();
 	private draining = false;
 	private redrainRequested = false;
@@ -56,6 +67,22 @@ export class WorkerDispatchScheduler {
 
 	get queuedCount(): number {
 		return this.queued.size;
+	}
+
+	/** Why a queued lane is still waiting, or undefined once it left the queue or was never admitted. */
+	getWaitState(laneId: string): WorkerDispatchWaitState | undefined {
+		return this.queued.has(laneId) ? this.waitStates.get(laneId) : undefined;
+	}
+
+	private recordWait(laneId: string, admission: Extract<WorkerDispatchAdmission, { action: "wait" }>): void {
+		const reason = admission.reason ?? "unspecified";
+		const current = this.waitStates.get(laneId);
+		if (current && current.reason === reason && current.detail === admission.detail) return;
+		this.waitStates.set(laneId, {
+			reason,
+			...(admission.detail ? { detail: admission.detail } : {}),
+			since: new Date().toISOString(),
+		});
 	}
 
 	hasQueueCapacity(priority = false): boolean {
@@ -270,10 +297,12 @@ export class WorkerDispatchScheduler {
 					const admission = this.options.admit(request, record);
 					if (admission.action === "wait") {
 						this.validated.delete(laneId);
+						this.recordWait(laneId, admission);
 						if (admission.reason === "write_reservation") this.reservationBlocked.add(laneId);
 						else this.reservationBlocked.delete(laneId);
 						continue;
 					}
+					this.waitStates.delete(laneId);
 					if (admission.action === "cancel") {
 						this.reservationBlocked.delete(laneId);
 						// Durable cancellation owns this transition. Retain the scheduler entry when
@@ -335,6 +364,7 @@ export class WorkerDispatchScheduler {
 		this.validated.delete(laneId);
 		const removed = this.queued.delete(laneId);
 		this.reservationBlocked.delete(laneId);
+		this.waitStates.delete(laneId);
 		const deregister = this.queuedDeregisters.get(laneId);
 		this.queuedDeregisters.delete(laneId);
 		try {

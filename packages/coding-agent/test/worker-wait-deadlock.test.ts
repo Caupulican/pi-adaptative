@@ -288,7 +288,7 @@ describe("worker wait deadlock prevention", () => {
 		expect(coordinator.acquire("caller-task", { attemptId: "caller-attempt" }, plan)).toEqual({
 			kind: "granted",
 		});
-		expect(coordinator.acquire("child-task", { attemptId: "child-attempt" }, plan)).toEqual({
+		expect(coordinator.acquire("child-task", { attemptId: "child-attempt" }, plan)).toMatchObject({
 			kind: "blocked",
 		});
 		const reservationState = coordinator as unknown as {
@@ -321,16 +321,18 @@ describe("worker wait deadlock prevention", () => {
 		expect(coordinator.acquire("caller-task", { attemptId: "caller-attempt" }, plan)).toEqual({
 			kind: "granted",
 		});
-		expect(coordinator.acquire("child-task", { attemptId: "child-attempt" }, plan)).toEqual({ kind: "blocked" });
+		expect(coordinator.acquire("child-task", { attemptId: "child-attempt" }, plan)).toMatchObject({
+			kind: "blocked",
+		});
 
 		const yielded = coordinator.yieldForWait("caller-task", "caller-attempt", 1);
 		expect(yielded).toBeDefined();
 		expect(coordinator.acquire("child-task", { attemptId: "child-attempt" }, plan)).toEqual({ kind: "granted" });
-		expect(coordinator.restoreAfterWait(yielded!)).toEqual({ kind: "blocked" });
+		expect(coordinator.restoreAfterWait(yielded!)).toMatchObject({ kind: "blocked" });
 
 		coordinator.release("child-task");
 		expect(coordinator.restoreAfterWait(yielded!)).toEqual({ kind: "granted" });
-		expect(coordinator.acquire("competitor-task", { attemptId: "competitor-attempt" }, plan)).toEqual({
+		expect(coordinator.acquire("competitor-task", { attemptId: "competitor-attempt" }, plan)).toMatchObject({
 			kind: "blocked",
 		});
 		coordinator.release("caller-task");
@@ -410,7 +412,7 @@ describe("worker wait deadlock prevention", () => {
 		expect(coordinator.acquire("caller-task", { attemptId: "caller-attempt" }, plan)).toEqual({
 			kind: "granted",
 		});
-		expect(coordinator.acquire("competitor-task", { attemptId: "competitor-attempt" }, plan)).toEqual({
+		expect(coordinator.acquire("competitor-task", { attemptId: "competitor-attempt" }, plan)).toMatchObject({
 			kind: "blocked",
 		});
 

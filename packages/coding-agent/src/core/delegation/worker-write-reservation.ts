@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, type FSWatcher, mkdirSync, unlinkSync, watch } from "node:fs";
-import { basename, dirname } from "node:path";
+import { existsSync, type FSWatcher, mkdirSync, readdirSync, unlinkSync, watch } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
 import { stateFile } from "../agent-paths.ts";
 import {
@@ -65,12 +65,20 @@ export interface WorkerWriteReservationLease {
 	writeScopes: readonly string[];
 }
 
+/** One persisted reservation that blocked an acquire, with the age the caller needs to explain the wait. */
+export interface WorkerWriteReservationConflict {
+	lease: WorkerWriteReservationLease;
+	createdAt: string;
+}
+
 export type WorkerWriteReservationAcquireResult =
 	| { kind: "granted"; lease?: WorkerWriteReservationLease }
 	| {
 			kind: "blocked";
 			reasonCode: "overlapping_write_scope" | "attempt_reservation_conflict" | "reservation_capacity_reached";
 			conflictingReservationIds?: readonly string[];
+			/** Every overlapping reservation, so the caller can prove an owner dead and release it. */
+			conflicts?: readonly WorkerWriteReservationConflict[];
 	  };
 
 export type WorkerWriteReservationReleaseResult =
@@ -350,7 +358,18 @@ export class WorkerWriteReservationStore {
 			}
 			const conflicts = overlappingReservationIds(store.reservations, workspace.executionIdentity, writeScopes);
 			if (conflicts.length > 0) {
-				return { kind: "blocked", reasonCode: "overlapping_write_scope", conflictingReservationIds: conflicts };
+				const conflictingIds = new Set(conflicts);
+				return {
+					kind: "blocked",
+					reasonCode: "overlapping_write_scope",
+					conflictingReservationIds: conflicts,
+					conflicts: store.reservations
+						.filter((reservation) => conflictingIds.has(reservation.reservationId))
+						.map((reservation) => ({
+							lease: leaseFromRecord(filePath, reservation),
+							createdAt: reservation.createdAt,
+						})),
+				};
 			}
 			if (store.reservations.length >= MAX_RESERVATIONS)
 				return { kind: "blocked", reasonCode: "reservation_capacity_reached" };
@@ -483,6 +502,46 @@ export class WorkerWriteReservationStore {
 				});
 			return { outcomes };
 		});
+	}
+
+	/**
+	 * Every workspace that currently has a durable reservation file, regardless of which cwd this
+	 * process runs in. Recovery must scan all of them: a reservation is keyed by the repository it
+	 * fences, and a dead owner's fence on a repository outside the caller's cwd blocks every later
+	 * writer on that repository until someone inspects that file. Unreadable or invalid files are
+	 * skipped (fail closed: their reservations stay in place until a caller with a lock rejects them).
+	 */
+	listWorkspaces(): WorkerWriteReservationWorkspace[] {
+		const directory = dirname(reservationFile(this.agentDir, "/"));
+		if (!existsSync(directory)) return [];
+		const workspaces = new Map<string, WorkerWriteReservationWorkspace>();
+		for (const fileName of readdirSync(directory)) {
+			if (!fileName.endsWith(".json")) continue;
+			let store: PersistedReservationStore;
+			try {
+				const raw = readBoundedTextFileSync(
+					join(directory, fileName),
+					MAX_FILE_BYTES,
+					"Worker write reservation store",
+				);
+				const parsed = JSON.parse(raw) as { repositoryRoot?: unknown };
+				if (typeof parsed?.repositoryRoot !== "string") continue;
+				store = parseStore(raw, parsed.repositoryRoot);
+			} catch {
+				continue;
+			}
+			for (const reservation of store.reservations) {
+				const workspace: WorkerWriteReservationWorkspace = reservation.isolatedWorktreeId
+					? {
+							repositoryRoot: store.repositoryRoot,
+							executionRoot: reservation.executionRoot,
+							isolatedWorktreeId: reservation.isolatedWorktreeId,
+						}
+					: { repositoryRoot: store.repositoryRoot, executionRoot: store.repositoryRoot };
+				workspaces.set(reservation.executionIdentity, workspace);
+			}
+		}
+		return [...workspaces.values()];
 	}
 
 	private readLocked(filePath: string, repositoryRoot: string): PersistedReservationStore {

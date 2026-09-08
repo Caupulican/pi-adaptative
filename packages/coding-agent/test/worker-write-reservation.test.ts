@@ -340,4 +340,27 @@ describe("WorkerWriteReservationStore", () => {
 			expect(close).toHaveBeenCalledOnce();
 		},
 	);
+
+	it("lists every persisted workspace so recovery can scan repositories outside the cwd", () => {
+		const paths = fixture();
+		const store = new WorkerWriteReservationStore({ agentDir: paths.agentDir });
+		expect(store.listWorkspaces()).toEqual([]);
+		grantedLease(store.acquire(request(paths)));
+		const second = join(dirname(paths.workspace), "second-repo");
+		const secondSource = join(second, "src");
+		mkdirSync(secondSource, { recursive: true });
+		grantedLease(
+			store.acquire({
+				...request(paths, { taskId: "task-2", attemptId: "attempt-2" }),
+				workspace: { repositoryRoot: second, executionRoot: second },
+				writeScopes: [secondSource],
+			}),
+		);
+		expect(
+			store
+				.listWorkspaces()
+				.map((workspace) => workspace.repositoryRoot)
+				.sort(),
+		).toEqual([realpathSync(paths.workspace), realpathSync(second)].sort());
+	});
 });

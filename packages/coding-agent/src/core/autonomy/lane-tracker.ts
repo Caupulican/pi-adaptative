@@ -46,6 +46,12 @@ export interface LaneRecord {
 	 * behaving unchanged; `undefined` for a lane never bound to a worktree-sync lane.
 	 */
 	worktreeLaneKey?: string;
+	/**
+	 * Process-local, never persisted: why a `queued` lane has not been dispatched by this controller
+	 * generation (capacity, dependencies, a write reservation held elsewhere, …). Absent for lanes that
+	 * are not queued or whose scheduler has not evaluated them yet.
+	 */
+	waitReason?: string;
 }
 
 const LANE_TYPES: readonly string[] = ["research", "worker", "learning", "tmux-worker"];
@@ -93,6 +99,7 @@ export function isLaneRecord(value: unknown): value is LaneRecord {
 	if (!isOptionalString(record.goalId)) return false;
 	if (!isOptionalString(record.evidenceEntryId)) return false;
 	if (!isOptionalString(record.worktreeLaneKey)) return false;
+	if (!isOptionalString(record.waitReason)) return false;
 	return true;
 }
 

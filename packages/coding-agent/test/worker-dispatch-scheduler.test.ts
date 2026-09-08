@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
-import { WorkerDispatchScheduler } from "../src/core/delegation/worker-dispatch-scheduler.ts";
+import {
+	type WorkerDispatchAdmission,
+	WorkerDispatchScheduler,
+} from "../src/core/delegation/worker-dispatch-scheduler.ts";
 import { DEFAULT_WORKER_FLEET_LIMITS } from "../src/core/delegation/worker-fleet-limits.ts";
 import type { InFlightWorkKind } from "../src/core/reload-blockers.ts";
 
@@ -483,5 +486,50 @@ describe("WorkerDispatchScheduler queue bounds", () => {
 		expect(deregisters[1]).toHaveBeenCalledOnce();
 		expect(warn).toHaveBeenCalledWith(expect.stringContaining("durable cancellation unavailable"));
 		expect(scheduler.queuedCount).toBe(0);
+	});
+});
+
+describe("WorkerDispatchScheduler wait state", () => {
+	it("records why a queued lane waits and clears it once the lane starts", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-scheduler-wait-state-"));
+		let admission: WorkerDispatchAdmission = {
+			action: "wait",
+			reason: "write_reservation",
+			detail: "held by session parent-2",
+		};
+		const run = vi.fn(async () => ({ started: true as const }));
+		const scheduler = new WorkerDispatchScheduler({
+			agentDir,
+			isDisposed: () => false,
+			admit: () => admission,
+			getRecord: () => record(0),
+			run,
+			cancel: vi.fn(),
+			warn: vi.fn(),
+		});
+		try {
+			expect(scheduler.getWaitState("worker-0")).toBeUndefined();
+			scheduler.enqueue(record(0), { instructions: "fenced" });
+			scheduler.drain();
+			const first = scheduler.getWaitState("worker-0");
+			expect(first).toMatchObject({ reason: "write_reservation", detail: "held by session parent-2" });
+
+			scheduler.drain(true);
+			expect(scheduler.getWaitState("worker-0")).toEqual(first);
+
+			admission = { action: "wait", reason: "capacity" };
+			scheduler.drain(true);
+			expect(scheduler.getWaitState("worker-0")).toMatchObject({ reason: "capacity" });
+			expect(scheduler.getWaitState("worker-0")?.detail).toBeUndefined();
+
+			admission = { action: "start" };
+			scheduler.drain(true);
+			expect(scheduler.getWaitState("worker-0")).toBeUndefined();
+			expect(run).toHaveBeenCalledOnce();
+			await Promise.resolve();
+		} finally {
+			scheduler.cancelQueued();
+			rmSync(agentDir, { recursive: true, force: true });
+		}
 	});
 });

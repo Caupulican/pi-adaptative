@@ -4,15 +4,54 @@ import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
 import { isLocalProcessAlive, localWorkerProcessOwnerLiveness } from "./worker-process-owner.ts";
 import {
+	type WorkerWriteReservationConflict,
 	type WorkerWriteReservationLease,
 	type WorkerWriteReservationRequest,
 	WorkerWriteReservationStore,
+	type WorkerWriteReservationWorkspace,
 } from "./worker-write-reservation.ts";
+
+/** Why a write admission is blocked, in terms the parent can act on. */
+export interface WorkerWriteReservationBlockDetail {
+	reasonCode: "overlapping_write_scope" | "attempt_reservation_conflict" | "reservation_capacity_reached";
+	repositoryRoot: string;
+	/** Reservations still standing after dead-owner reaping. */
+	conflicts: readonly {
+		reservationId: string;
+		ownerId: string;
+		parentSessionId: string;
+		createdAt: string;
+		ownerLiveness: "live" | "dead" | "unknown";
+		/** Held by a lane of this same coordinator (so a local worker, not a foreign process). */
+		local: boolean;
+	}[];
+	/** Dead-owner reservations this acquire released before retrying. */
+	reapedReservationIds: readonly string[];
+}
 
 export type WorkerWriteReservationAdmission =
 	| { kind: "granted" }
-	| { kind: "blocked" }
+	| { kind: "blocked"; detail?: WorkerWriteReservationBlockDetail }
 	| { kind: "denied"; reasonCode: "write_reservation_scope_invalid" | "write_reservation_unavailable" };
+
+/** One line a queue view can print for a blocked write admission. */
+export function formatWorkerWriteReservationBlock(detail: WorkerWriteReservationBlockDetail): string {
+	if (detail.reasonCode === "reservation_capacity_reached") {
+		return `write_reservation: ${detail.repositoryRoot} reservation store is full`;
+	}
+	if (detail.reasonCode === "attempt_reservation_conflict") {
+		return `write_reservation: ${detail.repositoryRoot} already reserved by this attempt with a different scope`;
+	}
+	const conflict = detail.conflicts[0];
+	const others = detail.conflicts.length > 1 ? ` and ${detail.conflicts.length - 1} more` : "";
+	const reaped =
+		detail.reapedReservationIds.length > 0
+			? `; released ${detail.reapedReservationIds.length} dead-owner reservation${detail.reapedReservationIds.length === 1 ? "" : "s"}`
+			: "";
+	if (!conflict) return `write_reservation: ${detail.repositoryRoot} overlapping scope${reaped}`;
+	const holder = conflict.local ? "a worker of this session" : `session ${conflict.parentSessionId}`;
+	return `write_reservation: ${detail.repositoryRoot} held by ${holder} (${conflict.ownerId}, owner ${conflict.ownerLiveness}, since ${conflict.createdAt})${others}${reaped}`;
+}
 
 export interface WorkerWriteReservationWaitYield {
 	laneId: string;
@@ -188,7 +227,7 @@ export class WorkerWriteReservationCoordinator {
 	}
 
 	recoverProvenStale(): void {
-		for (const workspace of this.hostWorkspaces()) {
+		for (const workspace of this.recoveryWorkspaces()) {
 			const discovered = this.store.recover({ workspace, evidence: [] });
 			const evidence = discovered.outcomes.map((outcome) => ({
 				reservationId: outcome.reservationId,
@@ -237,6 +276,82 @@ export class WorkerWriteReservationCoordinator {
 		return [...unique.values()];
 	}
 
+	/**
+	 * Host workspaces plus every workspace that has a durable reservation file. A reservation fences
+	 * the repository it names, not the cwd of the process that inspects it, so recovery limited to the
+	 * cwd leaves a dead owner's fence on any other repository standing forever.
+	 */
+	private recoveryWorkspaces(): WorkerWriteReservationWorkspace[] {
+		const unique = new Map<string, WorkerWriteReservationWorkspace>();
+		const key = (workspace: WorkerWriteReservationWorkspace) =>
+			`${canonicalPathScopeIdentity(workspace.repositoryRoot)}\0${canonicalPathScopeIdentity(workspace.executionRoot)}\0${workspace.isolatedWorktreeId ?? ""}`;
+		for (const workspace of this.hostWorkspaces()) unique.set(key(workspace), workspace);
+		let persisted: WorkerWriteReservationWorkspace[] = [];
+		try {
+			persisted = this.store.listWorkspaces();
+		} catch (error) {
+			this.options.warn(
+				`Worker write reservation directory scan failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		for (const workspace of persisted) {
+			const id = key(workspace);
+			if (!unique.has(id)) unique.set(id, workspace);
+		}
+		return [...unique.values()];
+	}
+
+	/**
+	 * Release every conflicting reservation whose owner process is provably dead. `unknown` liveness
+	 * (malformed owner, probe failure) never releases: recovery must not steal a live worker's fence.
+	 */
+	private reapDeadOwners(
+		conflicts: readonly WorkerWriteReservationConflict[],
+		options: { release: boolean } = { release: true },
+	): {
+		reaped: string[];
+		remaining: WorkerWriteReservationBlockDetail["conflicts"];
+	} {
+		const reaped: string[] = [];
+		const remaining: WorkerWriteReservationBlockDetail["conflicts"][number][] = [];
+		const localReservationIds = new Set([...this.leases.values()].map((lease) => lease.reservationId));
+		for (const conflict of conflicts) {
+			const local = localReservationIds.has(conflict.lease.reservationId);
+			const ownerLiveness = local
+				? "live"
+				: localWorkerProcessOwnerLiveness(
+						conflict.lease.ownerId,
+						this.options.isProcessAlive ?? isLocalProcessAlive,
+					);
+			if (ownerLiveness === "dead" && options.release) {
+				let released: ReturnType<WorkerWriteReservationStore["release"]>["kind"] | "error" = "error";
+				try {
+					released = this.store.release(conflict.lease).kind;
+				} catch (error) {
+					this.options.warn(
+						`Stale worker write reservation ${conflict.lease.reservationId} release failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+				if (released === "released" || released === "not_found") {
+					reaped.push(conflict.lease.reservationId);
+					this.options.warn(
+						`Released stale worker write reservation ${conflict.lease.reservationId} on ${conflict.lease.repositoryRoot}: owner ${conflict.lease.ownerId} (session ${conflict.lease.parentSessionId}, created ${conflict.createdAt}) is dead.`,
+					);
+					continue;
+				}
+			}
+			remaining.push({
+				reservationId: conflict.lease.reservationId,
+				ownerId: conflict.lease.ownerId,
+				parentSessionId: conflict.lease.parentSessionId,
+				createdAt: conflict.createdAt,
+				ownerLiveness,
+				local,
+			});
+		}
+		return { reaped, remaining };
+	}
+
 	private acquireLease(
 		laneId: string,
 		request: WorkerWriteReservationRequest,
@@ -244,11 +359,34 @@ export class WorkerWriteReservationCoordinator {
 		classifyScopeFailure: boolean,
 	): WorkerWriteReservationAdmission {
 		try {
-			const result = this.store.acquire(request);
+			let result = this.store.acquire(request);
+			let reapedReservationIds: string[] = [];
+			let remainingConflicts: WorkerWriteReservationBlockDetail["conflicts"] = [];
+			if (result.kind === "blocked" && result.conflicts && result.conflicts.length > 0) {
+				// A fence left by a process that no longer exists must not block a live writer. Prove the
+				// owner dead, release exactly those records, and re-run the same admission once.
+				const { reaped, remaining } = this.reapDeadOwners(result.conflicts);
+				reapedReservationIds = reaped;
+				remainingConflicts = remaining;
+				if (reaped.length > 0) {
+					result = this.store.acquire(request);
+					if (result.kind === "blocked") {
+						remainingConflicts = this.reapDeadOwners(result.conflicts ?? [], { release: false }).remaining;
+					}
+				}
+			}
 			if (result.kind === "blocked") {
 				this.recordLocalBlockers(laneId, result.conflictingReservationIds);
 				this.ensureWatch(request.workspace);
-				return { kind: "blocked" };
+				return {
+					kind: "blocked",
+					detail: {
+						reasonCode: result.reasonCode,
+						repositoryRoot: request.workspace.repositoryRoot,
+						conflicts: remainingConflicts,
+						reapedReservationIds,
+					},
+				};
 			}
 			if (!result.lease) {
 				this.blockedByLocalLaneIds.delete(laneId);
