@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import BinaryIO
+from typing import BinaryIO, Mapping
 
 from arithmetic import ArithmeticError, compile_arithmetic, evaluate_arithmetic
 import nodes
@@ -20,7 +20,7 @@ import parser as parser_module
 import proc
 import tokens as tokens_module
 from context import RUNNER_BUILTINS, STATE_BUILTINS, BuiltinContext, ExecContext
-from errors import LoopBreak, LoopContinue, LoopControl, ShellExit, UnsupportedConstruct
+from errors import ArithmeticExpansionError, LoopBreak, LoopContinue, LoopControl, ShellExit, UnsupportedConstruct
 from state import ShellState
 
 DEVNULL = os.devnull
@@ -504,6 +504,25 @@ def _apply_transient_assignments(command: nodes.SimpleCommand, ctx: ExecContext)
     return env
 
 
+# Compound commands that run inside one redirected frame (loops, conditionals, ((...))).
+_STRUCTURED_NODES = (
+    nodes.ForCommand,
+    nodes.ArithmeticForCommand,
+    nodes.ArithmeticCommand,
+    nodes.IfCommand,
+    nodes.WhileCommand,
+    nodes.UntilCommand,
+)
+_StructuredNode = (
+    nodes.ForCommand
+    | nodes.ArithmeticForCommand
+    | nodes.ArithmeticCommand
+    | nodes.IfCommand
+    | nodes.WhileCommand
+    | nodes.UntilCommand
+)
+
+
 def _dispatch_element(
     element,
     ctx: ExecContext,
@@ -512,17 +531,23 @@ def _dispatch_element(
     stderr_stream: BinaryIO | int,
     is_pipeline: bool = False,
 ) -> int:
-    if isinstance(element, nodes.Subshell):
-        return _execute_subshell(element, ctx, stdin_stream, stdout_stream, stderr_stream)
-    if isinstance(element, nodes.BraceGroup):
-        return _execute_brace_group(element, ctx, stdin_stream, stdout_stream, stderr_stream)
-    if isinstance(element, (nodes.ForCommand, nodes.ArithmeticForCommand)):
-        return _execute_for_command(element, ctx, stdin_stream, stdout_stream, stderr_stream)
-    if isinstance(element, (nodes.IfCommand, nodes.WhileCommand, nodes.UntilCommand)):
-        # Structured control flow shares the for-loop frame: same cwd/env scope, own redirects.
-        return _execute_for_command(element, ctx, stdin_stream, stdout_stream, stderr_stream)
-    if isinstance(element, nodes.SimpleCommand):
-        return _dispatch_simple_command(element, ctx, stdin_stream, stdout_stream, stderr_stream)
+    """Run one pipeline element. A `$((...))` that cannot be evaluated fails the element that
+    contains it (status 1) and the command list continues, exactly like bash; it never aborts
+    the whole request."""
+    try:
+        if isinstance(element, nodes.Subshell):
+            return _execute_subshell(element, ctx, stdin_stream, stdout_stream, stderr_stream)
+        if isinstance(element, nodes.BraceGroup):
+            return _execute_brace_group(element, ctx, stdin_stream, stdout_stream, stderr_stream)
+        if isinstance(element, _STRUCTURED_NODES):
+            # Loops, conditionals, and arithmetic commands share one frame: same cwd/env scope,
+            # own redirects.
+            return _execute_for_command(element, ctx, stdin_stream, stdout_stream, stderr_stream)
+        if isinstance(element, nodes.SimpleCommand):
+            return _dispatch_simple_command(element, ctx, stdin_stream, stdout_stream, stderr_stream)
+    except ArithmeticExpansionError as exc:
+        _write_merged(stderr_stream, f"bash: {exc.expression}: {exc.message}\n".encode("utf-8"), ctx)
+        return 1
     raise UnsupportedConstruct("malformed-syntax", f"unrecognized pipeline element {type(element)!r}")
 
 
@@ -549,15 +574,7 @@ def _sub_ctx(
 
 
 def _execute_redirected_compound(
-    node: (
-        nodes.Subshell
-        | nodes.BraceGroup
-        | nodes.ForCommand
-        | nodes.ArithmeticForCommand
-        | nodes.IfCommand
-        | nodes.WhileCommand
-        | nodes.UntilCommand
-    ),
+    node: nodes.Subshell | nodes.BraceGroup | _StructuredNode,
     ctx: ExecContext,
     stdin_stream,
     stdout_stream,
@@ -588,6 +605,8 @@ def _execute_redirected_compound(
                 return _execute_while_or_until(node, inner_ctx, until=isinstance(node, nodes.UntilCommand))
             if isinstance(node, nodes.IfCommand):
                 return _run_if_branches(node, inner_ctx)
+            if isinstance(node, nodes.ArithmeticCommand):
+                return _execute_arithmetic_command(node, inner_ctx)
             return execute(node.body, inner_ctx)
         except ShellExit as exc:
             if isolated:
@@ -610,13 +629,7 @@ def _execute_brace_group(node: nodes.BraceGroup, ctx: ExecContext, stdin_stream,
 
 
 def _execute_for_command(
-    node: (
-        nodes.ForCommand
-        | nodes.ArithmeticForCommand
-        | nodes.IfCommand
-        | nodes.WhileCommand
-        | nodes.UntilCommand
-    ),
+    node: _StructuredNode,
     ctx: ExecContext,
     stdin_stream,
     stdout_stream,
@@ -625,6 +638,42 @@ def _execute_for_command(
     return _execute_redirected_compound(
         node, ctx, stdin_stream, stdout_stream, stderr_stream, isolated=False
     )
+
+
+def _evaluate_arithmetic_text(expression: str, ctx: ExecContext) -> int:
+    """Expand the `$`-forms of an arithmetic body through the injected expander (a double-quoted
+    frame: no splitting, no globbing), then evaluate it against the session state."""
+    word = nodes.Word(segments=[nodes.DQ(segments=tokens_module.scan_arithmetic_segments(expression))])
+    source = "".join(ctx.expand_word(word, ctx))
+    try:
+        return evaluate_arithmetic(compile_arithmetic(source), ctx.state)
+    except ArithmeticError as exc:
+        raise ArithmeticExpansionError(expression.strip(), str(exc)) from exc
+
+
+def _execute_arithmetic_command(node: nodes.ArithmeticCommand, ctx: ExecContext) -> int:
+    """``((expr))``: bash exits 0 for a non-zero value and 1 for zero or an evaluation error."""
+    try:
+        return 0 if _evaluate_arithmetic_text(node.expression, ctx) != 0 else 1
+    except ArithmeticExpansionError as exc:
+        _write_merged(_merged_sink(ctx), f"bash: ((: {exc.expression}: {exc.message}\n".encode("utf-8"), ctx)
+        return 1
+
+
+def _run_let(argv: list[str], ctx: ExecContext, diagnostic_stream: BinaryIO | int) -> int:
+    """``let expr...``: every argument is one already-expanded arithmetic expression; the exit
+    status follows the last value (0 when non-zero), like bash."""
+    if len(argv) == 1:
+        _write_merged(diagnostic_stream, b"bash: let: expression expected\n", ctx)
+        return 1
+    value = 0
+    for expression in argv[1:]:
+        try:
+            value = evaluate_arithmetic(compile_arithmetic(expression), ctx.state)
+        except ArithmeticError as exc:
+            _write_merged(diagnostic_stream, f"bash: let: {expression}: {exc}\n".encode("utf-8"), ctx)
+            return 1
+    return 0 if value != 0 else 1
 
 
 def _run_if_branches(node: nodes.IfCommand, ctx: ExecContext) -> int:
@@ -754,13 +803,8 @@ def _dispatch_simple_command(
 
         if name in ctx.builtins:
             env = _apply_transient_assignments(command, ctx)
-            builtin_ctx = BuiltinContext(
-                argv=argv,
-                cwd=ctx.state.cwd,
-                env=env,
-                stdin=_as_stream(r_in, "rb"),
-                stdout=_as_stream(r_out, "wb"),
-                stderr=_as_stream(r_err, "wb"),
+            builtin_ctx = _builtin_context(
+                argv, ctx, env, _as_stream(r_in, "rb"), _as_stream(r_out, "wb"), _as_stream(r_err, "wb")
             )
             return ctx.builtins[name](builtin_ctx)
 
@@ -776,6 +820,29 @@ def _dispatch_simple_command(
         return exit_code
     finally:
         tracker.close()
+
+
+def _builtin_context(
+    argv: list[str],
+    ctx: ExecContext,
+    env: Mapping[str, str],
+    stdin: BinaryIO,
+    stdout: BinaryIO,
+    stderr: BinaryIO,
+) -> BuiltinContext:
+    """Every pure builtin receives the engine's argv runner, so a builtin that launches commands
+    (`find -exec`) resolves engine builtins and external commands exactly like a command line."""
+    return BuiltinContext(
+        argv=argv,
+        cwd=ctx.state.cwd,
+        env=env,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        run_argv=lambda child_argv, child_stdout, child_stderr: _run_argv(
+            child_argv, ctx, _empty_stream(), child_stdout, child_stderr
+        ),
+    )
 
 
 def _as_stream(fd_or_stream: BinaryIO | int, mode: str) -> BinaryIO:
@@ -869,6 +936,9 @@ def _run_state_builtin(
             ctx.state.unsetenv(item)
         return 0
 
+    if name == "let":
+        return _run_let(argv, ctx, diagnostic_stream)
+
     raise UnsupportedConstruct("unsupported-builtin", f"unsupported state builtin {name!r}")
 
 
@@ -937,27 +1007,38 @@ def _run_xargs(argv: list[str], ctx: ExecContext, in_stream: BinaryIO | int, out
 
 
 def _run_xargs_batch(argv: list[str], ctx: ExecContext, out_stream: BinaryIO | int) -> int:
+    return _run_argv(argv, ctx, _empty_stream(), out_stream, out_stream)
+
+
+def _run_argv(
+    argv: list[str],
+    ctx: ExecContext,
+    in_stream: BinaryIO | int,
+    out_stream: BinaryIO | int,
+    err_stream: BinaryIO | int,
+) -> int:
+    """Run one already-expanded argv the way a command line would: pure builtin, state builtin,
+    or external command through the engine's spawn rules. Shared by `xargs` and `find -exec`."""
     name = argv[0]
     if name in ctx.builtins:
-        builtin_ctx = BuiltinContext(
-            argv=argv,
-            cwd=ctx.state.cwd,
-            env=ctx.state.env.copy(),
-            stdin=_empty_stream(),
-            stdout=_as_stream(out_stream, "wb"),
-            stderr=_as_stream(out_stream, "wb"),
+        builtin_ctx = _builtin_context(
+            argv,
+            ctx,
+            ctx.state.env.copy(),
+            _as_stream(in_stream, "rb"),
+            _as_stream(out_stream, "wb"),
+            _as_stream(err_stream, "wb"),
         )
         return ctx.builtins[name](builtin_ctx)
     if name in STATE_BUILTINS:
-        return _run_state_builtin(name, argv, ctx, out_stream)
+        return _run_state_builtin(name, argv, ctx, out_stream, err_stream)
     scratch_state = ShellState(
         cwd=ctx.state.cwd,
         env=ctx.state.env.copy(),
         powershell_path=ctx.state.powershell_path,
     )
-    spawned = _spawn_argv_or_report(
-        argv, scratch_state, ctx, subprocess.DEVNULL, out_stream, out_stream
-    )
+    child_stdin: BinaryIO | int = subprocess.DEVNULL if isinstance(in_stream, io.BytesIO) else in_stream
+    spawned = _spawn_argv_or_report(argv, scratch_state, ctx, child_stdin, out_stream, err_stream)
     if spawned is None:
         return 127
     child, in_prep, out_prep, err_prep = spawned

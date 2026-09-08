@@ -286,7 +286,9 @@ describeOrSkip("pi-shell-engine commands/fs.py", () => {
 	});
 
 	describe("find", () => {
-		it("supports depth bounds, case-insensitive and path predicates, print0, negation and -exec", () => {
+		it("supports depth bounds, case-insensitive and path predicates, print0 and negation", () => {
+			// `-exec` needs the engine's argv runner (injected by exec.py) and is covered end-to-end in
+			// executor.test.ts; a bare BuiltinContext has no runner by design.
 			mkdirSync(join(root, "sub", "deep"), { recursive: true });
 			writeFileSync(join(root, "top.txt"), "");
 			writeFileSync(join(root, "sub", "Mid.TXT"), "");
@@ -315,18 +317,6 @@ describeOrSkip("pi-shell-engine commands/fs.py", () => {
 			expect(negated.stdout).toBe("./sub/Mid.TXT\n./sub/deep/leaf.txt\n");
 			const nul = p(python as string, "find", ["find", "sub", "-type", "f", "-print0"]);
 			expect(nul.stdout).toBe("sub/Mid.TXT\u0000sub/deep/leaf.txt\u0000");
-			const executed = p(python as string, "find", [
-				"find",
-				"sub",
-				"-name",
-				"leaf.txt",
-				"-exec",
-				"echo",
-				"found",
-				"{}",
-				";",
-			]);
-			expect(executed.stdout.trim()).toBe("found sub/deep/leaf.txt");
 		});
 
 		it("recursively lists /-normalized, ordinal-sorted paths rooted at PATH", () => {

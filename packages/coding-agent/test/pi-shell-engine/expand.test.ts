@@ -27,12 +27,15 @@ sys.path.insert(0, ${JSON.stringify(ENGINE_DIR)})
 from tokens import tokenize
 from parser import parse
 from expand import expand_word, ParamExpansionError
-from errors import UnsupportedConstruct
+from errors import ArithmeticExpansionError, UnsupportedConstruct
 
 class FakeState:
     def __init__(self, env, cwd):
         self.env = dict(env)
         self.cwd = cwd
+
+    def setenv(self, name, value):
+        self.env[name] = value
 
 class FakeCtx:
     def __init__(self, env, cwd, sub_result=("", 0)):
@@ -60,6 +63,8 @@ def run(command, env, cwd, sub_result=("", 0)):
         print(json.dumps({"ok": False, "code": e.code, "construct": e.construct, "message": e.message}))
     except ParamExpansionError as e:
         print(json.dumps({"ok": False, "paramError": True, "name": e.name, "message": e.message}))
+    except ArithmeticExpansionError as e:
+        print(json.dumps({"ok": False, "arithmeticError": True, "expression": e.expression, "message": e.message}))
 `;
 
 function expand(
@@ -77,6 +82,8 @@ function expand(
 	message?: string;
 	paramError?: boolean;
 	name?: string;
+	arithmeticError?: boolean;
+	expression?: string;
 } {
 	const program = `${HARNESS}
 run(${JSON.stringify(command)}, ${JSON.stringify(env)}, ${JSON.stringify(cwd)}, ${JSON.stringify(subResult)})
@@ -98,6 +105,30 @@ describe("pi-shell-engine expand_word", () => {
 	writeFileSync(join(tmpDir, "a.txt"), "");
 	writeFileSync(join(tmpDir, "b.txt"), "");
 	writeFileSync(join(tmpDir, "c.log"), "");
+
+	it(
+		"arithmetic expansion: $((...)) evaluates variables, nested parentheses, $" + "{#V}, and command substitution",
+		() => {
+			expect(expand(python, "echo $((x * 2 + 1))", { x: "5" }, tmpDir).result).toEqual(["11"]);
+			expect(expand(python, 'echo "n=$(( (x+1) * -1 ))"', { x: "5" }, tmpDir).result).toEqual(["n=-6"]);
+			expect(expand(python, "echo $(( $" + "{#s} + $(cat n) ))", { s: "hello" }, tmpDir, ["3", 0]).result).toEqual([
+				"8",
+			]);
+			expect(expand(python, "echo $((0x10 + 2 ** 3))", {}, tmpDir).result).toEqual(["24"]);
+		},
+	);
+
+	it("arithmetic expansion: assignments write back to the environment and failures are bounded", () => {
+		const assigned = expand(python, "echo $((y = x + 1))", { x: "1" }, tmpDir);
+		expect(assigned.result).toEqual(["2"]);
+		expect(assigned.env?.y).toBe("2");
+		expect(expand(python, "echo $((1/0))", {}, tmpDir)).toMatchObject({
+			ok: false,
+			arithmeticError: true,
+			expression: "1/0",
+			message: "division by zero",
+		});
+	});
 
 	it("literal (single-quoted): no expansion, no glob, no split", () => {
 		const out = expand(python, "echo 'a b $x *.txt'", {}, tmpDir);

@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- Arithmetic expansion `$((…))`, standalone `((…))` commands, and `let` in the bundled Windows shell engine, with parameter and command substitution inside the expression, assignments writing back to the session environment, and bounded per-command failures.
+
+### Fixed
+
+- Ran `find -exec` / `-exec … +` commands through the Windows shell engine's own dispatcher (builtins included) instead of a raw process spawn, which failed on Windows for `echo` and every other engine builtin.
+- Consolidated union validation diagnostics: a missing or unknown discriminator is reported once (`action: required, one of …` / `action: must be one of …`) instead of every branch's requirements plus a false `root: expected object` line; nested unions and non-object arguments report one line at their own path.
+
 ## [0.99.6] - 2026-09-07
 
 ### Fixed

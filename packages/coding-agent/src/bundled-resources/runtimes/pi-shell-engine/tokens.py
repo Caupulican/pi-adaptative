@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from errors import UnsupportedConstruct
 from escapes import ANSI_C_ESCAPES, decode_backslash_escapes
-from nodes import CmdSub, DQ, Lit, Param, Raw, Segment, Tilde, Word
+from nodes import Arith, CmdSub, DQ, Lit, Param, Raw, Segment, Tilde, Word
 
 _IDENT_START_RE = re.compile(r"[A-Za-z_]")
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -239,9 +239,8 @@ def _scan_dollar_form(src: str, pos: int) -> tuple[Segment, int]:
         return _parse_param_brace_content(src[pos + 2 : close]), close + 1
     if nxt == "(":
         if src[pos + 2 : pos + 3] == "(":
-            raise UnsupportedConstruct(
-                "arithmetic-expansion", "Arithmetic expansion '$((...))' is not supported."
-            )
+            expression, newpos = _scan_arithmetic_group(src, pos + 1)
+            return Arith(src=expression), newpos
         close = _find_closing_paren(src, pos + 2)
         return CmdSub(src=src[pos + 2 : close]), close + 1
     if nxt == "?":
@@ -403,7 +402,7 @@ def _scan_operator(src: str, pos: int) -> tuple[str, int]:
 
 
 def _scan_arithmetic_group(src: str, pos: int) -> tuple[str, int]:
-    """Scan ``((...))`` as one token while allowing balanced inner parentheses."""
+    """Scan ``((...))`` (`pos` at the first '(') as one unit while allowing balanced inner parentheses."""
     depth = 0
     cursor = pos + 2
     while cursor < len(src):
@@ -415,11 +414,26 @@ def _scan_arithmetic_group(src: str, pos: int) -> tuple[str, int]:
         elif char == ")":
             if depth == 0:
                 raise UnsupportedConstruct(
-                    "malformed-syntax", "Arithmetic loop header contains an unmatched ')'."
+                    "malformed-syntax", "Arithmetic expression contains an unmatched ')'."
                 )
             depth -= 1
         cursor += 1
-    raise _unterminated("arithmetic loop header")
+    raise _unterminated("arithmetic expression")
+
+
+def scan_arithmetic_segments(src: str) -> list[Segment]:
+    """Segments of an arithmetic body: `$`-forms and backticks expand, everything else is literal.
+
+    Bash performs parameter expansion, command substitution, and quote removal inside
+    ``$((...))``/``((...))`` before evaluating, so ``$(( ${#s} + $(cat n) ))`` is legal.
+    """
+    segments: list[Segment] = []
+    buf: list[str] = []
+    i = 0
+    while i < len(src):
+        i = _scan_or_append(src, i, segments, buf, literal_buffer=True, unquoted=False)
+    _flush_buffer(segments, buf, True)
+    return segments
 
 
 def _read_heredoc_body(src: str, pos: int, delimiter: str, strip_tabs: bool) -> tuple[str, int]:

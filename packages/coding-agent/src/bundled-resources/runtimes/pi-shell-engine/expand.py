@@ -13,8 +13,10 @@ from __future__ import annotations
 import fnmatch
 from typing import TYPE_CHECKING
 
-from errors import UnsupportedConstruct
-from nodes import CmdSub, DQ, Lit, Param, Raw, Tilde, Word
+from arithmetic import ArithmeticError, compile_arithmetic, evaluate_arithmetic
+from errors import ArithmeticExpansionError, UnsupportedConstruct
+from nodes import Arith, CmdSub, DQ, Lit, Param, Raw, Tilde, Word
+from tokens import scan_arithmetic_segments
 
 if TYPE_CHECKING:
     from context import ExecContext
@@ -91,6 +93,15 @@ class ParamExpansionError(Exception):
         self.message = message
 
 
+def expand_arithmetic_source(src: str, ctx: "ExecContext") -> int:
+    """Expand the `$`-forms inside an arithmetic body, then evaluate it against the session state."""
+    source = "".join(_expand_segment_as_field(segment, ctx) for segment in scan_arithmetic_segments(src))
+    try:
+        return evaluate_arithmetic(compile_arithmetic(source), ctx.state)
+    except ArithmeticError as exc:
+        raise ArithmeticExpansionError(src.strip(), str(exc)) from exc
+
+
 def _resolve_param(name: str, op: str | None, arg: Word | None, ctx: "ExecContext") -> tuple[str, bool]:
     """Resolve a Param segment. Returns (text, split_and_glob_eligible).
 
@@ -156,6 +167,8 @@ def _expand_segment_as_field(segment, ctx: "ExecContext") -> str:
     if isinstance(segment, CmdSub):
         text, _exit_code = ctx.run_command_substitution(segment.src, ctx)
         return text.rstrip("\n")
+    if isinstance(segment, Arith):
+        return str(expand_arithmetic_source(segment.src, ctx))
     if isinstance(segment, Tilde):
         if segment.user:
             raise UnsupportedConstruct("tilde-user", f"unsupported tilde expansion: ~{segment.user}")
@@ -223,6 +236,8 @@ def expand_word(word: Word, ctx: "ExecContext") -> list[str]:
             text, _exit_code = ctx.run_command_substitution(segment.src, ctx)
             text = text.rstrip("\n")
             append_splittable(text, raw=True)
+        elif isinstance(segment, Arith):
+            append_splittable(str(expand_arithmetic_source(segment.src, ctx)), raw=True)
         elif isinstance(segment, Tilde):
             if segment.user:
                 raise UnsupportedConstruct("tilde-user", f"unsupported tilde expansion: ~{segment.user}")

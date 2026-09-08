@@ -19,6 +19,7 @@ UNSUPPORTED_CONSTRUCTS = frozenset(
     {
         "job-control",
         "process-substitution",
+        # Retained for catalog stability: `$((...))`, `((...))`, and `let` are supported now.
         "arithmetic-expansion",
         "brace-expansion",
         "nested-shell",
@@ -46,6 +47,20 @@ class UnsupportedConstruct(Exception):
         super().__init__(message)
         self.code = "unsupported"
         self.construct = construct
+        self.message = message
+
+
+class ArithmeticExpansionError(Exception):
+    """A `$((...))` / `((...))` body that fails to parse or evaluate (bad token, division by zero).
+
+    Bash-level runtime error, not a grammar refusal: the command containing the expression
+    fails with status 1 and a bounded diagnostic while the rest of the command list keeps
+    running. Raised by the expander, consumed by the executor at the pipeline-element boundary.
+    """
+
+    def __init__(self, expression: str, message: str) -> None:
+        super().__init__(message)
+        self.expression = expression
         self.message = message
 
 

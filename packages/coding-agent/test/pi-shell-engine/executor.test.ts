@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -490,6 +490,38 @@ describe("pi-shell-engine main.py ParamExpansionError handling (architect fix #1
 		const frame = JSON.parse(control.slice(first + 1, second));
 		return { stdout: result.stdout, stderr: `${control.slice(0, first)}${control.slice(second + 1)}`, frame };
 	}
+
+	it("evaluates $((...)), ((...)), and let against the session environment", () => {
+		const command =
+			'x=5; echo $((x*2+1)) "$(( x - 6 ))"; ((x>3)) && echo big; ((x-5)) || echo zero; ' +
+			'let "x+=1" x*=2; echo $x; i=0; while ((i<3)); do i=$((i+1)); done; echo $i';
+		const { stdout, frame } = runMain(command, tmpdir());
+		expect(stdout).toBe("11 -1\nbig\nzero\n12\n3\n");
+		expect(frame.exitCode).toBe(0);
+		expect(frame.unsupported).toBeNull();
+		expect((frame.envDelta as Record<string, string>).x).toBe("12");
+	});
+
+	it("an arithmetic failure fails only the command containing it; the command list continues", () => {
+		const { stdout, frame } = runMain("echo $((1/0)); echo after; ((1/0)); echo rc=$?", tmpdir());
+		expect(stdout).toBe("bash: 1/0: division by zero\nafter\nbash: ((: 1/0: division by zero\nrc=1\n");
+		expect(stdout).not.toContain("Traceback");
+		expect(frame.exitCode).toBe(0);
+		expect(frame.unsupported).toBeNull();
+	});
+
+	it("find -exec runs every command through the engine dispatcher, so builtins like echo work on each host", () => {
+		// Live defect: `-exec echo` spawned a process named `echo`, which does not exist on Windows.
+		const dir = mkdtempSync(join(tmpdir(), "pi-find-exec-"));
+		mkdirSync(join(dir, "sub", "deep"), { recursive: true });
+		writeFileSync(join(dir, "sub", "deep", "leaf.txt"), "leaf\n");
+		writeFileSync(join(dir, "sub", "other.txt"), "other\n");
+		const command = "find sub -name leaf.txt -exec echo found {} \\; ; find sub -type f -name '*.txt' -exec cat {} +";
+		const { stdout, frame } = runMain(command, dir);
+		expect(stdout).toBe("found sub/deep/leaf.txt\nleaf\nother\n");
+		expect(frame.exitCode).toBe(0);
+		expect(frame.unsupported).toBeNull();
+	});
 
 	it("$" + "{V:?word} against an unset parameter aborts the command without crashing the engine", () => {
 		const { stdout, frame } = runMain("echo $" + "{V:?boom}", tmpdir());

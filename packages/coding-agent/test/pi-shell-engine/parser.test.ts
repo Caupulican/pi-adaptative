@@ -157,6 +157,29 @@ describe("pi-shell-engine tokenizer + parser", () => {
 			expect(element.body.entries).toHaveLength(1);
 		});
 
+		it("arithmetic expansion: $((...)) is a word segment carrying the raw expression", () => {
+			const ast = parseToDict(python, 'echo $((x + 1)) "n=$(( (a+b)*2 ))" $(( $' + "{#s} ))") as any;
+			const words = ast.entries[0].pipelines[0].elements[0].words;
+			expect(words[1].segments).toEqual([{ _: "Arith", src: "x + 1" }]);
+			expect(words[2].segments[0]._).toBe("DQ");
+			expect(words[2].segments[0].segments).toEqual([
+				{ _: "Lit", text: "n=" },
+				{ _: "Arith", src: " (a+b)*2 " },
+			]);
+			expect(words[3].segments).toEqual([{ _: "Arith", src: " $" + "{#s} " }]);
+		});
+
+		it("arithmetic command: ((expr)) is a pipeline element with redirects; let is an ordinary command word", () => {
+			const ast = parseToDict(python, "((i++)) > out.txt && let i+=1") as any;
+			const [first, second] = ast.entries[0].pipelines;
+			const element = first.elements[0];
+			expect(element._).toBe("ArithmeticCommand");
+			expect(element.expression).toBe("i++");
+			expect(element.redirects).toHaveLength(1);
+			expect(second.elements[0]._).toBe("SimpleCommand");
+			expect(second.elements[0].words[0].segments).toEqual([{ _: "Raw", text: "let" }]);
+		});
+
 		it("if command: single branch, no else", () => {
 			const ast = parseToDict(python, "if true; then echo yes; fi") as any;
 			const element = ast.entries[0].pipelines[0].elements[0];
@@ -355,7 +378,6 @@ describe("pi-shell-engine tokenizer + parser", () => {
 		it.each([
 			["job-control", "foo &"],
 			["process-substitution", "foo <(bar)"],
-			["arithmetic-expansion", "echo $((1+1))"],
 			["brace-expansion", "foo {a,b,c}"],
 			["exec-builtin", "exec foo"],
 			["function-definition", "name() { echo hi; }"],

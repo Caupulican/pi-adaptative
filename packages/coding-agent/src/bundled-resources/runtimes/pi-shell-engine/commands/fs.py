@@ -11,9 +11,9 @@ strings on `BuiltinContext`).
 from __future__ import annotations
 
 import fnmatch
+import io
 import os
 import time
-import subprocess
 import stat
 import shutil
 from typing import TYPE_CHECKING
@@ -493,22 +493,32 @@ def find(ctx: "BuiltinContext") -> int:
                         exit_code = 1
                 elif action == "exec":
                     command = [display if a == "{}" else a.replace("{}", display) for a in argv_template]
-                    result = subprocess.run(command, cwd=ctx.cwd, capture_output=True)
-                    out.append(result.stdout)
-                    if result.returncode != 0:
-                        out.append(result.stderr)
+                    _run_find_exec(ctx, command, out)
                 elif action == "exec+":
                     exec_batches.setdefault(index, []).append(display)
     for index, files in exec_batches.items():
         argv_template = actions[index][1]
         command = [a for a in argv_template if a != "{}"] + files
-        result = subprocess.run(command, cwd=ctx.cwd, capture_output=True)
-        out.append(result.stdout)
-        if result.returncode != 0:
-            out.append(result.stderr)
-            exit_code = exit_code or result.returncode
+        returncode = _run_find_exec(ctx, command, out)
+        if returncode != 0:
+            exit_code = exit_code or returncode
     ctx.stdout.write(b"".join(out))
     return exit_code
+
+
+def _run_find_exec(ctx: "BuiltinContext", command: list[str], out: list[bytes]) -> int:
+    """Run one `-exec` command through the engine's argv runner (builtins included) and keep
+    its stdout in find's output stream at the position the match was reached."""
+    if ctx.run_argv is None:
+        raise RuntimeError("find -exec requires the engine command runner; call find through exec.py")
+    stdout = io.BytesIO()
+    merged = ctx.stderr is None
+    stderr = io.BytesIO() if merged else ctx.stderr
+    returncode = ctx.run_argv(command, stdout, stderr)
+    out.append(stdout.getvalue())
+    if merged:
+        out.append(stderr.getvalue())
+    return returncode
 
 
 def rm(ctx: "BuiltinContext") -> int:

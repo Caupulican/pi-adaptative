@@ -162,6 +162,37 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 		}
 	});
 
+	it("(d2) arithmetic expansion, ((...)), let, and find -exec execute through the engine tier", async () => {
+		const sessionKey = freshSessionKey("arithmetic");
+		try {
+			const tool = createBashToolDefinition(process.cwd(), { sessionKey });
+			const arithmetic = await tool.execute(
+				"call-d2-arithmetic",
+				{ command: 'x=5; echo $((x*2+1)); ((x>3)) && echo big; let "x+=1"; echo $x; echo $((1/0)); echo after' },
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			const arithmeticContent = arithmetic.content[0];
+			if (arithmeticContent?.type !== "text") throw new Error("expected text output");
+			expect(arithmeticContent.text.trim()).toBe("11\nbig\n6\nbash: 1/0: division by zero\nafter");
+
+			// `echo` is an engine builtin with no Windows executable: -exec must dispatch through the engine.
+			const found = await tool.execute(
+				"call-d2-find-exec",
+				{ command: "find . -maxdepth 1 -name package.json -exec echo found {} \\;" },
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			const foundContent = found.content[0];
+			if (foundContent?.type !== "text") throw new Error("expected text output");
+			expect(foundContent.text.trim()).toBe("found ./package.json");
+		} finally {
+			await disposeShellExecutionSessionAndWait(sessionKey);
+		}
+	});
+
 	it("(e) with the runtime forced unavailable, a simple command still works via the PS floor and the complex command fails with the NAMED degradation error", async () => {
 		const sessionKey = freshSessionKey("degraded");
 		try {

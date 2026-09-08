@@ -589,8 +589,6 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 		it.each([
 			["job-control", "foo &"],
 			["process-substitution", "foo <(bar)"],
-			["arithmetic-expansion", "echo $((1+1))"],
-			["arithmetic-expansion", "((1+1))"],
 			["brace-expansion", "foo {a,b,c}"],
 			["exec-builtin", "exec foo"],
 			["function-definition", "name() { echo hi; }"],
@@ -610,6 +608,17 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 				expect(frame.unsupported?.code).toBe("unsupported");
 				expect(frame.unsupported?.construct).toBe(construct);
 				expect(stdout).toContain(frame.unsupported?.message ?? " never-matches ");
+			});
+		});
+
+		it("arithmetic expansion, ((...)) commands, and let evaluate end-to-end instead of refusing", () => {
+			// `arithmetic-expansion` stays in the frozen catalog, but the engine no longer raises it.
+			withTmpDir((dir) => {
+				const command = 'x=5; echo $((x*2+1)) "$(( x - 6 ))"; ((x>3)) && echo big; let "x+=1"; echo $x';
+				const { frame, stdout } = runEngine(python, command, dir, { HOME: dir });
+				expect(frame.unsupported).toBeNull();
+				expect(frame.exitCode).toBe(0);
+				expect(stdout).toBe("11 -1\nbig\n6\n");
 			});
 		});
 

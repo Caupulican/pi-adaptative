@@ -49,13 +49,20 @@ class CmdSub:
 
 
 @dataclass
+class Arith:
+    """$((...)) - raw inner expression; `$`-forms expand first, then it is evaluated as an integer."""
+
+    src: str
+
+
+@dataclass
 class Tilde:
     """Leading ~ (word-start, unquoted only); "" = current user -> $HOME."""
 
     user: str
 
 
-Segment = Lit | Raw | DQ | Param | CmdSub | Tilde
+Segment = Lit | Raw | DQ | Param | CmdSub | Arith | Tilde
 
 
 @dataclass
@@ -117,6 +124,14 @@ class ArithmeticForCommand:
 
 
 @dataclass
+class ArithmeticCommand:
+    """Standalone ``((expression))``: exits 0 when the value is non-zero, 1 otherwise."""
+
+    expression: str
+    redirects: list["Redirect"]
+
+
+@dataclass
 class IfCommand:
     """``if/elif/.../else/fi`` chain.
 
@@ -155,6 +170,7 @@ PipelineElement = (
     | BraceGroup
     | ForCommand
     | ArithmeticForCommand
+    | ArithmeticCommand
     | IfCommand
     | WhileCommand
     | UntilCommand

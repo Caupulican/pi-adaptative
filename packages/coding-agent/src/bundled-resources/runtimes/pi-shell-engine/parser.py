@@ -13,6 +13,7 @@ import re
 from errors import UnsupportedConstruct
 from nodes import (
     AndOr,
+    ArithmeticCommand,
     ArithmeticForCommand,
     BraceGroup,
     CommandList,
@@ -41,7 +42,6 @@ _JOB_CONTROL_WORDS = {"fg", "bg", "jobs", "wait", "disown"}
 # `if`/`while`/`until` are parsed as structured compound commands below; `case`/`select`
 # and function definitions remain refused — see UNSUPPORTED_CONSTRUCTS in errors.py.
 _CONTROL_FLOW_WORDS = {"case", "select"}
-_ARITHMETIC_WORDS = {"let"}
 _UNSUPPORTED_BUILTIN_WORDS = {"eval", "source", ".", "alias", "trap", "set", "shopt", "read", "declare", "local"}
 
 
@@ -86,8 +86,6 @@ def _check_command_word_banned(text: str) -> None:
         raise UnsupportedConstruct(
             "control-flow", f"Compound control-flow commands ('{text}') are not supported."
         )
-    if text in _ARITHMETIC_WORDS:
-        raise UnsupportedConstruct("arithmetic-expansion", f"Arithmetic command '{text}' is not supported.")
     if text == "function":
         raise UnsupportedConstruct("function-definition", "Function definitions are not supported.")
     if text == "exec":
@@ -227,11 +225,10 @@ class _Parser:
             return self.parse_while_or_until_command("while")
         if self.at_unquoted_word("until"):
             return self.parse_while_or_until_command("until")
-        if self.peek() is not None and self.peek().kind == "ARITH":
-            raise UnsupportedConstruct(
-                "arithmetic-expansion",
-                "Arithmetic commands '((...))' are supported only as a for-loop header.",
-            )
+        arithmetic = self.peek()
+        if arithmetic is not None and arithmetic.kind == "ARITH":
+            self.advance()
+            return ArithmeticCommand(expression=arithmetic.text or "", redirects=self._parse_redirects())
         command = self.parse_simple_command()
         if not command.assignments and not command.words and not command.redirects:
             # A fully empty SimpleCommand reached as a pipeline element means a missing
