@@ -10,6 +10,8 @@
 
 - With the engine on, every Windows bash call runs on the shell engine; the PowerShell floor serves only `windowsShell.pythonEngine: false` and a runtime outage, where a floor-expressible command still runs with the engine's cwd/env and a command that needs the engine fails with the outage and the floor's refusal.
 - The `windowsShell` settings are wired into the bash tool and the owner shell; `windowsShell.pythonEngine` previously had no effect.
+- `shellCommandPrefix` runs where the command runs: as bash grammar in the Windows shell engine (it was dropped there), and as PowerShell only when the floor runs the command.
+- A missing working directory is reported with the same message on every tier and platform.
 - A caller-owned bash backend (an extension's `user_bash` operations) receives the Windows simple-command floor contract and the local engine never runs for it.
 - A redirect target that cannot be opened fails only its command with a bash-style message instead of crashing the shell engine.
 

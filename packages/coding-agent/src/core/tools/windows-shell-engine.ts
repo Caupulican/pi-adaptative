@@ -16,7 +16,13 @@ import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { getBundledResourcesDir } from "../../config.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
-import { type GnuToolsDirSetting, getShellConfig, getShellEnv, resolveGnuToolsDir } from "../../utils/shell.ts";
+import {
+	type GnuToolsDirSetting,
+	getShellConfig,
+	getShellEnv,
+	missingWorkingDirectoryMessage,
+	resolveGnuToolsDir,
+} from "../../utils/shell.ts";
 import { ensurePythonRuntime, type PythonRuntimeOutcome } from "../python-runtime.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import type { BashOperations } from "./bash.ts";
@@ -334,9 +340,13 @@ class PersistentWindowsShellEngineSession {
 						if (settled || this.activeExec !== active || !controlFrame) return;
 						applyEngineFrame(state, controlFrame);
 						if (controlFrame.unsupported) {
-							settle(() =>
-								reject(new Error(controlFrame?.unsupported?.message ?? "Unsupported shell construct")),
-							);
+							// A missing working directory is reported with the same text the local shell
+							// backend uses, so the condition reads identically on every tier and platform.
+							const unsupportedMessage =
+								controlFrame.unsupported.construct === "cwd-missing"
+									? missingWorkingDirectoryMessage(effectiveCwd, "bash")
+									: controlFrame.unsupported.message;
+							settle(() => reject(new Error(unsupportedMessage)));
 							return;
 						}
 						settle(() => resolve({ exitCode: controlFrame?.exitCode ?? null }));

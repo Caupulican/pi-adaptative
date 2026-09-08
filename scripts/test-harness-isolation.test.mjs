@@ -97,6 +97,7 @@ const agentVerificationCoverageTests = [
 ];
 const codingAgentVerificationCoverageTests = [
 	"test/managed-shell-preparation.test.ts",
+	"test/gnu-tools-dir.test.ts",
 	"test/bash-execution-controller.test.ts",
 	"test/shell-verification-classifier.test.ts",
 	"test/shell-output-projection.test.ts",

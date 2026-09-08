@@ -29,6 +29,7 @@ import {
 	getPlatformShellToolName,
 	getShellConfig,
 	getShellEnv,
+	missingWorkingDirectoryMessage,
 	type PlatformShellToolName,
 	type ShellSessionContext,
 	trackDetachedChildPid,
@@ -199,7 +200,7 @@ function createLocalShellOperations(
 				try {
 					await fsAccess(cwd, constants.F_OK);
 				} catch {
-					throw new Error(`Working directory does not exist: ${cwd}\nCannot execute ${shellName} commands.`);
+					throw new Error(missingWorkingDirectoryMessage(cwd, shellName));
 				}
 				if (signal?.aborted) throw new Error("aborted");
 				const session = acquirePersistentShellSession(sessionKey, shellName);
@@ -222,7 +223,7 @@ function createLocalShellOperations(
 			try {
 				await fsAccess(cwd, constants.F_OK);
 			} catch {
-				throw new Error(`Working directory does not exist: ${cwd}\nCannot execute ${shellName} commands.`);
+				throw new Error(missingWorkingDirectoryMessage(cwd, shellName));
 			}
 			if (signal?.aborted) throw new Error("aborted");
 
@@ -367,7 +368,11 @@ export function createLocalPlatformShellOperations(
 						// The engine owns the state transition and resolves the original host cwd
 						// exactly once. Passing the already state-adjusted cwd here would make the
 						// engine mistake its own `cd` result for a host cwd change on the next call.
-						return await engineOperations.exec(route.command, cwd, execOptions);
+						// The operator's commandPrefix is bash grammar here, prepended to the source.
+						const engineCommand = options.commandPrefix
+							? `${options.commandPrefix}\n${route.command}`
+							: route.command;
+						return await engineOperations.exec(engineCommand, cwd, execOptions);
 					} catch (error) {
 						route = floorRouteAfterEngineOutage(command, platform, error);
 					}
@@ -1057,10 +1062,12 @@ function createShellToolDefinition(
 					// made is observed by the very next floor call.
 					effectiveCwd = resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd, options?.forceCwd);
 				}
-				const prepareSpawn = async (backend: string, engine: boolean) => {
-					// The engine executes the RAW Bash source unchanged: an arbitrary PowerShell
-					// commandPrefix would not parse as Bash grammar.
-					const resolvedCommand = engine ? backend : commandPrefix ? `${commandPrefix}\n${backend}` : backend;
+				const prepareSpawn = async (backend: string) => {
+					// The operator's commandPrefix runs where the command runs: in the engine it is bash
+					// grammar prepended to the source; on the floor (engine off, or its runtime gone) it
+					// is the PowerShell snippet it always was. Dropping it on one tier would silently
+					// lose a configured setting.
+					const resolvedCommand = commandPrefix ? `${commandPrefix}\n${backend}` : backend;
 					const spawnContext = resolveSpawnContext(
 						resolvedCommand,
 						effectiveCwd,
@@ -1079,7 +1086,7 @@ function createShellToolDefinition(
 					}
 					return { resolvedCommand, spawnContext };
 				};
-				let prepared = await prepareSpawn(backendCommand, engineRoute);
+				let prepared = await prepareSpawn(backendCommand);
 				const execute = (engine: boolean, target: typeof prepared) =>
 					(engine && engineOperations ? engineOperations : ops).exec(
 						target.spawnContext.command,
@@ -1102,7 +1109,7 @@ function createShellToolDefinition(
 					} catch (error) {
 						const floor = floorRouteAfterEngineOutage(source, contractPlatform, error);
 						engineRoute = false;
-						prepared = await prepareSpawn(floor.command, false);
+						prepared = await prepareSpawn(floor.command);
 						return execute(false, prepared);
 					}
 				});
@@ -1115,8 +1122,7 @@ function createShellToolDefinition(
 					// Per-command adapters run in the supplied cwd. Stateful adapters report their
 					// admission cwd explicitly; an unavailable report must not become a guessed cwd.
 					initialCwd: "initialCwd" in result ? result.initialCwd : spawnContext.cwd,
-					verificationCommand:
-						spawnContext.command === resolvedCommand && (engineRoute || !commandPrefix) ? source : undefined,
+					verificationCommand: spawnContext.command === resolvedCommand && !commandPrefix ? source : undefined,
 				};
 			};
 			try {

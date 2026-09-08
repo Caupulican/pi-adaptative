@@ -847,6 +847,34 @@ describe("windows shell engine operations", () => {
 		expect(capturedRequest?.powershellPath).toBeUndefined();
 	});
 
+	it("reports a missing working directory with the local shell backend's own message", async () => {
+		const spawn = fakeSpawn(({ stderr, request }) => {
+			const parsed = request as { cwd: string };
+			stderr.emit(
+				"data",
+				frameBytes({
+					exitCode: 2,
+					cwd: parsed.cwd,
+					envDelta: {},
+					unsupported: {
+						code: "unsupported",
+						construct: "cwd-missing",
+						message: `cwd does not exist: ${parsed.cwd}`,
+					},
+				}),
+			);
+		});
+		const ops = createWindowsShellEngineOperations("engine-cwd-missing-session", {
+			resolveRuntime: async () => READY_RUNTIME,
+			engineScriptPath: "/fake/main.py",
+			spawn,
+		});
+
+		await expect(collectOutput((onData) => ops.exec("echo test", "/no/such/dir", { onData }))).rejects.toThrow(
+			/^Working directory does not exist: \/no\/such\/dir\nCannot execute bash commands\.$/u,
+		);
+	});
+
 	it("carries the GNU tools directory in every request frame, resolved once per session", async () => {
 		const requests: Array<{ gnuToolsDir?: string }> = [];
 		let resolutions = 0;

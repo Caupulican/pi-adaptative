@@ -639,7 +639,8 @@ describe("Coding Agent Tools", () => {
 
 		it("should prepend command prefix when configured", async () => {
 			const bashWithPrefix = bashToolFor(testDir, {
-				commandPrefix: process.platform === "win32" ? "$env:TEST_VAR = 'hello'" : "export TEST_VAR=hello",
+				// The prefix runs where the command runs: bash grammar in the Windows shell engine too.
+				commandPrefix: "export TEST_VAR=hello",
 			});
 
 			const result = await bashWithPrefix.execute("test-prefix-1", {

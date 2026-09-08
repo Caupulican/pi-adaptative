@@ -42,6 +42,14 @@ function findExecutableOnPath(executable: string): string | null {
 	return null;
 }
 
+/**
+ * The one message for a working directory that does not exist, whichever tier noticed it: the
+ * local shell backend before spawning, or the shell engine's `cwd-missing` frame on Windows.
+ */
+export function missingWorkingDirectoryMessage(cwd: string, shellName: string): string {
+	return `Working directory does not exist: ${cwd}\nCannot execute ${shellName} commands.`;
+}
+
 const GNU_TOOLS_DIR_MARKERS = ["ls", "find"] as const;
 
 /** `windowsShell.gnuToolsDir`: `"auto"` discovers Git for Windows, `"off"` disables, else a directory. */
