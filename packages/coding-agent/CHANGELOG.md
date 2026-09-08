@@ -12,6 +12,7 @@
 - The `windowsShell` settings are wired into the bash tool and the owner shell; `windowsShell.pythonEngine` previously had no effect.
 - `shellCommandPrefix` runs where the command runs: as bash grammar in the Windows shell engine (it was dropped there), and as PowerShell only when the floor runs the command.
 - A missing working directory is reported with the same message on every tier and platform.
+- The Windows shell engine returns when its direct child exits, handing over the bytes still in the output pipe, instead of waiting for a detached grandchild that inherited the pipe (a `node -e` spawning a detached process hung the bash tool for the grandchild's lifetime).
 - A caller-owned bash backend (an extension's `user_bash` operations) receives the Windows simple-command floor contract and the local engine never runs for it.
 - A redirect target that cannot be opened fails only its command with a bash-style message instead of crashing the shell engine.
 

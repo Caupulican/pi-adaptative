@@ -717,6 +717,23 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 			});
 		});
 
+		it("returns when the direct child exits even if a grandchild keeps the inherited output pipe open", () => {
+			withTmpDir((dir) => {
+				// The parent spawns a detached grandchild that inherits stdout for 6 s, prints, and exits;
+				// bash returns at the parent's exit, and so must the engine (a live Windows hang).
+				const command =
+					`${python} -c "import subprocess, sys; ` +
+					"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(6)'], stdin=subprocess.DEVNULL); " +
+					"print('parent-exiting')\"";
+				const started = Date.now();
+				const { frame, stdout } = runEngine(python, command, dir, { PATH: process.env.PATH ?? "" });
+				expect(Date.now() - started).toBeLessThan(4_000);
+				expect(frame.unsupported).toBeNull();
+				expect(frame.exitCode).toBe(0);
+				expect(stdout.replace(/\r\n/g, "\n")).toBe("parent-exiting\n");
+			});
+		}, 8_000);
+
 		it("a leading & (PowerShell's call operator) is refused with the dialect named", () => {
 			withTmpDir((dir) => {
 				const { frame } = runEngine(python, '& "C:/Program Files/Tool/tool.exe" --version', dir);

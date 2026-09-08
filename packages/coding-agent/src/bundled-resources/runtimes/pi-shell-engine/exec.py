@@ -131,6 +131,20 @@ def _apply_redirects(
     return cur_in, cur_out, cur_err
 
 
+# After the direct child has exited, a pipe bridge gets this long to hand over the bytes still
+# buffered in the pipe. A grandchild that inherited the pipe (`node -e` spawning a detached
+# process with stdio: "inherit", `start /b`, a daemon) keeps the write end open for as long
+# as it lives; bash returns when its foreground child exits, and so does the engine.
+BRIDGE_DRAIN_GRACE_SECONDS = 0.25
+
+
+class _BridgeState:
+    """Whether a bridge thread may still deliver bytes to its memory stream."""
+
+    def __init__(self) -> None:
+        self.active = True
+
+
 class _ChildStream:
     """An OS-level fd usable by a spawned child, plus optional pipe-bridge cleanup.
 
@@ -142,10 +156,17 @@ class _ChildStream:
     bytes to/from the memory stream, so external children work identically either way.
     """
 
-    def __init__(self, fd: int, owns_fd: bool, join: object | None = None) -> None:
+    def __init__(
+        self,
+        fd: int,
+        owns_fd: bool,
+        join: object | None = None,
+        state: _BridgeState | None = None,
+    ) -> None:
         self.fd = fd
         self.owns_fd = owns_fd
         self.join = join
+        self.state = state
 
 
 def _real_fd(stream: BinaryIO | int) -> int | None:
@@ -162,12 +183,18 @@ def _direct_child_stream(stream: BinaryIO | int) -> _ChildStream | None:
     return _ChildStream(fd, owns_fd=False) if fd is not None else None
 
 
-def _copy_stream(source: BinaryIO, target: BinaryIO) -> None:
+def _copy_stream(source: BinaryIO, target: BinaryIO, state: _BridgeState | None = None) -> None:
+    # `read1` hands over whatever the pipe holds right now; a buffered `read(n)` would wait for
+    # n bytes or EOF, and EOF never comes while a grandchild keeps the pipe open.
+    read = getattr(source, "read1", None) or source.read
     while True:
-        chunk = source.read(65536)
+        chunk = read(65536)
         if not chunk:
             return
-        target.write(chunk)
+        # A bridge abandoned after its child exited must never deliver a late chunk into a
+        # sink that already belongs to the next request.
+        if state is None or state.active:
+            target.write(chunk)
 
 
 def _prepare_child_stream(stream: BinaryIO | int, *, child_reads: bool) -> _ChildStream:
@@ -176,23 +203,31 @@ def _prepare_child_stream(stream: BinaryIO | int, *, child_reads: bool) -> _Chil
         return direct
     assert not isinstance(stream, int)
     read_fd, write_fd = os.pipe()
+    state = _BridgeState()
 
     if child_reads:
         def bridge() -> None:
-            with os.fdopen(write_fd, "wb", closefd=True) as writer:
-                _copy_stream(stream, writer)
+            try:
+                with os.fdopen(write_fd, "wb", closefd=True) as writer:
+                    _copy_stream(stream, writer)
+            except OSError:
+                # The child exited without reading everything: nothing left to deliver.
+                return
 
         child_fd = read_fd
     else:
         def bridge() -> None:
-            with os.fdopen(read_fd, "rb", closefd=True) as reader:
-                _copy_stream(reader, stream)
+            try:
+                with os.fdopen(read_fd, "rb", closefd=True) as reader:
+                    _copy_stream(reader, stream, state)
+            except OSError:
+                return
 
         child_fd = write_fd
 
     thread = threading.Thread(target=bridge, daemon=True)
     thread.start()
-    return _ChildStream(child_fd, owns_fd=True, join=thread.join)
+    return _ChildStream(child_fd, owns_fd=True, join=thread.join, state=state)
 
 
 def _prepare_child_output(stream: BinaryIO | int) -> _ChildStream:
@@ -262,9 +297,15 @@ def _command_scratch_state(command: nodes.SimpleCommand, ctx: ExecContext) -> Sh
 
 
 def _finish_bridges(*preps: _ChildStream) -> None:
+    """Called after the direct child has exited: hand over what the pipe still holds, then
+    stop. A bridge whose pipe stays open (a grandchild inherited it) is abandoned; its thread
+    ends on that process's own EOF and delivers nothing further."""
     for prep in preps:
-        if prep.join is not None:
-            prep.join()
+        if prep.join is None:
+            continue
+        prep.join(BRIDGE_DRAIN_GRACE_SECONDS)
+        if prep.state is not None:
+            prep.state.active = False
 
 
 def _merged_sink(ctx: ExecContext) -> BinaryIO | int:
