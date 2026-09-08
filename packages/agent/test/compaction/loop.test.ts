@@ -311,15 +311,21 @@ describe("runCompactionLoop", () => {
 		expect(outcome.cycles).toBe(2);
 	});
 
-	it("escalates to the session tier when the summarizer length-stops", async () => {
+	it("retries a length-stopped checkpoint chunked with a doubled budget on the session tier", async () => {
 		const measureLiveTokens = scriptedMeasure([1200, 1200, 100]);
 		const summarizeAndVerify = vi.fn(async (params: CompactionCycleParams) => {
 			summarizeCalls += 1;
 			if (summarizeCalls === 1) {
-				expect(params.modelTier).toBe("cheap");
+				expect(params).toMatchObject({ modelTier: "cheap", chunked: false, summaryBudgetScale: 1 });
 				throw new Error("summary-length-stop: summarizer hit its output cap before completing the checkpoint");
 			}
-			expect(params.modelTier).toBe("session");
+			// Same request again would length-stop again: the retry shrinks the input and widens the output.
+			expect(params).toMatchObject({
+				modelTier: "session",
+				chunked: true,
+				keepRecentTokens: 400,
+				summaryBudgetScale: 2,
+			});
 			return { result: createResult("session-retry") };
 		});
 

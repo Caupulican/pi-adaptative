@@ -9,7 +9,11 @@ export interface CompactionCycleParams {
 	keepRecentTokens: number;
 	chunked: boolean;
 	deterministicOnly: boolean;
+	/** Summary output budget multiplier; doubled (up to 4×) after each length-stopped checkpoint. */
+	summaryBudgetScale: number;
 }
+
+const MAX_SUMMARY_BUDGET_SCALE = 4;
 
 export interface ModelAndAuth {
 	model: Model<any>;
@@ -236,6 +240,7 @@ function selectCycleParams(
 			keepRecentTokens: Math.max(1, Math.floor((lastParams?.keepRecentTokens ?? baseKeepRecent) / 2)),
 			chunked: true,
 			deterministicOnly: true,
+			summaryBudgetScale: lastParams?.summaryBudgetScale ?? 1,
 		};
 	}
 
@@ -245,6 +250,7 @@ function selectCycleParams(
 			keepRecentTokens: Math.max(1, baseKeepRecent),
 			chunked: false,
 			deterministicOnly: false,
+			summaryBudgetScale: 1,
 		};
 	}
 
@@ -253,7 +259,15 @@ function selectCycleParams(
 		deterministicOnly: false,
 	};
 
-	if (cause === "gate-failed" || cause === "auth-failed" || cause === "length-stop") {
+	if (cause === "length-stop") {
+		// The checkpoint ran past its output cap. A larger tier may have a bigger cap (the loop keeps the
+		// old tier when it resolves to the same model), but the change that actually lands is a bigger
+		// output budget over a smaller, chunked input: same-request retries only length-stop again.
+		params.modelTier = "session";
+		params.chunked = true;
+		params.keepRecentTokens = Math.max(1, Math.floor(lastParams.keepRecentTokens / 2));
+		params.summaryBudgetScale = Math.min(MAX_SUMMARY_BUDGET_SCALE, lastParams.summaryBudgetScale * 2);
+	} else if (cause === "gate-failed" || cause === "auth-failed") {
 		params.modelTier = "session";
 	} else if (cause === "input-overflow") {
 		params.chunked = true;
@@ -310,7 +324,8 @@ function sameParams(a: CompactionCycleParams, b: CompactionCycleParams): boolean
 		a.modelTier === b.modelTier &&
 		a.keepRecentTokens === b.keepRecentTokens &&
 		a.chunked === b.chunked &&
-		a.deterministicOnly === b.deterministicOnly
+		a.deterministicOnly === b.deterministicOnly &&
+		a.summaryBudgetScale === b.summaryBudgetScale
 	);
 }
 

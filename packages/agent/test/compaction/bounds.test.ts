@@ -219,6 +219,22 @@ describe("compaction bounds", () => {
 		expect(bigBudget).toBeGreaterThanOrEqual(Math.ceil(bigFacts.length / 4) + 500);
 	});
 
+	it("scales the summary output budget with the conversation size, bounded by the reserve", async () => {
+		completeSimpleMock.mockResolvedValue(response("## Active Task\nok"));
+		await generateSummary(messages(400_000), createModel(2_000_000, 100_000), 16384, "test-key");
+		const mediumBudget = completeSimpleMock.mock.calls[0]?.[2]?.maxTokens as number;
+
+		completeSimpleMock.mockClear();
+		completeSimpleMock.mockResolvedValue(response("## Active Task\nok"));
+		await generateSummary(messages(4_000_000), createModel(20_000_000, 100_000), 16384, "test-key");
+		const hugeBudget = completeSimpleMock.mock.calls[0]?.[2]?.maxTokens as number;
+
+		// ~100k input tokens earn ~2.5k output tokens; ~1M input tokens hit the 80%-of-reserve ceiling.
+		expect(mediumBudget).toBeGreaterThan(1500);
+		expect(mediumBudget).toBeLessThan(3000);
+		expect(hugeBudget).toBe(Math.floor(0.8 * 16384));
+	});
+
 	it("clamps the base summary budget to tiny model maxTokens", async () => {
 		completeSimpleMock.mockResolvedValue(response("## Active Task\nok"));
 

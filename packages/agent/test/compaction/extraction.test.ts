@@ -731,6 +731,9 @@ describe("extractCompactionFacts", () => {
 		expect(result.summary).toContain("## Files\n- src/open.ts");
 		expect(result.summary).toContain("## Open Problems\n- TEST npm test: 1 failed: open.test.ts");
 		expect(result.summary).toContain("## Critical Context");
+		expect(result.summary).toContain(
+			"The narrative of what was tried, learned, and decided was lost: re-read files before editing them and do not assume earlier conclusions.",
+		);
 		expect(result.summary).toContain("working-set-recall (must appear in ## Working Set):\nsrc/open.ts — EDIT");
 		expect(result.summary).toContain(
 			"open-errors-recall (must appear in ## Open Problems):\nTEST npm test: 1 failed: open.test.ts",

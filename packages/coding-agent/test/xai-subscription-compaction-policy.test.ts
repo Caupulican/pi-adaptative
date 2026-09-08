@@ -36,6 +36,47 @@ function supportFor(model: Model<Api>, settingsManager: SettingsManager): Compac
 	return new CompactionSupport(deps);
 }
 
+function meteredModel(tiers: boolean): Model<"openai-completions"> {
+	return {
+		id: "grok-4.6",
+		name: "Grok 4.6",
+		api: "openai-completions",
+		provider: "github-copilot",
+		baseUrl: "https://api.individual.githubcopilot.com",
+		reasoning: true,
+		input: ["text"],
+		cost: {
+			input: 2,
+			output: 6,
+			cacheRead: 0.5,
+			cacheWrite: 0,
+			...(tiers
+				? { tiers: [{ inputTokensAbove: 200_000, input: 4, output: 12, cacheRead: 1, cacheWrite: 0 }] }
+				: {}),
+		},
+		contextWindow: 500_000,
+		maxTokens: 128_000,
+	};
+}
+
+describe("tier-aware compaction trigger", () => {
+	it("compacts a metered model before its price tier boundary instead of at the default fraction", () => {
+		const support = supportFor(meteredModel(true), SettingsManager.inMemory());
+		expect(support.getAdaptedSettings().triggerPercent).toBe(0.4);
+	});
+
+	it("keeps the default fraction without tiers and honors an explicit owner setting over a tier", () => {
+		expect(supportFor(meteredModel(false), SettingsManager.inMemory()).getAdaptedSettings().triggerPercent).toBe(0.6);
+		const explicit = SettingsManager.inMemory({ compaction: { triggerPercent: 0.7 } });
+		expect(supportFor(meteredModel(true), explicit).getAdaptedSettings().triggerPercent).toBe(0.7);
+	});
+
+	it("leaves the xAI subscription session-replacement policy on the CLI's own fraction", () => {
+		const subscription = { ...xaiModel(true), cost: meteredModel(true).cost };
+		expect(supportFor(subscription, SettingsManager.inMemory()).getAdaptedSettings().triggerPercent).toBe(0.8);
+	});
+});
+
 describe("xAI subscription compaction policy", () => {
 	it("uses the installed CLI's 80% session-replacement policy", () => {
 		const subscriptionModel = xaiModel(true);

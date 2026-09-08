@@ -395,11 +395,17 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				});
 				if (event.reason === "manual") host.showError("Compaction cancelled");
 			} else if (event.result) {
-				host.activityLane?.finish("runtime:compaction", "success", {
+				const fallback = event.result.deterministic;
+				host.activityLane?.finish("runtime:compaction", fallback ? "neutral" : "success", {
 					id: "runtime:compaction",
 					kind: "runtime",
-					label: "Context compacted",
+					label: fallback ? `Context compacted (fallback: ${fallback.cause})` : "Context compacted",
 				});
+				if (fallback) {
+					host.showError(
+						`Compaction fell back to a deterministic checkpoint (${fallback.cause}): the narrative summary was lost; only files and task facts were kept.`,
+					);
+				}
 				await host.rebuildChatFromMessages();
 				host.addMessageToChat(
 					createCompactionSummaryMessage(

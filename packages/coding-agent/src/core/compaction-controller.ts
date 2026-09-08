@@ -242,8 +242,9 @@ export class CompactionController {
 		compactionModel: Model<Api>,
 		sessionModel: Model<Api>,
 		chunked: boolean,
+		summaryBudgetScale = 1,
 	): CompactionExecutionOptions {
-		const options: CompactionExecutionOptions = { chunked };
+		const options: CompactionExecutionOptions = { chunked, summaryBudgetScale };
 		const reusesSessionLane =
 			settings.strategy === "session-replacement" &&
 			compactionModel.provider === sessionModel.provider &&
@@ -585,7 +586,14 @@ export class CompactionController {
 							compactionThinkingLevel,
 							this.deps.agent.streamFn,
 							this.deps.buildPreDigest(),
-							this.buildExecutionOptions(preparation, settings, model, sessionModel, params.chunked),
+							this.buildExecutionOptions(
+								preparation,
+								settings,
+								model,
+								sessionModel,
+								params.chunked,
+								params.summaryBudgetScale,
+							),
 						),
 					signal,
 					model.provider,
@@ -629,6 +637,7 @@ export class CompactionController {
 			appliedResult.deterministic ? "fallback" : "success",
 			appliedResult.deterministic?.cause,
 		);
+		if (appliedResult.deterministic) this.emitDeterministicFallbackWarning(appliedResult.deterministic.cause);
 		this.deps.emit({
 			type: "compaction_end",
 			reason: "manual",
@@ -637,6 +646,18 @@ export class CompactionController {
 			willRetry: false,
 		});
 		return appliedResult;
+	}
+
+	/**
+	 * A facts-only checkpoint silently replaced the narrative the model was working from. The
+	 * session record already says `fallback`; the owner and the log must hear it too, because the
+	 * next turns will re-read and re-derive everything the lost summary carried.
+	 */
+	private emitDeterministicFallbackWarning(cause: string): void {
+		this.deps.emit({
+			type: "warning",
+			message: `Compaction fell back to a deterministic checkpoint (${cause}): the narrative summary was lost and only files and task facts were kept. The model will re-read what it needs; expect slower turns until it recovers context.`,
+		});
 	}
 
 	async check(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
@@ -913,7 +934,14 @@ export class CompactionController {
 								compactionThinkingLevel,
 								this.deps.agent.streamFn,
 								this.deps.buildPreDigest(),
-								this.buildExecutionOptions(preparation, settings, compactModel, model, params.chunked),
+								this.buildExecutionOptions(
+									preparation,
+									settings,
+									compactModel,
+									model,
+									params.chunked,
+									params.summaryBudgetScale,
+								),
 							),
 						signal,
 						compactModel.provider,
@@ -983,6 +1011,7 @@ export class CompactionController {
 				if (reason === "provider_recovery") this.appendProviderRecoveryContinuation();
 			}
 			this.finishCompactionLifecycle(result.deterministic ? "fallback" : "success", result.deterministic?.cause);
+			if (result.deterministic) this.emitDeterministicFallbackWarning(result.deterministic.cause);
 			this.deps.emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 			if (willRetry) return true;
 			return hadQueuedMessages || this.deps.agent.hasQueuedMessages();

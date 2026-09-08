@@ -189,6 +189,11 @@ export interface StructuredCompactionRequest {
 
 export interface CompactionExecutionOptions {
 	chunked?: boolean;
+	/**
+	 * Multiplier on the summary output budget, raised by the retry ladder after a length-stopped
+	 * checkpoint. Bounded inside {@link getSummaryBudget}; 1 means the computed budget as is.
+	 */
+	summaryBudgetScale?: number;
 	completion?: CompactionCompletion;
 	structuredRequest?: StructuredCompactionRequest;
 }
@@ -927,9 +932,14 @@ export async function generateSummaryWithUsage(
 	precomputedConversationText?: string,
 	completion?: CompactionCompletion,
 	structuredRequest?: StructuredCompactionRequest,
+	summaryBudgetScale = 1,
 ): Promise<{ text: string; usage: Usage }> {
 	const usage = createEmptyUsage();
-	const summaryBudget = getSummaryBudget(reserveTokens, model, factsBlock);
+	const inputTokens =
+		precomputedConversationText !== undefined
+			? estimateStringTokens(precomputedConversationText)
+			: currentMessages.reduce((total, message) => total + estimateTokens(message), 0);
+	const summaryBudget = getSummaryBudget(reserveTokens, model, factsBlock, inputTokens, summaryBudgetScale);
 	const maxTokens = summaryBudget;
 
 	let promptSuffix = fillPromptTemplate(
@@ -1021,21 +1031,40 @@ export const SUMMARY_BUDGET_MAX_TOKENS = 4_000;
 /** Prompt-side margin beyond raw conversation input (system prompt, labels, instructions). */
 const SUMMARIZER_PROMPT_MARGIN_TOKENS = 2_000;
 
-function getSummaryBudget(reserveTokens: number, model: Model<any>, factsBlock?: string): number {
+/**
+ * Output tokens the summary may spend per input token. A 375k-token conversation summarized into
+ * the 1,500-token base budget length-stopped every cycle live; giving the narrative room that grows
+ * with what it has to cover (bounded by the reserve) is what lets a long session keep its summary.
+ */
+const SUMMARY_BUDGET_INPUT_DIVISOR = 40;
+
+function getSummaryBudget(
+	reserveTokens: number,
+	model: Model<any>,
+	factsBlock?: string,
+	inputTokens = 0,
+	scale = 1,
+): number {
 	const modelMaxTokens = model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY;
 	// Verification demand is bounded at extraction time, so the summary budget can be derived from
 	// the actual gate demand instead of a blind hard cap. If the demanded facts cannot fit inside the
 	// caller's reserve budget, deterministic compaction is the only honest path.
 	const factsTokens = factsBlock ? estimateStringTokens(factsBlock) : 0;
 	const gateDemandBudget = factsTokens + 500;
-	const demandBudget = Math.max(SUMMARY_BUDGET_BASE_TOKENS, gateDemandBudget);
 	const reserveBudget = Math.floor(0.8 * reserveTokens);
 	if (factsTokens > reserveBudget || gateDemandBudget > modelMaxTokens) {
 		throw new Error(
 			`summary-demand-exceeds-reserve: required ${factsTokens} fact tokens, reserve budget ${reserveBudget}, model max ${modelMaxTokens}`,
 		);
 	}
-	return Math.max(1, Math.min(demandBudget, modelMaxTokens));
+	const sizeDemandBudget = Math.floor(Math.max(0, inputTokens) / SUMMARY_BUDGET_INPUT_DIVISOR);
+	const boundedScale = Number.isFinite(scale) && scale >= 1 ? scale : 1;
+	const demandBudget = Math.floor(
+		Math.max(SUMMARY_BUDGET_BASE_TOKENS, gateDemandBudget, sizeDemandBudget) * boundedScale,
+	);
+	// Never below what the gate demands, never above the reserve unless the gate itself needs more.
+	const ceiling = Math.max(reserveBudget, gateDemandBudget);
+	return Math.max(1, Math.min(demandBudget, ceiling, modelMaxTokens));
 }
 
 function getEffectiveContextWindow(model: Model<any>): number {
@@ -1424,6 +1453,7 @@ async function generateVerifiedSummary(options: {
 	facts: CompactionFacts;
 	factsBlock: string;
 	chunked: boolean;
+	summaryBudgetScale: number;
 }): Promise<VerifiedSummaryResult> {
 	let retryInstructions = options.customInstructions;
 	const usage = createEmptyUsage();
@@ -1450,6 +1480,7 @@ async function generateVerifiedSummary(options: {
 			precomputedConversationText,
 			options.completion,
 			options.structuredRequest,
+			options.summaryBudgetScale,
 		);
 		addUsage(usage, generated.usage);
 		const summary = generated.text;
@@ -1540,6 +1571,7 @@ export async function compact(
 		facts,
 		factsBlock,
 		chunked: executionOptions?.chunked ?? false,
+		summaryBudgetScale: executionOptions?.summaryBudgetScale ?? 1,
 	});
 
 	let summary = verified.summary;
@@ -1644,7 +1676,7 @@ export function createDeterministicCompaction(preparation: CompactionPreparation
 		"Preserve exact file paths, commands, line numbers, and error strings.",
 		"",
 		"## Critical Context",
-		"- Deterministic facts-only checkpoint; no LLM summary was accepted.",
+		"- Deterministic facts-only checkpoint; no LLM summary was accepted. The narrative of what was tried, learned, and decided was lost: re-read files before editing them and do not assume earlier conclusions.",
 		...delegatedWorkerLines,
 		factsText,
 	].join("\n");

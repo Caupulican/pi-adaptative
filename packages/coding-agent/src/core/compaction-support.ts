@@ -18,6 +18,28 @@ import type { SettingsManager } from "./settings-manager.ts";
 
 const XAI_SUBSCRIPTION_COMPACTION_TRIGGER_PERCENT = 0.8;
 
+/**
+ * A metered model whose price steps up above an input-token boundary (grok-4.6 doubles input and
+ * cache-read rates above 200k) should compact before crossing it: every turn past the boundary pays
+ * the higher rate on the whole prompt. Only the default fraction is lowered; an explicit owner
+ * setting and the xAI subscription's session-replacement policy keep their own values.
+ */
+function tierAwareCompactionTriggerPercent(
+	model: Model<Api>,
+	contextWindow: number,
+	triggerPercent: number | undefined,
+	settingsManager: SettingsManager,
+): number | undefined {
+	if (settingsManager.hasExplicitCompactionTriggerPercent()) return undefined;
+	if (triggerPercent === undefined || triggerPercent <= 0 || triggerPercent >= 1) return undefined;
+	const boundary = (model.cost?.tiers ?? [])
+		.map((tier) => tier.inputTokensAbove)
+		.filter((tokens) => Number.isFinite(tokens) && tokens > 0)
+		.sort((left, right) => left - right)[0];
+	if (boundary === undefined || boundary >= contextWindow * triggerPercent) return undefined;
+	return boundary / contextWindow;
+}
+
 function usesXaiSubscriptionSessionReplacement(model: Model<Api>): boolean {
 	if (model.provider !== "xai" || model.api !== "openai-responses") return false;
 	return model.compat !== undefined && "requestFormat" in model.compat && model.compat.requestFormat === "xai-cli";
@@ -73,11 +95,15 @@ export class CompactionSupport {
 		const maxKeepRecent = Math.floor(contextWindow * 0.5);
 		const keepRecentTokens = Math.min(settings.keepRecentTokens, maxKeepRecent);
 		const sessionReplacement = usesXaiSubscriptionSessionReplacement(model);
+		const tierAwareTriggerPercent = sessionReplacement
+			? undefined
+			: tierAwareCompactionTriggerPercent(model, contextWindow, settings.triggerPercent, settingsManager);
 
 		return {
 			...settings,
 			reserveTokens,
 			keepRecentTokens,
+			...(tierAwareTriggerPercent !== undefined ? { triggerPercent: tierAwareTriggerPercent } : {}),
 			...(sessionReplacement
 				? {
 						strategy: "session-replacement" as const,

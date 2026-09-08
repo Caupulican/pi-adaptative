@@ -534,6 +534,10 @@ describe("CompactionController auto-compaction re-entry", () => {
 		expect(terminalEvent).not.toHaveProperty("errorMessage");
 		expect(events.filter((event) => event.type === "warning")).toEqual([
 			expect.objectContaining({ message: expect.stringContaining("cycle 2: effect-not-restored") }),
+			// The deterministic checkpoint replaced the narrative: the owner hears it, not only the ledger.
+			expect.objectContaining({
+				message: expect.stringContaining("fell back to a deterministic checkpoint (effect-not-restored)"),
+			}),
 		]);
 		const lifecycleRecords = [...sessionManager.getSessionLifecycleIndex().compactionsById.values()];
 		expect(lifecycleRecords).toHaveLength(1);
