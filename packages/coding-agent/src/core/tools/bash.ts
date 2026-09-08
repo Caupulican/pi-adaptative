@@ -62,7 +62,7 @@ import {
 	expectedContentSearchNoMatch,
 } from "./search-command-guard.ts";
 import { tokenizeShellCommand } from "./shell-command-parser.ts";
-import { routeShellContract } from "./shell-contract-router.ts";
+import { routeShellContract, type ShellContractRoute } from "./shell-contract-router.ts";
 import "./output-reducers.ts";
 import { getAgentDir } from "../../config.ts";
 import { BUNDLED_OUTPUT_RULES } from "./output-rules.bundled.ts";
@@ -77,7 +77,11 @@ import { acquirePersistentShellSession } from "./shell-session.ts";
 import { classifyShellVerificationCommand } from "./shell-test-command.ts";
 import { TestVerificationOutput } from "./test-verification-output.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { createWindowsShellEngineOperations, type WindowsShellEngineOptions } from "./windows-shell-engine.ts";
+import {
+	createWindowsShellEngineOperations,
+	type WindowsShellEngineOptions,
+	WindowsShellEngineUnavailableError,
+} from "./windows-shell-engine.ts";
 import { getOrCreateWindowsShellState, mergeEffectiveEnv, resolveEffectiveCwd } from "./windows-shell-state.ts";
 
 /** Low-level silence bound retained for direct shell-operation consumers. Agent tool calls always pass a wall-clock bound. */
@@ -292,6 +296,26 @@ export function createLocalPowerShellOperations(options?: { shellPath?: string; 
 }
 
 /** Create the platform shell backend without requiring callers or the model to choose a shell. */
+/**
+ * The engine could not run this call. When the runtime is unavailable, a command the simple-command
+ * PowerShell floor can express runs there; a command that needs the engine fails with the runtime
+ * outage AND the floor's own named refusal, so the reader knows both what broke and what would work.
+ * Any other engine error is the command's real outcome and is rethrown untouched.
+ */
+function floorRouteAfterEngineOutage(
+	command: string,
+	platform: NodeJS.Platform,
+	error: unknown,
+): Extract<ShellContractRoute, { kind: "powershell" }> {
+	if (!(error instanceof WindowsShellEngineUnavailableError)) throw error;
+	const floor = routeShellContract(command, platform, { pythonEngine: false });
+	if (floor.kind !== "powershell") {
+		const refusal = floor.kind === "unsupported" ? floor.error : `The floor does not route ${floor.kind} commands.`;
+		throw new Error(`${error.message} This command needs the engine: ${refusal}`);
+	}
+	return floor;
+}
+
 export function createLocalPlatformShellOperations(
 	options: {
 		shellPath?: string;
@@ -322,19 +346,23 @@ export function createLocalPlatformShellOperations(
 			let resolvedCwd = cwd;
 			let resolvedExecOptions = execOptions;
 			if (platform === "win32") {
-				const route = routeShellContract(command, platform, { pythonEngine: pythonEngineEnabled });
+				let route = routeShellContract(command, platform, { pythonEngine: pythonEngineEnabled });
 				if (route.kind === "unsupported") throw new Error(route.error);
-				// The engine is the sole state mutator (D4); every Windows call — engine or PS
-				// tier — reads the SAME session state so a `cd`/`export` in one call is observed
-				// by the very next call regardless of which tier runs it.
+				// The engine is the sole state mutator (D4); the floor (engine off, or the engine's
+				// runtime unavailable) reads the SAME session state so a `cd`/`export` the engine
+				// made is observed by the very next floor call.
 				const state = getOrCreateWindowsShellState(engineSessionKey);
 				resolvedCwd = resolveEffectiveCwd(state, cwd, execOptions.forceCwd);
 				resolvedExecOptions = { ...execOptions, env: mergeEffectiveEnv(state, execOptions.env ?? getShellEnv()) };
 				if (route.kind === "python-engine") {
-					// The engine owns the state transition and resolves the original host cwd
-					// exactly once. Passing the already state-adjusted cwd here would make the
-					// engine mistake its own `cd` result for a host cwd change on the next call.
-					return engineOperations.exec(route.command, cwd, execOptions);
+					try {
+						// The engine owns the state transition and resolves the original host cwd
+						// exactly once. Passing the already state-adjusted cwd here would make the
+						// engine mistake its own `cd` result for a host cwd change on the next call.
+						return await engineOperations.exec(route.command, cwd, execOptions);
+					} catch (error) {
+						route = floorRouteAfterEngineOutage(command, platform, error);
+					}
 				}
 				if (route.kind === "powershell") resolvedCommand = route.command;
 			}
@@ -697,7 +725,7 @@ function createShellToolDefinition(
 	const contractDescription = options?.forceCwd
 		? "Execute a command in a persistent shell with a host-pinned working directory. Each invocation starts in the pinned directory; cd inside a command remains available and exported variables persist across calls."
 		: routesWindowsContract
-			? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (starts at the project working directory; current directory and environment variables persist across calls, including across the PowerShell and Python engine tiers; a failed command reports its effective cwd on a final `cwd:` line). On Windows, a deterministic router converts simple commands directly to PowerShell and routes word-list and arithmetic for loops, break/continue, portable builtins such as printf, pipelines, redirection, expansion, chaining, and state-mutating commands (cd/export/unset) through a bundled Python engine that implements the supported Bash grammar; named unsupported constructs (job control, process substitution, heredocs, nested shells, and similar) fail closed instead of being guessed."
+			? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (starts at the project working directory; current directory and environment variables persist across calls; a failed command reports its effective cwd on a final `cwd:` line). On Windows, every command runs through a bundled shell engine that implements the supported Bash grammar (loops, conditionals, functions, pipelines, redirection, expansion, chaining, cd/export/unset) and runs the real GNU coreutils/findutils/grep/sed/awk from Git for Windows when present, so Linux command habits work unchanged; named unsupported constructs (job control, process substitution, and similar) fail closed instead of being guessed."
 			: "Execute a Bash command in a persistent per-agent shell session that starts at the project working directory: `cd` and environment variables persist across calls, a failed command reports its effective cwd on a final `cwd:` line, and a timed-out or aborted command resets the session.";
 	return {
 		name: toolName,
@@ -708,9 +736,8 @@ function createShellToolDefinition(
 			: "Execute Bash commands (ls, grep, find, etc.)",
 		promptGuidelines: routesWindowsContract
 			? [
-					"On Windows, use Bash-like commands; never write PowerShell/ask owner to choose shell.",
-					"Supports for, break/continue, printf, pipes/redirection, expansions, chaining; unhandled syntax fails closed.",
-					"cd/export/unset state persists across bash calls and PowerShell/Python tiers.",
+					"On Windows, write ordinary Linux bash (GNU ls/find/grep/sed/awk flags, loops, functions, pipes); never write PowerShell or ask the owner to choose a shell.",
+					"Unhandled syntax fails closed by name; cd/export/unset state persists across bash calls.",
 					"File commands use literal paths; verify targets before recursive rm/cp/mv.",
 					`Bash timeout values are seconds; omit to use the ${DEFAULT_COMMAND_TIMEOUT_SECONDS}s default.`,
 					`Search narrowly: root/filters, prefer grep/find. A broad scan runs with its output routed to a managed file (as with broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}"); inspect it narrowly.`,
@@ -1013,46 +1040,61 @@ function createShellToolDefinition(
 					if (route.kind === "unsupported") throw new Error(route.error);
 					if (route.kind === "python-engine") engineRoute = true;
 					backendCommand = route.command;
-					// The engine is the sole state mutator (D4); every Windows call — engine or PS
-					// tier — reads the SAME session state so a `cd`/`export` in one call is observed
-					// by the very next call regardless of which tier runs it.
+					// The engine is the sole state mutator (D4); the floor (engine off, or the engine's
+					// runtime unavailable) reads the SAME session state so a `cd`/`export` the engine
+					// made is observed by the very next floor call.
 					effectiveCwd = resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd, options?.forceCwd);
 				}
-				// The engine executes the RAW Bash source unchanged: an arbitrary PowerShell
-				// commandPrefix would not parse as Bash grammar.
-				const resolvedCommand = engineRoute
-					? backendCommand
-					: commandPrefix
-						? `${commandPrefix}\n${backendCommand}`
-						: backendCommand;
-				const spawnContext = resolveSpawnContext(
-					resolvedCommand,
-					effectiveCwd,
-					spawnHook,
-					options?.getShellSessionContext,
-				);
-				if (routesWindowsContract) {
-					spawnContext.env = mergeEffectiveEnv(getOrCreateWindowsShellState(sessionKey), spawnContext.env);
-				}
-				if (options?.operations === undefined) {
-					spawnContext.env = await prepareManagedShellEnvironment(
-						spawnContext.command,
-						spawnContext.env,
-						options?.managedToolResolver,
+				const prepareSpawn = async (backend: string, engine: boolean) => {
+					// The engine executes the RAW Bash source unchanged: an arbitrary PowerShell
+					// commandPrefix would not parse as Bash grammar.
+					const resolvedCommand = engine ? backend : commandPrefix ? `${commandPrefix}\n${backend}` : backend;
+					const spawnContext = resolveSpawnContext(
+						resolvedCommand,
+						effectiveCwd,
+						spawnHook,
+						options?.getShellSessionContext,
 					);
-				}
+					if (routesWindowsContract) {
+						spawnContext.env = mergeEffectiveEnv(getOrCreateWindowsShellState(sessionKey), spawnContext.env);
+					}
+					if (options?.operations === undefined) {
+						spawnContext.env = await prepareManagedShellEnvironment(
+							spawnContext.command,
+							spawnContext.env,
+							options?.managedToolResolver,
+						);
+					}
+					return { resolvedCommand, spawnContext };
+				};
+				let prepared = await prepareSpawn(backendCommand, engineRoute);
+				const execute = (engine: boolean, target: typeof prepared) =>
+					(engine && engineOperations ? engineOperations : ops).exec(
+						target.spawnContext.command,
+						target.spawnContext.cwd,
+						{
+							onData,
+							signal,
+							timeout: effectiveTimeoutSeconds,
+							env: target.spawnContext.env,
+							forceCwd: options?.forceCwd,
+						},
+					);
 				// Shell commands cannot statically declare which files they mutate, so the
 				// actual execution takes the coarse exclusive barrier: it waits for
 				// in-flight edit/write mutations to drain and blocks new ones meanwhile.
-				const result = await withExclusiveMutationBarrier(() =>
-					(engineRoute && engineOperations ? engineOperations : ops).exec(spawnContext.command, spawnContext.cwd, {
-						onData,
-						signal,
-						timeout: effectiveTimeoutSeconds,
-						env: spawnContext.env,
-						forceCwd: options?.forceCwd,
-					}),
-				);
+				const result = await withExclusiveMutationBarrier(async () => {
+					if (!engineRoute) return execute(false, prepared);
+					try {
+						return await execute(true, prepared);
+					} catch (error) {
+						const floor = floorRouteAfterEngineOutage(source, contractPlatform, error);
+						engineRoute = false;
+						prepared = await prepareSpawn(floor.command, false);
+						return execute(false, prepared);
+					}
+				});
+				const { resolvedCommand, spawnContext } = prepared;
 				if (!routesWindowsContract && result.cwd) lastSessionCwd = result.cwd;
 				return {
 					exitCode: result.exitCode,

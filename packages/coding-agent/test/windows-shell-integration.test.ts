@@ -7,12 +7,12 @@ import { createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 
 /**
- * Cross-tier integration (WP-F §3): drives the REAL `bash` tool created by
- * `createBashToolDefinition` with the engine enabled, asserting the engine tier executes complex
- * Bash-like commands, `cd`/`export` state carries to the next call regardless of which tier runs
- * it, a named refusal surfaces for an unsupported construct, and the PS floor keeps working with a
- * named degradation error when the Python runtime is forced unavailable. win32 only — the router's
- * `python-engine` route and the PowerShell floor only exist on that platform.
+ * Integration (WP-F §3): drives the REAL `bash` tool created by `createBashToolDefinition` with the
+ * engine enabled, asserting the one engine executes simple and complex Bash-like commands alike,
+ * `cd`/`export` state carries to the next call, a named refusal surfaces for an unsupported
+ * construct, and the PS floor takes over with a named degradation error when the Python runtime is
+ * forced unavailable. win32 only — the router's `python-engine` route and the PowerShell floor only
+ * exist on that platform.
  */
 describe("windows shell cross-tier integration (bash tool + python engine on win32)", () => {
 	if (process.platform !== "win32") {
@@ -47,20 +47,18 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 		}
 	});
 
-	it("(b) cd in the engine tier -> a subsequent simple PS-tier command observes the new cwd", async () => {
+	it("(b) cd -> a subsequent pwd observes the new cwd", async () => {
 		const sessionKey = freshSessionKey("cd-state");
 		const sub = mkdtempSync(join(tmpdir(), "pi-win-shell-cd-"));
 		try {
 			const tool = createBashToolDefinition(process.cwd(), { sessionKey });
 			await tool.execute("call-b1", { command: `cd ${sub}` }, undefined, undefined, undefined as never);
-			// `pwd` alone routes through the PS floor (routeBuiltIn), not the engine.
 			const result = await tool.execute("call-b2", { command: "pwd" }, undefined, undefined, undefined as never);
 			const content = result.content[0];
 			if (content?.type !== "text") throw new Error("expected text output");
 			// Canonicalize both sides through the native realpath resolver: `mkdtempSync`
-			// returns a long-form path, but the PS floor's `pwd` may echo back an 8.3 short
-			// name (e.g. "runner~1") for the SAME directory — same identity, different
-			// spelling. `realpathSync.native` resolves both to one canonical form.
+			// returns a long-form path, but `pwd` may echo back an 8.3 short name (e.g.
+			// "runner~1") for the SAME directory — same identity, different spelling.
 			expect(realpathSync.native(content.text.trim()).toLowerCase()).toBe(realpathSync.native(sub).toLowerCase());
 		} finally {
 			await disposeShellExecutionSessionAndWait(sessionKey);
@@ -206,7 +204,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 				},
 			});
 
-			// Simple command: routes to the PS floor (`echo` is a routed builtin), never touches the engine.
+			// Simple command: the engine cannot start, so the floor runs it (`echo` is a routed builtin).
 			const simple = await tool.execute(
 				"call-e1",
 				{ command: "echo still-works" },
@@ -218,7 +216,8 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 			if (simpleContent?.type !== "text") throw new Error("expected text output");
 			expect(simpleContent.text.trim()).toBe("still-works");
 
-			// Complex command: routes to python-engine, which throws the named degradation error.
+			// Complex command: the floor cannot express it, so the named degradation error surfaces
+			// together with the floor's own refusal.
 			await expect(
 				tool.execute(
 					"call-e2",
@@ -227,7 +226,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 					undefined,
 					undefined as never,
 				),
-			).rejects.toThrow(/Windows shell engine \(Python\) is unavailable/);
+			).rejects.toThrow(/Windows shell engine \(Python\) is unavailable.*This command needs the engine/su);
 		} finally {
 			await disposeShellExecutionSessionAndWait(sessionKey);
 		}
@@ -272,7 +271,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 		}
 	});
 
-	it.skipIf(!hasRipgrep)("(g) invokes native rg.exe through both the simple and combined routes", async () => {
+	it.skipIf(!hasRipgrep)("(g) invokes native rg.exe as a simple command and inside a pipeline", async () => {
 		const sessionKey = freshSessionKey("native-ripgrep");
 		const root = mkdtempSync(join(tmpdir(), "pi-win-shell-rg-"));
 		const sourcePath = join(root, "Project 7 (Release).txt");
@@ -329,8 +328,8 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 		}
 	});
 
-	it("(h) retains one PowerShell process across 20 routed empty searches", async () => {
-		const sessionKey = freshSessionKey("powershell-process-lifetime");
+	it("(h) retains one engine coordinator across 20 empty searches", async () => {
+		const sessionKey = freshSessionKey("engine-process-lifetime");
 		const root = mkdtempSync(join(tmpdir(), "pi-win-shell-lifetime-"));
 		const sourcePath = join(root, "source.txt");
 		writeFileSync(sourcePath, "needle\n", "utf8");
@@ -372,7 +371,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 					undefined,
 					undefined as never,
 				),
-			).rejects.toThrow("Command exited with code 1");
+			).rejects.toThrow("Command exited with code 127");
 		} finally {
 			await disposeShellExecutionSessionAndWait(sessionKey);
 			rmSync(root, { recursive: true, force: true });

@@ -170,12 +170,27 @@ export interface WindowsShellEngineOptions {
 	resolveGnuToolsDir?: () => string | null;
 }
 
+/**
+ * The engine's Python runtime could not be resolved (uv/network/python). The bash tool catches
+ * this one error class to run the call on the degraded PowerShell floor when the floor can, and
+ * reports it verbatim when the command needs the engine; nothing else is ever retried elsewhere.
+ */
+export class WindowsShellEngineUnavailableError extends Error {
+	readonly reason: string;
+
+	constructor(reason: string) {
+		super(
+			`The Windows shell engine (Python) is unavailable: ${reason} The simple-command PowerShell floor still works; fix the Python runtime (uv/network) to restore for loops, portable builtins such as printf, pipelines, redirection, expansion, and chaining.`,
+		);
+		this.name = "WindowsShellEngineUnavailableError";
+		this.reason = reason;
+	}
+}
+
 function degradationError(
 	outcome: Extract<PythonRuntimeOutcome, { status: "offline" | "uv-unavailable" | "python-unavailable" }>,
 ): Error {
-	return new Error(
-		`The Windows shell engine (Python) is unavailable: ${outcome.reason} The simple-command PowerShell floor still works; fix the Python runtime (uv/network) to restore for loops, portable builtins such as printf, pipelines, redirection, expansion, and chaining.`,
-	);
+	return new WindowsShellEngineUnavailableError(outcome.reason);
 }
 
 class PersistentWindowsShellEngineSession {

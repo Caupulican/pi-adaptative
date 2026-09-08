@@ -342,20 +342,37 @@ const ROUTED_BUILTIN_NAMES = new Set([
 	"touch",
 ]);
 
+/**
+ * Classify one bash-tool call on Windows.
+ *
+ * With the engine enabled (the default) there is ONE executor: every non-empty command goes to the
+ * Python shell engine, which parses the full supported grammar, dispatches coreutils names to the
+ * real GNU binaries when the host has them, and spawns everything else as an external process. The
+ * PowerShell floor below only exists for `windowsShell.pythonEngine: false` and for the moment the
+ * engine's runtime is unavailable; splitting simple commands to PowerShell and everything else to
+ * Python gave two partial reimplementations with two flag matrices, and every live Windows outage
+ * came from the seam between them.
+ */
 export function routeShellContract(
 	command: string,
 	platform: NodeJS.Platform = process.platform,
 	options?: { pythonEngine?: boolean },
 ): ShellContractRoute {
 	if (platform !== "win32") return { kind: "passthrough", command };
-	const pythonEngine = options?.pythonEngine === true;
+	if (options?.pythonEngine === true) {
+		if (command.trim() === "") return { kind: "unsupported", error: "Shell command is empty." };
+		return { kind: "python-engine", command };
+	}
+	return routeOnPowerShellFloor(command);
+}
+
+/** The degraded, simple-command-only tier: a bounded set of builtin conversions or a quoted external argv. */
+function routeOnPowerShellFloor(command: string): ShellContractRoute {
 	const tokenized = tokenizePortableCommand(command);
 
 	// Complex constructs (pipelines, redirection, expansion, quoting the tokenizer refuses, …) are
-	// exactly the grammar the Python engine owns; with the engine off this is the original
-	// fail-closed floor verbatim.
+	// exactly the grammar the Python engine owns; the floor fails closed by name.
 	if (!tokenized.ok || !tokenized.argv) {
-		if (pythonEngine) return { kind: "python-engine", command };
 		return { kind: "unsupported", error: tokenized.error ?? UNSUPPORTED_OPERATOR_MESSAGE };
 	}
 
@@ -364,29 +381,23 @@ export function routeShellContract(
 	const argv = translatePosixDrivePaths(tokenized.argv);
 	const commandName = argv[0].toLowerCase();
 
-	// Inline env assignments (`NAME=value [cmd]`) are a state-mutating/expansion form the engine
-	// supports (§2.1); with the engine off this is the original fail-closed floor verbatim.
+	// Inline env assignments (`NAME=value [cmd]`) are a state-mutating/expansion form only the
+	// engine supports (§2.1).
 	if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(argv[0])) {
-		if (pythonEngine) return { kind: "python-engine", command };
 		return {
 			kind: "unsupported",
 			error: "Inline environment assignments are not supported. Configure the environment outside the shell command.",
 		};
 	}
 
-	// State mutators and controlled exit route to the engine unconditionally when enabled: the
-	// engine is the sole state owner and must frame `exit` instead of terminating the PS backend.
-	if (ENGINE_OWNED_BUILTINS.has(commandName)) {
-		if (pythonEngine) return { kind: "python-engine", command };
-		if (commandName === "exit") {
-			return {
-				kind: "unsupported",
-				error: "The Bash-like 'exit' builtin requires the Windows Python shell engine so Pi can preserve its terminal result protocol.",
-			};
-		}
+	// The engine is the sole state owner and must frame `exit` instead of terminating the PS backend.
+	if (ENGINE_OWNED_BUILTINS.has(commandName) && commandName === "exit") {
+		return {
+			kind: "unsupported",
+			error: "The Bash-like 'exit' builtin requires the Windows Python shell engine so Pi can preserve its terminal result protocol.",
+		};
 	}
 	if (ENGINE_ONLY_BUILTINS.has(commandName)) {
-		if (pythonEngine) return { kind: "python-engine", command };
 		return {
 			kind: "unsupported",
 			error: `The Bash-like '${argv[0]}' builtin requires the Windows Python shell engine. Enable windowsShell.pythonEngine to use it portably.`,
@@ -396,7 +407,6 @@ export function routeShellContract(
 	if (BLOCKED_NESTED_SHELLS.has(commandName)) {
 		// The Python engine spawns a nested shell as an ordinary external process; only the
 		// PowerShell-only floor has to refuse it.
-		if (pythonEngine) return { kind: "python-engine", command };
 		const powershellGuidance = ["powershell", "powershell.exe", "pwsh", "pwsh.exe"].includes(commandName)
 			? " Invoke the .ps1 path directly with its arguments, without powershell.exe -File or pwsh -File."
 			: " Invoke the target executable or supported script directly.";
@@ -410,14 +420,15 @@ export function routeShellContract(
 	if (ROUTED_BUILTIN_NAMES.has(commandName)) {
 		// The PS floor rejected the FORM (flags/argument shape); the engine supports the fuller
 		// flag set for the same builtin (§2.2).
-		if (pythonEngine) return { kind: "python-engine", command };
 		return {
 			kind: "unsupported",
 			error: `Unsupported ${argv[0]} form on Windows. Use a simpler Bash-like form or Pi's dedicated read/search/edit tools.`,
 		};
 	}
-	if (commandName.endsWith(".sh") || commandName.includes("/bin/")) {
-		if (pythonEngine) return { kind: "python-engine", command };
+	// A POSIX script target (`./build.sh`, `/usr/bin/env`, `/bin/sh`): a Windows path that merely
+	// contains a `bin` folder (`C:/Program Files/Git/bin/git.exe`, drive roots already translated
+	// above) is an ordinary external program.
+	if (commandName.endsWith(".sh") || (commandName.startsWith("/") && commandName.includes("/bin/"))) {
 		return {
 			kind: "unsupported",
 			error: "POSIX shell scripts are not supported by the Windows shell contract router.",

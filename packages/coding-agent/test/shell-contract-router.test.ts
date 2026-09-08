@@ -17,16 +17,15 @@ describe("stable Bash-like shell contract router", () => {
 		// Live defect: the PowerShell floor ran `git fetch` with every following line as arguments
 		// ("error: unknown switch `C'", "fatal: Invalid path '/n===README==='").
 		const floor = routeShellContract(command, "win32", { pythonEngine: false });
-		if (command === "ls\n") {
-			// A trailing line break is not a command list; the simple command keeps its lowest route.
-			expect(routeShellContract(command, "win32", { pythonEngine: true })).toMatchObject({ kind: "powershell" });
-			expect(floor).toMatchObject({ kind: "powershell", argv: ["ls"] });
-			return;
-		}
 		expect(routeShellContract(command, "win32", { pythonEngine: true })).toEqual({
 			kind: "python-engine",
 			command,
 		});
+		if (command === "ls\n") {
+			// A trailing line break is not a command list; the floor still runs the simple command.
+			expect(floor).toMatchObject({ kind: "powershell", argv: ["ls"] });
+			return;
+		}
 		expect(floor).toMatchObject({ kind: "unsupported" });
 		if (floor.kind !== "unsupported") throw new Error("Expected the floor to refuse a command list");
 		expect(floor.error).toMatch(/one simple command per call/u);
@@ -66,20 +65,51 @@ describe("stable Bash-like shell contract router", () => {
 		expect(route.command).toContain("else { exit $__pi_external_code }");
 	});
 
-	it("keeps native ripgrep on the lowest-overhead route for each command shape", () => {
-		const simple = routeShellContract('rg -n "TODO|FIXME" src/module.ts', "win32", { pythonEngine: true });
-		expect(simple).toMatchObject({
-			kind: "powershell",
-			argv: ["rg", "-n", "TODO|FIXME", "src/module.ts"],
+	it("runs native ripgrep through the one engine for every shape, and quotes it for the floor when the engine is off", () => {
+		const simpleCommand = 'rg -n "TODO|FIXME" src/module.ts';
+		expect(routeShellContract(simpleCommand, "win32", { pythonEngine: true })).toEqual({
+			kind: "python-engine",
+			command: simpleCommand,
 		});
-		if (simple.kind !== "powershell") throw new Error("Expected persistent PowerShell route for simple rg");
-		expect(simple.command).toContain("& 'rg' '-n' 'TODO|FIXME' 'src/module.ts'");
+		const floor = routeShellContract(simpleCommand, "win32", { pythonEngine: false });
+		expect(floor).toMatchObject({ kind: "powershell", argv: ["rg", "-n", "TODO|FIXME", "src/module.ts"] });
+		if (floor.kind !== "powershell") throw new Error("Expected PowerShell floor route for simple rg");
+		expect(floor.command).toContain("& 'rg' '-n' 'TODO|FIXME' 'src/module.ts'");
 
 		const combined = 'rg -n "TODO|FIXME" src | head -20';
 		expect(routeShellContract(combined, "win32", { pythonEngine: true })).toEqual({
 			kind: "python-engine",
 			command: combined,
 		});
+	});
+
+	it("refuses an empty command on both tiers instead of starting a process for nothing", () => {
+		for (const options of [{ pythonEngine: true }, { pythonEngine: false }]) {
+			expect(routeShellContract("   \n", "win32", options)).toEqual({
+				kind: "unsupported",
+				error: "Shell command is empty.",
+			});
+		}
+	});
+
+	it("treats a Windows program under a bin folder as an external on the floor; only POSIX-rooted paths are scripts", () => {
+		const gitCommand = '"C:/Program Files/Git/bin/git.exe" status';
+		expect(routeShellContract(gitCommand, "win32", { pythonEngine: false })).toMatchObject({
+			kind: "powershell",
+			argv: ["C:/Program Files/Git/bin/git.exe", "status"],
+		});
+		expect(
+			routeShellContract('"/c/Program Files/Git/bin/git.exe" status', "win32", { pythonEngine: false }),
+		).toMatchObject({
+			kind: "powershell",
+			argv: ["C:/Program Files/Git/bin/git.exe", "status"],
+		});
+		for (const command of ["/usr/bin/env node -v", "/bin/sh -c ls", "./build.sh"]) {
+			const floor = routeShellContract(command, "win32", { pythonEngine: false });
+			expect(floor).toMatchObject({ kind: "unsupported" });
+			if (floor.kind !== "unsupported") throw new Error("Expected POSIX script refusal");
+			expect(floor.error).toContain("POSIX shell scripts are not supported");
+		}
 	});
 
 	it("converts common Bash-like builtins without model-authored PowerShell", () => {
@@ -208,10 +238,21 @@ describe("stable Bash-like shell contract router", () => {
 			}
 		});
 
-		it("keeps the existing PowerShell floor for simple commands with the engine enabled", () => {
-			for (const command of ["pwd", "ls -la .", "git commit -m 'msg'", "node --version"]) {
-				const route = routeShellContract(command, "win32", { pythonEngine: true });
-				expect(route).toMatchObject({ kind: "powershell" });
+		it("routes every simple command to the engine as well: one executor, no PowerShell seam", () => {
+			// Live outages came from the seam: `ls -la D:/x` on PowerShell but `ls -la D:/x | head` on
+			// Python, each with its own flag matrix. With the engine on, PowerShell is never chosen.
+			for (const command of [
+				"pwd",
+				"ls -la .",
+				"git commit -m 'msg'",
+				"node --version",
+				"rg -n TODO src",
+				"echo hi",
+			]) {
+				expect(routeShellContract(command, "win32", { pythonEngine: true })).toEqual({
+					kind: "python-engine",
+					command,
+				});
 			}
 		});
 

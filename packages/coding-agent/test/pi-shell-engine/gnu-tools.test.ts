@@ -254,7 +254,7 @@ describeOrSkip("pi-shell-engine GNU-first dispatch (real tools before Python bui
 					["printf 'a.txt\\0' | xargs -0 cat", /^alpha\nbeta\n$/u],
 					["find . -maxdepth 1 -name a.txt -exec cat {} \\;", /^alpha\nbeta\n$/u],
 					["seq 3", /^1\n2\n3\n$/u],
-					["sha256sum a.txt", /^[0-9a-f]{64} {2}a\.txt\n$/u],
+					["sha256sum a.txt", /^[0-9a-f]{64} [ *]a\.txt\n$/u],
 					["uname -s", /MINGW|MSYS/u],
 					["dir sub", /b\.log/u],
 				];

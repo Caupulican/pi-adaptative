@@ -893,29 +893,39 @@ describe("windows shell engine operations", () => {
 		expect("gnuToolsDir" in (capturedRequest ?? {})).toBe(false);
 	});
 
-	it("threads engine cwd/env state into the very next createLocalPlatformShellOperations call, even to the PS tier", async () => {
+	it("keeps every command on the engine while it runs, and hands engine cwd/env to the floor only when the runtime is gone", async () => {
 		const sessionKey = "handoff-session";
-		const psCalls: Array<{ cwd: string; env?: NodeJS.ProcessEnv }> = [];
+		const psCalls: Array<{ command: string; cwd: string; env?: NodeJS.ProcessEnv }> = [];
 		const fakePsOperations = {
-			exec: async (_command: string, cwd: string, options: { env?: NodeJS.ProcessEnv }) => {
-				psCalls.push({ cwd, env: options.env });
+			exec: async (command: string, cwd: string, options: { env?: NodeJS.ProcessEnv }) => {
+				psCalls.push({ command, cwd, env: options.env });
 				return { exitCode: 0 };
 			},
 		};
+		const engineCommands: string[] = [];
 		const spawn = fakeSpawn(({ stderr, request }) => {
 			const parsed = request as { command: string };
+			engineCommands.push(parsed.command);
 			const frame: WindowsShellEngineFrame =
 				parsed.command === "cd /new/dir"
 					? { exitCode: 0, cwd: "/new/dir", envDelta: {}, unsupported: null }
 					: { exitCode: 0, cwd: "/new/dir", envDelta: { FOO: "bar" }, unsupported: null };
 			stderr.emit("data", frameBytes(frame));
 		});
+		let runtimeGone = false;
 		const operations = createLocalPlatformShellOperations(
 			{
 				sessionKey,
 				pythonEngine: true,
 				operations: fakePsOperations,
-				engineOptions: { resolveRuntime: async () => READY_RUNTIME, engineScriptPath: "/fake/main.py", spawn },
+				engineOptions: {
+					resolveRuntime: async () =>
+						runtimeGone
+							? { status: "python-unavailable", reason: "Simulated: uv lost its Python." }
+							: READY_RUNTIME,
+					engineScriptPath: "/fake/main.py",
+					spawn,
+				},
 			},
 			"win32",
 		);
@@ -923,9 +933,25 @@ describe("windows shell engine operations", () => {
 		await operations.exec("cd /new/dir", "/old/dir", { onData: () => {} });
 		await operations.exec("export FOO=bar", "/old/dir", { onData: () => {} });
 		await operations.exec("echo hi", "/old/dir", { onData: () => {} });
+		// One executor: the simple command ran on the engine too; PowerShell was never chosen.
+		expect(engineCommands).toEqual(["cd /new/dir", "export FOO=bar", "echo hi"]);
+		expect(psCalls).toHaveLength(0);
 
+		// The runtime disappears (a fresh coordinator must be started and cannot be): the floor runs
+		// the simple command with the engine's cwd/env, and a command that needs the engine names
+		// both the outage and the floor's refusal.
+		// The fake coordinator never exits, so the disposal's terminal wait is not awaited: the
+		// registry entry is gone synchronously and the next call must build a fresh session.
+		void disposeWindowsShellEngineSession(sessionKey);
+		runtimeGone = true;
+		await operations.exec("echo hi", "/old/dir", { onData: () => {} });
 		expect(psCalls).toHaveLength(1);
 		expect(psCalls[0].cwd).toBe("/new/dir");
 		expect(psCalls[0].env?.FOO).toBe("bar");
+		expect(psCalls[0].command).toContain("'hi'");
+		await expect(operations.exec("echo hi | head -1", "/old/dir", { onData: () => {} })).rejects.toThrow(
+			/Windows shell engine \(Python\) is unavailable: Simulated: uv lost its Python\..*This command needs the engine: Unsupported Bash construct on Windows/su,
+		);
+		expect(psCalls).toHaveLength(1);
 	});
 });
