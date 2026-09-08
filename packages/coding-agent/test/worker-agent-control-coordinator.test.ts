@@ -170,14 +170,32 @@ describe("WorkerAgentControlCoordinator", () => {
 			getLifecycle: () => lifecycle,
 			recoveredRequest: () => ({ instructions: "unused" }),
 			run: async () => ({ started: false, skipReason: "unused" }),
-			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			scheduler: {
+				enqueue: vi.fn(),
+				drain: vi.fn(),
+				track: vi.fn(),
+				dropQueued: vi.fn(),
+				getWaitState: (laneId: string) =>
+					laneId === "task-new"
+						? {
+								reason: "write_reservation" as const,
+								detail: "held by session other",
+								since: "2026-09-08T08:14:26.000Z",
+							}
+						: undefined,
+			},
 			statusChanged: vi.fn(),
 			abortLane: vi.fn(),
 			cancelLane: vi.fn(),
 		});
 
 		expect(coordinator.listWorkerAgents()).toEqual([
-			expect.objectContaining({ agentId: agent.agentId, activity: "active" }),
+			expect.objectContaining({
+				agentId: agent.agentId,
+				activity: "active",
+				dispatch: "queued",
+				waitReason: "write_reservation: held by session other (since 2026-09-08T08:14:26.000Z)",
+			}),
 		]);
 		await expect(coordinator.waitForWorkerAgent(agent.agentId, 1)).resolves.toEqual({
 			status: "active",

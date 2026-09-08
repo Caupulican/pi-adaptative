@@ -48,7 +48,7 @@ import {
 	WorkerConversationStore,
 } from "./worker-conversation-store.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
-import type { WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
+import { formatWorkerDispatchWait, type WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { projectWorkerTaskSessionView } from "./worker-task-view.ts";
@@ -65,7 +65,8 @@ export interface WorkerAgentControlCoordinatorOptions {
 	getLifecycle(): WorkerLifecycle;
 	recoveredRequest(attempt: AttemptRuntimeState): WorkerDelegationRequest;
 	run(request: WorkerDelegationRequest, record: LaneRecord): Promise<WorkerDelegationRunOutcome>;
-	scheduler: Pick<WorkerDispatchScheduler, "enqueue" | "track" | "drain" | "dropQueued">;
+	scheduler: Pick<WorkerDispatchScheduler, "enqueue" | "track" | "drain" | "dropQueued"> &
+		Partial<Pick<WorkerDispatchScheduler, "getWaitState">>;
 	statusChanged(): void;
 	getWorkerClaimSnapshot?(laneId: string): WorkerClaimSnapshotPayload | undefined;
 	getWorkerResult?(laneId: string): Pick<WorkerResultContract, "artifacts"> | undefined;
@@ -214,13 +215,15 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const agents = Object.values(snapshot.agents);
 		return agents
 			.sort((left, right) => left.depth - right.depth || left.createdAt.localeCompare(right.createdAt))
-			.map((agent) =>
-				this.workerAgentView(
+			.map((agent) => {
+				const attempt = latestAttempts.get(agent.agentId);
+				return this.workerAgentView(
 					agent,
-					this.projectAgentActivity(agent, latestAttempts.get(agent.agentId)),
+					this.projectAgentActivity(agent, attempt),
 					scope.callerAgentId,
-				),
-			);
+					attempt ?? null,
+				);
+			});
 	}
 
 	getWorkerTaskSessionView(): ReturnType<WorkerAgentControlPort["getWorkerTaskSessionView"]> {
@@ -2022,7 +2025,14 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		agent: AgentBindingContract,
 		activity: WorkerAgentActivity = this.activityForAgent(agent),
 		callerAgentId?: string,
+		/** `null` = the caller already resolved the latest attempt and found none; omit to resolve here. */
+		resolvedAttempt?: AttemptRuntimeState | null,
 	): WorkerAgentView {
+		const attempt = resolvedAttempt === undefined ? this.latestAgentAttempt(agent) : (resolvedAttempt ?? undefined);
+		// `activity` folds queued into active for control flow. The view still owes the parent the
+		// durable dispatch status and, for a queued attempt, the reason it has not started.
+		const waitState =
+			attempt?.status === "queued" ? this.options.scheduler.getWaitState?.(attempt.taskId) : undefined;
 		return {
 			agentId: agent.agentId,
 			...(agent.parentAgentId ? { parentAgentId: agent.parentAgentId } : {}),
@@ -2032,6 +2042,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			...(agent.resumeContext.modelRef ? { modelRef: agent.resumeContext.modelRef } : {}),
 			status: agent.status,
 			activity,
+			...(attempt ? { dispatch: attempt.status } : {}),
+			...(waitState ? { waitReason: formatWorkerDispatchWait(waitState) } : {}),
 			controllable: !callerAgentId || this.agentIsInCallerSubtree(agent, callerAgentId),
 			createdAt: agent.createdAt,
 			updatedAt: agent.updatedAt,

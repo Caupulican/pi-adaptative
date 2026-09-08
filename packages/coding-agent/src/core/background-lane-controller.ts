@@ -45,6 +45,7 @@ import type {
 	WorkerAgentTranscriptOptions,
 	WorkerAgentWaitMode,
 	WorkerAgentWaitResult,
+	WorkerGrantSummary,
 } from "./delegation/worker-agent-control.ts";
 import {
 	WorkerDelegationController,
@@ -478,6 +479,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		signal?: AbortSignal,
 	): Promise<{ started: false; skipReason: string } | { started: true; record: LaneRecord }> {
 		return this._getWorkerController().start(request, signal);
+	}
+
+	/** Effective grant of a lane's selected attempt, read from the durable execution contract. */
+	describeWorkerGrant(laneId: string): WorkerGrantSummary | undefined {
+		return this._getWorkerController().getWorkerGrant(laneId);
 	}
 
 	/** Durable logical-worker controls. Each checks UAC before materializing worker state. */

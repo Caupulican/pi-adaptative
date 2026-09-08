@@ -217,9 +217,47 @@ describe("delegate tool description varies by wiring mode", () => {
 			.map((content) => content.text)
 			.join("\n");
 		expect(text).toBe(
-			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; the owning parent will receive its terminal handoff, then use delegate status or bounded raw transcript pages\nCAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state, not stall or harness failure. Host starts it event-driven when dependencies, capacity, or explicit workspace reservations clear. Never poll, interrupt, or cancel a healthy running worker to force the queue. Independent machine-scope workers may run in parallel; an explicit path preserves collision fencing. If you start a fresh narrower replacement, cancel this queued agent after the replacement starts; otherwise both tasks will run.",
+			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; the owning parent will receive its terminal handoff, then use delegate status or bounded raw transcript pages\nCAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state, not stall or harness failure. Host starts it event-driven when dependencies, capacity, or explicit workspace reservations clear; the waiting line names which one and since when. A write reservation held by a dead owner is released automatically; one held by a live worker of another session clears only when that worker finishes. Never poll, interrupt, or cancel a healthy running worker to force the queue. Independent machine-scope workers may run in parallel; an explicit path preserves collision fencing. If you start a fresh narrower replacement, cancel this queued agent after the replacement starts; otherwise both tasks will run.",
 		);
 		expect(result.details).toEqual({ started: true, agentId: "worker-1", laneId: "worker-1", status: "queued" });
+	});
+
+	it("tells the parent the compiled grant and why a queued lane is waiting", async () => {
+		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			startWorkerDelegation: () => ({
+				started: true,
+				record: {
+					laneId: "worker-1",
+					type: "worker",
+					status: "queued",
+					modelRef: "xai/grok-4.6",
+					thinkingLevel: "medium",
+					waitReason: "write_reservation: /repo held by session other (since 2026-09-08T08:14:26.000Z)",
+				},
+			}),
+			describeWorkerGrant: (laneId) =>
+				laneId === "worker-1"
+					? { toolNames: ["read", "skill"], capabilities: ["filesystem.read", "skill.read"] }
+					: undefined,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+
+		const result = await definition.execute(
+			"call-1",
+			{ instructions: "do the thing" },
+			new AbortController().signal,
+			() => {},
+			{} as never,
+		);
+
+		const text = result.content
+			.filter((content) => content.type === "text")
+			.map((content) => content.text)
+			.join("\n");
+		expect(text).toContain(
+			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; effective model xai/grok-4.6, thinking medium; tools: read, skill; capabilities: filesystem.read, skill.read; waiting: write_reservation: /repo held by session other (since 2026-09-08T08:14:26.000Z); the owning parent will receive its terminal handoff",
+		);
 	});
 
 	it("starts a worker when the brief is only in the shared-schema task field", async () => {

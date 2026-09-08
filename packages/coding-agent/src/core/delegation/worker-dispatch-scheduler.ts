@@ -19,6 +19,11 @@ export interface WorkerDispatchWaitState {
 	since: string;
 }
 
+/** One line for status views: `write_reservation: … (since 2026-09-08T08:14:26.000Z)`. */
+export function formatWorkerDispatchWait(state: WorkerDispatchWaitState): string {
+	return `${state.reason}${state.detail ? `: ${state.detail}` : ""} (since ${state.since})`;
+}
+
 export interface WorkerDispatchSchedulerOptions {
 	agentDir: string;
 	/** Test seam for proving queue insertion rollback when reload-gate registration fails. */

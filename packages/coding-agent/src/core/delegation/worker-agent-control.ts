@@ -6,6 +6,7 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { parseBoundedStringArray } from "../orchestration/bounded-string-array.ts";
 import {
 	type AgentBindingStatus,
+	type AttemptStatus,
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	type WorkerRole,
@@ -220,6 +221,12 @@ export interface WorkerAgentBroadcastResult {
 }
 
 /** Explicit model-facing projection. Durable resume, session, path, and resource data stay host-only. */
+/** Effective grant admitted for a worker attempt, in the terms the parent chose it with. */
+export interface WorkerGrantSummary {
+	toolNames: readonly string[];
+	capabilities: readonly string[];
+}
+
 export interface WorkerAgentView {
 	agentId: string;
 	parentAgentId?: string;
@@ -230,6 +237,14 @@ export interface WorkerAgentView {
 	modelRef?: string;
 	status: AgentBindingStatus;
 	activity: WorkerAgentActivity;
+	/**
+	 * Durable status of the latest attempt. `activity` stays coarse (`active` covers queued, leased,
+	 * and running) because control flow keys on it; this field says whether the worker has actually
+	 * been dispatched, so a never-started `queued` attempt is not mistaken for running work.
+	 */
+	dispatch?: AttemptStatus;
+	/** Why a `queued` attempt has not been dispatched by this controller generation. */
+	waitReason?: string;
 	/** True when this caller may start/transcript/cancel the agent. Session-root lists are all true. */
 	controllable: boolean;
 	createdAt: string;

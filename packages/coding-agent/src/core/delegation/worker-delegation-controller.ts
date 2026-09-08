@@ -65,7 +65,7 @@ import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
 import { selectSanitizedContextFork } from "./sanitized-context-fork.ts";
 import { getLatestWorkerClaimSnapshot } from "./session-worker-claim.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
-import type { WorkerAgentControlPort } from "./worker-agent-control.ts";
+import type { WorkerAgentControlPort, WorkerGrantSummary } from "./worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
 import { createWorkerAttemptExecutor } from "./worker-attempt-executor.ts";
 import {
@@ -84,7 +84,11 @@ import {
 } from "./worker-conversation-store.ts";
 import { parseWorkerDelegationAuthorityRequest, type WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS, WorkerDirectoryAdmission } from "./worker-directory-admission.ts";
-import { type WorkerDispatchAdmission, WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
+import {
+	formatWorkerDispatchWait,
+	type WorkerDispatchAdmission,
+	WorkerDispatchScheduler,
+} from "./worker-dispatch-scheduler.ts";
 import {
 	buildWorkerExecutionPlan,
 	compileWorkerExecutionGrant,
@@ -1401,11 +1405,16 @@ export class WorkerDelegationController {
 			if (record.status !== "queued") return record;
 			const wait = this.scheduler.getWaitState(record.laneId);
 			if (!wait) return record;
-			return {
-				...record,
-				waitReason: `${wait.reason}${wait.detail ? `: ${wait.detail}` : ""} (since ${wait.since})`,
-			};
+			return { ...record, waitReason: formatWorkerDispatchWait(wait) };
 		});
+	}
+
+	/** Effective tool and capability grant of a lane's selected attempt, for the parent's start/status views. */
+	getWorkerGrant(laneId: string): WorkerGrantSummary | undefined {
+		const authority =
+			this.getWorkerLifecycle().getActiveAttempt(laneId)?.dispatch.executionContract?.worker.authority;
+		if (!authority) return undefined;
+		return { toolNames: [...authority.toolNames], capabilities: [...authority.capabilities] };
 	}
 
 	private workerProjectionHeadroomSkipReason(
@@ -1843,9 +1852,12 @@ export class WorkerDelegationController {
 	async start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
 		const capturedRequest = structuredClone(request);
 		const admission = await this.admitWorkerDirectory(capturedRequest, signal);
-		return admission.ok
+		const outcome = admission.ok
 			? this.startInternal(capturedRequest, undefined, admission)
-			: { started: false, skipReason: admission.skipReason };
+			: { started: false as const, skipReason: admission.skipReason };
+		if (!outcome.started) return outcome;
+		// A start that was queued already ran one scheduler admission; hand the parent its wait reason.
+		return { ...outcome, record: this.withWaitReasons([outcome.record])[0] ?? outcome.record };
 	}
 
 	private async admitWorkerDirectory(

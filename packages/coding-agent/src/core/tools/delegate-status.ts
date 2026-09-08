@@ -8,7 +8,7 @@ import type { OrchestrationPanelModel, OrchestrationPanelRow } from "./orchestra
 const MAX_WORKER_CONTROL_ID_CHARS = 512;
 
 export const WORKER_QUEUED_CAVEMAN_GUIDANCE =
-	"CAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state, not stall or harness failure. Host starts it event-driven when dependencies, capacity, or explicit workspace reservations clear. Never poll, interrupt, or cancel a healthy running worker to force the queue. Independent machine-scope workers may run in parallel; an explicit path preserves collision fencing. If you start a fresh narrower replacement, cancel this queued agent after the replacement starts; otherwise both tasks will run.";
+	"CAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state, not stall or harness failure. Host starts it event-driven when dependencies, capacity, or explicit workspace reservations clear; the waiting line names which one and since when. A write reservation held by a dead owner is released automatically; one held by a live worker of another session clears only when that worker finishes. Never poll, interrupt, or cancel a healthy running worker to force the queue. Independent machine-scope workers may run in parallel; an explicit path preserves collision fencing. If you start a fresh narrower replacement, cancel this queued agent after the replacement starts; otherwise both tasks will run.";
 
 export const DELEGATE_STATUS_ACTIONS = ["status", "review"] as const;
 
@@ -27,6 +27,8 @@ export interface DelegateStatusLaneView {
 	type: LaneRecord["type"];
 	status: LaneRecord["status"];
 	reasonCode?: string;
+	/** Present only for a queued lane this controller generation has evaluated and parked. */
+	waitReason?: string;
 	unreviewed: boolean;
 }
 
@@ -95,7 +97,10 @@ function formatRecord(
 	if (record.modelRef) {
 		lines.push(`effective model: ${record.modelRef}; thinking: ${record.thinkingLevel ?? "unknown"}`);
 	}
-	if (record.status === "queued") lines.push(WORKER_QUEUED_CAVEMAN_GUIDANCE);
+	if (record.status === "queued") {
+		if (record.waitReason) lines.push(`waiting: ${record.waitReason}`);
+		lines.push(WORKER_QUEUED_CAVEMAN_GUIDANCE);
+	}
 	if (record.reasonCode === "worker_blocked") {
 		lines.push(
 			"CAVEMAN MODE - MANDATORY: worker_blocked is a delivered task claim with blockers, not harness failure or lost state. Verify the claim, then continue or replan the parent task.",
@@ -134,6 +139,7 @@ function laneView(record: LaneRecord, claim: WorkerClaim | undefined): DelegateS
 		type: record.type,
 		status: record.status,
 		...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
+		...(record.status === "queued" && record.waitReason ? { waitReason: record.waitReason } : {}),
 		unreviewed: isUnreviewed(claim),
 	};
 }

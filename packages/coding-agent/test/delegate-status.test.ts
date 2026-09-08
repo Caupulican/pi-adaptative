@@ -174,6 +174,23 @@ describe("delegate status", () => {
 		expect(result.content[0]?.text).toContain("otherwise both tasks will run");
 	});
 
+	it("prints why a queued worker is waiting and what clears it", () => {
+		const waitReason = "write_reservation: /repo held by session other (owner live, since 2026-09-08T08:14:26.000Z)";
+		const result = executeDelegateStatusAction(
+			"status",
+			{ laneId: "worker-queued" },
+			{
+				getLaneRecords: () => [{ laneId: "worker-queued", type: "worker", status: "queued", waitReason }],
+				getWorkerClaimSnapshots: () => [],
+			},
+		);
+
+		expect(result.content[0]?.text).toContain(`waiting: ${waitReason}`);
+		expect(result.content[0]?.text).toContain("the waiting line names which one and since when");
+		expect(result.content[0]?.text).toContain("A write reservation held by a dead owner is released automatically");
+		expect(result.details.lanes).toEqual([expect.objectContaining({ laneId: "worker-queued", waitReason })]);
+	});
+
 	it("labels a delivered blocked claim as task evidence instead of harness failure", () => {
 		const result = executeDelegateStatusAction(
 			"status",

@@ -8,6 +8,7 @@ import {
 	type WorkerAgentBroadcastTargetResult,
 	type WorkerAgentControlPort,
 	type WorkerAgentView,
+	type WorkerGrantSummary,
 } from "../delegation/worker-agent-control.ts";
 import { MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES } from "../delegation/worker-conversation-store.ts";
 import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
@@ -633,6 +634,8 @@ export interface DelegateToolDependencies {
 	/** Active owner settings only; omitted/absent preserves the existing lean prompt verbatim. */
 	workerModelPinPolicy?: WorkerModelPinPolicy;
 	workerAgentControl?: WorkerAgentControlPort;
+	/** Effective tools and capabilities the host compiled for a lane, shown once on start. */
+	describeWorkerGrant?: (laneId: string) => WorkerGrantSummary | undefined;
 	/** Root-only bounded lane inspection and durable mutation-review acknowledgement. */
 	status?: DelegateStatusDependencies;
 	/** Root-only immutable session task-profile inspection and creation. */
@@ -647,6 +650,25 @@ export interface DelegateToolDependencies {
 	 * dropped or truncated to fit the provider prompt budget) — never required for correct operation.
 	 */
 	warn?: (message: string) => void;
+}
+
+/**
+ * First line of a start result. The model chose the worker's tools, model, and path; this is the
+ * host's answer to what it actually compiled, plus why a queued lane is not running yet.
+ */
+function describeStartedWorker(record: LaneRecord, grant: WorkerGrantSummary | undefined): string {
+	const parts = [
+		`delegate started (${record.status}) — stable agentId ${record.laneId}, task laneId ${record.laneId}`,
+	];
+	if (record.modelRef) parts.push(`effective model ${record.modelRef}, thinking ${record.thinkingLevel ?? "unknown"}`);
+	if (grant) {
+		parts.push(
+			`tools: ${grant.toolNames.length > 0 ? grant.toolNames.join(", ") : "none"}`,
+			`capabilities: ${grant.capabilities.length > 0 ? grant.capabilities.join(", ") : "none"}`,
+		);
+	}
+	if (record.status === "queued" && record.waitReason) parts.push(`waiting: ${record.waitReason}`);
+	return parts.join("; ");
 }
 
 const DELEGATE_DESCRIPTION_CORE =
@@ -2067,7 +2089,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						content: [
 							{
 								type: "text" as const,
-								text: `delegate started (${started.record.status}) — stable agentId ${started.record.laneId}, task laneId ${started.record.laneId}${started.record.modelRef ? `; effective model ${started.record.modelRef}, thinking ${started.record.thinkingLevel ?? "unknown"}` : ""}; the owning parent will receive its terminal handoff, then use delegate status or bounded raw transcript pages${started.record.status === "queued" ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
+								text: `${describeStartedWorker(started.record, deps.describeWorkerGrant?.(started.record.laneId))}; the owning parent will receive its terminal handoff, then use delegate status or bounded raw transcript pages${started.record.status === "queued" ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
 							},
 						],
 						details: {

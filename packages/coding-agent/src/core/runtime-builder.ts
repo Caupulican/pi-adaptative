@@ -61,7 +61,7 @@ import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./
 import type { ContextGcReport } from "./context-gc.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-tool-surface.ts";
 import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-claim.ts";
-import type { WorkerAgentControlPort } from "./delegation/worker-agent-control.ts";
+import type { WorkerAgentControlPort, WorkerGrantSummary } from "./delegation/worker-agent-control.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { execCommand } from "./exec.ts";
 import type { ExtensionImportAuthority } from "./extension-import-authority.ts";
@@ -363,6 +363,8 @@ export interface RuntimeBuilderDeps {
 		| { started: true; record: LaneRecord }
 		| Promise<{ started: false; skipReason: string } | { started: true; record: LaneRecord }>;
 	workerAgentControl?: WorkerAgentControlPort & Partial<TaskProfileWriterPort>;
+	/** Effective grant compiled for a lane, shown to the parent on delegate start. */
+	describeWorkerGrant?(laneId: string): WorkerGrantSummary | undefined;
 	getOrchestrationProfileCatalog(): Array<{ profileId: string; role: string; description: string }>;
 	getWorkerLaneRecords(): LaneRecord[];
 	getWorkerClaimSnapshots(): WorkerClaim[];
@@ -1290,6 +1292,9 @@ export class RuntimeBuilder {
 							signal,
 						),
 					runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),
+					...(this.deps.describeWorkerGrant
+						? { describeWorkerGrant: (laneId: string) => this.deps.describeWorkerGrant?.(laneId) }
+						: {}),
 					orchestrationProfiles: this.deps.getOrchestrationProfileCatalog(),
 					workerModelPinPolicy: settingsManager.getWorkerModelPinPolicy(),
 					...(workerAgentControl ? { workerAgentControl } : {}),
