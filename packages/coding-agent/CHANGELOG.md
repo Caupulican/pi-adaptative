@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+### Added
+
+- Windows shell parity: coreutils, findutils, grep, sed, awk, diff and the rest of the GNU vocabulary run as Git for Windows' real binaries from the shell engine (`windowsShell.gnuToolsDir`, default `auto`), with the engine's Python builtins as the floor for hosts without them; any bare name PATH lacks but that directory holds (`seq`, `sha256sum`, `uname`, `bash`) is filled in from it after PATH.
+- Shell engine grammar: functions with positional parameters, `return`, `local` and `shift`; `case` with `;;`, `;&`, `;;&`; `[[ … ]]`; brace expansion; `${v#p} ${v##p} ${v%p} ${v%%p} ${v/p/r} ${v//p/r} ${v:o:l} ${v^^} ${v,,}`; `$@ $* $# $0 $$`; `set -e -u -x -o pipefail` and `set --`; `command -v`; `test -a/-o`. Arrays, indirection, `select` and a leading PowerShell `&` refuse by name.
+- A Windows shell regression wall (`test/windows-shell-corpus.test.ts`) that replays every sanitized command shape from the measured Windows sessions through the router, the grammar and the executor with real GNU tools on Linux and Windows.
+
+### Changed
+
+- With the engine on, every Windows bash call runs on the shell engine; the PowerShell floor serves only `windowsShell.pythonEngine: false` and a runtime outage, where a floor-expressible command still runs with the engine's cwd/env and a command that needs the engine fails with the outage and the floor's refusal.
+- The `windowsShell` settings are wired into the bash tool and the owner shell; `windowsShell.pythonEngine` previously had no effect.
+- A caller-owned bash backend (an extension's `user_bash` operations) receives the Windows simple-command floor contract and the local engine never runs for it.
+- A redirect target that cannot be opened fails only its command with a bash-style message instead of crashing the shell engine.
+
+### Fixed
+
+- The PowerShell floor no longer treats a Windows program under a `bin` folder (`C:/Program Files/Git/bin/git.exe`) as a POSIX shell script.
+
 ## [0.99.10] - 2026-09-08
 
 ## [0.99.9] - 2026-09-08

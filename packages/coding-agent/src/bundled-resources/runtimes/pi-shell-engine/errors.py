@@ -96,3 +96,13 @@ class FunctionReturn(Exception):
     def __init__(self, exit_code: int) -> None:
         super().__init__(exit_code)
         self.exit_code = exit_code
+
+
+class RedirectError(Exception):
+    """A redirect target that cannot be opened (missing directory, permission): a bash-level
+    runtime error for the command that carries it, status 1, never a crash."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        super().__init__(reason)
+        self.path = path
+        self.message = f"bash: {path}: {reason}"

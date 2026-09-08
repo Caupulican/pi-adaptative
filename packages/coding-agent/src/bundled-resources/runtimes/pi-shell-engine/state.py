@@ -77,6 +77,8 @@ class ShellState:
     positional: list[str] = field(default_factory=list)
     # Functions defined in this request; a subshell copy sees them, its own definitions stay local.
     functions: dict[str, object] = field(default_factory=dict)
+    # `set -e -u -x -o pipefail` (errexit, nounset, xtrace, pipefail) for this request.
+    options: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if not isinstance(self.env, ShellEnvironment):
@@ -92,19 +94,14 @@ class ShellState:
             gnu_tools_dir=self.gnu_tools_dir,
             positional=list(self.positional),
             functions=dict(self.functions),
+            options=set(self.options),
         )
 
     def derive(self, env: Mapping[str, str]) -> "ShellState":
         """A scratch state for one command: this cwd and host configuration, the given env."""
-        return ShellState(
-            cwd=self.cwd,
-            env=ShellEnvironment(env),
-            last_exit_code=self.last_exit_code,
-            powershell_path=self.powershell_path,
-            gnu_tools_dir=self.gnu_tools_dir,
-            positional=list(self.positional),
-            functions=dict(self.functions),
-        )
+        derived = self.copy()
+        derived.env = ShellEnvironment(env)
+        return derived
 
     def chdir(self, path: str) -> None:
         """Validate `path` exists and is a directory, then update cwd + OLDPWD."""

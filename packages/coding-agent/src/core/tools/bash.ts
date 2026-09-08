@@ -320,7 +320,14 @@ export function createLocalPlatformShellOperations(
 	options: {
 		shellPath?: string;
 		commandPrefix?: string;
+		/**
+		 * A caller-owned backend (an extension's `user_bash` operations, a remote executor). On
+		 * Windows it receives the simple-command floor contract and the local engine never runs:
+		 * the engine executes on this machine, which is exactly what a custom backend replaces.
+		 */
 		operations?: BashOperations;
+		/** Test/embedding hook: the PowerShell-tier backend used beside the engine (engine stays on). */
+		floorOperations?: BashOperations;
 		sessionKey?: string;
 		/** Route complex/state-mutating Bash constructs and portable builtins to the Python engine on Windows. Default: true. */
 		pythonEngine?: boolean;
@@ -331,11 +338,12 @@ export function createLocalPlatformShellOperations(
 ): BashOperations {
 	const operations =
 		options.operations ??
+		options.floorOperations ??
 		createLocalShellOperations(getPlatformShellToolName(platform), {
 			shellPath: options.shellPath,
 			sessionKey: options.sessionKey,
 		});
-	const pythonEngineEnabled = options.pythonEngine !== false;
+	const pythonEngineEnabled = options.pythonEngine !== false && options.operations === undefined;
 	// One factory instance is one fallback tenant. Production agent sessions always pass their
 	// stable key; standalone callers that omit it must never collapse into a process-global engine.
 	const engineSessionKey = options.sessionKey ?? `platform-shell-operations:${randomUUID()}`;
@@ -431,7 +439,11 @@ export interface BashToolOptions {
 	pathFlavor?: ExecutionPathFlavor;
 	/** Platform used to choose the default backend and contract router. Defaults to process.platform. */
 	platform?: NodeJS.Platform;
-	/** Custom operations for command execution. Default: local platform shell */
+	/**
+	 * Custom operations for command execution (a caller-owned backend). Default: local platform
+	 * shell. On Windows a custom backend receives the simple-command floor contract and the local
+	 * engine never runs, since the engine executes on this machine.
+	 */
 	operations?: BashOperations;
 	/** Shared backend identity for exact cross-tool recovery with custom operations. */
 	failureRecoveryAuthority?: FileFailureRecoveryAuthority;
@@ -701,7 +713,7 @@ function createShellToolDefinition(
 	let lastSessionCwd: string | undefined;
 	const routesWindowsContract = contractPlatform === "win32";
 	const pathFlavor = options?.pathFlavor ?? (routesWindowsContract ? "win32" : "posix");
-	const pythonEngineEnabled = options?.windowsShellPythonEngine !== false;
+	const pythonEngineEnabled = options?.windowsShellPythonEngine !== false && options?.operations === undefined;
 	const engineOperations = routesWindowsContract
 		? createWindowsShellEngineOperations(sessionKey, options?.windowsShellEngineOptions)
 		: undefined;

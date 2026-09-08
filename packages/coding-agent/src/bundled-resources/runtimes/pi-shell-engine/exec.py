@@ -28,6 +28,7 @@ from errors import (
     LoopBreak,
     LoopContinue,
     LoopControl,
+    RedirectError,
     ShellExit,
     UnsupportedConstruct,
 )
@@ -45,7 +46,10 @@ class _Redirected:
         self.handles: list[BinaryIO] = []
 
     def open(self, path: str, mode: str) -> BinaryIO:
-        handle = open(path, mode)  # noqa: SIM115 - closed explicitly in close()
+        try:
+            handle = open(path, mode)  # noqa: SIM115 - closed explicitly in close()
+        except OSError as exc:
+            raise RedirectError(path, exc.strerror or "cannot open") from exc
         self.handles.append(handle)
         return handle
 
@@ -276,17 +280,20 @@ def _write_merged(stream: BinaryIO | int, data: bytes, ctx: ExecContext) -> None
         stream.flush()
 
 
-def execute(list_node: nodes.CommandList, ctx: ExecContext) -> int:
-    """Run a `CommandList`; returns the exit code of the last executed entry."""
+def execute(list_node: nodes.CommandList, ctx: ExecContext, *, condition: bool = False) -> int:
+    """Run a `CommandList`; returns the exit code of the last executed entry.
+
+    `condition` marks an `if`/`while`/`until` test list, where `set -e` never fires."""
     exit_code = 0
     for entry in list_node.entries:
-        exit_code = _execute_andor(entry, ctx)
+        exit_code = _execute_andor(entry, ctx, condition=condition)
         ctx.state.last_exit_code = exit_code
     return exit_code
 
 
-def _execute_andor(andor: nodes.AndOr, ctx: ExecContext) -> int:
+def _execute_andor(andor: nodes.AndOr, ctx: ExecContext, *, condition: bool = False) -> int:
     exit_code = 0
+    last = len(andor.pipelines) - 1
     for i, pipeline in enumerate(andor.pipelines):
         if i > 0:
             operator = andor.operators[i - 1]
@@ -296,6 +303,16 @@ def _execute_andor(andor: nodes.AndOr, ctx: ExecContext) -> int:
                 continue
         exit_code = _execute_pipeline(pipeline, ctx)
         ctx.state.last_exit_code = exit_code
+        # errexit: a failing pipeline ends the run unless it is tested (`if`, `while`, `!`,
+        # or any but the last element of an `&&`/`||` list), exactly bash's rule.
+        if (
+            exit_code != 0
+            and "errexit" in ctx.state.options
+            and not condition
+            and not pipeline.negated
+            and i == last
+        ):
+            raise ShellExit(exit_code)
     return exit_code
 
 
@@ -349,8 +366,16 @@ def _run_pipeline_elements(elements: list, ctx: ExecContext) -> int:
         is_write_end_owned_here = index < n - 1
 
         if isinstance(element, nodes.SimpleCommand) and _is_external_dispatch(element, ctx):
-            spawned = _spawn_external_stage(element, ctx, stdin_stream, stdout_stream, stderr_base)
-            if spawned is None:
+            try:
+                spawned = _spawn_external_stage(element, ctx, stdin_stream, stdout_stream, stderr_base)
+            except RedirectError as exc:
+                # A stage whose redirect target cannot be opened fails alone with status 1.
+                _write_merged(stderr_base, f"{exc.message}\n".encode("utf-8"), ctx)
+                spawned = None
+                results[index] = 1
+            if spawned is None and results[index] == 1:
+                pass
+            elif spawned is None:
                 # Command-not-found in a pipeline stage: report it, record 127 for this
                 # stage, and close the stage's owned write end so downstream sees EOF —
                 # never let this crash the engine or stall the rest of the pipeline.
@@ -429,6 +454,10 @@ def _run_pipeline_elements(elements: list, ctx: ExecContext) -> int:
             # exit-0/empty-output success.
             raise refusal
 
+    if "pipefail" in ctx.state.options:
+        failing = [code for code in results if code != 0]
+        if failing:
+            return failing[-1]
     return results[-1]
 
 
@@ -569,6 +598,9 @@ def _dispatch_element(
             return _dispatch_simple_command(element, ctx, stdin_stream, stdout_stream, stderr_stream)
     except ArithmeticExpansionError as exc:
         _write_merged(stderr_stream, f"bash: {exc.expression}: {exc.message}\n".encode("utf-8"), ctx)
+        return 1
+    except RedirectError as exc:
+        _write_merged(stderr_stream, f"{exc.message}\n".encode("utf-8"), ctx)
         return 1
     raise UnsupportedConstruct("malformed-syntax", f"unrecognized pipeline element {type(element)!r}")
 
@@ -786,7 +818,7 @@ def _run_if_branches(node: nodes.IfCommand, ctx: ExecContext) -> int:
     exits 0 wins and its body's exit status becomes the `if` command's status. If no branch
     matches, `else`'s body runs when present; otherwise the command exits 0 (bash semantics)."""
     for condition, body in node.branches:
-        condition_code = execute(condition, ctx)
+        condition_code = execute(condition, ctx, condition=True)
         ctx.state.last_exit_code = condition_code
         if condition_code == 0:
             return execute(body, ctx)
@@ -862,7 +894,7 @@ def _execute_while_or_until(node: nodes.WhileCommand | nodes.UntilCommand, ctx: 
     while True:
         _check_loop_budget(ctx, iteration, label=label)
         iteration += 1
-        condition_code = execute(node.condition, ctx)
+        condition_code = execute(node.condition, ctx, condition=True)
         ctx.state.last_exit_code = condition_code
         should_run = condition_code != 0 if until else condition_code == 0
         if not should_run:
@@ -898,6 +930,8 @@ def _dispatch_simple_command(
             # bash runs no command here. Redirects/assignments above still applied; exit 0.
             return 0
         name = argv[0]
+        if "xtrace" in ctx.state.options:
+            _write_merged(r_err, ("+ " + " ".join(argv) + "\n").encode("utf-8", errors="replace"), ctx)
 
         definition = ctx.state.functions.get(name)
         if isinstance(definition, nodes.FunctionDefinition):
@@ -1013,6 +1047,54 @@ def _run_command_builtin(
     return exit_code
 
 
+_SET_SHORT_OPTIONS = {"e": "errexit", "u": "nounset", "x": "xtrace"}
+_SET_LONG_OPTIONS = {"errexit": "errexit", "nounset": "nounset", "xtrace": "xtrace", "pipefail": "pipefail"}
+
+
+def _run_set_builtin(argv: list[str], ctx: ExecContext, diagnostic_stream: BinaryIO | int) -> int:
+    """`set -e -u -x -o pipefail` (and `+` to clear), `set --` for positional parameters. Any
+    other option is refused by name rather than silently accepted."""
+    args = argv[1:]
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            ctx.state.positional = list(args[index + 1 :])
+            return 0
+        if arg in ("-o", "+o"):
+            if index + 1 >= len(args):
+                _write_merged(diagnostic_stream, b"set: -o needs an option name\n", ctx)
+                return 2
+            option = _SET_LONG_OPTIONS.get(args[index + 1])
+            if option is None:
+                raise UnsupportedConstruct("unsupported-flag", f"set: option '{args[index + 1]}' is not supported.")
+            (ctx.state.options.add if arg == "-o" else ctx.state.options.discard)(option)
+            index += 2
+            continue
+        if arg[:1] in ("-", "+") and len(arg) > 1:
+            apply = ctx.state.options.add if arg[0] == "-" else ctx.state.options.discard
+            for letter in arg[1:]:
+                if letter == "o":
+                    # `set -euo pipefail`: the long option name is the next argument.
+                    if index + 1 >= len(args) or args[index + 1] not in _SET_LONG_OPTIONS:
+                        raise UnsupportedConstruct(
+                            "unsupported-flag", f"set: -o needs one of {', '.join(sorted(_SET_LONG_OPTIONS))}."
+                        )
+                    apply(_SET_LONG_OPTIONS[args[index + 1]])
+                    index += 1
+                    continue
+                option = _SET_SHORT_OPTIONS.get(letter)
+                if option is None:
+                    raise UnsupportedConstruct("unsupported-flag", f"set: option '{arg[0]}{letter}' is not supported.")
+                apply(option)
+            index += 1
+            continue
+        raise UnsupportedConstruct(
+            "unsupported-flag", "set: only -e, -u, -x, -o pipefail (and their + forms) and 'set -- args' are supported."
+        )
+    return 0
+
+
 def _run_state_builtin(
     name: str,
     argv: list[str],
@@ -1061,6 +1143,9 @@ def _run_state_builtin(
             return 1
         ctx.state.positional = ctx.state.positional[count:]
         return 0
+
+    if name == "set":
+        return _run_set_builtin(argv, ctx, diagnostic_stream)
 
     if name == "command":
         return _run_command_builtin(argv, ctx, in_stream if in_stream is not None else _empty_stream(), out_stream, diagnostic_stream)

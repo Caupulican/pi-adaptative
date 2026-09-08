@@ -45,7 +45,7 @@ _JOB_CONTROL_WORDS = {"fg", "bg", "jobs", "wait", "disown"}
 # `if`/`while`/`until`/`case`, `[[ ]]` and function definitions are parsed as structured
 # compound commands below; `select` and `coproc` remain refused (see UNSUPPORTED_CONSTRUCTS).
 _CONTROL_FLOW_WORDS = {"select", "coproc"}
-_UNSUPPORTED_BUILTIN_WORDS = {"eval", "source", ".", "alias", "trap", "set", "shopt", "read", "declare", "typeset", "readonly", "mapfile", "readarray"}
+_UNSUPPORTED_BUILTIN_WORDS = {"eval", "source", ".", "alias", "trap", "shopt", "read", "declare", "typeset", "readonly", "mapfile", "readarray"}
 
 
 def _literal_text_from_segments(segments: list) -> str | None:
@@ -239,6 +239,13 @@ class _Parser:
             return ArithmeticCommand(expression=arithmetic.text or "", redirects=self._parse_redirects())
         command = self.parse_simple_command()
         if not command.assignments and not command.words and not command.redirects:
+            if self.at_op("&"):
+                # `& "C:/…/tool.exe" args`: PowerShell's call operator, written by a model that
+                # switched dialects mid-command.
+                raise UnsupportedConstruct(
+                    "malformed-syntax",
+                    "A leading '&' is PowerShell's call operator, not bash: invoke the program directly, quoting its path.",
+                )
             # A fully empty SimpleCommand reached as a pipeline element means a missing
             # command word (e.g. "| foo", "a && ", "a | | b"). Assignment-only (`FOO=1`) and
             # redirect-only (`> file`) commands are valid and never reach here empty.

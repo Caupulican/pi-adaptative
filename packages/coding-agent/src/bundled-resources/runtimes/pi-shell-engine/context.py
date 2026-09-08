@@ -59,5 +59,5 @@ class ExecContext:
 
 # Executor-owned builtins are NOT in commands/REGISTRY: state mutators and `exit`
 # need ShellState/control-flow access, while the runner needs the executor.
-STATE_BUILTINS = {"cd", "export", "unset", "exit", "break", "continue", "let", "return", "local", "shift", "command"}
+STATE_BUILTINS = {"cd", "export", "unset", "exit", "break", "continue", "let", "return", "local", "shift", "command", "set"}
 RUNNER_BUILTINS = {"xargs"}

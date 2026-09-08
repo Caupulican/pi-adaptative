@@ -669,6 +669,62 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 			});
 		});
 
+		it("set -e/-u/-x/-o pipefail follow bash, set -- assigns positional parameters, other options refuse by name", () => {
+			withTmpDir((dir) => {
+				const errexit = runEngine(python, "set -e; false; echo not-reached", dir);
+				expect(errexit.frame.exitCode).toBe(1);
+				expect(errexit.stdout).toBe("");
+				const tested = runEngine(
+					python,
+					"set -e; false || echo handled; if false; then :; fi; ! false; echo after",
+					dir,
+				);
+				expect(tested.stdout).toBe("handled\nafter\n");
+				const nounset = runEngine(python, 'set -u; echo "${X:-fallback}"; echo "$UNSET_Y"; echo not-reached', dir);
+				expect(nounset.stdout).toContain("fallback\n");
+				expect(nounset.stdout).toContain("UNSET_Y: unbound variable");
+				expect(nounset.stdout).not.toContain("not-reached");
+				const pipefail = runEngine(
+					python,
+					"set -o pipefail; false | true; echo rc=$?; set +o pipefail; false | true; echo rc=$?",
+					dir,
+				);
+				expect(pipefail.stdout).toBe("rc=1\nrc=0\n");
+				const xtrace = runEngine(python, "set -x; echo hi", dir);
+				expect(xtrace.stdout).toBe("+ echo hi\nhi\n");
+				const combined = runEngine(python, "set -euo pipefail; set -- a b; echo $# $1", dir);
+				expect(combined.frame.unsupported).toBeNull();
+				expect(combined.stdout).toBe("2 a\n");
+				const unknown = runEngine(python, "set -k", dir);
+				expect(unknown.frame.unsupported?.construct).toBe("unsupported-flag");
+			});
+		});
+
+		it("a redirect target that cannot be opened fails only its command with a bash-style message", () => {
+			withTmpDir((dir) => {
+				const missing = join(dir, "no-such-dir", "out.txt").replaceAll("\\", "/");
+				const { frame, stdout } = runEngine(
+					python,
+					`echo hi > '${missing}'; echo rc=$?; ls . 2>'${missing}' | head -1; echo after`,
+					dir,
+				);
+				expect(frame.unsupported).toBeNull();
+				expect(stdout).toContain(`bash: ${missing}: No such file or directory`);
+				expect(stdout).toContain("rc=1");
+				expect(stdout).toContain("after");
+				expect(stdout).not.toContain("Traceback");
+			});
+		});
+
+		it("a leading & (PowerShell's call operator) is refused with the dialect named", () => {
+			withTmpDir((dir) => {
+				const { frame } = runEngine(python, '& "C:/Program Files/Tool/tool.exe" --version', dir);
+				expect(frame.exitCode).toBe(2);
+				expect(frame.unsupported?.construct).toBe("malformed-syntax");
+				expect(frame.unsupported?.message).toContain("PowerShell's call operator");
+			});
+		});
+
 		it("cwd-missing: request cwd does not exist", () => {
 			const missing = join(tmpdir(), "pi-conformance-missing-dir-does-not-exist");
 			const { frame } = runEngine(python, "echo hi", missing);

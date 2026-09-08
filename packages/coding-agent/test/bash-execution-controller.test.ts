@@ -178,14 +178,10 @@ describe("BashExecutionController", () => {
 	} else {
 		it("resolves a pipeline through the Python engine when the engine is enabled (default)", async () => {
 			const controller = makeController();
-			const operations: BashOperations = {
-				exec: async (_command, _cwd, _options) => {
-					throw new Error("engine route must not fall through to the raw shell operations");
-				},
-			};
-
-			const result = await controller.executeBash("node --version | more", undefined, {
-				operations,
+			// No custom operations: a caller-owned backend would turn the local engine off (it
+			// receives the floor contract), so the engine path is exercised with the default
+			// local backend, which is never spawned for an engine-routed command.
+			const result = await controller.executeBash("node --version | head -1", undefined, {
 				platform: "win32",
 				pythonEngine: true,
 			});

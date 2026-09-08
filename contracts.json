@@ -26,6 +26,7 @@
     "packages/coding-agent/test/native-worker-autonomy.test.ts",
     "packages/coding-agent/test/background-tool-task-controller.test.ts",
     "packages/coding-agent/test/tool-task.test.ts",
-    "packages/coding-agent/test/profiling/host-long-session.profile.test.ts"
+    "packages/coding-agent/test/profiling/host-long-session.profile.test.ts",
+    "packages/coding-agent/test/windows-shell-corpus.test.ts"
   ]
 }

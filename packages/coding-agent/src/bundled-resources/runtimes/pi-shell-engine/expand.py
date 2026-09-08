@@ -218,6 +218,9 @@ def _resolve_param(name: str, op: str | None, arg: "Word | Substitution | None",
     is_empty = is_unset or (special if special is not None else env.get(name, "")) == ""
     current = special if special is not None else env.get(name, "")
 
+    if is_unset and "nounset" in ctx.state.options and op not in (":-", ":=", ":+", ":?"):
+        raise ParamExpansionError(name, f"{name}: unbound variable")
+
     if op is None:
         return current, False
 

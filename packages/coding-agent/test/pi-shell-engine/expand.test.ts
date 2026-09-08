@@ -35,6 +35,7 @@ class FakeState:
         self.cwd = cwd
         self.positional = list(env.get("__POSITIONAL__", "").split("\\x1f")) if env.get("__POSITIONAL__") else []
         self.last_exit_code = 0
+        self.options = set()
 
     def setenv(self, name, value):
         self.env[name] = value

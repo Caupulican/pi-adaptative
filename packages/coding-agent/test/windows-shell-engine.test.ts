@@ -307,7 +307,7 @@ describe("windows shell engine operations", () => {
 			createLocalPlatformShellOperations(
 				{
 					pythonEngine: true,
-					operations: {
+					floorOperations: {
 						exec: async () => {
 							throw new Error("engine-owned command reached the PowerShell floor");
 						},
@@ -917,7 +917,7 @@ describe("windows shell engine operations", () => {
 			{
 				sessionKey,
 				pythonEngine: true,
-				operations: fakePsOperations,
+				floorOperations: fakePsOperations,
 				engineOptions: {
 					resolveRuntime: async () =>
 						runtimeGone
