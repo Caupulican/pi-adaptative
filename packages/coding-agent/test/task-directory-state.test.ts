@@ -76,6 +76,33 @@ describe("task directory state", () => {
 		expect(admitted.cwd).toBe(first.root);
 	});
 
+	it("accepts the workspace's own absolute root and absolute paths inside it as bind paths", () => {
+		const state = transitionTaskDirectoryState(createTaskDirectoryState(second), {
+			action: "bind",
+			taskId: "root",
+			pinned: true,
+			path: "d:\\FIXTURE SPACE\\日本語",
+		});
+		expect(resolveTaskDirectoryContext(state, "root", "session").cwd).toBe(second.root);
+		const nested = transitionTaskDirectoryState(state, {
+			action: "bind",
+			taskId: "nested",
+			pinned: true,
+			path: "D:\\fixture space\\日本語\\src\\lib",
+		});
+		expect(resolveTaskDirectoryContext(nested, "nested", "session").cwd).toBe(`${second.root}\\src\\lib`);
+		expect(() =>
+			transitionTaskDirectoryState(state, { action: "bind", taskId: "outside", pinned: true, path: "D:\\other" }),
+		).toThrow(/outside workspace "second" \(D:\\fixture space\\日本語\)/);
+		const posix = transitionTaskDirectoryState(createTaskDirectoryState(first), {
+			action: "bind",
+			taskId: "posix",
+			pinned: true,
+			path: "/fixture/first/pkg",
+		});
+		expect(resolveTaskDirectoryContext(posix, "posix", "session").cwd).toBe("/fixture/first/pkg");
+	});
+
 	it.each(["../escape", "/absolute", "\u0000", "D:relative", "D:\\absolute"])(
 		"rejects unsafe portable directory %j atomically",
 		(path) => {

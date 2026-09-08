@@ -2,8 +2,10 @@ import {
 	createExecutionContext,
 	type ExecutionAttachment,
 	type ExecutionContext,
+	executionPathApi,
 	resolveExecutionResource,
 } from "@caupulican/pi-agent-core/paths";
+import { isPathWithinScopeWithDialect } from "../autonomy/path-scope.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 export const MAX_TASK_WORKSPACES = 32;
@@ -59,8 +61,29 @@ function directoryContext(
 ): ExecutionContext {
 	if (path.length > MAX_DIRECTORY_PATH_LENGTH) throw new Error("Task directory exceeds path bound");
 	const base = createExecutionContext({ attachment, cwd: attachment.root, sessionId, generation });
-	const resolved = resolveExecutionResource(base, { base: "workspace", path });
+	const resolved = resolveExecutionResource(base, {
+		base: "workspace",
+		path: workspaceRelativePath(attachment, path),
+	});
 	return createExecutionContext({ ...base, cwd: resolved.path });
+}
+
+/**
+ * A bind names its directory relative to the workspace, but a model that just registered
+ * `D:\HW7Additional` naturally binds with that same absolute path. Inside the attachment root the
+ * absolute spelling is the same directory, so it is relativized; outside it stays a refusal that
+ * names both roots, because a binding never widens authority.
+ */
+function workspaceRelativePath(attachment: ExecutionAttachment, path: string): string {
+	const paths = executionPathApi(attachment.flavor);
+	if (!paths.isAbsolute(path)) return path;
+	if (!isPathWithinScopeWithDialect(path, attachment.root, attachment.flavor, attachment.caseSensitive)) {
+		throw new Error(
+			`Task directory ${JSON.stringify(path)} is outside workspace ${JSON.stringify(attachment.workspaceId)} (${attachment.root}); register that directory as its own workspace or bind a path inside this one`,
+		);
+	}
+	const relative = paths.relative(paths.resolve(attachment.root), paths.resolve(path));
+	return relative === "" ? "." : relative;
 }
 
 function freezeState(state: TaskDirectoryState): TaskDirectoryState {
