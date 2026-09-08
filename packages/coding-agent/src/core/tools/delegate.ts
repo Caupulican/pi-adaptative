@@ -29,6 +29,7 @@ import { ORCHESTRATION_PROFILE_TOOL_NAMES } from "../orchestration/lane-tool-man
 import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
 import type { WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import { normalizeProviderPromptGuidelines } from "../provider-tool-text.ts";
+import { partitionToolsForReadOnly } from "../tool-capability-policy.ts";
 import {
 	DELEGATE_STATUS_ACTIONS,
 	type DelegateStatusDependencies,
@@ -1082,6 +1083,9 @@ function delegateStartSkipText(reason: string): string {
 		// normalize before this branch; remaining misses still name the inheritance rule.
 		return `delegate skipped: ${reason}. A worker's tools come from this session's own active tool set (the tools you can call); omit toolNames to inherit every compatible tool.`;
 	}
+	if (reason.startsWith("orchestration_tool_capability_missing:")) {
+		return `delegate skipped: ${reason}. The compiled grant has no capability for that tool: readOnly keeps only local read tools, and a base profile's capability ceiling can exclude more. Drop the tool from toolNames, drop readOnly, or choose a base profile that grants it.`;
+	}
 	return `delegate skipped: ${reason}`;
 }
 
@@ -2040,6 +2044,18 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						action,
 						skipReason: "missing_instructions",
 					});
+				if (input.readOnly && input.toolNames) {
+					// readOnly narrows the capability set before tools are matched against it, so an
+					// explicit shell/write/network tool can never be granted. Say so here, before a lane
+					// exists, instead of failing the dispatch with a capability code the model has to decode.
+					const { excluded } = partitionToolsForReadOnly(input.toolNames);
+					if (excluded.length > 0) {
+						return invalid(
+							`delegate start readOnly excludes ${excluded.join(", ")}: readOnly keeps only local read tools (file reads, skills, memory query). Drop readOnly to grant them, or drop them from toolNames.`,
+							{ started: false, action, skipReason: "read_only_tool_conflict" },
+						);
+					}
+				}
 				const profileId = input.profileId?.trim();
 				const requirementIds = [
 					...(input.requirementId?.trim() ? [input.requirementId.trim()] : []),

@@ -20,9 +20,9 @@ import {
 import { CLASSIFIED_LANE_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
 import { resolvePinnedOrchestrationModel } from "../orchestration/model-binding.ts";
 import {
+	capabilitySurvivesReadOnly,
 	envelopeHasToolCapability,
 	getToolCapabilityPolicy,
-	resolveCapabilityPathAccess,
 } from "../tool-capability-policy.ts";
 import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-request.ts";
 import { LEAF_WORKER_DELEGATION_LIMITS } from "./worker-fleet-limits.ts";
@@ -249,12 +249,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	capabilities.delete("memory.mutate");
 	if (input.authority?.readOnly) {
 		for (const capability of capabilities) {
-			if (
-				resolveCapabilityPathAccess([capability]) !== "read" &&
-				capability !== "memory.query" &&
-				capability !== "settings.read"
-			)
-				capabilities.delete(capability);
+			if (!capabilitySurvivesReadOnly(capability)) capabilities.delete(capability);
 		}
 	}
 	const capabilityList = [...capabilities];

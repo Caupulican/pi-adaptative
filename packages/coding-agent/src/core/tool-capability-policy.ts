@@ -94,6 +94,37 @@ export function hasToolCapabilityPolicy(toolName: string): boolean {
 	return getToolCapabilityPolicy(toolName) !== undefined;
 }
 
+/**
+ * Whether a capability survives a `readOnly` worker grant: local reads plus the two read-only
+ * broker capabilities. Shell, process, write, network, and delegation capabilities do not.
+ */
+export function capabilitySurvivesReadOnly(capability: HarnessCapability): boolean {
+	return (
+		resolveCapabilityPathAccess([capability]) === "read" ||
+		capability === "memory.query" ||
+		capability === "settings.read"
+	);
+}
+
+/**
+ * Whether a tool can still be granted once `readOnly` has narrowed the capability set: every
+ * conjunctive clause must keep at least one surviving alternative. Unknown tools are reported as
+ * excluded so a caller never claims a grant this policy cannot back.
+ */
+export function toolSurvivesReadOnly(toolName: string): boolean {
+	const policy = getToolCapabilityPolicy(toolName);
+	if (!policy) return false;
+	return policy.capabilityClauses.every((clause) => clause.some(capabilitySurvivesReadOnly));
+}
+
+/** Split a tool list into what a `readOnly` grant keeps and what it silently drops. */
+export function partitionToolsForReadOnly(toolNames: readonly string[]): { kept: string[]; excluded: string[] } {
+	const kept: string[] = [];
+	const excluded: string[] = [];
+	for (const toolName of toolNames) (toolSurvivesReadOnly(toolName) ? kept : excluded).push(toolName);
+	return { kept, excluded };
+}
+
 export function toolUsesPathScope(toolName: string): boolean {
 	return getToolCapabilityPolicy(toolName)?.enforcements.includes("path-scope") ?? false;
 }

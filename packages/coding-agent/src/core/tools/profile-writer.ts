@@ -6,6 +6,7 @@ import type {
 	TaskProfileInspection,
 	TaskProfileWriterPort,
 } from "../orchestration/task-profile-writer.ts";
+import { partitionToolsForReadOnly } from "../tool-capability-policy.ts";
 import type { OrchestrationPanelModel } from "./orchestration-panel.ts";
 
 export const DELEGATE_PROFILE_ACTIONS = ["profile_inspect", "profile_create"] as const;
@@ -67,7 +68,14 @@ export function delegateProfilePanelModel(details: DelegateProfileToolDetails): 
 export function formatTaskProfileInspection(inspection: TaskProfileInspection): string {
 	const bases = inspection.baseProfiles.map((profile) => profile.profileId).join(", ") || "none";
 	const inheritedTools = inspection.inheritedToolNames.join(", ") || "none";
-	return `Optional owner-authored bases for profile_create: ${bases}. Omit baseProfileId to derive the foreground model, reasoning, compatible tools, and machine scope. Effective inherited native tools: ${inheritedTools}. Optional model, thinkingLevel, path, and toolNames fields narrow that inherited base. Available configured models: ${inspection.models.length}.`;
+	const { kept, excluded } = partitionToolsForReadOnly(inspection.inheritedToolNames);
+	// The inherited list is what a fresh worker gets by default. readOnly is not a subset the
+	// model can guess: name exactly which of those tools survive it and which it drops.
+	const readOnlyNote =
+		inspection.inheritedToolNames.length > 0
+			? ` readOnly: true keeps ${kept.join(", ") || "none"} and drops ${excluded.join(", ") || "none"}.`
+			: "";
+	return `Optional owner-authored bases for profile_create: ${bases}. Omit baseProfileId to derive the foreground model, reasoning, compatible tools, and machine scope. Effective inherited native tools: ${inheritedTools}.${readOnlyNote} Optional model, thinkingLevel, path, and toolNames fields narrow that inherited base. Available configured models: ${inspection.models.length}.`;
 }
 
 export function executeDelegateProfileAction(

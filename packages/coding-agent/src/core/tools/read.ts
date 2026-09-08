@@ -11,7 +11,14 @@ import type { Api, ImageContent, Model, TextContent } from "@caupulican/pi-ai";
 import { StreamingLineDecoder, type StreamingLineRecord } from "@caupulican/pi-ai/streaming-lines";
 import { Text } from "@caupulican/pi-tui";
 import { constants } from "fs";
-import { access as fsAccess, open as fsOpen, readFile as fsReadFile, stat as fsStat } from "fs/promises";
+import {
+	access as fsAccess,
+	lstat as fsLstat,
+	open as fsOpen,
+	readdir as fsReaddir,
+	readFile as fsReadFile,
+	stat as fsStat,
+} from "fs/promises";
 import { type Static, Type } from "typebox";
 import { getAgentDir, getReadmePath } from "../../config.ts";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.ts";
@@ -76,6 +83,72 @@ export interface ReadToolDetails {
 	truncation?: TruncationResult;
 	/** Present for `mode: "outline"`. */
 	outline?: { language: string; entries: number; totalLines: number; headFallback: boolean };
+	/** Present when the path was a directory and a bounded listing was returned instead of bytes. */
+	directory?: { entries: number; shown: number };
+}
+
+/** One directory member as the read tool lists it. */
+export interface ReadDirectoryEntry {
+	name: string;
+	kind: "dir" | "file" | "link" | "other";
+	/** Bytes for regular files; omitted for directories, links, and unreadable entries. */
+	size?: number;
+}
+
+/** Directory listings are orientation, not bulk transfer: keep them bounded like every read. */
+const DIRECTORY_LISTING_MAX_ENTRIES = 500;
+
+async function listLocalDirectory(absolutePath: string): Promise<ReadDirectoryEntry[] | undefined> {
+	if (!(await fsStat(absolutePath)).isDirectory()) return undefined;
+	const members = await fsReaddir(absolutePath, { withFileTypes: true });
+	const entries: ReadDirectoryEntry[] = [];
+	for (const member of members) {
+		if (member.isDirectory()) {
+			entries.push({ name: member.name, kind: "dir" });
+		} else if (member.isSymbolicLink()) {
+			entries.push({ name: member.name, kind: "link" });
+		} else if (member.isFile()) {
+			let size: number | undefined;
+			try {
+				size = (await fsLstat(join(absolutePath, member.name))).size;
+			} catch {
+				size = undefined;
+			}
+			entries.push({ name: member.name, kind: "file", ...(size !== undefined ? { size } : {}) });
+		} else {
+			entries.push({ name: member.name, kind: "other" });
+		}
+	}
+	return entries;
+}
+
+/**
+ * Directories first, then files, both by name, so a model orienting itself sees structure before
+ * leaves. The cap keeps a huge directory from displacing the conversation the way a huge file would.
+ */
+function renderDirectoryListing(
+	displayPath: string,
+	entries: readonly ReadDirectoryEntry[],
+): { text: string; details: NonNullable<ReadToolDetails["directory"]> } {
+	const rank = (entry: ReadDirectoryEntry): number => (entry.kind === "dir" ? 0 : 1);
+	const sorted = [...entries].sort((left, right) => rank(left) - rank(right) || left.name.localeCompare(right.name));
+	const shown = sorted.slice(0, DIRECTORY_LISTING_MAX_ENTRIES);
+	const lines = shown.map((entry) => {
+		if (entry.kind === "dir") return `${entry.name}/`;
+		if (entry.kind === "link") return `${entry.name} -> (symlink)`;
+		if (entry.kind === "file")
+			return entry.size === undefined ? entry.name : `${entry.name}  ${formatSize(entry.size)}`;
+		return `${entry.name}  (special)`;
+	});
+	const header = `Directory ${displayPath} (${entries.length} ${entries.length === 1 ? "entry" : "entries"})`;
+	const footer =
+		shown.length < entries.length
+			? `\n[${entries.length - shown.length} more entries not shown. Read a subdirectory or search with grep/find for the rest.]`
+			: "";
+	return {
+		text: entries.length === 0 ? `${header}\n(empty)` : `${header}\n${lines.join("\n")}${footer}`,
+		details: { entries: entries.length, shown: shown.length },
+	};
 }
 
 interface CompactReadClassification {
@@ -105,6 +178,12 @@ export interface ReadOperations {
 	detectImageMimeType?: (absolutePath: string) => Promise<string | null | undefined>;
 	/** File size in bytes, used to decide between whole-file and sliced reads. */
 	stat?: (absolutePath: string) => Promise<{ size: number }>;
+	/**
+	 * Members of a directory, or undefined when the path is not a directory. A read tool that is a
+	 * worker's only filesystem surface must be able to enumerate a tree; without this a read-only
+	 * worker can only guess file names.
+	 */
+	listDirectory?: (absolutePath: string) => Promise<ReadDirectoryEntry[] | undefined>;
 	/**
 	 * Stream a slice of lines out of the file with bounded memory. Any region of an
 	 * arbitrarily large file stays reachable in batches via offset continuation.
@@ -228,6 +307,7 @@ const defaultReadOperations: ReadOperations = {
 	access: (path) => fsAccess(path, constants.R_OK),
 	detectImageMimeType: detectSupportedImageMimeTypeFromFile,
 	stat: async (path) => ({ size: (await fsStat(path)).size }),
+	listDirectory: listLocalDirectory,
 	readLineSlice: readLocalLineSlice,
 	countLines: countLocalLines,
 };
@@ -522,9 +602,24 @@ export function createReadToolDefinition(
 								throw new Error(
 									"Session transcripts expose projected labels, not raw character windows. Use read with offset and limit, without column.",
 								);
-							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
 							let content: (TextContent | ImageContent)[];
 							let details: ReadToolDetails | undefined;
+							const directoryEntries = ops.listDirectory ? await ops.listDirectory(absolutePath) : undefined;
+							if (aborted) return;
+							if (directoryEntries) {
+								// A directory has no bytes to page; the useful read is its bounded listing.
+								if (column !== undefined || offset !== undefined || tail !== undefined || mode !== undefined) {
+									throw new Error(`${path} is a directory: read it without offset, tail, column, or mode.`);
+								}
+								const listing = renderDirectoryListing(path, directoryEntries);
+								signal?.removeEventListener("abort", onAbort);
+								resolve({
+									content: [{ type: "text", text: listing.text }],
+									details: { directory: listing.details },
+								});
+								return;
+							}
+							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
 							const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
 							const fileSize = ops.stat ? (await ops.stat(absolutePath)).size : undefined;
 							if (aborted) return;

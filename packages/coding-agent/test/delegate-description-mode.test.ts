@@ -194,6 +194,27 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(result.details).toEqual({ started: false, skipReason: "budget_exhausted" });
 	});
 
+	it("explains a capability-missing skip in terms of readOnly and the base profile", async () => {
+		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			startWorkerDelegation: () => ({ started: false, skipReason: "orchestration_tool_capability_missing:bash" }),
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+		const result = await definition.execute(
+			"call-1",
+			{ instructions: "do the thing" },
+			new AbortController().signal,
+			() => {},
+			{} as never,
+		);
+		const text = result.content
+			.filter((content) => content.type === "text")
+			.map((content) => content.text)
+			.join("\n");
+		expect(text).toContain("delegate skipped: orchestration_tool_capability_missing:bash");
+		expect(text).toContain("readOnly keeps only local read tools");
+	});
+
 	it("reports the parent-aware retrieval path in async mode", async () => {
 		const definition = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
