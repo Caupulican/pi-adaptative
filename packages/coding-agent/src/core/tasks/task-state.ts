@@ -452,7 +452,9 @@ export function resolveTaskStepSelector(
 	const idPrefix = steps.filter((step) => step.id.toLocaleLowerCase().startsWith(normalized));
 	if (idPrefix.length === 1) return idPrefix[0];
 	if (idPrefix.length > 1) {
-		throw new TaskStepsError(`Task step selector is ambiguous: ${idPrefix.map((step) => step.id).join(", ")}.`);
+		throw new TaskStepsError(
+			`Task step selector is ambiguous: ${idPrefix.map((step) => step.id).join(", ")}. Name one step by its number ("2") or full id.`,
+		);
 	}
 
 	const exactContent = steps.filter((step) => step.content.toLocaleLowerCase() === normalized);
@@ -461,7 +463,9 @@ export function resolveTaskStepSelector(
 	if (contentMatches.length === 1) return contentMatches[0];
 	if (exactContent.length > 1 || contentMatches.length > 1) {
 		const matches = exactContent.length > 1 ? exactContent : contentMatches;
-		throw new TaskStepsError(`Task step selector is ambiguous: ${matches.map((step) => step.id).join(", ")}.`);
+		throw new TaskStepsError(
+			`Task step selector is ambiguous: ${matches.map((step) => step.id).join(", ")}. Name one step by its number ("2") or full id.`,
+		);
 	}
 	// Name what can be selected: a refusal that only repeats the bad selector left the model guessing.
 	const open = steps.filter((step) => step.status !== "completed" && step.status !== "cancelled");

@@ -83,7 +83,7 @@ function optionalTaskStepFields(requirementIdsDescription: string) {
  */
 const batchUpdateItemSchema = Type.Object(
 	{
-		id: Type.String({ minLength: 1, pattern: "\\S", description: "Step id, unique prefix, or ordinal." }),
+		id: Type.String({ minLength: 1, pattern: "\\S", description: 'Step number ("3") or id ("step-3").' }),
 		status: Type.Optional(statusSchema),
 		note: Type.Optional(Type.String({ maxLength: 4_000 })),
 		evidence: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 32 })),
@@ -438,7 +438,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 		promptGuidelines: [
 			"Use for multi-step work; keep one in_progress step.",
 			"For project changes, establish Plan/Route before first mutation and link steps to the goal contract; task_steps owns execution detail, never a second outcome state.",
-			"Finish several steps in one call with update + updates: [{id, status, note}, …], never one call per step; work the first open step; record blockers; skip unchanged narration.",
+			'Finish several steps in one call with update + updates: [{id: "3", status, note}, …] (id is the step number), never one call per step; work the first open step; record blockers; skip unchanged narration.',
 			"Notes are one short line; long evidence belongs in goal add_evidence cited by toolCallId.",
 			"intake keeps every item; link goal requirementIds.",
 			"update's id is optional: omit it to target the active step. Completing the active step auto-starts the next pending one.",
@@ -590,6 +590,20 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 							// Fail closed before applying anything: a batch that names one unknown step must not
 							// half-apply, and the response names every failing item at once.
 							const problems: string[] = [];
+							// One selector repeated across items names one step at most; measured live, a model
+							// emitted `"id": "s"` for every item five times before switching to step numbers.
+							const selectorCounts = new Map<string, number>();
+							for (const item of input.updates) {
+								const key = item.id.trim().toLocaleLowerCase();
+								selectorCounts.set(key, (selectorCounts.get(key) ?? 0) + 1);
+							}
+							for (const [selector, count] of selectorCounts) {
+								if (count > 1) {
+									problems.push(
+										`updates[] repeats selector ${JSON.stringify(selector)} ${count} times; give each item its own step number ("1", "2", …) or full id.`,
+									);
+								}
+							}
 							input.updates.forEach((item, index) => {
 								try {
 									resolveUpdateSelector(before.steps, item.id, () => {});

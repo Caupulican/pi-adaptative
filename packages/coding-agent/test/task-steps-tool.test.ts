@@ -119,6 +119,38 @@ describe("task_steps tool", () => {
 		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["in_progress", "pending"]);
 	});
 
+	it("refuses a batch whose items repeat one selector and says to number each step", async () => {
+		// Measured live: every item carried `"id": "s"` (a truncated step id), five calls running,
+		// until the model switched to step numbers. The refusal must say that in one line.
+		const harness = createHarness();
+		await execute(harness.tool, {
+			action: "set",
+			steps: [{ content: "One", status: "in_progress" }, { content: "Two" }, { content: "Three" }],
+		});
+		const result = await execute(harness.tool, {
+			action: "update",
+			updates: [
+				{ id: "s", status: "completed" },
+				{ id: "s", status: "completed" },
+				{ id: "s", status: "completed" },
+			],
+		});
+		expect(result.details).toMatchObject({ action: "update", applied: false });
+		const text = result.content[0];
+		if (text?.type !== "text") throw new Error("Expected text task_steps result");
+		expect(text.text).toContain('updates[] repeats selector "s" 3 times; give each item its own step number');
+		expect(text.text).toContain('Name one step by its number ("2") or full id.');
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["in_progress", "pending", "pending"]);
+		const numbered = await execute(harness.tool, {
+			action: "update",
+			updates: [
+				{ id: "1", status: "completed" },
+				{ id: "2", status: "completed" },
+			],
+		});
+		expect(numbered.details).toMatchObject({ applied: true, autoPromotedStepId: "step-3" });
+	});
+
 	it("names the folded-arguments shape when the whole update object arrived inside id", async () => {
 		// Measured live (grok-4.6, two audits): `"step-1 Tesstatus Tescompleted Tesnote Tes…"` and a
 		// "vis-à-vis"-delimited twin. The generic not-found refusal only listed the open steps.
@@ -491,7 +523,7 @@ describe("task_steps tool", () => {
 		expect(harnessGuidelines(createHarness().tool)).toContain("requirementIds");
 		expect(harnessGuidelines(createHarness().tool)).not.toContain("pipelineRunId");
 		expect(harnessGuidelines(createHarness().tool)).toContain("multi-step work");
-		expect(harnessGuidelines(createHarness().tool)).toContain("updates: [{id, status, note}");
+		expect(harnessGuidelines(createHarness().tool)).toContain('updates: [{id: "3", status, note}');
 		expect(harnessGuidelines(createHarness().tool)).toContain("Notes are one short line");
 	});
 });

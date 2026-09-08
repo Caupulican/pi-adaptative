@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- A batched `task_steps update` whose items repeat one selector (measured live: `"id": "s"` on every item) is refused with a line asking for each item's own step number, and the ambiguity refusal now says how to name one step.
 - A `task_steps update` whose whole object arrived folded into `id` (property names as words in the selector) is refused with a diagnostic naming that shape and the correct JSON, instead of the generic step-not-found list.
 
 ## [0.99.7] - 2026-09-08
