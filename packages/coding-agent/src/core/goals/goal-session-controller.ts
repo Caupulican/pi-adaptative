@@ -106,6 +106,9 @@ interface QueuedOwnerChatGoal {
  * Owns durable goal state, exact continuation accounting, and the raw continuation loop. The
  * AgentSession facade supplies process collaborators but no longer implements goal lifecycle rules.
  */
+/** What a bounded harness guard did to the active goal. */
+export type GoalGuardRecovery = "resumed" | "blocked" | "no_goal";
+
 /** Classified reasons that mean the provider, not the harness, ended the turn. */
 const PROVIDER_FAILURE_REASONS: ReadonlySet<string> = new Set([
 	"overloaded",
@@ -602,15 +605,22 @@ export class GoalSessionController {
 		);
 	}
 
-	recoverFromHarnessGuard(info: AgentRunawayStopInfo): boolean {
+	recoverFromHarnessGuard(info: AgentRunawayStopInfo): GoalGuardRecovery {
 		const reason =
 			info.reason === "provider_turn_limit"
 				? `provider_turn_limit: reached the explicit ${info.repeats}-request provider-turn limit`
 				: info.reason === "stagnant_tool_cycle"
 					? `stagnant_tool_cycle: repeated tool-call signature ${info.signature} ${info.repeats} times with identical results`
 					: `runaway_tool_loop: repeated tool-call signature ${info.signature} ${info.repeats} times without progress`;
-		if (!this.stopActiveGoal("blocked", reason)) return false;
-		return this.resumeSystemBlockedGoal() !== undefined;
+		// One automatic resume per guard signature. A second identical stop means the recovery cue
+		// did not change the model's behavior; resuming again bought a runaway text loop live. The
+		// goal stays blocked with the reason until the owner prompts, which resumes system blocks.
+		const alreadyResumedForSignature =
+			info.reason !== "provider_turn_limit" &&
+			(this.getState()?.events ?? []).some((event) => event.type === "system_stop_goal" && event.reason === reason);
+		if (!this.stopActiveGoal("blocked", reason)) return "no_goal";
+		if (alreadyResumedForSignature) return "blocked";
+		return this.resumeSystemBlockedGoal() !== undefined ? "resumed" : "blocked";
 	}
 
 	markTerminalToolFailureBlocked(toolName: string): boolean {

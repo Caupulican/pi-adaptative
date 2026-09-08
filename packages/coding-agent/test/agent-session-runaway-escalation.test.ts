@@ -162,7 +162,7 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 		}
 	});
 
-	it("keeps enforcing recovery across consecutive bounded guards instead of terminalizing the goal", async () => {
+	it("resumes once per guard signature and blocks the goal when the same signature fires again", async () => {
 		const harness = await createHarness();
 		try {
 			const state = applyGoalEvent(
@@ -171,18 +171,40 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 			);
 			harness.session.saveGoalStateSnapshot(state);
 
-			for (let attempt = 0; attempt < 2; attempt++) {
-				harness.session.agent.onRunawayStop?.({
-					reason: "repeated_tool_call",
-					signature: "bash:{same-failed-probe}",
-					repeats: 12,
-				});
+			// Distinct signatures each earn one automatic resume: the goal is making different mistakes.
+			for (const signature of ["bash:{probe-a}", "bash:{probe-b}"]) {
+				harness.session.agent.onRunawayStop?.({ reason: "repeated_tool_call", signature, repeats: 12 });
 				expect(harness.session.getGoalStateSnapshot()?.status).toBe("active");
 			}
-
 			const eventTypes = harness.session.getGoalStateSnapshot()?.events.map((event) => event.type) ?? [];
 			expect(eventTypes.filter((type) => type === "system_stop_goal")).toHaveLength(2);
 			expect(eventTypes.filter((type) => type === "resume_goal")).toHaveLength(2);
+
+			// The same signature a second time means the recovery cue changed nothing: resuming again
+			// bought a runaway text loop live. The goal stays blocked with the reason until the owner prompts.
+			harness.session.agent.onRunawayStop?.({
+				reason: "repeated_tool_call",
+				signature: "bash:{probe-a}",
+				repeats: 12,
+			});
+			const blocked = harness.session.getGoalStateSnapshot();
+			expect(blocked).toMatchObject({
+				status: "blocked",
+				blockedReason: expect.stringContaining("bash:{probe-a}"),
+			});
+			expect(blocked?.events.filter((event) => event.type === "resume_goal")).toHaveLength(2);
+			expect(
+				harness
+					.eventsOfType("warning")
+					.some((event) =>
+						event.message.includes("already fired once for this signature, so the goal is now blocked"),
+					),
+			).toBe(true);
+
+			// An owner prompt resumes a system-blocked goal exactly as before.
+			harness.setResponses([fauxAssistantMessage("audit resumed by owner")]);
+			await harness.session.prompt("continue the audit", { autoContinueGoal: false });
+			expect(harness.session.getGoalStateSnapshot()?.status).toBe("active");
 		} finally {
 			harness.cleanup();
 		}

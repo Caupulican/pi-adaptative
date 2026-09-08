@@ -15,14 +15,15 @@ import {
 	type ToolValidationEscalationRecord,
 } from "./agent-session-contracts.ts";
 import type { CapabilityTierDemotion } from "./capability-tier.ts";
+import type { GoalGuardRecovery } from "./goals/goal-session-controller.ts";
 
 export interface SessionGuardDeps {
 	getModel(): Model<Api> | undefined;
 	/** The adaptation-store key for a model. */
 	formatModel(model: Model<Api>): string;
 	appendCustomEntry(customType: string, record: unknown): void;
-	/** Goal recovery after a guard: true when a durable goal stays active and will continue. */
-	recoverGoalFromHarnessGuard(info: AgentRunawayStopInfo): boolean;
+	/** Goal recovery after a guard: resumed (continues automatically), blocked (same guard twice; waits for the owner), or no goal. */
+	recoverGoalFromHarnessGuard(info: AgentRunawayStopInfo): GoalGuardRecovery;
 	/** Persist the graded demotion evidence for this model. */
 	setCapabilityTierDemotion(modelKey: string, demotion: CapabilityTierDemotion): void;
 	/** Re-read the tier policy after a demotion and apply what changes per turn. */
@@ -38,7 +39,8 @@ export interface SessionGuardDeps {
 
 /** Persist the guard evidence, retain active work, and force the next pass onto a recovery path. */
 export function handleRunawayStop(deps: SessionGuardDeps, info: AgentRunawayStopInfo): void {
-	const goalRecovered = deps.recoverGoalFromHarnessGuard(info);
+	const recovery = deps.recoverGoalFromHarnessGuard(info);
+	const goalRecovered = recovery === "resumed";
 	const model = deps.getModel();
 	const record: RunawayStopRecord = {
 		reason: info.reason,
@@ -74,9 +76,13 @@ export function handleRunawayStop(deps: SessionGuardDeps, info: AgentRunawayStop
 			: info.reason === "stagnant_tool_cycle"
 				? `the same tool-call cycle returned identical results ${info.repeats} times`
 				: `the model repeated the same tool call ${info.repeats} times in a row without making progress`;
-	deps.emitWarning(
-		`Bounded guard ended this run: ${cause}.${goalRecovered ? " The active goal remains scheduled; the next pass must use a different approach." : ""}`,
-	);
+	const goalNote =
+		recovery === "resumed"
+			? " The active goal remains scheduled; the next pass must use a different approach."
+			: recovery === "blocked"
+				? " The same guard already fired once for this signature, so the goal is now blocked; prompt to resume it."
+				: "";
+	deps.emitWarning(`Bounded guard ended this run: ${cause}.${goalNote}`);
 }
 
 /**
