@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -61,123 +61,13 @@ function loadFixture(): CorpusFixture {
 	return JSON.parse(readFileSync(FIXTURE_PATH, "utf-8")) as CorpusFixture;
 }
 
-// One Python process replays the whole corpus: tokenizer+parser for every shape, then the
-// real executor (registry, expander, GNU dispatch) for the harness-owned shapes.
-const REPLAY = `
-import sys, io, json, os, time, traceback
-sys.path.insert(0, ${JSON.stringify(ENGINE_DIR)})
-from tokens import tokenize
-from parser import parse
-import exec as execmod
-import proc
-from context import ExecContext, STATE_BUILTINS, RUNNER_BUILTINS
-from state import ShellState
-from commands import REGISTRY
-from errors import UnsupportedConstruct, ShellExit
-from expand import expand_word, ParamExpansionError
-import nodes
+const CORPUS_TOOL = join(ENGINE_DIR, "corpus.py");
 
-payload = json.load(open(sys.argv[1], encoding="utf-8"))
-sandbox = payload["sandbox"]
-gnu_dir = payload.get("gnuToolsDir")
-roots = payload["roots"]
-KEYWORDS = {"for", "do", "done", "if", "then", "else", "elif", "fi", "while", "until", "case", "esac", "in", "function", "[[", "]]", "!", "{", "}", "time"}
-OWNED = set(REGISTRY) | STATE_BUILTINS | RUNNER_BUILTINS | set(proc.GNU_PREFERRED_TOOLS) | KEYWORDS
-
-def command_names(ast):
-    names = set()
-    def visit_list(lst):
-        for andor in lst.entries:
-            for pipeline in andor.pipelines:
-                for element in pipeline.elements:
-                    visit_element(element)
-    def visit_element(element):
-        if isinstance(element, nodes.SimpleCommand):
-            if element.words:
-                word = element.words[0]
-                text = "".join(getattr(seg, "text", "\\x00") for seg in word.segments)
-                names.add(text)
-        elif isinstance(element, (nodes.Subshell, nodes.BraceGroup)):
-            visit_list(element.body)
-        elif isinstance(element, (nodes.ForCommand, nodes.ArithmeticForCommand, nodes.WhileCommand, nodes.UntilCommand)):
-            if hasattr(element, "condition"):
-                visit_list(element.condition)
-            visit_list(element.body)
-        elif isinstance(element, nodes.IfCommand):
-            for condition, body in element.branches:
-                visit_list(condition); visit_list(body)
-            if element.else_body is not None:
-                visit_list(element.else_body)
-        elif isinstance(element, nodes.CaseCommand):
-            for _patterns, body, _terminator in element.clauses:
-                visit_list(body)
-        elif isinstance(element, nodes.FunctionDefinition):
-            visit_element(element.body)
-    visit_list(ast)
-    return names
-
-def substitute(command):
-    for key, root in roots.items():
-        command = command.replace(root, sandbox[key])
-    return command
-
-results = []
-for shape in payload["shapes"]:
-    entry = {"id": shape["id"]}
-    try:
-        ast = parse(tokenize(shape["command"]))
-    except UnsupportedConstruct as exc:
-        entry["refusal"] = {"construct": exc.construct, "message": exc.message}
-        results.append(entry)
-        continue
-    except Exception:
-        entry["crash"] = traceback.format_exc()
-        results.append(entry)
-        continue
-    names = command_names(ast)
-    entry["names"] = sorted(names)
-    owned = all(name in OWNED for name in names)
-    entry["owned"] = owned
-    if not owned:
-        results.append(entry)
-        continue
-    work = os.path.join(sandbox["work"], shape["id"])
-    os.makedirs(work, exist_ok=True)
-    env = {"PATH": os.environ.get("PATH", ""), "PATHEXT": os.environ.get("PATHEXT", ""), "HOME": work, "TEMP": work, "TMP": work}
-    if os.environ.get("SYSTEMROOT"):
-        env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
-    state = ShellState(cwd=work, env=env, gnu_tools_dir=gnu_dir)
-    merged = io.BytesIO()
-    ctx = ExecContext(state=state, stdin=io.BytesIO(), stdout=merged, expand_word=expand_word,
-                      run_command_substitution=execmod.run_command_substitution, builtins=REGISTRY,
-                      deadline=time.monotonic() + 10.0, stderr=merged)
-    try:
-        exit_code = execmod.execute(parse(tokenize(substitute(shape["command"]))), ctx)
-    except ShellExit as exc:
-        exit_code = exc.exit_code
-    except UnsupportedConstruct as exc:
-        entry["refusal"] = {"construct": exc.construct, "message": exc.message}
-        exit_code = 2
-    except ParamExpansionError as exc:
-        exit_code = 1
-        merged.write(exc.message.encode("utf-8", "replace"))
-    except Exception:
-        entry["crash"] = traceback.format_exc()
-        exit_code = -1
-    entry["exitCode"] = exit_code
-    entry["output"] = merged.getvalue().decode("utf-8", "replace")[-2000:]
-    results.append(entry)
-json.dump(results, open(sys.argv[2], "w", encoding="utf-8"))
-`;
-
-interface ReplayEntry {
-	id: string;
-	refusal?: { construct: string; message: string };
-	crash?: string;
-	names?: string[];
-	owned?: boolean;
-	exitCode?: number;
-	output?: string;
+interface WallReport {
+	shapes: number;
+	owned: number;
+	refusedByDesign: number;
+	defects: Array<{ id: string; kind: string; detail: string; command: string }>;
 }
 
 function resolveWallGnuToolsDir(): string | null {
@@ -222,75 +112,42 @@ describe("Windows shell corpus wall", () => {
 			const gnuToolsDir = resolveWallGnuToolsDir();
 			// The wall's execution leg needs real GNU tools: Git for Windows on Windows, coreutils on Linux.
 			expect(gnuToolsDir, "GNU tools directory (Git for Windows usr/bin or /usr/bin)").not.toBeNull();
+			if (gnuToolsDir === null) throw new Error("unreachable: asserted above");
 			const scratch = mkdtempSync(join(tmpdir(), "pi-corpus-wall-"));
 			// Four levels deep so a shape's `cd ..` chains stay inside the sandbox.
-			const work = join(scratch, "a", "b", "c", "work");
-			mkdirSync(work, { recursive: true });
-			const forward = work.replaceAll("\\", "/");
-			const sandbox = {
-				work,
-				windows: forward,
-				windowsBackslash: work.replaceAll("/", "\\"),
-				gitBash: process.platform === "win32" ? `/${forward[0].toLowerCase()}${forward.slice(2)}` : forward,
-				wsl: process.platform === "win32" ? `/mnt/${forward[0].toLowerCase()}${forward.slice(2)}` : forward,
-				programFiles: join(forward, "Program Files"),
-			};
-			const payloadPath = join(scratch, "payload.json");
-			const resultsPath = join(scratch, "results.json");
-			writeFileSync(
-				payloadPath,
-				JSON.stringify({ shapes: fixture.shapes, roots: fixture.roots, sandbox, gnuToolsDir }),
-			);
+			const sandbox = join(scratch, "a", "b", "c");
+			mkdirSync(sandbox, { recursive: true });
+			const reportPath = join(scratch, "report.json");
 			try {
-				const run = spawnSync(python, ["-B", "-c", REPLAY, payloadPath, resultsPath], {
-					encoding: "utf-8",
-					maxBuffer: 256 * 1024 * 1024,
-					timeout: 15 * 60_000,
-				});
-				expect(run.status, `replay crashed: ${run.stderr}`).toBe(0);
-				const results = JSON.parse(readFileSync(resultsPath, "utf-8")) as ReplayEntry[];
-				const byId = new Map(fixture.shapes.map((shape) => [shape.id, shape]));
-				const defects: string[] = [];
-				let owned = 0;
-				let refusedByDesign = 0;
-				for (const entry of results) {
-					const shape = byId.get(entry.id);
-					if (!shape) throw new Error(`replay reported an unknown shape ${entry.id}`);
-					if (entry.crash) {
-						defects.push(`${entry.id} crashed:\n${entry.crash}\n  ${shape.command}`);
-						continue;
-					}
-					if (shape.expect !== "ok") {
-						refusedByDesign += 1;
-						if (entry.refusal?.construct !== shape.expect.construct) {
-							const got = entry.refusal
-								? `[${entry.refusal.construct}] ${entry.refusal.message}`
-								: "an accepted parse";
-							defects.push(
-								`${entry.id} expected the named refusal [${shape.expect.construct}] but got ${got}\n  ${shape.command}`,
-							);
-						}
-						continue;
-					}
-					if (entry.refusal) {
-						defects.push(
-							`${entry.id} refused [${entry.refusal.construct}] ${entry.refusal.message}\n  ${shape.command}`,
-						);
-						continue;
-					}
-					if (!entry.owned) continue;
-					owned += 1;
-					const output = entry.output ?? "";
-					const notFound = /^([^\s:]+): command not found$/mu.exec(output);
-					if (notFound)
-						defects.push(`${entry.id} lost a harness-owned command: ${notFound[0]}\n  ${shape.command}`);
-					if (/Traceback \(most recent call last\)/u.test(output))
-						defects.push(`${entry.id} traceback:\n${output}`);
-				}
-				expect(owned).toBeGreaterThan(300);
+				// The same replay and classification the operator tool runs (scripts/windows-shell-corpus.mjs).
+				const run = spawnSync(
+					python,
+					[
+						"-B",
+						CORPUS_TOOL,
+						"replay",
+						"--fixture",
+						FIXTURE_PATH,
+						"--sandbox",
+						sandbox,
+						"--gnu-tools-dir",
+						gnuToolsDir,
+						"--out",
+						reportPath,
+					],
+					{ encoding: "utf-8", maxBuffer: 256 * 1024 * 1024, timeout: 15 * 60_000 },
+				);
+				expect(existsSync(reportPath), `replay produced no report: ${run.stderr}\n${run.stdout}`).toBe(true);
+				const report = JSON.parse(readFileSync(reportPath, "utf-8")) as WallReport;
+				expect(report.shapes).toBe(fixture.shapes.length);
+				expect(report.owned).toBeGreaterThan(300);
 				// The refusal budget for supported families is zero; only dialect mistakes are refused.
-				expect(refusedByDesign).toBeLessThanOrEqual(20);
+				expect(report.refusedByDesign).toBeLessThanOrEqual(20);
+				const defects = report.defects.map(
+					(defect) => `${defect.id} ${defect.kind}: ${defect.detail}\n  ${defect.command}`,
+				);
 				expect(defects, `${defects.length} defect(s) in the corpus wall`).toEqual([]);
+				expect(run.status).toBe(0);
 			} finally {
 				rmSync(scratch, { recursive: true, force: true });
 			}

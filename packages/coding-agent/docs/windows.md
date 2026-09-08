@@ -93,6 +93,19 @@ To select an explicit PowerShell executable:
 }
 ```
 
+### Evaluating and evolving the shell contract from real sessions
+
+The harness measures its own bash contract against the commands models actually wrote, on this machine or on another one, without ever storing a private command:
+
+```
+node scripts/windows-shell-corpus.mjs evaluate                       # this machine's ~/.pi/agent/sessions
+node scripts/windows-shell-corpus.mjs evaluate --sessions <extracted .pi/agent/sessions from another machine> --platform win32
+node scripts/windows-shell-corpus.mjs harvest --write                # append the new shapes to the corpus fixture
+node scripts/windows-shell-corpus.mjs replay                         # the corpus wall, on demand
+```
+
+`harvest` turns every `bash` tool call in the transcripts into a shape: the grammar (operators, quoting, flags, keywords, expansions, path depth and spelling, regex and printf metacharacters) is kept byte for byte, every identifier, path component, hostname and literal becomes a synthetic token, a leak guard drops any shape that still carries a raw identifier, and each shape records the verdict the engine's grammar gives the real command so named refusals stay named. `replay` runs the fixture through the router, the grammar and, for every shape whose command names the harness owns, the real executor with the real GNU tools, and prints every defect. `evaluate` is both. `--write` appends the new shapes to `test/fixtures/windows-shell-corpus/commands.json` with stable ids, which is how a live failure becomes a regression shield before its fix lands; the wall (`test/windows-shell-corpus.test.ts`) replays that fixture in CI on Linux and Windows. The tool is `pi-shell-engine/corpus.py`, shipped with the runtime, so an installed pi can run it against its own sessions.
+
 ## Install
 
 The native PowerShell installer downloads and verifies the matching archive:
