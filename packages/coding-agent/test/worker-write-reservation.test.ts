@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { canonicalPathScopeIdentity } from "../src/core/autonomy/path-scope.ts";
 import {
 	type WorkerWriteReservationLease,
 	WorkerWriteReservationStore,
@@ -361,6 +362,11 @@ describe("WorkerWriteReservationStore", () => {
 				.listWorkspaces()
 				.map((workspace) => workspace.repositoryRoot)
 				.sort(),
-		).toEqual([realpathSync(paths.workspace), realpathSync(second)].sort());
+		).toEqual(
+			[
+				canonicalPathScopeIdentity(realpathSync(paths.workspace)),
+				canonicalPathScopeIdentity(realpathSync(second)),
+			].sort(),
+		);
 	});
 });
