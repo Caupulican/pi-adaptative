@@ -709,7 +709,8 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 					dir,
 				);
 				expect(frame.unsupported).toBeNull();
-				expect(stdout).toContain(`bash: ${missing}: No such file or directory`);
+				// The message names the resolved target (OS-native separators on Windows), then the reason.
+				expect(stdout).toMatch(/bash: .*no-such-dir.*out\.txt: No such file or directory/u);
 				expect(stdout).toContain("rc=1");
 				expect(stdout).toContain("after");
 				expect(stdout).not.toContain("Traceback");
