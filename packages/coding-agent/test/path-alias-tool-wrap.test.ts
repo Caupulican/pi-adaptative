@@ -5,9 +5,10 @@ import { describe, expect, it, vi } from "vitest";
 import { emptyPathAliasTable, extendPathAliasTable } from "../src/core/context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../src/core/context/path-alias-tool-wrap.ts";
 
-const table = extendPathAliasTable(emptyPathAliasTable("/repo"), [
-	"packages/coding-agent/src/core/tools/grep.ts",
-]).table;
+// The legend is host-owned, so the fixture root is host-absolute on every platform.
+const repo = resolve("/repo");
+const grepPath = join(repo, "packages", "coding-agent", "src", "core", "tools", "grep.ts");
+const table = extendPathAliasTable(emptyPathAliasTable(repo), ["packages/coding-agent/src/core/tools/grep.ts"]).table;
 
 function recordingTool() {
 	const calls: unknown[] = [];
@@ -31,11 +32,12 @@ describe("path alias tool wrapper", () => {
 			tool,
 			() => table,
 			new WeakSet(),
-			() => "/repo",
+			() => repo,
 		);
-		expect(wrapped.prepareArguments?.({ path: "p/grep.ts" })).toEqual({
-			path: "packages/coding-agent/src/core/tools/grep.ts",
-		});
+		// The loop prepares arguments before any directory admission exists, so the expansion must
+		// already be absolute: a relative one handed to a tool admitted into a pinned directory was
+		// re-resolved there (live: `packages/coding-agent/packages/coding-agent/...`, twice).
+		expect(wrapped.prepareArguments?.({ path: "p/grep.ts" })).toEqual({ path: grepPath });
 	});
 
 	it("anchors expansions to the legend root when the admitted directory differs from it", async () => {
@@ -83,11 +85,11 @@ describe("path alias tool wrapper", () => {
 				attachment: {
 					workspaceId: "repo",
 					attachmentId: "repo-v1",
-					root: "/repo",
+					root: repo,
 					flavor: "posix",
 					caseSensitive: true,
 				},
-				cwd: "/repo",
+				cwd: repo,
 				sessionId: "alias-test",
 				generation: 0,
 			});
@@ -96,7 +98,7 @@ describe("path alias tool wrapper", () => {
 				{ ...tool, bindInvocation },
 				() => table,
 				new WeakSet(),
-				() => "/repo",
+				() => repo,
 			);
 			const invocation = await wrapped.bindInvocation!("bound", { path });
 			try {
@@ -105,7 +107,7 @@ describe("path alias tool wrapper", () => {
 					expect(boundExecute).not.toHaveBeenCalled();
 				} else {
 					await invocation.execute("bound", { path });
-					expect(calls).toEqual([{ path: "packages/coding-agent/src/core/tools/grep.ts" }]);
+					expect(calls).toEqual([{ path: grepPath }]);
 				}
 			} finally {
 				invocation.release();
@@ -121,7 +123,7 @@ describe("path alias tool wrapper", () => {
 			tool as never,
 			() => table,
 			new WeakSet(),
-			() => "/repo",
+			() => repo,
 		);
 		await wrapped.execute(
 			"t1",
@@ -138,12 +140,12 @@ describe("path alias tool wrapper", () => {
 			tool as never,
 			() => table,
 			new WeakSet(),
-			() => "/repo",
+			() => repo,
 		);
 		expect(() => wrapped.execute("t2", { path: "p/ghost.ts" }, undefined as never, undefined)).toThrow(
 			/Unminted path alias "p\/ghost.ts"/,
 		);
 		await wrapped.execute("t3", { path: "p/grep.ts" }, undefined as never, undefined);
-		expect(calls).toEqual([{ path: "packages/coding-agent/src/core/tools/grep.ts" }]);
+		expect(calls).toEqual([{ path: grepPath }]);
 	});
 });

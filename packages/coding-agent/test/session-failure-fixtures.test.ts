@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import type { AgentMessage, AgentTool } from "@caupulican/pi-agent-core";
 import {
 	VerificationObligationTracker,
@@ -31,7 +32,8 @@ describe("synthetic session failure fixtures", () => {
 			description: "Read an in-memory fixture; never access the filesystem.",
 			parameters,
 			execute: async (_id, params) => {
-				if (params.path !== fixture.path) throw new Error(`ENOENT: ${params.path}`);
+				// The wrapper hands the executor the legend-root absolute spelling of the alias.
+				if (params.path !== resolve(fixture.cwd, fixture.path)) throw new Error(`ENOENT: ${params.path}`);
 				return { content: [{ type: "text", text: fixture.content }], details: undefined };
 			},
 		};

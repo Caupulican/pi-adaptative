@@ -91,7 +91,8 @@ describe("wrapToolWithPathAliasExpansion unminted-alias guard", () => {
 	});
 
 	it("expands a minted id and runs the tool", () => {
-		expect(runTool({ path: "p/module01.ts" }).seen).toEqual({ path: "src/core/module01.ts" });
+		// Executor-facing expansions are absolute under the legend root (see path-alias-tool-wrap).
+		expect(runTool({ path: "p/module01.ts" }).seen).toEqual({ path: join(dir, "src", "core", "module01.ts") });
 	});
 
 	it("passes a reserved token through untouched", () => {

@@ -7,6 +7,7 @@
 ### Fixed
 
 - Ran `find -exec` / `-exec … +` commands through the Windows shell engine's own dispatcher (builtins included) instead of a raw process spawn, which failed on Windows for `echo` and every other engine builtin.
+- Expanded `p/` path aliases in tool arguments to absolute paths under the legend root. The loop prepares arguments before any directory admission exists, so a repo-relative expansion handed to a tool admitted into a pinned directory was re-resolved there (`packages/coding-agent/packages/coding-agent/…`) and every aliased `read` after `task_directory select` failed; display expansion keeps the relative spelling.
 - Counted a repeated tool failure once per tool batch: identical calls emitted side by side in one assistant message (and the duplicates the admission gate blocks) share one occurrence, so the repeated-failure guard only ends a run when the model repeats a failure it has already seen. Four parallel `goal` calls that differed only in their ids had reached the limit inside a single batch.
 - Consolidated union validation diagnostics: a missing or unknown discriminator is reported once (`action: required, one of …` / `action: must be one of …`) instead of every branch's requirements plus a false `root: expected object` line; nested unions and non-object arguments report one line at their own path.
 
