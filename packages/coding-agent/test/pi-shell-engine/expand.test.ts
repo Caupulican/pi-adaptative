@@ -33,6 +33,8 @@ class FakeState:
     def __init__(self, env, cwd):
         self.env = dict(env)
         self.cwd = cwd
+        self.positional = list(env.get("__POSITIONAL__", "").split("\\x1f")) if env.get("__POSITIONAL__") else []
+        self.last_exit_code = 0
 
     def setenv(self, name, value):
         self.env[name] = value
@@ -187,6 +189,50 @@ describe("pi-shell-engine expand_word", () => {
 		expect(unquoted.result).toEqual(["a", "b"]);
 		const dq = expand(python, 'echo "$VAR"', { VAR: "a b" }, tmpDir);
 		expect(dq.result).toEqual(["a b"]);
+	});
+
+	it("$" + "{V#p} ${V##p} ${V%p} ${V%%p}: shortest/longest prefix and suffix strips", () => {
+		const env = { F: "/p/q/file.tar.gz" };
+		expect(expand(python, "echo $" + "{F##*/}", env, tmpDir).result).toEqual(["file.tar.gz"]);
+		expect(expand(python, "echo $" + "{F#/p/}", env, tmpDir).result).toEqual(["q/file.tar.gz"]);
+		expect(expand(python, "echo $" + "{F%%.*}", env, tmpDir).result).toEqual(["/p/q/file"]);
+		expect(expand(python, "echo $" + "{F%.gz}", env, tmpDir).result).toEqual(["/p/q/file.tar"]);
+		expect(expand(python, "echo $" + "{F#zzz}", env, tmpDir).result).toEqual(["/p/q/file.tar.gz"]);
+	});
+
+	it("$" + "{V/p/r} ${V//p/r} ${V/#p/r} ${V/%p/r}: first, every, anchored substitutions", () => {
+		const env = { V: "hello world" };
+		expect(expand(python, '"$' + '{V/o/0}"', env, tmpDir).result).toEqual(["hell0 world"]);
+		expect(expand(python, '"$' + '{V//o/0}"', env, tmpDir).result).toEqual(["hell0 w0rld"]);
+		expect(expand(python, '"$' + '{V/#hel/HEL}"', env, tmpDir).result).toEqual(["HELlo world"]);
+		expect(expand(python, '"$' + '{V/%rld/RLD}"', env, tmpDir).result).toEqual(["hello woRLD"]);
+		expect(expand(python, '"$' + '{V/o}"', env, tmpDir).result).toEqual(["hell world"]);
+		// `*` is greedy, as in bash: the match runs from the first `l` to the last `o`.
+		expect(expand(python, '"$' + '{V/l*o/X}"', env, tmpDir).result).toEqual(["heXrld"]);
+	});
+
+	it("$" + "{V:o} ${V:o:l} ${V: -n} ${V^^} ${V,,} ${V^}: substrings and case changes", () => {
+		const env = { V: "hello world" };
+		expect(expand(python, '"$' + '{V:6}"', env, tmpDir).result).toEqual(["world"]);
+		expect(expand(python, '"$' + '{V:1:3}"', env, tmpDir).result).toEqual(["ell"]);
+		expect(expand(python, '"$' + '{V: -3}"', env, tmpDir).result).toEqual(["rld"]);
+		expect(expand(python, '"$' + '{V:0:-6}"', env, tmpDir).result).toEqual(["hello"]);
+		expect(expand(python, '"$' + '{V^^}"', env, tmpDir).result).toEqual(["HELLO WORLD"]);
+		expect(expand(python, '"$' + '{V^}"', env, tmpDir).result).toEqual(["Hello world"]);
+		expect(expand(python, '"$' + '{V,,}"', { V: "ABC" }, tmpDir).result).toEqual(["abc"]);
+	});
+
+	it('positional and special parameters: $1 $# $@ $* $0, with "$@" keeping one field per argument', () => {
+		const env = { __POSITIONAL__: "x y\u001fz" };
+		expect(expand(python, "echo $1", env, tmpDir).result).toEqual(["x", "y"]);
+		expect(expand(python, 'echo "$1"', env, tmpDir).result).toEqual(["x y"]);
+		expect(expand(python, "echo $#", env, tmpDir).result).toEqual(["2"]);
+		expect(expand(python, 'echo "$@"', env, tmpDir).result).toEqual(["x y", "z"]);
+		expect(expand(python, 'echo "$*"', env, tmpDir).result).toEqual(["x y z"]);
+		expect(expand(python, 'echo "[$@]"', env, tmpDir).result).toEqual(["[x y", "z]"]);
+		expect(expand(python, 'echo "$@"', {}, tmpDir).result).toEqual([]);
+		expect(expand(python, "echo $3", env, tmpDir).result).toEqual([]);
+		expect(expand(python, "echo $0", env, tmpDir).result).toEqual(["bash"]);
 	});
 
 	it("tilde: ~ and ~/path expand to $HOME", () => {

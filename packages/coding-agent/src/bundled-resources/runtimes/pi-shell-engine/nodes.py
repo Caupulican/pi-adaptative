@@ -33,12 +33,22 @@ class DQ:
 
 
 @dataclass
+class Substitution:
+    """The `pattern/replacement` argument of `${VAR/pattern/replacement}`."""
+
+    pattern: "Word"
+    replacement: "Word"
+
+
+@dataclass
 class Param:
-    """$VAR / ${VAR} / ${VAR:-word} ... op in {None, ':-', ':=', ':+', ':?', '#len'}."""
+    """$VAR / ${VAR} / ${VAR:-word} ... op in {None, ':-', ':=', ':+', ':?', '#len', '#', '##',
+    '%', '%%', '/', '//', ':', '^', '^^', ',', ',,'}. Special names: digits (positional), '@',
+    '*', '#', '?', '$', '0'."""
 
     name: str
     op: str | None
-    arg: "Word | None"
+    arg: "Word | Substitution | None"
 
 
 @dataclass
@@ -164,6 +174,37 @@ class UntilCommand:
     redirects: list["Redirect"]
 
 
+@dataclass
+class CaseCommand:
+    """``case word in pattern|pattern) body ;; … esac``.
+
+    Each clause is ``(patterns, body, terminator)``; the terminator is ``;;`` (stop), ``;&``
+    (fall through into the next body unconditionally) or ``;;&`` (keep testing later clauses).
+    """
+
+    word: "Word"
+    clauses: list[tuple[list["Word"], "CommandList", str]]
+    redirects: list["Redirect"]
+
+
+@dataclass
+class ConditionalCommand:
+    """``[[ … ]]``: the operand words and structural operators (``!``, ``(``, ``)``, ``&&``,
+    ``||``, ``<``, ``>``) between the brackets, in source order; exec evaluates them lazily."""
+
+    items: list["Word | str"]
+    redirects: list["Redirect"]
+
+
+@dataclass
+class FunctionDefinition:
+    """``name() compound`` / ``function name compound``; defining it registers the body."""
+
+    name: str
+    body: "PipelineElement"
+    redirects: list["Redirect"]
+
+
 PipelineElement = (
     SimpleCommand
     | Subshell
@@ -174,6 +215,9 @@ PipelineElement = (
     | IfCommand
     | WhileCommand
     | UntilCommand
+    | CaseCommand
+    | ConditionalCommand
+    | FunctionDefinition
 )
 
 

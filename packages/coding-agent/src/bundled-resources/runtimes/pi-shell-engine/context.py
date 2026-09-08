@@ -8,7 +8,7 @@ windows-shell-workpackages-2026-07-19.md §1.5.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, BinaryIO, Callable, Mapping
 
 if TYPE_CHECKING:
@@ -51,9 +51,13 @@ class ExecContext:
     deadline: float | None
     stderr: BinaryIO | int | None = None
     loop_depth: int = 0
+    # Function call frames: `return` and `local` are meaningful only when depth > 0; each
+    # frame records the values `local` shadowed so the call can restore them.
+    function_depth: int = 0
+    local_scopes: list[dict[str, str | None]] = field(default_factory=list)
 
 
 # Executor-owned builtins are NOT in commands/REGISTRY: state mutators and `exit`
 # need ShellState/control-flow access, while the runner needs the executor.
-STATE_BUILTINS = {"cd", "export", "unset", "exit", "break", "continue", "let"}
+STATE_BUILTINS = {"cd", "export", "unset", "exit", "break", "continue", "let", "return", "local", "shift", "command"}
 RUNNER_BUILTINS = {"xargs"}

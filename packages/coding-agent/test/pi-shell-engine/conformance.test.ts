@@ -589,17 +589,16 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 		it.each([
 			["job-control", "foo &"],
 			["process-substitution", "foo <(bar)"],
-			["brace-expansion", "foo {a,b,c}"],
 			["exec-builtin", "exec foo"],
-			["function-definition", "name() { echo hi; }"],
-			["control-flow", "case $x in a) echo a;; esac"],
+			["control-flow", "select x in a b; do echo $x; done"],
 			["extended-glob", "foo @(a|b)"],
 			["unsupported-builtin", "eval foo"],
 			["unsupported-flag", "ls -Z"],
 			["tilde-user", "echo ~someuser"],
 			["malformed-syntax", ")"],
 			["malformed-syntax", "echo 'unterminated"],
-			["parameter-expansion", "echo ${VAR:2:3}"],
+			["parameter-expansion", "echo ${!VAR}"],
+			["array", "arr=(a b)"],
 		])("construct id: %s (%s)", (construct, command) => {
 			withTmpDir((dir) => {
 				const { frame, stdout } = runEngine(python, command, dir, { HOME: dir });
@@ -607,7 +606,7 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 				expect(frame.unsupported).not.toBeNull();
 				expect(frame.unsupported?.code).toBe("unsupported");
 				expect(frame.unsupported?.construct).toBe(construct);
-				expect(stdout).toContain(frame.unsupported?.message ?? " never-matches ");
+				expect(stdout).toContain(frame.unsupported?.message ?? " never-matches ");
 			});
 		});
 
@@ -624,10 +623,49 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 
 		it("a control-flow refusal frame carries exit 2 and no partial output", () => {
 			withTmpDir((dir) => {
-				const { frame, stdout } = runEngine(python, "case $x in a) echo reached;; esac", dir);
+				const { frame, stdout } = runEngine(python, "select x in a b; do echo reached; done", dir);
 				expect(frame.exitCode).toBe(2);
 				expect(frame.unsupported?.construct).toBe("control-flow");
 				expect(stdout.length).toBeGreaterThan(0);
+			});
+		});
+
+		it("functions, case, [[ ]], brace expansion, and command -v execute end-to-end instead of refusing", () => {
+			withTmpDir((dir) => {
+				writeFileSync(join(dir, "a.txt"), "x\n");
+				const command = [
+					'greet() { local who="$1"; printf "hi %s (%d)\\n" "$who" "$#"; return 3; }',
+					"greet you extra; echo rc=$?; echo who=$who",
+					'kind() { case "$1" in *.txt) echo text;; *.log|*.out) echo log;& *) echo tail;; esac; }',
+					"kind a.txt; kind b.log; kind c.bin",
+					'[[ -f a.txt && ! -d a.txt && "$PWD" == *"" ]] && echo cond',
+					"v=abc123; [[ $v =~ ^[a-z]+[0-9]+$ ]] && echo re",
+					"echo {a,b}{1..2} {01..03}",
+					'f=/p/q/file.tar.gz; echo "${f##*/} ${f%%.*} ${f/q/Q}"',
+					"command -v greet; command -v echo; command -v no-such-tool-xyz || echo missing",
+				].join("\n");
+				const { frame, stdout } = runEngine(python, command, dir, { HOME: dir, PATH: process.env.PATH ?? "" });
+				expect(frame.unsupported).toBeNull();
+				expect(frame.exitCode).toBe(0);
+				expect(stdout).toBe(
+					[
+						"hi you (2)",
+						"rc=3",
+						"who=",
+						"text",
+						"log",
+						"tail",
+						"tail",
+						"cond",
+						"re",
+						"a1 a2 b1 b2 01 02 03",
+						"file.tar.gz /p/q/file /p/Q/file.tar.gz",
+						"greet",
+						"echo",
+						"missing",
+						"",
+					].join("\n"),
+				);
 			});
 		});
 

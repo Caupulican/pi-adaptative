@@ -374,17 +374,70 @@ describe("pi-shell-engine tokenizer + parser", () => {
 		});
 	});
 
+	describe("functions, case, [[ ]], and brace expansion parse to structured nodes", () => {
+		it("name() { … } and function name { … } become FunctionDefinition with a BraceGroup body", () => {
+			const short = parseToDict(python, "greet() { echo hi; }") as {
+				entries: Array<{ pipelines: Array<{ elements: unknown[] }> }>;
+			};
+			const definition = short.entries[0].pipelines[0].elements[0] as {
+				_: string;
+				name: string;
+				body: { _: string };
+			};
+			expect(definition._).toBe("FunctionDefinition");
+			expect(definition.name).toBe("greet");
+			expect(definition.body._).toBe("BraceGroup");
+			const keyword = parseToDict(python, "function greet {\n  echo hi\n}\ngreet") as {
+				entries: Array<{ pipelines: Array<{ elements: unknown[] }> }>;
+			};
+			expect(keyword.entries).toHaveLength(2);
+			expect((keyword.entries[0].pipelines[0].elements[0] as { _: string })._).toBe("FunctionDefinition");
+		});
+
+		it("case … in pattern|pattern) … ;; esac keeps every clause with its terminator", () => {
+			const parsed = parseToDict(python, "case $x in\n a|b) echo ab ;;\n c) echo c ;&\n *) echo other\nesac") as {
+				entries: Array<{ pipelines: Array<{ elements: unknown[] }> }>;
+			};
+			const command = parsed.entries[0].pipelines[0].elements[0] as {
+				_: string;
+				clauses: Array<[unknown[], unknown, string]>;
+			};
+			expect(command._).toBe("CaseCommand");
+			expect(command.clauses).toHaveLength(3);
+			expect(command.clauses[0][0]).toHaveLength(2);
+			expect(command.clauses.map((clause) => clause[2])).toEqual([";;", ";&", ";;"]);
+		});
+
+		it("[[ … ]] collects operands and structural operators in source order", () => {
+			const parsed = parseToDict(python, "[[ -f x && ( $y == a* || ! -z $z ) ]] && echo yes") as {
+				entries: Array<{ pipelines: Array<{ elements: unknown[] }> }>;
+			};
+			const conditional = parsed.entries[0].pipelines[0].elements[0] as { _: string; items: unknown[] };
+			expect(conditional._).toBe("ConditionalCommand");
+			expect(conditional.items.filter((item) => typeof item === "string")).toEqual(["&&", "(", "||", ")"]);
+			expect(parsed.entries[0].pipelines).toHaveLength(2);
+		});
+
+		it("brace expansion produces one word per alternative before any other expansion", () => {
+			const parsed = parseToDict(python, "echo {a,b}{1..2} '{x,y}'") as {
+				entries: Array<{ pipelines: Array<{ elements: unknown[] }> }>;
+			};
+			const simple = parsed.entries[0].pipelines[0].elements[0] as { words: unknown[] };
+			expect(simple.words).toHaveLength(6);
+		});
+	});
+
 	describe("structured refusals (§2.3)", () => {
 		it.each([
 			["job-control", "foo &"],
 			["process-substitution", "foo <(bar)"],
-			["brace-expansion", "foo {a,b,c}"],
 			["exec-builtin", "exec foo"],
-			["function-definition", "name() { echo hi; }"],
-			["control-flow", "case $x in a) echo a;; esac"],
 			["control-flow", "select x in a b; do echo $x; done"],
+			["control-flow", "coproc cat"],
 			["extended-glob", "foo @(a|b)"],
 			["unsupported-builtin", "eval foo"],
+			["array", "arr=(a b c)"],
+			["array", "declare -a arr"],
 		])("construct id: %s", (construct, command) => {
 			const refusal = parseRefusal(python, command);
 			expect(refusal.code).toBe("unsupported");
@@ -419,8 +472,8 @@ print("tilde-user" in UNSUPPORTED_CONSTRUCTS)
 		});
 
 		it.each([
-			["parameter-expansion", "echo $" + "{VAR:2:3}"],
-			["parameter-expansion", "echo $" + "{V%x}"],
+			["parameter-expansion", "echo $" + "{!VAR}"],
+			["array", "echo $" + "{VAR[0]}"],
 		])("construct id: %s (out-of-matrix param-expansion form, architect amendment §1.6)", (construct, command) => {
 			const refusal = parseRefusal(python, command);
 			expect(refusal.code).toBe("unsupported");

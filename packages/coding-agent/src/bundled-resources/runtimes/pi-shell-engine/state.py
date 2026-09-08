@@ -73,6 +73,10 @@ class ShellState:
     # Names in `proc.GNU_PREFERRED_TOOLS` found there dispatch to the real binary before any
     # Python reimplementation (which stays as the floor for hosts without it).
     gnu_tools_dir: str | None = None
+    # Positional parameters (`$1`, `$@`, `$#`) of the running function; empty at top level.
+    positional: list[str] = field(default_factory=list)
+    # Functions defined in this request; a subshell copy sees them, its own definitions stay local.
+    functions: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.env, ShellEnvironment):
@@ -86,6 +90,8 @@ class ShellState:
             last_exit_code=self.last_exit_code,
             powershell_path=self.powershell_path,
             gnu_tools_dir=self.gnu_tools_dir,
+            positional=list(self.positional),
+            functions=dict(self.functions),
         )
 
     def derive(self, env: Mapping[str, str]) -> "ShellState":
@@ -96,6 +102,8 @@ class ShellState:
             last_exit_code=self.last_exit_code,
             powershell_path=self.powershell_path,
             gnu_tools_dir=self.gnu_tools_dir,
+            positional=list(self.positional),
+            functions=dict(self.functions),
         )
 
     def chdir(self, path: str) -> None:

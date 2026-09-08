@@ -6,6 +6,7 @@ Owned by WP-C. Reaches expansion/builtins ONLY through `ExecContext` (never impo
 
 from __future__ import annotations
 
+import fnmatch
 import io
 import os
 import subprocess
@@ -19,8 +20,17 @@ import nodes
 import parser as parser_module
 import proc
 import tokens as tokens_module
+from conditional import evaluate_conditional
 from context import RUNNER_BUILTINS, STATE_BUILTINS, BuiltinContext, ExecContext
-from errors import ArithmeticExpansionError, LoopBreak, LoopContinue, LoopControl, ShellExit, UnsupportedConstruct
+from errors import (
+    ArithmeticExpansionError,
+    FunctionReturn,
+    LoopBreak,
+    LoopContinue,
+    LoopControl,
+    ShellExit,
+    UnsupportedConstruct,
+)
 from state import ShellState
 from paths import resolve_request_path
 
@@ -450,7 +460,7 @@ def _is_external_dispatch(command: nodes.SimpleCommand, ctx: ExecContext) -> boo
     if not expanded:
         return False
     name = expanded[0]
-    if name in STATE_BUILTINS:
+    if name in STATE_BUILTINS or name in ctx.state.functions:
         return False
     if proc.resolve_gnu_tool(name, ctx.state.gnu_tools_dir) is not None:
         return True
@@ -495,6 +505,14 @@ def _expand_argv(command: nodes.SimpleCommand, ctx: ExecContext) -> list[str]:
     return argv
 
 
+def _apply_transient_assignments_to_state(command: nodes.SimpleCommand, ctx: ExecContext) -> None:
+    """`A=1 f`: a prefix assignment on a function call is visible inside the call (bash sets it
+    in the function's environment; the engine has no separate shell-variable table)."""
+    for name, word in command.assignments:
+        values = ctx.expand_word(word, ctx)
+        ctx.state.setenv(name, "".join(values) if values else "")
+
+
 def _apply_transient_assignments(command: nodes.SimpleCommand, ctx: ExecContext) -> dict[str, str]:
     env = ctx.state.env.copy()
     for name, word in command.assignments:
@@ -508,6 +526,8 @@ _STRUCTURED_NODES = (
     nodes.ForCommand,
     nodes.ArithmeticForCommand,
     nodes.ArithmeticCommand,
+    nodes.CaseCommand,
+    nodes.ConditionalCommand,
     nodes.IfCommand,
     nodes.WhileCommand,
     nodes.UntilCommand,
@@ -542,6 +562,9 @@ def _dispatch_element(
             # Loops, conditionals, and arithmetic commands share one frame: same cwd/env scope,
             # own redirects.
             return _execute_for_command(element, ctx, stdin_stream, stdout_stream, stderr_stream)
+        if isinstance(element, nodes.FunctionDefinition):
+            ctx.state.functions[element.name] = element
+            return 0
         if isinstance(element, nodes.SimpleCommand):
             return _dispatch_simple_command(element, ctx, stdin_stream, stdout_stream, stderr_stream)
     except ArithmeticExpansionError as exc:
@@ -569,6 +592,8 @@ def _sub_ctx(
         deadline=ctx.deadline,
         stderr=stderr_stream,
         loop_depth=ctx.loop_depth if loop_depth is None else loop_depth,
+        function_depth=ctx.function_depth,
+        local_scopes=ctx.local_scopes,
     )
 
 
@@ -606,6 +631,10 @@ def _execute_redirected_compound(
                 return _run_if_branches(node, inner_ctx)
             if isinstance(node, nodes.ArithmeticCommand):
                 return _execute_arithmetic_command(node, inner_ctx)
+            if isinstance(node, nodes.CaseCommand):
+                return _execute_case_command(node, inner_ctx)
+            if isinstance(node, nodes.ConditionalCommand):
+                return _execute_conditional_command(node, inner_ctx)
             return execute(node.body, inner_ctx)
         except ShellExit as exc:
             if isolated:
@@ -673,6 +702,82 @@ def _run_let(argv: list[str], ctx: ExecContext, diagnostic_stream: BinaryIO | in
             _write_merged(diagnostic_stream, f"bash: let: {expression}: {exc}\n".encode("utf-8"), ctx)
             return 1
     return 0 if value != 0 else 1
+
+
+def _expand_unsplit(word: nodes.Word, ctx: ExecContext) -> str:
+    """A word as one string (no field splitting, no globbing): a double-quoted frame."""
+    return "".join(ctx.expand_word(nodes.Word(segments=[nodes.DQ(segments=list(word.segments))]), ctx))
+
+
+def _execute_case_command(node: nodes.CaseCommand, ctx: ExecContext) -> int:
+    """`case`: the first clause with a matching pattern runs; `;;` ends the command, `;&` falls
+    through into the next body, `;;&` resumes pattern testing with the next clause."""
+    subject = _expand_unsplit(node.word, ctx)
+    exit_code = 0
+    fall_through = False
+    for patterns, body, terminator in node.clauses:
+        matched = fall_through or any(fnmatch.fnmatchcase(subject, _expand_unsplit(p, ctx)) for p in patterns)
+        if not matched:
+            continue
+        exit_code = execute(body, ctx)
+        ctx.state.last_exit_code = exit_code
+        if terminator == ";;":
+            return exit_code
+        fall_through = terminator == ";&"
+    return exit_code
+
+
+def _execute_conditional_command(node: nodes.ConditionalCommand, ctx: ExecContext) -> int:
+    """`[[ … ]]`: exit 0 when the expression holds, 1 otherwise; a malformed expression exits 2."""
+    try:
+        holds = evaluate_conditional(
+            node.items,
+            lambda word: _expand_unsplit(word, ctx),
+            lambda text: _evaluate_arithmetic_text(text, ctx),
+            ctx.state.cwd,
+            lambda name: name in ctx.state.env,
+        )
+    except UnsupportedConstruct as exc:
+        _write_merged(_merged_sink(ctx), f"bash: {exc.message}\n".encode("utf-8"), ctx)
+        return 2
+    return 0 if holds else 1
+
+
+def _call_function(
+    definition: nodes.FunctionDefinition,
+    argv: list[str],
+    ctx: ExecContext,
+    stdin_stream: BinaryIO | int,
+    stdout_stream: BinaryIO | int,
+    stderr_stream: BinaryIO | int,
+) -> int:
+    """Run a function body with its own positional parameters and `local` scope; `return`
+    ends it. Functions share the caller's cwd/env like bash; only `local` names are restored."""
+    tracker = _Redirected()
+    saved_positional = ctx.state.positional
+    ctx.state.positional = list(argv[1:])
+    scope: dict[str, str | None] = {}
+    ctx.local_scopes.append(scope)
+    try:
+        r_in, r_out, r_err = _apply_redirects(definition.redirects, ctx, stdin_stream, stdout_stream, stderr_stream, tracker)
+        inner_ctx = _sub_ctx(ctx, ctx.state, r_in, r_out, r_err, loop_depth=0)
+        inner_ctx.function_depth = ctx.function_depth + 1
+        try:
+            return _dispatch_element(definition.body, inner_ctx, r_in, r_out, r_err)
+        except FunctionReturn as exc:
+            return exc.exit_code
+        except LoopControl:
+            # `break`/`continue` never cross a function boundary.
+            return 0
+    finally:
+        ctx.local_scopes.pop()
+        for name, previous in scope.items():
+            if previous is None:
+                ctx.state.unsetenv(name)
+            else:
+                ctx.state.env[name] = previous
+        ctx.state.positional = saved_positional
+        tracker.close()
 
 
 def _run_if_branches(node: nodes.IfCommand, ctx: ExecContext) -> int:
@@ -794,8 +899,13 @@ def _dispatch_simple_command(
             return 0
         name = argv[0]
 
+        definition = ctx.state.functions.get(name)
+        if isinstance(definition, nodes.FunctionDefinition):
+            _apply_transient_assignments_to_state(command, ctx)
+            return _call_function(definition, argv, ctx, r_in, r_out, r_err)
+
         if name in STATE_BUILTINS:
-            return _run_state_builtin(name, argv, ctx, r_out, r_err)
+            return _run_state_builtin(name, argv, ctx, r_out, r_err, r_in)
 
         # The real GNU tool wins over every reimplementation (runner and pure builtins alike);
         # the external path below resolves it through `proc.spawn_external`.
@@ -861,14 +971,99 @@ def _as_stream(fd_or_stream: BinaryIO | int, mode: str) -> BinaryIO:
     return fd_or_stream
 
 
+def _run_command_builtin(
+    argv: list[str],
+    ctx: ExecContext,
+    in_stream: BinaryIO | int,
+    out_stream: BinaryIO | int,
+    diagnostic_stream: BinaryIO | int,
+) -> int:
+    """`command -v name…` prints how each name would run (a function or builtin by name, an
+    external by path) and exits 1 when any is missing; `command name args…` runs the name
+    bypassing functions."""
+    args = argv[1:]
+    verbose = False
+    while args and args[0].startswith("-") and args[0] != "--":
+        if args[0] in ("-v", "-V"):
+            verbose = True
+        elif args[0] != "-p":
+            _write_merged(diagnostic_stream, f"command: {args[0]}: invalid option\n".encode("utf-8"), ctx)
+            return 2
+        args = args[1:]
+    if args and args[0] == "--":
+        args = args[1:]
+    if not verbose:
+        if not args:
+            return 0
+        return _run_argv(args, ctx, in_stream, out_stream, diagnostic_stream)
+    exit_code = 0
+    for name in args:
+        if name in ctx.state.functions or name in STATE_BUILTINS or name in RUNNER_BUILTINS or name in ctx.builtins:
+            _write_merged(out_stream, f"{name}\n".encode("utf-8"), ctx)
+            continue
+        resolved = (
+            proc.resolve_gnu_tool(name, ctx.state.gnu_tools_dir)
+            or proc.resolve_external(name, ctx.state.env, ctx.state.cwd)
+            or proc.resolve_gnu_extra(name, ctx.state.gnu_tools_dir)
+        )
+        if resolved is None:
+            exit_code = 1
+            continue
+        _write_merged(out_stream, f"{resolved}\n".encode("utf-8"), ctx)
+    return exit_code
+
+
 def _run_state_builtin(
     name: str,
     argv: list[str],
     ctx: ExecContext,
     out_stream: BinaryIO | int,
     error_stream: BinaryIO | int | None = None,
+    in_stream: BinaryIO | int | None = None,
 ) -> int:
     diagnostic_stream = error_stream if error_stream is not None else out_stream
+    if name == "return":
+        if ctx.function_depth == 0:
+            _write_merged(diagnostic_stream, b"bash: return: can only be used in a function\n", ctx)
+            return 1
+        if len(argv) > 2:
+            _write_merged(diagnostic_stream, b"return: too many arguments\n", ctx)
+            return 1
+        if len(argv) == 1:
+            raise FunctionReturn(ctx.state.last_exit_code)
+        try:
+            raise FunctionReturn(int(argv[1], 10) & 0xFF)
+        except ValueError:
+            _write_merged(diagnostic_stream, f"return: {argv[1]}: numeric argument required\n".encode("utf-8"), ctx)
+            raise FunctionReturn(2) from None
+
+    if name == "local":
+        if ctx.function_depth == 0 or not ctx.local_scopes:
+            _write_merged(diagnostic_stream, b"bash: local: can only be used in a function\n", ctx)
+            return 1
+        scope = ctx.local_scopes[-1]
+        for item in argv[1:]:
+            if item.startswith("-"):
+                continue
+            key, has_value, value = item.partition("=")
+            if key not in scope:
+                scope[key] = ctx.state.env[key] if key in ctx.state.env else None
+            ctx.state.setenv(key, value if has_value else "")
+        return 0
+
+    if name == "shift":
+        try:
+            count = int(argv[1], 10) if len(argv) > 1 else 1
+        except ValueError:
+            _write_merged(diagnostic_stream, f"shift: {argv[1]}: numeric argument required\n".encode("utf-8"), ctx)
+            return 1
+        if count < 0 or count > len(ctx.state.positional):
+            return 1
+        ctx.state.positional = ctx.state.positional[count:]
+        return 0
+
+    if name == "command":
+        return _run_command_builtin(argv, ctx, in_stream if in_stream is not None else _empty_stream(), out_stream, diagnostic_stream)
     if name in ("break", "continue"):
         if len(argv) > 2:
             _write_merged(diagnostic_stream, f"{name}: too many arguments\n".encode("utf-8"), ctx)
@@ -1076,10 +1271,14 @@ def run_command_substitution(src: str, ctx: ExecContext) -> tuple[str, int]:
         builtins=ctx.builtins,
         deadline=ctx.deadline,
         stderr=ctx.stderr,
+        function_depth=ctx.function_depth,
+        local_scopes=ctx.local_scopes,
     )
     try:
         exit_code = execute(ast, sub_ctx)
     except ShellExit as exc:
+        exit_code = exc.exit_code
+    except FunctionReturn as exc:
         exit_code = exc.exit_code
     text = buffer.getvalue().decode("utf-8", errors="replace")
     return text.rstrip("\n"), exit_code

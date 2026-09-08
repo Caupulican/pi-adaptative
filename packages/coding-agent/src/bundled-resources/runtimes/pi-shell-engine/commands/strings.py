@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 
+from conditional import FILE_BINARY_OPS, INT_BINARY_OPS, UNARY_OPS, eval_file_binary, eval_int_binary, eval_unary
 from context import BuiltinContext
 from errors import UnsupportedConstruct
 from escapes import ECHO_ESCAPES, PRINTF_ESCAPES, decode_backslash_escapes
@@ -217,69 +218,54 @@ def cmd_pwd(ctx: BuiltinContext) -> int:
     return 0
 
 
-_UNARY_OPS = {"-e", "-f", "-d", "-r", "-w", "-x", "-s", "-n", "-z"}
-_STRING_BINARY = {"=", "!="}
-_INT_BINARY = {"-eq", "-ne", "-lt", "-le", "-gt", "-ge"}
-_PATH_UNARY_OPS = {"-e", "-f", "-d", "-r", "-w", "-x", "-s"}
+_STRING_BINARY = {"=", "==", "!="}
 
 
-def _eval_unary(op: str, operand: str, cwd: str) -> bool:
-    if op in _PATH_UNARY_OPS:
-        operand = resolve_request_path(cwd, operand)
-    if op == "-e":
-        return os.path.exists(operand)
-    if op == "-f":
-        return os.path.isfile(operand)
-    if op == "-d":
-        return os.path.isdir(operand)
-    if op == "-r":
-        return os.access(operand, os.R_OK)
-    if op == "-w":
-        return os.access(operand, os.W_OK)
-    if op == "-x":
-        return os.access(operand, os.X_OK)
-    if op == "-s":
-        return os.path.exists(operand) and os.path.getsize(operand) > 0
-    if op == "-n":
-        return len(operand) > 0
-    if op == "-z":
-        return len(operand) == 0
-    raise AssertionError(op)
+def _eval_test_expression(args: list[str], cwd: str) -> bool:
+    """One `test` expression without combiners: a unary, a binary, or a bare string."""
+    if len(args) == 0:
+        return False
+    if len(args) == 1:
+        return len(args[0]) > 0
+    if len(args) == 2 and args[0] in UNARY_OPS:
+        return eval_unary(args[0], args[1], cwd)
+    if len(args) == 3 and args[1] in _STRING_BINARY:
+        return (args[0] == args[2]) if args[1] != "!=" else (args[0] != args[2])
+    if len(args) == 3 and args[1] in INT_BINARY_OPS:
+        try:
+            return eval_int_binary(args[1], int(args[0]), int(args[2]))
+        except ValueError as exc:
+            raise UnsupportedConstruct("unsupported-flag", f"test: integer expression expected: {args!r}") from exc
+    if len(args) == 3 and args[1] in FILE_BINARY_OPS:
+        return eval_file_binary(args[1], args[0], args[2], cwd)
+    raise UnsupportedConstruct("unsupported-flag", f"test: unsupported expression {args!r}")
 
 
 def _eval_test(args: list[str], cwd: str) -> int:
-    negate = False
-    if args and args[0] == "!":
-        negate = True
-        args = args[1:]
-    for a in args:
-        if a in ("-a", "-o"):
-            raise UnsupportedConstruct("unsupported-flag", f"test: combiner {a!r} is unsupported")
-    result: bool
-    if len(args) == 0:
-        result = False
-    elif len(args) == 1:
-        result = len(args[0]) > 0
-    elif len(args) == 2 and args[0] in _UNARY_OPS:
-        result = _eval_unary(args[0], args[1], cwd)
-    elif len(args) == 3 and args[1] in _STRING_BINARY:
-        result = (args[0] == args[2]) if args[1] == "=" else (args[0] != args[2])
-    elif len(args) == 3 and args[1] in _INT_BINARY:
-        left = int(args[0])
-        right = int(args[2])
-        op = args[1]
-        result = {
-            "-eq": left == right,
-            "-ne": left != right,
-            "-lt": left < right,
-            "-le": left <= right,
-            "-gt": left > right,
-            "-ge": left >= right,
-        }[op]
-    else:
-        raise UnsupportedConstruct("unsupported-flag", f"test: unsupported expression {args!r}")
-    if negate:
-        result = not result
+    """`test` with `!` and the POSIX `-a`/`-o` combiners (`-a` binds tighter than `-o`)."""
+    or_groups: list[list[str]] = [[]]
+    for arg in args:
+        if arg == "-o":
+            or_groups.append([])
+        else:
+            or_groups[-1].append(arg)
+    result = False
+    for group in or_groups:
+        and_terms: list[list[str]] = [[]]
+        for arg in group:
+            if arg == "-a":
+                and_terms.append([])
+            else:
+                and_terms[-1].append(arg)
+        group_result = True
+        for term in and_terms:
+            negate = False
+            while term and term[0] == "!":
+                negate = not negate
+                term = term[1:]
+            value = _eval_test_expression(term, cwd)
+            group_result = group_result and (value != negate)
+        result = result or group_result
     return 0 if result else 1
 
 

@@ -36,6 +36,8 @@ UNSUPPORTED_CONSTRUCTS = frozenset(
         "tilde-user",
         "malformed-syntax",
         "parameter-expansion",
+        # Arrays (`name=(…)`, `${name[i]}`, `declare -a`): no array model in the engine's env.
+        "array",
     }
 )
 
@@ -86,3 +88,11 @@ class LoopBreak(LoopControl):
 
 class LoopContinue(LoopControl):
     """Continue one or more enclosing loops."""
+
+
+class FunctionReturn(Exception):
+    """`return [n]` inside a function body, consumed by the function call frame."""
+
+    def __init__(self, exit_code: int) -> None:
+        super().__init__(exit_code)
+        self.exit_code = exit_code

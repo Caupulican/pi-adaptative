@@ -12,9 +12,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from braces import brace_expand
 from errors import UnsupportedConstruct
 from escapes import ANSI_C_ESCAPES, decode_backslash_escapes
-from nodes import Arith, CmdSub, DQ, Lit, Param, Raw, Segment, Tilde, Word
+from nodes import Arith, CmdSub, DQ, Lit, Param, Raw, Segment, Substitution, Tilde, Word
 
 _IDENT_START_RE = re.compile(r"[A-Za-z_]")
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -206,26 +207,68 @@ def _scan_param_arg_word(text: str) -> Word:
     return Word(segments=segments)
 
 
+_SPECIAL_PARAM_RE = re.compile(r"[@*#?$0-9]")
+_DIGITS_RE = re.compile(r"[0-9]+")
+
+
+def _split_substitution(text: str) -> tuple[str, str]:
+    """Split `pattern/replacement` at the first unescaped `/`; a missing `/` means an empty replacement."""
+    index = 0
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == "/":
+            return text[:index], text[index + 1 :]
+        index += 1
+    return text, ""
+
+
 def _parse_param_brace_content(content: str) -> Param:
+    if content == "#" or content == "$":
+        return Param(name=content, op=None, arg=None)
     if content.startswith("#"):
         return Param(name=content[1:], op="#len", arg=None)
-    m = _IDENT_RE.match(content)
+    if content.startswith("!"):
+        raise UnsupportedConstruct(
+            "parameter-expansion",
+            f"Unsupported parameter expansion form '${{{content}}}': indirect expansion (${{!name}}) is not supported.",
+        )
+    m = _DIGITS_RE.match(content) or _IDENT_RE.match(content)
+    if m is None and content and _SPECIAL_PARAM_RE.match(content):
+        m = _SPECIAL_PARAM_RE.match(content)
     name = m.group(0) if m else ""
     rest = content[len(name) :]
-    for candidate in (":-", ":=", ":+", ":?"):
+    if rest.startswith("["):
+        raise UnsupportedConstruct(
+            "array",
+            f"Arrays are not supported ('${{{content}}}'): use a plain variable, a word list, or the positional parameters ($@).",
+        )
+    # Longest operator first: `##` before `#`, `%%` before `%`, `//` before `/`, `:-` before `:`.
+    for candidate in (":-", ":=", ":+", ":?", "##", "#", "%%", "%", "//", "/", "^^", "^", ",,", ",", ":"):
         if rest.startswith(candidate):
             arg_text = rest[len(candidate) :]
-            # Scan the FULL remainder into one Word: the default/alt/assign/err argument runs
-            # up to the already-matched closing brace, so whitespace inside it is literal text
-            # within Raw segments (bash: `${V:-a b}` -> default word is "a b", not just "a").
-            # Do not truncate at the first _scan_word word-boundary space.
+            if candidate in ("/", "//"):
+                pattern_text, replacement_text = _split_substitution(arg_text)
+                return Param(
+                    name=name,
+                    op=candidate,
+                    arg=Substitution(
+                        pattern=_scan_param_arg_word(pattern_text) if pattern_text else Word(segments=[]),
+                        replacement=_scan_param_arg_word(replacement_text) if replacement_text else Word(segments=[]),
+                    ),
+                )
+            # Scan the FULL remainder into one Word: the argument runs up to the already-matched
+            # closing brace, so whitespace inside it is literal text within Raw segments (bash:
+            # `${V:-a b}` -> default word is "a b", not just "a").
             arg_word = _scan_param_arg_word(arg_text) if arg_text else Word(segments=[])
             return Param(name=name, op=candidate, arg=arg_word)
     if rest:
         raise UnsupportedConstruct(
             "parameter-expansion",
-            f"Unsupported parameter expansion form '${{{content}}}': only ${{VAR}}, ${{VAR:-w}}, "
-            "${VAR:=w}, ${VAR:+w}, ${VAR:?w}, and ${#VAR} are supported.",
+            f"Unsupported parameter expansion form '${{{content}}}': supported are ${{VAR}}, ${{VAR:-w}}, ${{VAR:=w}}, "
+            "${VAR:+w}, ${VAR:?w}, ${#VAR}, ${VAR#p}, ${VAR##p}, ${VAR%p}, ${VAR%%p}, ${VAR/p/r}, ${VAR//p/r}, "
+            "${VAR:o}, ${VAR:o:l}, ${VAR^^}, ${VAR,,}, and the positional/special parameters.",
         )
     return Param(name=name, op=None, arg=None)
 
@@ -243,8 +286,8 @@ def _scan_dollar_form(src: str, pos: int) -> tuple[Segment, int]:
             return Arith(src=expression), newpos
         close = _find_closing_paren(src, pos + 2)
         return CmdSub(src=src[pos + 2 : close]), close + 1
-    if nxt == "?":
-        return Param(name="?", op=None, arg=None), pos + 2
+    if nxt and nxt in "?@*#$0123456789":
+        return Param(name=nxt, op=None, arg=None), pos + 2
     if nxt and (_IDENT_START_RE.match(nxt)):
         m = _IDENT_RE.match(src, pos + 1)
         assert m is not None
@@ -319,7 +362,6 @@ def _scan_word(src: str, pos: int) -> tuple[Word, int]:
         if c == "{":
             j = i + 1
             depth = 1
-            has_comma = False
             while j < n and depth > 0:
                 if src[j] == "{":
                     depth += 1
@@ -327,17 +369,14 @@ def _scan_word(src: str, pos: int) -> tuple[Word, int]:
                     depth -= 1
                     if depth == 0:
                         break
-                elif src[j] == "," and depth == 1:
-                    has_comma = True
                 j += 1
             if depth != 0:
                 buf.append(c)
                 i += 1
                 continue
-            if has_comma:
-                raise UnsupportedConstruct(
-                    "brace-expansion", "Brace expansion ('{a,b,c}') is not supported; list the values explicitly."
-                )
+            # A balanced brace group stays inside the word here; `tokenize` already ran brace
+            # expansion on the word's source text, so what remains (`{}`, `{single}`, `${x}`
+            # handled elsewhere) is literal.
             buf.append(src[i : j + 1])
             i = j + 1
             continue
@@ -379,6 +418,12 @@ def _scan_operator(src: str, pos: int) -> tuple[str, int]:
         return "<<<", pos + 3
     if src[pos : pos + 2] == "<<":
         return "<<", pos + 2
+    if src[pos : pos + 3] == ";;&":
+        return ";;&", pos + 3
+    if src[pos : pos + 2] == ";;":
+        return ";;", pos + 2
+    if src[pos : pos + 2] == ";&":
+        return ";&", pos + 2
     if src[pos : pos + 2] == "&>":
         return "&>", pos + 2
     if src[pos : pos + 2] == "&&":
@@ -450,6 +495,25 @@ def _read_heredoc_body(src: str, pos: int, delimiter: str, strip_tabs: bool) -> 
     raise UnsupportedConstruct("malformed-syntax", f"Heredoc delimiter {delimiter!r} was never closed.")
 
 
+def _append_words(tokens: list[Token], src: str, pos: int) -> int:
+    """Scan one word at `pos`; brace expansion may turn it into several WORD tokens."""
+    word, newpos = _scan_word(src, pos)
+    source = src[pos:newpos]
+    expanded = brace_expand(source)
+    if expanded == [source]:
+        tokens.append(Token(kind="WORD", segments=word.segments))
+        return newpos
+    for text in expanded:
+        if text == "":
+            tokens.append(Token(kind="WORD", segments=[]))
+            continue
+        piece, consumed = _scan_word(text, 0)
+        if consumed != len(text):
+            raise UnsupportedConstruct("malformed-syntax", f"Brace expansion produced an unscannable word {text!r}.")
+        tokens.append(Token(kind="WORD", segments=piece.segments))
+    return newpos
+
+
 def tokenize(src: str) -> list[Token]:
     n = len(src)
     tokens: list[Token] = []
@@ -495,9 +559,7 @@ def tokenize(src: str) -> list[Token]:
                 pos = newpos
                 continue
         if c == "{" and not (pos + 1 >= n or src[pos + 1] in " \t\n"):
-            word, newpos = _scan_word(src, pos)
-            tokens.append(Token(kind="WORD", segments=word.segments))
-            pos = newpos
+            pos = _append_words(tokens, src, pos)
             continue
         if c in "|&;(){}<>":
             op_text, newpos = _scan_operator(src, pos)
@@ -511,9 +573,7 @@ def tokenize(src: str) -> list[Token]:
                 tokens.append(Token(kind="WORD", segments=[Lit(text="")]))
                 pending_heredocs.append((len(tokens) - 1, delimiter, op_text == "<<-"))
             continue
-        word, newpos = _scan_word(src, pos)
-        tokens.append(Token(kind="WORD", segments=word.segments))
-        pos = newpos
+        pos = _append_words(tokens, src, pos)
     if pending_heredocs:
         for token_index, delimiter, strip_tabs in pending_heredocs:
             body, pos = _read_heredoc_body(src, pos, delimiter, strip_tabs)

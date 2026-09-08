@@ -16,9 +16,12 @@ from nodes import (
     ArithmeticCommand,
     ArithmeticForCommand,
     BraceGroup,
+    CaseCommand,
     CommandList,
+    ConditionalCommand,
     DQ,
     ForCommand,
+    FunctionDefinition,
     IfCommand,
     Lit,
     Pipeline,
@@ -36,13 +39,13 @@ from tokens import Token
 _ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _EXTGLOB_RE = re.compile(r"[@!?*+]\(")
-_BRACE_EXPANSION_RE = re.compile(r"\{[^{}]*,[^{}]*\}")
+_CASE_TERMINATORS = frozenset({";;", ";&", ";;&"})
 
 _JOB_CONTROL_WORDS = {"fg", "bg", "jobs", "wait", "disown"}
-# `if`/`while`/`until` are parsed as structured compound commands below; `case`/`select`
-# and function definitions remain refused — see UNSUPPORTED_CONSTRUCTS in errors.py.
-_CONTROL_FLOW_WORDS = {"case", "select"}
-_UNSUPPORTED_BUILTIN_WORDS = {"eval", "source", ".", "alias", "trap", "set", "shopt", "read", "declare", "local"}
+# `if`/`while`/`until`/`case`, `[[ ]]` and function definitions are parsed as structured
+# compound commands below; `select` and `coproc` remain refused (see UNSUPPORTED_CONSTRUCTS).
+_CONTROL_FLOW_WORDS = {"select", "coproc"}
+_UNSUPPORTED_BUILTIN_WORDS = {"eval", "source", ".", "alias", "trap", "set", "shopt", "read", "declare", "typeset", "readonly", "mapfile", "readarray"}
 
 
 def _literal_text_from_segments(segments: list) -> str | None:
@@ -68,15 +71,10 @@ def _literal_text(word: Word) -> str | None:
 
 def _check_word_banned_patterns(word: Word) -> None:
     for seg in word.segments:
-        if isinstance(seg, Raw):
-            if _EXTGLOB_RE.search(seg.text):
-                raise UnsupportedConstruct(
-                    "extended-glob", "Extended glob patterns ('@(...)','!(...)', etc.) are not supported."
-                )
-            if _BRACE_EXPANSION_RE.search(seg.text):
-                raise UnsupportedConstruct(
-                    "brace-expansion", "Brace expansion ('{a,b,c}') is not supported; list the values explicitly."
-                )
+        if isinstance(seg, Raw) and _EXTGLOB_RE.search(seg.text):
+            raise UnsupportedConstruct(
+                "extended-glob", "Extended glob patterns ('@(...)','!(...)', etc.) are not supported."
+            )
 
 
 def _check_command_word_banned(text: str) -> None:
@@ -86,10 +84,12 @@ def _check_command_word_banned(text: str) -> None:
         raise UnsupportedConstruct(
             "control-flow", f"Compound control-flow commands ('{text}') are not supported."
         )
-    if text == "function":
-        raise UnsupportedConstruct("function-definition", "Function definitions are not supported.")
     if text == "exec":
         raise UnsupportedConstruct("exec-builtin", "The 'exec' builtin is not supported.")
+    if text in ("declare", "typeset", "mapfile", "readarray"):
+        raise UnsupportedConstruct(
+            "array", f"The '{text}' builtin declares arrays, which are not supported; use plain variables or a word list."
+        )
     if text in _UNSUPPORTED_BUILTIN_WORDS:
         raise UnsupportedConstruct("unsupported-builtin", f"The '{text}' builtin is not supported.")
     # Nested shells (`powershell -Command`, `cmd /c`, `bash -lc`) and scripts run as external
@@ -103,6 +103,14 @@ _DUP_SUFFIX_RE = re.compile(r"&(\d+)$")
 
 def _is_redirect_op_text(text: str) -> bool:
     return "<" in text or ">" in text
+
+
+def _raw_word_text(tok: Token | None) -> str | None:
+    """The text of a WORD token made of exactly one unquoted run, else `None`."""
+    if tok is None or tok.kind != "WORD" or tok.segments is None or len(tok.segments) != 1:
+        return None
+    segment = tok.segments[0]
+    return segment.text if isinstance(segment, Raw) else None
 
 
 class _Parser:
@@ -127,15 +135,7 @@ class _Parser:
         return tok is not None and tok.kind == "OP" and tok.text == text
 
     def at_unquoted_word(self, text: str) -> bool:
-        tok = self.peek()
-        return (
-            tok is not None
-            and tok.kind == "WORD"
-            and tok.segments is not None
-            and len(tok.segments) == 1
-            and isinstance(tok.segments[0], Raw)
-            and tok.segments[0].text == text
-        )
+        return _raw_word_text(self.peek()) == text
 
     def _at_stop(self, stop_texts: frozenset[str], stop_words: frozenset[str]) -> bool:
         tok = self.peek()
@@ -217,10 +217,18 @@ class _Parser:
             self.advance()
             redirects = self._parse_redirects()
             return BraceGroup(body=body, redirects=redirects)
+        if self.at_unquoted_word("function"):
+            return self.parse_function_definition(keyword=True)
+        if self._at_function_header():
+            return self.parse_function_definition(keyword=False)
         if self.at_unquoted_word("for"):
             return self.parse_for_command()
         if self.at_unquoted_word("if"):
             return self.parse_if_command()
+        if self.at_unquoted_word("case"):
+            return self.parse_case_command()
+        if self.at_unquoted_word("[["):
+            return self.parse_conditional_command()
         if self.at_unquoted_word("while"):
             return self.parse_while_or_until_command("while")
         if self.at_unquoted_word("until"):
@@ -238,6 +246,120 @@ class _Parser:
                 "malformed-syntax", "Missing command: a pipeline/list element has no command word."
             )
         return command
+
+    def _skip_newlines(self) -> None:
+        while self.at_op("\n"):
+            self.advance()
+
+    def _at_function_header(self) -> bool:
+        """`name ( )` at command position: a function definition without the keyword."""
+        name = _raw_word_text(self.peek()) or ""
+        nxt1 = self.peek_at(1)
+        nxt2 = self.peek_at(2)
+        return (
+            _IDENTIFIER_RE.fullmatch(name) is not None
+            and nxt1 is not None
+            and nxt1.kind == "OP"
+            and nxt1.text == "("
+            and nxt2 is not None
+            and nxt2.kind == "OP"
+            and nxt2.text == ")"
+        )
+
+    def parse_function_definition(self, *, keyword: bool) -> FunctionDefinition:
+        if keyword:
+            self.advance()  # `function`
+        name = _raw_word_text(self.peek()) or ""
+        if not _IDENTIFIER_RE.fullmatch(name):
+            raise UnsupportedConstruct("malformed-syntax", "A function definition requires a plain name.")
+        self.advance()
+        if self.at_op("("):
+            self.advance()
+            if not self.at_op(")"):
+                raise UnsupportedConstruct("malformed-syntax", f"Function '{name}': expected ')' after '('.")
+            self.advance()
+        elif not keyword:
+            raise UnsupportedConstruct("malformed-syntax", f"Function '{name}': expected '()'.")
+        self._skip_newlines()
+        if not (self.at_op("{") or self.at_op("(") or self.at_unquoted_word("if") or self.at_unquoted_word("for")
+                or self.at_unquoted_word("while") or self.at_unquoted_word("until") or self.at_unquoted_word("case")
+                or self.at_unquoted_word("[[")):
+            raise UnsupportedConstruct(
+                "malformed-syntax", f"Function '{name}': the body must be a compound command such as {{ …; }}."
+            )
+        body = self.parse_pipeline_element()
+        if isinstance(body, FunctionDefinition):
+            raise UnsupportedConstruct("malformed-syntax", f"Function '{name}': the body cannot be another definition.")
+        return FunctionDefinition(name=name, body=body, redirects=self._parse_redirects())
+
+    def parse_case_command(self) -> CaseCommand:
+        self.advance()  # `case`
+        subject = self.peek()
+        if subject is None or subject.kind != "WORD":
+            raise UnsupportedConstruct("malformed-syntax", "A 'case' command requires a word after 'case'.")
+        self.advance()
+        self._skip_newlines()
+        if not self.at_unquoted_word("in"):
+            raise UnsupportedConstruct("malformed-syntax", "A 'case' command is missing its 'in' keyword.")
+        self.advance()
+        self._skip_seps()
+        clauses: list[tuple[list[Word], CommandList, str]] = []
+        while not self.at_unquoted_word("esac"):
+            if self.peek() is None:
+                raise UnsupportedConstruct("malformed-syntax", "A 'case' command is missing its closing 'esac' keyword.")
+            if self.at_op("("):
+                self.advance()
+            patterns: list[Word] = []
+            while True:
+                pattern = self.peek()
+                if pattern is None or pattern.kind != "WORD":
+                    raise UnsupportedConstruct("malformed-syntax", "A 'case' clause requires a pattern before ')'.")
+                patterns.append(Word(segments=pattern.segments or []))
+                self.advance()
+                if self.at_op("|"):
+                    self.advance()
+                    continue
+                break
+            if not self.at_op(")"):
+                raise UnsupportedConstruct("malformed-syntax", "A 'case' clause pattern must end with ')'.")
+            self.advance()
+            body = self.parse_command_list(_CASE_TERMINATORS, frozenset({"esac"}))
+            terminator = ";;"
+            tok = self.peek()
+            if tok is not None and tok.kind == "OP" and tok.text in _CASE_TERMINATORS:
+                terminator = tok.text or ";;"
+                self.advance()
+            elif not self.at_unquoted_word("esac"):
+                raise UnsupportedConstruct("malformed-syntax", "A 'case' clause must end with ';;' or 'esac'.")
+            clauses.append((patterns, body, terminator))
+            self._skip_seps()
+        self.advance()  # `esac`
+        return CaseCommand(word=Word(segments=subject.segments or []), clauses=clauses, redirects=self._parse_redirects())
+
+    def parse_conditional_command(self) -> ConditionalCommand:
+        self.advance()  # `[[`
+        items: list[Word | str] = []
+        while True:
+            tok = self.peek()
+            if tok is None:
+                raise UnsupportedConstruct("malformed-syntax", "A '[[' conditional is missing its closing ']]'.")
+            if self.at_unquoted_word("]]"):
+                self.advance()
+                break
+            if tok.kind == "OP":
+                if tok.text == "\n":
+                    self.advance()
+                    continue
+                if tok.text in ("&&", "||", "(", ")", "<", ">", "|"):
+                    items.append(tok.text)
+                    self.advance()
+                    continue
+                raise UnsupportedConstruct("malformed-syntax", f"[[ ]]: unexpected operator {tok.text!r}.")
+            items.append(Word(segments=tok.segments or []))
+            self.advance()
+        if not items:
+            raise UnsupportedConstruct("malformed-syntax", "A '[[' conditional requires an expression.")
+        return ConditionalCommand(items=items, redirects=self._parse_redirects())
 
     def _parse_for_body(self) -> CommandList:
         if not (self.at_op(";") or self.at_op("\n")):
@@ -301,16 +423,7 @@ class _Parser:
                 redirects=self._parse_redirects(),
             )
 
-        variable = self.peek()
-        variable_name = (
-            variable.segments[0].text
-            if variable is not None
-            and variable.kind == "WORD"
-            and variable.segments is not None
-            and len(variable.segments) == 1
-            and isinstance(variable.segments[0], Raw)
-            else ""
-        )
+        variable_name = _raw_word_text(self.peek()) or ""
         if not _IDENTIFIER_RE.fullmatch(variable_name):
             raise UnsupportedConstruct(
                 "malformed-syntax", "A for loop requires an unquoted shell variable name after 'for'."
@@ -451,22 +564,16 @@ class _Parser:
                     if m:
                         self.advance()
                         name, rest = m.group(1), m.group(2)
+                        if not rest and len(word.segments) == 1 and self.at_op("("):
+                            raise UnsupportedConstruct(
+                                "array",
+                                f"Arrays are not supported ('{name}=(…)'): use a space-separated word list in a plain variable, or a loop.",
+                            )
                         value_segments = ([Raw(text=rest)] if rest else []) + list(word.segments[1:])
                         assignments.append((name, Word(segments=value_segments)))
                         continue
             _check_word_banned_patterns(word)
             if not words:
-                nxt1 = self.peek_at(1)
-                nxt2 = self.peek_at(2)
-                if (
-                    nxt1 is not None
-                    and nxt1.kind == "OP"
-                    and nxt1.text == "("
-                    and nxt2 is not None
-                    and nxt2.kind == "OP"
-                    and nxt2.text == ")"
-                ):
-                    raise UnsupportedConstruct("function-definition", "Function definitions are not supported.")
                 literal = _literal_text(word)
                 if literal is not None:
                     _check_command_word_banned(literal)

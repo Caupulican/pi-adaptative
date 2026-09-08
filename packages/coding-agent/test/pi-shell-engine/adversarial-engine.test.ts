@@ -465,21 +465,15 @@ describe("pi-shell-engine adversarial", () => {
 			expect(runLine(py, "A=hello; echo ${#A}", dir).stdout).toBe("5\n");
 		});
 
-		it("${A#pre} (unsupported prefix-strip) is a named parameter-expansion refusal, never a crash", () => {
-			const result = runLine(py, "A=preval; echo ${A#pre}", tempDir());
-			expect(result.refused).toBe(true);
-			expect(result.construct).toBe("parameter-expansion");
-			assertNoCrash(result);
-		});
-
-		it("${A%suf} and ${A/x/y} (unsupported suffix-strip / substitution) are also named refusals", () => {
+		it("${A#pre}, ${A%suf} and ${A/x/y} strip and substitute with GNU bash semantics", () => {
 			const dir = tempDir();
-			const suffix = runLine(py, "A=valsuf; echo ${A%suf}", dir);
-			const substitution = runLine(py, "A=xyz; echo ${A/x/y}", dir);
-			expect(suffix.refused).toBe(true);
-			expect(suffix.construct).toBe("parameter-expansion");
-			expect(substitution.refused).toBe(true);
-			expect(substitution.construct).toBe("parameter-expansion");
+			expect(runLine(py, "A=preval; echo ${A#pre}", dir).stdout).toBe("val\n");
+			expect(runLine(py, "A=valsuf; echo ${A%suf}", dir).stdout).toBe("val\n");
+			expect(runLine(py, "A=xyz; echo ${A/x/y}", dir).stdout).toBe("yyz\n");
+			const indirection = runLine(py, "A=B; echo ${!A}", dir);
+			expect(indirection.refused).toBe(true);
+			expect(indirection.construct).toBe("parameter-expansion");
+			assertNoCrash(indirection);
 		});
 	});
 

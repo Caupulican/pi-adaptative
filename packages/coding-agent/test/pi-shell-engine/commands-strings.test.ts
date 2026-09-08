@@ -282,13 +282,15 @@ describe("pi-shell-engine commands/strings.py", () => {
 			expect(r.exitCode).toBe(0);
 		});
 
-		it("-a / -o combiners -> unsupported-flag refusal", () => {
-			const r = runBuiltin(python, "strings.cmd_test", {
-				argv: ["test", "1", "-eq", "1", "-a", "2", "-eq", "2"],
-			}) as Refusal;
-			expect(r.refused).toBe(true);
-			expect(r.code).toBe("unsupported");
-			expect(r.construct).toBe("unsupported-flag");
+		it("-a / -o combiners: -a binds tighter than -o, ! negates one term", () => {
+			const exitOf = (argv: string[]) =>
+				(runBuiltin(python, "strings.cmd_test", { argv }) as { exitCode: number }).exitCode;
+			expect(exitOf(["test", "1", "-eq", "1", "-a", "2", "-eq", "2"])).toBe(0);
+			expect(exitOf(["test", "1", "-eq", "1", "-a", "2", "-eq", "3"])).toBe(1);
+			expect(exitOf(["test", "1", "-eq", "2", "-o", "2", "-eq", "2"])).toBe(0);
+			expect(exitOf(["test", "1", "-eq", "2", "-o", "!", "2", "-eq", "3"])).toBe(0);
+			expect(exitOf(["test", "1", "-eq", "1", "-o", "x", "-a", "1", "-eq", "2"])).toBe(0);
+			expect(exitOf(["test", "a", "==", "a"])).toBe(0);
 		});
 	});
 
