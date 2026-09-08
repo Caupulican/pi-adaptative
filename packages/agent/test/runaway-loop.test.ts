@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { Agent } from "../src/agent.ts";
 import { agentLoop } from "../src/agent-loop.ts";
-import { TOOL_FAILURE_LEDGER_TRANSIENT_KIND } from "../src/tool-failure-memory.ts";
+import { readToolFailureOccurrence, TOOL_FAILURE_LEDGER_TRANSIENT_KIND } from "../src/tool-failure-memory.ts";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -3190,6 +3190,87 @@ describe("repeated-failure guard on the ledger occurrence", () => {
 			(event) => event.type === "tool_execution_end" && event.toolName === "fragile",
 		);
 		expect(fragileResults.length).toBeLessThanOrEqual(4);
+	});
+
+	it("does not count identical failures emitted in one parallel batch as repeats; later batches do", async () => {
+		// Live defect: one assistant message carried four goal calls that differed only in a volatile
+		// id; the ledger stamped them occ 1..4 and the guard ended the run before the model saw any
+		// of the failures.
+		function parallelStream(turns: number) {
+			let providerTurns = 0;
+			return () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					providerTurns++;
+					if (providerTurns <= turns) {
+						stream.push({
+							type: "done",
+							reason: "toolUse",
+							message: assistantMessage(
+								Array.from({ length: 4 }, (_, index) => ({
+									type: "toolCall" as const,
+									id: `fragile-${providerTurns}-${index}`,
+									name: "fragile",
+									// Sixteen hex digits: a volatile id the failure key normalizes, like a live requirement id.
+									arguments: {
+										value: `same-${(0xa1b2c3d4e5f60000 + providerTurns * 16 + index).toString(16)}`,
+									},
+								})),
+								"toolUse",
+							),
+						});
+						return;
+					}
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: assistantMessage([{ type: "text", text: "done" }], "stop"),
+					});
+				});
+				return stream;
+			};
+		}
+		const config = (stops: Array<{ reason: string; repeats: number }>): AgentLoopConfig => ({
+			model: createModel(),
+			convertToLlm: identityConverter,
+			maxStallTurns: 12,
+			maxRepeatedFailures: 4,
+			toolExecution: "parallel",
+			onRunawayStop: (info) => stops.push(info),
+		});
+		const context = () => ({ systemPrompt: "", messages: [], tools: [echoTool, failingTool()] });
+
+		const oneBatchStops: Array<{ reason: string; repeats: number }> = [];
+		const oneBatch = await drain(
+			agentLoop(
+				[{ role: "user", content: "keep trying", timestamp: 1 }],
+				context(),
+				config(oneBatchStops),
+				undefined,
+				parallelStream(1),
+			),
+		);
+		expect(oneBatchStops).toEqual([]);
+		const stamped = oneBatch.flatMap((event) =>
+			event.type === "message_end" && event.message.role === "toolResult" && event.message.isError
+				? [readToolFailureOccurrence(event.message.details)?.occurrence]
+				: [],
+		);
+		expect(stamped).toEqual([1, 1, 1, 1]);
+
+		const fourBatchStops: Array<{ reason: string; repeats: number }> = [];
+		await drain(
+			agentLoop(
+				[{ role: "user", content: "keep trying", timestamp: 1 }],
+				context(),
+				config(fourBatchStops),
+				undefined,
+				parallelStream(6),
+			),
+		);
+		expect(fourBatchStops).toEqual([
+			{ reason: "repeated_tool_call", repeats: 4, signature: expect.any(String), detail: expect.any(String) },
+		]);
 	});
 
 	it("does not stop when the failures are different calls", async () => {

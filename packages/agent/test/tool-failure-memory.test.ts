@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
 	assessToolFailure,
+	beginToolFailureBatch,
 	createRepeatedToolFailureResult,
 	createToolFailureContextMemory,
 	createToolFailureMemoryTracker,
@@ -195,6 +196,97 @@ describe("tool failure memory", () => {
 			role: "toolResult",
 			toolCallId: "call_view",
 		});
+	});
+
+	it("counts identical failures once per tool batch: parallel duplicates share the occurrence, the next batch escalates", () => {
+		// Live defect: four satisfy_requirement calls emitted side by side (only their volatile hex ids
+		// differed) were stamped occ 1..4 and reached the repeated-failure limit inside one batch.
+		const tracker = new Map();
+		beginToolFailureBatch(tracker);
+		const first = rememberToolFailure(
+			tracker,
+			"goal",
+			{ requirementId: "req-041a02f49a588eaa" },
+			"failed",
+			"tool_error",
+			"Cite verified evidence",
+		);
+		const second = rememberToolFailure(
+			tracker,
+			"goal",
+			{ requirementId: "req-d068aedefd40e704" },
+			"failed",
+			"tool_error",
+			"Cite verified evidence",
+		);
+		expect(first.failureKey).toBe(second.failureKey);
+		expect(first.occurrence).toBe(1);
+		expect(second.occurrence).toBe(1);
+		expect(second.kindMistakes).toBe(2);
+		beginToolFailureBatch(tracker);
+		const later = rememberToolFailure(
+			tracker,
+			"goal",
+			{ requirementId: "req-8071993b56ae7ba0" },
+			"failed",
+			"tool_error",
+			"Cite verified evidence",
+		);
+		expect(later.occurrence).toBe(2);
+		// Folding the same history from messages agrees with the write-time count.
+		const failed = (id: string, record: ReturnType<typeof rememberToolFailure>) => ({
+			...createToolFailureResult(record),
+			role: "toolResult" as const,
+			toolCallId: id,
+			toolName: "goal",
+			timestamp: 1,
+		});
+		const call = (id: string, requirementId: string) => ({
+			type: "toolCall" as const,
+			id,
+			name: "goal",
+			arguments: { requirementId },
+		});
+		const folded = createToolFailureMemoryTracker([
+			{
+				role: "assistant",
+				content: [call("c1", "req-041a02f49a588eaa"), call("c2", "req-d068aedefd40e704")],
+				api: "openai-responses",
+				provider: "x",
+				model: "m",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 1,
+			},
+			failed("c1", first),
+			failed("c2", second),
+			{
+				role: "assistant",
+				content: [call("c3", "req-8071993b56ae7ba0")],
+				api: "openai-responses",
+				provider: "x",
+				model: "m",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 1,
+			},
+			failed("c3", later),
+		] as never);
+		expect(folded.get(later.failureKey)?.occurrence).toBe(2);
 	});
 
 	it("tracks an incremental kind_mistakes counter specific to tool kind to aid self-calibration", () => {

@@ -289,8 +289,13 @@ call blocks up to its own timeout. Pinned by
 `scripts/check-coordinator-boundaries.mjs` that is lowered with each extraction and never raised.
 
 **One call failing identically ends the run on the ledger's own count.** The failure ledger
-counts every occurrence of a failure key; when one key reaches the tier's repeat count the run ends
-as a `repeated_tool_call` runaway, whatever else the model mixed into the same turns. The batch
+counts an occurrence of a failure key once per tool batch: an occurrence is an attempt the model
+made after seeing the previous failure, so identical calls emitted side by side in one assistant
+message (and the duplicates the admission gate blocks unexecuted) share one occurrence, and the
+history fold applies the same rule per assistant message. When one key reaches the tier's repeat
+count across batches the run ends as a `repeated_tool_call` runaway, whatever else the model mixed
+into the same turns. Why (2026-09-07): four parallel `goal` calls that differed only in their hex
+ids reached the limit inside a single batch and ended a live audit before the model saw a result. The batch
 fuses stay: the stagnant-cycle detector compares results with the ledger's per-occurrence stamp
 removed, so an identical failure is identical. Why: measured live, one invented `task_steps` id
 failed 28 times in 22 minutes inside batches whose other calls varied, and no guard fired. A slip
@@ -382,6 +387,7 @@ measurement gains no new surface.
 | 2026-09-07 | Whole-row task-directory status pagination replaces megabyte-scale responses, preserves complete escaped paths, and rejects stale cursors. Its measured 340-token schema receives a 350-token ceiling; the pre-existing 4,500-token aggregate remains unchanged. |
 | 2026-09-07 | Worker and verifier identity survives queued dispatch and resume; asynchronous probes retain queue ownership, recheck policy, and reject stale completions. Mailbox recovery precedes the start transition. Historical path-only recovery remains explicit and cannot bypass a saved identity. |
 | 2026-09-07 | Fresh workers capture admitted task cwd; explicit relative intent uses that directory while configured presets and default permission roots retain their original anchors. Queueing and foreground selection cannot retarget admitted work. |
+| 2026-09-07 | A failure key's occurrence advances once per tool batch (executed failures and gate-blocked duplicates alike); the repeated-failure stop counts attempts the model made after seeing a failure, never parallel siblings. |
 | 2026-09-07 | Persistent directory control earns a separate 330-token schema allowance; all pre-existing tools retain their combined 4,500-token ceiling. Explicit task pins address reproduced wrong-directory execution without widening grants or introducing per-turn schema churn. |
 | 2026-09-06 | Session-audit repairs strengthen receipt provenance, setup supersession, useful unsuccessful handoffs, goal attribution, structured repair, action validation, bounded progress detection, worker grants/inspection, scoped memory, atomic skill batches, and proportional instructions without raising prompt or scanner limits. |
 | 2026-09-02 | First edition: the invariants proven live on v0.97.24 and the ratchet model's gates. |

@@ -120,6 +120,39 @@ export type ToolFailureResultDetails = ToolFailureMemoryDetails | ToolFailureDir
 
 export type ToolFailureMemoryTracker = Map<string, ToolFailureMemoryRecord>;
 
+/**
+ * Failure keys already counted in the tool batch a tracker is currently recording. An occurrence
+ * is an attempt the model made after seeing the previous failure; identical calls emitted side by
+ * side in one assistant message were all decided before any of them failed, so they share one
+ * occurrence (measured live: four `satisfy_requirement` calls for four requirements in one batch
+ * reached the repeated-failure limit and ended the run before the model saw a single result).
+ */
+const batchCountedKeys = new WeakMap<ToolFailureMemoryTracker, Set<string>>();
+
+/** Marks the start of one tool batch (one assistant message) for the tracker's occurrence counting. */
+export function beginToolFailureBatch(tracker: ToolFailureMemoryTracker): void {
+	batchCountedKeys.set(tracker, new Set());
+}
+
+/** The next occurrence for `failureKey`: unchanged within a batch, one higher across batches. */
+function nextOccurrence(previous: number | undefined, countedInBatch: boolean): number {
+	return countedInBatch ? Math.max(previous ?? 0, 1) : (previous ?? 0) + 1;
+}
+
+/**
+ * Records that `failureKey` failed in the tracker's current batch; returns whether it already had.
+ * Every path that stamps an occurrence for a call the model just made (an executed failure or a
+ * call the admission gate blocked as unchanged) goes through this, so parallel duplicates and their
+ * blocked siblings share one occurrence.
+ */
+export function noteToolFailureInBatch(tracker: ToolFailureMemoryTracker, failureKey: string): boolean {
+	const batchKeys = batchCountedKeys.get(tracker);
+	if (!batchKeys) return false;
+	if (batchKeys.has(failureKey)) return true;
+	batchKeys.add(failureKey);
+	return false;
+}
+
 interface ToolOperationIdentity {
 	executionScope?: string;
 	failureKey: string;
@@ -1127,6 +1160,8 @@ interface FailureFoldState {
 	 * where it left off instead of starting again at one. Bounded like `active`.
 	 */
 	resolvedOccurrences: Map<string, number>;
+	/** Failure keys counted in the batch (assistant message) being folded; see `batchCountedKeys`. */
+	batchKeys: Set<string>;
 	activeDirectives: Map<string, ToolFailureDirectiveDetails["piToolFailureDirective"]>;
 	sequence: number;
 	kindMistakesMap: Map<string, number>;
@@ -1146,6 +1181,7 @@ function createFailureFoldState(): FailureFoldState {
 		filteredAssistantMessages: new WeakMap(),
 		active: new Map(),
 		resolvedOccurrences: new Map(),
+		batchKeys: new Set(),
 		activeDirectives: new Map(),
 		sequence: 0,
 		kindMistakesMap: new Map(),
@@ -1219,6 +1255,7 @@ function foldToolFailureContext(
 		const message = messages[index];
 		if (message.role === "assistant") {
 			activeDirectives.clear();
+			fold.batchKeys.clear();
 			const content = message.content;
 			for (let blockIdx = 0; blockIdx < content.length; blockIdx++) {
 				const block = content[blockIdx];
@@ -1297,8 +1334,12 @@ function foldToolFailureContext(
 			const previous = active.get(failureKey)?.record;
 			const occurrence = Math.max(
 				retained?.occurrence ?? 0,
-				(previous?.occurrence ?? fold.resolvedOccurrences.get(failureKey) ?? 0) + 1,
+				nextOccurrence(
+					previous?.occurrence ?? fold.resolvedOccurrences.get(failureKey),
+					fold.batchKeys.has(failureKey),
+				),
 			);
+			fold.batchKeys.add(failureKey);
 			const record: ToolFailureMemoryRecord = {
 				version: TOOL_FAILURE_MEMORY_VERSION,
 				...(executionScope ? { [TOOL_FAILURE_EXECUTION_SCOPE]: executionScope } : {}),
@@ -1597,6 +1638,7 @@ export function rememberToolFailure(
 	}
 	const identity = isDiscard ? undefined : operationIdentity(tool, args, executionScope);
 	const previous = identity ? tracker.get(identity.failureKey) : undefined;
+	const countedInBatch = identity !== undefined && noteToolFailureInBatch(tracker, identity.failureKey);
 	const record: ToolFailureMemoryRecord = {
 		version: TOOL_FAILURE_MEMORY_VERSION,
 		failureKey: identity ? identity.failureKey : `directive:${boundedFailureCode(failureCode)}`,
@@ -1605,7 +1647,7 @@ export function rememberToolFailure(
 		...(executionScope ? { [TOOL_FAILURE_EXECUTION_SCOPE]: executionScope } : {}),
 		tool: identity ? identity.tool : truncate(tool, MAX_TOOL_NAME_CHARS),
 		operation: identity ? identity.operation : "[discarded]",
-		occurrence: isDiscard ? 1 : (previous?.occurrence ?? 0) + 1,
+		occurrence: isDiscard ? 1 : nextOccurrence(previous?.occurrence, countedInBatch),
 		kindMistakes: kindCount,
 		mistakeKind: truncate(tool, MAX_TOOL_NAME_CHARS),
 		state,
@@ -1737,8 +1779,9 @@ export function createToolFailureResult(
 export function createRepeatedToolFailureResult(
 	record: ToolFailureMemoryRecord,
 	envelopeOnlyChange = false,
+	countedInBatch = false,
 ): AgentToolResult<ToolFailureMemoryDetails> {
-	const retainedRecord = retainBlockedToolFailure(record);
+	const retainedRecord = retainBlockedToolFailure(record, countedInBatch);
 	// The note states why this call did not run and what makes it runnable again; the retained
 	// root-cause correction stays the next_action, because that is the actionable half. Evidence is
 	// left out: nothing executed, so there is none — the prior run's evidence is still in the
@@ -1768,10 +1811,10 @@ export function createRepeatedToolFailureResult(
 	};
 }
 
-function retainBlockedToolFailure(record: ToolFailureMemoryRecord): ToolFailureMemoryRecord {
+function retainBlockedToolFailure(record: ToolFailureMemoryRecord, countedInBatch: boolean): ToolFailureMemoryRecord {
 	return {
 		...record,
-		occurrence: record.occurrence + 1,
+		occurrence: nextOccurrence(record.occurrence, countedInBatch),
 		kindMistakes: (record.kindMistakes ?? record.occurrence) + 1,
 	};
 }

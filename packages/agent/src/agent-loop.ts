@@ -28,6 +28,7 @@ import {
 } from "./provider-request-planner.ts";
 import {
 	assessToolFailure,
+	beginToolFailureBatch,
 	clearToolFailure,
 	createRepeatedToolFailureResult,
 	createToolFailureContextMemory,
@@ -36,6 +37,7 @@ import {
 	describeOperationOutcome,
 	getUnresolvedToolFailure,
 	normalizeToolSignature,
+	noteToolFailureInBatch,
 	readToolFailureOccurrence,
 	rememberToolFailure,
 	type ToolFailureContextMemory,
@@ -1014,6 +1016,7 @@ async function executeToolCalls(
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
+	beginToolFailureBatch(toolFailureMemory);
 	const execCtx: ToolExecutionContext = {
 		pendingBindings: new Set(),
 		messages: [],
@@ -1841,7 +1844,11 @@ async function prepareToolCall(
 			binding?.executionScope,
 		);
 		if (admission.kind === "blocked") {
-			const result = createRepeatedToolFailureResult(admission.record, admission.envelopeOnlyChange);
+			const result = createRepeatedToolFailureResult(
+				admission.record,
+				admission.envelopeOnlyChange,
+				noteToolFailureInBatch(toolFailureMemory, admission.record.failureKey),
+			);
 			const memoryRecord = result.details.piToolFailureMemory;
 			toolFailureMemory.set(admission.record.failureKey, memoryRecord);
 			return {
