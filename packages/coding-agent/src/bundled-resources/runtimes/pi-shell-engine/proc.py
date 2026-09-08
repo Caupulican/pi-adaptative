@@ -17,6 +17,66 @@ from state import ShellState
 
 TIMEOUT_EXIT_CODE = 124
 
+# Command names that dispatch to the real GNU binary (`<gnu_tools_dir>/<name>[.exe]`) when the
+# host has one. Models use GNU semantics end to end (`find -maxdepth`, `ls -lt`, `grep -RIn`,
+# `stat -c`, `awk`); a hand-written flag matrix can never converge on that surface, so the real
+# tool is primary and the Python builtin in commands/ is the floor for hosts without Git for
+# Windows. Engine-semantic names (`echo printf test [ pwd true false which`) and the state
+# builtins (`cd export unset exit …`) are deliberately absent: they must see engine state.
+# Nothing here is prepended to PATH, so `git`, `python`, `rg`, `node` resolve exactly as before.
+GNU_PREFERRED_TOOLS: frozenset[str] = frozenset(
+    {
+        "ls", "dir", "find", "grep", "egrep", "fgrep", "sed", "awk", "gawk",
+        "wc", "head", "tail", "sort", "uniq", "cut", "tr", "cat", "stat", "xargs",
+        "tee", "diff", "cmp", "file", "date", "env", "basename", "dirname",
+        "realpath", "readlink", "touch", "mkdir", "rm", "cp", "mv", "du", "df",
+    }
+)
+
+
+def _gnu_binary(name: str, gnu_tools_dir: str | None) -> str | None:
+    if not gnu_tools_dir or not name or os.sep in name or (os.altsep and os.altsep in name):
+        return None
+    candidates = [name + ".exe", name] if os.name == "nt" else [name]
+    for candidate in candidates:
+        full = os.path.join(gnu_tools_dir, candidate)
+        if os.path.isfile(full) and (os.name == "nt" or os.access(full, os.X_OK)):
+            return full
+    return None
+
+
+def resolve_gnu_tool(name: str, gnu_tools_dir: str | None) -> str | None:
+    """The real GNU binary for a `GNU_PREFERRED_TOOLS` name, or `None` when the host has none.
+
+    Only a bare command word qualifies: a path (`./ls`, `D:/x/ls.exe`) is the caller's explicit
+    choice and resolves through the ordinary PATH rules.
+    """
+    if name not in GNU_PREFERRED_TOOLS:
+        return None
+    return _gnu_binary(name, gnu_tools_dir)
+
+
+def resolve_gnu_extra(name: str, gnu_tools_dir: str | None) -> str | None:
+    """A bare name that PATH did not resolve but the GNU directory holds (`seq`, `sha256sum`,
+    `tac`, `uname`, `tar`, `bash`, …): the directory is the engine's last search entry, so a
+    native tool of the same name on PATH keeps precedence and only the otherwise-missing
+    Linux vocabulary is filled in."""
+    return _gnu_binary(name, gnu_tools_dir)
+
+
+def _child_env(state: ShellState, resolved: str) -> dict[str, str]:
+    """The child's environment. A GNU tool's own children (`xargs … cat`, `find -exec echo`,
+    `bash -c`) must resolve the same GNU vocabulary, and ahead of the unrelated Windows
+    `find.exe`/`sort.exe` in System32: the MSYS runtime does not add its own `usr/bin` to PATH
+    when the parent is a native process, so the engine prepends it for that child only. The
+    session environment is untouched."""
+    env = state.env.copy()
+    gnu_dir = state.gnu_tools_dir
+    if gnu_dir and os.path.dirname(resolved) == os.path.normpath(gnu_dir):
+        current = env.get("PATH", "") or ""
+        env["PATH"] = gnu_dir + (os.pathsep + current if current else "")
+    return dict(env)
+
 
 def resolve_external(name: str, env: dict[str, str], cwd: str | None = None) -> str | None:
     """Resolve `name` to an absolute path over `env["PATH"]`, honoring PATHEXT on win32.
@@ -87,7 +147,11 @@ def spawn_external(
     # A Linux-trained model's `/c/Program Files/.../tool.exe` and its `/mnt/d/repo` arguments
     # mean `C:/...` here; translate every drive-rooted token before resolution and spawn.
     argv = [translate_posix_drive_path(token) for token in argv]
-    resolved = resolve_external(argv[0], state.env, state.cwd)
+    resolved = (
+        resolve_gnu_tool(argv[0], state.gnu_tools_dir)
+        or resolve_external(argv[0], state.env, state.cwd)
+        or resolve_gnu_extra(argv[0], state.gnu_tools_dir)
+    )
     if resolved is None:
         raise FileNotFoundError(argv[0])
     full_argv = build_argv(resolved, argv, state.powershell_path)
@@ -99,7 +163,7 @@ def spawn_external(
     return subprocess.Popen(
         full_argv,
         cwd=state.cwd,
-        env=dict(state.env),
+        env=_child_env(state, resolved),
         stdin=stdin,
         stdout=stdout,
         stderr=stderr,

@@ -40,6 +40,7 @@ function makeController(): BashExecutionController {
 			({
 				getShellCommandPrefix: () => undefined,
 				getShellPath: () => undefined,
+				getWindowsShellSettings: () => ({ pythonEngine: true, gnuToolsDir: "auto" }),
 				getExposeSessionEnvironment: () => true,
 			}) as never,
 		isStreaming: () => false,
@@ -63,6 +64,7 @@ describe("BashExecutionController", () => {
 				({
 					getShellCommandPrefix: () => undefined,
 					getShellPath: () => undefined,
+					getWindowsShellSettings: () => ({ pythonEngine: true, gnuToolsDir: "auto" }),
 					getExposeSessionEnvironment: () => true,
 				}) as never,
 			isStreaming: () => false,
@@ -99,6 +101,7 @@ describe("BashExecutionController", () => {
 				({
 					getShellCommandPrefix: () => undefined,
 					getShellPath: () => undefined,
+					getWindowsShellSettings: () => ({ pythonEngine: true, gnuToolsDir: "auto" }),
 					getExposeSessionEnvironment: () => true,
 				}) as never,
 			isStreaming: () => false,
@@ -212,6 +215,7 @@ describe("BashExecutionController", () => {
 					({
 						getShellCommandPrefix: () => undefined,
 						getShellPath: () => undefined,
+						getWindowsShellSettings: () => ({ pythonEngine: true, gnuToolsDir: "auto" }),
 						getExposeSessionEnvironment: () => true,
 					}) as never,
 				isStreaming: () => false,
@@ -272,6 +276,7 @@ describe("BashExecutionController", () => {
 						({
 							getShellCommandPrefix: () => undefined,
 							getShellPath: () => undefined,
+							getWindowsShellSettings: () => ({ pythonEngine: true, gnuToolsDir: "auto" }),
 							getExposeSessionEnvironment: () => true,
 						}) as never,
 					isStreaming: () => false,
@@ -372,6 +377,7 @@ describe("BashExecutionController", () => {
 					({
 						getShellCommandPrefix: () => undefined,
 						getShellPath: () => undefined,
+						getWindowsShellSettings: () => ({ pythonEngine: true, gnuToolsDir: "auto" }),
 						getExposeSessionEnvironment: () => true,
 					}) as never,
 				isStreaming: () => false,

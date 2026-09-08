@@ -118,6 +118,9 @@ def _run_request(request: dict) -> None:
     powershell_path = request.get("powershellPath")
     if not isinstance(powershell_path, str) or not powershell_path:
         powershell_path = None
+    gnu_tools_dir = request.get("gnuToolsDir")
+    if not isinstance(gnu_tools_dir, str) or not gnu_tools_dir:
+        gnu_tools_dir = None
 
     original_env = dict(env)
 
@@ -133,7 +136,7 @@ def _run_request(request: dict) -> None:
         )
         return
 
-    state = ShellState(cwd=cwd, env=env, powershell_path=powershell_path)
+    state = ShellState(cwd=cwd, env=env, powershell_path=powershell_path, gnu_tools_dir=gnu_tools_dir)
     output = _OutputSink()
 
     deadline = None

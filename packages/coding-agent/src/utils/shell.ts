@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { basename, delimiter, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
 import { ensureManagedJscpd } from "./bundled-jscpd.ts";
@@ -40,6 +40,59 @@ function findExecutableOnPath(executable: string): string | null {
 		// Resolution falls through to known paths or the platform fallback.
 	}
 	return null;
+}
+
+const GNU_TOOLS_DIR_MARKERS = ["ls", "find"] as const;
+
+/** `windowsShell.gnuToolsDir`: `"auto"` discovers Git for Windows, `"off"` disables, else a directory. */
+export type GnuToolsDirSetting = "auto" | "off" | (string & {});
+
+/** True when `directory` holds the GNU coreutils/findutils binaries the engine dispatches to. */
+export function isGnuToolsDir(directory: string): boolean {
+	const suffix = process.platform === "win32" ? ".exe" : "";
+	return GNU_TOOLS_DIR_MARKERS.every((name) => existsSync(join(directory, `${name}${suffix}`)));
+}
+
+/**
+ * The real GNU tools on a Windows host: Git for Windows' `usr/bin`, found from the `git` on PATH
+ * (`cmd/git.exe`, `bin/git.exe`, and `mingw64/bin/git.exe` all sit under the install root) or under
+ * Program Files. `null` off Windows or when no such directory exists.
+ */
+export function discoverGnuToolsDir(): string | null {
+	if (process.platform !== "win32") return null;
+	const roots: string[] = [];
+	const git = findExecutableOnPath("git.exe");
+	if (git) {
+		let directory = dirname(git);
+		for (let depth = 0; depth < 3; depth += 1) {
+			roots.push(directory);
+			directory = dirname(directory);
+		}
+	}
+	for (const programFiles of [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]]) {
+		if (programFiles) roots.push(join(programFiles, "Git"));
+	}
+	for (const root of roots) {
+		const candidate = join(root, "usr", "bin");
+		if (isGnuToolsDir(candidate)) return candidate;
+	}
+	return null;
+}
+
+/**
+ * Resolve the `windowsShell.gnuToolsDir` setting to a directory the shell engine dispatches GNU
+ * tool names to, or `null` (engine builtins answer). An explicit directory that holds no GNU tools
+ * is a configuration error and is reported, never silently downgraded to the builtins.
+ */
+export function resolveGnuToolsDir(setting: GnuToolsDirSetting = "auto"): string | null {
+	if (setting === "off") return null;
+	if (setting === "auto") return discoverGnuToolsDir();
+	if (!isGnuToolsDir(setting)) {
+		throw new Error(
+			`windowsShell.gnuToolsDir "${setting}" does not hold GNU tools (${GNU_TOOLS_DIR_MARKERS.join(", ")}). Point it at Git for Windows' usr\\bin, set "auto" to discover it, or "off" to use the engine builtins.`,
+		);
+	}
+	return setting;
 }
 
 function isPowerShellExecutableAvailable(executable: string): boolean {

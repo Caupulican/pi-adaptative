@@ -244,11 +244,7 @@ def _spawn_argv_or_report(
 
 
 def _command_scratch_state(command: nodes.SimpleCommand, ctx: ExecContext) -> ShellState:
-    return ShellState(
-        cwd=ctx.state.cwd,
-        env=_apply_transient_assignments(command, ctx),
-        powershell_path=ctx.state.powershell_path,
-    )
+    return ctx.state.derive(_apply_transient_assignments(command, ctx))
 
 
 def _finish_bridges(*preps: _ChildStream) -> None:
@@ -454,7 +450,11 @@ def _is_external_dispatch(command: nodes.SimpleCommand, ctx: ExecContext) -> boo
     if not expanded:
         return False
     name = expanded[0]
-    if name in STATE_BUILTINS or name in RUNNER_BUILTINS or name in ctx.builtins:
+    if name in STATE_BUILTINS:
+        return False
+    if proc.resolve_gnu_tool(name, ctx.state.gnu_tools_dir) is not None:
+        return True
+    if name in RUNNER_BUILTINS or name in ctx.builtins:
         return False
     return True
 
@@ -797,10 +797,14 @@ def _dispatch_simple_command(
         if name in STATE_BUILTINS:
             return _run_state_builtin(name, argv, ctx, r_out, r_err)
 
-        if name in RUNNER_BUILTINS:
+        # The real GNU tool wins over every reimplementation (runner and pure builtins alike);
+        # the external path below resolves it through `proc.spawn_external`.
+        gnu_tool = proc.resolve_gnu_tool(name, ctx.state.gnu_tools_dir)
+
+        if gnu_tool is None and name in RUNNER_BUILTINS:
             return _run_xargs(argv, ctx, r_in, r_out)
 
-        if name in ctx.builtins:
+        if gnu_tool is None and name in ctx.builtins:
             env = _apply_transient_assignments(command, ctx)
             builtin_ctx = _builtin_context(
                 argv, ctx, env, _as_stream(r_in, "rb"), _as_stream(r_out, "wb"), _as_stream(r_err, "wb")
@@ -1019,7 +1023,9 @@ def _run_argv(
     """Run one already-expanded argv the way a command line would: pure builtin, state builtin,
     or external command through the engine's spawn rules. Shared by `xargs` and `find -exec`."""
     name = argv[0]
-    if name in ctx.builtins:
+    if name in STATE_BUILTINS:
+        return _run_state_builtin(name, argv, ctx, out_stream, err_stream)
+    if proc.resolve_gnu_tool(name, ctx.state.gnu_tools_dir) is None and name in ctx.builtins:
         builtin_ctx = _builtin_context(
             argv,
             ctx,
@@ -1029,13 +1035,7 @@ def _run_argv(
             _as_stream(err_stream, "wb"),
         )
         return ctx.builtins[name](builtin_ctx)
-    if name in STATE_BUILTINS:
-        return _run_state_builtin(name, argv, ctx, out_stream, err_stream)
-    scratch_state = ShellState(
-        cwd=ctx.state.cwd,
-        env=ctx.state.env.copy(),
-        powershell_path=ctx.state.powershell_path,
-    )
+    scratch_state = ctx.state.derive(ctx.state.env.copy())
     child_stdin: BinaryIO | int = subprocess.DEVNULL if isinstance(in_stream, io.BytesIO) else in_stream
     spawned = _spawn_argv_or_report(argv, scratch_state, ctx, child_stdin, out_stream, err_stream)
     if spawned is None:

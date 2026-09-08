@@ -71,6 +71,7 @@ export class BashExecutionController {
 
 		const commandPrefix = this.deps.getSettingsManager().getShellCommandPrefix();
 		const shellPath = this.deps.getSettingsManager().getShellPath();
+		const windowsShell = this.deps.getSettingsManager().getWindowsShellSettings();
 		const platform = options?.platform ?? process.platform;
 		const enableGitFilter = !options?.operations && !commandPrefix && !shellPath;
 		const cwd = this.deps.getSessionManager().getCwd();
@@ -86,7 +87,8 @@ export class BashExecutionController {
 				commandPrefix,
 				operations: options?.operations,
 				sessionKey: this.shellSessionKey,
-				pythonEngine: options?.pythonEngine,
+				pythonEngine: options?.pythonEngine ?? windowsShell.pythonEngine,
+				engineOptions: { gnuToolsDir: windowsShell.gnuToolsDir },
 			},
 			platform,
 		);

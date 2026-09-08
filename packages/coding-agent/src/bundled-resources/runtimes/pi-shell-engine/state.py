@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Mapping
 from paths import resolve_request_path
 
 
@@ -68,6 +69,10 @@ class ShellState:
     env: ShellEnvironment = field(default_factory=ShellEnvironment)
     last_exit_code: int = 0
     powershell_path: str | None = None
+    # Directory holding real GNU tools (Git for Windows `usr/bin`); `None` when the host has none.
+    # Names in `proc.GNU_PREFERRED_TOOLS` found there dispatch to the real binary before any
+    # Python reimplementation (which stays as the floor for hosts without it).
+    gnu_tools_dir: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.env, ShellEnvironment):
@@ -80,6 +85,17 @@ class ShellState:
             env=self.env.copy(),
             last_exit_code=self.last_exit_code,
             powershell_path=self.powershell_path,
+            gnu_tools_dir=self.gnu_tools_dir,
+        )
+
+    def derive(self, env: Mapping[str, str]) -> "ShellState":
+        """A scratch state for one command: this cwd and host configuration, the given env."""
+        return ShellState(
+            cwd=self.cwd,
+            env=ShellEnvironment(env),
+            last_exit_code=self.last_exit_code,
+            powershell_path=self.powershell_path,
+            gnu_tools_dir=self.gnu_tools_dir,
         )
 
     def chdir(self, path: str) -> None:

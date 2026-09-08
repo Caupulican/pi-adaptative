@@ -847,6 +847,52 @@ describe("windows shell engine operations", () => {
 		expect(capturedRequest?.powershellPath).toBeUndefined();
 	});
 
+	it("carries the GNU tools directory in every request frame, resolved once per session", async () => {
+		const requests: Array<{ gnuToolsDir?: string }> = [];
+		let resolutions = 0;
+		const spawn = fakeSpawn(({ stderr, request }) => {
+			requests.push(request as { gnuToolsDir?: string });
+			stderr.emit("data", frameBytes({ exitCode: 0, cwd: "/old/dir", envDelta: {}, unsupported: null }));
+		});
+		const ops = createWindowsShellEngineOperations("engine-gnu-tools-session", {
+			resolveRuntime: async () => READY_RUNTIME,
+			resolveGnuToolsDir: () => {
+				resolutions += 1;
+				return "C:\\Program Files\\Git\\usr\\bin";
+			},
+			engineScriptPath: "/fake/main.py",
+			spawn,
+		});
+
+		await collectOutput((onData) => ops.exec("ls -lt", "/old/dir", { onData }));
+		await collectOutput((onData) => ops.exec("find . -maxdepth 1 | head", "/old/dir", { onData }));
+
+		expect(resolutions).toBe(1);
+		expect(requests.map((request) => request.gnuToolsDir)).toEqual([
+			"C:\\Program Files\\Git\\usr\\bin",
+			"C:\\Program Files\\Git\\usr\\bin",
+		]);
+	});
+
+	it("omits the GNU tools directory from the frame when the host has none (builtins answer)", async () => {
+		let capturedRequest: { gnuToolsDir?: string } | undefined;
+		const spawn = fakeSpawn(({ stderr, request }) => {
+			capturedRequest = request as { gnuToolsDir?: string };
+			stderr.emit("data", frameBytes({ exitCode: 0, cwd: "/old/dir", envDelta: {}, unsupported: null }));
+		});
+		const ops = createWindowsShellEngineOperations("engine-no-gnu-tools-session", {
+			resolveRuntime: async () => READY_RUNTIME,
+			resolveGnuToolsDir: () => null,
+			engineScriptPath: "/fake/main.py",
+			spawn,
+		});
+
+		await collectOutput((onData) => ops.exec("ls -lt", "/old/dir", { onData }));
+
+		expect(capturedRequest).toBeDefined();
+		expect("gnuToolsDir" in (capturedRequest ?? {})).toBe(false);
+	});
+
 	it("threads engine cwd/env state into the very next createLocalPlatformShellOperations call, even to the PS tier", async () => {
 		const sessionKey = "handoff-session";
 		const psCalls: Array<{ cwd: string; env?: NodeJS.ProcessEnv }> = [];

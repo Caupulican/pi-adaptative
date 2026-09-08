@@ -6,6 +6,7 @@ import { homedir } from "os";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
+import type { GnuToolsDirSetting } from "../utils/shell.ts";
 import { stripBom } from "../utils/text.ts";
 import { configFile, directoryProfilesDir } from "./agent-paths.ts";
 import { DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS } from "./background-tool-task-controller.ts";
@@ -366,9 +367,16 @@ const MAX_BACKGROUND_TOOL_CALL_AFTER_MS = 3_600_000;
 /** Windows shell contract engine tier (`src/core/tools/windows-shell-engine.ts`). */
 export interface WindowsShellSettings {
 	pythonEngine?: boolean; // default: true -- routes complex/state-mutating Bash constructs to the bundled Python engine on Windows; explicit false restores the PowerShell-only floor verbatim
+	gnuToolsDir?: GnuToolsDirSetting; // default: "auto" -- Git for Windows' usr\bin discovered from the git on PATH; "off" keeps every coreutils name on the engine builtins; else an explicit directory of GNU tools
 }
 
 export type ResolvedWindowsShellSettings = Required<WindowsShellSettings>;
+
+function sanitizeGnuToolsDirSetting(value: unknown): GnuToolsDirSetting {
+	if (typeof value !== "string") return "auto";
+	const trimmed = value.trim();
+	return trimmed === "" ? "auto" : trimmed;
+}
 
 export type LearningPolicyLayer =
 	| "memory"
@@ -3851,6 +3859,7 @@ export class SettingsManager {
 		const configured = this.settings.windowsShell ?? {};
 		return {
 			pythonEngine: configured.pythonEngine !== false,
+			gnuToolsDir: sanitizeGnuToolsDirSetting(configured.gnuToolsDir),
 		};
 	}
 

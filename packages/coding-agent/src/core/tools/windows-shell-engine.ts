@@ -16,7 +16,7 @@ import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { getBundledResourcesDir } from "../../config.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
-import { getShellConfig, getShellEnv } from "../../utils/shell.ts";
+import { type GnuToolsDirSetting, getShellConfig, getShellEnv, resolveGnuToolsDir } from "../../utils/shell.ts";
 import { ensurePythonRuntime, type PythonRuntimeOutcome } from "../python-runtime.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import type { BashOperations } from "./bash.ts";
@@ -52,6 +52,8 @@ interface WindowsShellEngineRequest {
 	cwd: string;
 	env: NodeJS.ProcessEnv;
 	powershellPath?: string;
+	/** Directory of real GNU tools (Git for Windows `usr/bin`); absent when the host has none. */
+	gnuToolsDir?: string;
 	timeoutMs?: number;
 }
 
@@ -162,6 +164,10 @@ export interface WindowsShellEngineOptions {
 	spawn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess;
 	/** Override for tests: selected PowerShell host used to adapt `.ps1` external commands. */
 	resolvePowerShellPath?: () => string;
+	/** `windowsShell.gnuToolsDir`: where the engine finds real GNU tools. Default: `"auto"`. */
+	gnuToolsDir?: GnuToolsDirSetting;
+	/** Override for tests: resolves the GNU tools directory once per session. Default: `resolveGnuToolsDir`. */
+	resolveGnuToolsDir?: () => string | null;
 }
 
 function degradationError(
@@ -179,6 +185,9 @@ class PersistentWindowsShellEngineSession {
 	private readonly getState: (sessionKey: string) => WindowsShellState;
 	private readonly spawn: (command: string, args: string[], options: SpawnOptions) => ChildProcess;
 	private readonly resolvePowerShellPath: () => string;
+	private readonly resolveGnuToolsDir: () => string | null;
+	// Discovered once per session on the first request (a `where git` probe); `undefined` = not yet.
+	private gnuToolsDir: string | null | undefined;
 	private readonly coordinator = new PersistentProcessCoordinator();
 	private activeExec: ActiveEngineExec | null = null;
 	private disposed = false;
@@ -192,6 +201,7 @@ class PersistentWindowsShellEngineSession {
 		this.resolvePowerShellPath =
 			options.resolvePowerShellPath ??
 			(() => (process.platform === "win32" ? getShellConfig(undefined, "powershell").shell : "powershell"));
+		this.resolveGnuToolsDir = options.resolveGnuToolsDir ?? (() => resolveGnuToolsDir(options.gnuToolsDir));
 	}
 
 	exec(
@@ -225,6 +235,7 @@ class PersistentWindowsShellEngineSession {
 		const state = this.getState(this.key);
 		const effectiveCwd = resolveEffectiveCwd(state, cwd, forceCwd);
 		const effectiveEnv = mergeEffectiveEnv(state, env ?? getShellEnv());
+		if (this.gnuToolsDir === undefined) this.gnuToolsDir = this.resolveGnuToolsDir();
 		const child = await this.ensureChild(effectiveEnv);
 		if (this.disposed) {
 			this.killChild();
@@ -249,6 +260,7 @@ class PersistentWindowsShellEngineSession {
 			cwd: effectiveCwd,
 			env: effectiveEnv,
 			...(invokesPowerShellScript(command) ? { powershellPath: this.resolvePowerShellPath() } : {}),
+			...(this.gnuToolsDir ? { gnuToolsDir: this.gnuToolsDir } : {}),
 			...(requestTimeoutMs !== undefined ? { timeoutMs: requestTimeoutMs } : {}),
 		};
 		const outputBarrier = Buffer.from(`\x1e${requestId}\x1e`, "latin1");

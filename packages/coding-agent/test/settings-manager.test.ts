@@ -63,6 +63,27 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("windowsShell settings", () => {
+		it("defaults the GNU tools directory to auto-discovery and keeps an explicit choice", () => {
+			expect(SettingsManager.create(projectDir, agentDir).getWindowsShellSettings()).toEqual({
+				pythonEngine: true,
+				gnuToolsDir: "auto",
+			});
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ windowsShell: { pythonEngine: false, gnuToolsDir: "  D:\\tools\\usr\\bin " } }),
+			);
+			expect(SettingsManager.create(projectDir, agentDir).getWindowsShellSettings()).toEqual({
+				pythonEngine: false,
+				gnuToolsDir: "D:\\tools\\usr\\bin",
+			});
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ windowsShell: { gnuToolsDir: "off" } }));
+			expect(SettingsManager.create(projectDir, agentDir).getWindowsShellSettings().gnuToolsDir).toBe("off");
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ windowsShell: { gnuToolsDir: 7 } }));
+			expect(SettingsManager.create(projectDir, agentDir).getWindowsShellSettings().gnuToolsDir).toBe("auto");
+		});
+	});
+
 	describe("preserves externally added settings", () => {
 		it("should preserve enabledModels when changing thinking level", async () => {
 			// Create initial settings file

@@ -950,6 +950,7 @@ export class RuntimeBuilder {
 		const autoResizeImages = settingsManager.getImageAutoResize();
 		const shellCommandPrefix = settingsManager.getShellCommandPrefix();
 		const shellPath = settingsManager.getShellPath();
+		const windowsShell = settingsManager.getWindowsShellSettings();
 		const baseToolsOverride = this.deps.getBaseToolsOverride();
 		const toolAccess = this._createToolAccessPolicy();
 		// Artifact-producing tools must not emit a "Full output: artifact tool-output:<id>" handle
@@ -978,6 +979,8 @@ export class RuntimeBuilder {
 				shellPath,
 				sessionKey: this.deps.getShellSessionKey(),
 				platform: process.platform,
+				windowsShellPythonEngine: windowsShell.pythonEngine,
+				windowsShellEngineOptions: { gnuToolsDir: windowsShell.gnuToolsDir },
 				getShellSessionContext: () =>
 					buildShellSessionContext({
 						getAgent: () => this.deps.getAgent(),
