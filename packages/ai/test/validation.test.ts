@@ -164,6 +164,54 @@ describe("validateToolArguments", () => {
 		expect(JSON.stringify(events)).not.toContain("secret-value");
 	});
 
+	it("names the violated constraint for a well-typed value instead of repeating its type", () => {
+		const tool: Tool = {
+			name: "brief",
+			description: "Brief",
+			parameters: Type.Object({
+				task: Type.Optional(Type.String({ maxLength: 3_500 })),
+				tags: Type.Optional(Type.Array(Type.String(), { maxItems: 2 })),
+			}),
+		};
+		const events: unknown[] = [];
+		const telemetry = (event: unknown) => events.push(event);
+
+		expect(() =>
+			validateToolArguments(
+				tool,
+				{
+					type: "toolCall",
+					id: "tool-long",
+					name: "brief",
+					arguments: { task: "x".repeat(3_610), tags: ["a", "b", "c"] },
+				},
+				{ model: "test-model", provider: "test-provider", telemetry, repairEnabled: false },
+			),
+		).toThrow("Validation failed");
+
+		expect(events).toEqual([
+			expect.objectContaining({
+				outcome: "bounced",
+				failureShape: expect.arrayContaining([
+					{
+						path: "task",
+						expectedType: "string",
+						receivedType: "string",
+						keyword: "maxLength",
+						constraint: "must not have more than 3500 characters (received 3610 characters)",
+					},
+					{
+						path: "tags",
+						expectedType: "array",
+						receivedType: "array",
+						keyword: "maxItems",
+						constraint: "must not have more than 2 items (received 3 items)",
+					},
+				]),
+			}),
+		]);
+	});
+
 	it("honors the internal diagnostic repair kill while keeping validation bounces", () => {
 		const tool: Tool = {
 			name: "count",

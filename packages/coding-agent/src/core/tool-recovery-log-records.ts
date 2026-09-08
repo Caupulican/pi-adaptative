@@ -74,6 +74,7 @@ function copyFailureShape(
 		expectedType: boundedText(entry.expectedType),
 		receivedType: boundedText(entry.receivedType),
 		...(entry.keyword ? { keyword: boundedText(entry.keyword) } : {}),
+		...(entry.constraint ? { constraint: boundedText(entry.constraint) } : {}),
 	}));
 }
 

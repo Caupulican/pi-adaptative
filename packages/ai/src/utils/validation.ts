@@ -26,6 +26,44 @@ export interface ToolArgumentFailureShapeEntry {
 	expectedType: string;
 	receivedType: string;
 	keyword?: string;
+	/**
+	 * For a constraint failure on a well-typed value (maxLength, minimum, pattern, maxItems, …): the
+	 * validator's own sentence plus the received measure, e.g. `must not have more than 3500
+	 * characters (received 3610 characters)`. Absent for type mismatches, where the expected and
+	 * received types already say everything.
+	 */
+	constraint?: string;
+}
+
+/** Keywords whose failure the expected/received types describe completely. */
+const TYPE_LEVEL_KEYWORDS: ReadonlySet<string> = new Set([
+	"type",
+	"anyOf",
+	"oneOf",
+	"required",
+	"additionalProperties",
+	"enum",
+	"const",
+]);
+
+/**
+ * A value of the right type that still fails a constraint needs the constraint spelled out:
+ * "expected string, received string" told a model nothing about a 3,610-character brief that hit a
+ * 3,500-character cap. Pair the validator's sentence with the measure the model can act on.
+ */
+function constraintDescription(error: TLocalizedValidationError, value: unknown): string | undefined {
+	if (TYPE_LEVEL_KEYWORDS.has(error.keyword)) return undefined;
+	const received =
+		typeof value === "string"
+			? `received ${value.length} characters`
+			: Array.isArray(value)
+				? `received ${value.length} items`
+				: typeof value === "number"
+					? `received ${value}`
+					: undefined;
+	const message = error.message.trim();
+	if (!message) return received;
+	return received ? `${message} (${received})` : message;
 }
 
 export interface ToolArgumentValidationTelemetryEvent {
@@ -392,12 +430,14 @@ function formatFailureShape(
 		const pathSegments = path === "root" ? [] : path.split(".");
 		const expectedSchema = schemaAtValidationError(schema, error);
 		const value = receivedValueAtPath(args, pathSegments);
+		const constraint = constraintDescription(error, value);
 		pushUniqueFailureShapeEntry(shape, seen, {
 			path,
 			expectedType:
 				error.keyword === "additionalProperties" ? "forbidden" : expectedFailureType(error, expectedSchema),
 			receivedType: receivedTypeOf(value),
 			keyword: error.keyword,
+			...(constraint ? { constraint } : {}),
 		});
 	}
 	return shape;

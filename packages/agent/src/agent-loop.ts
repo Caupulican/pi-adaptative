@@ -1522,7 +1522,13 @@ function validationFailureCorrection(
 ): string {
 	const shape = event?.failureShape
 		?.slice(0, 3)
-		.map((entry) => `${entry.path}: expected ${entry.expectedType}, received ${entry.receivedType}`)
+		.map((entry) =>
+			// A constraint failure on a well-typed value is only actionable with the constraint itself;
+			// "expected string, received string" is what a length cap used to print.
+			entry.constraint
+				? `${entry.path}: ${entry.keyword ?? "constraint"} ${entry.constraint}`
+				: `${entry.path}: expected ${entry.expectedType}, received ${entry.receivedType}`,
+		)
 		.join("; ");
 	const rules = [
 		...new Set(

@@ -138,6 +138,32 @@ describe("delegate exact-action input corrections", () => {
 		await tool.execute("read-only", input, undefined, undefined, context);
 		expect(start).toHaveBeenCalledWith(expect.objectContaining({ authority: { readOnly: true } }), undefined);
 	});
+	it("folds a start brief given as task onto instructions before schema validation", () => {
+		const start = vi.fn(() => ({ started: false, skipReason: "fixture" }));
+		const tool = toolWithSpies(controlSpies(), start);
+		const brief = "Fix the profile tests. ".repeat(160);
+		expect(brief.length).toBeGreaterThan(3_500);
+		const prepared = tool.prepareArguments?.({ action: "start", task: brief }) as Record<string, unknown>;
+		expect(prepared).toEqual({ action: "start", instructions: brief });
+		expect(
+			validateToolArguments(
+				tool,
+				{ type: "toolCall", id: "long-brief", name: "delegate", arguments: prepared },
+				{ repairEnabled: false },
+			),
+		).toEqual(prepared);
+		// profile_create keeps its own task cap; the fold is start-only.
+		expect(tool.prepareArguments?.({ action: "profile_create", task: "short" })).toEqual({
+			action: "profile_create",
+			task: "short",
+		});
+		// Both fields present stays a runtime conflict, never a silent drop.
+		expect(tool.prepareArguments?.({ action: "start", task: "a", instructions: "b" })).toEqual({
+			action: "start",
+			task: "a",
+			instructions: "b",
+		});
+	});
 	it("rejects readOnly together with shell tools before any lane exists", async () => {
 		const start = vi.fn(() => ({ started: false, skipReason: "fixture" }));
 		const tool = toolWithSpies(controlSpies(), start);

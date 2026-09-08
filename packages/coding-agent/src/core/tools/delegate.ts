@@ -1125,6 +1125,20 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 		promptSnippet: "Coordinate autonomous persistent workers through host-compiled profiles.",
 		promptGuidelines: boundedGuidelines,
 		parameters: createDelegateSchema(availableActions),
+		// The flat wire schema exposes profile_create's `task` (3,500-char cap) beside start's
+		// `instructions` (16k cap). `sanitizeExactActionInput` already folds a start that only
+		// supplied `task` onto `instructions`, but it runs after schema validation, so a long brief
+		// was refused by the wrong cap. Apply the same fold before validation.
+		prepareArguments(args: unknown) {
+			if (!args || typeof args !== "object" || Array.isArray(args)) return args as DelegateToolInput;
+			const input = args as Record<string, unknown>;
+			const action = input.action ?? "start";
+			if (action !== "start" || typeof input.task !== "string" || typeof input.instructions === "string") {
+				return args as DelegateToolInput;
+			}
+			const { task, ...rest } = input;
+			return { ...rest, instructions: task } as DelegateToolInput;
+		},
 		renderShell: "self",
 		foregroundWait: (input: { action?: unknown }) =>
 			input.action === "wait" || input.action === "wait_many" || input.action === "inbox_wait",

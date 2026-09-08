@@ -17,6 +17,8 @@ export interface ToolValidationFailureShapeEntry {
 	expectedType: string;
 	receivedType: string;
 	keyword?: string;
+	/** Constraint sentence for a well-typed value that failed a bound (maxLength, minimum, …). */
+	constraint?: string;
 }
 
 export interface ToolValidationFailureCorpusRecord {
@@ -180,6 +182,7 @@ function sanitizeToolValidationShape(
 		expectedType: entry.expectedType.slice(0, MAX_DETAIL_CHARS),
 		receivedType: entry.receivedType.slice(0, MAX_DETAIL_CHARS),
 		...(entry.keyword ? { keyword: entry.keyword.slice(0, MAX_DETAIL_CHARS) } : {}),
+		...(entry.constraint ? { constraint: entry.constraint.slice(0, MAX_DETAIL_CHARS) } : {}),
 	}));
 }
 
