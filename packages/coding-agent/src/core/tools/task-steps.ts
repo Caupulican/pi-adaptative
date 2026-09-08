@@ -70,10 +70,27 @@ function optionalTaskStepFields(requirementIdsDescription: string) {
 				description: "Remove both pipeline ids. Cannot be combined with pipelineRunId/pipelineStageId.",
 			}),
 		),
-		note: Type.Optional(Type.String({ maxLength: 4_000 })),
+		note: Type.Optional(Type.String({ maxLength: 4_000, description: "One short line." })),
 		evidence: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 32 })),
 	};
 }
+
+/**
+ * One step transition inside a batched `update`. Deliberately the small field set a model changes
+ * in bulk: measured live, a model that had to finish four steps emitted four near-identical calls
+ * whose repeated JSON skeleton it then corrupted (delimiters replaced by filler tokens). One call
+ * with one skeleton removes the repetition at its source and saves the round trips.
+ */
+const batchUpdateItemSchema = Type.Object(
+	{
+		id: Type.String({ minLength: 1, pattern: "\\S", description: "Step id, unique prefix, or ordinal." }),
+		status: Type.Optional(statusSchema),
+		note: Type.Optional(Type.String({ maxLength: 4_000 })),
+		evidence: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 32 })),
+	},
+	{ additionalProperties: false },
+);
+export type TaskStepBatchUpdate = Static<typeof batchUpdateItemSchema>;
 
 const stepInputSchema = Type.Object(
 	{
@@ -117,6 +134,13 @@ const taskStepsSchema = Type.Union([
 			content: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
 			activeForm: Type.Optional(Type.String({ maxLength: 2_000 })),
 			...optionalTaskStepFields("Goal requirement ids this foreground step advances; [] clears existing links."),
+			updates: Type.Optional(
+				Type.Array(batchUpdateItemSchema, {
+					minItems: 1,
+					maxItems: MAX_TASK_STEPS,
+					description: "Several steps in one call; each item names its step. Omit the top-level id and fields.",
+				}),
+			),
 		},
 		{ additionalProperties: false },
 	),
@@ -146,6 +170,7 @@ export type TaskStepsToolInput = Static<typeof taskStepsSchema> &
 	Partial<TaskStepUpdate> & {
 		steps?: TaskStepInput[];
 		id?: string;
+		updates?: TaskStepBatchUpdate[];
 		showCompleted?: boolean;
 		clearCompleted?: boolean;
 		maxItems?: number;
@@ -191,8 +216,47 @@ const TASK_STEP_UPDATE_FIELDS = [
 ] as const;
 
 /** True when the update names at least one field to change (an id alone changes nothing). */
-function hasTaskStepUpdateFields(input: TaskStepsToolInput): boolean {
+function hasTaskStepUpdateFields(input: Partial<TaskStepUpdate>): boolean {
 	return TASK_STEP_UPDATE_FIELDS.some((field) => (input as Record<string, unknown>)[field] !== undefined);
+}
+
+const FOLDED_UPDATE_FIELD_RE = /^(?:status|note|evidence|content|activeform|requirementids|priority|owner):?$/i;
+
+/**
+ * A selector that carries two or more update property names as words is not a step name: the
+ * model folded the whole update object into `id` (measured live: `"step-1 Tesstatus Tescompleted
+ * Tesnote Tes…"`, later with "vis-à-vis" as the delimiter). Naming that shape lets the retry be
+ * right the first time; the generic "not found" refusal only listed the open steps.
+ */
+function looksLikeFoldedUpdate(selector: string): boolean {
+	const fieldWords = new Set(
+		selector
+			.split(/\s+/)
+			.filter((word) => FOLDED_UPDATE_FIELD_RE.test(word))
+			.map((word) => word.toLocaleLowerCase().replace(/:$/, "")),
+	);
+	return fieldWords.size >= 2;
+}
+
+function foldedUpdateError(selector: string): TaskStepsError {
+	const shown = selector.length > 80 ? `${selector.slice(0, 80)}…` : selector;
+	return new TaskStepsError(
+		`task_steps update received its properties folded into id (${JSON.stringify(shown)}). Send each property as its own JSON key: {"action":"update","id":"step-1","status":"completed","note":"…"}. To finish several steps at once send updates: [{"id":"step-1","status":"completed"}, …].`,
+	);
+}
+
+/** Resolve an update selector, naming the folded-arguments shape when that is why it failed. */
+function resolveUpdateSelector(
+	steps: readonly TaskStep[],
+	selector: string,
+	onNormalized: (note: string) => void,
+): TaskStep {
+	try {
+		return resolveTaskStepSelector(steps, selector, onNormalized);
+	} catch (error) {
+		if (error instanceof TaskStepsError && looksLikeFoldedUpdate(selector)) throw foldedUpdateError(selector);
+		throw error;
+	}
 }
 
 function toTaskStepUpdate(input: TaskStepsToolInput): TaskStepUpdate {
@@ -374,7 +438,8 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 		promptGuidelines: [
 			"Use for multi-step work; keep one in_progress step.",
 			"For project changes, establish Plan/Route before first mutation and link steps to the goal contract; task_steps owns execution detail, never a second outcome state.",
-			"Batch transitions; work the first open step; record evidence/blockers; skip unchanged narration.",
+			"Finish several steps in one call with update + updates: [{id, status, note}, …], never one call per step; work the first open step; record blockers; skip unchanged narration.",
+			"Notes are one short line; long evidence belongs in goal add_evidence cited by toolCallId.",
 			"intake keeps every item; link goal requirementIds.",
 			"update's id is optional: omit it to target the active step. Completing the active step auto-starts the next pending one.",
 			"advance completes current, then starts next pending.",
@@ -468,49 +533,88 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 						}
 						break;
 					case "update": {
-						// Omitted id targets the active step. Reuses resolveTaskStepSelector's own
-						// "current"/"active" resolution (including its "no in_progress step" error naming
-						// the open steps) instead of duplicating that logic here.
-						const selector = input.id?.trim() || "current";
-						const selected = resolveTaskStepSelector(before.steps, selector, (note) => selectorNotes.push(note));
-						// An update that carries no field changes nothing; reporting it as "recorded" hid five
-						// status-less calls in a row until the stagnant-cycle guard ended the run (measured
-						// live). Refuse once and name the fields so the retry is right the first time.
-						if (!hasTaskStepUpdateFields(input)) {
-							throw new TaskStepsError(
-								`task_steps update for ${selected.id} carried no changes. Include status (pending, in_progress, blocked, completed, cancelled), note, evidence, content, activeForm, priority, owner, or requirementIds.`,
-							);
-						}
-						if (
-							input.pipelineRunId !== undefined ||
-							input.pipelineStageId !== undefined ||
-							input.clearPipelineLink === true
-						) {
-							const clearingPipelineLink = input.clearPipelineLink === true;
-							validatePipelineLink(
-								deps,
-								clearingPipelineLink ? input.pipelineRunId : (input.pipelineRunId ?? selected.pipelineRunId),
-								clearingPipelineLink
-									? input.pipelineStageId
-									: (input.pipelineStageId ?? selected.pipelineStageId),
-								clearingPipelineLink,
-							);
-						}
-						state = updateTaskStep(state, selector, toTaskStepUpdate(input), timestamp);
-						// Completing the step that WAS active advances the cursor automatically -- the
-						// harness manages the step, so the model does not need a separate `advance` call
-						// for the common case. Guarded to the step that was in_progress before this call,
-						// so completing an unrelated pending/blocked step never disturbs the real cursor.
-						if (selected.status === "in_progress" && input.status === "completed") {
-							const promoted = findNextPendingStep(state.steps, selected.id);
-							if (promoted) {
-								state = updateTaskStep(state, promoted.id, { status: "in_progress" }, timestamp);
-								autoPromotedStepId = promoted.id;
+						const targeted = new Set<string>();
+						const applyUpdate = (selectorInput: string | undefined, update: TaskStepUpdate): void => {
+							// Omitted id targets the active step. Reuses resolveTaskStepSelector's own
+							// "current"/"active" resolution (including its "no in_progress step" error naming
+							// the open steps) instead of duplicating that logic here.
+							const selector = selectorInput?.trim() || "current";
+							const selected = resolveUpdateSelector(state.steps, selector, (note) => selectorNotes.push(note));
+							// An update that carries no field changes nothing; reporting it as "recorded" hid five
+							// status-less calls in a row until the stagnant-cycle guard ended the run (measured
+							// live). Refuse once and name the fields so the retry is right the first time.
+							if (!hasTaskStepUpdateFields(update)) {
+								throw new TaskStepsError(
+									`task_steps update for ${selected.id} carried no changes. Include status (pending, in_progress, blocked, completed, cancelled), note, evidence, content, activeForm, priority, owner, or requirementIds.`,
+								);
 							}
+							if (
+								update.pipelineRunId !== undefined ||
+								update.pipelineStageId !== undefined ||
+								update.clearPipelineLink === true
+							) {
+								const clearingPipelineLink = update.clearPipelineLink === true;
+								validatePipelineLink(
+									deps,
+									clearingPipelineLink
+										? update.pipelineRunId
+										: (update.pipelineRunId ?? selected.pipelineRunId),
+									clearingPipelineLink
+										? update.pipelineStageId
+										: (update.pipelineStageId ?? selected.pipelineStageId),
+									clearingPipelineLink,
+								);
+							}
+							state = updateTaskStep(state, selected.id, update, timestamp);
+							targeted.add(selected.id);
+							// Completing the step that WAS active advances the cursor automatically -- the
+							// harness manages the step, so the model does not need a separate `advance` call
+							// for the common case. Guarded to the step that was in_progress before this update,
+							// so completing an unrelated pending/blocked step never disturbs the real cursor.
+							if (selected.status === "in_progress" && update.status === "completed") {
+								const promoted = findNextPendingStep(state.steps, selected.id);
+								if (promoted) {
+									state = updateTaskStep(state, promoted.id, { status: "in_progress" }, timestamp);
+									autoPromotedStepId = promoted.id;
+								}
+							}
+						};
+						if (input.updates) {
+							// The batch owns every field: a top-level id or field beside `updates` is ambiguous
+							// (which step would it change?), so it is refused rather than guessed.
+							if (input.id !== undefined || hasTaskStepUpdateFields(input)) {
+								throw new TaskStepsError(
+									"task_steps update with updates[] must not also carry a top-level id or step fields; put every change inside its updates[] item.",
+								);
+							}
+							// Fail closed before applying anything: a batch that names one unknown step must not
+							// half-apply, and the response names every failing item at once.
+							const problems: string[] = [];
+							input.updates.forEach((item, index) => {
+								try {
+									resolveUpdateSelector(before.steps, item.id, () => {});
+								} catch (error) {
+									problems.push(
+										`updates[${index}]: ${error instanceof Error ? error.message : String(error)}`,
+									);
+									return;
+								}
+								if (!hasTaskStepUpdateFields(item)) {
+									problems.push(
+										`updates[${index}] (${item.id}) carried no changes; include status, note, or evidence.`,
+									);
+								}
+							});
+							if (problems.length > 0) throw new TaskStepsError(`Nothing applied. ${problems.join(" ")}`);
+							for (const item of input.updates) {
+								applyUpdate(item.id, { status: item.status, note: item.note, evidence: item.evidence });
+							}
+						} else {
+							applyUpdate(input.id, toTaskStepUpdate(input));
 						}
-						// Exclude the explicitly targeted step: its own status change was requested by
-						// the caller, so it is never a "silent" demotion even if it moved to pending.
-						demotedStepIds = computeDemotedStepIds(before, state, new Set([selected.id]));
+						// Exclude the explicitly targeted steps: their status changes were requested by the
+						// caller, so they are never "silent" demotions even if one moved to pending.
+						demotedStepIds = computeDemotedStepIds(before, state, targeted);
 						break;
 					}
 					case "clear":

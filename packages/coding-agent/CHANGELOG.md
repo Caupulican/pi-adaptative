@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- `task_steps update` accepts `updates: [{id, status, note, evidence}, …]` to finish several steps in one call. It fails closed (nothing applied) when any item names an unknown step or carries no change, refuses a batch beside top-level fields, and auto-starts the next pending step once. Measured live, a model that had to finish four steps emitted four near-identical calls and corrupted their repeated JSON skeleton.
+
+### Changed
+
+- `task_steps` guidance now asks for one batched update instead of one call per step and keeps notes to one short line, with long evidence cited through `goal add_evidence` by toolCallId.
+
+### Fixed
+
+- A `task_steps update` whose whole object arrived folded into `id` (property names as words in the selector) is refused with a diagnostic naming that shape and the correct JSON, instead of the generic step-not-found list.
+
 ## [0.99.7] - 2026-09-08
 
 ### Added

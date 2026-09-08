@@ -55,6 +55,92 @@ describe("task_steps tool", () => {
 		expect(allContent.text).toContain("focused test passed");
 	});
 
+	it("finishes several steps in one batched update, auto-starting the next pending step once", async () => {
+		// Measured live: four near-identical single-step updates in one message had their repeated
+		// JSON skeleton corrupted by the model; one call with one skeleton is the designed form.
+		const harness = createHarness();
+		await execute(harness.tool, {
+			action: "set",
+			steps: [
+				{ content: "Register", status: "in_progress" },
+				{ content: "Inspect" },
+				{ content: "Count" },
+				{ content: "Report" },
+			],
+		});
+		const result = await execute(harness.tool, {
+			action: "update",
+			updates: [
+				{ id: "step-1", status: "completed", note: "registered" },
+				{ id: "2", status: "completed", evidence: ["git log"] },
+				{ id: "step-3", status: "completed" },
+			],
+		});
+		expect(result.details).toMatchObject({
+			action: "update",
+			applied: true,
+			openStepCount: 1,
+			autoPromotedStepId: "step-4",
+		});
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual([
+			"completed",
+			"completed",
+			"completed",
+			"in_progress",
+		]);
+		expect(harness.getState()?.steps[0]?.notes).toEqual(["registered"]);
+		expect(harness.getState()?.steps[1]?.evidence).toEqual(["git log"]);
+	});
+
+	it("applies nothing from a batch that names an unknown step or an empty change, and refuses a batch beside top-level fields", async () => {
+		const harness = createHarness();
+		await execute(harness.tool, {
+			action: "set",
+			steps: [{ content: "One", status: "in_progress" }, { content: "Two" }],
+		});
+		const unknown = await execute(harness.tool, {
+			action: "update",
+			updates: [{ id: "step-1", status: "completed" }, { id: "step-9", status: "completed" }, { id: "step-2" }],
+		});
+		expect(unknown.details).toMatchObject({ action: "update", applied: false });
+		const unknownText = unknown.content[0];
+		if (unknownText?.type !== "text") throw new Error("Expected text task_steps result");
+		expect(unknownText.text).toContain("Nothing applied.");
+		expect(unknownText.text).toContain("updates[1]");
+		expect(unknownText.text).toContain("updates[2] (step-2) carried no changes");
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["in_progress", "pending"]);
+		const mixed = await execute(harness.tool, {
+			action: "update",
+			id: "step-1",
+			status: "completed",
+			updates: [{ id: "step-2", status: "completed" }],
+		});
+		expect(mixed.details).toMatchObject({ action: "update", applied: false });
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["in_progress", "pending"]);
+	});
+
+	it("names the folded-arguments shape when the whole update object arrived inside id", async () => {
+		// Measured live (grok-4.6, two audits): `"step-1 Tesstatus Tescompleted Tesnote Tes…"` and a
+		// "vis-à-vis"-delimited twin. The generic not-found refusal only listed the open steps.
+		const harness = createHarness();
+		await execute(harness.tool, { action: "set", steps: [{ content: "One", status: "in_progress" }] });
+		const folded = await execute(harness.tool, {
+			action: "update",
+			id: "step-1 vis-à-vis status completed vis-à-vis note vis-à-vis registered vis-à-vis evidence vis-à-vis x",
+		});
+		expect(folded.details).toMatchObject({ action: "update", applied: false });
+		const text = folded.content[0];
+		if (text?.type !== "text") throw new Error("Expected text task_steps result");
+		expect(text.text).toContain("properties folded into id");
+		expect(text.text).toContain("send updates: [");
+		// A plain unknown selector keeps the generic refusal that lists the open steps.
+		const plain = await execute(harness.tool, { action: "update", id: "step-7", status: "completed" });
+		const plainText = plain.content[0];
+		if (plainText?.type !== "text") throw new Error("Expected text task_steps result");
+		expect(plainText.text).toMatch(/not found/i);
+		expect(plainText.text).not.toContain("folded");
+	});
+
 	it("refuses an update that names no field to change and lists the accepted fields", async () => {
 		// Measured live: five id-only updates were "recorded" as no-ops until the stagnant-cycle
 		// guard ended the run; the model believed status had been sent each time.
@@ -124,6 +210,12 @@ describe("task_steps tool", () => {
 		expect(Value.Check(parameters, { action: "update", id: "", content: "Empty id still rejected" })).toBe(false);
 		expect(Value.Check(parameters, { action: "update", id: "step-1", steps: [] })).toBe(false);
 		expect(Value.Check(parameters, { action: "update", id: "step-1", content: "Updated" })).toBe(true);
+		expect(Value.Check(parameters, { action: "update", updates: [{ id: "step-1", status: "completed" }] })).toBe(
+			true,
+		);
+		expect(Value.Check(parameters, { action: "update", updates: [] })).toBe(false);
+		expect(Value.Check(parameters, { action: "update", updates: [{ status: "completed" }] })).toBe(false);
+		expect(Value.Check(parameters, { action: "update", updates: [{ id: "step-1", content: "no" }] })).toBe(false);
 		// Negative controls: all of the non-mutating and lifecycle actions retain their existing legal shape.
 		expect(Value.Check(parameters, { action: "list", showCompleted: true, maxItems: 1 })).toBe(true);
 		expect(Value.Check(parameters, { action: "clear" })).toBe(true);
@@ -399,7 +491,8 @@ describe("task_steps tool", () => {
 		expect(harnessGuidelines(createHarness().tool)).toContain("requirementIds");
 		expect(harnessGuidelines(createHarness().tool)).not.toContain("pipelineRunId");
 		expect(harnessGuidelines(createHarness().tool)).toContain("multi-step work");
-		expect(harnessGuidelines(createHarness().tool)).toContain("Batch transitions");
+		expect(harnessGuidelines(createHarness().tool)).toContain("updates: [{id, status, note}");
+		expect(harnessGuidelines(createHarness().tool)).toContain("Notes are one short line");
 	});
 });
 
