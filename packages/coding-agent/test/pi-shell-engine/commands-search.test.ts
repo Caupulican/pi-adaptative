@@ -239,6 +239,58 @@ describe("pi-shell-engine commands/search.py", () => {
 			expect(r.stdout).toBe("barfoo\n");
 		});
 
+		it("prints an address range with -n, the way transcripts page files", () => {
+			const text = Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join("\n") + "\n";
+			const r = runBuiltin(python, "search.cmd_sed", { argv: ["sed", "-n", "2,4p"], stdin: text }) as Result;
+			expect(r.stdout).toBe("line2\nline3\nline4\n");
+			const tail = runBuiltin(python, "search.cmd_sed", { argv: ["sed", "-n", "9,$p"], stdin: text }) as Result;
+			expect(tail.stdout).toBe("line9\nline10\n");
+			const single = runBuiltin(python, "search.cmd_sed", { argv: ["sed", "-n", "1p"], stdin: "only" }) as Result;
+			expect(single.stdout).toBe("only");
+		});
+
+		it("selects by regex address, deletes, and runs several -e scripts in order", () => {
+			const text = "alpha\nbeta\ngamma\ndelta\n";
+			const grep = runBuiltin(python, "search.cmd_sed", { argv: ["sed", "-n", "/^[bg]/p"], stdin: text }) as Result;
+			expect(grep.stdout).toBe("beta\ngamma\n");
+			const range = runBuiltin(python, "search.cmd_sed", {
+				argv: ["sed", "-n", "/beta/,/gamma/p"],
+				stdin: text,
+			}) as Result;
+			expect(range.stdout).toBe("beta\ngamma\n");
+			const del = runBuiltin(python, "search.cmd_sed", { argv: ["sed", "2d"], stdin: text }) as Result;
+			expect(del.stdout).toBe("alpha\ngamma\ndelta\n");
+			const chained = runBuiltin(python, "search.cmd_sed", {
+				argv: ["sed", "-e", "s/alpha/A/", "-e", "2,3d", "-e", "s/delta/D/"],
+				stdin: text,
+			}) as Result;
+			expect(chained.stdout).toBe("A\nD\n");
+			const semicolons = runBuiltin(python, "search.cmd_sed", { argv: ["sed", "1d;s/a/X/"], stdin: text }) as Result;
+			expect(semicolons.stdout).toBe("betX\ngXmma\ndeltX\n");
+		});
+
+		it("accepts -E, -ne clusters, and s///p under -n; refuses -i and unknown commands", () => {
+			const ere = runBuiltin(python, "search.cmd_sed", {
+				argv: ["sed", "-E", "s/(a)(b)/\\2\\1/"],
+				stdin: "ab\n",
+			}) as Result;
+			expect(ere.stdout).toBe("ba\n");
+			const cluster = runBuiltin(python, "search.cmd_sed", {
+				argv: ["sed", "-ne", "2p"],
+				stdin: "x\ny\n",
+			}) as Result;
+			expect(cluster.stdout).toBe("y\n");
+			const subPrint = runBuiltin(python, "search.cmd_sed", {
+				argv: ["sed", "-n", "s/foo/bar/p"],
+				stdin: "foo\nbaz\nfoo\n",
+			}) as Result;
+			expect(subPrint.stdout).toBe("bar\nbar\n");
+			const inPlace = runBuiltin(python, "search.cmd_sed", { argv: ["sed", "-i", "s/a/b/", "file"] });
+			expect(inPlace).toMatchObject({ refused: true, message: "sed: unsupported flag '-i'" });
+			const unknown = runBuiltin(python, "search.cmd_sed", { argv: ["sed", "1y/a/b/"], stdin: "a\n" });
+			expect(unknown).toMatchObject({ refused: true, message: expect.stringContaining("unsupported command 'y'") });
+		});
+
 		it("g flag replaces all occurrences", () => {
 			const r = runBuiltin(python, "search.cmd_sed", {
 				argv: ["sed", "s/foo/bar/g"],
@@ -304,8 +356,9 @@ describe("pi-shell-engine commands/search.py", () => {
 			expect(r.stdout).toBe("baz bar\n");
 		});
 
-		it("out-of-matrix refusal: non-s/// script -> unsupported-flag", () => {
-			const r = runBuiltin(python, "search.cmd_sed", { argv: ["sed", "d"], stdin: "x\n" }) as Refusal;
+		it("out-of-matrix refusal: a command outside p/d/s -> unsupported-flag", () => {
+			// `d` and `p` are in the matrix now; `y///` (transliterate) still is not.
+			const r = runBuiltin(python, "search.cmd_sed", { argv: ["sed", "y/ab/ba/"], stdin: "x\n" }) as Refusal;
 			expect(r.refused).toBe(true);
 			expect(r.code).toBe("unsupported");
 			expect(r.construct).toBe("unsupported-flag");

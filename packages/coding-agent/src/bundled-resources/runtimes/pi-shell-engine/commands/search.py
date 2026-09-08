@@ -317,60 +317,258 @@ def _parse_sed_replacement(repl: str) -> str:
     return "".join(out)
 
 
-def _parse_sed_script(script: str) -> tuple[str, str, bool, bool]:
-    if len(script) < 2 or script[0] != "s":
-        raise UnsupportedConstruct("unsupported-flag", "sed: only s/// scripts are supported")
-    delim = script[1]
-    if not delim or delim.isalnum() or delim == "\\":
-        raise UnsupportedConstruct("malformed-syntax", "sed: invalid delimiter")
-    parts: list[str] = []
-    current: list[str] = []
-    i = 2
+class _SedAddress:
+    """One sed address: a 1-based line number, `$` (last line), or a regex."""
+
+    __slots__ = ("line", "last", "regex")
+
+    def __init__(self, line: int | None = None, last: bool = False, regex: "re.Pattern[str] | None" = None):
+        self.line = line
+        self.last = last
+        self.regex = regex
+
+    def matches(self, lineno: int, text: str, is_last: bool) -> bool:
+        if self.line is not None:
+            return lineno == self.line
+        if self.last:
+            return is_last
+        return self.regex is not None and self.regex.search(text) is not None
+
+
+class _SedCommand:
+    """`p`, `d`, or `s///` with an optional address or address range."""
+
+    __slots__ = ("kind", "addr1", "addr2", "compiled", "replacement", "count", "print_on_sub", "in_range")
+
+    def __init__(self, kind: str, addr1: _SedAddress | None, addr2: _SedAddress | None):
+        self.kind = kind
+        self.addr1 = addr1
+        self.addr2 = addr2
+        self.compiled: re.Pattern[str] | None = None
+        self.replacement = ""
+        self.count = 1
+        self.print_on_sub = False
+        self.in_range = False
+
+    def selects(self, lineno: int, text: str, is_last: bool) -> bool:
+        if self.addr1 is None:
+            return True
+        if self.addr2 is None:
+            return self.addr1.matches(lineno, text, is_last)
+        if self.in_range:
+            # GNU: a numeric end address at or before the start line closes the range immediately.
+            if self.addr2.line is not None and self.addr2.line <= lineno:
+                self.in_range = False
+                return True
+            if self.addr2.matches(lineno, text, is_last):
+                self.in_range = False
+            return True
+        if self.addr1.matches(lineno, text, is_last):
+            if self.addr2.line is not None and self.addr2.line <= lineno:
+                return True
+            self.in_range = not (self.addr2.last and is_last)
+            return True
+        return False
+
+
+def _compile_sed_regex(pattern: str, icase: bool) -> re.Pattern[str]:
+    # BRE and ERE both compile through Python's `re`: the engine has always treated sed patterns as
+    # Python regexes, so `-E` is accepted without changing the grammar.
+    try:
+        return re.compile(pattern, re.IGNORECASE if icase else 0)
+    except re.error as exc:
+        raise UnsupportedConstruct("malformed-syntax", f"sed: invalid pattern: {exc}") from exc
+
+
+def _read_sed_delimited(script: str, i: int, delim: str) -> tuple[str, int]:
+    """Read text up to the next unescaped `delim`; returns (text, index after the delimiter)."""
+    out: list[str] = []
     n = len(script)
     while i < n:
         ch = script[i]
         if ch == "\\" and i + 1 < n and script[i + 1] == delim:
-            current.append(delim)
+            out.append(delim)
+            i += 2
+            continue
+        if ch == "\\" and i + 1 < n:
+            out.append(ch)
+            out.append(script[i + 1])
             i += 2
             continue
         if ch == delim:
-            parts.append("".join(current))
-            current = []
-            i += 1
-            if len(parts) == 2:
-                break
-            continue
-        current.append(ch)
+            return "".join(out), i + 1
+        out.append(ch)
         i += 1
-    if len(parts) != 2:
-        raise UnsupportedConstruct("malformed-syntax", "sed: unterminated s/// script")
-    remainder = script[i:]
-    global_flag = "g" in remainder
-    icase_flag = "i" in remainder
-    for c in remainder:
-        if c not in "gi":
-            raise UnsupportedConstruct("unsupported-flag", f"sed: unsupported flag '{c}'")
-    pattern, repl = parts
-    return pattern, repl, global_flag, icase_flag
+    raise UnsupportedConstruct("malformed-syntax", "sed: unterminated address or s/// script")
+
+
+def _parse_sed_address(script: str, i: int) -> tuple[_SedAddress | None, int]:
+    n = len(script)
+    if i >= n:
+        return None, i
+    ch = script[i]
+    if ch.isdigit():
+        j = i
+        while j < n and script[j].isdigit():
+            j += 1
+        line = int(script[i:j])
+        if line < 1:
+            raise UnsupportedConstruct("malformed-syntax", "sed: invalid usage of line address 0")
+        return _SedAddress(line=line), j
+    if ch == "$":
+        return _SedAddress(last=True), i + 1
+    if ch == "/" or (ch == "\\" and i + 1 < n):
+        delim = "/" if ch == "/" else script[i + 1]
+        text, j = _read_sed_delimited(script, i + 1 if ch == "/" else i + 2, delim)
+        icase = False
+        if j < n and script[j] == "I":
+            icase = True
+            j += 1
+        return _SedAddress(regex=_compile_sed_regex(text, icase)), j
+    return None, i
+
+
+def _parse_sed_commands(script: str) -> list[_SedCommand]:
+    commands: list[_SedCommand] = []
+    i = 0
+    n = len(script)
+    while i < n:
+        while i < n and script[i] in " \t;\n":
+            i += 1
+        if i >= n:
+            break
+        addr1, i = _parse_sed_address(script, i)
+        addr2 = None
+        if addr1 is not None and i < n and script[i] == ",":
+            addr2, i = _parse_sed_address(script, i + 1)
+            if addr2 is None:
+                raise UnsupportedConstruct("malformed-syntax", "sed: unexpected `,'")
+        while i < n and script[i] == " ":
+            i += 1
+        if i >= n:
+            raise UnsupportedConstruct("malformed-syntax", "sed: missing command")
+        kind = script[i]
+        i += 1
+        if kind in ("p", "d"):
+            commands.append(_SedCommand(kind, addr1, addr2))
+        elif kind == "s":
+            if i >= n:
+                raise UnsupportedConstruct("malformed-syntax", "sed: unterminated s/// script")
+            delim = script[i]
+            if delim.isalnum() or delim in "\\\n":
+                raise UnsupportedConstruct("malformed-syntax", "sed: invalid delimiter")
+            pattern, i = _read_sed_delimited(script, i + 1, delim)
+            repl, i = _read_sed_delimited(script, i, delim)
+            flags = ""
+            while i < n and script[i] not in " ;\n":
+                flags += script[i]
+                i += 1
+            for c in flags:
+                if c not in "gip":
+                    raise UnsupportedConstruct("unsupported-flag", f"sed: unsupported flag '{c}'")
+            command = _SedCommand("s", addr1, addr2)
+            command.compiled = _compile_sed_regex(pattern, "i" in flags)
+            command.replacement = _parse_sed_replacement(repl)
+            command.count = 0 if "g" in flags else 1
+            command.print_on_sub = "p" in flags
+            commands.append(command)
+        else:
+            raise UnsupportedConstruct(
+                "unsupported-flag", f"sed: unsupported command '{kind}' (supported: p, d, s///)"
+            )
+        while i < n and script[i] == " ":
+            i += 1
+        if i < n and script[i] not in ";\n":
+            raise UnsupportedConstruct("malformed-syntax", f"sed: unexpected characters after command: {script[i:]!r}")
+    if not commands:
+        raise UnsupportedConstruct("unsupported-flag", "sed: SCRIPT operand required")
+    return commands
+
+
+def _parse_sed_script(script: str) -> tuple[str, str, bool, bool]:
+    """Legacy single-`s///` parser kept for callers that only need the four fields."""
+    commands = _parse_sed_commands(script)
+    if len(commands) != 1 or commands[0].kind != "s" or commands[0].addr1 is not None:
+        raise UnsupportedConstruct("unsupported-flag", "sed: only s/// scripts are supported")
+    command = commands[0]
+    assert command.compiled is not None
+    return command.compiled.pattern, command.replacement, command.count == 0, bool(command.compiled.flags & re.IGNORECASE)
+
+
+def _parse_sed_argv(args: list[str]) -> tuple[bool, list[str], list[str]]:
+    """Return (quiet, scripts, files). `-n`, `-e SCRIPT`, `-E`/`-r`, and `--` are accepted; `-i` and
+    every other flag are refused so a file is never rewritten by a builtin the caller thought was
+    read-only."""
+    quiet = False
+    scripts: list[str] = []
+    operands: list[str] = []
+    i = 0
+    n = len(args)
+    end_of_flags = False
+    while i < n:
+        a = args[i]
+        if end_of_flags or a == "-" or not a.startswith("-"):
+            operands.append(a)
+            i += 1
+            continue
+        if a == "--":
+            end_of_flags = True
+            i += 1
+            continue
+        if a in ("--quiet", "--silent"):
+            quiet = True
+            i += 1
+            continue
+        if a in ("--regexp-extended",):
+            i += 1
+            continue
+        if a.startswith("--expression="):
+            scripts.append(a[len("--expression="):])
+            i += 1
+            continue
+        if a == "--expression" or a == "-e":
+            if i + 1 >= n:
+                raise UnsupportedConstruct("malformed-syntax", "sed: -e requires a script")
+            scripts.append(args[i + 1])
+            i += 2
+            continue
+        if a.startswith("--"):
+            raise UnsupportedConstruct("unsupported-flag", f"sed: unsupported flag {a!r}")
+        cluster = a[1:]
+        j = 0
+        consumed_next = False
+        while j < len(cluster):
+            c = cluster[j]
+            if c == "n":
+                quiet = True
+            elif c in "Er":
+                pass
+            elif c == "e":
+                rest = cluster[j + 1 :]
+                if rest:
+                    scripts.append(rest)
+                elif i + 1 < n:
+                    scripts.append(args[i + 1])
+                    consumed_next = True
+                else:
+                    raise UnsupportedConstruct("malformed-syntax", "sed: -e requires a script")
+                break
+            else:
+                raise UnsupportedConstruct("unsupported-flag", f"sed: unsupported flag {'-' + c!r}")
+            j += 1
+        i += 2 if consumed_next else 1
+    if not scripts:
+        if not operands:
+            raise UnsupportedConstruct("unsupported-flag", "sed: SCRIPT operand required")
+        scripts.append(operands.pop(0))
+    return quiet, scripts, operands
 
 
 def cmd_sed(ctx: BuiltinContext) -> int:
-    args = ctx.argv[1:]
-    if not args:
-        raise UnsupportedConstruct("unsupported-flag", "sed: SCRIPT operand required")
-    for a in args:
-        if a.startswith("-") and a != "-":
-            raise UnsupportedConstruct("unsupported-flag", f"sed: unsupported flag {a!r}")
-    script = args[0]
-    files = args[1:]
-    pattern, repl, global_flag, icase_flag = _parse_sed_script(script)
-    re_flags = re.IGNORECASE if icase_flag else 0
-    try:
-        compiled = re.compile(pattern, re_flags)
-    except re.error as exc:
-        raise UnsupportedConstruct("malformed-syntax", f"sed: invalid pattern: {exc}") from exc
-    py_repl = _parse_sed_replacement(repl)
-    count = 0 if global_flag else 1
+    quiet, scripts, files = _parse_sed_argv(ctx.argv[1:])
+    commands: list[_SedCommand] = []
+    for script in scripts:
+        commands.extend(_parse_sed_commands(script))
 
     def transform(data: bytes) -> bytes:
         text = data.decode("utf-8", errors="replace")
@@ -378,12 +576,40 @@ def cmd_sed(ctx: BuiltinContext) -> int:
             return b""
         had_trailing_newline = text.endswith("\n")
         body = text[:-1] if had_trailing_newline else text
-        lines = body.split("\n") if body or had_trailing_newline else [""]
-        if body == "" and not had_trailing_newline:
-            lines = [""]
-        result_lines = [compiled.sub(py_repl, ln, count=count) for ln in lines]
-        out = "\n".join(result_lines)
-        if had_trailing_newline:
+        lines = body.split("\n")
+        for command in commands:
+            command.in_range = False
+        emitted: list[str] = []
+        last_emitted_is_final_input_line = False
+        total = len(lines)
+        for index, line in enumerate(lines, start=1):
+            is_last = index == total
+            pattern_space = line
+            deleted = False
+            for command in commands:
+                if not command.selects(index, pattern_space, is_last):
+                    continue
+                if command.kind == "d":
+                    deleted = True
+                    break
+                if command.kind == "p":
+                    emitted.append(pattern_space)
+                    last_emitted_is_final_input_line = is_last
+                    continue
+                assert command.compiled is not None
+                pattern_space, substitutions = command.compiled.subn(
+                    command.replacement, pattern_space, count=command.count
+                )
+                if substitutions and command.print_on_sub:
+                    emitted.append(pattern_space)
+                    last_emitted_is_final_input_line = is_last
+            if not deleted and not quiet:
+                emitted.append(pattern_space)
+                last_emitted_is_final_input_line = is_last
+        if not emitted:
+            return b""
+        out = "\n".join(emitted)
+        if had_trailing_newline or not last_emitted_is_final_input_line:
             out += "\n"
         return out.encode("utf-8")
 
