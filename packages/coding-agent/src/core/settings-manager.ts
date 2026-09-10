@@ -9,6 +9,7 @@ import { normalizePath, resolvePath } from "../utils/paths.ts";
 import type { GnuToolsDirSetting } from "../utils/shell.ts";
 import { stripBom } from "../utils/text.ts";
 import { configFile, directoryProfilesDir } from "./agent-paths.ts";
+import { type EdgeClass, isEdgeClass } from "./autonomy/edge-policy.ts";
 import { DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS } from "./background-tool-task-controller.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
 import { type CostGuardSettings, DEFAULT_COST_GUARD_SETTINGS } from "./cost-guard.ts";
@@ -364,6 +365,15 @@ export type ResolvedBackgroundToolSettings = Required<BackgroundToolSettings>;
 const MIN_BACKGROUND_TOOL_CALL_AFTER_MS = 0;
 const MAX_BACKGROUND_TOOL_CALL_AFTER_MS = 3_600_000;
 
+/** The edge (`src/core/autonomy/edge-policy.ts`): operation classes this machine grants standing. */
+export interface EdgeSettings {
+	allow?: string[]; // default: [] -- edge classes (git.publish, package.publish, package.install, destructive.fs, settings.authority) that never ask on this machine; unknown names are ignored
+}
+
+export interface ResolvedEdgeSettings {
+	allow: EdgeClass[];
+}
+
 /** Windows shell contract engine tier (`src/core/tools/windows-shell-engine.ts`). */
 export interface WindowsShellSettings {
 	pythonEngine?: boolean; // default: true -- routes complex/state-mutating Bash constructs to the bundled Python engine on Windows; explicit false restores the PowerShell-only floor verbatim
@@ -619,7 +629,8 @@ export interface Settings {
 	toolOutput?: ToolOutputSettings; // Tool-output reduction pipeline (core/tools/output-reduction); on at the standard level by default
 	processMatrix?: ProcessMatrixSettings; // Durable master/worker process-matrix supervision (core/process-matrix); on by default
 	windowsShell?: WindowsShellSettings; // Windows shell contract engine tier (core/tools/windows-shell-engine); on by default
-	backgroundTool?: BackgroundToolSettings; // Auto-backgrounding threshold for long-running foreground tool calls (core/background-tool-task-controller); always on, threshold tunable
+	backgroundTool?: BackgroundToolSettings; // Clock-based backgrounding of long foreground tool calls (core/background-tool-task-controller); off by default
+	edge?: EdgeSettings; // Standing grants for the edge classes that would otherwise ask the operator (core/autonomy/edge-policy)
 	learningPolicy?: LearningPolicySettings; // Default-on audited learning policy; destructive supersessions remain proposal-gated
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
 	bedrock?: BedrockScopeSettings; // User-level verified profile/region/model scope for Amazon Bedrock
@@ -3922,6 +3933,12 @@ export class SettingsManager {
 				MAX_BACKGROUND_TOOL_CALL_AFTER_MS,
 			),
 		};
+	}
+
+	getEdgeSettings(): ResolvedEdgeSettings {
+		const configured = this.settings.edge?.allow;
+		const allow = Array.isArray(configured) ? configured.filter(isEdgeClass) : [];
+		return { allow: [...new Set(allow)] };
 	}
 
 	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings {

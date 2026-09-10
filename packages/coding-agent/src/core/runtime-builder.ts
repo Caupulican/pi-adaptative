@@ -52,6 +52,7 @@ import type {
 } from "./agent-session-contracts.ts";
 import { deriveCompositeChildEnvelope, wrapToolWithCapabilityEnvelopeGate } from "./autonomy/composite-tool-gate.ts";
 import type { CapabilityEnvelope, WorkerClaim } from "./autonomy/contracts.ts";
+import type { EdgeClass } from "./autonomy/edge-policy.ts";
 import { isPathWithinEnvelope, wrapToolWithEnvelopeScope } from "./autonomy/envelope-enforcement.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import { buildWorkerSessionPrivatePathEnvelope } from "./autonomy/worker-session-private-scope.ts";
@@ -343,6 +344,8 @@ export interface RuntimeBuilderDeps {
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string;
 	/** Trusted active verification identities reconstructed by the session owner. */
 	getActiveVerificationIds?(): readonly string[];
+	/** Record an edge grant the model cited from the operator's own words (goal grant_edge). */
+	grantEdgeFromInstructions?(grant: { class: EdgeClass; quote: string; messageEntryId: string }): void;
 	/** Authorize model-facing goal creation and its exact owner-requested token ceiling. */
 	authorizeGoalStartFromTool?(
 		input: Pick<GoalToolInput, "userGoal" | "tokenBudget">,
@@ -1112,6 +1115,9 @@ export class RuntimeBuilder {
 				const goalToolDefinition = createGoalToolDefinition({
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
 					getActiveVerificationIds: () => this.deps.getActiveVerificationIds?.() ?? [],
+					grantEdge: this.deps.grantEdgeFromInstructions
+						? (grant) => this.deps.grantEdgeFromInstructions?.(grant)
+						: undefined,
 					authorizeStart: (input) =>
 						this.deps.authorizeGoalStartFromTool ? this.deps.authorizeGoalStartFromTool(input) : null,
 					saveGoalState: (state, expected) => {

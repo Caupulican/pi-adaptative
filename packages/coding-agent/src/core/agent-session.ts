@@ -18,6 +18,7 @@ import type {
 	AgentRunawayStopInfo,
 	AgentState,
 	AgentTool,
+	BeforeToolCallResult,
 	StreamFn,
 	ThinkingLevel,
 	ToolValidationEscalationEvent,
@@ -46,6 +47,18 @@ import type {
 	WorkerClaim,
 	WorkerRequest,
 } from "./autonomy/contracts.ts";
+import {
+	classifyEdgeOperation,
+	collectEdgeGrants,
+	EDGE_GRANT_CUSTOM_TYPE,
+	EDGE_REVOKE_CUSTOM_TYPE,
+	type EdgeClass,
+	type EdgeConfirmationHandler,
+	type EdgeGrantRecord,
+	type EdgeGrantView,
+	type EdgeRevokeRecord,
+	edgeBlockReason,
+} from "./autonomy/edge-policy.ts";
 import { buildForegroundEnvelope, formatForegroundEnvelopeObservation } from "./autonomy/foreground-envelope.ts";
 import { evaluateToolGate } from "./autonomy/gates.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
@@ -271,6 +284,8 @@ export class AgentSession {
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
 	public capabilityEnvelope?: CapabilityEnvelope;
+	/** Set by an interactive host; without it an ungranted edge operation is blocked, never asked. */
+	private _edgeConfirmation?: EdgeConfirmationHandler;
 
 	private _scopedModels: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
 
@@ -1030,6 +1045,7 @@ export class AgentSession {
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			saveGoalStateSnapshot: (state, expected) => this.saveGoalStateSnapshot(state, expected),
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
+			grantEdgeFromInstructions: (grant) => this.grantEdge(grant.class, "instructions", grant),
 			authorizeGoalStartFromTool: (input) => this._goals.authorizeStartFromTool(input),
 			getTaskStepsStateSnapshot: () => this.getTaskStepsStateSnapshot(),
 			saveTaskStepsStateSnapshot: (state) => this.saveTaskStepsStateSnapshot(state),
@@ -1242,6 +1258,7 @@ export class AgentSession {
 			recordGateOutcome: (outcome) => this._recordGateOutcome(outcome),
 			getExtensionRunner: () => this._extensionRunner,
 			getToolSelectionController: () => this._toolSelection,
+			checkEdge: (toolName, args, executionCwd, signal) => this._checkEdge(toolName, args, executionCwd, signal),
 		});
 
 		// Always subscribe to agent events for internal handling
@@ -1461,6 +1478,68 @@ export class AgentSession {
 			{},
 		);
 		return [...dismissed];
+	}
+
+	// ---- The edge -------------------------------------------------------------------------------
+
+	/** The interactive host answers ungranted edge operations; a child or headless session cannot ask. */
+	setEdgeConfirmation(handler: EdgeConfirmationHandler | undefined): void {
+		this._edgeConfirmation = handler;
+	}
+
+	/** Granted edge classes: settings first, then the branch's grant and revoke records in order. */
+	getEdgeGrants(): EdgeGrantView[] {
+		return collectEdgeGrants(this.sessionManager.getBranch(), this.settingsManager.getEdgeSettings().allow);
+	}
+
+	/** Record a grant on the branch: the operator's decision here, or the model's citation of their words. */
+	grantEdge(
+		edgeClass: EdgeClass,
+		source: "operator" | "instructions",
+		details: { note?: string; quote?: string; messageEntryId?: string } = {},
+	): void {
+		const record: EdgeGrantRecord = {
+			version: 1,
+			class: edgeClass,
+			source,
+			...(details.quote ? { quote: details.quote } : {}),
+			...(details.messageEntryId ? { messageEntryId: details.messageEntryId } : {}),
+			...(details.note ? { note: details.note } : {}),
+			grantedAt: new Date().toISOString(),
+		};
+		this.sessionManager.appendCustomEntry(EDGE_GRANT_CUSTOM_TYPE, record);
+	}
+
+	/** Revoke a session or instruction grant; a settings grant is the machine's. Returns whether one was removed. */
+	revokeEdge(edgeClass: EdgeClass): boolean {
+		const current = this.getEdgeGrants().find((grant) => grant.class === edgeClass);
+		if (!current || current.source === "settings") return false;
+		const record: EdgeRevokeRecord = { version: 1, class: edgeClass, revokedAt: new Date().toISOString() };
+		this.sessionManager.appendCustomEntry(EDGE_REVOKE_CUSTOM_TYPE, record);
+		return true;
+	}
+
+	/**
+	 * Enforce the edge for one tool call. Ordinary work and granted classes pass; an ungranted class
+	 * asks the interactive host once (allow once, allow for the session, deny) and is blocked with
+	 * the reason when nobody can answer — a child session never asks.
+	 */
+	private async _checkEdge(
+		toolName: string,
+		args: unknown,
+		executionCwd: string | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<BeforeToolCallResult | undefined> {
+		const operation = classifyEdgeOperation({ toolName, args, cwd: executionCwd ?? this._cwd, scopeCwd: this._cwd });
+		if (!operation) return undefined;
+		if (this.getEdgeGrants().some((grant) => grant.class === operation.class)) return undefined;
+		const handler = this._isChildSession ? undefined : this._edgeConfirmation;
+		if (!handler) return { block: true, reason: edgeBlockReason(operation, false) };
+		const decision = await handler({ ...operation, toolName }, signal);
+		signal?.throwIfAborted();
+		if (decision === "deny") return { block: true, reason: edgeBlockReason(operation, true) };
+		if (decision === "allow-session") this.grantEdge(operation.class, "operator", { note: "allowed at the prompt" });
+		return undefined;
 	}
 
 	/** Preserve active verification identities and setup-repair proof inside the compaction checkpoint. */

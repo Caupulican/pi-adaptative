@@ -1,5 +1,6 @@
 import type { VerificationObligationView } from "@caupulican/pi-agent-core/verification-obligations";
 import { type Component, truncateToWidth } from "@caupulican/pi-tui";
+import type { EdgeGrantView } from "../../../core/autonomy/edge-policy.ts";
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
 import type { GoalState } from "../../../core/goals/goal-state.ts";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
@@ -29,6 +30,8 @@ export interface AgentsOverlaySnapshot {
 	items: readonly ActivityLaneItem[];
 	/** Failed verifications still open on the branch; shown so the operator never learns of them from an error. */
 	verification?: readonly VerificationObligationView[];
+	/** Edge classes granted (instructions, this session, settings); an ungranted class asks once. */
+	edge?: readonly EdgeGrantView[];
 }
 
 export interface AgentsOverlayOptions {

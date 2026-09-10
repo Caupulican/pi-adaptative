@@ -57,6 +57,8 @@ interface AgentsOverlayOwnerProbe {
 			getGoalStateSnapshot: () => GoalState | undefined;
 			getTaskStepsStateSnapshot: () => TaskStepsState | undefined;
 			getLaneRecords: () => LaneRecord[];
+			getVerificationObligations: () => [];
+			getEdgeGrants: () => [];
 		};
 	};
 	ui: TUI;
@@ -266,6 +268,8 @@ describe("agents overlay", () => {
 				session: {
 					getGoalStateSnapshot: () => undefined,
 					getTaskStepsStateSnapshot: () => undefined,
+					getVerificationObligations: () => [],
+					getEdgeGrants: () => [],
 					getLaneRecords: () => [
 						worker({
 							laneId: "lane-live",

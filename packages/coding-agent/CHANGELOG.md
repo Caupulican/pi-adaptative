@@ -2,6 +2,7 @@
 
 ### Added
 
+- The edge, made explicit. Five operation classes can need the operator — `git.publish`, `package.publish`, `package.install`, `destructive.fs`, `settings.authority` — classified literally from the tool call (a shell line is parsed into its commands; `git push`, `npm publish`, `pnpm add`, `rm -rf` outside the task directory, `git reset --hard`, a write to `settings.json`…); everything else is ordinary work and runs. A class granted by the task instructions (`goal grant_edge` with the operator's exact words, verified verbatim against their message), by the operator in the session (`/edge allow <class>`, or "Allow for this session" at the prompt) or by the machine (`edge.allow` in settings) never asks. An ungranted class asks once in the workbench (allow once · allow for this session · deny) while the tool call waits; a headless or child session blocks it with a reason that names every way to grant. `/edge list` shows the classes and their grants; the inspector gains an **Edge** block.
 - `repo_read`: read-only git (`status`, `log`, `diff`, `show`, `blame`, `ls-files`, `rev-parse`) for lanes without process authority. It runs git directly with an option allow-list — no shell, no hooks, pager or external diff/textconv drivers, `GIT_*` re-pointing from the parent environment dropped, pathspecs and `rev:path` object paths kept inside the directory it runs in, credential files model-blind like `read` — behind the new `repo.read` capability, which survives `readOnly`.
 
 ### Changed

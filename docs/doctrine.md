@@ -152,6 +152,20 @@ and `packages/coding-agent/test/phone-filesystem-workflow.test.ts`.
 
 ## Guards
 
+**The edge asks once; instructions, the session or the machine grant it, and nothing else in the
+tool layer ever asks.** The operations that can need the operator are five named classes —
+`git.publish` (push, tag, release), `package.publish`, `package.install` (adding a dependency or a
+global install), `destructive.fs` (deleting outside the task directory or discarding uncommitted
+work), `settings.authority` (the harness's own settings and credential files) — classified
+literally from the tool call; anything unknown is ordinary work and runs. A class granted by the
+task instructions (`goal grant_edge` with the operator's exact words, verified verbatim against a
+user message on the branch — a paraphrase grants nothing), by the operator in this session
+(`/edge allow`, or *allow for this session* at the prompt) or by the machine (`edge.allow` in
+settings) never asks. An ungranted class asks the interactive operator once with one key and the
+tool call waits for the answer; a headless or child session blocks it with a reason that names
+every way to grant. Pinned by `packages/coding-agent/test/edge-policy.test.ts` and
+`packages/coding-agent/test/agent-session-edge.test.ts`.
+
 **A failed admission cannot erase already-executed work.** The scheduler drains dispatched siblings
 before terminating after reservation failure or cancellation. Completed tool results remain in
 source order, agree with message callbacks, and precede the unsuccessful terminal signal. Calls

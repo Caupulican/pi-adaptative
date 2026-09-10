@@ -25,6 +25,7 @@ import {
 import { APP_NAME, APP_TITLE, getAgentDir, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import type { EdgeClass } from "../../core/autonomy/edge-policy.ts";
 import {
 	type CacheMissObservation,
 	detectCacheMissNotice,
@@ -92,6 +93,7 @@ import { openTranscriptOverlay } from "./components/transcript-overlay.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import * as configBackup from "./config-backup.ts";
+import { handleEdgeCommand } from "./edge-commands.ts";
 import { EditorOverlayHost } from "./editor-overlay-host.ts";
 import { ExtensionUiHost } from "./extension-ui-host.ts";
 import { openEditorForPath, openExternalEditor } from "./external-editor.ts";
@@ -498,6 +500,19 @@ export class InteractiveMode {
 				showError: (message) => this.showError(message),
 			},
 		});
+		// The edge asks here, once, with one key: an ungranted operation waits for the answer in the
+		// workbench instead of failing the model's call. Escape declines.
+		this.session.setEdgeConfirmation(async (request, signal) => {
+			const choice = await this.extensionUiHost.showExtensionSelector(
+				`Edge · ${request.class}\n${request.operation}\n${request.reason}`,
+				["Allow once", "Allow for this session", "Deny"],
+				signal ? { signal } : undefined,
+			);
+			this.refreshActivityLane();
+			if (choice === "Allow once") return "allow-once";
+			if (choice === "Allow for this session") return "allow-session";
+			return "deny";
+		});
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 
 		// Load hide thinking block setting
@@ -846,11 +861,13 @@ export class InteractiveMode {
 
 	private activityLaneSnapshot() {
 		const verification = this.session.getVerificationObligations();
+		const edge = this.session.getEdgeGrants();
 		return {
 			goalState: this.session.getGoalStateSnapshot(),
 			taskState: this.session.getTaskStepsStateSnapshot(),
 			laneRecords: this.session.getLaneRecords(),
 			...(verification.length ? { verification } : {}),
+			...(edge.length ? { edge } : {}),
 		};
 	}
 
@@ -1394,6 +1411,11 @@ export class InteractiveMode {
 			if (text === "/memory" || text.startsWith("/memory ")) {
 				this.editor.setText("");
 				await handleMemoryCommand(this.memoryCommandHost(), text);
+				return;
+			}
+			if (text === "/edge" || text.startsWith("/edge ")) {
+				this.editor.setText("");
+				await handleEdgeCommand(this.edgeHost(), text);
 				return;
 			}
 
@@ -3048,6 +3070,28 @@ export class InteractiveMode {
 			getAutoLearnTenantKey: () => this.getAutoLearnTenantKey(),
 			getAutoLearnDataDir: () => this.getAutoLearnDataDir(),
 			getAutoLearnTenantDataDir: () => this.getAutoLearnTenantDataDir(),
+		};
+	}
+
+	private edgeHost() {
+		return {
+			getEdgeGrants: () => this.session.getEdgeGrants(),
+			grantEdge: async (edgeClass: EdgeClass, note?: string) => {
+				this.session.grantEdge(edgeClass, "operator", note ? { note } : {});
+				this.refreshActivityLane();
+			},
+			revokeEdge: async (edgeClass: EdgeClass) => {
+				const revoked = this.session.revokeEdge(edgeClass);
+				this.refreshActivityLane();
+				return revoked;
+			},
+			showStatus: (message: string) => this.showStatus(message),
+			showError: (message: string) => this.showError(message),
+			showText: (body: string) => {
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new Text(body, 1, 0));
+				this.ui.requestRender();
+			},
 		};
 	}
 

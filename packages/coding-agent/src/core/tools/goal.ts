@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type Static, Type } from "typebox";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
+import { EDGE_CLASSES, type EdgeClass, isEdgeClass } from "../autonomy/edge-policy.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
@@ -51,8 +52,27 @@ const goalSchema = Type.Object(
 				Type.Literal("complete"),
 				Type.Literal("increment"),
 				Type.Literal("block_goal"),
+				Type.Literal("grant_edge"),
 			],
 			{ description: "Goal record action." },
+		),
+		edgeClass: Type.Optional(
+			Type.Union(
+				[
+					Type.Literal("git.publish"),
+					Type.Literal("package.publish"),
+					Type.Literal("package.install"),
+					Type.Literal("destructive.fs"),
+					Type.Literal("settings.authority"),
+				],
+				{ description: "grant_edge: the edge class the operator's instructions cover." },
+			),
+		),
+		quote: Type.Optional(
+			Type.String({
+				description:
+					"grant_edge: the operator's complete words granting it, verbatim from one of their messages (for example the whole sentence that says to push when done).",
+			}),
 		),
 		goalId: Type.Optional(Type.String({ description: "Stable goal id. Required for action 'start'." })),
 		userGoal: Type.Optional(Type.String({ description: "The goal statement. Required for action 'start'." })),
@@ -148,10 +168,13 @@ export type GoalToolInput = Static<typeof goalSchema>;
 export type GoalToolDefinition = ToolDefinition;
 
 export interface GoalToolDetails {
-	action: GoalActionName | "get";
+	action: GoalActionName | "get" | "grant_edge";
 	applied: boolean;
 	error?: string;
 	state?: GoalState;
+	/** Set on 'grant_edge': the class the operator's words granted, and the message they came from. */
+	edgeClass?: EdgeClass;
+	messageEntryId?: string;
 	/** Set on 'dispatch_worker' when a worker lane actually started; mirrors the requirement's
 	 * new `boundLaneId`. The in-process route by default, or a real persistent collaboration lane when
 	 * `dispatchTarget:"collaboration"` was selected and routed -- see {@link GoalToolDependencies.dispatchCollaborationWorker}. */
@@ -263,6 +286,11 @@ export interface GoalToolDependencies {
 	 * consult this gate.
 	 */
 	getActiveVerificationIds?: () => readonly string[];
+	/**
+	 * grant_edge: record that the operator's instructions cover an edge class. Only called after the
+	 * quote resolved verbatim to a user message; absent when the host has no edge (tests, SDK).
+	 */
+	grantEdge?: (grant: { class: EdgeClass; quote: string; messageEntryId: string }) => void;
 	/**
 	 * Resolve the producing call and its authoritative outcome on the active branch. Test evidence
 	 * additionally requires a trusted passing verification receipt; answered calls alone are not proof.
@@ -474,6 +502,43 @@ function goalExecutionError(
 	};
 }
 
+/**
+ * The model declares that the operator's words grant an edge class. Prose cannot widen authority:
+ * the quote must resolve verbatim to a user message on the branch (the provenance check goal
+ * evidence uses), and the grant is recorded on the session, where the edge reads it.
+ */
+function executeGrantEdge(
+	input: GoalToolInput,
+	deps: GoalToolDependencies,
+): { content: { type: "text"; text: string }[]; details: GoalToolDetails; isError?: boolean } {
+	const edgeClass = input.edgeClass;
+	const quote = input.quote?.trim() ?? "";
+	const fail = (error: string) => ({
+		content: [{ type: "text" as const, text: `goal grant_edge failed: ${error}` }],
+		details: { action: "grant_edge" as const, applied: false, error },
+		isError: true,
+	});
+	if (!edgeClass || !isEdgeClass(edgeClass)) return fail(`edgeClass must be one of ${EDGE_CLASSES.join(", ")}.`);
+	if (!quote) return fail("quote the operator's complete words that grant it.");
+	if (!deps.resolveUserEvidence || !deps.grantEdge) return fail("edge grants are unavailable in this session.");
+	const resolved = deps.resolveUserEvidence(quote);
+	if (!resolved.verified) {
+		return fail(
+			`${resolved.reason ?? "the quote did not resolve to a user message"}. A grant rests on the operator's exact words; a paraphrase or a sentence they did not write grants nothing. If they have not said it, ask them or continue without the operation.`,
+		);
+	}
+	deps.grantEdge({ class: edgeClass, quote, messageEntryId: resolved.messageEntryId });
+	return {
+		content: [
+			{
+				type: "text" as const,
+				text: `edge granted: ${edgeClass} from the operator's words ("${quote}"); it will not ask.`,
+			},
+		],
+		details: { action: "grant_edge" as const, applied: true, edgeClass, messageEntryId: resolved.messageEntryId },
+	};
+}
+
 export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDefinition {
 	const now = deps.now ?? (() => new Date().toISOString());
 	return {
@@ -487,6 +552,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			"After bounded read-only survey, make the project-relative delivery contract explicit in the goal requirements: POC/MVP proves the requested capability; complete means full integration across affected project surfaces.",
 			"Plans: task_steps. Workers: delegate. Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
 			"increment satisfies the current open requirement from unused evidence, or completes when none remain.",
+			"grant_edge: when the operator's instructions authorize an edge operation (git push/tag/release, publishing, adding a dependency, deleting outside the task, settings), record it with edgeClass and their exact words before the operation; a granted class never asks, an ungranted one asks the operator once.",
 			"complete needs current authoritative evidence, no remaining work, no active goal-owned lanes, no open task_steps, no goal-owned or cited running tool_task, and no active pipeline. Failed or canceled tool_task results are terminal and stop blocking liveness, but never become verified evidence automatically. block_requirement/block_goal only when the same verified owner/approval boundary or capability impossibility persists for 3 consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; otherwise keep working.",
 		],
 		parameters: goalSchema,
@@ -524,6 +590,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					details: { action: "get", applied: false, state },
 				};
 			}
+			if (input.action === "grant_edge") return executeGrantEdge(input, deps);
 			let normalizedInput = input;
 			if (input.action === "start" && deps.authorizeStart) {
 				const authority = deps.authorizeStart(input);

@@ -12,6 +12,8 @@
     "packages/coding-agent/test/delegate-exact-input-corrections.test.ts",
     "packages/coding-agent/test/worker-authority-resolver.test.ts",
     "packages/coding-agent/test/repo-read.test.ts",
+    "packages/coding-agent/test/edge-policy.test.ts",
+    "packages/coding-agent/test/agent-session-edge.test.ts",
     "packages/coding-agent/test/task-state.test.ts",
     "packages/coding-agent/test/goal-tool-core.test.ts",
     "packages/coding-agent/test/goal-evidence-verification.test.ts",

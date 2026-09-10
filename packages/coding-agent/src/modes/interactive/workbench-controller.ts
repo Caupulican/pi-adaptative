@@ -11,6 +11,7 @@ import { type AgentsOverlaySnapshot, buildWorkPanelModel, compactWorkPanel } fro
 import { fullConversationText } from "./components/question-conversation.ts";
 import {
 	CHECKS_SECTION,
+	EDGE_SECTION,
 	PLAN_SECTION,
 	TEAM_SECTION,
 	type WorkbenchComponent,
@@ -402,6 +403,18 @@ export function buildWorkbenchSections(snapshot: AgentsOverlaySnapshot, nowMs: n
 		if (checks.length > 3) rows.push(`  ${theme.fg("dim", `+${checks.length - 3} more`)}`);
 		rows.push(`  ${theme.fg("dim", "rerun the same check, or /verify dismiss")}`);
 		sections.push({ title: CHECKS_SECTION, meta: `${checks.length} failing`, body: rows });
+	}
+	// What the operator has granted at the edge; everything not listed asks once.
+	const edge = snapshot.edge ?? [];
+	if (edge.length) {
+		const rows = edge.slice(0, 3).map((grant) => {
+			const from =
+				grant.source === "instructions" ? "instructions" : grant.source === "operator" ? "session" : "settings";
+			return `  ${theme.fg("success", "✓")} ${theme.fg("text", grant.class)} ${theme.fg("dim", `· ${from}`)}`;
+		});
+		if (edge.length > 3) rows.push(`  ${theme.fg("dim", `+${edge.length - 3} more`)}`);
+		rows.push(`  ${theme.fg("dim", "/edge list · revoke <class>")}`);
+		sections.push({ title: EDGE_SECTION, meta: `${edge.length} granted`, body: rows });
 	}
 	if (teamRows.length) {
 		const team = compactWorkPanel({ ...model, rows: teamRows }, 4);

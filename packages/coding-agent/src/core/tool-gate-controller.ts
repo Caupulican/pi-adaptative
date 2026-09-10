@@ -30,6 +30,16 @@ export interface ToolGateControllerDeps {
 	getExtensionRunner(): ExtensionRunner;
 	/** Observe an execution only after all pre-execution gates and extension hooks allow it. */
 	getToolSelectionController?(): ToolSelectionController | undefined;
+	/**
+	 * The edge: an operation class the operator has not granted asks once (or is blocked when no
+	 * one can answer); a granted class and ordinary work return undefined.
+	 */
+	checkEdge?(
+		toolName: string,
+		args: unknown,
+		executionCwd: string | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<BeforeToolCallResult | undefined>;
 }
 
 export class ToolGateController {
@@ -71,6 +81,8 @@ export class ToolGateController {
 		};
 		const denied = await evaluate();
 		if (denied) return denied;
+		const edge = await this.deps.checkEdge?.(toolCall.name, args, executionContext?.cwd, signal);
+		if (edge) return edge;
 
 		const runner = this.deps.getExtensionRunner();
 		let extensionResult: BeforeToolCallResult | undefined;
