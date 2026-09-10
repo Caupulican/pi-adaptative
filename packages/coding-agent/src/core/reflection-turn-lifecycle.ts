@@ -13,6 +13,11 @@ export interface ReflectionTurnLifecycleDeps {
 	abortAgent(): void;
 	/** Stop reason of the last assistant message, including aborted ones. */
 	getLastAssistantStopReason(): StopReason | undefined;
+	/**
+	 * True while the session still has work in flight the operator is waiting on: an active goal or
+	 * a task step in progress. A reflection turn bought in that window reads as the agent stalling.
+	 */
+	hasOpenWork(): boolean;
 	isDisposed(): boolean;
 	warn(message: string): void;
 }
@@ -85,6 +90,10 @@ export class ReflectionTurnLifecycle {
 		// An aborted run is the user asking for LESS work, not more; reflection waits for a turn that
 		// actually finished. The cue stays due and merges with whatever the next completed turn adds.
 		if (isInterruptedAssistantStopReason(this.deps.getLastAssistantStopReason())) return;
+		// Open goal work is not a completed unit of work, whatever a short owner ping in the middle of
+		// it looked like: the cue stays due and buys its turn once the goal or its step closes. This is
+		// the four-request stall a "confirm when ready" ping used to cost mid-goal.
+		if (this.deps.hasOpenWork()) return;
 		const reflectionPrompt = this.deps.beginDueReflectionTurn();
 		if (!reflectionPrompt) return;
 		// One controller per turn, never reused: cancelling turn N must be unable to touch turn N+1.

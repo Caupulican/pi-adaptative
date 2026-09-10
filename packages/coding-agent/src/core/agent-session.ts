@@ -107,7 +107,7 @@ import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
-import type { GoalState } from "./goals/goal-state.ts";
+import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
 import { type ExplicitGoalStartAuthority, parseExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
@@ -925,6 +925,7 @@ export class AgentSession {
 			endReflectionTurn: () => this._reflection.endReflectionTurn(),
 			abortAgent: () => this.agent.abort(),
 			getLastAssistantStopReason: () => this._findLastAssistantMessage()?.stopReason,
+			hasOpenWork: () => this._hasOpenWork(),
 			isDisposed: () => this._disposed,
 			warn: (message) => this._emit({ type: "warning", message }),
 		});
@@ -3583,6 +3584,13 @@ export class AgentSession {
 	/** Retrieve the latest valid native task-step state from the active session log. */
 	getTaskStepsStateSnapshot(): TaskStepsState | undefined {
 		return getLatestTaskStepsStateSnapshot(this.sessionManager);
+	}
+
+	/** An active goal or an in-progress task step: work the operator is still waiting on. */
+	private _hasOpenWork(): boolean {
+		const goal = this.getGoalStateSnapshot();
+		if (goal && isGoalExecutionActive(goal.status)) return true;
+		return this.getTaskStepsStateSnapshot()?.steps.some((step) => step.status === "in_progress") ?? false;
 	}
 
 	/** Save the active ICM pipeline run pointer to the session log. */

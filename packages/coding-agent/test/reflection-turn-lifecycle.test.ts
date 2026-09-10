@@ -20,6 +20,7 @@ describe("reflection turn admission", () => {
 				endReflectionTurn,
 				abortAgent: vi.fn(),
 				getLastAssistantStopReason: () => stopReason,
+				hasOpenWork: () => false,
 				isDisposed: () => false,
 				warn: vi.fn(),
 			});
@@ -33,4 +34,33 @@ describe("reflection turn admission", () => {
 			expect(lifecycle.inFlight).toBe(false);
 		},
 	);
+});
+
+describe("reflection turn admission during open work", () => {
+	it("keeps the cue waiting while a goal or step is open and buys the turn once the work closes", async () => {
+		let open = true;
+		const prompt = vi.fn(async () => {});
+		const beginDueReflectionTurn = vi.fn(() => "Reflect on completed work");
+		const lifecycle = new ReflectionTurnLifecycle({
+			prompt,
+			beginDueReflectionTurn,
+			endReflectionTurn: vi.fn(),
+			abortAgent: vi.fn(),
+			getLastAssistantStopReason: () => "stop",
+			hasOpenWork: () => open,
+			isDisposed: () => false,
+			warn: vi.fn(),
+		});
+		// A short owner ping answered mid-goal: the turn completed, but the goal did not.
+		lifecycle.startDueTurn({});
+		await lifecycle.settle();
+		expect(beginDueReflectionTurn).not.toHaveBeenCalled();
+		expect(prompt).not.toHaveBeenCalled();
+		// The goal closes; the next completed turn's tail buys the one reflection turn.
+		open = false;
+		lifecycle.startDueTurn({});
+		await lifecycle.settle();
+		expect(beginDueReflectionTurn).toHaveBeenCalledTimes(1);
+		expect(prompt).toHaveBeenCalledTimes(1);
+	});
 });

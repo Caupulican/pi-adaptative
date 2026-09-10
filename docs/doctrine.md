@@ -201,7 +201,8 @@ a witness for an opaque result; ordinary content and policy overrides remain ava
 **An unresolved handoff remains readable and unsuccessful.** The host preserves the answer,
 retains the active obligations, and prevents successful goal completion. It does not erase prose
 or spend extra provider turns demanding opaque-ID grammar. Reflection cannot claim a cancelled
-submission or unsuccessful terminal turn. Pinned by
+submission or unsuccessful terminal turn, and it buys no turn while goal work is open (an active
+goal or an in-progress task step): the cue stays due until the work closes. Pinned by
 `packages/coding-agent/test/suite/regressions/unresolved-verification-handoff.test.ts` and
 `packages/coding-agent/test/reflection-turn-lifecycle.test.ts`.
 
