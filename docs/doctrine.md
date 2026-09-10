@@ -365,6 +365,8 @@ sessions. Pinned by `packages/coding-agent/test/memory-subsystem.test.ts` (proje
 memory), `packages/coding-agent/test/file-store-memory-provider.test.ts` (project scope search)
 and `packages/coding-agent/test/lane-private-paths.test.ts`.
 
+**A managed memory file can always be recovered, and only the operator adopts an external edit.** The managed state stores the committed content with its digest; an empty file against a non-empty managed revision is restored on start and before a write (nothing of anyone's is in an empty file); any other drift refuses the model's write and names `/memory accept` and `/memory restore`, which only the operator can run. Pinned by `packages/coding-agent/test/memory-drift-recovery.test.ts`.
+
 **Memory and skill admission preserve ownership.** Bounded OKF discovery visits the selected
 project first without crossing symlink boundaries. External memory edits remain protected by
 revision checks. A skill batch validates its entire requested set before one commit; an accepted

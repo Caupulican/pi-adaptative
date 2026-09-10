@@ -47,6 +47,7 @@ import {
 } from "../../core/goals/goal-continuation-defaults.ts";
 import { configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
+import type { ManagedMemoryTarget } from "../../core/memory/providers/file-store.ts";
 import type { PrismLlamaCppRuntime } from "../../core/models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
 import { formatMissingSessionCwdPrompt, type MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -101,6 +102,7 @@ import { type InteractiveLayoutHost, mountInteractiveLayout } from "./interactiv
 import * as keyHandlers from "./key-handlers.ts";
 import { type LoadedResourcesViewOptions, renderLoadedResources } from "./loaded-resources-view.ts";
 import * as localModelCommands from "./local-model-commands.ts";
+import { handleMemoryCommand } from "./memory-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
 import * as reportCommands from "./report-commands.ts";
 import * as resourceShellCommands from "./resource-shell-commands.ts";
@@ -1387,6 +1389,11 @@ export class InteractiveMode {
 			if (text === "/verify" || text.startsWith("/verify ")) {
 				this.editor.setText("");
 				await handleVerifyCommand(this.verifyHost(), text);
+				return;
+			}
+			if (text === "/memory" || text.startsWith("/memory ")) {
+				this.editor.setText("");
+				await handleMemoryCommand(this.memoryCommandHost(), text);
 				return;
 			}
 
@@ -3041,6 +3048,21 @@ export class InteractiveMode {
 			getAutoLearnTenantKey: () => this.getAutoLearnTenantKey(),
 			getAutoLearnDataDir: () => this.getAutoLearnDataDir(),
 			getAutoLearnTenantDataDir: () => this.getAutoLearnTenantDataDir(),
+		};
+	}
+
+	private memoryCommandHost() {
+		return {
+			memoryDriftReport: () => this.session.memoryDriftReport(),
+			memoryAcceptDrift: (target: ManagedMemoryTarget) => this.session.memoryAcceptDrift(target),
+			memoryRestoreManaged: (target: ManagedMemoryTarget) => this.session.memoryRestoreManaged(target),
+			showStatus: (message: string) => this.showStatus(message),
+			showError: (message: string) => this.showError(message),
+			showText: (body: string) => {
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new Text(body, 1, 0));
+				this.ui.requestRender();
+			},
 		};
 	}
 

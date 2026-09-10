@@ -168,6 +168,11 @@ export class MemoryController {
 		return this._memoryManager;
 	}
 
+	/** The bundled file-store writer, for operator recovery commands; undefined in child sessions or before init. */
+	getFileStoreWriter(): FileStoreProvider | undefined {
+		return this.deps.isChildSession() ? undefined : this._fileStoreWriter;
+	}
+
 	/** Queue one completed turn for provider-owned durable synchronization. Raw tool output is excluded by the caller. */
 	scheduleTurnSync(userText: string, assistantText: string): void {
 		if (!userText.trim() && !assistantText.trim()) return;

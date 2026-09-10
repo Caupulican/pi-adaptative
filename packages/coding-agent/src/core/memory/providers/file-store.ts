@@ -218,7 +218,7 @@ export const FILE_STORE_MEMORY_SYSTEM_NOTE =
 const FILE_STORE_MEMORY_TRIAGE_NOTE =
 	"[Memory triage: MEMORY.md (general) is over budget; move project-specific lines to target 'project' with memory replace/remove and keep the general lines. Never delete a line you did not move.]";
 const MEMORY_DRIFT_RECOVERY =
-	"Run memory list to inspect current, managed, and prompt revisions. Repeating a mutation cannot reconcile drift. The owner must review and preserve external edits, then restore the last managed revision before retrying. No owner command to accept external edits is available; do not edit managed-state metadata to bypass this guard.";
+	"The file was edited outside the managed write protocol. Repeating a mutation cannot reconcile drift and managed-state metadata must not be edited. The operator resolves it: /memory drift lists the managed files, /memory accept <memory|project|user> adopts the on-disk content as the managed revision, /memory restore <target> brings the last managed content back (the drifted file is kept as a backup). Tell the operator which one the edit deserves; do not retry.";
 /** Content that reads as project-specific: a ticket key, an absolute or drive path, or a branch. */
 const PROJECT_MARKER_RE = /\b[A-Z]{2,}-\d+\b|[A-Za-z]:[\\/]|(?:^|\s)\/[a-z][\w-]*\/|\bbranch\b/;
 
@@ -226,6 +226,27 @@ interface ManagedMemoryState {
 	version: 1;
 	committedDigest: string;
 	pendingDigest?: string;
+	/**
+	 * The committed content itself, so a managed revision can be restored. Without it a drift lock
+	 * had no way out: the state knew the digest of what it expected and nothing else.
+	 */
+	committedContent?: string;
+}
+
+export type ManagedMemoryTarget = "memory" | "project" | "user";
+
+export interface ManagedMemoryDriftEntry {
+	target: ManagedMemoryTarget;
+	label: string;
+	path: string;
+	drift: boolean;
+	emptyOnDisk: boolean;
+	currentChars: number;
+	currentDigest: string;
+	managedDigest?: string;
+	/** Chars of the stored managed content, when the state holds it. */
+	managedChars?: number;
+	stateStatus: ManagedMemoryStateRead["status"];
 }
 
 type ManagedMemoryStateRead =
@@ -273,10 +294,12 @@ function parseManagedMemoryState(raw: string): ManagedMemoryState | undefined {
 	const record = parsed as Record<string, unknown>;
 	if (record.version !== 1 || typeof record.committedDigest !== "string") return undefined;
 	if (record.pendingDigest !== undefined && typeof record.pendingDigest !== "string") return undefined;
+	if (record.committedContent !== undefined && typeof record.committedContent !== "string") return undefined;
 	return {
 		version: 1,
 		committedDigest: record.committedDigest,
 		...(typeof record.pendingDigest === "string" ? { pendingDigest: record.pendingDigest } : {}),
+		...(typeof record.committedContent === "string" ? { committedContent: record.committedContent } : {}),
 	};
 }
 
@@ -321,6 +344,36 @@ function reconcileManagedMemoryState(
 	return { recognized: false };
 }
 
+/** The stored managed content, only when it is really the committed revision (digest agrees). */
+function storedManagedContent(state: ManagedMemoryState | undefined): string | undefined {
+	if (!state || state.committedContent === undefined) return undefined;
+	return contentDigest(state.committedContent) === state.committedDigest ? state.committedContent : undefined;
+}
+
+/**
+ * A managed file found EMPTY while the state still holds non-empty committed content was truncated
+ * outside the protocol (a sync tool, a crash between writes, a stray editor save). Nothing of
+ * anyone's is in an empty file, so restoring the managed revision loses nothing and exercises no
+ * authority; the alternative was a session-long lock-out on the harness's own memory. Caller holds
+ * the content-file lock. Returns the restored content, or undefined when there was nothing to heal.
+ */
+async function healEmptyManagedFile(filePath: string, statePath: string): Promise<string | undefined> {
+	let currentOnDisk: string;
+	try {
+		currentOnDisk = await fs.readFile(filePath, "utf8");
+	} catch (error) {
+		if (!isMissingFileError(error)) throw error;
+		currentOnDisk = "";
+	}
+	if (currentOnDisk !== "") return undefined;
+	const stateRead = await readManagedMemoryState(statePath);
+	if (stateRead.status !== "valid") return undefined;
+	const content = storedManagedContent(stateRead.state);
+	if (!content) return undefined;
+	await writeFileAtomic(filePath, content, { mode: 0o600 });
+	return content;
+}
+
 /** Caller holds the content-file lock. Inspection never commits a pending state or adopts drift. */
 async function inspectManagedMemoryFile(filePath: string, statePath: string) {
 	const currentOnDisk = await fs.readFile(filePath, "utf8");
@@ -328,15 +381,21 @@ async function inspectManagedMemoryFile(filePath: string, statePath: string) {
 	const stateRead = await readManagedMemoryState(statePath);
 	const reconciled =
 		stateRead.status === "valid" ? reconcileManagedMemoryState(currentDigest, stateRead.state) : undefined;
+	// Recognized means the disk holds the committed revision, so the state may learn its content now.
+	const managedState = reconciled?.recognized ? { ...reconciled.state, committedContent: currentOnDisk } : undefined;
+	const contentLearned =
+		reconciled?.recognized === true &&
+		(stateRead.status !== "valid" || stateRead.state.committedContent !== currentOnDisk);
 	return {
 		currentOnDisk,
-		managedState: reconciled?.recognized ? reconciled.state : undefined,
-		stateChanged: reconciled?.recognized === true && reconciled.changed,
+		managedState,
+		stateChanged: (reconciled?.recognized === true && reconciled.changed) || contentLearned,
 		revision: {
 			currentDigest,
 			stateStatus: stateRead.status,
 			managedDigest: stateRead.status === "valid" ? stateRead.state.committedDigest : undefined,
 			pendingDigest: stateRead.status === "valid" ? stateRead.state.pendingDigest : undefined,
+			managedChars: stateRead.status === "valid" ? storedManagedContent(stateRead.state)?.length : undefined,
 			drift: reconciled?.recognized !== true,
 		},
 	};
@@ -354,9 +413,10 @@ async function commitManagedMemoryContent(
 		version: 1,
 		committedDigest: managedState.committedDigest,
 		pendingDigest: newDigest,
+		...(managedState.committedContent !== undefined ? { committedContent: managedState.committedContent } : {}),
 	});
 	await writeFileAtomic(filePath, newContent, { mode: 0o600 });
-	await writeManagedMemoryState(statePath, { version: 1, committedDigest: newDigest });
+	await writeManagedMemoryState(statePath, { version: 1, committedDigest: newDigest, committedContent: newContent });
 }
 
 function fitMemoryBlockToBudget(block: string, budget: MemoryPromptBudget | undefined): string {
@@ -404,6 +464,7 @@ export class FileStoreProvider implements MemoryProvider {
 	private lastWrittenMemory = "";
 	private lastWrittenUser = "";
 	private lastWrittenProjectMemory = "";
+	private readonly healNotices: string[] = [];
 	private userArchive?: UserMemoryArchive;
 	private okfStore?: OkfProjectMemoryStore;
 	private readonly options: FileStoreProviderOptions;
@@ -462,6 +523,13 @@ export class FileStoreProvider implements MemoryProvider {
 
 	private async initializeManagedFile(filePath: string, statePath: string): Promise<string> {
 		return withFileLock(filePath, async () => {
+			const healed = await healEmptyManagedFile(filePath, statePath);
+			if (healed !== undefined) {
+				this.healNotices.push(
+					`${basename(filePath)} was empty on disk; restored ${healed.length} chars from the managed revision.`,
+				);
+				return healed;
+			}
 			let current = "";
 			try {
 				current = await fs.readFile(filePath, "utf8");
@@ -473,20 +541,147 @@ export class FileStoreProvider implements MemoryProvider {
 			const currentDigest = contentDigest(current);
 			const stateRead = await readManagedMemoryState(statePath);
 			if (stateRead.status === "missing") {
-				await writeManagedMemoryState(statePath, { version: 1, committedDigest: currentDigest });
+				await writeManagedMemoryState(statePath, {
+					version: 1,
+					committedDigest: currentDigest,
+					committedContent: current,
+				});
 				return current;
 			}
 			if (stateRead.status === "invalid") {
 				await writeFileAtomic(`${statePath}.bak.${Date.now()}.${randomUUID()}`, stateRead.raw, { mode: 0o600 });
-				await writeManagedMemoryState(statePath, { version: 1, committedDigest: currentDigest });
+				await writeManagedMemoryState(statePath, {
+					version: 1,
+					committedDigest: currentDigest,
+					committedContent: current,
+				});
 				return current;
 			}
 
 			const reconciled = reconcileManagedMemoryState(currentDigest, stateRead.state);
-			if (reconciled.recognized && reconciled.changed) {
-				await writeManagedMemoryState(statePath, reconciled.state);
+			if (reconciled.recognized && (reconciled.changed || stateRead.state.committedContent !== current)) {
+				await writeManagedMemoryState(statePath, { ...reconciled.state, committedContent: current });
 			}
 			return current;
+		});
+	}
+
+	/** Notices the provider produced while repairing its own files; drained by whoever reports them. */
+	drainHealNotices(): string[] {
+		return this.healNotices.splice(0);
+	}
+
+	private managedTargets(): Array<{
+		target: ManagedMemoryTarget;
+		label: string;
+		filePath: string;
+		statePath: string;
+	}> {
+		return [
+			{
+				target: "memory",
+				label: "MEMORY.md (general)",
+				filePath: this.memoryFilePath,
+				statePath: this.memoryStatePath,
+			},
+			{
+				target: "project",
+				label: `MEMORY.md (project ${basename(this.projectRoot) || this.projectKey})`,
+				filePath: this.projectMemoryFilePath,
+				statePath: this.projectMemoryStatePath,
+			},
+			{ target: "user", label: "USER.md", filePath: this.userFilePath, statePath: this.userStatePath },
+		];
+	}
+
+	private setPromptSnapshot(target: ManagedMemoryTarget, content: string): void {
+		if (target === "memory") this.lastWrittenMemory = content;
+		else if (target === "project") this.lastWrittenProjectMemory = content;
+		else this.lastWrittenUser = content;
+	}
+
+	/** Read-only report of every managed file's on-disk revision against its managed revision. */
+	async driftReport(): Promise<ManagedMemoryDriftEntry[]> {
+		if (!this.ctx) return [];
+		return Promise.all(
+			this.managedTargets().map(({ target, label, filePath, statePath }) =>
+				withFileLock(filePath, async () => {
+					const { currentOnDisk, revision } = await inspectManagedMemoryFile(filePath, statePath);
+					return {
+						target,
+						label,
+						path: filePath,
+						drift: revision.drift,
+						emptyOnDisk: currentOnDisk === "",
+						currentChars: currentOnDisk.length,
+						currentDigest: revision.currentDigest,
+						...(revision.managedDigest !== undefined ? { managedDigest: revision.managedDigest } : {}),
+						...(revision.managedChars !== undefined ? { managedChars: revision.managedChars } : {}),
+						stateStatus: revision.stateStatus,
+					};
+				}),
+			),
+		);
+	}
+
+	/**
+	 * Operator authority: adopt the on-disk content as the managed revision. The model has no path
+	 * to this; it is the answer to "I edited MEMORY.md by hand and I mean it".
+	 */
+	async acceptDrift(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
+		const entry = this.managedTargets().find((candidate) => candidate.target === target);
+		if (!entry || !this.ctx) return { ok: false, message: `Unknown memory target ${target}.` };
+		return withFileLock(entry.filePath, async () => {
+			const { currentOnDisk, revision, managedState } = await inspectManagedMemoryFile(
+				entry.filePath,
+				entry.statePath,
+			);
+			if (managedState)
+				return { ok: true, message: `${entry.label} is already the managed revision; nothing to accept.` };
+			await writeManagedMemoryState(entry.statePath, {
+				version: 1,
+				committedDigest: revision.currentDigest,
+				committedContent: currentOnDisk,
+			});
+			this.setPromptSnapshot(target, currentOnDisk);
+			this.options.onDurableMemoryChanged?.();
+			return {
+				ok: true,
+				message: `${entry.label}: adopted the on-disk content (${currentOnDisk.length} chars) as the managed revision.`,
+			};
+		});
+	}
+
+	/** Operator authority: bring the last managed content back; the drifted file stays as a backup. */
+	async restoreManaged(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
+		const entry = this.managedTargets().find((candidate) => candidate.target === target);
+		if (!entry || !this.ctx) return { ok: false, message: `Unknown memory target ${target}.` };
+		return withFileLock(entry.filePath, async () => {
+			const { currentOnDisk, revision, managedState } = await inspectManagedMemoryFile(
+				entry.filePath,
+				entry.statePath,
+			);
+			if (managedState)
+				return { ok: true, message: `${entry.label} already holds the managed revision; nothing to restore.` };
+			const stateRead = await readManagedMemoryState(entry.statePath);
+			const content = stateRead.status === "valid" ? storedManagedContent(stateRead.state) : undefined;
+			if (content === undefined) {
+				return {
+					ok: false,
+					message: `${entry.label}: the managed revision's content is not stored (state ${revision.stateStatus}); /memory accept ${target} is the only way forward.`,
+				};
+			}
+			if (currentOnDisk !== "") {
+				const backupPath = `${entry.filePath}.bak.sha256-${revision.currentDigest}`;
+				await writeFileAtomic(backupPath, currentOnDisk, { mode: 0o600 });
+			}
+			await writeFileAtomic(entry.filePath, content, { mode: 0o600 });
+			this.setPromptSnapshot(target, content);
+			this.options.onDurableMemoryChanged?.();
+			return {
+				ok: true,
+				message: `${entry.label}: restored the managed revision (${content.length} chars)${currentOnDisk !== "" ? "; the drifted content is kept beside it as a backup" : ""}.`,
+			};
 		});
 	}
 
@@ -991,6 +1186,11 @@ export class FileStoreProvider implements MemoryProvider {
 
 					try {
 						return await withFileLock(filePath, async () => {
+							const healed = await healEmptyManagedFile(filePath, statePath);
+							if (healed !== undefined)
+								this.healNotices.push(
+									`${basename(filePath)} was empty on disk; restored ${healed.length} chars from the managed revision.`,
+								);
 							const { currentOnDisk, managedState, stateChanged, revision } = await inspectManagedMemoryFile(
 								filePath,
 								statePath,
@@ -1008,7 +1208,7 @@ export class FileStoreProvider implements MemoryProvider {
 								}
 								return memoryFailure(
 									"Drift detected",
-									`Error: Drift detected. Current memory does not match a managed revision (state: ${revision.stateStatus}). Current revision: ${revision.currentDigest}; managed revision: ${revision.managedDigest ?? "unavailable"}. Backup retained at ${backupPath}. Operation aborted. ${MEMORY_DRIFT_RECOVERY}`,
+									`Error: Drift detected. Current memory does not match a managed revision (state: ${revision.stateStatus}). Current revision: ${revision.currentDigest}; managed revision: ${revision.managedDigest ?? "unavailable"}${revision.managedChars !== undefined ? ` (${revision.managedChars} chars stored, restorable)` : " (content not stored; only accept can resolve)"}. Backup retained at ${backupPath}. Operation aborted. ${MEMORY_DRIFT_RECOVERY}`,
 									{ ...revision, backupPath },
 								);
 							}

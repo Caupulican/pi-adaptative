@@ -125,6 +125,7 @@ import { type CurationProposals, SkillCurator } from "./learning/skill-curator.t
 import { isWarmableLocalModel, LocalPrefixWarmController } from "./local-prefix-warm-controller.ts";
 import { LocalRuntimeController } from "./local-runtime-controller.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
+import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "./memory/providers/file-store.ts";
 import { MemoryController } from "./memory-controller.ts";
 import {
 	deriveModelCapabilityProfile,
@@ -1412,6 +1413,25 @@ export class AgentSession {
 	/** Reconstruct trusted active verification IDs at the goal-execution boundary. */
 	private _getActiveVerificationIds(): readonly string[] {
 		return new VerificationObligationTracker(this.agent.state.messages).getActiveIds();
+	}
+
+	/** Managed memory files against their managed revisions (operator recovery view). */
+	async memoryDriftReport(): Promise<ManagedMemoryDriftEntry[]> {
+		return (await this._memory.getFileStoreWriter()?.driftReport()) ?? [];
+	}
+
+	/** Operator authority: adopt the on-disk memory file as the managed revision. */
+	async memoryAcceptDrift(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
+		const writer = this._memory.getFileStoreWriter();
+		if (!writer) return { ok: false, message: "Managed memory is not available in this session." };
+		return writer.acceptDrift(target);
+	}
+
+	/** Operator authority: restore the last managed content of a memory file. */
+	async memoryRestoreManaged(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
+		const writer = this._memory.getFileStoreWriter();
+		if (!writer) return { ok: false, message: "Managed memory is not available in this session." };
+		return writer.restoreManaged(target);
 	}
 
 	/** Every active verification obligation with what the operator can read about it. */

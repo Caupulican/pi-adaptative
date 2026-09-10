@@ -20,6 +20,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "secrets", description: "Store and activate project credentials with Bitwarden" },
 	{ name: "autonomy", description: "Autonomy mode, diagnostics, research, fitness (/autonomy status)" },
 	{ name: "verify", description: "Verification obligations: /verify [list|show <id>|dismiss <id|all> [note]]" },
+	{ name: "memory", description: "Managed memory files: /memory drift · accept <target> · restore <target>" },
 	{
 		name: "models",
 		description: "Local model lifecycle: /models [list|suggest|add <ref>|remove <ref> confirm|stop]",
