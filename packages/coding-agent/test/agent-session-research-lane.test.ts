@@ -191,7 +191,8 @@ describe("AgentSession research lane (explicit runs)", () => {
 			const outcome = await harness.session.runResearchLaneOnce();
 
 			expect(outcome.record?.status).toBe("succeeded");
-			expect(firstTurnTools).toEqual(["read", "grep", "find", "ls"]);
+			// Read is read: the research lane's read-only loop includes read-only git.
+			expect(firstTurnTools).toEqual(["read", "grep", "find", "ls", "repo_read"]);
 			expect(firstTurnTools).not.toContain("write");
 			expect(firstTurnTools).not.toContain("delegate");
 			expect(harness.getPendingResponseCount()).toBe(0);

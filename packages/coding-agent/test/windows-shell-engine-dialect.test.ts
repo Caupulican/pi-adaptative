@@ -24,7 +24,8 @@ function notFoundMessage(python: string, argv: string[]): string {
 		env: { ...process.env, PYTHONPATH: ENGINE_DIR },
 	});
 	if (result.status !== 0) throw new Error(result.stderr);
-	return result.stdout;
+	// Python's text-mode stdout writes CRLF on Windows; the message itself is LF.
+	return result.stdout.replace(/\r\n/g, "\n");
 }
 
 describe("windows shell engine cmd.exe dialect hints", () => {

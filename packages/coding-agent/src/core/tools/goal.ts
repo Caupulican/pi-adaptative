@@ -57,22 +57,13 @@ const goalSchema = Type.Object(
 			{ description: "Goal record action." },
 		),
 		edgeClass: Type.Optional(
-			Type.Union(
-				[
-					Type.Literal("git.publish"),
-					Type.Literal("package.publish"),
-					Type.Literal("package.install"),
-					Type.Literal("destructive.fs"),
-					Type.Literal("settings.authority"),
-				],
-				{ description: "grant_edge: the edge class the operator's instructions cover." },
-			),
-		),
-		quote: Type.Optional(
 			Type.String({
 				description:
-					"grant_edge: the operator's complete words granting it, verbatim from one of their messages (for example the whole sentence that says to push when done).",
+					"grant_edge: git.publish | package.publish | package.install | destructive.fs | settings.authority",
 			}),
+		),
+		quote: Type.Optional(
+			Type.String({ description: "grant_edge: the operator's complete sentence granting it, verbatim." }),
 		),
 		goalId: Type.Optional(Type.String({ description: "Stable goal id. Required for action 'start'." })),
 		userGoal: Type.Optional(Type.String({ description: "The goal statement. Required for action 'start'." })),
