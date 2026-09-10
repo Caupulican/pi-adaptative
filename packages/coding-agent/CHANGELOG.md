@@ -9,6 +9,7 @@
 
 ### Changed
 
+- The `matrix-machine` theme is a phosphor palette: one green hue family in luminance steps (text `#bff5cd`, muted `#5fb37f`, dim `#2f7a4c`, accent `#48f08c`) on a green-cast void, cyan as the only secondary (links, user-message wash), amber for warnings, red reserved for removed lines and errors; the added/removed washes are the green and red panels. Contrast on the void: text 16.5:1, muted 7.9:1, dim 3.9:1, accent 13.6:1, red 7.4:1.
 - Diff rows can carry a surface tone: themes may define `toolDiffAddedBg` / `toolDiffRemovedBg`, and `matrix-machine` sets them to its green and red panels, so an edit's added and removed lines read as a wash instead of green-on-green foreground text. Themes without the tokens render exactly as before.
 - The terminal keeps the mouse by default: entering the workbench no longer enables button-event mouse tracking, so native selection, copy-on-select and right-click paste work as in any other terminal program.
 - One run state, shown where the answer lands: the activity lane renders as a reserved live row directly above the status rule, naming the single running tool or worker with its elapsed time (`● Bash (1m12s)`), the runtime label otherwise, with the plan step, concurrency counts, the message queue and the newest event on the right. The title strip carries identity only; the WORKING / WAITING / IDLE badge is gone.
