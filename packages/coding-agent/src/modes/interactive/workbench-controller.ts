@@ -9,7 +9,13 @@ import { stripAnsi } from "../../utils/ansi.ts";
 import type { ActivityLaneItem } from "./components/activity-lane.ts";
 import { type AgentsOverlaySnapshot, buildWorkPanelModel, compactWorkPanel } from "./components/agents-overlay.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
-import { PLAN_SECTION, TEAM_SECTION, type WorkbenchComponent, type WorkbenchSection } from "./components/workbench.ts";
+import {
+	PLAN_SECTION,
+	TEAM_SECTION,
+	type WorkbenchComponent,
+	type WorkbenchGeometry,
+	type WorkbenchSection,
+} from "./components/workbench.ts";
 import { theme } from "./theme/theme.ts";
 import { WorkspaceObservation } from "./workbench-workspace.ts";
 
@@ -22,6 +28,8 @@ interface WorkbenchPorts {
 	notice: (text: string, error?: boolean) => void;
 	/** Mouse ownership: absent when the host has no terminal mouse to hand over (tests, transcripts). */
 	mouse?: { enabled: () => boolean; set: (enabled: boolean) => void };
+	/** Persists the operator's work-area geometry after every change they make. */
+	geometry?: { save: (geometry: WorkbenchGeometry) => void };
 }
 
 /** UI-only cycle, input and copy coordinator. Task/worker state is never mutated here. */
@@ -241,9 +249,12 @@ export class WorkbenchController {
 			conversation.scroll(Math.max(1, this.view.conversationHeight - 1));
 		else if (keys.matches(data, "app.conversation.latest")) conversation.latest();
 		else if (keys.matches(data, "app.conversation.copy")) void this.copy(true);
-		else if (keys.matches(data, "app.execution.toggle")) this.view.toggleUpper();
-		else if (keys.matches(data, "app.workbench.grow")) this.view.growUpper();
-		else if (keys.matches(data, "app.workbench.shrink")) this.view.shrinkUpper();
+		else if (keys.matches(data, "app.execution.toggle")) this.changeGeometry(() => this.view.toggleUpper());
+		else if (keys.matches(data, "app.workbench.grow")) this.changeGeometry(() => this.view.growUpper());
+		else if (keys.matches(data, "app.workbench.shrink")) this.changeGeometry(() => this.view.shrinkUpper());
+		else if (keys.matches(data, "app.inspector.toggle")) this.changeGeometry(() => this.view.toggleInspector());
+		else if (keys.matches(data, "app.execution.maximize"))
+			this.changeGeometry(() => this.view.toggleExecutionMaximized());
 		else {
 			const mouse = parseMouseSequence(data);
 			if (!mouse) return undefined;
@@ -258,7 +269,7 @@ export class WorkbenchController {
 				if (headerAction === "latest") conversation.latest();
 				else if (headerAction) void this.copy(headerAction === "copyAll");
 			} else if (action === "down" && button === "left" && hit === "divider") {
-				this.view.toggleUpper();
+				this.changeGeometry(() => this.view.toggleUpper());
 			} else if (action === "down" && button === "left" && hit === "conversation") {
 				// A click only focuses the pane; the selection (and its frozen view) starts on drag.
 				this.pressPoint = { row: row - this.view.conversationTop, column: column - this.view.conversationLeft };
@@ -280,6 +291,12 @@ export class WorkbenchController {
 		}
 		this.ports.requestRender();
 		return { consume: true };
+	}
+
+	/** Every operator change to the work area is applied to the view and persisted in one step. */
+	private changeGeometry(mutate: () => void): void {
+		mutate();
+		this.ports.geometry?.save(this.view.geometry());
 	}
 
 	/** Hand the mouse to the workbench or back to the terminal; the view's hint row shows the owner. */

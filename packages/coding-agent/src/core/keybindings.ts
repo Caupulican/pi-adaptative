@@ -41,6 +41,8 @@ export interface AppKeybindings {
 	"app.workbench.grow": true;
 	"app.workbench.shrink": true;
 	"app.mouse.toggle": true;
+	"app.inspector.toggle": true;
+	"app.execution.maximize": true;
 	"app.clipboard.pasteImage": true;
 	"app.transcript.open": true;
 	"app.transcript.scrollUp": true;
@@ -157,6 +159,11 @@ export const KEYBINDINGS = {
 	"app.execution.toggle": { defaultKeys: "alt+o", description: "Collapse or expand the workbench work area" },
 	"app.workbench.grow": { defaultKeys: "alt+=", description: "Give the workbench work area one more row" },
 	"app.workbench.shrink": { defaultKeys: "alt+-", description: "Take one row from the workbench work area" },
+	"app.inspector.toggle": { defaultKeys: "alt+i", description: "Hide or show the Work plan / Team inspector" },
+	"app.execution.maximize": {
+		defaultKeys: "alt+x",
+		description: "Give Execution every row the conversation minimum leaves, or restore the work area",
+	},
 	"app.mouse.toggle": {
 		defaultKeys: "alt+m",
 		description:

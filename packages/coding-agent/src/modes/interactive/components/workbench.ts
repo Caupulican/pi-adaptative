@@ -40,7 +40,34 @@ export const TEAM_SECTION = "Team";
 const EXECUTION_META = "File effects and command outcomes";
 const MIN_INSPECTOR_WIDTH = 24;
 const SIDE_BY_SIDE_MIN_COLUMNS = 80;
-const DEFAULT_UPPER_ROWS = 10;
+export const DEFAULT_UPPER_ROWS = 10;
+/** The conversation never drops below this many rows, whatever the operator gives the work area. */
+export const MIN_CONVERSATION_ROWS = 6;
+export const MAX_UPPER_ROWS = 60;
+
+/** Everything the operator owns about the work area; persisted as-is across sessions. */
+export interface WorkbenchGeometry {
+	rows: number;
+	collapsed: boolean;
+	inspector: "shown" | "hidden";
+	executionMaximized: boolean;
+}
+
+export function clampUpperRows(rows: number): number {
+	return Math.max(2, Math.min(MAX_UPPER_ROWS, Math.floor(rows)));
+}
+
+/**
+ * Rows the work area takes out of `available` (the rows left after the title strip, the live row
+ * and the dock; the divider and the conversation header come out of it too). Pure so the budget is
+ * testable without a frame: collapsed takes none, maximized takes everything the conversation
+ * minimum leaves, otherwise the operator's rows up to that cap.
+ */
+export function workAreaRows(available: number, geometry: WorkbenchGeometry): number {
+	if (geometry.collapsed) return 0;
+	const cap = Math.max(0, available - 2 - MIN_CONVERSATION_ROWS);
+	return geometry.executionMaximized ? cap : Math.min(geometry.rows, cap);
+}
 
 /**
  * Human-facing composition only. The original transcript still owns all messages and actions.
@@ -65,6 +92,8 @@ export class WorkbenchComponent extends Container {
 	private displayedShell?: BashExecutionComponent;
 	private upperLimit = DEFAULT_UPPER_ROWS;
 	private collapsed = false;
+	private inspectorHidden = false;
+	private executionMaximized = false;
 	private executionCompact = false;
 	/** Who owns the mouse; the hint row reports it so a silent wheel is never a mystery. */
 	private mouseMode = false;
@@ -83,9 +112,23 @@ export class WorkbenchComponent extends Container {
 	/** Row of the divider that collapses or expands the work area; -1 in the native fallback. */
 	dividerRow = -1;
 	/** Key labels resolve once; the keybinding manager is static after startup. */
-	private keyLabels?: { toggle: string; resize: string; hint: string; mouse: string };
+	private keyLabels?: {
+		toggle: string;
+		resize: string;
+		hint: string;
+		mouse: string;
+		inspector: string;
+		maximize: string;
+	};
 
-	private keys(): { toggle: string; resize: string; hint: string; mouse: string } {
+	private keys(): {
+		toggle: string;
+		resize: string;
+		hint: string;
+		mouse: string;
+		inspector: string;
+		maximize: string;
+	} {
 		if (this.keyLabels) return this.keyLabels;
 		const key = (binding: Parameters<typeof keyText>[0], text: string) => {
 			const keys = keyText(binding);
@@ -103,6 +146,8 @@ export class WorkbenchComponent extends Container {
 				.filter(Boolean)
 				.join(" · "),
 			mouse: keyText("app.mouse.toggle"),
+			inspector: keyText("app.inspector.toggle"),
+			maximize: keyText("app.execution.maximize"),
 		};
 		return this.keyLabels;
 	}
@@ -180,8 +225,31 @@ export class WorkbenchComponent extends Container {
 	toggleUpper(): void {
 		this.collapsed = !this.collapsed;
 	}
+	/** Hide the Work plan / Team inspector so Execution takes the full width, or show it again. */
+	toggleInspector(): void {
+		this.inspectorHidden = !this.inspectorHidden;
+	}
+	/** Give Execution every row the conversation minimum leaves (inspector hidden meanwhile), or return to the operator's rows. */
+	toggleExecutionMaximized(): void {
+		this.executionMaximized = !this.executionMaximized;
+		if (this.executionMaximized) this.collapsed = false;
+	}
+	geometry(): WorkbenchGeometry {
+		return {
+			rows: this.upperLimit,
+			collapsed: this.collapsed,
+			inspector: this.inspectorHidden ? "hidden" : "shown",
+			executionMaximized: this.executionMaximized,
+		};
+	}
+	applyGeometry(geometry: WorkbenchGeometry): void {
+		this.upperLimit = clampUpperRows(geometry.rows);
+		this.collapsed = geometry.collapsed;
+		this.inspectorHidden = geometry.inspector === "hidden";
+		this.executionMaximized = geometry.executionMaximized;
+	}
 	resizeUpper(rows: number): void {
-		this.upperLimit = Math.max(2, Math.min(60, rows));
+		this.upperLimit = clampUpperRows(rows);
 	}
 	growUpper(): void {
 		this.resizeUpper(this.upperLimit + 1);
@@ -275,9 +343,17 @@ export class WorkbenchComponent extends Container {
 	}
 
 	private divider(columns: number, expanded: boolean): string {
-		const { toggle, resize } = this.keys();
+		const { toggle, resize, inspector, maximize } = this.keys();
 		const summary = expanded
-			? ["↕ work area", toggle && `${toggle} collapse`, resize && `${resize} rows`].filter(Boolean).join(" · ")
+			? [
+					this.executionMaximized ? "↕ execution maximized" : "↕ work area",
+					toggle && `${toggle} collapse`,
+					inspector && `${inspector} inspector`,
+					maximize && `${maximize} ${this.executionMaximized ? "restore" : "maximize"}`,
+					resize && `${resize} rows`,
+				]
+					.filter(Boolean)
+					.join(" · ")
 			: [
 					`▸ ${[
 						...this.sections.map((section) =>
@@ -351,6 +427,18 @@ export class WorkbenchComponent extends Container {
 		const executionMeta = visibleShell ? EXECUTION_META : this.executionMeta;
 		// A user shell opens at its command; the cycle's evidence follows its newest rows instead.
 		const follow = !visibleShell;
+		if (this.inspectorHidden || this.executionMaximized) {
+			return this.executionPane.render(
+				"Execution",
+				executionMeta,
+				executionLines(Math.max(1, columns - 2)),
+				0,
+				top,
+				columns,
+				height,
+				follow,
+			);
+		}
 		if (columns >= SIDE_BY_SIDE_MIN_COLUMNS) {
 			const leftWidth = Math.max(MIN_INSPECTOR_WIDTH, Math.floor(columns * this.inspectorFraction));
 			const rightX = leftWidth + 2;
@@ -460,7 +548,7 @@ export class WorkbenchComponent extends Container {
 		const liveRow = activity.length ? gutter(activity[0]!) : "";
 		const head = [this.headline(columns)];
 		const available = total - head.length - 1 - dockRows.length;
-		const upperRows = this.collapsed ? 0 : Math.min(this.upperLimit, Math.floor((available - 4) * 0.5));
+		const upperRows = workAreaRows(available, this.geometry());
 		const upper = upperRows >= 2 ? this.renderUpper(columns, upperRows, head.length) : [];
 		this.upperTop = head.length;
 		this.upperHeight = upper.length;

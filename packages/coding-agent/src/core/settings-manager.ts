@@ -528,9 +528,23 @@ export interface ToolRepairSettings {
 export interface WorkbenchSettings {
 	/** "off": the terminal keeps the mouse (native selection, copy-on-select, right-click paste). "on": the workbench captures wheel and clicks. */
 	mouse?: "off" | "on";
+	/** Work-area rows the operator chose (2..60); the conversation keeps its minimum regardless. */
+	rows?: number;
+	/** Work area collapsed to its divider. */
+	collapsed?: boolean;
+	/** Work plan / Team inspector shown beside Execution, or hidden so Execution takes the width. */
+	inspector?: "shown" | "hidden";
+	/** Execution takes every row the conversation minimum leaves. */
+	executionMaximized?: boolean;
 }
 
-export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> = Object.freeze({ mouse: "off" });
+export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> = Object.freeze({
+	mouse: "off",
+	rows: 10,
+	collapsed: false,
+	inspector: "shown",
+	executionMaximized: false,
+});
 
 export interface Settings {
 	lastChangelogVersion?: string;
@@ -3574,13 +3588,28 @@ export class SettingsManager {
 	}
 
 	getWorkbenchSettings(): Required<WorkbenchSettings> {
-		return { mouse: this.settings.workbench?.mouse ?? DEFAULT_WORKBENCH_SETTINGS.mouse };
+		const stored = this.settings.workbench ?? {};
+		const rows = typeof stored.rows === "number" && Number.isFinite(stored.rows) ? stored.rows : undefined;
+		return {
+			mouse: stored.mouse ?? DEFAULT_WORKBENCH_SETTINGS.mouse,
+			rows: rows === undefined ? DEFAULT_WORKBENCH_SETTINGS.rows : Math.max(2, Math.min(60, Math.floor(rows))),
+			collapsed: stored.collapsed ?? DEFAULT_WORKBENCH_SETTINGS.collapsed,
+			inspector: stored.inspector ?? DEFAULT_WORKBENCH_SETTINGS.inspector,
+			executionMaximized: stored.executionMaximized ?? DEFAULT_WORKBENCH_SETTINGS.executionMaximized,
+		};
 	}
 
 	setWorkbenchSetting<K extends keyof WorkbenchSettings>(key: K, value: Required<WorkbenchSettings>[K]): void {
+		this.setWorkbenchSettings({ [key]: value });
+	}
+
+	/** One write for a geometry change that touches several keys. */
+	setWorkbenchSettings(values: Partial<Required<WorkbenchSettings>>): void {
 		this.globalSettings.workbench ??= {};
-		this.globalSettings.workbench[key] = value;
-		this.markModified("workbench", key);
+		for (const [key, value] of Object.entries(values) as [keyof WorkbenchSettings, never][]) {
+			this.globalSettings.workbench[key] = value;
+			this.markModified("workbench", key);
+		}
 		this.save();
 	}
 

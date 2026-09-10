@@ -31,7 +31,7 @@ export interface InteractiveLayoutHost {
 	footer: FooterComponent;
 	activityLane?: ActivityLaneComponent;
 	keybindings: KeybindingsManager;
-	settingsManager: Pick<SettingsManager, "getWorkbenchSettings" | "setWorkbenchSetting">;
+	settingsManager: Pick<SettingsManager, "getWorkbenchSettings" | "setWorkbenchSetting" | "setWorkbenchSettings">;
 	extensionUiHost: Pick<ExtensionUiHost, "renderWidgets">;
 	streamingMessage?: AssistantMessage;
 	workbench?: WorkbenchController;
@@ -86,8 +86,12 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 				host.ui.terminal.setMouseTracking?.(enabled);
 			},
 		},
+		// Only the operator changes the work area; what they chose last time is where it starts.
+		geometry: { save: (geometry) => host.settingsManager.setWorkbenchSettings(geometry) },
 	});
-	view.setMouseMode(host.settingsManager.getWorkbenchSettings().mouse === "on");
+	const stored = host.settingsManager.getWorkbenchSettings();
+	view.setMouseMode(stored.mouse === "on");
+	view.applyGeometry(stored);
 	host.workbenchInputCleanup = host.ui.addInputListener((data) => host.workbench?.handleInput(data));
 	host.ui.addChild(view);
 }

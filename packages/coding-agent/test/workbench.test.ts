@@ -2,7 +2,7 @@ import { type Component, Container, Text, type TUI, visibleWidth } from "@caupul
 import { beforeAll, describe, expect, it } from "vitest";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.ts";
 import { ConversationWindow } from "../src/modes/interactive/components/conversation-window.ts";
-import { WorkbenchComponent } from "../src/modes/interactive/components/workbench.ts";
+import { WorkbenchComponent, workAreaRows } from "../src/modes/interactive/components/workbench.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -344,6 +344,46 @@ describe("Workbench layout", () => {
 			for (const line of view.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
 	});
+	it("lets the operator hide the inspector, maximize execution and round-trip the geometry", () => {
+		const { view } = setup();
+		view.setInspector([{ title: "Work plan", meta: "1 / 3", body: ["active step"] }]);
+		view.setExecution(new Rows(Array.from({ length: 100 }, (_, i) => `tool ${i}`)));
+		expect(workAreaRows(24, { rows: 10, collapsed: false, inspector: "shown", executionMaximized: false })).toBe(10);
+		expect(workAreaRows(24, { rows: 30, collapsed: false, inspector: "shown", executionMaximized: false })).toBe(16);
+		expect(workAreaRows(24, { rows: 10, collapsed: false, inspector: "shown", executionMaximized: true })).toBe(16);
+		expect(workAreaRows(24, { rows: 10, collapsed: true, inspector: "hidden", executionMaximized: true })).toBe(0);
+		const shown = view.render(110).map(stripAnsi);
+		expect(shown[1]).toMatch(/^ Work plan .*Execution/);
+		view.toggleInspector();
+		const hidden = view.render(110).map(stripAnsi);
+		expect(hidden[1]).toMatch(/^ Execution .*File effects and command outcomes/);
+		expect(hidden.join("\n")).not.toContain("Work plan");
+		expect(hidden.join("\n")).not.toContain("active step");
+		expect(view.upperHeight).toBe(10);
+		expect(hidden[view.dividerRow]).toMatch(/↕ work area/);
+		view.toggleInspector();
+		expect(view.render(110).map(stripAnsi)[1]).toMatch(/^ Work plan .*Execution/);
+		view.toggleExecutionMaximized();
+		const maximized = view.render(110).map(stripAnsi);
+		expect(view.upperHeight).toBe(16);
+		expect(view.conversationHeight).toBe(6);
+		expect(maximized[1]).toMatch(/^ Execution /);
+		expect(maximized[view.dividerRow]).toMatch(/↕ execution maximized/);
+		expect(maximized[16]).toContain("tool 99");
+		view.toggleExecutionMaximized();
+		view.render(110);
+		expect(view.upperHeight).toBe(10);
+		expect(view.geometry()).toEqual({ rows: 10, collapsed: false, inspector: "shown", executionMaximized: false });
+		view.applyGeometry({ rows: 4, collapsed: false, inspector: "hidden", executionMaximized: false });
+		const applied = view.render(110).map(stripAnsi);
+		expect(view.upperHeight).toBe(4);
+		expect(applied[1]).toMatch(/^ Execution /);
+		expect(view.geometry()).toEqual({ rows: 4, collapsed: false, inspector: "hidden", executionMaximized: false });
+		// Maximizing a collapsed work area opens it; rows outside the clamp are clamped.
+		view.applyGeometry({ rows: 500, collapsed: true, inspector: "shown", executionMaximized: false });
+		view.toggleExecutionMaximized();
+		expect(view.geometry()).toEqual({ rows: 60, collapsed: false, inspector: "shown", executionMaximized: true });
+	});
 	it("shows the live activity on the row where the answer lands, and names the work on the title strip", () => {
 		const { view } = setup();
 		const activity = new Text("● Editing reload ownership", 0, 0);
@@ -358,10 +398,11 @@ describe("Workbench layout", () => {
 		withActivity.setHeadline({ title: "tool reload reliability" });
 		const frame = withActivity.render(80).map(stripAnsi);
 		expect(frame[0]).toMatch(/^ pi {2}tool reload reliability\s*$/);
-		expect(withActivity.upperHeight).toBe(6);
-		expect(frame[8]).toContain("Conversation");
-		expect(withActivity.conversationTop).toBe(9);
-		expect(withActivity.conversationHeight).toBe(9);
+		// The operator's ten rows, capped so the conversation keeps its six-row minimum.
+		expect(withActivity.upperHeight).toBe(9);
+		expect(frame[11]).toContain("Conversation");
+		expect(withActivity.conversationTop).toBe(12);
+		expect(withActivity.conversationHeight).toBe(6);
 		// One state glyph on the whole frame, and it sits directly below the conversation rows.
 		expect(frame[withActivity.conversationTop + withActivity.conversationHeight]!.trimEnd()).toBe(
 			" ● Editing reload ownership",

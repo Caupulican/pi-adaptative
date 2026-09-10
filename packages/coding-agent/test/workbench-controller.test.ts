@@ -44,6 +44,37 @@ describe("Workbench input boundary", () => {
 		expect(controller.handleInput("\x1b[<0;5;5M")).toEqual({ consume: true });
 	});
 
+	it("persists every operator geometry change through the geometry port", () => {
+		const view = new WorkbenchComponent({
+			conversation: new Container(),
+			editor: new Container(),
+			dock: [],
+			brand: "pi",
+			viewportRows: () => 40,
+		});
+		const saved: unknown[] = [];
+		const controller = new WorkbenchController(view, {
+			keybindings: new KeybindingsManager(),
+			isInteractive: () => true,
+			requestRender() {},
+			messages: () => [],
+			copy: async () => {},
+			notice() {},
+			geometry: { save: (geometry) => saved.push(geometry) },
+		});
+		view.render(120);
+		controller.handleInput("\x1bi");
+		controller.handleInput("\x1bx");
+		controller.handleInput("\x1b=");
+		controller.handleInput("\x1bo");
+		expect(saved).toEqual([
+			{ rows: 10, collapsed: false, inspector: "hidden", executionMaximized: false },
+			{ rows: 10, collapsed: false, inspector: "hidden", executionMaximized: true },
+			{ rows: 11, collapsed: false, inspector: "hidden", executionMaximized: true },
+			{ rows: 11, collapsed: true, inspector: "hidden", executionMaximized: true },
+		]);
+	});
+
 	it("refuses the toggle without a terminal mouse instead of pretending", () => {
 		const view = new WorkbenchComponent({
 			conversation: new Container(),
@@ -367,8 +398,8 @@ describe("Workbench input boundary", () => {
 			notice() {},
 		});
 		view.render(80);
-		expect(view.conversationTop).toBe(9);
-		expect(view.conversationHeight).toBe(9);
+		expect(view.conversationTop).toBe(12);
+		expect(view.conversationHeight).toBe(6);
 		// The single row anchors to the bottom of the conversation area (row 18, 1-based 19).
 		controller.handleInput("\x1b[<0;1;18M"); // The gutter must not select text.
 		expect(view.conversation.following).toBe(true);
