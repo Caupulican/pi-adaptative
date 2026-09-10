@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
 import { spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
+import { withoutHarnessLaunchEnv } from "../core/harness-environment.ts";
 import { ensureManagedJscpd } from "./bundled-jscpd.ts";
 import { normalizePath } from "./paths.ts";
 import {
@@ -216,10 +217,12 @@ export interface ShellSessionContext {
 }
 
 export function getShellEnv(
-	environment: NodeJS.ProcessEnv = process.env,
+	inheritedEnvironment: NodeJS.ProcessEnv = process.env,
 	targetPlatform: NodeJS.Platform = process.platform,
 	sessionContext?: ShellSessionContext,
 ): NodeJS.ProcessEnv {
+	// A shell command inherits the operator's environment, never pi's own launch variables.
+	const environment = withoutHarnessLaunchEnv(inheritedEnvironment);
 	if (!managedJscpdProvisionAttempted) {
 		managedJscpdProvisionAttempted = true;
 		try {

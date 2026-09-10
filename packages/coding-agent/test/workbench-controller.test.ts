@@ -36,12 +36,40 @@ describe("Workbench input boundary", () => {
 		expect(controller.handleInput("\x1bm")).toEqual({ consume: true });
 		expect(captured).toBe(true);
 		expect(hint()).toContain("mouse: on");
-		expect(notices.at(-1)).toContain("Mouse captured");
+		expect(notices.at(-1)).toContain("Workbench owns the mouse");
 		controller.handleInput("\x1bm");
 		expect(captured).toBe(false);
 		expect(hint()).toContain("mouse: off");
 		// Reports that still arrive (an emulator flushing after release) are consumed, never typed.
 		expect(controller.handleInput("\x1b[<0;5;5M")).toEqual({ consume: true });
+	});
+
+	it("pastes the clipboard on a right click anywhere, through the paste port", async () => {
+		const view = new WorkbenchComponent({
+			conversation: new Container(),
+			editor: new Container(),
+			dock: [],
+			brand: "pi",
+			viewportRows: () => 40,
+		});
+		let pastes = 0;
+		const controller = new WorkbenchController(view, {
+			keybindings: new KeybindingsManager(),
+			isInteractive: () => true,
+			requestRender() {},
+			messages: () => [],
+			copy: async () => {},
+			notice() {},
+			paste: async () => {
+				pastes++;
+			},
+		});
+		view.render(120);
+		expect(controller.handleInput("\x1b[<2;40;20M")).toEqual({ consume: true }); // right button down, conversation
+		expect(controller.handleInput("\x1b[<2;40;20m")).toEqual({ consume: true });
+		expect(controller.handleInput("\x1b[<2;5;3M")).toEqual({ consume: true }); // right button down, work area
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(pastes).toBe(2);
 	});
 
 	it("persists every operator geometry change through the geometry port", () => {
@@ -412,8 +440,11 @@ describe("Workbench input boundary", () => {
 		controller.handleInput("\x1b[<0;2;18M");
 		controller.handleInput("\x1b[<32;7;18M");
 		controller.handleInput("\x1b[<0;7;18m");
-		await controller.copy(false);
+		// Release copies the selection, as the terminal would have; an explicit copy repeats it.
+		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(copies).toEqual(["hello"]);
+		await controller.copy(false);
+		expect(copies).toEqual(["hello", "hello"]);
 		expect(view.conversation.following).toBe(false);
 		controller.dispose();
 	});

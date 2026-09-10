@@ -13,6 +13,7 @@ import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getShellEnv } from "../utils/shell.ts";
 import type { ManagedToolResolver } from "../utils/tools-manager.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+import { withoutHarnessLaunchEnv } from "./harness-environment.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import {
 	type BashOperations,
@@ -96,7 +97,10 @@ export class BashExecutionController {
 		const platform = options?.platform ?? process.platform;
 		const enableGitFilter = !options?.operations && !commandPrefix && !shellPath;
 		const cwd = this.deps.getSessionManager().getCwd();
-		const inheritedEnvironment: NodeJS.ProcessEnv = { ...process.env, ...this.deps.getEnvironment?.(cwd) };
+		const inheritedEnvironment: NodeJS.ProcessEnv = withoutHarnessLaunchEnv({
+			...process.env,
+			...this.deps.getEnvironment?.(cwd),
+		});
 		const environment: NodeJS.ProcessEnv =
 			options?.operations === undefined
 				? getShellEnv(inheritedEnvironment, platform, buildShellSessionContext(this.deps))

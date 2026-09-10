@@ -8,7 +8,7 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import { expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
-import { copyToClipboard } from "../../utils/clipboard.ts";
+import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import type { ActivityLaneComponent } from "./components/activity-lane.ts";
 import type { FooterComponent } from "./components/footer.ts";
 import { isConversationMessage } from "./components/question-conversation.ts";
@@ -88,6 +88,19 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		},
 		// Only the operator changes the work area; what they chose last time is where it starts.
 		geometry: { save: (geometry) => host.settingsManager.setWorkbenchSettings(geometry) },
+		paste: async () => {
+			const text = await readClipboardText();
+			if (!text) {
+				host.activityLane?.announce("Clipboard has no text to paste", "neutral");
+				return;
+			}
+			if (!host.editor.insertTextAtCursor) {
+				host.activityLane?.announce("This editor cannot take a pasted selection", "failure");
+				return;
+			}
+			host.editor.insertTextAtCursor(text);
+			host.ui.requestRender();
+		},
 	});
 	const stored = host.settingsManager.getWorkbenchSettings();
 	view.setMouseMode(stored.mouse === "on");

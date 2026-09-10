@@ -4,6 +4,7 @@ import { getAgentDir } from "../config.ts";
 import { ensureTool } from "../utils/tools-manager.ts";
 import { cacheFile, runtimesDir } from "./agent-paths.ts";
 import { execCommand } from "./exec.ts";
+import { withoutHarnessLaunchEnv } from "./harness-environment.ts";
 
 export const PYTHON_RUNTIME_REQUEST = ">=3.10";
 export const PYTHON_RUNTIME_INSTALL_REQUEST = "3.13";
@@ -108,7 +109,7 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 		deps.makeDirectory(runtimeRoot);
 		deps.makeDirectory(cacheRoot);
 		const env: NodeJS.ProcessEnv = {
-			...process.env,
+			...withoutHarnessLaunchEnv(process.env),
 			UV_CACHE_DIR: cacheRoot,
 			UV_NO_PROGRESS: "1",
 			UV_PYTHON_INSTALL_DIR: runtimeRoot,

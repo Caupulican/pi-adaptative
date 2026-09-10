@@ -7,6 +7,7 @@ import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/ch
 import { type PathInputOptions, resolvePath } from "../../utils/paths.ts";
 import { composeExecutionEnvironment, type ExecutionEnvironment } from "../execution-environment.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { withoutHarnessLaunchEnv } from "../harness-environment.ts";
 import { awaitPreflight } from "../preflight.ts";
 import { ensurePythonRuntime, type PythonRuntimeOutcome } from "../python-runtime.ts";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
@@ -185,7 +186,10 @@ function clampInteger(value: number | undefined, fallback: number, minimum: numb
 function createLocalPythonOperations(): PythonOperations {
 	return {
 		stat: (path) => stat(path),
-		getEnvironment: async () => ({ variables: { ...process.env }, caseSensitive: process.platform !== "win32" }),
+		getEnvironment: async () => ({
+			variables: withoutHarnessLaunchEnv({ ...process.env }),
+			caseSensitive: process.platform !== "win32",
+		}),
 		async readOutputRules(path, signal) {
 			const text = await readFile(path, { encoding: "utf8", signal });
 			try {

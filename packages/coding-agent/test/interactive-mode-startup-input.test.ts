@@ -15,6 +15,7 @@ type SubmitContext = {
 	editor: {
 		addToHistory?: (text: string) => void;
 		setText: (text: string) => void;
+		getText: () => string;
 	};
 	shutdown: () => Promise<void>;
 	handleSecretsCommand: () => Promise<void>;
@@ -38,6 +39,7 @@ type SubmitContext = {
 		prompt: (text: string, options?: unknown) => Promise<void>;
 	};
 	showStatus: (message: string) => void;
+	showError: (message: string) => void;
 	footer: { invalidate: () => void };
 	compactionQueuedMessages: { text: string; mode: "steer" | "followUp"; images?: ImageContent[] }[];
 	activityLane?: { announce: (label: string, status?: string) => void };
@@ -92,6 +94,7 @@ function createSubmitContext(): SubmitContext {
 		editor: {
 			addToHistory: vi.fn(),
 			setText: vi.fn(),
+			getText: vi.fn(() => ""),
 		},
 		shutdown: vi.fn(async () => {}),
 		handleSecretsCommand: vi.fn(async () => {}),
@@ -124,6 +127,7 @@ function createSubmitContext(): SubmitContext {
 			prompt: vi.fn(async () => {}),
 		},
 		showStatus: vi.fn(),
+		showError: vi.fn(),
 		footer: { invalidate: vi.fn() },
 		flushPendingBashComponents: vi.fn(),
 		buildUserInputSubmission: (text: string) => ({ text }),
@@ -205,6 +209,25 @@ describe("InteractiveMode startup input", () => {
 		expect(context.activityLane?.announce).toHaveBeenCalledWith(
 			"Interrupting to send 2 queued messages now",
 			"neutral",
+		);
+	});
+
+	it("returns the queued text to the editor when the send-now prompt fails", async () => {
+		const context = createSubmitContext();
+		context.session.isStreaming = true;
+		(context.session.takeQueuedMessages as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+			steering: [{ text: "stop and confirm" }],
+			followUp: [],
+		});
+		context.session.getSteeringMessages = () => ["stop and confirm"];
+		(context.session.prompt as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("provider down"));
+		interactiveModePrototype.setupEditorSubmitHandler.call(context);
+
+		await context.defaultEditor.onSubmit?.("");
+
+		expect(context.editor.setText).toHaveBeenLastCalledWith("stop and confirm");
+		expect(context.showError).toHaveBeenCalledWith(
+			"Send now failed: provider down. The queued text is back in the editor.",
 		);
 	});
 

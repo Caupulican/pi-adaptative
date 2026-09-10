@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- `Agent.abort(reason?)` names the reason on the aborted assistant message on every failure path (`abortedErrorMessage`), and the stream path names it before `message_end`.
+
 ## [0.99.14] - 2026-09-10
 
 ## [0.99.13] - 2026-09-08

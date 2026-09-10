@@ -526,7 +526,7 @@ export interface ToolRepairSettings {
 
 /** Operator-owned Workbench geometry and input ownership; nothing here auto-sizes or auto-folds. */
 export interface WorkbenchSettings {
-	/** "off": the terminal keeps the mouse (native selection, copy-on-select, right-click paste). "on": the workbench captures wheel and clicks. */
+	/** "on": the workbench owns the mouse (wheel scroll, chips, drag-select that copies on release, right-click paste). "off": the terminal keeps it for its native gestures. */
 	mouse?: "off" | "on";
 	/** Work-area rows the operator chose (2..60), or "half" for an even split; the conversation keeps its minimum regardless. */
 	rows?: number | "half";
@@ -539,7 +539,7 @@ export interface WorkbenchSettings {
 }
 
 export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> = Object.freeze({
-	mouse: "off",
+	mouse: "on",
 	rows: "half",
 	collapsed: false,
 	inspector: "shown",

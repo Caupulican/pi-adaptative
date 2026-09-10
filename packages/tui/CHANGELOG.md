@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- `TerminalViewportMode` keeps the alternate screen and mouse capture as separate decisions (`setMouseTracking`); `ProcessTerminal({ mouse })` and `Terminal.setMouseTracking?` expose it.
+
 ## [0.99.14] - 2026-09-10
 
 ## [0.99.13] - 2026-09-08

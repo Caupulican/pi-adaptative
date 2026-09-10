@@ -407,6 +407,12 @@ describe("Agent", () => {
 				return stream;
 			},
 		});
+		// `message_end` is what a session log persists; the name must be on that payload, not patched later.
+		const persisted: string[] = [];
+		agent.subscribe((event) => {
+			if (event.type === "message_end" && event.message.role === "assistant" && "errorMessage" in event.message)
+				persisted.push(String(event.message.errorMessage));
+		});
 		const promptPromise = agent.prompt("hello");
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		agent.abort("send now");
@@ -414,6 +420,7 @@ describe("Agent", () => {
 		const last = agent.state.messages.at(-1);
 		expect(last?.role).toBe("assistant");
 		expect(last && "errorMessage" in last ? last.errorMessage : undefined).toBe("Operation aborted (send now)");
+		expect(persisted).toEqual(["Operation aborted (send now)"]);
 	});
 
 	it("should update state with mutators", () => {

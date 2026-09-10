@@ -1958,10 +1958,10 @@ describe("SettingsManager", () => {
 });
 
 describe("workbench settings", () => {
-	it("keeps the mouse with the terminal by default and persists a hand-over", () => {
+	it("gives the workbench the mouse by default and persists a hand-over to the terminal", () => {
 		const manager = SettingsManager.inMemory({});
 		expect(manager.getWorkbenchSettings()).toEqual({
-			mouse: "off",
+			mouse: "on",
 			rows: "half",
 			collapsed: false,
 			inspector: "shown",
@@ -1974,8 +1974,8 @@ describe("workbench settings", () => {
 			executionMaximized: true,
 			collapsed: true,
 		});
-		manager.setWorkbenchSetting("mouse", "on");
-		expect(manager.getWorkbenchSettings().mouse).toBe("on");
-		expect(SettingsManager.inMemory({ workbench: { mouse: "on" } }).getWorkbenchSettings().mouse).toBe("on");
+		manager.setWorkbenchSetting("mouse", "off");
+		expect(manager.getWorkbenchSettings().mouse).toBe("off");
+		expect(SettingsManager.inMemory({ workbench: { mouse: "off" } }).getWorkbenchSettings().mouse).toBe("off");
 	});
 });

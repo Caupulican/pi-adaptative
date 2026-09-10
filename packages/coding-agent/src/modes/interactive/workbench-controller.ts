@@ -30,6 +30,8 @@ interface WorkbenchPorts {
 	mouse?: { enabled: () => boolean; set: (enabled: boolean) => void };
 	/** Persists the operator's work-area geometry after every change they make. */
 	geometry?: { save: (geometry: WorkbenchGeometry) => void };
+	/** Right click: the terminal's paste gesture, provided by the workbench while it owns the mouse. */
+	paste?: () => Promise<void>;
 }
 
 /** UI-only cycle, input and copy coordinator. Task/worker state is never mutated here. */
@@ -272,6 +274,9 @@ export class WorkbenchController {
 				else if (headerAction) void this.copy(headerAction === "copyAll");
 			} else if (action === "down" && button === "left" && hit === "divider") {
 				this.changeGeometry(() => this.view.toggleUpper());
+			} else if (action === "down" && button === "right") {
+				// The terminal cannot paste while the workbench owns the mouse, so the workbench does.
+				void this.ports.paste?.();
 			} else if (action === "down" && button === "left" && hit === "conversation") {
 				// A click only focuses the pane; the selection (and its frozen view) starts on drag.
 				this.pressPoint = { row: row - this.view.conversationTop, column: column - this.view.conversationLeft };
@@ -285,6 +290,8 @@ export class WorkbenchController {
 				}
 				if (this.selecting) conversation.select(point, false);
 				if (action === "up") {
+					// Copy on release, as the terminal would have: the selection is the operator's intent.
+					if (this.selecting) void this.copy(false);
 					this.selecting = false;
 					this.pressPoint = undefined;
 				}
@@ -313,8 +320,8 @@ export class WorkbenchController {
 		this.view.setMouseMode(enabled);
 		this.ports.notice(
 			enabled
-				? "Mouse captured: wheel scrolls panes, chips click; hold shift for native selection"
-				: "Mouse returned to the terminal: select, copy and paste natively",
+				? "Workbench owns the mouse: wheel scrolls, drag copies on release, right click pastes"
+				: "Terminal owns the mouse: native selection and paste; no wheel scrolling",
 		);
 	}
 

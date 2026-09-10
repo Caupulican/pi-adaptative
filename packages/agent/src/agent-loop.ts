@@ -585,9 +585,6 @@ async function runLoop(
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
-				// The provider stream built this message without knowing why it was aborted.
-				if (message.stopReason === "aborted")
-					message.errorMessage = abortedErrorMessage(message.errorMessage, true, signal?.reason);
 				await emit({ type: "turn_end", message, toolResults: [] });
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
@@ -997,6 +994,14 @@ async function streamAssistantResponse(
 		...(firstTokenAt !== undefined ? { firstTokenAt } : {}),
 		streamEndAt,
 	};
+	// The provider stream built an aborted message without knowing why; name it here, before
+	// `message_end`, because that event is what the session log persists.
+	if (finalMessage.stopReason === "aborted") {
+		finalMessage = {
+			...finalMessage,
+			errorMessage: abortedErrorMessage(finalMessage.errorMessage, true, signal?.reason),
+		};
+	}
 	if (addedPartial) {
 		context.messages[context.messages.length - 1] = finalMessage;
 	} else {

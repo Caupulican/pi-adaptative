@@ -2574,7 +2574,7 @@ export class InteractiveMode {
 	 * Get all queued messages (read-only).
 	 * Combines session queue and compaction queue.
 	 */
-	private getAllQueuedMessages(): { steering: string[]; followUp: string[] } {
+	private getAllQueuedMessages(): { steering: string[]; followUp: string[]; commands: string[] } {
 		return {
 			steering: [
 				...this.session.getSteeringMessages(),
@@ -2582,9 +2582,9 @@ export class InteractiveMode {
 			],
 			followUp: [
 				...this.session.getFollowUpMessages(),
-				...this.session.getQueuedExtensionCommands(),
 				...this.compactionQueuedMessages.filter((msg) => msg.mode === "followUp").map((msg) => msg.text),
 			],
+			commands: [...this.session.getQueuedExtensionCommands()],
 		};
 	}
 
@@ -2648,6 +2648,15 @@ export class InteractiveMode {
 		await this.session.waitForForegroundIdle();
 		try {
 			await this.session.prompt(text, { images: images.length ? images : undefined, processSlashCommands: false });
+		} catch (error) {
+			// The operator's words are not lost with the failed submission: they return to the editor
+			// (images do not survive an editor round-trip; the failure says so).
+			const current = this.editor.getText();
+			this.editor.setText([text, current].filter((part) => part.trim()).join("\n\n"));
+			const detail = error instanceof Error ? error.message : String(error);
+			this.showError(
+				`Send now failed: ${detail}. The queued text is back in the editor${images.length ? "; its images were dropped" : ""}.`,
+			);
 		} finally {
 			this.refreshAutonomyFooterStatus();
 		}
@@ -2658,24 +2667,26 @@ export class InteractiveMode {
 	private updatePendingMessagesDisplay(): void {
 		this.pendingMessagesContainer.clear();
 		for (const component of this.pendingBashComponents) this.pendingMessagesContainer.addChild(component);
-		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
+		const { steering: steeringMessages, followUp: followUpMessages, commands } = this.getAllQueuedMessages();
 		const steeringCount = steeringMessages.length;
 		const followUpCount = followUpMessages.length;
-		const total = steeringCount + followUpCount;
+		const commandCount = commands.length;
+		const total = steeringCount + followUpCount + commandCount;
 		if (total > 0) {
 			const dequeueHint = this.getAppKeyDisplay("app.message.dequeue");
 			// The label states the delivery boundary; a queued message is never a mystery in flight.
+			// Extension commands execute against the session after the run; send-now never sends them,
+			// so the offer appears only when a message would actually go.
 			const details = [
 				steeringCount > 0 ? `${steeringCount} steering → next model turn` : undefined,
 				followUpCount > 0 ? `${followUpCount} follow-up → after this run` : undefined,
+				commandCount > 0 ? `${commandCount} command${commandCount > 1 ? "s" : ""} → after this run` : undefined,
+				steeringCount + followUpCount > 0 ? "enter send now" : undefined,
+				`${dequeueHint} edit`,
 			]
 				.filter((value): value is string => value !== undefined)
 				.join(" · ");
-			this.activityLane?.wait({
-				id: "queue:messages",
-				kind: "queue",
-				label: `Queued ${total} · ${details} · enter send now · ${dequeueHint} edit`,
-			});
+			this.activityLane?.wait({ id: "queue:messages", kind: "queue", label: `Queued ${total} · ${details}` });
 		} else {
 			this.activityLane?.remove("queue:messages");
 		}

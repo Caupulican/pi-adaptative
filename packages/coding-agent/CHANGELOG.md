@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Fixed
+
+- Tool commands (`bash`, `python`, the owner shell, the Python runtime) no longer inherit the variables the runtime supervisor injects for pi's own launch (`PI_PACKAGE_DIR`, `TSX_TSCONFIG_PATH`, `PI_RUNTIME_SUPERVISOR`). A vitest run started from inside pi resolved the harness's installed generation instead of the checkout, failed on assets the generation does not ship, and its failure became a trusted verification obligation that a corrected environment could not resolve. An operator's own `PI_PACKAGE_DIR` on an unsupervised launch is kept. The coding-agent test setup removes the same keys.
+- The aborted assistant message is named (`Operation aborted (send now)`) before `message_end`, so the session log carries the reason, not only the in-memory state.
+- Send-now returns the queued text to the editor and reports the failure when the submission throws, instead of losing it.
+- The queue label lists queued extension commands separately and offers `enter send now` only when a steering or follow-up message would go; send-now never sends extension commands.
+
+### Changed
+
+- The workbench owns the mouse by default again and provides the terminal's gestures itself: a drag selection is copied on release and a right click pastes the clipboard's text into the editor, while the wheel scrolls the panes. `Alt+M` hands the mouse to the terminal for native gestures. (0.99.14 had left the mouse to the terminal, which made the wheel dead inside the workbench.)
+- The staged pre-commit hook also runs the browser smoke check when `packages/ai`, `packages/web-ui` or the manifests are staged.
+
 ## [0.99.14] - 2026-09-10
 
 ### Added
