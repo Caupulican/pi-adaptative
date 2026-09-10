@@ -46,6 +46,7 @@
 - Hydrate/update locally with `npm install --ignore-scripts`; clean/CI-style with `npm ci --ignore-scripts`. Don't run lifecycle scripts unless the user asks.
 - If dep metadata changes, refresh `package-lock.json` with `npm install --package-lock-only --ignore-scripts`.
 - Pre-commit blocks lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1`. Don't bypass unless the user wants the lockfile change committed.
+- The pre-commit hook is staged-scoped (`scripts/precommit-staged.mjs`): exclude/lockfile guards, biome on the staged files biome.json covers (restaged after `--write`), the contract-doctrine gate, the browser smoke check when `packages/ai`, `packages/web-ui` or the manifests are staged, every staged `*.test.ts` / `scripts/*.test.mjs` file with its workspace runner, and one project `tsc --noEmit` when a TypeScript source under `packages/` is staged. It never runs the repo-wide `npm run check` chain or a whole suite; CI and `npm run release:*` own those. `node scripts/precommit-staged.mjs --dry-run` prints the plan for the current staged set.
 
 ## Git
 
