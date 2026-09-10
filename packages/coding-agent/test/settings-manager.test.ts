@@ -1956,3 +1956,13 @@ describe("SettingsManager", () => {
 		});
 	});
 });
+
+describe("workbench settings", () => {
+	it("keeps the mouse with the terminal by default and persists a hand-over", () => {
+		const manager = SettingsManager.inMemory({});
+		expect(manager.getWorkbenchSettings()).toEqual({ mouse: "off" });
+		manager.setWorkbenchSetting("mouse", "on");
+		expect(manager.getWorkbenchSettings().mouse).toBe("on");
+		expect(SettingsManager.inMemory({ workbench: { mouse: "on" } }).getWorkbenchSettings().mouse).toBe("on");
+	});
+});

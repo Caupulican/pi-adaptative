@@ -355,7 +355,10 @@ export class InteractiveMode {
 		// getCapabilities() and cache a settings-less result (P1g).
 		applyTerminalSettings(terminalCapabilityOverridesFromSettings(this.settingsManager));
 		this.ui = new TUI(
-			new ProcessTerminal({ workbench: this.hasHumanAudience }),
+			new ProcessTerminal({
+				workbench: this.hasHumanAudience,
+				mouse: this.settingsManager.getWorkbenchSettings().mouse === "on",
+			}),
 			this.settingsManager.getShowHardwareCursor(),
 		);
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());

@@ -86,6 +86,12 @@ export interface Terminal {
 	// Whether Kitty keyboard protocol is active
 	get kittyProtocolActive(): boolean;
 
+	/**
+	 * Hand the mouse to the application (button-event tracking) or back to the emulator. Optional:
+	 * only a terminal that owns a full-screen viewport has a mouse to give.
+	 */
+	setMouseTracking?(enabled: boolean): void;
+
 	// Cursor positioning (relative to current position)
 	moveBy(lines: number): void; // Move cursor up (negative) or down (positive) by N lines
 
@@ -111,8 +117,13 @@ export interface Terminal {
 export class ProcessTerminal implements Terminal {
 	private readonly viewportMode?: TerminalViewportMode;
 
-	constructor(options: { workbench?: boolean } = {}) {
-		if (options.workbench) this.viewportMode = new TerminalViewportMode((data) => this.write(data));
+	constructor(options: { workbench?: boolean; mouse?: boolean } = {}) {
+		if (options.workbench)
+			this.viewportMode = new TerminalViewportMode((data) => this.write(data), { mouse: options.mouse });
+	}
+
+	setMouseTracking(enabled: boolean): void {
+		this.viewportMode?.setMouseTracking(enabled);
 	}
 
 	private wasRaw = false;

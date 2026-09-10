@@ -524,6 +524,14 @@ export interface ToolRepairSettings {
 	logging?: boolean;
 }
 
+/** Operator-owned Workbench geometry and input ownership; nothing here auto-sizes or auto-folds. */
+export interface WorkbenchSettings {
+	/** "off": the terminal keeps the mouse (native selection, copy-on-select, right-click paste). "on": the workbench captures wheel and clicks. */
+	mouse?: "off" | "on";
+}
+
+export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> = Object.freeze({ mouse: "off" });
+
 export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
@@ -580,6 +588,7 @@ export interface Settings {
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
 	defaultTools?: string[]; // Default tool allowlist for main sessions (global-only)
 	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
+	workbench?: WorkbenchSettings;
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
 	showCacheMissNotices?: boolean; // Show notices for cache misses from idle gaps or model switches (default: false)
@@ -3561,6 +3570,17 @@ export class SettingsManager {
 	setEnabledModels(patterns: string[] | undefined): void {
 		this.globalSettings.enabledModels = patterns;
 		this.markModified("enabledModels");
+		this.save();
+	}
+
+	getWorkbenchSettings(): Required<WorkbenchSettings> {
+		return { mouse: this.settings.workbench?.mouse ?? DEFAULT_WORKBENCH_SETTINGS.mouse };
+	}
+
+	setWorkbenchSetting<K extends keyof WorkbenchSettings>(key: K, value: Required<WorkbenchSettings>[K]): void {
+		this.globalSettings.workbench ??= {};
+		this.globalSettings.workbench[key] = value;
+		this.markModified("workbench", key);
 		this.save();
 	}
 

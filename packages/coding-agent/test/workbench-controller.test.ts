@@ -12,6 +12,59 @@ import { workbenchCounterFixture } from "./fixtures/session-failures.ts";
 
 describe("Workbench input boundary", () => {
 	beforeAll(() => initTheme("dark"));
+	it("hands the mouse over and back on the toggle key, reporting the owner in the hint row", () => {
+		const view = new WorkbenchComponent({
+			conversation: new Container(),
+			editor: new Container(),
+			dock: [],
+			brand: "pi",
+			viewportRows: () => 40,
+		});
+		let captured = false;
+		const notices: string[] = [];
+		const controller = new WorkbenchController(view, {
+			keybindings: new KeybindingsManager(),
+			isInteractive: () => true,
+			requestRender() {},
+			messages: () => [],
+			copy: async () => {},
+			notice: (text) => notices.push(text),
+			mouse: { enabled: () => captured, set: (enabled) => (captured = enabled) },
+		});
+		const hint = () => stripAnsi(view.render(120).at(-1) ?? "");
+		expect(hint()).toContain("mouse: off");
+		expect(controller.handleInput("\x1bm")).toEqual({ consume: true });
+		expect(captured).toBe(true);
+		expect(hint()).toContain("mouse: on");
+		expect(notices.at(-1)).toContain("Mouse captured");
+		controller.handleInput("\x1bm");
+		expect(captured).toBe(false);
+		expect(hint()).toContain("mouse: off");
+		// Reports that still arrive (an emulator flushing after release) are consumed, never typed.
+		expect(controller.handleInput("\x1b[<0;5;5M")).toEqual({ consume: true });
+	});
+
+	it("refuses the toggle without a terminal mouse instead of pretending", () => {
+		const view = new WorkbenchComponent({
+			conversation: new Container(),
+			editor: new Container(),
+			dock: [],
+			brand: "pi",
+			viewportRows: () => 40,
+		});
+		const notices: { text: string; error?: boolean }[] = [];
+		const controller = new WorkbenchController(view, {
+			keybindings: new KeybindingsManager(),
+			isInteractive: () => true,
+			requestRender() {},
+			messages: () => [],
+			copy: async () => {},
+			notice: (text, error) => notices.push({ text, error }),
+		});
+		controller.handleInput("\x1bm");
+		expect(notices).toEqual([{ text: "This terminal has no mouse to hand over", error: true }]);
+	});
+
 	it("keeps replayed and late background outcomes out of the next cycle's count, including narrow panes", () => {
 		const view = new WorkbenchComponent({
 			conversation: new Container(),

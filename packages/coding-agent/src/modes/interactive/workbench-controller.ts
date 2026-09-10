@@ -26,6 +26,8 @@ interface WorkbenchPorts {
 	messages: () => Iterable<AgentMessage>;
 	copy: (text: string) => Promise<void>;
 	notice: (text: string, error?: boolean) => void;
+	/** Mouse ownership: absent when the host has no terminal mouse to hand over (tests, transcripts). */
+	mouse?: { enabled: () => boolean; set: (enabled: boolean) => void };
 }
 
 /** UI-only cycle, input and copy coordinator. Task/worker state is never mutated here. */
@@ -238,6 +240,12 @@ export class WorkbenchController {
 		}
 		const keys = this.ports.keybindings;
 		const conversation = this.view.conversation;
+		// Mouse ownership is a session choice, not a pane action: it works before the first frame too.
+		if (keys.matches(data, "app.mouse.toggle")) {
+			this.toggleMouse();
+			this.ports.requestRender();
+			return { consume: true };
+		}
 		if (this.view.conversationHeight === 0) {
 			this.selecting = false;
 			return isMouseSequence(data) ? { consume: true } : undefined;
@@ -287,6 +295,23 @@ export class WorkbenchController {
 		}
 		this.ports.requestRender();
 		return { consume: true };
+	}
+
+	/** Hand the mouse to the workbench or back to the terminal; the view's hint row shows the owner. */
+	toggleMouse(): void {
+		const mouse = this.ports.mouse;
+		if (!mouse) {
+			this.ports.notice("This terminal has no mouse to hand over", true);
+			return;
+		}
+		const enabled = !mouse.enabled();
+		mouse.set(enabled);
+		this.view.setMouseMode(enabled);
+		this.ports.notice(
+			enabled
+				? "Mouse captured: wheel scrolls panes, chips click; hold shift for native selection"
+				: "Mouse returned to the terminal: select, copy and paste natively",
+		);
 	}
 
 	async copy(all: boolean): Promise<void> {

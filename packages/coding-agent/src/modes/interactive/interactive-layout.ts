@@ -7,6 +7,7 @@ import { APP_NAME } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
+import type { SettingsManager } from "../../core/settings-manager.ts";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import type { ActivityLaneComponent } from "./components/activity-lane.ts";
 import type { FooterComponent } from "./components/footer.ts";
@@ -30,6 +31,7 @@ export interface InteractiveLayoutHost {
 	footer: FooterComponent;
 	activityLane?: ActivityLaneComponent;
 	keybindings: KeybindingsManager;
+	settingsManager: Pick<SettingsManager, "getWorkbenchSettings" | "setWorkbenchSetting">;
 	extensionUiHost: Pick<ExtensionUiHost, "renderWidgets">;
 	streamingMessage?: AssistantMessage;
 	workbench?: WorkbenchController;
@@ -76,7 +78,16 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		},
 		copy: copyToClipboard,
 		notice: (text, error) => host.activityLane?.announce(text, error ? "failure" : "neutral"),
+		// The terminal owns the mouse unless the operator hands it over; the choice persists.
+		mouse: {
+			enabled: () => host.settingsManager.getWorkbenchSettings().mouse === "on",
+			set: (enabled) => {
+				host.settingsManager.setWorkbenchSetting("mouse", enabled ? "on" : "off");
+				host.ui.terminal.setMouseTracking?.(enabled);
+			},
+		},
 	});
+	view.setMouseMode(host.settingsManager.getWorkbenchSettings().mouse === "on");
 	host.workbenchInputCleanup = host.ui.addInputListener((data) => host.workbench?.handleInput(data));
 	host.ui.addChild(view);
 }

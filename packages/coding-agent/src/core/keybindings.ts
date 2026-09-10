@@ -40,6 +40,7 @@ export interface AppKeybindings {
 	"app.execution.toggle": true;
 	"app.workbench.grow": true;
 	"app.workbench.shrink": true;
+	"app.mouse.toggle": true;
 	"app.clipboard.pasteImage": true;
 	"app.transcript.open": true;
 	"app.transcript.scrollUp": true;
@@ -156,6 +157,11 @@ export const KEYBINDINGS = {
 	"app.execution.toggle": { defaultKeys: "alt+o", description: "Collapse or expand the workbench work area" },
 	"app.workbench.grow": { defaultKeys: "alt+=", description: "Give the workbench work area one more row" },
 	"app.workbench.shrink": { defaultKeys: "alt+-", description: "Take one row from the workbench work area" },
+	"app.mouse.toggle": {
+		defaultKeys: "alt+m",
+		description:
+			"Give the mouse to the workbench (wheel scroll, chips) or back to the terminal (native selection and paste)",
+	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: defaultImagePasteKeys(),
 		description: "Paste image from clipboard",

@@ -70,6 +70,8 @@ export class WorkbenchComponent extends Container {
 	private upperLimit = DEFAULT_UPPER_ROWS;
 	private collapsed = false;
 	private executionCompact = false;
+	/** Who owns the mouse; the hint row reports it so a silent wheel is never a mystery. */
+	private mouseMode = false;
 	private readonly inspectorPane = new WorkbenchPane();
 	private readonly executionPane = new WorkbenchPane();
 	private inspectorFraction = 0.3;
@@ -85,9 +87,9 @@ export class WorkbenchComponent extends Container {
 	/** Row of the divider that collapses or expands the work area; -1 in the native fallback. */
 	dividerRow = -1;
 	/** Key labels resolve once; the keybinding manager is static after startup. */
-	private keyLabels?: { toggle: string; resize: string; hint: string };
+	private keyLabels?: { toggle: string; resize: string; hint: string; mouse: string };
 
-	private keys(): { toggle: string; resize: string; hint: string } {
+	private keys(): { toggle: string; resize: string; hint: string; mouse: string } {
 		if (this.keyLabels) return this.keyLabels;
 		const key = (binding: Parameters<typeof keyText>[0], text: string) => {
 			const keys = keyText(binding);
@@ -104,8 +106,13 @@ export class WorkbenchComponent extends Container {
 			]
 				.filter(Boolean)
 				.join(" · "),
+			mouse: keyText("app.mouse.toggle"),
 		};
 		return this.keyLabels;
+	}
+
+	setMouseMode(enabled: boolean): void {
+		this.mouseMode = enabled;
 	}
 
 	constructor(options: WorkbenchOptions) {
@@ -309,7 +316,9 @@ export class WorkbenchComponent extends Container {
 	}
 
 	private hintRow(columns: number): string {
-		return truncateToWidth(` ${theme.fg("dim", this.keys().hint)}`, columns, "");
+		const { hint, mouse } = this.keys();
+		const owner = ` · ${mouse ? `${mouse} ` : ""}mouse: ${this.mouseMode ? "on" : "off"}`;
+		return truncateToWidth(` ${theme.fg("dim", hint + owner)}`, columns, "");
 	}
 
 	private inspectorContent(width: number): { title: string; meta: string; lines: string[] } {

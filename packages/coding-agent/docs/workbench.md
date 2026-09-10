@@ -12,19 +12,20 @@ The conversation viewport never emits the OSC 133 prompt-zone marks that the inl
 
 ## Reading and copying
 
-- Mouse wheel inside an inspector or execution surface: scroll only that surface. Its title row shows the visible row range when content overflows; title rows and gutters are not scroll targets.
-- Mouse wheel inside conversation or `Alt+PageUp` / `Alt+PageDown`: scroll conversation without changing editor history.
-- Scrolling upward pauses following; the conversation header then reads *Reading* and offers **Latest ↓**. Scrolling back to the final page, `Ctrl+End`, or **Latest ↓** resumes it.
-- Drag to select conversation text. A plain click only focuses the pane; the selection starts when the pointer moves, and only then does the displayed text freeze while the model continues working. `Ctrl+X` copies the selection (terminal-native selection copies on its own), and tree-selector copying retains precedence.
+The terminal owns the mouse by default (`workbench.mouse: "off"` in settings): drag selects natively, the emulator copies on release, and right-click pastes exactly as in any other terminal program. `Alt+M` hands the mouse to the workbench and back; the choice persists across sessions, the hint row reports the current owner, and the change applies immediately without leaving the screen.
+
+- `Alt+PageUp` / `Alt+PageDown`: scroll conversation without changing editor history. `Ctrl+End` or **Latest ↓** resumes following.
+- Scrolling upward pauses following; the conversation header then reads *Reading* and offers **Latest ↓**.
+- With the mouse captured (`Alt+M`): the wheel scrolls the surface under the pointer (inspector, execution or conversation; title rows and gutters are not scroll targets, and an overflowing surface shows its visible row range in its title row), header chips click, a click on the divider collapses or expands the work area, and a drag inside the conversation selects text. A plain click only focuses the pane; the selection starts when the pointer moves, and only then does the displayed text freeze while the model continues working. `Ctrl+X` copies that selection; tree-selector copying retains precedence. Most emulators still offer native selection while captured when Shift is held.
 - The conversation anchors to the bottom: the latest row sits directly above the status band, and a transcript shorter than the area leaves its empty rows above, never below.
 - Reading position anchors to the entry under the top row. When live-history trimming removes that entry, the conversation resumes following instead of jumping to the oldest retained rows.
 - An answer the verification gate withheld (the model claimed completion while a trusted verification was still failing) shows as an `Answer withheld` line in the conversation instead of leaving the screen unchanged.
 - **Copy conversation** or `Alt+C` copies user/assistant prose and answered `ask_question` interactions from the current session branch, including history outside the visible window. Routine tool output is excluded. Copies above 10 MiB are refused explicitly; use `/export` instead.
 - `Alt+O`: collapse or expand the work area; `Alt+=` / `Alt+-`: resize it. `Ctrl+T`: open the complete action transcript, including images and full results.
 
-New shortcuts are configurable through the existing keybinding manager: `app.conversation.pageUp`, `app.conversation.pageDown`, `app.conversation.latest`, `app.conversation.copy`, `app.execution.toggle`, `app.workbench.grow`, and `app.workbench.shrink`. Editor shortcuts and active modal navigation retain their existing owners.
+New shortcuts are configurable through the existing keybinding manager: `app.conversation.pageUp`, `app.conversation.pageDown`, `app.conversation.latest`, `app.conversation.copy`, `app.execution.toggle`, `app.workbench.grow`, `app.workbench.shrink`, and `app.mouse.toggle`. Editor shortcuts and active modal navigation retain their existing owners.
 
-Terminal-native selection, typically available by holding Shift, depends on the terminal emulator and cannot notify the application to pause. The application-owned drag selection does pause. Clipboard transport uses the existing platform clipboard/OSC 52 adapter; remote terminal support varies.
+Terminal-native selection cannot notify the application to pause; the application-owned drag selection (mouse captured) does pause. Clipboard transport uses the existing platform clipboard/OSC 52 adapter; remote terminal support varies.
 
 ## File effects and limits
 
