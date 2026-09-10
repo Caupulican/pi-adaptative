@@ -367,19 +367,19 @@ describe("Workbench input boundary", () => {
 			notice() {},
 		});
 		view.render(80);
-		expect(view.conversationTop).toBe(10);
+		expect(view.conversationTop).toBe(9);
 		expect(view.conversationHeight).toBe(9);
 		// The single row anchors to the bottom of the conversation area (row 18, 1-based 19).
-		controller.handleInput("\x1b[<0;1;19M"); // The gutter must not select text.
+		controller.handleInput("\x1b[<0;1;18M"); // The gutter must not select text.
 		expect(view.conversation.following).toBe(true);
 		// A click without a drag only focuses the pane: nothing freezes, following continues.
-		controller.handleInput("\x1b[<0;2;19M");
-		controller.handleInput("\x1b[<0;2;19m");
+		controller.handleInput("\x1b[<0;2;18M");
+		controller.handleInput("\x1b[<0;2;18m");
 		expect(view.conversation.following).toBe(true);
 		expect(view.conversation.selectionText()).toBeUndefined();
-		controller.handleInput("\x1b[<0;2;19M");
-		controller.handleInput("\x1b[<32;7;19M");
-		controller.handleInput("\x1b[<0;7;19m");
+		controller.handleInput("\x1b[<0;2;18M");
+		controller.handleInput("\x1b[<32;7;18M");
+		controller.handleInput("\x1b[<0;7;18m");
 		await controller.copy(false);
 		expect(copies).toEqual(["hello"]);
 		expect(view.conversation.following).toBe(false);

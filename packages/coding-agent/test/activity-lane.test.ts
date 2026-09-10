@@ -4,6 +4,7 @@ import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts
 import { addTaskStep, createTaskStepsState, updateTaskStep } from "../src/core/tasks/task-state.ts";
 import {
 	ActivityLaneComponent,
+	formatElapsed,
 	projectActivityLane,
 	renderActivityLaneLine,
 } from "../src/modes/interactive/components/activity-lane.ts";
@@ -46,11 +47,43 @@ describe("activity lane", () => {
 
 		expect(lines).toHaveLength(1);
 		expect(text).toContain("Implementing status lane");
-		// Workers aggregate into counts instead of consuming plan-slot width.
-		expect(text).toContain("1 agent");
+		// The one running worker is the subject of the turn slot; counts appear only with company.
+		expect(text).toMatch(/●\s+agent · Fast coder/);
+		expect(text).not.toContain("1 agent");
 		// The task owns the plan slot; the goal yields to it.
 		expect(text).not.toContain("Stabilize the harness");
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(62);
+	});
+
+	it("names the one running tool as the subject with its elapsed time, and counts tools once there is company", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		const text = () => stripAnsi(lane.render(100).join("\n"));
+		lane.start({ id: "runtime:turn", kind: "runtime", label: "Working..." });
+		expect(text()).toMatch(/^\s*●\s+Working\.\.\. \(0s\)\s*$/);
+		now += 12_000;
+		lane.start({ id: "tool:1", kind: "tool", label: "Bash", tag: "bash" });
+		expect(text()).toMatch(/^\s*●\s+Bash \(0s\)\s*$/);
+		now += 72_000;
+		expect(text()).toContain("Bash (1m12s)");
+		expect(text()).not.toContain("1 bash");
+		lane.start({ id: "tool:2", kind: "tool", label: "Bash", tag: "bash" });
+		expect(text()).toContain("2 bash");
+		expect(text()).not.toContain("Bash (");
+		lane.remove("tool:2");
+		expect(text()).toContain("Bash (1m12s)");
+		lane.finish("tool:1", "success");
+		// The finished tool is the newest event for a moment; a generic turn label yields to it.
+		expect(text()).toMatch(/●\s+Bash\s*$/);
+		expect(text()).not.toContain("(1m");
+		lane.dispose();
+		expect(formatElapsed(59_999)).toBe("59s");
+		expect(formatElapsed(3_600_000 + 120_000)).toBe("1h02m");
 	});
 
 	it("does not replay old terminal state when a resumed session is primed", () => {
@@ -262,9 +295,9 @@ describe("activity lane slots", () => {
 	});
 
 	it("falls back to the activity kind when tag normalization is empty", () => {
-		const text = render([tool("empty", " _--_ ")], 100);
+		const text = render([tool("empty", " _--_ "), tool("blank", "   ")], 100);
 
-		expect(text).toContain("1 tool");
+		expect(text).toContain("2 tool");
 	});
 
 	it("shows only the newest terminal event and keeps load-bearing runtime labels in the turn slot", () => {

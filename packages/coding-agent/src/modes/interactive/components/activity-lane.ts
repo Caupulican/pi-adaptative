@@ -15,6 +15,8 @@ export interface ActivityLaneItem {
 	status: ActivityLaneStatus;
 	/** Short aggregation key (e.g. "bash", "python", "agent") for the concurrency slot. */
 	tag?: string;
+	/** Epoch ms when the work began; the live row shows the elapsed time next to its subject. */
+	startedAt?: number;
 }
 
 export interface ActivityLaneCanonicalSnapshot {
@@ -29,6 +31,16 @@ export interface ActivityLaneProjection {
 }
 
 const DEFAULT_TERMINAL_HOLD_MS = 2_000;
+const ELAPSED_TICK_MS = 1_000;
+
+/** `12s`, `1m12s`, `1h02m`: the coarsest unit the operator needs to judge "is it stuck". */
+export function formatElapsed(ms: number): string {
+	const seconds = Math.max(0, Math.floor(ms / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m${String(seconds % 60).padStart(2, "0")}s`;
+	return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
+}
 const MAX_ACTIVITY_LABEL_LENGTH = 240;
 const MAX_SEEN_TERMINALS = 512;
 
@@ -198,6 +210,8 @@ interface AggregateGroup {
 
 interface LaneSlots {
 	turn: ActivityLaneItem | undefined;
+	/** The one live tool or worker when exactly one runs: it becomes the subject of the turn slot. */
+	soloTool: ActivityLaneItem | undefined;
 	plan: ActivityLaneItem | undefined;
 	groups: AggregateGroup[];
 	queue: ActivityLaneItem | undefined;
@@ -219,6 +233,7 @@ function classifySlots(items: readonly ActivityLaneItem[]): LaneSlots {
 	let queue: ActivityLaneItem | undefined;
 	let event: ActivityLaneItem | undefined;
 	const groups = new Map<string, AggregateGroup>();
+	const running: ActivityLaneItem[] = [];
 
 	for (const item of items) {
 		if (isTerminalStatus(item.status)) {
@@ -241,6 +256,7 @@ function classifySlots(items: readonly ActivityLaneItem[]): LaneSlots {
 				break;
 			case "tool":
 			case "worker": {
+				running.push(item);
 				const tag = normalizeActivityTag(item.tag, item.kind);
 				const group = groups.get(tag) ?? { tag, count: 0, waiting: false };
 				group.count += 1;
@@ -253,7 +269,14 @@ function classifySlots(items: readonly ActivityLaneItem[]): LaneSlots {
 		}
 	}
 
-	return { turn, plan: plan ?? goal, groups: [...groups.values()], queue, event };
+	return {
+		turn,
+		soloTool: running.length === 1 ? running[0] : undefined,
+		plan: plan ?? goal,
+		groups: [...groups.values()],
+		queue,
+		event,
+	};
 }
 
 function renderConcurrency(theme: Theme, groups: readonly AggregateGroup[]): string {
@@ -268,7 +291,12 @@ function renderConcurrency(theme: Theme, groups: readonly AggregateGroup[]): str
 	return parts.join(theme.fg("dim", " · "));
 }
 
-export function renderActivityLaneLine(theme: Theme, items: readonly ActivityLaneItem[], width: number): string[] {
+export function renderActivityLaneLine(
+	theme: Theme,
+	items: readonly ActivityLaneItem[],
+	width: number,
+	now?: number,
+): string[] {
 	const safeWidth = Math.max(1, width);
 	if (items.length === 0 || safeWidth < 3) return [];
 	const slots = classifySlots(items);
@@ -276,18 +304,26 @@ export function renderActivityLaneLine(theme: Theme, items: readonly ActivityLan
 
 	const indent = " ";
 	const gap = " ".repeat(SLOT_GAP_WIDTH);
+	const elapsed = (item: ActivityLaneItem | undefined): string =>
+		item?.startedAt !== undefined && now !== undefined ? ` (${formatElapsed(now - item.startedAt)})` : "";
 
-	// Turn slot: alive-anchor glyph plus the live runtime label. Never hardcode "working".
-	// Generic Working... is omitted when a more specific plan, tool, queue, or event exists.
+	// Turn slot: alive-anchor glyph plus the subject of the work and how long it has run. The one
+	// running tool is the subject when there is exactly one; otherwise the live runtime label is,
+	// and a generic Working... yields to a more specific plan, tool, queue, or event.
 	let turnPart = "";
-	if (slots.turn) {
-		const liveLabel = slots.turn.label.trim();
-		const normalized = liveLabel.toLowerCase();
-		const generic = normalized === "working" || normalized === "working." || normalized === "working...";
-		const hasSpecific =
-			Boolean(slots.plan) || slots.groups.length > 0 || Boolean(slots.queue) || Boolean(slots.event);
-		const text = generic && hasSpecific ? "" : slots.turn.label;
-		const dotColor: ThemeColor = slots.turn.status === "waiting" ? "warning" : "accent";
+	if (slots.turn || slots.soloTool) {
+		const status = slots.turn?.status === "waiting" || slots.soloTool?.status === "waiting" ? "waiting" : "active";
+		const dotColor: ThemeColor = status === "waiting" ? "warning" : "accent";
+		let text = "";
+		if (slots.soloTool) {
+			text = `${slots.soloTool.label}${elapsed(slots.soloTool)}`;
+		} else if (slots.turn) {
+			const normalized = slots.turn.label.trim().toLowerCase();
+			const generic = normalized === "working" || normalized === "working." || normalized === "working...";
+			const hasSpecific =
+				Boolean(slots.plan) || slots.groups.length > 0 || Boolean(slots.queue) || Boolean(slots.event);
+			text = generic && hasSpecific ? "" : `${slots.turn.label}${elapsed(slots.turn)}`;
+		}
 		turnPart = text
 			? `${theme.fg(dotColor, "●")} ${theme.fg("muted", truncateToWidth(text, TURN_TEXT_MAX, "…"))}`
 			: `${theme.fg(dotColor, "●")}`;
@@ -306,7 +342,8 @@ export function renderActivityLaneLine(theme: Theme, items: readonly ActivityLan
 
 	// Right-aligned slots at natural size. Events and concurrency drop before the plan
 	// shrinks below its preferred width; the user-owned queue state remains visible.
-	let concurrencyPart = renderConcurrency(theme, slots.groups);
+	// The solo tool already names itself in the turn slot; a "1 bash" count would repeat it.
+	let concurrencyPart = slots.soloTool ? "" : renderConcurrency(theme, slots.groups);
 	const queuePart = slots.queue ? theme.fg("warning", truncateToWidth(slots.queue.label, QUEUE_TEXT_MAX, "…")) : "";
 	let eventPart = slots.event
 		? `${theme.fg(STATUS_COLORS[slots.event.status], "●")} ${theme.fg(
@@ -351,11 +388,43 @@ export class ActivityLaneComponent implements Component {
 	private readonly transientTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private readonly seenTerminalKeys = new Set<string>();
 	private transientSequence = 0;
+	private readonly now: () => number;
+	/** Runs only while timed work is live, so the elapsed figure advances; never keeps the process alive. */
+	private ticker?: ReturnType<typeof setInterval>;
 
-	constructor(theme: Theme, requestRender: () => void, terminalHoldMs = DEFAULT_TERMINAL_HOLD_MS) {
+	constructor(
+		theme: Theme,
+		requestRender: () => void,
+		terminalHoldMs = DEFAULT_TERMINAL_HOLD_MS,
+		now: () => number = Date.now,
+	) {
 		this.theme = theme;
 		this.requestRender = requestRender;
 		this.terminalHoldMs = terminalHoldMs;
+		this.now = now;
+	}
+
+	private timedKind(kind: ActivityLaneKind): boolean {
+		return kind === "runtime" || kind === "tool" || kind === "worker";
+	}
+
+	private syncTicker(): void {
+		const timed = [...this.live.values()].some((item) => item.startedAt !== undefined);
+		if (timed && !this.ticker) {
+			this.ticker = setInterval(() => this.requestRender(), ELAPSED_TICK_MS);
+			this.ticker.unref?.();
+		} else if (!timed && this.ticker) {
+			clearInterval(this.ticker);
+			this.ticker = undefined;
+		}
+	}
+
+	private setLive(item: Omit<ActivityLaneItem, "status">, status: "active" | "waiting"): void {
+		const startedAt =
+			item.startedAt ?? this.live.get(item.id)?.startedAt ?? (this.timedKind(item.kind) ? this.now() : undefined);
+		this.live.set(item.id, { ...item, label: boundedLabel(item.label), status, startedAt });
+		this.syncTicker();
+		this.requestRender();
 	}
 
 	private rememberTerminal(key: string): void {
@@ -392,6 +461,7 @@ export class ActivityLaneComponent implements Component {
 		if (this.sessionKey !== sessionKey) {
 			this.clearTransient();
 			this.live.clear();
+			this.syncTicker();
 			this.seenTerminalKeys.clear();
 			this.sessionKey = sessionKey;
 		}
@@ -407,13 +477,11 @@ export class ActivityLaneComponent implements Component {
 	}
 
 	start(item: Omit<ActivityLaneItem, "status">): void {
-		this.live.set(item.id, { ...item, label: boundedLabel(item.label), status: "active" });
-		this.requestRender();
+		this.setLive(item, "active");
 	}
 
 	wait(item: Omit<ActivityLaneItem, "status">): void {
-		this.live.set(item.id, { ...item, label: boundedLabel(item.label), status: "waiting" });
-		this.requestRender();
+		this.setLive(item, "waiting");
 	}
 
 	update(id: string, label: string): void {
@@ -424,7 +492,9 @@ export class ActivityLaneComponent implements Component {
 	}
 
 	remove(id: string): void {
-		if (this.live.delete(id)) this.requestRender();
+		if (!this.live.delete(id)) return;
+		this.syncTicker();
+		this.requestRender();
 	}
 
 	removeByPrefix(prefix: string): void {
@@ -434,12 +504,15 @@ export class ActivityLaneComponent implements Component {
 			this.live.delete(id);
 			removed = true;
 		}
-		if (removed) this.requestRender();
+		if (!removed) return;
+		this.syncTicker();
+		this.requestRender();
 	}
 
 	finish(id: string, status: "success" | "failure" | "neutral", fallback?: Omit<ActivityLaneItem, "status">): void {
 		const current = this.live.get(id) ?? fallback;
 		this.live.delete(id);
+		this.syncTicker();
 		if (current) this.addTransient({ ...current, label: boundedLabel(current.label), status });
 		this.requestRender();
 	}
@@ -461,12 +534,14 @@ export class ActivityLaneComponent implements Component {
 	}
 
 	render(width: number): string[] {
-		return renderActivityLaneLine(this.theme, this.getItems(), width);
+		return renderActivityLaneLine(this.theme, this.getItems(), width, this.now());
 	}
 
 	invalidate(): void {}
 
 	dispose(): void {
+		if (this.ticker) clearInterval(this.ticker);
+		this.ticker = undefined;
 		this.clearTransient();
 		this.live.clear();
 		this.canonical.clear();

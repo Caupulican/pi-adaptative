@@ -47,15 +47,17 @@ describe("Workbench terminal rendering", () => {
 			ui.requestRender();
 			await terminal.waitForRender();
 			expect(view.conversationTop).toBe(start); // evidence never moves the conversation
-			expect(terminal.getViewport()[0]).toMatch(/^ pi .*IDLE\s*$/);
-			expect(terminal.getViewport()[2]).toMatch(
+			expect(terminal.getViewport()[0]).toMatch(/^ pi\s*$/);
+			expect(terminal.getViewport()[1]).toMatch(
 				/^ Work plan .*1 \/ 2 {4}Execution .*File effects and command outcomes( · \d+-\d+\/\d+ ↕)?\s*$/,
 			);
 			expect(terminal.getViewport()[view.conversationTop - 1]).toMatch(
 				/^ Conversation · Following latest .* Copy conversation\s*$/,
 			);
-			expect(terminal.getViewport()[view.conversationTop + view.conversationHeight]).toMatch(/^─+$/);
-			expect(terminal.getViewport()[view.conversationTop + view.conversationHeight + 1]).toContain(
+			// The live row sits between the conversation and the status rule.
+			expect(terminal.getViewport()[view.conversationTop + view.conversationHeight]!.trim()).toBe("");
+			expect(terminal.getViewport()[view.conversationTop + view.conversationHeight + 1]).toMatch(/^─+$/);
+			expect(terminal.getViewport()[view.conversationTop + view.conversationHeight + 2]).toContain(
 				"status at bottom",
 			);
 			for (const line of terminal.getViewport()) expect(line).not.toMatch(/[┌┐└┘│]/);
@@ -63,8 +65,8 @@ describe("Workbench terminal rendering", () => {
 			view.setExecution(undefined);
 			ui.requestRender();
 			await terminal.waitForRender();
-			expect(terminal.getViewport()[2]).toContain("Work plan");
-			expect(terminal.getViewport()[3]).toContain("Work complete");
+			expect(terminal.getViewport()[1]).toContain("Work plan");
+			expect(terminal.getViewport()[2]).toContain("Work complete");
 			expect(view.conversationTop).toBe(start);
 			expect(terminal.getViewport()[start - 1]).toContain("Conversation");
 			const overlay = ui.showOverlay(new Text("question dialog", 0, 0));

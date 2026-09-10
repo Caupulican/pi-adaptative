@@ -6,12 +6,9 @@ import { ConversationWindow } from "./conversation-window.ts";
 import { keyText } from "./keybinding-hints.ts";
 import { labelRow, surfaceRow, WorkbenchPane } from "./workbench-pane.ts";
 
-export type WorkbenchRunState = "working" | "waiting" | "idle";
-
+/** The title strip names the work; the run state lives on the live row inside the conversation zone. */
 export interface WorkbenchHeadline {
-	/** Plan or goal naming the current work; the host fallback names the session otherwise. */
 	title?: string;
-	state: WorkbenchRunState;
 }
 
 /** One inspector block: a titled group of rows (plan steps, team members). */
@@ -41,7 +38,6 @@ export interface WorkbenchOptions {
 export const PLAN_SECTION = "Work plan";
 export const TEAM_SECTION = "Team";
 const EXECUTION_META = "File effects and command outcomes";
-const RUN_STATE_LABEL: Record<WorkbenchRunState, string> = { working: "WORKING", waiting: "WAITING", idle: "IDLE" };
 const MIN_INSPECTOR_WIDTH = 24;
 const SIDE_BY_SIDE_MIN_COLUMNS = 80;
 const DEFAULT_UPPER_ROWS = 10;
@@ -62,7 +58,7 @@ export class WorkbenchComponent extends Container {
 	readonly conversation: ConversationWindow;
 	private readonly options: WorkbenchOptions;
 	private sections: WorkbenchSection[] = [];
-	private headlineState: WorkbenchHeadline = { state: "idle" };
+	private headlineState: WorkbenchHeadline = {};
 	private execution?: Component;
 	private executionMeta = EXECUTION_META;
 	private executionEvidence?: Component;
@@ -81,7 +77,7 @@ export class WorkbenchComponent extends Container {
 	conversationLeft = 1;
 	conversationWidth = 0;
 	conversationHeight = 0;
-	/** First row of the work area; rows above it are the title strip and live activity. */
+	/** First row of the work area; the row above it is the title strip. */
 	upperTop = 0;
 	upperHeight = 0;
 	/** Row of the divider that collapses or expands the work area; -1 in the native fallback. */
@@ -236,25 +232,18 @@ export class WorkbenchComponent extends Container {
 		for (const section of this.sections) if (!Array.isArray(section.body)) section.body.invalidate();
 	}
 
+	/** Identity only: brand and the work's name. State belongs to the live row, where the answer lands. */
 	private headline(columns: number): string {
 		const inner = Math.max(0, columns - 2);
-		const { state } = this.headlineState;
-		const badgeText = RUN_STATE_LABEL[state];
-		const badge = theme.fg(state === "working" ? "accent" : state === "waiting" ? "warning" : "dim", badgeText);
 		const fallback = this.options.title?.() ?? "";
 		const title = this.headlineState.title || (fallback === this.options.brand ? "" : fallback);
 		let left = theme.bold(theme.fg("accent", this.options.brand));
-		let leftWidth = visibleWidth(this.options.brand);
+		const leftWidth = visibleWidth(this.options.brand);
 		if (title) {
-			const room = inner - leftWidth - 2 - badgeText.length - 2;
-			if (room >= 4) {
-				const shown = truncateToWidth(title, room, "…");
-				left += `  ${theme.fg("muted", shown)}`;
-				leftWidth += 2 + visibleWidth(shown);
-			}
+			const room = inner - leftWidth - 2;
+			if (room >= 4) left += `  ${theme.fg("muted", truncateToWidth(title, room, "…"))}`;
 		}
-		if (leftWidth + 2 + badgeText.length > inner) return truncateToWidth(` ${left}`, columns, "");
-		return ` ${left}${" ".repeat(inner - leftWidth - badgeText.length)}${badge} `;
+		return truncateToWidth(` ${left}`, columns, "");
 	}
 
 	private conversationHeader(columns: number): string {
@@ -451,7 +440,7 @@ export class WorkbenchComponent extends Container {
 		// Rows that already fit skip the grapheme scan; the width lookup is cached per string.
 		const gutter = (line: string) =>
 			line ? ` ${visibleWidth(line) <= inner ? line : truncateToWidth(line, inner, "")}` : "";
-		// Title strip, activity, divider, conversation header, three conversation rows and the
+		// Title strip, divider, conversation header, three conversation rows, the live row and the
 		// status boundary stay.
 		const dockBudget = Math.max(0, total - editor.length - 9);
 		const above = this.options.dock.flatMap((component) => component.render(inner)).slice(-dockBudget);
@@ -466,9 +455,11 @@ export class WorkbenchComponent extends Container {
 			...below.map(gutter),
 			this.hintRow(columns),
 		];
+		// The live row is reserved even when idle so the geometry never jumps between turns.
 		const activity = this.options.activity?.render(inner).slice(0, 1) ?? [];
-		const head = [this.headline(columns), activity.length ? gutter(activity[0]!) : ""];
-		const available = total - head.length - dockRows.length;
+		const liveRow = activity.length ? gutter(activity[0]!) : "";
+		const head = [this.headline(columns)];
+		const available = total - head.length - 1 - dockRows.length;
 		const upperRows = this.collapsed ? 0 : Math.min(this.upperLimit, Math.floor((available - 4) * 0.5));
 		const upper = upperRows >= 2 ? this.renderUpper(columns, upperRows, head.length) : [];
 		this.upperTop = head.length;
@@ -480,6 +471,6 @@ export class WorkbenchComponent extends Container {
 		const header = this.conversationHeader(columns);
 		const body = this.conversation.render(inner, this.conversationHeight).map(gutter);
 		while (body.length < this.conversationHeight) body.push("");
-		return [...head, ...upper, this.divider(columns, upper.length > 0), header, ...body, ...dockRows];
+		return [...head, ...upper, this.divider(columns, upper.length > 0), header, ...body, liveRow, ...dockRows];
 	}
 }

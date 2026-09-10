@@ -193,7 +193,7 @@ describe("Workbench layout", () => {
 		const short = view.render(110).map(stripAnsi);
 		const top = view.conversationTop;
 		expect(view.upperHeight).toBe(10);
-		expect(top).toBe(14);
+		expect(top).toBe(13);
 		output.lines = Array.from({ length: 100 }, (_, i) => `tool row ${i}`);
 		output.invalidate();
 		const long = view.render(110).map(stripAnsi);
@@ -205,25 +205,27 @@ describe("Workbench layout", () => {
 		view.toggleUpper();
 		const collapsed = view.render(110).map(stripAnsi);
 		expect(view.upperHeight).toBe(0);
-		expect(view.conversationTop).toBe(4);
-		expect(collapsed[2]).toMatch(/▸ Work plan 1 \/ 3/);
+		expect(view.conversationTop).toBe(3);
+		expect(collapsed[1]).toMatch(/▸ Work plan 1 \/ 3/);
 		view.toggleUpper();
 		view.shrinkUpper();
 		view.shrinkUpper();
 		view.render(110);
 		expect(view.upperHeight).toBe(8);
-		expect(view.conversationTop).toBe(12);
+		expect(view.conversationTop).toBe(11);
 		for (const frame of [short, long]) {
 			expect(frame).toHaveLength(30);
-			expect(frame[0]).toMatch(/^ pi {2}sample-project +IDLE $/);
-			expect(frame[1]).toBe("");
-			expect(frame[2]).toMatch(
+			// Identity only on the title strip: no run-state badge lives outside the conversation zone.
+			expect(frame[0]).toMatch(/^ pi {2}sample-project\s*$/);
+			expect(frame[1]).toMatch(
 				/^ Work plan .*1 \/ 3 {4}Execution .*File effects and command outcomes( · \d+-\d+\/\d+ ↕)?\s*$/,
 			);
-			expect(frame[12]).toMatch(/^─+ ↕ work area.*─+$/);
-			expect(frame[13]).toMatch(/^ Conversation · Following latest .* Copy conversation {2}$/);
+			expect(frame[11]).toMatch(/^─+ ↕ work area.*─+$/);
+			expect(frame[12]).toMatch(/^ Conversation · Following latest .* Copy conversation {2}$/);
 			expect(frame[top + 11]!.trimEnd()).toBe(" conversation body");
 			expect(frame[top]).toBe("");
+			// The live row is reserved above the status rule even while idle, so geometry never jumps.
+			expect(frame.at(-5)).toBe("");
 			expect(frame.at(-4)).toMatch(/^─+$/);
 			expect(frame.at(-3)!.trimEnd()).toBe(" status across the entire screen");
 			expect(frame.at(-2)!.trimEnd()).toBe(" input across the entire screen");
@@ -234,7 +236,7 @@ describe("Workbench layout", () => {
 	it("shows placeholders in an empty work area and bounds geometry on narrow and short terminals", () => {
 		const { view } = setup();
 		const empty = view.render(110).map(stripAnsi);
-		expect(empty[2]).toContain("Work plan");
+		expect(empty[1]).toContain("Work plan");
 		expect(empty.join("\n")).toContain("No open steps");
 		expect(empty.join("\n")).toContain("No agents");
 		expect(empty.join("\n")).toContain("No file effects or command outcomes yet");
@@ -255,8 +257,8 @@ describe("Workbench layout", () => {
 		const frame = short.render(80).map(stripAnsi);
 		expect(frame).toHaveLength(9);
 		expect(short.upperHeight).toBe(0);
-		expect(frame[2]).toMatch(/^─+.*─+$/);
-		expect(frame[3]).toContain("Conversation");
+		expect(frame[1]).toMatch(/^─+.*─+$/);
+		expect(frame[2]).toContain("Conversation");
 		expect(short.conversationHeight).toBe(4);
 	});
 	it("scrolls upper panes independently without moving conversation or dock", () => {
@@ -266,37 +268,37 @@ describe("Workbench layout", () => {
 		const initial = view.render(110).map(stripAnsi);
 		const top = view.conversationTop;
 		// Execution follows its newest rows; the inspector opens at its first rows.
-		expect(initial[3]).toContain("work 0");
-		expect(initial[11]).toContain("tool 99");
-		expect(view.scrollUpper(50, 3, -3)).toBe(true);
+		expect(initial[2]).toContain("work 0");
+		expect(initial[10]).toContain("tool 99");
+		expect(view.scrollUpper(50, 2, -3)).toBe(true);
 		let frame = view.render(110).map(stripAnsi);
-		expect(frame[11]).toContain("tool 96");
+		expect(frame[10]).toContain("tool 96");
 		expect(frame.slice(top - 1)).toEqual(initial.slice(top - 1));
 		expect(view.conversation.following).toBe(true);
-		expect(view.scrollUpper(50, 3, 3)).toBe(true);
-		expect(view.render(110).map(stripAnsi)[11]).toContain("tool 99");
-		expect(view.scrollUpper(1, 3, 3)).toBe(true);
+		expect(view.scrollUpper(50, 2, 3)).toBe(true);
+		expect(view.render(110).map(stripAnsi)[10]).toContain("tool 99");
+		expect(view.scrollUpper(1, 2, 3)).toBe(true);
 		frame = view.render(110).map(stripAnsi);
-		expect(frame[3]).toContain("work 3");
-		expect(frame[11]).toContain("tool 99");
+		expect(frame[2]).toContain("work 3");
+		expect(frame[10]).toContain("tool 99");
 		// Gutters, pane titles, the title strip and the dock are not scroll targets.
-		expect(view.scrollUpper(0, 3, 3)).toBe(false);
-		expect(view.scrollUpper(1, 2, 3)).toBe(false);
+		expect(view.scrollUpper(0, 2, 3)).toBe(false);
+		expect(view.scrollUpper(1, 1, 3)).toBe(false);
 		expect(view.scrollUpper(1, 0, 3)).toBe(false);
 		expect(view.scrollUpper(1, 29, 3)).toBe(false);
 		view.setExecution(new Rows(["new result"]));
-		expect(view.render(110).map(stripAnsi)[3]).toContain("new result");
+		expect(view.render(110).map(stripAnsi)[2]).toContain("new result");
 		// New evidence with a growing tail stays followed until the operator scrolls up.
 		const growing = new Rows(Array.from({ length: 30 }, (_, i) => `grow ${i}`));
 		view.setExecution(growing);
-		expect(view.render(110).map(stripAnsi)[11]).toContain("grow 29");
+		expect(view.render(110).map(stripAnsi)[10]).toContain("grow 29");
 		growing.lines = Array.from({ length: 40 }, (_, i) => `grow ${i}`);
 		growing.invalidate();
-		expect(view.render(110).map(stripAnsi)[11]).toContain("grow 39");
-		expect(view.scrollUpper(50, 3, -3)).toBe(true);
+		expect(view.render(110).map(stripAnsi)[10]).toContain("grow 39");
+		expect(view.scrollUpper(50, 2, -3)).toBe(true);
 		growing.lines = Array.from({ length: 50 }, (_, i) => `grow ${i}`);
 		growing.invalidate();
-		expect(view.render(110).map(stripAnsi)[11]).toContain("grow 36");
+		expect(view.render(110).map(stripAnsi)[10]).toContain("grow 36");
 	});
 	it("clears invisible hit targets when a large editor takes over the screen", () => {
 		const { view, editor } = setup();
@@ -312,7 +314,7 @@ describe("Workbench layout", () => {
 		const { view, editor } = setup();
 		const lines = view.render(110).map(stripAnsi);
 		expect(lines).toHaveLength(30);
-		expect(lines[13]).toContain("Conversation");
+		expect(lines[12]).toContain("Conversation");
 		expect(lines.at(-4)).toMatch(/^─+$/);
 		expect(lines.at(-3)!.trimEnd()).toBe(" status across the entire screen");
 		expect(lines.at(-2)!.trimEnd()).toBe(" input across the entire screen");
@@ -328,21 +330,21 @@ describe("Workbench layout", () => {
 		view.setExecution(new Rows(Array.from({ length: 50 }, (_, i) => `diff ${i}`)));
 		const running = view.render(110);
 		const conversationStart = running.findIndex((line) => stripAnsi(line).includes("Conversation"));
-		expect(conversationStart).toBe(13);
-		expect(stripAnsi(running.slice(2, 12).join("\n"))).toMatch(/Team .*1 active/);
+		expect(conversationStart).toBe(12);
+		expect(stripAnsi(running.slice(1, 11).join("\n"))).toMatch(/Team .*1 active/);
 		view.setInspector([{ title: "Work plan", meta: "3 / 3", body: ["Work complete"] }]);
 		const done = view.render(110);
-		expect(done.findIndex((line) => stripAnsi(line).includes("Conversation"))).toBe(13);
+		expect(done.findIndex((line) => stripAnsi(line).includes("Conversation"))).toBe(12);
 		expect(stripAnsi(done.join("\n"))).toContain("diff 49");
 		view.toggleUpper();
 		const collapsed = view.render(110).map(stripAnsi);
-		expect(collapsed[2]).toMatch(/▸ Work plan 3 \/ 3 · Execution/);
-		expect(collapsed[3]).toContain("Conversation");
+		expect(collapsed[1]).toMatch(/▸ Work plan 3 \/ 3 · Execution/);
+		expect(collapsed[2]).toContain("Conversation");
 		for (const width of [1, 20, 60, 110]) {
 			for (const line of view.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
 	});
-	it("shows the live activity line under the title strip and the run state on the right", () => {
+	it("shows the live activity on the row where the answer lands, and names the work on the title strip", () => {
 		const { view } = setup();
 		const activity = new Text("● Editing reload ownership", 0, 0);
 		const withActivity = new WorkbenchComponent({
@@ -353,13 +355,19 @@ describe("Workbench layout", () => {
 			brand: "pi",
 			viewportRows: () => 20,
 		});
-		withActivity.setHeadline({ title: "tool reload reliability", state: "working" });
+		withActivity.setHeadline({ title: "tool reload reliability" });
 		const frame = withActivity.render(80).map(stripAnsi);
-		expect(frame[0]).toMatch(/^ pi {2}tool reload reliability +WORKING $/);
-		expect(frame[1]!.trimEnd()).toBe(" ● Editing reload ownership");
+		expect(frame[0]).toMatch(/^ pi {2}tool reload reliability\s*$/);
 		expect(withActivity.upperHeight).toBe(6);
-		expect(frame[9]).toContain("Conversation");
-		expect(withActivity.conversationTop).toBe(10);
-		expect(view.render(80).map(stripAnsi)[0]).toMatch(/IDLE $/);
+		expect(frame[8]).toContain("Conversation");
+		expect(withActivity.conversationTop).toBe(9);
+		expect(withActivity.conversationHeight).toBe(9);
+		// One state glyph on the whole frame, and it sits directly below the conversation rows.
+		expect(frame[withActivity.conversationTop + withActivity.conversationHeight]!.trimEnd()).toBe(
+			" ● Editing reload ownership",
+		);
+		expect(frame.filter((line) => line.includes("●"))).toHaveLength(1);
+		expect(frame.join("\n")).not.toMatch(/WORKING|IDLE|WAITING/);
+		expect(view.render(80).map(stripAnsi)[0]).not.toMatch(/IDLE|WORKING/);
 	});
 });

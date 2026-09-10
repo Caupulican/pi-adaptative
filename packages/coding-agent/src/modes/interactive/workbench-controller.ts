@@ -9,13 +9,7 @@ import { stripAnsi } from "../../utils/ansi.ts";
 import type { ActivityLaneItem } from "./components/activity-lane.ts";
 import { type AgentsOverlaySnapshot, buildWorkPanelModel, compactWorkPanel } from "./components/agents-overlay.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
-import {
-	PLAN_SECTION,
-	TEAM_SECTION,
-	type WorkbenchComponent,
-	type WorkbenchRunState,
-	type WorkbenchSection,
-} from "./components/workbench.ts";
+import { PLAN_SECTION, TEAM_SECTION, type WorkbenchComponent, type WorkbenchSection } from "./components/workbench.ts";
 import { theme } from "./theme/theme.ts";
 import { WorkspaceObservation } from "./workbench-workspace.ts";
 
@@ -43,7 +37,6 @@ export class WorkbenchController {
 	/** Left button went down inside the conversation; a drag from here selects, a plain click does not. */
 	private pressPoint?: { row: number; column: number };
 	private snapshot?: AgentsOverlaySnapshot;
-	private runState: WorkbenchRunState = "idle";
 	private workTitle?: string;
 	private disposed = false;
 	private readonly workspace: WorkspaceObservation;
@@ -67,7 +60,6 @@ export class WorkbenchController {
 		this.staleEvidence = false;
 		this.lastObservationNote = undefined;
 		this.snapshot = undefined;
-		this.runState = "idle";
 		this.workTitle = undefined;
 		this.view.conversation.reset();
 		this.view.setExecution(undefined);
@@ -88,15 +80,11 @@ export class WorkbenchController {
 		if (cwd) this.observationReady = this.workspace.begin(cwd);
 		this.staleEvidence = true;
 		this.lastObservationNote = undefined;
-		this.runState = "working";
-		this.publishHeadline();
 		// A prior failed action remains a receipt; a new task is not evidence of recovery.
 		this.updateExecution();
 	}
 
 	complete(): void {
-		this.runState = "idle";
-		this.publishHeadline();
 		this.updateExecution();
 	}
 
@@ -110,7 +98,7 @@ export class WorkbenchController {
 	}
 
 	private publishHeadline(): void {
-		this.view.setHeadline({ title: this.workTitle, state: this.runState });
+		this.view.setHeadline({ title: this.workTitle });
 	}
 
 	beforeTool(name: string, cwd: string): void {
@@ -222,9 +210,6 @@ export class WorkbenchController {
 		this.snapshot = snapshot;
 		this.view.setInspector(buildWorkbenchSections(snapshot, Date.now()));
 		this.workTitle = workTitle(snapshot.items);
-		if (snapshot.items.some((item) => item.kind === "runtime" && item.status === "waiting"))
-			this.runState = "waiting";
-		else if (this.runState === "waiting") this.runState = "working";
 		this.publishHeadline();
 	}
 
