@@ -94,7 +94,7 @@ describe("workflow tools share the admitted project", () => {
 				const next =
 					change === "replaced"
 						? createGoalState({ goalId: "replacement-goal", userGoal: "Inspect different project", now: "T1" })
-						: applyGoalEvent(initial, { type: "progress", now: "T1" });
+						: applyGoalEvent(initial, { type: "pause_goal", now: "T1" });
 				harness.session.saveGoalStateSnapshot(next);
 			}
 			const before = harness.session.getGoalStateSnapshot();
