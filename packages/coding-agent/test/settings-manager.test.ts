@@ -1962,7 +1962,7 @@ describe("workbench settings", () => {
 		const manager = SettingsManager.inMemory({});
 		expect(manager.getWorkbenchSettings()).toEqual({
 			mouse: "off",
-			rows: 10,
+			rows: "half",
 			collapsed: false,
 			inspector: "shown",
 			executionMaximized: false,

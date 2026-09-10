@@ -40,14 +40,18 @@ export const TEAM_SECTION = "Team";
 const EXECUTION_META = "File effects and command outcomes";
 const MIN_INSPECTOR_WIDTH = 24;
 const SIDE_BY_SIDE_MIN_COLUMNS = 80;
-export const DEFAULT_UPPER_ROWS = 10;
+/** Until the operator resizes, evidence and conversation share the rows evenly. */
+export const DEFAULT_UPPER_ROWS: WorkAreaRows = "half";
 /** The conversation never drops below this many rows, whatever the operator gives the work area. */
 export const MIN_CONVERSATION_ROWS = 6;
 export const MAX_UPPER_ROWS = 60;
 
+/** Explicit rows the operator chose, or "half": an even split that follows the terminal's height. */
+export type WorkAreaRows = number | "half";
+
 /** Everything the operator owns about the work area; persisted as-is across sessions. */
 export interface WorkbenchGeometry {
-	rows: number;
+	rows: WorkAreaRows;
 	collapsed: boolean;
 	inspector: "shown" | "hidden";
 	executionMaximized: boolean;
@@ -57,16 +61,22 @@ export function clampUpperRows(rows: number): number {
 	return Math.max(2, Math.min(MAX_UPPER_ROWS, Math.floor(rows)));
 }
 
+/** The even split for a given budget: half of what is left after the divider and the header. */
+export function halfWorkAreaRows(available: number): number {
+	return Math.max(0, Math.floor((available - 2) / 2));
+}
+
 /**
  * Rows the work area takes out of `available` (the rows left after the title strip, the live row
  * and the dock; the divider and the conversation header come out of it too). Pure so the budget is
  * testable without a frame: collapsed takes none, maximized takes everything the conversation
- * minimum leaves, otherwise the operator's rows up to that cap.
+ * minimum leaves, otherwise the operator's rows (or the even split) up to that cap.
  */
 export function workAreaRows(available: number, geometry: WorkbenchGeometry): number {
 	if (geometry.collapsed) return 0;
 	const cap = Math.max(0, available - 2 - MIN_CONVERSATION_ROWS);
-	return geometry.executionMaximized ? cap : Math.min(geometry.rows, cap);
+	const rows = geometry.rows === "half" ? halfWorkAreaRows(available) : geometry.rows;
+	return geometry.executionMaximized ? cap : Math.min(rows, cap);
 }
 
 /**
@@ -90,7 +100,9 @@ export class WorkbenchComponent extends Container {
 	private executionMeta = EXECUTION_META;
 	private executionEvidence?: Component;
 	private displayedShell?: BashExecutionComponent;
-	private upperLimit = DEFAULT_UPPER_ROWS;
+	private upperLimit: WorkAreaRows = DEFAULT_UPPER_ROWS;
+	/** Row budget of the last frame; an even split resolves against it when the operator resizes. */
+	private lastAvailable = 0;
 	private collapsed = false;
 	private inspectorHidden = false;
 	private executionMaximized = false;
@@ -243,7 +255,7 @@ export class WorkbenchComponent extends Container {
 		};
 	}
 	applyGeometry(geometry: WorkbenchGeometry): void {
-		this.upperLimit = clampUpperRows(geometry.rows);
+		this.upperLimit = geometry.rows === "half" ? "half" : clampUpperRows(geometry.rows);
 		this.collapsed = geometry.collapsed;
 		this.inspectorHidden = geometry.inspector === "hidden";
 		this.executionMaximized = geometry.executionMaximized;
@@ -251,11 +263,15 @@ export class WorkbenchComponent extends Container {
 	resizeUpper(rows: number): void {
 		this.upperLimit = clampUpperRows(rows);
 	}
+	/** The rows the work area has now: the operator's number, or the even split of the last frame. */
+	private currentUpperRows(): number {
+		return this.upperLimit === "half" ? halfWorkAreaRows(this.lastAvailable) : this.upperLimit;
+	}
 	growUpper(): void {
-		this.resizeUpper(this.upperLimit + 1);
+		this.resizeUpper(this.currentUpperRows() + 1);
 	}
 	shrinkUpper(): void {
-		this.resizeUpper(this.upperLimit - 1);
+		this.resizeUpper(this.currentUpperRows() - 1);
 	}
 	resizeInspector(fraction: number): void {
 		this.inspectorFraction = Math.max(0.2, Math.min(0.45, fraction));
@@ -548,6 +564,7 @@ export class WorkbenchComponent extends Container {
 		const liveRow = activity.length ? gutter(activity[0]!) : "";
 		const head = [this.headline(columns)];
 		const available = total - head.length - 1 - dockRows.length;
+		this.lastAvailable = available;
 		const upperRows = workAreaRows(available, this.geometry());
 		const upper = upperRows >= 2 ? this.renderUpper(columns, upperRows, head.length) : [];
 		this.upperTop = head.length;

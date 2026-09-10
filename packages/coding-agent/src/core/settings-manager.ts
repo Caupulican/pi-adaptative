@@ -528,8 +528,8 @@ export interface ToolRepairSettings {
 export interface WorkbenchSettings {
 	/** "off": the terminal keeps the mouse (native selection, copy-on-select, right-click paste). "on": the workbench captures wheel and clicks. */
 	mouse?: "off" | "on";
-	/** Work-area rows the operator chose (2..60); the conversation keeps its minimum regardless. */
-	rows?: number;
+	/** Work-area rows the operator chose (2..60), or "half" for an even split; the conversation keeps its minimum regardless. */
+	rows?: number | "half";
 	/** Work area collapsed to its divider. */
 	collapsed?: boolean;
 	/** Work plan / Team inspector shown beside Execution, or hidden so Execution takes the width. */
@@ -540,7 +540,7 @@ export interface WorkbenchSettings {
 
 export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> = Object.freeze({
 	mouse: "off",
-	rows: 10,
+	rows: "half",
 	collapsed: false,
 	inspector: "shown",
 	executionMaximized: false,
@@ -3592,7 +3592,7 @@ export class SettingsManager {
 		const rows = typeof stored.rows === "number" && Number.isFinite(stored.rows) ? stored.rows : undefined;
 		return {
 			mouse: stored.mouse ?? DEFAULT_WORKBENCH_SETTINGS.mouse,
-			rows: rows === undefined ? DEFAULT_WORKBENCH_SETTINGS.rows : Math.max(2, Math.min(60, Math.floor(rows))),
+			rows: rows === undefined ? "half" : Math.max(2, Math.min(60, Math.floor(rows))),
 			collapsed: stored.collapsed ?? DEFAULT_WORKBENCH_SETTINGS.collapsed,
 			inspector: stored.inspector ?? DEFAULT_WORKBENCH_SETTINGS.inspector,
 			executionMaximized: stored.executionMaximized ?? DEFAULT_WORKBENCH_SETTINGS.executionMaximized,

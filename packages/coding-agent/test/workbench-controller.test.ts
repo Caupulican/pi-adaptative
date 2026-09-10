@@ -67,11 +67,12 @@ describe("Workbench input boundary", () => {
 		controller.handleInput("\x1bx");
 		controller.handleInput("\x1b=");
 		controller.handleInput("\x1bo");
+		// 40 rows: 37 in the budget, the even split is 17; the first resize makes it an explicit 18.
 		expect(saved).toEqual([
-			{ rows: 10, collapsed: false, inspector: "hidden", executionMaximized: false },
-			{ rows: 10, collapsed: false, inspector: "hidden", executionMaximized: true },
-			{ rows: 11, collapsed: false, inspector: "hidden", executionMaximized: true },
-			{ rows: 11, collapsed: true, inspector: "hidden", executionMaximized: true },
+			{ rows: "half", collapsed: false, inspector: "hidden", executionMaximized: false },
+			{ rows: "half", collapsed: false, inspector: "hidden", executionMaximized: true },
+			{ rows: 18, collapsed: false, inspector: "hidden", executionMaximized: true },
+			{ rows: 18, collapsed: true, inspector: "hidden", executionMaximized: true },
 		]);
 	});
 
@@ -398,8 +399,8 @@ describe("Workbench input boundary", () => {
 			notice() {},
 		});
 		view.render(80);
-		expect(view.conversationTop).toBe(12);
-		expect(view.conversationHeight).toBe(6);
+		expect(view.conversationTop).toBe(10);
+		expect(view.conversationHeight).toBe(8);
 		// The single row anchors to the bottom of the conversation area (row 18, 1-based 19).
 		controller.handleInput("\x1b[<0;1;18M"); // The gutter must not select text.
 		expect(view.conversation.following).toBe(true);

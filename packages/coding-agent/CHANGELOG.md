@@ -14,7 +14,7 @@
 - The terminal keeps the mouse by default: entering the workbench no longer enables button-event mouse tracking, so native selection, copy-on-select and right-click paste work as in any other terminal program.
 - One run state, shown where the answer lands: the activity lane renders as a reserved live row directly above the status rule, naming the single running tool or worker with its elapsed time (`● Bash (1m12s)`), the runtime label otherwise, with the plan step, concurrency counts, the message queue and the newest event on the right. The title strip carries identity only; the WORKING / WAITING / IDLE badge is gone.
 - The queue label states the delivery boundary: `Queued 1 · 1 steering → next model turn · enter send now · alt+up edit`.
-- The work area's row cap is everything a six-row conversation leaves instead of half the screen.
+- The work area takes half of the available rows by default (evidence and conversation share a tall terminal evenly) and its cap is everything a six-row conversation leaves; the first resize turns the split into a persisted row count.
 - Reflection buys no provider turn while goal work is open (an active goal or an in-progress task step); the cue stays due and fires once the work closes, so a short owner ping mid-goal no longer costs a reflection checkpoint, a memory read and a continuation resume before the goal continues.
 
 ## [0.99.13] - 2026-09-08

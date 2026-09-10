@@ -183,6 +183,8 @@ describe("Workbench layout", () => {
 			title: () => "sample-project",
 			viewportRows: () => 30,
 		});
+		// These fixtures pin an operator-chosen ten rows; the even-split default has its own test.
+		view.applyGeometry({ rows: 10, collapsed: false, inspector: "shown", executionMaximized: false });
 		return { view, editor };
 	}
 	it("keeps the work area fixed: evidence never moves the conversation; only the operator collapses or resizes it", () => {
@@ -349,6 +351,16 @@ describe("Workbench layout", () => {
 		view.setInspector([{ title: "Work plan", meta: "1 / 3", body: ["active step"] }]);
 		view.setExecution(new Rows(Array.from({ length: 100 }, (_, i) => `tool ${i}`)));
 		expect(workAreaRows(24, { rows: 10, collapsed: false, inspector: "shown", executionMaximized: false })).toBe(10);
+		// The default is an even split of the budget after the divider and the header, under the same cap.
+		expect(workAreaRows(24, { rows: "half", collapsed: false, inspector: "shown", executionMaximized: false })).toBe(
+			11,
+		);
+		expect(workAreaRows(60, { rows: "half", collapsed: false, inspector: "shown", executionMaximized: false })).toBe(
+			29,
+		);
+		expect(workAreaRows(12, { rows: "half", collapsed: false, inspector: "shown", executionMaximized: false })).toBe(
+			4,
+		);
 		expect(workAreaRows(24, { rows: 30, collapsed: false, inspector: "shown", executionMaximized: false })).toBe(16);
 		expect(workAreaRows(24, { rows: 10, collapsed: false, inspector: "shown", executionMaximized: true })).toBe(16);
 		expect(workAreaRows(24, { rows: 10, collapsed: true, inspector: "hidden", executionMaximized: true })).toBe(0);
@@ -383,6 +395,14 @@ describe("Workbench layout", () => {
 		view.applyGeometry({ rows: 500, collapsed: true, inspector: "shown", executionMaximized: false });
 		view.toggleExecutionMaximized();
 		expect(view.geometry()).toEqual({ rows: 60, collapsed: false, inspector: "shown", executionMaximized: true });
+		// Resizing from the even split starts from the rows it currently has, then becomes explicit.
+		view.applyGeometry({ rows: "half", collapsed: false, inspector: "shown", executionMaximized: false });
+		view.render(110);
+		expect(view.upperHeight).toBe(11);
+		view.growUpper();
+		view.render(110);
+		expect(view.upperHeight).toBe(12);
+		expect(view.geometry().rows).toBe(12);
 	});
 	it("shows the live activity on the row where the answer lands, and names the work on the title strip", () => {
 		const { view } = setup();
@@ -398,11 +418,11 @@ describe("Workbench layout", () => {
 		withActivity.setHeadline({ title: "tool reload reliability" });
 		const frame = withActivity.render(80).map(stripAnsi);
 		expect(frame[0]).toMatch(/^ pi {2}tool reload reliability\s*$/);
-		// The operator's ten rows, capped so the conversation keeps its six-row minimum.
-		expect(withActivity.upperHeight).toBe(9);
-		expect(frame[11]).toContain("Conversation");
-		expect(withActivity.conversationTop).toBe(12);
-		expect(withActivity.conversationHeight).toBe(6);
+		// The even-split default: 17 budget rows, minus divider and header, halved.
+		expect(withActivity.upperHeight).toBe(7);
+		expect(frame[9]).toContain("Conversation");
+		expect(withActivity.conversationTop).toBe(10);
+		expect(withActivity.conversationHeight).toBe(8);
 		// One state glyph on the whole frame, and it sits directly below the conversation rows.
 		expect(frame[withActivity.conversationTop + withActivity.conversationHeight]!.trimEnd()).toBe(
 			" ● Editing reload ownership",
