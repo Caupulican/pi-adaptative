@@ -709,6 +709,15 @@ export class Agent {
 	}
 
 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
+		const reason = this.activeRun?.abortController.signal.reason;
+		const base = error instanceof Error ? error.message : String(error);
+		// A named abort keeps its name here too, so both failure paths read the same in a transcript.
+		const errorMessage =
+			aborted && typeof reason === "string" && reason.length > 0
+				? base === reason
+					? `Operation aborted (${reason})`
+					: `${base} (${reason})`
+				: base;
 		const failureMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: "" }],
@@ -717,7 +726,7 @@ export class Agent {
 			model: this._state.model.id,
 			usage: createEmptyUsage(),
 			stopReason: aborted ? "aborted" : "error",
-			errorMessage: error instanceof Error ? error.message : String(error),
+			errorMessage,
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
 		await this.processEvents({ type: "message_start", message: failureMessage, origin: "local" });

@@ -27,6 +27,7 @@ type SubmitContext = {
 		getFollowUpMessages: () => readonly string[];
 		takeQueuedMessages: () => { steering: QueuedInput[]; followUp: QueuedInput[] };
 		abort: (reason?: string) => Promise<void>;
+		waitForForegroundIdle: () => Promise<void>;
 		model: Model<Api>;
 		readonly thinkingLevel: ThinkingLevel;
 		settingsManager: {
@@ -108,6 +109,7 @@ function createSubmitContext(): SubmitContext {
 				return taken;
 			}),
 			abort: vi.fn(async () => {}),
+			waitForForegroundIdle: vi.fn(async () => {}),
 			model: getModel("xai", "grok-4.6"),
 			get thinkingLevel() {
 				return thinkingLevel;
@@ -172,6 +174,9 @@ describe("InteractiveMode startup input", () => {
 		(context.session.abort as ReturnType<typeof vi.fn>).mockImplementation(async (reason?: string) => {
 			order.push(`abort:${reason}`);
 		});
+		(context.session.waitForForegroundIdle as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+			order.push("foreground idle");
+		});
 		(context.session.prompt as ReturnType<typeof vi.fn>).mockImplementation(async (text: string) => {
 			order.push(`prompt:${text}`);
 		});
@@ -188,7 +193,11 @@ describe("InteractiveMode startup input", () => {
 
 		await context.defaultEditor.onSubmit?.("");
 
-		expect(order).toEqual(["abort:send now", "prompt:stop and confirm\n\nthen run the payments suite"]);
+		expect(order).toEqual([
+			"abort:send now",
+			"foreground idle",
+			"prompt:stop and confirm\n\nthen run the payments suite",
+		]);
 		expect(context.session.prompt).toHaveBeenLastCalledWith("stop and confirm\n\nthen run the payments suite", {
 			images: [image],
 			processSlashCommands: false,

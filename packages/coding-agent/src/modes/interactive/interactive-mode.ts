@@ -2643,6 +2643,9 @@ export class InteractiveMode {
 			"neutral",
 		);
 		await this.session.abort("send now");
+		// The aborted prompt still holds the foreground lease until its tail finishes; a root prompt
+		// submitted before that is refused as busy.
+		await this.session.waitForForegroundIdle();
 		try {
 			await this.session.prompt(text, { images: images.length ? images : undefined, processSlashCommands: false });
 		} finally {

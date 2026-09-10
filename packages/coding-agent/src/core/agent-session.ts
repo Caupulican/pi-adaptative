@@ -3144,6 +3144,15 @@ export class AgentSession {
 		await this.agent.waitForIdle();
 	}
 
+	/**
+	 * Resolve once no foreground submission holds the lease: the agent run has ended AND the prompt
+	 * that owned it has finished its tail. `abort()` alone returns at the first of those; a caller
+	 * that wants to submit a new root prompt right after an abort waits for the second.
+	 */
+	waitForForegroundIdle(): Promise<void> {
+		return this._foregroundRecovery.waitForIdle();
+	}
+
 	// =========================================================================
 	// Model Management
 	// =========================================================================
