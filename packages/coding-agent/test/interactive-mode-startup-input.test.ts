@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
-import { type Api, getModel, type Model } from "@caupulican/pi-ai";
+import { type Api, getModel, type ImageContent, type Model } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import type { QueuedInput } from "../src/core/pending-input-queue-controller.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
@@ -20,7 +21,12 @@ type SubmitContext = {
 	session: {
 		isCompacting: boolean;
 		isStreaming: boolean;
+		isRetrying: boolean;
 		isBashRunning: boolean;
+		getSteeringMessages: () => readonly string[];
+		getFollowUpMessages: () => readonly string[];
+		takeQueuedMessages: () => { steering: QueuedInput[]; followUp: QueuedInput[] };
+		abort: (reason?: string) => Promise<void>;
 		model: Model<Api>;
 		readonly thinkingLevel: ThinkingLevel;
 		settingsManager: {
@@ -32,6 +38,10 @@ type SubmitContext = {
 	};
 	showStatus: (message: string) => void;
 	footer: { invalidate: () => void };
+	compactionQueuedMessages: { text: string; mode: "steer" | "followUp"; images?: ImageContent[] }[];
+	activityLane?: { announce: (label: string, status?: string) => void };
+	hasQueuedMessages: () => boolean;
+	sendQueuedMessagesNow: () => Promise<void>;
 	flushPendingBashComponents: () => void;
 	buildUserInputSubmission: (text: string) => UserInputSubmission;
 	takeClipboardImagesForText: (text: string) => unknown[] | undefined;
@@ -59,6 +69,8 @@ type ClipboardImageContext = {
 
 type InteractiveModePrivate = {
 	setupEditorSubmitHandler(this: SubmitContext): void;
+	hasQueuedMessages(this: SubmitContext): boolean;
+	sendQueuedMessagesNow(this: SubmitContext): Promise<void>;
 	getUserInput(this: InputContext): Promise<UserInputSubmission>;
 	buildUserInputSubmission(this: ClipboardImageContext, text: string): UserInputSubmission;
 	takeClipboardImagesForText(this: ClipboardImageContext, text: string): unknown[] | undefined;
@@ -69,7 +81,12 @@ const interactiveModePrototype = InteractiveMode.prototype as unknown as Interac
 function createSubmitContext(): SubmitContext {
 	let thinkingLevel: ThinkingLevel = "high";
 	const fastMode = new Map<string, boolean>();
+	const queued: { steering: QueuedInput[]; followUp: QueuedInput[] } = { steering: [], followUp: [] };
 	return {
+		compactionQueuedMessages: [],
+		activityLane: { announce: vi.fn() },
+		hasQueuedMessages: interactiveModePrototype.hasQueuedMessages,
+		sendQueuedMessagesNow: interactiveModePrototype.sendQueuedMessagesNow,
 		defaultEditor: {},
 		editor: {
 			addToHistory: vi.fn(),
@@ -80,7 +97,17 @@ function createSubmitContext(): SubmitContext {
 		session: {
 			isCompacting: false,
 			isStreaming: false,
+			isRetrying: false,
 			isBashRunning: false,
+			getSteeringMessages: () => queued.steering.map((entry) => entry.text),
+			getFollowUpMessages: () => queued.followUp.map((entry) => entry.text),
+			takeQueuedMessages: vi.fn(() => {
+				const taken = { steering: queued.steering, followUp: queued.followUp };
+				queued.steering = [];
+				queued.followUp = [];
+				return taken;
+			}),
+			abort: vi.fn(async () => {}),
 			model: getModel("xai", "grok-4.6"),
 			get thinkingLevel() {
 				return thinkingLevel;
@@ -135,6 +162,61 @@ describe("InteractiveMode startup input", () => {
 		expect(context.editor.setText).toHaveBeenCalledWith("");
 		expect(context.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
 		expect(context.ui.requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("sends the queued messages now on an empty Enter while streaming: interrupt first, then one prompt with the images", async () => {
+		const context = createSubmitContext();
+		context.session.isStreaming = true;
+		const image: ImageContent = { type: "image", data: "aGk=", mimeType: "image/png" };
+		const order: string[] = [];
+		(context.session.abort as ReturnType<typeof vi.fn>).mockImplementation(async (reason?: string) => {
+			order.push(`abort:${reason}`);
+		});
+		(context.session.prompt as ReturnType<typeof vi.fn>).mockImplementation(async (text: string) => {
+			order.push(`prompt:${text}`);
+		});
+		interactiveModePrototype.setupEditorSubmitHandler.call(context);
+		await context.defaultEditor.onSubmit?.("stop and confirm");
+		await context.defaultEditor.onSubmit?.(">> then run the payments suite");
+		// Fill the fake session queue the way the real one would after those two prompts.
+		(context.session.takeQueuedMessages as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+			steering: [{ text: "stop and confirm", images: [image] }],
+			followUp: [{ text: "then run the payments suite" }],
+		});
+		context.session.getSteeringMessages = () => ["stop and confirm"];
+		order.length = 0;
+
+		await context.defaultEditor.onSubmit?.("");
+
+		expect(order).toEqual(["abort:send now", "prompt:stop and confirm\n\nthen run the payments suite"]);
+		expect(context.session.prompt).toHaveBeenLastCalledWith("stop and confirm\n\nthen run the payments suite", {
+			images: [image],
+			processSlashCommands: false,
+		});
+		expect(context.activityLane?.announce).toHaveBeenCalledWith(
+			"Interrupting to send 2 queued messages now",
+			"neutral",
+		);
+	});
+
+	it("does nothing on an empty Enter when nothing is queued, when idle, or during compaction", async () => {
+		const context = createSubmitContext();
+		interactiveModePrototype.setupEditorSubmitHandler.call(context);
+		context.session.isStreaming = true;
+		await context.defaultEditor.onSubmit?.("   ");
+		expect(context.session.abort).not.toHaveBeenCalled();
+		expect(context.session.prompt).not.toHaveBeenCalled();
+
+		context.session.isStreaming = false;
+		context.session.getSteeringMessages = () => ["waiting"];
+		await context.defaultEditor.onSubmit?.("");
+		expect(context.session.abort).not.toHaveBeenCalled();
+
+		context.session.isStreaming = true;
+		context.session.isCompacting = true;
+		await context.defaultEditor.onSubmit?.("");
+		expect(context.session.abort).not.toHaveBeenCalled();
+		expect(context.showStatus).toHaveBeenCalledWith("Compaction in progress; queued messages are sent when it ends");
 	});
 
 	it("queues every submitted message as steering while compacting", async () => {

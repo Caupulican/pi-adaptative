@@ -1345,7 +1345,13 @@ export class InteractiveMode {
 	private setupEditorSubmitHandler(): void {
 		this.defaultEditor.onSubmit = async (text: string) => {
 			text = text.trim();
-			if (!text) return;
+			if (!text) {
+				// Enter on an empty editor while a message waits behind the running turn: the second
+				// Enter means "stop and take it now", the one gesture Escape-then-retype used to be.
+				if ((this.session.isStreaming || this.session.isRetrying) && this.hasQueuedMessages())
+					await this.sendQueuedMessagesNow();
+				return;
+			}
 
 			if (text === "/quit" || text === "/exit") {
 				this.editor.setText("");
@@ -2601,6 +2607,51 @@ export class InteractiveMode {
 		};
 	}
 
+	/** Steering and follow-up messages waiting on the running turn; queued extension commands do not count. */
+	private hasQueuedMessages(): boolean {
+		return (
+			this.session.getSteeringMessages().length +
+				this.session.getFollowUpMessages().length +
+				this.compactionQueuedMessages.length >
+			0
+		);
+	}
+
+	/**
+	 * Interrupt the running turn and submit everything queued as one root prompt, images included,
+	 * steering first, then follow-ups, each in queue order. Extension commands stay queued.
+	 */
+	private async sendQueuedMessagesNow(): Promise<void> {
+		if (this.session.isCompacting) {
+			this.showStatus("Compaction in progress; queued messages are sent when it ends");
+			return;
+		}
+		const { steering, followUp } = this.session.takeQueuedMessages();
+		const compaction = this.compactionQueuedMessages.splice(0);
+		const entries = [
+			...steering,
+			...compaction.filter((message) => message.mode === "steer"),
+			...followUp,
+			...compaction.filter((message) => message.mode === "followUp"),
+		];
+		if (entries.length === 0) return;
+		this.updatePendingMessagesDisplay();
+		const text = entries.map((entry) => entry.text).join("\n\n");
+		const images = entries.flatMap((entry) => entry.images ?? []);
+		this.activityLane?.announce(
+			`Interrupting to send ${entries.length} queued message${entries.length > 1 ? "s" : ""} now`,
+			"neutral",
+		);
+		await this.session.abort("send now");
+		try {
+			await this.session.prompt(text, { images: images.length ? images : undefined, processSlashCommands: false });
+		} finally {
+			this.refreshAutonomyFooterStatus();
+		}
+		this.updatePendingMessagesDisplay();
+		this.ui.requestRender();
+	}
+
 	private updatePendingMessagesDisplay(): void {
 		this.pendingMessagesContainer.clear();
 		for (const component of this.pendingBashComponents) this.pendingMessagesContainer.addChild(component);
@@ -2610,16 +2661,17 @@ export class InteractiveMode {
 		const total = steeringCount + followUpCount;
 		if (total > 0) {
 			const dequeueHint = this.getAppKeyDisplay("app.message.dequeue");
+			// The label states the delivery boundary; a queued message is never a mystery in flight.
 			const details = [
-				steeringCount > 0 ? `${steeringCount} steering` : undefined,
-				followUpCount > 0 ? `${followUpCount} follow-up` : undefined,
+				steeringCount > 0 ? `${steeringCount} steering → next model turn` : undefined,
+				followUpCount > 0 ? `${followUpCount} follow-up → after this run` : undefined,
 			]
 				.filter((value): value is string => value !== undefined)
 				.join(" · ");
 			this.activityLane?.wait({
 				id: "queue:messages",
 				kind: "queue",
-				label: `Queued ${total} · ${details} · ${dequeueHint} edit`,
+				label: `Queued ${total} · ${details} · enter send now · ${dequeueHint} edit`,
 			});
 		} else {
 			this.activityLane?.remove("queue:messages");

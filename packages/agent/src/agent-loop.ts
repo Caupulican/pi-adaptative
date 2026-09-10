@@ -193,7 +193,7 @@ function streamAgentLoop(
 		stream.push(event);
 	})
 		.catch(async (error) => {
-			const messages = [createLoopFailureMessage(error, config, signal?.aborted ?? false)];
+			const messages = [createLoopFailureMessage(error, config, signal?.aborted ?? false, signal?.reason)];
 			stream.push({ type: "agent_end", messages });
 			return messages;
 		})
@@ -272,7 +272,20 @@ function assertContinuableContext(context: AgentContext): void {
 	}
 }
 
-function createLoopFailureMessage(error: unknown, config: AgentLoopConfig, aborted: boolean): AssistantMessage {
+function createLoopFailureMessage(
+	error: unknown,
+	config: AgentLoopConfig,
+	aborted: boolean,
+	abortReason?: unknown,
+): AssistantMessage {
+	const base = error instanceof Error ? error.message : String(error);
+	// A named abort (`agent.abort("send now")`) keeps its name so a transcript can tell it from Escape.
+	const named = aborted && typeof abortReason === "string" && abortReason.length > 0;
+	const errorMessage = !named
+		? base
+		: base === abortReason
+			? `Operation aborted (${abortReason})`
+			: `${base} (${abortReason})`;
 	return {
 		role: "assistant",
 		content: [{ type: "text", text: "" }],
@@ -281,7 +294,7 @@ function createLoopFailureMessage(error: unknown, config: AgentLoopConfig, abort
 		model: config.model.id,
 		usage: createEmptyUsage(),
 		stopReason: aborted ? "aborted" : "error",
-		errorMessage: error instanceof Error ? error.message : String(error),
+		errorMessage,
 		timestamp: Date.now(),
 	};
 }
@@ -605,6 +618,7 @@ async function runLoop(
 						executedToolBatch.failure?.cause ?? signal?.reason,
 						config,
 						signal?.aborted ?? false,
+						signal?.reason,
 					);
 					await emit({ type: "message_start", message: failure });
 					await emit({ type: "message_end", message: failure });

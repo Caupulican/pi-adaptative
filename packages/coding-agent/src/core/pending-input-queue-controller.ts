@@ -13,6 +13,12 @@ export interface PendingQueueSnapshot {
 	commands: string[];
 }
 
+/** One queued message as the operator submitted it: its text and any images it carried. */
+export interface QueuedInput {
+	text: string;
+	images?: ImageContent[];
+}
+
 export interface PendingInputQueueDeps {
 	readonly agent: Agent;
 	readonly skillVault: SkillVaultController;
@@ -35,8 +41,8 @@ export interface PendingInputQueueDeps {
  * controller for the underlying queue mechanics; this class has no event/emit dependency.
  */
 export class PendingInputQueueController {
-	private _steeringMessages: string[] = [];
-	private _followUpMessages: string[] = [];
+	private _steering: QueuedInput[] = [];
+	private _followUp: QueuedInput[] = [];
 	private _queuedExtensionCommands: string[] = [];
 	private readonly deps: PendingInputQueueDeps;
 
@@ -45,15 +51,15 @@ export class PendingInputQueueController {
 	}
 
 	get count(): number {
-		return this._steeringMessages.length + this._followUpMessages.length + this._queuedExtensionCommands.length;
+		return this._steering.length + this._followUp.length + this._queuedExtensionCommands.length;
 	}
 
 	getSteering(): readonly string[] {
-		return this._steeringMessages;
+		return this._steering.map((entry) => entry.text);
 	}
 
 	getFollowUp(): readonly string[] {
-		return this._followUpMessages;
+		return this._followUp.map((entry) => entry.text);
 	}
 
 	getCommands(): readonly string[] {
@@ -62,8 +68,8 @@ export class PendingInputQueueController {
 
 	snapshot(): PendingQueueSnapshot {
 		return {
-			steering: [...this._steeringMessages],
-			followUp: [...this._followUpMessages],
+			steering: this.getSteering() as string[],
+			followUp: this.getFollowUp() as string[],
 			commands: [...this._queuedExtensionCommands],
 		};
 	}
@@ -155,13 +161,13 @@ export class PendingInputQueueController {
 
 	/** Queue a steering message (already expanded, no extension command check). */
 	queueSteer(text: string, images?: ImageContent[], queuedGoalAuthority?: ExplicitGoalStartAuthority): void {
-		this._steeringMessages.push(text);
+		this._steering.push({ text, images });
 		this.deps.agent.steer(this._createQueuedUserMessage(text, images, queuedGoalAuthority));
 	}
 
 	/** Queue a follow-up message (already expanded, no extension command check). */
 	queueFollowUp(text: string, images?: ImageContent[], queuedGoalAuthority?: ExplicitGoalStartAuthority): void {
-		this._followUpMessages.push(text);
+		this._followUp.push({ text, images });
 		this.deps.agent.followUp(this._createQueuedUserMessage(text, images, queuedGoalAuthority));
 	}
 
@@ -181,24 +187,37 @@ export class PendingInputQueueController {
 	 * queued -- callers use that to decide whether a queue_update event is warranted.
 	 */
 	removeIfPending(messageText: string): "steering" | "followUp" | undefined {
-		const steeringIndex = this._steeringMessages.indexOf(messageText);
+		const steeringIndex = this._steering.findIndex((entry) => entry.text === messageText);
 		if (steeringIndex !== -1) {
-			this._steeringMessages.splice(steeringIndex, 1);
+			this._steering.splice(steeringIndex, 1);
 			return "steering";
 		}
-		const followUpIndex = this._followUpMessages.indexOf(messageText);
+		const followUpIndex = this._followUp.findIndex((entry) => entry.text === messageText);
 		if (followUpIndex !== -1) {
-			this._followUpMessages.splice(followUpIndex, 1);
+			this._followUp.splice(followUpIndex, 1);
 			return "followUp";
 		}
 		return undefined;
 	}
 
+	/**
+	 * Take every queued steering and follow-up message, images included, out of both this
+	 * controller and the agent's mirrored queues. Extension commands stay queued: they execute
+	 * against the session, not as prompt text.
+	 */
+	takeMessages(): { steering: QueuedInput[]; followUp: QueuedInput[] } {
+		const taken = { steering: this._steering, followUp: this._followUp };
+		this._steering = [];
+		this._followUp = [];
+		this.deps.agent.clearAllQueues();
+		return taken;
+	}
+
 	/** Clear all three queues (including the agent's own mirrored queues) and return what was cleared. */
 	clear(): PendingQueueSnapshot {
 		const result = this.snapshot();
-		this._steeringMessages = [];
-		this._followUpMessages = [];
+		this._steering = [];
+		this._followUp = [];
 		this._queuedExtensionCommands = [];
 		this.deps.agent.clearAllQueues();
 		return result;

@@ -27,6 +27,14 @@ New shortcuts are configurable through the existing keybinding manager: `app.con
 
 Terminal-native selection cannot notify the application to pause; the application-owned drag selection (mouse captured) does pause. Clipboard transport uses the existing platform clipboard/OSC 52 adapter; remote terminal support varies.
 
+## Talking while it works
+
+- Enter while the model is working queues the text as **steering**: it is delivered at the next model turn, after the running tool batch completes. A `>>` prefix (or `Alt+Enter` where the terminal passes it) queues a **follow-up**, delivered after this run ends.
+- The live row states the boundary: `Queued 1 · 1 steering → next model turn · enter send now · alt+up edit`.
+- **Enter on an empty editor** while something is queued interrupts the running turn and sends everything queued as one prompt — steering first, then follow-ups, images included. The aborted turn's message reads `Operation aborted (send now)`, so a transcript can tell it from Escape.
+- `Escape` still interrupts and restores the queued text to the editor without sending it; `Alt+Up` recalls queued text for editing.
+- During compaction the queue waits for compaction to end; send-now says so instead of interrupting it.
+
 ## File effects and limits
 
 Edit diffs, written content, command results and failures appear above conversation. Routine reads stay in the action transcript. Explicit user shell commands remain visible in the upper band.

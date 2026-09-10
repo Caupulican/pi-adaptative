@@ -193,7 +193,8 @@ export function projectActivityLane(snapshot: ActivityLaneCanonicalSnapshot): Ac
  */
 const TURN_TEXT_MAX = 32;
 const EVENT_TEXT_MAX = 36;
-const QUEUE_TEXT_MAX = 32;
+/** The queue label carries its delivery boundary and the send-now key; it is the operator's own state and must read whole. */
+const QUEUE_TEXT_MAX = 80;
 const AGGREGATE_GROUP_MAX = 3;
 const PLAN_TEXT_MIN = 24;
 const SLOT_GAP_WIDTH = 2;

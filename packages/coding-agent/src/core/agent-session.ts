@@ -144,7 +144,7 @@ import {
 } from "./models/perf-profile.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
-import { PendingInputQueueController } from "./pending-input-queue-controller.ts";
+import { PendingInputQueueController, type QueuedInput } from "./pending-input-queue-controller.ts";
 import {
 	appendPipelineRunSnapshot,
 	createActivePipelineContextMessage,
@@ -3102,6 +3102,13 @@ export class AgentSession {
 		return result;
 	}
 
+	/** Take queued steering and follow-up messages (text and images) to send them another way. */
+	takeQueuedMessages(): { steering: QueuedInput[]; followUp: QueuedInput[] } {
+		const result = this._pendingQueue.takeMessages();
+		this._emitQueueUpdate();
+		return result;
+	}
+
 	/** Number of pending messages (includes steering, follow-up, and queued extension commands) */
 	get pendingMessageCount(): number {
 		return this._pendingQueue.count;
@@ -3129,10 +3136,10 @@ export class AgentSession {
 	/**
 	 * Abort current operation and wait for agent to become idle.
 	 */
-	async abort(): Promise<void> {
+	async abort(reason?: string): Promise<void> {
 		this.runtimeUpdates.cancel();
 		this.abortRetry();
-		this.agent.abort();
+		this.agent.abort(reason);
 		await this.agent.waitForIdle();
 	}
 

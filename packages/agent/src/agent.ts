@@ -445,9 +445,9 @@ export class Agent {
 		return this.activeRun?.abortController.signal;
 	}
 
-	/** Abort the current run, if one is active. */
-	abort(): void {
-		this.activeRun?.abortController.abort();
+	/** Abort the current run, if one is active. A reason names why in the aborted message. */
+	abort(reason?: string): void {
+		this.activeRun?.abortController.abort(reason);
 	}
 
 	/**
