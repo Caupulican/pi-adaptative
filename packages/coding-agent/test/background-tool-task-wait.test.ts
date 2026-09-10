@@ -32,6 +32,7 @@ function controlledContext() {
 		toolCall,
 		args: {},
 		context: { systemPrompt: "", messages: [], tools: [] } satisfies AgentContext,
+		trigger: "clock",
 		elapsedMs: 15_000,
 		completion,
 		cancel: vi.fn(),

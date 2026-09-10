@@ -2082,7 +2082,11 @@ async function executeAndFinalizePreparedToolCall(
 	foregroundSignal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<FinalizedToolCallOutcome> {
-	const backgroundDelay = getBackgroundToolCallDelay(config);
+	// The model can ask for a background task up front; otherwise only the operator's clock (off by
+	// default) or a manual host request moves a foreground call to the background.
+	const backgroundRequested =
+		config.isBackgroundRequested?.(prepared.toolCall.name, prepared.toolCall.arguments) === true;
+	const backgroundDelay = backgroundRequested ? 0 : getBackgroundToolCallDelay(config);
 	const canHandoff =
 		config.handoffToolCall && (backgroundDelay !== undefined || config.subscribeToolCallHandoffRequest !== undefined);
 	const executionAbort = canHandoff ? createLinkedToolAbort(foregroundSignal) : undefined;
@@ -2163,6 +2167,7 @@ async function executeAndFinalizePreparedToolCall(
 			args: prepared.args,
 			context: currentContext,
 			executionContext: prepared.binding?.executionContext,
+			trigger: outcome.kind === "manual" ? "manual" : backgroundRequested ? "requested" : "clock",
 			elapsedMs: Math.max(0, Date.now() - startedAt),
 			completion: handedOffCompletion,
 			cancel: executionAbort.cancel,

@@ -75,6 +75,12 @@ const pythonSchema = Type.Object(
 				description: `Wall-clock timeout. Defaults to ${DEFAULT_PYTHON_TIMEOUT_SECONDS} seconds and is capped at ${MAX_PYTHON_TIMEOUT_SECONDS}.`,
 			}),
 		),
+		background: Type.Optional(
+			Type.Boolean({
+				description:
+					"Run as a session task at once and return its task id instead of waiting. Use only for work you do not need before your next step; collect it later with tool_task wait (needs the tool_task tool; without it the code runs in the foreground).",
+			}),
+		),
 		fullOutput: Type.Optional(
 			Type.Boolean({
 				description:
@@ -268,6 +274,7 @@ export function createPythonToolDefinition(
 			"Explicit approval required: destructive deletion, publish/push/release, long-running services.",
 		],
 		parameters: pythonSchema,
+		backgroundRequested: (input) => input.background === true,
 		failureRecovery: {
 			actions: recoveryAuthority
 				? [

@@ -127,6 +127,12 @@ const bashSchema = Type.Object({
 			description: `Wall-clock timeout in SECONDS, not milliseconds. Defaults to ${DEFAULT_COMMAND_TIMEOUT_SECONDS}; positive overrides are capped at ${MAX_COMMAND_TIMEOUT_SECONDS}. Zero or negative values use the default.`,
 		}),
 	),
+	background: Type.Optional(
+		Type.Boolean({
+			description:
+				"Run as a session task at once and return its task id instead of waiting. Use only for a command you do not need before your next step; collect it later with tool_task wait (needs the tool_task tool; without it the command runs in the foreground). Omit to wait for the command (default, bounded by timeout).",
+		}),
+	),
 	broadSearch: Type.Optional(
 		Type.Literal(BROAD_SEARCH_OUTPUT_ROUTE, {
 			description:
@@ -772,6 +778,7 @@ function createShellToolDefinition(
 					`Search narrowly: root/filters, prefer grep/find. A broad scan runs with its output routed to a managed file (as with broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}"); inspect it narrowly.`,
 				],
 		parameters: bashSchema,
+		backgroundRequested: (input) => input.background === true,
 		failureRecovery: {
 			getFailureTargets: (params, failure) =>
 				failureRecoveryAuthority &&

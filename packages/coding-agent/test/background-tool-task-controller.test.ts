@@ -42,6 +42,7 @@ function controlledContext(toolCallId = "call-1") {
 		toolCall,
 		args: toolCall.arguments,
 		context: { systemPrompt: "", messages: [], tools: [] } satisfies AgentContext,
+		trigger: "clock",
 		elapsedMs: 15_000,
 		completion,
 		cancel: vi.fn(),
@@ -102,6 +103,24 @@ describe("BackgroundToolTaskController", () => {
 		expect(restored.list()[0]?.piVerification).toEqual(expected);
 		await restored.shutdown();
 		await controller.shutdown();
+	});
+
+	it("names the trigger in the stub: a requested task never reads as a timeout", () => {
+		const { controller } = createHarness("session-1");
+		const requested = controlledContext("req-1");
+		requested.context.trigger = "requested";
+		requested.context.elapsedMs = 3;
+		const handoff = controller.handoff(requested.context);
+		const text = handoff?.result.content[0]?.type === "text" ? handoff.result.content[0].text : "";
+		expect(text).toContain("started as session task tool-task-1 (background requested)");
+		expect(text).not.toContain("exceeded");
+
+		const manual = controlledContext("man-1");
+		manual.context.trigger = "manual";
+		manual.context.elapsedMs = 4_000;
+		const moved = controller.handoff(manual.context);
+		const movedText = moved?.result.content[0]?.type === "text" ? moved.result.content[0].text : "";
+		expect(movedText).toContain("moved to session task tool-task-2 by the operator after 4s");
 	});
 
 	it("never hands off a call the tool declares a foreground wait", () => {

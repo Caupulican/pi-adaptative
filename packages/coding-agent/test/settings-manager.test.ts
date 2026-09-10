@@ -1143,11 +1143,16 @@ describe("SettingsManager", () => {
 			expect(manager.getBackgroundToolSettings().callAfterMs).toBe(45000);
 		});
 
-		it("should fall back to the default for a non-integer or out-of-range callAfterMs", () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ backgroundTool: { callAfterMs: 500 } }));
+		it("should fall back to the default for a non-integer or out-of-range callAfterMs, and accept 0 as off", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ backgroundTool: { callAfterMs: -5 } }));
 			expect(SettingsManager.create(projectDir, agentDir).getBackgroundToolSettings().callAfterMs).toBe(
 				DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS,
 			);
+			expect(DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS).toBe(0);
+
+			rmSync(join(agentDir, "settings.json"));
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ backgroundTool: { callAfterMs: 500 } }));
+			expect(SettingsManager.create(projectDir, agentDir).getBackgroundToolSettings().callAfterMs).toBe(500);
 
 			rmSync(join(agentDir, "settings.json"));
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ backgroundTool: { callAfterMs: 12.5 } }));

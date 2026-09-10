@@ -356,12 +356,12 @@ export const DEFAULT_PROCESS_MATRIX_WATCHER_POLL_MS = 25_000;
 
 /** Auto-backgrounding threshold for long-running foreground tool calls; see `core/background-tool-task-controller.ts`. */
 export interface BackgroundToolSettings {
-	callAfterMs?: number; // default: DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS (15000) -- a foreground tool call running longer than this hands off to a background task; auto-backgrounding itself stays always-on, only the threshold is tunable
+	callAfterMs?: number; // default: DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS (0 = off) -- a positive value hands a foreground tool call running longer than this off to a background task; the model's `background: true` and the operator's app.tools.background work regardless
 }
 
 export type ResolvedBackgroundToolSettings = Required<BackgroundToolSettings>;
 
-const MIN_BACKGROUND_TOOL_CALL_AFTER_MS = 1_000;
+const MIN_BACKGROUND_TOOL_CALL_AFTER_MS = 0;
 const MAX_BACKGROUND_TOOL_CALL_AFTER_MS = 3_600_000;
 
 /** Windows shell contract engine tier (`src/core/tools/windows-shell-engine.ts`). */

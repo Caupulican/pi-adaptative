@@ -284,8 +284,11 @@ order. Pinned by `packages/coding-agent/test/worker-directory-admission.test.ts`
 `packages/coding-agent/test/session-worker-directories.test.ts`, and
 `packages/coding-agent/test/agent-session-worker-delegation.test.ts`.
 
-**An explicit wait is never handed off.** A tool declares which calls are foreground waits; such a
-call blocks up to its own timeout. Pinned by
+**A foreground call is handed off only on the model's request or the operator's clock.** A tool
+declares which calls are foreground waits (never handed off) and which ask for a background task
+up front (`backgroundRequested`, handed off at once); every other call blocks up to its own timeout
+unless the operator configured a clock (`backgroundTool.callAfterMs`, off by default) or moved the
+call by hand. Pinned by `packages/agent/test/agent-loop.test.ts` (foreground by default) and
 `packages/coding-agent/test/background-tool-task-controller.test.ts` and
 `packages/coding-agent/test/tool-task.test.ts`.
 

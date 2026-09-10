@@ -67,6 +67,7 @@ function start(controller: BackgroundToolTaskController, executionContext?: Exec
 		},
 		args: {},
 		context: { systemPrompt: "", messages: [], tools: [] },
+		trigger: "clock",
 		elapsedMs: 1,
 		completion: completion.promise,
 		cancel: () => {},

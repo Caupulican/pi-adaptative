@@ -497,6 +497,13 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 */
 	foregroundWait?(args: Static<TParams>): boolean;
 
+	/**
+	 * True when the caller asked for this call to run as a background session task from the start
+	 * (`background: true` on bash/python). Foreground is otherwise the default up to the call's own
+	 * timeout; the clock-based handoff that used to move every call after 15 s is off by default.
+	 */
+	backgroundRequested?(args: Static<TParams>): boolean;
+
 	/** Execute the tool. */
 	execute(
 		toolCallId: string,

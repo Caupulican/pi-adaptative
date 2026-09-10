@@ -250,8 +250,15 @@ export interface BackgroundToolCallCompletion {
 }
 
 /** Context offered to a host when a prepared tool call crosses its foreground latency budget. */
+export type BackgroundToolCallTrigger = "requested" | "clock" | "manual";
+
 export interface BackgroundToolCallContext extends BeforeToolCallContext {
-	/** Configured foreground latency budget that elapsed. */
+	/**
+	 * What moved the call: the model asked for a background task up front (`requested`), the
+	 * operator's latency clock elapsed (`clock`), or the host asked by hand (`manual`).
+	 */
+	trigger: BackgroundToolCallTrigger;
+	/** Foreground time spent before the handoff (about zero for a requested one). */
 	elapsedMs: number;
 	/** Event-driven terminal signal for the real, policy-finalized execution. */
 	completion: Promise<BackgroundToolCallCompletion>;
@@ -807,6 +814,13 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * `handoffToolCall` boundary before its automatic latency budget elapses.
 	 */
 	subscribeToolCallHandoffRequest?: (toolCallId: string, request: () => void) => () => void;
+
+	/**
+	 * True when the model asked for this call to run as a background task from the start (a tool
+	 * argument such as `background: true`). The call crosses `handoffToolCall` at once instead of
+	 * waiting for a latency budget; the host decides whether a handoff is possible at all.
+	 */
+	isBackgroundRequested?: (toolName: string, args: unknown) => boolean;
 }
 
 /**

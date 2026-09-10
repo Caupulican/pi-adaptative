@@ -2,6 +2,7 @@
 
 ### Changed
 
+- Foreground is the default for tool calls: the 15-second clock that moved every longer `bash`/`python` call to a background task is off (`backgroundTool.callAfterMs` default `0`; a positive value restores it). A call waits up to its own timeout with the live row showing its elapsed time; the model asks for a background task explicitly with `background: true` on `bash`/`python`, and the operator can still move a running call with the tools-background key. Measured across 58 sessions the clock cost 411 handoffs and 518 waits, about 12 % of all provider requests.
 - Verification obligations are run-scoped and operator-resolvable. A failing trusted check marks only the run that produced it (its answer stays readable with a warning); obligations inherited from earlier runs stay listed with their command and directory, block `goal complete` and pause goal continuation with a typed `verification_unresolved` decision, but a later answer is an ordinary answer. `/verify` lists, shows and dismisses them; a dismissal is a user-plane record the tracker honours and goal evidence never counts as a pass. The inspector gains a **Checks** block.
 
 ### Fixed

@@ -23,19 +23,33 @@ import { formatArtifactNotice, packToolOutput } from "./context/tool-output-pack
 import { hasOnlyKeys, isPlainRecord, isRecordObject } from "./util/value-guards.ts";
 
 /**
- * Foreground tool calls running longer than this hand off to a background task (see `handoff`
- * below). Configurable via `SettingsManager.getBackgroundToolSettings().callAfterMs`; this constant
- * is only its fallback default, used when the setting is unset or fails sanitization.
+ * Clock-based handoff of foreground tool calls; `0` means off, which is the default. Configurable
+ * via `SettingsManager.getBackgroundToolSettings().callAfterMs` for an operator who wants the old
+ * behaviour back at a threshold of their choice.
  *
- * The default's justification is measured, not assumed, and is under-tuned by that measurement:
- * re-collecting a backgrounded result costs at least one extra provider round trip (observed p50
- * 5.7s, p90 12.8s across a real fleet sample), so backgrounding anything that would have finished
- * within roughly 25-30s is a net loss. 15s sits below that break-even point, and a real sample saw
- * roughly 10% of bash calls terminate at exactly this threshold. The value is left unchanged here
- * deliberately — raising the default is a product/cost tradeoff for the owner to make separately
- * from making it configurable at all.
+ * Off by measurement: the 15 s default that shipped before turned every build or test into three
+ * provider requests — the handoff stub, the model's `tool_task wait`, and the "parent woke" cycle —
+ * 411 handoffs and 518 waits across 58 sessions, about 12 % of every request those sessions made,
+ * while re-collecting a backgrounded result cost p50 5.7 s per round trip. The reasons for the
+ * clock (a frozen screen, undeliverable steering) are gone: the live row shows the running call
+ * with its elapsed time, and Escape or an empty Enter interrupts it. A call now stays in the
+ * foreground up to its own timeout unless the model asks for a background task (`background: true`)
+ * or the operator moves it (`app.tools.background`).
  */
-export const DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS = 15_000;
+export const DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS = 0;
+
+/** First line of the handoff stub: says what moved the call, so a requested task never reads as a timeout. */
+function handoffHeadline(context: BackgroundToolCallContext, taskId: string): string {
+	const seconds = Math.max(1, Math.round(context.elapsedMs / 1000));
+	switch (context.trigger) {
+		case "requested":
+			return `Tool ${context.toolCall.name} started as session task ${taskId} (background requested).`;
+		case "manual":
+			return `Tool ${context.toolCall.name} moved to session task ${taskId} by the operator after ${seconds}s.`;
+		default:
+			return `Tool ${context.toolCall.name} exceeded ${seconds}s; running as session task ${taskId}.`;
+	}
+}
 /**
  * How long one `tool_task wait` may block by default. A wait is the model's own decision to have
  * nothing else to do until the task ends, so it blocks as long as a delegate wait may (five
@@ -557,7 +571,7 @@ export class BackgroundToolTaskController {
 					{
 						type: "text",
 						text: [
-							`Tool ${context.toolCall.name} exceeded ${Math.max(1, Math.round(context.elapsedMs / 1000))}s; running as session task ${taskId}.`,
+							handoffHeadline(context, taskId),
 							"Continue independent work. Dependency: tool_task action=wait once with taskId; event-driven, never poll.",
 						].join("\n"),
 					},

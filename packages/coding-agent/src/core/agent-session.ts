@@ -1774,6 +1774,8 @@ export class AgentSession {
 			this.getActiveToolNames().includes("tool_task") ? this._backgroundToolTasks.handoff(context) : undefined;
 		this.agent.subscribeToolCallHandoffRequest = (toolCallId, request) =>
 			this._backgroundToolTasks.subscribeHandoffRequest(toolCallId, request);
+		this.agent.isBackgroundRequested = (tool, args) =>
+			this.getToolDefinition(tool)?.backgroundRequested?.(args as never) === true;
 		this.agent.onRunawayStop = (info) => this._handleRunawayStop(info);
 		this.agent.onToolValidationEscalation = (event) => this._handleToolValidationEscalation(event);
 		this.agent.toolFailureProtocolProse = this.getCapabilityTierPolicy().protocolProse;

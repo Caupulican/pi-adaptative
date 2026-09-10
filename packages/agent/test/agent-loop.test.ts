@@ -6636,3 +6636,87 @@ describe("continuation state seeds the sent prefix across runs", () => {
 		expect(createAgentLoopContinuationState().providerRequestPrefixState?.sentPrefixCount).toBe(0);
 	});
 });
+
+describe("foreground by default, background on request", () => {
+	function slowTool(delayMs: number, onRun?: () => void): AgentTool<ReturnType<typeof Type.Object>, { ran: true }> {
+		const schema = Type.Object({ background: Type.Optional(Type.Boolean()) });
+		return {
+			name: "slow",
+			label: "Slow",
+			description: "Takes a while",
+			parameters: schema,
+			async execute() {
+				onRun?.();
+				await new Promise((resolve) => setTimeout(resolve, delayMs));
+				return { content: [{ type: "text", text: "slow finished" }], details: { ran: true } };
+			},
+		} as unknown as AgentTool<ReturnType<typeof Type.Object>, { ran: true }>;
+	}
+	function run(args: Record<string, unknown>, config: Partial<AgentLoopConfig>, handoffs: string[]) {
+		let providerCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("run it")],
+			{ systemPrompt: "base", messages: [], tools: [slowTool(60)] },
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				handoffToolCall: (context) => {
+					handoffs.push(context.toolCall.name);
+					return {
+						result: { content: [{ type: "text", text: "handed off" }], details: { taskId: "tool-task-1" } },
+						completion: context.completion.then(() => undefined),
+					} as never;
+				},
+				...config,
+			},
+			undefined,
+			() => {
+				const response = new MockAssistantStream();
+				const turn = providerCalls++;
+				queueMicrotask(() => {
+					pushDone(
+						response,
+						turn === 0
+							? createAssistantMessage(
+									[{ type: "toolCall", id: "slow-1", name: "slow", arguments: args }],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]),
+					);
+				});
+				return response;
+			},
+		);
+		return stream.result();
+	}
+
+	it("keeps a slow call in the foreground when no clock is configured", async () => {
+		const handoffs: string[] = [];
+		const messages = await run({}, { backgroundToolCallAfterMs: 0 }, handoffs);
+		expect(handoffs).toEqual([]);
+		const result = messages.find((message) => message.role === "toolResult");
+		expect(result && "content" in result ? JSON.stringify(result.content) : "").toContain("slow finished");
+	});
+
+	it("hands a call off at once when the model asked for a background task", async () => {
+		const handoffs: string[] = [];
+		const messages = await run(
+			{ background: true },
+			{
+				backgroundToolCallAfterMs: 0,
+				isBackgroundRequested: (name, args) =>
+					name === "slow" && (args as { background?: boolean }).background === true,
+			},
+			handoffs,
+		);
+		expect(handoffs).toEqual(["slow"]);
+		const result = messages.find((message) => message.role === "toolResult");
+		expect(result && "content" in result ? JSON.stringify(result.content) : "").toContain("handed off");
+	});
+
+	it("still honours an operator clock when one is set", async () => {
+		const handoffs: string[] = [];
+		await run({}, { backgroundToolCallAfterMs: 10 }, handoffs);
+		expect(handoffs).toEqual(["slow"]);
+	});
+});
