@@ -5,7 +5,7 @@ import { createBackgroundToolTerminalMessage } from "../src/core/background-tool
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { WorkbenchComponent } from "../src/modes/interactive/components/workbench.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
-import { WorkbenchController } from "../src/modes/interactive/workbench-controller.ts";
+import { buildWorkbenchSections, WorkbenchController } from "../src/modes/interactive/workbench-controller.ts";
 import { WorkspaceObservation } from "../src/modes/interactive/workbench-workspace.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 import { workbenchCounterFixture } from "./fixtures/session-failures.ts";
@@ -102,6 +102,29 @@ describe("Workbench input boundary", () => {
 			{ rows: 18, collapsed: false, inspector: "hidden", executionMaximized: true },
 			{ rows: 18, collapsed: true, inspector: "hidden", executionMaximized: true },
 		]);
+	});
+
+	it("lists failing verifications as a Checks block the operator can act on", () => {
+		const sections = buildWorkbenchSections(
+			{
+				laneRecords: [],
+				items: [],
+				verification: [
+					{ id: "shell-test-abc", command: "vitest run test/x.test.ts", cwd: "/repo/packages/coding-agent" },
+					{ id: "shell-test-def" },
+				],
+			},
+			Date.now(),
+		);
+		const checks = sections.find((section) => section.title === "Checks");
+		expect(checks?.meta).toBe("2 failing");
+		const rows = (Array.isArray(checks?.body) ? checks.body : []).map(stripAnsi);
+		expect(rows[0]).toContain("vitest run test/x.test.ts");
+		expect(rows[1]).toContain("shell-test-def");
+		expect(rows.at(-1)).toContain("/verify dismiss");
+		expect(buildWorkbenchSections({ laneRecords: [], items: [] }, Date.now()).some((s) => s.title === "Checks")).toBe(
+			false,
+		);
 	});
 
 	it("refuses the toggle without a terminal mouse instead of pretending", () => {

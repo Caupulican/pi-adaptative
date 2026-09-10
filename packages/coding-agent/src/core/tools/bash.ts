@@ -1294,6 +1294,9 @@ function createShellToolDefinition(
 										: {}),
 									...(verification.repairGroup !== undefined ? { repairGroup: verification.repairGroup } : {}),
 									...(repairOf !== undefined ? { repairOf } : {}),
+									// Display identity for the operator and the model; the id stays the identity.
+									command: verification.display,
+									...(verification.cwd !== undefined ? { cwd: verification.cwd } : {}),
 									status:
 										exitCode === 0 && (runnerOutcome === undefined || runnerOutcome === "passed")
 											? "passed"

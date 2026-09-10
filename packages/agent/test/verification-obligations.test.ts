@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { agentLoop } from "../src/agent-loop.ts";
 import type { AgentMessage } from "../src/types.ts";
 import {
+	createVerificationDismissalDetails,
 	createVerificationObligationSnapshotDetails,
 	retainedVerificationDetails,
 	VerificationObligationTracker,
@@ -75,7 +76,7 @@ function customMessage(details: unknown): AgentMessage {
 }
 
 describe("VerificationObligationTracker", () => {
-	it("ends the actual loop after one retained partial handoff, without buying a grammar rewrite", async () => {
+	it("answers normally when the only failures were inherited from an earlier run, keeping them active", async () => {
 		const failure = failedVerification("alpha");
 		const handoff = assistantText("The fix needs a fixture correction before verification can pass.");
 		let requests = 0;
@@ -112,15 +113,14 @@ describe("VerificationObligationTracker", () => {
 		);
 		const messages = await loop.result();
 		expect(requests).toBe(1);
-		expect(messages.at(-1)).toMatchObject({
-			content: handoff.content,
-			stopReason: "error",
-			errorMessage: "verification_handoff_required",
-		});
+		// The answer is an answer: the failure belongs to an earlier run, so it stays listed and keeps
+		// blocking goal completion, but this run is not marked unsuccessful for it.
+		expect(messages.at(-1)).toMatchObject({ content: handoff.content, stopReason: "stop" });
 		expect(new VerificationObligationTracker([failure, ...messages]).getActiveIds()).toEqual(["alpha"]);
 	});
-	it("preserves a useful handoff while marking unresolved verification as an unsuccessful terminal", () => {
-		const tracker = new VerificationObligationTracker([failedVerification("alpha")]);
+	it("preserves a useful handoff while marking the run that produced the failure as unsuccessful", () => {
+		const tracker = new VerificationObligationTracker([]);
+		tracker.record([failedVerification("alpha")]);
 		const message = assistantText(
 			"The parser fix is implemented. The regression still fails because the fixture is missing.",
 		);
@@ -129,24 +129,118 @@ describe("VerificationObligationTracker", () => {
 		expect(terminal.stopReason).toBe("error");
 		expect(terminal.errorMessage).toContain("verification_handoff_required");
 		expect(tracker.getActiveIds()).toEqual(["alpha"]);
+		expect(tracker.getIdsOpenedThisRun()).toEqual(["alpha"]);
 		tracker.record([passedVerification("alpha")]);
 		expect(tracker.enforceTerminalMessage(message)).toBe(message);
 	});
+	it("leaves a later run's answer alone when its failures were inherited, until the run fails one itself", () => {
+		const inherited = new VerificationObligationTracker([failedVerification("alpha")]);
+		const message = assistantText("Here is the review you asked for.");
+		expect(inherited.getIdsOpenedThisRun()).toEqual([]);
+		expect(inherited.enforceTerminalMessage(message)).toBe(message);
+		expect(inherited.getActiveIds()).toEqual(["alpha"]);
+		// Re-failing the inherited check inside this run makes it this run's own.
+		inherited.record([failedVerification("alpha")]);
+		expect(inherited.getIdsOpenedThisRun()).toEqual(["alpha"]);
+		expect(inherited.enforceTerminalMessage(message).stopReason).toBe("error");
+	});
+	it("keeps this run's own failures across a mid-run context restore, and drops them once resolved", () => {
+		const tracker = new VerificationObligationTracker([]);
+		const failure = failedVerification("alpha");
+		tracker.record([failure]);
+		tracker.restore([failure]);
+		expect(tracker.getIdsOpenedThisRun()).toEqual(["alpha"]);
+		expect(tracker.enforceTerminalMessage(assistantText("still red")).stopReason).toBe("error");
+		tracker.restore([failure, passedVerification("alpha")]);
+		expect(tracker.getIdsOpenedThisRun()).toEqual([]);
+		expect(tracker.getActiveIds()).toEqual([]);
+	});
+	it("resolves obligations from the operator's dismissal record and never from prose", () => {
+		const tracker = new VerificationObligationTracker([]);
+		tracker.record([failedVerification("alpha"), failedVerification("beta")]);
+		const details = createVerificationDismissalDetails(["alpha", "missing"], "environment fault");
+		expect(details).toEqual({
+			piVerificationDismissal: { version: 1, ids: ["alpha", "missing"], note: "environment fault" },
+		});
+		tracker.record([
+			{
+				role: "custom",
+				customType: "pi_verification_dismissal",
+				content: "dismissed",
+				display: true,
+				details,
+				timestamp: 3,
+			},
+		]);
+		expect(tracker.getActiveIds()).toEqual(["beta"]);
+		expect(tracker.getIdsOpenedThisRun()).toEqual(["beta"]);
+		// A malformed dismissal is ignored, never widened; a message with the type but no details clears nothing.
+		tracker.record([
+			{
+				role: "custom",
+				customType: "pi_verification_dismissal",
+				content: "x",
+				display: true,
+				details: { piVerificationDismissal: { version: 1, ids: "beta" } },
+				timestamp: 4,
+			},
+		]);
+		expect(tracker.getActiveIds()).toEqual(["beta"]);
+		expect(createVerificationDismissalDetails([])).toBeUndefined();
+		expect(createVerificationDismissalDetails(["_verification_overflow"])).toBeUndefined();
+	});
+	it("carries the command and directory in the open, in the instruction, the view and the snapshot", () => {
+		const tracker = new VerificationObligationTracker([]);
+		tracker.record([
+			toolResult({
+				piVerification: {
+					version: 1,
+					id: "alpha",
+					status: "failed",
+					command: "vitest run test/x.test.ts",
+					cwd: "/repo/packages/coding-agent",
+				},
+			}),
+		]);
+		expect(tracker.getActiveObligations()).toEqual([
+			{ id: "alpha", command: "vitest run test/x.test.ts", cwd: "/repo/packages/coding-agent" },
+		]);
+		const instruction = tracker.requestInstruction() ?? "";
+		expect(instruction).toContain("- alpha — vitest run test/x.test.ts (in /repo/packages/coding-agent)");
+		expect(instruction).toContain("/verify");
+		const snapshot = tracker.createSnapshotDetails();
+		expect(snapshot?.piVerificationObligations.descriptions).toEqual([
+			{ id: "alpha", command: "vitest run test/x.test.ts", cwd: "/repo/packages/coding-agent" },
+		]);
+		const restored = new VerificationObligationTracker([compactionSummary(snapshot)]);
+		expect(restored.getActiveObligations()).toEqual(tracker.getActiveObligations());
+		// Oversized or control-character text is bounded, never rejected as a whole record.
+		const noisy = new VerificationObligationTracker([]);
+		noisy.record([
+			toolResult({
+				piVerification: { version: 1, id: "beta", status: "failed", command: `x\u0007${"y".repeat(400)}` },
+			}),
+		]);
+		expect(noisy.getActiveObligations()[0]?.command?.length).toBe(200);
+		expect(noisy.getActiveObligations()[0]?.command?.includes("\u0007")).toBe(false);
+	});
 	it("does not turn opaque-id prose into successful verification", () => {
-		const tracker = new VerificationObligationTracker([failedVerification("alpha")]);
+		const tracker = new VerificationObligationTracker([]);
+		tracker.record([failedVerification("alpha")]);
 		const message = assistantText("VERIFICATION_UNRESOLVED alpha: environment unavailable");
 		expect(tracker.enforceTerminalMessage(message).stopReason).toBe("error");
 		expect(tracker.getActiveIds()).toEqual(["alpha"]);
 	});
 	it("projects unresolved identities without requiring a special handoff grammar", () => {
-		const tracker = new VerificationObligationTracker([failedVerification("alpha"), failedVerification("beta")]);
+		const tracker = new VerificationObligationTracker([]);
+		tracker.record([failedVerification("alpha"), failedVerification("beta")]);
 		const prompt = tracker.appendSystemPrompt("base");
 		expect(prompt).toContain("no special answer format is required");
 		expect(prompt).toContain("Analyze the red output and relevant changes");
 		expect(prompt).toContain("inspect and repair the authoritative owner");
 		expect(prompt).toContain("rerun the same verification");
 		expect(prompt).toContain("Unrelated successful tools do not clear an obligation");
-		expect(prompt).toContain("Completion claims are forbidden while any verification obligation remains active");
+		expect(prompt).toContain("The goal cannot be completed while any verification obligation remains active");
 
 		for (const text of [
 			"The fix is incomplete; alpha and beta still fail.",
@@ -236,10 +330,11 @@ describe("VerificationObligationTracker", () => {
 		const snapshot = createVerificationObligationSnapshotDetails(tracker.getActiveIds());
 		const restored = new VerificationObligationTracker([compactionSummary(snapshot)]);
 		expect(restored.getActiveIds()).toContain("_verification_overflow");
-		expect(
-			restored.enforceTerminalMessage(assistantText("VERIFICATION_UNRESOLVED check-01: a remaining failure"))
-				.stopReason,
-		).toBe("error");
+		// Inherited through the snapshot: listed, not this run's own failure.
+		const answer = assistantText("VERIFICATION_UNRESOLVED check-01: a remaining failure");
+		expect(restored.enforceTerminalMessage(answer)).toBe(answer);
+		restored.record([failedVerification("check-01")]);
+		expect(restored.enforceTerminalMessage(answer).stopReason).toBe("error");
 	});
 
 	it("never evicts the overflow witness itself, even once it is the oldest tracked entry", () => {

@@ -19,7 +19,8 @@ export type GoalContinuationReasonCode =
 	| "tool_task_in_flight"
 	| "worker_wait_timeout"
 	| "lane_sync_conflict"
-	| "lane_sync_required";
+	| "lane_sync_required"
+	| "verification_unresolved";
 
 export interface GoalContinuationDecision {
 	action: GoalContinuationAction;
@@ -92,6 +93,12 @@ export function evaluateGoalContinuation(args: {
 	 * a bound worker — a handoff stub is not completion.
 	 */
 	inFlightToolTaskIds?: ReadonlySet<string>;
+	/**
+	 * Verification obligations still failed on the branch. Once nothing else stands between the
+	 * goal and completion, they are the operator's call — rerun the check or `/verify dismiss` —
+	 * not a reason to keep spending continuation turns on an answer the host will never accept.
+	 */
+	activeVerificationIds?: readonly string[];
 }): GoalContinuationDecision {
 	if (!args.state) {
 		return {
@@ -229,6 +236,14 @@ export function evaluateGoalContinuation(args: {
 				action: "waiting",
 				reasonCode: "tool_task_in_flight",
 				message: `Background tool_task(s) ${[...args.inFlightToolTaskIds].join(", ")} are still running; wait once via tool_task before completing.`,
+			};
+		}
+		if (args.activeVerificationIds && args.activeVerificationIds.length > 0) {
+			return {
+				...baseDecision,
+				action: "ask-user",
+				reasonCode: "verification_unresolved",
+				message: `Verification obligation(s) ${args.activeVerificationIds.join(", ")} remain failed; the goal cannot complete until the same check passes or the operator resolves them with /verify.`,
 			};
 		}
 		return {

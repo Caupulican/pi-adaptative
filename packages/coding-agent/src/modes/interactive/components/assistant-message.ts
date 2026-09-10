@@ -217,7 +217,7 @@ export class AssistantMessageComponent extends Container {
 					new Text(
 						theme.fg(
 							"warning",
-							"Verification remains unresolved. This run has not passed its outstanding checks.",
+							"Verification remains unresolved: this run's own check is still failing. Rerun it, or /verify to see and dismiss it.",
 						),
 						1,
 						0,

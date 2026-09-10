@@ -13,8 +13,26 @@ export const VERIFICATION_HANDOFF_REQUIRED_ERROR = "verification_handoff_require
  * transient-records.ts). Never changes across the life of a conversation - it is the join key
  * `reconcileTransientRecords` uses to find the last recorded instance in durable history. */
 export const VERIFICATION_OBLIGATION_TRANSIENT_KIND = "pi_verification_obligation";
+/**
+ * Custom message type an operator command appends to resolve obligations by their own authority.
+ * The record is user-plane: only the operator's command writes it, the model has no tool for it, and
+ * the resolution is never a passing test — goal evidence still needs a real receipt.
+ */
+export const VERIFICATION_DISMISSAL_CUSTOM_TYPE = "pi_verification_dismissal";
+/** Bounded, human-readable identity that rides a record so nobody has to reason about an opaque id. */
+export const MAX_VERIFICATION_COMMAND_LENGTH = 200;
+export const MAX_VERIFICATION_CWD_LENGTH = 512;
 
 type VerificationStatus = "failed" | "passed";
+
+/** What the operator and the model can read about an obligation without decoding its id. */
+export type VerificationObligationView = {
+	id: string;
+	command?: string;
+	cwd?: string;
+	/** Present when the obligation is an empty-test setup failure a corrected bash may repair. */
+	setupRepairGroup?: string;
+};
 
 export type VerificationRecord = {
 	version: 1;
@@ -28,6 +46,10 @@ export type VerificationRecord = {
 	repairGroup?: string;
 	/** Requested setup replacement; the tracker validates its scope, phase and ordering. */
 	repairOf?: string;
+	/** The verification as it was run, bounded; display only, never identity. */
+	command?: string;
+	/** Where it ran, bounded; display only, never identity. */
+	cwd?: string;
 };
 
 export type VerificationObligationSnapshotDetails = {
@@ -35,8 +57,41 @@ export type VerificationObligationSnapshotDetails = {
 		version: 1;
 		activeIds: string[];
 		setupFailures?: Array<{ id: string; repairGroup: string }>;
+		descriptions?: Array<{ id: string; command?: string; cwd?: string }>;
 	};
 };
+
+export type VerificationDismissalDetails = {
+	piVerificationDismissal: { version: 1; ids: string[]; note?: string };
+};
+
+/** Build the details of an operator dismissal record; ids must be well-formed and bounded. */
+export function createVerificationDismissalDetails(
+	ids: readonly string[],
+	note?: string,
+): VerificationDismissalDetails | undefined {
+	const canonical = boundedCanonicalIds(ids.filter((id) => id !== VERIFICATION_OVERFLOW_ID));
+	if (!canonical || canonical.length === 0) return undefined;
+	const trimmed = note?.trim().slice(0, MAX_VERIFICATION_COMMAND_LENGTH);
+	return { piVerificationDismissal: { version: 1, ids: canonical, ...(trimmed ? { note: trimmed } : {}) } };
+}
+
+function readVerificationDismissal(details: unknown): string[] | undefined {
+	if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
+	const candidate = ownDataValue(details, "piVerificationDismissal");
+	if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+	if (ownDataValue(candidate, "version") !== 1) return undefined;
+	const ids = ownDataValue(candidate, "ids");
+	if (!Array.isArray(ids) || !ids.every((id): id is string => typeof id === "string")) return undefined;
+	return boundedCanonicalIds(ids);
+}
+
+function boundedDisplayText(value: unknown, limit: number): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const text = value.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "").trim();
+	if (!text) return undefined;
+	return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
+}
 
 function ownDataValue(record: object, key: string): unknown {
 	const descriptor = Object.getOwnPropertyDescriptor(record, key);
@@ -67,6 +122,8 @@ function readVerificationRecord(candidate: unknown): VerificationRecord | undefi
 	const evidence = ownDataValue(candidate, "evidence");
 	const repairGroup = ownDataValue(candidate, "repairGroup");
 	const repairOf = ownDataValue(candidate, "repairOf");
+	const command = boundedDisplayText(ownDataValue(candidate, "command"), MAX_VERIFICATION_COMMAND_LENGTH);
+	const cwd = boundedDisplayText(ownDataValue(candidate, "cwd"), MAX_VERIFICATION_CWD_LENGTH);
 	if (version !== 1 || !isVerificationId(id) || (status !== "failed" && status !== "passed")) return undefined;
 	if (originTaskId !== undefined && !isOriginTaskId(originTaskId)) return undefined;
 	if (outcome !== undefined && outcome !== "executed" && outcome !== "setup_failed" && outcome !== "unconfirmed")
@@ -84,6 +141,8 @@ function readVerificationRecord(candidate: unknown): VerificationRecord | undefi
 		...(evidence !== undefined ? { evidence } : {}),
 		...(repairGroup !== undefined ? { repairGroup } : {}),
 		...(repairOf !== undefined ? { repairOf } : {}),
+		...(command !== undefined ? { command } : {}),
+		...(cwd !== undefined ? { cwd } : {}),
 	};
 }
 
@@ -154,7 +213,36 @@ function readVerificationObligationSnapshot(
 		!setupFailures.every((entry, index) => ownDataValue(rawSetup[index], "id") === entry.id)
 	)
 		return undefined;
-	return { version: 1, activeIds: canonicalIds, ...(setupFailures.length ? { setupFailures } : {}) };
+	const descriptions = canonicalDescriptions(ownDataValue(candidate, "descriptions"), canonicalIds);
+	if (!descriptions) return undefined;
+	return {
+		version: 1,
+		activeIds: canonicalIds,
+		...(setupFailures.length ? { setupFailures } : {}),
+		...(descriptions.length ? { descriptions } : {}),
+	};
+}
+
+/** Display descriptions ride the snapshot only for ids it retains; anything else is dropped, never trusted. */
+function canonicalDescriptions(
+	value: unknown,
+	activeIds: readonly string[],
+): Array<{ id: string; command?: string; cwd?: string }> | undefined {
+	if (value === undefined) return [];
+	if (!Array.isArray(value) || value.length > activeIds.length) return undefined;
+	const seen = new Set<string>();
+	const records: Array<{ id: string; command?: string; cwd?: string }> = [];
+	for (const candidate of value) {
+		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+		const id = ownDataValue(candidate, "id");
+		if (!isSnapshotVerificationId(id) || !activeIds.includes(id) || seen.has(id)) return undefined;
+		seen.add(id);
+		const command = boundedDisplayText(ownDataValue(candidate, "command"), MAX_VERIFICATION_COMMAND_LENGTH);
+		const cwd = boundedDisplayText(ownDataValue(candidate, "cwd"), MAX_VERIFICATION_CWD_LENGTH);
+		if (command === undefined && cwd === undefined) continue;
+		records.push({ id, ...(command !== undefined ? { command } : {}), ...(cwd !== undefined ? { cwd } : {}) });
+	}
+	return records.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
 }
 
 function readVerificationEvents(details: unknown): VerificationRecord[] | typeof VERIFICATION_OVERFLOW_ID | undefined {
@@ -175,16 +263,20 @@ function readVerificationEvents(details: unknown): VerificationRecord[] | typeof
 export function createVerificationObligationSnapshotDetails(
 	activeIds: readonly string[],
 	setupFailures?: readonly { id: string; repairGroup: string }[],
+	descriptions?: readonly { id: string; command?: string; cwd?: string }[],
 ): VerificationObligationSnapshotDetails | undefined {
 	const canonicalIds = boundedCanonicalIds(activeIds);
 	if (!canonicalIds) return undefined;
 	const canonicalSetup = canonicalSetupFailures(setupFailures, canonicalIds);
 	if (!canonicalSetup) return undefined;
+	const canonicalDescribed = canonicalDescriptions(descriptions, canonicalIds);
+	if (!canonicalDescribed) return undefined;
 	return {
 		piVerificationObligations: {
 			version: 1,
 			activeIds: canonicalIds,
 			...(canonicalSetup.length ? { setupFailures: canonicalSetup } : {}),
+			...(canonicalDescribed.length ? { descriptions: canonicalDescribed } : {}),
 		},
 	};
 }
@@ -192,19 +284,25 @@ export function createVerificationObligationSnapshotDetails(
 function formatActiveVerificationFailures(
 	ids: readonly string[],
 	setupGroups: ReadonlyMap<string, string>,
+	descriptions: ReadonlyMap<string, { command?: string; cwd?: string }>,
 ): string | undefined {
 	if (ids.length === 0) return undefined;
+	const describe = (id: string): string => {
+		const description = descriptions.get(id);
+		const where = description?.cwd ? ` (in ${description.cwd})` : "";
+		const what = description?.command ? ` — ${description.command}${where}` : "";
+		const setup = setupGroups.has(id) ? ` (empty-test setup; corrected bash may set repairOf="${id}")` : "";
+		return `- ${id}${what}${setup}`;
+	};
 	return [
 		"ACTIVE VERIFICATION FAILURES",
-		"Trusted verification obligations remain unresolved. A trusted pass for the same id resolves an obligation. An explicitly linked empty-test setup repair also requires matching test arguments within the same workspace and a later executed pass.",
+		"Trusted verification obligations remain unresolved. A trusted pass of the same command in the same directory resolves an obligation. An explicitly linked empty-test setup repair also requires matching test arguments within the same workspace and a later executed pass.",
 		"Analyze the red output and relevant changes, inspect and repair the authoritative owner, then rerun the same verification.",
-		"Unrelated successful tools do not clear an obligation. Completion claims are forbidden while any verification obligation remains active.",
+		"Unrelated successful tools do not clear an obligation. The goal cannot be completed while any verification obligation remains active.",
 		`An active ${VERIFICATION_OVERFLOW_ID} means bounded history lost individual failure identities; tool passes never clear that overflow obligation.`,
-		"If verification cannot be completed, explain the completed work, remaining failures, and next action in ordinary prose. The host retains unresolved status separately; no special answer format is required.",
-		"Active ids:",
-		...ids.map(
-			(id) => `- ${id}${setupGroups.has(id) ? ` (empty-test setup; corrected bash may set repairOf="${id}")` : ""}`,
-		),
+		"If verification cannot be completed, explain the completed work, remaining failures, and next action in ordinary prose. The host retains unresolved status separately; no special answer format is required. When the failure came from the environment rather than the code, say so: the operator resolves such obligations with /verify.",
+		"Active obligations:",
+		...ids.map(describe),
 	].join("\n");
 }
 
@@ -217,8 +315,8 @@ function formatActiveVerificationFailures(
  */
 export const VERIFICATION_OBLIGATIONS_CLEARED_TEXT =
 	"ACTIVE VERIFICATION FAILURES\nAll verification obligations that were active earlier in this " +
-	"conversation have since resolved through trusted passing verification or validated setup repair. None are " +
-	"currently active; no id-specific completion format is required.";
+	"conversation have since resolved through trusted passing verification, validated setup repair, or the " +
+	"operator's dismissal. None are currently active; no id-specific completion format is required.";
 
 function rememberFailedVerification(activeIds: Map<string, true>, id: string): void {
 	if (activeIds.has(id)) {
@@ -247,6 +345,15 @@ function rememberFailedVerification(activeIds: Map<string, true>, id: string): v
 export class VerificationObligationTracker {
 	private readonly activeIds = new Map<string, true>();
 	private readonly activeSetupGroups = new Map<string, string>();
+	/** Display identity of each active obligation, bounded; never consulted for resolution. */
+	private readonly descriptions = new Map<string, { command?: string; cwd?: string }>();
+	/**
+	 * Obligations opened or re-failed by THIS run (records seen after the constructor's history
+	 * replay). Only these mark the run's terminal answer as unresolved: an obligation a previous run
+	 * left behind still blocks goal completion and stays listed, but a later answer is an answer.
+	 */
+	private readonly openedThisRun = new Set<string>();
+	private replaying = false;
 	/** First transcript position of each host-owned background placeholder. */
 	private readonly backgroundTaskRevisions = new Map<string, number>();
 	/** Revision of each retained active identity; omitted identities cannot be cleared by a stale pass. */
@@ -254,16 +361,33 @@ export class VerificationObligationTracker {
 	private transcriptRevision = 0;
 
 	constructor(messages: readonly AgentMessage[] = []) {
-		this.record(messages);
+		this.replay(messages);
 	}
 
+	/**
+	 * Rebuild from a replaced context inside the SAME run (the loop swaps its context between
+	 * provider turns). The failures this run already produced stay this run's: only the active set is
+	 * recomputed, and an id the replay no longer holds active drops out of the run's own set.
+	 */
 	restore(messages: readonly AgentMessage[]): void {
 		this.activeIds.clear();
 		this.activeSetupGroups.clear();
+		this.descriptions.clear();
 		this.activeRevisions.clear();
 		this.backgroundTaskRevisions.clear();
 		this.transcriptRevision = 0;
-		this.record(messages);
+		this.replay(messages);
+		for (const id of [...this.openedThisRun]) if (!this.activeIds.has(id)) this.openedThisRun.delete(id);
+	}
+
+	/** History belongs to earlier runs: it shapes the active set but never this run's own failures. */
+	private replay(messages: readonly AgentMessage[]): void {
+		this.replaying = true;
+		try {
+			this.record(messages);
+		} finally {
+			this.replaying = false;
+		}
 	}
 
 	record(messages: readonly AgentMessage[]): void {
@@ -274,6 +398,7 @@ export class VerificationObligationTracker {
 				if (!snapshot) continue;
 				this.activeIds.clear();
 				this.activeSetupGroups.clear();
+				this.descriptions.clear();
 				this.activeRevisions.clear();
 				this.backgroundTaskRevisions.clear();
 				for (const id of snapshot.activeIds) {
@@ -282,6 +407,15 @@ export class VerificationObligationTracker {
 				}
 				for (const record of snapshot.setupFailures ?? [])
 					this.activeSetupGroups.set(record.id, record.repairGroup);
+				for (const record of snapshot.descriptions ?? [])
+					this.descriptions.set(record.id, { command: record.command, cwd: record.cwd });
+				continue;
+			}
+			if (message.role === "custom" && message.customType === VERIFICATION_DISMISSAL_CUSTOM_TYPE) {
+				// The operator's own record: their authority resolves, and nothing else about the
+				// record is trusted (a malformed one is ignored, never widened).
+				for (const id of readVerificationDismissal(message.details) ?? [])
+					this.applyRecord({ version: 1, id, status: "passed" }, revision, true);
 				continue;
 			}
 			const background = message.role === "toolResult" ? readBackgroundTaskId(message.details) : { present: false };
@@ -352,6 +486,8 @@ export class VerificationObligationTracker {
 			this.activeIds.delete(record.id);
 			this.activeRevisions.delete(record.id);
 			this.activeSetupGroups.delete(record.id);
+			this.descriptions.delete(record.id);
+			this.openedThisRun.delete(record.id);
 			return;
 		}
 		const setupGroup =
@@ -361,11 +497,20 @@ export class VerificationObligationTracker {
 				? record.repairGroup
 				: undefined;
 		rememberFailedVerification(this.activeIds, record.id);
+		if (!this.replaying) this.openedThisRun.add(record.id);
 		for (const id of this.activeRevisions.keys()) {
 			if (!this.activeIds.has(id)) {
 				this.activeRevisions.delete(id);
 				this.activeSetupGroups.delete(id);
+				this.descriptions.delete(id);
+				this.openedThisRun.delete(id);
 			}
+		}
+		if (this.activeIds.has(record.id) && (record.command !== undefined || record.cwd !== undefined)) {
+			this.descriptions.set(record.id, {
+				...(record.command !== undefined ? { command: record.command } : {}),
+				...(record.cwd !== undefined ? { cwd: record.cwd } : {}),
+			});
 		}
 		if (setupGroup !== undefined && this.activeIds.has(record.id)) this.activeSetupGroups.set(record.id, setupGroup);
 		else this.activeSetupGroups.delete(record.id);
@@ -384,7 +529,26 @@ export class VerificationObligationTracker {
 	 * provider's cached prefix.
 	 */
 	requestInstruction(): string | undefined {
-		return formatActiveVerificationFailures(this.getActiveIds(), this.activeSetupGroups);
+		return formatActiveVerificationFailures(this.getActiveIds(), this.activeSetupGroups, this.descriptions);
+	}
+
+	/** Every active obligation with what the operator can read about it, in deterministic order. */
+	getActiveObligations(): VerificationObligationView[] {
+		return this.getActiveIds().map((id) => {
+			const description = this.descriptions.get(id);
+			const setupRepairGroup = this.activeSetupGroups.get(id);
+			return {
+				id,
+				...(description?.command !== undefined ? { command: description.command } : {}),
+				...(description?.cwd !== undefined ? { cwd: description.cwd } : {}),
+				...(setupRepairGroup !== undefined ? { setupRepairGroup } : {}),
+			};
+		});
+	}
+
+	/** Ids this run opened or re-failed; what makes the run's own terminal answer unresolved. */
+	getIdsOpenedThisRun(): readonly string[] {
+		return [...this.openedThisRun].filter((id) => this.activeIds.has(id)).sort();
 	}
 
 	/**
@@ -409,16 +573,21 @@ export class VerificationObligationTracker {
 		return createVerificationObligationSnapshotDetails(
 			this.getActiveIds(),
 			[...this.activeSetupGroups].map(([id, repairGroup]) => ({ id, repairGroup })),
+			[...this.descriptions].map(([id, description]) => ({ id, ...description })),
 		);
 	}
 
-	/** Retains the model's handoff while preventing an unresolved run from reporting success. */
+	/**
+	 * Retains the model's handoff while preventing the run that produced an unresolved failure from
+	 * reporting success. Obligations inherited from earlier runs do not make a later answer an
+	 * error: they stay listed and keep blocking goal completion, which is where completion is claimed.
+	 */
 	enforceTerminalMessage(message: AssistantMessage): AssistantMessage {
 		if (
 			message.stopReason === "error" ||
 			message.stopReason === "aborted" ||
 			message.content.some((block) => block.type === "toolCall") ||
-			this.activeIds.size === 0
+			this.getIdsOpenedThisRun().length === 0
 		) {
 			return message;
 		}

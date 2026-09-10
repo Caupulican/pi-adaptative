@@ -86,4 +86,82 @@ describe("unresolved verification session handoff", () => {
 			),
 		).toMatchObject({ isError: false });
 	});
+
+	it("answers a later question normally while the obligation stays active, and completes after the operator dismisses it", async () => {
+		const verificationId = "session-inherited-check";
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) =>
+					pi.registerTool({
+						name: "verify",
+						label: "Verify",
+						description: "Run the focused check",
+						parameters: Type.Object({}),
+						async execute() {
+							return {
+								content: [{ type: "text", text: "failed" }],
+								details: { piVerification: { version: 1, id: verificationId, status: "failed" } },
+								isError: true,
+							};
+						},
+					}),
+			],
+		});
+		appendGoalStateSnapshot(
+			harness.sessionManager,
+			createGoalState({ goalId: "inherited-goal", userGoal: "Repair and verify", now: new Date().toISOString() }),
+		);
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("verify", {})], { stopReason: "toolUse" }),
+			fauxAssistantMessage("The check fails on this machine; the fixture is missing."),
+		]);
+		await harness.session.prompt("Run the focused check.");
+		expect(harness.session.messages.at(-1)).toMatchObject({
+			stopReason: "error",
+			errorMessage: "verification_handoff_required",
+		});
+		expect(harness.session.getVerificationObligations().map((o) => o.id)).toEqual([verificationId]);
+
+		// A later root turn that does not touch verification is an ordinary answer.
+		harness.setResponses([fauxAssistantMessage("Here is the summary you asked for.")]);
+		await harness.session.prompt("Summarize what you found.");
+		expect(harness.session.messages.at(-1)).toMatchObject({ stopReason: "stop" });
+		expect(getAssistantTexts(harness)).toContain("Here is the summary you asked for.");
+		expect(harness.session.getVerificationObligations().map((o) => o.id)).toEqual([verificationId]);
+
+		// Completion still waits on the obligation until the operator resolves it.
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("update_goal", { status: "complete" }, { id: "blocked-completion" })], {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("Could not complete."),
+		]);
+		await harness.session.prompt("Mark it complete.");
+		expect(
+			harness.session.messages.find(
+				(message) => message.role === "toolResult" && message.toolCallId === "blocked-completion",
+			),
+		).toMatchObject({ isError: true });
+
+		const dismissed = await harness.session.dismissVerificationObligations([verificationId], "fixture absent here");
+		expect(dismissed).toEqual([verificationId]);
+		expect(harness.session.getVerificationObligations()).toEqual([]);
+		expect(
+			harness.session.messages.find(
+				(message) => message.role === "custom" && message.customType === "pi_verification_dismissal",
+			),
+		).toMatchObject({ display: true });
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("update_goal", { status: "complete" }, { id: "dismissed-completion" })], {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("Completed."),
+		]);
+		await harness.session.prompt("Mark it complete now.");
+		expect(
+			harness.session.messages.find(
+				(message) => message.role === "toolResult" && message.toolCallId === "dismissed-completion",
+			),
+		).toMatchObject({ isError: false });
+	});
 });

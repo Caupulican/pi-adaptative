@@ -124,6 +124,7 @@ import {
 	theme,
 } from "./theme/theme.ts";
 import * as usageCommands from "./usage-commands.ts";
+import { handleVerifyCommand } from "./verify-commands.ts";
 import type { WorkbenchController } from "./workbench-controller.ts";
 
 const TUI_HISTORY_RELOAD_CHUNK_SIZE = 20;
@@ -842,10 +843,12 @@ export class InteractiveMode {
 	}
 
 	private activityLaneSnapshot() {
+		const verification = this.session.getVerificationObligations();
 		return {
 			goalState: this.session.getGoalStateSnapshot(),
 			taskState: this.session.getTaskStepsStateSnapshot(),
 			laneRecords: this.session.getLaneRecords(),
+			...(verification.length ? { verification } : {}),
 		};
 	}
 
@@ -1379,6 +1382,14 @@ export class InteractiveMode {
 			)
 				return;
 
+			// Operator-only commands act on the host, never on the model: they run locally even while
+			// the model is working, instead of being queued as steering text for it to read.
+			if (text === "/verify" || text.startsWith("/verify ")) {
+				this.editor.setText("");
+				await handleVerifyCommand(this.verifyHost(), text);
+				return;
+			}
+
 			// Other input submitted during work is steering. Slash/bang text must not execute
 			// commands that would interrupt the current stream or compaction.
 			if (this.session.isCompacting) {
@@ -1425,6 +1436,7 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+
 			if (text === "/fitness" || text.startsWith("/fitness ")) {
 				const fitnessArgs = text.slice("/fitness".length).trim();
 				this.editor.setText("");
@@ -3029,6 +3041,21 @@ export class InteractiveMode {
 			getAutoLearnTenantKey: () => this.getAutoLearnTenantKey(),
 			getAutoLearnDataDir: () => this.getAutoLearnDataDir(),
 			getAutoLearnTenantDataDir: () => this.getAutoLearnTenantDataDir(),
+		};
+	}
+
+	private verifyHost() {
+		return {
+			getVerificationObligations: () => this.session.getVerificationObligations(),
+			dismissVerificationObligations: (ids: readonly string[], note?: string) =>
+				this.session.dismissVerificationObligations(ids, note),
+			showStatus: (message: string) => this.showStatus(message),
+			showError: (message: string) => this.showError(message),
+			showText: (body: string) => {
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new Text(body, 1, 0));
+				this.ui.requestRender();
+			},
 		};
 	}
 

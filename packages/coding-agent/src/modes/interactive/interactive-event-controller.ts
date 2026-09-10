@@ -319,7 +319,11 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				host.activeToolCalls.finish(event.toolCallId);
 				host.ui.requestRender();
 			}
-			if (["task_steps", "goal", "delegate"].includes(event.toolName)) {
+			// A verification receipt changes what the inspector's Checks block shows; refresh it too.
+			const details = event.result.details;
+			const carriesVerification =
+				!!details && typeof details === "object" && "piVerification" in (details as Record<string, unknown>);
+			if (["task_steps", "goal", "delegate"].includes(event.toolName) || carriesVerification) {
 				host.refreshActivityLane();
 			}
 			host.workbench?.record(component?.getWorkbenchPreview(), {
@@ -333,6 +337,8 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 
 		case "agent_end": {
 			if (!event.willRetry) host.workbench?.complete();
+			// The run's receipts are all in the transcript now; the inspector (plan, team, checks) follows them.
+			host.refreshActivityLane();
 			if (host.isNativeReflectionEnabled()) host.maybeRunNativeReflection(event.messages);
 			else if (!host.maybeStartAutoLearn()) host.maybeStartAutonomyReview(event.messages);
 			if (host.settingsManager.getShowTerminalProgress()) host.ui.terminal.setProgress(false);

@@ -144,6 +144,20 @@ export interface ShellVerificationCommand {
 	repairGroup?: string;
 	/** Expected execution directory when the command can be canonicalized without shell evaluation. */
 	cwd?: string;
+	/** The verification as a person would read it (stages joined by their connectors), bounded. */
+	display: string;
+}
+
+const MAX_DISPLAY_LENGTH = 200;
+
+function displayCommand(sequence: ShellCommandSequence): string {
+	const parts: string[] = [];
+	sequence.invocations.forEach((invocation, index) => {
+		if (index > 0) parts.push(sequence.connectors[index - 1] ?? "&&");
+		parts.push(invocation.join(" "));
+	});
+	const text = parts.join(" ").replace(/\s+/g, " ").trim();
+	return text.length <= MAX_DISPLAY_LENGTH ? text : `${text.slice(0, MAX_DISPLAY_LENGTH - 1)}…`;
 }
 
 function isPipefailSetup(args: string[]): boolean {
@@ -267,5 +281,6 @@ export function classifyShellVerificationCommand(
 		cwd: executionCwd,
 		...(repairGroup !== undefined ? { repairGroup } : {}),
 		id: `shell-test-${createHash("sha256").update(JSON.stringify(identity)).digest("base64url")}`,
+		display: displayCommand(sequence),
 	};
 }

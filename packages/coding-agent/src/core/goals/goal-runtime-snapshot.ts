@@ -1,4 +1,6 @@
+import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import { VerificationObligationTracker } from "@caupulican/pi-agent-core/verification-obligations";
 import type { EvidenceBundle, LearningDecision, WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
@@ -211,9 +213,16 @@ export function buildGoalRuntimeSnapshot(args: {
 	const maxWorkerWaitMs = args.maxWorkerWaitMs ?? DEFAULT_GOAL_WORKER_WAIT_MS;
 	const inFlightToolTaskIds = new Set(workState.runningToolTaskIds);
 
+	// Obligations live on the branch's own transcript, the same source the goal-completion gate reads.
+	const activeVerificationIds = new VerificationObligationTracker(
+		args.sessionManager
+			.getBranch()
+			.flatMap((entry) => (entry.type === "message" ? [entry.message as AgentMessage] : [])),
+	).getActiveIds();
 	const continuation = evaluateGoalContinuation({
 		state: goalState,
 		settings: { maxStallTurns: args.settings.maxStallTurns },
+		...(activeVerificationIds.length > 0 ? { activeVerificationIds } : {}),
 		inFlightGoalLaneIds,
 		now,
 		maxWorkerWaitMs,

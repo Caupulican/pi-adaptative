@@ -37,6 +37,7 @@ export interface WorkbenchOptions {
 
 export const PLAN_SECTION = "Work plan";
 export const TEAM_SECTION = "Team";
+export const CHECKS_SECTION = "Checks";
 const EXECUTION_META = "File effects and command outcomes";
 const MIN_INSPECTOR_WIDTH = 24;
 const SIDE_BY_SIDE_MIN_COLUMNS = 80;

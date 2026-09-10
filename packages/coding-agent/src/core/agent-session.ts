@@ -22,7 +22,12 @@ import type {
 	ThinkingLevel,
 	ToolValidationEscalationEvent,
 } from "@caupulican/pi-agent-core/types";
-import { VerificationObligationTracker } from "@caupulican/pi-agent-core/verification-obligations";
+import {
+	createVerificationDismissalDetails,
+	VERIFICATION_DISMISSAL_CUSTOM_TYPE,
+	VerificationObligationTracker,
+	type VerificationObligationView,
+} from "@caupulican/pi-agent-core/verification-obligations";
 import type { Api, AssistantMessage, ImageContent, Message, Model, TextContent, Usage } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
@@ -1407,6 +1412,35 @@ export class AgentSession {
 	/** Reconstruct trusted active verification IDs at the goal-execution boundary. */
 	private _getActiveVerificationIds(): readonly string[] {
 		return new VerificationObligationTracker(this.agent.state.messages).getActiveIds();
+	}
+
+	/** Every active verification obligation with what the operator can read about it. */
+	getVerificationObligations(): VerificationObligationView[] {
+		return new VerificationObligationTracker(this.agent.state.messages).getActiveObligations();
+	}
+
+	/**
+	 * The operator resolves obligations by their own authority (`/verify dismiss`). The record is a
+	 * user-plane custom message the tracker honours; it is never a passing test, so goal evidence
+	 * that needs a real receipt still needs one. Returns the ids actually dismissed.
+	 */
+	async dismissVerificationObligations(ids: readonly string[], note?: string): Promise<string[]> {
+		const active = new Set(this._getActiveVerificationIds());
+		const targets = ids.filter((id) => active.has(id));
+		const details = createVerificationDismissalDetails(targets, note);
+		if (!details) return [];
+		const dismissed = details.piVerificationDismissal.ids;
+		const reason = note?.trim() ? ` — ${note.trim()}` : "";
+		await this.sendCustomMessage(
+			{
+				customType: VERIFICATION_DISMISSAL_CUSTOM_TYPE,
+				content: `Operator dismissed verification obligation${dismissed.length > 1 ? "s" : ""}: ${dismissed.join(", ")}${reason}`,
+				display: true,
+				details,
+			},
+			{},
+		);
+		return [...dismissed];
 	}
 
 	/** Preserve active verification identities and setup-repair proof inside the compaction checkpoint. */

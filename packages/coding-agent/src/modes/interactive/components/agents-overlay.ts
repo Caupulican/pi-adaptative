@@ -1,3 +1,4 @@
+import type { VerificationObligationView } from "@caupulican/pi-agent-core/verification-obligations";
 import { type Component, truncateToWidth } from "@caupulican/pi-tui";
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
 import type { GoalState } from "../../../core/goals/goal-state.ts";
@@ -26,6 +27,8 @@ export interface AgentsOverlaySnapshot {
 	taskState?: TaskStepsState;
 	laneRecords: readonly LaneRecord[];
 	items: readonly ActivityLaneItem[];
+	/** Failed verifications still open on the branch; shown so the operator never learns of them from an error. */
+	verification?: readonly VerificationObligationView[];
 }
 
 export interface AgentsOverlayOptions {

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Verification obligations are run-scoped and operator-resolvable. A failing trusted check marks only the run that produced it (its answer stays readable with a warning); obligations inherited from earlier runs stay listed with their command and directory, block `goal complete` and pause goal continuation with a typed `verification_unresolved` decision, but a later answer is an ordinary answer. `/verify` lists, shows and dismisses them; a dismissal is a user-plane record the tracker honours and goal evidence never counts as a pass. The inspector gains a **Checks** block.
+
 ### Fixed
 
 - Tool commands (`bash`, `python`, the owner shell, the Python runtime) no longer inherit the variables the runtime supervisor injects for pi's own launch (`PI_PACKAGE_DIR`, `TSX_TSCONFIG_PATH`, `PI_RUNTIME_SUPERVISOR`). A vitest run started from inside pi resolved the harness's installed generation instead of the checkout, failed on assets the generation does not ship, and its failure became a trusted verification obligation that a corrected environment could not resolve. An operator's own `PI_PACKAGE_DIR` on an unsupervised launch is kept. The coding-agent test setup removes the same keys.

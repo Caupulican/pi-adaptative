@@ -2023,10 +2023,11 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		expect(providerCalls).toBe(1);
+		// Restored from the snapshot, the obligation is listed for the model and still blocks goal
+		// completion; it belongs to an earlier run, so this run's answer is an answer.
 		expect((await stream.result()).at(-1)).toMatchObject({
 			content: [{ type: "text", text: "The check remains unresolved; an external owner must repair it." }],
-			stopReason: "error",
-			errorMessage: "verification_handoff_required",
+			stopReason: "stop",
 		});
 		expect(providerPrompts[0]).toContain(`ACTIVE VERIFICATION FAILURES`);
 		expect(providerPrompts[0]).toContain(verificationId);

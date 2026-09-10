@@ -198,11 +198,16 @@ a witness for an opaque result; ordinary content and policy overrides remain ava
 `packages/coding-agent/test/node-verification-boundary.test.ts`, and
 `packages/coding-agent/test/test-verification-output.test.ts`.
 
-**An unresolved handoff remains readable and unsuccessful.** The host preserves the answer,
-retains the active obligations, and prevents successful goal completion. It does not erase prose
-or spend extra provider turns demanding opaque-ID grammar. Reflection cannot claim a cancelled
-submission or unsuccessful terminal turn, and it buys no turn while goal work is open (an active
-goal or an in-progress task step): the cue stays due until the work closes. Pinned by
+**An unresolved obligation marks the run that produced it and blocks completion; it never
+errors a later answer.** The host preserves the answer of the run whose own check failed and
+marks that run unsuccessful; obligations inherited from earlier runs stay listed with their
+command and directory, block goal completion and pause goal continuation (`verification_unresolved`
+asks the operator), but a later root answer is an ordinary answer. The operator resolves an
+obligation with `/verify dismiss`, a user-plane record the tracker honours and goal evidence never
+counts as a pass. The host does not erase prose or spend extra provider turns demanding opaque-ID
+grammar. Reflection cannot claim a cancelled submission or unsuccessful terminal turn, and it buys
+no turn while goal work is open (an active goal or an in-progress task step): the cue stays due
+until the work closes. Pinned by
 `packages/coding-agent/test/suite/regressions/unresolved-verification-handoff.test.ts` and
 `packages/coding-agent/test/reflection-turn-lifecycle.test.ts`.
 

@@ -10,6 +10,7 @@ import type { ActivityLaneItem } from "./components/activity-lane.ts";
 import { type AgentsOverlaySnapshot, buildWorkPanelModel, compactWorkPanel } from "./components/agents-overlay.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
 import {
+	CHECKS_SECTION,
 	PLAN_SECTION,
 	TEAM_SECTION,
 	type WorkbenchComponent,
@@ -390,6 +391,17 @@ export function buildWorkbenchSections(snapshot: AgentsOverlaySnapshot, nowMs: n
 					`  ${theme.fg("success", "✓")} ${theme.fg("muted", planRows.length ? `Work complete · ${planRows.length} steps` : "No open steps")}`,
 				];
 		sections.push({ title: PLAN_SECTION, meta, body });
+	}
+	// Failed verifications are the operator's to see and to resolve; they never hide inside an error.
+	const checks = snapshot.verification ?? [];
+	if (checks.length) {
+		const rows = checks.slice(0, 3).map((check) => {
+			const what = check.command ?? check.id;
+			return `  ${theme.fg("error", "✗")} ${theme.fg("text", what)}`;
+		});
+		if (checks.length > 3) rows.push(`  ${theme.fg("dim", `+${checks.length - 3} more`)}`);
+		rows.push(`  ${theme.fg("dim", "rerun the same check, or /verify dismiss")}`);
+		sections.push({ title: CHECKS_SECTION, meta: `${checks.length} failing`, body: rows });
 	}
 	if (teamRows.length) {
 		const team = compactWorkPanel({ ...model, rows: teamRows }, 4);
