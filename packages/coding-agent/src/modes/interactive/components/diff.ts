@@ -12,6 +12,17 @@ function parseDiffLine(line: string): { prefix: string; lineNum: string; content
 }
 
 /**
+ * An added or removed row: its foreground token, and its surface tone when the theme defines one.
+ * On palettes where added-green sits on a green-tinted panel, the foreground alone reads as grey;
+ * the wash is what makes the change land.
+ */
+function paintDiffLine(kind: "added" | "removed", text: string): string {
+	const painted = theme.fg(kind === "added" ? "toolDiffAdded" : "toolDiffRemoved", text);
+	const surface = kind === "added" ? "toolDiffAddedBg" : "toolDiffRemovedBg";
+	return theme.hasBg(surface) ? theme.bg(surface, painted) : painted;
+}
+
+/**
  * Replace tabs with spaces for consistent rendering.
  */
 function replaceTabs(text: string): string {
@@ -121,20 +132,20 @@ export function renderDiff(diffText: string, _options: RenderDiffOptions = {}): 
 					replaceTabs(added.content),
 				);
 
-				result.push(theme.fg("toolDiffRemoved", `-${removed.lineNum} ${removedLine}`));
-				result.push(theme.fg("toolDiffAdded", `+${added.lineNum} ${addedLine}`));
+				result.push(paintDiffLine("removed", `-${removed.lineNum} ${removedLine}`));
+				result.push(paintDiffLine("added", `+${added.lineNum} ${addedLine}`));
 			} else {
 				// Show all removed lines first, then all added lines
 				for (const removed of removedLines) {
-					result.push(theme.fg("toolDiffRemoved", `-${removed.lineNum} ${replaceTabs(removed.content)}`));
+					result.push(paintDiffLine("removed", `-${removed.lineNum} ${replaceTabs(removed.content)}`));
 				}
 				for (const added of addedLines) {
-					result.push(theme.fg("toolDiffAdded", `+${added.lineNum} ${replaceTabs(added.content)}`));
+					result.push(paintDiffLine("added", `+${added.lineNum} ${replaceTabs(added.content)}`));
 				}
 			}
 		} else if (parsed.prefix === "+") {
 			// Standalone added line
-			result.push(theme.fg("toolDiffAdded", `+${parsed.lineNum} ${replaceTabs(parsed.content)}`));
+			result.push(paintDiffLine("added", `+${parsed.lineNum} ${replaceTabs(parsed.content)}`));
 			i++;
 		} else {
 			// Context line

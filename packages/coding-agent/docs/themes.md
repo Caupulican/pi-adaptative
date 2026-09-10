@@ -201,6 +201,8 @@ Every theme must define all 51 color tokens. There are no optional colors.
 | `toolDiffAdded` | Added lines |
 | `toolDiffRemoved` | Removed lines |
 | `toolDiffContext` | Context lines |
+| `toolDiffAddedBg` | Optional surface tone under added rows (a wash makes edits land on palettes where the added colour sits on a tinted panel) |
+| `toolDiffRemovedBg` | Optional surface tone under removed rows |
 
 ### Syntax Highlighting (9 colors)
 

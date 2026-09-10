@@ -59,6 +59,8 @@
 		"toolDiffAdded": "green",
 		"toolDiffRemoved": "red",
 		"toolDiffContext": "muted",
+		"toolDiffAddedBg": "panelGreen",
+		"toolDiffRemovedBg": "panelRed",
 
 		"syntaxComment": "dim",
 		"syntaxKeyword": "blue",

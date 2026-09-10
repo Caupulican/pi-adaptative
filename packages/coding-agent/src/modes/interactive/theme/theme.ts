@@ -78,6 +78,9 @@ const ThemeJsonSchema = Type.Object({
 		toolDiffAdded: ColorValueSchema,
 		toolDiffRemoved: ColorValueSchema,
 		toolDiffContext: ColorValueSchema,
+		/** Surface tones under added/removed diff rows; optional, rows keep foreground-only colouring without them. */
+		toolDiffAddedBg: Type.Optional(ColorValueSchema),
+		toolDiffRemovedBg: Type.Optional(ColorValueSchema),
 		// Syntax Highlighting (9 colors)
 		syntaxComment: ColorValueSchema,
 		syntaxKeyword: ColorValueSchema,
@@ -245,7 +248,9 @@ export type ThemeBg =
 	| "toolPendingBg"
 	| "toolSuccessBg"
 	| "toolErrorBg"
-	| "workbenchSurface";
+	| "workbenchSurface"
+	| "toolDiffAddedBg"
+	| "toolDiffRemovedBg";
 
 type ColorMode = "truecolor" | "256color";
 
@@ -440,6 +445,11 @@ export class Theme {
 		const ansi = this.bgColors.get(color);
 		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
 		return `${ansi}${text}\x1b[49m`; // Reset only background color
+	}
+
+	/** Optional surfaces (diff rows) exist only when the theme defines them. */
+	hasBg(color: ThemeBg): boolean {
+		return this.bgColors.has(color);
 	}
 
 	bold(text: string): string {
@@ -691,6 +701,8 @@ function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string
 		"toolSuccessBg",
 		"toolErrorBg",
 		"workbenchSurface",
+		"toolDiffAddedBg",
+		"toolDiffRemovedBg",
 	]);
 	for (const [key, value] of Object.entries(resolvedColors)) {
 		if (bgColorKeys.has(key)) {

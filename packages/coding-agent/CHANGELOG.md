@@ -9,6 +9,7 @@
 
 ### Changed
 
+- Diff rows can carry a surface tone: themes may define `toolDiffAddedBg` / `toolDiffRemovedBg`, and `matrix-machine` sets them to its green and red panels, so an edit's added and removed lines read as a wash instead of green-on-green foreground text. Themes without the tokens render exactly as before.
 - The terminal keeps the mouse by default: entering the workbench no longer enables button-event mouse tracking, so native selection, copy-on-select and right-click paste work as in any other terminal program.
 - One run state, shown where the answer lands: the activity lane renders as a reserved live row directly above the status rule, naming the single running tool or worker with its elapsed time (`● Bash (1m12s)`), the runtime label otherwise, with the plan step, concurrency counts, the message queue and the newest event on the right. The title strip carries identity only; the WORKING / WAITING / IDLE badge is gone.
 - The queue label states the delivery boundary: `Queued 1 · 1 steering → next model turn · enter send now · alt+up edit`.
