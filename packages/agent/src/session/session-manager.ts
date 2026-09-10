@@ -2537,6 +2537,15 @@ export class SessionManager {
 		return this.entries.length;
 	}
 
+	/** User and assistant turns on the session: what a hidden-history placeholder can stand for. */
+	getConversationEntryCount(): number {
+		let count = 0;
+		for (const entry of this.entries) {
+			if (entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant")) count++;
+		}
+		return count;
+	}
+
 	/**
 	 * Release large own payload properties from one already-persisted message without reopening the
 	 * session. Calling this immediately after append advances the bounded file-location cursor only

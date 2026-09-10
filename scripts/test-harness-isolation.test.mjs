@@ -96,6 +96,7 @@ const agentVerificationCoverageTests = [
 	"test/session/session-context-cache.test.ts",
 ];
 const codingAgentVerificationCoverageTests = [
+	"test/agent-session-edge.test.ts",
 	"test/managed-shell-preparation.test.ts",
 	"test/gnu-tools-dir.test.ts",
 	"test/bash-execution-controller.test.ts",

@@ -17,9 +17,10 @@ describe("stable Bash-like shell contract router", () => {
 		// Live defect: the PowerShell floor ran `git fetch` with every following line as arguments
 		// ("error: unknown switch `C'", "fatal: Invalid path '/n===README==='").
 		const floor = routeShellContract(command, "win32", { pythonEngine: false });
+		// A CRLF script reaches the engine as LF: the line structure is kept, the `\r` is not.
 		expect(routeShellContract(command, "win32", { pythonEngine: true })).toEqual({
 			kind: "python-engine",
-			command,
+			command: command.replace(/\r\n?/g, "\n"),
 		});
 		if (command === "ls\n") {
 			// A trailing line break is not a command list; the floor still runs the simple command.

@@ -71,7 +71,7 @@ describe("FileStoreProvider recovery evidence", () => {
 			]),
 		});
 		expect(text(listed)).toContain("Drift detected");
-		expect(text(listed)).toContain("owner");
+		expect(text(listed)).toContain("/memory accept");
 		expect(provider.systemPromptBlock()).toContain(managed.trim());
 		expect(provider.systemPromptBlock()).not.toContain(external.trim());
 		expect(readFileSync(statePath, "utf8")).toBe(stateBefore);
@@ -173,7 +173,12 @@ describe("FileStoreProvider recovery evidence", () => {
 			expect(readFileSync(memoryPath, "utf8")).toBe(external);
 		}
 		expect(readdirSync(agentDir).filter((name) => name.includes(".bak."))).toHaveLength(2);
-		expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual({ version: 1, committedDigest: digest("") });
+		// The managed state carries the committed content beside its digest (empty here).
+		expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual({
+			version: 1,
+			committedDigest: digest(""),
+			committedContent: "",
+		});
 	});
 
 	it("refuses a conflicting existing backup without overwriting either copy", async () => {

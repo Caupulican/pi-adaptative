@@ -76,8 +76,8 @@ describe("setup verification compaction", () => {
 		expect(new VerificationObligationTracker(harness.session.messages).getActiveIds()).toEqual(
 			outcome === "setup_failed" ? [] : ["initial"],
 		);
-		expect(harness.session.messages.at(-1)).toMatchObject({
-			stopReason: outcome === "setup_failed" ? "stop" : "error",
-		});
+		// The executed failure stays active across compaction (asserted above) and blocks goal
+		// completion; it was opened in an earlier run, so this run's answer is an ordinary answer.
+		expect(harness.session.messages.at(-1)).toMatchObject({ stopReason: "stop" });
 	});
 });

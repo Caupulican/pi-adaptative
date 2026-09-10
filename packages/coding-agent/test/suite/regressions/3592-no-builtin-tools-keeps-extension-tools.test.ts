@@ -100,6 +100,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"pipeline",
 			"python",
 			"read",
+			"repo_read",
 			"run_toolkit_script",
 			"runtime_update",
 			"secret_store",

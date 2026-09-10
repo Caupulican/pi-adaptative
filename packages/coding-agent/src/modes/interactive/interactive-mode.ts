@@ -1792,9 +1792,20 @@ export class InteractiveMode {
 		this.streamingUiUpdateTimer = undefined;
 	}
 
-	/** Conversation turns on the session, not control records: what "History hidden" can stand for. */
+	/**
+	 * Conversation turns on the session, not control records: what "History hidden" can stand for.
+	 * The manager counts them itself; startup never walks the entries here (typing performance).
+	 */
 	private getSessionRecordCount(): number {
-		return countConversationEntries(this.sessionManager.getEntries());
+		const manager = this.sessionManager as typeof this.sessionManager & {
+			getConversationEntryCount?: () => number;
+			getEntryCount?: () => number;
+		};
+		return (
+			manager.getConversationEntryCount?.() ??
+			manager.getEntryCount?.() ??
+			countConversationEntries(manager.getEntries())
+		);
 	}
 
 	private showDeferredHistoryPlaceholder(options: { requestRender?: boolean } = {}): void {
