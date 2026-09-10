@@ -130,7 +130,7 @@ describe("goal evidence concurrent persistence", () => {
 			const next =
 				change === "replaced"
 					? createGoalState({ goalId: "replacement", userGoal: "Other work", now: "T1" })
-					: applyGoalEvent(initial, { type: "progress", now: "T1" });
+					: applyGoalEvent(initial, { type: "pause_goal", now: "T1" });
 			const spy = vi.spyOn(harness.session, "saveGoalStateSnapshot").mockImplementationOnce((state, expected) => {
 				if (change !== "unchanged") save(next);
 				return save(state, expected);

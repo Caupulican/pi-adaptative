@@ -36,10 +36,22 @@ describe("pending goal evidence ownership", () => {
 
 	it.each([
 		{ type: "progress", now: "T2" },
+		{ type: "add_requirement", id: "req-1", text: "Review", now: "T2" },
+	] satisfies GoalEvent[])("replays ledger bookkeeping ($type) interleaved with evidence", (event) => {
+		// An increment satisfying a requirement while parallel file verifications awaited refused every
+		// one of them in the live census; ledger bookkeeping never revises what the goal is.
+		const current = applyGoalEvent(applyGoalEvent(applyGoalEvent(observed, addition), event), {
+			...addition,
+			id: "ev-2",
+		});
+		expect(resolveGoalEvidenceCommitState(observed, current)).toBe(current);
+	});
+
+	it.each([
 		{ type: "pause_goal", now: "T2" },
 		{ type: "cancel_goal", now: "T2" },
 		{ type: "edit_goal", userGoal: "Different work", now: "T2" },
-	] satisfies GoalEvent[])("rejects $type interleaved with evidence", (event) => {
+	] satisfies GoalEvent[])("rejects lifecycle or objective change $type interleaved with evidence", (event) => {
 		const current = applyGoalEvent(applyGoalEvent(applyGoalEvent(observed, addition), event), {
 			...addition,
 			id: "ev-2",

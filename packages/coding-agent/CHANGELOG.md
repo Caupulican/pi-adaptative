@@ -3,7 +3,7 @@
 ### Fixed
 
 - `delegate retire` no longer leaves a Team "session retained" row. Worker lane records carry the logical agent's binding status (`agentStatus`); the inspector and the work overlay count and list only lanes whose agent is not retired, while `delegate status`, `review`, goal `kind: "worker"` evidence, recovery, and notifications keep resolving the lane. `delegate status` names a retired agent on its lane.
-- `goal` calls in one batch are chained on the tool instance, so parallel `add_evidence` no longer loses its verification to an `increment` (or any other transition) landing in the same batch.
+- `goal add_evidence` no longer fails when ledger bookkeeping lands while its verification awaits: an `increment`, requirement change, dispatch, progress tick, or budget record in the same batch is replayed under the existing ancestry proof. Lifecycle and objective changes still require a fresh observation.
 - `webfetch` no longer refuses ordinary pages as "too complex". The Markdown budget now models Turndown's measured cost (sibling fan-out times the text beneath one parent; ~1e9 is about a second) instead of characters times depth, which refused any long README nested 30 levels deep. Markup past the budget degrades to the linear plain-text extract of the same page and says so; `format: "text"` is linear and never refused for its shape. No site-specific URL rewriting.
 
 ## [0.99.15] - 2026-09-10

@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import {
 	applyGoalEvent,
+	type GoalEvent,
 	type GoalState,
 	isGoalExecutionActive,
 	isGoalResumableStatus,
@@ -18,7 +19,27 @@ export function getGoalStateRevision(state: GoalState): GoalStateRevision {
 	return { goalId: state.goalId, revision: state.revision ?? 0 };
 }
 
-/** Rebase a pending evidence observation only across proven evidence-only journal additions. */
+/**
+ * Journal events that extend the ledger without revising what the goal is or whether it runs. A
+ * pending evidence observation can be replayed across them: appending evidence commutes with other
+ * evidence, requirement bookkeeping (an `increment` satisfying a requirement landed while parallel
+ * file verifications awaited and refused all of them in the live census), dispatches, progress ticks,
+ * and budget records. Lifecycle and objective changes are not in this set: the writer observed an
+ * active goal with a given objective and must re-observe after those.
+ */
+const LEDGER_EVENT_TYPES: ReadonlySet<GoalEvent["type"]> = new Set([
+	"add_evidence",
+	"add_requirement",
+	"satisfy_requirement",
+	"block_requirement",
+	"reopen_requirement",
+	"dispatch_worker",
+	"progress",
+	"no_progress",
+	"record_continuation_budget",
+]);
+
+/** Rebase a pending evidence observation across proven ledger-only journal additions. */
 export function resolveGoalEvidenceCommitState(
 	observed: GoalState | undefined,
 	current: GoalState | undefined,
@@ -30,7 +51,7 @@ export function resolveGoalEvidenceCommitState(
 			let replayed = observed;
 			for (let index = current.events.length - added; index < current.events.length; index++) {
 				const event = current.events[index];
-				if (event.type !== "add_evidence") break;
+				if (!LEDGER_EVENT_TYPES.has(event.type)) break;
 				replayed = applyGoalEvent(replayed, event);
 			}
 			// Replay also proves ancestry: an equal id/revision on a replaced branch is insufficient.

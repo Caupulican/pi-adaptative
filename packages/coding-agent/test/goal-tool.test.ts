@@ -1,3 +1,6 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
@@ -12,6 +15,9 @@ import {
 } from "../src/core/tools/goal.ts";
 
 const ctx = undefined as unknown as ExtensionContext;
+
+/** A file URL that is well-formed on every platform and resolves to nothing. */
+const missingFile = (name: string) => pathToFileURL(join(tmpdir(), "pi-goal-test-missing", name)).href;
 
 function createHarness(options: { getActiveVerificationIds?: () => readonly string[] } = {}) {
 	const sessionManager = SessionManager.inMemory();
@@ -581,10 +587,10 @@ describe("goal setup in one call", () => {
 		expect(harness.getState()?.requirements).toHaveLength(1);
 	});
 
-	it("chains one batch of add_evidence and increment so no evidence loses its verification", async () => {
-		// Live census: a batch of add_evidence + increment refused every evidence call. The increment
-		// ran synchronously while the file verifications awaited, and the evidence rebase tolerates only
-		// other evidence landing meanwhile. On one tool instance the calls now run in emission order.
+	it("keeps every evidence call in a batch with an increment that lands mid-verification", async () => {
+		// Live census: a batch of add_evidence + increment refused every evidence call. The increment ran
+		// synchronously while the file verifications awaited, and the rebase then tolerated only other
+		// evidence. Requirement bookkeeping now replays under the same ancestry proof; calls stay parallel.
 		const { tool, run, getState, sessionManager } = createHarness();
 		await run({ action: "start", goalId: "g1", userGoal: "Ship feature" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Ledger holds" });
@@ -593,14 +599,14 @@ describe("goal setup in one call", () => {
 		const results = await Promise.all([
 			tool.execute(
 				"c1",
-				{ action: "add_evidence", kind: "file", summary: "one", uri: "file:///tmp/one.ts" },
+				{ action: "add_evidence", kind: "file", summary: "one", uri: missingFile("one.ts") },
 				undefined,
 				undefined,
 				ctx,
 			),
 			tool.execute(
 				"c2",
-				{ action: "add_evidence", kind: "file", summary: "two", uri: "file:///tmp/two.ts" },
+				{ action: "add_evidence", kind: "file", summary: "two", uri: missingFile("two.ts") },
 				undefined,
 				undefined,
 				ctx,
