@@ -381,6 +381,41 @@ describe("Agent", () => {
 		expect(receivedSignal?.aborted).toBe(true);
 	});
 
+	it("names a reasoned abort in the aborted assistant message, on the stream path", async () => {
+		const agent = new Agent({
+			streamFn: (_model, _context, options) => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					const checkAbort = () => {
+						if (options?.signal?.aborted) {
+							stream.push({
+								type: "error",
+								reason: "aborted",
+								error: {
+									...createAssistantMessage(""),
+									stopReason: "aborted",
+									errorMessage: "Operation aborted",
+								},
+							});
+						} else {
+							setTimeout(checkAbort, 5);
+						}
+					};
+					checkAbort();
+				});
+				return stream;
+			},
+		});
+		const promptPromise = agent.prompt("hello");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		agent.abort("send now");
+		await promptPromise;
+		const last = agent.state.messages.at(-1);
+		expect(last?.role).toBe("assistant");
+		expect(last && "errorMessage" in last ? last.errorMessage : undefined).toBe("Operation aborted (send now)");
+	});
+
 	it("should update state with mutators", () => {
 		const agent = new Agent();
 

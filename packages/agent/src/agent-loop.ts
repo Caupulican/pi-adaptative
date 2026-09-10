@@ -272,20 +272,31 @@ function assertContinuableContext(context: AgentContext): void {
 	}
 }
 
+/**
+ * A named abort (`agent.abort("send now")`) keeps its name in the aborted message so a transcript
+ * can tell it from Escape. Unnamed aborts and non-abort failures keep their message as is.
+ */
+export function abortedErrorMessage(
+	base: string | undefined,
+	aborted: boolean,
+	abortReason: unknown,
+): string | undefined {
+	if (!aborted || typeof abortReason !== "string" || abortReason.length === 0) return base;
+	const text = base ?? "Operation aborted";
+	return text === abortReason ? `Operation aborted (${abortReason})` : `${text} (${abortReason})`;
+}
+
 function createLoopFailureMessage(
 	error: unknown,
 	config: AgentLoopConfig,
 	aborted: boolean,
 	abortReason?: unknown,
 ): AssistantMessage {
-	const base = error instanceof Error ? error.message : String(error);
-	// A named abort (`agent.abort("send now")`) keeps its name so a transcript can tell it from Escape.
-	const named = aborted && typeof abortReason === "string" && abortReason.length > 0;
-	const errorMessage = !named
-		? base
-		: base === abortReason
-			? `Operation aborted (${abortReason})`
-			: `${base} (${abortReason})`;
+	const errorMessage = abortedErrorMessage(
+		error instanceof Error ? error.message : String(error),
+		aborted,
+		abortReason,
+	);
 	return {
 		role: "assistant",
 		content: [{ type: "text", text: "" }],
@@ -574,6 +585,9 @@ async function runLoop(
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				// The provider stream built this message without knowing why it was aborted.
+				if (message.stopReason === "aborted")
+					message.errorMessage = abortedErrorMessage(message.errorMessage, true, signal?.reason);
 				await emit({ type: "turn_end", message, toolResults: [] });
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
