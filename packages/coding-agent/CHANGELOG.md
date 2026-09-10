@@ -3,6 +3,7 @@
 ### Added
 
 - Workbench geometry belongs to the operator: `Alt+I` hides the Work plan / Team inspector so Execution takes the full width, `Alt+X` gives Execution every row a six-row conversation leaves and restores the previous rows on the next press, and rows, collapsed state, inspector visibility and the maximized flag persist under `workbench.*` in settings.
+- `Ctrl+PageUp` / `Ctrl+PageDown` page the Execution pane from the keyboard; the last page follows new evidence again.
 - `Alt+M` hands the mouse to the workbench (wheel scroll, chips, divider click, drag selection) and back to the terminal; the choice persists (`workbench.mouse`) and the hint row names the owner.
 - Enter on an empty editor while a message is queued behind the running turn interrupts that turn and sends everything queued as one prompt, images included; the aborted turn reads `Operation aborted (send now)`.
 - The pre-commit hook is staged-scoped (`scripts/precommit-staged.mjs`): guards, biome on the staged files, the contract-doctrine gate, the staged test files, and one project type check when TypeScript source is staged. `--dry-run` prints the plan. The full `npm run check` chain and the complete suite remain CI and release gates.

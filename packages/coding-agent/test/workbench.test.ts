@@ -301,6 +301,14 @@ describe("Workbench layout", () => {
 		growing.lines = Array.from({ length: 50 }, (_, i) => `grow ${i}`);
 		growing.invalidate();
 		expect(view.render(110).map(stripAnsi)[10]).toContain("grow 36");
+		// Keyboard paging reaches the same rows without a pointer; the last page follows again.
+		expect(view.pageExecution(-1)).toBe(true);
+		expect(view.render(110).map(stripAnsi)[10]).toContain("grow 28");
+		for (let page = 0; page < 3; page++) expect(view.pageExecution(1)).toBe(true);
+		expect(view.render(110).map(stripAnsi)[10]).toContain("grow 49");
+		growing.lines = Array.from({ length: 55 }, (_, i) => `grow ${i}`);
+		growing.invalidate();
+		expect(view.render(110).map(stripAnsi)[10]).toContain("grow 54");
 	});
 	it("clears invisible hit targets when a large editor takes over the screen", () => {
 		const { view, editor } = setup();

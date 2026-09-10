@@ -252,6 +252,8 @@ export class WorkbenchController {
 		else if (keys.matches(data, "app.execution.toggle")) this.changeGeometry(() => this.view.toggleUpper());
 		else if (keys.matches(data, "app.workbench.grow")) this.changeGeometry(() => this.view.growUpper());
 		else if (keys.matches(data, "app.workbench.shrink")) this.changeGeometry(() => this.view.shrinkUpper());
+		else if (keys.matches(data, "app.execution.pageUp")) this.view.pageExecution(-1);
+		else if (keys.matches(data, "app.execution.pageDown")) this.view.pageExecution(1);
 		else if (keys.matches(data, "app.inspector.toggle")) this.changeGeometry(() => this.view.toggleInspector());
 		else if (keys.matches(data, "app.execution.maximize"))
 			this.changeGeometry(() => this.view.toggleExecutionMaximized());

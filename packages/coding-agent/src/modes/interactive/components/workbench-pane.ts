@@ -59,11 +59,22 @@ export class WorkbenchPane {
 
 	scrollAt(column: number, row: number, delta: number): boolean {
 		if (column < this.x || column >= this.x + this.width || row < this.y || row >= this.y + this.height) return false;
+		return this.scrollBy(delta);
+	}
+
+	/** Scroll without a pointer: the keyboard path for a terminal that keeps its mouse. */
+	scrollBy(delta: number): boolean {
+		if (this.height <= 0) return false;
 		const step = Math.sign(delta) * Math.min(Math.abs(delta), this.height);
 		const end = Math.max(0, this.count - this.height);
 		this.offset = Math.max(0, Math.min(end, this.offset + step));
 		this.pinned = this.offset < end;
 		return true;
+	}
+
+	/** One page is the content rows the pane shows; the direction is the sign. */
+	pageBy(direction: number): boolean {
+		return this.scrollBy(Math.sign(direction) * Math.max(1, this.height - 1));
 	}
 
 	/**

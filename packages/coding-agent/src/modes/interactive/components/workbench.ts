@@ -229,6 +229,10 @@ export class WorkbenchComponent extends Container {
 	scrollUpper(column: number, row: number, delta: number): boolean {
 		return this.inspectorPane.scrollAt(column, row, delta) || this.executionPane.scrollAt(column, row, delta);
 	}
+	/** Page the Execution pane from the keyboard; paging to the end resumes following new evidence. */
+	pageExecution(direction: number): boolean {
+		return this.executionPane.pageBy(direction);
+	}
 	dismissUserShell(): void {
 		this.dismissedShell = this.options.conversation.children.findLast(
 			(child): child is BashExecutionComponent => child instanceof BashExecutionComponent,

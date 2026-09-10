@@ -43,6 +43,8 @@ export interface AppKeybindings {
 	"app.mouse.toggle": true;
 	"app.inspector.toggle": true;
 	"app.execution.maximize": true;
+	"app.execution.pageUp": true;
+	"app.execution.pageDown": true;
 	"app.clipboard.pasteImage": true;
 	"app.transcript.open": true;
 	"app.transcript.scrollUp": true;
@@ -163,6 +165,14 @@ export const KEYBINDINGS = {
 	"app.execution.maximize": {
 		defaultKeys: "alt+x",
 		description: "Give Execution every row the conversation minimum leaves, or restore the work area",
+	},
+	"app.execution.pageUp": {
+		defaultKeys: "ctrl+pageUp",
+		description: "Page the Execution pane up through earlier evidence",
+	},
+	"app.execution.pageDown": {
+		defaultKeys: "ctrl+pageDown",
+		description: "Page the Execution pane down; the last page follows new evidence again",
 	},
 	"app.mouse.toggle": {
 		defaultKeys: "alt+m",
