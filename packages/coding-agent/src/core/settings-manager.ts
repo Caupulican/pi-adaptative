@@ -546,6 +546,8 @@ export interface WorkbenchSettings {
 	inspector?: "shown" | "hidden";
 	/** Execution takes every row the conversation minimum leaves. */
 	executionMaximized?: boolean;
+	/** Previews Execution retains per cycle (4..200); the transcript keeps the complete record. */
+	previews?: number;
 }
 
 export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> = Object.freeze({
@@ -554,6 +556,7 @@ export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> =
 	collapsed: false,
 	inspector: "shown",
 	executionMaximized: false,
+	previews: 24,
 });
 
 export interface Settings {
@@ -2686,7 +2689,9 @@ export class SettingsManager {
 	}
 
 	getSteeringMode(): "all" | "one-at-a-time" {
-		return this.settings.steeringMode || "one-at-a-time";
+		// Every queued steering message reaches the next model turn together; the census saw the
+		// second of two steers wait a whole turn with nothing on screen saying so.
+		return this.settings.steeringMode || "all";
 	}
 
 	setSteeringMode(mode: "all" | "one-at-a-time"): void {
@@ -3607,6 +3612,7 @@ export class SettingsManager {
 			collapsed: stored.collapsed ?? DEFAULT_WORKBENCH_SETTINGS.collapsed,
 			inspector: stored.inspector ?? DEFAULT_WORKBENCH_SETTINGS.inspector,
 			executionMaximized: stored.executionMaximized ?? DEFAULT_WORKBENCH_SETTINGS.executionMaximized,
+			previews: sanitizeIntegerSetting(stored.previews, DEFAULT_WORKBENCH_SETTINGS.previews, 4, 200),
 		};
 	}
 

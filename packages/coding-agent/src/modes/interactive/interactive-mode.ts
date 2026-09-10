@@ -93,6 +93,7 @@ import { openTranscriptOverlay } from "./components/transcript-overlay.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import * as configBackup from "./config-backup.ts";
+import { countConversationEntries } from "./conversation-entries.ts";
 import { handleEdgeCommand } from "./edge-commands.ts";
 import { EditorOverlayHost } from "./editor-overlay-host.ts";
 import { ExtensionUiHost } from "./extension-ui-host.ts";
@@ -1791,9 +1792,9 @@ export class InteractiveMode {
 		this.streamingUiUpdateTimer = undefined;
 	}
 
+	/** Conversation turns on the session, not control records: what "History hidden" can stand for. */
 	private getSessionRecordCount(): number {
-		const manager = this.sessionManager as typeof this.sessionManager & { getEntryCount?: () => number };
-		return manager.getEntryCount?.() ?? manager.getEntries().length;
+		return countConversationEntries(this.sessionManager.getEntries());
 	}
 
 	private showDeferredHistoryPlaceholder(options: { requestRender?: boolean } = {}): void {
@@ -2719,7 +2720,11 @@ export class InteractiveMode {
 			// Extension commands execute against the session after the run; send-now never sends them,
 			// so the offer appears only when a message would actually go.
 			const details = [
-				steeringCount > 0 ? `${steeringCount} steering → next model turn` : undefined,
+				steeringCount > 0
+					? this.session.steeringMode === "one-at-a-time" && steeringCount > 1
+						? `${steeringCount} steering → one per model turn`
+						: `${steeringCount} steering → next model turn`
+					: undefined,
 				followUpCount > 0 ? `${followUpCount} follow-up → after this run` : undefined,
 				commandCount > 0 ? `${commandCount} command${commandCount > 1 ? "s" : ""} → after this run` : undefined,
 				steeringCount + followUpCount > 0 ? "enter send now" : undefined,

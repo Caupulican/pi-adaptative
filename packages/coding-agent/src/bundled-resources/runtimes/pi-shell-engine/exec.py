@@ -285,11 +285,42 @@ def _spawn_argv_or_report(
             ctx.deadline,
         )
     except FileNotFoundError:
-        message = f"{argv[0]}: command not found\n"
+        message = command_not_found_message(argv)
         _write_merged(
             stderr_stream, message.encode("utf-8", errors="replace"), ctx
         )
         return None
+
+
+# cmd.exe builtins have no executable, so a model that slips into that dialect lost the whole
+# call to "command not found" with nothing to correct by (the census saw `dir /b` three times).
+# The refusal keeps its exit status; only its text names the bash spelling.
+CMD_DIALECT_HINTS: dict[str, str] = {
+    "dir": "ls -1 (for dir /b), ls -R (for dir /s), ls -la",
+    "type": "cat",
+    "copy": "cp",
+    "xcopy": "cp -r",
+    "move": "mv",
+    "ren": "mv",
+    "rename": "mv",
+    "del": "rm",
+    "erase": "rm",
+    "rd": "rm -r",
+    "md": "mkdir -p",
+    "cls": "clear",
+    "findstr": "grep -n",
+    "fc": "diff",
+    "attrib": "chmod / ls -la",
+}
+
+
+def command_not_found_message(argv: list[str]) -> str:
+    """`name: command not found`, plus the bash spelling when the name is a cmd.exe builtin."""
+    name = argv[0]
+    hint = CMD_DIALECT_HINTS.get(name.lower())
+    if hint is None:
+        return f"{name}: command not found\n"
+    return f"{name}: command not found (cmd.exe builtin; in bash use {hint})\n"
 
 
 def _command_scratch_state(command: nodes.SimpleCommand, ctx: ExecContext) -> ShellState:

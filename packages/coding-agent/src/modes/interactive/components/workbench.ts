@@ -154,6 +154,8 @@ export class WorkbenchComponent extends Container {
 			hint: [
 				"/ commands",
 				key("app.interrupt", "interrupt"),
+				// Windows Terminal swallows alt+enter; the `>>` prefix is the follow-up gesture there.
+				process.env.WT_SESSION ? ">> follow-up" : key("app.message.followUp", "follow-up"),
 				key("app.transcript.open", "transcript"),
 				key("app.conversation.copy", "copy conversation"),
 			]

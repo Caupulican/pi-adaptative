@@ -230,7 +230,9 @@ class PersistentWindowsShellEngineSession {
 		cwd: string,
 		options: Parameters<BashOperations["exec"]>[2],
 	): Promise<{ exitCode: number | null }> {
-		return this.coordinator.runSerialized(() => this.execNow(command, cwd, options));
+		// The router normalizes CRLF for the bash tool; direct callers of the engine get the same grammar.
+		const script = command.replace(/\r\n?/g, "\n");
+		return this.coordinator.runSerialized(() => this.execNow(script, cwd, options));
 	}
 
 	/**

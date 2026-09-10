@@ -78,6 +78,7 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		},
 		copy: copyToClipboard,
 		notice: (text, error) => host.activityLane?.announce(text, error ? "failure" : "neutral"),
+		previewLimit: () => host.session.settingsManager.getWorkbenchSettings().previews,
 		// The terminal owns the mouse unless the operator hands it over; the choice persists.
 		mouse: {
 			enabled: () => host.settingsManager.getWorkbenchSettings().mouse === "on",

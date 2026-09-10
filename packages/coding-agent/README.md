@@ -239,7 +239,7 @@ Submit messages while the agent is working:
 
 On Windows Terminal, `Alt+Enter` is fullscreen by default. Remap it in [docs/terminal-setup.md](docs/terminal-setup.md) so pi can receive the follow-up shortcut.
 
-Configure delivery in [settings](docs/settings.md): `steeringMode` and `followUpMode` can be `"one-at-a-time"` (default, waits for response) or `"all"` (delivers all queued at once). `transport` selects provider transport preference (`"sse"`, `"websocket"`, or `"auto"`) for providers that support multiple transports.
+Configure delivery in [settings](docs/settings.md): `steeringMode` (default `"all"`: every queued steer reaches the next model turn together) and `followUpMode` (default `"one-at-a-time"`, waits for a response) can each be `"one-at-a-time"` or `"all"`. `transport` selects provider transport preference (`"sse"`, `"websocket"`, or `"auto"`) for providers that support multiple transports.
 
 ---
 

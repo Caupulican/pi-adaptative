@@ -1971,6 +1971,7 @@ describe("workbench settings", () => {
 			collapsed: false,
 			inspector: "shown",
 			executionMaximized: false,
+			previews: 24,
 		});
 		manager.setWorkbenchSettings({ rows: 200, inspector: "hidden", executionMaximized: true, collapsed: true });
 		expect(manager.getWorkbenchSettings()).toMatchObject({

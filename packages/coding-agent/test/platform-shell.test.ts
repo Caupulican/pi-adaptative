@@ -14,6 +14,7 @@ import {
 import { classifyToolTrust } from "../src/core/security/untrusted-boundary.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 import { type BashToolOptions, createAllToolDefinitions, createBashToolDefinition } from "../src/core/tools/index.ts";
+import { routeShellContract } from "../src/core/tools/shell-contract-router.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 import {
 	createPowerShellHostEnvironment,
@@ -34,6 +35,16 @@ describe("automatic platform shell contract", () => {
 	it("maps platform-specific stored names to the stable contract", () => {
 		expect(mapToolNamesForPlatform(["read", "powershell", "edit"], "win32")).toEqual(["read", "bash", "edit"]);
 		expect(mapToolNamesForPlatform(["bash", "powershell"], "linux")).toEqual(["bash"]);
+	});
+
+	it("normalizes CRLF to LF before routing on Windows, on both tiers", () => {
+		expect(routeShellContract("ls -la\r\nsort names.txt\r\n", "win32", { pythonEngine: true })).toEqual({
+			kind: "python-engine",
+			command: "ls -la\nsort names.txt\n",
+		});
+		const floor = routeShellContract("ls -la\r\n", "win32", { pythonEngine: false });
+		expect(floor.kind).not.toBe("unsupported");
+		expect(routeShellContract("ls\r\nls", "linux")).toEqual({ kind: "passthrough", command: "ls\r\nls" });
 	});
 
 	it("lends the catalog read tools natively whenever bash is on the surface, never bash in their place", () => {

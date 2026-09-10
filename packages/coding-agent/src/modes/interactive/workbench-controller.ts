@@ -34,6 +34,8 @@ interface WorkbenchPorts {
 	geometry?: { save: (geometry: WorkbenchGeometry) => void };
 	/** Right click: the terminal's paste gesture, provided by the workbench while it owns the mouse. */
 	paste?: () => Promise<void>;
+	/** Previews retained per cycle (`workbench.previews`); the default keeps a long cycle readable. */
+	previewLimit?: () => number;
 }
 
 /** UI-only cycle, input and copy coordinator. Task/worker state is never mutated here. */
@@ -100,6 +102,11 @@ export class WorkbenchController {
 		this.updateExecution();
 	}
 
+	private previewLimit(): number {
+		const limit = this.ports.previewLimit?.();
+		return limit !== undefined && Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : DEFAULT_PREVIEW_LIMIT;
+	}
+
 	/** The first evidence of a cycle replaces the previous cycle's previews and counters. */
 	private beginEvidence(): void {
 		if (!this.staleEvidence) return;
@@ -155,7 +162,7 @@ export class WorkbenchController {
 				preview = undefined;
 			},
 		});
-		if (this.previews.length > MAX_PREVIEWS) this.previews.shift();
+		if (this.previews.length > this.previewLimit()) this.previews.shift();
 		this.updateExecution();
 	}
 
@@ -165,7 +172,7 @@ export class WorkbenchController {
 		this.invocations.record(observation);
 		if (preview) {
 			this.previews.push(preview);
-			if (this.previews.length > MAX_PREVIEWS) this.previews.shift();
+			if (this.previews.length > this.previewLimit()) this.previews.shift();
 		}
 		this.updateExecution();
 	}
@@ -342,7 +349,7 @@ export class WorkbenchController {
 	}
 }
 
-const MAX_PREVIEWS = 12;
+const DEFAULT_PREVIEW_LIMIT = 24;
 const TEAM_SECTIONS = new Set(["Workers", "Background tools"]);
 const ACTIVE_WORKER = new Set<LaneRecord["status"]>(["queued", "running"]);
 

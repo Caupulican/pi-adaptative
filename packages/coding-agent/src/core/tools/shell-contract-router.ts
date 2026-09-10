@@ -359,11 +359,14 @@ export function routeShellContract(
 	options?: { pythonEngine?: boolean },
 ): ShellContractRoute {
 	if (platform !== "win32") return { kind: "passthrough", command };
+	// A CRLF script is an accident of the host, never a meaning: a `\r` that reaches a coreutil as
+	// part of an argument fails it (`sort: cannot read: /r`). Bash grammar is LF.
+	const normalized = command.replace(/\r\n?/g, "\n");
 	if (options?.pythonEngine === true) {
-		if (command.trim() === "") return { kind: "unsupported", error: "Shell command is empty." };
-		return { kind: "python-engine", command };
+		if (normalized.trim() === "") return { kind: "unsupported", error: "Shell command is empty." };
+		return { kind: "python-engine", command: normalized };
 	}
-	return routeOnPowerShellFloor(command);
+	return routeOnPowerShellFloor(normalized);
 }
 
 /** The degraded, simple-command-only tier: a bounded set of builtin conversions or a quoted external argv. */

@@ -481,7 +481,7 @@ A model's registry limit is a theoretical maximum (grok-4.6 advertises 500,000 o
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `steeringMode` | string | `"one-at-a-time"` | How steering messages are sent: `"all"` or `"one-at-a-time"` |
+| `steeringMode` | string | `"all"` | How steering messages are sent: `"all"` (every queued steer reaches the next model turn together) or `"one-at-a-time"` (one per turn) |
 | `followUpMode` | string | `"one-at-a-time"` | How follow-up messages are sent: `"all"` or `"one-at-a-time"` |
 | `transport` | string | `"auto"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, `"websocket-cached"`, or `"auto"` |
 | `httpIdleTimeoutMs` | number | `660000` | HTTP header/body idle timeout. Nonzero values constrain every phase-aware stream watchdog below the transport timeout; `0` disables only the HTTP bound. |
