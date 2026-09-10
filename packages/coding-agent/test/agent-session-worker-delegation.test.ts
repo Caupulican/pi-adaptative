@@ -883,28 +883,36 @@ describe("AgentSession worker delegation", () => {
 			if (!followUp.record) throw new Error("Expected a durable follow-up record.");
 
 			let activeOwner = "";
-			await vi.waitFor(() => {
-				const snapshot = new WorkerLifecycle({
-					agentDir: harness.tempDir,
-					sessionId: harness.session.sessionId,
-				}).getTaskRuntimeSnapshot();
-				const attemptId = snapshot.tasks[followUp.record!.laneId]?.attemptIds.at(-1);
-				const attempt = attemptId ? snapshot.attempts[attemptId] : undefined;
-				expect(attempt?.status, JSON.stringify(harness.eventsOfType("warning"))).toBe("running");
-				activeOwner = attempt?.lease?.ownerId ?? "";
-			});
+			await vi.waitFor(
+				() => {
+					const snapshot = new WorkerLifecycle({
+						agentDir: harness.tempDir,
+						sessionId: harness.session.sessionId,
+					}).getTaskRuntimeSnapshot();
+					const attemptId = snapshot.tasks[followUp.record!.laneId]?.attemptIds.at(-1);
+					const attempt = attemptId ? snapshot.attempts[attemptId] : undefined;
+					expect(attempt?.status, JSON.stringify(harness.eventsOfType("warning"))).toBe("running");
+					activeOwner = attempt?.lease?.ownerId ?? "";
+					// The attempt is leased and started through the file-backed lifecycle; a loaded Windows
+					// runner has taken longer than waitFor's one-second default to reach "running".
+				},
+				{ timeout: 10_000 },
+			);
 			expect(activeOwner).toMatch(/^pi-worker:\d+:/);
 			expect(controls.interruptWorkerAgent(initial.record.laneId)).toEqual({ interrupted: true });
 
 			releaseFollowUp(fauxAssistantMessage('{"summary":"interrupted turn unwound"}'));
-			await vi.waitFor(() => {
-				const snapshot = new WorkerLifecycle({
-					agentDir: harness.tempDir,
-					sessionId: harness.session.sessionId,
-				}).getTaskRuntimeSnapshot();
-				const attemptId = snapshot.tasks[followUp.record!.laneId]?.attemptIds.at(-1);
-				expect(attemptId ? snapshot.attempts[attemptId]?.status : undefined).toBe("suspended");
-			});
+			await vi.waitFor(
+				() => {
+					const snapshot = new WorkerLifecycle({
+						agentDir: harness.tempDir,
+						sessionId: harness.session.sessionId,
+					}).getTaskRuntimeSnapshot();
+					const attemptId = snapshot.tasks[followUp.record!.laneId]?.attemptIds.at(-1);
+					expect(attemptId ? snapshot.attempts[attemptId]?.status : undefined).toBe("suspended");
+				},
+				{ timeout: 10_000 },
+			);
 		} finally {
 			releaseFollowUp(fauxAssistantMessage('{"summary":"cleanup"}'));
 			harness.cleanup();
