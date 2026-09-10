@@ -629,31 +629,67 @@ export class FileStoreProvider implements MemoryProvider {
 	 * to this; it is the answer to "I edited MEMORY.md by hand and I mean it".
 	 */
 	async acceptDrift(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
-		const entry = this.managedTargets().find((candidate) => candidate.target === target);
-		if (!entry || !this.ctx) return { ok: false, message: `Unknown memory target ${target}.` };
-		return withFileLock(entry.filePath, async () => {
-			const { currentOnDisk, revision, managedState } = await inspectManagedMemoryFile(
-				entry.filePath,
-				entry.statePath,
-			);
-			if (managedState)
-				return { ok: true, message: `${entry.label} is already the managed revision; nothing to accept.` };
-			await writeManagedMemoryState(entry.statePath, {
-				version: 1,
-				committedDigest: revision.currentDigest,
-				committedContent: currentOnDisk,
-			});
-			this.setPromptSnapshot(target, currentOnDisk);
-			this.options.onDurableMemoryChanged?.();
-			return {
-				ok: true,
-				message: `${entry.label}: adopted the on-disk content (${currentOnDisk.length} chars) as the managed revision.`,
-			};
-		});
+		return this.withDriftedTarget(
+			target,
+			"is already the managed revision; nothing to accept",
+			async (entry, drift) => {
+				await writeManagedMemoryState(entry.statePath, {
+					version: 1,
+					committedDigest: drift.revision.currentDigest,
+					committedContent: drift.currentOnDisk,
+				});
+				this.setPromptSnapshot(target, drift.currentOnDisk);
+				this.options.onDurableMemoryChanged?.();
+				return {
+					ok: true,
+					message: `${entry.label}: adopted the on-disk content (${drift.currentOnDisk.length} chars) as the managed revision.`,
+				};
+			},
+		);
 	}
 
 	/** Operator authority: bring the last managed content back; the drifted file stays as a backup. */
 	async restoreManaged(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
+		return this.withDriftedTarget(
+			target,
+			"already holds the managed revision; nothing to restore",
+			async (entry, drift) => {
+				const { currentOnDisk, revision } = drift;
+				const stateRead = await readManagedMemoryState(entry.statePath);
+				const content = stateRead.status === "valid" ? storedManagedContent(stateRead.state) : undefined;
+				if (content === undefined) {
+					return {
+						ok: false,
+						message: `${entry.label}: the managed revision's content is not stored (state ${revision.stateStatus}); /memory accept ${target} is the only way forward.`,
+					};
+				}
+				if (currentOnDisk !== "") {
+					const backupPath = `${entry.filePath}.bak.sha256-${revision.currentDigest}`;
+					await writeFileAtomic(backupPath, currentOnDisk, { mode: 0o600 });
+				}
+				await writeFileAtomic(entry.filePath, content, { mode: 0o600 });
+				this.setPromptSnapshot(target, content);
+				this.options.onDurableMemoryChanged?.();
+				return {
+					ok: true,
+					message: `${entry.label}: restored the managed revision (${content.length} chars)${currentOnDisk !== "" ? "; the drifted content is kept beside it as a backup" : ""}.`,
+				};
+			},
+		);
+	}
+
+	/**
+	 * The prologue both operator recoveries share: resolve the target, hold its file lock, inspect
+	 * it, and answer at once when the file already is the managed revision.
+	 */
+	private async withDriftedTarget(
+		target: ManagedMemoryTarget,
+		alreadyManaged: string,
+		recover: (
+			entry: ReturnType<FileStoreProvider["managedTargets"]>[number],
+			drift: Pick<Awaited<ReturnType<typeof inspectManagedMemoryFile>>, "currentOnDisk" | "revision">,
+		) => Promise<{ ok: boolean; message: string }>,
+	): Promise<{ ok: boolean; message: string }> {
 		const entry = this.managedTargets().find((candidate) => candidate.target === target);
 		if (!entry || !this.ctx) return { ok: false, message: `Unknown memory target ${target}.` };
 		return withFileLock(entry.filePath, async () => {
@@ -661,27 +697,8 @@ export class FileStoreProvider implements MemoryProvider {
 				entry.filePath,
 				entry.statePath,
 			);
-			if (managedState)
-				return { ok: true, message: `${entry.label} already holds the managed revision; nothing to restore.` };
-			const stateRead = await readManagedMemoryState(entry.statePath);
-			const content = stateRead.status === "valid" ? storedManagedContent(stateRead.state) : undefined;
-			if (content === undefined) {
-				return {
-					ok: false,
-					message: `${entry.label}: the managed revision's content is not stored (state ${revision.stateStatus}); /memory accept ${target} is the only way forward.`,
-				};
-			}
-			if (currentOnDisk !== "") {
-				const backupPath = `${entry.filePath}.bak.sha256-${revision.currentDigest}`;
-				await writeFileAtomic(backupPath, currentOnDisk, { mode: 0o600 });
-			}
-			await writeFileAtomic(entry.filePath, content, { mode: 0o600 });
-			this.setPromptSnapshot(target, content);
-			this.options.onDurableMemoryChanged?.();
-			return {
-				ok: true,
-				message: `${entry.label}: restored the managed revision (${content.length} chars)${currentOnDisk !== "" ? "; the drifted content is kept beside it as a backup" : ""}.`,
-			};
+			if (managedState) return { ok: true, message: `${entry.label} ${alreadyManaged}.` };
+			return recover(entry, { currentOnDisk, revision });
 		});
 	}
 

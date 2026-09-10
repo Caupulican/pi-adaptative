@@ -3090,6 +3090,13 @@ export class InteractiveMode {
 				this.refreshActivityLane();
 				return revoked;
 			},
+			...this.operatorCommandOutput(),
+		};
+	}
+
+	/** The three ways an operator-only command speaks: a status row, an error row, or a block in the conversation. */
+	private operatorCommandOutput() {
+		return {
 			showStatus: (message: string) => this.showStatus(message),
 			showError: (message: string) => this.showError(message),
 			showText: (body: string) => {
@@ -3105,13 +3112,7 @@ export class InteractiveMode {
 			memoryDriftReport: () => this.session.memoryDriftReport(),
 			memoryAcceptDrift: (target: ManagedMemoryTarget) => this.session.memoryAcceptDrift(target),
 			memoryRestoreManaged: (target: ManagedMemoryTarget) => this.session.memoryRestoreManaged(target),
-			showStatus: (message: string) => this.showStatus(message),
-			showError: (message: string) => this.showError(message),
-			showText: (body: string) => {
-				this.chatContainer.addChild(new Spacer(1));
-				this.chatContainer.addChild(new Text(body, 1, 0));
-				this.ui.requestRender();
-			},
+			...this.operatorCommandOutput(),
 		};
 	}
 
@@ -3120,13 +3121,7 @@ export class InteractiveMode {
 			getVerificationObligations: () => this.session.getVerificationObligations(),
 			dismissVerificationObligations: (ids: readonly string[], note?: string) =>
 				this.session.dismissVerificationObligations(ids, note),
-			showStatus: (message: string) => this.showStatus(message),
-			showError: (message: string) => this.showError(message),
-			showText: (body: string) => {
-				this.chatContainer.addChild(new Spacer(1));
-				this.chatContainer.addChild(new Text(body, 1, 0));
-				this.ui.requestRender();
-			},
+			...this.operatorCommandOutput(),
 		};
 	}
 

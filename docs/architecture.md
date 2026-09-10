@@ -9,6 +9,7 @@ session module under `packages/coding-agent/src/core`. Regenerate after adding o
 |---|---|---|
 | `agent-session-background-tasks.ts` | no | Construction of the session's background tool-task controller, extracted from the session coordinator (decomposition ratchet: the coordinator only wires, its line ceiling only moves down). |
 | `agent-session-contracts.ts` | no | (no header comment) |
+| `agent-session-edge.ts` | yes | The edge, bound to one session: grants live on the branch, the confirmation handler belongs to the interactive host, and a child session never asks. |
 | `agent-session-guards.ts` | no | Guard handlers the agent loop fires into the session: a runaway stop (a bounded harness guard ended a run) and a tool-validation escalation (repeated identical validation failures). |
 | `agent-session-runtime.ts` | yes | (no header comment) |
 | `agent-session-services.ts` | no | (no header comment) |
@@ -42,5 +43,5 @@ session module under `packages/coding-agent/src/core`. Regenerate after adding o
 | `tool-gate-controller.ts` | no | Agent tool-call gate: model-router escalation, autonomy gating, extension tool hooks, and the untrusted-content output boundary. |
 | `tool-protocol-controller.ts` | no | (no header comment) |
 
-34 modules, 15 with a test file of the same name.
+35 modules, 16 with a test file of the same name.
 

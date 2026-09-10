@@ -174,24 +174,41 @@ function boundedCanonicalIds(activeIds: readonly string[]): string[] | undefined
 	return sortedIds;
 }
 
+/**
+ * A per-id list riding the snapshot: absent means empty, and anything unbounded, duplicated,
+ * malformed, or naming an id the snapshot does not retain rejects the whole snapshot. The
+ * reader decides what one entry means; undefined from it rejects, null skips the entry.
+ */
+function canonicalSnapshotList<T extends { id: string }>(
+	value: unknown,
+	activeIds: readonly string[],
+	isId: (id: unknown) => id is string,
+	readEntry: (candidate: object, id: string) => T | null | undefined,
+): T[] | undefined {
+	if (value === undefined) return [];
+	if (!Array.isArray(value) || value.length > activeIds.length) return undefined;
+	const seen = new Set<string>();
+	const records: T[] = [];
+	for (const candidate of value) {
+		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+		const id = ownDataValue(candidate, "id");
+		if (!isId(id) || !activeIds.includes(id) || seen.has(id)) return undefined;
+		seen.add(id);
+		const record = readEntry(candidate, id);
+		if (record === undefined) return undefined;
+		if (record !== null) records.push(record);
+	}
+	return records.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+}
+
 function canonicalSetupFailures(
 	value: unknown,
 	activeIds: readonly string[],
 ): Array<{ id: string; repairGroup: string }> | undefined {
-	if (value === undefined) return [];
-	if (!Array.isArray(value) || value.length > activeIds.length) return undefined;
-	const seen = new Set<string>();
-	const records: Array<{ id: string; repairGroup: string }> = [];
-	for (const candidate of value) {
-		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
-		const id = ownDataValue(candidate, "id");
+	return canonicalSnapshotList(value, activeIds, isVerificationId, (candidate, id) => {
 		const repairGroup = ownDataValue(candidate, "repairGroup");
-		if (!isVerificationId(id) || !isVerificationId(repairGroup) || !activeIds.includes(id) || seen.has(id))
-			return undefined;
-		seen.add(id);
-		records.push({ id, repairGroup });
-	}
-	return records.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+		return isVerificationId(repairGroup) ? { id, repairGroup } : undefined;
+	});
 }
 
 function readVerificationObligationSnapshot(
@@ -223,26 +240,17 @@ function readVerificationObligationSnapshot(
 	};
 }
 
-/** Display descriptions ride the snapshot only for ids it retains; anything else is dropped, never trusted. */
+/** Display descriptions ride the snapshot only for ids it retains; an entry without text is dropped, never trusted. */
 function canonicalDescriptions(
 	value: unknown,
 	activeIds: readonly string[],
 ): Array<{ id: string; command?: string; cwd?: string }> | undefined {
-	if (value === undefined) return [];
-	if (!Array.isArray(value) || value.length > activeIds.length) return undefined;
-	const seen = new Set<string>();
-	const records: Array<{ id: string; command?: string; cwd?: string }> = [];
-	for (const candidate of value) {
-		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
-		const id = ownDataValue(candidate, "id");
-		if (!isSnapshotVerificationId(id) || !activeIds.includes(id) || seen.has(id)) return undefined;
-		seen.add(id);
+	return canonicalSnapshotList(value, activeIds, isSnapshotVerificationId, (candidate, id) => {
 		const command = boundedDisplayText(ownDataValue(candidate, "command"), MAX_VERIFICATION_COMMAND_LENGTH);
 		const cwd = boundedDisplayText(ownDataValue(candidate, "cwd"), MAX_VERIFICATION_CWD_LENGTH);
-		if (command === undefined && cwd === undefined) continue;
-		records.push({ id, ...(command !== undefined ? { command } : {}), ...(cwd !== undefined ? { cwd } : {}) });
-	}
-	return records.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+		if (command === undefined && cwd === undefined) return null;
+		return { id, ...(command !== undefined ? { command } : {}), ...(cwd !== undefined ? { cwd } : {}) };
+	});
 }
 
 function readVerificationEvents(details: unknown): VerificationRecord[] | typeof VERIFICATION_OVERFLOW_ID | undefined {
