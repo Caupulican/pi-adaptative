@@ -532,6 +532,26 @@ function executeGrantEdge(
 
 export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDefinition {
 	const now = deps.now ?? (() => new Date().toISOString());
+	// Goal calls in one batch run through the parallel pool (packages/agent/src/agent-loop.ts), and
+	// this tool's read-modify-write is genuinely asynchronous: file evidence is stat'ed and worker
+	// dispatch awaited between the read and the save. The evidence rebase (goal-lifecycle.ts,
+	// resolveGoalEvidenceCommitState) tolerates only other evidence landing meanwhile; an increment or
+	// requirement transition in the same batch invalidated every verification in flight (live census:
+	// three refusals from one batch of add_evidence + increment). Calls on this tool instance are
+	// therefore chained: each starts after the previous one settled, in emission order, while still
+	// pooling with unrelated tools. `executionMode: "sequential"` would also serialize them, but as a
+	// barrier group that keeps every other tool out of the batch (task-steps.ts documents that cost).
+	// Writers outside this instance (continuation controller, /goal) keep the concurrent-revision
+	// refusal, which is correct for them.
+	let mutationTail = Promise.resolve();
+	const serialized = <T>(work: () => Promise<T>): Promise<T> => {
+		const run = mutationTail.then(work, work);
+		mutationTail = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
+	};
 	return {
 		name: LEGACY_GOAL_TOOL_NAME,
 		label: "goal",
@@ -568,127 +588,138 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			details: GoalToolDetails;
 			isError?: boolean;
 		}> {
-			if (input.action === "get") {
-				const state = deps.getGoalState();
-				if (!state) {
+			return serialized(async () => {
+				if (input.action === "get") {
+					const state = deps.getGoalState();
+					if (!state) {
+						return {
+							content: [{ type: "text", text: "No goal exists for this session." }],
+							details: { action: "get", applied: false },
+						};
+					}
 					return {
-						content: [{ type: "text", text: "No goal exists for this session." }],
-						details: { action: "get", applied: false },
+						content: [{ type: "text", text: summarizeGoalState(state) }],
+						details: { action: "get", applied: false, state },
 					};
 				}
-				return {
-					content: [{ type: "text", text: summarizeGoalState(state) }],
-					details: { action: "get", applied: false, state },
-				};
-			}
-			if (input.action === "grant_edge") return executeGrantEdge(input, deps);
-			let normalizedInput = input;
-			if (input.action === "start" && deps.authorizeStart) {
-				const authority = deps.authorizeStart(input);
-				if (typeof authority === "string") {
+				if (input.action === "grant_edge") return executeGrantEdge(input, deps);
+				let normalizedInput = input;
+				if (input.action === "start" && deps.authorizeStart) {
+					const authority = deps.authorizeStart(input);
+					if (typeof authority === "string") {
+						return {
+							content: [{ type: "text", text: `goal start failed: ${authority}` }],
+							details: { action: "start", applied: false, error: authority },
+							isError: true,
+						};
+					}
+					normalizedInput = {
+						...input,
+						...(typeof authority === "number" ? { tokenBudget: authority } : {}),
+					};
+					if (authority === null) delete normalizedInput.tokenBudget;
+				}
+				const mapped = toGoalAction(normalizedInput);
+				if ("error" in mapped) {
 					return {
-						content: [{ type: "text", text: `goal start failed: ${authority}` }],
-						details: { action: "start", applied: false, error: authority },
+						content: [{ type: "text" as const, text: `goal ${input.action} failed: ${mapped.error}` }],
+						details: { action: input.action, applied: false, error: mapped.error },
 						isError: true,
 					};
 				}
-				normalizedInput = {
-					...input,
-					...(typeof authority === "number" ? { tokenBudget: authority } : {}),
-				};
-				if (authority === null) delete normalizedInput.tokenBudget;
-			}
-			const mapped = toGoalAction(normalizedInput);
-			if ("error" in mapped) {
-				return {
-					content: [{ type: "text" as const, text: `goal ${input.action} failed: ${mapped.error}` }],
-					details: { action: input.action, applied: false, error: mapped.error },
-					isError: true,
-				};
-			}
 
-			let action: GoalAction = mapped;
-			const evidenceState = action.action === "add_evidence" ? deps.getGoalState() : undefined;
-			let evidenceFailureReason: string | undefined;
-			if (action.action === "add_evidence") {
-				signal?.throwIfAborted();
-				const resolved = await resolveEvidenceVerified(action.kind, action.uri, action.summary, deps, signal);
-				signal?.throwIfAborted();
-				evidenceFailureReason = resolved.reason;
-				const uri = resolved.uri ?? action.uri;
-				action = {
-					...action,
-					evidenceId:
-						input.evidenceId ??
-						generatedGoalRecordId("ev", {
-							kind: action.kind,
-							summary: action.summary.trim(),
-							uri: action.kind === "file" ? (uri ?? "") : (uri?.trim() ?? ""),
-						}),
-					verified: resolved.verified,
-					outcome: resolved.outcome,
-					uri,
-				};
-			}
-			// Honest dispatch reporting: distinguish "dispatched" (laneId), "declined" (skipReason --
-			// the dependency IS wired but the underlying delegation starter refused, e.g. disabled or
-			// already at capacity), and "unwired" (no dependency at all) -- never collapse a real
-			// decline into a silent no-laneId no-op indistinguishable from the dep being absent.
-			let dispatchNote: string | undefined;
-			let dispatchSkipReason: string | undefined;
-			// Indeterminate-binding dedupe guard: checked BEFORE any dispatch side effect, for BOTH
-			// routes. A requirement already bound to a lane that is either still live (a plain
-			// duplicate) or whose liveness/outcome cannot be determined at all (for example, a legacy
-			// snapshot with no lane record or worker result) must never be
-			// re-dispatched silently; only a CONFIRMED terminal outcome allows a legitimate retry.
-			let dispatchGuardRefused = false;
-			if (action.action === "dispatch_worker") {
-				// Captured into a `const` so the "dispatch_worker" narrowing survives into the closures
-				// below -- TS does not narrow a `let`-bound outer variable across a callback boundary.
-				const dispatchAction = action;
-				const boundRequirement = deps
-					.getGoalState()
-					?.requirements.find((r) => r.id === dispatchAction.requirementId);
-				const bound = boundRequirement?.boundLaneId;
-				if (bound !== undefined) {
-					const boundLaneRecord = deps.getLaneRecords?.().find((record) => record.laneId === bound);
-					const isLiveInFlight =
-						boundLaneRecord !== undefined &&
-						(boundLaneRecord.status === "queued" || boundLaneRecord.status === "running");
-					if (isLiveInFlight) {
-						dispatchSkipReason = "requirement_already_bound";
-					} else {
-						// `boundLaneRecord` present here is necessarily terminal (isLiveInFlight was false).
-						const hasTerminalOutcome =
-							boundLaneRecord !== undefined ||
-							(deps.getWorkerClaimSnapshots?.().some((claim) => claim.requestId === bound) ?? false);
-						if (!hasTerminalOutcome) dispatchSkipReason = "bound_lane_indeterminate";
-					}
-					if (dispatchSkipReason) {
-						dispatchGuardRefused = true;
-						dispatchNote = `No worker was dispatched (${dispatchSkipReason}); requirement '${dispatchAction.requirementId}' remains bound to lane '${bound}'.`;
+				let action: GoalAction = mapped;
+				const evidenceState = action.action === "add_evidence" ? deps.getGoalState() : undefined;
+				let evidenceFailureReason: string | undefined;
+				if (action.action === "add_evidence") {
+					signal?.throwIfAborted();
+					const resolved = await resolveEvidenceVerified(action.kind, action.uri, action.summary, deps, signal);
+					signal?.throwIfAborted();
+					evidenceFailureReason = resolved.reason;
+					const uri = resolved.uri ?? action.uri;
+					action = {
+						...action,
+						evidenceId:
+							input.evidenceId ??
+							generatedGoalRecordId("ev", {
+								kind: action.kind,
+								summary: action.summary.trim(),
+								uri: action.kind === "file" ? (uri ?? "") : (uri?.trim() ?? ""),
+							}),
+						verified: resolved.verified,
+						outcome: resolved.outcome,
+						uri,
+					};
+				}
+				// Honest dispatch reporting: distinguish "dispatched" (laneId), "declined" (skipReason --
+				// the dependency IS wired but the underlying delegation starter refused, e.g. disabled or
+				// already at capacity), and "unwired" (no dependency at all) -- never collapse a real
+				// decline into a silent no-laneId no-op indistinguishable from the dep being absent.
+				let dispatchNote: string | undefined;
+				let dispatchSkipReason: string | undefined;
+				// Indeterminate-binding dedupe guard: checked BEFORE any dispatch side effect, for BOTH
+				// routes. A requirement already bound to a lane that is either still live (a plain
+				// duplicate) or whose liveness/outcome cannot be determined at all (for example, a legacy
+				// snapshot with no lane record or worker result) must never be
+				// re-dispatched silently; only a CONFIRMED terminal outcome allows a legitimate retry.
+				let dispatchGuardRefused = false;
+				if (action.action === "dispatch_worker") {
+					// Captured into a `const` so the "dispatch_worker" narrowing survives into the closures
+					// below -- TS does not narrow a `let`-bound outer variable across a callback boundary.
+					const dispatchAction = action;
+					const boundRequirement = deps
+						.getGoalState()
+						?.requirements.find((r) => r.id === dispatchAction.requirementId);
+					const bound = boundRequirement?.boundLaneId;
+					if (bound !== undefined) {
+						const boundLaneRecord = deps.getLaneRecords?.().find((record) => record.laneId === bound);
+						const isLiveInFlight =
+							boundLaneRecord !== undefined &&
+							(boundLaneRecord.status === "queued" || boundLaneRecord.status === "running");
+						if (isLiveInFlight) {
+							dispatchSkipReason = "requirement_already_bound";
+						} else {
+							// `boundLaneRecord` present here is necessarily terminal (isLiveInFlight was false).
+							const hasTerminalOutcome =
+								boundLaneRecord !== undefined ||
+								(deps.getWorkerClaimSnapshots?.().some((claim) => claim.requestId === bound) ?? false);
+							if (!hasTerminalOutcome) dispatchSkipReason = "bound_lane_indeterminate";
+						}
+						if (dispatchSkipReason) {
+							dispatchGuardRefused = true;
+							dispatchNote = `No worker was dispatched (${dispatchSkipReason}); requirement '${dispatchAction.requirementId}' remains bound to lane '${bound}'.`;
+						}
 					}
 				}
-			}
-			if (action.action === "dispatch_worker" && !dispatchGuardRefused) {
-				const collaborationRequested = input.dispatchTarget === "collaboration";
-				let useCollaboration = collaborationRequested && deps.dispatchCollaborationWorker !== undefined;
-				let collaborationFallbackReason: string | undefined;
-				let dispatched: { laneId?: string; skipReason?: string } | undefined;
-				if (useCollaboration) {
-					dispatched = await deps.dispatchCollaborationWorker?.({
-						requirementId: action.requirementId,
-						instructions: action.instructions,
-					});
-					if (
-						!dispatched?.laneId &&
-						(dispatched?.skipReason === "collaboration_unavailable" ||
-							dispatched?.skipReason === "collaboration_extension_not_loaded") &&
-						deps.startWorkerDelegation
-					) {
-						collaborationFallbackReason = dispatched?.skipReason;
-						useCollaboration = false;
-						dispatched = await deps.startWorkerDelegation(
+				if (action.action === "dispatch_worker" && !dispatchGuardRefused) {
+					const collaborationRequested = input.dispatchTarget === "collaboration";
+					let useCollaboration = collaborationRequested && deps.dispatchCollaborationWorker !== undefined;
+					let collaborationFallbackReason: string | undefined;
+					let dispatched: { laneId?: string; skipReason?: string } | undefined;
+					if (useCollaboration) {
+						dispatched = await deps.dispatchCollaborationWorker?.({
+							requirementId: action.requirementId,
+							instructions: action.instructions,
+						});
+						if (
+							!dispatched?.laneId &&
+							(dispatched?.skipReason === "collaboration_unavailable" ||
+								dispatched?.skipReason === "collaboration_extension_not_loaded") &&
+							deps.startWorkerDelegation
+						) {
+							collaborationFallbackReason = dispatched?.skipReason;
+							useCollaboration = false;
+							dispatched = await deps.startWorkerDelegation(
+								{
+									requirementId: action.requirementId,
+									instructions: action.instructions,
+								},
+								signal,
+							);
+						}
+					} else {
+						if (collaborationRequested) collaborationFallbackReason = "collaboration_extension_not_loaded";
+						dispatched = await deps.startWorkerDelegation?.(
 							{
 								requirementId: action.requirementId,
 								instructions: action.instructions,
@@ -696,141 +727,132 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 							signal,
 						);
 					}
-				} else {
-					if (collaborationRequested) collaborationFallbackReason = "collaboration_extension_not_loaded";
-					dispatched = await deps.startWorkerDelegation?.(
-						{
-							requirementId: action.requirementId,
-							instructions: action.instructions,
-						},
-						signal,
-					);
+					action = { ...action, laneId: dispatched?.laneId };
+					if (dispatched?.laneId) {
+						dispatchNote = collaborationFallbackReason
+							? `Collaboration route returned ${collaborationFallbackReason}; dispatched native fallback worker lane '${dispatched.laneId}' for requirement '${action.requirementId}'.`
+							: useCollaboration
+								? `Dispatched collaboration worker lane '${dispatched.laneId}' for requirement '${action.requirementId}'.`
+								: `Dispatched in-process worker lane '${dispatched.laneId}' for requirement '${action.requirementId}' (native default).`;
+					} else {
+						const wired = useCollaboration ? deps.dispatchCollaborationWorker : deps.startWorkerDelegation;
+						dispatchSkipReason = dispatched?.skipReason ?? (wired ? "declined" : "dependency_unwired");
+						dispatchNote = `${collaborationFallbackReason ? `Collaboration route returned ${collaborationFallbackReason}; ` : ""}No worker was dispatched (${dispatchSkipReason}); requirement '${action.requirementId}' is recorded but not bound to a lane.`;
+					}
 				}
-				action = { ...action, laneId: dispatched?.laneId };
-				if (dispatched?.laneId) {
-					dispatchNote = collaborationFallbackReason
-						? `Collaboration route returned ${collaborationFallbackReason}; dispatched native fallback worker lane '${dispatched.laneId}' for requirement '${action.requirementId}'.`
-						: useCollaboration
-							? `Dispatched collaboration worker lane '${dispatched.laneId}' for requirement '${action.requirementId}'.`
-							: `Dispatched in-process worker lane '${dispatched.laneId}' for requirement '${action.requirementId}' (native default).`;
-				} else {
-					const wired = useCollaboration ? deps.dispatchCollaborationWorker : deps.startWorkerDelegation;
-					dispatchSkipReason = dispatched?.skipReason ?? (wired ? "declined" : "dependency_unwired");
-					dispatchNote = `${collaborationFallbackReason ? `Collaboration route returned ${collaborationFallbackReason}; ` : ""}No worker was dispatched (${dispatchSkipReason}); requirement '${action.requirementId}' is recorded but not bound to a lane.`;
-				}
-			}
 
-			// Parallel evidence may extend the same goal while verification waits. Rebase only across
-			// those additions; replacements and other transitions still invalidate the observation.
-			const latest = deps.getGoalState();
-			const current =
-				action.action === "add_evidence" ? resolveGoalEvidenceCommitState(evidenceState, latest) : latest;
-			let nextState: GoalState;
-			if (action.action === "dispatch_worker" && dispatchGuardRefused) {
-				// Short-circuit: the guard refused before any dispatch attempt -- never call
-				// applyGoalAction for this turn, so the requirement's existing `boundLaneId` is
-				// preserved exactly as-is rather than clobbered to `undefined` by the reducer's
-				// unconditional `boundLaneId: event.laneId` write (goal-state.ts's dispatch_worker case).
-				// `current` is guaranteed defined here: the guard only refuses when a requirement with
-				// a `boundLaneId` was found on it.
-				nextState = current as GoalState;
-			} else {
-				let activePipeline: ReturnType<NonNullable<GoalToolDependencies["getActivePipeline"]>>;
-				let activeGoalLaneIds: string[] | undefined;
-				if (
-					current &&
-					isGoalExecutionActive(current.status) &&
-					(action.action === "complete" || action.action === "increment")
-				) {
-					try {
-						const boundLaneIds = new Set(
-							current.requirements.flatMap((requirement) =>
-								requirement.boundLaneId ? [requirement.boundLaneId] : [],
-							),
-						);
-						activeGoalLaneIds = deps
-							.getLaneRecords?.()
-							.filter(
-								(record) =>
-									(record.status === "queued" || record.status === "running") &&
-									(record.goalId === current.goalId || boundLaneIds.has(record.laneId)),
-							)
-							.map((record) => record.laneId);
-					} catch (error) {
-						const message = `Cannot verify active goal-owned lane state: ${error instanceof Error ? error.message : String(error)}`;
-						return goalExecutionError(input.action, message, current);
+				// Parallel evidence may extend the same goal while verification waits. Rebase only across
+				// those additions; replacements and other transitions still invalidate the observation.
+				const latest = deps.getGoalState();
+				const current =
+					action.action === "add_evidence" ? resolveGoalEvidenceCommitState(evidenceState, latest) : latest;
+				let nextState: GoalState;
+				if (action.action === "dispatch_worker" && dispatchGuardRefused) {
+					// Short-circuit: the guard refused before any dispatch attempt -- never call
+					// applyGoalAction for this turn, so the requirement's existing `boundLaneId` is
+					// preserved exactly as-is rather than clobbered to `undefined` by the reducer's
+					// unconditional `boundLaneId: event.laneId` write (goal-state.ts's dispatch_worker case).
+					// `current` is guaranteed defined here: the guard only refuses when a requirement with
+					// a `boundLaneId` was found on it.
+					nextState = current as GoalState;
+				} else {
+					let activePipeline: ReturnType<NonNullable<GoalToolDependencies["getActivePipeline"]>>;
+					let activeGoalLaneIds: string[] | undefined;
+					if (
+						current &&
+						isGoalExecutionActive(current.status) &&
+						(action.action === "complete" || action.action === "increment")
+					) {
+						try {
+							const boundLaneIds = new Set(
+								current.requirements.flatMap((requirement) =>
+									requirement.boundLaneId ? [requirement.boundLaneId] : [],
+								),
+							);
+							activeGoalLaneIds = deps
+								.getLaneRecords?.()
+								.filter(
+									(record) =>
+										(record.status === "queued" || record.status === "running") &&
+										(record.goalId === current.goalId || boundLaneIds.has(record.laneId)),
+								)
+								.map((record) => record.laneId);
+						} catch (error) {
+							const message = `Cannot verify active goal-owned lane state: ${error instanceof Error ? error.message : String(error)}`;
+							return goalExecutionError(input.action, message, current);
+						}
+						try {
+							activePipeline = deps.getActivePipeline?.();
+						} catch (error) {
+							const message = `Cannot verify active pipeline state: ${error instanceof Error ? error.message : String(error)}`;
+							return goalExecutionError(input.action, message, current);
+						}
 					}
-					try {
-						activePipeline = deps.getActivePipeline?.();
-					} catch (error) {
-						const message = `Cannot verify active pipeline state: ${error instanceof Error ? error.message : String(error)}`;
-						return goalExecutionError(input.action, message, current);
+					const result = applyGoalAction(current, action, now(), {
+						requireVerifiedEvidenceForCompletion: deps.requireVerifiedEvidenceForCompletion?.() ?? true,
+						openTaskSteps: deps.getOpenTaskSteps?.(),
+						backgroundToolTasks: deps.getBackgroundToolTasks?.(),
+						activePipeline,
+						activeGoalLaneIds,
+					});
+					if (!result.ok) {
+						return {
+							content: [{ type: "text" as const, text: `goal ${input.action} failed: ${result.error}` }],
+							details: { action: input.action, applied: false, error: result.error, state: current },
+							isError: true,
+						};
 					}
+					if (result.state.status === "completed") {
+						let activeVerificationIds: readonly string[];
+						try {
+							activeVerificationIds = deps.getActiveVerificationIds?.() ?? [];
+						} catch (error) {
+							const message = `Cannot verify active verification obligations: ${error instanceof Error ? error.message : String(error)}`;
+							return goalExecutionError(input.action, message, current);
+						}
+						if (activeVerificationIds.length > 0) {
+							return goalExecutionError(
+								input.action,
+								`Cannot transition goal to ${result.state.status}: active verification obligation(s) remain (${activeVerificationIds.join(", ")}). The same verification id must report status passed first.`,
+								current,
+							);
+						}
+					}
+					deps.saveGoalState(result.state, current ? getGoalStateRevision(current) : undefined);
+					nextState = result.state;
 				}
-				const result = applyGoalAction(current, action, now(), {
-					requireVerifiedEvidenceForCompletion: deps.requireVerifiedEvidenceForCompletion?.() ?? true,
-					openTaskSteps: deps.getOpenTaskSteps?.(),
-					backgroundToolTasks: deps.getBackgroundToolTasks?.(),
-					activePipeline,
-					activeGoalLaneIds,
-				});
-				if (!result.ok) {
-					return {
-						content: [{ type: "text" as const, text: `goal ${input.action} failed: ${result.error}` }],
-						details: { action: input.action, applied: false, error: result.error, state: current },
-						isError: true,
-					};
-				}
-				if (result.state.status === "completed") {
-					let activeVerificationIds: readonly string[];
-					try {
-						activeVerificationIds = deps.getActiveVerificationIds?.() ?? [];
-					} catch (error) {
-						const message = `Cannot verify active verification obligations: ${error instanceof Error ? error.message : String(error)}`;
-						return goalExecutionError(input.action, message, current);
-					}
-					if (activeVerificationIds.length > 0) {
-						return goalExecutionError(
-							input.action,
-							`Cannot transition goal to ${result.state.status}: active verification obligation(s) remain (${activeVerificationIds.join(", ")}). The same verification id must report status passed first.`,
-							current,
-						);
-					}
-				}
-				deps.saveGoalState(result.state, current ? getGoalStateRevision(current) : undefined);
-				nextState = result.state;
-			}
 
-			const summary = summarizeGoalState(nextState, { action, openTaskSteps: deps.getOpenTaskSteps?.() });
-			let evidenceNote = "";
-			if (action.action === "add_evidence") {
-				let status = `unverified: ${evidenceFailureReason ?? unverifiedEvidenceReason(action.kind)}`;
-				if (action.verified === true) {
-					status =
-						action.kind === "user"
-							? `verified user statement via ${action.uri}`
-							: `verified${action.uri && action.uri !== input.uri?.trim() ? ` via ${action.kind === "file" ? "file" : "toolCallId"} ${action.uri}` : ""}`;
-					if (action.outcome) status += `; operation ${action.outcome}`;
+				const summary = summarizeGoalState(nextState, { action, openTaskSteps: deps.getOpenTaskSteps?.() });
+				let evidenceNote = "";
+				if (action.action === "add_evidence") {
+					let status = `unverified: ${evidenceFailureReason ?? unverifiedEvidenceReason(action.kind)}`;
+					if (action.verified === true) {
+						status =
+							action.kind === "user"
+								? `verified user statement via ${action.uri}`
+								: `verified${action.uri && action.uri !== input.uri?.trim() ? ` via ${action.kind === "file" ? "file" : "toolCallId"} ${action.uri}` : ""}`;
+						if (action.outcome) status += `; operation ${action.outcome}`;
+					}
+					evidenceNote = `Evidence '${action.evidenceId}' recorded (${status}).`;
 				}
-				evidenceNote = `Evidence '${action.evidenceId}' recorded (${status}).`;
-			}
-			const receipt =
-				action.action === "progress"
-					? `Progress recorded; lifecycle unchanged (${nextState.status}).${nextState.status === "blocked" ? " Only the owner can resume it with /goal resume." : ""}`
-					: `goal ${input.action} recorded.`;
-			const text = [receipt, evidenceNote, summary, dispatchNote]
-				.filter((line): line is string => Boolean(line))
-				.join("\n");
-			return {
-				content: [{ type: "text" as const, text }],
-				details: {
-					action: input.action,
-					applied: true,
-					state: nextState,
-					...(action.action === "dispatch_worker" && action.laneId ? { dispatchedLaneId: action.laneId } : {}),
-					...(action.action === "dispatch_worker" && !action.laneId ? { dispatchSkipReason } : {}),
-				},
-			};
+				const receipt =
+					action.action === "progress"
+						? `Progress recorded; lifecycle unchanged (${nextState.status}).${nextState.status === "blocked" ? " Only the owner can resume it with /goal resume." : ""}`
+						: `goal ${input.action} recorded.`;
+				const text = [receipt, evidenceNote, summary, dispatchNote]
+					.filter((line): line is string => Boolean(line))
+					.join("\n");
+				return {
+					content: [{ type: "text" as const, text }],
+					details: {
+						action: input.action,
+						applied: true,
+						state: nextState,
+						...(action.action === "dispatch_worker" && action.laneId ? { dispatchedLaneId: action.laneId } : {}),
+						...(action.action === "dispatch_worker" && !action.laneId ? { dispatchSkipReason } : {}),
+					},
+				};
+			});
 		},
 	};
 }

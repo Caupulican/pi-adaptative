@@ -26,6 +26,8 @@ export interface DelegateStatusLaneView {
 	thinkingLevel?: NonNullable<LaneRecord["thinkingLevel"]>;
 	type: LaneRecord["type"];
 	status: LaneRecord["status"];
+	/** Binding status of the lane's logical agent when known; "retired" takes no follow_up, resume, or wait. */
+	agentStatus?: NonNullable<LaneRecord["agentStatus"]>;
 	reasonCode?: string;
 	/** Present only for a queued lane this controller generation has evaluated and parked. */
 	waitReason?: string;
@@ -94,6 +96,9 @@ function formatRecord(
 	result?: Pick<WorkerResultContract, "artifacts">,
 ): string {
 	const lines = [`${record.laneId}: ${formattedRecordStatus(record)}`];
+	if (record.agentStatus === "retired") {
+		lines.push("agent retired: no follow_up, resume, or wait; delegate transcript still reads its conversation.");
+	}
 	if (record.modelRef) {
 		lines.push(`effective model: ${record.modelRef}; thinking: ${record.thinkingLevel ?? "unknown"}`);
 	}
@@ -138,6 +143,7 @@ function laneView(record: LaneRecord, claim: WorkerClaim | undefined): DelegateS
 		...(record.thinkingLevel ? { thinkingLevel: record.thinkingLevel } : {}),
 		type: record.type,
 		status: record.status,
+		...(record.agentStatus ? { agentStatus: record.agentStatus } : {}),
 		...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
 		...(record.status === "queued" && record.waitReason ? { waitReason: record.waitReason } : {}),
 		unreviewed: isUnreviewed(claim),
@@ -152,6 +158,7 @@ function lanePanelRow(view: DelegateStatusLaneView, details?: DelegateStatusTool
 		view.thinkingLevel ? `thinking ${view.thinkingLevel}` : undefined,
 		view.type === "tmux-worker" ? "tmux" : undefined,
 		view.reasonCode,
+		view.agentStatus === "retired" ? "retired" : undefined,
 		view.unreviewed ? "review required" : undefined,
 	].filter((value): value is string => value !== undefined);
 	const expandedDetails = [

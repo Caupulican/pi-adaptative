@@ -7,7 +7,12 @@ import type { KeybindingsManager } from "../../core/keybindings.ts";
 import { type OrchestrationPanelModel, renderOrchestrationPanelRows } from "../../core/tools/orchestration-panel.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import type { ActivityLaneItem } from "./components/activity-lane.ts";
-import { type AgentsOverlaySnapshot, buildWorkPanelModel, compactWorkPanel } from "./components/agents-overlay.ts";
+import {
+	type AgentsOverlaySnapshot,
+	buildWorkPanelModel,
+	compactWorkPanel,
+	isRetainedWorkerLane,
+} from "./components/agents-overlay.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
 import {
 	CHECKS_SECTION,
@@ -426,9 +431,7 @@ export function buildWorkbenchSections(snapshot: AgentsOverlaySnapshot, nowMs: n
 	if (teamRows.length) {
 		const team = compactWorkPanel({ ...model, rows: teamRows }, 4);
 		const shown = team.rows ?? [];
-		const workers = snapshot.laneRecords.filter(
-			(record) => record.type === "worker" || record.type === "tmux-worker",
-		);
+		const workers = snapshot.laneRecords.filter(isRetainedWorkerLane);
 		const active = workers.filter((record) => ACTIVE_WORKER.has(record.status)).length;
 		const meta = active ? `${active} active` : `${workers.length} ${workers.length === 1 ? "agent" : "agents"}`;
 		const body: Component | string[] = shown.length

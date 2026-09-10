@@ -1,14 +1,30 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { Container, Text } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
+import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { createBackgroundToolTerminalMessage } from "../src/core/background-tool-task-controller.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import { WorkbenchComponent } from "../src/modes/interactive/components/workbench.ts";
+import { WorkbenchComponent, type WorkbenchSection } from "../src/modes/interactive/components/workbench.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { buildWorkbenchSections, WorkbenchController } from "../src/modes/interactive/workbench-controller.ts";
 import { WorkspaceObservation } from "../src/modes/interactive/workbench-workspace.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 import { workbenchCounterFixture } from "./fixtures/session-failures.ts";
+
+function idleWorker(laneId: string, agentStatus: NonNullable<LaneRecord["agentStatus"]>): LaneRecord {
+	return {
+		laneId,
+		type: "worker",
+		status: "succeeded",
+		label: "review",
+		completedAt: "2026-09-10T20:34:00.000Z",
+		agentStatus,
+	};
+}
+
+function teamBody(section: WorkbenchSection | undefined): string {
+	return (Array.isArray(section?.body) ? section.body : []).map(stripAnsi).join("\n");
+}
 
 describe("Workbench input boundary", () => {
 	beforeAll(() => initTheme("dark"));
@@ -125,6 +141,31 @@ describe("Workbench input boundary", () => {
 		expect(buildWorkbenchSections({ laneRecords: [], items: [] }, Date.now()).some((s) => s.title === "Checks")).toBe(
 			false,
 		);
+	});
+
+	it("keeps an idle succeeded worker as a retained session", () => {
+		const sections = buildWorkbenchSections(
+			{ laneRecords: [idleWorker("worker-1", "registered")], items: [] },
+			Date.now(),
+		);
+		const team = sections.find((section) => section.title === "Team");
+		expect(team?.meta).toBe("1 agent");
+		expect(teamBody(team)).toContain("1 session retained");
+	});
+
+	it("stops counting a retired agent's lane as a retained session", () => {
+		// delegate retire ends the worker's session; the lane record stays for status, evidence, and
+		// recovery, so the Team block decides by the agent's binding status, not by the record's absence.
+		const retired = idleWorker("worker-1", "retired");
+		const both = buildWorkbenchSections(
+			{ laneRecords: [retired, idleWorker("worker-2", "registered")], items: [] },
+			Date.now(),
+		);
+		const team = both.find((section) => section.title === "Team");
+		expect(team?.meta).toBe("1 agent");
+		expect(teamBody(team)).toContain("1 session retained");
+		const only = buildWorkbenchSections({ laneRecords: [retired], items: [] }, Date.now());
+		expect(only.some((section) => section.title === "Team")).toBe(false);
 	});
 
 	it("refuses the toggle without a terminal mouse instead of pretending", () => {

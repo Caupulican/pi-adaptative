@@ -255,4 +255,24 @@ describe("delegate status", () => {
 		expect(result.content[0]?.text).toContain("A delivered terminal handoff proves persistence and delivery worked");
 		expect(result.content[0]?.text).toContain("continue or replan");
 	});
+
+	it("names a retired agent on its lane instead of hiding the lane", () => {
+		// delegate retire ends the session, not the lane: status, review, and worker evidence still
+		// resolve it, and the reply says what the agent can no longer do.
+		const retired: LaneRecord = {
+			laneId: "worker-retired",
+			type: "worker",
+			status: "succeeded",
+			reasonCode: "worker_completed",
+			agentStatus: "retired",
+		};
+		const result = executeDelegateStatusAction(
+			"status",
+			{ laneId: "worker-retired" },
+			{ getLaneRecords: () => [retired], getWorkerClaimSnapshots: () => [] },
+		);
+		expect(result.content[0]?.text).toContain("worker-retired: succeeded (worker_completed)");
+		expect(result.content[0]?.text).toContain("agent retired: no follow_up, resume, or wait");
+		expect(result.details).toMatchObject({ lanes: [{ laneId: "worker-retired", agentStatus: "retired" }] });
+	});
 });

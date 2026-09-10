@@ -194,6 +194,7 @@ describe("isLaneRecord", () => {
 	it("accepts a fully populated record and a minimal one", () => {
 		expect(isLaneRecord(valid)).toBe(true);
 		expect(isLaneRecord({ laneId: "worker-1", type: "worker", status: "running" })).toBe(true);
+		expect(isLaneRecord({ ...valid, agentStatus: "retired" })).toBe(true);
 	});
 
 	it("rejects structurally invalid values", () => {
@@ -205,6 +206,7 @@ describe("isLaneRecord", () => {
 		expect(isLaneRecord({ ...valid, costUsd: "free" })).toBe(false);
 		expect(isLaneRecord({ ...valid, label: 7 })).toBe(false);
 		expect(isLaneRecord({ ...valid, profileId: false })).toBe(false);
+		expect(isLaneRecord({ ...valid, agentStatus: "gone" })).toBe(false);
 		const { laneId: _laneId, ...missingLaneId } = valid;
 		expect(isLaneRecord(missingLaneId)).toBe(false);
 	});

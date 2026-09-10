@@ -11,6 +11,18 @@ const BROWSER_USER_AGENT =
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
 const PI_USER_AGENT = "Pi-Adaptative-WebFetch";
 
+/** A completed exchange whose status is not success. Transport, policy, and timeout failures stay plain errors. */
+export class PublicWebHttpError extends Error {
+	readonly status: number;
+	readonly url: string;
+	constructor(status: number, url: string) {
+		super(`HTTP ${status} fetching ${url}`);
+		this.name = "PublicWebHttpError";
+		this.status = status;
+		this.url = url;
+	}
+}
+
 export interface WebResponse {
 	status: number;
 	headers: { get(name: string): string | null };
@@ -177,7 +189,7 @@ export class PublicWebClient {
 					continue;
 				}
 				if (response.status < 200 || response.status >= 300)
-					throw new Error(`HTTP ${response.status} fetching ${url.href}`);
+					throw new PublicWebHttpError(response.status, url.href);
 				const contentType = response.headers.get("content-type") ?? "";
 				const mime = contentType.split(";", 1)[0].trim().toLowerCase();
 				if (

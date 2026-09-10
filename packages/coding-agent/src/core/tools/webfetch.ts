@@ -4,7 +4,7 @@ import type { ArtifactStore } from "../context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "../context/tool-output-packer.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { MAX_WEB_TIMEOUT_SECONDS, PublicWebClient } from "../web/public-web-client.ts";
-import { convertWebContent } from "../web/web-content.ts";
+import { convertWebContentDegrading } from "../web/web-content.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const webFetchSchema = Type.Object({
@@ -45,26 +45,37 @@ export function createWebFetchToolDefinition(
 		parameters: webFetchSchema,
 		async execute(toolCallId, { url, format = "markdown", timeout }, signal) {
 			if (!["markdown", "text", "html"].includes(format)) throw new Error("Invalid WebFetch format");
-			const result = await client.get(
-				url,
+			const accept =
 				format === "html"
 					? "text/html,application/xhtml+xml,text/plain;q=0.8"
-					: "text/markdown,text/plain;q=0.9,text/html;q=0.8,application/json;q=0.7",
-				timeout,
-				signal,
-			);
-			const rawContent = convertWebContent(result.text, result.contentType, format, result.url);
+					: "text/markdown,text/plain;q=0.9,text/html;q=0.8,application/json;q=0.7";
+			const result = await client.get(url, accept, timeout, signal);
+			const converted = convertWebContentDegrading(result.text, result.contentType, format, result.url);
 			signal?.throwIfAborted();
 			const packed = packToolOutput(
-				{ toolName: "webfetch", path: result.url, rawContent, sessionEntryId: toolCallId, reproducible: false },
+				{
+					toolName: "webfetch",
+					path: result.url,
+					rawContent: converted.content,
+					sessionEntryId: toolCallId,
+					reproducible: false,
+				},
 				options?.artifactStore,
 				toolCallId,
 			);
-			const notice = packed.artifactId
-				? `\n${formatArtifactNotice(packed.artifactId)}`
-				: packed.truncation.truncated
-					? "\n[Output truncated; artifact storage unavailable.]"
-					: "";
+			const notice = [
+				converted.degraded
+					? "[HTML exceeded the Markdown conversion budget; plain-text extract of the same page.]"
+					: "",
+				packed.artifactId
+					? formatArtifactNotice(packed.artifactId)
+					: packed.truncation.truncated
+						? "[Output truncated; artifact storage unavailable.]"
+						: "",
+			]
+				.filter(Boolean)
+				.map((line) => `\n${line}`)
+				.join("");
 			return {
 				content: [{ type: "text", text: `Source: ${result.url}\n\n${packed.content}${notice}` }],
 				details: {

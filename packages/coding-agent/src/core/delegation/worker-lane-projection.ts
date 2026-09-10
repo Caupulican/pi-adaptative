@@ -48,6 +48,10 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 	const attempt = selectedWorkerAttempt(snapshot, taskId);
 	if (!task || !attempt) return undefined;
 	const managed = isManagedWorkerAttempt(attempt);
+	// Retire keeps the binding, the transcript, and this record. The binding status lets the Team
+	// blocks tell a retained session from a retired one without dropping the lane for status, review,
+	// worker evidence, or recovery, which all resolve lanes through this projection.
+	const agentStatus = attempt.agentId ? snapshot.agents[attempt.agentId]?.status : undefined;
 	const objective = snapshot.objectives[task.task.objectiveId];
 	const awaitingVerification =
 		attempt.result?.nextAction === "independent_verification_required" && task.verification === undefined;
@@ -90,6 +94,7 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 			: { completedAt: task.verification?.completedAt ?? attempt.updatedAt }),
 		...(attempt.result?.usage.costUsd !== undefined ? { costUsd: attempt.result.usage.costUsd } : {}),
 		...(goalId ? { goalId } : {}),
+		...(agentStatus ? { agentStatus } : {}),
 		...(attempt.dispatch.worktreeLaneKey ? { worktreeLaneKey: attempt.dispatch.worktreeLaneKey } : {}),
 	};
 }

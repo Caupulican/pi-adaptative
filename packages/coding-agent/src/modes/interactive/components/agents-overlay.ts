@@ -106,6 +106,11 @@ function backgroundToolRow(item: ActivityLaneItem): OrchestrationPanelRow {
 const ACTIVE_WORKER_STATUSES = new Set<LaneRecord["status"]>(["queued", "running"]);
 const ACTIVE_BACKGROUND_TOOL_STATUSES = new Set<ActivityLaneItem["status"]>(["active", "waiting"]);
 
+/** A worker lane whose logical agent still holds a session; `delegate retire` ends the session but keeps the record. */
+export function isRetainedWorkerLane(record: LaneRecord): boolean {
+	return (record.type === "worker" || record.type === "tmux-worker") && record.agentStatus !== "retired";
+}
+
 interface WorkActivityProjection {
 	workers: LaneRecord[];
 	activeWorkers: LaneRecord[];
@@ -114,7 +119,7 @@ interface WorkActivityProjection {
 }
 
 function projectWorkActivity(snapshot: AgentsOverlaySnapshot, nowMs: number): WorkActivityProjection {
-	const workers = snapshot.laneRecords.filter((record) => record.type === "worker" || record.type === "tmux-worker");
+	const workers = snapshot.laneRecords.filter(isRetainedWorkerLane);
 	const activeWorkers = workers.filter((record) => ACTIVE_WORKER_STATUSES.has(record.status));
 	const finishedWorkers = workers
 		.filter((record) => !ACTIVE_WORKER_STATUSES.has(record.status))

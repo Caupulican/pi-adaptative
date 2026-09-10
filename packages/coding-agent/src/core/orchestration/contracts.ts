@@ -130,7 +130,8 @@ export type AttemptStatus = (typeof ATTEMPT_STATUSES)[number];
 export const WORKER_RESULT_STATUSES = ["completed", "partial", "blocked", "failed", "cancelled"] as const;
 export type WorkerResultContractStatus = (typeof WORKER_RESULT_STATUSES)[number];
 
-export type AgentBindingStatus = "registered" | "active" | "suspended" | "resuming" | "retired";
+export const AGENT_BINDING_STATUSES = ["registered", "active", "suspended", "resuming", "retired"] as const;
+export type AgentBindingStatus = (typeof AGENT_BINDING_STATUSES)[number];
 
 export interface AgentResumeContext {
 	provider: "pi" | "external";

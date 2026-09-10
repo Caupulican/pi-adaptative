@@ -3,6 +3,7 @@ import { createAgentIdentity } from "./agent-resume.ts";
 import { validateAttemptUsageSnapshot } from "./attempt-usage.ts";
 import {
 	type AcceptanceCriterion,
+	AGENT_BINDING_STATUSES,
 	type AgentBindingContract,
 	type AgentResumeContext,
 	type ApprovalRequestContract,
@@ -1098,7 +1099,7 @@ function normalizeAgentBinding(value: unknown, label: string): AgentBindingContr
 		throw new DurableTaskRuntimeError(`${label}.role is invalid.`);
 	}
 	const status = string(agent.status, `${label}.status`);
-	if (!["registered", "active", "suspended", "resuming", "retired"].includes(status)) {
+	if (!AGENT_BINDING_STATUSES.some((candidate) => candidate === status)) {
 		throw new DurableTaskRuntimeError(`${label}.status is invalid.`);
 	}
 	const context = exactRecord(agent.resumeContext, `${label}.resumeContext`, [

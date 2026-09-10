@@ -6,7 +6,12 @@
  * snapshots. Terminal lane records are persisted separately via `session-lane-record.ts`.
  */
 
-import { ORCHESTRATION_THINKING_LEVELS, type OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
+import {
+	AGENT_BINDING_STATUSES,
+	type AgentBindingStatus,
+	ORCHESTRATION_THINKING_LEVELS,
+	type OrchestrationThinkingLevel,
+} from "../orchestration/contracts.ts";
 
 export type LaneType = "research" | "worker" | "learning" | "tmux-worker";
 
@@ -46,6 +51,13 @@ export interface LaneRecord {
 	 * behaving unchanged; `undefined` for a lane never bound to a worktree-sync lane.
 	 */
 	worktreeLaneKey?: string;
+	/**
+	 * Binding status of the logical agent that owns the selected attempt, projected from durable
+	 * orchestration state. A retired agent has no session left to resume: the record stays for
+	 * status, review, evidence, and recovery, but it is no longer a retained Team session. Absent
+	 * for lanes that never had a logical agent.
+	 */
+	agentStatus?: AgentBindingStatus;
 	/**
 	 * Process-local, never persisted: why a `queued` lane has not been dispatched by this controller
 	 * generation (capacity, dependencies, a write reservation held elsewhere, …). Absent for lanes that
@@ -99,6 +111,12 @@ export function isLaneRecord(value: unknown): value is LaneRecord {
 	if (!isOptionalString(record.goalId)) return false;
 	if (!isOptionalString(record.evidenceEntryId)) return false;
 	if (!isOptionalString(record.worktreeLaneKey)) return false;
+	if (
+		record.agentStatus !== undefined &&
+		!AGENT_BINDING_STATUSES.some((candidate) => candidate === record.agentStatus)
+	) {
+		return false;
+	}
 	if (!isOptionalString(record.waitReason)) return false;
 	return true;
 }

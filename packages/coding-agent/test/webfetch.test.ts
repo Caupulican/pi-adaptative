@@ -17,13 +17,15 @@ function fixture(responses: Response[]) {
 	return { client, tool, close, request, lookup };
 }
 
-async function expectHtmlComplexityRejection(content: string, url = "https://example.com") {
+async function expectHtmlComplexityDegraded(content: string, url = "https://example.com") {
 	const f = fixture([new Response(content, { headers: { "content-type": "text/html" } })]);
 	// Stop at the expensive conversion boundary: a missing guard must fail without allocating
-	// the very amplified DOM/output this test is intended to prevent.
+	// the very amplified DOM/output this test is intended to prevent. The linear text extract is returned.
 	const conversion = vi.spyOn(TurndownService.prototype, "turndown").mockReturnValue("unreachable conversion");
 	try {
-		await expect(f.tool.execute("call", { url })).rejects.toThrow(/complexity/i);
+		const result = await f.tool.execute("call", { url });
+		const text = result.content.find((block) => block.type === "text")?.text ?? "";
+		expect(text).toContain("HTML exceeded the Markdown conversion budget; plain-text extract of the same page.");
 		expect(conversion).not.toHaveBeenCalled();
 	} finally {
 		conversion.mockRestore();
@@ -330,17 +332,14 @@ describe("WebFetch content and artifact boundary", () => {
 		});
 		expect(store.cleanup()).toEqual([]);
 	});
-	it("rejects excessive HTML depth before recursive conversion", async () => {
-		const f = fixture([
-			new Response(`${"<div>".repeat(129)}body${"</div>".repeat(129)}`, {
-				headers: { "content-type": "text/html" },
-			}),
-		]);
-		await expect(f.tool.execute("call", { url: "https://example.com" })).rejects.toThrow(/complexity/i);
+	it("degrades excessive HTML depth to the plain-text extract instead of refusing", async () => {
+		await expectHtmlComplexityDegraded(`${"<div>".repeat(129)}body${"</div>".repeat(129)}`);
 	});
-	it.each(["<!-- hidden -->".repeat(50_001), "<span>x</span>".repeat(25_001)])(
-		"counts non-element nodes in the HTML complexity budget (%#)",
+	it.each(["<!-- hidden -->".repeat(50_001), `${"<p>" + "y".repeat(1024) + "</p>"}`.repeat(4000)])(
+		"degrades wide sibling fan-out over large text, which Turndown folds quadratically (%#)",
 		async (content) => {
+			// Measured: 4,000 siblings over 4 MB take 17 s in Turndown; the budget models exactly that
+			// product (children x characters beneath one parent) and never reaches the converter.
 			const control = fixture([
 				new Response("<!-- hidden --><span>visible</span>".repeat(100), {
 					headers: { "content-type": "text/html" },
@@ -349,25 +348,43 @@ describe("WebFetch content and artifact boundary", () => {
 			await expect(control.tool.execute("control", { url: "https://example.com" })).resolves.toMatchObject({
 				details: { truncated: false },
 			});
-			await expectHtmlComplexityRejection(content);
+			await expectHtmlComplexityDegraded(content);
 		},
 	);
-	it.each([200, 3000])("bounds %i expanded relative links before allocating the converted document", async (count) => {
-		const content = '<a href="page">guide</a>'.repeat(count);
-		const response = () => new Response(content, { headers: { "content-type": "text/html" } });
-		const shortBase = fixture([response()]);
+	it("counts relative links at their expanded length, so a long base URL amplifies fan-out work", async () => {
+		const content = (count: number) => '<a href="page">guide</a>'.repeat(count);
+		const longBase = `https://example.com/${"x".repeat(8000)}/index`;
+		const shortBase = fixture([new Response(content(3000), { headers: { "content-type": "text/html" } })]);
 		await expect(shortBase.tool.execute("control", { url: "https://example.com/index" })).resolves.toMatchObject({
-			details: { truncated: count === 3000 },
-		});
-		await expectHtmlComplexityRejection(content, `https://example.com/${"x".repeat(8000)}/index`);
-	});
-	it("bounds repeated ancestor text traversal, with shallow content as a control", async () => {
-		const body = "x".repeat(512 * 1024);
-		const shallow = fixture([new Response(`<div>${body}</div>`, { headers: { "content-type": "text/html" } })]);
-		await expect(shallow.tool.execute("control", { url: "https://example.com" })).resolves.toMatchObject({
 			details: { truncated: true },
 		});
-		await expectHtmlComplexityRejection(`${"<div>".repeat(64)}${body}${"</div>".repeat(64)}`);
+		const few = fixture([new Response(content(200), { headers: { "content-type": "text/html" } })]);
+		await expect(few.tool.execute("control", { url: longBase })).resolves.toMatchObject({
+			details: { truncated: true },
+		});
+		await expectHtmlComplexityDegraded(content(3000), longBase);
+	});
+	it("converts deep but narrow markup: depth alone is cheap for Turndown", async () => {
+		const body = "x".repeat(512 * 1024);
+		for (const depth of [1, 64]) {
+			const f = fixture([
+				new Response(`${"<div>".repeat(depth)}${body}${"</div>".repeat(depth)}`, {
+					headers: { "content-type": "text/html" },
+				}),
+			]);
+			const result = await f.tool.execute("call", { url: "https://example.com" });
+			expect(result.details).toMatchObject({ truncated: true });
+			expect(result.content.find((block) => block.type === "text")?.text).not.toContain("plain-text extract");
+		}
+	});
+	it("extracts text linearly past the Markdown budget without degrading", async () => {
+		// The budget bounds the recursive Markdown conversion; the streaming text pass is linear in an
+		// input the client already caps, so a text request is never refused for its shape.
+		const f = fixture([new Response("<span>x</span>".repeat(25_001), { headers: { "content-type": "text/html" } })]);
+		const result = await f.tool.execute("call", { url: "https://example.com", format: "text" });
+		const text = result.content.find((block) => block.type === "text")?.text ?? "";
+		expect(text).not.toContain("plain-text extract");
+		expect(text).toContain("xxx");
 	});
 	it("decodes split UTF-8 chunks and declared legacy charset without losing text", async () => {
 		const bytes = new TextEncoder().encode("café");

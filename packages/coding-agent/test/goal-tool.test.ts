@@ -20,7 +20,12 @@ function createHarness(options: { getActiveVerificationIds?: () => readonly stri
 	const saves: GoalState[] = [];
 	const tool = createGoalToolDefinition({
 		getGoalState: () => state,
-		saveGoalState: (next) => {
+		saveGoalState: (next, expected) => {
+			if (expected && state && (state.goalId !== expected.goalId || (state.revision ?? 0) !== expected.revision)) {
+				throw new Error(
+					"Goal state changed concurrently during evidence verification. Retry against the latest state.",
+				);
+			}
 			state = next;
 			saves.push(next);
 		},
@@ -574,5 +579,40 @@ describe("goal setup in one call", () => {
 		expect(result.isError).toBe(true);
 		expect(JSON.stringify(result.content)).toContain("already exists");
 		expect(harness.getState()?.requirements).toHaveLength(1);
+	});
+
+	it("chains one batch of add_evidence and increment so no evidence loses its verification", async () => {
+		// Live census: a batch of add_evidence + increment refused every evidence call. The increment
+		// ran synchronously while the file verifications awaited, and the evidence rebase tolerates only
+		// other evidence landing meanwhile. On one tool instance the calls now run in emission order.
+		const { tool, run, getState, sessionManager } = createHarness();
+		await run({ action: "start", goalId: "g1", userGoal: "Ship feature" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Ledger holds" });
+		sessionManager.appendMessage({ role: "user", content: "owner confirmed the ledger", timestamp: 1000 });
+		await run({ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "owner confirmed the ledger" });
+		const results = await Promise.all([
+			tool.execute(
+				"c1",
+				{ action: "add_evidence", kind: "file", summary: "one", uri: "file:///tmp/one.ts" },
+				undefined,
+				undefined,
+				ctx,
+			),
+			tool.execute(
+				"c2",
+				{ action: "add_evidence", kind: "file", summary: "two", uri: "file:///tmp/two.ts" },
+				undefined,
+				undefined,
+				ctx,
+			),
+			tool.execute("c3", { action: "increment" }, undefined, undefined, ctx),
+		]);
+		expect(results.map((result) => result.isError === true)).toEqual([false, false, false]);
+		expect(getState()?.evidence.map((evidence) => evidence.summary)).toEqual([
+			"owner confirmed the ledger",
+			"one",
+			"two",
+		]);
+		expect(getState()?.requirements.map((requirement) => requirement.status)).toEqual(["satisfied"]);
 	});
 });
