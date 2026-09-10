@@ -212,7 +212,7 @@ describe("delegate tool description varies by wiring mode", () => {
 			.map((content) => content.text)
 			.join("\n");
 		expect(text).toContain("delegate skipped: orchestration_tool_capability_missing:bash");
-		expect(text).toContain("readOnly keeps only local read tools");
+		expect(text).toContain("readOnly keeps reads only (read, grep, find, ls, repo_read, skill, memory query)");
 	});
 
 	it("reports the parent-aware retrieval path in async mode", async () => {

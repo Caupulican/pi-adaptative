@@ -337,7 +337,10 @@ describe("non-native phone filesystem workflow", () => {
 				.slice(3)
 				.map((result) => result.content.map((block) => (block.type === "text" ? block.text : "")).join("\n"));
 			expect(bashOutputs).toHaveLength(3);
-			expect(bashOutputs.every((output) => output.includes("running as session task"))).toBe(true);
+			// The stub names what moved the call: these three were moved by hand through the seam.
+			expect(bashOutputs.every((output) => /moved to session task tool-task-\d+ by the operator/.test(output))).toBe(
+				true,
+			);
 			const waitedOutputs = waitResults.map((result) =>
 				result.content.map((block) => (block.type === "text" ? block.text : "")).join("\n"),
 			);

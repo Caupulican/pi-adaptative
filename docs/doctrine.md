@@ -311,7 +311,9 @@ order. Pinned by `packages/coding-agent/test/worker-directory-admission.test.ts`
 declares which calls are foreground waits (never handed off) and which ask for a background task
 up front (`backgroundRequested`, handed off at once); every other call blocks up to its own timeout
 unless the operator configured a clock (`backgroundTool.callAfterMs`, off by default) or moved the
-call by hand. Pinned by `packages/agent/test/agent-loop.test.ts` (foreground by default) and
+call by hand. The handoff stub names which of the three moved the call (`started as session task
+… (background requested)`, `exceeded Ns; running as session task`, `moved to session task … by the
+operator`). Pinned by `packages/agent/test/agent-loop.test.ts` (foreground by default) and
 `packages/coding-agent/test/background-tool-task-controller.test.ts` and
 `packages/coding-agent/test/tool-task.test.ts`.
 

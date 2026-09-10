@@ -630,7 +630,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	): WorkerAgentRetireResult {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl().retireWorkerAgent(agentId, scope, options);
+		const control = this._getWorkerController().getAgentControl();
+		return options ? control.retireWorkerAgent(agentId, scope, options) : control.retireWorkerAgent(agentId, scope);
 	}
 
 	resolveWorkerAgentLane(agentId: string, scope?: WorkerAgentControlScope): WorkerAgentLaneResolution | undefined {

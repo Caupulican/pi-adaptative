@@ -933,8 +933,13 @@ describe("leaf worker orchestration", () => {
 			});
 
 			expect(run.record?.status).toBe("succeeded");
+			// A parent with bash lends the catalog reads and read-only git natively (read is read).
 			expect(tools).toEqual([
 				"read",
+				"grep",
+				"find",
+				"ls",
+				"repo_read",
 				"write",
 				"edit",
 				"python",

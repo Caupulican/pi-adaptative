@@ -45,7 +45,7 @@ function handoffHeadline(context: BackgroundToolCallContext, taskId: string): st
 		case "requested":
 			return `Tool ${context.toolCall.name} started as session task ${taskId} (background requested).`;
 		case "manual":
-			return `Tool ${context.toolCall.name} moved to session task ${taskId} by the operator after ${seconds}s.`;
+			return `Tool ${context.toolCall.name} moved to session task ${taskId} by the operator${context.elapsedMs >= 1000 ? ` after ${seconds}s` : ""}.`;
 		default:
 			return `Tool ${context.toolCall.name} exceeded ${seconds}s; running as session task ${taskId}.`;
 	}

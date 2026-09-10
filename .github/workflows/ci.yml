@@ -63,7 +63,27 @@ jobs:
           (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
         shell: pwsh
         run: |
-          choco install fd --version=10.4.2 --yes --no-progress
+          # Chocolatey's community feed is the first source; when it is unreachable (it was, on
+          # 2026-09-10, for every Windows job of one run) the pinned release archive from GitHub is
+          # the second, so a feed outage never decides a CI result.
+          $version = "10.4.2"
+          $installed = $false
+          try {
+            choco install fd --version=$version --yes --no-progress
+            $installed = ($LASTEXITCODE -eq 0)
+          } catch { $installed = $false }
+          if (-not $installed) {
+            Write-Host "choco install fd failed; installing fd $version from the GitHub release archive"
+            $dir = Join-Path $env:RUNNER_TEMP "fd-$version"
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            $archive = Join-Path $dir "fd.zip"
+            Invoke-WebRequest -Uri "https://github.com/sharkdp/fd/releases/download/v$version/fd-v$version-x86_64-pc-windows-msvc.zip" -OutFile $archive
+            Expand-Archive -Path $archive -DestinationPath $dir -Force
+            $exe = Get-ChildItem -Path $dir -Recurse -Filter fd.exe | Select-Object -First 1
+            if (-not $exe) { throw "fd.exe not found in the release archive" }
+            Add-Content -Path $env:GITHUB_PATH -Value $exe.DirectoryName
+            $env:PATH = "$($exe.DirectoryName);$env:PATH"
+          }
           fd --version
 
       - name: Install dependencies
@@ -178,7 +198,27 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install fd --version=10.4.2 --yes --no-progress
+          # Chocolatey's community feed is the first source; when it is unreachable (it was, on
+          # 2026-09-10, for every Windows job of one run) the pinned release archive from GitHub is
+          # the second, so a feed outage never decides a CI result.
+          $version = "10.4.2"
+          $installed = $false
+          try {
+            choco install fd --version=$version --yes --no-progress
+            $installed = ($LASTEXITCODE -eq 0)
+          } catch { $installed = $false }
+          if (-not $installed) {
+            Write-Host "choco install fd failed; installing fd $version from the GitHub release archive"
+            $dir = Join-Path $env:RUNNER_TEMP "fd-$version"
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            $archive = Join-Path $dir "fd.zip"
+            Invoke-WebRequest -Uri "https://github.com/sharkdp/fd/releases/download/v$version/fd-v$version-x86_64-pc-windows-msvc.zip" -OutFile $archive
+            Expand-Archive -Path $archive -DestinationPath $dir -Force
+            $exe = Get-ChildItem -Path $dir -Recurse -Filter fd.exe | Select-Object -First 1
+            if (-not $exe) { throw "fd.exe not found in the release archive" }
+            Add-Content -Path $env:GITHUB_PATH -Value $exe.DirectoryName
+            $env:PATH = "$($exe.DirectoryName);$env:PATH"
+          }
           fd --version
 
       - name: Install dependencies
