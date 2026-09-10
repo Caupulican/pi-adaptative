@@ -84,12 +84,14 @@ describe("resolveWorkerAuthority", () => {
 		expect(compiled.ok).toBe(true);
 		if (!compiled.ok) throw new Error(compiled.reasonCodes.join(","));
 		if (readOnly) {
-			expect(resolution.shipment.profile.capabilityCeiling).toEqual(["filesystem.read"]);
-			expect(plan.requiredCapabilities).toEqual(["filesystem.read"]);
-			expect(plan.toolManifests.map((entry) => entry.toolName)).toEqual(["read"]);
+			// Read is read: the parent's bash lends the catalog read tools and read-only git natively.
+			expect(resolution.shipment.profile.capabilityCeiling).toEqual(["filesystem.read", "repo.read"]);
+			expect(plan.requiredCapabilities).toEqual(["filesystem.read", "repo.read"]);
+			expect(plan.toolManifests.map((entry) => entry.toolName)).toEqual(["read", "grep", "find", "ls", "repo_read"]);
+			expect(plan.readPaths).not.toEqual([]);
 			expect(plan.writePaths).toEqual([]);
-			expect(compiled.grant.capabilities).toEqual(["filesystem.read"]);
-			expect(compiled.grant.allowedTools).toEqual(["read"]);
+			expect(compiled.grant.capabilities).toEqual(["filesystem.read", "repo.read"]);
+			expect(compiled.grant.allowedTools).toEqual(["read", "grep", "find", "ls", "repo_read"]);
 			expect(compiled.grant.writePaths).toEqual([]);
 		}
 	});
@@ -260,9 +262,9 @@ describe("resolveWorkerAuthority", () => {
 		});
 	});
 
-	it("normalizes catalog grep/find/ls onto bash when the parent surface has bash and not those tools", () => {
+	it("lends catalog grep/find/ls and repo_read natively when the parent surface has bash and not those tools", () => {
 		const resolution = resolveWorkerAuthority({
-			authority: { toolNames: ["read", "grep", "find", "ls"] },
+			authority: { toolNames: ["read", "grep", "find", "ls", "repo_read"] },
 			foregroundModel: model,
 			foregroundToolNames: ["read", "bash", "edit", "write"],
 			modelRegistry,
@@ -271,7 +273,37 @@ describe("resolveWorkerAuthority", () => {
 
 		expect(resolution.ok).toBe(true);
 		if (!resolution.ok) return;
-		expect(resolution.shipment.profile.toolNames).toEqual(["read", "bash"]);
+		expect(resolution.shipment.profile.toolNames).toEqual(["read", "grep", "find", "ls", "repo_read"]);
+	});
+
+	it("keeps a readOnly worker on native reads and read-only git, never bash", () => {
+		const resolution = resolveWorkerAuthority({
+			authority: { readOnly: true, toolNames: ["read", "grep", "repo_read"] },
+			foregroundModel: model,
+			foregroundToolNames: ["read", "bash", "edit", "write"],
+			foregroundEnvelope: {
+				id: "parent",
+				capabilities: ["filesystem.read", "filesystem.write", "process.exec"],
+			},
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+
+		expect(resolution.ok).toBe(true);
+		if (!resolution.ok) throw new Error(resolution.reason);
+		expect(resolution.shipment.profile.toolNames).toEqual(["read", "grep", "repo_read"]);
+		expect(resolution.shipment.profile.capabilityCeiling).toEqual(["filesystem.read", "repo.read"]);
+	});
+
+	it("does not invent repo.read for an explicit capability list or a base profile", () => {
+		const explicit = resolveWorkerAuthority({
+			authority: { capabilities: ["filesystem.read", "process.exec"], toolNames: ["read", "repo_read"] },
+			foregroundModel: model,
+			foregroundToolNames: ["read", "bash"],
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+		expect(explicit).toEqual({ ok: false, reason: "orchestration_tool_capability_missing:repo_read" });
 	});
 
 	it("keeps first-class grep/find/ls when those tools are already on the parent surface", () => {
@@ -288,9 +320,9 @@ describe("resolveWorkerAuthority", () => {
 		expect(resolution.shipment.profile.toolNames).toEqual(["read", "grep", "find", "ls"]);
 	});
 
-	it("still refuses grep/find/ls when the parent has neither those tools nor bash", () => {
+	it("still refuses grep/find/ls/repo_read when the parent has neither those tools nor bash", () => {
 		const resolution = resolveWorkerAuthority({
-			authority: { toolNames: ["read", "grep", "find", "ls"] },
+			authority: { toolNames: ["read", "grep", "find", "ls", "repo_read"] },
 			foregroundModel: model,
 			foregroundToolNames: ["read"],
 			modelRegistry,
@@ -299,7 +331,7 @@ describe("resolveWorkerAuthority", () => {
 
 		expect(resolution).toEqual({
 			ok: false,
-			reason: "orchestration_tool_unavailable:grep,find,ls",
+			reason: "orchestration_tool_unavailable:grep,find,ls,repo_read",
 		});
 	});
 

@@ -294,11 +294,7 @@ describe("delegate exact-action input corrections", () => {
 		expect(acknowledgeWorkerReview).toHaveBeenCalledExactlyOnceWith("lane-1");
 	});
 
-	it.each([
-		{ agentId: "worker-1" },
-		{ agentIds: ["worker-1", "worker-2"] },
-		{ laneId: "lane-1", agentId: "worker-1" },
-	])("rejects unsupported status selectors instead of reading the whole fleet: %j", async (selector) => {
+	it("refuses a status agentId it cannot resolve instead of reading the whole fleet", async () => {
 		const getLaneRecords = vi.fn(() => []);
 		const tool = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
@@ -307,19 +303,42 @@ describe("delegate exact-action input corrections", () => {
 		});
 		const result = await tool.execute(
 			"scoped-status",
-			{ action: "status", ...selector },
+			{ action: "status", agentId: "worker-1" },
 			undefined,
 			undefined,
 			context,
 		);
 		expect(result.isError).toBe(true);
 		expect(delegateText(result)).toContain("laneId");
-		expect(result.details).toMatchObject({ started: false, skipReason: "action_field_forbidden" });
+		expect(result.details).toMatchObject({ started: false, skipReason: "worker_agent_control_unavailable" });
 		expect(getLaneRecords).not.toHaveBeenCalled();
-		const overview = await tool.execute("overview", { action: "status" }, undefined, undefined, context);
-		expect(overview.isError).not.toBe(true);
-		expect(getLaneRecords).toHaveBeenCalledTimes(1);
 	});
+
+	it.each([{ agentIds: ["worker-1", "worker-2"] }, { laneId: "lane-1", agentId: "worker-1" }])(
+		"rejects ambiguous status selectors instead of reading the whole fleet: %j",
+		async (selector) => {
+			const getLaneRecords = vi.fn(() => []);
+			const tool = createDelegateToolDefinition({
+				caller: { kind: "session_root" },
+				runWorkerDelegation: async () => ({ started: false }),
+				status: { getLaneRecords, getWorkerClaimSnapshots: () => [] },
+			});
+			const result = await tool.execute(
+				"scoped-status",
+				{ action: "status", ...selector },
+				undefined,
+				undefined,
+				context,
+			);
+			expect(result.isError).toBe(true);
+			expect(delegateText(result)).toContain("laneId");
+			expect(result.details).toMatchObject({ started: false, skipReason: "action_field_forbidden" });
+			expect(getLaneRecords).not.toHaveBeenCalled();
+			const overview = await tool.execute("overview", { action: "status" }, undefined, undefined, context);
+			expect(overview.isError).not.toBe(true);
+			expect(getLaneRecords).toHaveBeenCalledTimes(1);
+		},
+	);
 
 	it("waits for every listed worker when wait is spelled with agentIds", async () => {
 		// Waiting is read-only, so the plural can only mean wait_many; refusing it cost a live run a
@@ -409,31 +428,38 @@ describe("delegate exact-action input corrections", () => {
 		}
 	});
 
-	it("rejects a message-bearing task field on follow_up and send", async () => {
-		for (const action of ["follow_up", "send"] as const) {
-			const spies = controlSpies();
-			const tool = toolWithSpies(spies);
+	it("adopts a task field as the message on follow_up and send, and names the conflict when both are sent", async () => {
+		const spies = controlSpies();
+		const tool = toolWithSpies(spies);
 
-			const result = await tool.execute(
-				`${action}-task`,
-				{ action, agentId: "worker-1", task: "do the thing" },
-				undefined,
-				undefined,
-				context,
-			);
+		const followUp = await tool.execute(
+			"follow_up-task",
+			{ action: "follow_up", agentId: "worker-1", task: "do the thing" },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(followUp.isError).not.toBe(true);
+		expect(spies.followUpSessionRootWorkerAgent).toHaveBeenCalledWith(
+			"worker-1",
+			"do the thing",
+			expect.objectContaining({ idempotencyKey: expect.any(String) }),
+		);
 
-			expect(result.isError).toBe(true);
-			expect(result.details).toMatchObject({ started: false, action, skipReason: "action_field_forbidden" });
-			const text = delegateText(result);
-			expect(text).toContain("does not accept field task");
-			expect(text).toContain("message");
-			expect(text).toContain("Nothing was queued.");
-			expect(spies.followUpSessionRootWorkerAgent).not.toHaveBeenCalled();
-			expect(spies.sendWorkerAgentMessage).not.toHaveBeenCalled();
-		}
+		const both = await tool.execute(
+			"send-both",
+			{ action: "send", agentId: "worker-1", task: "one", message: "two" },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(both.isError).toBe(true);
+		expect(both.details).toMatchObject({ started: false, action: "send", skipReason: "action_field_forbidden" });
+		expect(delegateText(both)).toContain("Both task and message were sent");
+		expect(spies.sendWorkerAgentMessage).not.toHaveBeenCalled();
 	});
 
-	it("rejects interrupt with a message instead of silently dropping the undelivered text", async () => {
+	it("interrupts and queues the message as two reported operations instead of dropping the text", async () => {
 		const spies = controlSpies();
 		const tool = toolWithSpies(spies);
 
@@ -445,17 +471,72 @@ describe("delegate exact-action input corrections", () => {
 			context,
 		);
 
-		expect(result.isError).toBe(true);
-		expect(result.details).toMatchObject({
-			started: false,
-			action: "interrupt",
-			skipReason: "action_field_forbidden",
-		});
+		expect(result.isError).not.toBe(true);
+		expect(spies.interruptWorkerAgent).toHaveBeenCalledWith("worker-10");
+		expect(result.details).toMatchObject({ started: true, action: "interrupt", agentId: "worker-10", queued: true });
 		const text = delegateText(result);
-		expect(text).toContain("delegate interrupt does not accept field message");
-		expect(text).toContain("The worker was NOT interrupted and the message was NOT delivered.");
-		expect(text).toContain("follow_up");
-		expect(spies.interruptWorkerAgent).not.toHaveBeenCalled();
+		expect(text).toContain("interrupted");
+		expect(text).toContain("queued for worker-10");
+		expect(text).toContain("delegate resume");
+	});
+
+	it("resolves status agentId to the agent's latest lane and refuses two selectors", async () => {
+		const resolveWorkerAgentLane = vi.fn((agentId: string) => ({
+			laneId: `${agentId}-lane-3`,
+			status: "running" as const,
+		}));
+		const getLaneRecords = vi.fn(() => [
+			{ laneId: "worker-1-lane-3", type: "worker" as const, status: "running" as const },
+		]);
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ resolveWorkerAgentLane }),
+			status: { getLaneRecords, getWorkerClaimSnapshots: () => [] },
+		});
+
+		const resolved = await tool.execute(
+			"status-agent",
+			{ action: "status", agentId: "worker-1" },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(resolveWorkerAgentLane).toHaveBeenCalledWith("worker-1");
+		expect(resolved.isError).not.toBe(true);
+		expect(resolved.details).toMatchObject({
+			action: "status",
+			kind: "lane",
+			laneId: "worker-1-lane-3",
+			agentId: "worker-1",
+		});
+		expect(delegateText(resolved)).toContain("resolved worker-1 → lane worker-1-lane-3");
+
+		const both = await tool.execute(
+			"status-both",
+			{ action: "status", agentId: "worker-1", laneId: "worker-1-lane-3" },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(both.isError).toBe(true);
+		expect(delegateText(both)).toContain("one selector");
+	});
+
+	it("passes retire force through as a pending-message discard", async () => {
+		const spies = controlSpies();
+		const tool = toolWithSpies(spies);
+		await tool.execute(
+			"retire-force",
+			{ action: "retire", agentId: "worker-1", force: true },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(spies.retireWorkerAgent).toHaveBeenCalledWith("worker-1", undefined, { discardPending: true });
+		await tool.execute("retire-plain", { action: "retire", agentId: "worker-2" }, undefined, undefined, context);
+		expect(spies.retireWorkerAgent).toHaveBeenLastCalledWith("worker-2");
 	});
 
 	it("names the conflict when both the wrong field and its counterpart are sent", async () => {

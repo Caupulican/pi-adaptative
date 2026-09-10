@@ -43,9 +43,13 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 /** Current-process default tool request. */
 export const DEFAULT_ACTIVE_TOOL_NAMES: readonly string[] = getDefaultActiveToolNames();
 
-/** First-class catalog search/list tools whose live default surface is the bash contract. */
-export const BASH_BACKED_CATALOG_TOOL_NAMES = ["grep", "find", "ls"] as const;
-const BASH_BACKED_CATALOG_TOOL_NAME_SET: ReadonlySet<string> = new Set(BASH_BACKED_CATALOG_TOOL_NAMES);
+/**
+ * Catalog read tools the bash contract already covers (file search, listing, read-only git). A
+ * surface that has bash lends them natively: a worker gets `grep`/`find`/`ls` (filesystem.read) and
+ * `repo_read` (repo.read), never bash in their place. Read is read; the main session keeps routing
+ * its own searches through bash and its guards.
+ */
+export const BASH_BACKED_CATALOG_TOOL_NAMES = ["grep", "find", "ls", "repo_read"] as const;
 
 /** Map legacy/platform-specific shell and tool alias names to stable agent contracts. */
 export function mapToolNamesForPlatform(
@@ -69,23 +73,17 @@ export function mapToolNamesForPlatform(
 }
 
 /**
- * Map requested tool names onto an inherited surface. Catalog grep/find/ls stay first-class when
- * that surface already has them; otherwise they collapse onto bash when bash is inherited. Other
- * names are unchanged so a later admission check can still refuse a real privilege miss.
+ * The tools a surface can lend to a worker: every mapped name, plus the catalog read tools whenever
+ * bash is present. Order is the surface's own, catalog reads appended, so an omitted request
+ * inherits a deterministic list.
  */
-export function mapToolNamesOntoSurface(
-	names: readonly string[],
+export function lendableToolSurface(
 	surface: readonly string[],
 	platform: NodeJS.Platform = process.platform,
 ): string[] {
-	const inherited = new Set(mapToolNamesForPlatform(surface, platform));
-	const mapped: string[] = [];
-	for (const name of mapToolNamesForPlatform(names, platform)) {
-		const resolved =
-			!inherited.has(name) && BASH_BACKED_CATALOG_TOOL_NAME_SET.has(name) && inherited.has(STABLE_SHELL_TOOL_NAME)
-				? STABLE_SHELL_TOOL_NAME
-				: name;
-		if (!mapped.includes(resolved)) mapped.push(resolved);
+	const lendable = mapToolNamesForPlatform(surface, platform);
+	if (lendable.includes(STABLE_SHELL_TOOL_NAME)) {
+		for (const name of BASH_BACKED_CATALOG_TOOL_NAMES) if (!lendable.includes(name)) lendable.push(name);
 	}
-	return mapped;
+	return lendable;
 }

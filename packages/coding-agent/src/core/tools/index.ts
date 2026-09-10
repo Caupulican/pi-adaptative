@@ -121,6 +121,15 @@ export {
 	type ReadToolOptions,
 } from "./read.ts";
 export {
+	createRepoReadTool,
+	createRepoReadToolDefinition,
+	REPO_READ_ACTIONS,
+	type RepoReadAction,
+	type RepoReadToolDetails,
+	type RepoReadToolInput,
+	type RepoReadToolOptions,
+} from "./repo-read.ts";
+export {
 	createSecretStoreToolDefinition,
 	type SecretStoreStatus,
 	type SecretStoreToolDetails,
@@ -179,6 +188,7 @@ import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createPythonTool, createPythonToolDefinition, type PythonToolOptions } from "./python.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
+import { createRepoReadTool, createRepoReadToolDefinition, type RepoReadToolOptions } from "./repo-read.ts";
 import { createSkillAuditTool, createSkillAuditToolDefinition, type SkillAuditToolOptions } from "./skill-audit.ts";
 import { createSkillifyTool, createSkillifyToolDefinition, type SkillifyToolOptions } from "./skillify.ts";
 import { createToolDefinitionWithRuntime, type ToolDef, type ToolName } from "./tool-definition-factory.ts";
@@ -206,6 +216,7 @@ export interface ToolsOptions {
 	grep?: GrepToolOptions;
 	find?: FindToolOptions;
 	ls?: LsToolOptions;
+	repo_read?: RepoReadToolOptions;
 	skill_audit?: SkillAuditToolOptions;
 	skillify?: SkillifyToolOptions;
 	extensionify?: ExtensionifyToolOptions;
@@ -255,6 +266,8 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createFindTool(cwd, options?.find);
 		case "ls":
 			return createLsTool(cwd, options?.ls);
+		case "repo_read":
+			return createRepoReadTool(cwd, options?.repo_read);
 		case "skill_audit":
 			return createSkillAuditTool(cwd, options?.skill_audit);
 		case "skillify":
@@ -292,6 +305,7 @@ export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOption
 		createGrepToolDefinition(cwd, options?.grep),
 		createFindToolDefinition(cwd, options?.find),
 		createLsToolDefinition(cwd, options?.ls),
+		createRepoReadToolDefinition(cwd, options?.repo_read),
 	];
 }
 
@@ -311,6 +325,7 @@ export function createAllToolDefinitions(
 		grep: createGrepToolDefinition(cwd, options?.grep),
 		find: createFindToolDefinition(cwd, options?.find),
 		ls: createLsToolDefinition(cwd, options?.ls),
+		repo_read: createRepoReadToolDefinition(cwd, options?.repo_read),
 		skill_audit: createSkillAuditToolDefinition(cwd, options?.skill_audit),
 		skillify: createSkillifyToolDefinition(cwd, options?.skillify),
 		extensionify: createExtensionifyToolDefinition(cwd, options?.extensionify),
@@ -341,6 +356,7 @@ export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[]
 		createGrepTool(cwd, options?.grep),
 		createFindTool(cwd, options?.find),
 		createLsTool(cwd, options?.ls),
+		createRepoReadTool(cwd, options?.repo_read),
 	];
 }
 
@@ -360,6 +376,7 @@ export function createAllTools(
 		grep: createGrepTool(cwd, options?.grep),
 		find: createFindTool(cwd, options?.find),
 		ls: createLsTool(cwd, options?.ls),
+		repo_read: createRepoReadTool(cwd, options?.repo_read),
 		skill_audit: createSkillAuditTool(cwd, options?.skill_audit),
 		skillify: createSkillifyTool(cwd, options?.skillify),
 		extensionify: createExtensionifyTool(cwd, options?.extensionify),

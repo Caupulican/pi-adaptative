@@ -29,6 +29,7 @@ import { createGrepTool } from "../tools/grep.ts";
 import { createLsTool } from "../tools/ls.ts";
 import { createPythonTool } from "../tools/python.ts";
 import { createReadTool } from "../tools/read.ts";
+import { createRepoReadTool } from "../tools/repo-read.ts";
 import { createRunProcessTool } from "../tools/run-process.ts";
 import { disposeShellExecutionSession } from "../tools/shell-execution-session.ts";
 import { createWriteTool } from "../tools/write.ts";
@@ -36,7 +37,7 @@ import type { CapabilityEnvelope } from "./contracts.ts";
 import { evaluateToolGate } from "./gates.ts";
 import type { WorkerToolAdapterRegistry } from "./worker-tool-adapter-registry.ts";
 
-const READ_ONLY_LANE_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
+const READ_ONLY_LANE_TOOL_NAMES = ["read", "grep", "find", "ls", "repo_read"] as const;
 const WRITE_LANE_TOOL_NAMES = ["write", "edit"] as const;
 const PYTHON_LANE_TOOL_NAME = "python" as const;
 const PROCESS_LANE_TOOL_NAME = "run_process" as const;
@@ -132,6 +133,7 @@ function createLaneTools(
 		["grep", () => createGrepTool(cwd)],
 		["find", () => createFindTool(cwd)],
 		["ls", () => createLsTool(cwd)],
+		["repo_read", () => createRepoReadTool(cwd)],
 		["write", () => createWriteTool(cwd, { intentController: fileMutationIntents })],
 		["edit", () => createEditTool(cwd, { intentController: fileMutationIntents })],
 		[PYTHON_LANE_TOOL_NAME, () => createPythonTool(cwd)],

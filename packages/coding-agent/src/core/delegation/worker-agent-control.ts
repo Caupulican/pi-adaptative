@@ -259,6 +259,17 @@ export interface WorkerAgentRetireResult {
 	replayed: boolean;
 }
 
+export interface WorkerAgentRetireOptions {
+	/** Dead-letter the agent's undelivered control messages instead of refusing to retire. */
+	discardPending?: boolean;
+}
+
+/** The task lane an agent identity currently stands for: its latest attempt. */
+export interface WorkerAgentLaneResolution {
+	laneId: string;
+	status: AttemptStatus;
+}
+
 /** One canonical host port for model-facing logical-agent controls. */
 export interface WorkerAgentControlPort {
 	/** Session-root read receipt for exact terminal generations; distinct from mutation review. */
@@ -315,7 +326,13 @@ export interface WorkerAgentControlPort {
 	): { started: boolean; record?: LaneRecord; skipReason?: string };
 	cancelWorkerAgent(agentId: string, reasonCode?: string, scope?: WorkerAgentControlScope): LaneRecord | undefined;
 	/** Retire one idle leaf without deleting its durable binding, lineage, transcript, or attempt history. */
-	retireWorkerAgent(agentId: string, scope?: WorkerAgentControlScope): WorkerAgentRetireResult;
+	retireWorkerAgent(
+		agentId: string,
+		scope?: WorkerAgentControlScope,
+		options?: WorkerAgentRetireOptions,
+	): WorkerAgentRetireResult;
+	/** The lane of the agent's latest attempt, so a status question about an agent has one exact answer. */
+	resolveWorkerAgentLane?(agentId: string, scope?: WorkerAgentControlScope): WorkerAgentLaneResolution | undefined;
 	waitForWorkerAgent(
 		agentId: string,
 		timeoutMs?: number,
@@ -1325,6 +1342,28 @@ export class WorkerAgentMailbox {
 		);
 		if (changed) this.notify();
 		return changed;
+	}
+
+	/** Fail every undelivered control message (a forced retire). Delivered history and replies are untouched. */
+	deadLetterPending(reason: string): number {
+		const failureReason = reason.trim();
+		if (!failureReason || failureReason.length > MAX_MAILBOX_IDENTITY_CHARS) {
+			throw new TypeError("A worker task failure reason is invalid.");
+		}
+		let count = 0;
+		this.update(
+			(state) => ({
+				...state,
+				messages: state.messages.map((message) => {
+					if (message.deliveredAt !== undefined || message.failedAt !== undefined) return message;
+					count++;
+					return { ...message, failedAt: transitionTimestamp(message.createdAt), failureReason };
+				}),
+			}),
+			true,
+		);
+		if (count > 0) this.notify();
+		return count;
 	}
 
 	/** Commit one exact reply acknowledgement and release its protected history slot. */

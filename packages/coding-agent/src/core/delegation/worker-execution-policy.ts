@@ -21,7 +21,13 @@ import { getToolCapabilityPolicy, requiredEnvelopeCapabilities } from "../tool-c
 import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
 
 const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
+const REPO_READ_TOOL_NAME = "repo_read";
 const WRITE_TOOL_NAMES = ["write", "edit"] as const;
+
+/** Capabilities that put a lane's read paths in play (repo.read reads the repository under them). */
+function isReadPathCapability(capability: HarnessCapability): boolean {
+	return capability === "filesystem.read" || capability === "worktree.read" || capability === "repo.read";
+}
 
 function delegatedToolCapabilities(toolName: string): readonly HarnessCapability[] {
 	return requiredEnvelopeCapabilities(toolName);
@@ -79,9 +85,7 @@ export function narrowWorkerExecutionPlan(
 	);
 	const requiredCapabilities = [...new Set(toolManifests.flatMap((manifest) => manifest.capabilities))];
 	const grantedTools = new Set(toolManifests.map((manifest) => manifest.toolName));
-	const readEnabled = requiredCapabilities.some(
-		(capability) => capability === "filesystem.read" || capability === "worktree.read",
-	);
+	const readEnabled = requiredCapabilities.some(isReadPathCapability);
 	const writeEnabled = grantedTools.has("write") || grantedTools.has("edit");
 	return {
 		cwd: admitted.cwd ?? current.cwd,
@@ -129,6 +133,7 @@ export function buildWorkerExecutionPlan(args: {
 	const grantsRead =
 		args.profile.capabilityCeiling.includes("filesystem.read") ||
 		args.profile.capabilityCeiling.includes("worktree.read");
+	const grantsRepoRead = args.profile.capabilityCeiling.includes("repo.read");
 	const writeEligible =
 		args.settings.writeEnabled &&
 		(args.profile.capabilityCeiling.includes("filesystem.write") ||
@@ -150,6 +155,7 @@ export function buildWorkerExecutionPlan(args: {
 	const enabledAdapterToolNames = (args.workerToolAdapterNames ?? []).filter((name) => profileToolNames.has(name));
 	const enabledToolNames = [
 		...(grantsRead ? READ_TOOL_NAMES : []),
+		...(grantsRepoRead ? [REPO_READ_TOOL_NAME] : []),
 		...(writeEligible ? WRITE_TOOL_NAMES : []),
 		...(memoryEligible ? [WORKER_MEMORY_READ_TOOL_NAME] : []),
 		...enabledProcessToolNames,
@@ -157,9 +163,7 @@ export function buildWorkerExecutionPlan(args: {
 	];
 	const toolManifests = buildLaneToolManifests(args.profile, enabledToolNames);
 	const grantedTools = new Set(toolManifests.map((manifest) => manifest.toolName));
-	const readEnabled = toolManifests.some((manifest) =>
-		manifest.capabilities.some((capability) => capability === "filesystem.read" || capability === "worktree.read"),
-	);
+	const readEnabled = toolManifests.some((manifest) => manifest.capabilities.some(isReadPathCapability));
 	const writeEnabled = grantedTools.has("write") || grantedTools.has("edit");
 	const processEnabled =
 		grantedTools.has("python") ||
@@ -256,9 +260,7 @@ export function compileManagedProcessExecutionGrant(args: {
 	}
 	if (unknownTools.length > 0) return { ok: false, reasonCodes: unknownTools.map((name) => `unknown_tool:${name}`) };
 	const capabilities = [...new Set(manifests.flatMap((manifest) => manifest.capabilities))];
-	const readEnabled = capabilities.some(
-		(capability) => capability === "filesystem.read" || capability === "worktree.read",
-	);
+	const readEnabled = capabilities.some(isReadPathCapability);
 	const writeEnabled = capabilities.some(
 		(capability) => capability === "filesystem.write" || capability === "worktree.mutate",
 	);

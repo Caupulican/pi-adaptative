@@ -17,6 +17,22 @@ import type { CredentialPathPolicy, CredentialPathProbe, CredentialPathProtectio
 import { createCredentialPathPolicy } from "./native-credential-path-probe.ts";
 
 const DIRECT_PATH_TOOLS = new Set(["read", "edit", "write", "ls", "image_generate"]);
+
+/** Files a repo_read call addresses: its pathspecs and the object path of every `rev:path` revision. */
+function repoReadFileSpecs(args: Record<string, unknown>): string[] {
+	const specs: string[] = [];
+	if (Array.isArray(args.paths)) {
+		for (const spec of args.paths) if (typeof spec === "string" && spec.length > 0) specs.push(spec);
+	}
+	if (Array.isArray(args.revisions)) {
+		for (const revision of args.revisions) {
+			if (typeof revision !== "string") continue;
+			const colon = revision.indexOf(":");
+			if (colon > 0 && colon < revision.length - 1) specs.push(revision.slice(colon + 1));
+		}
+	}
+	return specs;
+}
 const SHELL_INSPECTION_COMMANDS = new Set([
 	"cat",
 	"head",
@@ -565,6 +581,10 @@ export function credentialToolBlockReason(
 			const pat = typeof args.pattern === "string" ? args.pattern : undefined;
 			return evaluateFindRisk(Boolean(target && paths.isProtected(target)), pat);
 		}
+		case "repo_read":
+			return repoReadFileSpecs(args).some((spec) => paths.isProtected(spec))
+				? CREDENTIAL_BLOCK_REASONS.fileBlind
+				: undefined;
 		case "run_process": {
 			const bin = typeof args.executable === "string" ? args.executable : undefined;
 			const argv = Array.isArray(args.args)
@@ -663,6 +683,13 @@ export async function credentialToolBlockReasonAsync(
 		const pattern = typeof args.pattern === "string" ? args.pattern : undefined;
 		const isProt = Boolean(path && (await paths.isProtectedAsync(path, signal)));
 		return evaluateFindRisk(isProt, pattern);
+	}
+	if (toolName === "repo_read") {
+		for (const spec of repoReadFileSpecs(args)) {
+			signal?.throwIfAborted();
+			if (await paths.isProtectedAsync(spec, signal)) return CREDENTIAL_BLOCK_REASONS.fileBlind;
+		}
+		return undefined;
 	}
 	if (toolName === "run_process") {
 		const executable = typeof args.executable === "string" ? args.executable : undefined;

@@ -87,6 +87,7 @@ const CAPABILITY_ENFORCEMENT = new Map<HarnessCapability, ToolCapabilityManifest
 	["filesystem.write", "path-scope"],
 	["worktree.read", "path-scope"],
 	["worktree.mutate", "path-scope"],
+	["repo.read", "path-scope"],
 	["process.exec", "process-launcher"],
 	["tests.execute", "process-launcher"],
 	["network.http", "service-proxy"],

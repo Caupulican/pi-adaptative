@@ -154,7 +154,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			readOnly: Type.Optional(
 				Type.Boolean({
 					description:
-						"Fresh workers only: true narrows inherited authority to local reads, excluding write, shell/process, and network/service tools. Task prose alone does not restrict grants.",
+						"Fresh workers only: true narrows inherited authority to reads — read, grep, find, ls, repo_read (read-only git), skill, memory query — excluding write, shell/process, and network/service tools. Task prose alone does not restrict grants.",
 				}),
 			),
 			instructions: Type.Optional(
@@ -272,6 +272,12 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 					description: "Event wait timeout; expiry is nonterminal, not stall evidence.",
 				}),
 			),
+			force: Type.Optional(
+				Type.Boolean({
+					description:
+						"retire only: discard the worker's undelivered control messages instead of refusing to retire.",
+				}),
+			),
 			laneId: Type.Optional(
 				Type.String({
 					maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
@@ -367,24 +373,25 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
 	reply: ["action", "message", "replyToMessageId"],
 	wait: ["action", "agentId", "timeoutMs"],
 	wait_many: ["action", "agentIds", "mode", "timeoutMs"],
-	interrupt: ["action", "agentId"],
+	interrupt: ["action", "agentId", "message"],
 	resume: ["action", "agentId"],
-	retire: ["action", "agentId"],
+	retire: ["action", "agentId", "force"],
 	cancel: ["action", "agentId"],
-	status: ["action", "laneId"],
-	review: ["action", "laneId"],
+	status: ["action", "laneId", "agentId"],
+	review: ["action", "laneId", "agentId"],
 	profile_inspect: ["action"],
 	profile_create: ["action", "task", "baseProfileId", "model", "thinkingLevel", "path", "toolNames"],
 } as const satisfies Record<DelegateAction, readonly DelegateInputField[]>;
 
 /**
  * Wrong-field input that CARRIES A PAYLOAD is corrected by name instead of being deleted. Deleting
- * these produced either a downstream error that never named the field the model actually sent
- * (`agentIds` -> `delegate cancel requires agentId`) or, worse, a success path that silently dropped
- * user text (`interrupt {agentId, message}` reported the worker interrupted and never delivered the
- * message). A mapped field with a defined value ALWAYS rejects: adopting `agentIds: [one]` would
- * make the plural spelling work sometimes, which is the ambiguity these singular lifecycle actions
- * exist to avoid. Every other disallowed field keeps the sanitize-and-proceed contract below.
+ * these produced a downstream error that never named the field the model actually sent
+ * (`agentIds` -> `delegate cancel requires agentId`). A plural spelling on a singular lifecycle
+ * action ALWAYS rejects: adopting `agentIds: [one]` would make it work sometimes, which is the
+ * ambiguity these actions exist to avoid. Spellings with exactly one reading are absorbed instead
+ * (`task` on follow_up/send is the message, `agentId` on status is that agent's latest lane,
+ * `message` on interrupt is queued for the paused worker) — see sanitizeExactActionInput and the
+ * executor. Every other disallowed field keeps the sanitize-and-proceed contract below.
  */
 const EXACT_ACTION_FIELD_CORRECTIONS: ReadonlyArray<{
 	readonly actions: readonly DelegateAction[];
@@ -394,15 +401,9 @@ const EXACT_ACTION_FIELD_CORRECTIONS: ReadonlyArray<{
 }> = [
 	{
 		actions: ["status", "review"],
-		field: "agentId",
-		correction: (action) =>
-			`delegate ${action} does not accept agentId. Nothing was inspected or acknowledged. Use the exact laneId returned for the task; agent identity is not a lane selector.`,
-	},
-	{
-		actions: ["status", "review"],
 		field: "agentIds",
 		correction: (action) =>
-			`delegate ${action} does not accept agentIds. Nothing was inspected or acknowledged. Use one exact laneId per call; omit selectors only for a status overview.`,
+			`delegate ${action} does not accept agentIds. Nothing was inspected or acknowledged. Use one agentId or one exact laneId per call; omit selectors only for a status overview.`,
 	},
 	{
 		// `wait` is not here: waiting is read-only, so a plural wait can only mean wait_many and is
@@ -412,19 +413,6 @@ const EXACT_ACTION_FIELD_CORRECTIONS: ReadonlyArray<{
 		correction: (action) =>
 			`delegate ${action} does not accept field agentIds. Nothing was executed. Use singular agentId — one call per worker.`,
 		counterpart: { field: "agentId", conflict: "Both agentIds and agentId were sent; keep only agentId." },
-	},
-	{
-		actions: ["follow_up", "send"],
-		field: "task",
-		correction: (action) =>
-			`delegate ${action} does not accept field task. Nothing was queued. Put the message text in message.`,
-		counterpart: { field: "message", conflict: "Both task and message were sent; keep only message." },
-	},
-	{
-		actions: ["interrupt"],
-		field: "message",
-		correction: () =>
-			"delegate interrupt does not accept field message. The worker was NOT interrupted and the message was NOT delivered. interrupt only pauses the worker; send text with follow_up after resume.",
 	},
 ];
 
@@ -456,8 +444,39 @@ function sanitizeExactActionInput(
 	const correction = correctExactActionInput(input, action);
 	if (correction) return { input: { ...input }, violation: correction };
 	const exactInput = { ...input };
+	if (
+		(action === "status" || action === "review") &&
+		exactInput.agentId !== undefined &&
+		exactInput.laneId !== undefined
+	) {
+		return {
+			input: exactInput,
+			violation: {
+				message: `delegate ${action} takes one selector: agentId (the agent's latest lane) or laneId, not both. Nothing was inspected or acknowledged.`,
+				skipReason: "action_field_forbidden",
+			},
+		};
+	}
 	for (const field of Object.keys(exactInput)) {
 		if (Reflect.get(exactInput, field) !== undefined && !allowed.includes(field)) {
+			if ((action === "follow_up" || action === "send") && field === "task") {
+				const taskText = typeof exactInput.task === "string" ? exactInput.task.trim() : "";
+				const messageText = typeof exactInput.message === "string" ? exactInput.message.trim() : "";
+				// `task` is the start/profile_create brief on the shared schema; on a message action
+				// it can only be the message. Both fields together is a conflict; drop neither.
+				if (taskText && !messageText) {
+					exactInput.message = exactInput.task;
+					delete exactInput.task;
+					continue;
+				}
+				return {
+					input: exactInput,
+					violation: {
+						message: `delegate ${action} does not accept field task alongside message. Nothing was queued. Both task and message were sent; keep only message.`,
+						skipReason: "action_field_forbidden",
+					},
+				};
+			}
 			if (action === "profile_create" && field === "resourceProfileNames") {
 				return {
 					input: exactInput,
@@ -1081,12 +1100,12 @@ function delegateStartSkipText(reason: string): string {
 	}
 	if (reason.startsWith("orchestration_tool_unavailable:")) {
 		// Measured live: an orchestrator asked a worker for tools outside the live parent surface,
-		// lost the turn and armed the failure ledger. Catalog grep/find/ls on a bash-only parent
-		// normalize before this branch; remaining misses still name the inheritance rule.
-		return `delegate skipped: ${reason}. A worker's tools come from this session's own active tool set (the tools you can call); omit toolNames to inherit every compatible tool.`;
+		// lost the turn and armed the failure ledger. A parent with bash lends grep/find/ls/repo_read
+		// natively before this branch; remaining misses still name the inheritance rule.
+		return `delegate skipped: ${reason}. A worker's tools come from this session's own active tool set (the tools you can call; a session with bash also lends grep, find, ls and repo_read); omit toolNames to inherit every compatible tool.`;
 	}
 	if (reason.startsWith("orchestration_tool_capability_missing:")) {
-		return `delegate skipped: ${reason}. The compiled grant has no capability for that tool: readOnly keeps only local read tools, and a base profile's capability ceiling can exclude more. Drop the tool from toolNames, drop readOnly, or choose a base profile that grants it.`;
+		return `delegate skipped: ${reason}. The compiled grant has no capability for that tool: readOnly keeps reads only (read, grep, find, ls, repo_read, skill, memory query), and a base profile's capability ceiling can exclude more. Drop the tool from toolNames, drop readOnly, or choose a base profile that grants it.`;
 	}
 	return `delegate skipped: ${reason}`;
 }
@@ -1382,7 +1401,46 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 									},
 								}
 							: status;
-					const statusResult = executeDelegateStatusAction(action, { laneId: input.laneId }, statusDependencies);
+					let laneId = input.laneId?.trim() || undefined;
+					let resolvedFromAgent: string | undefined;
+					const statusAgentId = input.agentId?.trim();
+					if (!laneId && statusAgentId) {
+						// An agent identity names its latest task lane; a status question about an agent
+						// has that one exact answer, so it is resolved instead of refused.
+						const resolver = deps.workerAgentControl?.resolveWorkerAgentLane;
+						if (!resolver) {
+							return invalid(
+								`delegate ${action} cannot resolve agentId here; use the laneId from the status overview`,
+								{
+									started: false,
+									action,
+									agentId: statusAgentId,
+									skipReason: "worker_agent_control_unavailable",
+								},
+							);
+						}
+						const resolved = resolver.call(deps.workerAgentControl, statusAgentId);
+						if (!resolved) {
+							return invalid(
+								`delegate ${action}: worker ${statusAgentId} has no task lane yet; nothing was inspected or acknowledged`,
+								{ started: false, action, agentId: statusAgentId, skipReason: "worker_agent_lane_missing" },
+							);
+						}
+						laneId = resolved.laneId;
+						resolvedFromAgent = `${statusAgentId} → lane ${resolved.laneId} (latest task, ${resolved.status})`;
+					}
+					const rawStatusResult = executeDelegateStatusAction(action, { laneId }, statusDependencies);
+					const statusResult = resolvedFromAgent
+						? {
+								...rawStatusResult,
+								content: rawStatusResult.content.map((item, index) =>
+									index === 0 && item.type === "text"
+										? { ...item, text: `resolved ${resolvedFromAgent}\n${item.text}` }
+										: item,
+								),
+								details: { ...rawStatusResult.details, agentId: statusAgentId },
+							}
+						: rawStatusResult;
 					if (action === "status") {
 						if (exposedStatusRecords !== undefined && statusRecords !== undefined) {
 							const exposed = new Set(exposedStatusRecords);
@@ -1853,16 +1911,56 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						const outcome = workerScope
 							? deps.workerAgentControl.interruptWorkerAgent(agentId, workerScope)
 							: deps.workerAgentControl.interruptWorkerAgent(agentId);
+						const interruptText = outcome.interrupted
+							? `worker ${agentId} interrupted; resume preserves its admitted state`
+							: `worker ${agentId} was not interrupted (${outcome.reason ?? "unknown"})`;
+						const interruptMessage = input.message?.trim();
+						if (!interruptMessage) {
+							return {
+								content: [{ type: "text" as const, text: interruptText }],
+								details: { started: outcome.interrupted, action, agentId, skipReason: outcome.reason },
+							};
+						}
+						// A message on interrupt is two operations: pause, then queue the text for the
+						// paused worker so resume delivers it. Neither is dropped and both are reported.
+						const replayScope = deps.resolveMessageReplayScope?.();
+						if (!replayScope) {
+							return invalid(`${interruptText}; the message was NOT queued: no durable message replay scope`, {
+								started: outcome.interrupted,
+								action,
+								agentId,
+								skipReason: "message_replay_scope_unavailable",
+							});
+						}
+						const queueOptions = {
+							idempotencyKey: messageIdempotencyKey(caller, replayScope, toolCallId, "send"),
+						};
+						const queued =
+							caller.kind === "session_root"
+								? deps.workerAgentControl.sendSessionRootWorkerAgentMessage(
+										agentId,
+										interruptMessage,
+										queueOptions,
+									)
+								: deps.workerAgentControl.sendWorkerAgentMessage(agentId, interruptMessage, {
+										...queueOptions,
+										senderAgentId: caller.agentId,
+									});
 						return {
 							content: [
 								{
 									type: "text" as const,
-									text: outcome.interrupted
-										? `worker ${agentId} interrupted; resume preserves its admitted state`
-										: `worker ${agentId} was not interrupted (${outcome.reason ?? "unknown"})`,
+									text: `${interruptText}; message ${queued.messageId} queued for ${agentId} (delivered when the worker resumes: delegate resume)`,
 								},
 							],
-							details: { started: outcome.interrupted, action, agentId, skipReason: outcome.reason },
+							details: {
+								started: outcome.interrupted,
+								action,
+								agentId,
+								messageId: queued.messageId,
+								queued: queued.queued,
+								skipReason: outcome.reason,
+							},
 						};
 					}
 					if (action === "resume") {
@@ -1904,9 +2002,12 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								skipReason: "worker_agent_control_unavailable",
 							});
 						}
-						const outcome = workerScope
-							? deps.workerAgentControl.retireWorkerAgent(agentId, workerScope)
-							: deps.workerAgentControl.retireWorkerAgent(agentId);
+						const retireOptions = input.force === true ? { discardPending: true } : undefined;
+						const outcome = retireOptions
+							? deps.workerAgentControl.retireWorkerAgent(agentId, workerScope, retireOptions)
+							: workerScope
+								? deps.workerAgentControl.retireWorkerAgent(agentId, workerScope)
+								: deps.workerAgentControl.retireWorkerAgent(agentId);
 						return {
 							content: [
 								{
@@ -2067,7 +2168,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					const { excluded } = partitionToolsForReadOnly(input.toolNames);
 					if (excluded.length > 0) {
 						return invalid(
-							`delegate start readOnly excludes ${excluded.join(", ")}: readOnly keeps only local read tools (file reads, skills, memory query). Drop readOnly to grant them, or drop them from toolNames.`,
+							`delegate start readOnly excludes ${excluded.join(", ")}: readOnly keeps reads only (read, grep, find, ls, repo_read for git history and diffs, skill, memory query). Drop readOnly to grant them, or drop them from toolNames.`,
 							{ started: false, action, skipReason: "read_only_tool_conflict" },
 						);
 					}

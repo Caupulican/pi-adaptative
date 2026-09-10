@@ -44,7 +44,7 @@ describe("classified lane tool surface", () => {
 	it("provides fresh classified read tools without a lane profile", () => {
 		const first = createLaneToolSurface({ cwd });
 		const second = createLaneToolSurface({ cwd });
-		expect(first.allowedTools).toEqual(["read", "grep", "find", "ls"]);
+		expect(first.allowedTools).toEqual(["read", "grep", "find", "ls", "repo_read"]);
 		expect(first.tools.map((tool) => tool.name)).toEqual(first.allowedTools);
 		expect(first.tools[0]).not.toBe(second.tools[0]);
 		expect(first.allowedTools).not.toContain("delegate");
@@ -136,7 +136,7 @@ describe("classified lane tool surface", () => {
 		for (const laneProfile of [profile({}), profile({ tools: { allow: [], block: [] } })]) {
 			const surface = createLaneToolSurface({ cwd, profile: laneProfile });
 			expect(surface.allowedTools).toEqual([]);
-			expect(surface.deniedTools).toEqual(["read", "grep", "find", "ls"]);
+			expect(surface.deniedTools).toEqual(["read", "grep", "find", "ls", "repo_read"]);
 			expect(surface.tools).toEqual([]);
 		}
 	});
@@ -148,13 +148,13 @@ describe("classified lane tool surface", () => {
 			writeEnabled: true,
 			writePaths: ["src"],
 		});
-		expect(allowed.allowedTools).toEqual(["read", "grep", "find", "ls", "write", "edit"]);
+		expect(allowed.allowedTools).toEqual(["read", "grep", "find", "ls", "repo_read", "write", "edit"]);
 		expect(allowed.allowedTools).not.toContain("delegate");
 		expect(allowed.allowedTools).not.toContain("ask_question");
 
 		const blocked = createLaneToolSurface({ cwd, profile: profile({ tools: { block: ["*"] } }) });
 		expect(blocked.allowedTools).toEqual([]);
-		expect(blocked.deniedTools).toEqual(["read", "grep", "find", "ls"]);
+		expect(blocked.deniedTools).toEqual(["read", "grep", "find", "ls", "repo_read"]);
 	});
 
 	it("applies concrete allow/deny and block-only filters with block precedence", () => {
@@ -166,7 +166,7 @@ describe("classified lane tool surface", () => {
 		expect(concrete.deniedTools).toEqual(["grep"]);
 
 		const blockOnly = createLaneToolSurface({ cwd, profile: profile({ tools: { block: ["grep"] } }) });
-		expect(blockOnly.allowedTools).toEqual(["read", "find", "ls"]);
+		expect(blockOnly.allowedTools).toEqual(["read", "find", "ls", "repo_read"]);
 	});
 
 	it("surfaces concrete opaque grants instead of making them executable", () => {
@@ -240,12 +240,14 @@ describe("classified lane tool surface", () => {
 			"grep",
 			"find",
 			"ls",
+			"repo_read",
 		]);
 		expect(createLaneToolSurface({ cwd, profile: allowAll, writePaths: ["src"] }).allowedTools).toEqual([
 			"read",
 			"grep",
 			"find",
 			"ls",
+			"repo_read",
 		]);
 	});
 

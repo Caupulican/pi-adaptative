@@ -8,6 +8,7 @@ import {
 describe("readOnly tool partition", () => {
 	it("keeps local read and read-broker capabilities and drops everything else", () => {
 		expect(capabilitySurvivesReadOnly("filesystem.read")).toBe(true);
+		expect(capabilitySurvivesReadOnly("repo.read")).toBe(true);
 		expect(capabilitySurvivesReadOnly("skill.read")).toBe(true);
 		expect(capabilitySurvivesReadOnly("memory.query")).toBe(true);
 		expect(capabilitySurvivesReadOnly("settings.read")).toBe(true);

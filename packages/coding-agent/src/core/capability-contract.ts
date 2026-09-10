@@ -9,6 +9,7 @@ export const HARNESS_CAPABILITIES = [
 	"tests.execute",
 	"worktree.read",
 	"worktree.mutate",
+	"repo.read",
 	"memory.query",
 	"memory.mutate",
 	"settings.read",

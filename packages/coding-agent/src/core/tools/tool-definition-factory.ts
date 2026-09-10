@@ -10,6 +10,7 @@ import { createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
 import { createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createPythonToolDefinition, type PythonToolOptions } from "./python.ts";
 import { createReadToolDefinition, type ReadToolOptions } from "./read.ts";
+import { createRepoReadToolDefinition, type RepoReadToolOptions } from "./repo-read.ts";
 import { createSkillAuditToolDefinition, type SkillAuditToolOptions } from "./skill-audit.ts";
 import { createSkillifyToolDefinition, type SkillifyToolOptions } from "./skillify.ts";
 import { createWebFetchToolDefinition, type WebFetchOptions } from "./webfetch.ts";
@@ -27,6 +28,7 @@ export type ToolName =
 	| "grep"
 	| "find"
 	| "ls"
+	| "repo_read"
 	| "skill_audit"
 	| "skillify"
 	| "extensionify"
@@ -42,6 +44,7 @@ export const allToolNames: ReadonlySet<ToolName> = new Set([
 	"grep",
 	"find",
 	"ls",
+	"repo_read",
 	"skill_audit",
 	"skillify",
 	"extensionify",
@@ -58,6 +61,7 @@ export interface ToolDefinitionOptions {
 	grep?: GrepToolOptions;
 	find?: FindToolOptions;
 	ls?: LsToolOptions;
+	repo_read?: RepoReadToolOptions;
 	skill_audit?: SkillAuditToolOptions;
 	skillify?: SkillifyToolOptions;
 	extensionify: ExtensionifyRuntimeOptions;
@@ -87,6 +91,8 @@ export function createToolDefinitionWithRuntime(
 			return createFindToolDefinition(cwd, options.find);
 		case "ls":
 			return createLsToolDefinition(cwd, options.ls);
+		case "repo_read":
+			return createRepoReadToolDefinition(cwd, options.repo_read);
 		case "skill_audit":
 			return createSkillAuditToolDefinition(cwd, options.skill_audit);
 		case "skillify":

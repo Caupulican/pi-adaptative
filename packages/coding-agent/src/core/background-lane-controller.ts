@@ -38,8 +38,10 @@ import type {
 	WorkerAgentBroadcastResult,
 	WorkerAgentControlPort,
 	WorkerAgentControlScope,
+	WorkerAgentLaneResolution,
 	WorkerAgentMessageOptions,
 	WorkerAgentReplyResult,
+	WorkerAgentRetireOptions,
 	WorkerAgentRetireResult,
 	WorkerAgentTaskStartOptions,
 	WorkerAgentTranscriptOptions,
@@ -621,10 +623,20 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._getWorkerController().getAgentControl().cancelWorkerAgent(agentId, reasonCode, scope);
 	}
 
-	retireWorkerAgent(agentId: string, scope?: WorkerAgentControlScope): WorkerAgentRetireResult {
+	retireWorkerAgent(
+		agentId: string,
+		scope?: WorkerAgentControlScope,
+		options?: WorkerAgentRetireOptions,
+	): WorkerAgentRetireResult {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl().retireWorkerAgent(agentId, scope);
+		return this._getWorkerController().getAgentControl().retireWorkerAgent(agentId, scope, options);
+	}
+
+	resolveWorkerAgentLane(agentId: string, scope?: WorkerAgentControlScope): WorkerAgentLaneResolution | undefined {
+		if (!this.deps.isDelegateToolActive())
+			throw new Error("Worker delegation control is unavailable in this UAC surface.");
+		return this._getWorkerController().getAgentControl().resolveWorkerAgentLane?.(agentId, scope);
 	}
 
 	waitForWorkerAgent(

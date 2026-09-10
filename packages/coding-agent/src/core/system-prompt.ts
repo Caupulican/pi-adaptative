@@ -312,6 +312,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const hasGrep = activeTools.includes("grep");
 	const hasFind = activeTools.includes("find");
 	const hasLs = activeTools.includes("ls");
+	const hasRepoRead = activeTools.includes("repo_read");
 
 	// File exploration guidelines
 	if (!fullPrompt && !leanPrompt) {
@@ -324,6 +325,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			addGuideline(
 				"rg/jq: scoped roots/filters; JSON through a jq projection, never dumped; exhaustive output to file",
 			);
+		}
+		if (hasRepoRead) {
+			addGuideline("repo_read: git status/log/diff/show/blame/ls-files read-only, no shell needed");
 		}
 		if (hasPython) {
 			addGuideline("Python: bounded scripts/data, source edits via read/edit/write");

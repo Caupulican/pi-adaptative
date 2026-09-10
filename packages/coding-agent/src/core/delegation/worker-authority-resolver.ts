@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
-import { mapToolNamesForPlatform, mapToolNamesOntoSurface, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
+import { lendableToolSurface, mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import {
 	ROOT_MEMORY_TOOL_NAME,
 	WORKER_MEMORY_READ_TOOL_NAME,
@@ -48,6 +48,7 @@ const DEFAULT_TOOL_NAMES = [
 	"edit",
 	"python",
 	STABLE_SHELL_TOOL_NAME,
+	"repo_read",
 	"artifact_retrieve",
 	"skill",
 	"skill_audit",
@@ -58,6 +59,7 @@ const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [
 	"filesystem.write",
 	"worktree.read",
 	"worktree.mutate",
+	"repo.read",
 	"process.exec",
 	"network.http",
 	"service.mcp",
@@ -203,12 +205,13 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	if (baseForbiddenTool) {
 		return { ok: false, reason: `orchestration_tool_unavailable:${baseForbiddenTool}` };
 	}
-	const inheritedSurfaceNames = input.base
-		? mapToolNamesForPlatform(input.base.profile.toolNames)
-		: inheritedForegroundToolNames;
-	const configuredToolNames = mapToolNamesOntoSurface(
-		input.authority?.toolNames ?? input.base?.profile.toolNames ?? inheritedForegroundToolNames,
-		inheritedSurfaceNames,
+	// A parent with bash lends the catalog read tools natively (see lendableToolSurface); a request
+	// for grep/find/ls/repo_read is therefore satisfied with read authority, never with bash.
+	const inheritedSurfaceNames = lendableToolSurface(
+		input.base ? input.base.profile.toolNames : inheritedForegroundToolNames,
+	);
+	const configuredToolNames = mapToolNamesForPlatform(
+		input.authority?.toolNames ?? input.base?.profile.toolNames ?? inheritedSurfaceNames,
 	).filter((toolName) => !WORKER_ROOT_MEMORY_TOOL_NAMES.has(toolName));
 	const deniedForegroundTools = new Set(input.base ? [] : (input.foregroundEnvelope?.deniedTools ?? []));
 	const uniqueToolNames = [
@@ -247,6 +250,15 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	);
 	capabilities.delete("workflow.delegate");
 	capabilities.delete("memory.mutate");
+	// A parent that may run processes can already read its repository through git; the read grain
+	// of that authority is lent alongside. An explicit capability list or a base profile stays exact.
+	if (
+		!input.authority?.capabilities &&
+		!input.base &&
+		(capabilities.has("process.exec") || capabilities.has("tests.execute"))
+	) {
+		capabilities.add("repo.read");
+	}
 	if (input.authority?.readOnly) {
 		for (const capability of capabilities) {
 			if (!capabilitySurvivesReadOnly(capability)) capabilities.delete(capability);

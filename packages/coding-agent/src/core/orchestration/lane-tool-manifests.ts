@@ -8,6 +8,7 @@ export const CLASSIFIED_LANE_TOOL_NAMES = [
 	"grep",
 	"find",
 	"ls",
+	"repo_read",
 	"write",
 	"edit",
 	WORKER_MEMORY_READ_TOOL_NAME,

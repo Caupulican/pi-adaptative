@@ -14,6 +14,7 @@ export type ToolPathAccess = "none" | "read" | "write";
 const READ_PATH_CAPABILITIES: ReadonlySet<HarnessCapability> = new Set([
 	"filesystem.read",
 	"worktree.read",
+	"repo.read",
 	"skill.read",
 	"source.read",
 ]);
@@ -42,6 +43,8 @@ const DELEGATE_POLICY = policy([["workflow.delegate"]], "control-plane");
 
 const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	...["read", "ls", "grep", "find"].map((toolName) => [toolName, READ_POLICY] as const),
+	// Read-only git without process authority: the read grain of `process.exec`, kept by readOnly.
+	["repo_read", policy([["repo.read"]], "path-scope")],
 	...["write", "edit", "edit-diff"].map((toolName) => [toolName, WRITE_POLICY] as const),
 	...["bash", "python", "powershell", "shell", "run_toolkit_script", "run_process"].map(
 		(toolName) => [toolName, PROCESS_POLICY] as const,
@@ -252,6 +255,7 @@ export function describeToolCapabilityAuthority(toolName: string): string {
 	switch (getToolCapabilityPolicy(toolName)?.capabilityClauses[0]?.[0]) {
 		case "filesystem.read":
 		case "worktree.read":
+		case "repo.read":
 			return "read";
 		case "filesystem.write":
 		case "worktree.mutate":

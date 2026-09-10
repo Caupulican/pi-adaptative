@@ -57,6 +57,7 @@ export function extractToolPathArguments(toolName: string, params: unknown): str
 		(normalizedToolName === "find" ||
 			normalizedToolName === "grep" ||
 			normalizedToolName === "ls" ||
+			normalizedToolName === "repo_read" ||
 			normalizedToolName === "pipeline")
 	) {
 		paths.push(".");

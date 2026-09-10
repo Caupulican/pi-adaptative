@@ -8,8 +8,8 @@ import { buildForegroundEnvelope } from "../src/core/autonomy/foreground-envelop
 import { evaluateToolGate } from "../src/core/autonomy/gates.ts";
 import {
 	getDefaultActiveToolNames,
+	lendableToolSurface,
 	mapToolNamesForPlatform,
-	mapToolNamesOntoSurface,
 } from "../src/core/default-tool-surface.ts";
 import { classifyToolTrust } from "../src/core/security/untrusted-boundary.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
@@ -36,15 +36,18 @@ describe("automatic platform shell contract", () => {
 		expect(mapToolNamesForPlatform(["bash", "powershell"], "linux")).toEqual(["bash"]);
 	});
 
-	it("collapses catalog grep/find/ls onto bash only when bash is on the inherited surface", () => {
-		expect(mapToolNamesOntoSurface(["read", "grep", "find", "ls"], ["read", "bash"])).toEqual(["read", "bash"]);
-		expect(mapToolNamesOntoSurface(["read", "grep", "find", "ls"], ["read", "grep", "find", "ls"])).toEqual([
+	it("lends the catalog read tools natively whenever bash is on the surface, never bash in their place", () => {
+		expect(lendableToolSurface(["read", "bash"])).toEqual(["read", "bash", "grep", "find", "ls", "repo_read"]);
+		expect(lendableToolSurface(["read", "grep", "find", "ls"])).toEqual(["read", "grep", "find", "ls"]);
+		expect(lendableToolSurface(["read", "shell", "grep"])).toEqual([
 			"read",
+			"bash",
 			"grep",
 			"find",
 			"ls",
+			"repo_read",
 		]);
-		expect(mapToolNamesOntoSurface(["read", "grep", "write"], ["read", "bash"])).toEqual(["read", "bash", "write"]);
+		expect(lendableToolSurface(["read"])).toEqual(["read"]);
 	});
 
 	it("uses headless PowerShell launch flags without overriding command encoding", () => {

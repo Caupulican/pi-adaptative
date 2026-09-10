@@ -18,7 +18,7 @@ export type ToolTrustLevel = "trusted" | "untrusted";
 const UNTRUSTED_NAME_RE =
 	/(fetch|search|web|browser|crawl|http|url|download|scrape|curl|wget|request|api|exec|execute|run[_-]?script|shell|subagent|delegate|recall|graph|automata)/i;
 /** First-party tools that operate on the agent's own working scope — always trusted. */
-const TRUSTED_BUILTINS = new Set(["read", "grep", "find", "ls", "edit", "write", "memory"]);
+const TRUSTED_BUILTINS = new Set(["read", "grep", "find", "ls", "repo_read", "edit", "write", "memory"]);
 
 /**
  * Classify a tool's output trust. Precedence: explicit declared trust → trusted built-in → untrusted

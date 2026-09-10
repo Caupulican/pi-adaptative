@@ -9,6 +9,7 @@ import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { workerMachinePathRoots } from "../src/core/delegation/worker-machine-scope.ts";
 import { createDelegateToolDefinition } from "../src/core/tools/delegate.ts";
 import type { DelegateProfileToolDetails } from "../src/core/tools/profile-writer.ts";
+import { spawnProcessSync } from "../src/utils/child-process.ts";
 import { createHarness, getMessageText } from "./suite/harness.ts";
 
 function externalWorkspace(parent: string, suffix: string): string {
@@ -284,6 +285,50 @@ describe("native worker autonomy", () => {
 				started: false,
 				skipReason: expect.stringContaining("orchestration_authority_invalid"),
 			});
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("gives a readOnly review worker native reads and read-only git, never a shell", async () => {
+		const harness = await createHarness({
+			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
+		});
+		let materializedTools: string[] = [];
+		let toolResults = "";
+		try {
+			const init = spawnProcessSync("git", ["init", "-q"], { cwd: harness.tempDir, encoding: "utf-8" });
+			expect(init.status).toBe(0);
+			harness.setResponses([
+				(context) => {
+					materializedTools = (context.tools ?? []).map((tool) => tool.name);
+					return fauxAssistantMessage(
+						[fauxToolCall("repo_read", { action: "rev-parse", options: ["--is-inside-work-tree"] })],
+						{ stopReason: "toolUse" },
+					);
+				},
+				(context) => {
+					toolResults = context.messages
+						.filter((message) => message.role === "toolResult")
+						.map(getMessageText)
+						.join("\n");
+					return fauxAssistantMessage('{"summary":"history reviewed","status":"completed"}');
+				},
+			]);
+
+			const run = await harness.session.runWorkerDelegationOnce({
+				instructions: "Review the repository history and report.",
+				authority: { readOnly: true },
+			});
+
+			expect(run.started).toBe(true);
+			expect(materializedTools).toEqual(expect.arrayContaining(["read", "grep", "find", "ls", "repo_read"]));
+			for (const denied of ["bash", "python", "write", "edit"]) expect(materializedTools).not.toContain(denied);
+			expect(toolResults).toContain("true");
+			const worker = firstExecutionContract(harness);
+			expect(worker?.authority.capabilities).toContain("repo.read");
+			expect(worker?.authority.capabilities).not.toContain("process.exec");
+			expect(worker?.authority.toolNames).toContain("repo_read");
 		} finally {
 			await harness.cleanup();
 		}

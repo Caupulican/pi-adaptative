@@ -29,10 +29,12 @@ import {
 	type WorkerAgentBroadcastResult,
 	type WorkerAgentControlPort,
 	type WorkerAgentControlScope,
+	type WorkerAgentLaneResolution,
 	WorkerAgentMailbox,
 	type WorkerAgentMessage,
 	type WorkerAgentMessageOptions,
 	type WorkerAgentReplyResult,
+	type WorkerAgentRetireOptions,
 	type WorkerAgentRetireResult,
 	type WorkerAgentTaskMetadata,
 	type WorkerAgentTaskStartOptions,
@@ -1150,7 +1152,16 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return record;
 	}
 
-	retireWorkerAgent(agentId: string, scope: WorkerAgentControlScope = {}): WorkerAgentRetireResult {
+	resolveWorkerAgentLane(agentId: string, scope: WorkerAgentControlScope = {}): WorkerAgentLaneResolution | undefined {
+		const { attempt } = this.controlledAgentAttempt(agentId, scope);
+		return attempt ? { laneId: attempt.taskId, status: attempt.status } : undefined;
+	}
+
+	retireWorkerAgent(
+		agentId: string,
+		scope: WorkerAgentControlScope = {},
+		options: WorkerAgentRetireOptions = {},
+	): WorkerAgentRetireResult {
 		this.requireControl();
 		let target = this.requireControllableAgent(agentId, scope);
 		if (target.status === "retired") {
@@ -1168,9 +1179,18 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		this.reconcileWorkerReplyOutboxesBestEffort();
 		const pendingMessages = mailbox.pending();
 		if (pendingMessages.length > 0) {
-			throw new Error(
-				`Logical worker agent '${target.agentId}' has ${pendingMessages.length} pending control message${pendingMessages.length === 1 ? "" : "s"}.`,
-			);
+			if (!options.discardPending) {
+				// Name what would be lost; the caller decides with force.
+				const listed = pendingMessages
+					.slice(0, 5)
+					.map((message) => `${message.messageId} (${message.kind}, ${message.content.length} chars)`)
+					.join(", ");
+				const more = pendingMessages.length > 5 ? `, +${pendingMessages.length - 5} more` : "";
+				throw new Error(
+					`Logical worker agent '${target.agentId}' has ${pendingMessages.length} pending control message${pendingMessages.length === 1 ? "" : "s"}: ${listed}${more}. Deliver them (resume or follow_up) or retire with force: true to discard them.`,
+				);
+			}
+			mailbox.deadLetterPending("retired_with_force");
 		}
 		const unresolvedReplyCount = mailbox.awaitingReplies().length + mailbox.listReplyAcknowledgements().length;
 		if (unresolvedReplyCount > 0) {

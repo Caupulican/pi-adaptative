@@ -78,11 +78,15 @@ token limit. Pinned by `packages/coding-agent/test/agent-session-retry.test.ts`.
 
 **A slip the harness can absorb normalizes; only real ambiguity refuses, and the refusal names the
 rule.** Refusals per hundred assistant turns are the measure (`scripts/refusal-census.mjs`); the
-ceiling on the frontier tier is one. Catalog `grep`/`find`/`ls` requested for a worker whose parent
-surface has `bash` and not those first-class tools normalize onto `bash`; a sibling such as `write`
-that is not on the parent surface still refuses and names the rule. An invented `sN-<slug>` or
-`sN-<uuid>` task-step selector names the one step carrying that number; a trailing numeric fragment
-(`s1-2`) still refuses. Pinned by
+ceiling on the frontier tier is one. Catalog `grep`/`find`/`ls`/`repo_read` requested for a worker
+whose parent surface has `bash` are lent natively (read authority, never `bash` in their place); a
+sibling such as `write` that is not on the parent surface still refuses and names the rule. A
+delegate spelling with exactly one reading is absorbed and reported — `task` on `follow_up`/`send`
+is the message, `agentId` on `status`/`review` is that agent's latest lane, `message` on
+`interrupt` is queued for the paused worker, `retire` with undelivered control messages lists them
+and takes `force: true` — while a plural on a singular action or two selectors still refuse. An
+invented `sN-<slug>` or `sN-<uuid>` task-step selector names the one step carrying that number; a
+trailing numeric fragment (`s1-2`) still refuses. Pinned by
 `packages/coding-agent/test/delegate-exact-input-corrections.test.ts`,
 `packages/coding-agent/test/worker-authority-resolver.test.ts`,
 `packages/coding-agent/test/task-state.test.ts`,
@@ -247,14 +251,19 @@ Pinned by `packages/coding-agent/test/agent-session-runaway-escalation.test.ts` 
 
 **Workers deny by default and never exceed the parent's surface.** A worker's tools come from the
 parent's active tool set; root-only tools and nested delegation are refused with the rule named.
-Fresh admission can request `readOnly: true`, which removes write, process, network and service
-authority. Prose cannot narrow a grant. Persistent reuse retains its existing grant and rejects
+Read is read: a parent with `bash` lends the catalog read tools (`grep`, `find`, `ls`) and read-only
+git (`repo_read`, capability `repo.read`) natively, so `readOnly: true` — which removes write,
+process, network and service authority — still leaves a worker able to search files and read
+repository history. `repo_read` runs git with an argv allow-list: no shell, no hooks, pager or diff
+drivers, only output-shaping options, pathspecs and object paths inside its directory, credential
+files model-blind like `read`. Prose cannot narrow a grant. Persistent reuse retains its existing grant and rejects
 authority overrides. Status exposes only validated permission names bound to the selected
 attempt, never permission guesses or raw resource grants. Inspection pages omit opaque provider
 replay signatures before output sizing; raw replay remains exact and both input and output are
 bounded. Unsupported status selectors refuse instead of expanding the selection.
-Pinned by `packages/coding-agent/test/worker-authority-resolver.test.ts` and
+Pinned by `packages/coding-agent/test/worker-authority-resolver.test.ts`,
 `packages/coding-agent/test/native-worker-autonomy.test.ts`,
+`packages/coding-agent/test/repo-read.test.ts`,
 `packages/coding-agent/test/worker-task-view.test.ts`, and
 `packages/coding-agent/test/worker-transcript-inspection.test.ts`.
 
