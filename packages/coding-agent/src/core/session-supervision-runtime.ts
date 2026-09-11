@@ -4,6 +4,7 @@ import { isGoalExecutionActive } from "./goals/goal-state.ts";
 import { createAgentIdentity } from "./orchestration/agent-resume.ts";
 import type { ResumablePayload } from "./process-matrix/codes.ts";
 import {
+	CLOCK_JUMP_CUSTOM_TYPE,
 	getOrchestrationAgentId,
 	getProcessTaskRef,
 	type ProcessMatrixRuntimeHandle,
@@ -112,6 +113,7 @@ export class SessionSupervisionRuntime implements AgentSessionRuntimeResource {
 					settings: session.settingsManager.getProcessMatrixSettings(),
 					isProcessAlive: this.options.isProcessAlive,
 					notify: (text) => this.notify(session, "process-matrix-notice", text),
+					recordClockJump: (record) => void sessionManager.appendCustomEntry(CLOCK_JUMP_CUSTOM_TYPE, record),
 					onDiagnostic: this.options.onDiagnostic,
 					requestExit: this.options.requestExit,
 				}),

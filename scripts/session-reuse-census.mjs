@@ -11,7 +11,9 @@
  *
  * Reuse is `cacheRead / (input + cacheRead + cacheWrite)` from the assistant `usage` record. A wipe
  * is a request whose cacheRead is below 30% of the previous prompt (same model, previous prompt
- * over 10,000 tokens). Reads session files only; never writes.
+ * over 10,000 tokens). Wall-clock spans (idle between requests, time to first token) exclude any
+ * `clock_jump` the process-matrix heartbeat recorded: a suspended host is not time anything spent.
+ * Reads session files only; never writes.
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +36,8 @@ export const DEFAULT_GATE = {
 	compactionFallbacks: 0,
 };
 
+/** Session custom entry the process-matrix heartbeat writes when the wall clock jumped. */
+const CLOCK_JUMP_CUSTOM_TYPE = "clock_jump";
 const WIPE_RATIO = 0.3;
 const WIPE_MIN_PREVIOUS_PROMPT = 10_000;
 const MISS_MAX_CACHE_READ = 1_000;
@@ -62,6 +66,18 @@ function recordKind(entry) {
 	return entry.type ?? "?";
 }
 
+/**
+ * Milliseconds of the window [startMs, endMs] that fell inside a recorded clock jump. Wall clock
+ * the host was suspended for belongs to no request, so it is removed from every wall-clock span.
+ */
+function suspendedMs(jumps, startMs, endMs) {
+	if (!(endMs > startMs)) return 0;
+	return jumps.reduce(
+		(sum, jump) => sum + Math.max(0, Math.min(endMs, jump.endMs) - Math.max(startMs, jump.startMs)),
+		0,
+	);
+}
+
 function triggerGroup(between) {
 	if (between.includes("custom_message:reflection_turn_trigger")) return "reflection_turn";
 	if (between.includes("custom_message:goal_continuation_trigger")) return "goal_continuation";
@@ -81,9 +97,15 @@ export function censusEntries(entries) {
 	let runtimeVersion;
 	let previous;
 	let between = [];
+	const clockJumps = [];
 	entries.forEach((entry, index) => {
 		if (entry.type === "compaction") compactions += 1;
 		if (entry.type === "compaction_end" && entry.outcome === "fallback") compactionFallbacks += 1;
+		if (entry.type === "custom" && entry.customType === CLOCK_JUMP_CUSTOM_TYPE) {
+			const startMs = Date.parse(entry.data?.previousTickAt ?? "");
+			const endMs = Date.parse(entry.data?.tickAt ?? "");
+			if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) clockJumps.push({ startMs, endMs });
+		}
 		if (entry.type === "custom" && entry.customType === "reflection_cue_state") {
 			const version = entry.data?.versionChange?.metadata?.runtimeVersion;
 			if (typeof version === "string") runtimeVersion = version;
@@ -135,11 +157,23 @@ export function censusEntries(entries) {
 			cacheRead < WIPE_RATIO * previous.prompt;
 		const ttft =
 			typeof message.firstTokenAt === "number" && typeof message.timestamp === "number"
-				? (message.firstTokenAt - message.timestamp) / 1000
+				? Math.max(
+						0,
+						(message.firstTokenAt -
+							message.timestamp -
+							suspendedMs(clockJumps, message.timestamp, message.firstTokenAt)) /
+							1000,
+					)
 				: undefined;
 		const idleSeconds =
 			previous && typeof message.timestamp === "number" && typeof previous.endedAt === "number"
-				? Math.max(0, (message.timestamp - previous.endedAt) / 1000)
+				? Math.max(
+						0,
+						(message.timestamp -
+							previous.endedAt -
+							suspendedMs(clockJumps, previous.endedAt, message.timestamp)) /
+							1000,
+					)
 				: undefined;
 		const request = {
 			index,

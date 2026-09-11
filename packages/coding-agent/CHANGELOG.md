@@ -2,6 +2,9 @@
 
 ### Changed
 
+- A file's encoding is resolved by the harness, never handed back to the model. `read` and `edit` resolve it as: the `encoding` argument, the new `fileEncodings` setting (glob to codec), the nearest `.editorconfig` charset, a BOM, strict UTF-8, and finally detection by the managed Python codec (BOM-less UTF-16 by NUL pattern, otherwise windows-1252 with latin-1 for the five undefined positions). Edits of non-UTF-8 files are byte splices through that codec, verified by re-reading; a replacement the codec cannot represent fails before any write and names the character (`replacement_unrepresentable`). `read_encoding_required` now means only that Python is unavailable. Results name the encoding and its source; a detected encoding is remembered per file until its bytes change.
+- A background `cd <path> && git <filtered subcommand>` resolves its landing directory with a detached probe instead of moving the session; the foreground shape still moves it.
+- The process-matrix heartbeat records a `clock_jump` session entry when the wall clock skips more than five intervals (a suspended host), and the reuse census excludes those spans from idle and first-token times.
 - Foreground `bash` calls emitted together now run together. Each call takes a lane from an elastic pool of reusable persistent shells (three warm per session, growing on demand to eight, idle extras retired after a minute) instead of queueing on one shell; the working directory is shared across the pool, exported variables stay in the lane that set them. The mutation barrier became a group lock: announced command runs share it, file mutations share it, the two never overlap, and admission follows emission order. On Windows the engine tier uses the same pool with one shared shell state per session.
 - The parallel tool pool width is a setting, `toolExecution.concurrency` (default 8, was a fixed 4).
 

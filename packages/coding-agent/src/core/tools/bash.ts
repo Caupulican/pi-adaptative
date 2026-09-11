@@ -457,6 +457,15 @@ function shellQuoteArgument(value: string): string {
 	return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+/**
+ * The last non-empty line a probe printed, trimmed of the line ending the shell added. Undefined
+ * when the probe printed nothing at all: a missing answer must stay missing, never be guessed.
+ */
+function lastPrintedLine(output: string): string | undefined {
+	const lines = output.split(/\r?\n/).filter((line) => line.trim().length > 0);
+	return lines.length > 0 ? lines[lines.length - 1].trim() : undefined;
+}
+
 function resolveSpawnContext(
 	command: string,
 	cwd: string,
@@ -1224,26 +1233,42 @@ function createShellToolDefinition(
 								? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
 								: (sessionLanes.currentCwd ?? filterContext.cwd);
 						if (classification.cwdPrefix !== undefined) {
-							// `cd <path> && git …`: the shell would leave the session in <path>, so the cd is
-							// replayed into the session first and the filtered run happens where it landed.
-							// It stays a session command even for a background call: the filtered git run is
-							// spawned directly (it never touches the shell), and only the session can report
-							// where a cd actually lands. A detached cd would land nowhere observable.
+							// `cd <path> && git …`: the filtered git run is spawned directly (it never touches
+							// the shell), so the directory the cd lands in has to come from the shell itself.
+							const cdCommand = `cd ${shellQuoteArgument(classification.cwdPrefix)}`;
 							const cdChunks: Buffer[] = [];
-							const moved = await runInSession(`cd ${shellQuoteArgument(classification.cwdPrefix)}`, (data) =>
-								cdChunks.push(data),
-							);
-							const movedCwd = routesWindowsContract
-								? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
-								: (moved.cwd ?? moved.spawnCwd);
-							if (moved.exitCode !== 0) {
-								// The cd failed: that is the command's outcome, reported like any non-zero exit.
+							const collectCd = (data: Buffer) => cdChunks.push(data);
+							// The cd failed: that is the command's outcome, reported like any non-zero exit.
+							const failedCd = async (exitCode: number | null, reportedCwd: string) => {
 								for (const chunk of cdChunks) output.append(chunk);
 								const snapshot = await finishOutput();
 								const { text: cdText } = formatOutput(snapshot, "");
-								throw createExitError(cdText, moved.exitCode ?? 1, movedCwd);
+								return createExitError(cdText, exitCode ?? 1, reportedCwd);
+							};
+							if (background === true) {
+								// A detached command runs in its own child shell and must leave the session
+								// exactly where it stood, so the landing directory is observed rather than
+								// entered: `cd <path> && pwd` runs through the same detached path the command
+								// itself takes (starting from the pool's directory), and the absolute path it
+								// prints is where the filtered git runs. No lane and no session directory move.
+								const probe = await runInSession(`${cdCommand} && pwd`, collectCd, { detached: true });
+								const printed = lastPrintedLine(Buffer.concat(cdChunks).toString("utf-8"));
+								if (probe.exitCode !== 0) throw await failedCd(probe.exitCode, probe.spawnCwd);
+								if (printed === undefined) {
+									throw new Error(`The shell reported no working directory for '${cdCommand}'.`);
+								}
+								gitCwd = printed;
+							} else {
+								// A foreground `cd` is the shell's own state change: the session moves with it,
+								// exactly as it would have without the filter, and the filtered run happens
+								// where it landed.
+								const moved = await runInSession(cdCommand, collectCd);
+								const movedCwd = routesWindowsContract
+									? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
+									: (moved.cwd ?? moved.spawnCwd);
+								if (moved.exitCode !== 0) throw await failedCd(moved.exitCode, movedCwd);
+								gitCwd = movedCwd;
 							}
-							gitCwd = movedCwd;
 						}
 						const res = await executeFilteredGit(
 							gitCwd,

@@ -96,6 +96,8 @@ export interface ProcessMatrixRuntimeConfig {
 	notify: (text: string) => void | Promise<void>;
 	/** Diagnostics sink (never throws into the session). */
 	onDiagnostic?: (message: string) => void;
+	/** Session-log sink for a wall-clock discontinuity observed between two heartbeat ticks. */
+	recordClockJump?: (record: ClockJumpRecord) => void;
 	/** Cooperative self-exit -- called by a worker once wound down (grace expiry or a
 	 * master-granted cleanup directive). Never called for the master's own lifecycle. */
 	requestExit: () => Promise<void>;
@@ -139,6 +141,38 @@ function describeError(error: unknown): string {
 
 function nowIso(now: () => number): string {
 	return new Date(now()).toISOString();
+}
+
+/** Session custom-entry type for a wall-clock discontinuity. Read by the latency census. */
+export const CLOCK_JUMP_CUSTOM_TYPE = "clock_jump";
+
+/**
+ * The wall clock between two heartbeat ticks. A transcript cannot otherwise distinguish a harness
+ * that stalled from a host that was suspended: both leave one long silent span between entries.
+ */
+export interface ClockJumpRecord {
+	previousTickAt: string;
+	tickAt: string;
+	gapMs: number;
+	intervalMs: number;
+}
+
+/**
+ * How many heartbeat intervals a tick gap must exceed before it is a jump. A loaded event loop
+ * delays a timer by a fraction of its interval; a suspended host skips whole intervals at once.
+ */
+const CLOCK_JUMP_INTERVAL_MULTIPLE = 5;
+
+/** The record for a tick that arrived far later than its own cadence, or undefined for a normal tick. */
+function detectClockJump(previousTickMs: number, tickMs: number, intervalMs: number): ClockJumpRecord | undefined {
+	const gapMs = tickMs - previousTickMs;
+	if (!(intervalMs > 0) || gapMs <= intervalMs * CLOCK_JUMP_INTERVAL_MULTIPLE) return undefined;
+	return {
+		previousTickAt: new Date(previousTickMs).toISOString(),
+		tickAt: new Date(tickMs).toISOString(),
+		gapMs,
+		intervalMs,
+	};
 }
 
 function emitRuntimeNotice(config: ProcessMatrixRuntimeConfig, text: string): void {
@@ -200,7 +234,21 @@ async function startMasterBranch(
 	let ownsEntry = true;
 	let heartbeatTask: Promise<void> | undefined;
 	const lifetime = new AbortController();
+	// The heartbeat is the session's only fixed-cadence observation of the wall clock, so it is also
+	// where a suspended host becomes visible. The gap is measured before anything can skip the tick:
+	// entry ownership and a still-running store write say nothing about what the clock did.
+	let previousTickMs = now();
 	const heartbeatTimer = setInterval(() => {
+		const tickMs = now();
+		const clockJump = detectClockJump(previousTickMs, tickMs, config.settings.heartbeatMs);
+		previousTickMs = tickMs;
+		if (clockJump) {
+			try {
+				config.recordClockJump?.(clockJump);
+			} catch (error) {
+				config.onDiagnostic?.(`process-matrix: failed to record a clock jump: ${describeError(error)}`);
+			}
+		}
 		if (stopped || !ownsEntry || heartbeatTask) return;
 		const expected = entry;
 		const next = applyHeartbeat(expected, nowIso(now));

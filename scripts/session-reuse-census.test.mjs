@@ -83,3 +83,36 @@ test("censuses persisted host records against tool output and fails the gate", (
 	assert.ok(failures.some((f) => f.startsWith("compaction fallbacks 1")));
 	assert.equal(evaluateGate(census, {}).length, 0);
 });
+
+test("excludes a recorded clock jump from the idle gap and from time to first token", () => {
+	const clockJump = (fromMs, toMs) => ({
+		type: "custom",
+		customType: "clock_jump",
+		data: {
+			previousTickAt: new Date(fromMs).toISOString(),
+			tickAt: new Date(toMs).toISOString(),
+			gapMs: toMs - fromMs,
+			intervalMs: 5_000,
+		},
+	});
+	const first = assistant(0, { input: 12_000, cacheRead: 0 });
+	const second = assistant(1, { input: 200, cacheRead: 13_000, ttftMs: 20_000 });
+	const idleFrom = first.message.streamEndAt;
+	const idleSeconds = (second.message.timestamp - idleFrom) / 1000;
+	// A jump is written while the session waits, so it precedes the assistant entry it falls inside:
+	// the first slept through 30s of the idle gap, the second through 15s of the request itself.
+	const suspended = [
+		{ type: "session", version: 4 },
+		user("hi"),
+		first,
+		clockJump(idleFrom + 10_000, idleFrom + 40_000),
+		clockJump(second.message.timestamp + 1_000, second.message.timestamp + 16_000),
+		second,
+	];
+	const requests = censusEntries(suspended).requests;
+	assert.equal(requests[1].idleSeconds, idleSeconds - 30);
+	assert.equal(requests[1].ttft, 5);
+	const withoutJumps = censusEntries(suspended.filter((entry) => entry.customType !== "clock_jump")).requests;
+	assert.equal(withoutJumps[1].idleSeconds, idleSeconds);
+	assert.equal(withoutJumps[1].ttft, 20);
+});
