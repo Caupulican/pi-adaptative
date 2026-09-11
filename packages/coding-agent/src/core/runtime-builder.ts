@@ -954,6 +954,7 @@ export class RuntimeBuilder {
 		const shellCommandPrefix = settingsManager.getShellCommandPrefix();
 		const shellPath = settingsManager.getShellPath();
 		const windowsShell = settingsManager.getWindowsShellSettings();
+		const fileEncodings = settingsManager.getFileEncodings();
 		const baseToolsOverride = this.deps.getBaseToolsOverride();
 		const toolAccess = this._createToolAccessPolicy();
 		// Artifact-producing tools must not emit a "Full output: artifact tool-output:<id>" handle
@@ -975,7 +976,7 @@ export class RuntimeBuilder {
 			agentDir: this.deps.getAgentDir(),
 		};
 		const toolOptions: ToolDefinitionOptions = {
-			read: { autoResizeImages },
+			read: { autoResizeImages, fileEncodings },
 			bash: {
 				outputReduction,
 				commandPrefix: shellCommandPrefix,
@@ -1002,7 +1003,7 @@ export class RuntimeBuilder {
 				omitEnvironmentVariables: ["BW_SESSION"],
 			},
 			write: { intentController: this._fileMutationIntents },
-			edit: { intentController: this._fileMutationIntents },
+			edit: { intentController: this._fileMutationIntents, fileEncodings },
 			grep: { artifactStore: toolArtifactStore },
 			find: { artifactStore: toolArtifactStore },
 			artifact_retrieve: { artifactStore: toolArtifactStore },

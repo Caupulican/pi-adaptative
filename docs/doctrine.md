@@ -176,6 +176,21 @@ message into three sequential waits. Pinned by `packages/coding-agent/test/shell
 `packages/coding-agent/test/bash-concurrent-lanes.test.ts` and
 `packages/coding-agent/test/bash-edit-write-race.test.ts`.
 
+**A file's encoding is the harness's problem, never the model's.** Read and edit resolve it in
+this order: the `encoding` argument, the `fileEncodings` setting (glob to codec), the nearest
+`.editorconfig` charset, a BOM, strict UTF-8, and finally the managed Python codec's detection
+(UTF-16 by NUL pattern, otherwise the total windows-1252 / latin-1 decode). Every edit of a
+non-UTF-8 file is a byte splice through that codec: untouched bytes are copied verbatim, each
+replacement is encoded in the resolved codec, the write is verified by re-reading, and a
+replacement the codec cannot represent fails before any byte is written and names the character.
+The only encoding failure a model can see is "Python is unavailable". Why: eleven read failures in
+one live session told the model that "exact UTF-8 replacement is unsafe" and it abandoned the tool
+for shell decoding; the owner's rule is that Python is applied to do the edit safely, mandatorily.
+Pinned by `packages/coding-agent/test/edit-detected-encoding.test.ts`,
+`packages/coding-agent/test/read-encoding-recovery.test.ts`,
+`packages/coding-agent/test/edit-byte-preservation.test.ts` and, for the ledger guidance text,
+`packages/agent/test/tool-failure-memory.test.ts`.
+
 **The sanitizer keeps a rejected attempt out of the agent's context.** Measured on the request
 after an omission, the server prompt cache still hit almost fully; the omission costs one request
 without the transport delta, not a re-prefill. Pinned by `packages/agent/test/tool-failure-memory.test.ts`

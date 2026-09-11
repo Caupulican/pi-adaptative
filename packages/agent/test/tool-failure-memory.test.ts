@@ -1096,7 +1096,7 @@ describe("tool failure memory", () => {
 		expect((pointer.ledger ?? "").length).toBeLessThan((full.ledger ?? "").length - 300);
 	});
 
-	it("forgets an encoding-corrupt attempt after one change-approach directive", () => {
+	it("forgets an encoding-corrupt attempt after one recovery directive", () => {
 		const assessment = assessToolFailure(
 			"PI_FILE_ENCODING_CORRUPTION: corrupt.dat is not valid UTF-8 text",
 			"failed",
@@ -1106,9 +1106,9 @@ describe("tool failure memory", () => {
 			failureCode: "encoding_corruption",
 			phase: "execution",
 			guidance:
-				"Change approach: exact UTF-8 replacement unsafe. Use encoding-aware/byte-safe tool; never replay text edit.",
+				"The file's bytes could not be edited safely in the resolved encoding (see diagnostic); fix the replacement characters or declare the real encoding, never retype the edit.",
 			policyGuidance:
-				"Change approach: exact UTF-8 replacement unsafe. Use encoding-aware/byte-safe tool; never replay text edit.",
+				"The file's bytes could not be edited safely in the resolved encoding (see diagnostic); fix the replacement characters or declare the real encoding, never retype the edit.",
 			attemptMemory: "discard",
 		});
 
@@ -1166,7 +1166,7 @@ describe("tool failure memory", () => {
 		];
 		const nextRequest = sanitizeToolFailureContext(failedTurn, "base");
 		expect(nextRequest.messages).toEqual([]);
-		expect(nextRequest.ledger).toContain("Change approach");
+		expect(nextRequest.ledger).toContain("never retype the edit");
 		expect(nextRequest.ledger).not.toContain("payload");
 		expect(nextRequest.ledger).not.toContain("corrupt.dat");
 

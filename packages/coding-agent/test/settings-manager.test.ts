@@ -1150,6 +1150,45 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("fileEncodings settings", () => {
+		it("has no source-charset rules by default", () => {
+			expect(SettingsManager.create(projectDir, agentDir).getFileEncodings()).toEqual([]);
+		});
+
+		it("puts project rules ahead of global ones and keeps each file's declaration order", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ fileEncodings: { "*.pas": "cp437", "*.inc": "latin1" } }),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ fileEncodings: { "*.pas": "windows-1252", "*.rc": "utf-16-le" } }),
+			);
+			expect(SettingsManager.create(projectDir, agentDir).getFileEncodings()).toEqual([
+				{ glob: "*.pas", encoding: "windows-1252" },
+				{ glob: "*.rc", encoding: "utf-16-le" },
+				{ glob: "*.inc", encoding: "latin1" },
+			]);
+		});
+
+		it("drops entries whose glob or encoding is not a usable string", () => {
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({
+					fileEncodings: { "*.pas": "  ", "*.rc": 7, "  ": "latin1", "*.dfm": "  cp437  " },
+				}),
+			);
+			expect(SettingsManager.create(projectDir, agentDir).getFileEncodings()).toEqual([
+				{ glob: "*.dfm", encoding: "cp437" },
+			]);
+		});
+
+		it("ignores a fileEncodings value that is not an object", () => {
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ fileEncodings: ["*.pas"] }));
+			expect(SettingsManager.create(projectDir, agentDir).getFileEncodings()).toEqual([]);
+		});
+	});
+
 	describe("backgroundTool settings", () => {
 		it("should default callAfterMs to DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

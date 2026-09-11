@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execCommand } from "../src/core/exec.ts";
+import { pythonEditByteCodec } from "../src/core/tools/edit-byte-codec.ts";
 import { decodeTextChunks } from "../src/core/tools/file-text-decoder.ts";
 import { spawnProcess } from "../src/utils/child-process.ts";
 
@@ -70,5 +71,57 @@ describe("encoded read process ownership", () => {
 		expect(spawnProcess).toHaveBeenCalledTimes(1);
 		const child = vi.mocked(spawnProcess).mock.results[0].value;
 		expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+	});
+});
+
+describe("managed codec encoding detection", () => {
+	it.each([
+		{ name: "strict UTF-8", bytes: Buffer.from("café🙂\nlast\n"), encoding: "utf-8" },
+		{
+			name: "windows-1252 curly quotes",
+			bytes: Buffer.concat([Buffer.from("caf"), Buffer.from([0xe9, 0x20, 0x93, 0x6f, 0x6b, 0x94, 0x0a])]),
+			encoding: "windows-1252",
+		},
+		{
+			name: "latin-1 for bytes windows-1252 leaves undefined",
+			bytes: Buffer.concat([Buffer.from("plain "), Buffer.from([0x81, 0x8d, 0x8f, 0x90, 0x9d, 0x0a])]),
+			encoding: "latin-1",
+		},
+		{ name: "BOM-less UTF-16LE", bytes: Buffer.from("café🙂\nlast\n", "utf16le"), encoding: "utf-16-le" },
+		{
+			name: "BOM-less UTF-16BE",
+			bytes: Buffer.from("café🙂\nlast\n", "utf16le").swap16(),
+			encoding: "utf-16-be",
+		},
+	])("resolves $name without a declaration", async ({ bytes, encoding }) => {
+		const document = await pythonEditByteCodec.decode(bytes, undefined);
+		expect({ encoding: document.encoding, detected: document.detected }).toEqual({ encoding, detected: true });
+	});
+
+	it("keeps a declared encoding out of the detection path", async () => {
+		const bytes = Buffer.concat([Buffer.from("caf"), Buffer.from([0xe9, 0x0a])]);
+		const document = await pythonEditByteCodec.decode(bytes, "cp1252");
+		expect({ encoding: document.encoding, detected: document.detected }).toEqual({
+			encoding: "cp1252",
+			detected: false,
+		});
+	});
+
+	it("requires evidence for NUL-bearing bytes that are not UTF-16", async () => {
+		await expect(pythonEditByteCodec.decode(Buffer.from("ok\n\0rest"), undefined)).rejects.toThrow(
+			/Source encoding is unknown or malformed/,
+		);
+	});
+
+	it("names the first unrepresentable replacement character instead of writing bytes", async () => {
+		const bytes = Buffer.concat([Buffer.from("caf"), Buffer.from([0xe9, 0x0a])]);
+		const document = await pythonEditByteCodec.decode(bytes, undefined);
+		await expect(document.encode([{ start: 0, end: 3, replacement: "a → b" }])).rejects.toThrow(
+			/cannot be represented in windows-1252.*→|→.*windows-1252/s,
+		);
+		// Negative control: a representable replacement still encodes in the detected codec.
+		expect(await document.encode([{ start: 0, end: 3, replacement: "kaf" }])).toEqual(
+			Buffer.concat([Buffer.from("kaf"), Buffer.from([0xe9, 0x0a])]),
+		);
 	});
 });

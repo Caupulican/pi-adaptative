@@ -178,7 +178,7 @@ describe("managed edit encoding recovery", () => {
 	it.each([
 		{ encoding: "cp1252", newText: "🙂", bytes: Buffer.from("targeté", "latin1") },
 		{ encoding: "cp1252", newText: "changed", bytes: Buffer.from("\uFEFFtarget", "utf16le") },
-		{ encoding: undefined, newText: "changed", bytes: Buffer.from("targeté", "latin1") },
+		{ encoding: "cp1252", newText: "changed", bytes: Buffer.from("ok\n\0rest") },
 	])(
 		"does not mutate for unavailable encoding evidence or an unsafe conversion: $encoding",
 		async ({ encoding, newText, bytes }) => {

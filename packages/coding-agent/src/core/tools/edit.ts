@@ -1,6 +1,6 @@
 import { type AgentTool, createAgentToolFailureRecoveryAuthority } from "@caupulican/pi-agent-core/types";
 import { Box, Container, Spacer, Text } from "@caupulican/pi-tui";
-import { readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
+import { readFile as fsReadFile, stat as fsStat, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
@@ -19,7 +19,14 @@ import {
 	normalizeToLF,
 	planEditsToNormalizedContent,
 } from "./edit-diff.ts";
-import { resolveDeclaredEncoding } from "./file-encoding-metadata.ts";
+import {
+	describeFileEncodingSource,
+	type FileEncodingRule,
+	PYTHON_DETECTION_SOURCE,
+	recallDetectedFileEncoding,
+	rememberDetectedFileEncoding,
+	resolveFileEncoding,
+} from "./file-encoding-metadata.ts";
 import {
 	EDIT_RETARGET_RECOVERY_TARGET_KIND,
 	FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
@@ -75,7 +82,7 @@ const editEncodingSchema = Type.Optional(
 		minLength: 1,
 		maxLength: 80,
 		description:
-			"Known source codec for legacy/BOM-less text, e.g. cp1252 or utf-16-le. Never guess. BOM-marked files recover automatically through Python; source encoding is preserved.",
+			"Override for the source codec, e.g. cp1252 or utf-16-le. The harness resolves the encoding itself (project declarations, BOM, UTF-8, then a managed Python codec that detects legacy and BOM-less text) and preserves it, so pass this only when you know that resolution is wrong.",
 	}),
 );
 const editSchema = Type.Union([
@@ -110,7 +117,7 @@ type LegacyEditToolInput = {
 
 export interface EditToolDetails {
 	phase: "edited";
-	encodingRecovery?: { codec: "python"; encoding: string; verified: true };
+	encodingRecovery?: { codec: "python"; encoding: string; verified: true; source: string };
 	contentRef?: string;
 	/** Display-oriented diff of the changes made */
 	diff?: string;
@@ -141,6 +148,8 @@ const defaultEditOperations: EditOperations = {
 export interface EditToolOptions {
 	/** Custom operations for file editing. Default: local filesystem */
 	operations?: EditOperations;
+	/** User-declared source charsets by glob, consulted before the project's `.editorconfig`. */
+	fileEncodings?: readonly FileEncodingRule[];
 	/** Shared backend identity for exact cross-tool recovery with custom operations. */
 	failureRecoveryAuthority?: FileFailureRecoveryAuthority;
 	/** Session-owned harness preflight and exact-content-reference authority. */
@@ -480,7 +489,7 @@ export function createEditToolDefinition(
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit existing text in one call, preserving source bytes and line endings. BOM-marked encodings recover through a managed Python codec; provide encoding for known legacy/BOM-less text. Send path and all edits; after a path-only failure, reuse payloadRef with the corrected path. Harness owns preflight and stale checks.",
+			"Edit existing text in one call, preserving source bytes and line endings. The harness resolves the source encoding itself and edits legacy, BOM-marked and BOM-less files byte-safely through a managed Python codec; encoding is only an override. Send path and all edits; after a path-only failure, reuse payloadRef with the corrected path. Harness owns preflight and stale checks.",
 		promptSnippet: "Preflight existing files; apply exact, stale-safe edits",
 		promptGuidelines: [
 			"Call once per file with all its replacements; edits to different files may be emitted together in one message. Harness owns preparation/stale checks.",
@@ -539,7 +548,7 @@ export function createEditToolDefinition(
 								authority: failureRecoveryAuthority.contractAuthority,
 								targetKind: FILE_ENCODING_RECOVERY_TARGET_KIND,
 								instruction:
-									"Establish the source encoding, then call edit with encoding and the intended replacements. Its managed Python codec preserves BOM, individual newlines and untouched bytes; never guess the codec.",
+									"The harness already resolved the encoding; fix the replacement the diagnostic names, or pass encoding only when authoritative metadata shows the resolved codec is wrong. Its managed Python codec preserves BOM, individual newlines and untouched bytes.",
 							},
 							{
 								kind: "repair" as const,
@@ -601,12 +610,36 @@ export function createEditToolDefinition(
 							throw new Error("Retarget cannot change the retained source encoding");
 						encoding ??= retainedEncoding;
 					}
+					// The single resolution point: the call's own argument, then the user's fileEncodings
+					// rules, then the project's .editorconfig. A file none of them names is resolved from
+					// its own bytes by the managed codec, so a legacy source is edited byte-safely instead
+					// of handing the model a charset question. A foreign backend's metadata does not live
+					// on this filesystem, so only local edits consult declarations or the detection cache.
+					let encodingSource: string | undefined;
+					let sourceMtimeMs: number | undefined;
 					if (encoding === undefined && options?.operations === undefined) {
-						// A charset the project declares for this file is evidence, exactly like the argument:
-						// it selects the byte-preserving codec path instead of the strict UTF-8 one. A foreign
-						// backend's metadata does not live on this filesystem, so only local edits consult it.
-						encoding = (await resolveDeclaredEncoding(absolutePath, { signal }))?.encoding;
+						const resolved = await resolveFileEncoding(absolutePath, cwd, {
+							fileEncodings: options?.fileEncodings,
+							signal,
+						});
 						throwIfAborted();
+						encoding = resolved?.encoding;
+						encodingSource = resolved ? describeFileEncodingSource(resolved, cwd) : undefined;
+						if (encoding === undefined) {
+							sourceMtimeMs = await fsStat(absolutePath).then(
+								(stats) => stats.mtimeMs,
+								() => undefined,
+							);
+							throwIfAborted();
+							const cached =
+								sourceMtimeMs === undefined
+									? undefined
+									: recallDetectedFileEncoding(absolutePath, sourceMtimeMs);
+							if (cached !== undefined) {
+								encoding = cached;
+								encodingSource = PYTHON_DETECTION_SOURCE;
+							}
+						}
 					}
 					let staleLeaseRefreshes = 0;
 					const confirmLeaseOrRefresh = async (): Promise<boolean> => {
@@ -685,6 +718,9 @@ export function createEditToolDefinition(
 						const finalContent = recovered
 							? await recovered.encode(applied.splices)
 							: bom + applied.sourceContent;
+						if (recovered?.detected && sourceMtimeMs !== undefined) {
+							rememberDetectedFileEncoding(absolutePath, sourceMtimeMs, recovered.encoding);
+						}
 						if (!(await confirmLeaseOrRefresh())) return undefined;
 						throwIfAborted();
 						// Keep the verification witness private: an adapter may mutate the buffer it receives.
@@ -697,6 +733,15 @@ export function createEditToolDefinition(
 								"Encoding recovery write verification failed; file outcome requires inspection before retry.",
 							);
 						}
+						// The bytes just written are in the resolved encoding by construction, so the next
+						// read or edit of this file resolves it without detecting it a second time.
+						if (recovered?.detected && options?.operations === undefined) {
+							const written = await fsStat(absolutePath).then(
+								(stats) => stats.mtimeMs,
+								() => undefined,
+							);
+							if (written !== undefined) rememberDetectedFileEncoding(absolutePath, written, recovered.encoding);
+						}
 						throwIfAborted();
 						return {
 							baseContent: applied.baseContent,
@@ -708,6 +753,9 @@ export function createEditToolDefinition(
 											codec: "python" as const,
 											encoding: recovered.encoding,
 											verified: true as const,
+											source: recovered.detected
+												? PYTHON_DETECTION_SOURCE
+												: (encodingSource ?? "the encoding argument"),
 										},
 									}
 								: {}),
@@ -733,7 +781,13 @@ export function createEditToolDefinition(
 						content: [
 							{
 								type: "text",
-								text: `Successfully replaced ${edits.length} block(s) in ${path}. To copy these exact bytes to a different new path, call write once for that path with contentRef ${contentReference.contentRef}.`,
+								// Name the codec in the answer: a byte-preserving edit through a resolved encoding
+								// is a different guarantee from a plain UTF-8 write, and the reader must see it.
+								text: `Successfully replaced ${edits.length} block(s) in ${path}. To copy these exact bytes to a different new path, call write once for that path with contentRef ${contentReference.contentRef}.${
+									completedRound.encodingRecovery
+										? `\n[edited through the python codec as ${completedRound.encodingRecovery.encoding} (${completedRound.encodingRecovery.source})]`
+										: ""
+								}`,
 							},
 						],
 						details: {

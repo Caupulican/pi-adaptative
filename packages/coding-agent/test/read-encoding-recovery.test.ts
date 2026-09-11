@@ -17,6 +17,13 @@ vi.mock("../src/core/python-runtime.ts", () => ({
 const directories: string[] = [];
 afterEach(async () => {
 	vi.clearAllMocks();
+	// clearAllMocks keeps a per-test mockResolvedValue in place; restore the ready runtime explicitly.
+	vi.mocked(ensurePythonRuntime).mockResolvedValue({
+		status: "ready",
+		pythonPath: process.platform === "win32" ? "python" : "python3",
+		uvPath: "synthetic-unused",
+		pythonInstalled: false,
+	});
 	await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -63,11 +70,29 @@ describe("read encoding recovery", () => {
 			expect(await readFile(path)).toEqual(bytes);
 		});
 
-		it(`reports where undeclared non-UTF-8 bytes start instead of substituting them (budget ${maxTextReadBytes})`, async () => {
+		it(`resolves undeclared non-UTF-8 bytes through Python and names the detection (budget ${maxTextReadBytes})`, async () => {
 			// "line1\nline2\ncaf\u00E9\n" written as windows-1252: the 0xe9 at byte 15 opens line 3.
 			const { cwd, path } = await fixture(
 				Buffer.concat([Buffer.from("line1\nline2\ncaf"), Buffer.from([0xe9, 0x0a])]),
 			);
+			const tool = createReadTool(cwd, { maxTextReadBytes });
+			const result = await tool.execute("detected", { path });
+			expect(textOf(result)).toBe("line1\nline2\ncaf\u00E9\n[decoded as windows-1252 per python detection]");
+			expect(result.details).toMatchObject({ encoding: { name: "windows-1252", source: "python detection" } });
+			expect(textOf(result)).not.toContain("\uFFFD");
+			// Negative control: a literal replacement character is valid source text.
+			await writeFile(path, "a\uFFFDb");
+			expect(textOf(await createReadTool(cwd, { maxTextReadBytes }).execute("valid", { path }))).toBe("a\uFFFDb");
+		});
+
+		it(`asks for an encoding only when the managed Python codec is unavailable (budget ${maxTextReadBytes})`, async () => {
+			const { cwd, path } = await fixture(
+				Buffer.concat([Buffer.from("line1\nline2\ncaf"), Buffer.from([0xe9, 0x0a])]),
+			);
+			vi.mocked(ensurePythonRuntime).mockResolvedValue({
+				status: "offline",
+				reason: "Synthetic offline runtime",
+			});
 			const tool = createReadTool(cwd, { maxTextReadBytes });
 			const failure = await tool.execute("bad", { path }).then(
 				() => undefined,
@@ -79,20 +104,14 @@ describe("read encoding recovery", () => {
 				outputSignature: expect.stringMatching(/\S/),
 			});
 			const message = (failure as Error).message;
-			expect(message).toContain("PI_READ_ENCODING_REQUIRED");
-			expect(message).toContain(path);
-			expect(message).toContain("line 3, byte offset 15");
-			expect(message).toContain("windows-1252");
-			expect(message).toContain(".editorconfig");
-			expect(message).not.toContain("\uFFFD");
+			expect(message).toBe(
+				`PI_READ_ENCODING_REQUIRED: ${path} is not valid UTF-8 (first invalid byte at line 3, byte offset 15) and the managed Python codec is unavailable (Synthetic offline runtime). Run pi doctor to provision Python, or pass encoding.`,
+			);
 			// The signature identifies the same undecodable position across attempts.
 			const repeated = await tool.execute("bad-again", { path }).catch((error: unknown) => error);
 			expect((repeated as { outputSignature: string }).outputSignature).toBe(
 				(failure as { outputSignature: string }).outputSignature,
 			);
-			// Negative control: a literal replacement character is valid source text.
-			await writeFile(path, "a\uFFFDb");
-			expect(textOf(await createReadTool(cwd, { maxTextReadBytes }).execute("valid", { path }))).toBe("a\uFFFDb");
 		});
 
 		it(`decodes a charset declared in .editorconfig and names the declaration (budget ${maxTextReadBytes})`, async () => {

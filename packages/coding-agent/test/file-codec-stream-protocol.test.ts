@@ -68,10 +68,12 @@ describe("codec read stream framing and terminal evidence", () => {
 			expect(await session.decode(Buffer.from("first"), "utf-16-le", false)).toEqual({
 				text: "é🙂\r\n",
 				encoding: "utf-16-le",
+				detected: false,
 			});
 			expect(await session.decode(Buffer.alloc(0), "utf-16-le", true)).toEqual({
 				text: "é🙂\r\n",
 				encoding: "utf-16-le",
+				detected: false,
 			});
 			expect(b.requests.map((request) => request.sequence)).toEqual([0, 1]);
 			expect(b.stdout.destroyed).toBe(true);

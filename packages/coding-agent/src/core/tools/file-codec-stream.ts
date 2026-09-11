@@ -10,8 +10,10 @@ interface CodecFrame {
 	sequence: number;
 	final: boolean;
 	encoding?: unknown;
+	detected?: unknown;
 	text?: unknown;
 	error?: unknown;
+	detail?: unknown;
 }
 
 /** A read owns one helper. Frames are correlated, serialized, bounded, and never replayed. */
@@ -113,7 +115,7 @@ export async function createFileCodecReadSession(signal?: AbortSignal) {
 			source: Buffer,
 			encoding: string | undefined,
 			final: boolean,
-		): Promise<{ text: string; encoding: string }> {
+		): Promise<{ text: string; encoding: string; detected: boolean }> {
 			if (failure) throw failure;
 			if (closed || exited || endingFrame || pending) throw new Error("Encoding read session is not available");
 			const request = JSON.stringify({ sequence, final, encoding, source: source.toString("base64") });
@@ -137,11 +139,11 @@ export async function createFileCodecReadSession(signal?: AbortSignal) {
 					if (failure) throw failure;
 					if (result.code !== ("error" in frame ? 1 : 0)) throw fileCodecRecoveryError();
 				}
-				if ("error" in frame) throw fileCodecRecoveryError(frame.error);
+				if ("error" in frame) throw fileCodecRecoveryError(frame.error, frame.detail);
 				if (failure) throw failure;
 				if (typeof frame.text !== "string" || !frame.text.isWellFormed() || typeof frame.encoding !== "string")
 					throw fileCodecRecoveryError();
-				return { text: frame.text, encoding: frame.encoding };
+				return { text: frame.text, encoding: frame.encoding, detected: frame.detected === true };
 			} catch (error) {
 				fail(error instanceof Error ? error : fileCodecRecoveryError());
 				throw failure;

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
-import { ENCODING_EVIDENCE_REQUIRED } from "./file-codec-runner.ts";
+import { ENCODING_EVIDENCE_REQUIRED, PythonCodecUnavailableError } from "./file-codec-runner.ts";
 import { createFileCodecReadSession } from "./file-codec-stream.ts";
 import { firstInvalidUtf8Offset } from "./file-encoding-policy.ts";
 
@@ -41,16 +41,26 @@ function incompleteUtf8Tail(bytes: Buffer): Buffer {
 }
 
 /**
- * A read that cannot decode its bytes is a read problem with a read remedy: name the encoding, or
- * declare it once for the file type. It is not the edit contract's "replacement is unsafe", and it
- * never means the model should abandon the tool for a hand-rolled decode in a shell.
+ * Resolving the encoding is the harness's job, not the model's, so this failure exists only when
+ * the managed codec itself cannot run: without Python nothing can decode the bytes, and the only
+ * remedies left are provisioning the runtime or naming the encoding in the call.
  */
-function readEncodingRequiredError(path: string, evidence: UndecodableByte): AgentToolExecutionError {
+function readEncodingRequiredError(path: string, evidence: UndecodableByte, reason: string): AgentToolExecutionError {
 	return new AgentToolExecutionError(
-		`${READ_ENCODING_REQUIRED_MARKER}: ${path} is not valid UTF-8 (first invalid byte at line ${evidence.line}, byte offset ${evidence.offset}). Re-read with encoding (for example "windows-1252" for Delphi/Windows sources) or declare it once in .editorconfig ([*.pas] charset = latin1). No edit was attempted.`,
+		`${READ_ENCODING_REQUIRED_MARKER}: ${path} is not valid UTF-8 (first invalid byte at line ${evidence.line}, byte offset ${evidence.offset}) and the managed Python codec is unavailable (${reason}). Run pi doctor to provision Python, or pass encoding.`,
 		READ_ENCODING_REQUIRED_FAILURE_CODE,
 		createHash("sha256").update(`${path}\0${evidence.offset}`).digest("base64url"),
 		"tool_failure",
+	);
+}
+
+/**
+ * Python ran and still found no encoding that decodes these bytes as text: the source is binary or
+ * genuinely ambiguous. That is the edit contract's corruption class, told where to look.
+ */
+function encodingEvidenceError(path: string, evidence: UndecodableByte): Error {
+	return new Error(
+		`${ENCODING_EVIDENCE_REQUIRED} First undecodable byte in ${path} at line ${evidence.line}, byte offset ${evidence.offset}.`,
 	);
 }
 
@@ -60,12 +70,19 @@ export async function* decodeTextChunks(
 	path: string,
 	encoding?: string,
 	signal?: AbortSignal,
+	onEncodingDetected?: (encoding: string) => void,
 ): AsyncGenerator<string> {
 	if (signal?.aborted) throw new Error("Encoding recovery aborted");
 	const native = new TextDecoder("utf-8", { fatal: true });
 	let consumedBytes = 0;
 	let consumedNewlines = 0;
 	let heldTail: Buffer = EMPTY;
+	/**
+	 * Every byte handed to the consumer so far was 7-bit. While that holds, the native decode can
+	 * still be abandoned for the codec: ASCII means the same text under every codec the helper can
+	 * resolve, so the delivered prefix stays correct whatever the rest of the file turns out to be.
+	 */
+	let asciiOnly = true;
 	let evidence: UndecodableByte | undefined;
 	const locate = (bytes: Buffer, final: boolean): UndecodableByte => {
 		const scanned = heldTail.length > 0 ? Buffer.concat([heldTail, bytes]) : bytes;
@@ -80,68 +97,110 @@ export async function* decodeTextChunks(
 		try {
 			if (bytes.includes(0)) throw new Error("NUL-bearing input");
 			const text = native.decode(bytes, { stream: !final });
+			const tail = final ? EMPTY : incompleteUtf8Tail(bytes);
+			// Only bytes that became text count: a sequence the decoder is still holding has been
+			// delivered to nobody, so it cannot make an already-delivered prefix wrong.
+			if (asciiOnly) asciiOnly = !bytes.subarray(0, bytes.length - tail.length).some((byte) => byte >= 0x80);
 			consumedBytes += bytes.length;
 			consumedNewlines += countNewlines(bytes);
-			heldTail = final ? EMPTY : incompleteUtf8Tail(bytes);
+			heldTail = tail;
 			return text;
 		} catch {
 			evidence ??= locate(bytes, final);
 			throw new Error(ENCODING_EVIDENCE_REQUIRED);
 		}
 	};
-	let selected = false;
-	let prefix: Buffer = Buffer.alloc(0);
+	// Native UTF-8 is only the fast path, and only when nothing named an encoding. Everything else
+	// belongs to the managed codec, which owns BOM handling and detection alike.
+	let nativePath = encoding === undefined;
 	let run: Awaited<ReturnType<typeof createFileCodecReadSession>> | undefined;
-	let decoded = false;
 	let selectedEncoding = encoding;
-	const decode = async (bytes: Buffer, final: boolean): Promise<string> => {
-		if (signal?.aborted) throw new Error("Encoding recovery aborted");
-		if (!selected) {
-			selected = true;
-			if (encoding === undefined) {
-				try {
-					return decodeNative(bytes, final);
-				} catch {
-					// BOM-marked input can recover; ambiguous input requires explicit evidence.
-				}
-			}
+	let decoded = false;
+	const openSession = async (): Promise<void> => {
+		try {
 			run = await createFileCodecReadSession(signal);
+		} catch (error) {
+			if (error instanceof PythonCodecUnavailableError && encoding === undefined && evidence !== undefined)
+				throw readEncodingRequiredError(path, evidence, error.reason);
+			throw error;
 		}
-		if (!run) return decodeNative(bytes, final);
+	};
+	const decodeThroughCodec = async (bytes: Buffer, final: boolean): Promise<string> => {
+		if (!run) await openSession();
+		if (!run) throw new Error("Encoding recovery session unavailable");
 		const result = await run.decode(bytes, selectedEncoding, final);
-		if (decoded && result.encoding !== selectedEncoding) {
-			throw new Error("Invalid incremental encoding response");
-		}
+		if (decoded && result.encoding !== selectedEncoding) throw new Error("Invalid incremental encoding response");
+		if (!decoded && result.detected) onEncodingDetected?.(result.encoding);
 		decoded = true;
 		selectedEncoding = result.encoding;
 		return result.text;
 	};
+	/** BOM selection needs the first four bytes, so nothing is decoded before the stream has them. */
+	let pending: Buffer = EMPTY;
+	let started = false;
+	/** Bytes the native decoder was still holding when the codec took over; theirs to decode now. */
+	const handOver = (bytes: Buffer): Buffer => {
+		if (heldTail.length === 0) return bytes;
+		const carried = Buffer.concat([heldTail, bytes]);
+		heldTail = EMPTY;
+		return carried;
+	};
 	try {
 		for await (const chunk of chunks) {
 			if (signal?.aborted) throw new Error("Encoding recovery aborted");
-			for (let start = 0; start < chunk.length; start += DECODE_CHUNK_BYTES) {
-				let bytes = chunk.subarray(start, start + DECODE_CHUNK_BYTES);
-				if (!selected) {
-					bytes = Buffer.concat([prefix, bytes]);
-					if (bytes.length < 4) {
-						prefix = bytes;
-						continue;
-					}
-					prefix = Buffer.alloc(0);
-				}
-				yield await decode(bytes, false);
-				if (signal?.aborted) throw new Error("Encoding recovery aborted");
+			const source = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk;
+			pending = EMPTY;
+			if (!started && source.length < 4) {
+				pending = Buffer.from(source);
+				continue;
 			}
+			let start = 0;
+			while (start < source.length) {
+				if (signal?.aborted) throw new Error("Encoding recovery aborted");
+				if (!nativePath) {
+					// One frame per source chunk: detection is only as good as the bytes it sees, and a
+					// whole-file read hands the helper the whole file.
+					const text = await decodeThroughCodec(handOver(source.subarray(start)), false);
+					start = source.length;
+					started = true;
+					yield text;
+					break;
+				}
+				const bytes = source.subarray(start, start + DECODE_CHUNK_BYTES);
+				let text: string;
+				try {
+					text = decodeNative(bytes, false);
+				} catch (error) {
+					if (!asciiOnly) throw error;
+					nativePath = false;
+					continue;
+				}
+				start += bytes.length;
+				started = true;
+				yield text;
+			}
+			if (signal?.aborted) throw new Error("Encoding recovery aborted");
 		}
-		yield await decode(prefix, true);
+		if (nativePath) {
+			try {
+				yield decodeNative(pending, true);
+			} catch (error) {
+				if (!asciiOnly) throw error;
+				nativePath = false;
+				yield await decodeThroughCodec(handOver(pending), true);
+			}
+		} else {
+			yield await decodeThroughCodec(handOver(pending), true);
+		}
 	} catch (error) {
-		// Only an unnamed encoding is a read-encoding problem: with a named codec the failure is the
-		// codec's own, and the edit contract's diagnostic stands.
+		// With a named codec the failure is that codec's own and the edit contract's diagnostic
+		// stands. Without one, the harness has exhausted UTF-8, declarations and detection, so the
+		// source is binary or ambiguous — say where it stops being text.
 		throw encoding === undefined &&
 			evidence !== undefined &&
 			error instanceof Error &&
 			error.message === ENCODING_EVIDENCE_REQUIRED
-			? readEncodingRequiredError(path, evidence)
+			? encodingEvidenceError(path, evidence)
 			: error;
 	} finally {
 		await run?.close();
@@ -153,8 +212,9 @@ export async function decodeReadText(
 	path: string,
 	encoding?: string,
 	signal?: AbortSignal,
+	onEncodingDetected?: (encoding: string) => void,
 ): Promise<string> {
 	const parts: string[] = [];
-	for await (const text of decodeTextChunks([source], path, encoding, signal)) parts.push(text);
+	for await (const text of decodeTextChunks([source], path, encoding, signal, onEncodingDetected)) parts.push(text);
 	return parts.join("");
 }

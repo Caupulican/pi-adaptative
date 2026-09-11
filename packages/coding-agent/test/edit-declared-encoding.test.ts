@@ -49,20 +49,16 @@ describe("edit with a charset declared in project metadata", () => {
 		const result = await tool.execute("declared", { path, edits: [{ oldText: "target", newText: "changed" }] });
 		expect(await readFile(path)).toEqual(delphiSource("changed"));
 		expect(result.details).toMatchObject({
-			encodingRecovery: { codec: "python", encoding: "cp1252", verified: true },
+			encodingRecovery: { codec: "python", encoding: "windows-1252", verified: true, source: ".editorconfig" },
 		});
 	});
 
-	it("keeps the undeclared edit failure unchanged", async () => {
+	it("resolves the same file through Python detection when nothing declares it", async () => {
 		const { tool, path } = await fixture({ declare: false });
-		const failure = await tool
-			.execute("undeclared", { path, edits: [{ oldText: "target", newText: "changed" }] })
-			.then(
-				() => undefined,
-				(error: unknown) => error,
-			);
-		expect((failure as Error).message).toContain("PI_FILE_ENCODING_CORRUPTION");
-		expect((failure as Error).message).not.toContain("PI_READ_ENCODING_REQUIRED");
-		expect(await readFile(path)).toEqual(delphiSource("target"));
+		const result = await tool.execute("undeclared", { path, edits: [{ oldText: "target", newText: "changed" }] });
+		expect(await readFile(path)).toEqual(delphiSource("changed"));
+		expect(result.details).toMatchObject({
+			encodingRecovery: { codec: "python", encoding: "windows-1252", verified: true, source: "python detection" },
+		});
 	});
 });

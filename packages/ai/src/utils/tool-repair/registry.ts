@@ -262,7 +262,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		failureCode: "encoding_corruption",
 		attemptMemory: "discard",
 		guidance:
-			"Change approach: exact UTF-8 replacement unsafe. Use encoding-aware/byte-safe tool; never replay text edit.",
+			"The file's bytes could not be edited safely in the resolved encoding (see diagnostic); fix the replacement characters or declare the real encoding, never retype the edit.",
 		matches(message: string): boolean {
 			return /\bPI_FILE_ENCODING_CORRUPTION\b/i.test(message);
 		},
@@ -273,8 +273,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		failureCode: "read_encoding_required",
 		attemptMemory: "discard",
 		retainDiagnostic: true,
-		guidance:
-			"Re-read with the encoding named in the diagnostic, or declare charset in .editorconfig for the file type; do not switch tools.",
+		guidance: "Python is required for non-UTF-8 files; provision it (pi doctor) or pass encoding.",
 		matches(message: string): boolean {
 			return /\bPI_READ_ENCODING_REQUIRED\b/i.test(message);
 		},

@@ -37,8 +37,23 @@ BOMS = (
 )
 
 
+# The five positions windows-1252 leaves undefined; a file using them is ISO-8859-1, not 1252.
+CP1252_UNDEFINED = (0x81, 0x8D, 0x8F, 0x90, 0x9D)
+# UTF-16 text is at least this much NUL, and its NULs sit on one parity of byte offsets.
+MIN_UTF16_NUL_SHARE = 0.30
+MIN_UTF16_NUL_ALIGNMENT = 0.90
+
+
 class EncodingEvidenceRequired(ValueError):
     pass
+
+
+class ReplacementUnrepresentable(ValueError):
+    """One replacement character the resolved codec has no byte for; reported before any output."""
+    def __init__(self, character, encoding):
+        super().__init__("replacement unrepresentable")
+        self.character = character
+        self.encoding = encoding
 
 
 class CodecUnavailable(LookupError):
@@ -227,18 +242,72 @@ def lookup_codec(name):
         return IconvCodec(name)
 
 
+def decodes_strictly(encoding, data):
+    try:
+        codecs.lookup(encoding).decode(data, "strict")
+    except (UnicodeDecodeError, LookupError, ValueError):
+        return False
+    return True
+
+
+def detect_utf16(source):
+    """BOM-less UTF-16 is NUL-dense and parity-aligned; nothing here guesses a charset."""
+    nuls = source.count(0)
+    if nuls < len(source) * MIN_UTF16_NUL_SHARE:
+        return None
+    odd = sum(1 for offset in range(1, len(source), 2) if source[offset] == 0)
+    for aligned, encoding in ((odd, "utf-16-le"), (nuls - odd, "utf-16-be")):
+        if aligned >= nuls * MIN_UTF16_NUL_ALIGNMENT and decodes_strictly(encoding, source):
+            return encoding
+    return None
+
+
+def detect_encoding(source):
+    """Deterministic, dependency-free resolution for a file nothing declares.
+
+    The two BOM-less UTF-16 byte orders by NUL density and parity, then strict UTF-8, then the
+    single-byte family the legacy Windows toolchains actually emit. Anything else is reported as
+    missing evidence rather than decoded under a guess.
+    """
+    # NUL first: this helper decodes text, and a NUL that is not UTF-16 padding means the source
+    # is binary or ambiguous, even when its bytes happen to satisfy strict UTF-8.
+    if 0 in source:
+        encoding = detect_utf16(source)
+        if encoding is None:
+            raise EncodingEvidenceRequired("ambiguous NUL-bearing source")
+        return encoding
+    if decodes_strictly("utf-8", source):
+        return "utf-8"
+    if decodes_strictly("windows-1252", source):
+        return "windows-1252"
+    # ISO-8859-1 is the total codec: accept it only when the five undefined 1252 positions are
+    # the whole difference, so a genuinely undecodable file still asks for evidence.
+    defined = bytes(byte for byte in source if byte not in CP1252_UNDEFINED)
+    if len(defined) != len(source) and decodes_strictly("windows-1252", defined) and decodes_strictly("latin-1", source):
+        return "latin-1"
+    raise EncodingEvidenceRequired("undetectable single-byte source")
+
+
 def select_encoding(original, requested):
-    bom, detected = next(((b, c) for b, c in BOMS if original.startswith(b)), (b"", None))
-    encoding = lookup_codec(requested).name if requested else detected
+    bom, marked = next(((b, c) for b, c in BOMS if original.startswith(b)), (b"", None))
+    # The canonical spelling settles the BOM and byte-order checks; the response reports the
+    # encoding under the name the caller or the detector used, so a resolved name means the same
+    # codec when a later call sends it back.
+    canonical = lookup_codec(requested).name if requested else None
+    encoding = requested or marked
+    detected = False
     if not encoding:
-        raise EncodingEvidenceRequired("explicit encoding required")
-    if detected:
-        if encoding not in (detected, detected.rsplit("-", 1)[0], "utf-8-sig" if detected == "utf-8" else detected):
+        encoding = detect_encoding(original)
+        detected = True
+    if marked:
+        if canonical is not None and canonical not in (
+            marked, marked.rsplit("-", 1)[0], "utf-8-sig" if marked == "utf-8" else marked
+        ):
             raise ValueError("encoding conflicts with BOM")
-        encoding = detected
-    elif encoding in ("utf-16", "utf-32", "utf-8-sig"):
+        encoding = marked
+    elif canonical in ("utf-16", "utf-32", "utf-8-sig"):
         raise ValueError("codec requires BOM or explicit byte order")
-    return bom, encoding, original[len(bom):]
+    return bom, encoding, original[len(bom):], detected
 
 
 def read_source(request):
@@ -253,6 +322,7 @@ class ReadStream:
     def __init__(self):
         self.decoder = None
         self.encoding = None
+        self.detected = False
         self.finished = False
 
     def feed(self, request):
@@ -260,9 +330,11 @@ class ReadStream:
             raise ValueError("invalid read lifecycle")
         source = read_source(request)
         if self.decoder is None:
-            _, self.encoding, source = select_encoding(source, request.get("encoding"))
+            _, self.encoding, source, self.detected = select_encoding(source, request.get("encoding"))
             self.decoder = lookup_codec(self.encoding).incrementaldecoder(errors="strict")
         elif request.get("encoding") != self.encoding:
+            # After a resolution the caller echoes the encoding it was given; a different one
+            # would change codec mid-stream and silently reinterpret the bytes already decoded.
             raise ValueError("changed read encoding")
         text = self.decoder.decode(source, final=request["final"])
         if not isinstance(text, str) or "\0" in text:
@@ -270,18 +342,44 @@ class ReadStream:
         if len(self.decoder.getstate()[0]) > MAX_SOURCE:
             raise ValueError("decoder state bound")
         self.finished = request["final"]
-        return {"text": text, "encoding": self.encoding}
+        return {"text": text, "encoding": self.encoding, "detected": self.detected}
+
+
+def encode_replacement(codec, encoding, replacement):
+    """Encode one replacement, naming the first character the codec has no bytes for."""
+    try:
+        return codec.encode(replacement, "strict")[0]
+    except CodecUnavailable:
+        raise
+    except UnicodeEncodeError as error:
+        raise ReplacementUnrepresentable(error.object[error.start], encoding) from error
+    except (ValueError, LookupError) as error:
+        raise ReplacementUnrepresentable(locate_unrepresentable(codec, replacement), encoding) from error
+
+
+def locate_unrepresentable(codec, replacement):
+    """Bounded bisection for codecs that report a failure without an offset (iconv transports)."""
+    low, high = 0, len(replacement)
+    while high - low > 1:
+        middle = (low + high) // 2
+        try:
+            codec.encode(replacement[:middle], "strict")
+        except Exception:
+            high = middle
+        else:
+            low = middle
+    return replacement[low:high]
 
 
 def transform(request):
     original = read_source(request)
-    bom, encoding, source = select_encoding(original, request.get("encoding"))
+    bom, encoding, source, detected = select_encoding(original, request.get("encoding"))
     codec = lookup_codec(encoding)
     text = codec.decode(source, "strict")[0]
     if not isinstance(text, str) or "\0" in text or codec.encode(text, "strict")[0] != source:
         raise ValueError("source does not round-trip as text")
     if request["operation"] == "decode":
-        return {"text": text, "encoding": encoding}
+        return {"text": text, "encoding": encoding, "detected": detected}
     if request["operation"] != "splice":
         raise ValueError("unknown operation")
 
@@ -320,7 +418,7 @@ def transform(request):
         replacement = span["replacement"]
         if not isinstance(replacement, str) or "\0" in replacement:
             raise ValueError("invalid replacement")
-        encoded = codec.encode(replacement, "strict")[0]
+        encoded = encode_replacement(codec, encoding, replacement)
         output.extend((source[byte_cursor:byte_cursor + len(prefix)], encoded))
         expected.extend((untouched, replacement))
         byte_cursor += len(prefix) + len(old)
@@ -333,16 +431,25 @@ def transform(request):
     result = b"".join(output)
     if len(result) > MAX_SOURCE or codec.decode(result[len(bom):], "strict")[0] != "".join(expected):
         raise ValueError("encoded edit verification failed")
-    return {"bytes": base64.b64encode(result).decode("ascii"), "encoding": encoding}
+    return {"bytes": base64.b64encode(result).decode("ascii"), "encoding": encoding, "detected": detected}
 
 
 def failure_reason(error):
-    # Never echo source bytes, replacement text, or a traceback into diagnostics.
+    # Never echo source bytes, whole replacements, or a traceback into diagnostics.
     if isinstance(error, EncodingEvidenceRequired):
         return "encoding_required"
     if isinstance(error, CodecUnavailable):
         return "codec_unavailable"
+    if isinstance(error, ReplacementUnrepresentable):
+        return "replacement_unrepresentable"
     return "preservation_unverified"
+
+
+def failure_detail(error):
+    """The one character the caller must change, plus the codec that rejected it."""
+    if isinstance(error, ReplacementUnrepresentable):
+        return {"character": error.character, "encoding": error.encoding}
+    return None
 
 
 def serve_read_stream():
@@ -368,6 +475,9 @@ def serve_read_stream():
             sequence += 1
         except Exception as error:
             output = {"sequence": sequence, "final": final, "error": failure_reason(error)}
+            detail = failure_detail(error)
+            if detail is not None:
+                output["detail"] = detail
             sys.stdout.buffer.write(json.dumps(output).encode("ascii") + b"\n")
             sys.stdout.buffer.flush()
             return 1
@@ -384,5 +494,9 @@ if __name__ == "__main__":
         result = transform(json.loads(payload))
         sys.stdout.buffer.write(json.dumps(result, ensure_ascii=True).encode("ascii"))
     except Exception as error:
-        sys.stdout.buffer.write(json.dumps({"error": failure_reason(error)}).encode("ascii"))
+        failure = {"error": failure_reason(error)}
+        detail = failure_detail(error)
+        if detail is not None:
+            failure["detail"] = detail
+        sys.stdout.buffer.write(json.dumps(failure).encode("ascii"))
         sys.exit(1)

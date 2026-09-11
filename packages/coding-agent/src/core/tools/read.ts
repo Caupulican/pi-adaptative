@@ -30,7 +30,15 @@ import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { buildCodeOutline, renderCodeOutline } from "./code-outline.ts";
-import { resolveDeclaredEncoding } from "./file-encoding-metadata.ts";
+import {
+	describeFileEncodingSource,
+	type FileEncodingRule,
+	PYTHON_DETECTION_SOURCE,
+	type ResolvedFileEncoding,
+	recallDetectedFileEncoding,
+	rememberDetectedFileEncoding,
+	resolveFileEncoding,
+} from "./file-encoding-metadata.ts";
 import {
 	FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
 	FILE_EXISTS_RECOVERY_TARGET_KIND,
@@ -50,7 +58,7 @@ const readSchema = Type.Object({
 	encoding: Type.Optional(
 		Type.String({
 			description:
-				"Known source encoding for legacy or BOM-less text. BOM-marked Unicode recovers automatically; never guess an unknown encoding.",
+				"Override for the source encoding. The harness resolves it on its own (project declarations, BOM, UTF-8, then a managed Python codec that detects legacy and BOM-less text), so pass this only when you know the file's codec and that resolution is wrong.",
 		}),
 	),
 	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
@@ -86,7 +94,7 @@ export interface ReadToolDetails {
 	outline?: { language: string; entries: number; totalLines: number; headFallback: boolean };
 	/** Present when the path was a directory and a bounded listing was returned instead of bytes. */
 	directory?: { entries: number; shown: number };
-	/** Present when the charset came from project metadata instead of the call. */
+	/** Present when the charset came from metadata, settings, or codec detection instead of the call. */
 	encoding?: { name: string; source: string };
 }
 
@@ -154,17 +162,6 @@ function renderDirectoryListing(
 	};
 }
 
-/**
- * Name the declaring file the way the reader would type it: relative while it is inside the working
- * directory, absolute once it is outside, never a path that walks back out of the tree.
- */
-function formatDeclarationSource(source: string, cwd: string): string {
-	const relativePath = relative(cwd, source);
-	return relativePath === "" || relativePath.startsWith("..") || isAbsolute(relativePath)
-		? source
-		: relativePath.split(sep).join("/");
-}
-
 interface CompactReadClassification {
 	kind: "docs" | "resource" | "skill";
 	label: string;
@@ -205,7 +202,10 @@ export interface ReadOperations {
 	 */
 	readLineSlice?: (absolutePath: string, options: LineSliceOptions) => Promise<LineSlice>;
 	/** Count decoded lines using the same encoding and cancellation contract as readLineSlice. */
-	countLines?: (absolutePath: string, options?: { encoding?: string; signal?: AbortSignal }) => Promise<number>;
+	countLines?: (
+		absolutePath: string,
+		options?: { encoding?: string; onEncodingDetected?: (encoding: string) => void; signal?: AbortSignal },
+	) => Promise<number>;
 }
 
 export interface LineSliceOptions {
@@ -215,6 +215,8 @@ export interface LineSliceOptions {
 	maxLineChars?: number;
 	/** Source encoding, shared by whole-file, outline, count, and sliced reads. */
 	encoding?: string;
+	/** Called with the charset the managed codec resolved when nothing declared one. */
+	onEncodingDetected?: (encoding: string) => void;
 	signal?: AbortSignal;
 	/** 0-based line to start collecting at. */
 	startLine: number;
@@ -235,7 +237,13 @@ const SLICE_SCAN_CHUNK_BYTES = 1024 * 1024;
 async function scanLines(
 	absolutePath: string,
 	onLine: (line: StreamingLineRecord, index: number) => boolean,
-	options?: { encoding?: string; signal?: AbortSignal; maxLineChars?: number; startColumn?: number },
+	options?: {
+		encoding?: string;
+		onEncodingDetected?: (encoding: string) => void;
+		signal?: AbortSignal;
+		maxLineChars?: number;
+		startColumn?: number;
+	},
 ): Promise<void> {
 	const handle = await fsOpen(absolutePath, "r");
 	try {
@@ -258,7 +266,13 @@ async function scanLines(
 		}
 		let index = 0;
 		let emittedAnyLine = false;
-		for await (const text of decodeTextChunks(sourceChunks(), absolutePath, options?.encoding, options?.signal)) {
+		for await (const text of decodeTextChunks(
+			sourceChunks(),
+			absolutePath,
+			options?.encoding,
+			options?.signal,
+			options?.onEncodingDetected,
+		)) {
 			const lines = lineDecoder.pushRecords(text);
 			for (const line of lines) {
 				emittedAnyLine = true;
@@ -302,7 +316,7 @@ async function readLocalLineSlice(absolutePath: string, options: LineSliceOption
 
 async function countLocalLines(
 	absolutePath: string,
-	options?: { encoding?: string; signal?: AbortSignal },
+	options?: { encoding?: string; onEncodingDetected?: (encoding: string) => void; signal?: AbortSignal },
 ): Promise<number> {
 	let count = 0;
 	await scanLines(
@@ -350,6 +364,8 @@ export interface ReadToolOptions {
 	maxTextReadBytes?: number;
 	/** Pathology guard for image reads; larger images return downscale guidance. Default 128 MiB. */
 	maxImageReadBytes?: number;
+	/** User-declared source charsets by glob, consulted before the project's `.editorconfig`. */
+	fileEncodings?: readonly FileEncodingRule[];
 }
 
 type ReadRenderArgs = { path?: string; file_path?: string; offset?: number; limit?: number };
@@ -638,23 +654,64 @@ export function createReadToolDefinition(
 							const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
 							const fileSize = ops.stat ? (await ops.stat(absolutePath)).size : undefined;
 							if (aborted) return;
-							// A charset the project declares for this file is evidence, exactly like the
-							// argument: legacy sources decode on the first read instead of failing once per
-							// file. An explicit argument still wins, and a foreign backend's metadata does
-							// not live on this filesystem, so only local reads consult it.
-							const declaredEncoding =
+							// The single resolution point: the call's own argument, then the user's
+							// fileEncodings rules, then the project's .editorconfig. A file none of them
+							// names is resolved from its own bytes by the managed codec while decoding, so
+							// legacy sources read on the first try instead of asking the model for a charset.
+							// A foreign backend's metadata does not live on this filesystem, so only local
+							// reads consult declarations or remember what detection found.
+							const declaredEncoding: ResolvedFileEncoding | undefined =
 								encoding === undefined && !mimeType && localFileSystem
-									? await resolveDeclaredEncoding(absolutePath, { signal })
+									? await resolveFileEncoding(absolutePath, cwd, {
+											fileEncodings: options?.fileEncodings,
+											signal,
+										})
 									: undefined;
 							if (aborted) return;
-							const sourceEncoding = encoding ?? declaredEncoding?.encoding;
-							/** Name the declaration in the result: a silent charset switch is a guess to the reader. */
+							// The modification time keys what detection found, so the edit that follows this
+							// read resolves the same file to the same charset without detecting it again.
+							const sourceMtimeMs =
+								encoding === undefined && !declaredEncoding && !mimeType && localFileSystem
+									? await fsStat(absolutePath).then(
+											(stats) => stats.mtimeMs,
+											() => undefined,
+										)
+									: undefined;
+							if (aborted) return;
+							const cachedDetection =
+								sourceMtimeMs === undefined
+									? undefined
+									: recallDetectedFileEncoding(absolutePath, sourceMtimeMs);
+							const sourceEncoding = encoding ?? declaredEncoding?.encoding ?? cachedDetection;
+							let detectedEncoding: string | undefined;
+							const onEncodingDetected = (name: string): void => {
+								detectedEncoding ??= name;
+								if (sourceMtimeMs !== undefined)
+									rememberDetectedFileEncoding(absolutePath, sourceMtimeMs, name);
+							};
+							/** Name the evidence in the result: a silent charset switch is a guess to the reader. */
 							const withDeclaredEncoding = (
 								parts: (TextContent | ImageContent)[],
 								current: ReadToolDetails | undefined,
 							): { content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined } => {
-								if (!declaredEncoding) return { content: parts, details: current };
-								const note = `[decoded as ${declaredEncoding.encoding} per ${formatDeclarationSource(declaredEncoding.source, cwd)}]`;
+								const resolved = declaredEncoding
+									? {
+											name: declaredEncoding.encoding,
+											source:
+												declaredEncoding.source === "editorconfig"
+													? (declaredEncoding.declaredIn ?? "")
+													: "settings fileEncodings",
+											label: describeFileEncodingSource(declaredEncoding, cwd),
+										}
+									: (detectedEncoding ?? cachedDetection) !== undefined
+										? {
+												name: (detectedEncoding ?? cachedDetection) as string,
+												source: PYTHON_DETECTION_SOURCE,
+												label: PYTHON_DETECTION_SOURCE,
+											}
+										: undefined;
+								if (!resolved) return { content: parts, details: current };
+								const note = `[decoded as ${resolved.name} per ${resolved.label}]`;
 								const last = parts[parts.length - 1];
 								return {
 									content:
@@ -663,7 +720,7 @@ export function createReadToolDefinition(
 											: [...parts, { type: "text", text: note }],
 									details: {
 										...current,
-										encoding: { name: declaredEncoding.encoding, source: declaredEncoding.source },
+										encoding: { name: resolved.name, source: resolved.source },
 									},
 								};
 							};
@@ -718,6 +775,7 @@ export function createReadToolDefinition(
 												maxLines: OUTLINE_MAX_SOURCE_LINES,
 												maxChars: OUTLINE_MAX_SOURCE_CHARS,
 												encoding: sourceEncoding,
+												onEncodingDetected,
 												signal,
 											})
 										: undefined;
@@ -728,6 +786,7 @@ export function createReadToolDefinition(
 											absolutePath,
 											sourceEncoding,
 											signal,
+											onEncodingDetected,
 										);
 								const outline = buildCodeOutline(path, outlineText);
 								content = [{ type: "text", text: renderCodeOutline(path, outline) }];
@@ -762,7 +821,11 @@ export function createReadToolDefinition(
 										startLine = Math.max(0, offset - 1);
 									} else if (tail !== undefined) {
 										const counted = ops.countLines
-											? await ops.countLines(absolutePath, { encoding: sourceEncoding, signal })
+											? await ops.countLines(absolutePath, {
+													encoding: sourceEncoding,
+													onEncodingDetected,
+													signal,
+												})
 											: undefined;
 										if (counted !== undefined) {
 											totalFileLines = counted;
@@ -779,6 +842,7 @@ export function createReadToolDefinition(
 										maxLines: userLimitedLines ?? DEFAULT_MAX_LINES,
 										maxChars: DEFAULT_MAX_BYTES * 4,
 										encoding: sourceEncoding,
+										onEncodingDetected,
 										signal,
 									});
 									if (slice.lines.length === 0 && startLine > 0) {
@@ -788,7 +852,13 @@ export function createReadToolDefinition(
 									moreContentRemains = !slice.reachedEnd;
 								} else {
 									const buffer = await ops.readFile(absolutePath);
-									const textContent = await decodeReadText(buffer, absolutePath, sourceEncoding, signal);
+									const textContent = await decodeReadText(
+										buffer,
+										absolutePath,
+										sourceEncoding,
+										signal,
+										onEncodingDetected,
+									);
 									textContentForJsonCheck = textContent;
 									const allLines = splitContentLines(textContent);
 									totalFileLines = allLines.length;

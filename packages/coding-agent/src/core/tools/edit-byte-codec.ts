@@ -14,6 +14,8 @@ export interface EditByteCodec {
 	): Promise<{
 		text: string;
 		encoding: string;
+		/** True when the codec resolved the encoding itself, with nothing declaring it. */
+		detected: boolean;
 		encode(splices: readonly EditSourceSplice[]): Promise<Buffer>;
 	}>;
 }
@@ -44,6 +46,7 @@ export const pythonEditByteCodec: EditByteCodec = {
 		return {
 			text: decoded.text,
 			encoding: decoded.encoding,
+			detected: decoded.detected,
 			async encode(splices) {
 				const encoded = await run({ operation: "splice", source: original, encoding, splices });
 				if (!("bytes" in encoded) || typeof encoded.bytes !== "string" || encoded.encoding !== decoded.encoding)

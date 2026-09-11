@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ensurePythonRuntime } from "../src/core/python-runtime.ts";
 import { decodeReadText, decodeTextChunks } from "../src/core/tools/file-text-decoder.ts";
 
 vi.mock("../src/core/python-runtime.ts", () => ({
@@ -11,6 +12,16 @@ vi.mock("../src/core/python-runtime.ts", () => ({
 }));
 
 const fixturePath = "/fixture/source.pas";
+
+// clearAllMocks keeps a per-test mockResolvedValue in place; restore the ready runtime explicitly.
+afterEach(() => {
+	vi.mocked(ensurePythonRuntime).mockResolvedValue({
+		status: "ready",
+		pythonPath: process.platform === "win32" ? "python" : "python3",
+		uvPath: "synthetic-unused",
+		pythonInstalled: false,
+	});
+});
 
 async function decoded(chunks: Iterable<Buffer> | AsyncIterable<Buffer>, encoding?: string, signal?: AbortSignal) {
 	const parts: string[] = [];
@@ -56,7 +67,6 @@ describe("incremental source text decoding", () => {
 
 	it.each([
 		{ bytes: Buffer.from([0xff, 0xfe, 0x61]), encoding: undefined },
-		{ bytes: Buffer.from([0x61, 0x62, 0x63, 0x64, 0xc3]), encoding: undefined },
 		{ bytes: Buffer.from("\uFEFFabc", "utf16le"), encoding: "cp1252" },
 		{ bytes: Buffer.from("YWJj"), encoding: "base64_codec" },
 	])("does not certify incomplete, conflicting, or non-text data: %j", async ({ bytes, encoding }) => {
@@ -66,27 +76,40 @@ describe("incremental source text decoding", () => {
 	it.each([
 		{ name: "one chunk", stride: 0 },
 		{ name: "one-byte chunks", stride: 1 },
-	])("locates the first undecodable byte for undeclared bytes ($name)", async ({ stride }) => {
-		// "line1\nline2\ncafé\n" as windows-1252: the 0xe9 opening line 3 sits at byte offset 15.
+	])("resolves undeclared single-byte source text through the codec ($name)", async ({ stride }) => {
+		// "line1\nline2\ncafé\n" as windows-1252: the 0xe9 opening line 3 is undecodable as UTF-8.
 		const bytes = Buffer.concat([Buffer.from("line1\nline2\ncaf"), Buffer.from([0xe9, 0x0a])]);
 		const source = stride === 0 ? [bytes] : [...bytes].map((byte) => Buffer.from([byte]));
-		const failure = await decoded(source).then(
-			() => undefined,
-			(error: unknown) => error,
-		);
-		expect(failure).toMatchObject({ failureCode: "read_encoding_required", errorKind: "tool_failure" });
-		expect((failure as Error).message).toContain(
-			`PI_READ_ENCODING_REQUIRED: ${fixturePath} is not valid UTF-8 (first invalid byte at line 3, byte offset 15)`,
-		);
+		expect(await decoded(source)).toBe("line1\nline2\ncafé\n");
 	});
 
-	it("locates the first NUL as the undecodable byte", async () => {
+	it("hands an ASCII prefix to the codec when the first undecodable byte arrives late", async () => {
+		const bytes = Buffer.concat([Buffer.from("ascii header\n"), Buffer.from([0xe9, 0x0a])]);
+		expect(await decoded([bytes.subarray(0, 8), bytes.subarray(8)])).toBe("ascii header\né\n");
+	});
+
+	it("reports the first undecodable byte when no codec can be resolved", async () => {
 		const failure = await decoded([Buffer.from("ok\n\0rest")]).then(
 			() => undefined,
 			(error: unknown) => error,
 		);
-		expect(failure).toMatchObject({ failureCode: "read_encoding_required" });
-		expect((failure as Error).message).toContain("first invalid byte at line 2, byte offset 3");
+		const message = (failure as Error).message;
+		expect(message).toContain("PI_FILE_ENCODING_CORRUPTION");
+		expect(message).toContain(`${fixturePath} at line 2, byte offset 3`);
+		expect(failure).not.toHaveProperty("failureCode", "read_encoding_required");
+	});
+
+	it("asks for an encoding only when the managed Python codec is unavailable", async () => {
+		vi.mocked(ensurePythonRuntime).mockResolvedValue({ status: "offline", reason: "Synthetic offline runtime" });
+		const bytes = Buffer.concat([Buffer.from("line1\nline2\ncaf"), Buffer.from([0xe9, 0x0a])]);
+		const failure = await decoded([bytes]).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(failure).toMatchObject({ failureCode: "read_encoding_required", errorKind: "tool_failure" });
+		expect((failure as Error).message).toBe(
+			`PI_READ_ENCODING_REQUIRED: ${fixturePath} is not valid UTF-8 (first invalid byte at line 3, byte offset 15) and the managed Python codec is unavailable (Synthetic offline runtime). Run pi doctor to provision Python, or pass encoding.`,
+		);
 	});
 
 	it("keeps codec failures for an explicitly named encoding out of the read-encoding class", async () => {

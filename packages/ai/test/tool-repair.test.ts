@@ -419,7 +419,7 @@ describe("tool argument repair", () => {
 
 	it("separates a read encoding requirement from an edit encoding corruption", () => {
 		const readFailure =
-			'PI_READ_ENCODING_REQUIRED: /src/unit.pas is not valid UTF-8 (first invalid byte at line 3, byte offset 15). Re-read with encoding (for example "windows-1252" for Delphi/Windows sources) or declare it once in .editorconfig ([*.pas] charset = latin1). No edit was attempted.';
+			"PI_READ_ENCODING_REQUIRED: /src/unit.pas is not valid UTF-8 (first invalid byte at line 3, byte offset 15) and the managed Python codec is unavailable (no interpreter). Run pi doctor to provision Python, or pass encoding.";
 		expect(getToolExecutionErrorPolicy(readFailure)).toMatchObject({
 			name: "readEncodingRequired",
 			phase: "execution",

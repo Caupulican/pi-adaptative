@@ -68,10 +68,26 @@ describe("edit byte preservation", () => {
 	});
 
 	it.each([
-		{ label: "BOM-less UTF-16LE", bytes: Buffer.from("target", "utf16le") },
+		{
+			label: "BOM-less UTF-16LE",
+			bytes: Buffer.from("target", "utf16le"),
+			after: Buffer.from("tXrget", "utf16le"),
+		},
+		{
+			label: "legacy single-byte text",
+			bytes: Buffer.from([0x74, 0x61, 0x72, 0x67, 0x65, 0x74, 0xe9]),
+			after: Buffer.from([0x74, 0x58, 0x72, 0x67, 0x65, 0x74, 0xe9]),
+		},
+	])("edits an undeclared encoding the codec resolves, byte for byte: $label", async ({ bytes, after }) => {
+		const { tool, path } = await fixture(bytes);
+		await tool.execute("fixture-edit", { path, edits: [{ oldText: "a", newText: "X" }] });
+		expect(await readFile(path)).toEqual(after);
+	});
+
+	it.each([
 		{ label: "malformed UTF-16 BOM body", bytes: Buffer.from([0xff, 0xfe, 0x74]) },
-		{ label: "legacy or malformed UTF-8", bytes: Buffer.from([0x74, 0x61, 0x72, 0x67, 0x65, 0x74, 0xe9]) },
-	])("rejects unsupported bytes without rewriting them: $label", async ({ bytes }) => {
+		{ label: "NUL-bearing binary", bytes: Buffer.from([0x74, 0x61, 0x00, 0xfe, 0x01]) },
+	])("rejects unresolvable bytes without rewriting them: $label", async ({ bytes }) => {
 		const { tool, path, cwd } = await fixture(bytes);
 		await expect(tool.execute("fixture-edit", { path, edits: [{ oldText: "a", newText: "X" }] })).rejects.toThrow(
 			/PI_FILE_ENCODING_CORRUPTION/,

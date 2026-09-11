@@ -2,7 +2,13 @@ import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveDeclaredEncoding } from "../src/core/tools/file-encoding-metadata.ts";
+import {
+	forgetDetectedFileEncodings,
+	recallDetectedFileEncoding,
+	rememberDetectedFileEncoding,
+	resolveDeclaredEncoding,
+	resolveFileEncoding,
+} from "../src/core/tools/file-encoding-metadata.ts";
 
 const directories: string[] = [];
 
@@ -175,5 +181,62 @@ describe("declared source encoding from project metadata", () => {
 		const root = await tree();
 		await writeFile(join(root, ".editorconfig"), "[*.pas]\nindent_style = tab\n");
 		expect(await resolveDeclaredEncoding(join(root, "unit.pas"))).toBeUndefined();
+	});
+});
+
+describe("resolved source encoding", () => {
+	it("prefers an explicit argument, then the fileEncodings setting, then .editorconfig", async () => {
+		const root = await tree();
+		const config = join(root, ".editorconfig");
+		await writeFile(config, "root = true\n\n[*.pas]\ncharset = latin1\n");
+		const target = join(root, "unit.pas");
+		const fileEncodings = [{ glob: "*.pas", encoding: "cp437" }];
+
+		expect(await resolveFileEncoding(target, root, {})).toEqual({
+			encoding: "windows-1252",
+			source: "editorconfig",
+			declaredIn: config,
+		});
+		expect(await resolveFileEncoding(target, root, { fileEncodings })).toEqual({
+			encoding: "cp437",
+			source: "settings",
+		});
+		expect(await resolveFileEncoding(target, root, { fileEncodings, argument: "utf-16-le" })).toEqual({
+			encoding: "utf-16-le",
+			source: "argument",
+		});
+	});
+
+	it("matches fileEncodings globs with EditorConfig semantics and takes the first match", async () => {
+		const root = await tree();
+		await mkdir(join(root, "src", "forms"), { recursive: true });
+		const fileEncodings = [
+			{ glob: "src/**.dfm", encoding: "cp437" },
+			{ glob: "*.dfm", encoding: "utf-16-le" },
+			{ glob: "{a,b}.txt", encoding: "latin1" },
+		];
+		const resolved = async (...segments: string[]) =>
+			(await resolveFileEncoding(join(root, ...segments), root, { fileEncodings }))?.encoding;
+		expect(await resolved("src", "forms", "main.dfm")).toBe("cp437");
+		expect(await resolved("other", "main.dfm")).toBe("utf-16-le");
+		expect(await resolved("a.txt")).toBe("latin1");
+		expect(await resolved("c.txt")).toBeUndefined();
+	});
+
+	it("returns nothing when neither the argument, the setting, nor a declaration applies", async () => {
+		const root = await tree();
+		expect(await resolveFileEncoding(join(root, "unit.pas"), root, { fileEncodings: [] })).toBeUndefined();
+	});
+});
+
+describe("detected source encoding cache", () => {
+	it("recalls a detection for the same content and forgets it when the file changes", () => {
+		forgetDetectedFileEncodings();
+		const path = join("/fixture", "unit.pas");
+		expect(recallDetectedFileEncoding(path, 1000)).toBeUndefined();
+		rememberDetectedFileEncoding(path, 1000, "windows-1252");
+		expect(recallDetectedFileEncoding(path, 1000)).toBe("windows-1252");
+		expect(recallDetectedFileEncoding(path, 1001)).toBeUndefined();
+		expect(recallDetectedFileEncoding(join("/fixture", "other.pas"), 1000)).toBeUndefined();
 	});
 });

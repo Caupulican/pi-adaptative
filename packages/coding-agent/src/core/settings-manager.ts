@@ -40,6 +40,7 @@ import {
 import { isWorkerSession } from "./session-role.ts";
 import { validateSkillName } from "./skills.ts";
 import type { ToolkitScript } from "./toolkit/script-registry.ts";
+import type { FileEncodingRule } from "./tools/file-encoding-metadata.ts";
 import { acquireFileLockSync, LOW_LATENCY_FILE_LOCK_OPTIONS, writeFileAtomicSync } from "./util/atomic-file.ts";
 import { matchesCompiledPattern } from "./util/minimatch-cache.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
@@ -369,6 +370,15 @@ export interface ToolExecutionSettings {
 
 export type ResolvedToolExecutionSettings = Required<ToolExecutionSettings>;
 
+/**
+ * Source charsets the user states for files the project itself does not declare, as EditorConfig
+ * globs relative to the working directory. The harness resolves an undeclared file from its own
+ * bytes through the managed Python codec, so this is for the cases content cannot settle: a tree
+ * whose legacy charset is not the one detection would infer, or one that must not be inferred at
+ * all. Project rules are consulted before global ones, and the first matching glob wins.
+ */
+export type FileEncodingsSettings = Record<string, string>;
+
 export const DEFAULT_TOOL_EXECUTION_CONCURRENCY = 8;
 const MIN_TOOL_EXECUTION_CONCURRENCY = 1;
 const MAX_TOOL_EXECUTION_CONCURRENCY = 32;
@@ -645,6 +655,7 @@ export interface Settings {
 	windowsShell?: WindowsShellSettings; // Windows shell contract engine tier (core/tools/windows-shell-engine); on by default
 	backgroundTool?: BackgroundToolSettings; // Clock-based backgrounding of long foreground tool calls (core/background-tool-task-controller); off by default
 	toolExecution?: ToolExecutionSettings; // Parallel tool batch pool width (packages/agent refill pool); 8 by default
+	fileEncodings?: FileEncodingsSettings; // Source charset per EditorConfig-style glob; overrides .editorconfig, loses to an explicit encoding argument
 	edge?: EdgeSettings; // Standing grants for the edge classes that would otherwise ask the operator (core/autonomy/edge-policy)
 	learningPolicy?: LearningPolicySettings; // Default-on audited learning policy; destructive supersessions remain proposal-gated
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
@@ -3951,6 +3962,28 @@ export class SettingsManager {
 				MAX_TOOL_EXECUTION_CONCURRENCY,
 			),
 		};
+	}
+
+	/**
+	 * The `fileEncodings` rules in the order they are consulted: this project's first, then the
+	 * global ones it does not already cover. The effective-settings merge cannot express that on its
+	 * own — merging two maps keeps the global declaration order — so the layers are read directly.
+	 */
+	getFileEncodings(): FileEncodingRule[] {
+		const rules: FileEncodingRule[] = [];
+		const claimed = new Set<string>();
+		for (const layer of [this.directoryProfileSettings, this.projectSettings, this.globalSettings]) {
+			const configured = layer.fileEncodings;
+			if (!configured || typeof configured !== "object" || Array.isArray(configured)) continue;
+			for (const [pattern, value] of Object.entries(configured)) {
+				const glob = typeof pattern === "string" ? pattern.trim() : "";
+				const encoding = typeof value === "string" ? value.trim() : "";
+				if (glob.length === 0 || encoding.length === 0 || claimed.has(glob)) continue;
+				claimed.add(glob);
+				rules.push({ glob, encoding });
+			}
+		}
+		return rules;
 	}
 
 	getBackgroundToolSettings(): ResolvedBackgroundToolSettings {

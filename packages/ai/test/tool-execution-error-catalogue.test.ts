@@ -23,7 +23,7 @@ describe("tool execution error catalogue", () => {
 			bashEmptyRedirectTarget: "redirect target expanded to nothing",
 			encodingCorruption: "PI_FILE_ENCODING_CORRUPTION: legacy.dat is not valid UTF-8 text",
 			readEncodingRequired:
-				"PI_READ_ENCODING_REQUIRED: /src/unit.pas is not valid UTF-8 (first invalid byte at line 3, byte offset 15).",
+				"PI_READ_ENCODING_REQUIRED: /src/unit.pas is not valid UTF-8 (first invalid byte at line 3, byte offset 15) and the managed Python codec is unavailable (no interpreter).",
 			repeatedSuccessfulCall: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.diagnostic,
 			fileMutationRetarget:
 				"PI_FILE_MUTATION_RETARGET: retained as payloadRef file-mutation:123e4567-e89b-12d3-a456-426614174000",
@@ -123,7 +123,7 @@ describe("tool execution error catalogue", () => {
 			retainDiagnostic: false,
 			unchangedRetryLimit: 0,
 			guidance:
-				"Change approach: exact UTF-8 replacement unsafe. Use encoding-aware/byte-safe tool; never replay text edit.",
+				"The file's bytes could not be edited safely in the resolved encoding (see diagnostic); fix the replacement characters or declare the real encoding, never retype the edit.",
 		});
 	});
 

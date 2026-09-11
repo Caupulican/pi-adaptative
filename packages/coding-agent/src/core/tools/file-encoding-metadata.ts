@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { stripBom } from "../../utils/text.ts";
 
 /**
@@ -12,6 +12,22 @@ export interface DeclaredEncoding {
 	encoding: string;
 	/** Absolute path of the `.editorconfig` that declared it. */
 	source: string;
+}
+
+/** One `fileEncodings` rule: an EditorConfig-style glob, relative to the working directory. */
+export interface FileEncodingRule {
+	glob: string;
+	encoding: string;
+}
+
+/** Where a resolved charset came from, in the order the harness consults them. */
+export type FileEncodingSource = "argument" | "settings" | "editorconfig";
+
+export interface ResolvedFileEncoding {
+	encoding: string;
+	source: FileEncodingSource;
+	/** Absolute path of the `.editorconfig` that declared it; present only for `"editorconfig"`. */
+	declaredIn?: string;
 }
 
 interface EditorConfigSection {
@@ -291,4 +307,82 @@ export async function resolveDeclaredEncoding(
 		if (parent === directory) return undefined;
 		directory = parent;
 	}
+}
+
+/** How a charset the codec resolved from the file's own bytes is named to the model. */
+export const PYTHON_DETECTION_SOURCE = "python detection";
+
+/**
+ * Name the evidence the way the reader would type it: a declaring file relative while it is inside
+ * the working directory, absolute once it is outside, never a path that walks back out of the tree.
+ */
+export function describeFileEncodingSource(resolved: ResolvedFileEncoding, cwd: string): string {
+	if (resolved.source === "argument") return "the encoding argument";
+	if (resolved.source === "settings") return "settings fileEncodings";
+	const declaredIn = resolved.declaredIn ?? "";
+	const relativePath = relative(cwd, declaredIn);
+	return relativePath === "" || relativePath.startsWith("..") || isAbsolute(relativePath)
+		? declaredIn
+		: relativePath.split(sep).join("/");
+}
+
+/**
+ * The charset for one file, from the only places that can state it without guessing: the call's own
+ * argument, the user's `fileEncodings` setting, then the project's `.editorconfig`. Nothing here
+ * inspects bytes — a file no declaration covers is resolved later, from its content, by the managed
+ * Python codec.
+ */
+export async function resolveFileEncoding(
+	absolutePath: string,
+	cwd: string,
+	settings?: {
+		argument?: string;
+		fileEncodings?: readonly FileEncodingRule[];
+		stopAt?: string;
+		signal?: AbortSignal;
+	},
+): Promise<ResolvedFileEncoding | undefined> {
+	settings?.signal?.throwIfAborted();
+	if (settings?.argument !== undefined) return { encoding: settings.argument, source: "argument" };
+	const target = resolvePath(absolutePath);
+	for (const rule of settings?.fileEncodings ?? []) {
+		// First match in declaration order wins, exactly as a section list is read top to bottom.
+		if (sectionMatches(rule.glob, resolvePath(cwd), target)) return { encoding: rule.encoding, source: "settings" };
+	}
+	const declared = await resolveDeclaredEncoding(absolutePath, {
+		stopAt: settings?.stopAt,
+		signal: settings?.signal,
+	});
+	return declared ? { encoding: declared.encoding, source: "editorconfig", declaredIn: declared.source } : undefined;
+}
+
+/**
+ * What the codec resolved from a file's own bytes, so a read and the edit that follows it agree on
+ * one charset instead of each paying for its own detection. The modification time is the witness:
+ * different bytes are a different file, and the entry stops applying the moment they change.
+ */
+const detectedEncodings = new Map<string, string>();
+const MAX_REMEMBERED_DETECTIONS = 512;
+
+function detectionKey(absolutePath: string, mtimeMs: number): string {
+	return `${resolvePath(absolutePath)}\0${mtimeMs}`;
+}
+
+export function rememberDetectedFileEncoding(absolutePath: string, mtimeMs: number, encoding: string): void {
+	const key = detectionKey(absolutePath, mtimeMs);
+	detectedEncodings.delete(key);
+	detectedEncodings.set(key, encoding);
+	for (const oldest of detectedEncodings.keys()) {
+		if (detectedEncodings.size <= MAX_REMEMBERED_DETECTIONS) break;
+		detectedEncodings.delete(oldest);
+	}
+}
+
+export function recallDetectedFileEncoding(absolutePath: string, mtimeMs: number): string | undefined {
+	return detectedEncodings.get(detectionKey(absolutePath, mtimeMs));
+}
+
+/** Test seam: the cache is session state, not a cross-test fixture. */
+export function forgetDetectedFileEncodings(): void {
+	detectedEncodings.clear();
 }
