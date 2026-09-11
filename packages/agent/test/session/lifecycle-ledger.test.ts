@@ -166,6 +166,20 @@ describe("session lifecycle ledger", () => {
 		).toThrow(/resultMessageEntryId/);
 	});
 
+	it("keeps the request's reasoning level in the clear next to the config fingerprint", () => {
+		const session = SessionManager.inMemory();
+		session.appendRequestSnapshot({ ...requestSnapshot("req-reasoned"), reasoning: "low" });
+		session.appendRequestSnapshot(requestSnapshot("req-plain"));
+		const snapshots = session
+			.getEntries()
+			.filter((entry) => entry.type === "request_snapshot")
+			.map((entry) => [entry.requestId, entry.reasoning]);
+		expect(snapshots).toEqual([
+			["req-reasoned", "low"],
+			["req-plain", undefined],
+		]);
+	});
+
 	it("accepts provider identifiers containing colon and pipe and keeps model order", () => {
 		const session = SessionManager.inMemory();
 		session.appendRequestSnapshot(requestSnapshot("provider:req|1"));

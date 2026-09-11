@@ -378,6 +378,7 @@ export class ForegroundLifecycleController {
 			toolsFingerprint: toolsFingerprint(context.context.tools ?? []),
 			historyFingerprint: historyFingerprint(context.context.messages),
 			messageEntryIds: messageEntryIds(this.deps.sessionManager),
+			...(typeof context.reasoning === "string" ? { reasoning: context.reasoning } : {}),
 		});
 		dumpProviderRequest(requestId, context.context);
 		signal?.throwIfAborted();

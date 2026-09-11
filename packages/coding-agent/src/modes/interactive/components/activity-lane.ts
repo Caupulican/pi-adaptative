@@ -211,6 +211,8 @@ export function projectActivityLane(snapshot: ActivityLaneCanonicalSnapshot): Ac
  * Color carries status only; labels stay in the text/muted hierarchy.
  */
 const TURN_TEXT_MAX = 32;
+/** The subject keeps at least this much of the slot when the timing suffix is long. */
+const TURN_TEXT_MIN_LABEL = 8;
 const EVENT_TEXT_MAX = 36;
 /** The queue label carries its delivery boundary and the send-now key; it is the operator's own state and must read whole. */
 const QUEUE_TEXT_MAX = 80;
@@ -346,19 +348,24 @@ export function renderActivityLaneLine(
 	if (slots.turn || slots.soloTool) {
 		const status = slots.turn?.status === "waiting" || slots.soloTool?.status === "waiting" ? "waiting" : "active";
 		const dotColor: ThemeColor = status === "waiting" ? "warning" : "accent";
+		// The timing suffix is the fact the slot exists for; a long subject yields width to it rather
+		// than swallowing it at the right edge.
+		const withTiming = (label: string, item: ActivityLaneItem): string => {
+			const suffix = elapsed(item);
+			const labelWidth = Math.max(TURN_TEXT_MIN_LABEL, TURN_TEXT_MAX - visibleWidth(suffix));
+			return `${truncateToWidth(label, labelWidth, "…")}${suffix}`;
+		};
 		let text = "";
 		if (slots.soloTool) {
-			text = `${slots.soloTool.label}${elapsed(slots.soloTool)}`;
+			text = withTiming(slots.soloTool.label, slots.soloTool);
 		} else if (slots.turn) {
 			const normalized = slots.turn.label.trim().toLowerCase();
 			const generic = normalized === "working" || normalized === "working." || normalized === "working...";
 			const hasSpecific =
 				Boolean(slots.plan) || slots.groups.length > 0 || Boolean(slots.queue) || Boolean(slots.event);
-			text = generic && hasSpecific ? "" : `${slots.turn.label}${elapsed(slots.turn)}`;
+			text = generic && hasSpecific ? "" : withTiming(slots.turn.label, slots.turn);
 		}
-		turnPart = text
-			? `${theme.fg(dotColor, "●")} ${theme.fg("muted", truncateToWidth(text, TURN_TEXT_MAX, "…"))}`
-			: `${theme.fg(dotColor, "●")}`;
+		turnPart = text ? `${theme.fg(dotColor, "●")} ${theme.fg("muted", text)}` : `${theme.fg(dotColor, "●")}`;
 	}
 
 	// Plan slot: task/goal only. Do not copy the turn label into the plan slot.

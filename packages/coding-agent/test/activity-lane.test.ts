@@ -127,6 +127,24 @@ describe("activity lane", () => {
 		lane.dispose();
 	});
 
+	it("a long subject yields width to the timing suffix instead of swallowing it", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		const text = () => stripAnsi(lane.render(100).join("\n"));
+		lane.start({ id: "runtime:turn", kind: "runtime", label: "Reading the worker report and the ledger" });
+		now += 9_000;
+		lane.markFirstToken("runtime:turn");
+		now += 14_000;
+		const line = text();
+		expect(line).toContain("(23s, first 9s)");
+		expect(line).toMatch(/Reading[^(]*… \(23s, first 9s\)/);
+	});
+
 	it("keeps the first-token phrasing off every item that never waits for a token", () => {
 		let now = 1_000_000;
 		const lane = new ActivityLaneComponent(

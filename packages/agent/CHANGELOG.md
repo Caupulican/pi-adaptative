@@ -5,6 +5,7 @@
 - `Agent.abort(reason)` requires a reason; the persisted assistant message reads `Operation aborted (<reason>)` and a tool killed by that abort finalizes as a cancellation (`failureCode: "aborted"`) carrying the same name. Cancellations never enter the tool failure ledger.
 - Tool reservation contexts carry the call's emission index and whether it declares a mutation target (`AgentTool.mutationTarget`); the partition scheduler closes the open parallel group before a call whose arguments name an earlier sibling's mutation target, so emission order is honored for path dependencies inside one assistant message.
 - `DEFAULT_CLOUD_STREAM_IDLE`: stream-idle bounds for hosted providers (connect 120 s, active idle 120 s, quiet idle 300 s, everything else from `DEFAULT_STREAM_IDLE`), for hosts that pick a watchdog budget by model class.
+- `request_snapshot` entries carry `reasoning`, the level the request was sent with, in the clear next to the effective-config fingerprint, so a session census can count requests a request-local policy lowered.
 
 ## [0.99.17] - 2026-09-11
 

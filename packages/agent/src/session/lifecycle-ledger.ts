@@ -19,6 +19,12 @@ export interface RequestSnapshotEntry extends SessionEntryBase {
 	toolsFingerprint: string;
 	historyFingerprint: string;
 	messageEntryIds: string[];
+	/**
+	 * The reasoning level the request was sent with, when the host resolved one. Kept in the clear
+	 * (the effective-config fingerprint folds it) so a session census can count the requests a
+	 * request-local policy lowered, such as host-started turns.
+	 */
+	reasoning?: string;
 }
 
 export type SessionRequestSnapshotInput = Omit<RequestSnapshotEntry, "type" | "id" | "parentId" | "timestamp">;
@@ -132,6 +138,7 @@ function fieldsForType(type: string): readonly string[] {
 				"toolsFingerprint",
 				"historyFingerprint",
 				"messageEntryIds",
+				"reasoning",
 			];
 		case "foreground_tool_start":
 			return ["requestId", "assistantMessageEntryId", "callId", "toolName"];
@@ -194,6 +201,7 @@ export function validateSessionLifecycleEntry(value: unknown): asserts value is 
 			assertBoundedString(record.toolsFingerprint, "toolsFingerprint");
 			assertBoundedString(record.historyFingerprint, "historyFingerprint");
 			assertStringArray(record.messageEntryIds, "messageEntryIds");
+			if (record.reasoning !== undefined) assertBoundedString(record.reasoning, "reasoning", 64);
 			break;
 		case "foreground_tool_start":
 			assertExternalId(record.requestId, "requestId");
