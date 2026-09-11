@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS } from "../src/core/background-tool-task-controller.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "../src/core/context-gc.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS } from "../src/core/http-dispatcher.ts";
-import { getDirectoryResourceProfileInfo, SettingsManager } from "../src/core/settings-manager.ts";
+import {
+	DEFAULT_TOOL_EXECUTION_CONCURRENCY,
+	getDirectoryResourceProfileInfo,
+	SettingsManager,
+} from "../src/core/settings-manager.ts";
 import { validateSkillName } from "../src/core/skills.ts";
 
 describe("SettingsManager", () => {
@@ -1122,6 +1126,27 @@ describe("SettingsManager", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 
 			expect(() => manager.getHttpIdleTimeoutMs()).toThrow("Invalid httpIdleTimeoutMs setting");
+		});
+	});
+
+	describe("toolExecution settings", () => {
+		it("defaults the parallel tool pool width to DEFAULT_TOOL_EXECUTION_CONCURRENCY", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getToolExecutionSettings().concurrency).toBe(DEFAULT_TOOL_EXECUTION_CONCURRENCY);
+			expect(DEFAULT_TOOL_EXECUTION_CONCURRENCY).toBe(8);
+		});
+
+		it("lets project settings override the pool width and falls back for out-of-range values", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ toolExecution: { concurrency: 2 } }));
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ toolExecution: { concurrency: 12 } }),
+			);
+			expect(SettingsManager.create(projectDir, agentDir).getToolExecutionSettings().concurrency).toBe(12);
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ toolExecution: { concurrency: 0 } }));
+			expect(SettingsManager.create(projectDir, agentDir).getToolExecutionSettings().concurrency).toBe(
+				DEFAULT_TOOL_EXECUTION_CONCURRENCY,
+			);
 		});
 	});
 

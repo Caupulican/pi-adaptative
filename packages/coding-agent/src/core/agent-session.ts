@@ -1818,6 +1818,7 @@ export class AgentSession {
 		this.agent.beforeToolCall = this._toolGate.beforeToolCall;
 		this.agent.afterToolCall = this._toolGate.afterToolCall;
 		this.agent.backgroundToolCallAfterMs = this.settingsManager.getBackgroundToolSettings().callAfterMs;
+		this.agent.toolConcurrency = this.settingsManager.getToolExecutionSettings().concurrency;
 		this.agent.handoffToolCall = (context) =>
 			this.getActiveToolNames().includes("tool_task") ? this._backgroundToolTasks.handoff(context) : undefined;
 		this.agent.subscribeToolCallHandoffRequest = (toolCallId, request) =>

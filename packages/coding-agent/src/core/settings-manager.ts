@@ -362,6 +362,17 @@ export interface BackgroundToolSettings {
 
 export type ResolvedBackgroundToolSettings = Required<BackgroundToolSettings>;
 
+/** Parallel tool execution (packages/agent's refill pool): how many tool bodies of one assistant message run at once. */
+export interface ToolExecutionSettings {
+	concurrency?: number; // default: DEFAULT_TOOL_EXECUTION_CONCURRENCY -- pool width for a parallel tool batch; sequential-mode tools still run alone
+}
+
+export type ResolvedToolExecutionSettings = Required<ToolExecutionSettings>;
+
+export const DEFAULT_TOOL_EXECUTION_CONCURRENCY = 8;
+const MIN_TOOL_EXECUTION_CONCURRENCY = 1;
+const MAX_TOOL_EXECUTION_CONCURRENCY = 32;
+
 const MIN_BACKGROUND_TOOL_CALL_AFTER_MS = 0;
 const MAX_BACKGROUND_TOOL_CALL_AFTER_MS = 3_600_000;
 
@@ -633,6 +644,7 @@ export interface Settings {
 	processMatrix?: ProcessMatrixSettings; // Durable master/worker process-matrix supervision (core/process-matrix); on by default
 	windowsShell?: WindowsShellSettings; // Windows shell contract engine tier (core/tools/windows-shell-engine); on by default
 	backgroundTool?: BackgroundToolSettings; // Clock-based backgrounding of long foreground tool calls (core/background-tool-task-controller); off by default
+	toolExecution?: ToolExecutionSettings; // Parallel tool batch pool width (packages/agent refill pool); 8 by default
 	edge?: EdgeSettings; // Standing grants for the edge classes that would otherwise ask the operator (core/autonomy/edge-policy)
 	learningPolicy?: LearningPolicySettings; // Default-on audited learning policy; destructive supersessions remain proposal-gated
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
@@ -3926,6 +3938,18 @@ export class SettingsManager {
 		return {
 			pythonEngine: configured.pythonEngine !== false,
 			gnuToolsDir: sanitizeGnuToolsDirSetting(configured.gnuToolsDir),
+		};
+	}
+
+	getToolExecutionSettings(): ResolvedToolExecutionSettings {
+		const configured = this.settings.toolExecution ?? {};
+		return {
+			concurrency: sanitizeIntegerSetting(
+				configured.concurrency,
+				DEFAULT_TOOL_EXECUTION_CONCURRENCY,
+				MIN_TOOL_EXECUTION_CONCURRENCY,
+				MAX_TOOL_EXECUTION_CONCURRENCY,
+			),
 		};
 	}
 
