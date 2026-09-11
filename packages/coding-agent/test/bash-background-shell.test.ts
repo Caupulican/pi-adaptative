@@ -127,21 +127,25 @@ describe.skipIf(process.platform !== "win32")("background commands and the Windo
 		const sessionKey = `test-bg-engine-${randomUUID()}`;
 		const tool = createEngineTool(root, sessionKey);
 		try {
-			let backgroundSettled = false;
+			// The property under test is ordering, not speed: the foreground command must not queue
+			// behind the background coordinator. Comparing the two completion instants proves exactly
+			// that and cannot flake on a loaded host, where both sides stretch together and any
+			// wall-clock bound on the foreground spawn eventually trips.
+			let backgroundDoneAt: number | undefined;
 			const background = tool
 				.execute("bg-win-1", { command: "sleep 3; echo bg-done", background: true })
 				.then((result) => {
-					backgroundSettled = true;
+					backgroundDoneAt = Date.now();
 					return result;
 				});
 
-			const startedAt = Date.now();
 			const foreground = await tool.execute("fg-win-1", { command: "echo fg-ran" });
+			const foregroundDoneAt = Date.now();
 
 			expect(text(foreground)).toContain("fg-ran");
-			expect(Date.now() - startedAt).toBeLessThan(2_500);
-			expect(backgroundSettled).toBe(false);
+			expect(backgroundDoneAt).toBeUndefined();
 			expect(text(await background)).toContain("bg-done");
+			expect(foregroundDoneAt).toBeLessThan(backgroundDoneAt ?? Number.NaN);
 		} finally {
 			await disposeShellExecutionSessionAndWait(sessionKey);
 			rmSync(root, { recursive: true, force: true });

@@ -189,6 +189,16 @@ export interface BackgroundToolTerminalMessage {
 			toolCallId: string;
 			status: BackgroundToolTaskStatus;
 			toolName: string;
+			/**
+			 * What this wake-up actually had to carry, measured rather than assumed: the UTF-8 byte
+			 * length of the record's final output (0 when it produced none) and whether the message
+			 * carried that output in full. `inlined: false` is exactly the record that printed the
+			 * `output omitted` line and still owes a `tool_task wait`, so a session's records price
+			 * the 24 KiB message budget from durable evidence -- persisted task records carry no
+			 * output, so nothing else in the session can answer it after the fact.
+			 */
+			outputBytes: number;
+			inlined: boolean;
 			artifactId?: string;
 			piVerification?: BackgroundToolVerification;
 			piToolInvocation?: ToolInvocationReceipt;
@@ -265,6 +275,8 @@ export function loadBackgroundToolTaskRecordsNewestFirst(
 interface TerminalOutputProjection {
 	taskId: string;
 	statusLine: string;
+	/** UTF-8 byte length of the record's final output; 0 when the task produced none. */
+	outputBytes: number;
 	/** The record's final output, rendered verbatim under the message budget. */
 	inlineOutput?: string;
 	/** Replacement line naming the exact `tool_task wait` that still collects this output. */
@@ -292,14 +304,16 @@ function projectTerminalOutputs(
 	const candidates = included.map((record) => {
 		const statusLine = `- ${record.taskId}: ${record.status} tool=${record.toolName}`;
 		const output = record.output ?? "";
+		const outputBytes = utf8Bytes(output);
 		return {
 			taskId: record.taskId,
 			statusLine,
 			output,
+			outputBytes,
 			omissionLine:
 				output === ""
 					? undefined
-					: `  output omitted (${utf8Bytes(output)} bytes): tool_task action=wait taskId=${record.taskId}`,
+					: `  output omitted (${outputBytes} bytes): tool_task action=wait taskId=${record.taskId}`,
 		};
 	});
 	// Start from the message every record would produce if nothing were inlined, then spend the
@@ -310,12 +324,12 @@ function projectTerminalOutputs(
 		if (candidate.omissionLine) total += utf8Bytes(candidate.omissionLine) + 1;
 	}
 	return candidates.map((candidate) => {
-		const { taskId, statusLine, output, omissionLine } = candidate;
-		if (!omissionLine) return { taskId, statusLine };
-		const delta = utf8Bytes(output) - utf8Bytes(omissionLine);
-		if (total + delta > MAX_TERMINAL_MESSAGE_BYTES) return { taskId, statusLine, omissionLine };
+		const { taskId, statusLine, output, outputBytes, omissionLine } = candidate;
+		if (!omissionLine) return { taskId, statusLine, outputBytes };
+		const delta = outputBytes - utf8Bytes(omissionLine);
+		if (total + delta > MAX_TERMINAL_MESSAGE_BYTES) return { taskId, statusLine, outputBytes, omissionLine };
 		total += delta;
-		return { taskId, statusLine, inlineOutput: output };
+		return { taskId, statusLine, outputBytes, inlineOutput: output };
 	});
 }
 
@@ -378,13 +392,18 @@ export function createBackgroundToolTerminalMessage(
 	if (records.length === 0) throw new TypeError("Background tool terminal handoff requires at least one record");
 	const wakeParent = options?.wakeParent ?? true;
 	const { included, omitted, projections } = terminalOutputProjectionsFor(records, wakeParent);
-	const projected = included.map((record) => {
+	const projected = included.map((record, index) => {
 		const verification = retainedBackgroundToolVerification(record, record.taskId);
+		// The projection decided what rode along; measurement reports that same decision instead of
+		// re-deriving it, so the two can never disagree. `projections` maps 1:1 over `included`.
+		const projection = projections[index];
 		return {
 			taskId: record.taskId,
 			toolCallId: record.toolCallId,
 			status: record.status,
 			toolName: record.toolName,
+			outputBytes: projection?.outputBytes ?? utf8Bytes(record.output ?? ""),
+			inlined: projection?.omissionLine === undefined,
 			...(record.artifactId ? { artifactId: record.artifactId } : {}),
 			...(record.piToolInvocation ? { piToolInvocation: retainedToolInvocation(record) } : {}),
 			...(record.executionContext ? { executionContext: record.executionContext } : {}),
@@ -732,8 +751,15 @@ export class BackgroundToolTaskController {
 		return [...this.tasks.values()].map((state) => ({ ...state.record }));
 	}
 
-	/** Model-facing read that consumes terminal delivery without approving its outcome. */
-	observe(taskIds?: string | readonly string[]): BackgroundToolTaskRecord[] {
+	/**
+	 * Model-facing read that consumes terminal delivery without approving its outcome.
+	 *
+	 * Only a read that actually carried the task's output may call this: the delivered wake-up (via
+	 * its receipt) and `wait`. `list` is a status-only snapshot and must never observe -- the
+	 * notifier delivers only records still unobserved, so consuming here would drop the output the
+	 * listing never showed.
+	 */
+	private observe(taskIds?: string | readonly string[]): BackgroundToolTaskRecord[] {
 		const ids = typeof taskIds === "string" ? [taskIds] : taskIds;
 		const states = ids
 			? ids.flatMap((taskId) => {

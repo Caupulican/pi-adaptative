@@ -304,6 +304,46 @@ describe("BackgroundToolTaskController", () => {
 		expect(backgroundToolTerminalDeliveredTaskIds(records)).toEqual(["tool-task-1", "tool-task-3"]);
 	});
 
+	it("measures each record's output bytes and whether the wake-up carried it", () => {
+		const record = (taskId: string, output: string): BackgroundToolTaskRecord => ({
+			sessionId: "session-a",
+			taskId,
+			toolCallId: `call-${taskId}`,
+			toolName: "bash",
+			status: "completed",
+			startedAt: "2026-08-01T12:00:00.000Z",
+			completedAt: "2026-08-01T12:00:01.000Z",
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "bash completed",
+			output,
+		});
+		// Multi-byte on purpose: the budget is spent in bytes, so the measurement must be bytes too.
+		const multiByte = "café ✓";
+		const overBudget = "z".repeat(30 * 1024);
+		const records = [record("tool-task-1", multiByte), record("tool-task-2", overBudget), record("tool-task-3", "")];
+
+		const message = createBackgroundToolTerminalMessage(records);
+
+		expect(Buffer.byteLength(multiByte, "utf8")).toBeGreaterThan(multiByte.length);
+		expect(message.details.records).toEqual([
+			expect.objectContaining({
+				taskId: "tool-task-1",
+				outputBytes: Buffer.byteLength(multiByte, "utf8"),
+				inlined: true,
+			}),
+			expect.objectContaining({ taskId: "tool-task-2", outputBytes: 30 * 1024, inlined: false }),
+			expect.objectContaining({ taskId: "tool-task-3", outputBytes: 0, inlined: true }),
+		]);
+		// The fields report the projection's own decision: an omitted record still measures the full
+		// output it owes a wait, and `inlined` agrees with the delivery receipt exactly.
+		expect(message.content).toContain(multiByte);
+		expect(message.content).toContain(
+			`output omitted (${30 * 1024} bytes): tool_task action=wait taskId=tool-task-2`,
+		);
+		expect(message.content).not.toContain(overBudget);
+		expect(backgroundToolTerminalDeliveredTaskIds(records)).toEqual(["tool-task-1", "tool-task-3"]);
+	});
+
 	it("owns task identity and terminal output per session", async () => {
 		const first = createHarness("session-a");
 		const second = createHarness("session-b");
@@ -551,19 +591,23 @@ describe("BackgroundToolTaskController", () => {
 		await controller.shutdown();
 	});
 
-	it("marks a terminal event observed when tool_task list views it before delivery", async () => {
+	it("leaves a terminal record unread when a list views it before delivery, so the wake-up still carries it", async () => {
 		let releaseDelivery!: () => void;
 		const deliveryGate = new Promise<void>((resolve) => {
 			releaseDelivery = resolve;
 		});
-		const delivered: BackgroundToolTaskRecord[] = [];
+		// The real notifier skips records that are already observed and reports what it inlined, so a
+		// listing that consumed delivery would silence the result entirely.
+		const delivered: Array<{ taskId: string; observedAt: string | undefined }> = [];
 		const controller = new BackgroundToolTaskController({
 			getSessionId: () => "session-a",
 			getArtifactStore: () => undefined,
 			persist: () => {},
-			notifyTerminal: async (records) => {
+			notifyTerminal: async (records, options) => {
 				await deliveryGate;
-				delivered.push(...records);
+				const unread = records.filter((record) => record.observedAt === undefined);
+				delivered.push(...unread.map((record) => ({ taskId: record.taskId, observedAt: record.observedAt })));
+				return { deliveredTaskIds: backgroundToolTerminalDeliveredTaskIds(unread, options) };
 			},
 		});
 		const call = controlledContext();
@@ -576,12 +620,15 @@ describe("BackgroundToolTaskController", () => {
 		await Promise.resolve();
 		await Promise.resolve();
 
-		const observed = controller.observe();
+		const listed = controller.list();
 		releaseDelivery();
 		await controller.waitForNotifications();
 
-		expect(observed).toEqual([expect.objectContaining({ taskId: "tool-task-1", status: "completed" })]);
-		expect(delivered).toEqual([expect.objectContaining({ taskId: "tool-task-1", observedAt: expect.any(String) })]);
+		expect(listed).toEqual([expect.objectContaining({ taskId: "tool-task-1", status: "completed" })]);
+		expect(listed[0]?.observedAt).toBeUndefined();
+		expect(delivered).toEqual([{ taskId: "tool-task-1", observedAt: undefined }]);
+		// The delivered wake-up is what consumed it, and only after it carried the output.
+		expect(controller.list()[0]?.observedAt).toEqual(expect.any(String));
 		await controller.shutdown();
 	});
 
@@ -983,7 +1030,15 @@ describe("BackgroundToolTaskController", () => {
 		expect(message.content).toContain("Parent was not woken because the owning goal is no longer active");
 		expect(message.content).not.toContain("Parent woke");
 		expect(message.details.records).toEqual([
-			{ taskId: "tool-task-1", toolCallId: "call-1", status: "completed", toolName: "slow", artifactId: "abc123" },
+			{
+				taskId: "tool-task-1",
+				toolCallId: "call-1",
+				status: "completed",
+				toolName: "slow",
+				outputBytes: 4,
+				inlined: true,
+				artifactId: "abc123",
+			},
 		]);
 	});
 

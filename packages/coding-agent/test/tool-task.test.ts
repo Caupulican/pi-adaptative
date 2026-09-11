@@ -102,10 +102,8 @@ function backgroundCall(toolCallId: string): {
 
 describe("tool_task", () => {
 	it("lists bounded session tasks without encouraging polling", async () => {
-		const observe = vi.fn(() => [running]);
 		const tool = createToolTaskToolDefinition({
 			list: () => [running],
-			observe,
 			wait: vi.fn(),
 			cancel: vi.fn(),
 		});
@@ -114,34 +112,35 @@ describe("tool_task", () => {
 		expect(text).toContain("tool-task-1: running");
 		expect(text).toContain("Do not poll");
 		expect(result.details).toMatchObject({ kind: "list", count: 1 });
-		expect(observe).toHaveBeenCalledOnce();
 	});
 
-	it("observes only terminal tasks included in the bounded list result", async () => {
+	it("lists only the bounded tail of session tasks, by status and never by output", async () => {
 		const records = Array.from({ length: 40 }, (_, index) => ({
 			...terminal,
 			taskId: `tool-task-${index + 1}`,
 			toolCallId: `call-${index + 1}`,
+			output: `full output of task ${index + 1}`,
 		}));
-		const observe = vi.fn();
 		const tool = createToolTaskToolDefinition({
 			list: () => records,
-			observe,
 			wait: vi.fn(),
 			cancel: vi.fn(),
 		});
 
 		const result = await tool.execute("call", { action: "list" }, undefined, undefined, extensionContext);
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
-		expect(observe).toHaveBeenCalledWith(records.slice(-32).map((record) => record.taskId));
-		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("8 older task(s) omitted") });
+		expect(text).toContain("8 older task(s) omitted");
+		expect(text).toContain("tool-task-40: completed");
+		expect(text).not.toContain("tool-task-8:");
+		// A listing shows status only; the completion wake-up is what carries the output.
+		expect(text).not.toContain("full output of task");
 	});
 
 	it("waits once on the controller's terminal event", async () => {
 		const wait = vi.fn(async () => terminal);
 		const tool = createToolTaskToolDefinition({
 			list: () => [running],
-			observe: () => [running],
 			wait,
 			cancel: vi.fn(),
 		});
@@ -170,6 +169,56 @@ describe("tool_task", () => {
 		expect(result.isError).not.toBe(true);
 	});
 
+	it("leaves a terminal record unread when list views it before delivery, so the wake-up still carries it", async () => {
+		let releaseDelivery!: () => void;
+		const deliveryGate = new Promise<void>((resolve) => {
+			releaseDelivery = resolve;
+		});
+		const deliveredOutputs: string[] = [];
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			persist: () => {},
+			// Like the real notifier: it delivers only the records still unobserved, and its receipt
+			// names what that delivered message carried in full.
+			notifyTerminal: async (records, options) => {
+				await deliveryGate;
+				const unread = records.filter((record) => record.observedAt === undefined);
+				deliveredOutputs.push(...unread.map((record) => record.output));
+				return { deliveredTaskIds: backgroundToolTerminalDeliveredTaskIds(unread, options) };
+			},
+		});
+		const call = backgroundCall("call-1");
+		controller.handoff(call.context);
+		call.complete({
+			toolCall: call.context.toolCall,
+			isError: false,
+			result: { content: [{ type: "text", text: "Test Files  3 passed (3)" }], details: {} },
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const tool = createToolTaskToolDefinition({
+			list: () => controller.list(),
+			wait: (taskId, signal, timeoutMs) => controller.wait(taskId, signal, timeoutMs),
+			cancel: (taskId) => controller.cancel(taskId),
+		});
+		const listed = await tool.execute("call", { action: "list" }, undefined, undefined, extensionContext);
+		const text = listed.content[0]?.type === "text" ? listed.content[0].text : "";
+
+		// The listing shows status only, so it must not consume the delivery that carries the output.
+		expect(text).toContain("tool-task-1: completed");
+		expect(text).not.toContain("Test Files  3 passed (3)");
+		expect(controller.list()[0]?.observedAt).toBeUndefined();
+
+		releaseDelivery();
+		await controller.waitForNotifications();
+
+		expect(deliveredOutputs).toEqual(["Test Files  3 passed (3)"]);
+		expect(controller.list()[0]?.observedAt).toEqual(expect.any(String));
+		await controller.shutdown();
+	});
+
 	it("answers a wait immediately for a record the completion wake-up already delivered", async () => {
 		const controller = new BackgroundToolTaskController({
 			getSessionId: () => "session-a",
@@ -193,9 +242,6 @@ describe("tool_task", () => {
 
 		const tool = createToolTaskToolDefinition({
 			list: () => controller.list(),
-			observe: (taskIds) => {
-				controller.observe(taskIds);
-			},
 			wait: (taskId, signal, timeoutMs) => controller.wait(taskId, signal, timeoutMs),
 			cancel: (taskId) => controller.cancel(taskId),
 		});
@@ -216,7 +262,6 @@ describe("tool_task", () => {
 	it("returns a running snapshot as nonterminal control flow instead of a tool failure", async () => {
 		const tool = createToolTaskToolDefinition({
 			list: () => [running],
-			observe: () => [running],
 			wait: async () => running,
 			cancel: vi.fn(),
 		});
@@ -243,7 +288,6 @@ describe("tool_task", () => {
 	] as const)("projects a %s terminal task as a failed tool call", async (_status, record) => {
 		const tool = createToolTaskToolDefinition({
 			list: () => [record],
-			observe: () => [record],
 			wait: async () => record,
 			cancel: vi.fn(),
 		});
@@ -263,7 +307,6 @@ describe("tool_task", () => {
 	it("preserves a failed pending background verification through its single wait result", async () => {
 		const tool = createToolTaskToolDefinition({
 			list: () => [verificationFailed],
-			observe: () => [verificationFailed],
 			wait: async () => verificationFailed,
 			cancel: vi.fn(),
 		});
@@ -289,7 +332,6 @@ describe("tool_task", () => {
 			.mockResolvedValueOnce(verificationPassed);
 		const tool = createToolTaskToolDefinition({
 			list: () => [verificationPassed],
-			observe: () => [verificationPassed],
 			wait,
 			cancel: vi.fn(),
 		});
@@ -319,7 +361,6 @@ describe("tool_task", () => {
 		const watchdogRecord = { ...running, taskId: "tool-task-2", toolCallId: "call-2" };
 		const tool = createToolTaskToolDefinition({
 			list: () => [delivered, watchdogRecord],
-			observe: () => [delivered, watchdogRecord],
 			wait: async (taskId) => (taskId === delivered.taskId ? delivered : watchdogRecord),
 			cancel: vi.fn(),
 		});
@@ -347,7 +388,6 @@ describe("tool_task", () => {
 		const ordinary = { ...terminal, terminalDelivery: "pending" as const };
 		const tool = createToolTaskToolDefinition({
 			list: () => [ordinary],
-			observe: () => [ordinary],
 			wait: async () => ordinary,
 			cancel: vi.fn(),
 		});
@@ -366,7 +406,6 @@ describe("tool_task", () => {
 	it("projects an invalid or rejected wait as a failed tool call", async () => {
 		const tool = createToolTaskToolDefinition({
 			list: () => [],
-			observe: () => [],
 			wait: async () => {
 				throw new Error("Unknown background tool task tool-task-missing");
 			},
@@ -392,7 +431,6 @@ describe("tool_task", () => {
 		const cancel = vi.fn((taskId: string) => taskId === "tool-task-1");
 		const tool = createToolTaskToolDefinition({
 			list: () => [running],
-			observe: () => [running],
 			wait: vi.fn(),
 			cancel,
 		});
@@ -408,10 +446,8 @@ describe("tool_task", () => {
 	});
 
 	it("reports an empty session snapshot without the polling guidance", async () => {
-		const observe = vi.fn();
 		const tool = createToolTaskToolDefinition({
 			list: () => [],
-			observe,
 			wait: vi.fn(),
 			cancel: vi.fn(),
 		});
@@ -420,14 +456,12 @@ describe("tool_task", () => {
 
 		expect(result.content).toEqual([{ type: "text", text: "No background tool tasks in this session." }]);
 		expect(result.details).toMatchObject({ kind: "list", count: 0 });
-		expect(observe).toHaveBeenCalledWith([]);
 	});
 
 	it("names a cancellation that addressed nothing so the model does not assume it landed", async () => {
 		const cancel = vi.fn(() => false);
 		const tool = createToolTaskToolDefinition({
 			list: () => [terminal],
-			observe: () => [terminal],
 			wait: vi.fn(),
 			cancel,
 		});
@@ -449,7 +483,6 @@ describe("tool_task", () => {
 		const silent = { ...terminal, output: "" };
 		const tool = createToolTaskToolDefinition({
 			list: () => [silent],
-			observe: () => [silent],
 			wait: async () => silent,
 			cancel: vi.fn(),
 		});
@@ -469,7 +502,6 @@ describe("tool_task", () => {
 		const spilled = { ...terminal, artifactId: "artifact-7" };
 		const tool = createToolTaskToolDefinition({
 			list: () => [spilled],
-			observe: () => [spilled],
 			wait: async () => spilled,
 			cancel: vi.fn(),
 		});
@@ -488,7 +520,6 @@ describe("tool_task", () => {
 	it("projects a non-Error wait rejection as readable text instead of losing it", async () => {
 		const tool = createToolTaskToolDefinition({
 			list: () => [running],
-			observe: () => [running],
 			wait: async () => {
 				throw "controller went away";
 			},
@@ -514,7 +545,6 @@ describe("tool_task", () => {
 		const startedAt = new Date(Date.now() - 90_000).toISOString();
 		const tool = createToolTaskToolDefinition({
 			list: () => [],
-			observe: vi.fn(),
 			wait: async () => ({ ...running, startedAt }),
 			cancel: vi.fn(),
 		});

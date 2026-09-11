@@ -455,7 +455,14 @@ under one 24 KiB message budget; a record whose output does not fit gets an `out
 naming the exact `tool_task wait` that collects it. The notifier builds the message from the
 records still unread when it delivers and returns a receipt of the ids it inlined; the controller
 marks exactly those observed (the wake-up is the model-facing read) and never re-derives the set
-from an older snapshot; an omitted one stays unread until its own wait. The handoff stub, the `tool_task` guideline and the `background` descriptions all say the
+from an older snapshot; an omitted one stays unread until its own wait. `tool_task action=list` is
+a status-only read and never observes: it prints `taskId: status — summary` and no output, so
+consuming delivery there would make the notifier (which delivers only still-unread records) skip
+exactly the records whose output the listing never showed. Only the wake-up and `wait` consume a
+record. Each record in the wake-up's `details` carries `outputBytes` (the output's UTF-8 length) and
+`inlined` (whether this message carried it in full), so the byte budget is priced from what was
+delivered instead of assumed; persisted task records drop their output, so nothing else can answer
+that afterwards. The handoff stub, the `tool_task` guideline and the `background` descriptions all say the
 same thing: wait only for an omitted output, never poll. Why: listing only `taskId: status` made
 every background job cost a second provider request whose sole purpose was to fetch bytes the
 record already held, 10-45 s on a slow-first-token provider. Pinned by
