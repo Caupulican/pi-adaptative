@@ -65,6 +65,7 @@ export {
 
 const SENTINEL_BYTE = 0x1e;
 const BASH_SENTINEL_PAYLOAD_PREFIX = Buffer.from("v1:", "latin1");
+const BASH_SENTINEL_PAYLOAD_PREFIX_V2 = Buffer.from("v2:", "latin1");
 const MAX_STARTUP_DIAGNOSTIC_BYTES = 16 * 1024;
 const POWERSHELL_SESSION_READY_BYTES = Buffer.from(POWERSHELL_SESSION_READY_MARKER, "latin1");
 const POWERSHELL_SESSION_STDERR_READY_BYTES = Buffer.from(POWERSHELL_SESSION_STDERR_READY_MARKER, "latin1");
@@ -79,6 +80,12 @@ export interface ShellSessionExecOptions {
 	env?: NodeJS.ProcessEnv;
 	/** Host-owned task pin: re-enter cwd for this invocation without discarding shell environment. */
 	forceCwd?: boolean;
+	/**
+	 * Session-wide exported variables shared by every lane of one shell session. Before the command,
+	 * the lane applies what other lanes exported since its last command; after it, the lane
+	 * contributes what the command changed. Bash lanes only; a PowerShell session ignores it.
+	 */
+	exportLedger?: ShellExportLedger;
 }
 
 export interface ShellSessionExecutionResult {
@@ -87,6 +94,101 @@ export interface ShellSessionExecutionResult {
 	initialCwd?: string;
 	/** Shell-reported directory after the submitted command. */
 	cwd?: string;
+	/**
+	 * The shell's `export -p` listing after the command, present only for a caller that passed an
+	 * `exportLedger` and only when the listing changed on this lane.
+	 */
+	exports?: string;
+}
+
+const EXPORT_LISTING_LINE = /^declare -x ([A-Za-z_][A-Za-z0-9_]*)(?:=|$)/;
+/** Names the shell manages itself; they change on their own and are never a session export. */
+const VOLATILE_EXPORT_NAMES: ReadonlySet<string> = new Set(["_", "PWD", "OLDPWD", "SHLVL"]);
+
+/** `export -p` output as name -> the exact `declare -x` line that recreates the variable. */
+function parseExportListing(listing: string): Map<string, string> {
+	const entries = new Map<string, string>();
+	for (const line of listing.split("\n")) {
+		const match = EXPORT_LISTING_LINE.exec(line);
+		if (match && !VOLATILE_EXPORT_NAMES.has(match[1] as string)) entries.set(match[1] as string, line);
+	}
+	return entries;
+}
+
+/**
+ * Exported variables of one shell session, shared by all of its lanes.
+ *
+ * A lane is one persistent bash process; the pool spreads one session's commands over several. The
+ * session's environment is what the model reasons about: `export FOO=1` in one command and `$FOO`
+ * two commands later must agree even when the pool ran them on different lanes. Each lane reports
+ * its `export -p` listing in the command sentinel whenever it changed; the ledger merges the DELTA
+ * the lane produced (what that command set, changed or unset) into the session set, so two lanes
+ * finishing in any order each contribute their own changes and a stale snapshot can never erase
+ * a sibling's export. Before its next command, a lane behind the ledger's version replays the
+ * `declare -x` lines it lacks and an `unset -v` for every name the session no longer exports.
+ */
+export class ShellExportLedger {
+	private baseline: Map<string, string> | undefined;
+	private entries = new Map<string, string>();
+	private currentVersion = 0;
+
+	/** Bumps each time the session set changes; a lane compares it with the version it last applied. */
+	get version(): number {
+		return this.currentVersion;
+	}
+
+	/** Names the session currently exports, for diagnostics and tests. */
+	names(): string[] {
+		return [...this.entries.keys()];
+	}
+
+	/**
+	 * Merge what one lane's command changed. `previous` is that lane's last reported listing
+	 * (undefined for its first report, which is then measured against the session baseline: the
+	 * first listing any lane ever reported, i.e. the environment every lane was spawned with).
+	 */
+	record(previous: string | undefined, listing: string): void {
+		const next = parseExportListing(listing);
+		if (this.baseline === undefined) {
+			// The first report seeds the session: its `previous` is the spawn environment every lane
+			// starts from (the shell reports it before its first command), and the listing after that
+			// command is measured against it like any later delta.
+			this.baseline = previous === undefined ? next : parseExportListing(previous);
+			this.entries = new Map(this.baseline);
+		}
+		const before = previous === undefined ? this.baseline : parseExportListing(previous);
+		let changed = false;
+		for (const [name, line] of next) {
+			if (before.get(name) === line) continue;
+			if (this.entries.get(name) === line) continue;
+			this.entries.set(name, line);
+			changed = true;
+		}
+		for (const name of before.keys()) {
+			if (next.has(name) || !this.entries.has(name)) continue;
+			this.entries.delete(name);
+			changed = true;
+		}
+		if (changed) this.currentVersion += 1;
+	}
+
+	/**
+	 * The commands that bring a lane whose last reported listing is `laneListing` (undefined: a lane
+	 * that has not reported yet, so it still holds the baseline) up to the session set. Undefined
+	 * when the lane already matches.
+	 */
+	preludeFor(laneListing: string | undefined): string | undefined {
+		const lane =
+			laneListing === undefined ? (this.baseline ?? new Map<string, string>()) : parseExportListing(laneListing);
+		const lines: string[] = [];
+		for (const [name, line] of this.entries) {
+			if (lane.get(name) !== line) lines.push(line);
+		}
+		for (const name of lane.keys()) {
+			if (!this.entries.has(name)) lines.push(`unset -v ${name}`);
+		}
+		return lines.length === 0 ? undefined : lines.join("\n");
+	}
 }
 
 export interface PersistentShellSessionOptions {
@@ -112,14 +214,28 @@ function escapeSingleQuotesPowerShell(value: string): string {
 export function buildBashWire(command: string, nonce: string, cdTo: string | null): string {
 	const body = cdTo ? `command cd -- '${escapeSingleQuotesPosix(cdTo)}' && {\n${command}\n}` : command;
 	return [
+		// The exported set rides the frame only when it changed since this lane's previous command:
+		// the listing is compared in the shell against the lane's own snapshot (a plain, unexported
+		// variable, so it never appears in the listing itself). The snapshot is taken BEFORE the first
+		// command, so a lane's baseline is the environment it was spawned with, and that baseline is
+		// reported once so the session ledger can measure the first command's delta against it. One
+		// `$(export -p)` subshell per listing, no external process; the shell-managed names that change
+		// on their own (`_`, PWD, OLDPWD, SHLVL) are dropped inside the subshell so they never count.
+		"__pi_exports_before=",
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion, not a template literal
+		'if [ -z "${__PI_EXPORT_SNAPSHOT+x}" ]; then __PI_EXPORT_SNAPSHOT=$(unset -v _ PWD OLDPWD SHLVL; export -p); __pi_exports_before=$__PI_EXPORT_SNAPSHOT; fi',
 		`{ eval "$(cat <<'PI_EOF_${nonce}'`,
 		body,
 		`PI_EOF_${nonce}`,
 		`)"; } < /dev/null 2>&1`,
-		// Version and byte length make the frame unambiguous even when a legal POSIX path contains
-		// the record-separator byte used to terminate the sentinel. The subshell keeps its status
-		// scratch variable and LC_ALL change out of the persistent caller session.
-		`(__pi_status=$?; LC_ALL=C; printf '\\n\\036%s:v1:%s:%s:%s\\036' '${nonce}' "$__pi_status" "\${#PWD}" "$PWD")`,
+		"__pi_status=$?",
+		"__pi_exports=$(unset -v _ PWD OLDPWD SHLVL; export -p)",
+		'if [ "$__pi_exports" != "$__PI_EXPORT_SNAPSHOT" ]; then __PI_EXPORT_SNAPSHOT=$__pi_exports; __pi_exports_out=$__pi_exports; else __pi_exports_out=; fi',
+		// Version and byte lengths make the frame unambiguous even when a legal POSIX path or an
+		// exported value contains the record-separator byte used to terminate the sentinel. The
+		// subshell keeps the LC_ALL change (byte-counting lengths) out of the persistent session.
+		`(LC_ALL=C; printf '\\n\\036%s:v2:%s:%s:%s:%s:%s:%s:%s\\036' '${nonce}' "$__pi_status" "\${#PWD}" "$PWD" "\${#__pi_exports_before}" "$__pi_exports_before" "\${#__pi_exports_out}" "$__pi_exports_out")`,
+		"unset -v __pi_status __pi_exports __pi_exports_before __pi_exports_out",
 		"",
 	].join("\n");
 }
@@ -128,11 +244,76 @@ interface ParsedShellSentinel {
 	closeIndex: number;
 	exitCode: number | null;
 	cwd?: string;
+	/** The lane's listing before its first command (its baseline), reported once. */
+	exportsBefore?: string;
+	exports?: string;
 }
 
-/** Parse the versioned bash frame plus the legacy exit-only/exit+cwd PowerShell test frames. */
+/**
+ * Parse the v2 bash frame: `<exit>:<pwd bytes>:<pwd>:<baseline bytes>:<baseline>:<listing
+ * bytes>:<listing>` closed by the sentinel byte. Undefined while the frame is incomplete; on a corrupt frame, the exit code is kept
+ * and the other fields degrade, exactly like the v1 parser.
+ */
+function parseVersionedFrameV2(buffer: Buffer, payloadStart: number): ParsedShellSentinel | undefined {
+	const exitStart = payloadStart + BASH_SENTINEL_PAYLOAD_PREFIX_V2.length;
+	const exitEnd = buffer.indexOf(0x3a, exitStart);
+	if (exitEnd === -1) return undefined;
+	const exitCodeText = buffer.subarray(exitStart, exitEnd).toString("latin1");
+	const parsedExitCode = Number.parseInt(exitCodeText, 10);
+	const exitCode = Number.isNaN(parsedExitCode) ? null : parsedExitCode;
+	const readFramed = (lengthStart: number): { value: Buffer; end: number } | undefined | null => {
+		const lengthEnd = buffer.indexOf(0x3a, lengthStart);
+		if (lengthEnd === -1) return undefined;
+		const lengthText = buffer.subarray(lengthStart, lengthEnd).toString("latin1");
+		if (!/^\d+$/.test(lengthText)) return null;
+		const byteLength = Number.parseInt(lengthText, 10);
+		if (!Number.isSafeInteger(byteLength)) return null;
+		const valueStart = lengthEnd + 1;
+		const end = valueStart + byteLength;
+		if (buffer.length <= end) return undefined;
+		return { value: buffer.subarray(valueStart, end), end };
+	};
+	const cwd = readFramed(exitEnd + 1);
+	if (cwd === undefined) return undefined;
+	if (cwd !== null && buffer[cwd.end] === 0x3a) {
+		const before = readFramed(cwd.end + 1);
+		if (before === undefined) return undefined;
+		if (before !== null && buffer[before.end] === 0x3a) {
+			const listing = readFramed(before.end + 1);
+			if (listing === undefined) return undefined;
+			if (listing !== null && buffer[listing.end] === SENTINEL_BYTE) {
+				return {
+					closeIndex: listing.end,
+					exitCode,
+					...(cwd.value.length > 0 ? { cwd: cwd.value.toString("utf8") } : {}),
+					...(before.value.length > 0 ? { exportsBefore: before.value.toString("utf8") } : {}),
+					...(listing.value.length > 0 ? { exports: listing.value.toString("utf8") } : {}),
+				};
+			}
+		}
+	}
+	const closeIndex = buffer.indexOf(SENTINEL_BYTE, exitEnd + 1);
+	if (closeIndex === -1) return undefined;
+	return { closeIndex, exitCode };
+}
+
+/** Parse the versioned bash frames plus the legacy exit-only/exit+cwd PowerShell test frames. */
 function parseShellSentinel(buffer: Buffer, payloadStart: number): ParsedShellSentinel | undefined {
 	const available = buffer.length - payloadStart;
+	const v2ComparisonLength = Math.min(available, BASH_SENTINEL_PAYLOAD_PREFIX_V2.length);
+	if (
+		v2ComparisonLength > 0 &&
+		buffer.compare(
+			BASH_SENTINEL_PAYLOAD_PREFIX_V2,
+			0,
+			v2ComparisonLength,
+			payloadStart,
+			payloadStart + v2ComparisonLength,
+		) === 0
+	) {
+		if (available < BASH_SENTINEL_PAYLOAD_PREFIX_V2.length) return undefined;
+		return parseVersionedFrameV2(buffer, payloadStart);
+	}
 	const prefixComparisonLength = Math.min(available, BASH_SENTINEL_PAYLOAD_PREFIX.length);
 	const couldBeVersioned =
 		prefixComparisonLength > 0 &&
@@ -261,6 +442,10 @@ export class PersistentShellSession {
 	private childEnv: NodeJS.ProcessEnv | null = null;
 	private lastRequestedCwd: string | null = null;
 	private lastReportedCwd: string | undefined;
+	/** This lane's last reported `export -p` listing; what its next delta is measured against. */
+	private lastReportedExports: string | undefined;
+	/** Ledger version this lane last applied or contributed; behind the ledger means a prelude is due. */
+	private appliedExportVersion = 0;
 	private activeExec: ActiveExec | null = null;
 	private rejectStartup: ((error: Error) => void) | null = null;
 	private disposed = false;
@@ -327,7 +512,7 @@ export class PersistentShellSession {
 	private async execNow(
 		command: string,
 		cwd: string,
-		{ onData, signal, timeoutSeconds, silenceMs, env, forceCwd }: ShellSessionExecOptions,
+		{ onData, signal, timeoutSeconds, silenceMs, env, forceCwd, exportLedger }: ShellSessionExecOptions,
 	): Promise<ShellSessionExecutionResult> {
 		if (this.disposed) throw new Error(`Shell session "${this.key}" is disposed`);
 		if (signal?.aborted) throw new Error("aborted");
@@ -358,6 +543,12 @@ export class PersistentShellSession {
 			if (environmentPrelude) resolvedCommand = `${environmentPrelude}\n${command}`;
 			this.childEnv = { ...resolvedEnv };
 		}
+		// Bring this lane up to what the session's other lanes exported since its last command.
+		if (this.kind !== "powershell" && exportLedger && exportLedger.version !== this.appliedExportVersion) {
+			const exportPrelude = exportLedger.preludeFor(this.lastReportedExports);
+			if (exportPrelude) resolvedCommand = `${exportPrelude}\n${resolvedCommand}`;
+			this.appliedExportVersion = exportLedger.version;
+		}
 
 		const child = this.coordinator.child;
 		if (!child?.stdin || !child.stdout || !child.stderr) {
@@ -381,6 +572,8 @@ export class PersistentShellSession {
 				let stderrPending: Buffer = Buffer.alloc(0);
 				let commandExitCode: number | null | undefined;
 				let commandCwd: string | undefined;
+				let commandExports: string | undefined;
+				let commandExportsBefore: string | undefined;
 				let stderrBarrierSeen = this.kind !== "powershell";
 				let timeoutTimer: NodeJS.Timeout | undefined;
 
@@ -424,7 +617,24 @@ export class PersistentShellSession {
 					const exitCode = commandExitCode;
 					if (exitCode === undefined || !stderrBarrierSeen) return;
 					this.lastReportedCwd = commandCwd;
-					settle(() => resolve({ exitCode, initialCwd, cwd: commandCwd }));
+					// A lane's first frame carries the listing it started with: its own baseline, and the
+					// session's when no lane has reported yet.
+					if (commandExportsBefore !== undefined) this.lastReportedExports = commandExportsBefore;
+					if (commandExports !== undefined || commandExportsBefore !== undefined) {
+						// The lane contributes the delta its command produced; from then on it matches the
+						// session set, whether or not that delta changed it.
+						exportLedger?.record(this.lastReportedExports, commandExports ?? (commandExportsBefore as string));
+						if (commandExports !== undefined) this.lastReportedExports = commandExports;
+						if (exportLedger) this.appliedExportVersion = exportLedger.version;
+					}
+					settle(() =>
+						resolve({
+							exitCode,
+							initialCwd,
+							cwd: commandCwd,
+							...(exportLedger && commandExports !== undefined ? { exports: commandExports } : {}),
+						}),
+					);
 				};
 				// Retain only a tail that could still be a sentinel in progress: a sentinel starts
 				// with "\n" + 0x1e + nonce, so anything whose suffix is inconsistent with that
@@ -459,6 +669,8 @@ export class PersistentShellSession {
 								emitStdoutPending(stdoutPending.length);
 								commandExitCode = parsed.exitCode;
 								commandCwd = parsed.cwd;
+								commandExports = parsed.exports;
+								commandExportsBefore = parsed.exportsBefore;
 								resolveWhenComplete();
 								return;
 							}
@@ -543,6 +755,9 @@ export class PersistentShellSession {
 		this.childEnv = { ...spawnedEnv };
 		this.lastRequestedCwd = spawnedCwd;
 		this.lastReportedCwd = spawnedCwd;
+		// A fresh process holds the spawn environment: the ledger's baseline, nothing applied yet.
+		this.lastReportedExports = undefined;
+		this.appliedExportVersion = 0;
 	}
 
 	private async spawnPowerShellChild(
@@ -682,6 +897,8 @@ export class PersistentShellSession {
 		this.childEnv = null;
 		this.lastRequestedCwd = null;
 		this.lastReportedCwd = undefined;
+		this.lastReportedExports = undefined;
+		this.appliedExportVersion = 0;
 	}
 
 	private killChild(): void {

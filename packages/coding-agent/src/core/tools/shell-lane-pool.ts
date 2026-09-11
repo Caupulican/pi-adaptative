@@ -13,7 +13,7 @@
  * `disposeLane`.
  */
 
-import { disposePersistentShellSession } from "./shell-session.ts";
+import { disposePersistentShellSession, ShellExportLedger } from "./shell-session.ts";
 
 /** Warm lanes created on the first acquire; these are never retired. */
 export const DEFAULT_MIN_SHELL_LANES = 3;
@@ -252,15 +252,18 @@ export class ShellLanePool<TLane> {
  * `acquirePersistentShellSession`, so a session replaced underneath the pool (a shell-kind change,
  * a reset after a timeout) is picked up lazily instead of being retained as a dead object.
  *
- * The pool, not the lane, owns the working directory. A `cd` on any lane moves the whole pool: the
- * directory a command reports becomes the directory every later command starts in, which is what
- * "one persistent shell session" meant before the pool existed. Exported variables have no such
- * report, so they stay in the lane that set them.
+ * The pool, not the lane, owns the working directory and the exported variables. A `cd` on any lane
+ * moves the whole pool: the directory a command reports becomes the directory every later command
+ * starts in, which is what "one persistent shell session" meant before the pool existed. An
+ * `export` on any lane reaches the whole pool through the {@link ShellExportLedger}: each lane
+ * contributes the delta its commands produced and replays what it lacks before its next command.
  */
 export class ShellSessionLanes {
 	readonly pool: ShellLanePool<string>;
 	/** Directory the pool is standing in; undefined until a command has reported one. */
 	currentCwd: string | undefined;
+	/** Exported variables of the session, merged from every lane's reports. */
+	readonly exports = new ShellExportLedger();
 
 	constructor(sessionKey: string) {
 		this.pool = new ShellLanePool<string>({

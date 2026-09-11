@@ -200,7 +200,7 @@ nothing; the shell half was only found by a live run after the barrier half was 
 **Commands emitted together run together.** Foreground bash calls take lanes from an elastic pool
 of reusable persistent shells (three kept warm per session, more created on demand up to eight,
 idle extras retired after a minute; the pool owns the working directory so a `cd` on any lane
-moves the next command wherever it runs, exported variables stay in the lane that set them), and the
+moves the next command wherever it runs, exported variables reach every lane through the export ledger), and the
 mutation barrier is a group lock: announced command runs hold it together, file mutations hold it
 together, the two groups never overlap, admission is in emission order, and an unannounced run stays
 exclusive. Why: one persistent shell plus a FIFO writer lock turned three commands emitted in one
@@ -219,6 +219,19 @@ worker lanes shared one lock and one announcement table. Callers that name no sc
 default scope, which is exactly what a single-session process always had. Pinned by
 `packages/coding-agent/test/mutation-lock-scope.test.ts` and
 `packages/coding-agent/test/bash-edit-write-race.test.ts`.
+
+**An export on any lane is an export of the session.** Every bash lane reports its `export -p`
+listing in the command sentinel (frame v2) only when the listing changed since that lane's previous
+command, compared in the shell against an unexported snapshot variable (one `$(export -p)` subshell
+per command, no external process, payload only on change). The session's export ledger merges the
+DELTA each lane's command produced (set, changed, unset) into the session set, so two lanes finishing
+in either order both contribute and a sibling's stale snapshot can never erase an export; a lane
+behind the ledger replays the `declare -x` lines it lacks and `unset -v` for names the session no
+longer exports before its next command. Windows engine lanes share one `WindowsShellState` and need
+no ledger; the PowerShell floor stays lane-local. Why: with the lane pool, `export FOO=1` in one
+command and `$FOO` two commands later could land on different shells. Pinned by
+`packages/coding-agent/test/shell-export-sync.test.ts` and
+`packages/coding-agent/test/bash-concurrent-lanes.test.ts`.
 
 **A file's encoding is the harness's problem, never the model's.** Read and edit resolve it in
 this order: the `encoding` argument, the `fileEncodings` setting (glob to codec), the nearest

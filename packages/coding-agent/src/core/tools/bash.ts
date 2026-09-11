@@ -302,6 +302,9 @@ function createLocalShellOperations(
 						forceCwd,
 						timeoutSeconds: hasWallClock ? timeout : undefined,
 						silenceMs: !hasWallClock && silenceMs > 0 ? silenceMs : undefined,
+						// Exports are the session's, not the lane's: the lane applies what other lanes
+						// exported since its last command and contributes what this command changes.
+						exportLedger: lanes.exports,
 					});
 					// Last completion wins: the directory the shell reports is where the whole pool
 					// stands from now on.

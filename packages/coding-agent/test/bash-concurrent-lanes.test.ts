@@ -121,19 +121,27 @@ describe.skipIf(process.platform === "win32")("foreground bash calls on the shel
 		}
 	});
 
-	it("carries a variable a command needs into that command, whichever lane runs it", async () => {
+	it("shares an export across every lane: set in one call, read by the next calls whichever lane runs them", async () => {
 		const root = makeRoot();
 		const sessionKey = `test-lanes-env-${randomUUID()}`;
 		const tool = createSessionTool(root, sessionKey);
 		try {
-			// Exported state lives in the lane that set it, so a command that needs a variable states
-			// it itself. That is the documented contract and it holds on every lane.
+			// The tool promises that environment variables persist across calls. With the pool, the
+			// next call may run on any lane, so the export must reach all of them.
+			expect(await runAnnouncedBatch(tool, [{ command: "export PI_LANE_SYNC=value-1" }])).toEqual(["(no output)"]);
 			const outputs = await runAnnouncedBatch(tool, [
-				{ command: "FOO=1 sh -c 'echo value-$FOO'" },
-				{ command: "FOO=1 sh -c 'echo value-$FOO'" },
-				{ command: "FOO=1 sh -c 'echo value-$FOO'" },
+				{ command: "echo $PI_LANE_SYNC" },
+				{ command: "echo $PI_LANE_SYNC" },
+				{ command: "echo $PI_LANE_SYNC" },
 			]);
 			expect(outputs.map((output) => output.trim())).toEqual(["value-1", "value-1", "value-1"]);
+			// An unset reaches them the same way.
+			expect(await runAnnouncedBatch(tool, [{ command: "unset PI_LANE_SYNC" }])).toEqual(["(no output)"]);
+			const after = await runAnnouncedBatch(tool, [
+				{ command: "printenv PI_LANE_SYNC || echo gone" },
+				{ command: "printenv PI_LANE_SYNC || echo gone" },
+			]);
+			expect(after.map((output) => output.trim())).toEqual(["gone", "gone"]);
 		} finally {
 			await disposeShellExecutionSessionAndWait(sessionKey);
 			rmSync(root, { recursive: true, force: true });
@@ -169,6 +177,35 @@ describe.skipIf(process.platform === "win32")("foreground bash calls on the shel
 });
 
 describe.skipIf(process.platform !== "win32")("Windows shell engine lanes", () => {
+	it("shares an export across engine lanes because they run on one session state", async () => {
+		const root = makeRoot();
+		const sessionKey = `test-engine-exports-${randomUUID()}`;
+		const operations = createWindowsShellEngineOperations(sessionKey);
+		try {
+			expect(
+				(await operations.exec("export PI_ENGINE_SYNC=engine-one", root, { onData: () => {}, timeout: 30 }))
+					.exitCode,
+			).toBe(0);
+			// Three commands emitted together spread over engine lanes; each sees the export.
+			const outputs: string[][] = [[], [], []];
+			const results = await Promise.all(
+				outputs.map((chunks) =>
+					operations
+						.exec('echo "[$PI_ENGINE_SYNC]"', root, {
+							onData: (data) => chunks.push(data.toString("utf8")),
+							timeout: 30,
+						})
+						.then((result) => result.exitCode),
+				),
+			);
+			expect(results).toEqual([0, 0, 0]);
+			for (const chunks of outputs) expect(chunks.join("")).toContain("[engine-one]");
+		} finally {
+			await disposeWindowsShellEngineSession(sessionKey);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("runs engine commands emitted together concurrently on a shared session state", async () => {
 		const root = makeRoot();
 		const sessionKey = `test-engine-lanes-${randomUUID()}`;
