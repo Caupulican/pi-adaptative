@@ -13,7 +13,7 @@
  * `--dry-run` prints the plan for the current staged set without running anything.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -80,6 +80,14 @@ export function partitionBiomeFiles(biomeFiles, unstagedChangedFiles) {
 		whole: biomeFiles.filter((path) => !partial.has(path)),
 		partiallyStaged: biomeFiles.filter((path) => partial.has(path)),
 	};
+}
+
+/** Where a partially staged file's staged blob is checked: a sibling with the same extension, never committed. */
+export function stagedCopyPath(path) {
+	const slash = path.lastIndexOf("/");
+	const directory = slash === -1 ? "" : path.slice(0, slash + 1);
+	const name = slash === -1 ? path : path.slice(slash + 1);
+	return `${directory}.precommit-staged-${name}`;
 }
 
 /** Pure planner: staged repo-relative paths plus biome includes → the gates this commit buys. */
@@ -169,17 +177,25 @@ export function main(argv = process.argv.slice(2)) {
 			if (present.length > 0) execFileSync("git", ["add", "--", ...present], { cwd: repoRoot, stdio: "inherit" });
 		}
 		// A partially staged file is checked on its STAGED content and never rewritten or restaged:
-		// `git add` here would commit the unstaged hunks too. Formatting it is the author's move.
+		// `git add` here would commit the unstaged hunks too. Formatting it is the author's move. The
+		// staged blob is checked as a temporary sibling file (same directory, same extension) because
+		// biome's stdin mode reports "contents aren't fixed" even when its output equals its input.
 		for (const path of partiallyStaged) {
 			const staged = execFileSync("git", ["show", `:${path}`], { cwd: repoRoot });
 			const label = `biome on staged content of partially staged ${path}`;
 			process.stdout.write(`precommit: ${label}\n`);
-			const result = spawnSync(process.execPath, [biomeBin, "check", "--error-on-warnings", `--stdin-file-path=${path}`], {
-				cwd: repoRoot,
-				input: staged,
-				stdio: ["pipe", "inherit", "inherit"],
-				env: process.env,
-			});
+			const stagedCopy = stagedCopyPath(path);
+			writeFileSync(join(repoRoot, stagedCopy), staged);
+			let result;
+			try {
+				result = spawnSync(process.execPath, [biomeBin, "check", "--error-on-warnings", stagedCopy], {
+					cwd: repoRoot,
+					stdio: "inherit",
+					env: process.env,
+				});
+			} finally {
+				rmSync(join(repoRoot, stagedCopy), { force: true });
+			}
 			if (result.status !== 0) {
 				console.error(
 					`❌ precommit: ${label} failed. Stage the formatted content (format the file, then stage the hunks you mean) or stage the whole file.`,

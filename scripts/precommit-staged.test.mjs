@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { biomeCoveredFiles, globToRegExp, partitionBiomeFiles, planStagedGates } from "./precommit-staged.mjs";
+import { biomeCoveredFiles, globToRegExp, partitionBiomeFiles, planStagedGates, stagedCopyPath } from "./precommit-staged.mjs";
 
 const biomeIncludes = JSON.parse(readFileSync(new URL("../biome.json", import.meta.url), "utf8")).files.includes;
 
@@ -73,4 +73,9 @@ test("a partially staged file is checked on its staged content, never rewritten 
 	);
 	assert.deepEqual(whole, ["packages/coding-agent/src/a.ts", "scripts/c.mjs"]);
 	assert.deepEqual(partiallyStaged, ["packages/coding-agent/src/b.ts"]);
+});
+
+test("a staged blob is checked as a sibling copy with the same extension", () => {
+	assert.equal(stagedCopyPath("packages/coding-agent/src/core/agent-session.ts"), "packages/coding-agent/src/core/.precommit-staged-agent-session.ts");
+	assert.equal(stagedCopyPath("top.mjs"), ".precommit-staged-top.mjs");
 });
