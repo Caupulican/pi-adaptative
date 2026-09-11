@@ -433,3 +433,151 @@ describe("emission-order announcements", () => {
 		retireToolCall("unrelated-write");
 	});
 });
+
+/**
+ * The barrier is a shell-GROUP lock, not a single writer lock: command runs announced in one wave
+ * hold it together so the shell lane pool can actually run them side by side, while file mutations
+ * stay exclusive against the whole group. Fairness is emission order, so a mutation announced after
+ * a batch of commands still waits for all of them, and a command announced after a write still
+ * waits for that write.
+ */
+describe("announced shell runs hold the barrier as a group", () => {
+	it("two shell runs announced in one wave overlap, and a mutation announced after them waits for both", async () => {
+		const order: string[] = [];
+		announceToolCall("group-bash-a", 0, false, "batch-shell-group");
+		announceToolCall("group-bash-b", 1, false, "batch-shell-group");
+		announceToolCall("group-write", 2, true, "batch-shell-group");
+
+		const gateA = deferred();
+		const gateB = deferred();
+		const runA = withExclusiveMutationBarrier(
+			async () => {
+				order.push("a-start");
+				await gateA.promise;
+				order.push("a-end");
+			},
+			{ holdId: "group-bash-a" },
+		);
+		const runB = withExclusiveMutationBarrier(
+			async () => {
+				order.push("b-start");
+				await gateB.promise;
+				order.push("b-end");
+			},
+			{ holdId: "group-bash-b" },
+		);
+		// Both bodies are running at the same time: neither waited for the other.
+		await waitUntil(() => order.includes("a-start") && order.includes("b-start"));
+
+		let mutated = false;
+		const mutation = withFileMutationQueue(
+			"/tmp/shell-group-write.txt",
+			async () => {
+				mutated = true;
+				order.push("write");
+			},
+			undefined,
+			{ callId: "group-write" },
+		);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(mutated).toBe(false);
+
+		gateA.resolve();
+		await runA;
+		// One of the two finishing is not enough: the group still holds the lock.
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(mutated).toBe(false);
+
+		gateB.resolve();
+		await Promise.all([runB, mutation]);
+		expect(order).toEqual(["a-start", "b-start", "a-end", "b-end", "write"]);
+		retireToolCall("group-bash-a");
+		retireToolCall("group-bash-b");
+		retireToolCall("group-write");
+	});
+
+	it("a shell run announced after a mutation waits for it, then the next wave's shell runs overlap again", async () => {
+		const order: string[] = [];
+		announceToolCall("ordered-write", 0, true, "batch-shell-after-write");
+		announceToolCall("ordered-bash", 1, false, "batch-shell-after-write");
+
+		const writeGate = deferred();
+		const mutation = withFileMutationQueue(
+			"/tmp/shell-after-write.txt",
+			async () => {
+				order.push("write-start");
+				await writeGate.promise;
+				order.push("write-end");
+			},
+			undefined,
+			{ callId: "ordered-write" },
+		);
+		await waitUntil(() => order.includes("write-start"));
+
+		const run = withExclusiveMutationBarrier(
+			async () => {
+				order.push("bash");
+			},
+			{ holdId: "ordered-bash" },
+		);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(order).toEqual(["write-start"]);
+
+		writeGate.resolve();
+		await Promise.all([mutation, run]);
+		expect(order).toEqual(["write-start", "write-end", "bash"]);
+		retireToolCall("ordered-write");
+		retireToolCall("ordered-bash");
+
+		// The next wave starts clean: its two commands hold the group together.
+		announceToolCall("next-bash-a", 0, false, "batch-shell-after-write-2");
+		announceToolCall("next-bash-b", 1, false, "batch-shell-after-write-2");
+		const nextGate = deferred();
+		const nextA = withExclusiveMutationBarrier(
+			async () => {
+				order.push("next-a");
+				await nextGate.promise;
+			},
+			{ holdId: "next-bash-a" },
+		);
+		const nextB = withExclusiveMutationBarrier(
+			async () => {
+				order.push("next-b");
+			},
+			{ holdId: "next-bash-b" },
+		);
+		await nextB;
+		expect(order.slice(-2)).toEqual(["next-a", "next-b"]);
+		nextGate.resolve();
+		await nextA;
+		retireToolCall("next-bash-a");
+		retireToolCall("next-bash-b");
+	});
+
+	it("a command run nobody announced stays exclusive against an announced shell group", async () => {
+		const order: string[] = [];
+		announceToolCall("mixed-bash", 0, false, "batch-shell-mixed");
+
+		const announcedGate = deferred();
+		const announced = withExclusiveMutationBarrier(
+			async () => {
+				order.push("announced-start");
+				await announcedGate.promise;
+				order.push("announced-end");
+			},
+			{ holdId: "mixed-bash" },
+		);
+		await waitUntil(() => order.includes("announced-start"));
+
+		const unannounced = withExclusiveMutationBarrier(async () => {
+			order.push("unannounced");
+		});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(order).toEqual(["announced-start"]);
+
+		announcedGate.resolve();
+		await Promise.all([announced, unannounced]);
+		expect(order).toEqual(["announced-start", "announced-end", "unannounced"]);
+		retireToolCall("mixed-bash");
+	});
+});

@@ -68,6 +68,7 @@ import "./output-reducers.ts";
 import { getAgentDir } from "../../config.ts";
 import { BUNDLED_OUTPUT_RULES } from "./output-rules.bundled.ts";
 import { createRuleOutputReducer, loadOutputRules } from "./output-rules.ts";
+import { acquireShellSessionLanes } from "./shell-lane-pool.ts";
 import {
 	createShellOutputProjector,
 	type ShellOutputProjection,
@@ -268,11 +269,16 @@ function createLocalShellOperations(
 		}
 	};
 	if (sessionKey !== undefined && !options?.shellPath) {
+		// The POSIX bash session reports and owns its own working directory, so the lane pool is the
+		// cwd authority for it and shares that directory across lanes. A PowerShell session's
+		// directory belongs to WindowsShellState, which the Windows tier resolves before the call:
+		// substituting the pool's directory there would fight that authority.
+		const poolOwnsCwd = shellName === "bash";
 		return {
 			exec: async (command, cwd, execOptions) => {
 				const { onData, signal, timeout, env, forceCwd, detached } = execOptions;
-				// Checked before the session is touched at all: a detached command must never take a
-				// place in the session's one-command-at-a-time queue, not even to be skipped.
+				// Checked before a lane is touched at all: a detached command must never take a lane,
+				// not even to be skipped.
 				if (detached === true) return execOnce(command, cwd, execOptions);
 				try {
 					await fsAccess(cwd, constants.F_OK);
@@ -280,17 +286,30 @@ function createLocalShellOperations(
 					throw new Error(missingWorkingDirectoryMessage(cwd, shellName));
 				}
 				if (signal?.aborted) throw new Error("aborted");
-				const session = acquirePersistentShellSession(sessionKey, shellName);
+				const lanes = acquireShellSessionLanes(sessionKey);
+				// Every lane starts each command where the pool is standing. A lane whose last request
+				// was somewhere else re-enters that directory, exactly as the single session did when a
+				// host-pinned directory differed from its last request.
+				const laneCwd = poolOwnsCwd && forceCwd !== true ? (lanes.currentCwd ?? cwd) : cwd;
 				const silenceMs = commandSilenceMsOverride ?? DEFAULT_COMMAND_SILENCE_MS;
 				const hasWallClock = timeout !== undefined && timeout > 0;
-				return session.exec(command, cwd, {
-					onData,
-					signal,
-					env,
-					forceCwd,
-					timeoutSeconds: hasWallClock ? timeout : undefined,
-					silenceMs: !hasWallClock && silenceMs > 0 ? silenceMs : undefined,
-				});
+				const laneKey = await lanes.pool.acquire(signal);
+				try {
+					const result = await acquirePersistentShellSession(laneKey, shellName).exec(command, laneCwd, {
+						onData,
+						signal,
+						env,
+						forceCwd,
+						timeoutSeconds: hasWallClock ? timeout : undefined,
+						silenceMs: !hasWallClock && silenceMs > 0 ? silenceMs : undefined,
+					});
+					// Last completion wins: the directory the shell reports is where the whole pool
+					// stands from now on.
+					if (poolOwnsCwd && result.cwd) lanes.currentCwd = result.cwd;
+					return result;
+				} finally {
+					lanes.pool.release(laneKey);
+				}
 			},
 		};
 	}
@@ -729,9 +748,10 @@ function createShellToolDefinition(
 				],
 			}
 		: undefined;
-	// The directory the persistent POSIX session last reported ($PWD after the previous command):
-	// a filtered run must happen where the shell is, not where the tool was created.
-	let lastSessionCwd: string | undefined;
+	// Where the POSIX lane pool is standing ($PWD after the last command that reported one): a
+	// filtered run must happen where the shell is, not where the tool was created. The pool owns it
+	// so every lane and every tool instance on this session key sees the same directory.
+	const sessionLanes = acquireShellSessionLanes(sessionKey);
 	const routesWindowsContract = contractPlatform === "win32";
 	const pathFlavor = options?.pathFlavor ?? (routesWindowsContract ? "win32" : "posix");
 	const pythonEngineEnabled = options?.windowsShellPythonEngine !== false && options?.operations === undefined;
@@ -753,21 +773,31 @@ function createShellToolDefinition(
 				void engineOperations.prewarm(context.env);
 			});
 		} else if (backendShell === "powershell" && options.shellPath === undefined) {
-			const session = acquirePersistentShellSession(sessionKey, backendShell);
 			setImmediate(() => {
 				const context = resolveSpawnContext("", cwd, spawnHook, options?.getShellSessionContext);
 				context.env = mergeEffectiveEnv(getOrCreateWindowsShellState(sessionKey), context.env);
-				void session.prewarm(context.cwd, context.env).catch(() => {
-					// The first real command retries and surfaces the complete candidate failure.
-				});
+				// Warm the lane every sequential command lands on, through the pool: a session warmed
+				// outside it would be a shell nobody runs on and nobody disposes.
+				void sessionLanes.pool
+					.acquire()
+					.then(async (laneKey) => {
+						try {
+							await acquirePersistentShellSession(laneKey, backendShell).prewarm(context.cwd, context.env);
+						} finally {
+							sessionLanes.pool.release(laneKey);
+						}
+					})
+					.catch(() => {
+						// The first real command retries and surfaces the complete candidate failure.
+					});
 			});
 		}
 	}
 	const contractDescription = options?.forceCwd
-		? "Execute a command in a persistent shell with a host-pinned working directory. Each invocation starts in the pinned directory; cd inside a command remains available and exported variables persist across calls."
+		? "Execute a command in a persistent shell with a host-pinned working directory. Each invocation starts in the pinned directory; cd inside a command remains available and exported variables persist across calls. Commands issued together run concurrently on a pool of shells (three kept warm, more added on demand, idle extras retired); the working directory is shared across the pool, exported variables persist only within the lane that set them, so prefix later commands explicitly."
 		: routesWindowsContract
-			? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (starts at the project working directory; current directory and environment variables persist across calls; a failed command reports its effective cwd on a final `cwd:` line). On Windows, every command runs through a bundled shell engine that implements the supported Bash grammar (loops, conditionals, functions, pipelines, redirection, expansion, chaining, cd/export/unset) and runs the real GNU coreutils/findutils/grep/sed/awk from Git for Windows when present, so Linux command habits work unchanged; named unsupported constructs (job control, process substitution, and similar) fail closed instead of being guessed."
-			: "Execute a Bash command in a persistent per-agent shell session that starts at the project working directory: `cd` and environment variables persist across calls, a failed command reports its effective cwd on a final `cwd:` line, and a timed-out or aborted command resets the session.";
+			? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (starts at the project working directory; current directory and environment variables persist across calls; a failed command reports its effective cwd on a final `cwd:` line). On Windows, every command runs through a bundled shell engine that implements the supported Bash grammar (loops, conditionals, functions, pipelines, redirection, expansion, chaining, cd/export/unset) and runs the real GNU coreutils/findutils/grep/sed/awk from Git for Windows when present, so Linux command habits work unchanged; named unsupported constructs (job control, process substitution, and similar) fail closed instead of being guessed. Commands issued together run concurrently on a pool of shells (three kept warm, more added on demand, idle extras retired); the working directory is shared across the pool, exported variables persist only within the lane that set them, so prefix later commands explicitly."
+			: "Execute a Bash command in a persistent per-agent shell session that starts at the project working directory: `cd` and environment variables persist across calls, a failed command reports its effective cwd on a final `cwd:` line, and a timed-out or aborted command resets the session. Commands issued together run concurrently on a pool of shells (three kept warm, more added on demand, idle extras retired); the working directory is shared across the pool, exported variables persist only within the lane that set them, so prefix later commands explicitly.";
 	return {
 		name: toolName,
 		label: toolName,
@@ -1083,7 +1113,7 @@ function createShellToolDefinition(
 					// A detached command starts where the session is standing, not at the project root: it
 					// is the shell the agent is in, minus the shared session. The Windows contract reads
 					// the same current directory out of the session state below.
-					effectiveCwd = lastSessionCwd ?? cwd;
+					effectiveCwd = sessionLanes.currentCwd ?? cwd;
 				}
 				if (routesWindowsContract) {
 					const route = routeShellContract(source, contractPlatform, { pythonEngine: pythonEngineEnabled });
@@ -1162,9 +1192,13 @@ function createShellToolDefinition(
 					{ signal, holdId: toolCallId },
 				);
 				const { resolvedCommand, spawnContext } = prepared;
-				// A detached command's cd never moved the session, so its reported directory must not
-				// become the session's directory either.
-				if (!routesWindowsContract && !detached && result.cwd) lastSessionCwd = result.cwd;
+				// The lane pool records the directory of every command it ran itself. A caller-supplied
+				// backend is invisible to it, so the tool records that backend's report here instead -
+				// and a detached command's cd never moved the session, so its report is not recorded
+				// at all.
+				if (options?.operations !== undefined && !routesWindowsContract && !detached && result.cwd) {
+					sessionLanes.currentCwd = result.cwd;
+				}
 				return {
 					exitCode: result.exitCode,
 					cwd: result.cwd,
@@ -1188,7 +1222,7 @@ function createShellToolDefinition(
 							? filterContext.cwd
 							: routesWindowsContract
 								? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
-								: (lastSessionCwd ?? filterContext.cwd);
+								: (sessionLanes.currentCwd ?? filterContext.cwd);
 						if (classification.cwdPrefix !== undefined) {
 							// `cd <path> && git …`: the shell would leave the session in <path>, so the cd is
 							// replayed into the session first and the filtered run happens where it landed.

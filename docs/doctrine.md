@@ -165,6 +165,17 @@ nothing; the shell half was only found by a live run after the barrier half was 
 `packages/coding-agent/test/background-handoff-barrier.test.ts` and
 `packages/coding-agent/test/bash-background-shell.test.ts`.
 
+**Commands emitted together run together.** Foreground bash calls take lanes from an elastic pool
+of reusable persistent shells (three kept warm per session, more created on demand up to eight,
+idle extras retired after a minute; the pool owns the working directory so a `cd` on any lane
+moves the next command wherever it runs, exported variables stay in the lane that set them), and the
+mutation barrier is a group lock: announced command runs hold it together, file mutations hold it
+together, the two groups never overlap, admission is in emission order, and an unannounced run stays
+exclusive. Why: one persistent shell plus a FIFO writer lock turned three commands emitted in one
+message into three sequential waits. Pinned by `packages/coding-agent/test/shell-lane-pool.test.ts`,
+`packages/coding-agent/test/bash-concurrent-lanes.test.ts` and
+`packages/coding-agent/test/bash-edit-write-race.test.ts`.
+
 **The sanitizer keeps a rejected attempt out of the agent's context.** Measured on the request
 after an omission, the server prompt cache still hit almost fully; the omission costs one request
 without the transport delta, not a re-prefill. Pinned by `packages/agent/test/tool-failure-memory.test.ts`

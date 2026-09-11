@@ -221,7 +221,7 @@ describe("windows shell engine operations", () => {
 		expect(coordinator.spawnCount).toBe(1);
 	});
 
-	it("serializes concurrent requests before deriving the next request state", async () => {
+	it("derives a serialized request from the frame before it, and spreads a concurrent wave over lanes sharing that state", async () => {
 		const requests: FakeCoordinatorHandles["request"][] = [];
 		const coordinator = fakeCoordinatorSpawn(({ child, stdout, stderr, request, persistent }) => {
 			requests.push(request);
@@ -239,20 +239,32 @@ describe("windows shell engine operations", () => {
 			);
 			if (!persistent) child.emit("close", 0);
 		});
-		const ops = createWindowsShellEngineOperations("engine-serialized-session", {
+		const sessionKey = "engine-serialized-session";
+		const ops = createWindowsShellEngineOperations(sessionKey, {
 			resolveRuntime: async () => READY_RUNTIME,
 			engineScriptPath: "/fake/main.py",
 			spawn: coordinator.spawn,
 		});
 
-		await Promise.all([
-			ops.exec("export FOO=bar", "/old/dir", { onData: () => {} }),
-			ops.exec("echo $FOO", "/old/dir", { onData: () => {} }),
-		]);
-
+		// One after the other: each request is derived only after the preceding frame was applied,
+		// and both land on the same warm lane.
+		await ops.exec("export FOO=bar", "/old/dir", { onData: () => {} });
+		await ops.exec("echo $FOO", "/old/dir", { onData: () => {} });
 		expect(coordinator.spawnCount).toBe(1);
 		expect(requests).toHaveLength(2);
 		expect(requests[1].env.FOO).toBe("bar");
+
+		// Emitted together: separate lanes, so neither waits for the other, and both read the one
+		// session state the earlier export wrote.
+		await Promise.all([
+			ops.exec("echo one", "/old/dir", { onData: () => {} }),
+			ops.exec("echo two", "/old/dir", { onData: () => {} }),
+		]);
+		expect(coordinator.spawnCount).toBe(2);
+		expect(requests).toHaveLength(4);
+		expect(requests[2].env.FOO).toBe("bar");
+		expect(requests[3].env.FOO).toBe("bar");
+		void disposeWindowsShellEngineSession(sessionKey);
 	});
 
 	it("isolates coordinator processes and state across simultaneous tenant session keys", async () => {

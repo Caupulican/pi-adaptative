@@ -28,6 +28,7 @@ import { isRecordObject } from "../util/value-guards.ts";
 import type { BashOperations } from "./bash.ts";
 import { PersistentProcessCoordinator } from "./persistent-process-coordinator.ts";
 import { tokenizeShellCommand } from "./shell-command-parser.ts";
+import { ShellLanePool } from "./shell-lane-pool.ts";
 import {
 	applyEngineFrame,
 	disposeWindowsShellState,
@@ -524,13 +525,70 @@ function acquireWindowsShellEngineSession(
 	return session;
 }
 
-/** Kill and forget a Python coordinator. The next call for this key starts a clean process. */
+/**
+ * Kill and forget a Python coordinator, together with the lane pool keyed to it. The next call for
+ * this key starts clean processes.
+ */
 export function disposeWindowsShellEngineSession(key: string): Promise<void> {
+	const lanes = engineLanePools.get(key);
+	engineLanePools.delete(key);
+	// A lane key never owns a pool of its own, so disposing the lanes cannot recurse.
+	const lanesDisposed = lanes ? lanes.pool.dispose() : undefined;
 	const session = engineSessions.get(key);
-	if (!session) return Promise.resolve();
-	engineSessions.delete(key);
-	session.dispose();
-	return session.terminalPromise;
+	if (session) {
+		engineSessions.delete(key);
+		session.dispose();
+	}
+	if (!lanesDisposed) return session ? session.terminalPromise : Promise.resolve();
+	if (!session) return lanesDisposed;
+	return Promise.all([lanesDisposed, session.terminalPromise]).then(() => undefined);
+}
+
+/**
+ * The engine lanes of one agent session.
+ *
+ * Every lane is its own coordinator process, so commands emitted together stop queueing behind each
+ * other, but all lanes read and write the PRIMARY session's {@link WindowsShellState}: the working
+ * directory and the exports the engine applied are the session's, not one lane's. A detached command
+ * keeps its own throwaway coordinator and state, which is what makes it detached.
+ */
+interface WindowsShellEngineLanes {
+	pool: ShellLanePool<string>;
+	laneOptions: WindowsShellEngineOptions;
+}
+
+const engineLanePools = new Map<string, WindowsShellEngineLanes>();
+
+function acquireEngineLanes(sessionKey: string, options: WindowsShellEngineOptions): WindowsShellEngineLanes {
+	const existing = engineLanePools.get(sessionKey);
+	if (existing) return existing;
+	const resolveState = options.getState ?? getOrCreateWindowsShellState;
+	const laneOptions: WindowsShellEngineOptions = { ...options, getState: () => resolveState(sessionKey) };
+	const lanes: WindowsShellEngineLanes = {
+		laneOptions,
+		pool: new ShellLanePool<string>({
+			createLane: (index) => `${sessionKey}#lane-${index}`,
+			disposeLane: (laneKey) => disposeWindowsShellEngineSession(laneKey),
+		}),
+	};
+	engineLanePools.set(sessionKey, lanes);
+	return lanes;
+}
+
+async function execOnEngineLane(
+	sessionKey: string,
+	options: WindowsShellEngineOptions,
+	command: string,
+	cwd: string,
+	execOptions: Parameters<BashOperations["exec"]>[2],
+): Promise<{ exitCode: number | null }> {
+	const { pool, laneOptions } = acquireEngineLanes(sessionKey, options);
+	const laneKey = await pool.acquire(execOptions.signal);
+	try {
+		return await acquireWindowsShellEngineSession(laneKey, laneOptions).exec(command, cwd, execOptions);
+	} finally {
+		pool.release(laneKey);
+	}
 }
 
 /** The engine tier: a bash backend plus the prewarm that starts its coordinator ahead of use. */
@@ -577,7 +635,18 @@ export function createWindowsShellEngineOperations(
 		exec: (command, cwd, execOptions) =>
 			execOptions.detached === true
 				? execOnDetachedEngineSession(sessionKey, options, command, cwd, execOptions)
-				: acquireWindowsShellEngineSession(sessionKey, options).exec(command, cwd, execOptions),
-		prewarm: (env) => acquireWindowsShellEngineSession(sessionKey, options).prewarm(env),
+				: execOnEngineLane(sessionKey, options, command, cwd, execOptions),
+		// Warms the first lane, which is also the lane every sequential command lands on. Going
+		// through the pool is what registers that lane for disposal instead of leaving a coordinator
+		// nobody owns behind.
+		prewarm: async (env) => {
+			const { pool, laneOptions } = acquireEngineLanes(sessionKey, options);
+			const laneKey = await pool.acquire();
+			try {
+				await acquireWindowsShellEngineSession(laneKey, laneOptions).prewarm(env);
+			} finally {
+				pool.release(laneKey);
+			}
+		},
 	};
 }

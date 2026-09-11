@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Changed
+
+- Foreground `bash` calls emitted together now run together. Each call takes a lane from an elastic pool of reusable persistent shells (three warm per session, growing on demand to eight, idle extras retired after a minute) instead of queueing on one shell; the working directory is shared across the pool, exported variables stay in the lane that set them. The mutation barrier became a group lock: announced command runs share it, file mutations share it, the two never overlap, and admission follows emission order. On Windows the engine tier uses the same pool with one shared shell state per session.
+- The parallel tool pool width is a setting, `toolExecution.concurrency` (default 8, was a fixed 4).
+
 ### Fixed
 
 - A bash or python call started with `background: true` no longer blocks the rest of the session. It answered its batch after two milliseconds but every later bash/python call queued behind it twice over: behind the process-wide exclusive mutation barrier it held, and behind the agent's persistent shell session, which runs one command at a time (measured live: a turn hung 30 minutes behind a checkout waiting on a dead VPN; a sibling `echo` finished exactly when a 45-second background `sleep` did). A background command now runs in its own child shell started from the session's current directory (its cd and exports do not persist; on Windows a throwaway engine coordinator), waits only for the file writes its own message emitted before it, and releases the barrier the instant its body starts. A clock or manual handoff releases the barrier when the call becomes a session task, and a call still queued on the barrier unwinds the moment the run is aborted, so an operator interrupt takes effect at once.

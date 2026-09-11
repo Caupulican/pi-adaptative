@@ -59,6 +59,7 @@ import type { ResourceLoader } from "../resource-loader.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
 import { executeToolkitScript } from "../toolkit/script-runner.ts";
+import { disposeShellSessionLanes } from "../tools/shell-lane-pool.ts";
 import { disposePersistentShellSession } from "../tools/shell-session.ts";
 import type { ReadOnlySkillBroker } from "../tools/skill.ts";
 import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
@@ -575,9 +576,12 @@ export class WorkerDelegationController {
 		this.runTeardownStep("dispose worker terminal handoffs", () => this.terminalHandoffs.dispose());
 		this.runTeardownStep("dispose worker write reservations", () => this.writeReservations.dispose());
 		for (const shellSessionKey of this.shellSessionKeys) {
-			this.runTeardownStep(`dispose worker shell ${shellSessionKey}`, () =>
-				disposePersistentShellSession(shellSessionKey),
-			);
+			this.runTeardownStep(`dispose worker shell ${shellSessionKey}`, () => {
+				disposePersistentShellSession(shellSessionKey);
+				// Foreground commands run on a pool of lanes keyed under the session; disposing only
+				// the session key would leave every lane's shell behind.
+				void disposeShellSessionLanes(shellSessionKey);
+			});
 		}
 		this.shellSessionKeys.clear();
 		this.runTeardownStep("clear worker conversation cache", () => this.conversations.clearCache());
