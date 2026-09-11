@@ -5057,9 +5057,13 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 			const results = messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
 			expect(results).toHaveLength(1);
 			expect(results[0]?.isError).toBe(true);
+			// The cancellation text stands as the result: no failure record is wrapped around it (a record
+			// for this operation would make the recovery gate refuse the model's own re-issue of the
+			// interrupted command), and no failure memory is retained in its details.
 			const recordText = results[0]?.content.find((block) => block.type === "text")?.text ?? "";
-			expect(recordText).toContain('"failure_code":"aborted"');
-			expect(recordText).toContain('"phase":"cancelled"');
+			expect(recordText.startsWith("Operation aborted (send now)")).toBe(true);
+			expect(recordText).not.toContain("[harness]");
+			expect(JSON.stringify(results[0]?.details ?? {})).not.toContain("piToolFailureMemory");
 
 			// A cancellation is not a mistake: it never counts against the tool and never stands as an
 			// active failure the model has to clear.

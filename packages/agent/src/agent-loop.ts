@@ -2425,7 +2425,16 @@ async function finalizeExecutedToolCall(
 			failureMessage || result.content.find((block) => block.type === "text")?.text || "Tool execution failed";
 		const assessment = assessToolFailure(effectiveFailureMessage, "failed", errorClass);
 		const effectiveFailureCode = failureCode ?? assessment.failureCode;
-		if (errorKind === "operation_outcome") {
+		if (effectiveFailureCode === "aborted") {
+			// A cancellation is not an operation outcome and not a mistake. It leaves no failure record
+			// (the recovery gate builds a blocking state from any record for this operation, which would
+			// refuse the model's own re-issue of the interrupted command) and no gate effect (an
+			// "unproductive" observation would spend the identical-retry allowance on a call nobody let
+			// finish). The cancellation text, already naming the abort, stands as the result; the ledger
+			// fold recognizes it by its text and never counts it.
+			clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args, prepared.binding?.executionScope);
+			result = { ...result, usage };
+		} else if (errorKind === "operation_outcome") {
 			// The tool ran the operation to completion; the non-zero status is the observation the
 			// agent asked for. Nothing here is a mistake, so no failure record is remembered and the
 			// tool's own output stands exactly as written. The governor still notes that repeating

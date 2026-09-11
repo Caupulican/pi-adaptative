@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Fixed
+
+- A bash or python call started with `background: true` no longer holds the process-wide exclusive mutation barrier for its whole life. It answered its batch after two milliseconds but every sibling bash/python in the batch parked behind it, the group could not settle, and the model's turn hung until the job exited (measured live: 30 minutes behind a checkout waiting on a dead VPN). A background call never takes the barrier; a clock or manual handoff releases it when the call becomes a session task; a call still queued on the barrier unwinds the moment the run is aborted, so an operator interrupt takes effect at once.
+- A tool killed by an abort is recorded as a cancellation (`Operation aborted (<reason>)`), not as a model mistake with no diagnostic; the credential guard reports the value it caught instead of "failed without retaining raw error output".
+- Every abort names its cause in the persisted message (`user interrupt`, `send now`, `compaction`, `reflection`, `session dispose`, `submission superseded`, …); a transcript can now tell an operator stop from a harness stop.
+- Reading a file that is not UTF-8 no longer fails with the edit contract's "exact UTF-8 replacement unsafe" directive. `read` and `edit` honor the charset the project declares in `.editorconfig` (`latin1` reads as windows-1252; nearest file wins, `root = true` stops the walk); the result names the codec and its source. An undeclared, undecodable read fails as `read_encoding_required` with the line and byte offset of the first invalid sequence and a read remedy.
+- A parallel tool batch honors emission order where it matters: a call whose arguments name a path an earlier sibling writes or edits runs after it, and the exclusive barrier waits for mutations announced ahead of it even when they join late. A `write` followed by a `bash` or `goal` call on the same path in one message no longer races the file's creation.
+- `background` teaching on bash/python says when a background start is a loss: a start followed immediately by `tool_task wait` costs an extra request and is slower than a foreground call with a timeout.
+
 ## [0.99.17] - 2026-09-11
 
 ### Fixed

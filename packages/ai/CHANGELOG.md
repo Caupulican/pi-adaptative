@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Tool repair catalogue entry `readEncodingRequired` (`PI_READ_ENCODING_REQUIRED` → `read_encoding_required`): a read-specific diagnostic that keeps its text and tells the model to re-read with the named encoding or declare the charset, distinct from the edit contract's `encoding_corruption`.
+
 ## [0.99.17] - 2026-09-11
 
 ## [0.99.16] - 2026-09-10

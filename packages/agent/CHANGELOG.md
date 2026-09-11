@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Changed
+
+- `Agent.abort(reason)` requires a reason; the persisted assistant message reads `Operation aborted (<reason>)` and a tool killed by that abort finalizes as a cancellation (`failureCode: "aborted"`) carrying the same name. Cancellations never enter the tool failure ledger.
+- Tool reservation contexts carry the call's emission index and whether it declares a mutation target (`AgentTool.mutationTarget`); the partition scheduler closes the open parallel group before a call whose arguments name an earlier sibling's mutation target, so emission order is honored for path dependencies inside one assistant message.
+
 ## [0.99.17] - 2026-09-11
 
 ### Fixed

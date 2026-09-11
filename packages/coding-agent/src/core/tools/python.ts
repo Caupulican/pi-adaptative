@@ -78,7 +78,7 @@ const pythonSchema = Type.Object(
 		background: Type.Optional(
 			Type.Boolean({
 				description:
-					"Run as a session task at once and return its task id instead of waiting. Use only for work you do not need before your next step; collect it later with tool_task wait (needs the tool_task tool; without it the code runs in the foreground).",
+					"Run as a session task at once and return its task id instead of waiting. Use only when you will do other work before you need the result; a background start followed immediately by tool_task wait costs an extra request and is slower than a foreground call with a timeout. Collect it later with tool_task wait (needs the tool_task tool; without it the code runs in the foreground).",
 			}),
 		),
 		fullOutput: Type.Optional(
