@@ -178,6 +178,98 @@ describe("exclusive barrier cancellation and early release", () => {
 		await second;
 	});
 
+	it("a run released while still queued waits for active readers to drain before running", async () => {
+		const order: string[] = [];
+		const mutationGate = deferred();
+		const mutation = withFileMutationQueue("/tmp/lockless-drain.txt", async () => {
+			order.push("write-start");
+			await mutationGate.promise;
+			order.push("write-end");
+		});
+		await waitUntil(() => order.includes("write-start"));
+
+		// Reaches the head of the queue, takes the writer lock, and waits for the reader side to empty.
+		const locked = withExclusiveMutationBarrier(
+			async () => {
+				order.push("locked");
+			},
+			{ holdId: "drain-locked" },
+		);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(order).toEqual(["write-start"]);
+
+		// Queued behind it, then handed off: it drops exclusivity, not the write it arrived after.
+		const lockless = withExclusiveMutationBarrier(
+			async () => {
+				order.push("lockless");
+			},
+			{ holdId: "drain-lockless" },
+		);
+		expect(releaseExclusiveHold("drain-lockless")).toBe(true);
+		// The lock goes away while the write is still in flight: without a drain wait of its own the
+		// released run would start mid-write, which is exactly what the barrier exists to prevent.
+		expect(releaseExclusiveHold("drain-locked")).toBe(true);
+		let duringWrite: string[];
+		try {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		} finally {
+			// The barrier is process-global: a failed expectation must never leave a write in flight.
+			duringWrite = [...order];
+			mutationGate.resolve();
+			await Promise.all([mutation, locked, lockless]);
+		}
+		expect(duringWrite).toEqual(["write-start"]);
+		expect(order.slice(0, 2)).toEqual(["write-start", "write-end"]);
+		expect(order.slice(2).sort()).toEqual(["locked", "lockless"]);
+	});
+
+	it("several exclusive runs waiting on the same reader drain all proceed once readers reach zero", async () => {
+		const order: string[] = [];
+		const mutationGate = deferred();
+		const mutation = withFileMutationQueue("/tmp/multi-drain.txt", async () => {
+			order.push("write-start");
+			await mutationGate.promise;
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			order.push("write-end");
+		});
+		await waitUntil(() => order.includes("write-start"));
+
+		const runs: Promise<void>[] = [
+			withExclusiveMutationBarrier(
+				async () => {
+					order.push("multi-locked");
+				},
+				{ holdId: "multi-locked" },
+			),
+		];
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		for (const name of ["multi-a", "multi-b"]) {
+			runs.push(
+				withExclusiveMutationBarrier(
+					async () => {
+						order.push(name);
+					},
+					{ holdId: name },
+				),
+			);
+			expect(releaseExclusiveHold(name)).toBe(true);
+		}
+		expect(releaseExclusiveHold("multi-locked")).toBe(true);
+		let duringWrite: string[];
+		try {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		} finally {
+			// One single-slot resolver cannot serve three waiters: every run waiting on this drain has
+			// to be woken, not just the one that armed the slot last.
+			duringWrite = [...order];
+			mutationGate.resolve();
+			await Promise.all([mutation, ...runs]);
+		}
+		expect(duringWrite).toEqual(["write-start"]);
+		expect(order.slice(0, 2)).toEqual(["write-start", "write-end"]);
+		expect(order.slice(2).sort()).toEqual(["multi-a", "multi-b", "multi-locked"]);
+	});
+
 	it("a signal already aborted at entry rejects without queueing", async () => {
 		const controller = new AbortController();
 		controller.abort("already gone");

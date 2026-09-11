@@ -30,6 +30,7 @@ import { PersistentProcessCoordinator } from "./persistent-process-coordinator.t
 import { tokenizeShellCommand } from "./shell-command-parser.ts";
 import {
 	applyEngineFrame,
+	disposeWindowsShellState,
 	getOrCreateWindowsShellState,
 	mergeEffectiveEnv,
 	resolveEffectiveCwd,
@@ -537,6 +538,33 @@ export interface WindowsShellEngineOperations extends BashOperations {
 	prewarm(env?: NodeJS.ProcessEnv): Promise<void>;
 }
 
+let detachedEngineSessionCount = 0;
+
+/**
+ * Run one command on a coordinator of its own, then drop it along with its shell state.
+ *
+ * A session coordinator runs one command at a time, so a detached command on it would hold the
+ * agent's shell for its whole life. Its own key also gives it its own `WindowsShellState`: the
+ * command starts in the directory the caller passes (the session's current one) and its `cd` and
+ * exports die with it. The key is unique per call, so two detached commands never queue behind
+ * each other either.
+ */
+async function execOnDetachedEngineSession(
+	sessionKey: string,
+	options: WindowsShellEngineOptions,
+	command: string,
+	cwd: string,
+	execOptions: Parameters<BashOperations["exec"]>[2],
+): Promise<{ exitCode: number | null }> {
+	const key = `${sessionKey}#detached-${++detachedEngineSessionCount}`;
+	try {
+		return await acquireWindowsShellEngineSession(key, options).exec(command, cwd, execOptions);
+	} finally {
+		await disposeWindowsShellEngineSession(key);
+		disposeWindowsShellState(key);
+	}
+}
+
 /** Create the Python-engine tier for one bash-tool session. */
 export function createWindowsShellEngineOperations(
 	sessionKey: string,
@@ -547,7 +575,9 @@ export function createWindowsShellEngineOperations(
 		// credential/environment changes) deletes only this tenant's entry; an already-built tool
 		// then lazily acquires a fresh coordinator instead of retaining the disposed instance.
 		exec: (command, cwd, execOptions) =>
-			acquireWindowsShellEngineSession(sessionKey, options).exec(command, cwd, execOptions),
+			execOptions.detached === true
+				? execOnDetachedEngineSession(sessionKey, options, command, cwd, execOptions)
+				: acquireWindowsShellEngineSession(sessionKey, options).exec(command, cwd, execOptions),
 		prewarm: (env) => acquireWindowsShellEngineSession(sessionKey, options).prewarm(env),
 	};
 }

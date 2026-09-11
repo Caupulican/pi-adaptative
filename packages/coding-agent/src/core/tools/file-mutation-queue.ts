@@ -18,7 +18,13 @@ const backendQueues = new WeakMap<FileMutationQueueBackend, BackendQueueState>()
 // cannot statically declare which files a command touches, so it takes the coarse
 // writer lock instead of a per-file one.
 let activeReaders = 0;
-let readersDrained: (() => void) | undefined;
+/**
+ * Every exclusive run currently waiting for the reader side to empty. More than one can wait at a
+ * time: a run released early (see {@link releaseExclusiveHold}) keeps waiting for the mutations it
+ * arrived after while the next run already owns the lock, so a single resolver slot would leave
+ * whichever waiter armed it first parked forever.
+ */
+const readerDrainWaiters = new Set<() => void>();
 /** Resolves when the exclusive run at the head of the queue RELEASES the writer lock. */
 let writerQueue: Promise<void> = Promise.resolve();
 let writerActive: Promise<void> | undefined;
@@ -172,10 +178,28 @@ async function acquireReader(signal?: AbortSignal): Promise<void> {
 
 function releaseReader(): void {
 	activeReaders--;
-	if (activeReaders === 0 && readersDrained) {
-		const drained = readersDrained;
-		readersDrained = undefined;
-		drained();
+	if (activeReaders > 0 || readerDrainWaiters.size === 0) return;
+	// Resolve from a snapshot: each waiter removes its own entry when it wakes.
+	const waiters = [...readerDrainWaiters];
+	readerDrainWaiters.clear();
+	for (const waiter of waiters) waiter();
+}
+
+/**
+ * Wait until no file mutation is in flight. Aborting the wait removes this waiter, so an abandoned
+ * wait never leaves a resolver armed for the next drain.
+ */
+async function waitForReadersToDrain(signal: AbortSignal | undefined): Promise<void> {
+	if (activeReaders === 0) return;
+	let waiter!: () => void;
+	const drained = new Promise<void>((resolveDrained) => {
+		waiter = resolveDrained;
+		readerDrainWaiters.add(waiter);
+	});
+	try {
+		await raceAbort(drained, signal);
+	} finally {
+		readerDrainWaiters.delete(waiter);
 	}
 }
 
@@ -255,9 +279,12 @@ export function withExclusiveMutationBarrier<T>(
 		}
 		if (hold.lockless) {
 			// Released while still queued: the run no longer claims exclusivity, so it never takes the
-			// writer lock and the queue moves on at once.
+			// writer lock and the queue moves on at once. It still waits for the mutations that were
+			// already in flight when it arrived - "nobody waits for this run any more" is not "this run
+			// may start in the middle of somebody else's write".
 			handOnQueue();
 			try {
+				await waitForReadersToDrain(signal);
 				return await fn();
 			} finally {
 				unregister();
@@ -278,20 +305,7 @@ export function withExclusiveMutationBarrier<T>(
 		};
 		hold.release = release;
 		try {
-			if (activeReaders > 0) {
-				let drained!: () => void;
-				const drain = new Promise<void>((resolveDrain) => {
-					drained = resolveDrain;
-					readersDrained = resolveDrain;
-				});
-				try {
-					await raceAbort(drain, signal);
-				} catch (error) {
-					// An abandoned drain wait must not leave its resolver armed for the next reader.
-					if (readersDrained === drained) readersDrained = undefined;
-					throw error;
-				}
-			}
+			await waitForReadersToDrain(signal);
 			return await fn();
 		} finally {
 			release();

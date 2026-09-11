@@ -16,7 +16,7 @@ import {
 	type FileFailureRecoveryAuthority,
 	selectFileFailureRecoveryAuthority,
 } from "./file-failure-recovery.ts";
-import { withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
+import { releaseExclusiveHold, withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import {
 	formatOutputReductionNotice,
@@ -78,7 +78,7 @@ const pythonSchema = Type.Object(
 		background: Type.Optional(
 			Type.Boolean({
 				description:
-					"Run as a session task at once and return its task id instead of waiting. Use only when you will do other work before you need the result; a background start followed immediately by tool_task wait costs an extra request and is slower than a foreground call with a timeout. Collect it later with tool_task wait (needs the tool_task tool; without it the code runs in the foreground).",
+					"Run as a session task at once and return its task id instead of waiting. It runs in its own process (its working directory and environment changes do not persist), waits only for file writes emitted before it in this message, and never blocks other commands. Use only when you will do other work before you need the result; a background start followed immediately by tool_task wait costs an extra request and is slower than a foreground call with a timeout. Collect it later with tool_task wait (needs the tool_task tool; without it the code runs in the foreground). Omit to wait for the code (default, bounded by the timeout).",
 			}),
 		),
 		fullOutput: Type.Optional(
@@ -445,16 +445,18 @@ export function createPythonToolDefinition(
 						onStderr: (chunk) => stderr.append(chunk),
 					});
 				};
-				// Python cannot statically declare which files a snippet touches, so a foreground run
-				// takes the coarse exclusive barrier. A background call is the exception: the model
-				// declared it independent of the batch and the harness hands it off as a detached session
-				// task at once, so holding the barrier for the job's whole life would park every sibling
-				// call behind a command nobody is waiting for. `holdId` lets a later handoff drop the
-				// barrier for a run that only becomes a session task after it started.
-				execution =
-					input.background === true
-						? await runSnippet()
-						: await withExclusiveMutationBarrier(runSnippet, { signal, holdId: toolCallId });
+				// Python cannot statically declare which files a snippet touches, so every run takes the
+				// coarse exclusive barrier. A background call releases it the instant its own body
+				// starts: it still runs after the writes its own message emitted before it, but nothing
+				// stays parked behind a job nobody is waiting for. `holdId` also lets a later handoff
+				// drop the barrier for a run that only becomes a session task after it started.
+				execution = await withExclusiveMutationBarrier(
+					async () => {
+						if (input.background === true) releaseExclusiveHold(toolCallId);
+						return runSnippet();
+					},
+					{ signal, holdId: toolCallId },
+				);
 				const snapshots = finishStreams();
 				const sections: string[] = [];
 				if (snapshots.stdout.content) sections.push(snapshots.stdout.content.trimEnd());

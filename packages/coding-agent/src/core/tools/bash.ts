@@ -44,7 +44,7 @@ import {
 	WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
 	workspaceRecoveryTarget,
 } from "./file-failure-recovery.ts";
-import { withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
+import { releaseExclusiveHold, withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
 import { applyGitTailStage, classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
 import { prepareManagedShellEnvironment } from "./managed-shell-preparation.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
@@ -130,7 +130,7 @@ const bashSchema = Type.Object({
 	background: Type.Optional(
 		Type.Boolean({
 			description:
-				"Run as a session task at once and return its task id instead of waiting. Use only when you will do other work before you need the result; a background start followed immediately by tool_task wait costs an extra request and is slower than a foreground call with a timeout. Collect it later with tool_task wait (needs the tool_task tool; without it the command runs in the foreground). Omit to wait for the command (default, bounded by timeout).",
+				"Run as a session task at once and return its task id instead of waiting. It runs in its own shell started from the session's current directory (its cd and exports do not persist), waits only for file writes emitted before it in this message, and never blocks other commands. Use only when you will do other work before you need the result; a background start followed immediately by tool_task wait costs an extra request and is slower than a foreground call with a timeout. Collect it later with tool_task wait (needs the tool_task tool; without it the command runs in the foreground). Omit to wait for the command (default, bounded by timeout).",
 		}),
 	),
 	broadSearch: Type.Optional(
@@ -189,6 +189,11 @@ export interface BashOperations {
 			env?: NodeJS.ProcessEnv;
 			/** Host-owned directory pin; stateful backends must re-enter cwd under their execution lock. */
 			forceCwd?: boolean;
+			/**
+			 * Run outside the agent's persistent shell session: the command starts in `cwd` with `env`,
+			 * its cd and exports do not persist, and it never queues behind or blocks other commands.
+			 */
+			detached?: boolean;
 		},
 	) => Promise<{ exitCode: number | null; cwd?: string; initialCwd?: string }>;
 }
@@ -200,9 +205,75 @@ function createLocalShellOperations(
 	// A session key selects the persistent per-agent backend. An explicit custom shell path keeps
 	// per-command spawning: persistent sessions assume the resolved platform shell's flag set.
 	const sessionKey = options?.sessionKey;
+	// The per-command spawn. It is the whole backend without a session key, and it is also where a
+	// detached call runs on a session-keyed backend: one spawn implementation, never a second copy.
+	const execOnce: BashOperations["exec"] = async (command, cwd, { onData, signal, timeout, env }) => {
+		const { shell, args } = getShellConfig(options?.shellPath, shellName);
+		try {
+			await fsAccess(cwd, constants.F_OK);
+		} catch {
+			throw new Error(missingWorkingDirectoryMessage(cwd, shellName));
+		}
+		if (signal?.aborted) throw new Error("aborted");
+
+		const shellEnvironment = env ?? getShellEnv();
+		const hostedCommand = shellName === "powershell" ? `${POWERSHELL_7_GUARD}${command}` : command;
+		const child = spawn(shell, [...args, hostedCommand], {
+			cwd,
+			detached: process.platform !== "win32",
+			env: shellName === "powershell" ? createPowerShellHostEnvironment(shellEnvironment) : shellEnvironment,
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		if (child.pid) trackDetachedChildPid(child.pid);
+		const terminationController = new AbortController();
+		const onAbort = () => terminationController.abort();
+		let silenceKilled = false;
+		const silenceMs = commandSilenceMsOverride ?? DEFAULT_COMMAND_SILENCE_MS;
+		const silenceWatchdog =
+			(timeout === undefined || timeout <= 0) && silenceMs > 0
+				? createSilenceWatchdog({
+						silenceMs,
+						onSilence: () => {
+							silenceKilled = true;
+							terminationController.abort();
+						},
+					})
+				: undefined;
+		const onChunk = (data: Buffer) => {
+			silenceWatchdog?.touch();
+			onData(data);
+		};
+
+		try {
+			child.stdout?.on("data", onChunk);
+			child.stderr?.on("data", onChunk);
+			if (signal) {
+				if (signal.aborted) onAbort();
+				else signal.addEventListener("abort", onAbort, { once: true });
+			}
+			const terminal = await waitForChildProcessWithTermination(child, {
+				signal: terminationController.signal,
+				timeoutMs: timeout !== undefined && timeout > 0 ? timeout * 1000 : undefined,
+				killGraceMs: 2_000,
+			});
+			if (signal?.aborted) throw new Error("aborted");
+			if (terminal.reason === "timeout") throw new Error(`timeout:${timeout}`);
+			if (silenceKilled) throw new Error(`silence:${silenceMs / 1000}`);
+			return { exitCode: terminal.code, initialCwd: cwd };
+		} finally {
+			silenceWatchdog?.disarm();
+			if (child.pid) untrackDetachedChildPid(child.pid);
+			if (signal) signal.removeEventListener("abort", onAbort);
+		}
+	};
 	if (sessionKey !== undefined && !options?.shellPath) {
 		return {
-			exec: async (command, cwd, { onData, signal, timeout, env, forceCwd }) => {
+			exec: async (command, cwd, execOptions) => {
+				const { onData, signal, timeout, env, forceCwd, detached } = execOptions;
+				// Checked before the session is touched at all: a detached command must never take a
+				// place in the session's one-command-at-a-time queue, not even to be skipped.
+				if (detached === true) return execOnce(command, cwd, execOptions);
 				try {
 					await fsAccess(cwd, constants.F_OK);
 				} catch {
@@ -223,68 +294,7 @@ function createLocalShellOperations(
 			},
 		};
 	}
-	return {
-		exec: async (command, cwd, { onData, signal, timeout, env }) => {
-			const { shell, args } = getShellConfig(options?.shellPath, shellName);
-			try {
-				await fsAccess(cwd, constants.F_OK);
-			} catch {
-				throw new Error(missingWorkingDirectoryMessage(cwd, shellName));
-			}
-			if (signal?.aborted) throw new Error("aborted");
-
-			const shellEnvironment = env ?? getShellEnv();
-			const hostedCommand = shellName === "powershell" ? `${POWERSHELL_7_GUARD}${command}` : command;
-			const child = spawn(shell, [...args, hostedCommand], {
-				cwd,
-				detached: process.platform !== "win32",
-				env: shellName === "powershell" ? createPowerShellHostEnvironment(shellEnvironment) : shellEnvironment,
-				stdio: ["ignore", "pipe", "pipe"],
-				windowsHide: true,
-			});
-			if (child.pid) trackDetachedChildPid(child.pid);
-			const terminationController = new AbortController();
-			const onAbort = () => terminationController.abort();
-			let silenceKilled = false;
-			const silenceMs = commandSilenceMsOverride ?? DEFAULT_COMMAND_SILENCE_MS;
-			const silenceWatchdog =
-				(timeout === undefined || timeout <= 0) && silenceMs > 0
-					? createSilenceWatchdog({
-							silenceMs,
-							onSilence: () => {
-								silenceKilled = true;
-								terminationController.abort();
-							},
-						})
-					: undefined;
-			const onChunk = (data: Buffer) => {
-				silenceWatchdog?.touch();
-				onData(data);
-			};
-
-			try {
-				child.stdout?.on("data", onChunk);
-				child.stderr?.on("data", onChunk);
-				if (signal) {
-					if (signal.aborted) onAbort();
-					else signal.addEventListener("abort", onAbort, { once: true });
-				}
-				const terminal = await waitForChildProcessWithTermination(child, {
-					signal: terminationController.signal,
-					timeoutMs: timeout !== undefined && timeout > 0 ? timeout * 1000 : undefined,
-					killGraceMs: 2_000,
-				});
-				if (signal?.aborted) throw new Error("aborted");
-				if (terminal.reason === "timeout") throw new Error(`timeout:${timeout}`);
-				if (silenceKilled) throw new Error(`silence:${silenceMs / 1000}`);
-				return { exitCode: terminal.code, initialCwd: cwd };
-			} finally {
-				silenceWatchdog?.disarm();
-				if (child.pid) untrackDetachedChildPid(child.pid);
-				if (signal) signal.removeEventListener("abort", onAbort);
-			}
-		},
-	};
+	return { exec: execOnce };
 }
 
 /**
@@ -1057,6 +1067,7 @@ function createShellToolDefinition(
 			const runInSession = async (
 				source: string,
 				onData: (data: Buffer) => void,
+				execution?: { detached?: boolean },
 			): Promise<{
 				exitCode: number | null;
 				cwd?: string;
@@ -1064,9 +1075,16 @@ function createShellToolDefinition(
 				initialCwd?: string;
 				verificationCommand?: string;
 			}> => {
+				const detached = execution?.detached === true;
 				let backendCommand = source;
 				let engineRoute = false;
 				let effectiveCwd = cwd;
+				if (!routesWindowsContract && detached && !options?.forceCwd) {
+					// A detached command starts where the session is standing, not at the project root: it
+					// is the shell the agent is in, minus the shared session. The Windows contract reads
+					// the same current directory out of the session state below.
+					effectiveCwd = lastSessionCwd ?? cwd;
+				}
 				if (routesWindowsContract) {
 					const route = routeShellContract(source, contractPlatform, { pythonEngine: pythonEngineEnabled });
 					if (route.kind === "unsupported") throw new Error(route.error);
@@ -1112,6 +1130,7 @@ function createShellToolDefinition(
 							timeout: effectiveTimeoutSeconds,
 							env: target.spawnContext.env,
 							forceCwd: options?.forceCwd,
+							detached,
 						},
 					);
 				const runCommand = async () => {
@@ -1129,18 +1148,23 @@ function createShellToolDefinition(
 				// actual execution takes the coarse exclusive barrier: it waits for
 				// in-flight edit/write mutations to drain and blocks new ones meanwhile.
 				//
-				// A background call is the exception: the model declared this command independent of
-				// everything else in the batch, and the harness hands it off as a detached session task
-				// within milliseconds. Holding the barrier for the job's whole life parked every sibling
-				// bash/python behind a command nobody is waiting for (measured live: turns hung for up to
-				// 30 minutes). `holdId` lets the handoff drop the barrier for a command that becomes a
-				// session task after it already started (see releaseExclusiveHold).
-				const result =
-					background === true
-						? await runCommand()
-						: await withExclusiveMutationBarrier(runCommand, { signal, holdId: toolCallId });
+				// A background call takes the same barrier and releases it the instant its own body starts:
+				// it still runs after the writes its own message emitted before it, but nothing stays
+				// parked behind it for the rest of its life. Holding it parked every sibling bash/python
+				// behind a command nobody is waiting for (measured live: turns hung for up to 30 minutes).
+				// `holdId` also lets a later handoff drop the barrier for a foreground command that
+				// becomes a session task after it already started (see releaseExclusiveHold).
+				const result = await withExclusiveMutationBarrier(
+					async () => {
+						if (background === true) releaseExclusiveHold(toolCallId);
+						return runCommand();
+					},
+					{ signal, holdId: toolCallId },
+				);
 				const { resolvedCommand, spawnContext } = prepared;
-				if (!routesWindowsContract && result.cwd) lastSessionCwd = result.cwd;
+				// A detached command's cd never moved the session, so its reported directory must not
+				// become the session's directory either.
+				if (!routesWindowsContract && !detached && result.cwd) lastSessionCwd = result.cwd;
 				return {
 					exitCode: result.exitCode,
 					cwd: result.cwd,
@@ -1168,6 +1192,9 @@ function createShellToolDefinition(
 						if (classification.cwdPrefix !== undefined) {
 							// `cd <path> && git …`: the shell would leave the session in <path>, so the cd is
 							// replayed into the session first and the filtered run happens where it landed.
+							// It stays a session command even for a background call: the filtered git run is
+							// spawned directly (it never touches the shell), and only the session can report
+							// where a cd actually lands. A detached cd would land nowhere observable.
 							const cdChunks: Buffer[] = [];
 							const moved = await runInSession(`cd ${shellQuoteArgument(classification.cwdPrefix)}`, (data) =>
 								cdChunks.push(data),
@@ -1220,7 +1247,7 @@ function createShellToolDefinition(
 				let initialCwd: string | undefined;
 				let verificationCommand: string | undefined;
 				try {
-					const result = await runInSession(command, handleData);
+					const result = await runInSession(command, handleData, { detached: background === true });
 					exitCode = result.exitCode;
 					sessionCwd = result.cwd;
 					spawnCwd = result.spawnCwd;

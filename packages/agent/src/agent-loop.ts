@@ -1556,7 +1556,9 @@ function abortedToolCallText(abortReason?: unknown, toolMessage?: string): strin
 				: undefined;
 	const headline = reason ? `Operation aborted (${reason})` : "Operation aborted";
 	const detail = toolMessage?.trim();
-	return detail && detail !== headline ? `${headline}\n${detail}` : headline;
+	// A tool that rethrew the abort reason itself has nothing to add: only a message that says
+	// something else (partial output, the command's own status line) earns a second line.
+	return detail && detail !== headline && detail !== reason ? `${headline}\n${detail}` : headline;
 }
 
 function createAbortedToolCallOutcome(

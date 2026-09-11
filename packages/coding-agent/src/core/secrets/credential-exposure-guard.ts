@@ -849,6 +849,10 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 				signal?.throwIfAborted();
 				return redactResult(await executor.execute(toolCallId, params, signal, safeUpdate), boundary, mock);
 			} catch (error) {
+				// A cancellation is not this guard's to describe: the run's abort reason (a plain string for a
+				// named abort, thrown verbatim by throwIfAborted) passes through untouched so the loop finalizes
+				// the call as `Operation aborted (<reason>)` without a second line about the guard.
+				if (signal?.aborted || (signal?.reason !== undefined && error === signal.reason)) throw error;
 				const redact = (text: string): string =>
 					boundary ? boundary.redactSensitiveText(text) : redactKnownSecrets(text);
 				if (error instanceof Error) {

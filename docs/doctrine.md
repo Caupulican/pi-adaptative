@@ -152,13 +152,18 @@ mistake, and is not an active failure. Why: a 30-minute hang ended with two kill
 to the model as mistakes with no diagnostic. Pinned by `packages/agent/test/agent-loop.test.ts`
 (cancellation cases) and `packages/agent/test/tool-failure-memory.test.ts`.
 
-**A background or handed-off command does not hold the exclusive mutation barrier.** `background:
-true` skips it; a clock or manual handoff releases it the moment the call becomes a session task;
-a call still queued on the barrier unwinds at once when its signal aborts. Why: a background
-`svnproject` held the process-wide writer lock for its whole life, every sibling bash/python
-parked behind it, the turn hung 30 minutes and Escape did nothing. Pinned by
-`packages/coding-agent/test/bash-edit-write-race.test.ts` and
-`packages/coding-agent/test/background-handoff-barrier.test.ts`.
+**A background command occupies neither the exclusive mutation barrier nor the agent's shell
+session.** `background: true` waits only for the file writes its own message emitted before it,
+releases the barrier the instant its body starts, and runs in its own child shell started from the
+session's current directory (its cd and exports do not persist; on Windows a throwaway engine
+coordinator); a clock or manual handoff releases the barrier the moment the call becomes a session
+task; a call still queued on the barrier unwinds at once when its signal aborts. Why: a background
+`svnproject` held the process-wide writer lock AND the one-command-at-a-time persistent shell for
+its whole life, every sibling bash/python parked behind it, the turn hung 30 minutes and Escape did
+nothing; the shell half was only found by a live run after the barrier half was fixed. Pinned by
+`packages/coding-agent/test/bash-edit-write-race.test.ts`,
+`packages/coding-agent/test/background-handoff-barrier.test.ts` and
+`packages/coding-agent/test/bash-background-shell.test.ts`.
 
 **The sanitizer keeps a rejected attempt out of the agent's context.** Measured on the request
 after an omission, the server prompt cache still hit almost fully; the omission costs one request
