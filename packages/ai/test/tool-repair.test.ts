@@ -417,6 +417,24 @@ describe("tool argument repair", () => {
 		expect(getToolExecutionErrorPolicy("bash: syntax error near unexpected token `|'")).toBeUndefined();
 	});
 
+	it("separates a read encoding requirement from an edit encoding corruption", () => {
+		const readFailure =
+			'PI_READ_ENCODING_REQUIRED: /src/unit.pas is not valid UTF-8 (first invalid byte at line 3, byte offset 15). Re-read with encoding (for example "windows-1252" for Delphi/Windows sources) or declare it once in .editorconfig ([*.pas] charset = latin1). No edit was attempted.';
+		expect(getToolExecutionErrorPolicy(readFailure)).toMatchObject({
+			name: "readEncodingRequired",
+			phase: "execution",
+			failureCode: "read_encoding_required",
+			attemptMemory: "discard",
+			retainDiagnostic: true,
+		});
+		expect(getToolExecutionErrorPolicy(readFailure)?.failureCode).not.toBe("encoding_corruption");
+		expect(
+			getToolExecutionErrorPolicy(
+				"PI_FILE_ENCODING_CORRUPTION: Source encoding is unknown or malformed. Establish its encoding from authoritative project metadata or ask the user, then call read or edit with encoding. No file write was attempted.",
+			),
+		).toMatchObject({ name: "encodingCorruption", failureCode: "encoding_corruption" });
+	});
+
 	it("keeps the registry as the named repair source of truth", () => {
 		expect(TOOL_REPAIR_REGISTRY.map((entry) => entry.name)).toEqual([
 			"nullOptionalDrop",

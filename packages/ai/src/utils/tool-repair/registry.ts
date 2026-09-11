@@ -268,6 +268,18 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		},
 	},
 	{
+		name: "readEncodingRequired",
+		phase: "execution",
+		failureCode: "read_encoding_required",
+		attemptMemory: "discard",
+		retainDiagnostic: true,
+		guidance:
+			"Re-read with the encoding named in the diagnostic, or declare charset in .editorconfig for the file type; do not switch tools.",
+		matches(message: string): boolean {
+			return /\bPI_READ_ENCODING_REQUIRED\b/i.test(message);
+		},
+	},
+	{
 		name: "repeatedSuccessfulCall",
 		phase: "execution",
 		failureCode: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.failureCode,

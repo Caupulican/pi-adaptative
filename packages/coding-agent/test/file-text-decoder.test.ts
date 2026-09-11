@@ -10,9 +10,11 @@ vi.mock("../src/core/python-runtime.ts", () => ({
 	})),
 }));
 
+const fixturePath = "/fixture/source.pas";
+
 async function decoded(chunks: Iterable<Buffer> | AsyncIterable<Buffer>, encoding?: string, signal?: AbortSignal) {
 	const parts: string[] = [];
-	for await (const text of decodeTextChunks(chunks, encoding, signal)) parts.push(text);
+	for await (const text of decodeTextChunks(chunks, fixturePath, encoding, signal)) parts.push(text);
 	return parts.join("");
 }
 
@@ -61,10 +63,45 @@ describe("incremental source text decoding", () => {
 		await expect(decoded([bytes], encoding)).rejects.toThrow(/encoding|codec/i);
 	});
 
+	it.each([
+		{ name: "one chunk", stride: 0 },
+		{ name: "one-byte chunks", stride: 1 },
+	])("locates the first undecodable byte for undeclared bytes ($name)", async ({ stride }) => {
+		// "line1\nline2\ncafé\n" as windows-1252: the 0xe9 opening line 3 sits at byte offset 15.
+		const bytes = Buffer.concat([Buffer.from("line1\nline2\ncaf"), Buffer.from([0xe9, 0x0a])]);
+		const source = stride === 0 ? [bytes] : [...bytes].map((byte) => Buffer.from([byte]));
+		const failure = await decoded(source).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(failure).toMatchObject({ failureCode: "read_encoding_required", errorKind: "tool_failure" });
+		expect((failure as Error).message).toContain(
+			`PI_READ_ENCODING_REQUIRED: ${fixturePath} is not valid UTF-8 (first invalid byte at line 3, byte offset 15)`,
+		);
+	});
+
+	it("locates the first NUL as the undecodable byte", async () => {
+		const failure = await decoded([Buffer.from("ok\n\0rest")]).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(failure).toMatchObject({ failureCode: "read_encoding_required" });
+		expect((failure as Error).message).toContain("first invalid byte at line 2, byte offset 3");
+	});
+
+	it("keeps codec failures for an explicitly named encoding out of the read-encoding class", async () => {
+		const failure = await decoded([Buffer.from("\uFEFFabc", "utf16le")], "cp1252").then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect((failure as Error).message).toContain("PI_FILE_ENCODING_CORRUPTION");
+		expect(failure).not.toHaveProperty("failureCode", "read_encoding_required");
+	});
+
 	it("retains a UTF-16 surrogate pair across the native 1 MiB scan boundary", async () => {
 		const text = `${"a".repeat(524286)}🙂last`;
 		const bytes = Buffer.from(`\uFEFF${text}`, "utf16le");
-		expect(await decodeReadText(bytes)).toBe(text);
+		expect(await decodeReadText(bytes, fixturePath)).toBe(text);
 	});
 
 	it("does not pull a backend after cancellation before iteration", async () => {
@@ -92,7 +129,7 @@ describe("incremental source text decoding", () => {
 				closed = true;
 			}
 		}
-		for await (const text of decodeTextChunks(source())) {
+		for await (const text of decodeTextChunks(source(), fixturePath)) {
 			expect(text).toBe("first");
 			break;
 		}
@@ -122,7 +159,7 @@ describe("incremental source text decoding", () => {
 				closed = true;
 			}
 		}
-		const iterator = decodeTextChunks(source(), undefined, controller.signal);
+		const iterator = decodeTextChunks(source(), fixturePath, undefined, controller.signal);
 		expect((await iterator.next()).value).toBe("abcd");
 		controller.abort();
 		await expect(iterator.next()).rejects.toThrow(/abort/i);

@@ -16,12 +16,14 @@ vi.mock("../src/core/python-runtime.ts", () => ({
 
 afterEach(() => vi.clearAllMocks());
 
+const fixturePath = "/fixture/source.txt";
+
 describe("encoded read process ownership", () => {
 	it("uses one bounded helper for the entire read, not one process per chunk", async () => {
 		const bytes = Buffer.from("\uFEFFcafé🙂\r\nlast", "utf16le");
 		const pieces = [...bytes].map((byte) => Buffer.from([byte]));
 		let text = "";
-		for await (const part of decodeTextChunks(pieces)) text += part;
+		for await (const part of decodeTextChunks(pieces, fixturePath)) text += part;
 		expect(text).toBe("café🙂\r\nlast");
 		expect(spawnProcess).toHaveBeenCalledTimes(1);
 		expect(execCommand).not.toHaveBeenCalled();
@@ -31,7 +33,7 @@ describe("encoded read process ownership", () => {
 
 	it("keeps native UTF-8 reads process-free", async () => {
 		let text = "";
-		for await (const part of decodeTextChunks([Buffer.from("café")])) text += part;
+		for await (const part of decodeTextChunks([Buffer.from("café")], fixturePath)) text += part;
 		expect(text).toBe("café");
 		expect(spawnProcess).not.toHaveBeenCalled();
 		expect(execCommand).not.toHaveBeenCalled();
@@ -43,7 +45,7 @@ describe("encoded read process ownership", () => {
 			yield Buffer.from("\uFEFFfirst", "utf16le");
 			throw failure;
 		}
-		const reader = decodeTextChunks(source());
+		const reader = decodeTextChunks(source(), fixturePath);
 		expect(await reader.next()).toEqual({ value: "first", done: false });
 		await expect(reader.next()).rejects.toBe(failure);
 		const child = vi.mocked(spawnProcess).mock.results[0].value;
@@ -60,7 +62,7 @@ describe("encoded read process ownership", () => {
 				closed = true;
 			}
 		}
-		for await (const text of decodeTextChunks(source())) {
+		for await (const text of decodeTextChunks(source(), fixturePath)) {
 			expect(text).toBe("first");
 			break;
 		}

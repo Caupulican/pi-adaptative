@@ -19,6 +19,7 @@ import {
 	normalizeToLF,
 	planEditsToNormalizedContent,
 } from "./edit-diff.ts";
+import { resolveDeclaredEncoding } from "./file-encoding-metadata.ts";
 import {
 	EDIT_RETARGET_RECOVERY_TARGET_KIND,
 	FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
@@ -595,6 +596,13 @@ export function createEditToolDefinition(
 					if (encoding !== undefined && retainedEncoding !== undefined && encoding !== retainedEncoding)
 						throw new Error("Retarget cannot change the retained source encoding");
 					encoding ??= retainedEncoding;
+				}
+				if (encoding === undefined && options?.operations === undefined) {
+					// A charset the project declares for this file is evidence, exactly like the argument:
+					// it selects the byte-preserving codec path instead of the strict UTF-8 one. A foreign
+					// backend's metadata does not live on this filesystem, so only local edits consult it.
+					encoding = (await resolveDeclaredEncoding(absolutePath, { signal }))?.encoding;
+					throwIfAborted();
 				}
 				let staleLeaseRefreshes = 0;
 				const confirmLeaseOrRefresh = async (): Promise<boolean> => {

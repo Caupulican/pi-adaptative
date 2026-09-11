@@ -22,6 +22,8 @@ describe("tool execution error catalogue", () => {
 			bashMissingCommandWord: "Missing command: a pipeline/list element has no command word.",
 			bashEmptyRedirectTarget: "redirect target expanded to nothing",
 			encodingCorruption: "PI_FILE_ENCODING_CORRUPTION: legacy.dat is not valid UTF-8 text",
+			readEncodingRequired:
+				"PI_READ_ENCODING_REQUIRED: /src/unit.pas is not valid UTF-8 (first invalid byte at line 3, byte offset 15).",
 			repeatedSuccessfulCall: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.diagnostic,
 			fileMutationRetarget:
 				"PI_FILE_MUTATION_RETARGET: retained as payloadRef file-mutation:123e4567-e89b-12d3-a456-426614174000",
