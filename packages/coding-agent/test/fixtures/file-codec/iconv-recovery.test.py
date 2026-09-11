@@ -70,6 +70,44 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(caught.exception.character, "🙂")
         self.assertEqual(module["failure_reason"](caught.exception), "replacement_unrepresentable")
 
+    def test_a_transport_failure_without_an_offset_still_names_one_character(self):
+        convert = scope["run_iconv"]
+
+        def substituting(executable, source, target, data):
+            # Lossy in the direction that carries no offset: the transport's own round-trip check
+            # rejects the whole replacement and says nothing about where it went wrong.
+            if target == "X-FIXTURE":
+                data = data.replace("🙂".encode(), b"?")
+            return convert(executable, source, target, data)
+
+        with patch.dict(scope, {"run_iconv": substituting}):
+            with self.assertRaises(module["ReplacementUnrepresentable"]) as caught:
+                self.transform("splice", "target".encode("cp037"),
+                               splices=[{"start": 0, "end": 6, "replacement": "ab🙂cd"}])
+        self.assertEqual(caught.exception.character, "🙂")
+        self.assertEqual(module["failure_detail"](caught.exception), {"character": "🙂", "encoding": "X-FIXTURE"})
+
+    def test_a_codec_that_goes_unavailable_while_locating_keeps_its_own_diagnostic(self):
+        convert = scope["run_iconv"]
+        replacement = "ab🙂cd"
+
+        def failing(executable, source, target, data):
+            # The whole replacement fails without an offset, and the converter is gone by the time
+            # the bisection asks about a shorter prefix of it. An availability failure is not a
+            # character the caller could have written differently.
+            probe = data.decode("utf-8") if target == "X-FIXTURE" else None
+            if probe and probe != replacement and replacement.startswith(probe):
+                raise scope["CodecUnavailable"]("synthetic unavailable converter")
+            if target == "X-FIXTURE":
+                data = data.replace("🙂".encode(), b"?")
+            return convert(executable, source, target, data)
+
+        with patch.dict(scope, {"run_iconv": failing}):
+            with self.assertRaises(scope["CodecUnavailable"]) as caught:
+                self.transform("splice", "target".encode("cp037"),
+                               splices=[{"start": 0, "end": 6, "replacement": replacement}])
+        self.assertEqual(module["failure_reason"](caught.exception), "codec_unavailable")
+
     def test_lossy_success_is_rejected_by_independent_text_verification(self):
         convert = scope["run_iconv"]
 
