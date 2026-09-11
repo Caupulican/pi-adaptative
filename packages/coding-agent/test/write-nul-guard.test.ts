@@ -30,7 +30,7 @@ describe("write tool NUL guard", () => {
 		const path = join(cwd, "created.txt");
 
 		await expect(tool.execute("nul-write", { path, content: `head${NUL}tail` })).rejects.toThrow(
-			/^PI_NUL_IN_CONTENT: write content has U\+0000 \(NUL\) at character offset 4: "head\\0tail"\./,
+			/^PI_NUL_IN_CONTENT: write content has U\+0000 \(NUL\) at character offset 4: "head\\x00tail"\./,
 		);
 		expect(existsSync(path)).toBe(false);
 	});
@@ -71,7 +71,7 @@ describe("write tool NUL guard", () => {
 		);
 
 		expect(failure).toContain("at character offset 25:");
-		expect(failure).toContain(`"...${"é".repeat(20)}\\0${"x".repeat(20)}..."`);
+		expect(failure).toContain(`"...${"é".repeat(20)}\\x00${"x".repeat(20)}..."`);
 	});
 
 	it("leaves NUL-free content, including other control characters, writing normally", async () => {

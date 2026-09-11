@@ -45,7 +45,7 @@ describe("edit tool NUL guard", () => {
 		await expect(
 			tool.execute("nul-edit", { path, edits: [{ oldText: "beta", newText: `va${NUL}lue` }] }),
 		).rejects.toThrow(
-			/^PI_NUL_IN_REPLACEMENT: Edit 1 has U\+0000 \(NUL\) in newText at character offset 2: "va\\0lue"\./,
+			/^PI_NUL_IN_REPLACEMENT: Edit 1 has U\+0000 \(NUL\) in newText at character offset 2: "va\\x00lue"\./,
 		);
 		expect(await readFile(path)).toEqual(original);
 	});
@@ -76,7 +76,7 @@ describe("edit tool NUL guard", () => {
 					{ oldText: "gamma", newText: `GAM${NUL}MA` },
 				],
 			}),
-		).rejects.toThrow(/Edit 2 has U\+0000 \(NUL\) in newText at character offset 3: "GAM\\0MA"/);
+		).rejects.toThrow(/Edit 2 has U\+0000 \(NUL\) in newText at character offset 3: "GAM\\x00MA"/);
 		expect(await readFile(path, "utf-8")).toBe("alpha\nbeta\ngamma\n");
 	});
 
@@ -91,7 +91,7 @@ describe("edit tool NUL guard", () => {
 		);
 
 		expect(failure).toContain("at character offset 25:");
-		expect(failure).toContain(`"...${"é".repeat(20)}\\0${"x".repeat(20)}..."`);
+		expect(failure).toContain(`"...${"é".repeat(20)}\\x00${"x".repeat(20)}..."`);
 	});
 
 	it("refuses before the path is prepared, so a missing target still reports the NUL", async () => {
@@ -138,6 +138,6 @@ describe("edit tool NUL guard", () => {
 				{ oldText: `a${NUL}b`, newText: `A${NUL}B` },
 				{ oldText: "plain", newText: `pl${NUL}ain` },
 			]),
-		).toEqual({ index: 2, characterOffset: 2, context: "pl\\0ain" });
+		).toEqual({ index: 2, characterOffset: 2, context: "pl\\x00ain" });
 	});
 });

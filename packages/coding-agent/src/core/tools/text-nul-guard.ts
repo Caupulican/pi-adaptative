@@ -26,13 +26,13 @@ export const NUL_IN_CONTENT_MARKER = "PI_NUL_IN_CONTENT";
 const NUL_CONTEXT_CHARACTERS = 20;
 
 const CONTROL_ESCAPES: ReadonlyMap<string, string> = new Map([
-	[NUL, "\\0"],
+	[NUL, "\\x00"],
 	["\n", "\\n"],
 	["\r", "\\r"],
 	["\t", "\\t"],
 ]);
 
-/** Renders control characters so the diagnostic stays one readable line, NUL as the `\0` escape. */
+/** Renders control characters so the diagnostic stays one readable line, NUL as `\x00` (never `\0`, which reads as octal before a digit). */
 function escapeControlCharacters(text: string): string {
 	let escaped = "";
 	for (const character of text) {
