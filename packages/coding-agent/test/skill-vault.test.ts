@@ -367,22 +367,38 @@ describe("SkillVaultController", () => {
 		expect(projected).not.toContain("BRAVO-BODY");
 	});
 
-	it("enforces the pin limit without mutating vault state and permits re-pinning", () => {
+	it("loads past the pin cap unpinned, keeps earlier pins, and permits re-pinning", () => {
+		// A pin is a retention preference; the load itself is what the model asked for. Refusing the
+		// whole load for the cap cost a turn per session in the 2026-09-10 census.
 		const skills = createSkills([
 			{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" },
 			{ name: "bravo", description: "Bravo guidance.", body: "BRAVO-BODY" },
 			{ name: "charlie", description: "Charlie guidance.", body: "CHARLIE-BODY" },
+			{ name: "delta", description: "Delta guidance.", body: "DELTA-BODY" },
 		]);
 		const vault = new SkillVaultController({ getSkills: () => skills });
 		expect(vault.load("alpha", "model", true)).toMatchObject({ ok: true, pinned: true });
 		expect(vault.load("bravo", "model", true)).toMatchObject({ ok: true, pinned: true });
-		const revision = vault.getContextRevision();
 
-		expect(vault.load("charlie", "model", true)).toMatchObject({ ok: false, reason: "pin_limit" });
-		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["alpha", "bravo"]);
-		expect(vault.getContextRevision()).toBe(revision);
+		expect(vault.load("charlie", "model", true)).toMatchObject({ ok: true, pinned: false, pinCapReached: true });
+		expect(vault.status().slots).toMatchObject([
+			{ name: "alpha", pinned: true },
+			{ name: "bravo", pinned: true },
+			{ name: "charlie", pinned: false },
+		]);
 
-		expect(vault.load("alpha", "model", true)).toMatchObject({ ok: true, pinned: true });
+		// A batch takes the remaining pin room in request order: re-pinning alpha frees nothing, so
+		// only the first new name fits once bravo is unloaded.
+		vault.unload("bravo");
+		const batch = vault.loadMany(["alpha", "charlie", "delta"], "model", true);
+		expect(batch).toMatchObject({
+			ok: true,
+			results: [
+				{ name: "alpha", pinned: true },
+				{ name: "charlie", pinned: true },
+				{ name: "delta", pinned: false, pinCapReached: true },
+			],
+		});
 		expect(vault.load("charlie", "model")).toMatchObject({ ok: true, pinned: false });
 	});
 
@@ -742,6 +758,32 @@ describe("SkillVaultController", () => {
 		expect(primer).not.toContain("filePath");
 	});
 
+	it("loads a pinned batch past the pin cap and names the skills that stayed unpinned", async () => {
+		const skills = createSkills([
+			{ name: "keeper", description: "Existing guidance", body: "KEEPER" },
+			{ name: "alpha", description: "alpha", body: "ALPHA" },
+			{ name: "bravo", description: "bravo", body: "BRAVO" },
+		]);
+		const vault = new SkillVaultController({ getSkills: () => skills, now: () => 1000 });
+		vault.load("keeper", "model", true);
+		const tool = createSkillVaultToolDefinition(vault);
+		const result = await tool.execute(
+			"batch",
+			{ action: "load", names: ["alpha", "bravo"], pin: true },
+			undefined,
+			undefined,
+			{} as never,
+		);
+		expect(result.isError).not.toBe(true);
+		const text = result.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+		expect(text).toContain("skill loaded_pending: alpha (pinned)");
+		expect(text).toContain("skill loaded_pending: bravo (not pinned: 2 pins already held");
+		expect(vault.status().slots).toMatchObject([
+			{ name: "keeper", pinned: true },
+			{ name: "alpha", pinned: true },
+			{ name: "bravo", pinned: false },
+		]);
+	});
 	it("reports a deterministic host-owned state", () => {
 		const skills = createSkills([
 			{ name: "frontend-motion", description: "Accessible web motion.", body: "Use transforms." },
@@ -755,7 +797,6 @@ describe("SkillVaultController", () => {
 		{ names: ["alpha", "bravo", "charlie", "delta", "echo"], limit: 4096, pin: false },
 		{ names: ["alpha", "missing"], limit: 4096, pin: false },
 		{ names: ["alpha", "bravo", "charlie"], limit: 1024, pin: false },
-		{ names: ["alpha", "bravo"], limit: 4096, pin: true },
 	])("rejects an inadmissible batch atomically: $names, bytes=$limit, pin=$pin", async ({ names, limit, pin }) => {
 		const skills = createSkills([
 			{ name: "keeper", description: "Existing guidance", body: "KEEPER" },

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- `skill load` with `pin` no longer fails the whole load when the pin cap is spent: the skills load, the remaining pin room goes to the requested names in order, and the reply names each skill that stayed unpinned.
+
 ## [0.99.16] - 2026-09-10
 
 ### Fixed

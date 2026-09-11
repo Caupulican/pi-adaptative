@@ -61,10 +61,19 @@ export interface SkillSearchResult {
 }
 
 export type SkillLoadResult =
-	| { ok: true; state: "loaded_pending"; name: string; baseDir: string; pinned: boolean; evicted?: string[] }
+	| {
+			ok: true;
+			state: "loaded_pending";
+			name: string;
+			baseDir: string;
+			pinned: boolean;
+			/** The load asked to pin this skill but the pin cap was already spent; it is resident unpinned. */
+			pinCapReached?: true;
+			evicted?: string[];
+	  }
 	| {
 			ok: false;
-			reason: "not_found" | "body_too_large" | "invalid_body" | "read_failed" | "pin_limit" | "capacity";
+			reason: "not_found" | "body_too_large" | "invalid_body" | "read_failed" | "capacity";
 			message: string;
 	  };
 
@@ -266,18 +275,22 @@ export class SkillVaultController {
 				message: `At most ${MAX_LOADED_SKILLS} skills can be loaded together; choose a smaller set.`,
 			};
 		}
+		// Pinning is a retention preference, never a reason to refuse the load the model asked for
+		// (2026-09-10 census: two sessions lost a turn each to a pin-cap refusal and retried unpinned).
+		// Requested names take the remaining pin room in request order; the rest load unpinned and
+		// say so, while slots pinned by earlier loads keep their pins.
+		let pinRoom = MAX_PINNED_SKILLS;
 		if (pin) {
-			let pinnedCount = names.size;
 			for (const [slotName, slot] of this.slots) {
-				if (!names.has(slotName) && slot.pinned) pinnedCount++;
+				if (!names.has(slotName) && slot.pinned) pinRoom--;
 			}
-			if (pinnedCount > MAX_PINNED_SKILLS) {
-				return {
-					ok: false,
-					reason: "pin_limit",
-					message: `At most ${MAX_PINNED_SKILLS} skills can be pinned; unload a pinned skill or reload it without pin first.`,
-				};
-			}
+		}
+		const pinnedNames = new Set<string>();
+		const pinCapReached = new Set<string>();
+		for (const name of names) {
+			if (!pin) break;
+			if (pinnedNames.size < pinRoom) pinnedNames.add(name);
+			else pinCapReached.add(name);
 		}
 		const maxBodyBytes = this.resolveMaxBodyBytes();
 		const prepared = new Map<string, SkillSlotState>();
@@ -293,7 +306,7 @@ export class SkillVaultController {
 				bodyBytes,
 				systemPromptSection: activeSkillContext(skill, body),
 				requester,
-				pinned: pin,
+				pinned: pinnedNames.has(name),
 				loadedAtMs: now,
 				fileDevice: file.dev,
 				fileInode: file.ino,
@@ -339,7 +352,8 @@ export class SkillVaultController {
 				state: "loaded_pending",
 				name: slot.skill.name,
 				baseDir: slot.skill.baseDir,
-				pinned: pin,
+				pinned: slot.pinned,
+				...(pinCapReached.has(slot.skill.name) ? { pinCapReached: true as const } : {}),
 				...(index === prepared.size - 1 && evicted.length > 0 ? { evicted } : {}),
 			})),
 		};

@@ -26,7 +26,9 @@ const skillSchema = Type.Object(
 			}),
 		),
 		pin: Type.Optional(
-			Type.Boolean({ description: `prioritize retention while loaded; max ${MAX_PINNED_SKILLS} pinned skills` }),
+			Type.Boolean({
+				description: `prioritize retention while loaded; at most ${MAX_PINNED_SKILLS} pins, further requests load unpinned`,
+			}),
 		),
 	},
 	{ additionalProperties: false },
@@ -117,7 +119,11 @@ function searchText(result: SkillSearchResult): string {
 }
 
 function loadText(result: Extract<SkillLoadResult, { ok: true }>): string {
-	const pin = result.pinned ? " (pinned)" : "";
+	const pin = result.pinned
+		? " (pinned)"
+		: result.pinCapReached
+			? ` (not pinned: ${MAX_PINNED_SKILLS} pins already held; unload a pinned skill to pin this one)`
+			: "";
 	const evicted = result.evicted ? `; EVICTED: ${result.evicted.join(", ")}` : "";
 	return `skill loaded_pending: ${result.name}${pin} (base ${result.baseDir}), activates next request; expires when idle${evicted}`;
 }
