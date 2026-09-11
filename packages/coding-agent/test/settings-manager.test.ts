@@ -2116,4 +2116,26 @@ describe("workbench settings", () => {
 		expect(manager.getWorkbenchSettings().mouse).toBe("off");
 		expect(SettingsManager.inMemory({ workbench: { mouse: "off" } }).getWorkbenchSettings().mouse).toBe("off");
 	});
+
+	it("validates the host-turn thinking policy and reads an unrecognized value as unset", () => {
+		expect(SettingsManager.inMemory().getHostTurnThinkingLevel()).toBeUndefined();
+		expect(SettingsManager.inMemory({ reasoning: {} }).getHostTurnThinkingLevel()).toBeUndefined();
+		expect(SettingsManager.inMemory({ reasoning: { hostTurnThinking: "inherit" } }).getHostTurnThinkingLevel()).toBe(
+			"inherit",
+		);
+		expect(SettingsManager.inMemory({ reasoning: { hostTurnThinking: "low" } }).getHostTurnThinkingLevel()).toBe(
+			"low",
+		);
+		expect(SettingsManager.inMemory({ reasoning: { hostTurnThinking: "off" } }).getHostTurnThinkingLevel()).toBe(
+			"off",
+		);
+		// A typo is reported by name once and then falls back to the documented default; it never
+		// reaches a provider as a thinking level and never passes silently.
+		const typo = SettingsManager.inMemory({ reasoning: { hostTurnThinking: "cheap" as unknown as "low" } });
+		expect(typo.getHostTurnThinkingLevel()).toBeUndefined();
+		expect(typo.getHostTurnThinkingLevel()).toBeUndefined();
+		const reported = typo.drainErrors().map(({ error }) => error.message);
+		expect(reported).toHaveLength(1);
+		expect(reported[0]).toMatch(/reasoning\.hostTurnThinking: unknown value "cheap"/);
+	});
 });

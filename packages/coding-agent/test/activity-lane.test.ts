@@ -86,6 +86,95 @@ describe("activity lane", () => {
 		expect(formatElapsed(3_600_000 + 120_000)).toBe("1h02m");
 	});
 
+	/**
+	 * The row's whole job in the turn slot is "is this stuck". On a slow-first-token provider the
+	 * elapsed figure alone cannot say whether the provider has answered at all, so the parenthetical
+	 * carries the answer - and only once the wait is long enough to be news, so a fast provider
+	 * renders exactly what it always did.
+	 */
+	it("names the wait for the first token, then what it cost, without disturbing a fast turn", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		const text = () => stripAnsi(lane.render(100).join("\n"));
+		lane.start({ id: "runtime:turn", kind: "runtime", label: "Working..." });
+
+		now += 2_000;
+		expect(text()).toContain("Working... (2s)");
+		expect(text()).not.toContain("no token yet");
+
+		now += 7_000;
+		expect(text()).toContain("Working... (9s, no token yet)");
+
+		lane.markFirstToken("runtime:turn");
+		now += 14_000;
+		expect(text()).toContain("Working... (23s, first 9s)");
+
+		// Idempotent: a later delta must not move the mark forward.
+		lane.markFirstToken("runtime:turn");
+		expect(text()).toContain("(23s, first 9s)");
+
+		// The mark belongs to the turn: the next turn starts unmarked and silent again.
+		lane.remove("runtime:turn");
+		lane.start({ id: "runtime:turn", kind: "runtime", label: "Working..." });
+		expect(text()).toContain("Working... (0s)");
+		now += 9_000;
+		expect(text()).toContain("Working... (9s, no token yet)");
+		lane.dispose();
+	});
+
+	it("keeps the first-token phrasing off every item that never waits for a token", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		const text = () => stripAnsi(lane.render(100).join("\n"));
+		lane.start({ id: "tool:1", kind: "tool", label: "Bash", tag: "bash" });
+		now += 30_000;
+		expect(text()).toContain("Bash (30s)");
+		expect(text()).not.toContain("no token yet");
+
+		lane.remove("tool:1");
+		lane.wait({ id: "runtime:retry", kind: "runtime", label: "Retry 1/3 in 20s" });
+		now += 20_000;
+		expect(text()).toContain("Retry 1/3 in 20s (20s)");
+		expect(text()).not.toContain("no token yet");
+
+		// markFirstToken is a no-op for an item that is not live.
+		lane.markFirstToken("runtime:turn");
+		expect(text()).not.toContain("first ");
+		lane.dispose();
+	});
+
+	it("carries the first-token mark across a label change inside the same turn", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		const text = () => stripAnsi(lane.render(100).join("\n"));
+		lane.start({ id: "runtime:turn", kind: "runtime", label: "Working..." });
+		now += 5_000;
+		lane.markFirstToken("runtime:turn");
+		now += 5_000;
+		// The working indicator toggling re-starts the same live id mid-turn; the clock and the mark
+		// both belong to the turn, so both survive it.
+		lane.start({ id: "runtime:turn", kind: "runtime", label: "Reading" });
+		expect(text()).toContain("Reading (10s, first 5s)");
+		lane.update("runtime:turn", "Citing");
+		expect(text()).toContain("Citing (10s, first 5s)");
+		lane.dispose();
+	});
+
 	it("does not replay old terminal state when a resumed session is primed", () => {
 		let taskState = addTaskStep(createTaskStepsState("T0"), { content: "Already done" }, "T1");
 		const step = taskState.steps[0];

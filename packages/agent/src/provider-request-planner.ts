@@ -453,6 +453,7 @@ export async function startPlannedAgentProviderRequestWithId(
 						model: config.model,
 						context: materialized.context,
 						maxTokens: requestMaxTokens,
+						sourceMessages: plan.messages,
 					})
 				: config.reasoning;
 			const streamFunction = streamFn ?? streamSimple;

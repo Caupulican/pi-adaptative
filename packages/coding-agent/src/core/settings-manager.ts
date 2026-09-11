@@ -597,6 +597,21 @@ export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> =
 	previews: 24,
 });
 
+export interface ReasoningSettings {
+	/**
+	 * Thinking level for a turn the HOST started after a background tool or worker finished, whose
+	 * expected work is bookkeeping: read the delivered result, cite it, continue. Ordinary turns the
+	 * operator or the model drives are never affected, and `/thinking` still reports the session level.
+	 *
+	 * - unset (the default): one level below the session's current level, with a floor of `"low"`,
+	 *   and never above the session level (so a session already at or below `"low"` is left alone).
+	 * - `"inherit"`: exactly the session level, i.e. the behaviour before this setting existed.
+	 * - an explicit level: that level, clamped to at most the session level. This policy only ever
+	 *   lowers effort for a host turn; it can never raise it.
+	 */
+	hostTurnThinking?: ThinkingLevel | "inherit";
+}
+
 export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
@@ -614,6 +629,8 @@ export interface Settings {
 	scout?: ScoutSettings;
 	/** Proactive per-turn cost guard (#34). */
 	costGuard?: Partial<CostGuardSettings>;
+	/** Per-request reasoning policy for turns the operator did not start. */
+	reasoning?: ReasoningSettings;
 	/** Skill curator (#32): auto-archive stale reflection-promoted skills at session start. */
 	curator?: { autoArchive?: boolean; staleDays?: number };
 	contextGc?: ContextGcSettings;
@@ -2925,6 +2942,29 @@ export class SettingsManager {
 		this.globalSettings.costGuard = normalized;
 		this.markModified("costGuard");
 		this.save();
+	}
+
+	private hostTurnThinkingRejected: unknown = undefined;
+
+	/**
+	 * Host-turn reasoning policy (see {@link ReasoningSettings.hostTurnThinking}). An unrecognized
+	 * value is reported once by name through the settings diagnostics and then reads as unset, so a
+	 * typo neither reaches the provider nor passes silently.
+	 */
+	getHostTurnThinkingLevel(): ThinkingLevel | "inherit" | undefined {
+		const configured = this.settings.reasoning?.hostTurnThinking;
+		if (configured === undefined || configured === "inherit") return configured;
+		if (isThinkingLevel(configured)) return configured;
+		if (this.hostTurnThinkingRejected !== configured) {
+			this.hostTurnThinkingRejected = configured;
+			this.recordError(
+				"global",
+				new Error(
+					`reasoning.hostTurnThinking: unknown value ${JSON.stringify(configured)}; expected a thinking level or "inherit". Using the default (one level below the session level).`,
+				),
+			);
+		}
+		return undefined;
 	}
 
 	getFailoverSettings(): Required<FailoverSettings> {

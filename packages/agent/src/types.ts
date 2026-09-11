@@ -615,10 +615,21 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Resolve the reasoning effort after context transformation and immediately before the provider
 	 * request. This supports request-local policy decisions that must not mutate persisted agent state.
+	 *
+	 * `context` is the MATERIALIZED WIRE context: `convertToLlm` has already turned every non-wire
+	 * AgentMessage kind into a plain `user` message, so a `role: "custom"` message and its
+	 * `customType` are no longer visible there. `sourceMessages` is this request's durable
+	 * agent-message plan, unconverted - the only place a policy can recognize which host-initiated
+	 * message the request is answering.
 	 */
 	resolveRequestReasoning?: (
 		reasoning: SimpleStreamOptions["reasoning"],
-		request: { model: Model<Api>; context: Context; maxTokens?: number },
+		request: {
+			model: Model<Api>;
+			context: Context;
+			maxTokens?: number;
+			sourceMessages: readonly AgentMessage[];
+		},
 	) => SimpleStreamOptions["reasoning"];
 
 	/**

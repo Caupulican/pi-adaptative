@@ -303,6 +303,15 @@ describe("InteractiveMode.handleUsageCommand", () => {
 				getContextUsage: () => ({ percent: 66.6, tokens: 66_600, contextWindow: 100_000 }),
 				autoCompactionEnabled: true,
 				getLastCostGuardDecision: () => ({ over: true, estUsd: 1.23, thresholdUsd: 1, action: "warn" }),
+				hostTurnReasoning: {
+					getLastDecision: () => ({
+						customType: "background-worker-completion",
+						sessionLevel: "high",
+						resolvedLevel: "medium",
+						lowered: true,
+					}),
+					getLoweredRequestCount: () => 3,
+				},
 				getModelRouterStatus: (formatLabel: (label: string) => string) =>
 					`${formatLabel("Status:")} enabled\n${formatLabel("Routing:")} waiting for prompt`,
 			},
@@ -331,6 +340,7 @@ describe("InteractiveMode.handleUsageCommand", () => {
 		expect(output).toContain("Compaction gate failures: 4 (1 deterministic gap-fill)");
 		expect(output).toContain("Failing compaction checks: open-errors-recall x4 (0.09-0.43 < 0.70)");
 		expect(output).toContain("Cost guard: over $1.2300/$1.0000 (warn)");
+		expect(output).toContain("Host-turn thinking: high to medium (3 lowered; last background-worker-completion)");
 		expect(output).toContain("Auto Learn: enabled");
 		expect(output).toContain("Scavenger model: anthropic/claude-haiku-4-5");
 		expect(output).toContain("Model Router");

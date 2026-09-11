@@ -120,6 +120,7 @@ import { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
 import { type ExplicitGoalStartAuthority, parseExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
+import { HostTurnReasoningController } from "./host-turn-reasoning.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
 import { HumanInputController } from "./human-input-controller.ts";
 import { DURABLE_LEARNING_MEMORY_POLICY_VERSION, DurableLearningState } from "./learning/durable-learning-state.ts";
@@ -374,6 +375,8 @@ export class AgentSession {
 	private readonly _analytics: SessionAnalytics;
 	private readonly _treeNavigator: SessionTreeNavigator;
 	private readonly _costGuard: CostGuardController;
+	/** Host-turn reasoning policy (host-turn-reasoning.ts): the latest decision and this session's lowered count. */
+	readonly hostTurnReasoning: HostTurnReasoningController;
 	/** Per-turn model-router subsystem (see model-router-controller.ts); owns the transient route/intent,
 	 * the cheap-turn session buffer, the escalation/retry flags, and the sticky last-decision/skip-reason
 	 * used by the status report. Its parallel routed drive path delegates every turn back to
@@ -450,7 +453,7 @@ export class AgentSession {
 			return this._costGuard.resolveRequestReasoning(
 				request.model,
 				request.context,
-				resolvedReasoning,
+				this.hostTurnReasoning.resolveRequestReasoning(request.model, request.sourceMessages, resolvedReasoning),
 				request.maxTokens,
 			);
 		};
@@ -610,6 +613,7 @@ export class AgentSession {
 			getLearningAuditRecords: () => this.getLearningAuditRecords(),
 		});
 		this._modelRegistry = config.modelRegistry;
+		this.hostTurnReasoning = new HostTurnReasoningController(() => this.settingsManager.getHostTurnThinkingLevel());
 		this._costGuard = new CostGuardController({
 			getSettings: () => this.settingsManager.getCostGuardSettings(),
 			getCompactionReserveTokens: () => this.settingsManager.getCompactionReserveTokens(),

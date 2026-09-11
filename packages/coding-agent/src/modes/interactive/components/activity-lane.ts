@@ -17,6 +17,11 @@ export interface ActivityLaneItem {
 	tag?: string;
 	/** Epoch ms when the work began; the live row shows the elapsed time next to its subject. */
 	startedAt?: number;
+	/**
+	 * Epoch ms when this turn's first provider token arrived (`ActivityLaneController.markFirstToken`).
+	 * Belongs to the turn that owns `startedAt`: a fresh clock always begins unmarked.
+	 */
+	firstTokenAt?: number;
 }
 
 export interface ActivityLaneCanonicalSnapshot {
@@ -32,6 +37,13 @@ export interface ActivityLaneProjection {
 
 const DEFAULT_TERMINAL_HOLD_MS = 2_000;
 const ELAPSED_TICK_MS = 1_000;
+/**
+ * Below this, the wait for the first token is not news and the row stays exactly as it was: one
+ * elapsed figure. Above it the operator can no longer tell "the provider has not answered" from
+ * "it is writing", which is the whole reason the mark exists (measured: p50 11.5 s to first token
+ * on a slow-first-token provider, ~40 % of the turn's active time).
+ */
+const FIRST_TOKEN_NOTICE_MS = 3_000;
 
 /** `12s`, `1m12s`, `1h02m`: the coarsest unit the operator needs to judge "is it stuck". */
 export function formatElapsed(ms: number): string {
@@ -45,6 +57,13 @@ const MAX_ACTIVITY_LABEL_LENGTH = 240;
 const MAX_SEEN_TERMINALS = 512;
 
 export const BACKGROUND_TOOL_ACTIVITY_ID_PREFIX = "background-tool:";
+
+/** The one live item that brackets a whole assistant turn, and so the only one that awaits a first token. */
+export const RUNTIME_TURN_ACTIVITY_ID = "runtime:turn";
+
+export function isTurnActivityItem(item: Pick<ActivityLaneItem, "id" | "kind">): boolean {
+	return item.kind === "runtime" && item.id === RUNTIME_TURN_ACTIVITY_ID;
+}
 
 export function backgroundToolActivityId(taskId: string): string {
 	return `${BACKGROUND_TOOL_ACTIVITY_ID_PREFIX}${taskId}`;
@@ -305,8 +324,20 @@ export function renderActivityLaneLine(
 
 	const indent = " ";
 	const gap = " ".repeat(SLOT_GAP_WIDTH);
-	const elapsed = (item: ActivityLaneItem | undefined): string =>
-		item?.startedAt !== undefined && now !== undefined ? ` (${formatElapsed(now - item.startedAt)})` : "";
+	// One parenthetical carries every timing fact about the subject, in one unit vocabulary, with no
+	// glyph of its own: the row's only glyph is the status dot. The first-token half appears only
+	// once the wait is long enough to mean something (FIRST_TOKEN_NOTICE_MS), so a fast provider
+	// renders exactly what it always did.
+	const elapsed = (item: ActivityLaneItem | undefined): string => {
+		if (item?.startedAt === undefined || now === undefined) return "";
+		const total = formatElapsed(now - item.startedAt);
+		if (!isTurnActivityItem(item)) return ` (${total})`;
+		const waitedMs = (item.firstTokenAt ?? now) - item.startedAt;
+		if (waitedMs < FIRST_TOKEN_NOTICE_MS) return ` (${total})`;
+		return item.firstTokenAt === undefined
+			? ` (${total}, no token yet)`
+			: ` (${total}, first ${formatElapsed(waitedMs)})`;
+	};
 
 	// Turn slot: alive-anchor glyph plus the subject of the work and how long it has run. The one
 	// running tool is the subject when there is exactly one; otherwise the live runtime label is,
@@ -421,9 +452,13 @@ export class ActivityLaneComponent implements Component {
 	}
 
 	private setLive(item: Omit<ActivityLaneItem, "status">, status: "active" | "waiting"): void {
-		const startedAt =
-			item.startedAt ?? this.live.get(item.id)?.startedAt ?? (this.timedKind(item.kind) ? this.now() : undefined);
-		this.live.set(item.id, { ...item, label: boundedLabel(item.label), status, startedAt });
+		// A caller that supplies neither clock is continuing the live item it already started (the
+		// working indicator toggling, a label change); anything else begins a new turn. The first-token
+		// mark rides with the clock it measures, so a new turn always starts unmarked.
+		const carried = item.startedAt === undefined ? this.live.get(item.id) : undefined;
+		const startedAt = item.startedAt ?? carried?.startedAt ?? (this.timedKind(item.kind) ? this.now() : undefined);
+		const firstTokenAt = item.firstTokenAt ?? carried?.firstTokenAt;
+		this.live.set(item.id, { ...item, label: boundedLabel(item.label), status, startedAt, firstTokenAt });
 		this.syncTicker();
 		this.requestRender();
 	}
@@ -483,6 +518,18 @@ export class ActivityLaneComponent implements Component {
 
 	wait(item: Omit<ActivityLaneItem, "status">): void {
 		this.setLive(item, "waiting");
+	}
+
+	/**
+	 * Stamp the arrival of this turn's first provider token. Idempotent within the turn: the first
+	 * call wins and later ones are no-ops, so the caller may mark on every content delta. A no-op for
+	 * an item that is not live or has no clock to measure against.
+	 */
+	markFirstToken(id: string, at: number = this.now()): void {
+		const current = this.live.get(id);
+		if (!current || current.startedAt === undefined || current.firstTokenAt !== undefined) return;
+		this.live.set(id, { ...current, firstTokenAt: at });
+		this.requestRender();
 	}
 
 	update(id: string, label: string): void {

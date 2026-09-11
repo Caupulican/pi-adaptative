@@ -150,6 +150,14 @@ export function handleUsageCommand(host: UsageReportHost): void {
 	} else {
 		info += `${theme.fg("dim", "Cost guard:")} enabled; awaiting the next provider projection\n`;
 	}
+	const hostTurn = host.session.hostTurnReasoning.getLastDecision();
+	const loweredHostTurns = host.session.hostTurnReasoning.getLoweredRequestCount();
+	if (hostTurn) {
+		const effect = hostTurn.lowered ? `${hostTurn.sessionLevel} to ${hostTurn.resolvedLevel}` : "inherited";
+		info += `${theme.fg("dim", "Host-turn thinking:")} ${effect} (${loweredHostTurns} lowered; last ${hostTurn.customType})\n`;
+	} else {
+		info += `${theme.fg("dim", "Host-turn thinking:")} no host-initiated turn yet\n`;
+	}
 	info += `${theme.fg("dim", "Auto Learn:")} ${autoLearn.enabled ? "enabled" : "disabled"}\n`;
 	info += `${theme.fg("dim", "Scavenger model:")} ${autoLearn.model || "active"}\n`;
 	info += `${theme.fg("dim", "Reflection cue:")} ${autoLearn.reflectionReview ? "enabled" : "disabled"} (root-only durable cue; ${autoLearn.reflectionMinToolCalls} tool-call trigger)\n`;

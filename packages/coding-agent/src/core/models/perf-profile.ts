@@ -1,7 +1,7 @@
 import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
 import { isStreamStallError, type StreamIdleOptions } from "@caupulican/pi-agent-core/reliability";
 import type { StreamFn } from "@caupulican/pi-agent-core/types";
-import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
+import { createAssistantMessageEventStream, isFirstTokenEvent } from "@caupulican/pi-ai/event-stream";
 import type {
 	Api,
 	AssistantMessage,
@@ -358,13 +358,6 @@ function recordSuccessfulStreamSample(input: {
 	} catch {
 		// Perf profiling must never fail the user turn.
 	}
-}
-
-function isFirstTokenEvent(event: AssistantMessageEvent): boolean {
-	return (
-		(event.type === "text_delta" || event.type === "thinking_delta" || event.type === "toolcall_delta") &&
-		event.delta.length > 0
-	);
 }
 
 function expectedPrefillFromProfile(profile: ModelPerfProfile | undefined, promptTokens: number): number | undefined {

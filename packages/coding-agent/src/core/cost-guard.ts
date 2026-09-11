@@ -109,8 +109,12 @@ export function evaluateCostGuard(
 	};
 }
 
-/** Reasoning levels in descending cost order, used to pick the next-cheaper level on a downgrade. */
-const REASONING_LADDER = ["ultra", "max", "xhigh", "high", "medium", "low", "minimal", "off"] as const;
+/**
+ * Reasoning levels in descending cost order, used to pick the next-cheaper level on a downgrade.
+ * Exported as the one ladder every request-local reasoning policy ranks against (see
+ * `host-turn-reasoning.ts`); a second copy would be free to disagree about what "one level below" means.
+ */
+export const REASONING_LADDER = ["ultra", "max", "xhigh", "high", "medium", "low", "minimal", "off"] as const;
 export type ReasoningLevel = (typeof REASONING_LADDER)[number];
 export type ReasoningEffortMap = Readonly<Partial<Record<ReasoningLevel, string | null>>>;
 

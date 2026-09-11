@@ -154,3 +154,19 @@ export class AssistantMessageEventStream extends EventStream<AssistantMessageEve
 export function createAssistantMessageEventStream(): AssistantMessageEventStream {
 	return new AssistantMessageEventStream();
 }
+
+/**
+ * Whether this stream event is the provider's FIRST produced content, i.e. the event that ends
+ * time-to-first-token and starts generation.
+ *
+ * One definition, three consumers: the agent loop stamps `AssistantMessage.firstTokenAt` with it
+ * (D1 observability), the model perf profile splits request time on it, and the interactive live
+ * row marks the turn with it. A row that disagreed with the telemetry would be worse than no row,
+ * so they all ask here. A zero-length delta is a protocol artifact, not a token.
+ */
+export function isFirstTokenEvent(event: AssistantMessageEvent): boolean {
+	return (
+		(event.type === "text_delta" || event.type === "thinking_delta" || event.type === "toolcall_delta") &&
+		event.delta.length > 0
+	);
+}

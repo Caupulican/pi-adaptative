@@ -1,6 +1,7 @@
 import type { AgentMessage, ToolCallRepairInfo } from "@caupulican/pi-agent-core";
 import { createCompactionSummaryMessage } from "@caupulican/pi-agent-core/messages";
 import type { AssistantMessage } from "@caupulican/pi-ai";
+import { isFirstTokenEvent } from "@caupulican/pi-ai/event-stream";
 import {
 	type Container,
 	type Loader,
@@ -21,6 +22,7 @@ import {
 	type ActivityLaneKind,
 	BACKGROUND_TOOL_ACTIVITY_ID_PREFIX,
 	backgroundToolActivityId,
+	RUNTIME_TURN_ACTIVITY_ID,
 } from "./components/activity-lane.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { CountdownTimer } from "./components/countdown-timer.ts";
@@ -227,7 +229,14 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			break;
 
 		case "message_update":
-			if (host.streamingComponent && event.message.role === "assistant") {
+			if (event.message.role !== "assistant") break;
+			// The turn's time-to-first-token ends here, at the provider's first produced content, not
+			// at the framing events around it: `isFirstTokenEvent` is the same predicate the agent
+			// loop stamps `firstTokenAt` with. The mark is idempotent, so every later delta is a no-op.
+			if (isFirstTokenEvent(event.assistantMessageEvent)) {
+				host.activityLane?.markFirstToken(RUNTIME_TURN_ACTIVITY_ID);
+			}
+			if (host.streamingComponent) {
 				updateCommentaryActivity(host, event.message);
 				host.applyStreamingMessageUpdate(event.message);
 			}

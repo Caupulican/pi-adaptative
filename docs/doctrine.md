@@ -74,6 +74,25 @@ capability tier narrows it further, a goal budget further still; nothing widens 
 Why: one full-class model streamed a single sentence for twenty-three minutes against a 500,000
 token limit. Pinned by `packages/coding-agent/test/agent-session-retry.test.ts`.
 
+**A turn the host starts for itself runs one rung cheaper, and the live row says where the time
+went.** The request that answers a host-delivered completion (`background-tool-completion`,
+`background-worker-completion` - recognized on the durable agent messages, never on the wire
+context, where `convertToLlm` has already flattened every custom message into a `user` one) is
+requested one thinking rung below the session level, floored at `low`, never above the session
+level and never raising effort; `reasoning.hostTurnThinking` sets an explicit level (clamped to the
+session level) or `"inherit"` to switch the policy off, and the session's own level never moves.
+Its expected work is bookkeeping: read the delivered result, cite it, continue. Separately, the
+interactive live row marks the turn's first token - the same `isFirstTokenEvent` predicate that
+stamps `AssistantMessage.firstTokenAt` and splits the model perf profile - and shows
+`(9s, no token yet)` then `(23s, first 9s)` once the wait passes three seconds, so a fast provider
+renders exactly the elapsed figure it always did. Why: on a slow-first-token provider the first
+token is p50 11.5 s, about 40 % of a turn's active time, and the operator could not tell "waiting
+for the provider" from "generating" while paying full reasoning effort for a turn that only had to
+quote a finished result. Pinned by `packages/coding-agent/test/host-turn-reasoning.test.ts`,
+`packages/coding-agent/test/suite/agent-session-host-turn-reasoning.test.ts`,
+`packages/coding-agent/test/activity-lane.test.ts` and
+`packages/coding-agent/test/interactive-event-controller.test.ts`.
+
 ## Tool surfaces
 
 **A slip the harness can absorb normalizes; only real ambiguity refuses, and the refusal names the

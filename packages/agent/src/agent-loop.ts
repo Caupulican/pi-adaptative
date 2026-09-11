@@ -3,7 +3,7 @@
  * Transforms to Message[] only at the LLM call boundary.
  */
 
-import { EventStream } from "@caupulican/pi-ai/event-stream";
+import { EventStream, isFirstTokenEvent } from "@caupulican/pi-ai/event-stream";
 import {
 	formatToolRepairStandingRule,
 	REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE,
@@ -919,8 +919,9 @@ async function streamAssistantResponse(
 	let abortedForDegeneration = false;
 	/**
 	 * D1 observability (see AssistantMessage.firstTokenAt in types.ts): stamped on the first event
-	 * that carries actual generated content - a `_delta` event specifically, never a `_start`/`_end`
-	 * framing event - and left `undefined` if the stream errors or aborts before one ever arrives.
+	 * that carries actual generated content (`isFirstTokenEvent`: a non-empty `_delta`, never a
+	 * `_start`/`_end` framing event) and left `undefined` if the stream errors or aborts before one
+	 * ever arrives. The perf profile and the interactive live row read the same predicate.
 	 */
 	let firstTokenAt: number | undefined;
 
@@ -942,12 +943,7 @@ async function streamAssistantResponse(
 			case "toolcall_start":
 			case "toolcall_delta":
 			case "toolcall_end":
-				if (
-					firstTokenAt === undefined &&
-					(event.type === "text_delta" || event.type === "thinking_delta" || event.type === "toolcall_delta")
-				) {
-					firstTokenAt = Date.now();
-				}
+				if (firstTokenAt === undefined && isFirstTokenEvent(event)) firstTokenAt = Date.now();
 				if (partialMessage) {
 					partialMessage = event.partial;
 					context.messages[context.messages.length - 1] = partialMessage;
