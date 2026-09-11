@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createEditTool } from "../src/core/tools/edit.ts";
 import { FileMutationIntentController } from "../src/core/tools/file-mutation-intent.ts";
-import { withFileMutationQueue } from "../src/core/tools/file-mutation-queue.ts";
+import { withExclusiveMutationBarrier, withFileMutationQueue } from "../src/core/tools/file-mutation-queue.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
 import { FILE_SYMLINK_TESTS_SUPPORTED } from "./helpers/filesystem-links.ts";
 
@@ -74,6 +74,45 @@ describe("withFileMutationQueue", () => {
 		expect(order.indexOf("a:start")).toBeLessThan(order.indexOf("a:end"));
 		expect(order.indexOf("b:start")).toBeLessThan(order.indexOf("b:end"));
 		expect(order.indexOf("b:start")).toBeLessThan(order.indexOf("a:end"));
+	});
+
+	it("with an aborted signal while waiting on a writer rejects with the reason and does not run the mutation", async () => {
+		const started = createDeferred();
+		const releaseWriter = createDeferred();
+		const exclusive = withExclusiveMutationBarrier(async () => {
+			started.resolve();
+			await releaseWriter.promise;
+		});
+		await started.promise;
+
+		const controller = new AbortController();
+		let mutated = false;
+		const mutation = withFileMutationQueue(
+			"/tmp/file-mutation-queue-aborted",
+			async () => {
+				mutated = true;
+			},
+			undefined,
+			{ signal: controller.signal },
+		);
+		let settled = false;
+		mutation.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		await delay(20);
+		expect(settled).toBe(false);
+
+		controller.abort("turn cancelled");
+		await expect(mutation).rejects.toBe("turn cancelled");
+		expect(mutated).toBe(false);
+
+		releaseWriter.resolve();
+		await exclusive;
 	});
 
 	it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)("uses the same queue for symlink aliases", async () => {

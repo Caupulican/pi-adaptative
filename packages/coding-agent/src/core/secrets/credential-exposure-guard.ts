@@ -795,6 +795,15 @@ function createExposureMock(
  * lane tools. The default is the fail-closed authority contract; the owner runtime opts into the
  * mock stream explicitly, so a caller that forgets the mode never widens visibility by accident.
  */
+/** Names a thrown non-Error precisely enough to act on: its primitive type, or its constructor. */
+function describeThrownValue(error: unknown): string {
+	if (error === null) return "null";
+	const type = typeof error;
+	if (type !== "object") return type;
+	const name = (error as { constructor?: { name?: unknown } }).constructor?.name;
+	return typeof name === "string" && name.length > 0 ? name : "object";
+}
+
 export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema, TDetails>(
 	tool: AgentTool<TParameters, TDetails>,
 	cwd: string,
@@ -840,16 +849,21 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 				signal?.throwIfAborted();
 				return redactResult(await executor.execute(toolCallId, params, signal, safeUpdate), boundary, mock);
 			} catch (error) {
+				const redact = (text: string): string =>
+					boundary ? boundary.redactSensitiveText(text) : redactKnownSecrets(text);
 				if (error instanceof Error) {
-					const message = boundary
-						? boundary.redactSensitiveText(error.message)
-						: redactKnownSecrets(error.message);
+					const message = redact(error.message);
 					if (error instanceof AgentToolExecutionError) {
 						throw new AgentToolExecutionError(message, error.failureCode, error.outputSignature, error.errorKind);
 					}
 					throw new Error(message);
 				}
-				throw new Error("Credential-safe tool execution failed without retaining raw error output.");
+				// A thrown non-Error is the live shape of a cancellation: `signal.throwIfAborted()` throws
+				// the abort REASON, and a named abort's reason is a plain string. Reporting only that the
+				// value was lost left the model, the failure ledger and the operator with no cause at all.
+				throw new Error(
+					`Credential-safe tool execution failed: ${describeThrownValue(error)}: ${redact(String(error))}`,
+				);
 			}
 		},
 	}));

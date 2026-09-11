@@ -1505,12 +1505,29 @@ function createRepeatedSuccessfulToolCallOutcome(
 	};
 }
 
+/**
+ * One wording for a cancellation, whether the call was stopped before it started or threw mid-flight.
+ * A named abort (`agent.abort("send now")`) keeps its name so the transcript can tell an operator
+ * stop from a crash; the tool's own message follows it when it says something else.
+ */
+function abortedToolCallText(abortReason?: unknown, toolMessage?: string): string {
+	const reason =
+		typeof abortReason === "string" && abortReason.length > 0
+			? abortReason
+			: abortReason instanceof Error && abortReason.message.length > 0
+				? abortReason.message
+				: undefined;
+	const headline = reason ? `Operation aborted (${reason})` : "Operation aborted";
+	const detail = toolMessage?.trim();
+	return detail && detail !== headline ? `${headline}\n${detail}` : headline;
+}
+
 function createAbortedToolCallOutcome(
 	validationEvent: ToolArgumentValidationTelemetryEvent | undefined,
 ): ImmediateToolCallOutcome {
 	return {
 		kind: "immediate",
-		result: createErrorToolResult("Operation aborted"),
+		result: createErrorToolResult(abortedToolCallText()),
 		isError: true,
 		phase: "cancelled",
 		failureCode: "aborted",
@@ -2238,15 +2255,34 @@ async function executePreparedToolCall(
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		const toolFailure = error instanceof AgentToolExecutionError ? error : undefined;
-		executed = {
-			result: createErrorToolResult(message),
-			operationCompleted: toolFailure?.errorKind === "operation_outcome",
-			isError: true,
-			errorClass: error instanceof Error ? error.name : typeof error,
-			failureMessage: message,
-			errorKind: toolFailure?.errorKind ?? "tool_failure",
-			...(toolFailure ? { failureCode: toolFailure.failureCode, outputSignature: toolFailure.outputSignature } : {}),
-		};
+		// The run was stopped: whatever the tool threw on its way out is the shape of a cancellation,
+		// not a mistake the model made. Classifying it as one cost a ledger entry, a kind-mistake count
+		// and a correction the model could not act on, for an operation nobody asked it to finish.
+		const cancelled = signal?.aborted === true || (signal?.reason !== undefined && error === signal.reason);
+		if (cancelled) {
+			const cancellationText = abortedToolCallText(signal?.reason, message);
+			executed = {
+				result: createErrorToolResult(cancellationText),
+				operationCompleted: false,
+				isError: true,
+				errorClass: error instanceof Error ? error.name : typeof error,
+				failureMessage: cancellationText,
+				failureCode: "aborted",
+				errorKind: "tool_failure",
+			};
+		} else {
+			executed = {
+				result: createErrorToolResult(message),
+				operationCompleted: toolFailure?.errorKind === "operation_outcome",
+				isError: true,
+				errorClass: error instanceof Error ? error.name : typeof error,
+				failureMessage: message,
+				errorKind: toolFailure?.errorKind ?? "tool_failure",
+				...(toolFailure
+					? { failureCode: toolFailure.failureCode, outputSignature: toolFailure.outputSignature }
+					: {}),
+			};
+		}
 	}
 	return { ...executed, progressDeliveryFailed: await progress.finish() };
 }

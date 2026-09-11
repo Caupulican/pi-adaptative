@@ -9,6 +9,7 @@ import {
 	credentialToolBlockReason,
 	wrapToolWithCredentialExposureGuard,
 } from "../src/core/secrets/credential-exposure-guard.ts";
+import { withExclusiveMutationBarrier } from "../src/core/tools/file-mutation-queue.ts";
 
 const testSchema = Type.Object({ path: Type.Optional(Type.String()), command: Type.Optional(Type.String()) });
 
@@ -425,6 +426,81 @@ describe("credential exposure guard", () => {
 		expect(genericThrown).toBeInstanceOf(Error);
 		expect(genericThrown).not.toBeInstanceOf(AgentToolExecutionError);
 		expect(genericThrown).toMatchObject({ message: "generic [REDACTED_SECRET]" });
+	});
+
+	it("reports a non-Error thrown value instead of discarding it", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-guard-non-error-"));
+		tempDirs.push(root);
+		const guarded = wrapToolWithCredentialExposureGuard(
+			{
+				name: "python",
+				label: "python",
+				description: "test python",
+				parameters: testSchema,
+				async execute() {
+					throw "plain string failure";
+				},
+			} satisfies AgentTool<typeof testSchema>,
+			root,
+		);
+		const message = await guarded.execute("call", {}).then(
+			() => "resolved",
+			(error: unknown) => (error instanceof Error ? error.message : String(error)),
+		);
+		expect(message).toContain("plain string failure");
+		expect(message).toContain("string");
+	});
+
+	it("names the abort reason when a parked tool is cancelled mid-execution", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-guard-abort-reason-"));
+		tempDirs.push(root);
+		const guarded = wrapToolWithCredentialExposureGuard(
+			{
+				name: "python",
+				label: "python",
+				description: "test python",
+				parameters: testSchema,
+				async execute(_toolCallId, _params, signal) {
+					// The live shape: the call is parked in the exclusive mutation barrier behind another
+					// exclusive run, and the operator aborts the turn with a named reason.
+					return await withExclusiveMutationBarrier(
+						async () => {
+							signal?.throwIfAborted();
+							return { content: [{ type: "text" as const, text: "never" }], details: {} };
+						},
+						{ signal },
+					);
+				},
+			} satisfies AgentTool<typeof testSchema>,
+			root,
+		);
+
+		let releaseHolder!: () => void;
+		const holderGate = new Promise<void>((resolve) => {
+			releaseHolder = resolve;
+		});
+		let holderStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			holderStarted = resolve;
+		});
+		const holder = withExclusiveMutationBarrier(async () => {
+			holderStarted();
+			await holderGate;
+		});
+		await started;
+
+		const controller = new AbortController();
+		const parked = guarded.execute("call", {}, controller.signal);
+		const settled = parked.then(
+			() => "resolved",
+			(error: unknown) => (error instanceof Error ? error.message : String(error)),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		controller.abort("send now");
+		releaseHolder();
+		await holder;
+
+		expect(await settled).toContain("send now");
 	});
 });
 

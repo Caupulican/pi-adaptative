@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { agentLoop, agentLoopContinue, createAgentLoopContinuationState, runAgentLoop } from "../src/agent-loop.ts";
 import {
 	createToolFailureContextMemory,
+	sanitizeToolFailureContext,
 	TOOL_FAILURE_LEDGER_CLEARED_TEXT,
 	TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
 } from "../src/tool-failure-memory.ts";
@@ -5002,6 +5003,71 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 	});
 
 	describe("S0.3 - abort mid-batch (both branches)", () => {
+		it("a tool that throws after the run is aborted finalizes as a cancellation", async () => {
+			const schema = Type.Object({ value: Type.String() });
+			const controller = new AbortController();
+			const tool: AgentTool<typeof schema, { value: string }> = {
+				name: "step",
+				label: "Step",
+				description: "Step tool",
+				parameters: schema,
+				async execute(_toolCallId, _params, signal) {
+					// The live shape: the operator stops the turn while the call is still running, and the
+					// call rethrows the signal's own reason (throwIfAborted) rather than an Error.
+					controller.abort("send now");
+					signal?.throwIfAborted();
+					return { content: [{ type: "text", text: "never" }], details: { value: "never" } };
+				},
+			};
+			let executedText = "";
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				// The run is aborted, so a second provider turn would throw at its own preflight; cap the
+				// loop to isolate how the aborted call itself is finalized.
+				maxProviderTurns: 1,
+				afterToolCall: async ({ result }) => {
+					executedText = result.content.find((block) => block.type === "text")?.text ?? "";
+					return undefined;
+				},
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			const stream = agentLoop([createUserMessage("run one")], context, config, controller.signal, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					response.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[{ type: "toolCall", id: "call-a", name: "step", arguments: { value: "a" } }],
+							"toolUse",
+						),
+					});
+				});
+				return response;
+			});
+			for await (const _event of stream) {
+				// consume
+			}
+			const messages = await stream.result();
+
+			// The executor's own outcome names the cancellation and its reason.
+			expect(executedText.startsWith("Operation aborted (send now)")).toBe(true);
+
+			const results = messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+			expect(results).toHaveLength(1);
+			expect(results[0]?.isError).toBe(true);
+			const recordText = results[0]?.content.find((block) => block.type === "text")?.text ?? "";
+			expect(recordText).toContain('"failure_code":"aborted"');
+			expect(recordText).toContain('"phase":"cancelled"');
+
+			// A cancellation is not a mistake: it never counts against the tool and never stands as an
+			// active failure the model has to clear.
+			const sanitized = sanitizeToolFailureContext([...messages], "base prompt");
+			expect(sanitized.ledger).toBeUndefined();
+			expect(JSON.stringify(sanitized)).not.toContain("ACTIVE TOOL FAILURES");
+		});
+
 		it("sequential: a call whose OWN preparation observes an already-aborted signal is finalized as an explicit error result; later calls are simply absent (never prepared) - no throw", async () => {
 			const schema = Type.Object({ value: Type.String() });
 			const executed: string[] = [];

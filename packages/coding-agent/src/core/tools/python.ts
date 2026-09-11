@@ -288,7 +288,7 @@ export function createPythonToolDefinition(
 					]
 				: [],
 		},
-		async execute(_toolCallId, input, signal) {
+		async execute(toolCallId, input, signal) {
 			signal?.throwIfAborted();
 			const hasCode = typeof input.code === "string";
 			const hasScript = typeof input.scriptPath === "string" && input.scriptPath.length > 0;
@@ -416,7 +416,7 @@ export function createPythonToolDefinition(
 			};
 			let execution: PythonExecutionResult;
 			try {
-				execution = await withExclusiveMutationBarrier(() => {
+				const runSnippet = () => {
 					signal?.throwIfAborted();
 					const environment = composeExecutionEnvironment(
 						baseEnvironment,
@@ -444,7 +444,17 @@ export function createPythonToolDefinition(
 						onStdout: (chunk) => stdout.append(chunk),
 						onStderr: (chunk) => stderr.append(chunk),
 					});
-				});
+				};
+				// Python cannot statically declare which files a snippet touches, so a foreground run
+				// takes the coarse exclusive barrier. A background call is the exception: the model
+				// declared it independent of the batch and the harness hands it off as a detached session
+				// task at once, so holding the barrier for the job's whole life would park every sibling
+				// call behind a command nobody is waiting for. `holdId` lets a later handoff drop the
+				// barrier for a run that only becomes a session task after it started.
+				execution =
+					input.background === true
+						? await runSnippet()
+						: await withExclusiveMutationBarrier(runSnippet, { signal, holdId: toolCallId });
 				const snapshots = finishStreams();
 				const sections: string[] = [];
 				if (snapshots.stdout.content) sections.push(snapshots.stdout.content.trimEnd());

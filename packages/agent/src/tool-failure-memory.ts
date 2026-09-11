@@ -781,6 +781,22 @@ function isToolFailurePhase(value: unknown): value is ToolFailurePhase {
 	);
 }
 
+/**
+ * Whether this failure result records a CANCELLATION rather than a mistake.
+ *
+ * An operator Escape, a `send now`, or any other abort stops a call that was doing exactly what it
+ * was asked to do. Counting it as a kind mistake and keeping it in ACTIVE TOOL FAILURES charged the
+ * model for the interruption: the ledger demanded a correction for an operation nobody wanted
+ * finished, and every later request carried the record until an unrelated success cleared it. The
+ * tool result itself stays in the transcript, which is the honest record of what was stopped.
+ */
+function isCancelledToolFailure(record: ToolFailureMemoryRecord | undefined, text: string): boolean {
+	if (record) {
+		return record.phase === "cancelled" || inferToolFailurePhase(record.state, record.failureCode) === "cancelled";
+	}
+	return getToolExecutionErrorPolicy(text)?.phase === "cancelled";
+}
+
 function inferToolFailurePhase(state: ToolFailureState, failureCode: string): ToolFailurePhase {
 	if (failureCode === "malformed_call" || failureCode === "unknown_tool" || failureCode === "invalid_arguments") {
 		return "validation";
@@ -1280,6 +1296,8 @@ function foldToolFailureContext(
 		const isHarnessFailure = message.isError === true || textPayload.startsWith("[harness] ");
 		if (isHarnessFailure) {
 			const retained = readFailureRecord(message.details);
+			// A cancelled call never reaches the ledger: see isCancelledToolFailure.
+			if (isCancelledToolFailure(retained, textPayload)) continue;
 			const toolName =
 				retained?.failureCode === UNKNOWN_TOOL_KIND
 					? UNKNOWN_TOOL_KIND

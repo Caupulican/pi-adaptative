@@ -788,8 +788,8 @@ function createShellToolDefinition(
 					: [],
 		},
 		async execute(
-			_toolCallId,
-			{ command, timeout, broadSearch, fullOutput, repairOf }: BashToolInput,
+			toolCallId,
+			{ command, timeout, broadSearch, fullOutput, repairOf, background }: BashToolInput,
 			signal?: AbortSignal,
 			onUpdate?,
 			_ctx?,
@@ -1114,10 +1114,7 @@ function createShellToolDefinition(
 							forceCwd: options?.forceCwd,
 						},
 					);
-				// Shell commands cannot statically declare which files they mutate, so the
-				// actual execution takes the coarse exclusive barrier: it waits for
-				// in-flight edit/write mutations to drain and blocks new ones meanwhile.
-				const result = await withExclusiveMutationBarrier(async () => {
+				const runCommand = async () => {
 					if (!engineRoute) return execute(false, prepared);
 					try {
 						return await execute(true, prepared);
@@ -1127,7 +1124,21 @@ function createShellToolDefinition(
 						prepared = await prepareSpawn(floor.command);
 						return execute(false, prepared);
 					}
-				});
+				};
+				// Shell commands cannot statically declare which files they mutate, so the
+				// actual execution takes the coarse exclusive barrier: it waits for
+				// in-flight edit/write mutations to drain and blocks new ones meanwhile.
+				//
+				// A background call is the exception: the model declared this command independent of
+				// everything else in the batch, and the harness hands it off as a detached session task
+				// within milliseconds. Holding the barrier for the job's whole life parked every sibling
+				// bash/python behind a command nobody is waiting for (measured live: turns hung for up to
+				// 30 minutes). `holdId` lets the handoff drop the barrier for a command that becomes a
+				// session task after it already started (see releaseExclusiveHold).
+				const result =
+					background === true
+						? await runCommand()
+						: await withExclusiveMutationBarrier(runCommand, { signal, holdId: toolCallId });
 				const { resolvedCommand, spawnContext } = prepared;
 				if (!routesWindowsContract && result.cwd) lastSessionCwd = result.cwd;
 				return {

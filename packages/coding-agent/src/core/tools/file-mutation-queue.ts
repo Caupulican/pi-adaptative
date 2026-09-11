@@ -19,20 +19,49 @@ const backendQueues = new WeakMap<FileMutationQueueBackend, BackendQueueState>()
 // writer lock instead of a per-file one.
 let activeReaders = 0;
 let readersDrained: (() => void) | undefined;
+/** Resolves when the exclusive run at the head of the queue RELEASES the writer lock. */
 let writerQueue: Promise<void> = Promise.resolve();
 let writerActive: Promise<void> | undefined;
 
-function acquireReader(): Promise<void> {
-	// No writer holds or is draining: join immediately (synchronously counted, so a
-	// writer that starts checking activeReaders right after can never miss this join).
+/**
+ * Rejects with the signal's reason when it aborts. `dispose` detaches the listener, so a waiter that
+ * finished before the abort leaves nothing armed behind it.
+ */
+function abortRejection(signal: AbortSignal): { promise: Promise<never>; dispose: () => void } {
+	let onAbort!: () => void;
+	const promise = new Promise<never>((_resolve, reject) => {
+		onAbort = () => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	// Every waiter races this promise and rethrows the reason itself; marking it handled keeps a lost
+	// race (the wait finished first, the run aborts later) from surfacing as an unhandled rejection.
+	promise.catch(() => undefined);
+	return { promise, dispose: () => signal.removeEventListener("abort", onAbort) };
+}
+
+/** Await `promise`, but stop waiting and throw the signal's reason the moment it aborts. */
+async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (!signal) return promise;
+	if (signal.aborted) throw signal.reason;
+	const watch = abortRejection(signal);
+	try {
+		return await Promise.race([promise, watch.promise]);
+	} finally {
+		watch.dispose();
+	}
+}
+
+async function acquireReader(signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) throw signal.reason;
+	// No writer holds or is draining: join immediately (synchronously counted, so a writer that
+	// starts checking activeReaders right after can never miss this join).
 	if (!writerActive) {
 		activeReaders++;
-		return Promise.resolve();
+		return;
 	}
 	// A writer holds (or is waiting to): wait for it to fully release before joining.
-	return writerActive.then(() => {
-		activeReaders++;
-	});
+	await raceAbort(writerActive, signal);
+	activeReaders++;
 }
 
 function releaseReader(): void {
@@ -44,34 +73,138 @@ function releaseReader(): void {
 	}
 }
 
+interface ExclusiveHold {
+	/** Releases the writer lock and hands the queue on. Set once the run reaches the head of the queue. */
+	release?: () => void;
+	/** True while the run has not yet reached the head of the exclusive queue. */
+	queued: boolean;
+	/** Set on a still-queued run: when its turn comes it runs `fn` without taking the lock at all. */
+	lockless: boolean;
+	/** True once the hold has been released early, or its `fn` has settled: nothing left to release. */
+	done: boolean;
+}
+
+/** Live exclusive runs that named themselves, keyed by hold id (the tool call id). */
+const exclusiveHolds = new Map<string, ExclusiveHold>();
+
 /**
  * Run fn exclusively: waits for all in-flight (running or queued) file mutations to
  * drain, then blocks new ones and other exclusive runs until fn settles. Exclusive
  * runs themselves queue FIFO against each other.
+ *
+ * `options.signal` makes the WAIT cancellable: an abort while the run is still queued (or still
+ * waiting for readers to drain) rejects at once with the signal's reason, never runs fn, and frees
+ * the queue position. `options.holdId` names the run so {@link releaseExclusiveHold} can stop it
+ * holding the barrier while its work keeps running.
  */
-export function withExclusiveMutationBarrier<T>(fn: () => Promise<T>): Promise<T> {
-	const run = writerQueue.then(async () => {
-		let release!: () => void;
-		writerActive = new Promise<void>((resolveWriter) => {
-			release = resolveWriter;
+export function withExclusiveMutationBarrier<T>(
+	fn: () => Promise<T>,
+	options?: { signal?: AbortSignal; holdId?: string },
+): Promise<T> {
+	const signal = options?.signal;
+	// Already cancelled before it queued: nothing to schedule, and no position to release.
+	if (signal?.aborted) return Promise.reject(signal.reason);
+	const holdId = options?.holdId;
+	const hold: ExclusiveHold = { queued: true, lockless: false, done: false };
+	if (holdId !== undefined) exclusiveHolds.set(holdId, hold);
+	const unregister = (): void => {
+		hold.done = true;
+		hold.release = undefined;
+		if (holdId !== undefined && exclusiveHolds.get(holdId) === hold) exclusiveHolds.delete(holdId);
+	};
+
+	const predecessor = writerQueue;
+	let handOnQueue!: () => void;
+	const queueHandedOn = new Promise<void>((resolveHandOn) => {
+		handOnQueue = resolveHandOn;
+	});
+	// The queue advances when this run releases the writer lock, not when fn settles: a handed-off
+	// command keeps running long after it stops being exclusive (see releaseExclusiveHold). Both
+	// handlers are given so the chain itself never rejects.
+	writerQueue = predecessor.then(
+		() => queueHandedOn,
+		() => queueHandedOn,
+	);
+
+	return (async () => {
+		try {
+			await raceAbort(predecessor, signal);
+		} catch (error) {
+			hold.queued = false;
+			handOnQueue();
+			unregister();
+			throw error;
+		}
+		hold.queued = false;
+		if (hold.lockless) {
+			// Released while still queued: the run no longer claims exclusivity, so it never takes the
+			// writer lock and the queue moves on at once.
+			handOnQueue();
+			try {
+				return await fn();
+			} finally {
+				unregister();
+			}
+		}
+		let releaseWriter!: () => void;
+		const active = new Promise<void>((resolveWriter) => {
+			releaseWriter = resolveWriter;
 		});
+		writerActive = active;
+		let lockHeld = true;
+		const release = (): void => {
+			if (!lockHeld) return;
+			lockHeld = false;
+			if (writerActive === active) writerActive = undefined;
+			releaseWriter();
+			handOnQueue();
+		};
+		hold.release = release;
 		try {
 			if (activeReaders > 0) {
-				await new Promise<void>((resolveDrain) => {
+				let drained!: () => void;
+				const drain = new Promise<void>((resolveDrain) => {
+					drained = resolveDrain;
 					readersDrained = resolveDrain;
 				});
+				try {
+					await raceAbort(drain, signal);
+				} catch (error) {
+					// An abandoned drain wait must not leave its resolver armed for the next reader.
+					if (readersDrained === drained) readersDrained = undefined;
+					throw error;
+				}
 			}
 			return await fn();
 		} finally {
-			writerActive = undefined;
 			release();
+			unregister();
 		}
-	});
-	writerQueue = run.then(
-		() => undefined,
-		() => undefined,
-	);
-	return run;
+	})();
+}
+
+/**
+ * Stop holding the exclusive barrier for `holdId` while its command keeps running.
+ *
+ * A handed-off command is a detached session task: it has already answered the batch that started
+ * it, so it must not keep every file mutation and every sibling exclusive run parked behind it for
+ * the rest of its life. Returns true when this call released a hold that was still holding the
+ * writer lock or still queued; false for an unknown, already-released or already-settled hold.
+ */
+export function releaseExclusiveHold(holdId: string): boolean {
+	const hold = exclusiveHolds.get(holdId);
+	if (!hold || hold.done) return false;
+	if (hold.queued) {
+		hold.done = true;
+		hold.lockless = true;
+		return true;
+	}
+	const release = hold.release;
+	if (!release) return false;
+	hold.done = true;
+	hold.release = undefined;
+	release();
+	return true;
 }
 
 async function getMutationQueueKey(filePath: string): Promise<string> {
@@ -98,6 +231,7 @@ export async function withFileMutationQueue<T>(
 	filePath: string,
 	fn: () => Promise<T>,
 	backend: FileMutationQueueBackend = localFileMutationQueueBackend,
+	options?: { signal?: AbortSignal },
 ): Promise<T> {
 	let state = backendQueues.get(backend);
 	if (!state) {
@@ -126,15 +260,19 @@ export async function withFileMutationQueue<T>(
 	);
 
 	const { key, currentQueue, chainedQueue, releaseNext } = await registration;
+	let joinedReaders = false;
 	try {
 		// Join the reader side as soon as this call is admitted, before waiting on the
 		// per-file queue: a mutation already queued behind another on the same file must
 		// still count as in-flight for the exclusive barrier, not just the one executing.
-		await acquireReader();
+		await acquireReader(options?.signal);
+		joinedReaders = true;
 		await currentQueue;
 		return await fn();
 	} finally {
-		releaseReader();
+		// A cancelled wait never joined the reader side; releasing it would credit a reader that was
+		// never counted and let an exclusive run start while others are still in flight.
+		if (joinedReaders) releaseReader();
 		releaseNext();
 		if (queues.get(key) === chainedQueue) {
 			queues.delete(key);

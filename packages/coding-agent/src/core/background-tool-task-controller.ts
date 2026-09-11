@@ -20,6 +20,7 @@ import {
 import type { Usage } from "@caupulican/pi-ai";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "./context/tool-output-packer.ts";
+import { releaseExclusiveHold } from "./tools/file-mutation-queue.ts";
 import { hasOnlyKeys, isPlainRecord, isRecordObject } from "./util/value-guards.ts";
 
 /**
@@ -564,6 +565,11 @@ export class BackgroundToolTaskController {
 			(completion) => this.settle(state, completion),
 			(error) => this.settleRejected(state, error),
 		);
+		// The call has left the batch: it is a detached session task now, so it must stop holding the
+		// process-wide exclusive mutation barrier its tool took when it started. A command requested as
+		// background never takes the barrier at all; a clock or manual handoff releases it here, which
+		// is the only reason a 30-minute job used to park every sibling bash/python behind it.
+		releaseExclusiveHold(context.toolCall.id);
 
 		return {
 			result: {

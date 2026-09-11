@@ -145,6 +145,21 @@ retrying it; one later call keeps it.** Why: one corrective call may precede the
 asks for; a record kept forever re-appended the trailing ledger on every request. Pinned by
 `packages/agent/test/tool-failure-memory.test.ts`.
 
+**A cancelled call never enters the failure ledger.** An abort (operator interrupt, send now,
+compaction, dispose) stops a call that was doing what it was asked; a tool that throws while the
+run's signal is aborted finalizes as `aborted` with the abort's name in its text, is not a kind
+mistake, and is not an active failure. Why: a 30-minute hang ended with two killed siblings charged
+to the model as mistakes with no diagnostic. Pinned by `packages/agent/test/agent-loop.test.ts`
+(cancellation cases) and `packages/agent/test/tool-failure-memory.test.ts`.
+
+**A background or handed-off command does not hold the exclusive mutation barrier.** `background:
+true` skips it; a clock or manual handoff releases it the moment the call becomes a session task;
+a call still queued on the barrier unwinds at once when its signal aborts. Why: a background
+`svnproject` held the process-wide writer lock for its whole life, every sibling bash/python
+parked behind it, the turn hung 30 minutes and Escape did nothing. Pinned by
+`packages/coding-agent/test/bash-edit-write-race.test.ts` and
+`packages/coding-agent/test/background-handoff-barrier.test.ts`.
+
 **The sanitizer keeps a rejected attempt out of the agent's context.** Measured on the request
 after an omission, the server prompt cache still hit almost fully; the omission costs one request
 without the transport delta, not a re-prefill. Pinned by `packages/agent/test/tool-failure-memory.test.ts`
