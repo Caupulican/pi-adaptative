@@ -64,13 +64,22 @@ function encodingEvidenceError(path: string, evidence: UndecodableByte): Error {
 	);
 }
 
-/** Read-only decoding. Unlike edits, reads need no canonical byte round-trip or splice proof. */
+/**
+ * Read-only decoding. Unlike edits, reads need no canonical byte round-trip or splice proof.
+ *
+ * `wholeSource` re-presents the complete source for detection. A streamed read hands the codec one
+ * bounded chunk at a time, and a codec resolved from the chunk where UTF-8 first failed can be
+ * contradicted by a later one, so when nothing declares an encoding the whole source is read once
+ * for detection before any of it is decoded. A caller that cannot re-present its source (a one-shot
+ * stream it does not own) resolves the encoding from the bytes it still has, as it always did.
+ */
 export async function* decodeTextChunks(
 	chunks: AsyncIterable<Buffer> | Iterable<Buffer>,
 	path: string,
 	encoding?: string,
 	signal?: AbortSignal,
 	onEncodingDetected?: (encoding: string) => void,
+	wholeSource?: () => AsyncIterable<Buffer> | Iterable<Buffer>,
 ): AsyncGenerator<string> {
 	if (signal?.aborted) throw new Error("Encoding recovery aborted");
 	const native = new TextDecoder("utf-8", { fatal: true });
@@ -125,7 +134,24 @@ export async function* decodeTextChunks(
 			throw error;
 		}
 	};
+	/**
+	 * The detection pre-pass: one streamed read of the whole source, before a byte of it is decoded.
+	 * It runs once, only when nothing declared an encoding, and the decode frames then carry the
+	 * resolved name instead of asking the helper to judge each chunk on its own.
+	 */
+	let detectionRun = false;
+	const detectWholeSource = async (): Promise<void> => {
+		if (detectionRun || selectedEncoding !== undefined || wholeSource === undefined) return;
+		detectionRun = true;
+		if (!run) await openSession();
+		if (!run) throw new Error("Encoding recovery session unavailable");
+		const resolved = await run.detect(wholeSource());
+		selectedEncoding = resolved.encoding;
+		// A byte-order mark is the file declaring its own encoding; only evidence is a detection.
+		if (resolved.detected) onEncodingDetected?.(resolved.encoding);
+	};
 	const decodeThroughCodec = async (bytes: Buffer, final: boolean): Promise<string> => {
+		await detectWholeSource();
 		if (!run) await openSession();
 		if (!run) throw new Error("Encoding recovery session unavailable");
 		const result = await run.decode(bytes, selectedEncoding, final);
@@ -215,6 +241,10 @@ export async function decodeReadText(
 	onEncodingDetected?: (encoding: string) => void,
 ): Promise<string> {
 	const parts: string[] = [];
-	for await (const text of decodeTextChunks([source], path, encoding, signal, onEncodingDetected)) parts.push(text);
+	// The whole file is already in hand, so detection re-reads exactly these bytes. It still has to
+	// be a separate pass: the decoder hands the codec one 1 MiB window at a time, and an ASCII head
+	// longer than that window would otherwise hide the bytes that settle the encoding.
+	for await (const text of decodeTextChunks([source], path, encoding, signal, onEncodingDetected, () => [source]))
+		parts.push(text);
 	return parts.join("");
 }

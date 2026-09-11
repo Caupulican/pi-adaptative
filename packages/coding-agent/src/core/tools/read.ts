@@ -255,11 +255,18 @@ async function scanLines(
 				startColumn: options?.startColumn,
 			},
 		);
-		async function* sourceChunks() {
+		/**
+		 * Chunks of the file. The scan reads from the handle's own position; the encoding-detection
+		 * pass reads the same file again `fromStart`, by explicit offset, so it neither moves that
+		 * position nor writes into the chunk the scan is still holding (each call owns its buffer).
+		 */
+		async function* readChunks(fromStart: boolean) {
 			const buffer = Buffer.allocUnsafe(SLICE_SCAN_CHUNK_BYTES);
+			let position = 0;
 			while (!options?.signal?.aborted) {
-				const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+				const { bytesRead } = await handle.read(buffer, 0, buffer.length, fromStart ? position : null);
 				if (bytesRead === 0) return;
+				position += bytesRead;
 				yield buffer.subarray(0, bytesRead);
 			}
 			throw new Error("Operation aborted");
@@ -267,11 +274,12 @@ async function scanLines(
 		let index = 0;
 		let emittedAnyLine = false;
 		for await (const text of decodeTextChunks(
-			sourceChunks(),
+			readChunks(false),
 			absolutePath,
 			options?.encoding,
 			options?.signal,
 			options?.onEncodingDetected,
+			() => readChunks(true),
 		)) {
 			const lines = lineDecoder.pushRecords(text);
 			for (const line of lines) {

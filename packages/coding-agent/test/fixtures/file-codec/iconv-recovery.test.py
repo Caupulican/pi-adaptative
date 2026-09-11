@@ -64,8 +64,11 @@ class RecoveryTests(unittest.TestCase):
             self.read(reader, b"", final=True)
 
     def test_unrepresentable_replacement_never_returns_bytes(self):
-        with self.assertRaises(UnicodeEncodeError):
+        # The bounded failure names the character and the codec; the raw encode error never escapes.
+        with self.assertRaises(module["ReplacementUnrepresentable"]) as caught:
             self.transform("splice", b"\xa3\x81\x99\x87\x85\xa3", splices=[{"start": 0, "end": 6, "replacement": "🙂"}])
+        self.assertEqual(caught.exception.character, "🙂")
+        self.assertEqual(module["failure_reason"](caught.exception), "replacement_unrepresentable")
 
     def test_lossy_success_is_rejected_by_independent_text_verification(self):
         convert = scope["run_iconv"]

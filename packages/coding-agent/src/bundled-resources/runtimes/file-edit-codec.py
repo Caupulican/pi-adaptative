@@ -4,7 +4,9 @@ Matching and newline policy belong to the TypeScript edit planner. This helper
 validates its source-coordinate splices, preserves untouched source bytes, and
 encodes only replacements with the same strict codec. Read-only incremental
 decoding carries codec state between bounded chunks, without edit round-trip
-requirements. BOM/encoding selection is shared. This helper never writes a file.
+requirements. BOM/encoding selection and detection are shared by every path, so a
+source handed over at once and the same source streamed in chunks resolve
+identically. This helper never writes a file.
 """
 import base64
 import codecs
@@ -39,9 +41,11 @@ BOMS = (
 
 # The five positions windows-1252 leaves undefined; a file using them is ISO-8859-1, not 1252.
 CP1252_UNDEFINED = (0x81, 0x8D, 0x8F, 0x90, 0x9D)
+CP1252_UNDEFINED_BYTES = bytes(CP1252_UNDEFINED)
 # UTF-16 text is at least this much NUL, and its NULs sit on one parity of byte offsets.
 MIN_UTF16_NUL_SHARE = 0.30
 MIN_UTF16_NUL_ALIGNMENT = 0.90
+MAX_BOM_BYTES = max(len(marker) for marker, _ in BOMS)
 
 
 class EncodingEvidenceRequired(ValueError):
@@ -242,54 +246,103 @@ def lookup_codec(name):
         return IconvCodec(name)
 
 
-def decodes_strictly(encoding, data):
-    try:
-        codecs.lookup(encoding).decode(data, "strict")
-    except (UnicodeDecodeError, LookupError, ValueError):
-        return False
-    return True
+class EncodingDetector:
+    """Incremental evidence for a source nothing declares.
 
+    Keeps counters and strict incremental decoder state, never the bytes, so one whole source and
+    the same source streamed in bounded chunks reach the same verdict. Detection is deterministic
+    and dependency-free: the two BOM-less UTF-16 byte orders by NUL density and parity, then strict
+    UTF-8, then the single-byte family the legacy Windows toolchains actually emit. Anything else is
+    reported as missing evidence rather than decoded under a guess.
+    """
 
-def detect_utf16(source):
-    """BOM-less UTF-16 is NUL-dense and parity-aligned; nothing here guesses a charset."""
-    nuls = source.count(0)
-    if nuls < len(source) * MIN_UTF16_NUL_SHARE:
-        return None
-    odd = sum(1 for offset in range(1, len(source), 2) if source[offset] == 0)
-    for aligned, encoding in ((odd, "utf-16-le"), (nuls - odd, "utf-16-be")):
-        if aligned >= nuls * MIN_UTF16_NUL_ALIGNMENT and decodes_strictly(encoding, source):
+    CANDIDATES = ("utf-8", "utf-16-le", "utf-16-be", "windows-1252", "latin-1")
+
+    def __init__(self):
+        self.length = 0
+        self.nuls = 0
+        self.odd_nuls = 0
+        self.undefined_seen = False
+        self.finished = False
+        self.decoders = {}
+        self.rejected = set()
+        for name in self.CANDIDATES:
+            try:
+                self.decoders[name] = codecs.lookup(name).incrementaldecoder(errors="strict")
+            except LookupError:
+                self.rejected.add(name)
+        # windows-1252 with its five undefined positions removed: ISO-8859-1 is the total codec, so
+        # it is accepted only when those positions are the whole difference.
+        try:
+            self.defined = codecs.lookup("windows-1252").incrementaldecoder(errors="strict")
+        except LookupError:
+            self.defined = None
+
+    def feed(self, chunk, final=False):
+        if self.finished:
+            raise ValueError("invalid detect lifecycle")
+        self.nuls += chunk.count(0)
+        # NULs at odd offsets of the WHOLE source, so a chunk boundary cannot shift the parity.
+        self.odd_nuls += chunk[(1 if self.length % 2 == 0 else 0)::2].count(0)
+        if not self.undefined_seen:
+            self.undefined_seen = any(byte in chunk for byte in CP1252_UNDEFINED)
+        self.length += len(chunk)
+        for name, decoder in self.decoders.items():
+            if name in self.rejected:
+                continue
+            try:
+                decoder.decode(chunk, final)
+            except (UnicodeDecodeError, ValueError):
+                self.rejected.add(name)
+        if self.defined is not None:
+            try:
+                self.defined.decode(chunk.translate(None, CP1252_UNDEFINED_BYTES), final)
+            except (UnicodeDecodeError, ValueError):
+                self.defined = None
+        self.finished = final
+
+    def resolve(self):
+        if not self.finished:
+            raise ValueError("detection is incomplete")
+        # NUL first: this helper decodes text, and a NUL that is not UTF-16 padding means the source
+        # is binary or ambiguous, even when its bytes happen to satisfy strict UTF-8.
+        if self.nuls:
+            encoding = self.resolve_utf16()
+            if encoding is None:
+                raise EncodingEvidenceRequired("ambiguous NUL-bearing source")
             return encoding
-    return None
+        if "utf-8" not in self.rejected:
+            return "utf-8"
+        if "windows-1252" not in self.rejected:
+            return "windows-1252"
+        if self.undefined_seen and self.defined is not None and "latin-1" not in self.rejected:
+            return "latin-1"
+        raise EncodingEvidenceRequired("undetectable single-byte source")
+
+    def resolve_utf16(self):
+        """BOM-less UTF-16 is NUL-dense and parity-aligned; nothing here guesses a charset."""
+        if self.nuls < self.length * MIN_UTF16_NUL_SHARE:
+            return None
+        for aligned, encoding in ((self.odd_nuls, "utf-16-le"), (self.nuls - self.odd_nuls, "utf-16-be")):
+            if aligned >= self.nuls * MIN_UTF16_NUL_ALIGNMENT and encoding not in self.rejected:
+                return encoding
+        return None
 
 
 def detect_encoding(source):
-    """Deterministic, dependency-free resolution for a file nothing declares.
+    """Resolve one whole source through the same detector a streamed source is resolved with."""
+    detector = EncodingDetector()
+    detector.feed(source, True)
+    return detector.resolve()
 
-    The two BOM-less UTF-16 byte orders by NUL density and parity, then strict UTF-8, then the
-    single-byte family the legacy Windows toolchains actually emit. Anything else is reported as
-    missing evidence rather than decoded under a guess.
-    """
-    # NUL first: this helper decodes text, and a NUL that is not UTF-16 padding means the source
-    # is binary or ambiguous, even when its bytes happen to satisfy strict UTF-8.
-    if 0 in source:
-        encoding = detect_utf16(source)
-        if encoding is None:
-            raise EncodingEvidenceRequired("ambiguous NUL-bearing source")
-        return encoding
-    if decodes_strictly("utf-8", source):
-        return "utf-8"
-    if decodes_strictly("windows-1252", source):
-        return "windows-1252"
-    # ISO-8859-1 is the total codec: accept it only when the five undefined 1252 positions are
-    # the whole difference, so a genuinely undecodable file still asks for evidence.
-    defined = bytes(byte for byte in source if byte not in CP1252_UNDEFINED)
-    if len(defined) != len(source) and decodes_strictly("windows-1252", defined) and decodes_strictly("latin-1", source):
-        return "latin-1"
-    raise EncodingEvidenceRequired("undetectable single-byte source")
+
+def match_bom(head):
+    """The byte-order mark the source opens with, if any. A short head simply matches fewer."""
+    return next(((marker, name) for marker, name in BOMS if head.startswith(marker)), (b"", None))
 
 
 def select_encoding(original, requested):
-    bom, marked = next(((b, c) for b, c in BOMS if original.startswith(b)), (b"", None))
+    bom, marked = match_bom(original)
     # The canonical spelling settles the BOM and byte-order checks; the response reports the
     # encoding under the name the caller or the detector used, so a resolved name means the same
     # codec when a later call sends it back.
@@ -345,26 +398,112 @@ class ReadStream:
         return {"text": text, "encoding": self.encoding, "detected": self.detected}
 
 
+class DetectStream:
+    """Whole-source detection over bounded frames, answered on the final frame.
+
+    A streamed decode sees one bounded chunk at a time, so a codec chosen from the first chunk can
+    be contradicted by the last one. This pass reads every byte and keeps none of them.
+    """
+
+    def __init__(self):
+        self.head = b""
+        self.marked = None
+        self.finished = False
+        self.detector = EncodingDetector()
+
+    def feed(self, request):
+        if self.finished or type(request["final"]) is not bool:
+            raise ValueError("invalid detect lifecycle")
+        final = request["final"]
+        source = read_source(request)
+        if self.head is not None:
+            # A byte-order mark can straddle the first frames, so nothing is judged before the
+            # source has the four bytes the longest mark needs (or has ended).
+            self.head += source
+            if len(self.head) < MAX_BOM_BYTES and not final:
+                return None
+            _, self.marked = match_bom(self.head)
+            source = self.head
+            self.head = None
+        # A mark settles the encoding exactly as it does for a whole source handed over at once,
+        # and the bytes behind it are then evidence for nothing. A mark is the file declaring its
+        # own encoding, so it is reported as a declaration, never as this helper's detection.
+        if self.marked is None:
+            self.detector.feed(source, final)
+        self.finished = final
+        if not final:
+            return None
+        if self.marked is not None:
+            return {"encoding": self.marked, "detected": False}
+        return {"encoding": self.detector.resolve(), "detected": True}
+
+
+class ReadSession:
+    """One read owns one helper: the optional whole-source detection pass, then the decode stream."""
+
+    def __init__(self):
+        self.detection = None
+        self.stream = ReadStream()
+
+    @property
+    def finished(self):
+        return self.stream.finished
+
+    def feed(self, request):
+        operation = request.get("operation", "decode")
+        if operation == "decode":
+            return self.stream.feed(request)
+        if operation != "detect":
+            raise ValueError("unknown read operation")
+        if self.stream.decoder is not None:
+            raise ValueError("invalid read lifecycle")
+        if self.detection is None:
+            self.detection = DetectStream()
+        resolved = self.detection.feed(request)
+        return {} if resolved is None else resolved
+
+
 def encode_replacement(codec, encoding, replacement):
-    """Encode one replacement, naming the first character the codec has no bytes for."""
+    """Encode one replacement, naming the first character the codec has no bytes for.
+
+    Every codec kind answers with the same bounded failure. A Python codec raises UnicodeEncodeError
+    about the replacement itself and carries the offset; an iconv transport reports a failure of its
+    own, about text the caller never wrote, so the offending character is located by bisection
+    instead of read out of a foreign error. No encode failure leaves here as itself: the caller is
+    told which character to change, never handed a codec's internals. An unavailable codec is not an
+    encode failure and keeps its own diagnostic.
+    """
     try:
         return codec.encode(replacement, "strict")[0]
     except CodecUnavailable:
         raise
     except UnicodeEncodeError as error:
-        raise ReplacementUnrepresentable(error.object[error.start], encoding) from error
+        reported = isinstance(error.object, str) and error.object == replacement
+        character = (
+            error.object[error.start]
+            if reported and 0 <= error.start < len(replacement)
+            else locate_unrepresentable(codec, replacement)
+        )
+        raise ReplacementUnrepresentable(character, encoding) from error
     except (ValueError, LookupError) as error:
         raise ReplacementUnrepresentable(locate_unrepresentable(codec, replacement), encoding) from error
 
 
 def locate_unrepresentable(codec, replacement):
-    """Bounded bisection for codecs that report a failure without an offset (iconv transports)."""
+    """Bounded bisection for codecs that report a failure without an offset (iconv transports).
+
+    Only an encoding failure narrows the span. A codec that has become unavailable mid-bisection is
+    an availability failure with its own remedy, so it is never reported as a character the caller
+    could have written differently.
+    """
     low, high = 0, len(replacement)
     while high - low > 1:
         middle = (low + high) // 2
         try:
             codec.encode(replacement[:middle], "strict")
-        except Exception:
+        except CodecUnavailable:
+            raise
+        except (UnicodeEncodeError, ValueError, LookupError):
             high = middle
         else:
             low = middle
@@ -453,9 +592,9 @@ def failure_detail(error):
 
 
 def serve_read_stream():
-    reader = ReadStream()
+    session = ReadSession()
     sequence = 0
-    while not reader.finished:
+    while not session.finished:
         final = False
         try:
             payload = sys.stdin.buffer.readline(MAX_PROTOCOL + 1)
@@ -465,7 +604,7 @@ def serve_read_stream():
             final = request.get("final", False)
             if type(request.get("sequence")) is not int or request["sequence"] != sequence:
                 raise ValueError("invalid read sequence")
-            result = reader.feed(request)
+            result = session.feed(request)
             result.update(sequence=sequence, final=final)
             output = json.dumps(result, ensure_ascii=True).encode("ascii") + b"\n"
             if len(output) > MAX_PROTOCOL:

@@ -1106,7 +1106,7 @@ function createShellToolDefinition(
 			const runInSession = async (
 				source: string,
 				onData: (data: Buffer) => void,
-				execution?: { detached?: boolean },
+				execution?: { detached?: boolean; floorCommand?: string },
 			): Promise<{
 				exitCode: number | null;
 				cwd?: string;
@@ -1126,9 +1126,19 @@ function createShellToolDefinition(
 				}
 				if (routesWindowsContract) {
 					const route = routeShellContract(source, contractPlatform, { pythonEngine: pythonEngineEnabled });
-					if (route.kind === "unsupported") throw new Error(route.error);
-					if (route.kind === "python-engine") engineRoute = true;
-					backendCommand = route.command;
+					// `floorCommand` is the tool's own spelling of this program in the floor's grammar.
+					// The router translates MODEL-authored Bash for the floor and refuses what it cannot
+					// express there; a program the tool wrote itself needs no translation and its
+					// refusal is not the router's to give. The engine speaks Bash, so it keeps `source`.
+					engineRoute = route.kind === "python-engine";
+					if (route.kind === "unsupported") {
+						if (execution?.floorCommand === undefined) throw new Error(route.error);
+						backendCommand = execution.floorCommand;
+					} else if (engineRoute) {
+						backendCommand = route.command;
+					} else {
+						backendCommand = execution?.floorCommand ?? route.command;
+					}
 					// The engine is the sole state mutator (D4); the floor (engine off, or the engine's
 					// runtime unavailable) reads the SAME session state so a `cd`/`export` the engine
 					// made is observed by the very next floor call.
@@ -1177,9 +1187,18 @@ function createShellToolDefinition(
 					try {
 						return await execute(true, prepared);
 					} catch (error) {
-						const floor = floorRouteAfterEngineOutage(source, contractPlatform, error);
+						// The engine is gone. A tool-authored program already carries its floor spelling;
+						// anything else is model text the router has to translate, and an error that is
+						// not the engine's outage is the command's own outcome and is rethrown there.
+						let floorCommand: string;
+						if (execution?.floorCommand === undefined) {
+							floorCommand = floorRouteAfterEngineOutage(source, contractPlatform, error).command;
+						} else {
+							if (!(error instanceof WindowsShellEngineUnavailableError)) throw error;
+							floorCommand = execution.floorCommand;
+						}
 						engineRoute = false;
-						prepared = await prepareSpawn(floor.command);
+						prepared = await prepareSpawn(floorCommand);
 						return execute(false, prepared);
 					}
 				};
@@ -1248,10 +1267,18 @@ function createShellToolDefinition(
 							if (background === true) {
 								// A detached command runs in its own child shell and must leave the session
 								// exactly where it stood, so the landing directory is observed rather than
-								// entered: `cd <path> && pwd` runs through the same detached path the command
-								// itself takes (starting from the pool's directory), and the absolute path it
-								// prints is where the filtered git runs. No lane and no session directory move.
-								const probe = await runInSession(`${cdCommand} && pwd`, collectCd, { detached: true });
+								// entered: the probe runs through the same detached path the command itself
+								// takes (starting from the pool's directory), and the absolute path it prints
+								// is where the filtered git runs. No lane and no session directory move.
+								//
+								// Every tier gets the probe in its own grammar. The Bash contract (POSIX
+								// shells, and the Windows engine, which speaks Bash) reads `cd … && pwd`; the
+								// PowerShell floor has no `&&` to route, so it gets the PowerShell program
+								// that answers the same question.
+								const probe = await runInSession(`${cdCommand} && pwd`, collectCd, {
+									detached: true,
+									floorCommand: `Set-Location -LiteralPath '${classification.cwdPrefix.replaceAll("'", "''")}'; (Get-Location).Path`,
+								});
 								const printed = lastPrintedLine(Buffer.concat(cdChunks).toString("utf-8"));
 								if (probe.exitCode !== 0) throw await failedCd(probe.exitCode, probe.spawnCwd);
 								if (printed === undefined) {

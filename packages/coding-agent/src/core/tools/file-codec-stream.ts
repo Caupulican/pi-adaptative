@@ -36,7 +36,14 @@ export async function createFileCodecReadSession(signal?: AbortSignal) {
 	let storage: Buffer = Buffer.alloc(0);
 	let retained = 0;
 	let pending:
-		| { sequence: number; final: boolean; resolve(frame: CodecFrame): void; reject(error: Error): void }
+		| {
+				sequence: number;
+				final: boolean;
+				/** Whether this frame's `final` ends the helper process, or only one phase of the read. */
+				endsProcess: boolean;
+				resolve(frame: CodecFrame): void;
+				reject(error: Error): void;
+		  }
 		| undefined;
 	const fail = (error: Error) => {
 		failure ??= error;
@@ -96,7 +103,7 @@ export async function createFileCodecReadSession(signal?: AbortSignal) {
 			)
 				throw fileCodecRecoveryError();
 			frameReceived = true;
-			endingFrame = pending.final || "error" in frame;
+			endingFrame = (pending.final && pending.endsProcess) || "error" in frame;
 			retained = 0;
 			pending.resolve(frame as CodecFrame);
 		} catch {
@@ -110,47 +117,90 @@ export async function createFileCodecReadSession(signal?: AbortSignal) {
 	if (!child.stdin || !child.stdout || !child.stderr) fail(fileCodecRecoveryError());
 	signal?.addEventListener("abort", onAbort, { once: true });
 	if (signal?.aborted) onAbort();
+	/**
+	 * One correlated request/response. `endsProcess` says whether this frame's `final` ends the
+	 * helper: the decode stream's final frame does, a detection pass's final frame only ends that
+	 * phase, because the decode frames it resolved the encoding for still have to run.
+	 */
+	const exchange = async (
+		body: Record<string, unknown>,
+		final: boolean,
+		endsProcess: boolean,
+	): Promise<CodecFrame> => {
+		if (failure) throw failure;
+		if (closed || exited || endingFrame || pending) throw new Error("Encoding read session is not available");
+		const request = JSON.stringify({ sequence, final, ...body });
+		if (Buffer.byteLength(request) + 1 > MAX_FILE_CODEC_PROTOCOL_BYTES) throw fileCodecRecoveryError();
+		const response = Promise.withResolvers<CodecFrame>();
+		pending = { sequence: sequence++, final, endsProcess, resolve: response.resolve, reject: response.reject };
+		frameReceived = false;
+		const deadline = setTimeout(() => fail(new Error("Encoding recovery timed out")), FILE_CODEC_TIMEOUT_MS);
+		try {
+			try {
+				child.stdin?.write(`${request}\n`, (error) => {
+					if (error) fail(fileCodecRecoveryError());
+				});
+			} catch {
+				fail(fileCodecRecoveryError());
+			}
+			const frame = await response.promise;
+			if (endingFrame) {
+				child.stdin?.end();
+				const result = await terminal;
+				if (failure) throw failure;
+				if (result.code !== ("error" in frame ? 1 : 0)) throw fileCodecRecoveryError();
+			}
+			if ("error" in frame) throw fileCodecRecoveryError(frame.error, frame.detail);
+			if (failure) throw failure;
+			return frame;
+		} catch (error) {
+			fail(error instanceof Error ? error : fileCodecRecoveryError());
+			throw failure;
+		} finally {
+			clearTimeout(deadline);
+			pending = undefined;
+		}
+	};
+	/** A response that violates the protocol ends the session: nothing about it is evidence. */
+	const invalid = (): never => {
+		fail(fileCodecRecoveryError());
+		throw failure ?? fileCodecRecoveryError();
+	};
 	return {
+		/**
+		 * Resolve the encoding from the WHOLE source before a byte of it is decoded. A streamed
+		 * decode sees one bounded chunk at a time, so a codec chosen from the first chunk can be
+		 * contradicted by the last one; the helper keeps counters and decoder state here, never the
+		 * bytes, so this stays bounded however large the source is.
+		 */
+		async detect(chunks: AsyncIterable<Buffer> | Iterable<Buffer>): Promise<{ encoding: string; detected: boolean }> {
+			for await (const chunk of chunks) {
+				const frame = await exchange({ operation: "detect", source: chunk.toString("base64") }, false, false);
+				// An encoding before the source has ended would be a verdict on bytes nobody has read.
+				if ("encoding" in frame && frame.encoding !== undefined) invalid();
+			}
+			const frame = await exchange({ operation: "detect", source: "" }, true, false);
+			if (typeof frame.encoding !== "string" || frame.encoding.length === 0 || typeof frame.detected !== "boolean")
+				invalid();
+			return { encoding: frame.encoding as string, detected: frame.detected === true };
+		},
 		async decode(
 			source: Buffer,
 			encoding: string | undefined,
 			final: boolean,
 		): Promise<{ text: string; encoding: string; detected: boolean }> {
-			if (failure) throw failure;
-			if (closed || exited || endingFrame || pending) throw new Error("Encoding read session is not available");
-			const request = JSON.stringify({ sequence, final, encoding, source: source.toString("base64") });
-			if (Buffer.byteLength(request) + 1 > MAX_FILE_CODEC_PROTOCOL_BYTES) throw fileCodecRecoveryError();
-			const response = Promise.withResolvers<CodecFrame>();
-			pending = { sequence: sequence++, final, resolve: response.resolve, reject: response.reject };
-			frameReceived = false;
-			const deadline = setTimeout(() => fail(new Error("Encoding recovery timed out")), FILE_CODEC_TIMEOUT_MS);
-			try {
-				try {
-					child.stdin?.write(`${request}\n`, (error) => {
-						if (error) fail(fileCodecRecoveryError());
-					});
-				} catch {
-					fail(fileCodecRecoveryError());
-				}
-				const frame = await response.promise;
-				if (endingFrame) {
-					child.stdin?.end();
-					const result = await terminal;
-					if (failure) throw failure;
-					if (result.code !== ("error" in frame ? 1 : 0)) throw fileCodecRecoveryError();
-				}
-				if ("error" in frame) throw fileCodecRecoveryError(frame.error, frame.detail);
-				if (failure) throw failure;
-				if (typeof frame.text !== "string" || !frame.text.isWellFormed() || typeof frame.encoding !== "string")
-					throw fileCodecRecoveryError();
-				return { text: frame.text, encoding: frame.encoding, detected: frame.detected === true };
-			} catch (error) {
-				fail(error instanceof Error ? error : fileCodecRecoveryError());
-				throw failure;
-			} finally {
-				clearTimeout(deadline);
-				pending = undefined;
-			}
+			const frame = await exchange(
+				{ operation: "decode", encoding, source: source.toString("base64") },
+				final,
+				true,
+			);
+			if (typeof frame.text !== "string" || !frame.text.isWellFormed() || typeof frame.encoding !== "string")
+				invalid();
+			return {
+				text: frame.text as string,
+				encoding: frame.encoding as string,
+				detected: frame.detected === true,
+			};
 		},
 		async close(): Promise<void> {
 			closed = true;

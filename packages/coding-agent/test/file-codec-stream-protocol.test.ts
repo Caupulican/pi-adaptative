@@ -233,3 +233,116 @@ describe("codec read stream framing and terminal evidence", () => {
 		expect(b.child.stdin?.destroyed).toBe(true);
 	});
 });
+
+/**
+ * The detection pass runs on the same session, before the decode frames it resolves the encoding
+ * for. Its final frame ends the pass, not the helper: the process has to stay up to decode. A
+ * verdict offered before the source has ended would be a verdict on bytes nobody has read yet.
+ */
+describe("codec detection frames on the read session", () => {
+	interface DetectRequest extends Request {
+		operation?: string;
+		source?: string;
+	}
+
+	function detectBackend(answer: (request: DetectRequest) => string) {
+		const child = new ChildProcess();
+		const stdout = new PassThrough();
+		const stderr = new PassThrough();
+		const requests: DetectRequest[] = [];
+		child.stdout = stdout;
+		child.stderr = stderr;
+		child.stdin = new Writable({
+			write(data: Buffer, _encoding, callback) {
+				const request: DetectRequest = JSON.parse(data.toString("utf8"));
+				requests.push(request);
+				stdout.write(answer(request));
+				callback();
+			},
+		});
+		vi.mocked(spawnProcess).mockReturnValueOnce(child);
+		const finish = (code: number) => {
+			Object.defineProperty(child, "exitCode", { value: code, configurable: true });
+			stdout.end();
+			stderr.end();
+			child.emit("exit", code, null);
+			child.emit("close", code, null);
+		};
+		return { child, stdout, stderr, requests, finish };
+	}
+
+	it("streams every chunk, answers on the final frame, and keeps the helper alive to decode", async () => {
+		const b = detectBackend((request) => {
+			if (request.operation === "detect") {
+				const verdict = request.final ? { encoding: "latin-1", detected: true } : {};
+				return `${JSON.stringify({ sequence: request.sequence, final: request.final, ...verdict })}\n`;
+			}
+			if (request.final) setImmediate(() => b.finish(0));
+			return `${JSON.stringify({ sequence: request.sequence, final: request.final, text: "é", encoding: "latin-1", detected: false })}\n`;
+		});
+		const session = await createFileCodecReadSession();
+		try {
+			expect(await session.detect([Buffer.from("first"), Buffer.from("second")])).toEqual({
+				encoding: "latin-1",
+				detected: true,
+			});
+			// The helper is still serving: the decode frames the verdict was resolved for follow it.
+			expect(await session.decode(Buffer.from("first"), "latin-1", true)).toEqual({
+				text: "é",
+				encoding: "latin-1",
+				detected: false,
+			});
+		} finally {
+			await session.close();
+		}
+		expect(b.requests.map((request) => [request.operation, request.final])).toEqual([
+			["detect", false],
+			["detect", false],
+			["detect", true],
+			["decode", true],
+		]);
+		expect(b.requests.map((request) => request.sequence)).toEqual([0, 1, 2, 3]);
+		expect(spawnProcess).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		{
+			name: "a verdict before the source ended",
+			answer: (r: DetectRequest) =>
+				`${JSON.stringify({ sequence: r.sequence, final: r.final, encoding: "latin-1", detected: true })}\n`,
+		},
+		{
+			name: "a final frame with no encoding",
+			answer: (r: DetectRequest) => `${JSON.stringify({ sequence: r.sequence, final: r.final })}\n`,
+		},
+		{
+			name: "a final frame that does not say whether it detected",
+			answer: (r: DetectRequest) =>
+				`${JSON.stringify({ sequence: r.sequence, final: r.final, encoding: r.final ? "latin-1" : undefined })}\n`,
+		},
+	])("rejects $name", async ({ answer }) => {
+		const b = detectBackend(answer);
+		const session = await createFileCodecReadSession();
+		try {
+			await expect(session.detect([Buffer.from("first")])).rejects.toThrow(/could not verify preservation/);
+		} finally {
+			await session.close();
+		}
+		expect(b.stdout.destroyed).toBe(true);
+	});
+
+	it("reports missing evidence from the detection pass with its own error exit", async () => {
+		const b = detectBackend((request) => {
+			setImmediate(() => b.finish(1));
+			return `${JSON.stringify({ sequence: request.sequence, final: request.final, error: "encoding_required" })}\n`;
+		});
+		const session = await createFileCodecReadSession();
+		try {
+			await expect(session.detect([Buffer.from("first")])).rejects.toThrow(
+				/Source encoding is unknown or malformed/,
+			);
+		} finally {
+			await session.close();
+		}
+	});
+});
