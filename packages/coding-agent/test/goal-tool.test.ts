@@ -196,6 +196,73 @@ describe("goal tool", () => {
 		expect(state?.requirements[0]?.status).toBe("satisfied");
 	});
 
+	it("satisfies the cited requirements in the same add_evidence call once the evidence verifies", async () => {
+		const { run, getState, sessionManager } = createHarness();
+		await run({ action: "start", goalId: "g1", userGoal: "Ship feature" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Implement X" });
+		await run({ action: "add_requirement", requirementId: "r2", text: "Document X" });
+		sessionManager.appendMessage({ role: "user", content: "owner confirmed X", timestamp: 1000 });
+
+		const result = await run({
+			action: "add_evidence",
+			evidenceId: "e1",
+			kind: "user",
+			summary: "owner confirmed X",
+			requirementIds: ["r1", "r2"],
+		});
+
+		expect(result.details.applied).toBe(true);
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("Requirement(s) r1, r2 satisfied by this evidence.");
+		const state = getState();
+		expect(state?.requirements.map((requirement) => requirement.status)).toEqual(["satisfied", "satisfied"]);
+		// Identical outcome to a following satisfy_requirement: the same evidence id is cited on each.
+		expect(state?.requirements.map((requirement) => requirement.evidenceIds)).toEqual([["e1"], ["e1"]]);
+	});
+
+	it("satisfies nothing, and says so, when the evidence in the same call did not verify", async () => {
+		const { run, getState } = createHarness();
+		await run({ action: "start", goalId: "g1", userGoal: "Ship feature" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Implement X" });
+
+		const result = await run({
+			action: "add_evidence",
+			evidenceId: "e1",
+			kind: "user",
+			summary: "nobody said this",
+			requirementId: "r1",
+		});
+
+		expect(result.details.applied).toBe(true);
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("Requirement(s) r1 were not satisfied: this evidence did not verify.");
+		const state = getState();
+		expect(state?.requirements[0]?.status).toBe("open");
+		expect(state?.evidence.find((entry) => entry.id === "e1")?.verified).toBe(false);
+	});
+
+	it("keeps the evidence and names the requirement that could not be satisfied", async () => {
+		const { run, getState, sessionManager } = createHarness();
+		await run({ action: "start", goalId: "g1", userGoal: "Ship feature" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Implement X" });
+		sessionManager.appendMessage({ role: "user", content: "owner confirmed X", timestamp: 1000 });
+
+		const result = await run({
+			action: "add_evidence",
+			evidenceId: "e1",
+			kind: "user",
+			summary: "owner confirmed X",
+			requirementIds: ["r1", "r-typo"],
+		});
+
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("Requirement(s) r1 satisfied by this evidence.");
+		expect(text).toContain("Requirement 'r-typo' was not satisfied: Unknown requirement 'r-typo'.");
+		const state = getState();
+		expect(state?.requirements[0]?.status).toBe("satisfied");
+		expect(state?.evidence.find((entry) => entry.id === "e1")?.verified).toBe(true);
+	});
+
 	it("does not persist when an action fails validation", async () => {
 		const { run, saves } = createHarness();
 		const result = await run({ action: "progress" });

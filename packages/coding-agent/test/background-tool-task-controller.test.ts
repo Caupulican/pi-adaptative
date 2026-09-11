@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	BackgroundToolTaskController,
 	type BackgroundToolTaskRecord,
+	backgroundToolTerminalDeliveredTaskIds,
 	collectCitedRunningToolTaskIds,
 	createBackgroundToolTerminalMessage,
 	findBackgroundToolTask,
@@ -63,6 +64,8 @@ function createHarness(sessionId: string) {
 		notifyTerminal: async (records, options) => {
 			notifications.push(...records);
 			wakeSignals.push(options.wakeParent);
+			// Like the real notifier: report what the delivered message inlined.
+			return { deliveredTaskIds: backgroundToolTerminalDeliveredTaskIds(records, options) };
 		},
 		onLiveTasksChanged: (tasks) => liveSignals.push(tasks.map((task) => task.taskId)),
 	});
@@ -210,6 +213,95 @@ describe("BackgroundToolTaskController", () => {
 		expect(message.content).toContain("4 additional terminal tool task(s) omitted");
 		expect(message.content).not.toContain("tool-task-9:");
 		expect(message.content).toContain("tool_task action=wait");
+		// Every included record fits the budget here, so the wake-up itself is the result.
+		expect(message.content).toContain("retained outside the terminal handoff");
+		expect(message.content).not.toContain("output omitted (");
+		expect(backgroundToolTerminalDeliveredTaskIds(records)).toEqual(
+			Array.from({ length: 8 }, (_, index) => `tool-task-${index + 1}`),
+		);
+	});
+
+	it("carries each final output inline so a completion needs no wait request", () => {
+		const record = (taskId: string, output: string): BackgroundToolTaskRecord => ({
+			sessionId: "session-a",
+			taskId,
+			toolCallId: `call-${taskId}`,
+			toolName: "bash",
+			status: "completed",
+			startedAt: "2026-08-01T12:00:00.000Z",
+			completedAt: "2026-08-01T12:00:01.000Z",
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "bash completed",
+			output,
+		});
+
+		const message = createBackgroundToolTerminalMessage([
+			record("tool-task-1", "Test Files  3 passed (3)"),
+			record("tool-task-2", "build succeeded"),
+		]);
+
+		expect(message.content).toContain("- tool-task-1: completed tool=bash\nTest Files  3 passed (3)");
+		expect(message.content).toContain("- tool-task-2: completed tool=bash\nbuild succeeded");
+		expect(message.content).toContain(
+			"Parent woke. Results above are final. Call tool_task action=wait only for a task marked output omitted; never poll.",
+		);
+		expect(message.content).not.toContain("output omitted (");
+		expect(backgroundToolTerminalDeliveredTaskIds([record("tool-task-1", "ok")])).toEqual(["tool-task-1"]);
+	});
+
+	it("leaves only an over-budget output to a wait, and names that exact call", () => {
+		const big = "x".repeat(20 * 1024);
+		const records: BackgroundToolTaskRecord[] = [
+			{
+				sessionId: "session-a",
+				taskId: "tool-task-1",
+				toolCallId: "call-1",
+				toolName: "bash",
+				status: "completed",
+				startedAt: "2026-08-01T12:00:00.000Z",
+				completedAt: "2026-08-01T12:00:01.000Z",
+				elapsedBeforeHandoffMs: 15_000,
+				summary: "bash completed",
+				output: big,
+			},
+			{
+				sessionId: "session-a",
+				taskId: "tool-task-2",
+				toolCallId: "call-2",
+				toolName: "bash",
+				status: "completed",
+				startedAt: "2026-08-01T12:00:00.000Z",
+				completedAt: "2026-08-01T12:00:02.000Z",
+				elapsedBeforeHandoffMs: 15_000,
+				summary: "bash completed",
+				output: "y".repeat(20 * 1024),
+			},
+			{
+				sessionId: "session-a",
+				taskId: "tool-task-3",
+				toolCallId: "call-3",
+				toolName: "bash",
+				status: "completed",
+				startedAt: "2026-08-01T12:00:00.000Z",
+				completedAt: "2026-08-01T12:00:03.000Z",
+				elapsedBeforeHandoffMs: 15_000,
+				summary: "bash completed",
+				output: "small tail result",
+			},
+		];
+
+		const message = createBackgroundToolTerminalMessage(records);
+
+		// Emission order spends the budget: the first big output rides along, the second cannot,
+		// and a later small one still fits behind it.
+		expect(message.content).toContain(big);
+		expect(message.content).toContain(
+			`output omitted (${20 * 1024} bytes): tool_task action=wait taskId=tool-task-2`,
+		);
+		expect(message.content).not.toContain("y".repeat(20 * 1024));
+		expect(message.content).toContain("small tail result");
+		expect(Buffer.byteLength(message.content, "utf8")).toBeLessThanOrEqual(24 * 1024);
+		expect(backgroundToolTerminalDeliveredTaskIds(records)).toEqual(["tool-task-1", "tool-task-3"]);
 	});
 
 	it("owns task identity and terminal output per session", async () => {
@@ -398,6 +490,63 @@ describe("BackgroundToolTaskController", () => {
 			expect.objectContaining({ taskId: "tool-task-1", status: "running" }),
 			expect.objectContaining({ taskId: "tool-task-1", status: "completed" }),
 			expect.objectContaining({ taskId: "tool-task-1", status: "completed", terminalDelivery: "delivered" }),
+		]);
+		await controller.shutdown();
+	});
+
+	it("marks an inline-delivered terminal observed, and leaves an omitted one for its wait", async () => {
+		const { controller, notifications } = createHarness("session-inline");
+		const first = controlledContext("call-1");
+		controller.handoff(first.context);
+		const second = controlledContext("call-2");
+		controller.handoff(second.context);
+		first.resolveCompletion({
+			toolCall: first.context.toolCall,
+			result: { content: [{ type: "text", text: "z".repeat(20 * 1024) }], details: {} },
+			isError: false,
+		});
+		second.resolveCompletion({
+			toolCall: second.context.toolCall,
+			result: { content: [{ type: "text", text: "w".repeat(20 * 1024) }], details: {} },
+			isError: false,
+		});
+		await controller.waitForNotifications();
+
+		expect(notifications.map((record) => record.taskId)).toEqual(["tool-task-1", "tool-task-2"]);
+		const observedAt = controller.list().map((record) => record.observedAt !== undefined);
+		expect(observedAt).toEqual([true, false]);
+		// The unread one still answers its own wait immediately; delivery consumed nothing it owns.
+		await expect(controller.wait("tool-task-2")).resolves.toMatchObject({ status: "completed" });
+		await controller.shutdown();
+	});
+
+	it("observes exactly what the delivery receipt names, never its own snapshot of the batch", async () => {
+		// The notifier builds the wake-up from the records still unread when it delivers; a wait
+		// that lands in between can shrink that set. The controller therefore takes the inline set
+		// from the receipt and nothing else.
+		const persisted: BackgroundToolTaskRecord[] = [];
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-receipt",
+			getArtifactStore: () => createInMemoryArtifactStore(),
+			persist: (record) => persisted.push(record),
+			notifyTerminal: (records) => ({ deliveredTaskIds: records.slice(1).map((record) => record.taskId) }),
+		});
+		const first = controlledContext("call-1");
+		controller.handoff(first.context);
+		const second = controlledContext("call-2");
+		controller.handoff(second.context);
+		for (const call of [first, second]) {
+			call.resolveCompletion({
+				toolCall: call.context.toolCall,
+				result: { content: [{ type: "text", text: "small" }], details: {} },
+				isError: false,
+			});
+		}
+		await controller.waitForNotifications();
+
+		expect(controller.list().map((record) => [record.taskId, record.observedAt !== undefined])).toEqual([
+			["tool-task-1", false],
+			["tool-task-2", true],
 		]);
 		await controller.shutdown();
 	});

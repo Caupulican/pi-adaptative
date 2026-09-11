@@ -131,7 +131,7 @@ const bashSchema = Type.Object({
 	background: Type.Optional(
 		Type.Boolean({
 			description:
-				"Run as a session task at once and return its task id instead of waiting. It runs in its own shell started from the session's current directory (its cd and exports do not persist), waits only for file writes emitted before it in this message, and never blocks other commands. Use only when you will do other work before you need the result; a background start followed immediately by tool_task wait costs an extra request and is slower than a foreground call with a timeout. Collect it later with tool_task wait (needs the tool_task tool; without it the command runs in the foreground). Omit to wait for the command (default, bounded by timeout).",
+				"Run as a session task at once and return its task id instead of waiting. It runs in its own shell started from the session's current directory (its cd and exports do not persist), waits only for file writes emitted before it in this message, and never blocks other commands. Use only when you will do other work before you need the result; a background start followed immediately by tool_task wait costs an extra request and is slower than a foreground call with a timeout. Its result arrives in the completion wake-up; tool_task wait is only for an omitted output (needs the tool_task tool; without it the command runs in the foreground). Omit to wait for the command (default, bounded by timeout).",
 		}),
 	),
 	broadSearch: Type.Optional(

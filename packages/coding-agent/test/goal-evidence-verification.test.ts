@@ -206,6 +206,24 @@ describe("goal evidence ref verification", () => {
 		expect(getState()?.evidence.find((e) => e.id === "e1")?.verified).toBe(false);
 	});
 
+	it("kind 'file' names a file inside a cited directory instead of repeating 'not a regular file'", async () => {
+		const dir = tempDir();
+		writeFileSync(join(dir, "report.md"), "synthetic\n");
+		const { run } = createProducer({ cwd: () => dir });
+
+		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
+		const result = await run({
+			action: "add_evidence",
+			evidenceId: "e1",
+			kind: "file",
+			summary: "points at a directory, not a file",
+			uri: ".",
+		});
+
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("file evidence locator is a directory; cite a file inside it (e.g. report.md)");
+	});
+
 	it("an unproven user statement is false while a tool claim without a locator is unchecked", async () => {
 		const { run, getState } = createProducer();
 
@@ -655,6 +673,64 @@ describe("goal test evidence from session receipts", () => {
 		for (const locator of ["pytest", "np", "grep store", "NPM TEST -- --grep store"]) {
 			expect(resolveSessionToolEvidence(sessionManager, [], locator, "tool").verified).toBe(false);
 		}
+	});
+
+	it("matches a command citation on what ran, not on how it was typed", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(bashCall("run-1", "npx vitest --run test/goal-tool.test.ts", 1000));
+		sessionManager.appendMessage(toolResultMessage("run-1", 1001));
+
+		// Layout only: leading/trailing space, a collapsed run of internal spaces, one trailing ";".
+		for (const locator of [
+			"  npx vitest --run test/goal-tool.test.ts  ",
+			"npx  vitest   --run  test/goal-tool.test.ts",
+			"npx vitest --run test/goal-tool.test.ts;",
+			"command: npx vitest   --run test/goal-tool.test.ts ;",
+		]) {
+			expect(resolveSessionToolEvidence(sessionManager, [], locator, "tool")).toEqual({
+				verified: true,
+				toolCallId: "run-1",
+				outcome: "succeeded",
+			});
+		}
+		// Identity still comes from the text: a different case or a dropped flag is a different call.
+		for (const locator of [
+			"NPX VITEST --run test/goal-tool.test.ts",
+			"npx vitest test/goal-tool.test.ts",
+			"npx vitest --run test/goal-tool.test.ts --reporter=dot",
+		]) {
+			expect(resolveSessionToolEvidence(sessionManager, [], locator, "tool").verified).toBe(false);
+		}
+	});
+
+	it("matches a python citation and names the newest calls when nothing matches", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(bashCall("run-1", "npm run build", 1000));
+		sessionManager.appendMessage(toolResultMessage("run-1", 1001));
+		const pythonCall = bashCall("run-2", "unused", 1002);
+		pythonCall.content = [{ type: "toolCall", id: "run-2", name: "python", arguments: { code: "print( 1 +  1 )" } }];
+		sessionManager.appendMessage(pythonCall);
+		sessionManager.appendMessage({ ...toolResultMessage("run-2", 1003), toolName: "python" });
+		sessionManager.appendMessage(bashCall("run-3", "npm run check -- --since main", 1004));
+		sessionManager.appendMessage(toolResultMessage("run-3", 1005));
+		sessionManager.appendMessage(bashCall("run-4", "x".repeat(120), 1006));
+		sessionManager.appendMessage(toolResultMessage("run-4", 1007));
+
+		expect(resolveSessionToolEvidence(sessionManager, [], "print( 1 +  1 )", "tool")).toEqual({
+			verified: true,
+			toolCallId: "run-2",
+			outcome: "succeeded",
+		});
+
+		const unmatched = resolveSessionToolEvidence(sessionManager, [], "I ran the build", "tool");
+		expect(unmatched.verified).toBe(false);
+		const reason = unmatched.verified ? "" : unmatched.reason;
+		// The three most recent producing calls, newest first, each with a bounded excerpt.
+		expect(reason).toContain("no producing call matches this id or exact command on the active branch");
+		expect(reason).toContain(`run-4 (${"x".repeat(60)}\u2026)`);
+		expect(reason).toContain("run-3 (npm run check -- --since main)");
+		expect(reason).toContain("run-2 (print( 1 + 1 ))");
+		expect(reason).not.toContain("run-1");
 	});
 
 	it("through the wired path: test evidence cited by command text verifies and carries the call id", async () => {

@@ -94,6 +94,22 @@ trailing numeric fragment (`s1-2`) still refuses. Pinned by
 `packages/coding-agent/test/goal-evidence-verification.test.ts`, and
 `packages/coding-agent/test/bash-search-guard.test.ts`.
 
+**A cited command matches its producing call on what was executed, and a miss says what to cite.**
+Tool evidence compares the citation and the call's `command` (bash, `run_process`) or `code` /
+`scriptPath` (python) after normalizing layout only: surrounding and internal whitespace runs and
+one trailing `;`. Case, flags, ordering and every other character stay significant, so a
+paraphrase cannot select a call it did not produce; a `toolCallId` still matches exactly and wins.
+A miss names the newest producing call ids with a 60-character excerpt each, or says no producing
+call is recorded. `add_evidence` accepts `requirementId` / `requirementIds`: once the evidence
+verifies, the same call satisfies those requirements through the satisfy reducer, citing the new
+evidence id, and the reply names what it satisfied; evidence that does not verify satisfies
+nothing; an unknown requirement keeps the evidence and the satisfies that already landed and names
+the miss. A directory cited as file evidence is refused naming a file inside it. Why: a re-typed
+command with a collapsed run of spaces cost a rejected goal turn each time, and every verified
+evidence entry cost a second request just to satisfy its requirement. Pinned by
+`packages/coding-agent/test/goal-evidence-verification.test.ts` and
+`packages/coding-agent/test/goal-tool.test.ts`.
+
 **Tool output is a shorter version of the real output, never a different one; the original is one
 read away.** Every reducer only removes lines, collapses repeats or regroups what the command
 printed (a search hit keeps its path and line, a diagnostic its file, position, code and message;
@@ -363,6 +379,19 @@ unless the operator configured a clock (`backgroundTool.callAfterMs`, off by def
 call by hand. The handoff stub names which of the three moved the call (`started as session task
 … (background requested)`, `exceeded Ns; running as session task`, `moved to session task … by the
 operator`). Pinned by `packages/agent/test/agent-loop.test.ts` (foreground by default) and
+`packages/coding-agent/test/background-tool-task-controller.test.ts` and
+`packages/coding-agent/test/tool-task.test.ts`.
+
+**The completion wake-up carries the result.** When a background task ends, its wake-up lists each
+finished record's status line followed by its bounded final output verbatim, in emission order,
+under one 24 KiB message budget; a record whose output does not fit gets an `output omitted` line
+naming the exact `tool_task wait` that collects it. The notifier builds the message from the
+records still unread when it delivers and returns a receipt of the ids it inlined; the controller
+marks exactly those observed (the wake-up is the model-facing read) and never re-derives the set
+from an older snapshot; an omitted one stays unread until its own wait. The handoff stub, the `tool_task` guideline and the `background` descriptions all say the
+same thing: wait only for an omitted output, never poll. Why: listing only `taskId: status` made
+every background job cost a second provider request whose sole purpose was to fetch bytes the
+record already held, 10-45 s on a slow-first-token provider. Pinned by
 `packages/coding-agent/test/background-tool-task-controller.test.ts` and
 `packages/coding-agent/test/tool-task.test.ts`.
 

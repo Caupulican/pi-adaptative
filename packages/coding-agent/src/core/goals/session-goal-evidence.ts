@@ -43,6 +43,63 @@ export function resolveSessionUserEvidence(
 	return { verified: false, reason: "no user message on the active branch matches the complete quoted statement" };
 }
 
+/** The command a bash/python/run_process call actually ran, or undefined for any other call. */
+function producingCommand(call: ToolCall): string | undefined {
+	if (call.name === "bash" || call.name === "run_process") {
+		const command = call.arguments?.command;
+		return typeof command === "string" ? command : undefined;
+	}
+	if (call.name === "python") {
+		const code = call.arguments?.code ?? call.arguments?.scriptPath;
+		return typeof code === "string" ? code : undefined;
+	}
+	return undefined;
+}
+
+/**
+ * One spelling for a cited command and for the command a call actually ran, so the two compare on
+ * what was executed rather than on how it was typed.
+ *
+ * Identity still comes from the text itself: only layout is normalized (surrounding and internal
+ * whitespace, one trailing `;`). Case, flags, ordering and every other character stay significant,
+ * so a paraphrase or a different invocation can never select a call it did not produce. Measured
+ * live, a re-typed command with a collapsed run of spaces cost a rejected goal turn each time.
+ */
+function normalizeProducingCommand(value: string): string {
+	return value.trim().replace(/\s+/g, " ").replace(/;$/, "").trim();
+}
+
+const MAX_COMMAND_EXCERPT_CHARS = 60;
+const MAX_SUGGESTED_CALLS = 3;
+
+/**
+ * What the model should cite next when nothing matched. "No producing call matches" alone left it
+ * guessing at spellings across whole turns; the newest bash/python call ids with an excerpt each
+ * make the next citation exact.
+ */
+function unmatchedCommandReason(branch: ReturnType<SessionManager["getBranch"]>): string {
+	const suggestions: string[] = [];
+	for (let index = branch.length - 1; index >= 0 && suggestions.length < MAX_SUGGESTED_CALLS; index--) {
+		const entry = branch[index];
+		if (entry?.type !== "message" || entry.message.role !== "assistant") continue;
+		const content = entry.message.content;
+		for (let part = content.length - 1; part >= 0 && suggestions.length < MAX_SUGGESTED_CALLS; part--) {
+			const call = content[part];
+			if (call?.type !== "toolCall") continue;
+			const command = producingCommand(call);
+			if (command === undefined) continue;
+			const excerpt = normalizeProducingCommand(command);
+			suggestions.push(
+				`${call.id} (${excerpt.length > MAX_COMMAND_EXCERPT_CHARS ? `${excerpt.slice(0, MAX_COMMAND_EXCERPT_CHARS)}…` : excerpt})`,
+			);
+		}
+	}
+	const base = "no producing call matches this id or exact command on the active branch";
+	return suggestions.length === 0
+		? `${base}; no bash or python call is recorded on it`
+		: `${base}; cite one of the most recent calls: ${suggestions.join(", ")}`;
+}
+
 /**
  * Session adapter for the goal tool's evidence port. A locator selects one producing call; its
  * outcome decides trust. Exact command citations select the newest attempt, including failures and
@@ -59,7 +116,7 @@ export function resolveSessionToolEvidence(
 	if (!locator) return { verified: false, reason: "cite a producing toolCallId or its exact command" };
 	const task = findBackgroundToolTask(backgroundTasks, locator);
 	const callId = task?.toolCallId ?? locator;
-	const command = locator.replace(/^(?:command|cmd|run|shell|tool)\s*[:=]\s*/i, "").trim();
+	const command = normalizeProducingCommand(locator.replace(/^(?:command|cmd|run|shell|tool)\s*[:=]\s*/i, ""));
 	const branch = sessionManager.getBranch();
 	let call: ToolCall | undefined;
 	let callIndex = -1;
@@ -68,15 +125,13 @@ export function resolveSessionToolEvidence(
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
 			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-			call = entry.message.content.findLast(
-				(part): part is ToolCall =>
-					part.type === "toolCall" &&
-					(matchCommand
-						? !task &&
-							(part.name === "bash" || part.name === "run_process") &&
-							part.arguments?.command === command
-						: part.id === callId),
-			);
+			call = entry.message.content.findLast((part): part is ToolCall => {
+				if (part.type !== "toolCall") return false;
+				if (!matchCommand) return part.id === callId;
+				if (task) return false;
+				const produced = producingCommand(part);
+				return produced !== undefined && normalizeProducingCommand(produced) === command;
+			});
 			if (call) {
 				callIndex = index;
 				break;
@@ -84,8 +139,7 @@ export function resolveSessionToolEvidence(
 		}
 		if (call) break;
 	}
-	if (!call)
-		return { verified: false, reason: "no producing call matches this id or exact command on the active branch" };
+	if (!call) return { verified: false, reason: unmatchedCommandReason(branch) };
 
 	const background = task ?? findBackgroundToolTask(backgroundTasks, call.id);
 	if (background) {

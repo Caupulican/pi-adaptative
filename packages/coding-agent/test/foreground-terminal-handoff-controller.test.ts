@@ -610,6 +610,52 @@ describe("ForegroundTerminalHandoffController", () => {
 		expect(foreground.releaseSubmission).toHaveBeenCalledWith(lease);
 	});
 
+	it("reports in the receipt only the outputs the delivered wake-up carried", async () => {
+		// Two records are announced; one is read by a wait before the foreground goes idle. The
+		// message built at delivery covers only the still-unread one, and so does the receipt.
+		let releaseIdle!: () => void;
+		const idle = new Promise<void>((resolve) => {
+			releaseIdle = resolve;
+		});
+		const lease = {} as ForegroundSubmissionLease;
+		const foreground = {
+			waitForIdle: vi.fn(() => idle),
+			tryAcquireSubmission: vi.fn(() => lease),
+			releaseSubmission: vi.fn(),
+		} as unknown as ForegroundRecoveryController;
+		const startCustomMessageTurn = vi.fn(async () => ({ completion: Promise.resolve() }));
+		const controller = new ForegroundTerminalHandoffController({
+			foreground,
+			isDisposed: () => false,
+			getGoalStateSnapshot: () => undefined,
+			startCustomMessageTurn,
+			enqueueCustomMessageTurn: vi.fn(async () => undefined),
+			sendCustomMessage: vi.fn(async () => undefined),
+			warn: vi.fn(),
+		});
+		const base = {
+			sessionId: "session-a",
+			toolName: "bash",
+			status: "completed" as const,
+			startedAt: "2026-08-21T20:00:00.000Z",
+			completedAt: "2026-08-21T20:00:01.000Z",
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "bash completed",
+		};
+		const readByWait = { ...base, taskId: "tool-task-1", toolCallId: "call-1", output: "first output" };
+		const unread = { ...base, taskId: "tool-task-2", toolCallId: "call-2", output: "second output" };
+
+		const notification = controller.notifyTools([readByWait, unread], true);
+		Object.assign(readByWait, { observedAt: "2026-08-21T20:00:02.000Z" });
+		releaseIdle();
+		const receipt = await notification;
+
+		expect(receipt).toEqual({ deliveredTaskIds: ["tool-task-2"] });
+		const [message] = startCustomMessageTurn.mock.calls[0] as unknown as [{ content: string }];
+		expect(message.content).toContain("second output");
+		expect(message.content).not.toContain("first output");
+	});
+
 	it("silently consumes a background tool terminal observed before delivery", async () => {
 		const { controller, foreground, lease, sendCustomMessage, startCustomMessageTurn } = createController();
 

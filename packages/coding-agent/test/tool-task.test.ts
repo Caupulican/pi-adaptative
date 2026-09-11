@@ -1,5 +1,11 @@
+import type { AgentContext, BackgroundToolCallCompletion, BackgroundToolCallContext } from "@caupulican/pi-agent-core";
+import type { AssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import type { BackgroundToolTaskRecord } from "../src/core/background-tool-task-controller.ts";
+import {
+	BackgroundToolTaskController,
+	type BackgroundToolTaskRecord,
+	backgroundToolTerminalDeliveredTaskIds,
+} from "../src/core/background-tool-task-controller.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { createToolTaskToolDefinition } from "../src/core/tools/tool-task.ts";
 
@@ -52,6 +58,47 @@ const canceled: BackgroundToolTaskRecord = {
 };
 
 const extensionContext = {} as ExtensionContext;
+
+function backgroundCall(toolCallId: string): {
+	context: BackgroundToolCallContext;
+	complete: (completion: BackgroundToolCallCompletion) => void;
+} {
+	let complete!: (completion: BackgroundToolCallCompletion) => void;
+	const completion = new Promise<BackgroundToolCallCompletion>((resolve) => {
+		complete = resolve;
+	});
+	const toolCall = { type: "toolCall" as const, id: toolCallId, name: "bash", arguments: { command: "true" } };
+	const assistantMessage: AssistantMessage = {
+		role: "assistant",
+		content: [toolCall],
+		api: "openai-responses",
+		provider: "openai",
+		model: "mock",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse",
+		timestamp: Date.now(),
+	};
+	return {
+		context: {
+			assistantMessage,
+			toolCall,
+			args: toolCall.arguments,
+			context: { systemPrompt: "", messages: [], tools: [] } satisfies AgentContext,
+			trigger: "requested",
+			elapsedMs: 0,
+			completion,
+			cancel: vi.fn(),
+		},
+		complete,
+	};
+}
 
 describe("tool_task", () => {
 	it("lists bounded session tasks without encouraging polling", async () => {
@@ -121,6 +168,49 @@ describe("tool_task", () => {
 		expect(wait).toHaveBeenLastCalledWith("tool-task-1", signal, 120_000);
 		expect(result.details).toMatchObject({ kind: "wait", taskId: "tool-task-1", status: "completed" });
 		expect(result.isError).not.toBe(true);
+	});
+
+	it("answers a wait immediately for a record the completion wake-up already delivered", async () => {
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			persist: () => {},
+			// Like the real notifier: the receipt names what the delivered wake-up carried.
+			notifyTerminal: (records, options) => ({
+				deliveredTaskIds: backgroundToolTerminalDeliveredTaskIds(records, options),
+			}),
+		});
+		const call = backgroundCall("call-1");
+		controller.handoff(call.context);
+		call.complete({
+			toolCall: call.context.toolCall,
+			isError: false,
+			result: { content: [{ type: "text", text: "Test Files  3 passed (3)" }], details: {} },
+		});
+		await controller.waitForNotifications();
+		// The wake-up carried this output, so the controller already consumed it as read.
+		expect(controller.list()[0]?.observedAt).toEqual(expect.any(String));
+
+		const tool = createToolTaskToolDefinition({
+			list: () => controller.list(),
+			observe: (taskIds) => {
+				controller.observe(taskIds);
+			},
+			wait: (taskId, signal, timeoutMs) => controller.wait(taskId, signal, timeoutMs),
+			cancel: (taskId) => controller.cancel(taskId),
+		});
+		const result = await Promise.race([
+			tool.execute("call", { action: "wait", taskId: "tool-task-1" }, undefined, undefined, extensionContext),
+			new Promise<never>((_resolve, reject) => {
+				const timer = setTimeout(() => reject(new Error("wait blocked on an already-delivered record")), 1_000);
+				timer.unref?.();
+			}),
+		]);
+
+		expect(result.content).toEqual([{ type: "text", text: "Test Files  3 passed (3)" }]);
+		expect(result.details).toMatchObject({ kind: "wait", taskId: "tool-task-1", status: "completed" });
+		expect(result.isError).not.toBe(true);
+		await controller.shutdown();
 	});
 
 	it("returns a running snapshot as nonterminal control flow instead of a tool failure", async () => {

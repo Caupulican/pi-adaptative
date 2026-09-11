@@ -13,6 +13,7 @@ import {
 	BackgroundToolTaskController,
 	type BackgroundToolTaskControllerDeps,
 	type BackgroundToolTaskRecord,
+	type BackgroundToolTerminalDeliveryResult,
 	loadBackgroundToolTaskRecordsNewestFirst,
 } from "./background-tool-task-controller.ts";
 
@@ -22,7 +23,11 @@ export interface SessionBackgroundToolTaskDeps {
 	getCurrentSubmissionEpoch(): number | undefined;
 	isForegroundWait(toolName: string, args: unknown): boolean;
 	getArtifactStore(): ReturnType<BackgroundToolTaskControllerDeps["getArtifactStore"]>;
-	notifyTerminal(records: readonly BackgroundToolTaskRecord[], wakeParent: boolean): void | Promise<void>;
+	/** Resolves with the ids whose output the delivered wake-up carried; those count as observed. */
+	notifyTerminal(
+		records: readonly BackgroundToolTaskRecord[],
+		wakeParent: boolean,
+	): BackgroundToolTerminalDeliveryResult | Promise<BackgroundToolTerminalDeliveryResult>;
 	emit(event: AgentSessionEvent): void;
 	addSpawnedUsage(usage: Usage, options: { label?: string; sourceSessionId?: string; reportId?: string }): void;
 }

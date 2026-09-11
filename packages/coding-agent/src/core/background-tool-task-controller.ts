@@ -65,6 +65,13 @@ const MAX_INLINE_OUTPUT_LINES = 400;
 /** Budgeted so a projected failure summary keeps its diagnostic instead of cutting it off. */
 const MAX_SUMMARY_CHARS = 320;
 const MAX_TERMINAL_HANDOFF_RECORDS = 8;
+/**
+ * Total byte budget for one completion wake-up, outputs included. Smaller than the per-record
+ * inline bound (`MAX_INLINE_OUTPUT_BYTES`) times the record bound on purpose: the wake-up rides an
+ * ordinary request, so a batch of large results spends the budget on the first ones and leaves the
+ * rest an exact `tool_task wait` to collect.
+ */
+const MAX_TERMINAL_MESSAGE_BYTES = 24 * 1024;
 const TASK_ID_PATTERN = /^tool-task-([1-9]\d*)$/;
 const RECORD_KEYS = [
 	"sessionId",
@@ -162,6 +169,16 @@ export interface BackgroundToolTaskLiveView {
 	description: string;
 }
 
+/** What a delivered wake-up actually read on the model's behalf. */
+export interface BackgroundToolTerminalDeliveryReceipt {
+	/** Task ids whose final output rode the delivered message in full (never an `output omitted` one). */
+	deliveredTaskIds: readonly string[];
+}
+
+/** A notifier's answer: the receipt, or nothing when it delivered no output. */
+// biome-ignore lint/suspicious/noConfusingVoidType: void keeps fire-and-forget notifiers (`() => {}`) valid
+export type BackgroundToolTerminalDeliveryResult = void | undefined | BackgroundToolTerminalDeliveryReceipt;
+
 export interface BackgroundToolTerminalMessage {
 	customType: "background-tool-completion";
 	content: string;
@@ -195,7 +212,15 @@ export interface BackgroundToolTaskControllerDeps {
 	/** Durable task records on the active branch, newest first, without rebuilding full model context. */
 	loadPersistedRecordsNewestFirst?(): readonly unknown[];
 	persist(record: BackgroundToolTaskRecord): void;
-	notifyTerminal(records: readonly BackgroundToolTaskRecord[], options: { wakeParent: boolean }): Promise<void> | void;
+	/**
+	 * Deliver a terminal batch. The receipt names the task ids whose final output the delivered
+	 * message carried in full; the controller marks exactly those observed. A notifier that
+	 * returns nothing delivered no output (a record then stays unread until its own wait).
+	 */
+	notifyTerminal(
+		records: readonly BackgroundToolTaskRecord[],
+		options: { wakeParent: boolean },
+	): BackgroundToolTerminalDeliveryResult | Promise<BackgroundToolTerminalDeliveryResult>;
 	onLiveTasksChanged?(tasks: readonly BackgroundToolTaskLiveView[]): void;
 	recordUsage?(taskId: string, usage: Usage): void;
 	onError?(message: string, error: unknown): void;
@@ -231,14 +256,123 @@ export function loadBackgroundToolTaskRecordsNewestFirst(
 	}
 }
 
+/** One included record's body in the wake-up: its final output inline, or the wait hint that replaces it. */
+interface TerminalOutputProjection {
+	taskId: string;
+	statusLine: string;
+	/** The record's final output, rendered verbatim under the message budget. */
+	inlineOutput?: string;
+	/** Replacement line naming the exact `tool_task wait` that still collects this output. */
+	omissionLine?: string;
+}
+
+function utf8Bytes(value: string): number {
+	return Buffer.byteLength(value, "utf8");
+}
+
+/**
+ * Decide, in emission order and under one message-wide byte budget, which final outputs ride the
+ * wake-up itself.
+ *
+ * Listing only `taskId: status` made every background job cost two provider requests -- the start
+ * and a `tool_task wait` whose sole purpose was to fetch bytes the record already held. On a
+ * slow-first-token provider that second request is 10-45 s of pure latency. The record's output is
+ * already bounded at completion (`MAX_INLINE_OUTPUT_BYTES`, artifact reference beyond that), so the
+ * wake-up can carry it; only what genuinely does not fit is left for a wait.
+ */
+function projectTerminalOutputs(
+	included: readonly BackgroundToolTaskRecord[],
+	reservedBytes: number,
+): TerminalOutputProjection[] {
+	const candidates = included.map((record) => {
+		const statusLine = `- ${record.taskId}: ${record.status} tool=${record.toolName}`;
+		const output = record.output ?? "";
+		return {
+			taskId: record.taskId,
+			statusLine,
+			output,
+			omissionLine:
+				output === ""
+					? undefined
+					: `  output omitted (${utf8Bytes(output)} bytes): tool_task action=wait taskId=${record.taskId}`,
+		};
+	});
+	// Start from the message every record would produce if nothing were inlined, then spend the
+	// remaining budget in emission order. A later small output still fits after a large one is left out.
+	let total = reservedBytes;
+	for (const candidate of candidates) {
+		total += utf8Bytes(candidate.statusLine) + 1;
+		if (candidate.omissionLine) total += utf8Bytes(candidate.omissionLine) + 1;
+	}
+	return candidates.map((candidate) => {
+		const { taskId, statusLine, output, omissionLine } = candidate;
+		if (!omissionLine) return { taskId, statusLine };
+		const delta = utf8Bytes(output) - utf8Bytes(omissionLine);
+		if (total + delta > MAX_TERMINAL_MESSAGE_BYTES) return { taskId, statusLine, omissionLine };
+		total += delta;
+		return { taskId, statusLine, inlineOutput: output };
+	});
+}
+
+function terminalMessageTailLines(wakeParent: boolean): string[] {
+	return wakeParent
+		? [
+				"Parent woke. Results above are final. Call tool_task action=wait only for a task marked output omitted; never poll.",
+			]
+		: ["Parent was not woken because the owning goal is no longer active. Wait for explicit user input."];
+}
+
+function terminalOutputProjectionsFor(
+	records: readonly BackgroundToolTaskRecord[],
+	wakeParent: boolean,
+): { included: readonly BackgroundToolTaskRecord[]; omitted: number; projections: TerminalOutputProjection[] } {
+	const included = records.slice(0, MAX_TERMINAL_HANDOFF_RECORDS);
+	const omitted = records.length - included.length;
+	const header = "Background tool terminal handoff:";
+	const tail = terminalMessageTailLines(wakeParent);
+	const overflowLine = omitted > 0 ? [`- ${omitted} additional terminal tool task(s) omitted.`] : [];
+	const reservedBytes = [header, ...overflowLine, ...tail].reduce((sum, line) => sum + utf8Bytes(line) + 1, 0);
+	return { included, omitted, projections: projectTerminalOutputs(included, reservedBytes) };
+}
+
+/**
+ * Task ids whose final output the wake-up delivers in full. The controller marks exactly these
+ * observed at delivery, so the ledger treats them as read and nothing re-delivers them; a task left
+ * with an `output omitted` line stays unread until its `tool_task wait` collects it.
+ */
+export function backgroundToolTerminalDeliveredTaskIds(
+	records: readonly BackgroundToolTaskRecord[],
+	options?: { wakeParent?: boolean },
+): string[] {
+	if (records.length === 0) return [];
+	const { projections } = terminalOutputProjectionsFor(records, options?.wakeParent ?? true);
+	return projections.filter((projection) => projection.omissionLine === undefined).map((p) => p.taskId);
+}
+
+/**
+ * The wake-up message and the receipt of what it carried, projected once from the same records.
+ * The notifier builds the message from the records still unread at delivery time and returns this
+ * receipt, so the controller never re-derives the inline set from an older snapshot.
+ */
+export function projectBackgroundToolTerminalDelivery(
+	records: readonly BackgroundToolTaskRecord[],
+	options?: { wakeParent?: boolean },
+): { message: BackgroundToolTerminalMessage; receipt: BackgroundToolTerminalDeliveryReceipt } {
+	const wakeParent = options?.wakeParent ?? true;
+	const message = createBackgroundToolTerminalMessage(records, { wakeParent });
+	return {
+		message,
+		receipt: { deliveredTaskIds: wakeParent ? backgroundToolTerminalDeliveredTaskIds(records, { wakeParent }) : [] },
+	};
+}
+
 export function createBackgroundToolTerminalMessage(
 	records: readonly BackgroundToolTaskRecord[],
 	options?: { wakeParent?: boolean },
 ): BackgroundToolTerminalMessage {
 	if (records.length === 0) throw new TypeError("Background tool terminal handoff requires at least one record");
-	const included = records.slice(0, MAX_TERMINAL_HANDOFF_RECORDS);
-	const omitted = records.length - included.length;
 	const wakeParent = options?.wakeParent ?? true;
+	const { included, omitted, projections } = terminalOutputProjectionsFor(records, wakeParent);
 	const projected = included.map((record) => {
 		const verification = retainedBackgroundToolVerification(record, record.taskId);
 		return {
@@ -256,11 +390,13 @@ export function createBackgroundToolTerminalMessage(
 		customType: "background-tool-completion",
 		content: [
 			"Background tool terminal handoff:",
-			...included.map((record) => `- ${record.taskId}: ${record.status} tool=${record.toolName}`),
+			...projections.flatMap((projection) => [
+				projection.statusLine,
+				...(projection.inlineOutput !== undefined ? [projection.inlineOutput] : []),
+				...(projection.omissionLine !== undefined ? [projection.omissionLine] : []),
+			]),
 			...(omitted > 0 ? [`- ${omitted} additional terminal tool task(s) omitted.`] : []),
-			...(wakeParent
-				? ["Parent woke. Need result: tool_task action=wait once; never poll."]
-				: ["Parent was not woken because the owning goal is no longer active. Wait for explicit user input."]),
+			...terminalMessageTailLines(wakeParent),
 		].join("\n"),
 		display: true,
 		details: {
@@ -578,7 +714,7 @@ export class BackgroundToolTaskController {
 						type: "text",
 						text: [
 							handoffHeadline(context, taskId),
-							"Continue independent work. Dependency: tool_task action=wait once with taskId; event-driven, never poll.",
+							"Continue independent work; the completion wake-up carries its result. Call tool_task action=wait with taskId only when you have nothing else to do until it ends, or when the wake-up marks its output omitted; never poll.",
 						].join("\n"),
 					},
 				],
@@ -967,10 +1103,11 @@ export class BackgroundToolTaskController {
 			await Promise.resolve();
 			const batch = this.queuedNotifications.splice(0, MAX_TERMINAL_HANDOFF_RECORDS);
 			const records = batch.map((notification) => notification.record);
+			const wakeParent = batch.some((notification) => notification.wakeParent);
+			let receipt: BackgroundToolTerminalDeliveryReceipt | undefined;
 			try {
-				await this.deps.notifyTerminal(records, {
-					wakeParent: batch.some((notification) => notification.wakeParent),
-				});
+				const result = await this.deps.notifyTerminal(records, { wakeParent });
+				receipt = typeof result === "object" ? result : undefined;
 			} catch (error) {
 				// A rejected handoff is not a delivery receipt. Put the exact records back ahead of
 				// newer completions and retry on an event-driven backoff; persistence already contains
@@ -992,6 +1129,13 @@ export class BackgroundToolTaskController {
 			}
 			this.notificationRetryCount = 0;
 			for (const record of records) this.markNotificationDelivered(record);
+			// The wake-up carried these outputs in full, so this delivery IS the model-facing read --
+			// the same consumption a `tool_task wait` performs. The notifier reports what its delivered
+			// message inlined (it builds that message from the records still unread at delivery, which
+			// can be fewer than this batch), so the receipt is the only source for what was read. A
+			// record left with an `output omitted` line stays unobserved until its own wait collects it.
+			const deliveredTaskIds = receipt?.deliveredTaskIds ?? [];
+			if (deliveredTaskIds.length > 0) this.observe(deliveredTaskIds);
 			for (const record of records) {
 				this.activeNotificationRecords.delete(record);
 			}

@@ -92,7 +92,7 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 			"List, wait for, or cancel this session's background tool calls. Continue other work; wait blocks until the task ends or timeoutMs (default 300000), never poll. Cite a completed taskId as goal evidence or task_steps evidence.",
 		promptSnippet: "Event-driven background tool control; wait once, never poll.",
 		promptGuidelines: [
-			"Handoff is not completion. Need the result: wait once with taskId.",
+			"A completion wake-up carries the result; wait once with taskId only for a task it marks output omitted.",
 			"Cite the taskId on the matching task_steps step and as goal add_evidence kind=tool uri.",
 		],
 		parameters: schema,

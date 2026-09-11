@@ -2,7 +2,8 @@ import type { CustomMessage } from "@caupulican/pi-agent-core";
 import type { LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
 import {
 	type BackgroundToolTaskRecord,
-	createBackgroundToolTerminalMessage,
+	type BackgroundToolTerminalDeliveryReceipt,
+	projectBackgroundToolTerminalDelivery,
 } from "./background-tool-task-controller.ts";
 import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
 import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
@@ -113,13 +114,20 @@ interface TerminalDeliveryPlan {
 	 * only when this equals the CURRENT submission's epoch -- see `resolveWake`.
 	 */
 	ownerEpoch?: number;
+	/** Background tool task ids whose output this plan's message carries in full (tool plans only). */
+	deliveredTaskIds?: readonly string[];
 }
+
+/** Task ids read by a delivery; a plan that delivered nothing, or no tool output, reports none. */
+type DeliveryReceipt = readonly string[];
 
 interface PendingTerminalDelivery {
 	prepare(): TerminalDeliveryPlan | undefined;
-	resolve(): void;
+	resolve(receipt: DeliveryReceipt): void;
 	reject(error: unknown): void;
 }
+
+const NOTHING_DELIVERED: DeliveryReceipt = [];
 
 const MAX_DELIVERED_TERMINAL_IDENTITIES = 512;
 const ATTENTION_CLAIM_STATUSES: ReadonlySet<LaneTerminalStatus> = new Set(["blocked", "partial"]);
@@ -202,7 +210,7 @@ export function buildForegroundWorkerTerminalHandoffContent(
 export class ForegroundTerminalHandoffController {
 	private readonly deps: ForegroundTerminalHandoffControllerDeps;
 	private readonly pending = new Set<PendingTerminalDelivery>();
-	private readonly terminalDeliveries = new Map<string, Promise<void>>();
+	private readonly terminalDeliveries = new Map<string, Promise<DeliveryReceipt>>();
 	private readonly deliveredTerminalIdentities = new Set<string>();
 
 	constructor(deps: ForegroundTerminalHandoffControllerDeps) {
@@ -220,14 +228,26 @@ export class ForegroundTerminalHandoffController {
 		);
 	}
 
-	async notifyTools(records: readonly BackgroundToolTaskRecord[], wakeParent: boolean): Promise<void> {
-		if (!wakeParent || records.every((record) => record.observedAt !== undefined)) return;
+	/**
+	 * Resolves with the receipt of what the delivered wake-up read: the ids whose output it carried
+	 * in full, restricted to this call's own records. The message is built from the records still
+	 * unread at delivery time, so the receipt reflects the delivery, never the request.
+	 */
+	async notifyTools(
+		records: readonly BackgroundToolTaskRecord[],
+		wakeParent: boolean,
+	): Promise<BackgroundToolTerminalDeliveryReceipt> {
+		if (!wakeParent || records.every((record) => record.observedAt !== undefined)) {
+			return { deliveredTaskIds: [] };
+		}
 		this.assertLive("background tool terminal handoff was delivered");
-		await this.scheduleUnique(
+		const delivered = await this.scheduleUnique(
 			records,
 			(record) => ["tool", record.sessionId, record.taskId, record.completedAt ?? "", record.status].join("\0"),
 			(uniqueRecords) => this.prepareToolDelivery(uniqueRecords),
 		);
+		const own = new Set(records.map((record) => record.taskId));
+		return { deliveredTaskIds: delivered.filter((taskId) => own.has(taskId)) };
 	}
 
 	/** Deliver queued terminals immediately before the agent loop polls its steering inbox. */
@@ -238,7 +258,7 @@ export class ForegroundTerminalHandoffController {
 				const plan = pending.prepare();
 				if (!plan) {
 					this.pending.delete(pending);
-					pending.resolve();
+					pending.resolve(NOTHING_DELIVERED);
 					continue;
 				}
 				if (!plan.wakeParent) continue;
@@ -253,7 +273,9 @@ export class ForegroundTerminalHandoffController {
 					continue;
 				}
 				this.pending.delete(pending);
-				void this.deps.enqueueCustomMessageTurn(plan.message).then(pending.resolve, pending.reject);
+				void this.deps
+					.enqueueCustomMessageTurn(plan.message)
+					.then(() => pending.resolve(plan.deliveredTaskIds ?? NOTHING_DELIVERED), pending.reject);
 			} catch (error) {
 				this.pending.delete(pending);
 				pending.reject(error);
@@ -261,8 +283,8 @@ export class ForegroundTerminalHandoffController {
 		}
 	}
 
-	private schedule(prepare: () => TerminalDeliveryPlan | undefined): Promise<void> {
-		return new Promise<void>((resolve, reject) => {
+	private schedule(prepare: () => TerminalDeliveryPlan | undefined): Promise<DeliveryReceipt> {
+		return new Promise<DeliveryReceipt>((resolve, reject) => {
 			const pending: PendingTerminalDelivery = { prepare, resolve, reject };
 			this.pending.add(pending);
 			void this.deliverWhenIdle(pending);
@@ -273,8 +295,8 @@ export class ForegroundTerminalHandoffController {
 		records: readonly T[],
 		identity: (record: T) => string,
 		prepare: (records: readonly T[]) => TerminalDeliveryPlan | undefined,
-	): Promise<void> {
-		const receipts = new Set<Promise<void>>();
+	): Promise<DeliveryReceipt> {
+		const receipts = new Set<Promise<DeliveryReceipt>>();
 		const uniqueRecords: T[] = [];
 		const uniqueIdentities: string[] = [];
 		for (const record of records) {
@@ -306,7 +328,7 @@ export class ForegroundTerminalHandoffController {
 				},
 			);
 		}
-		await Promise.all(receipts);
+		return (await Promise.all(receipts)).flat();
 	}
 
 	private rememberDeliveredTerminal(identity: string): void {
@@ -332,8 +354,9 @@ export class ForegroundTerminalHandoffController {
 					return;
 				}
 				try {
-					await this.deliverWithLease(pending.prepare(), lease);
-					pending.resolve();
+					const plan = pending.prepare();
+					await this.deliverWithLease(plan, lease);
+					pending.resolve(plan?.deliveredTaskIds ?? NOTHING_DELIVERED);
 				} catch (error) {
 					pending.reject(error);
 				}
@@ -422,8 +445,11 @@ export class ForegroundTerminalHandoffController {
 		const unread = records.filter((record) => record.observedAt === undefined);
 		if (unread.length === 0) return undefined;
 		const wake = this.resolveWake(unread);
-		const toolMessage = createBackgroundToolTerminalMessage(unread, { wakeParent: wake.wakeParent });
+		const { message: toolMessage, receipt } = projectBackgroundToolTerminalDelivery(unread, {
+			wakeParent: wake.wakeParent,
+		});
 		return {
+			deliveredTaskIds: receipt.deliveredTaskIds,
 			message: {
 				...toolMessage,
 				details: {
