@@ -3,6 +3,7 @@
 ### Changed
 
 - The request that answers only `goal` / `task_steps` results runs at `low` thinking, clamped to the session level (`reasoning.bookkeepingThinking`: a level, or `"inherit"` to switch it off); a message mixing bookkeeping with real work is real work, and the request after the next real tool result is back at the session level. Recorded like the host-turn decision (`kind: "bookkeeping"`).
+- `/edge allow all` grants every edge class for the session in one command (and `/edge revoke all` clears them); several classes can be named at once, each recorded as its own durable grant so a later single revoke narrows a full grant instead of undoing it. Commits were never an edge class; only push, tag and release ask.
 
 ## [0.99.18] - 2026-09-11
 

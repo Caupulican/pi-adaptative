@@ -291,8 +291,10 @@ work), `settings.authority` (the harness's own settings and credential files) �
 literally from the tool call; anything unknown is ordinary work and runs. A class granted by the
 task instructions (`goal grant_edge` with the operator's exact words, verified verbatim against a
 user message on the branch — a paraphrase grants nothing), by the operator in this session
-(`/edge allow`, or *allow for this session* at the prompt) or by the machine (`edge.allow` in
-settings) never asks. An ungranted class asks the interactive operator once with one key and the
+(`/edge allow <class…|all>`, or *allow for this session* at the prompt) or by the machine
+(`edge.allow` in settings) never asks; a session or instruction grant is a durable record on the
+session branch and lasts until revoked, so a full grant covers the whole work, and a commit is
+ordinary work that never asks. An ungranted class asks the interactive operator once with one key and the
 tool call waits for the answer; a headless or child session blocks it with a reason that names
 every way to grant. Pinned by `packages/coding-agent/test/edge-policy.test.ts` and
 `packages/coding-agent/test/agent-session-edge.test.ts`.
