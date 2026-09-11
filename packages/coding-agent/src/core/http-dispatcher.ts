@@ -1,10 +1,11 @@
 import { DEFAULT_STREAM_IDLE, type StreamIdleOptions } from "@caupulican/pi-agent-core/reliability";
 import * as undici from "undici";
 
-// The default stays strictly greater than the stall watchdog's quiet bound (600s — see
-// pi-agent-core DEFAULT_STREAM_IDLE): 660s = quiet bound + 60s margin. Shorter explicit
-// values remain supported because constrainStreamIdleToHttpTimeout clamps every watchdog
-// phase and its adaptive ceiling below the nonzero undici timeout.
+// The default stays strictly greater than the largest default stall-watchdog quiet bound (the
+// local budget's 600s, pi-agent-core DEFAULT_STREAM_IDLE; the cloud budget's is 300s,
+// DEFAULT_CLOUD_STREAM_IDLE): 660s = local quiet bound + 60s margin. Shorter explicit values
+// remain supported because constrainStreamIdleToHttpTimeout clamps every watchdog phase and its
+// adaptive ceiling below the nonzero undici timeout.
 export const DEFAULT_HTTP_IDLE_TIMEOUT_MS = 660_000;
 
 const MAX_HTTP_WATCHDOG_MARGIN_MS = 60_000;

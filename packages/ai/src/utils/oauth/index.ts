@@ -171,8 +171,10 @@ export async function getOAuthApiKey(
 		}
 		try {
 			creds = await refresh;
-		} catch (_error) {
-			throw new Error(`Failed to refresh OAuth token for ${providerId}`);
+		} catch (error) {
+			// The provider's own failure (HTTP status, invalid_grant, network) is the reason a caller
+			// can act on; it rides as the cause so the user-facing message can name it.
+			throw new Error(`Failed to refresh OAuth token for ${providerId}`, { cause: error });
 		}
 	}
 

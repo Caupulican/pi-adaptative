@@ -2,7 +2,7 @@ import { DEFAULT_CLOUD_STREAM_IDLE, DEFAULT_STREAM_IDLE } from "@caupulican/pi-a
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import type { Api, Model } from "@caupulican/pi-ai/types";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveStreamStallBudget } from "../src/core/agent-session.ts";
+import { resolveStreamStallBudget } from "../src/core/stream-stall-budget.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 
 /**

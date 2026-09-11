@@ -48,7 +48,17 @@ const TOKEN_LIKE_RE = /[A-Za-z0-9_]{24,}/g;
 
 /** The failure text a provider or the lock layer produced, with anything token-shaped removed. */
 function redactRefreshFailureReason(error: unknown): string {
-	const raw = error instanceof Error ? error.message : String(error);
+	// Follow the cause chain: the refresh wrapper names the provider, its cause names what the
+	// provider actually said (HTTP status, invalid_grant, a network error).
+	const parts: string[] = [];
+	const seen = new Set<unknown>();
+	for (let current: unknown = error; current !== undefined && current !== null && !seen.has(current); ) {
+		seen.add(current);
+		const text = (current instanceof Error ? current.message : String(current)).trim();
+		if (text.length > 0 && parts[parts.length - 1] !== text) parts.push(text);
+		current = current instanceof Error ? current.cause : undefined;
+	}
+	const raw = parts.join(": ");
 	const redacted = raw.replace(TOKEN_LIKE_RE, "[redacted]").trim();
 	if (redacted.length === 0) return "no reason reported";
 	return redacted.length > 300 ? `${redacted.slice(0, 300)}...` : redacted;

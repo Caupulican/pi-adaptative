@@ -515,7 +515,8 @@ describe("AuthStorage", () => {
 			expect(failure).toBeInstanceOf(OAuthCredentialUnusableError);
 			expect(failure.providerId).toBe(providerId);
 			expect(failure.expiresAt.toISOString()).toBe(new Date(expires).toISOString());
-			expect(failure.reason.length).toBeGreaterThan(0);
+			// The provider's own failure text survives the refresh wrapper as its cause.
+			expect(failure.reason).toBe(`Failed to refresh OAuth token for ${providerId}: offline`);
 			expect(failure.message).toBe(
 				`OAuth credential for ${providerId} expired on ${new Date(expires).toISOString()} ` +
 					`and could not be refreshed (${failure.reason}). Run pi login ${providerId} to reauthorize.`,

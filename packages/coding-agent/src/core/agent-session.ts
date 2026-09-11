@@ -4,12 +4,7 @@ import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import type { CompactionResult, CompactionSettings } from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
 import { type CustomMessage, createCustomMessage } from "@caupulican/pi-agent-core/messages";
-import {
-	DEFAULT_CLOUD_STREAM_IDLE,
-	DEFAULT_STREAM_IDLE,
-	type StreamIdleOptions,
-	withStreamIdleWatchdog,
-} from "@caupulican/pi-agent-core/reliability";
+import { type StreamIdleOptions, withStreamIdleWatchdog } from "@caupulican/pi-agent-core/reliability";
 import type { BranchSummaryEntry, SessionManager } from "@caupulican/pi-agent-core/session";
 import { NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR } from "@caupulican/pi-agent-core/tool-protocol-residue";
 import type {
@@ -192,14 +187,9 @@ import { hasRunningBackgroundedToolCall, isSessionSettled } from "./session-sett
 import { createSessionShutdownTracker } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
-import type {
-	ResourceProfileFilterSettings,
-	SettingsManager,
-	SettingsScope,
-	StreamStallModelClass,
-	StreamStallSettings,
-} from "./settings-manager.ts";
+import type { ResourceProfileFilterSettings, SettingsManager, SettingsScope } from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
+import { resolveStreamStallBudget } from "./stream-stall-budget.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
 import { captureSessionTaskDirectoryContext } from "./tasks/task-directory-context.ts";
@@ -239,37 +229,6 @@ let streamIdleOptionsOverride: Partial<StreamIdleOptions> | undefined;
  */
 export function setStreamIdleOptionsForTests(opts: Partial<StreamIdleOptions> | undefined): void {
 	streamIdleOptionsOverride = opts;
-}
-
-/** The settings surface the stall resolver needs; the session passes its SettingsManager. */
-export interface StreamStallSettingsSource {
-	getStreamStallSettings(modelClass: StreamStallModelClass): StreamStallSettings;
-}
-
-/**
- * Stall bounds for one model, resolved from the budget its class draws on.
- *
- * A CPU-served local model legitimately sits silent for minutes while it loads and prefills, so
- * its bounds are generous; a hosted stream silent that long is dead, and waiting out the local
- * bound burns the turn. One shared budget could only ever serve one of the two, so the class
- * picks both the configured budget (`retry.stall.local` / `retry.stall.cloud`, with the legacy
- * top-level keys standing in for `local`) and the defaults the unset fields fall back to.
- *
- * Unset fields are left at the class default rather than copied over as `undefined`: the HTTP
- * clamp downstream re-defaults any undefined bound to DEFAULT_STREAM_IDLE, which would silently
- * hand a cloud stream the local quiet bound.
- */
-export function resolveStreamStallBudget(
-	model: Model<Api>,
-	settings: StreamStallSettingsSource,
-): { modelClass: StreamStallModelClass; base: StreamIdleOptions } {
-	const modelClass: StreamStallModelClass = isLocalOrManagedRouterModel(model) ? "local" : "cloud";
-	const configured = settings.getStreamStallSettings(modelClass);
-	const base: StreamIdleOptions = { ...(modelClass === "local" ? DEFAULT_STREAM_IDLE : DEFAULT_CLOUD_STREAM_IDLE) };
-	if (configured.connectMs !== undefined) base.connectMs = configured.connectMs;
-	if (configured.activeIdleMs !== undefined) base.activeIdleMs = configured.activeIdleMs;
-	if (configured.quietIdleMs !== undefined) base.quietIdleMs = configured.quietIdleMs;
-	return { modelClass, base };
 }
 
 /**

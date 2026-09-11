@@ -57,7 +57,7 @@ describe("expired OAuth credential at the session boundary", () => {
 
 		const expected =
 			`OAuth credential for ${PROVIDER_ID} expired on ${new Date(EXPIRES_AT).toISOString()} ` +
-			`and could not be refreshed (Failed to refresh OAuth token for ${PROVIDER_ID}). ` +
+			`and could not be refreshed (Failed to refresh OAuth token for ${PROVIDER_ID}: offline). ` +
 			`Run pi login ${PROVIDER_ID} to reauthorize.`;
 		expect(failure).toBe(expected);
 		expect(failure).not.toContain("No API key");
