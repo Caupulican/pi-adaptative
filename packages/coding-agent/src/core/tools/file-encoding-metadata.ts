@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { stripBom } from "../../utils/text.ts";
 
@@ -46,7 +46,12 @@ interface NumericRange {
 }
 
 /** Parsed files are reused until the file itself changes. */
-const parsedFiles = new Map<string, { mtimeMs: number; parsed: ParsedEditorConfig }>();
+/**
+ * Parsed `.editorconfig` files by path, keyed on their exact bytes. An mtime key missed a rewrite
+ * inside one timestamp tick (a fast NTFS host served the previous charset); the file is tiny, so
+ * reading and comparing it costs what the stat did and cannot miss a change.
+ */
+const parsedFiles = new Map<string, { bytes: Buffer; parsed: ParsedEditorConfig }>();
 
 /**
  * EditorConfig's charset vocabulary is `latin1`, `utf-8`, `utf-8-bom`, `utf-16be`, `utf-16le`.
@@ -256,21 +261,19 @@ function parseEditorConfig(text: string): ParsedEditorConfig {
 }
 
 async function loadEditorConfig(path: string): Promise<ParsedEditorConfig | undefined> {
-	let mtimeMs: number;
+	let bytes: Buffer;
 	try {
-		const stats = await stat(path);
-		if (!stats.isFile()) return undefined;
-		mtimeMs = stats.mtimeMs;
+		bytes = await readFile(path);
 	} catch (error) {
 		// A directory without an .editorconfig is the normal case, not a failure; anything else is.
 		const code = (error as NodeJS.ErrnoException).code;
-		if (code === "ENOENT" || code === "ENOTDIR" || code === "ENAMETOOLONG") return undefined;
+		if (code === "ENOENT" || code === "ENOTDIR" || code === "ENAMETOOLONG" || code === "EISDIR") return undefined;
 		throw error;
 	}
 	const cached = parsedFiles.get(path);
-	if (cached && cached.mtimeMs === mtimeMs) return cached.parsed;
-	const parsed = parseEditorConfig(stripBom(await readFile(path, "utf-8")));
-	parsedFiles.set(path, { mtimeMs, parsed });
+	if (cached?.bytes.equals(bytes)) return cached.parsed;
+	const parsed = parseEditorConfig(stripBom(bytes.toString("utf-8")));
+	parsedFiles.set(path, { bytes, parsed });
 	return parsed;
 }
 
