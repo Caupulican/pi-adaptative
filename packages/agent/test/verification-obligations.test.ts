@@ -118,6 +118,90 @@ describe("VerificationObligationTracker", () => {
 		expect(messages.at(-1)).toMatchObject({ content: handoff.content, stopReason: "stop" });
 		expect(new VerificationObligationTracker([failure, ...messages]).getActiveIds()).toEqual(["alpha"]);
 	});
+	it("opens a new subject on a mid-run user message: earlier failures stay active but stop marking the answer", () => {
+		const tracker = new VerificationObligationTracker([]);
+		tracker.record([failedVerification("alpha")]);
+		expect(tracker.getIdsOpenedThisRun()).toEqual(["alpha"]);
+		tracker.beginSubject();
+		expect(tracker.getIdsOpenedThisRun()).toEqual([]);
+		expect(tracker.getActiveIds()).toEqual(["alpha"]);
+		const answer = assistantText("The library you asked about does X.");
+		expect(tracker.enforceTerminalMessage(answer)).toBe(answer);
+		// A failure the new subject produces is its own again.
+		tracker.record([failedVerification("beta")]);
+		expect(tracker.getIdsOpenedThisRun()).toEqual(["beta"]);
+		expect(tracker.enforceTerminalMessage(answer).stopReason).toBe("error");
+	});
+
+	it("answers a question the user interjects while the run's own checks are red", async () => {
+		// 2026-09-10 census: a goal run had a red vitest, the user asked an unrelated question via
+		// steering, and the answer was withheld for checks it never touched. A user turn is a subject
+		// boundary; the red check stays active for goal completion.
+		const failure = failedVerification("alpha");
+		let requests = 0;
+		let steeringDelivered = false;
+		const loop = agentLoop(
+			[{ role: "user", content: "Fix the parser.", timestamp: 2 }],
+			{
+				messages: [],
+				systemPrompt: "Test harness",
+				tools: [
+					{
+						name: "verify",
+						label: "verify",
+						description: "run the check",
+						parameters: { type: "object", properties: {} },
+						execute: async () => ({ content: failure.content, details: failure.details, isError: true }),
+					},
+				],
+			},
+			{
+				model: {
+					id: "mock",
+					name: "mock",
+					api: "openai-responses",
+					provider: "test",
+					baseUrl: "https://example.invalid",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 2048,
+				},
+				convertToLlm: (messages) =>
+					messages.filter(
+						(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+					),
+				getSteeringMessages: async () => {
+					if (requests !== 1 || steeringDelivered) return [];
+					steeringDelivered = true;
+					return [{ role: "user", content: "Unrelated: what does jaccard measure?", timestamp: 3 }];
+				},
+				maxProviderTurns: 4,
+			},
+			undefined,
+			() => {
+				requests++;
+				const stream = createAssistantMessageEventStream();
+				const message =
+					requests === 1
+						? {
+								...assistantText(""),
+								content: [{ type: "toolCall" as const, id: "verify-call", name: "verify", arguments: {} }],
+								stopReason: "toolUse" as const,
+							}
+						: assistantText("Jaccard measures set overlap: intersection over union.");
+				stream.push({ type: "done", reason: requests === 1 ? "toolUse" : "stop", message });
+				stream.end();
+				return stream;
+			},
+		);
+		const messages = await loop.result();
+		expect(requests).toBe(2);
+		expect(messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(new VerificationObligationTracker(messages).getActiveIds()).toEqual(["alpha"]);
+	});
+
 	it("preserves a useful handoff while marking the run that produced the failure as unsuccessful", () => {
 		const tracker = new VerificationObligationTracker([]);
 		tracker.record([failedVerification("alpha")]);

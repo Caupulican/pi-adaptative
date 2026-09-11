@@ -635,6 +635,22 @@ describe("compact verification gap-fill", () => {
 		};
 	}
 
+	it("lets the host name the active task so an answered aside never becomes the checkpoint's task", () => {
+		const goal = createMessageEntry(createUserMessage("Finish the roadmap: repair ownership assurance"));
+		const work = createMessageEntry(createAssistantMessage("working", createMockUsage(6000, 1000)));
+		const aside = createMessageEntry(createUserMessage("quick question: what does jaccard measure?"));
+		const answer = createMessageEntry(createAssistantMessage("set overlap", createMockUsage(6000, 1000)));
+		const entries = [goal, work, aside, answer];
+		expect(prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS)?.facts?.activeTaskSource).toBe(
+			"quick question: what does jaccard measure?",
+		);
+		expect(
+			prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS, {
+				activeTask: "Finish the roadmap: repair ownership assurance",
+			})?.facts?.activeTaskSource,
+		).toBe("Finish the roadmap: repair ownership assurance");
+	});
+
 	it("fills missing gate items deterministically without a second summarizer call", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const prompts: string[] = [];

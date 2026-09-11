@@ -148,7 +148,7 @@ function assistantToolCallTarget(name: string, rawArgs: unknown): string | undef
 	return undefined;
 }
 
-function clampText(text: string, maxLen: number): string {
+export function clampText(text: string, maxLen: number): string {
 	return text.length > maxLen ? text.slice(0, maxLen) : text;
 }
 

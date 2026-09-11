@@ -528,7 +528,12 @@ async function runLoop(
 		// follow-up messages must not re-admit a known-bad unchanged operation. Count every owner
 		// message so live admission stays byte-for-byte aligned with transcript restoration.
 		for (const message of pendingMessages) {
-			if (message.role === "user") toolFailureRecoveryGate.noteWorldAdvance();
+			if (message.role === "user") {
+				toolFailureRecoveryGate.noteWorldAdvance();
+				// An owner turn mid-run is a new subject: earlier failures stay active but stop
+				// marking this subject's answer as unresolved (see beginSubject).
+				verificationObligations.beginSubject();
+			}
 			await emit({ type: "message_start", message });
 			await emit({ type: "message_end", message });
 			currentContext.messages.push(message);

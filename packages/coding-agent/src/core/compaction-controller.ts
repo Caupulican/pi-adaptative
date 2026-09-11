@@ -158,6 +158,8 @@ export interface CompactionControllerDeps {
 	getMemoryPreCompressInsight(): Promise<string>;
 	/** Add bounded host-owned metadata to the compaction details before persistence. */
 	decorateCompactionDetails?(details: unknown): unknown;
+	/** The objective of an active goal, so an answered aside never becomes the checkpoint's Active Task. */
+	getActiveTask?(): string | undefined;
 	refreshAfterCompaction(): void;
 	getFailureCorpus(): FailureCorpusRecorder;
 	measureLiveContextTokens(): number;
@@ -278,7 +280,12 @@ export class CompactionController {
 	private prepareCompactionWithPackedHostRecords(
 		...[branch, settings, options]: Parameters<typeof prepareCompaction>
 	): ReturnType<typeof prepareCompaction> {
-		return prepareCompaction(branch, settings, { ...options, packHostRecords: packSupersededHostRecords });
+		const activeTask = this.deps.getActiveTask?.();
+		return prepareCompaction(branch, settings, {
+			...options,
+			...(activeTask ? { activeTask } : {}),
+			packHostRecords: packSupersededHostRecords,
+		});
 	}
 
 	private beginCompactionLifecycle(preparation: CompactionPreparation): void {

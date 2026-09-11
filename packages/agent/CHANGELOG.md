@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- A user message delivered while a run is in progress opens a new subject: verification failures the run produced before it stay active (listed, blocking goal completion) but no longer withhold the answer to the new subject. `prepareCompaction` accepts `activeTask`, a host-owned Active Task that replaces the latest user message, so an answered aside never becomes the checkpoint's task.
 - Compaction no longer lets the summarizer invent a Mandatory Rule and carry it forever. A summarizer-authored rule survives the deterministic gap-fill only when a spoken user sentence from the compacted span backs it or the previous checkpoint already carried it; extractor-owned prohibitions stay forced verbatim, and `avoid …` now counts as one. Field incident: "just read the grimdex app" became "do not modify project files", was copied verbatim past "your task is to finish it", and the model stopped repairing after every compaction.
 
 ## [0.99.16] - 2026-09-10

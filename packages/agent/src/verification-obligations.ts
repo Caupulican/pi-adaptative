@@ -554,6 +554,17 @@ export class VerificationObligationTracker {
 		});
 	}
 
+	/**
+	 * A user message delivered mid-run opens a new subject. What the run failed before it belongs to
+	 * the earlier subject: it stays active (listed, blocking goal completion, pausing continuation)
+	 * but no longer marks the answer to the new subject as unresolved. A failure the new subject
+	 * produces is its own. Without this, a question asked while a goal's checks were red had its
+	 * answer withheld for checks it never touched (2026-09-10 census).
+	 */
+	beginSubject(): void {
+		this.openedThisRun.clear();
+	}
+
 	/** Ids this run opened or re-failed; what makes the run's own terminal answer unresolved. */
 	getIdsOpenedThisRun(): readonly string[] {
 		return [...this.openedThisRun].filter((id) => this.activeIds.has(id)).sort();

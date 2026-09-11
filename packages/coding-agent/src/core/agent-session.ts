@@ -772,6 +772,10 @@ export class AgentSession {
 			buildPreDigest: () => this._buildCompactionPreDigest(),
 			getMemoryPreCompressInsight: () => this._memory.onPreCompress(),
 			decorateCompactionDetails: (details) => this._decorateCompactionDetails(details),
+			getActiveTask: () => {
+				const goal = this.getGoalStateSnapshot();
+				return goal && isGoalExecutionActive(goal.status) ? goal.userGoal : undefined;
+			},
 			refreshAfterCompaction: () => this._refreshAfterCompaction(),
 			getFailureCorpus: () => this._failureCorpus,
 			measureLiveContextTokens: () => this._measureLiveContextTokensForCompaction(),

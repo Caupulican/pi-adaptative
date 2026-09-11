@@ -643,7 +643,7 @@ export type DelegateCaller = { kind: "session_root" } | { kind: "worker"; agentI
 
 type DelegateStartOutcome =
 	| { started: false; skipReason: string }
-	| { started: true; record: LaneRecord; modelPinBypass?: string };
+	| { started: true; record: LaneRecord; modelPinBypass?: string; similarLaneIds?: string[] };
 
 export interface DelegateToolDependencies {
 	startWorkerDelegation?: (
@@ -677,7 +677,11 @@ export interface DelegateToolDependencies {
  * First line of a start result. The model chose the worker's tools, model, and path; this is the
  * host's answer to what it actually compiled, plus why a queued lane is not running yet.
  */
-function describeStartedWorker(record: LaneRecord, grant: WorkerGrantSummary | undefined): string {
+function describeStartedWorker(
+	record: LaneRecord,
+	grant: WorkerGrantSummary | undefined,
+	similarLaneIds?: readonly string[],
+): string {
 	const parts = [
 		`delegate started (${record.status}) — stable agentId ${record.laneId}, task laneId ${record.laneId}`,
 	];
@@ -690,6 +694,11 @@ function describeStartedWorker(record: LaneRecord, grant: WorkerGrantSummary | u
 		);
 	}
 	if (record.status === "queued" && record.waitReason) parts.push(`waiting: ${record.waitReason}`);
+	if (similarLaneIds?.length) {
+		parts.push(
+			`similar active lane${similarLaneIds.length === 1 ? "" : "s"}: ${similarLaneIds.join(", ")} — if this duplicates one, cancel the copy`,
+		);
+	}
 	return parts.join("; ");
 }
 
@@ -1077,6 +1086,10 @@ function workerTaskSessionJson(
 }
 
 function delegateStartSkipText(reason: string): string {
+	if (reason.startsWith("worker_duplicate_of:")) {
+		const laneId = reason.slice("worker_duplicate_of:".length);
+		return `delegate not started: ${laneId} is already running these same instructions; no second copy was started. Use wait, status, or transcript on ${laneId}. To run the task twice on purpose, change the instructions to say what differs (scope, model, angle).`;
+	}
 	if (reason === "worker_model_pins_invalid") {
 		return "delegate not started: CAVEMAN MODE - MANDATORY: worker_model_pins_invalid is an owner configuration error. Fresh workers are blocked. Do not retry, remove model overrides, or select a fallback; report that the user must repair workerDelegation.modelPins.";
 	}
@@ -2222,7 +2235,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						content: [
 							{
 								type: "text" as const,
-								text: `${describeStartedWorker(started.record, deps.describeWorkerGrant?.(started.record.laneId))}; the owning parent will receive its terminal handoff, then use delegate status or bounded raw transcript pages${started.record.status === "queued" ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
+								text: `${describeStartedWorker(started.record, deps.describeWorkerGrant?.(started.record.laneId), started.similarLaneIds)}; the owning parent will receive its terminal handoff, then use delegate status or bounded raw transcript pages${started.record.status === "queued" ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
 							},
 						],
 						details: {

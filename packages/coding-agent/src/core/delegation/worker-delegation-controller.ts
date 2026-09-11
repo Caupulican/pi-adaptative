@@ -116,6 +116,7 @@ import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
 import type { WorkerRunOutcome } from "./worker-runner.ts";
+import { DUPLICATE_WORKER_TASK_THRESHOLD, findSimilarActiveWorkerLanes } from "./worker-task-similarity.ts";
 import { finalizeWorkerClaim } from "./worker-terminal-finalizer.ts";
 import {
 	type WorkerTerminalHandoff,
@@ -244,7 +245,13 @@ interface PreparedWorkerAgent {
 
 type QueuedWorkerAttemptOutcome =
 	| { started: false; skipReason: string }
-	| { started: true; record: LaneRecord; modelPinBypass?: WorkerRole };
+	| {
+			started: true;
+			record: LaneRecord;
+			modelPinBypass?: WorkerRole;
+			/** Active lanes whose instructions resemble this one; the parent decides whether one is a copy. */
+			similarLaneIds?: string[];
+	  };
 
 type PreparedWorkerRun = QueuedWorkerAttemptOutcome & {
 	completion?: Promise<WorkerDelegationRunOutcome>;
@@ -1858,13 +1865,25 @@ export class WorkerDelegationController {
 
 	async start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
 		const capturedRequest = structuredClone(request);
+		// A fresh dispatch whose instructions are the same text as an active lane's is that lane:
+		// absorbing it costs nothing, a second copy costs a worker. A merely similar lane is named so
+		// the parent can cancel one on purpose.
+		const similar = capturedRequest.verificationOfTaskId
+			? []
+			: findSimilarActiveWorkerLanes(this.lifecycle.getTaskRuntimeSnapshot(), capturedRequest.instructions);
+		const duplicate = similar.find((lane) => lane.similarity >= DUPLICATE_WORKER_TASK_THRESHOLD);
+		if (duplicate) return { started: false, skipReason: `worker_duplicate_of:${duplicate.laneId}` };
 		const admission = await this.admitWorkerDirectory(capturedRequest, signal);
 		const outcome = admission.ok
 			? this.startInternal(capturedRequest, undefined, admission)
 			: { started: false as const, skipReason: admission.skipReason };
 		if (!outcome.started) return outcome;
 		// A start that was queued already ran one scheduler admission; hand the parent its wait reason.
-		return { ...outcome, record: this.withWaitReasons([outcome.record])[0] ?? outcome.record };
+		return {
+			...outcome,
+			record: this.withWaitReasons([outcome.record])[0] ?? outcome.record,
+			...(similar.length > 0 ? { similarLaneIds: similar.map((lane) => lane.laneId) } : {}),
+		};
 	}
 
 	private async admitWorkerDirectory(

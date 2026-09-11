@@ -2,6 +2,8 @@
 
 ### Fixed
 
+- A question asked while a goal run's checks are red is answered as an ordinary answer; the red checks still pause continuation and block completion. Compaction keeps the active goal's objective as the checkpoint's Active Task, so an answered aside is history, not the task the run resumes.
+- `delegate start` absorbs a fresh dispatch whose instructions are the same text as an active lane's (reply names that lane; no second worker starts) and names merely similar active lanes on a start that does go ahead.
 - `skill load` with `pin` no longer fails the whole load when the pin cap is spent: the skills load, the remaining pin room goes to the requested names in order, and the reply names each skill that stayed unpinned.
 
 ## [0.99.16] - 2026-09-10

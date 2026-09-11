@@ -34,6 +34,7 @@ import { addUsage, createEmptyUsage } from "../usage.ts";
 import {
 	ACTIVE_TASK_SOURCE_MAX_CHARS,
 	type CompactionFacts,
+	clampText,
 	extractCompactionFacts,
 	mergePersistentCompactionUserFacts,
 	renderFactsBlock,
@@ -1283,6 +1284,12 @@ export interface CompactionPreparation {
 export interface PrepareCompactionOptions {
 	allowTrailingCompactionAsPrevious?: boolean;
 	/**
+	 * Host-owned active task that replaces the latest user message as the checkpoint's `## Active
+	 * Task` (the objective of an active goal). An aside the user asked and the model already answered
+	 * is then history, never the task the next checkpoint resumes.
+	 */
+	activeTask?: string;
+	/**
 	 * Host projection applied to the messages the summarizer reads, so stale host records the live
 	 * request already packs never reach it in full (see `packSupersededHostRecords` in the host).
 	 */
@@ -1301,6 +1308,7 @@ function extractCheckpointFacts(
 	prevCompactionIndex: number,
 	previousUserFacts: Pick<CompactionFacts, "activeTaskSource" | "prohibitions"> | undefined,
 	previousSummary: string | undefined,
+	activeTask: string | undefined,
 ): CompactionFacts {
 	let facts = extractCompactionFacts(pathEntries, start, boundaryEnd);
 	if (prevCompactionIndex >= 0) {
@@ -1309,7 +1317,11 @@ function extractCheckpointFacts(
 		const persistedUserFacts = previousUserFacts ?? extractCompactionFacts(pathEntries, 0, boundaryEnd);
 		facts = mergePersistentCompactionUserFacts(facts, persistedUserFacts);
 	}
-	return { ...facts, carriedRules: previousSummary ? extractMandatoryRuleLines(previousSummary) : [] };
+	return {
+		...facts,
+		...(activeTask?.trim() ? { activeTaskSource: clampText(activeTask.trim(), ACTIVE_TASK_SOURCE_MAX_CHARS) } : {}),
+		carriedRules: previousSummary ? extractMandatoryRuleLines(previousSummary) : [],
+	};
 }
 
 export function prepareCompaction(
@@ -1368,6 +1380,7 @@ export function prepareCompaction(
 			prevCompactionIndex,
 			previousUserFacts,
 			previousSummary,
+			options?.activeTask,
 		);
 
 		const messagesToSummarize = options?.packHostRecords ? options.packHostRecords(liveMessages) : liveMessages;
@@ -1436,6 +1449,7 @@ export function prepareCompaction(
 		prevCompactionIndex,
 		previousUserFacts,
 		previousSummary,
+		options?.activeTask,
 	);
 
 	return {
