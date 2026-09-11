@@ -6,8 +6,10 @@ import { join, resolve } from "node:path";
 import { assertExecutionAbsolutePath, executionPathApi, type PathInputOptions } from "@caupulican/pi-agent-core/paths";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
 import {
+	disposeMutationLockScope,
 	type FileMutationQueueBackend,
 	localFileMutationQueueBackend,
+	retainMutationLockScope,
 	withFileMutationQueue,
 } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
@@ -383,6 +385,7 @@ export class FileMutationIntentController {
 		);
 		this.now = options.now ?? Date.now;
 		this.mutationScope = options.mutationScope;
+		if (this.mutationScope !== undefined) retainMutationLockScope(this.mutationScope);
 	}
 
 	assertOperationsDialect(usesCustomOperations: boolean): void {
@@ -627,6 +630,7 @@ export class FileMutationIntentController {
 			}
 			if (firstError) throw firstError;
 		});
+		if (this.mutationScope !== undefined) disposeMutationLockScope(this.mutationScope);
 	}
 
 	async copyReferencedContent(

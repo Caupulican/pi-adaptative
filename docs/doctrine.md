@@ -208,15 +208,19 @@ message into three sequential waits. Pinned by `packages/coding-agent/test/shell
 `packages/coding-agent/test/bash-concurrent-lanes.test.ts` and
 `packages/coding-agent/test/bash-edit-write-race.test.ts`.
 
-**The group lock belongs to the session; the per-path queue belongs to the process.** The barrier's
-holders, waiters and emission-order announcements live in a scope keyed by the session's shell
-identity (`agent:<uuid>`, or a worker lane's own key), so a batch switch in one in-process session
-never retires another session's announcements and one session's exclusive command run never parks
-another session's file writes. The per-path mutation queue stays process-wide on purpose: two
-sessions writing one file must still take turns, which is a property of the file, not of the
-session. Why: every piece of that state used to be a module global, so a parent session and its
-worker lanes shared one lock and one announcement table. Callers that name no scope share one
-default scope, which is exactly what a single-session process always had. Pinned by
+**The group lock belongs to the worktree; emission order belongs to the session; the per-path
+queue belongs to the process.** The barrier's holders and waiters live in a scope keyed by the
+canonical directory a session or worker lane works in (`worktree:<realpath>`), so every session in
+one tree interlocks: a lane's write waits for the parent's running command and the reverse, exactly
+as one session's own calls do. Announcements are per announcer inside that scope: a reservation
+wave switch retires only the announcing session's older announcements, and "an earlier call" is
+measured only among one session's emission indexes, so a parent and its lanes never order or retire
+each other's calls. The per-path mutation queue stays process-wide: two sessions writing one file
+take turns whatever tree they think they are in. A scope is held open by every session and lane
+constructed in it and disposed when the last one leaves; callers that name no scope share one
+default scope, which is what a single-session process always had. Why: every piece of that state
+used to be a module global (a parent and its lanes shared one announcement table), and a first
+per-session cut removed the interlock along with the bug. Pinned by
 `packages/coding-agent/test/mutation-lock-scope.test.ts` and
 `packages/coding-agent/test/bash-edit-write-race.test.ts`.
 

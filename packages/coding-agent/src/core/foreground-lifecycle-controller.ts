@@ -57,6 +57,8 @@ interface ForegroundLifecycleControllerDeps {
 	 * Omitted announces into the process-wide default scope, which is what a single-session host had.
 	 */
 	getMutationScope?(): string;
+	/** The session announcing its calls; emission order is compared only among one announcer's calls. */
+	getAnnouncer?(): string;
 }
 
 interface StartedToolIdentity {
@@ -454,7 +456,10 @@ export class ForegroundLifecycleController {
 		// an exclusive run find its own emission index.
 		const batchId = `${requestId}\u0000${assistantMessageEntryId}`;
 		const mutationScope = this.deps.getMutationScope?.();
-		for (const call of calls) announceToolCall(call.callId, call.index, call.mutation, batchId, mutationScope);
+		const announcer = this.deps.getAnnouncer?.();
+		for (const call of calls) {
+			announceToolCall(call.callId, call.index, call.mutation, batchId, mutationScope, announcer);
+		}
 		for (const identity of identities) this.startedTools.set(this.toolKey(identity), identity);
 		for (const identity of identities) {
 			const callKey = this.callKey(identity.callId, identity.toolName);

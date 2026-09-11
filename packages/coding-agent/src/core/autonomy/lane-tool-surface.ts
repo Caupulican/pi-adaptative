@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { AgentLoopConfig, AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
@@ -25,7 +24,7 @@ import { matchesResourceProfilePattern } from "../settings-manager.ts";
 import { createBashTool } from "../tools/bash.ts";
 import { createEditTool } from "../tools/edit.ts";
 import { FileMutationIntentController } from "../tools/file-mutation-intent.ts";
-import { disposeMutationLockScope } from "../tools/file-mutation-queue.ts";
+import { mutationScopeForWorktree } from "../tools/file-mutation-queue.ts";
 import { createFindTool } from "../tools/find.ts";
 import { createGrepTool } from "../tools/grep.ts";
 import { createLsTool } from "../tools/ls.ts";
@@ -201,11 +200,10 @@ function createLaneTools(
  * positive path scope.
  */
 export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneToolSurface {
-	// One lock scope per lane: a lane's writes, python snippets and shell commands still interlock
-	// with each other, but never with the parent session's (see tools/file-mutation-queue.ts). The
-	// lane's own shell identity names it when it has one; a lane without a shell still needs an
-	// identity of its own, because python and write/edit must share a lock inside the lane.
-	const mutationScope = options.shellSessionKey ?? `lane:${randomUUID()}`;
+	// The lock scope is the worktree's: a lane working in the parent's directory tree interlocks
+	// with the parent's command runs and writes (a lane's write waits for the parent's running
+	// build), while a lane in its own worktree shares nothing (see tools/file-mutation-queue.ts).
+	const mutationScope = mutationScopeForWorktree(options.cwd);
 	const fileMutationIntents = new FileMutationIntentController({ mutationScope });
 	const writeCapable = options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0;
 	const pythonCapable =
@@ -310,7 +308,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		),
 		dispose: async () => {
 			if (options.shellSessionKey) disposeShellExecutionSession(options.shellSessionKey);
-			disposeMutationLockScope(mutationScope);
+			// The intent controller releases the lane's hold on the worktree scope.
 			await fileMutationIntents.dispose();
 		},
 		allowedTools,

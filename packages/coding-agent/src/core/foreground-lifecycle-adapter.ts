@@ -25,6 +25,7 @@ export class ForegroundLifecycleAdapter {
 		sessionManager: SessionManager,
 		modelRouter: ModelRouterController,
 		getMutationScope?: () => string,
+		getAnnouncer?: () => string,
 	) {
 		this.sessionManager = sessionManager;
 		this.lifecycle = new ForegroundLifecycleController({
@@ -33,6 +34,7 @@ export class ForegroundLifecycleAdapter {
 			modelRouter,
 			emitWarning: (message) => this.pendingWarnings.push(message),
 			...(getMutationScope ? { getMutationScope } : {}),
+			...(getAnnouncer ? { getAnnouncer } : {}),
 		});
 	}
 

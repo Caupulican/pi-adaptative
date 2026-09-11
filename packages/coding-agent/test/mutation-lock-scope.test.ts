@@ -11,6 +11,8 @@ import {
 	DEFAULT_MUTATION_SCOPE,
 	disposeMutationLockScope,
 	getMutationLockScope,
+	mutationScopeForWorktree,
+	retainMutationLockScope,
 	retireToolCall,
 	withExclusiveMutationBarrier,
 	withFileMutationQueue,
@@ -156,6 +158,72 @@ describe("per-session mutation lock scopes", () => {
 		retireToolCall("a2-write", "session-a");
 	});
 
+	it("two sessions in one worktree: a wave switch in one leaves the other's announcements pending", async () => {
+		const scope = `worktree-shared-${Math.random().toString(36).slice(2)}`;
+		announceToolCall("b-write", 0, true, "batch-b", scope, "session-b");
+		announceToolCall("b-bash", 1, false, "batch-b", scope, "session-b");
+		announceToolCall("a-write", 0, true, "batch-a1", scope, "session-a");
+		// Session A moves to its next wave; B's calls are still in flight.
+		announceToolCall("a2-write", 0, true, "batch-a2", scope, "session-a");
+		const bBash = withExclusiveMutationBarrier(async () => "b-ran", { holdId: "b-bash", scope });
+		// B's bash waits for B's earlier write, which is still pending, so it must not have run yet.
+		expect(await settled(bBash)).toBe(false);
+		retireToolCall("b-write", scope);
+		expect(await bBash).toBe("b-ran");
+		retireToolCall("b-bash", scope);
+		retireToolCall("a2-write", scope);
+	});
+
+	it("two sessions in one worktree: emission order is compared only among one session's calls", async () => {
+		const scope = `worktree-order-${Math.random().toString(36).slice(2)}`;
+		// Session A has a pending write at index 0; session B's bash is index 1 of ITS OWN wave.
+		announceToolCall("a-write", 0, true, "batch-a", scope, "session-a");
+		announceToolCall("b-bash", 1, false, "batch-b", scope, "session-b");
+		const bBash = withExclusiveMutationBarrier(async () => "b-ran", { holdId: "b-bash", scope });
+		// A's index-0 write is not "earlier" for B: B's bash runs without waiting for it.
+		expect(await bBash).toBe("b-ran");
+		retireToolCall("a-write", scope);
+		retireToolCall("b-bash", scope);
+	});
+
+	it("two sessions in one worktree still interlock: one's exclusive run blocks the other's write", async () => {
+		const scope = `worktree-interlock-${Math.random().toString(36).slice(2)}`;
+		const gate = deferred();
+		const order: string[] = [];
+		const run = withExclusiveMutationBarrier(
+			async () => {
+				order.push("a-run-start");
+				await gate.promise;
+				order.push("a-run-end");
+			},
+			{ scope },
+		);
+		await waitUntil(() => order.includes("a-run-start"));
+		const write = withFileMutationQueue(
+			path.join(tmpdir(), "pi-scope-b.txt"),
+			async () => {
+				order.push("b-write");
+			},
+			undefined,
+			{ scope },
+		);
+		expect(await settled(write)).toBe(false);
+		gate.resolve();
+		await Promise.all([run, write]);
+		expect(order).toEqual(["a-run-start", "a-run-end", "b-write"]);
+	});
+
+	it("a retained scope survives until its last holder releases it", () => {
+		const key = `worktree-retain-${Math.random().toString(36).slice(2)}`;
+		retainMutationLockScope(key);
+		retainMutationLockScope(key);
+		const scope = getMutationLockScope(key);
+		disposeMutationLockScope(key);
+		expect(getMutationLockScope(key)).toBe(scope);
+		disposeMutationLockScope(key);
+		expect(getMutationLockScope(key)).not.toBe(scope);
+	});
+
 	it("two scopes writing the same path still serialize through the per-path queue", async () => {
 		const order: string[] = [];
 		const gate = deferred();
@@ -289,11 +357,13 @@ describe("mutation scope wiring", () => {
 		expect(order).toEqual(["run-start", "foreign-mutation", "run-end", "scoped-mutation"]);
 	});
 
-	it("a lane's write tool takes the lane's own lock, not another lane's", async () => {
+	it("a lane's write tool takes its worktree's lock: another worktree's run never blocks it, its own does", async () => {
+		const otherCwd = mkdtempSync(path.join(tmpdir(), "pi-mutation-scope-other-"));
+		mkdirSync(path.join(otherCwd, "src"), { recursive: true });
 		const surfaces: LaneToolSurface[] = [];
-		const createLane = (shellSessionKey: string): LaneToolSurface => {
+		const createLane = (laneCwd: string, shellSessionKey: string): LaneToolSurface => {
 			const surface = createLaneToolSurface({
-				cwd,
+				cwd: laneCwd,
 				profile: profile({ tools: { allow: ["write"] } }),
 				writeEnabled: true,
 				writePaths: ["src"],
@@ -302,21 +372,22 @@ describe("mutation scope wiring", () => {
 			surfaces.push(surface);
 			return surface;
 		};
-		const laneA = createLane("lane-shell-a");
-		const laneB = createLane("lane-shell-b");
+		const laneA = createLane(cwd, "lane-shell-a");
+		const laneB = createLane(otherCwd, "lane-shell-b");
 		const writeA = laneA.tools.find((tool) => tool.name === "write");
 		const writeB = laneB.tools.find((tool) => tool.name === "write");
 		if (!writeA || !writeB) throw new Error("Expected lane write tools.");
 
 		const gate = deferred();
 		const order: string[] = [];
+		// A command run in lane A's worktree (the parent session's `npm run build`, say).
 		const exclusive = withExclusiveMutationBarrier(
 			async () => {
 				order.push("lane-a-run-start");
 				await gate.promise;
 				order.push("lane-a-run-end");
 			},
-			{ scope: "lane-shell-a" },
+			{ scope: mutationScopeForWorktree(cwd) },
 		);
 		await waitUntil(() => order.includes("lane-a-run-start"));
 
@@ -332,5 +403,6 @@ describe("mutation scope wiring", () => {
 		expect(order).toEqual(["lane-a-run-start", "lane-b-write", "lane-a-run-end", "lane-a-write"]);
 
 		for (const surface of surfaces) await surface.dispose();
+		rmSync(otherCwd, { recursive: true, force: true });
 	});
 });

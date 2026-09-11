@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
@@ -104,11 +105,18 @@ interface ToolCallAnnouncement {
 	joined: boolean;
 	/** Reservation wave identity, when the host supplies one. */
 	batchId: string | undefined;
+	/**
+	 * The session that announced the call. Emission order is meaningful only among one session's
+	 * calls: another session's index 0 says nothing about this session's index 3, and a wave switch in
+	 * one session must never retire the announcements another session is still ordered by.
+	 */
+	announcer: string | undefined;
 }
 
 interface EarlierCallWaiter {
 	index: number;
 	awaited: ToolCallKind;
+	announcer: string | undefined;
 	resolve: () => void;
 }
 
@@ -124,7 +132,7 @@ interface ExclusiveHold {
 }
 
 /**
- * One session's group lock and emission-order announcements.
+ * One worktree's group lock and the emission-order announcements of the sessions working in it.
  *
  * Both are session state, not process state. A batch identity belongs to one agent's assistant
  * message, so a wave announced by session A must never retire the announcements session B is still
@@ -139,8 +147,11 @@ export class MutationLockScope {
 	/** Armed by runs that gave up the lock but must still not start in the middle of somebody's write. */
 	private readonly drainWaiters = new Set<() => void>();
 	private readonly announcements = new Map<string, ToolCallAnnouncement>();
-	private announcedBatchId: string | undefined;
+	/** The wave each announcer is currently in; a new wave retires that announcer's older announcements only. */
+	private readonly announcedBatchIds = new Map<string | undefined, string>();
 	private readonly earlierCallWaiters = new Set<EarlierCallWaiter>();
+	/** Sessions and lanes holding this scope open; the scope is disposed only when the last one leaves. */
+	users = 0;
 	/** Live command runs that named themselves, keyed by hold id (the tool call id). */
 	private readonly exclusiveHolds = new Map<string, ExclusiveHold>();
 	/** A disposed scope leaves the registry only once nothing in it is still live. */
@@ -243,8 +254,9 @@ export class MutationLockScope {
 		}
 	}
 
-	private hasPendingCallBefore(index: number, kind: ToolCallKind): boolean {
+	private hasPendingCallBefore(index: number, kind: ToolCallKind, announcer: string | undefined): boolean {
 		for (const announcement of this.announcements.values()) {
+			if (announcement.announcer !== announcer) continue;
 			if (announcement.kind === kind && !announcement.joined && announcement.index < index) return true;
 		}
 		return false;
@@ -252,21 +264,29 @@ export class MutationLockScope {
 
 	private releaseClearedWaiters(): void {
 		for (const waiter of [...this.earlierCallWaiters]) {
-			if (this.hasPendingCallBefore(waiter.index, waiter.awaited)) continue;
+			if (this.hasPendingCallBefore(waiter.index, waiter.awaited, waiter.announcer)) continue;
 			this.earlierCallWaiters.delete(waiter);
 			waiter.resolve();
 		}
 	}
 
-	announce(callId: string, index: number, kind: boolean | ToolCallKind, batchId: string | undefined): void {
+	announce(
+		callId: string,
+		index: number,
+		kind: boolean | ToolCallKind,
+		batchId: string | undefined,
+		announcer: string | undefined,
+	): void {
 		const resolvedKind: ToolCallKind = typeof kind === "boolean" ? (kind ? "mutation" : "other") : kind;
-		if (batchId !== undefined && batchId !== this.announcedBatchId) {
+		if (batchId !== undefined && batchId !== this.announcedBatchIds.get(announcer)) {
 			for (const [announcedCallId, announcement] of this.announcements) {
-				if (announcement.batchId !== batchId) this.announcements.delete(announcedCallId);
+				if (announcement.announcer === announcer && announcement.batchId !== batchId) {
+					this.announcements.delete(announcedCallId);
+				}
 			}
-			this.announcedBatchId = batchId;
+			this.announcedBatchIds.set(announcer, batchId);
 		}
-		this.announcements.set(callId, { index, kind: resolvedKind, joined: false, batchId });
+		this.announcements.set(callId, { index, kind: resolvedKind, joined: false, batchId, announcer });
 		this.releaseClearedWaiters();
 	}
 
@@ -309,10 +329,10 @@ export class MutationLockScope {
 	): Promise<void> {
 		if (callId === undefined) return;
 		const announcement = this.announcements.get(callId);
-		if (!announcement || !this.hasPendingCallBefore(announcement.index, awaited)) return;
+		if (!announcement || !this.hasPendingCallBefore(announcement.index, awaited, announcement.announcer)) return;
 		let waiter!: EarlierCallWaiter;
 		const cleared = new Promise<void>((resolveCleared) => {
-			waiter = { index: announcement.index, awaited, resolve: resolveCleared };
+			waiter = { index: announcement.index, awaited, announcer: announcement.announcer, resolve: resolveCleared };
 			this.earlierCallWaiters.add(waiter);
 		});
 		try {
@@ -452,8 +472,34 @@ export function getMutationLockScope(key: string = DEFAULT_MUTATION_SCOPE): Muta
  * until its last holder, waiter and announcement is gone: dropping it early would hand the next
  * caller a fresh lock while somebody is still writing under the old one.
  */
+/**
+ * Hold a scope open for one session or lane. Several sessions share a worktree scope, so the scope
+ * is disposed only when the last holder releases it (see {@link disposeMutationLockScope}).
+ */
+export function retainMutationLockScope(key: string): void {
+	getMutationLockScope(key).users += 1;
+}
+
+/**
+ * The lock scope of a worktree: every session working in the same directory tree shares the group
+ * lock (a lane's write must still wait for the parent's running command and the reverse), while
+ * emission order stays per announcing session. Canonicalized so two spellings of one directory meet.
+ */
+export function mutationScopeForWorktree(cwd: string): string {
+	let canonical: string;
+	try {
+		canonical = realpathSync.native(cwd);
+	} catch {
+		canonical = resolve(cwd);
+	}
+	return `worktree:${process.platform === "win32" ? canonical.toLowerCase() : canonical}`;
+}
+
 export function disposeMutationLockScope(key: string): void {
-	mutationLockScopes.get(key)?.requestDispose();
+	const scope = mutationLockScopes.get(key);
+	if (!scope) return;
+	if (scope.users > 0) scope.users -= 1;
+	if (scope.users === 0) scope.requestDispose();
 }
 
 /**
@@ -473,8 +519,9 @@ export function announceToolCall(
 	kind: boolean | ToolCallKind,
 	batchId?: string,
 	scope?: string,
+	announcer?: string,
 ): void {
-	getMutationLockScope(scope).announce(callId, index, kind, batchId);
+	getMutationLockScope(scope).announce(callId, index, kind, batchId, announcer);
 }
 
 /**

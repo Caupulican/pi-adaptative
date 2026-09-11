@@ -142,6 +142,7 @@ import { dispatchCollaborationWorker } from "./tools/collaboration-dispatch.ts";
 import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
 import { FileMutationIntentController } from "./tools/file-mutation-intent.ts";
+import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import { createFindTool } from "./tools/find.ts";
 import { createGoalLifecycleToolDefinitions, createGoalToolDefinition, type GoalToolInput } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
@@ -505,8 +506,10 @@ export class RuntimeBuilder {
 			// The harness's own memory, skills and sessions are searchable without a file glob.
 			agentDir: deps.getAgentDir(),
 		};
-		// The group lock and the emission-order announcements are this session's, not the process's.
-		this._fileMutationIntents = new FileMutationIntentController({ mutationScope: deps.getShellSessionKey() });
+		// The group lock is the worktree's (shared with every session working in it); emission order is per session.
+		this._fileMutationIntents = new FileMutationIntentController({
+			mutationScope: mutationScopeForWorktree(deps.getCwd()),
+		});
 	}
 
 	/**
@@ -985,7 +988,7 @@ export class RuntimeBuilder {
 				sessionKey: this.deps.getShellSessionKey(),
 				// Not `sessionKey`: a task-directory invocation rebinds that to its own shell lane, while
 				// the lock this run takes must stay the one the session's writes and announcements use.
-				mutationScope: this.deps.getShellSessionKey(),
+				mutationScope: mutationScopeForWorktree(this.deps.getCwd()),
 				platform: process.platform,
 				windowsShellPythonEngine: windowsShell.pythonEngine,
 				windowsShellEngineOptions: { gnuToolsDir: windowsShell.gnuToolsDir },
@@ -1005,7 +1008,7 @@ export class RuntimeBuilder {
 				outputReduction,
 				environment: (cwd) => this._credentialManager.getEnvironmentForCwd(cwd) ?? {},
 				omitEnvironmentVariables: ["BW_SESSION"],
-				mutationScope: this.deps.getShellSessionKey(),
+				mutationScope: mutationScopeForWorktree(this.deps.getCwd()),
 			},
 			write: { intentController: this._fileMutationIntents },
 			edit: { intentController: this._fileMutationIntents, fileEncodings },

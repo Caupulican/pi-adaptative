@@ -110,14 +110,25 @@ async function launchResumableWorker(
 	});
 }
 
-function collectSettingsDiagnostics(
+/**
+ * Startup and runtime creation each build their own SettingsManager over the same files, and each
+ * records the same diagnostics; the operator reads a diagnostic once, under the first context that
+ * produced it.
+ */
+const reportedSettingsDiagnostics = new Set<string>();
+
+export function collectSettingsDiagnostics(
 	settingsManager: SettingsManager,
 	context: string,
 ): AgentSessionRuntimeDiagnostic[] {
-	return settingsManager.drainErrors().map(({ scope, error }) => ({
-		type: "warning",
-		message: `(${context}, ${scope} settings) ${error.message}`,
-	}));
+	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
+	for (const { scope, error } of settingsManager.drainErrors()) {
+		const key = `${scope}\u0000${error.message}`;
+		if (reportedSettingsDiagnostics.has(key)) continue;
+		reportedSettingsDiagnostics.add(key);
+		diagnostics.push({ type: "warning", message: `(${context}, ${scope} settings) ${error.message}` });
+	}
+	return diagnostics;
 }
 
 function reportDiagnostics(diagnostics: readonly AgentSessionRuntimeDiagnostic[]): void {

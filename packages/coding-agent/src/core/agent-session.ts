@@ -201,7 +201,7 @@ import { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
 import { ToolPerformanceStore } from "./tool-selection/tool-performance-store.ts";
 import { formatToolSelectionReport, ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import type { BashOperations } from "./tools/bash.ts";
-import { disposeMutationLockScope } from "./tools/file-mutation-queue.ts";
+import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
 
 // ============================================================================
@@ -323,6 +323,12 @@ export class AgentSession {
 	private _cwd: string;
 	/** Per-agent persistent shell session identity: stable across runtime reloads, disposed with the session. */
 	private readonly _shellSessionKey = `agent:${randomUUID()}`;
+	/** Lock scope of the worktree this session started in; shared with every session working there. */
+	private _mutationScopeKey: string | undefined;
+	private get mutationScope(): string {
+		this._mutationScopeKey ??= mutationScopeForWorktree(this._cwd);
+		return this._mutationScopeKey;
+	}
 	private _agentDir: string;
 	private _collectWorkspaceSources: typeof collectWorkspaceSources;
 	private readonly _localRuntimeController: LocalRuntimeController;
@@ -737,7 +743,7 @@ export class AgentSession {
 			getCurrentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
 			isForegroundWait: (tool, args) => this.getToolDefinition(tool)?.foregroundWait?.(args as never) === true,
 			getArtifactStore: () => this._getToolArtifactStore(),
-			getMutationScope: () => this._shellSessionKey,
+			getMutationScope: () => this.mutationScope,
 			notifyTerminal: (records, wakeParent) => this._terminalHandoffs.notifyTools(records, wakeParent),
 			emit: (event) => this._emit(event),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
@@ -911,6 +917,7 @@ export class AgentSession {
 			this.agent,
 			this.sessionManager,
 			this._modelRouter,
+			() => this.mutationScope,
 			() => this._shellSessionKey,
 		);
 		this._foregroundLifecycle.start();
@@ -1255,7 +1262,7 @@ export class AgentSession {
 			},
 		});
 		this._toolGate = new ToolGateController({
-			getMutationScope: () => this._shellSessionKey,
+			getMutationScope: () => this.mutationScope,
 			maybeEscalateToolCall: (toolName, args) => this._modelRouter.maybeEscalateToolCall(toolName, args),
 			getCwd: () => this._cwd,
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
@@ -2209,9 +2216,6 @@ export class AgentSession {
 		safely(() => this._unsubscribeSettingsChanges?.());
 		this._unsubscribeSettingsChanges = undefined;
 		trackRequired(() => disposeShellExecutionSessionAndWait(this._shellSessionKey));
-		// The session's group lock and emission-order announcements die with the session; a scope that
-		// still has a live holder stays registered until that holder is gone.
-		safely(() => disposeMutationLockScope(this._shellSessionKey));
 		safely(() => this._localPrefixWarm.cancel());
 		safely(() => this.agent.abort("session dispose"));
 		track(() => this._gatewayRegistry.stop());
