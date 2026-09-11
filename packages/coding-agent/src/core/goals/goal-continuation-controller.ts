@@ -20,7 +20,7 @@ export type GoalContinuationReasonCode =
 	| "worker_wait_timeout"
 	| "lane_sync_conflict"
 	| "lane_sync_required"
-	| "verification_unresolved";
+	| "verification_repair_required";
 
 export interface GoalContinuationDecision {
 	action: GoalContinuationAction;
@@ -239,11 +239,15 @@ export function evaluateGoalContinuation(args: {
 			};
 		}
 		if (args.activeVerificationIds && args.activeVerificationIds.length > 0) {
+			// A red check is ordinary iteration, not a stopping point: compiles and tests fail many
+			// times before work lands. Asking the operator here threw away the autonomy the goal exists
+			// for. The loop keeps going; the runaway and stall guards bound it, and only an
+			// environment failure is the operator's to dismiss.
 			return {
 				...baseDecision,
-				action: "ask-user",
-				reasonCode: "verification_unresolved",
-				message: `Verification obligation(s) ${args.activeVerificationIds.join(", ")} remain failed; the goal cannot complete until the same check passes or the operator resolves them with /verify.`,
+				action: "continue",
+				reasonCode: "verification_repair_required",
+				message: `Verification obligation(s) ${args.activeVerificationIds.join(", ")} are red. Read the failing output, find why it broke, repair the owning code, then rerun the same check in the same directory; the goal completes only after it passes. If the failure is environmental (missing toolchain, network, permissions), say so: the operator dismisses it with /verify.`,
 			};
 		}
 		return {

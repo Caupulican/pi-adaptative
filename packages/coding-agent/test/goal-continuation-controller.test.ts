@@ -177,6 +177,35 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 		expect(decision.message).toContain("req-1");
 	});
 
+	it("keeps going with a repair directive while a verification check is red", () => {
+		// Compiles and tests fail many times before work lands; stopping to ask the operator at every
+		// red check defeats the autonomy the goal exists for (owner, 2026-09-10).
+		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
+		state = applyGoalEvent(state, {
+			type: "add_evidence",
+			id: "ev-1",
+			kind: "test",
+			summary: "suite passed",
+			uri: "tool-call-1",
+			verified: true,
+			outcome: "succeeded",
+			now: "T1",
+		});
+		state = applyGoalEvent(state, { type: "satisfy_requirement", id: "req-1", evidenceIds: ["ev-1"], now: "T2" });
+
+		const decision = evaluateGoalContinuation({
+			state,
+			settings: { maxStallTurns: 3 },
+			activeVerificationIds: ["shell-test-abc"],
+		});
+
+		expect(decision.action).toBe("continue");
+		expect(decision.reasonCode).toBe("verification_repair_required");
+		expect(decision.message).toContain("shell-test-abc");
+		expect(decision.message).toContain("find why it broke");
+	});
+
 	it("active goal at the stall threshold enforces a different recovery approach", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
 		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });

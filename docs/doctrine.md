@@ -219,8 +219,11 @@ a witness for an opaque result; ordinary content and policy overrides remain ava
 **An unresolved obligation marks the run that produced it and blocks completion; it never
 errors a later answer.** The host preserves the answer of the run whose own check failed and
 marks that run unsuccessful; obligations inherited from earlier runs stay listed with their
-command and directory, block goal completion and pause goal continuation (`verification_unresolved`
-asks the operator), but a later root answer is an ordinary answer. The operator resolves an
+command and directory and block goal completion; goal continuation keeps going with a repair
+directive (`verification_repair_required`: read the red output, find why it broke, fix, rerun), since a
+failing compile or test mid-work is ordinary iteration and the runaway guards bound it. A user
+message delivered mid-run opens a new subject, so that subject's answer is ordinary even while the
+earlier subject's checks are red; a later root answer is an ordinary answer. The operator resolves an
 obligation with `/verify dismiss`, a user-plane record the tracker honours and goal evidence never
 counts as a pass. The host does not erase prose or spend extra provider turns demanding opaque-ID
 grammar. Reflection cannot claim a cancelled submission or unsuccessful terminal turn, and it buys
