@@ -10,6 +10,7 @@ import type { ProviderRequestSnapshotContext, ToolCallStartContext } from "@caup
 import type { Api, AssistantMessage, Message, Model, ToolResultMessage } from "@caupulican/pi-ai";
 import type { ModelRouterController } from "./model-router-controller.ts";
 import { dumpProviderRequest } from "./request-dump.ts";
+import { announceToolCall, retireToolCall } from "./tools/file-mutation-queue.ts";
 
 const MAX_MESSAGE_ENTRY_IDS = 256;
 /**
@@ -325,6 +326,7 @@ export class ForegroundLifecycleController {
 
 	/** Drop in-flight associations when the host swaps/reloads the active session branch. */
 	resetForSessionReload(): void {
+		for (const identity of this.startedTools.values()) retireToolCall(identity.callId);
 		this.startedTools.clear();
 		this.pendingToolsByCall.clear();
 	}
@@ -439,6 +441,13 @@ export class ForegroundLifecycleController {
 				}),
 			),
 		);
+		// Emission-order announcement for the whole wave, before any body starts. A mutation tool only
+		// reaches the mutation queue deep inside its own execute, so without this a sibling exclusive
+		// run (bash, python) dispatched in the same batch takes the writer lock first and runs against
+		// the pre-mutation workspace. Announcing every call -- not only the mutations -- is what lets
+		// an exclusive run find its own emission index.
+		const batchId = `${requestId}\u0000${assistantMessageEntryId}`;
+		for (const call of calls) announceToolCall(call.callId, call.index, call.mutation, batchId);
 		for (const identity of identities) this.startedTools.set(this.toolKey(identity), identity);
 		for (const identity of identities) {
 			const callKey = this.callKey(identity.callId, identity.toolName);
@@ -465,6 +474,9 @@ export class ForegroundLifecycleController {
 		if (message.role !== "toolResult") return;
 		if (this.completedResultMessages.has(message)) return;
 		const result = message as ToolResultMessage;
+		// Durable terminal for the emission-order announcement. ToolGateController already retires it
+		// at the execution terminal; this covers a reserved call that never reached execution at all.
+		retireToolCall(result.toolCallId);
 		const pending = this.pendingToolsByCall.get(this.callKey(result.toolCallId, result.toolName));
 		if (pending?.size !== 1) return;
 		const key = pending.values().next().value as string;

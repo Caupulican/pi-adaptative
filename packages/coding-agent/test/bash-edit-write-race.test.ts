@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+	announceToolCall,
 	releaseExclusiveHold,
+	retireToolCall,
 	withExclusiveMutationBarrier,
 	withFileMutationQueue,
 } from "../src/core/tools/file-mutation-queue.ts";
@@ -197,5 +199,145 @@ describe("exclusive barrier cancellation and early release", () => {
 			next = true;
 		});
 		expect(next).toBe(true);
+	});
+});
+
+/**
+ * Emission order inside one assistant message's tool batch. The host announces every reserved call
+ * with its 0-based position before any body starts; a mutation announcement stays pending until its
+ * tool actually joins the reader side, which happens only after that tool's own lease/credential
+ * preflight. Without this an exclusive run dispatched in the same batch reached the writer lock
+ * first, saw no reader, and ran against the pre-mutation workspace.
+ */
+describe("emission-order announcements", () => {
+	it("an exclusive run announced after a pending mutation waits for that mutation to join and finish, even when the mutation joins late", async () => {
+		const order: string[] = [];
+		announceToolCall("write-call", 0, true, "batch-late-join");
+		announceToolCall("bash-call", 1, false, "batch-late-join");
+
+		const mutationGate = deferred();
+		const exclusive = withExclusiveMutationBarrier(
+			async () => {
+				order.push("bash");
+			},
+			{ holdId: "bash-call" },
+		);
+		// The mutation has not reached the queue yet: this is the tool's preflight window, exactly
+		// where the race used to be lost.
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(order).toEqual([]);
+
+		const mutation = withFileMutationQueue(
+			"/tmp/emission-late-join.txt",
+			async () => {
+				order.push("write-start");
+				await mutationGate.promise;
+				order.push("write-end");
+			},
+			undefined,
+			{ callId: "write-call" },
+		);
+		await waitUntil(() => order.includes("write-start"));
+		expect(order).toEqual(["write-start"]);
+		mutationGate.resolve();
+		await Promise.all([mutation, exclusive]);
+		expect(order).toEqual(["write-start", "write-end", "bash"]);
+		retireToolCall("write-call");
+		retireToolCall("bash-call");
+	});
+
+	it("an announced mutation that is retired without joining does not block the exclusive run", async () => {
+		const order: string[] = [];
+		announceToolCall("rejected-write", 0, true, "batch-retired");
+		announceToolCall("bash-after-rejected", 1, false, "batch-retired");
+
+		const exclusive = withExclusiveMutationBarrier(
+			async () => {
+				order.push("bash");
+			},
+			{ holdId: "bash-after-rejected" },
+		);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(order).toEqual([]);
+
+		// The write never reached the mutation queue: its own preflight rejected it. The terminal
+		// retires the announcement, and the exclusive run must proceed instead of parking forever.
+		retireToolCall("rejected-write");
+		await exclusive;
+		expect(order).toEqual(["bash"]);
+		retireToolCall("bash-after-rejected");
+	});
+
+	it("an exclusive run announced BEFORE a mutation does not wait for it", async () => {
+		const order: string[] = [];
+		announceToolCall("bash-first", 0, false, "batch-bash-first");
+		announceToolCall("write-second", 1, true, "batch-bash-first");
+
+		const bashGate = deferred();
+		const exclusive = withExclusiveMutationBarrier(
+			async () => {
+				order.push("bash-start");
+				await bashGate.promise;
+				order.push("bash-end");
+			},
+			{ holdId: "bash-first" },
+		);
+		await waitUntil(() => order.includes("bash-start"));
+
+		const mutation = withFileMutationQueue(
+			"/tmp/emission-bash-first.txt",
+			async () => {
+				order.push("write");
+			},
+			undefined,
+			{ callId: "write-second" },
+		);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(order).toEqual(["bash-start"]);
+		bashGate.resolve();
+		await Promise.all([exclusive, mutation]);
+		expect(order).toEqual(["bash-start", "bash-end", "write"]);
+		retireToolCall("bash-first");
+		retireToolCall("write-second");
+	});
+
+	it("a new reservation wave retires whatever the previous one left pending", async () => {
+		const order: string[] = [];
+		// A wave that never retired its mutation: the turn died between reservation and execution.
+		announceToolCall("abandoned-write", 0, true, "batch-abandoned");
+
+		announceToolCall("next-write", 0, true, "batch-next");
+		announceToolCall("next-bash", 1, false, "batch-next");
+		const exclusive = withExclusiveMutationBarrier(
+			async () => {
+				order.push("bash");
+			},
+			{ holdId: "next-bash" },
+		);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		// Still waiting for its OWN wave's mutation, not for the abandoned one.
+		expect(order).toEqual([]);
+		await withFileMutationQueue(
+			"/tmp/emission-next-wave.txt",
+			async () => {
+				order.push("write");
+			},
+			undefined,
+			{ callId: "next-write" },
+		);
+		await exclusive;
+		expect(order).toEqual(["write", "bash"]);
+		retireToolCall("next-write");
+		retireToolCall("next-bash");
+	});
+
+	it("an exclusive run with no announcement of its own keeps the pre-announcement behavior", async () => {
+		const order: string[] = [];
+		announceToolCall("unrelated-write", 0, true, "batch-unannounced");
+		await withExclusiveMutationBarrier(async () => {
+			order.push("bash");
+		});
+		expect(order).toEqual(["bash"]);
+		retireToolCall("unrelated-write");
 	});
 });

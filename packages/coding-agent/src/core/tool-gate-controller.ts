@@ -15,6 +15,7 @@ import { evaluateToolGateAsync } from "./autonomy/gates.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
+import { retireToolCall } from "./tools/file-mutation-queue.ts";
 
 type BeforeToolCall = NonNullable<Agent["beforeToolCall"]>;
 type AfterToolCall = NonNullable<Agent["afterToolCall"]>;
@@ -121,6 +122,11 @@ export class ToolGateController {
 	};
 
 	readonly afterToolCall: AfterToolCall = async ({ toolCall, args, result, isError, executionContext }) => {
+		// Execution terminal for the emission-order announcement the reservation made: this call can no
+		// longer start a file mutation, so a sibling exclusive run emitted after it must stop waiting.
+		// Retired first and synchronously, before any hook here can throw -- a write rejected by its own
+		// preflight would otherwise park a later bash in the same batch for the rest of the turn.
+		retireToolCall(toolCall.id);
 		const runner = this.deps.getExtensionRunner();
 		let content = result.content;
 		let details = result.details;

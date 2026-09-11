@@ -34,6 +34,7 @@ import {
 	FileMutationIntentController,
 	type FileMutationLease,
 	FileMutationPreflightError,
+	resolveMutationPathTarget,
 } from "./file-mutation-intent.ts";
 import { renderToolPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -489,6 +490,7 @@ export function createEditToolDefinition(
 			"Success returns a locked-source diff/contentRef; do not reread automatically.",
 		],
 		parameters: editSchema,
+		mutationTarget: resolveMutationPathTarget,
 		renderShell: "self",
 		prepareArguments: prepareEditArguments,
 		failureRecovery: {
@@ -550,7 +552,7 @@ export function createEditToolDefinition(
 					: []),
 			],
 		},
-		async execute(_toolCallId, input: EditToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
+		async execute(toolCallId, input: EditToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
 			const validated = validateEditInput(input);
 			const { path } = validated;
 			const absolutePath = intentController.resolvePath(path, cwd);
@@ -567,180 +569,186 @@ export function createEditToolDefinition(
 				throw error;
 			}
 
-			return intentController.withMutationQueue(absolutePath, async () => {
-				// Do not reject from an abort event listener here: that would release the
-				// mutation queue while an in-flight filesystem operation may still finish.
-				// Checking signal.aborted after each await observes the same aborts while
-				// keeping the queue locked until the current operation has settled.
-				const throwIfAborted = (): void => {
-					if (signal?.aborted) throw new Error("Operation aborted");
-				};
-
-				throwIfAborted();
-				let payloadRef: string | undefined;
-				let encoding = validated.encoding;
-				let edits: Edit[];
-				if (validated.edits !== undefined) {
-					edits = validated.edits;
-				} else {
-					payloadRef = validated.payloadRef;
-					const retained: unknown = JSON.parse(
-						await intentController.readMutationPayload(payloadRef, "edit", signal),
-					);
-					if (!retained || typeof retained !== "object" || !("edits" in retained))
-						throw new Error("Invalid retained edit payload");
-					edits = validateEdits(retained.edits);
-					const retainedEncoding = "encoding" in retained ? retained.encoding : undefined;
-					if (retainedEncoding !== undefined && typeof retainedEncoding !== "string")
-						throw new Error("Invalid retained encoding");
-					if (encoding !== undefined && retainedEncoding !== undefined && encoding !== retainedEncoding)
-						throw new Error("Retarget cannot change the retained source encoding");
-					encoding ??= retainedEncoding;
-				}
-				if (encoding === undefined && options?.operations === undefined) {
-					// A charset the project declares for this file is evidence, exactly like the argument:
-					// it selects the byte-preserving codec path instead of the strict UTF-8 one. A foreign
-					// backend's metadata does not live on this filesystem, so only local edits consult it.
-					encoding = (await resolveDeclaredEncoding(absolutePath, { signal }))?.encoding;
-					throwIfAborted();
-				}
-				let staleLeaseRefreshes = 0;
-				const confirmLeaseOrRefresh = async (): Promise<boolean> => {
-					try {
-						await intentController.assertCurrent(lease, signal);
-						return true;
-					} catch (error) {
-						if (
-							!(error instanceof FileMutationIdentityError) ||
-							staleLeaseRefreshes >= MAX_STALE_LEASE_REFRESHES
-						) {
-							throw error;
-						}
-						staleLeaseRefreshes++;
-						await intentController.refreshIdentity(lease, signal);
-						return false;
-					}
-				};
-
-				// One round reads content bracketed by two matching identity observations of the
-				// lease version and re-checks that identity immediately before writing. Same-process
-				// edits are serialized by the file mutation queue. The pre-write check is a
-				// point-in-time observation, not a hold on the file: an external write landing
-				// between that check and ops.writeFile is neither detected nor preserved. The round
-				// writes the full buffer computed from its own read, so the external write is
-				// overwritten, its bytes are unrecoverable, and nothing observes the loss — not this
-				// round, and not any later one.
-				const runEditRound = async (): Promise<
-					| {
-							baseContent: string;
-							newContent: string;
-							finalContent: string | Buffer;
-							encodingRecovery?: EditToolDetails["encodingRecovery"];
-							matchPlanReused: boolean;
-							diffResult: { diff: string; firstChangedLine: number | undefined };
-					  }
-					| undefined
-				> => {
-					if (!(await confirmLeaseOrRefresh())) return undefined;
-					throwIfAborted();
-
-					// Read the file.
-					const buffer = await ops.readFile(absolutePath);
-					const {
-						text: content,
-						bom,
-						recovery: recovered,
-					} = await decodeEditDocument(buffer, path, encoding, signal);
-					throwIfAborted();
-
-					// Strip BOM before matching. The model will not include an invisible BOM in oldText.
-					const normalizedContent = normalizeToLF(content);
-					const cachedForInput =
-						cachedMatchPlan?.absolutePath === absolutePath && editsMatch(cachedMatchPlan.edits, edits)
-							? cachedMatchPlan
-							: undefined;
-					if (cachedForInput) cachedMatchPlan = undefined;
-					const matchPlanReused =
-						cachedForInput !== undefined &&
-						cachedForInput.sourceDigest === digestNormalizedEditSource(normalizedContent);
-					let applied: ReturnType<typeof applyEditMatchPlanToSource>;
-					try {
-						const plan = matchPlanReused
-							? cachedForInput.plan
-							: planEditsToNormalizedContent(normalizedContent, edits, path);
-						applied = applyEditMatchPlanToSource(content, plan, path);
-					} catch (error) {
-						throw error instanceof Error && intentController.hasProducedContent(absolutePath, buffer)
-							? new Error(
-									`The current content of ${path} was produced by an earlier mutation in this run; re-match oldText against it. ${error.message}`,
-								)
-							: error;
-					}
-					throwIfAborted();
-
-					const finalContent = recovered ? await recovered.encode(applied.splices) : bom + applied.sourceContent;
-					if (!(await confirmLeaseOrRefresh())) return undefined;
-					throwIfAborted();
-					// Keep the verification witness private: an adapter may mutate the buffer it receives.
-					await ops.writeFile(
-						absolutePath,
-						Buffer.isBuffer(finalContent) ? Buffer.from(finalContent) : finalContent,
-					);
-					if (Buffer.isBuffer(finalContent) && !(await ops.readFile(absolutePath)).equals(finalContent)) {
-						throw new Error(
-							"Encoding recovery write verification failed; file outcome requires inspection before retry.",
-						);
-					}
-					throwIfAborted();
-					return {
-						baseContent: applied.baseContent,
-						newContent: applied.newContent,
-						finalContent,
-						...(recovered
-							? {
-									encodingRecovery: {
-										codec: "python" as const,
-										encoding: recovered.encoding,
-										verified: true as const,
-									},
-								}
-							: {}),
-						matchPlanReused,
-						diffResult:
-							matchPlanReused && cachedForInput
-								? { diff: cachedForInput.diff, firstChangedLine: cachedForInput.firstChangedLine }
-								: generateDiffString(applied.baseContent, applied.newContent),
+			return intentController.withMutationQueue(
+				absolutePath,
+				async () => {
+					// Do not reject from an abort event listener here: that would release the
+					// mutation queue while an in-flight filesystem operation may still finish.
+					// Checking signal.aborted after each await observes the same aborts while
+					// keeping the queue locked until the current operation has settled.
+					const throwIfAborted = (): void => {
+						if (signal?.aborted) throw new Error("Operation aborted");
 					};
-				};
 
-				let completedRound: Awaited<ReturnType<typeof runEditRound>>;
-				do {
-					completedRound = await runEditRound();
-				} while (completedRound === undefined);
-				const { finalContent, matchPlanReused, diffResult, baseContent, newContent } = completedRound;
+					throwIfAborted();
+					let payloadRef: string | undefined;
+					let encoding = validated.encoding;
+					let edits: Edit[];
+					if (validated.edits !== undefined) {
+						edits = validated.edits;
+					} else {
+						payloadRef = validated.payloadRef;
+						const retained: unknown = JSON.parse(
+							await intentController.readMutationPayload(payloadRef, "edit", signal),
+						);
+						if (!retained || typeof retained !== "object" || !("edits" in retained))
+							throw new Error("Invalid retained edit payload");
+						edits = validateEdits(retained.edits);
+						const retainedEncoding = "encoding" in retained ? retained.encoding : undefined;
+						if (retainedEncoding !== undefined && typeof retainedEncoding !== "string")
+							throw new Error("Invalid retained encoding");
+						if (encoding !== undefined && retainedEncoding !== undefined && encoding !== retainedEncoding)
+							throw new Error("Retarget cannot change the retained source encoding");
+						encoding ??= retainedEncoding;
+					}
+					if (encoding === undefined && options?.operations === undefined) {
+						// A charset the project declares for this file is evidence, exactly like the argument:
+						// it selects the byte-preserving codec path instead of the strict UTF-8 one. A foreign
+						// backend's metadata does not live on this filesystem, so only local edits consult it.
+						encoding = (await resolveDeclaredEncoding(absolutePath, { signal }))?.encoding;
+						throwIfAborted();
+					}
+					let staleLeaseRefreshes = 0;
+					const confirmLeaseOrRefresh = async (): Promise<boolean> => {
+						try {
+							await intentController.assertCurrent(lease, signal);
+							return true;
+						} catch (error) {
+							if (
+								!(error instanceof FileMutationIdentityError) ||
+								staleLeaseRefreshes >= MAX_STALE_LEASE_REFRESHES
+							) {
+								throw error;
+							}
+							staleLeaseRefreshes++;
+							await intentController.refreshIdentity(lease, signal);
+							return false;
+						}
+					};
 
-				const contentReference = intentController.rememberContent(absolutePath, finalContent);
-				if (payloadRef) await intentController.discardMutationPayload(payloadRef);
+					// One round reads content bracketed by two matching identity observations of the
+					// lease version and re-checks that identity immediately before writing. Same-process
+					// edits are serialized by the file mutation queue. The pre-write check is a
+					// point-in-time observation, not a hold on the file: an external write landing
+					// between that check and ops.writeFile is neither detected nor preserved. The round
+					// writes the full buffer computed from its own read, so the external write is
+					// overwritten, its bytes are unrecoverable, and nothing observes the loss — not this
+					// round, and not any later one.
+					const runEditRound = async (): Promise<
+						| {
+								baseContent: string;
+								newContent: string;
+								finalContent: string | Buffer;
+								encodingRecovery?: EditToolDetails["encodingRecovery"];
+								matchPlanReused: boolean;
+								diffResult: { diff: string; firstChangedLine: number | undefined };
+						  }
+						| undefined
+					> => {
+						if (!(await confirmLeaseOrRefresh())) return undefined;
+						throwIfAborted();
 
-				const patch = generateUnifiedPatch(path, baseContent, newContent);
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Successfully replaced ${edits.length} block(s) in ${path}. To copy these exact bytes to a different new path, call write once for that path with contentRef ${contentReference.contentRef}.`,
+						// Read the file.
+						const buffer = await ops.readFile(absolutePath);
+						const {
+							text: content,
+							bom,
+							recovery: recovered,
+						} = await decodeEditDocument(buffer, path, encoding, signal);
+						throwIfAborted();
+
+						// Strip BOM before matching. The model will not include an invisible BOM in oldText.
+						const normalizedContent = normalizeToLF(content);
+						const cachedForInput =
+							cachedMatchPlan?.absolutePath === absolutePath && editsMatch(cachedMatchPlan.edits, edits)
+								? cachedMatchPlan
+								: undefined;
+						if (cachedForInput) cachedMatchPlan = undefined;
+						const matchPlanReused =
+							cachedForInput !== undefined &&
+							cachedForInput.sourceDigest === digestNormalizedEditSource(normalizedContent);
+						let applied: ReturnType<typeof applyEditMatchPlanToSource>;
+						try {
+							const plan = matchPlanReused
+								? cachedForInput.plan
+								: planEditsToNormalizedContent(normalizedContent, edits, path);
+							applied = applyEditMatchPlanToSource(content, plan, path);
+						} catch (error) {
+							throw error instanceof Error && intentController.hasProducedContent(absolutePath, buffer)
+								? new Error(
+										`The current content of ${path} was produced by an earlier mutation in this run; re-match oldText against it. ${error.message}`,
+									)
+								: error;
+						}
+						throwIfAborted();
+
+						const finalContent = recovered
+							? await recovered.encode(applied.splices)
+							: bom + applied.sourceContent;
+						if (!(await confirmLeaseOrRefresh())) return undefined;
+						throwIfAborted();
+						// Keep the verification witness private: an adapter may mutate the buffer it receives.
+						await ops.writeFile(
+							absolutePath,
+							Buffer.isBuffer(finalContent) ? Buffer.from(finalContent) : finalContent,
+						);
+						if (Buffer.isBuffer(finalContent) && !(await ops.readFile(absolutePath)).equals(finalContent)) {
+							throw new Error(
+								"Encoding recovery write verification failed; file outcome requires inspection before retry.",
+							);
+						}
+						throwIfAborted();
+						return {
+							baseContent: applied.baseContent,
+							newContent: applied.newContent,
+							finalContent,
+							...(recovered
+								? {
+										encodingRecovery: {
+											codec: "python" as const,
+											encoding: recovered.encoding,
+											verified: true as const,
+										},
+									}
+								: {}),
+							matchPlanReused,
+							diffResult:
+								matchPlanReused && cachedForInput
+									? { diff: cachedForInput.diff, firstChangedLine: cachedForInput.firstChangedLine }
+									: generateDiffString(applied.baseContent, applied.newContent),
+						};
+					};
+
+					let completedRound: Awaited<ReturnType<typeof runEditRound>>;
+					do {
+						completedRound = await runEditRound();
+					} while (completedRound === undefined);
+					const { finalContent, matchPlanReused, diffResult, baseContent, newContent } = completedRound;
+
+					const contentReference = intentController.rememberContent(absolutePath, finalContent);
+					if (payloadRef) await intentController.discardMutationPayload(payloadRef);
+
+					const patch = generateUnifiedPatch(path, baseContent, newContent);
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Successfully replaced ${edits.length} block(s) in ${path}. To copy these exact bytes to a different new path, call write once for that path with contentRef ${contentReference.contentRef}.`,
+							},
+						],
+						details: {
+							phase: "edited" as const,
+							...(completedRound.encodingRecovery ? { encodingRecovery: completedRound.encodingRecovery } : {}),
+							contentRef: contentReference.contentRef,
+							diff: diffResult.diff,
+							patch,
+							firstChangedLine: diffResult.firstChangedLine,
+							matchPlanReused,
 						},
-					],
-					details: {
-						phase: "edited" as const,
-						...(completedRound.encodingRecovery ? { encodingRecovery: completedRound.encodingRecovery } : {}),
-						contentRef: contentReference.contentRef,
-						diff: diffResult.diff,
-						patch,
-						firstChangedLine: diffResult.firstChangedLine,
-						matchPlanReused,
-					},
-				};
-			});
+					};
+				},
+				{ callId: toolCallId },
+			);
 		},
 		renderCall(args, theme, context) {
 			const component = getEditCallRenderComponent(context.state, context.lastComponent);

@@ -504,6 +504,16 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 */
 	backgroundRequested?(args: Static<TParams>): boolean;
 
+	/**
+	 * The file this call will mutate, as the model spelled it, or undefined when it mutates nothing.
+	 *
+	 * Declaring it lets the agent loop keep emission order inside one assistant message: a later
+	 * sibling naming this path runs in a later group, and the host announces the call as a pending
+	 * mutation so a sibling exclusive run (bash, python) waits for it instead of racing it. Called
+	 * on RAW provider arguments before schema validation, so it must be total and never throw.
+	 */
+	mutationTarget?(args: Static<TParams>): string | undefined;
+
 	/** Execute the tool. */
 	execute(
 		toolCallId: string,

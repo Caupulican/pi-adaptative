@@ -40,6 +40,20 @@ class MutationPayloadCapacityError extends Error {
 
 export type FileMutationKind = "write" | "edit";
 
+/**
+ * The file a `path`-shaped tool call will mutate, as the model spelled it.
+ *
+ * Declared by write and edit as their `mutationTarget` so the agent loop can keep emission order
+ * inside a parallel batch: a later sibling whose arguments name this path runs in a later group.
+ * It runs on RAW provider arguments, before schema validation, so it must be total: anything that
+ * is not a non-empty `path` string declares no target.
+ */
+export function resolveMutationPathTarget(args: unknown): string | undefined {
+	if (args === null || typeof args !== "object") return undefined;
+	const path: unknown = (args as { path?: unknown }).path;
+	return typeof path === "string" && path.length > 0 ? path : undefined;
+}
+
 export interface FilePathIdentity {
 	dev: string;
 	ino: string;
@@ -382,8 +396,17 @@ export class FileMutationIntentController {
 		);
 	}
 
-	withMutationQueue<T>(absolutePath: string, operation: () => Promise<T>): Promise<T> {
-		return withFileMutationQueue(absolutePath, operation, this.operations.mutationQueue);
+	/**
+	 * `options.callId` is the tool call id this mutation belongs to. It consumes the emission-order
+	 * announcement the host made when the call was reserved, so an exclusive run emitted after this
+	 * one stops waiting for it the moment it joins the reader side (see file-mutation-queue.ts).
+	 */
+	withMutationQueue<T>(
+		absolutePath: string,
+		operation: () => Promise<T>,
+		options?: { callId?: string; signal?: AbortSignal },
+	): Promise<T> {
+		return withFileMutationQueue(absolutePath, operation, this.operations.mutationQueue, options);
 	}
 
 	async prepare(

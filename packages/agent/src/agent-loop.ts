@@ -1175,15 +1175,19 @@ async function finalizeStartedToolCall(
 
 async function reservePreparedToolCalls(
 	execCtx: ToolExecutionContext,
-	preparedCalls: readonly PreparedToolCall[],
+	preparedCalls: readonly { preparation: PreparedToolCall; index: number }[],
 ): Promise<void> {
 	if (preparedCalls.length === 0) return;
 	execCtx.signal?.throwIfAborted();
 	if (execCtx.config.onToolCallStart) {
-		const calls: ToolCallStartContext[] = preparedCalls.map((prepared) => ({
+		const calls: ToolCallStartContext[] = preparedCalls.map(({ preparation: prepared, index }) => ({
 			requestId: execCtx.requestId,
 			callId: prepared.toolCall.id,
 			toolName: prepared.toolCall.name,
+			// Emission position and declared mutation intent travel with the reservation so a host can
+			// sequence this wave's side effects before any body starts, without a registry lookup.
+			index,
+			mutation: prepared.tool.mutationTarget?.(prepared.args) !== undefined,
 			assistantMessage: execCtx.assistantMessage,
 			toolCall: prepared.toolCall,
 			args: prepared.args,
@@ -1193,7 +1197,7 @@ async function reservePreparedToolCalls(
 		await execCtx.config.onToolCallStart(calls, execCtx.signal);
 	}
 	execCtx.signal?.throwIfAborted();
-	for (const prepared of preparedCalls) {
+	for (const { preparation: prepared } of preparedCalls) {
 		await emitToolExecutionStart(prepared.toolCall, execCtx.emit);
 	}
 }
@@ -1214,7 +1218,7 @@ async function executeBarrierToolCall(
 ): Promise<{ finalized: FinalizedToolCallOutcome; toolResultMessage: ToolResultMessage }> {
 	const started = await prepareAndStartToolCall(execCtx, toolCall, index);
 	if (started.kind === "prepared") {
-		await reservePreparedToolCalls(execCtx, [started.preparation]);
+		await reservePreparedToolCalls(execCtx, [{ preparation: started.preparation, index }]);
 	}
 	const finalized = await finalizeStartedToolCall(execCtx, started);
 	execCtx.toolFailureRecoveryGate.apply(finalized.executionGateEffect);
@@ -1262,6 +1266,15 @@ type ToolExecutionGroup =
  * the open parallel group, opening a fresh one if none is open. Every call appears in exactly one
  * group, in original relative order; concatenating the groups' outputs back together (as
  * `executeToolCallsPartitioned` does) reproduces the original emission order.
+ *
+ * A second rule keeps emission order MEANINGFUL inside one message: a call whose arguments name a
+ * file an earlier sibling of the open group declared it would mutate (`mutationTarget`) closes that
+ * group and opens a new one. Live, `[write checkout_status.txt, goal add_evidence(file: that path)]`
+ * ran concurrently and the second call's stat hit ENOENT a second before the file appeared. The
+ * dependent call is NOT a barrier of its own: it starts a fresh parallel group and ordinary
+ * parallel semantics continue after it. Alias-spelled paths (`p/...`) are not expanded here -
+ * preparation expands them later - so each target is matched by its full spelling AND by its
+ * basename, which the alias and the real path share.
  */
 function partitionToolCalls(
 	toolCalls: readonly AgentToolCall[],
@@ -1269,20 +1282,44 @@ function partitionToolCalls(
 ): ToolExecutionGroup[] {
 	const groups: ToolExecutionGroup[] = [];
 	let openGroup: { kind: "parallel"; entries: { call: AgentToolCall; index: number }[] } | undefined;
+	/** Mutation targets declared by earlier calls of the currently open group, plus their basenames. */
+	let openGroupMutationTargets = new Set<string>();
 	for (const [index, call] of toolCalls.entries()) {
-		const mode = tools?.find((tool) => tool.name === call.name)?.executionMode;
-		if (mode === "sequential") {
+		const tool = tools?.find((candidate) => candidate.name === call.name);
+		if (tool?.executionMode === "sequential") {
 			openGroup = undefined;
+			openGroupMutationTargets = new Set();
 			groups.push({ kind: "barrier", call, index });
 			continue;
+		}
+		if (openGroup && referencesMutationTarget(call, openGroupMutationTargets)) {
+			// Everything in the open group is fully settled before the next group starts, so the
+			// mutation this call depends on has landed by the time it runs.
+			openGroup = undefined;
+			openGroupMutationTargets = new Set();
 		}
 		if (!openGroup) {
 			openGroup = { kind: "parallel", entries: [] };
 			groups.push(openGroup);
 		}
 		openGroup.entries.push({ call, index });
+		const target = tool?.mutationTarget?.(call.arguments);
+		if (target === undefined) continue;
+		openGroupMutationTargets.add(target);
+		const base = target.split(/[\\/]/).pop();
+		if (base !== undefined && base.length > 0) openGroupMutationTargets.add(base);
 	}
 	return groups;
+}
+
+/** True when this call's raw arguments mention any file an earlier sibling declared it will mutate. */
+function referencesMutationTarget(call: AgentToolCall, mutationTargets: ReadonlySet<string>): boolean {
+	if (mutationTargets.size === 0) return false;
+	const serializedArguments = JSON.stringify(call.arguments ?? {});
+	for (const target of mutationTargets) {
+		if (serializedArguments.includes(target)) return true;
+	}
+	return false;
 }
 
 /**
@@ -1336,7 +1373,7 @@ async function pooledExecuteToolCalls(
 				await Promise.race(inFlight.values());
 				continue;
 			}
-			const refillWave: PreparedToolCall[] = [];
+			const refillWave: { preparation: PreparedToolCall; index: number }[] = [];
 			const refillSlots: { slot: number; started: StartedToolCall }[] = [];
 			while (refillWave.length < free && next < entries.length && !execCtx.signal?.aborted) {
 				const entry = entries[next];
@@ -1348,7 +1385,7 @@ async function pooledExecuteToolCalls(
 					await settle(slot, started.finalized);
 					continue;
 				}
-				refillWave.push(started.preparation);
+				refillWave.push({ preparation: started.preparation, index: entry.index });
 				refillSlots.push({ slot, started });
 			}
 			if (refillSlots.length === 0) continue;

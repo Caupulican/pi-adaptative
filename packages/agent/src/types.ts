@@ -282,6 +282,14 @@ export interface ToolCallStartContext extends BeforeToolCallContext {
 	callId: string;
 	/** Tool registry name used for this call. */
 	toolName: string;
+	/** 0-based position of this call in its assistant message's tool calls. */
+	index: number;
+	/**
+	 * True when this call's tool declared a `mutationTarget` for these arguments. A host that
+	 * sequences file mutations against exclusive runs needs the flag at reservation time, before any
+	 * body in the wave starts, and gets it here rather than looking the tool up in its own registry.
+	 */
+	mutation: boolean;
 }
 
 /**
@@ -1102,6 +1110,16 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * If omitted, the default execution mode applies.
 	 */
 	executionMode?: ToolExecutionMode;
+	/**
+	 * The file this call will mutate, as the model spelled it, or undefined when it mutates nothing.
+	 *
+	 * Declaring it buys two things the loop cannot infer: a later sibling in the same assistant
+	 * message whose arguments name this path is scheduled in a LATER group (`partitionToolCalls`),
+	 * and the host can announce the call as a pending mutation so a sibling exclusive run waits for
+	 * it instead of racing it. Called on RAW provider arguments before schema validation, so an
+	 * implementation must be total and must never throw.
+	 */
+	mutationTarget?: (args: any) => string | undefined;
 }
 
 /** Context snapshot passed into the low-level agent loop. */

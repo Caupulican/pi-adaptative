@@ -51,6 +51,112 @@ async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined
 	}
 }
 
+/**
+ * Emission-order bookkeeping for one assistant message's tool-call wave.
+ *
+ * The barrier's contract - "an exclusive run waits for in-flight file mutations to drain" - is only
+ * meaningful if "in-flight" means "emitted before me". A mutation tool joins the reader side deep
+ * inside its own execute, after its lease/credential preflight, so a sibling exclusive run
+ * dispatched in the same parallel batch reaches the writer lock first and sees no reader at all.
+ * Live, `[write rotina.json, bash "tfps run rotina"]` ran the command before the file existed.
+ *
+ * The host therefore ANNOUNCES every reserved call with its emission index before any body in the
+ * wave starts. An exclusive run waits for every earlier-emitted mutation either to join the reader
+ * side (`joined`, from then on the reader count covers it) or to be retired at its terminal, before
+ * it takes the writer lock. A call nobody announced keeps the pre-announcement behavior.
+ */
+interface ToolCallAnnouncement {
+	/** 0-based position of the call in its assistant message's tool calls. */
+	index: number;
+	/** True when this call's tool declared a file it will mutate. */
+	mutation: boolean;
+	/** True once this call's mutation joined the reader side: `activeReaders` covers it from then on. */
+	joined: boolean;
+	/** Reservation wave identity, when the host supplies one. */
+	batchId: string | undefined;
+}
+
+const toolCallAnnouncements = new Map<string, ToolCallAnnouncement>();
+let announcedBatchId: string | undefined;
+
+interface EarlierMutationWaiter {
+	index: number;
+	resolve: () => void;
+}
+const earlierMutationWaiters = new Set<EarlierMutationWaiter>();
+
+function hasPendingMutationBefore(index: number): boolean {
+	for (const announcement of toolCallAnnouncements.values()) {
+		if (announcement.mutation && !announcement.joined && announcement.index < index) return true;
+	}
+	return false;
+}
+
+function releaseClearedWaiters(): void {
+	for (const waiter of [...earlierMutationWaiters]) {
+		if (hasPendingMutationBefore(waiter.index)) continue;
+		earlierMutationWaiters.delete(waiter);
+		waiter.resolve();
+	}
+}
+
+/**
+ * Record a reserved tool call at its emission position, before any body in the wave starts.
+ *
+ * `mutation` marks a call whose tool declared a file mutation target: only those are waited for.
+ * Every other reserved call is still announced, because that is how an exclusive run learns its own
+ * emission index. `batchId` names the reservation wave; a wave with a new identity retires whatever
+ * the previous one left behind, which can never join any more - its results already produced the
+ * assistant message this wave belongs to.
+ */
+export function announceToolCall(callId: string, index: number, mutation: boolean, batchId?: string): void {
+	if (batchId !== undefined && batchId !== announcedBatchId) {
+		for (const [announcedCallId, announcement] of toolCallAnnouncements) {
+			if (announcement.batchId !== batchId) toolCallAnnouncements.delete(announcedCallId);
+		}
+		announcedBatchId = batchId;
+	}
+	toolCallAnnouncements.set(callId, { index, mutation, joined: false, batchId });
+	releaseClearedWaiters();
+}
+
+/**
+ * Drop a call's announcement at its terminal, whether or not a mutation ever joined. An aborted or
+ * preflight-rejected write must never park a later exclusive sibling for the rest of the batch.
+ */
+export function retireToolCall(callId: string): void {
+	if (!toolCallAnnouncements.delete(callId)) return;
+	releaseClearedWaiters();
+}
+
+function joinAnnouncedMutation(callId: string | undefined): void {
+	if (callId === undefined) return;
+	const announcement = toolCallAnnouncements.get(callId);
+	if (!announcement || announcement.joined) return;
+	announcement.joined = true;
+	releaseClearedWaiters();
+}
+
+/**
+ * Wait until no mutation announced EARLIER than `callId` is still pending. Returns at once for a
+ * call that was never announced, so a host that does not announce sees today's behavior.
+ */
+export async function waitForAnnouncedMutations(callId: string | undefined, signal?: AbortSignal): Promise<void> {
+	if (callId === undefined) return;
+	const announcement = toolCallAnnouncements.get(callId);
+	if (!announcement || !hasPendingMutationBefore(announcement.index)) return;
+	let waiter!: EarlierMutationWaiter;
+	const cleared = new Promise<void>((resolveCleared) => {
+		waiter = { index: announcement.index, resolve: resolveCleared };
+		earlierMutationWaiters.add(waiter);
+	});
+	try {
+		await raceAbort(cleared, signal);
+	} finally {
+		earlierMutationWaiters.delete(waiter);
+	}
+}
+
 async function acquireReader(signal?: AbortSignal): Promise<void> {
 	if (signal?.aborted) throw signal.reason;
 	// No writer holds or is draining: join immediately (synchronously counted, so a writer that
@@ -136,6 +242,17 @@ export function withExclusiveMutationBarrier<T>(
 			throw error;
 		}
 		hold.queued = false;
+		// Emission order, before the writer lock is taken: an exclusive run must not outrun a file
+		// mutation its own batch emitted earlier but that has not reached the reader side yet. This
+		// wait has to happen BEFORE `writerActive` is set, or the mutation it is waiting for would
+		// park in `acquireReader` behind this very run.
+		try {
+			await waitForAnnouncedMutations(holdId, signal);
+		} catch (error) {
+			handOnQueue();
+			unregister();
+			throw error;
+		}
 		if (hold.lockless) {
 			// Released while still queued: the run no longer claims exclusivity, so it never takes the
 			// writer lock and the queue moves on at once.
@@ -231,7 +348,7 @@ export async function withFileMutationQueue<T>(
 	filePath: string,
 	fn: () => Promise<T>,
 	backend: FileMutationQueueBackend = localFileMutationQueueBackend,
-	options?: { signal?: AbortSignal },
+	options?: { signal?: AbortSignal; callId?: string },
 ): Promise<T> {
 	let state = backendQueues.get(backend);
 	if (!state) {
@@ -267,6 +384,9 @@ export async function withFileMutationQueue<T>(
 		// still count as in-flight for the exclusive barrier, not just the one executing.
 		await acquireReader(options?.signal);
 		joinedReaders = true;
+		// The announcement this call was reserved with stops being "pending" exactly here: the reader
+		// count now covers it, so an exclusive run waiting on it can stop waiting and start draining.
+		joinAnnouncedMutation(options?.callId);
 		await currentQueue;
 		return await fn();
 	} finally {

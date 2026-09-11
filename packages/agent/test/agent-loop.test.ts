@@ -6145,6 +6145,164 @@ describe("Phase 3 S5 - pool invariants, partition semantics, env matrix, full-lo
 			expect(order.indexOf("start:read-2")).toBeGreaterThan(askEnd);
 		});
 	});
+	/**
+	 * Emission order inside ONE parallel group. `executionMode` only says whether a tool can overlap
+	 * with anything; it cannot say that THIS call depends on a file THAT sibling is about to write.
+	 * A tool declares the file it will mutate (`mutationTarget`), and a later sibling whose arguments
+	 * name that file is scheduled into a later group so the mutation has landed before it runs.
+	 */
+	describe("S5.6b - partition semantics: a later sibling that names an earlier sibling's mutation target", () => {
+		function makeOrderedTool(
+			name: string,
+			order: string[],
+			mutationTarget?: (args: any) => string | undefined,
+		): AgentTool<ReturnType<typeof Type.Object>, Record<string, never>> {
+			const schema = Type.Object({ path: Type.Optional(Type.String()), note: Type.Optional(Type.String()) });
+			const tool: AgentTool<typeof schema, Record<string, never>> = {
+				name,
+				label: name,
+				description: name,
+				parameters: schema,
+				...(mutationTarget ? { mutationTarget } : {}),
+				async execute(toolCallId) {
+					order.push(`start:${toolCallId}`);
+					await Promise.resolve();
+					await Promise.resolve();
+					order.push(`end:${toolCallId}`);
+					return { content: [{ type: "text", text: toolCallId }], details: {} };
+				},
+			};
+			return tool;
+		}
+
+		async function runBatch(
+			tools: AgentTool<any, any>[],
+			toolCalls: { id: string; name: string; args: Record<string, unknown> }[],
+			onToolCallStart?: AgentLoopConfig["onToolCallStart"],
+		): Promise<void> {
+			const context: AgentContext = { systemPrompt: "", messages: [], tools };
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				...(onToolCallStart ? { onToolCallStart } : {}),
+			};
+			let providerCall = 0;
+			const stream = agentLoop([createUserMessage("do it")], context, config, undefined, () => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								toolCalls.map((call) => ({
+									type: "toolCall" as const,
+									id: call.id,
+									name: call.name,
+									arguments: call.args,
+								})),
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			});
+			for await (const _event of stream) {
+				// consume
+			}
+		}
+
+		it("a call whose arguments name an earlier sibling's mutation target runs in a later group", async () => {
+			const order: string[] = [];
+			const write = makeOrderedTool("write", order, (args) => (args as { path?: string }).path);
+			const inspect = makeOrderedTool("inspect", order);
+			await runBatch(
+				[write, inspect],
+				[
+					{ id: "write-1", name: "write", args: { path: "reports/checkout_status.txt" } },
+					{ id: "inspect-1", name: "inspect", args: { note: "reports/checkout_status.txt" } },
+				],
+			);
+			// Two groups: the dependent call starts only after the mutation has fully ended.
+			expect(order).toEqual(["start:write-1", "end:write-1", "start:inspect-1", "end:inspect-1"]);
+		});
+
+		it("an alias-spelled path matches the mutation target by basename", async () => {
+			const order: string[] = [];
+			const write = makeOrderedTool("write", order, (args) => (args as { path?: string }).path);
+			const inspect = makeOrderedTool("inspect", order);
+			await runBatch(
+				[write, inspect],
+				[
+					{ id: "write-1", name: "write", args: { path: "/abs/workspace/checkout_status.txt" } },
+					{ id: "inspect-1", name: "inspect", args: { note: "p/1/checkout_status.txt" } },
+				],
+			);
+			expect(order).toEqual(["start:write-1", "end:write-1", "start:inspect-1", "end:inspect-1"]);
+		});
+
+		it("independent calls stay in one group and still overlap", async () => {
+			const order: string[] = [];
+			const write = makeOrderedTool("write", order, (args) => (args as { path?: string }).path);
+			const inspect = makeOrderedTool("inspect", order);
+			await runBatch(
+				[write, inspect],
+				[
+					{ id: "write-1", name: "write", args: { path: "reports/checkout_status.txt" } },
+					{ id: "inspect-1", name: "inspect", args: { note: "something else entirely" } },
+				],
+			);
+			expect(order.indexOf("start:inspect-1")).toBeLessThan(order.indexOf("end:write-1"));
+		});
+
+		it("the dependent call opens a fresh parallel group instead of becoming a barrier of its own", async () => {
+			const order: string[] = [];
+			const write = makeOrderedTool("write", order, (args) => (args as { path?: string }).path);
+			const inspect = makeOrderedTool("inspect", order);
+			await runBatch(
+				[write, inspect],
+				[
+					{ id: "write-1", name: "write", args: { path: "reports/checkout_status.txt" } },
+					{ id: "inspect-1", name: "inspect", args: { note: "reports/checkout_status.txt" } },
+					{ id: "inspect-2", name: "inspect", args: { note: "unrelated" } },
+				],
+			);
+			expect(order.indexOf("start:inspect-1")).toBeGreaterThan(order.indexOf("end:write-1"));
+			// Ordinary parallel semantics continue after it: the two inspects share the new group.
+			expect(order.indexOf("start:inspect-2")).toBeLessThan(order.indexOf("end:inspect-1"));
+		});
+
+		it("the reservation context carries the emission index and mutation flag", async () => {
+			const order: string[] = [];
+			const write = makeOrderedTool("write", order, (args) => (args as { path?: string }).path);
+			const inspect = makeOrderedTool("inspect", order);
+			const reserved: { callId: string; index: number; mutation: boolean }[] = [];
+			await runBatch(
+				[write, inspect],
+				[
+					{ id: "inspect-1", name: "inspect", args: { note: "unrelated" } },
+					{ id: "write-1", name: "write", args: { path: "reports/checkout_status.txt" } },
+				],
+				(calls) => {
+					for (const call of calls) {
+						reserved.push({ callId: call.callId, index: call.index, mutation: call.mutation });
+					}
+				},
+			);
+			expect(reserved).toEqual([
+				{ callId: "inspect-1", index: 0, mutation: false },
+				{ callId: "write-1", index: 1, mutation: true },
+			]);
+		});
+	});
 
 	describe("S5.7 - env matrix: PI_TOOL_PARALLELISM_DISABLED and PI_TOOL_CONCURRENCY", () => {
 		const originalDisabled = process.env.PI_TOOL_PARALLELISM_DISABLED;

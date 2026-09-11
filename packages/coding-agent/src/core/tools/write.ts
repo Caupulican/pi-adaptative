@@ -16,6 +16,7 @@ import {
 	type FileContentReference,
 	FileMutationIntentController,
 	FileMutationPreflightError,
+	resolveMutationPathTarget,
 } from "./file-mutation-intent.ts";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -324,6 +325,7 @@ export function createWriteToolDefinition(
 			"write is create-only; edit existing files. Reuse contentRef for exact copies.",
 		],
 		parameters: writeSchema,
+		mutationTarget: resolveMutationPathTarget,
 		failureRecovery: {
 			getFailureTargets: (params, failure) =>
 				failure.failureCode === "mutation_retarget_required"
@@ -363,7 +365,7 @@ export function createWriteToolDefinition(
 					: []),
 			],
 		},
-		async execute(_toolCallId, input: WriteToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
+		async execute(toolCallId, input: WriteToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
 			const { path } = input;
 			const absolutePath = intentController.resolvePath(path, cwd);
 			const content = "content" in input && typeof input.content === "string" ? input.content : undefined;
@@ -376,57 +378,65 @@ export function createWriteToolDefinition(
 			}
 			try {
 				const lease = await intentController.prepare("write", absolutePath, signal, path);
-				return await intentController.withMutationQueue(absolutePath, async () => {
-					// Do not reject from an abort event listener here: that would release the
-					// mutation queue while an in-flight filesystem operation may still finish.
-					// Checking signal.aborted after each await observes the same aborts while
-					// keeping the queue locked until the current operation has settled.
-					const throwIfAborted = (): void => {
-						if (signal?.aborted) throw new Error("Operation aborted");
-					};
+				return await intentController.withMutationQueue(
+					absolutePath,
+					async () => {
+						// Do not reject from an abort event listener here: that would release the
+						// mutation queue while an in-flight filesystem operation may still finish.
+						// Checking signal.aborted after each await observes the same aborts while
+						// keeping the queue locked until the current operation has settled.
+						const throwIfAborted = (): void => {
+							if (signal?.aborted) throw new Error("Operation aborted");
+						};
 
-					throwIfAborted();
-					await intentController.assertCurrent(lease, signal);
-					await ops.mkdir(intentController.parentPath(absolutePath));
-					throwIfAborted();
+						throwIfAborted();
+						await intentController.assertCurrent(lease, signal);
+						await ops.mkdir(intentController.parentPath(absolutePath));
+						throwIfAborted();
 
-					let contentReference: FileContentReference;
-					try {
-						if (content !== undefined) {
-							await ops.createFile(absolutePath, content);
-							contentReference = intentController.rememberContent(absolutePath, content);
-						} else if (contentRef !== undefined) {
-							contentReference = await intentController.copyReferencedContent(contentRef, absolutePath, signal);
-						} else {
-							if (payloadRef === undefined) throw new Error("Write requires a payload reference.");
-							contentReference = await intentController.copyMutationPayload(payloadRef, absolutePath, signal);
+						let contentReference: FileContentReference;
+						try {
+							if (content !== undefined) {
+								await ops.createFile(absolutePath, content);
+								contentReference = intentController.rememberContent(absolutePath, content);
+							} else if (contentRef !== undefined) {
+								contentReference = await intentController.copyReferencedContent(
+									contentRef,
+									absolutePath,
+									signal,
+								);
+							} else {
+								if (payloadRef === undefined) throw new Error("Write requires a payload reference.");
+								contentReference = await intentController.copyMutationPayload(payloadRef, absolutePath, signal);
+							}
+						} catch (error) {
+							if (typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST") {
+								throw new FileMutationPreflightError(
+									"write_collision",
+									`Write collision: ${path} already exists; no content was overwritten.`,
+								);
+							}
+							throw error;
 						}
-					} catch (error) {
-						if (typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST") {
-							throw new FileMutationPreflightError(
-								"write_collision",
-								`Write collision: ${path} already exists; no content was overwritten.`,
-							);
-						}
-						throw error;
-					}
-					throwIfAborted();
+						throwIfAborted();
 
-					const byteCount = contentReference.byteLength;
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `Successfully wrote ${byteCount} bytes to ${path}; this write is complete, so do not call write again for this path. To copy these exact bytes to a different new path, call write once for that path with contentRef ${contentReference.contentRef}.`,
+						const byteCount = contentReference.byteLength;
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: `Successfully wrote ${byteCount} bytes to ${path}; this write is complete, so do not call write again for this path. To copy these exact bytes to a different new path, call write once for that path with contentRef ${contentReference.contentRef}.`,
+								},
+							],
+							details: {
+								phase: "written" as const,
+								contentRef: contentReference.contentRef,
+								byteCount,
 							},
-						],
-						details: {
-							phase: "written" as const,
-							contentRef: contentReference.contentRef,
-							byteCount,
-						},
-					};
-				});
+						};
+					},
+					{ callId: toolCallId },
+				);
 			} catch (error) {
 				if (error instanceof FileMutationPreflightError && error.reason === "write_collision") {
 					throw await writeCollisionWithRetainedPayload(error, input, intentController, signal);

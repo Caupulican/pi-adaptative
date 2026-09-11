@@ -17,6 +17,7 @@ export function wrapToolDefinition<TParameters extends TSchema, TDetails = unkno
 		failureRecovery: definition.failureRecovery,
 		bindInvocation: definition.bindInvocation?.bind(definition),
 		executionMode: definition.executionMode,
+		mutationTarget: definition.mutationTarget?.bind(definition),
 		execute: (toolCallId, params, signal, onUpdate) =>
 			definition.execute(toolCallId, params, signal, onUpdate, ctxFactory?.() as ExtensionContext),
 	};
@@ -49,6 +50,7 @@ export function createToolDefinitionFromAgentTool<TParameters extends TSchema, T
 		failureRecovery: tool.failureRecovery,
 		bindInvocation: tool.bindInvocation?.bind(tool),
 		executionMode: tool.executionMode,
+		mutationTarget: tool.mutationTarget?.bind(tool),
 		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),
 	};
 }
