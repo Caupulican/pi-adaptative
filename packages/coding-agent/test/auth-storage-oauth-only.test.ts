@@ -1,6 +1,6 @@
 import { type OAuthCredentials, registerOAuthProvider, unregisterOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AuthStorage } from "../src/core/auth-storage.ts";
+import { AuthStorage, OAuthCredentialUnusableError } from "../src/core/auth-storage.ts";
 
 const provider = "imagegen-oauth-test";
 afterEach(() => {
@@ -46,7 +46,7 @@ describe("OAuth-only credential resolution", () => {
 		expect(await store.getApiKey(provider)).toBe("api-key");
 	});
 
-	it("failed refresh cannot fall back to a configured key", async () => {
+	it("a failed refresh is reported, never silently replaced by a configured key", async () => {
 		registerOAuthProvider({
 			id: provider,
 			name: "Test",
@@ -61,8 +61,12 @@ describe("OAuth-only credential resolution", () => {
 		const store = AuthStorage.inMemory({
 			[provider]: { type: "oauth", access: "expired", refresh: "refresh", expires: 0 },
 		});
-		store.setFallbackResolver(() => "fallback-key");
-		expect(await store.getOAuthApiKey(provider)).toBeUndefined();
-		expect(await store.getApiKey(provider)).toBeUndefined();
+		const fallback = vi.fn(() => "fallback-key");
+		store.setFallbackResolver(fallback);
+
+		// The credential is stored and expired: the caller must learn that, not "no API key".
+		await expect(store.getOAuthApiKey(provider)).rejects.toBeInstanceOf(OAuthCredentialUnusableError);
+		await expect(store.getApiKey(provider)).rejects.toThrow(/expired on .* and could not be refreshed/);
+		expect(fallback).not.toHaveBeenCalled();
 	});
 });

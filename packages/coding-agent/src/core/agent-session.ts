@@ -5,6 +5,7 @@ import type { CompactionResult, CompactionSettings } from "@caupulican/pi-agent-
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
 import { type CustomMessage, createCustomMessage } from "@caupulican/pi-agent-core/messages";
 import {
+	DEFAULT_CLOUD_STREAM_IDLE,
 	DEFAULT_STREAM_IDLE,
 	type StreamIdleOptions,
 	withStreamIdleWatchdog,
@@ -191,7 +192,13 @@ import { hasRunningBackgroundedToolCall, isSessionSettled } from "./session-sett
 import { createSessionShutdownTracker } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
-import type { ResourceProfileFilterSettings, SettingsManager, SettingsScope } from "./settings-manager.ts";
+import type {
+	ResourceProfileFilterSettings,
+	SettingsManager,
+	SettingsScope,
+	StreamStallModelClass,
+	StreamStallSettings,
+} from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
@@ -232,6 +239,37 @@ let streamIdleOptionsOverride: Partial<StreamIdleOptions> | undefined;
  */
 export function setStreamIdleOptionsForTests(opts: Partial<StreamIdleOptions> | undefined): void {
 	streamIdleOptionsOverride = opts;
+}
+
+/** The settings surface the stall resolver needs; the session passes its SettingsManager. */
+export interface StreamStallSettingsSource {
+	getStreamStallSettings(modelClass: StreamStallModelClass): StreamStallSettings;
+}
+
+/**
+ * Stall bounds for one model, resolved from the budget its class draws on.
+ *
+ * A CPU-served local model legitimately sits silent for minutes while it loads and prefills, so
+ * its bounds are generous; a hosted stream silent that long is dead, and waiting out the local
+ * bound burns the turn. One shared budget could only ever serve one of the two, so the class
+ * picks both the configured budget (`retry.stall.local` / `retry.stall.cloud`, with the legacy
+ * top-level keys standing in for `local`) and the defaults the unset fields fall back to.
+ *
+ * Unset fields are left at the class default rather than copied over as `undefined`: the HTTP
+ * clamp downstream re-defaults any undefined bound to DEFAULT_STREAM_IDLE, which would silently
+ * hand a cloud stream the local quiet bound.
+ */
+export function resolveStreamStallBudget(
+	model: Model<Api>,
+	settings: StreamStallSettingsSource,
+): { modelClass: StreamStallModelClass; base: StreamIdleOptions } {
+	const modelClass: StreamStallModelClass = isLocalOrManagedRouterModel(model) ? "local" : "cloud";
+	const configured = settings.getStreamStallSettings(modelClass);
+	const base: StreamIdleOptions = { ...(modelClass === "local" ? DEFAULT_STREAM_IDLE : DEFAULT_CLOUD_STREAM_IDLE) };
+	if (configured.connectMs !== undefined) base.connectMs = configured.connectMs;
+	if (configured.activeIdleMs !== undefined) base.activeIdleMs = configured.activeIdleMs;
+	if (configured.quietIdleMs !== undefined) base.quietIdleMs = configured.quietIdleMs;
+	return { modelClass, base };
 }
 
 /**
@@ -462,16 +500,15 @@ export class AgentSession {
 		this.agent.streamFn = tagRawness(
 			withStreamIdleWatchdog(profiledStreamFn, (model, context) => {
 				const configured = {
-					...stallSettingsSource.getStreamStallSettings(),
+					// Local/managed models and cloud providers draw on separate budgets; see
+					// resolveStreamStallBudget.
+					...resolveStreamStallBudget(model, stallSettingsSource).base,
 					// The output repetition guard's threshold follows the model's capability tier.
 					outputRepetitionRepeats: this.getCapabilityTierPolicy().repetitionGuardRepeats,
 					...streamIdleOptionsOverride,
 				};
 				const httpIdleTimeoutMs = stallSettingsSource.getHttpIdleTimeoutMs();
-				const httpBounded = constrainStreamIdleToHttpTimeout(
-					{ ...DEFAULT_STREAM_IDLE, ...configured },
-					httpIdleTimeoutMs,
-				);
+				const httpBounded = constrainStreamIdleToHttpTimeout(configured, httpIdleTimeoutMs);
 				const profile = modelAdaptationStore.get(formatModelRouterModel(model)).perf;
 				const adaptive = resolveAdaptiveStreamIdleOptions({
 					base: httpBounded.options,

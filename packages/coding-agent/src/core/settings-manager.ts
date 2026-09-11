@@ -139,17 +139,34 @@ export interface ProviderRetrySettings {
 }
 
 export interface StreamStallSettings {
-	connectMs?: number; // default: 120000 — max wait for the first stream event
-	activeIdleMs?: number; // default: 180000 — max event gap while content is flowing
-	quietIdleMs?: number; // default: 600000 — max event gap during prefill/unstreamed thinking; clamped below nonzero httpIdleTimeoutMs
+	connectMs?: number; // max wait for the first stream event (default: local 120000, cloud 120000)
+	activeIdleMs?: number; // max event gap while content is flowing (default: local 180000, cloud 120000)
+	quietIdleMs?: number; // max event gap during prefill/unstreamed thinking, clamped below nonzero httpIdleTimeoutMs (default: local 600000, cloud 300000)
 }
+
+/**
+ * Stream-stall bounds, split by model class: a CPU-served local model legitimately sits silent
+ * for minutes while it loads and prefills, a hosted stream that goes quiet that long is dead.
+ * `local` governs local and pi-managed models, `cloud` every hosted provider.
+ *
+ * The top-level bounds predate the split and still work: they are the `local` budget (a `local`
+ * entry wins field by field over them), and while they are set without a `cloud` entry the
+ * manager reports once that cloud providers are now governed by `retry.stall.cloud`.
+ */
+export interface StreamStallBudgetSettings extends StreamStallSettings {
+	local?: StreamStallSettings;
+	cloud?: StreamStallSettings;
+}
+
+/** Which stall budget a model draws on; see {@link StreamStallBudgetSettings}. */
+export type StreamStallModelClass = "local" | "cloud";
 
 export interface RetrySettings {
 	enabled?: boolean; // default: true
 	maxRetries?: number; // default: 3
 	baseDelayMs?: number; // default: 2000 (exponential backoff: 2s, 4s, 8s)
 	provider?: ProviderRetrySettings;
-	stall?: StreamStallSettings; // stream-stall watchdog bounds (pi-agent-core reliability/watchdogs.ts)
+	stall?: StreamStallBudgetSettings; // stream-stall watchdog bounds per model class (pi-agent-core reliability/watchdogs.ts)
 }
 
 export interface TerminalSettings {
@@ -874,6 +891,11 @@ function parseTimeoutSetting(value: unknown, settingName: string): number | unde
 }
 
 /** Stall bounds must be strictly positive — 0 is not "disabled" here (it would stall instantly). */
+/** True when a stall block still carries the pre-split, class-less bounds. */
+function hasLegacyStreamStallBounds(stall: StreamStallBudgetSettings | undefined): boolean {
+	return stall?.connectMs !== undefined || stall?.activeIdleMs !== undefined || stall?.quietIdleMs !== undefined;
+}
+
 function parseStallBoundMs(value: unknown, settingName: string): number | undefined {
 	if (value === undefined) return undefined;
 	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
@@ -1333,6 +1355,9 @@ export class SettingsManager {
 		this.reportWorkerDelegationDiagnostics("project", this.projectSettings);
 		this.reportWorkerDelegationDiagnostics("directoryProfile", this.directoryProfileSettings);
 		this.settings = this.mergeEffectiveSettings();
+		// Reported at construction as well as from the getter so the startup drain in main.ts
+		// shows it, rather than only a later request-time read.
+		this.reportLegacyStreamStallScopeDiagnostic();
 		this.refreshProfileRegistry();
 	}
 
@@ -1366,6 +1391,35 @@ export class SettingsManager {
 		if (diagnostics.length > 0) {
 			this.recordError(scope, new Error(`Worker delegation settings: ${diagnostics.join("; ")}`));
 		}
+	}
+
+	private legacyStreamStallScopeReported = false;
+
+	/**
+	 * `retry.stall.{connectMs,activeIdleMs,quietIdleMs}` used to govern every provider. They now
+	 * govern local and pi-managed models only, so a file raised for a CPU-served model no longer
+	 * silently leaves a dead cloud stream running for its quiet bound. Reported once, through the
+	 * same channel the other settings diagnostics use, and only while no cloud budget is set (once
+	 * the user writes one, the split is deliberate and there is nothing to warn about).
+	 */
+	private reportLegacyStreamStallScopeDiagnostic(): void {
+		if (this.legacyStreamStallScopeReported) return;
+		const stall = this.settings.retry?.stall;
+		if (!hasLegacyStreamStallBounds(stall) || stall?.cloud !== undefined) return;
+		this.legacyStreamStallScopeReported = true;
+		const scope: SettingsErrorScope = hasLegacyStreamStallBounds(this.projectSettings.retry?.stall)
+			? "project"
+			: hasLegacyStreamStallBounds(this.directoryProfileSettings.retry?.stall)
+				? "directoryProfile"
+				: "global";
+		this.recordError(
+			scope,
+			new Error(
+				"retry.stall.connectMs/activeIdleMs/quietIdleMs now apply to local and pi-managed models only; " +
+					"cloud providers use retry.stall.cloud (defaults: connect 120000ms, active idle 120000ms, quiet idle 300000ms). " +
+					"Move them under retry.stall.local, and set retry.stall.cloud, to make the split explicit.",
+			),
+		);
 	}
 
 	private getActiveProfileNamesForDiagnostics(): string[] {
@@ -3204,16 +3258,28 @@ export class SettingsManager {
 	}
 
 	/**
-	 * Stream-stall watchdog bounds (pi-agent-core reliability/watchdogs.ts). Returns only the
-	 * fields the user set, validated; unset fields fall back to DEFAULT_STREAM_IDLE at the
-	 * wiring site (agent-session constructor). Resolved per request, so edits apply live.
+	 * Stream-stall watchdog bounds (pi-agent-core reliability/watchdogs.ts) for one model class.
+	 * Returns only the fields the user set, validated; unset fields fall back to that class's
+	 * defaults at the wiring site (agent-session's stall resolver), which are DEFAULT_STREAM_IDLE
+	 * for `local` and DEFAULT_CLOUD_STREAM_IDLE for `cloud`. Resolved per request, so edits apply
+	 * live. The legacy top-level bounds are the `local` budget; a `local` entry overrides them
+	 * field by field. See {@link StreamStallBudgetSettings}.
 	 */
-	getStreamStallSettings(): { connectMs?: number; activeIdleMs?: number; quietIdleMs?: number } {
+	getStreamStallSettings(modelClass: StreamStallModelClass): StreamStallSettings {
+		this.reportLegacyStreamStallScopeDiagnostic();
 		const stall = this.settings.retry?.stall;
+		const named = modelClass === "local" ? stall?.local : stall?.cloud;
+		const read = (field: keyof StreamStallSettings): number | undefined => {
+			if (named?.[field] !== undefined) {
+				return parseStallBoundMs(named[field], `retry.stall.${modelClass}.${field}`);
+			}
+			// Only the local budget inherits the pre-split keys; a cloud stream never did.
+			return modelClass === "local" ? parseStallBoundMs(stall?.[field], `retry.stall.${field}`) : undefined;
+		};
 		return {
-			connectMs: parseStallBoundMs(stall?.connectMs, "retry.stall.connectMs"),
-			activeIdleMs: parseStallBoundMs(stall?.activeIdleMs, "retry.stall.activeIdleMs"),
-			quietIdleMs: parseStallBoundMs(stall?.quietIdleMs, "retry.stall.quietIdleMs"),
+			connectMs: read("connectMs"),
+			activeIdleMs: read("activeIdleMs"),
+			quietIdleMs: read("quietIdleMs"),
 		};
 	}
 

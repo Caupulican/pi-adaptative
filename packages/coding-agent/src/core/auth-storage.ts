@@ -42,6 +42,46 @@ export type AuthCredential = ApiKeyCredential | OAuthCredential;
 
 export type AuthStorageData = Record<string, AuthCredential>;
 
+/** A run of 24+ unbroken token characters: access/refresh tokens and JWT segments look like this,
+ *  provider ids and ordinary prose do not. */
+const TOKEN_LIKE_RE = /[A-Za-z0-9_]{24,}/g;
+
+/** The failure text a provider or the lock layer produced, with anything token-shaped removed. */
+function redactRefreshFailureReason(error: unknown): string {
+	const raw = error instanceof Error ? error.message : String(error);
+	const redacted = raw.replace(TOKEN_LIKE_RE, "[redacted]").trim();
+	if (redacted.length === 0) return "no reason reported";
+	return redacted.length > 300 ? `${redacted.slice(0, 300)}...` : redacted;
+}
+
+/**
+ * A stored OAuth credential exists for the provider but cannot produce a usable key: it expired
+ * and the refresh failed, was refused, or could not be attempted.
+ *
+ * This is not "no API key". The credential is there, so telling the user no key is configured
+ * sends them to the wrong fix; the message names the credential, when it expired, why the refresh
+ * failed, and the command that repairs it. The message is the user-facing text: layers that flatten
+ * a rejection to its message (the model registry's request-auth resolution does) pass it through
+ * unchanged, and structured consumers read {@link providerId}, {@link expiresAt} and {@link reason}.
+ */
+export class OAuthCredentialUnusableError extends Error {
+	readonly providerId: string;
+	readonly expiresAt: Date;
+	readonly reason: string;
+
+	constructor(providerId: string, expiresAtMs: number, reason: string) {
+		const expiresAt = new Date(expiresAtMs);
+		super(
+			`OAuth credential for ${providerId} expired on ${expiresAt.toISOString()} and could not be refreshed ` +
+				`(${reason}). Run pi login ${providerId} to reauthorize.`,
+		);
+		this.name = "OAuthCredentialUnusableError";
+		this.providerId = providerId;
+		this.expiresAt = expiresAt;
+		this.reason = reason;
+	}
+}
+
 export type AuthStatus = {
 	configured: boolean;
 	source?: "stored" | "runtime" | "environment" | "fallback" | "models_json_key" | "models_json_command";
@@ -470,21 +510,42 @@ export class AuthStorage {
 		});
 	}
 
-	/** Stored OAuth only: never executes key commands or resolves runtime/env/fallback API keys. */
+	/**
+	 * Stored OAuth only: never executes key commands or resolves runtime/env/fallback API keys.
+	 *
+	 * Returns undefined when the provider has no stored OAuth credential at all. When one exists
+	 * but is expired and unusable, this throws {@link OAuthCredentialUnusableError} instead of
+	 * returning undefined — an expired credential is a different failure from a missing one, and
+	 * reporting it as "no API key" hid a four-day-stale token behind the wrong instruction.
+	 */
 	async getOAuthApiKey(providerId: string): Promise<string | undefined> {
 		const cred = this.data[providerId];
 		const provider = getOAuthProvider(providerId);
 		if (cred?.type !== "oauth" || !provider || this.loadError) return undefined;
 		if (Date.now() < cred.expires) return provider.getApiKey(cred);
 		try {
-			return (await this.refreshOAuthTokenWithLock(providerId))?.apiKey;
+			const refreshed = (await this.refreshOAuthTokenWithLock(providerId))?.apiKey;
+			if (refreshed !== undefined) return refreshed;
+			// No refresh happened. Either the credential is gone from the file (another process
+			// logged out — then there genuinely is no credential) or it is still the expired one.
+			const current = this.data[providerId];
+			if (current?.type !== "oauth") return undefined;
+			if (Date.now() < current.expires) return provider.getApiKey(current);
+			throw new OAuthCredentialUnusableError(
+				providerId,
+				current.expires,
+				"the stored refresh token was refused or is no longer present",
+			);
 		} catch (error) {
+			if (error instanceof OAuthCredentialUnusableError) throw error;
 			this.recordError(error);
 			this.reload();
 			const updated = this.data[providerId];
-			return !this.loadError && updated?.type === "oauth" && Date.now() < updated.expires
-				? provider.getApiKey(updated)
-				: undefined;
+			if (!this.loadError && updated?.type === "oauth" && Date.now() < updated.expires) {
+				return provider.getApiKey(updated);
+			}
+			const expiresAt = updated?.type === "oauth" ? updated.expires : cred.expires;
+			throw new OAuthCredentialUnusableError(providerId, expiresAt, redactRefreshFailureReason(error));
 		}
 	}
 
@@ -496,6 +557,10 @@ export class AuthStorage {
 	 * 3. OAuth token from auth.json (auto-refreshed with locking)
 	 * 4. Environment variable
 	 * 5. Fallback resolver (models.json custom providers)
+	 *
+	 * Throws {@link OAuthCredentialUnusableError} when the provider's stored OAuth credential is
+	 * expired and unrefreshable: that is a different failure from "no key configured", and the
+	 * lower-priority sources below it must not quietly stand in for the credential the user chose.
 	 */
 	async getApiKey(providerId: string, options?: { includeFallback?: boolean }): Promise<string | undefined> {
 		// Runtime override takes highest priority

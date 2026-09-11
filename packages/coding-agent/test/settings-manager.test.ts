@@ -62,7 +62,12 @@ describe("SettingsManager", () => {
 				maxRetries: 7,
 				maxRetryDelayMs: 5000,
 			});
-			expect(manager.getStreamStallSettings()).toEqual({ connectMs: 10, activeIdleMs: 20, quietIdleMs: 30 });
+			expect(manager.getStreamStallSettings("local")).toEqual({ connectMs: 10, activeIdleMs: 20, quietIdleMs: 30 });
+			expect(manager.getStreamStallSettings("cloud")).toEqual({
+				connectMs: undefined,
+				activeIdleMs: undefined,
+				quietIdleMs: undefined,
+			});
 			expect(manager.getEnabledModels()).toEqual(["project/model"]);
 		});
 	});
@@ -1997,31 +2002,94 @@ describe("SettingsManager", () => {
 	});
 
 	describe("stream-stall settings", () => {
-		it("returns undefined fields when unset (defaults live at the wiring site)", () => {
+		it("returns undefined fields for both model classes when unset (defaults live at the wiring site)", () => {
 			const settings = SettingsManager.inMemory({});
-			expect(settings.getStreamStallSettings()).toEqual({
+			for (const modelClass of ["local", "cloud"] as const) {
+				expect(settings.getStreamStallSettings(modelClass)).toEqual({
+					connectMs: undefined,
+					activeIdleMs: undefined,
+					quietIdleMs: undefined,
+				});
+			}
+		});
+
+		it("reads the legacy top-level bounds as the local budget and leaves the cloud budget unset", () => {
+			const settings = SettingsManager.inMemory({
+				retry: { stall: { connectMs: 300_000, activeIdleMs: 300_000, quietIdleMs: 900_000 } },
+			});
+			expect(settings.getStreamStallSettings("local")).toEqual({
+				connectMs: 300_000,
+				activeIdleMs: 300_000,
+				quietIdleMs: 900_000,
+			});
+			expect(settings.getStreamStallSettings("cloud")).toEqual({
 				connectMs: undefined,
 				activeIdleMs: undefined,
 				quietIdleMs: undefined,
 			});
 		});
 
-		it("returns validated user-set bounds", () => {
+		it("reports the legacy keys' narrowed scope exactly once through the settings diagnostics channel", () => {
+			const settings = SettingsManager.inMemory({ retry: { stall: { quietIdleMs: 900_000 } } });
+			settings.getStreamStallSettings("local");
+			settings.getStreamStallSettings("cloud");
+			const messages = settings
+				.drainErrors()
+				.map(({ error }) => error.message)
+				.filter((message) => message.includes("retry.stall"));
+			expect(messages).toHaveLength(1);
+			expect(messages[0]).toMatch(/local/);
+			expect(messages[0]).toMatch(/retry\.stall\.cloud/);
+			settings.getStreamStallSettings("cloud");
+			expect(settings.drainErrors()).toEqual([]);
+		});
+
+		it("stays silent about the legacy keys once a cloud budget is configured", () => {
 			const settings = SettingsManager.inMemory({
-				retry: { stall: { connectMs: 60_000, activeIdleMs: 360_000, quietIdleMs: 900_000 } },
+				retry: { stall: { quietIdleMs: 900_000, cloud: { quietIdleMs: 300_000 } } },
 			});
-			expect(settings.getStreamStallSettings()).toEqual({
-				connectMs: 60_000,
-				activeIdleMs: 360_000,
+			settings.getStreamStallSettings("local");
+			settings.getStreamStallSettings("cloud");
+			expect(
+				settings
+					.drainErrors()
+					.map(({ error }) => error.message)
+					.filter((message) => message.includes("retry.stall")),
+			).toEqual([]);
+		});
+
+		it("returns each named budget, with an explicit local bound overriding the legacy key it replaces", () => {
+			const settings = SettingsManager.inMemory({
+				retry: {
+					stall: {
+						connectMs: 300_000,
+						quietIdleMs: 900_000,
+						local: { connectMs: 240_000 },
+						cloud: { connectMs: 120_000, activeIdleMs: 120_000, quietIdleMs: 300_000 },
+					},
+				},
+			});
+			expect(settings.getStreamStallSettings("local")).toEqual({
+				connectMs: 240_000,
+				activeIdleMs: undefined,
 				quietIdleMs: 900_000,
+			});
+			expect(settings.getStreamStallSettings("cloud")).toEqual({
+				connectMs: 120_000,
+				activeIdleMs: 120_000,
+				quietIdleMs: 300_000,
 			});
 		});
 
-		it("rejects zero/negative/non-numeric bounds loudly (a 0 bound would stall instantly)", () => {
+		it("rejects zero/negative/non-numeric bounds loudly, naming the exact key (a 0 bound would stall instantly)", () => {
 			const zero = SettingsManager.inMemory({ retry: { stall: { quietIdleMs: 0 } } });
-			expect(() => zero.getStreamStallSettings()).toThrow(/retry.stall.quietIdleMs/);
-			const negative = SettingsManager.inMemory({ retry: { stall: { activeIdleMs: -5 } } });
-			expect(() => negative.getStreamStallSettings()).toThrow(/retry.stall.activeIdleMs/);
+			expect(() => zero.getStreamStallSettings("local")).toThrow(/retry\.stall\.quietIdleMs/);
+			const negative = SettingsManager.inMemory({ retry: { stall: { local: { activeIdleMs: -5 } } } });
+			expect(() => negative.getStreamStallSettings("local")).toThrow(/retry\.stall\.local\.activeIdleMs/);
+			const cloud = SettingsManager.inMemory({
+				retry: { stall: { cloud: { connectMs: "soon" as unknown as number } } },
+			});
+			expect(() => cloud.getStreamStallSettings("cloud")).toThrow(/retry\.stall\.cloud\.connectMs/);
 		});
 	});
 });

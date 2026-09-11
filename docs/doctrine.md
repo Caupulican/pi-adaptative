@@ -326,6 +326,28 @@ measured against one real loop and a legitimately repetitive output must not cos
 Pinned by `packages/coding-agent/test/agent-session-runaway-escalation.test.ts` and
 `packages/coding-agent/test/capability-tier.test.ts`.
 
+**A stall budget belongs to a model class, never to every provider at once.** Local and
+pi-managed models draw on `retry.stall.local` (the legacy top-level `connectMs` / `activeIdleMs` /
+`quietIdleMs` keys are that budget, a `local` entry overrides them field by field) over the
+generous `DEFAULT_STREAM_IDLE` bounds; every hosted provider draws on `retry.stall.cloud` over
+`DEFAULT_CLOUD_STREAM_IDLE` (connect 120 s, active 120 s, quiet 300 s). An unset field keeps its
+class default rather than falling through the HTTP clamp to the local default. While legacy keys
+are set without a `cloud` entry the settings diagnostics say so once at startup. Why: a CPU-served
+local model legitimately sits silent for minutes while it loads, a hosted stream silent that long
+is dead, and one shared budget raised for the first left dead cloud streams running for fifteen
+minutes. Pinned by `packages/coding-agent/test/stream-stall-model-class.test.ts` and
+`packages/coding-agent/test/settings-manager.test.ts`.
+
+**An expired credential is never reported as a missing one.** A stored OAuth credential that is
+past its expiry and cannot be refreshed fails as `OAuthCredentialUnusableError`: the provider,
+the expiry date, the redacted refresh failure and `Run pi login <provider>`; lower-priority key
+sources never stand in for the credential the user chose, and only a provider with no stored
+credential at all reads `No API key`. Why: a four-day-stale token surfaced as "No API key for
+provider: xai", which points at the wrong fix. Pinned by
+`packages/coding-agent/test/auth-storage.test.ts`,
+`packages/coding-agent/test/auth-storage-oauth-only.test.ts` and
+`packages/coding-agent/test/agent-session-oauth-credential-expired.test.ts`.
+
 ## Workers
 
 **Workers deny by default and never exceed the parent's surface.** A worker's tools come from the

@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerOAuthProvider } from "@caupulican/pi-ai/oauth";
+import { type OAuthCredentials, registerOAuthProvider } from "@caupulican/pi-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { AuthStorage } from "../src/core/auth-storage.ts";
+import { AuthStorage, OAuthCredentialUnusableError } from "../src/core/auth-storage.ts";
 import { clearConfigValueCache } from "../src/core/resolve-config-value.ts";
 import {
 	createCounterConfigCommand,
@@ -436,33 +436,44 @@ describe("AuthStorage", () => {
 		});
 	});
 
-	describe("oauth lock compromise handling", () => {
-		test("returns undefined on compromised lock and allows a later retry", async () => {
-			const providerId = `test-oauth-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-			registerOAuthProvider({
-				id: providerId,
-				name: "Test OAuth Provider",
-				async login() {
-					throw new Error("Not used in this test");
-				},
-				async refreshToken(credentials) {
-					return {
-						...credentials,
-						access: "refreshed-access-token",
-						expires: Date.now() + 60_000,
-					};
-				},
-				getApiKey(credentials) {
-					return `Bearer ${credentials.access}`;
-				},
-			});
+	function registerTestOAuthProvider(refreshToken: (credentials: OAuthCredentials) => Promise<OAuthCredentials>) {
+		const providerId = `test-oauth-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		registerOAuthProvider({
+			id: providerId,
+			name: "Test OAuth Provider",
+			async login() {
+				throw new Error("Not used in this test");
+			},
+			refreshToken,
+			getApiKey(credentials) {
+				return `Bearer ${credentials.access}`;
+			},
+		});
+		return providerId;
+	}
 
+	async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+		return promise.then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+	}
+
+	describe("oauth lock compromise handling", () => {
+		test("reports the compromised lock as an unusable credential and allows a later retry", async () => {
+			const providerId = registerTestOAuthProvider(async (credentials) => ({
+				...credentials,
+				access: "refreshed-access-token",
+				expires: Date.now() + 60_000,
+			}));
+
+			const expires = Date.now() - 10_000;
 			writeAuthJson({
 				[providerId]: {
 					type: "oauth",
 					refresh: "refresh-token",
 					access: "expired-access-token",
-					expires: Date.now() - 10_000,
+					expires,
 				},
 			});
 
@@ -475,13 +486,99 @@ describe("AuthStorage", () => {
 				return realLock(file, options);
 			});
 
-			const firstTry = await authStorage.getApiKey(providerId);
-			expect(firstTry).toBeUndefined();
+			// The credential exists and is expired: saying "no API key" would be false, so the
+			// failed refresh is reported instead.
+			const failure = await rejectionOf(authStorage.getApiKey(providerId));
+			expect(failure).toBeInstanceOf(OAuthCredentialUnusableError);
+			expect((failure as OAuthCredentialUnusableError).reason).toMatch(/lock/i);
 
 			lockSpy.mockRestore();
 
 			const secondTry = await authStorage.getApiKey(providerId);
 			expect(secondTry).toBe("Bearer refreshed-access-token");
+		});
+	});
+
+	describe("unusable oauth credentials", () => {
+		test("an expired credential whose refresh fails names the provider, the expiry and the reason", async () => {
+			const providerId = registerTestOAuthProvider(async () => {
+				throw new Error("offline");
+			});
+			const expires = Date.now() - 4 * 24 * 60 * 60 * 1000;
+			writeAuthJson({
+				[providerId]: { type: "oauth", refresh: "refresh-token", access: "expired-access-token", expires },
+			});
+			authStorage = AuthStorage.create(authJsonPath);
+
+			const failure = (await rejectionOf(authStorage.getOAuthApiKey(providerId))) as OAuthCredentialUnusableError;
+
+			expect(failure).toBeInstanceOf(OAuthCredentialUnusableError);
+			expect(failure.providerId).toBe(providerId);
+			expect(failure.expiresAt.toISOString()).toBe(new Date(expires).toISOString());
+			expect(failure.reason.length).toBeGreaterThan(0);
+			expect(failure.message).toBe(
+				`OAuth credential for ${providerId} expired on ${new Date(expires).toISOString()} ` +
+					`and could not be refreshed (${failure.reason}). Run pi login ${providerId} to reauthorize.`,
+			);
+			// The whole point: the key exists, so "no API key" would be a lie.
+			expect(failure.message).not.toContain("No API key");
+			expect(await rejectionOf(authStorage.getApiKey(providerId))).toBeInstanceOf(OAuthCredentialUnusableError);
+		});
+
+		test("keeps tokens out of the reported reason", async () => {
+			const providerId = registerTestOAuthProvider(async (credentials) => ({
+				...credentials,
+				access: "refreshed-access-token",
+				expires: Date.now() + 60_000,
+			}));
+			writeAuthJson({
+				[providerId]: {
+					type: "oauth",
+					refresh: "refresh-token",
+					access: "expired-access-token",
+					expires: Date.now() - 10_000,
+				},
+			});
+			authStorage = AuthStorage.create(authJsonPath);
+
+			const secretToken = "sk-livetokenABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+			const lockSpy = vi.spyOn(lockfile, "lock");
+			lockSpy.mockImplementationOnce(async () => {
+				throw new Error(`refresh rejected for ${secretToken}`);
+			});
+
+			const failure = (await rejectionOf(authStorage.getOAuthApiKey(providerId))) as OAuthCredentialUnusableError;
+
+			expect(failure).toBeInstanceOf(OAuthCredentialUnusableError);
+			expect(failure.reason).not.toContain(secretToken);
+			expect(failure.message).not.toContain(secretToken);
+			expect(failure.reason).toContain("[redacted]");
+		});
+
+		test("a provider with no stored credential still resolves to nothing instead of failing", async () => {
+			const providerId = registerTestOAuthProvider(async (credentials) => credentials);
+			writeAuthJson({});
+			authStorage = AuthStorage.create(authJsonPath);
+
+			expect(await authStorage.getOAuthApiKey(providerId)).toBeUndefined();
+			expect(await authStorage.getApiKey(providerId)).toBeUndefined();
+		});
+
+		test("an unexpired credential is returned without a refresh", async () => {
+			const refresh = vi.fn(async (credentials: OAuthCredentials) => credentials);
+			const providerId = registerTestOAuthProvider(refresh);
+			writeAuthJson({
+				[providerId]: {
+					type: "oauth",
+					refresh: "refresh-token",
+					access: "live-access-token",
+					expires: Date.now() + 600_000,
+				},
+			});
+			authStorage = AuthStorage.create(authJsonPath);
+
+			expect(await authStorage.getOAuthApiKey(providerId)).toBe("Bearer live-access-token");
+			expect(refresh).not.toHaveBeenCalled();
 		});
 	});
 

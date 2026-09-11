@@ -115,6 +115,20 @@ export const DEFAULT_STREAM_IDLE: StreamIdleOptions = {
 	quietIdleMs: 600_000,
 };
 
+/** Defaults for a cloud provider: connect 120s / first progress 120s / active 120s / quiet 300s.
+ *  A hosted stream that goes silent is dead or wedged; the minutes of legitimate silence that
+ *  {@link DEFAULT_STREAM_IDLE} allows are a property of a CPU-served local model loading and
+ *  prefilling, not of a cloud endpoint. Connect stays at 120s because first-token waits of 65s
+ *  were measured on xAI at high reasoning, and the quiet bound still has to sit below the HTTP
+ *  dispatcher idle timeout. Hosts pick the set with the model's class; see the coding-agent
+ *  session's stall resolver and `retry.stall.{local,cloud}`. */
+export const DEFAULT_CLOUD_STREAM_IDLE: StreamIdleOptions = {
+	...DEFAULT_STREAM_IDLE,
+	connectMs: 120_000,
+	activeIdleMs: 120_000,
+	quietIdleMs: 300_000,
+};
+
 /** Re-resolved at the start of every request, so hosts can wire live-tunable settings. */
 export type StreamIdleOptionsResolver = (...args: Parameters<StreamFn>) => Partial<StreamIdleOptions>;
 
