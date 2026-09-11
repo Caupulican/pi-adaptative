@@ -68,6 +68,20 @@ function workspaceOf(path) {
 	return match?.[1];
 }
 
+/**
+ * Split biome's staged files into the ones whose working copy equals the index (biome may format
+ * them in place and the gate restages them) and the partially staged ones (unstaged hunks on top
+ * of the staged content). Restaging a partially staged file would sweep its unstaged hunks into the
+ * commit, so those files are only checked, on their staged content, never rewritten or restaged.
+ */
+export function partitionBiomeFiles(biomeFiles, unstagedChangedFiles) {
+	const partial = new Set(unstagedChangedFiles);
+	return {
+		whole: biomeFiles.filter((path) => !partial.has(path)),
+		partiallyStaged: biomeFiles.filter((path) => partial.has(path)),
+	};
+}
+
 /** Pure planner: staged repo-relative paths plus biome includes → the gates this commit buys. */
 export function planStagedGates(staged, options) {
 	const files = staged.map((path) => path.replaceAll("\\", "/"));
@@ -139,16 +153,40 @@ export function main(argv = process.argv.slice(2)) {
 	run("info-exclude guard", process.execPath, [join(scriptsDir, "check-info-exclude-staged.mjs")]);
 	run("lockfile guard", process.execPath, [join(scriptsDir, "check-lockfile-commit.mjs")]);
 	if (plan.biome.length > 0) {
-		run(`biome on ${plan.biome.length} staged file(s)`, process.execPath, [
-			join(repoRoot, "node_modules/@biomejs/biome/bin/biome"),
-			"check",
-			"--write",
-			"--error-on-warnings",
-			...plan.biome,
-		]);
-		// Formatting mutates the working tree; restage exactly the files it may have touched.
-		const present = plan.biome.filter((path) => existsSync(join(repoRoot, path)));
-		if (present.length > 0) execFileSync("git", ["add", "--", ...present], { cwd: repoRoot, stdio: "inherit" });
+		const biomeBin = join(repoRoot, "node_modules/@biomejs/biome/bin/biome");
+		const unstagedChanged = execFileSync("git", ["diff", "--name-only", "-z", "--", ...plan.biome], {
+			cwd: repoRoot,
+			encoding: "utf8",
+		})
+			.split("\0")
+			.map((line) => line.trim().replaceAll("\\", "/"))
+			.filter(Boolean);
+		const { whole, partiallyStaged } = partitionBiomeFiles(plan.biome, unstagedChanged);
+		if (whole.length > 0) {
+			run(`biome on ${whole.length} staged file(s)`, process.execPath, [biomeBin, "check", "--write", "--error-on-warnings", ...whole]);
+			// Formatting mutates the working tree; restage exactly the files it may have touched.
+			const present = whole.filter((path) => existsSync(join(repoRoot, path)));
+			if (present.length > 0) execFileSync("git", ["add", "--", ...present], { cwd: repoRoot, stdio: "inherit" });
+		}
+		// A partially staged file is checked on its STAGED content and never rewritten or restaged:
+		// `git add` here would commit the unstaged hunks too. Formatting it is the author's move.
+		for (const path of partiallyStaged) {
+			const staged = execFileSync("git", ["show", `:${path}`], { cwd: repoRoot });
+			const label = `biome on staged content of partially staged ${path}`;
+			process.stdout.write(`precommit: ${label}\n`);
+			const result = spawnSync(process.execPath, [biomeBin, "check", "--error-on-warnings", `--stdin-file-path=${path}`], {
+				cwd: repoRoot,
+				input: staged,
+				stdio: ["pipe", "inherit", "inherit"],
+				env: process.env,
+			});
+			if (result.status !== 0) {
+				console.error(
+					`❌ precommit: ${label} failed. Stage the formatted content (format the file, then stage the hunks you mean) or stage the whole file.`,
+				);
+				process.exit(result.status ?? 1);
+			}
+		}
 	}
 	run("contract-doctrine gate", process.execPath, [join(scriptsDir, "check-contract-doctrine.mjs")]);
 	if (plan.browserSmoke) run("browser smoke check", "npm", ["run", "check:browser-smoke"]);

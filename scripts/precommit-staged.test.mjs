@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { biomeCoveredFiles, globToRegExp, planStagedGates } from "./precommit-staged.mjs";
+import { biomeCoveredFiles, globToRegExp, partitionBiomeFiles, planStagedGates } from "./precommit-staged.mjs";
 
 const biomeIncludes = JSON.parse(readFileSync(new URL("../biome.json", import.meta.url), "utf8")).files.includes;
 
@@ -64,4 +64,13 @@ test("browser smoke runs only when its inputs are staged", () => {
 	assert.equal(planStagedGates(["package-lock.json"], { biomeIncludes }).browserSmoke, true);
 	assert.equal(planStagedGates(["packages/agent/src/agent.ts"], { biomeIncludes }).browserSmoke, false);
 	assert.equal(planStagedGates(["scripts/precommit-staged.mjs"], { biomeIncludes }).typecheck, false);
+});
+
+test("a partially staged file is checked on its staged content, never rewritten or restaged", () => {
+	const { whole, partiallyStaged } = partitionBiomeFiles(
+		["packages/coding-agent/src/a.ts", "packages/coding-agent/src/b.ts", "scripts/c.mjs"],
+		["packages/coding-agent/src/b.ts"],
+	);
+	assert.deepEqual(whole, ["packages/coding-agent/src/a.ts", "scripts/c.mjs"]);
+	assert.deepEqual(partiallyStaged, ["packages/coding-agent/src/b.ts"]);
 });
