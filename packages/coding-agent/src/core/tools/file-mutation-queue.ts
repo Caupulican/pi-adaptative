@@ -1,6 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
+import { waitInQueue } from "./abortable-queue-wait.ts";
 
 /** Share this object across cooperating controllers on one backend. Keys are backend-canonical identities. */
 export interface FileMutationQueueBackend {
@@ -196,20 +197,16 @@ export class MutationLockScope {
 			else this.holders = { group, count: 1 };
 			return Promise.resolve();
 		}
-		return new Promise<void>((admit, reject) => {
-			let waiter!: LockWaiter;
-			const onAbort = (): void => {
-				const position = this.waiters.indexOf(waiter);
-				if (position !== -1) this.waiters.splice(position, 1);
-				reject(signal?.reason);
+		return waitInQueue<LockWaiter, void>(
+			this.waiters,
+			signal,
+			(admit, _reject, detach) => ({ group, admit, detach }),
+			() => {
 				// The abandoned position may have been the one blocking everything behind it.
 				this.pumpLock();
 				this.settle();
-			};
-			waiter = { group, admit, detach: () => signal?.removeEventListener("abort", onAbort) };
-			this.waiters.push(waiter);
-			signal?.addEventListener("abort", onAbort, { once: true });
-		});
+			},
+		);
 	}
 
 	releaseLock(): void {

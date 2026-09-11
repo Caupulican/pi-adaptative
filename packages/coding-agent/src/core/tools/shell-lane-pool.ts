@@ -13,6 +13,7 @@
  * `disposeLane`.
  */
 
+import { waitInQueue } from "./abortable-queue-wait.ts";
 import { disposePersistentShellSession, ShellExportLedger } from "./shell-session.ts";
 
 /** Warm lanes created on the first acquire; these are never retired. */
@@ -182,21 +183,11 @@ export class ShellLanePool<TLane> {
 	}
 
 	private waitForLane(signal: AbortSignal | undefined): Promise<TLane> {
-		return new Promise<TLane>((admit, reject) => {
-			let waiter!: LaneWaiter<TLane>;
-			const onAbort = (): void => {
-				const position = this.waiters.indexOf(waiter);
-				if (position !== -1) this.waiters.splice(position, 1);
-				reject(signal?.reason);
-			};
-			waiter = {
-				admit,
-				reject,
-				detach: () => signal?.removeEventListener("abort", onAbort),
-			};
-			this.waiters.push(waiter);
-			signal?.addEventListener("abort", onAbort, { once: true });
-		});
+		return waitInQueue<LaneWaiter<TLane>, TLane>(this.waiters, signal, (admit, reject, detach) => ({
+			admit,
+			reject,
+			detach,
+		}));
 	}
 
 	private armRetirement(entry: LaneEntry<TLane>): void {
