@@ -2137,5 +2137,17 @@ describe("workbench settings", () => {
 		const reported = typo.drainErrors().map(({ error }) => error.message);
 		expect(reported).toHaveLength(1);
 		expect(reported[0]).toMatch(/reasoning\.hostTurnThinking: unknown value "cheap"/);
+		// The bookkeeping policy reads the same way and reports its own key.
+		const book = SettingsManager.inMemory({ reasoning: { bookkeepingThinking: "fast" as unknown as "low" } });
+		expect(book.getBookkeepingThinkingLevel()).toBeUndefined();
+		expect(book.drainErrors().map(({ error }) => error.message)[0]).toMatch(
+			/reasoning\.bookkeepingThinking: unknown value "fast"/,
+		);
+		expect(
+			SettingsManager.inMemory({ reasoning: { bookkeepingThinking: "inherit" } }).getCheapTurnSettings(),
+		).toEqual({
+			hostTurn: undefined,
+			bookkeeping: "inherit",
+		});
 	});
 });

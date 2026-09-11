@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- The request that answers only `goal` / `task_steps` results runs at `low` thinking, clamped to the session level (`reasoning.bookkeepingThinking`: a level, or `"inherit"` to switch it off); a message mixing bookkeeping with real work is real work, and the request after the next real tool result is back at the session level. Recorded like the host-turn decision (`kind: "bookkeeping"`).
+
 ## [0.99.18] - 2026-09-11
 
 ### Changed

@@ -81,7 +81,12 @@ context, where `convertToLlm` has already flattened every custom message into a 
 requested one thinking rung below the session level, floored at `low`, never above the session
 level and never raising effort; `reasoning.hostTurnThinking` sets an explicit level (clamped to the
 session level) or `"inherit"` to switch the policy off, and the session's own level never moves.
-Its expected work is bookkeeping: read the delivered result, cite it, continue. Separately, the
+Its expected work is bookkeeping: read the delivered result, cite it, continue. The same policy
+covers the model's own bookkeeping: the request that answers ONLY `goal` / `task_steps` results (the
+assistant message called nothing else) runs at `low`, clamped to the session level
+(`reasoning.bookkeepingThinking`: a level, or `"inherit"` to switch it off); a message that mixed a
+`task_steps` update with real work is real work, and the request after the next real tool result is
+back at the session level. Separately, the
 interactive live row marks the turn's first token - the same `isFirstTokenEvent` predicate that
 stamps `AssistantMessage.firstTokenAt` and splits the model perf profile - and shows
 `(9s, no token yet)` then `(23s, first 9s)` once the wait passes three seconds, so a fast provider

@@ -613,7 +613,7 @@ export class AgentSession {
 			getLearningAuditRecords: () => this.getLearningAuditRecords(),
 		});
 		this._modelRegistry = config.modelRegistry;
-		this.hostTurnReasoning = new HostTurnReasoningController(() => this.settingsManager.getHostTurnThinkingLevel());
+		this.hostTurnReasoning = new HostTurnReasoningController(() => this.settingsManager.getCheapTurnSettings());
 		this._costGuard = new CostGuardController({
 			getSettings: () => this.settingsManager.getCostGuardSettings(),
 			getCompactionReserveTokens: () => this.settingsManager.getCompactionReserveTokens(),

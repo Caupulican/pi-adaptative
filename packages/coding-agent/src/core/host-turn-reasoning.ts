@@ -27,13 +27,39 @@ export type HostTurnCustomType = (typeof HOST_TURN_CUSTOM_TYPES)[number];
 
 export type HostTurnThinkingSetting = ThinkingLevel | "inherit" | undefined;
 
-/** One resolved host-turn decision, retained for the usage report exactly like the cost guard's. */
+/**
+ * Tools whose calls are bookkeeping: they record or read the harness's own state (goal lifecycle,
+ * task steps) and never touch the workspace. A request that only answers their results is a
+ * continuation of bookkeeping, not the operator's question: it reads a receipt and moves on.
+ */
+export const BOOKKEEPING_TOOL_NAMES: ReadonlySet<string> = new Set([
+	"goal",
+	"create_goal",
+	"get_goal",
+	"update_goal",
+	"task_steps",
+]);
+
+/** Which cheap-turn rule matched a request. */
+export type CheapTurnKind = "host-turn" | "bookkeeping";
+
+/** One resolved decision, retained for the usage report exactly like the cost guard's. */
 export interface HostTurnReasoningDecision {
-	customType: HostTurnCustomType;
+	kind: CheapTurnKind;
+	/** The host completion the request answers (host-turn rule). */
+	customType?: HostTurnCustomType;
+	/** The bookkeeping tools whose results the request answers (bookkeeping rule). */
+	tools?: readonly string[];
 	sessionLevel: ModelThinkingLevel;
 	resolvedLevel: ModelThinkingLevel;
 	/** False when the policy resolved to the session level itself (`"inherit"`, or a floor/clamp no-op). */
 	lowered: boolean;
+}
+
+/** Both rules' settings; the controller reads them live so an edit applies to the next request. */
+export interface CheapTurnSettings {
+	hostTurn: HostTurnThinkingSetting;
+	bookkeeping: HostTurnThinkingSetting;
 }
 
 /** The floor the default policy never goes below: a bookkeeping turn still has to read and cite. */
@@ -54,6 +80,31 @@ export function hostTurnCustomType(sourceMessages: readonly AgentMessage[]): Hos
 	const last = sourceMessages.at(-1);
 	if (last?.role !== "custom") return undefined;
 	return HOST_TURN_CUSTOM_TYPES.find((candidate) => candidate === last.customType);
+}
+
+/**
+ * The bookkeeping tools whose results this request answers, or undefined. The request's last
+ * messages must be tool results, and the assistant message they answer must have called ONLY
+ * bookkeeping tools: a message that mixed a `task_steps` update with a real edit is real work.
+ */
+export function bookkeepingContinuationTools(sourceMessages: readonly AgentMessage[]): string[] | undefined {
+	let index = sourceMessages.length - 1;
+	const answered: string[] = [];
+	while (index >= 0 && sourceMessages[index]?.role === "toolResult") {
+		const result = sourceMessages[index] as { toolName?: string };
+		if (typeof result.toolName === "string") answered.push(result.toolName);
+		index -= 1;
+	}
+	if (answered.length === 0) return undefined;
+	const assistant = sourceMessages[index];
+	if (assistant?.role !== "assistant" || !Array.isArray(assistant.content)) return undefined;
+	const called = assistant.content.flatMap((block) =>
+		block.type === "toolCall" && typeof block.name === "string" ? [block.name] : [],
+	);
+	if (called.length === 0) return undefined;
+	if (!called.every((name) => BOOKKEEPING_TOOL_NAMES.has(name))) return undefined;
+	if (!answered.every((name) => BOOKKEEPING_TOOL_NAMES.has(name))) return undefined;
+	return [...new Set(called)];
 }
 
 /** The highest supported level at or below `desiredRank`; the cheapest supported one when none qualifies. */
@@ -144,7 +195,41 @@ export function resolveHostTurnRequestReasoning(input: {
 		input.effortMap,
 	);
 	return {
+		kind: "host-turn",
 		customType,
+		sessionLevel: input.sessionLevel,
+		resolvedLevel,
+		lowered: resolvedLevel !== input.sessionLevel,
+	};
+}
+
+/**
+ * Resolve a bookkeeping continuation: the request that answers only `goal` / `task_steps` results.
+ *
+ * - unset: `"low"`, clamped to at most the session level (a session already at or below `low` is
+ *   left alone). A receipt needs reading and citing, not deliberation; the request after the next
+ *   real tool result is back at the session level.
+ * - `"inherit"`: the session level unchanged (the policy is off).
+ * - an explicit level: that level, clamped to at most the session level.
+ */
+export function resolveBookkeepingRequestReasoning(input: {
+	sourceMessages: readonly AgentMessage[];
+	sessionLevel: ModelThinkingLevel | undefined;
+	setting: HostTurnThinkingSetting;
+	supportedLevels?: readonly ModelThinkingLevel[];
+	effortMap?: ReasoningEffortMap;
+}): HostTurnReasoningDecision | undefined {
+	const tools = bookkeepingContinuationTools(input.sourceMessages);
+	if (!tools || input.sessionLevel === undefined) return undefined;
+	const resolvedLevel = resolveHostTurnThinkingLevel(
+		input.sessionLevel,
+		input.setting === undefined ? DEFAULT_FLOOR : input.setting,
+		input.supportedLevels,
+		input.effortMap,
+	);
+	return {
+		kind: "bookkeeping",
+		tools,
 		sessionLevel: input.sessionLevel,
 		resolvedLevel,
 		lowered: resolvedLevel !== input.sessionLevel,
@@ -157,12 +242,12 @@ export function resolveHostTurnRequestReasoning(input: {
  * turns ran cheap" without re-reading the transcript. Best-effort - it never fails a provider call.
  */
 export class HostTurnReasoningController {
-	private readonly getSetting: () => HostTurnThinkingSetting;
+	private readonly getSettings: () => CheapTurnSettings;
 	private lastDecision: HostTurnReasoningDecision | undefined;
 	private loweredRequests = 0;
 
-	constructor(getSetting: () => HostTurnThinkingSetting) {
-		this.getSetting = getSetting;
+	constructor(getSettings: () => CheapTurnSettings) {
+		this.getSettings = getSettings;
 	}
 
 	/** Latest host-turn decision for the host UI/report. Undefined until one host turn has run. */
@@ -181,13 +266,16 @@ export class HostTurnReasoningController {
 		reasoning: ModelThinkingLevel | undefined,
 	): ModelThinkingLevel | undefined {
 		try {
-			const decision = resolveHostTurnRequestReasoning({
+			const settings = this.getSettings();
+			const shared = {
 				sourceMessages,
 				sessionLevel: reasoning,
-				setting: this.getSetting(),
 				supportedLevels: getSupportedThinkingLevels(model),
 				effortMap: model.thinkingLevelMap,
-			});
+			};
+			const decision =
+				resolveHostTurnRequestReasoning({ ...shared, setting: settings.hostTurn }) ??
+				resolveBookkeepingRequestReasoning({ ...shared, setting: settings.bookkeeping });
 			if (!decision) return reasoning;
 			this.lastDecision = decision;
 			if (decision.lowered) this.loweredRequests++;

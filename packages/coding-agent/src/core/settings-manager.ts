@@ -610,6 +610,15 @@ export interface ReasoningSettings {
 	 *   lowers effort for a host turn; it can never raise it.
 	 */
 	hostTurnThinking?: ThinkingLevel | "inherit";
+	/**
+	 * Thinking level for the request that answers ONLY bookkeeping tool results (`goal`,
+	 * `task_steps`): the model just recorded or read harness state and is about to continue.
+	 *
+	 * - unset (the default): `"low"`, clamped to at most the session level.
+	 * - `"inherit"`: the session level, i.e. the policy is off.
+	 * - an explicit level: that level, clamped to at most the session level. Never raises effort.
+	 */
+	bookkeepingThinking?: ThinkingLevel | "inherit";
 }
 
 export interface Settings {
@@ -2944,27 +2953,48 @@ export class SettingsManager {
 		this.save();
 	}
 
-	private hostTurnThinkingRejected: unknown = undefined;
+	private readonly reasoningLevelRejected = new Map<string, unknown>();
 
 	/**
-	 * Host-turn reasoning policy (see {@link ReasoningSettings.hostTurnThinking}). An unrecognized
-	 * value is reported once by name through the settings diagnostics and then reads as unset, so a
-	 * typo neither reaches the provider nor passes silently.
+	 * One request-local reasoning setting (see {@link ReasoningSettings}). An unrecognized value is
+	 * reported once by name through the settings diagnostics and then reads as unset, so a typo
+	 * neither reaches the provider nor passes silently.
 	 */
-	getHostTurnThinkingLevel(): ThinkingLevel | "inherit" | undefined {
-		const configured = this.settings.reasoning?.hostTurnThinking;
+	private readReasoningLevelSetting(
+		key: "hostTurnThinking" | "bookkeepingThinking",
+		fallbackDescription: string,
+	): ThinkingLevel | "inherit" | undefined {
+		const configured = this.settings.reasoning?.[key];
 		if (configured === undefined || configured === "inherit") return configured;
 		if (isThinkingLevel(configured)) return configured;
-		if (this.hostTurnThinkingRejected !== configured) {
-			this.hostTurnThinkingRejected = configured;
+		if (this.reasoningLevelRejected.get(key) !== configured) {
+			this.reasoningLevelRejected.set(key, configured);
 			this.recordError(
 				"global",
 				new Error(
-					`reasoning.hostTurnThinking: unknown value ${JSON.stringify(configured)}; expected a thinking level or "inherit". Using the default (one level below the session level).`,
+					`reasoning.${key}: unknown value ${JSON.stringify(configured)}; expected a thinking level or "inherit". Using the default (${fallbackDescription}).`,
 				),
 			);
 		}
 		return undefined;
+	}
+
+	/** Host-turn reasoning policy (see {@link ReasoningSettings.hostTurnThinking}). */
+	getHostTurnThinkingLevel(): ThinkingLevel | "inherit" | undefined {
+		return this.readReasoningLevelSetting("hostTurnThinking", "one level below the session level");
+	}
+
+	/** Bookkeeping-continuation reasoning policy (see {@link ReasoningSettings.bookkeepingThinking}). */
+	getBookkeepingThinkingLevel(): ThinkingLevel | "inherit" | undefined {
+		return this.readReasoningLevelSetting("bookkeepingThinking", "low, clamped to the session level");
+	}
+
+	/** Both request-local reasoning policies, read live for the next request. */
+	getCheapTurnSettings(): {
+		hostTurn: ThinkingLevel | "inherit" | undefined;
+		bookkeeping: ThinkingLevel | "inherit" | undefined;
+	} {
+		return { hostTurn: this.getHostTurnThinkingLevel(), bookkeeping: this.getBookkeepingThinkingLevel() };
 	}
 
 	getFailoverSettings(): Required<FailoverSettings> {
