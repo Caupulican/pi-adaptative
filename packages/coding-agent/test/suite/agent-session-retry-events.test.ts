@@ -491,7 +491,7 @@ describe("AgentSession retry and event characterization", () => {
 
 		const promptPromise = harness.session.prompt("hi");
 		await sawMessageUpdate;
-		await harness.session.abort();
+		await harness.session.abort("test abort");
 		await promptPromise;
 
 		expect(harness.events[harness.events.length - 1]?.type).toBe("agent_end");

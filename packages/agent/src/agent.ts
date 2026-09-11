@@ -449,8 +449,13 @@ export class Agent {
 		return this.activeRun?.abortController.signal;
 	}
 
-	/** Abort the current run, if one is active. A reason names why in the aborted message. */
-	abort(reason?: string): void {
+	/**
+	 * Abort the current run, if one is active. The reason is required and names the abort in the
+	 * aborted assistant message and in the result of any tool the abort kills, so a transcript tells
+	 * an operator interrupt from a compaction, a reflection, a dispose or a superseded submission.
+	 * Use a short, stable, lower-case label.
+	 */
+	abort(reason: string): void {
 		this.activeRun?.abortController.abort(reason);
 	}
 

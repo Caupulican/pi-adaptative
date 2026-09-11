@@ -108,7 +108,7 @@ async function abortExecution(model: Model<string>) {
 
 	const promptPromise = agent.prompt("Count slowly from 1 to 20.");
 	setTimeout(() => {
-		agent.abort();
+		agent.abort("test abort");
 	}, 30);
 
 	await promptPromise;

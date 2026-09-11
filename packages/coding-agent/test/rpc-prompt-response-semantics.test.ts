@@ -161,7 +161,7 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 		cleanup: async () => {
 			try {
 				if (session.isStreaming) {
-					await session.abort();
+					await session.abort("test abort");
 				}
 			} catch {
 				// ignore test cleanup failures

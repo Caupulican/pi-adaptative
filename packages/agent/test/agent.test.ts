@@ -375,7 +375,7 @@ describe("Agent", () => {
 		expect(receivedSignal).toBeDefined();
 		expect(receivedSignal?.aborted).toBe(false);
 
-		agent.abort();
+		agent.abort("test abort");
 		await promptPromise;
 
 		expect(receivedSignal?.aborted).toBe(true);
@@ -421,6 +421,42 @@ describe("Agent", () => {
 		expect(last?.role).toBe("assistant");
 		expect(last && "errorMessage" in last ? last.errorMessage : undefined).toBe("Operation aborted (send now)");
 		expect(persisted).toEqual(["Operation aborted (send now)"]);
+	});
+
+	it("names a compaction abort in the aborted assistant message", async () => {
+		const agent = new Agent({
+			streamFn: (_model, _context, options) => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					const checkAbort = () => {
+						if (options?.signal?.aborted) {
+							stream.push({
+								type: "error",
+								reason: "aborted",
+								error: {
+									...createAssistantMessage(""),
+									stopReason: "aborted",
+									errorMessage: "Operation aborted",
+								},
+							});
+						} else {
+							setTimeout(checkAbort, 5);
+						}
+					};
+					checkAbort();
+				});
+				return stream;
+			},
+		});
+		const promptPromise = agent.prompt("hello");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		agent.abort("compaction");
+		await promptPromise;
+		const last = agent.state.messages.at(-1);
+		expect(last?.role).toBe("assistant");
+		expect(last && "stopReason" in last ? last.stopReason : undefined).toBe("aborted");
+		expect(last && "errorMessage" in last ? last.errorMessage : undefined).toBe("Operation aborted (compaction)");
 	});
 
 	it("should update state with mutators", () => {
@@ -486,7 +522,7 @@ describe("Agent", () => {
 		const agent = new Agent();
 
 		// Should not throw even if nothing is running
-		expect(() => agent.abort()).not.toThrow();
+		expect(() => agent.abort("test abort")).not.toThrow();
 	});
 
 	it("should throw when prompt() called while streaming", async () => {
@@ -527,7 +563,7 @@ describe("Agent", () => {
 		);
 
 		// Cleanup - abort to stop the stream
-		agent.abort();
+		agent.abort("test abort");
 		await firstPrompt.catch(() => {}); // Ignore abort error
 	});
 
@@ -565,7 +601,7 @@ describe("Agent", () => {
 		);
 
 		// Cleanup
-		agent.abort();
+		agent.abort("test abort");
 		await firstPrompt.catch(() => {});
 	});
 
@@ -810,7 +846,7 @@ describe("Agent", () => {
 		expect(() => agent.reset()).toThrow(AgentBusyError);
 		expect(agent.state.messages.length).toBeGreaterThan(0);
 
-		agent.abort();
+		agent.abort("test abort");
 		await promptPromise.catch(() => {});
 		await agent.waitForIdle();
 

@@ -459,7 +459,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "abort": {
-				await session.abort();
+				await session.abort("rpc abort");
 				return success(id, "abort");
 			}
 

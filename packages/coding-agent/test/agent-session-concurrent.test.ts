@@ -155,7 +155,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		);
 
 		// Cleanup
-		await session.abort();
+		await session.abort("test abort");
 		await firstPrompt.catch(() => {}); // Ignore abort error
 	});
 
@@ -254,7 +254,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(session.pendingMessageCount).toBe(1);
 
 		// Cleanup
-		await session.abort();
+		await session.abort("test abort");
 		await firstPrompt.catch(() => {});
 	});
 
@@ -271,7 +271,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(session.pendingMessageCount).toBe(1);
 
 		// Cleanup
-		await session.abort();
+		await session.abort("test abort");
 		await firstPrompt.catch(() => {});
 	});
 

@@ -117,13 +117,13 @@ export class ScoutController {
 				}
 				if (turnsUsed >= turnLimit || outputTokens >= MAX_OUTPUT_TOKENS) {
 					truncated = true;
-					agent.abort();
+					agent.abort("scout turn limit");
 				}
 			});
 
 			const abortScout = (): void => {
 				truncated = true;
-				agent.abort();
+				agent.abort("scout cancelled");
 			};
 			this.deps.signal?.addEventListener("abort", abortScout, { once: true });
 			let runFailure: string | undefined;

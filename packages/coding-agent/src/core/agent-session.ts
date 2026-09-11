@@ -766,7 +766,7 @@ export class AgentSession {
 			isRawStream: () => this._isRawStreamSimple(this.agent.streamFn),
 			disconnectAgent: () => this._disconnectFromAgent(),
 			reconnectAgent: () => this._reconnectToAgent(),
-			abortForeground: () => this.abort(),
+			abortForeground: () => this.abort("compaction"),
 			emit: (event) => this._emit(event),
 			estimateCurrentContextTokens: (messages) => this._pipeline.estimateCurrentContextTokens(messages),
 			buildPreDigest: () => this._buildCompactionPreDigest(),
@@ -944,7 +944,7 @@ export class AgentSession {
 			prompt: (text, options) => this.prompt(text, options),
 			beginDueReflectionTurn: () => this._reflection.beginDueReflectionTurn(),
 			endReflectionTurn: () => this._reflection.endReflectionTurn(),
-			abortAgent: () => this.agent.abort(),
+			abortAgent: () => this.agent.abort("reflection"),
 			getLastAssistantStopReason: () => this._findLastAssistantMessage()?.stopReason,
 			hasOpenWork: () => this._hasOpenWork(),
 			isDisposed: () => this._disposed,
@@ -1115,7 +1115,7 @@ export class AgentSession {
 			getContextUsage: () => this.getContextUsage(),
 			compactForExtension: (options) => this.compactForExtension(options),
 			reload: () => this.reload(),
-			abort: () => this.abort(),
+			abort: () => this.abort("extension"),
 			getSystemPrompt: () => this.systemPrompt,
 			getExtensionCommandContextActions: () => this._extensionCommandContextActions,
 			refreshCurrentModelFromRegistry: () => this._refreshCurrentModelFromRegistry(),
@@ -2205,7 +2205,7 @@ export class AgentSession {
 		this._unsubscribeSettingsChanges = undefined;
 		trackRequired(() => disposeShellExecutionSessionAndWait(this._shellSessionKey));
 		safely(() => this._localPrefixWarm.cancel());
-		safely(() => this.agent.abort());
+		safely(() => this.agent.abort("session dispose"));
 		track(() => this._gatewayRegistry.stop());
 		track(() => this._backgroundToolTasks.shutdown());
 		track(() => this._runtimeBuilder.dispose());
@@ -2962,7 +2962,7 @@ export class AgentSession {
 		if (submissionSignal) {
 			const onAbort = () => {
 				this._foregroundRecovery.abortRetry();
-				this.agent.abort();
+				this.agent.abort("submission superseded");
 			};
 			submissionSignal.addEventListener("abort", onAbort, { once: true });
 			releaseSubmissionSignal = () => submissionSignal.removeEventListener("abort", onAbort);
@@ -3239,9 +3239,10 @@ export class AgentSession {
 	}
 
 	/**
-	 * Abort current operation and wait for agent to become idle.
+	 * Abort current operation and wait for agent to become idle. The reason is required and names the
+	 * abort in the persisted aborted message; use a short, stable, lower-case label.
 	 */
-	async abort(reason?: string): Promise<void> {
+	async abort(reason: string): Promise<void> {
 		this.runtimeUpdates.cancel();
 		this.abortRetry();
 		this.agent.abort(reason);

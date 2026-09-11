@@ -216,7 +216,7 @@ export class ModelRouterController {
 			})
 		) {
 			this._modelRouterEscalationRequested = true;
-			this.deps.getAgent().abort();
+			this.deps.getAgent().abort("model router escalation");
 			return {
 				block: true,
 				reason:
@@ -243,7 +243,7 @@ export class ModelRouterController {
 	requestValidationFailureEscalation(): void {
 		if (this._activeModelRouterRoute?.tier !== "cheap") return;
 		this._modelRouterEscalationRequested = true;
-		this.deps.getAgent().abort();
+		this.deps.getAgent().abort("model router validation escalation");
 	}
 
 	/**

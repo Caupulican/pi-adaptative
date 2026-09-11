@@ -229,7 +229,7 @@ describe("AgentSession bash and persistence characterization", () => {
 
 		const promptPromise = harness.session.prompt("hi");
 		await sawMessageUpdate;
-		await harness.session.abort();
+		await harness.session.abort("test abort");
 		await promptPromise;
 
 		const entries = harness.sessionManager.getEntries();
