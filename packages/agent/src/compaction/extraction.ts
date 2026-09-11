@@ -30,6 +30,16 @@ export interface CompactionFacts {
 	activeTaskSource: string;
 	/** Latest-first worker evidence retained only by deterministic checkpoints. */
 	delegatedWorkerFacts?: CompactionDelegatedWorkerFact[];
+	/**
+	 * Spoken user sentences from the compacted span, oldest first, bounded. A summarizer-authored
+	 * Mandatory Rule survives gap-fill only when one of these backs it or the previous checkpoint
+	 * already carried it (2026-09-10 field incident: "just read the grimdex app" became the rule
+	 * "do not modify project files", was copied forward verbatim past "your task is to finish it", and
+	 * the model then refused to repair). Absent on hand-built facts, which disables that vetting.
+	 */
+	userStatements?: string[];
+	/** Mandatory Rules bullets of the previous checkpoint; vetted when they entered it. */
+	carriedRules?: string[];
 }
 
 interface ToolCallFact {
@@ -44,7 +54,7 @@ interface ToolCallFact {
 	discardedFailure: boolean;
 }
 
-const PROHIBITION_PATTERN = /\b(do not|don't|never|stop (?:doing|using|changing)|no more)\b/i;
+const PROHIBITION_PATTERN = /\b(do not|don't|never|avoid|stop (?:doing|using|changing)|no more)\b/i;
 // Deliberately narrow: a bare "stop" ("stop the server and rerun") is everyday phrasing, not a
 // reversal of the prior work — matching it marked whole turns cancelled and made the
 // cancelled-work gate fight the recall gates (2026-07-06 incident).
@@ -56,6 +66,9 @@ const PROHIBITION_SOURCE_MAX_CHARS = 1_500;
 /** Upper bound on gate-demanded rules; most recent win (same bounding rationale as Done carry-over). */
 const MAX_PROHIBITIONS = 8;
 const PROHIBITION_MAX_CHARS = 160;
+/** Spoken user sentences kept as rule backing; most recent win. */
+const MAX_USER_STATEMENTS = 64;
+const USER_STATEMENT_MAX_CHARS = 200;
 /** Upper bound on gate-demanded actions; mirrors the prompt's "15 most recent Done items" rule. */
 const MAX_ACTIONS = 15;
 const MAX_WORKING_SET_FILES = 8;
@@ -369,6 +382,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 			prohibitions: [],
 			cancelledText: "",
 			activeTaskSource: "",
+			userStatements: [],
 			delegatedWorkerFacts: [],
 		};
 	}
@@ -384,6 +398,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 	const actions: string[] = [];
 	const openErrors = new Map<string, CompactionErrorFact & { lastTouch: number }>();
 	const prohibitions: string[] = [];
+	const userStatements: string[] = [];
 	let activeTaskSource = "";
 	const cancelledParts: string[] = [];
 	const sinceLastUser: string[] = [];
@@ -410,6 +425,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 				// extracted from one pasted instruction). Documents live on disk; skip them here.
 				if (userText.length <= PROHIBITION_SOURCE_MAX_CHARS) {
 					for (const sentence of splitSentenceLines(userText)) {
+						userStatements.push(clampText(sentence, USER_STATEMENT_MAX_CHARS));
 						if (!PROHIBITION_PATTERN.test(sentence)) {
 							continue;
 						}
@@ -607,6 +623,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 		cancelledText: cancelledParts.join("\n"),
 		activeTaskSource,
 		delegatedWorkerFacts,
+		userStatements: userStatements.slice(-MAX_USER_STATEMENTS),
 	};
 }
 

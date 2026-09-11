@@ -613,6 +613,13 @@ describe("compact verification gap-fill", () => {
 		prohibitions: ["do not touch the legacy client"],
 		cancelledText: "wrapped legacy client adapter",
 		activeTaskSource: "Fix the two failing tests now",
+		// Spoken user sentences back summarizer-authored rules; the model-carried "Always run tests"
+		// rule below survives because the user said it, not because the harness never vets.
+		userStatements: [
+			"do not touch the legacy client",
+			"Always run tests from packages/coding-agent",
+			"Fix the two failing tests now",
+		],
 	};
 
 	function createPreparation(): CompactionPreparation {

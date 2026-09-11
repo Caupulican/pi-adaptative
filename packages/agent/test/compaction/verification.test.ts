@@ -7,6 +7,7 @@ import {
 	COMPACTION_WORKED_EXAMPLE_SENTINEL,
 	containment,
 	deterministicallyFillSummaryGaps,
+	extractMandatoryRuleLines,
 	FILES_READ_RECALL_THRESHOLD,
 	isCompactionSummaryStructurallyUsable,
 	jaccard,
@@ -375,8 +376,8 @@ Continue
 
 	it("preserves a model-carried Mandatory Rules line the extractor does not own", () => {
 		// "Always run tests from packages/coding-agent" does not match PROHIBITION_PATTERN
-		// (do not|don't|never|stop doing/using/changing|no more), so the extractor never harvests it as
-		// a prohibition. The model faithfully carried it forward; gap-fill must not delete it.
+		// (do not|don't|never|avoid|stop doing/using/changing|no more), so the extractor never harvests
+		// it as a prohibition. The user said it, the model carried it; gap-fill must not delete it.
 		const facts: CompactionFacts = {
 			files: [],
 			workingSet: [],
@@ -385,6 +386,7 @@ Continue
 			prohibitions: [],
 			cancelledText: "",
 			activeTaskSource: "",
+			userStatements: ["Always run tests from packages/coding-agent"],
 		};
 		const summary = `## Active Task
 (none)
@@ -407,6 +409,94 @@ Continue
 		const filled = deterministicallyFillSummaryGaps(summary, facts);
 
 		expect(filled.summary).toContain("### Mandatory Rules\n- Always run tests from packages/coding-agent.");
+	});
+
+	it("drops a summarizer-authored rule no user statement backs, keeps backed and carried ones", () => {
+		// 2026-09-10 field incident: "just read the grimdex app" was written up as a prohibition, copied
+		// forward verbatim by the update prompt past "your task is to finish it", and the model then
+		// refused to repair. A rule must trace to a spoken user sentence or to the previous checkpoint.
+		const facts: CompactionFacts = {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: ["avoid trello by the way"],
+			cancelledText: "",
+			activeTaskSource: "fire up companion agent to help your work",
+			userStatements: [
+				"just read the grimdex app",
+				"avoid trello by the way",
+				"fire up companion agent to help your work",
+			],
+			carriedRules: ["- Always run tests from packages/coding-agent."],
+		};
+		const summary = `## Active Task
+User: fire up companion agent to help your work
+
+### Mandatory Rules
+- Do not use Trello. (User)
+- Read the GrimDex app only; do not modify project files. (User)
+- Fire up a companion agent to help the work. (User)
+- Always run tests from packages/coding-agent.
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)`;
+
+		const filled = deterministicallyFillSummaryGaps(summary, facts);
+		const rules = filled.summary.split("### Mandatory Rules")[1].split("## Working Set")[0];
+
+		expect(rules).not.toContain("do not modify project files");
+		expect(rules).toContain("- avoid trello by the way");
+		expect(rules).not.toContain("Do not use Trello");
+		expect(rules).toContain("- Fire up a companion agent to help the work. (User)");
+		expect(rules).toContain("- Always run tests from packages/coding-agent.");
+	});
+
+	it("keeps every model-carried rule when facts carry no user statements to vet against", () => {
+		const facts: CompactionFacts = {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource: "",
+		};
+		const summary = `## Active Task
+(none)
+
+### Mandatory Rules
+- Read the GrimDex app only; do not modify project files. (User)
+
+## Done
+(none)`;
+		const filled = deterministicallyFillSummaryGaps(summary, facts);
+		expect(filled.summary).toContain("- Read the GrimDex app only; do not modify project files. (User)");
+	});
+
+	it("extracts the Mandatory Rules bullets a checkpoint carries", () => {
+		expect(
+			extractMandatoryRuleLines(`## Active Task
+User: x
+
+### Mandatory Rules
+- Do not use Trello. (User)
+
+- Always run tests from packages/coding-agent.
+
+## Working Set
+(none)`),
+		).toEqual(["- Do not use Trello. (User)", "- Always run tests from packages/coding-agent."]);
+		expect(extractMandatoryRuleLines("## Active Task\nUser: x\n\n### Mandatory Rules\n(none)\n")).toEqual([]);
 	});
 
 	it("never overwrites non-empty Mandatory Rules content with the (none) placeholder", () => {

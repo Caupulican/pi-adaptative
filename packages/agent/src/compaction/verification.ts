@@ -298,7 +298,10 @@ export function deterministicallyFillSummaryGaps(summary: string, facts: Compact
 	activeTask.lines = facts.activeTaskSource ? buildActiveTaskLines(facts.activeTaskSource) : ["(none)"];
 
 	const mandatoryRules = sectionByName.get(SECTION_MANDATORY_RULES)!;
-	mandatoryRules.lines = reconcileMandatoryRules(mandatoryRules.lines, facts.prohibitions);
+	mandatoryRules.lines = reconcileMandatoryRules(mandatoryRules.lines, facts.prohibitions, {
+		statements: facts.userStatements,
+		carried: facts.carriedRules,
+	});
 
 	const workingSet = sectionByName.get(SECTION_WORKING_SET)!;
 	for (const file of facts.workingSet) {
@@ -521,13 +524,18 @@ function textContainsCompactionSentinel(text: string): boolean {
  * carrying the worked-example sentinel by definition (textContainsCompactionSentinel) — the latter is
  * exact and unconditional, since that token can only ever have come from the harness's own prompt.
  */
-function reconcileMandatoryRules(lines: readonly string[], prohibitions: readonly string[]): string[] {
+function reconcileMandatoryRules(
+	lines: readonly string[],
+	prohibitions: readonly string[],
+	backing?: { statements?: readonly string[]; carried?: readonly string[] },
+): string[] {
 	const result = lines.filter(
 		(line) =>
 			line.trim() !== "(none)" &&
 			line.trim() !== "" &&
 			!isCompactionControlEcho(line) &&
-			!textContainsCompactionSentinel(line),
+			!textContainsCompactionSentinel(line) &&
+			isMandatoryRuleBacked(line, backing),
 	);
 	for (const rule of prohibitions) {
 		const canonical = `- ${rule}`;
@@ -548,6 +556,47 @@ function reconcileMandatoryRules(lines: readonly string[], prohibitions: readonl
 		}
 	}
 	return result.length > 0 ? result : ["(none)"];
+}
+
+/**
+ * A rule the summarizer wrote must trace to something the user actually said. The summarizer is told
+ * to write "every user prohibition" as an imperative bullet, and it paraphrases: "just read the grimdex
+ * app" became "Read the GrimDex app only; do not modify project files", which the update prompt then
+ * copied forward verbatim past the user's later "your task is to finish it" (2026-09-10 field
+ * incident: the model complied with the invented rule and stopped repairing). Backing is a spoken user
+ * sentence from the compacted span containing most of the rule's tokens, or the previous checkpoint
+ * already carrying the line (it was vetted when it entered). Without statements to vet against
+ * (hand-built facts) every line is kept, as before. A trailing "(User)"-style source marker is not
+ * part of the rule.
+ */
+const MANDATORY_RULE_BACKING_THRESHOLD = 0.6;
+const MANDATORY_RULE_CARRIED_THRESHOLD = 0.8;
+const MANDATORY_RULE_SOURCE_MARKER = /\s*\((?:user|assistant|system|owner|turn)[^)]*\)\s*$/i;
+
+function mandatoryRuleTokens(line: string): Set<string> {
+	return tokenSet(line.replace(/^\s*[-*]\s*/, "").replace(MANDATORY_RULE_SOURCE_MARKER, ""));
+}
+
+function isMandatoryRuleBacked(
+	line: string,
+	backing: { statements?: readonly string[]; carried?: readonly string[] } | undefined,
+): boolean {
+	if (!backing?.statements) return true;
+	const rule = mandatoryRuleTokens(line);
+	if (rule.size < 2) return true;
+	for (const carried of backing.carried ?? []) {
+		if (containment(rule, mandatoryRuleTokens(carried)) >= MANDATORY_RULE_CARRIED_THRESHOLD) return true;
+	}
+	for (const statement of backing.statements) {
+		if (containment(rule, tokenSet(statement)) >= MANDATORY_RULE_BACKING_THRESHOLD) return true;
+	}
+	return false;
+}
+
+/** The Mandatory Rules bullets of a checkpoint, as written (no placeholder, no blanks). */
+export function extractMandatoryRuleLines(summary: string): string[] {
+	const section = parseSummarySections(summary).find((candidate) => candidate.normalized === SECTION_MANDATORY_RULES);
+	return (section?.lines ?? []).filter((line) => line.trim() !== "" && line.trim() !== "(none)");
 }
 
 /** Markdown-style escape: a line starting with `##`/`###` gains one leading backslash so the harness's

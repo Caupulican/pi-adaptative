@@ -54,6 +54,7 @@ import {
 	buildRetryPrompt,
 	CompactionVerificationError,
 	deterministicallyFillSummaryGaps,
+	extractMandatoryRuleLines,
 	isCompactionSummaryStructurallyUsable,
 	type VerificationReport,
 	verifySummary,
@@ -1288,6 +1289,29 @@ export interface PrepareCompactionOptions {
 	packHostRecords?: (messages: AgentMessage[]) => AgentMessage[];
 }
 
+/**
+ * Facts for the span to summarize, merged with the persisted user facts of the previous checkpoint
+ * and carrying that checkpoint's Mandatory Rules bullets (vetted when they entered it) so the
+ * deterministic gap-fill can tell a copied-forward rule from one the summarizer just invented.
+ */
+function extractCheckpointFacts(
+	pathEntries: SessionEntry[],
+	start: number,
+	boundaryEnd: number,
+	prevCompactionIndex: number,
+	previousUserFacts: Pick<CompactionFacts, "activeTaskSource" | "prohibitions"> | undefined,
+	previousSummary: string | undefined,
+): CompactionFacts {
+	let facts = extractCompactionFacts(pathEntries, start, boundaryEnd);
+	if (prevCompactionIndex >= 0) {
+		// Older checkpoints did not persist these exact facts. Pay one linear migration scan, then
+		// persist the result below so later compactions stay incremental instead of becoming quadratic.
+		const persistedUserFacts = previousUserFacts ?? extractCompactionFacts(pathEntries, 0, boundaryEnd);
+		facts = mergePersistentCompactionUserFacts(facts, persistedUserFacts);
+	}
+	return { ...facts, carriedRules: previousSummary ? extractMandatoryRuleLines(previousSummary) : [] };
+}
+
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
@@ -1337,11 +1361,14 @@ export function prepareCompaction(
 
 		const fileOps = extractFileOperations(liveMessages, pathEntries, prevCompactionIndex);
 		const factStart = prevCompactionIndex >= 0 ? prevCompactionIndex + 1 : 0;
-		let facts = extractCompactionFacts(pathEntries, factStart, boundaryEnd);
-		if (prevCompactionIndex >= 0) {
-			const persistedUserFacts = previousUserFacts ?? extractCompactionFacts(pathEntries, 0, boundaryEnd);
-			facts = mergePersistentCompactionUserFacts(facts, persistedUserFacts);
-		}
+		const facts = extractCheckpointFacts(
+			pathEntries,
+			factStart,
+			boundaryEnd,
+			prevCompactionIndex,
+			previousUserFacts,
+			previousSummary,
+		);
 
 		const messagesToSummarize = options?.packHostRecords ? options.packHostRecords(liveMessages) : liveMessages;
 		return {
@@ -1402,13 +1429,14 @@ export function prepareCompaction(
 		}
 	}
 
-	let facts = extractCompactionFacts(pathEntries, boundaryStart, boundaryEnd);
-	if (prevCompactionIndex >= 0) {
-		// Older checkpoints did not persist these exact facts. Pay one linear migration scan, then
-		// persist the result below so later compactions stay incremental instead of becoming quadratic.
-		const persistedUserFacts = previousUserFacts ?? extractCompactionFacts(pathEntries, 0, boundaryEnd);
-		facts = mergePersistentCompactionUserFacts(facts, persistedUserFacts);
-	}
+	const facts = extractCheckpointFacts(
+		pathEntries,
+		boundaryStart,
+		boundaryEnd,
+		prevCompactionIndex,
+		previousUserFacts,
+		previousSummary,
+	);
 
 	return {
 		firstKeptEntryId,

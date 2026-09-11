@@ -214,6 +214,24 @@ describe("extractCompactionFacts", () => {
 		expect(facts.activeTaskSource).toBe("Resume");
 	});
 
+	it("records spoken user sentences as rule backing and harvests avoid as a prohibition", () => {
+		const facts = extractCompactionFacts(
+			[
+				createMessageEntry(createUserMessage("just read the grimdex app. avoid trello by the way")),
+				createMessageEntry(createAssistantMessage([{ type: "text", text: "ok" }])),
+				createMessageEntry(createUserMessage("fire up companion agent to help your work")),
+			],
+			0,
+			3,
+		);
+		expect(facts.userStatements).toEqual([
+			"just read the grimdex app",
+			"avoid trello by the way",
+			"fire up companion agent to help your work",
+		]);
+		expect(facts.prohibitions).toEqual(["avoid trello by the way"]);
+	});
+
 	it("does not harvest subordinate prohibition fragments as standalone rules", () => {
 		resetEntryCounter();
 		const text =
