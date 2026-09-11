@@ -44,6 +44,7 @@ import {
 	resolveMutationPathTarget,
 } from "./file-mutation-intent.ts";
 import { renderToolPath, str } from "./render-utils.ts";
+import { assertNoNulInEditReplacements } from "./text-nul-guard.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 type EditPreview = EditDiffResult | EditDiffError;
@@ -200,6 +201,9 @@ function validateEdits(edits: unknown): Edit[] {
 			throw new Error("Edit tool input is invalid. Every edit requires string oldText and newText fields.");
 		}
 	}
+	// Validation phase: a replacement carrying U+0000 is refused here, before the mutation queue,
+	// before the file is read and before anything is written.
+	assertNoNulInEditReplacements(edits as Edit[]);
 	return edits as Edit[];
 }
 

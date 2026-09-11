@@ -19,6 +19,7 @@ import {
 	resolveMutationPathTarget,
 } from "./file-mutation-intent.ts";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
+import { assertNoNulInWriteContent } from "./text-nul-guard.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const writePathSchema = Type.String({ minLength: 1 });
@@ -376,6 +377,10 @@ export function createWriteToolDefinition(
 			if ([content, contentRef, payloadRef].filter((value) => value !== undefined).length !== 1) {
 				throw new Error("Write requires exactly one of content, contentRef, or payloadRef.");
 			}
+			// Validation phase: content carrying U+0000 is refused here, before the mutation queue and
+			// before the parent directory or the file itself is created. A reference instead of inline
+			// content names bytes this guard already cleared when they were first authored.
+			if (content !== undefined) assertNoNulInWriteContent(content);
 			try {
 				const lease = await intentController.prepare("write", absolutePath, signal, path);
 				return await intentController.withMutationQueue(

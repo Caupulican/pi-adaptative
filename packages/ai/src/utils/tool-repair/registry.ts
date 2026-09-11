@@ -279,6 +279,30 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		},
 	},
 	{
+		name: "nulInReplacement",
+		phase: "execution",
+		failureCode: "nul_in_replacement",
+		attemptMemory: "discard",
+		retainDiagnostic: true,
+		guidance:
+			"Replacement carried U+0000; text files never contain NUL. Re-send that edit with the identical replacement minus the NUL; never write the file through bash or python instead.",
+		matches(message: string): boolean {
+			return /\bPI_NUL_IN_REPLACEMENT\b/i.test(message);
+		},
+	},
+	{
+		name: "nulInContent",
+		phase: "execution",
+		failureCode: "nul_in_content",
+		attemptMemory: "discard",
+		retainDiagnostic: true,
+		guidance:
+			"Write content carried U+0000; text files never contain NUL. Re-send the identical content minus the NUL; never create the file through bash or python instead.",
+		matches(message: string): boolean {
+			return /\bPI_NUL_IN_CONTENT\b/i.test(message);
+		},
+	},
+	{
 		name: "repeatedSuccessfulCall",
 		phase: "execution",
 		failureCode: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.failureCode,

@@ -3,6 +3,7 @@
 ### Added
 
 - `getOAuthApiKey`'s refresh failure carries the provider's own error as its `cause`, so hosts can name the real reason (HTTP status, `invalid_grant`, network) instead of the generic wrapper text.
+- Tool repair catalogue entries `nulInReplacement` (`PI_NUL_IN_REPLACEMENT` → `nul_in_replacement`) and `nulInContent` (`PI_NUL_IN_CONTENT` → `nul_in_content`): the edit/write NUL guards keep their diagnostic, discard the attempt, and tell the model to re-send the identical replacement or content without the NUL rather than reach for a shell.
 - Tool repair catalogue entry `readEncodingRequired` (`PI_READ_ENCODING_REQUIRED` → `read_encoding_required`): a read-specific diagnostic that keeps its text and tells the model to re-read with the named encoding or declare the charset, distinct from the edit contract's `encoding_corruption`.
 
 ## [0.99.17] - 2026-09-11

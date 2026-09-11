@@ -6,6 +6,7 @@ import { Compile } from "typebox/compile";
 import { describe, expect, it, vi } from "vitest";
 import type { Tool, ToolCall } from "../src/types.ts";
 import {
+	getToolExecutionAttemptMemory,
 	getToolExecutionErrorPolicy,
 	TOOL_REPAIR_MODE_NAMES,
 	TOOL_REPAIR_REGISTRY,
@@ -433,6 +434,34 @@ describe("tool argument repair", () => {
 				"PI_FILE_ENCODING_CORRUPTION: Source encoding is unknown or malformed. Establish its encoding from authoritative project metadata or ask the user, then call read or edit with encoding. No file write was attempted.",
 			),
 		).toMatchObject({ name: "encodingCorruption", failureCode: "encoding_corruption" });
+	});
+
+	it("classifies a NUL in an edit replacement and in write content as separate repairable refusals", () => {
+		const nul = String.fromCharCode(0);
+		const replacementFailure = `PI_NUL_IN_REPLACEMENT: Edit 2 has U+0000 (NUL) in newText at character offset 11: "const caf\u00e9 =\\01;". Text files never contain NUL.`;
+		expect(getToolExecutionErrorPolicy(replacementFailure)).toMatchObject({
+			name: "nulInReplacement",
+			phase: "execution",
+			failureCode: "nul_in_replacement",
+			attemptMemory: "discard",
+			retainDiagnostic: true,
+		});
+		expect(getToolExecutionErrorPolicy(replacementFailure)?.guidance).toMatch(/text files never contain NUL/i);
+		expect(getToolExecutionErrorPolicy(replacementFailure)?.guidance).toMatch(/never write the file through bash/i);
+
+		const contentFailure = `PI_NUL_IN_CONTENT: write content has U+0000 (NUL) at character offset 3: "abc\\0def". Text files never contain NUL.`;
+		expect(getToolExecutionErrorPolicy(contentFailure)).toMatchObject({
+			name: "nulInContent",
+			phase: "execution",
+			failureCode: "nul_in_content",
+			attemptMemory: "discard",
+			retainDiagnostic: true,
+		});
+		expect(getToolExecutionErrorPolicy(contentFailure)?.failureCode).not.toBe("nul_in_replacement");
+		expect(getToolExecutionAttemptMemory("nul_in_replacement")).toBe("discard");
+		expect(getToolExecutionAttemptMemory("nul_in_content")).toBe("discard");
+		// A diagnostic that merely carries the raw byte, with no marker, is not one of these refusals.
+		expect(getToolExecutionErrorPolicy(`some tool printed ${nul} bytes`)).toBeUndefined();
 	});
 
 	it("keeps the registry as the named repair source of truth", () => {

@@ -25,6 +25,9 @@ describe("tool execution error catalogue", () => {
 			readEncodingRequired:
 				"PI_READ_ENCODING_REQUIRED: /src/unit.pas is not valid UTF-8 (first invalid byte at line 3, byte offset 15) and the managed Python codec is unavailable (no interpreter).",
 			repeatedSuccessfulCall: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.diagnostic,
+			nulInReplacement:
+				'PI_NUL_IN_REPLACEMENT: Edit 2 has U+0000 (NUL) in newText at character offset 11: "const caf\u00e9 =\\01;".',
+			nulInContent: 'PI_NUL_IN_CONTENT: write content has U+0000 (NUL) at character offset 3: "abc\\0def".',
 			fileMutationRetarget:
 				"PI_FILE_MUTATION_RETARGET: retained as payloadRef file-mutation:123e4567-e89b-12d3-a456-426614174000",
 			fileNotFound: "ENOENT: no such file or directory, open 'missing.txt'",

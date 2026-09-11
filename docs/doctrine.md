@@ -128,6 +128,22 @@ their bytes, compiler reports three quarters. Pinned by
 `packages/coding-agent/test/diagnostics-output-reducer.test.ts` and
 `packages/coding-agent/test/json-output-reducer.test.ts`.
 
+**A NUL never reaches a text file through `edit` or `write`.** U+0000 in a replacement or in
+written content is a transport defect, not content: an editing model has been observed sending it in
+place of a space next to multi-byte characters, and once it lands git reports the file as binary and
+every importer breaks, invisibly, because a NUL renders as nothing. Both tools refuse it in their
+validation phase, before the mutation queue, before the file is read and before anything is created,
+so a missing target still reports the NUL rather than a path failure. The diagnostic names the
+1-based edit index, the code point, the character offset counted in code points and twenty
+characters of context on each side with the NUL escaped as `\0`, and it demands the same replacement
+re-sent without that character, never the file written through a shell instead. Neither tool repairs
+the string: guessing which character the NUL replaced is how a corrupted space becomes a corrupted
+file. `edit` skips the check for a replacement whose own `oldText` also carries U+0000, so this guard
+never becomes the layer that refuses a NUL-bearing source; that stays the edit encoding contract's
+decision. Repair codes `nul_in_replacement` and `nul_in_content` carry the guidance. Pinned by
+`packages/coding-agent/test/edit-nul-guard.test.ts`,
+`packages/coding-agent/test/write-nul-guard.test.ts` and `packages/ai/test/tool-repair.test.ts`.
+
 **The tool list stays stable between explicit runtime or provider transitions.** It sits before
 the messages in every prompt, so ordinary turns must not churn disclosed schemas. Explicit reload
 commits a new tool generation, and provider-specific tools follow the active model; those intentional
@@ -190,6 +206,18 @@ together, the two groups never overlap, admission is in emission order, and an u
 exclusive. Why: one persistent shell plus a FIFO writer lock turned three commands emitted in one
 message into three sequential waits. Pinned by `packages/coding-agent/test/shell-lane-pool.test.ts`,
 `packages/coding-agent/test/bash-concurrent-lanes.test.ts` and
+`packages/coding-agent/test/bash-edit-write-race.test.ts`.
+
+**The group lock belongs to the session; the per-path queue belongs to the process.** The barrier's
+holders, waiters and emission-order announcements live in a scope keyed by the session's shell
+identity (`agent:<uuid>`, or a worker lane's own key), so a batch switch in one in-process session
+never retires another session's announcements and one session's exclusive command run never parks
+another session's file writes. The per-path mutation queue stays process-wide on purpose: two
+sessions writing one file must still take turns, which is a property of the file, not of the
+session. Why: every piece of that state used to be a module global, so a parent session and its
+worker lanes shared one lock and one announcement table. Callers that name no scope share one
+default scope, which is exactly what a single-session process always had. Pinned by
+`packages/coding-agent/test/mutation-lock-scope.test.ts` and
 `packages/coding-agent/test/bash-edit-write-race.test.ts`.
 
 **A file's encoding is the harness's problem, never the model's.** Read and edit resolve it in
