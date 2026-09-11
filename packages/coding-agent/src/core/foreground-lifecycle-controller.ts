@@ -52,6 +52,11 @@ interface ForegroundLifecycleControllerDeps {
 	sessionManager: SessionManager;
 	modelRouter: ModelRouterController;
 	emitWarning(message: string): void;
+	/**
+	 * Session identity of the group lock these announcements order (see file-mutation-queue.ts).
+	 * Omitted announces into the process-wide default scope, which is what a single-session host had.
+	 */
+	getMutationScope?(): string;
 }
 
 interface StartedToolIdentity {
@@ -326,7 +331,8 @@ export class ForegroundLifecycleController {
 
 	/** Drop in-flight associations when the host swaps/reloads the active session branch. */
 	resetForSessionReload(): void {
-		for (const identity of this.startedTools.values()) retireToolCall(identity.callId);
+		const scope = this.deps.getMutationScope?.();
+		for (const identity of this.startedTools.values()) retireToolCall(identity.callId, scope);
 		this.startedTools.clear();
 		this.pendingToolsByCall.clear();
 	}
@@ -447,7 +453,8 @@ export class ForegroundLifecycleController {
 		// the pre-mutation workspace. Announcing every call -- not only the mutations -- is what lets
 		// an exclusive run find its own emission index.
 		const batchId = `${requestId}\u0000${assistantMessageEntryId}`;
-		for (const call of calls) announceToolCall(call.callId, call.index, call.mutation, batchId);
+		const mutationScope = this.deps.getMutationScope?.();
+		for (const call of calls) announceToolCall(call.callId, call.index, call.mutation, batchId, mutationScope);
 		for (const identity of identities) this.startedTools.set(this.toolKey(identity), identity);
 		for (const identity of identities) {
 			const callKey = this.callKey(identity.callId, identity.toolName);
@@ -476,7 +483,7 @@ export class ForegroundLifecycleController {
 		const result = message as ToolResultMessage;
 		// Durable terminal for the emission-order announcement. ToolGateController already retires it
 		// at the execution terminal; this covers a reserved call that never reached execution at all.
-		retireToolCall(result.toolCallId);
+		retireToolCall(result.toolCallId, this.deps.getMutationScope?.());
 		const pending = this.pendingToolsByCall.get(this.callKey(result.toolCallId, result.toolName));
 		if (pending?.size !== 1) return;
 		const key = pending.values().next().value as string;

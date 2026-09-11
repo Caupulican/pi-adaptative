@@ -16,13 +16,23 @@ export class ForegroundLifecycleAdapter {
 	private readonly sessionManager: SessionManager;
 	private pendingWarnings: string[] = [];
 
-	constructor(agent: Agent, sessionManager: SessionManager, modelRouter: ModelRouterController) {
+	/**
+	 * `getMutationScope` names the session whose group lock these emission-order announcements order
+	 * (see tools/file-mutation-queue.ts). Omitted keeps the process-wide default scope.
+	 */
+	constructor(
+		agent: Agent,
+		sessionManager: SessionManager,
+		modelRouter: ModelRouterController,
+		getMutationScope?: () => string,
+	) {
 		this.sessionManager = sessionManager;
 		this.lifecycle = new ForegroundLifecycleController({
 			agent,
 			sessionManager,
 			modelRouter,
 			emitWarning: (message) => this.pendingWarnings.push(message),
+			...(getMutationScope ? { getMutationScope } : {}),
 		});
 	}
 

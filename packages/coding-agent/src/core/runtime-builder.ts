@@ -505,7 +505,8 @@ export class RuntimeBuilder {
 			// The harness's own memory, skills and sessions are searchable without a file glob.
 			agentDir: deps.getAgentDir(),
 		};
-		this._fileMutationIntents = new FileMutationIntentController();
+		// The group lock and the emission-order announcements are this session's, not the process's.
+		this._fileMutationIntents = new FileMutationIntentController({ mutationScope: deps.getShellSessionKey() });
 	}
 
 	/**
@@ -982,6 +983,9 @@ export class RuntimeBuilder {
 				commandPrefix: shellCommandPrefix,
 				shellPath,
 				sessionKey: this.deps.getShellSessionKey(),
+				// Not `sessionKey`: a task-directory invocation rebinds that to its own shell lane, while
+				// the lock this run takes must stay the one the session's writes and announcements use.
+				mutationScope: this.deps.getShellSessionKey(),
 				platform: process.platform,
 				windowsShellPythonEngine: windowsShell.pythonEngine,
 				windowsShellEngineOptions: { gnuToolsDir: windowsShell.gnuToolsDir },
@@ -1001,6 +1005,7 @@ export class RuntimeBuilder {
 				outputReduction,
 				environment: (cwd) => this._credentialManager.getEnvironmentForCwd(cwd) ?? {},
 				omitEnvironmentVariables: ["BW_SESSION"],
+				mutationScope: this.deps.getShellSessionKey(),
 			},
 			write: { intentController: this._fileMutationIntents },
 			edit: { intentController: this._fileMutationIntents, fileEncodings },

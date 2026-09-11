@@ -28,6 +28,8 @@ export interface SessionBackgroundToolTaskDeps {
 		records: readonly BackgroundToolTaskRecord[],
 		wakeParent: boolean,
 	): BackgroundToolTerminalDeliveryResult | Promise<BackgroundToolTerminalDeliveryResult>;
+	/** Session identity of the group lock a handed-off command run holds. */
+	getMutationScope(): string;
 	emit(event: AgentSessionEvent): void;
 	addSpawnedUsage(usage: Usage, options: { label?: string; sourceSessionId?: string; reportId?: string }): void;
 }
@@ -39,6 +41,7 @@ export function createSessionBackgroundToolTasks(deps: SessionBackgroundToolTask
 		getCurrentSubmissionEpoch: () => deps.getCurrentSubmissionEpoch(),
 		getSessionLineageIds: () => deps.getSessionManager().getSessionLineageIds(),
 		isForegroundWait: (tool, args) => deps.isForegroundWait(tool, args),
+		getMutationScope: () => deps.getMutationScope(),
 		getArtifactStore: () => deps.getArtifactStore(),
 		loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(deps.getSessionManager()),
 		persist: (record) => deps.getSessionManager().appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, record),

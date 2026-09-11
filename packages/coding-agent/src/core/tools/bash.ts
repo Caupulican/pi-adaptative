@@ -514,6 +514,13 @@ export interface BashToolOptions {
 	 * tool instances (subagents) auto-generate their own key and stay isolated.
 	 */
 	sessionKey?: string;
+	/**
+	 * Session identity for the shared group lock and the emission-order announcements
+	 * (see file-mutation-queue.ts). This is deliberately NOT `sessionKey`: a task-directory
+	 * invocation rebinds `sessionKey` to its own shell lane, while the lock and the announcements it
+	 * is ordered against belong to the AGENT SESSION. Omitted keeps the process-wide default scope.
+	 */
+	mutationScope?: string;
 	/** Host-owned task pin. Each invocation starts in cwd; command-local cd remains available. */
 	forceCwd?: boolean;
 	/** Route complex/state-mutating Bash constructs and portable builtins to the Python engine on Windows. Default: true. */
@@ -722,6 +729,7 @@ function createShellToolDefinition(
 ): ToolDefinition<typeof bashSchema, BashToolDetails | undefined> {
 	const toolName = "bash";
 	const sessionKey = options?.sessionKey ?? `bash-tool:${randomUUID()}`;
+	const mutationScope = options?.mutationScope;
 	const ops =
 		options?.operations ??
 		(backendShell === "powershell"
@@ -1214,10 +1222,10 @@ function createShellToolDefinition(
 				// becomes a session task after it already started (see releaseExclusiveHold).
 				const result = await withExclusiveMutationBarrier(
 					async () => {
-						if (background === true) releaseExclusiveHold(toolCallId);
+						if (background === true) releaseExclusiveHold(toolCallId, mutationScope);
 						return runCommand();
 					},
-					{ signal, holdId: toolCallId },
+					{ signal, holdId: toolCallId, ...(mutationScope !== undefined ? { scope: mutationScope } : {}) },
 				);
 				const { resolvedCommand, spawnContext } = prepared;
 				// The lane pool records the directory of every command it ran itself. A caller-supplied

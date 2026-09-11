@@ -41,6 +41,11 @@ export interface ToolGateControllerDeps {
 		executionCwd: string | undefined,
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined>;
+	/**
+	 * Session identity of the group lock this call's announcement belongs to
+	 * (see file-mutation-queue.ts). Omitted retires in the process-wide default scope.
+	 */
+	getMutationScope?(): string;
 }
 
 export class ToolGateController {
@@ -126,7 +131,7 @@ export class ToolGateController {
 		// longer start a file mutation, so a sibling exclusive run emitted after it must stop waiting.
 		// Retired first and synchronously, before any hook here can throw -- a write rejected by its own
 		// preflight would otherwise park a later bash in the same batch for the rest of the turn.
-		retireToolCall(toolCall.id);
+		retireToolCall(toolCall.id, this.deps.getMutationScope?.());
 		const runner = this.deps.getExtensionRunner();
 		let content = result.content;
 		let details = result.details;

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { AgentLoopConfig, AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
@@ -24,6 +25,7 @@ import { matchesResourceProfilePattern } from "../settings-manager.ts";
 import { createBashTool } from "../tools/bash.ts";
 import { createEditTool } from "../tools/edit.ts";
 import { FileMutationIntentController } from "../tools/file-mutation-intent.ts";
+import { disposeMutationLockScope } from "../tools/file-mutation-queue.ts";
 import { createFindTool } from "../tools/find.ts";
 import { createGrepTool } from "../tools/grep.ts";
 import { createLsTool } from "../tools/ls.ts";
@@ -119,6 +121,7 @@ function createLaneTools(
 	cwd: string,
 	names: readonly string[],
 	fileMutationIntents: FileMutationIntentController,
+	mutationScope: string,
 	privatePathBoundary?: CredentialExposureBoundary,
 	readMemory?: (query: string) => Promise<string>,
 	executionPolicy?: OrchestrationExecutionPolicy,
@@ -136,7 +139,7 @@ function createLaneTools(
 		["repo_read", () => createRepoReadTool(cwd)],
 		["write", () => createWriteTool(cwd, { intentController: fileMutationIntents })],
 		["edit", () => createEditTool(cwd, { intentController: fileMutationIntents })],
-		[PYTHON_LANE_TOOL_NAME, () => createPythonTool(cwd)],
+		[PYTHON_LANE_TOOL_NAME, () => createPythonTool(cwd, { mutationScope })],
 	]);
 	if (executionPolicy) {
 		factories.set(PROCESS_LANE_TOOL_NAME, () =>
@@ -147,6 +150,7 @@ function createLaneTools(
 		factories.set(STABLE_SHELL_TOOL_NAME, () =>
 			createBashTool(cwd, {
 				sessionKey: shellSessionKey,
+				mutationScope,
 				forceCwd: true,
 				prewarmWindowsShell: true,
 				...(shellOutputDirectory ? { outputDirectory: shellOutputDirectory } : {}),
@@ -197,7 +201,12 @@ function createLaneTools(
  * positive path scope.
  */
 export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneToolSurface {
-	const fileMutationIntents = new FileMutationIntentController();
+	// One lock scope per lane: a lane's writes, python snippets and shell commands still interlock
+	// with each other, but never with the parent session's (see tools/file-mutation-queue.ts). The
+	// lane's own shell identity names it when it has one; a lane without a shell still needs an
+	// identity of its own, because python and write/edit must share a lock inside the lane.
+	const mutationScope = options.shellSessionKey ?? `lane:${randomUUID()}`;
+	const fileMutationIntents = new FileMutationIntentController({ mutationScope });
 	const writeCapable = options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0;
 	const pythonCapable =
 		options.toolManifests?.some((manifest) => manifest.toolName === PYTHON_LANE_TOOL_NAME) === true;
@@ -289,6 +298,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			options.cwd,
 			allowedTools,
 			fileMutationIntents,
+			mutationScope,
 			privatePathBoundary,
 			options.readMemory,
 			options.executionPolicy,
@@ -300,6 +310,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		),
 		dispose: async () => {
 			if (options.shellSessionKey) disposeShellExecutionSession(options.shellSessionKey);
+			disposeMutationLockScope(mutationScope);
 			await fileMutationIntents.dispose();
 		},
 		allowedTools,

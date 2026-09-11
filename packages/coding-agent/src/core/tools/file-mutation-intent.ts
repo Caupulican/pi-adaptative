@@ -148,6 +148,12 @@ export interface FileMutationIntentControllerOptions {
 	mutationPayloadByteLimit?: number;
 	mutationPayloadTtlMs?: number;
 	now?: () => number;
+	/**
+	 * Session identity for the shared group lock and the emission-order announcements
+	 * (see file-mutation-queue.ts). Omitted keeps every mutation in the process-wide default scope,
+	 * which is what a single-session host had all along.
+	 */
+	mutationScope?: string;
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -331,6 +337,8 @@ export class FileMutationIntentController {
 	private readonly mutationPayloadByteLimit: number;
 	private readonly mutationPayloadTtlMs: number;
 	private readonly now: () => number;
+	/** Session identity forwarded to the group lock; undefined keeps the process-wide default scope. */
+	private readonly mutationScope: string | undefined;
 	private readonly contentReferences = new Map<string, ContentReferenceRecord>();
 	private readonly mutationPayloads = new Map<string, MutationPayloadRecord>();
 	private mutationPayloadBytes = 0;
@@ -374,6 +382,7 @@ export class FileMutationIntentController {
 			"Mutation payload TTL",
 		);
 		this.now = options.now ?? Date.now;
+		this.mutationScope = options.mutationScope;
 	}
 
 	assertOperationsDialect(usesCustomOperations: boolean): void {
@@ -406,7 +415,10 @@ export class FileMutationIntentController {
 		operation: () => Promise<T>,
 		options?: { callId?: string; signal?: AbortSignal },
 	): Promise<T> {
-		return withFileMutationQueue(absolutePath, operation, this.operations.mutationQueue, options);
+		return withFileMutationQueue(absolutePath, operation, this.operations.mutationQueue, {
+			...options,
+			...(this.mutationScope !== undefined ? { scope: this.mutationScope } : {}),
+		});
 	}
 
 	async prepare(

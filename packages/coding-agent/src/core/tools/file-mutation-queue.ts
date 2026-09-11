@@ -11,6 +11,11 @@ interface BackendQueueState {
 	queues: Map<string, Promise<void>>;
 	registration: Promise<void>;
 }
+/**
+ * Per-path serialization, process-wide on purpose. Two sessions that write the same file must still
+ * take turns: that is a property of the FILE, not of the session. Only the group lock and the
+ * emission-order announcements below are per session (see {@link MutationLockScope}).
+ */
 const backendQueues = new WeakMap<FileMutationQueueBackend, BackendQueueState>();
 
 /**
@@ -33,18 +38,12 @@ const backendQueues = new WeakMap<FileMutationQueueBackend, BackendQueueState>()
  */
 type LockGroup = "mutation" | "shell" | "exclusive";
 
-let lockHolders: { readonly group: LockGroup; count: number } | undefined;
-
 interface LockWaiter {
 	group: LockGroup;
 	admit: () => void;
 	/** Detaches the abort listener, so a waiter admitted normally leaves nothing armed behind it. */
 	detach: () => void;
 }
-
-const lockWaiters: LockWaiter[] = [];
-/** Armed by runs that gave up the lock but must still not start in the middle of somebody's write. */
-const mutationDrainWaiters = new Set<() => void>();
 
 function groupsShareTheLock(waiting: LockGroup, holding: LockGroup): boolean {
 	return waiting === holding && waiting !== "exclusive";
@@ -78,78 +77,6 @@ async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined
 	}
 }
 
-/** Admit every waiter at the front of the queue that can share the lock with the current holders. */
-function pumpLock(): void {
-	while (lockWaiters.length > 0) {
-		const head = lockWaiters[0];
-		if (lockHolders && !groupsShareTheLock(head.group, lockHolders.group)) return;
-		lockWaiters.shift();
-		head.detach();
-		if (lockHolders) lockHolders.count += 1;
-		else lockHolders = { group: head.group, count: 1 };
-		head.admit();
-	}
-}
-
-/**
- * Join `group`. Joins synchronously when the lock is free or already held by the same group and
- * nobody is queued, so a run that starts checking the holders right after can never miss this join.
- */
-function acquireLock(group: LockGroup, signal: AbortSignal | undefined): Promise<void> {
-	if (signal?.aborted) return Promise.reject(signal.reason);
-	if (lockWaiters.length === 0 && (!lockHolders || groupsShareTheLock(group, lockHolders.group))) {
-		if (lockHolders) lockHolders.count += 1;
-		else lockHolders = { group, count: 1 };
-		return Promise.resolve();
-	}
-	return new Promise<void>((admit, reject) => {
-		let waiter!: LockWaiter;
-		const onAbort = (): void => {
-			const position = lockWaiters.indexOf(waiter);
-			if (position !== -1) lockWaiters.splice(position, 1);
-			reject(signal?.reason);
-			// The abandoned position may have been the one blocking everything behind it.
-			pumpLock();
-		};
-		waiter = { group, admit, detach: () => signal?.removeEventListener("abort", onAbort) };
-		lockWaiters.push(waiter);
-		signal?.addEventListener("abort", onAbort, { once: true });
-	});
-}
-
-function releaseLock(): void {
-	if (!lockHolders) return;
-	lockHolders.count -= 1;
-	if (lockHolders.count > 0) return;
-	const released = lockHolders.group;
-	lockHolders = undefined;
-	if (released === "mutation") {
-		// Resolve from a snapshot: each waiter removes its own entry when it wakes.
-		const waiters = [...mutationDrainWaiters];
-		mutationDrainWaiters.clear();
-		for (const waiter of waiters) waiter();
-	}
-	pumpLock();
-}
-
-/**
- * Wait until no file mutation holds the lock. Aborting the wait removes this waiter, so an abandoned
- * wait never leaves a resolver armed for the next drain.
- */
-async function waitForMutationsToDrain(signal: AbortSignal | undefined): Promise<void> {
-	if (lockHolders?.group !== "mutation") return;
-	let waiter!: () => void;
-	const drained = new Promise<void>((resolveDrained) => {
-		waiter = resolveDrained;
-		mutationDrainWaiters.add(waiter);
-	});
-	try {
-		await raceAbort(drained, signal);
-	} finally {
-		mutationDrainWaiters.delete(waiter);
-	}
-}
-
 /**
  * Emission-order bookkeeping for one assistant message's tool-call wave.
  *
@@ -178,112 +105,10 @@ interface ToolCallAnnouncement {
 	batchId: string | undefined;
 }
 
-const toolCallAnnouncements = new Map<string, ToolCallAnnouncement>();
-let announcedBatchId: string | undefined;
-
 interface EarlierCallWaiter {
 	index: number;
 	awaited: ToolCallKind;
 	resolve: () => void;
-}
-const earlierCallWaiters = new Set<EarlierCallWaiter>();
-
-function hasPendingCallBefore(index: number, kind: ToolCallKind): boolean {
-	for (const announcement of toolCallAnnouncements.values()) {
-		if (announcement.kind === kind && !announcement.joined && announcement.index < index) return true;
-	}
-	return false;
-}
-
-function releaseClearedWaiters(): void {
-	for (const waiter of [...earlierCallWaiters]) {
-		if (hasPendingCallBefore(waiter.index, waiter.awaited)) continue;
-		earlierCallWaiters.delete(waiter);
-		waiter.resolve();
-	}
-}
-
-/**
- * Record a reserved tool call at its emission position, before any body in the wave starts.
- *
- * `kind` says what the call does: `"mutation"` (or the legacy `true`) for a call whose tool declared
- * a file mutation target, `"shell"` for a command run, `"other"` (or the legacy `false`) for
- * anything else. Every reserved call is announced, because that is how a command run learns its own
- * emission index; a run announced as `"other"` declares itself a shell run when it takes the lock.
- * `batchId` names the reservation wave; a wave with a new identity retires whatever the previous one
- * left behind, which can never join any more - its results already produced the assistant message
- * this wave belongs to.
- */
-export function announceToolCall(callId: string, index: number, kind: boolean | ToolCallKind, batchId?: string): void {
-	const resolvedKind: ToolCallKind = typeof kind === "boolean" ? (kind ? "mutation" : "other") : kind;
-	if (batchId !== undefined && batchId !== announcedBatchId) {
-		for (const [announcedCallId, announcement] of toolCallAnnouncements) {
-			if (announcement.batchId !== batchId) toolCallAnnouncements.delete(announcedCallId);
-		}
-		announcedBatchId = batchId;
-	}
-	toolCallAnnouncements.set(callId, { index, kind: resolvedKind, joined: false, batchId });
-	releaseClearedWaiters();
-}
-
-/**
- * Drop a call's announcement at its terminal, whether or not it ever joined the lock. An aborted or
- * preflight-rejected write must never park a later command run for the rest of the batch.
- */
-export function retireToolCall(callId: string): void {
-	if (!toolCallAnnouncements.delete(callId)) return;
-	releaseClearedWaiters();
-}
-
-/** The announcement stops being "pending": it joined the lock, or it never will. */
-function markAnnouncementJoined(callId: string | undefined): void {
-	if (callId === undefined) return;
-	const announcement = toolCallAnnouncements.get(callId);
-	if (!announcement || announcement.joined) return;
-	announcement.joined = true;
-	releaseClearedWaiters();
-}
-
-/**
- * Declare an announced call a command run. Taking the group lock is the declaration: only the run
- * itself knows it is one, since the host announces a command exactly like any other non-mutating
- * tool. Returns false for a call nobody announced, which keeps the pre-announcement behavior.
- */
-function declareAnnouncedShellRun(callId: string | undefined): boolean {
-	if (callId === undefined) return false;
-	const announcement = toolCallAnnouncements.get(callId);
-	if (!announcement || announcement.kind === "mutation") return false;
-	announcement.kind = "shell";
-	return true;
-}
-
-/**
- * Wait until no call of `awaited` announced EARLIER than `callId` is still pending. Returns at once
- * for a call that was never announced, so a host that does not announce sees today's behavior.
- */
-async function waitForEarlierAnnouncedCalls(
-	callId: string | undefined,
-	awaited: ToolCallKind,
-	signal: AbortSignal | undefined,
-): Promise<void> {
-	if (callId === undefined) return;
-	const announcement = toolCallAnnouncements.get(callId);
-	if (!announcement || !hasPendingCallBefore(announcement.index, awaited)) return;
-	let waiter!: EarlierCallWaiter;
-	const cleared = new Promise<void>((resolveCleared) => {
-		waiter = { index: announcement.index, awaited, resolve: resolveCleared };
-		earlierCallWaiters.add(waiter);
-	});
-	try {
-		await raceAbort(cleared, signal);
-	} finally {
-		earlierCallWaiters.delete(waiter);
-	}
-}
-
-/** Wait until no mutation announced EARLIER than `callId` is still pending. */
-export function waitForAnnouncedMutations(callId: string | undefined, signal?: AbortSignal): Promise<void> {
-	return waitForEarlierAnnouncedCalls(callId, "mutation", signal);
 }
 
 interface ExclusiveHold {
@@ -297,8 +122,380 @@ interface ExclusiveHold {
 	done: boolean;
 }
 
-/** Live command runs that named themselves, keyed by hold id (the tool call id). */
-const exclusiveHolds = new Map<string, ExclusiveHold>();
+/**
+ * One session's group lock and emission-order announcements.
+ *
+ * Both are session state, not process state. A batch identity belongs to one agent's assistant
+ * message, so a wave announced by session A must never retire the announcements session B is still
+ * ordered by; and an exclusive command run in A must not park B's file mutations behind it - the two
+ * sessions share no shell lane (the lane pool is already keyed by shell session key) and no emission
+ * order. What they DO share is the filesystem, which the per-path queue above arbitrates on its own.
+ */
+export class MutationLockScope {
+	readonly key: string;
+	private holders: { readonly group: LockGroup; count: number } | undefined;
+	private readonly waiters: LockWaiter[] = [];
+	/** Armed by runs that gave up the lock but must still not start in the middle of somebody's write. */
+	private readonly drainWaiters = new Set<() => void>();
+	private readonly announcements = new Map<string, ToolCallAnnouncement>();
+	private announcedBatchId: string | undefined;
+	private readonly earlierCallWaiters = new Set<EarlierCallWaiter>();
+	/** Live command runs that named themselves, keyed by hold id (the tool call id). */
+	private readonly exclusiveHolds = new Map<string, ExclusiveHold>();
+	/** A disposed scope leaves the registry only once nothing in it is still live. */
+	private disposeRequested = false;
+
+	constructor(key: string) {
+		this.key = key;
+	}
+
+	/** Nothing holds, waits for, or is announced in this scope: it carries no state worth keeping. */
+	get idle(): boolean {
+		return (
+			this.holders === undefined &&
+			this.waiters.length === 0 &&
+			this.drainWaiters.size === 0 &&
+			this.announcements.size === 0 &&
+			this.earlierCallWaiters.size === 0 &&
+			this.exclusiveHolds.size === 0
+		);
+	}
+
+	requestDispose(): void {
+		this.disposeRequested = true;
+		this.settle();
+	}
+
+	/** Drop a disposed scope from the registry at the first moment it holds nothing. */
+	private settle(): void {
+		if (!this.disposeRequested || !this.idle) return;
+		if (mutationLockScopes.get(this.key) === this) mutationLockScopes.delete(this.key);
+	}
+
+	/** Admit every waiter at the front of the queue that can share the lock with the current holders. */
+	private pumpLock(): void {
+		while (this.waiters.length > 0) {
+			const head = this.waiters[0];
+			if (this.holders && !groupsShareTheLock(head.group, this.holders.group)) return;
+			this.waiters.shift();
+			head.detach();
+			if (this.holders) this.holders.count += 1;
+			else this.holders = { group: head.group, count: 1 };
+			head.admit();
+		}
+	}
+
+	/**
+	 * Join `group`. Joins synchronously when the lock is free or already held by the same group and
+	 * nobody is queued, so a run that starts checking the holders right after can never miss this join.
+	 */
+	acquireLock(group: LockGroup, signal: AbortSignal | undefined): Promise<void> {
+		if (signal?.aborted) return Promise.reject(signal.reason);
+		if (this.waiters.length === 0 && (!this.holders || groupsShareTheLock(group, this.holders.group))) {
+			if (this.holders) this.holders.count += 1;
+			else this.holders = { group, count: 1 };
+			return Promise.resolve();
+		}
+		return new Promise<void>((admit, reject) => {
+			let waiter!: LockWaiter;
+			const onAbort = (): void => {
+				const position = this.waiters.indexOf(waiter);
+				if (position !== -1) this.waiters.splice(position, 1);
+				reject(signal?.reason);
+				// The abandoned position may have been the one blocking everything behind it.
+				this.pumpLock();
+				this.settle();
+			};
+			waiter = { group, admit, detach: () => signal?.removeEventListener("abort", onAbort) };
+			this.waiters.push(waiter);
+			signal?.addEventListener("abort", onAbort, { once: true });
+		});
+	}
+
+	releaseLock(): void {
+		if (!this.holders) return;
+		this.holders.count -= 1;
+		if (this.holders.count > 0) return;
+		const released = this.holders.group;
+		this.holders = undefined;
+		if (released === "mutation") {
+			// Resolve from a snapshot: each waiter removes its own entry when it wakes.
+			const waiters = [...this.drainWaiters];
+			this.drainWaiters.clear();
+			for (const waiter of waiters) waiter();
+		}
+		this.pumpLock();
+		this.settle();
+	}
+
+	/**
+	 * Wait until no file mutation holds the lock. Aborting the wait removes this waiter, so an abandoned
+	 * wait never leaves a resolver armed for the next drain.
+	 */
+	private async waitForMutationsToDrain(signal: AbortSignal | undefined): Promise<void> {
+		if (this.holders?.group !== "mutation") return;
+		let waiter!: () => void;
+		const drained = new Promise<void>((resolveDrained) => {
+			waiter = resolveDrained;
+			this.drainWaiters.add(waiter);
+		});
+		try {
+			await raceAbort(drained, signal);
+		} finally {
+			this.drainWaiters.delete(waiter);
+		}
+	}
+
+	private hasPendingCallBefore(index: number, kind: ToolCallKind): boolean {
+		for (const announcement of this.announcements.values()) {
+			if (announcement.kind === kind && !announcement.joined && announcement.index < index) return true;
+		}
+		return false;
+	}
+
+	private releaseClearedWaiters(): void {
+		for (const waiter of [...this.earlierCallWaiters]) {
+			if (this.hasPendingCallBefore(waiter.index, waiter.awaited)) continue;
+			this.earlierCallWaiters.delete(waiter);
+			waiter.resolve();
+		}
+	}
+
+	announce(callId: string, index: number, kind: boolean | ToolCallKind, batchId: string | undefined): void {
+		const resolvedKind: ToolCallKind = typeof kind === "boolean" ? (kind ? "mutation" : "other") : kind;
+		if (batchId !== undefined && batchId !== this.announcedBatchId) {
+			for (const [announcedCallId, announcement] of this.announcements) {
+				if (announcement.batchId !== batchId) this.announcements.delete(announcedCallId);
+			}
+			this.announcedBatchId = batchId;
+		}
+		this.announcements.set(callId, { index, kind: resolvedKind, joined: false, batchId });
+		this.releaseClearedWaiters();
+	}
+
+	retire(callId: string): void {
+		if (!this.announcements.delete(callId)) return;
+		this.releaseClearedWaiters();
+		this.settle();
+	}
+
+	/** The announcement stops being "pending": it joined the lock, or it never will. */
+	private markAnnouncementJoined(callId: string | undefined): void {
+		if (callId === undefined) return;
+		const announcement = this.announcements.get(callId);
+		if (!announcement || announcement.joined) return;
+		announcement.joined = true;
+		this.releaseClearedWaiters();
+	}
+
+	/**
+	 * Declare an announced call a command run. Taking the group lock is the declaration: only the run
+	 * itself knows it is one, since the host announces a command exactly like any other non-mutating
+	 * tool. Returns false for a call nobody announced, which keeps the pre-announcement behavior.
+	 */
+	private declareAnnouncedShellRun(callId: string | undefined): boolean {
+		if (callId === undefined) return false;
+		const announcement = this.announcements.get(callId);
+		if (!announcement || announcement.kind === "mutation") return false;
+		announcement.kind = "shell";
+		return true;
+	}
+
+	/**
+	 * Wait until no call of `awaited` announced EARLIER than `callId` is still pending. Returns at once
+	 * for a call that was never announced, so a host that does not announce sees today's behavior.
+	 */
+	async waitForEarlierAnnouncedCalls(
+		callId: string | undefined,
+		awaited: ToolCallKind,
+		signal: AbortSignal | undefined,
+	): Promise<void> {
+		if (callId === undefined) return;
+		const announcement = this.announcements.get(callId);
+		if (!announcement || !this.hasPendingCallBefore(announcement.index, awaited)) return;
+		let waiter!: EarlierCallWaiter;
+		const cleared = new Promise<void>((resolveCleared) => {
+			waiter = { index: announcement.index, awaited, resolve: resolveCleared };
+			this.earlierCallWaiters.add(waiter);
+		});
+		try {
+			await raceAbort(cleared, signal);
+		} finally {
+			this.earlierCallWaiters.delete(waiter);
+		}
+	}
+
+	/** See {@link withExclusiveMutationBarrier}; this is that barrier inside one scope. */
+	runExclusive<T>(fn: () => Promise<T>, options?: { signal?: AbortSignal; holdId?: string }): Promise<T> {
+		const signal = options?.signal;
+		// Already cancelled before it queued: nothing to schedule, and no position to release.
+		if (signal?.aborted) return Promise.reject(signal.reason);
+		const holdId = options?.holdId;
+		// Declared synchronously, before any await: from here on a later-emitted mutation knows there is
+		// a command run ahead of it that has not taken the lock yet.
+		const group: LockGroup = this.declareAnnouncedShellRun(holdId) ? "shell" : "exclusive";
+		const hold: ExclusiveHold = { queued: true, lockless: false, done: false };
+		if (holdId !== undefined) this.exclusiveHolds.set(holdId, hold);
+		const unregister = (): void => {
+			hold.done = true;
+			hold.release = undefined;
+			// A run that never joined the lock never will: a mutation ordered behind this announcement
+			// must stop waiting at this run's terminal, not at the host's retire.
+			this.markAnnouncementJoined(holdId);
+			if (holdId !== undefined && this.exclusiveHolds.get(holdId) === hold) this.exclusiveHolds.delete(holdId);
+			this.settle();
+		};
+
+		return (async () => {
+			// Emission order, before the lock is touched: a command run must not outrun a file mutation
+			// its own batch emitted earlier but that has not reached the lock yet. This wait has to happen
+			// BEFORE this run joins, or the mutation it is waiting for would park behind this very run.
+			try {
+				await this.waitForEarlierAnnouncedCalls(holdId, "mutation", signal);
+			} catch (error) {
+				unregister();
+				throw error;
+			}
+			if (hold.lockless) {
+				// Released before it joined: the run no longer claims a place in the group, so it never
+				// takes the lock. It still waits for the mutations that were already in flight when it
+				// arrived - "nobody waits for this run any more" is not "this run may start in the middle
+				// of somebody else's write".
+				try {
+					await this.waitForMutationsToDrain(signal);
+					return await fn();
+				} finally {
+					unregister();
+				}
+			}
+			try {
+				await this.acquireLock(group, signal);
+			} catch (error) {
+				unregister();
+				throw error;
+			}
+			hold.queued = false;
+			let holdsLock = true;
+			const release = (): void => {
+				if (!holdsLock) return;
+				holdsLock = false;
+				this.releaseLock();
+			};
+			if (hold.lockless) {
+				// Handed off while it was still waiting for the lock. It has the lock now; giving it back
+				// at once is the same thing as never having taken it, minus a race with the hand-off.
+				release();
+				try {
+					await this.waitForMutationsToDrain(signal);
+					return await fn();
+				} finally {
+					unregister();
+				}
+			}
+			hold.release = release;
+			this.markAnnouncementJoined(holdId);
+			try {
+				return await fn();
+			} finally {
+				release();
+				unregister();
+			}
+		})();
+	}
+
+	/** See {@link releaseExclusiveHold}; this is that release inside one scope. */
+	releaseHold(holdId: string): boolean {
+		const hold = this.exclusiveHolds.get(holdId);
+		if (!hold || hold.done) return false;
+		// It stops claiming the lock here, so nothing ordered behind this announcement may keep waiting
+		// for it to take one - a handed-off command runs for as long as it likes.
+		this.markAnnouncementJoined(holdId);
+		if (hold.queued) {
+			hold.done = true;
+			hold.lockless = true;
+			return true;
+		}
+		const release = hold.release;
+		if (!release) return false;
+		hold.done = true;
+		hold.release = undefined;
+		release();
+		return true;
+	}
+
+	/** Join the mutation group and mark this call's announcement covered by the holders. */
+	async joinMutationGroup(callId: string | undefined, signal: AbortSignal | undefined): Promise<void> {
+		await this.acquireLock("mutation", signal);
+		// The announcement this call was reserved with stops being "pending" exactly here: the lock
+		// holders now cover it, so a command run waiting on it can stop waiting.
+		this.markAnnouncementJoined(callId);
+	}
+}
+
+/**
+ * Scope key for every caller that names no session. Hosts that never scope keep exactly one group
+ * lock and one announcement table, which is what a single-session process had all along.
+ */
+export const DEFAULT_MUTATION_SCOPE = "process";
+
+const mutationLockScopes = new Map<string, MutationLockScope>();
+
+/** The lock and announcements for one session key, created on first use. */
+export function getMutationLockScope(key: string = DEFAULT_MUTATION_SCOPE): MutationLockScope {
+	let scope = mutationLockScopes.get(key);
+	if (!scope) {
+		scope = new MutationLockScope(key);
+		mutationLockScopes.set(key, scope);
+	}
+	return scope;
+}
+
+/**
+ * Forget a session's lock and announcements. A scope that still holds live state stays registered
+ * until its last holder, waiter and announcement is gone: dropping it early would hand the next
+ * caller a fresh lock while somebody is still writing under the old one.
+ */
+export function disposeMutationLockScope(key: string): void {
+	mutationLockScopes.get(key)?.requestDispose();
+}
+
+/**
+ * Record a reserved tool call at its emission position, before any body in the wave starts.
+ *
+ * `kind` says what the call does: `"mutation"` (or the legacy `true`) for a call whose tool declared
+ * a file mutation target, `"shell"` for a command run, `"other"` (or the legacy `false`) for
+ * anything else. Every reserved call is announced, because that is how a command run learns its own
+ * emission index; a run announced as `"other"` declares itself a shell run when it takes the lock.
+ * `batchId` names the reservation wave; a wave with a new identity retires whatever the previous one
+ * left behind, which can never join any more - its results already produced the assistant message
+ * this wave belongs to. `scope` names the session this wave belongs to.
+ */
+export function announceToolCall(
+	callId: string,
+	index: number,
+	kind: boolean | ToolCallKind,
+	batchId?: string,
+	scope?: string,
+): void {
+	getMutationLockScope(scope).announce(callId, index, kind, batchId);
+}
+
+/**
+ * Drop a call's announcement at its terminal, whether or not it ever joined the lock. An aborted or
+ * preflight-rejected write must never park a later command run for the rest of the batch.
+ */
+export function retireToolCall(callId: string, scope?: string): void {
+	getMutationLockScope(scope).retire(callId);
+}
+
+/** Wait until no mutation announced EARLIER than `callId` is still pending. */
+export function waitForAnnouncedMutations(
+	callId: string | undefined,
+	signal?: AbortSignal,
+	scope?: string,
+): Promise<void> {
+	return getMutationLockScope(scope).waitForEarlierAnnouncedCalls(callId, "mutation", signal);
+}
 
 /**
  * Run fn against the shell-group lock: it waits for all in-flight (running or queued) file mutations
@@ -310,84 +507,14 @@ const exclusiveHolds = new Map<string, ExclusiveHold>();
  * rejects at once with the signal's reason, never runs fn, and frees the queue position.
  * `options.holdId` names the run so {@link releaseExclusiveHold} can stop it holding the lock while
  * its work keeps running, and is also the announcement this run is ordered by.
+ * `options.scope` names the session whose lock this is; runs and mutations in other sessions are
+ * unaffected by it.
  */
 export function withExclusiveMutationBarrier<T>(
 	fn: () => Promise<T>,
-	options?: { signal?: AbortSignal; holdId?: string },
+	options?: { signal?: AbortSignal; holdId?: string; scope?: string },
 ): Promise<T> {
-	const signal = options?.signal;
-	// Already cancelled before it queued: nothing to schedule, and no position to release.
-	if (signal?.aborted) return Promise.reject(signal.reason);
-	const holdId = options?.holdId;
-	// Declared synchronously, before any await: from here on a later-emitted mutation knows there is
-	// a command run ahead of it that has not taken the lock yet.
-	const group: LockGroup = declareAnnouncedShellRun(holdId) ? "shell" : "exclusive";
-	const hold: ExclusiveHold = { queued: true, lockless: false, done: false };
-	if (holdId !== undefined) exclusiveHolds.set(holdId, hold);
-	const unregister = (): void => {
-		hold.done = true;
-		hold.release = undefined;
-		// A run that never joined the lock never will: a mutation ordered behind this announcement
-		// must stop waiting at this run's terminal, not at the host's retire.
-		markAnnouncementJoined(holdId);
-		if (holdId !== undefined && exclusiveHolds.get(holdId) === hold) exclusiveHolds.delete(holdId);
-	};
-
-	return (async () => {
-		// Emission order, before the lock is touched: a command run must not outrun a file mutation
-		// its own batch emitted earlier but that has not reached the lock yet. This wait has to happen
-		// BEFORE this run joins, or the mutation it is waiting for would park behind this very run.
-		try {
-			await waitForEarlierAnnouncedCalls(holdId, "mutation", signal);
-		} catch (error) {
-			unregister();
-			throw error;
-		}
-		if (hold.lockless) {
-			// Released before it joined: the run no longer claims a place in the group, so it never
-			// takes the lock. It still waits for the mutations that were already in flight when it
-			// arrived - "nobody waits for this run any more" is not "this run may start in the middle
-			// of somebody else's write".
-			try {
-				await waitForMutationsToDrain(signal);
-				return await fn();
-			} finally {
-				unregister();
-			}
-		}
-		try {
-			await acquireLock(group, signal);
-		} catch (error) {
-			unregister();
-			throw error;
-		}
-		hold.queued = false;
-		let holdsLock = true;
-		const release = (): void => {
-			if (!holdsLock) return;
-			holdsLock = false;
-			releaseLock();
-		};
-		if (hold.lockless) {
-			// Handed off while it was still waiting for the lock. It has the lock now; giving it back
-			// at once is the same thing as never having taken it, minus a race with the hand-off.
-			release();
-			try {
-				await waitForMutationsToDrain(signal);
-				return await fn();
-			} finally {
-				unregister();
-			}
-		}
-		hold.release = release;
-		markAnnouncementJoined(holdId);
-		try {
-			return await fn();
-		} finally {
-			release();
-			unregister();
-		}
-	})();
+	return getMutationLockScope(options?.scope).runExclusive(fn, options);
 }
 
 /**
@@ -398,23 +525,8 @@ export function withExclusiveMutationBarrier<T>(
  * the rest of its life. Returns true when this call released a hold that was still holding the lock
  * or still waiting for it; false for an unknown, already-released or already-settled hold.
  */
-export function releaseExclusiveHold(holdId: string): boolean {
-	const hold = exclusiveHolds.get(holdId);
-	if (!hold || hold.done) return false;
-	// It stops claiming the lock here, so nothing ordered behind this announcement may keep waiting
-	// for it to take one - a handed-off command runs for as long as it likes.
-	markAnnouncementJoined(holdId);
-	if (hold.queued) {
-		hold.done = true;
-		hold.lockless = true;
-		return true;
-	}
-	const release = hold.release;
-	if (!release) return false;
-	hold.done = true;
-	hold.release = undefined;
-	release();
-	return true;
+export function releaseExclusiveHold(holdId: string, scope?: string): boolean {
+	return getMutationLockScope(scope).releaseHold(holdId);
 }
 
 async function getMutationQueueKey(filePath: string): Promise<string> {
@@ -436,12 +548,15 @@ export const localFileMutationQueueBackend: FileMutationQueueBackend = Object.fr
 /**
  * Serialize file mutation operations targeting the same file.
  * Operations for different files still run in parallel.
+ *
+ * `options.scope` names the session whose group lock and announcements this mutation takes part in;
+ * the per-path queue is process-wide either way, so two sessions writing one file still take turns.
  */
 export async function withFileMutationQueue<T>(
 	filePath: string,
 	fn: () => Promise<T>,
 	backend: FileMutationQueueBackend = localFileMutationQueueBackend,
-	options?: { signal?: AbortSignal; callId?: string },
+	options?: { signal?: AbortSignal; callId?: string; scope?: string },
 ): Promise<T> {
 	let state = backendQueues.get(backend);
 	if (!state) {
@@ -470,25 +585,23 @@ export async function withFileMutationQueue<T>(
 	);
 
 	const { key, currentQueue, chainedQueue, releaseNext } = await registration;
+	const scope = getMutationLockScope(options?.scope);
 	let holdsLock = false;
 	try {
 		// Emission order, before the lock is touched: a mutation must not outrun a command run its own
 		// batch emitted earlier but that has not reached the lock yet.
-		await waitForEarlierAnnouncedCalls(options?.callId, "shell", options?.signal);
+		await scope.waitForEarlierAnnouncedCalls(options?.callId, "shell", options?.signal);
 		// Join the mutation group as soon as this call is admitted, before waiting on the per-file
 		// queue: a mutation already queued behind another on the same file must still count as
 		// in-flight for a command run, not just the one executing.
-		await acquireLock("mutation", options?.signal);
+		await scope.joinMutationGroup(options?.callId, options?.signal);
 		holdsLock = true;
-		// The announcement this call was reserved with stops being "pending" exactly here: the lock
-		// holders now cover it, so a command run waiting on it can stop waiting.
-		markAnnouncementJoined(options?.callId);
 		await currentQueue;
 		return await fn();
 	} finally {
 		// A cancelled wait never joined the lock; releasing it would credit a holder that was never
 		// counted and let a command run start while mutations are still in flight.
-		if (holdsLock) releaseLock();
+		if (holdsLock) scope.releaseLock();
 		releaseNext();
 		if (queues.get(key) === chainedQueue) {
 			queues.delete(key);
