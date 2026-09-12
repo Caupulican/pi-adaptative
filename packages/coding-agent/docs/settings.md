@@ -249,6 +249,7 @@ Direct `write`/`edit` calls use review-after-apply semantics. The compiled grant
 | `workerDelegation.maxConcurrent` | number | `20` | Global running-agent concurrency inside the fixed fleet and queue bounds |
 | `workerDelegation.writeEnabled` | boolean | `true` | Expose direct `write`/`edit`; explicit `false` revokes them for newly admitted work and narrows resumed grants |
 | `workerDelegation.modelPins` | object | - | Optional exact `default` and per-role provider/model/thinking bindings for fresh workers; malformed or unavailable applicable pins fail closed |
+| `workerDelegation.thinking` | `"step_down"` \| `"inherit"` | `"step_down"` | How a worker derives its thinking level when no authority, profile or pin sets one: one notch below the foreground level (`xhigh` -> `high`, floor `minimal`, `off` stays off) or an exact copy |
 
 ### Tool Repair
 

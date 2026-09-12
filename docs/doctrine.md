@@ -451,6 +451,17 @@ the grant anchor could silently add a new share. Pinned by
 `packages/coding-agent/test/worker-execution-policy.test.ts`, and
 `packages/coding-agent/test/session-worker-directories.test.ts`.
 
+**A worker inherits the foreground thinking level one notch down; authored levels are never
+moved.** When neither the delegation authority nor the profile binding pins a thinking level, the
+worker runs one step below the owner's live level (`xhigh` -> `high`), with `minimal` as the floor
+and `off` staying off; `workerDelegation.thinking: "inherit"` restores the copy. An authority pin,
+a profile binding and a model pin are authored choices and are applied exactly as written. Why:
+measured on the owner's sessions of 2026-09-04..11, workers inherited `xhigh`, and a wave of five
+to seven workers each spending the foreground's full reasoning budget at once was the largest
+single source of shared-account load (277 of the 334 xAI requests that overlapped another were
+workers), while the owner's own request waited behind them. Pinned by
+`packages/coding-agent/test/worker-authority-resolver.test.ts`.
+
 **Queue validation cannot substitute a directory or start an attempt twice.** Fresh worker and
 verifier contracts capture native directory identity before durable dispatch. Queued and resumed
 execution revalidates that identity with bounded cancellation before provider execution; capacity

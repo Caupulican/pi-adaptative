@@ -659,6 +659,7 @@ export class WorkerDelegationController {
 			...input,
 			...(foregroundModel ? { foregroundModel } : {}),
 			foregroundThinkingLevel: this.deps.getForegroundThinkingLevel?.(),
+			foregroundThinkingPolicy: this.deps.getSettingsManager().getWorkerThinkingPolicy(),
 			...(this.deps.getForegroundToolNames ? { foregroundToolNames: this.deps.getForegroundToolNames() } : {}),
 			...(this.deps.getCapabilityEnvelope() ? { foregroundEnvelope: this.deps.getCapabilityEnvelope() } : {}),
 			cwd: this.deps.getCwd(),

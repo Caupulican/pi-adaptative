@@ -304,6 +304,15 @@ export const DEFAULT_WORKER_DELEGATION_WRITE_ENABLED = true;
 export const MAX_WORKER_DELEGATION_MAX_USD = Number.MAX_SAFE_INTEGER;
 export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = Number.MAX_SAFE_INTEGER;
 export const MAX_WORKER_DELEGATION_MAX_CONCURRENT = Number.MAX_SAFE_INTEGER;
+/**
+ * How a worker's thinking level is derived when nothing pins it: `step_down` runs workers one notch
+ * below the foreground level (xhigh -> high), `inherit` copies the foreground level. Measured
+ * 2026-09-11: workers inherited xhigh, and a wave of five to seven workers each spending the
+ * foreground's full reasoning budget at once was the largest single source of shared-account load.
+ */
+export type WorkerThinkingPolicy = "inherit" | "step_down";
+export const WORKER_THINKING_POLICIES: readonly WorkerThinkingPolicy[] = ["inherit", "step_down"];
+export const DEFAULT_WORKER_DELEGATION_THINKING: WorkerThinkingPolicy = "step_down";
 
 export interface WorkerDelegationSettings {
 	enabled?: boolean; // default: true for capable models; explicit false is a hard off-switch
@@ -313,10 +322,11 @@ export interface WorkerDelegationSettings {
 	writeEnabled?: boolean; // default: true; explicit false revokes direct write/edit tools
 	maxConcurrent?: number; // default: 20; running leaf-worker concurrency; fixed fleet safety ceilings separately bound durable identities and queued dispatches
 	modelPins?: WorkerModelPinsSettings; // optional global/local role pins; absent preserves adaptive routing exactly
+	thinking?: WorkerThinkingPolicy; // default: step_down; worker thinking relative to the foreground when no authority or profile pins it
 }
 
 export type ResolvedWorkerDelegationSettings = Required<
-	Omit<WorkerDelegationSettings, "orchestrationProfile" | "modelPins">
+	Omit<WorkerDelegationSettings, "orchestrationProfile" | "modelPins" | "thinking">
 > &
 	Pick<WorkerDelegationSettings, "orchestrationProfile">;
 
@@ -1038,6 +1048,20 @@ function normalizeWorkerDelegationLayer(
 				reportDiagnostic,
 				"maxConcurrent",
 				`a safe integer between 1 and ${MAX_WORKER_DELEGATION_MAX_CONCURRENT}`,
+			);
+		}
+	}
+	if (Object.hasOwn(value, "thinking")) {
+		if (
+			typeof value.thinking === "string" &&
+			WORKER_THINKING_POLICIES.includes(value.thinking as WorkerThinkingPolicy)
+		) {
+			normalized.thinking = value.thinking as WorkerThinkingPolicy;
+		} else {
+			reportInvalidWorkerDelegationField(
+				reportDiagnostic,
+				"thinking",
+				`one of ${WORKER_THINKING_POLICIES.join(", ")}`,
 			);
 		}
 	}
@@ -4172,6 +4196,12 @@ export class SettingsManager {
 			resolved.orchestrationProfile = configured.orchestrationProfile.trim();
 		}
 		return resolved;
+	}
+
+	/** Worker thinking relative to the foreground when neither authority nor profile pins it. */
+	getWorkerThinkingPolicy(): WorkerThinkingPolicy {
+		const configured = normalizeWorkerDelegationLayer(this.settings.workerDelegation) ?? {};
+		return configured.thinking ?? DEFAULT_WORKER_DELEGATION_THINKING;
 	}
 
 	getWorkerModelPinPolicy(): WorkerModelPinPolicy {

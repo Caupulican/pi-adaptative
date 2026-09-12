@@ -13,12 +13,14 @@ import type { ModelRegistry } from "../model-registry.ts";
 import {
 	type HarnessCapability,
 	ORCHESTRATION_SCHEMA_VERSION,
+	ORCHESTRATION_THINKING_LEVELS,
 	type OrchestrationModelBinding,
 	type OrchestrationProfile,
 	type OrchestrationThinkingLevel,
 } from "../orchestration/contracts.ts";
 import { CLASSIFIED_LANE_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
 import { resolvePinnedOrchestrationModel } from "../orchestration/model-binding.ts";
+import { DEFAULT_WORKER_DELEGATION_THINKING, type WorkerThinkingPolicy } from "../settings-manager.ts";
 import {
 	capabilitySurvivesReadOnly,
 	envelopeHasToolCapability,
@@ -71,6 +73,8 @@ export interface WorkerAuthorityResolutionInput {
 	modelPin?: OrchestrationModelBinding;
 	foregroundModel?: Model<Api>;
 	foregroundThinkingLevel?: OrchestrationThinkingLevel;
+	/** How an inherited foreground thinking level is applied to the worker; default `step_down`. */
+	foregroundThinkingPolicy?: WorkerThinkingPolicy;
 	foregroundToolNames?: readonly string[];
 	foregroundEnvelope?: CapabilityEnvelope;
 	cwd?: string;
@@ -127,12 +131,24 @@ export function bindCompiledToolSurface(
 	return { ...shipment, profile };
 }
 
+/**
+ * One notch below `level` on the orchestration thinking ladder. `off` stays off (reasoning is
+ * disabled, not merely low) and `minimal` is the floor, so stepping down never turns reasoning off
+ * on a model the foreground runs with reasoning on.
+ */
+export function stepDownThinkingLevel(level: OrchestrationThinkingLevel): OrchestrationThinkingLevel {
+	const index = ORCHESTRATION_THINKING_LEVELS.indexOf(level);
+	if (index <= ORCHESTRATION_THINKING_LEVELS.indexOf("minimal")) return level;
+	return ORCHESTRATION_THINKING_LEVELS[index - 1]!;
+}
+
 function selectModelBinding(
 	modelPin: OrchestrationModelBinding | undefined,
 	authority: WorkerDelegationAuthorityRequest | undefined,
 	base: ResolvedWorkerProfile | undefined,
 	foregroundModel: Model<Api> | undefined,
 	foregroundThinkingLevel: OrchestrationThinkingLevel | undefined,
+	foregroundThinkingPolicy: WorkerThinkingPolicy,
 	modelRegistry: ModelRegistry,
 ): OrchestrationModelBinding | undefined {
 	if (modelPin) return { ...modelPin };
@@ -141,12 +157,19 @@ function selectModelBinding(
 	if (!provider || !modelId) return undefined;
 	const sameAsBase = provider === base?.modelBinding.provider && modelId === base.modelBinding.modelId;
 	const selectedModel = modelRegistry.find(provider, modelId);
+	// Only the branch that copies the FOREGROUND level is subject to the thinking policy: an
+	// authority pin and a profile binding are authored choices and stay exactly as written.
+	const inheritedFromForeground = (): OrchestrationThinkingLevel => {
+		const level = foregroundThinkingLevel ?? resolveModelThinkingLevel(foregroundModel!, undefined);
+		if (foregroundThinkingPolicy === "inherit") return level;
+		return resolveModelThinkingLevel(foregroundModel!, stepDownThinkingLevel(level));
+	};
 	const thinkingLevel =
 		authority?.thinkingLevel ??
 		(sameAsBase
 			? base.modelBinding.thinkingLevel
 			: foregroundModel && provider === foregroundModel.provider && modelId === foregroundModel.id
-				? (foregroundThinkingLevel ?? resolveModelThinkingLevel(foregroundModel, undefined))
+				? inheritedFromForeground()
 				: selectedModel
 					? resolveModelThinkingLevel(selectedModel, undefined)
 					: "off");
@@ -171,6 +194,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		input.base,
 		input.foregroundModel,
 		input.foregroundThinkingLevel,
+		input.foregroundThinkingPolicy ?? DEFAULT_WORKER_DELEGATION_THINKING,
 		input.modelRegistry,
 	);
 	if (!binding) return { ok: false, reason: "orchestration_model_required" };

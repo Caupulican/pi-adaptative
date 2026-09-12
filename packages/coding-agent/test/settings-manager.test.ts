@@ -93,6 +93,20 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("workerDelegation.thinking", () => {
+		it("defaults to step_down, keeps a valid choice and ignores an invalid one", () => {
+			expect(SettingsManager.create(projectDir, agentDir).getWorkerThinkingPolicy()).toBe("step_down");
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ workerDelegation: { thinking: "inherit" } }));
+			expect(SettingsManager.create(projectDir, agentDir).getWorkerThinkingPolicy()).toBe("inherit");
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ workerDelegation: { thinking: "louder" } }));
+			expect(SettingsManager.create(projectDir, agentDir).getWorkerThinkingPolicy()).toBe("step_down");
+			// The resolved delegation settings object is unchanged by the new field.
+			expect(SettingsManager.create(projectDir, agentDir).getWorkerDelegationSettings()).not.toHaveProperty(
+				"thinking",
+			);
+		});
+	});
+
 	describe("preserves externally added settings", () => {
 		it("should preserve enabledModels when changing thinking level", async () => {
 			// Create initial settings file

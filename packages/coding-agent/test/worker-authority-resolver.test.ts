@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
 	bindCompiledVerifierIdentity,
 	resolveWorkerAuthority,
+	stepDownThinkingLevel,
 } from "../src/core/delegation/worker-authority-resolver.ts";
 import { parseWorkerDelegationAuthorityRequest } from "../src/core/delegation/worker-delegation-request.ts";
 import {
@@ -385,6 +386,88 @@ describe("resolveWorkerAuthority", () => {
 		});
 		expect(derivedIds).not.toContain(profile.profileId);
 		expect(new Set(derivedIds).size).toBe(derivedIds.length);
+	});
+
+	it("steps an inherited foreground thinking level down one notch unless something pins it", () => {
+		// xhigh is only supported when the model maps it (see getSupportedThinkingLevels).
+		const reasoningModel = {
+			id: "m1",
+			provider: "faux",
+			reasoning: true,
+			thinkingLevelMap: { xhigh: "xhigh" },
+		} as Model<Api>;
+		const reasoningRegistry = {
+			find: () => reasoningModel,
+			hasConfiguredAuth: () => true,
+		} as unknown as ModelRegistry;
+		const resolveBinding = (input: {
+			foregroundThinkingLevel?: "xhigh" | "minimal" | "off";
+			foregroundThinkingPolicy?: "inherit" | "step_down";
+			authority?: { thinkingLevel?: "low" };
+		}) => {
+			const resolution = resolveWorkerAuthority({
+				authority: { path: "/repo", ...(input.authority ?? {}) },
+				foregroundModel: reasoningModel,
+				foregroundThinkingLevel: input.foregroundThinkingLevel,
+				...(input.foregroundThinkingPolicy ? { foregroundThinkingPolicy: input.foregroundThinkingPolicy } : {}),
+				foregroundToolNames: ["read"],
+				foregroundEnvelope: { id: "parent", capabilities: ["filesystem.read"] },
+				modelRegistry: reasoningRegistry,
+				isModelExhausted: () => false,
+			});
+			if (!resolution.ok) throw new Error(resolution.reason);
+			return resolution.shipment.modelBinding.thinkingLevel;
+		};
+
+		// Default policy: the worker runs one notch below the owner's xhigh.
+		expect(resolveBinding({ foregroundThinkingLevel: "xhigh" })).toBe("high");
+		// Explicit inherit copies the foreground level exactly.
+		expect(resolveBinding({ foregroundThinkingLevel: "xhigh", foregroundThinkingPolicy: "inherit" })).toBe("xhigh");
+		// An authority pin is an authored choice and is never stepped.
+		expect(resolveBinding({ foregroundThinkingLevel: "xhigh", authority: { thinkingLevel: "low" } })).toBe("low");
+		// The floor never turns reasoning off, and off stays off.
+		expect(resolveBinding({ foregroundThinkingLevel: "minimal" })).toBe("minimal");
+		expect(resolveBinding({ foregroundThinkingLevel: "off" })).toBe("off");
+	});
+
+	it("keeps a profile-bound thinking level exactly as authored under the step-down policy", () => {
+		const xhighModel = {
+			id: "m1",
+			provider: "faux",
+			reasoning: true,
+			thinkingLevelMap: { xhigh: "xhigh" },
+		} as Model<Api>;
+		const xhighRegistry = { find: () => xhighModel, hasConfiguredAuth: () => true } as unknown as ModelRegistry;
+		const base: ResolvedWorkerProfile = {
+			model: xhighModel,
+			modelBinding: { provider: xhighModel.provider, modelId: xhighModel.id, thinkingLevel: "xhigh" },
+			profile: createTestWorkerOrchestrationProfile({
+				profileId: "authored-thinking",
+				model: xhighModel,
+				toolNames: ["read"],
+				capabilityCeiling: ["filesystem.read"],
+			}),
+			resourcePointers: [],
+		};
+		const resolution = resolveWorkerAuthority({
+			base,
+			cwd: "/repo",
+			foregroundModel: xhighModel,
+			foregroundThinkingLevel: "xhigh",
+			foregroundThinkingPolicy: "step_down",
+			modelRegistry: xhighRegistry,
+			isModelExhausted: () => false,
+		});
+		if (!resolution.ok) throw new Error(resolution.reason);
+		expect(resolution.shipment.modelBinding.thinkingLevel).toBe("xhigh");
+	});
+
+	it("steps every level down one notch with minimal as the floor", () => {
+		expect(
+			["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].map((level) =>
+				stepDownThinkingLevel(level as never),
+			),
+		).toEqual(["off", "minimal", "minimal", "low", "medium", "high", "xhigh", "max"]);
 	});
 
 	it("derives a new implementation identity when a verifier compiles to a new identity", () => {
