@@ -855,7 +855,18 @@ export class AgentSession {
 			settingsManager: this.settingsManager,
 			failureCorpus: this._failureCorpus,
 			getContextWindow: () => this.model?.contextWindow ?? 0,
-			emit: (event) => this._emit(event),
+			emit: (event) => {
+				// Retry lifecycle events are persisted before they reach the UI so a retried-and-
+				// recovered provider failure leaves a session record a census can count.
+				if (event.type === "auto_retry_start" || event.type === "auto_retry_end") {
+					const model = this.model;
+					this._foregroundLifecycle.recordRetryEvent(
+						event,
+						model ? { provider: model.provider, id: model.id } : undefined,
+					);
+				}
+				this._emit(event);
+			},
 			checkCompaction: (message) => this._checkCompaction(message),
 			onSuccessfulAssistant: () => this._compaction.resetOverflowRecovery(),
 			settleRuntimeUpdate: (signal) => this.runtimeUpdates.settle(signal),

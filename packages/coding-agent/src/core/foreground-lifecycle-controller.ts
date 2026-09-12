@@ -21,7 +21,22 @@ const MAX_MESSAGE_ENTRY_IDS = 256;
  * read by any runtime decision.
  */
 export const PROVIDER_TRANSPORT_TELEMETRY_CUSTOM_TYPE = "provider_transport_telemetry";
+/**
+ * Durable record of one automatic provider retry (start: the failure and the backoff chosen; end:
+ * whether the retried request eventually succeeded). Before this record existed the retry
+ * controller's events reached only the live UI, so a rate limit or overload the harness retried
+ * and recovered from left no trace in the session and could not be counted by a later census.
+ * Joined to the request it retries through `requestId` (the latest `request_snapshot`); never
+ * read by any runtime decision.
+ */
+export const PROVIDER_RETRY_CUSTOM_TYPE = "provider_retry";
+
+/** The retry controller's two lifecycle events, as the recovery controller emits them. */
+export type ProviderRetryLifecycleEvent =
+	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
+	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
 const MAX_WARNING_LENGTH = 500;
+const MAX_RETRY_ERROR_MESSAGE_LENGTH = 2_000;
 const MAX_EXACT_FINGERPRINT_CHARS = 32 * 1024;
 const MAX_FINGERPRINT_DEPTH = 16;
 const MAX_FINGERPRINT_ITEMS = 256;
@@ -410,6 +425,40 @@ export class ForegroundLifecycleController {
 			} catch {
 				// A failed diagnostic write must never fail the request it observes.
 			}
+		}
+	}
+
+	/**
+	 * Durably record one automatic retry lifecycle event, correlated to the request that failed via
+	 * `lastRequestId` and stamped with the model the session was on. Never throws: a failed
+	 * diagnostic write must never fail the recovery it observes (see `recordTransportTelemetry`).
+	 */
+	recordRetryEvent(event: ProviderRetryLifecycleEvent, model?: { provider: string; id: string }): void {
+		const data =
+			event.type === "auto_retry_start"
+				? {
+						phase: "start" as const,
+						attempt: event.attempt,
+						maxAttempts: event.maxAttempts,
+						delayMs: event.delayMs,
+						errorMessage: event.errorMessage.slice(0, MAX_RETRY_ERROR_MESSAGE_LENGTH),
+					}
+				: {
+						phase: "end" as const,
+						attempt: event.attempt,
+						success: event.success,
+						...(event.finalError === undefined
+							? {}
+							: { finalError: event.finalError.slice(0, MAX_RETRY_ERROR_MESSAGE_LENGTH) }),
+					};
+		try {
+			this.deps.sessionManager.appendCustomEntry(PROVIDER_RETRY_CUSTOM_TYPE, {
+				requestId: this.lastRequestId,
+				...(model ? { provider: model.provider, modelId: model.id } : {}),
+				...data,
+			});
+		} catch {
+			// A failed diagnostic write must never fail the recovery it observes.
 		}
 	}
 

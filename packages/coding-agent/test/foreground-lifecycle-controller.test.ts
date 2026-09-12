@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	type ForegroundLifecycleAgentDependency,
 	ForegroundLifecycleController,
+	PROVIDER_RETRY_CUSTOM_TYPE,
 	PROVIDER_TRANSPORT_TELEMETRY_CUSTOM_TYPE,
 } from "../src/core/foreground-lifecycle-controller.ts";
 import type { ModelRouterController } from "../src/core/model-router-controller.ts";
@@ -273,6 +274,61 @@ describe("foreground lifecycle controller", () => {
 			.getEntries()
 			.filter((entry) => entry.type === "custom" && entry.customType === PROVIDER_TRANSPORT_TELEMETRY_CUSTOM_TYPE);
 		expect(telemetry).toHaveLength(2);
+	});
+
+	it("persists retry start and end events joined to the latest request snapshot", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const agent: ForegroundLifecycleAgentDependency & {
+			onProviderRequestSnapshot?: (...args: never[]) => Promise<void>;
+		} = {
+			state: { messages: [] },
+			resetSanitizerPrefixHorizon: () => {},
+		};
+		const controller = new ForegroundLifecycleController({
+			agent,
+			sessionManager,
+			modelRouter: { commitSessionBufferPrefix: () => new Map() } as ModelRouterController,
+			emitWarning: () => {},
+		});
+		controller.install();
+		await agent.onProviderRequestSnapshot?.(
+			{
+				requestId: "req-retry",
+				model: { api: "faux", provider: "faux", id: "faux-1" },
+				reasoning: "off",
+				maxTokens: 128,
+				attempt: 0,
+				context: { systemPrompt: "", tools: [], messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			} as never,
+			undefined,
+		);
+
+		controller.recordRetryEvent(
+			{ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: "429 rate limit" },
+			{ provider: "faux", id: "faux-1" },
+		);
+		controller.recordRetryEvent(
+			{ type: "auto_retry_end", success: true, attempt: 1 },
+			{ provider: "faux", id: "faux-1" },
+		);
+
+		const records = sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "custom" && entry.customType === PROVIDER_RETRY_CUSTOM_TYPE)
+			.map((entry) => (entry as { data: Record<string, unknown> }).data);
+		expect(records).toEqual([
+			{
+				requestId: "req-retry",
+				provider: "faux",
+				modelId: "faux-1",
+				phase: "start",
+				attempt: 1,
+				maxAttempts: 3,
+				delayMs: 2000,
+				errorMessage: "429 rate limit",
+			},
+			{ requestId: "req-retry", provider: "faux", modelId: "faux-1", phase: "end", attempt: 1, success: true },
+		]);
 	});
 
 	it("does nothing for a message with no provider_transport diagnostic", () => {
