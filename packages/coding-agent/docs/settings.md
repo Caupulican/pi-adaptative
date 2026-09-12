@@ -249,6 +249,8 @@ Direct `write`/`edit` calls use review-after-apply semantics. The compiled grant
 | `workerDelegation.maxConcurrent` | number | `3` | Global running-agent concurrency inside the fixed fleet and queue bounds; the default is the Codex CLI's per-session limit (4 threads including the root) |
 | `workerDelegation.writeEnabled` | boolean | `true` | Expose direct `write`/`edit`; explicit `false` revokes them for newly admitted work and narrows resumed grants |
 | `workerDelegation.modelPins` | object | - | Optional exact `default` and per-role provider/model/thinking bindings for fresh workers; malformed or unavailable applicable pins fail closed |
+| `workerDelegation.account` | `"other"` \| `"same"` | `"other"` | Which account a fresh, unpinned worker runs on: another authenticated provider (a separate subscription or key, so a worker wave never competes with the owner's turn for one account) or the foreground model. Falls back to the foreground when no alternative is authenticated |
+| `workerDelegation.routeProviders` | string[] | `[]` | Ordered routing candidates, each `provider` (its default model) or `provider/modelId`; every other authenticated provider follows in catalog order. Example: `["openrouter/inclusionai/ling-3.0-flash-fin:free", "openai-codex"]` |
 | `workerDelegation.thinking` | `"step_down"` \| `"inherit"` | `"step_down"` | How a worker derives its thinking level when no authority, profile or pin sets one: one notch below the foreground level (`xhigh` -> `high`, floor `minimal`, `off` stays off) or an exact copy |
 
 ### Tool Repair

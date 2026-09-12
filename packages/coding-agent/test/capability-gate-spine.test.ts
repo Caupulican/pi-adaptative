@@ -484,6 +484,7 @@ describe("model-router tier resolution honors the tool-probe verdict", () => {
 				getModelRegistry: () => ({
 					getAll: () => models,
 					hasConfiguredAuth: () => true,
+					getAvailable: () => [],
 				}),
 				isModelExhausted: () => false,
 				getFailoverStatus: () => ({ exhausted: [] }),

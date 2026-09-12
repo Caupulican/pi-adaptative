@@ -18,6 +18,7 @@ import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fi
 const model = { id: "m1", provider: "faux", reasoning: true } as Model<Api>;
 const modelRegistry = {
 	find: () => model,
+	getAvailable: () => [],
 	hasConfiguredAuth: () => true,
 } as unknown as ModelRegistry;
 
@@ -340,6 +341,7 @@ describe("resolveWorkerAuthority", () => {
 		const alternateModel = { id: "m2", provider: "faux", reasoning: true } as Model<Api>;
 		const identityRegistry = {
 			find: (_provider: string, modelId: string) => (modelId === alternateModel.id ? alternateModel : model),
+			getAvailable: () => [],
 			hasConfiguredAuth: () => true,
 		} as unknown as ModelRegistry;
 		const profile = Object.assign(
@@ -398,6 +400,7 @@ describe("resolveWorkerAuthority", () => {
 		} as Model<Api>;
 		const reasoningRegistry = {
 			find: () => reasoningModel,
+			getAvailable: () => [],
 			hasConfiguredAuth: () => true,
 		} as unknown as ModelRegistry;
 		const resolveBinding = (input: {
@@ -430,6 +433,127 @@ describe("resolveWorkerAuthority", () => {
 		expect(resolveBinding({ foregroundThinkingLevel: "off" })).toBe("off");
 	});
 
+	it("routes a fresh unpinned worker to another authenticated account and steps its thinking down", () => {
+		const foreground = {
+			id: "grok-4.6",
+			provider: "xai",
+			reasoning: true,
+			thinkingLevelMap: { xhigh: "xhigh" },
+		} as Model<Api>;
+		const codex = { id: "gpt-5.6-sol", provider: "openai-codex", reasoning: true } as Model<Api>;
+		const ling = { id: "inclusionai/ling-3.0-flash-fin:free", provider: "openrouter", reasoning: true } as Model<Api>;
+		const models = [foreground, codex, ling];
+		const authed = new Set(["xai", "openai-codex", "openrouter"]);
+		const local = { id: "local", provider: "llama-cpp", reasoning: false } as Model<Api>;
+		models.push(local);
+		const registry = {
+			find: (provider: string, modelId: string) => models.find((m) => m.provider === provider && m.id === modelId),
+			// llama-cpp needs no auth and so is "available", but it is not an account.
+			getAvailable: () => models.filter((m) => authed.has(m.provider) || m.provider === "llama-cpp"),
+			hasConfiguredAuth: (m: Model<Api>) => authed.has(m.provider) || m.provider === "llama-cpp",
+			authStorage: { hasAuth: (provider: string) => authed.has(provider) },
+		} as unknown as ModelRegistry;
+		const resolve = (routing: { account: "other" | "same"; routeProviders: string[] }, exhausted: string[] = []) => {
+			const resolution = resolveWorkerAuthority({
+				authority: { path: "/repo" },
+				foregroundModel: foreground,
+				foregroundThinkingLevel: "xhigh",
+				foregroundToolNames: ["read"],
+				foregroundEnvelope: { id: "parent", capabilities: ["filesystem.read"] },
+				accountRouting: routing,
+				modelRegistry: registry,
+				isModelExhausted: (m) => exhausted.includes(`${m.provider}/${m.id}`),
+			});
+			if (!resolution.ok) throw new Error(resolution.reason);
+			return resolution.shipment.modelBinding;
+		};
+		// Default: the first other authenticated provider in catalog order, at the provider's default model.
+		expect(resolve({ account: "other", routeProviders: [] })).toEqual({
+			provider: "openai-codex",
+			modelId: "gpt-5.6-sol",
+			thinkingLevel: "high",
+		});
+		// An explicit order wins, and a `provider/modelId` entry names the exact model (ids may contain slashes).
+		expect(
+			resolve({
+				account: "other",
+				routeProviders: ["openrouter/inclusionai/ling-3.0-flash-fin:free", "openai-codex"],
+			}),
+		).toMatchObject({
+			provider: "openrouter",
+			modelId: "inclusionai/ling-3.0-flash-fin:free",
+		});
+		// An exhausted candidate is skipped; the foreground's own provider is never a candidate.
+		expect(
+			resolve({ account: "other", routeProviders: ["openrouter", "xai", "openai-codex"] }, [
+				"openrouter/inclusionai/ling-3.0-flash-fin:free",
+			]),
+		).toMatchObject({
+			provider: "openai-codex",
+		});
+		// `same` keeps the foreground account.
+		expect(resolve({ account: "same", routeProviders: ["openai-codex"] })).toMatchObject({
+			provider: "xai",
+			modelId: "grok-4.6",
+			thinkingLevel: "high",
+		});
+		// With no other ACCOUNT the worker inherits the foreground: the credential-free local
+		// server is available but is not a budget of its own.
+		authed.delete("openai-codex");
+		authed.delete("openrouter");
+		expect(resolve({ account: "other", routeProviders: [] })).toMatchObject({ provider: "xai", modelId: "grok-4.6" });
+		// Named explicitly, a credential-free provider is the owner's choice and is honoured.
+		expect(resolve({ account: "other", routeProviders: ["llama-cpp/local"] })).toMatchObject({
+			provider: "llama-cpp",
+			modelId: "local",
+		});
+	});
+
+	it("never moves an authority model, a pin or a profile binding to another account", () => {
+		const foreground = { id: "grok-4.6", provider: "xai", reasoning: true } as Model<Api>;
+		const codex = { id: "gpt-5.6-sol", provider: "openai-codex", reasoning: true } as Model<Api>;
+		const models = [foreground, codex, model];
+		const registry = {
+			find: (provider: string, modelId: string) => models.find((m) => m.provider === provider && m.id === modelId),
+			getAvailable: () => models,
+			hasConfiguredAuth: () => true,
+			authStorage: { hasAuth: () => true },
+		} as unknown as ModelRegistry;
+		const routing = { account: "other" as const, routeProviders: ["openai-codex"] };
+		const withAuthorityModel = resolveWorkerAuthority({
+			authority: { path: "/repo", model: { provider: "xai", modelId: "grok-4.6" } },
+			foregroundModel: foreground,
+			foregroundToolNames: ["read"],
+			foregroundEnvelope: { id: "parent", capabilities: ["filesystem.read"] },
+			accountRouting: routing,
+			modelRegistry: registry,
+			isModelExhausted: () => false,
+		});
+		if (!withAuthorityModel.ok) throw new Error(withAuthorityModel.reason);
+		expect(withAuthorityModel.shipment.modelBinding).toMatchObject({ provider: "xai", modelId: "grok-4.6" });
+		const base: ResolvedWorkerProfile = {
+			model,
+			modelBinding: { provider: model.provider, modelId: model.id, thinkingLevel: "off" },
+			profile: createTestWorkerOrchestrationProfile({
+				profileId: "authored-binding",
+				model,
+				toolNames: ["read"],
+				capabilityCeiling: ["filesystem.read"],
+			}),
+			resourcePointers: [],
+		};
+		const withBase = resolveWorkerAuthority({
+			base,
+			cwd: "/repo",
+			foregroundModel: foreground,
+			accountRouting: routing,
+			modelRegistry: registry,
+			isModelExhausted: () => false,
+		});
+		if (!withBase.ok) throw new Error(withBase.reason);
+		expect(withBase.shipment.modelBinding).toMatchObject({ provider: "faux", modelId: "m1", thinkingLevel: "off" });
+	});
+
 	it("keeps a profile-bound thinking level exactly as authored under the step-down policy", () => {
 		const xhighModel = {
 			id: "m1",
@@ -437,7 +561,11 @@ describe("resolveWorkerAuthority", () => {
 			reasoning: true,
 			thinkingLevelMap: { xhigh: "xhigh" },
 		} as Model<Api>;
-		const xhighRegistry = { find: () => xhighModel, hasConfiguredAuth: () => true } as unknown as ModelRegistry;
+		const xhighRegistry = {
+			find: () => xhighModel,
+			getAvailable: () => [],
+			hasConfiguredAuth: () => true,
+		} as unknown as ModelRegistry;
 		const base: ResolvedWorkerProfile = {
 			model: xhighModel,
 			modelBinding: { provider: xhighModel.provider, modelId: xhighModel.id, thinkingLevel: "xhigh" },

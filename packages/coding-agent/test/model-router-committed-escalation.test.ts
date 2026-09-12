@@ -103,6 +103,7 @@ function makeProbe(throwAfterCommit: boolean): RouterProbe {
 		getModelRegistry: () =>
 			({
 				hasConfiguredAuth: () => true,
+				getAvailable: () => [],
 				getAll: () => [cheapModel, expensiveModel],
 			}) as never,
 		isModelExhausted: () => false,

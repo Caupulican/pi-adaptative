@@ -316,6 +316,22 @@ export const MAX_WORKER_DELEGATION_MAX_CONCURRENT = Number.MAX_SAFE_INTEGER;
  * foreground's full reasoning budget at once was the largest single source of shared-account load.
  */
 export type WorkerThinkingPolicy = "inherit" | "step_down";
+/**
+ * Which account fresh workers run on when nothing pins their model: `other` routes them to a
+ * configured provider the foreground is NOT using (a separate subscription or key, so a worker
+ * wave never competes with the owner's own turn for one account's budget), `same` keeps them on the
+ * foreground model. `routeProviders` orders the candidates (`provider` or `provider/modelId`);
+ * every other authenticated provider follows in catalog order; with no alternative the worker
+ * falls back to the foreground model.
+ */
+export type WorkerAccountPolicy = "other" | "same";
+export const WORKER_ACCOUNT_POLICIES: readonly WorkerAccountPolicy[] = ["other", "same"];
+export const DEFAULT_WORKER_DELEGATION_ACCOUNT: WorkerAccountPolicy = "other";
+const MAX_WORKER_ROUTE_PROVIDERS = 16;
+export interface WorkerAccountRouting {
+	account: WorkerAccountPolicy;
+	routeProviders: string[];
+}
 export const WORKER_THINKING_POLICIES: readonly WorkerThinkingPolicy[] = ["inherit", "step_down"];
 export const DEFAULT_WORKER_DELEGATION_THINKING: WorkerThinkingPolicy = "step_down";
 
@@ -328,10 +344,12 @@ export interface WorkerDelegationSettings {
 	maxConcurrent?: number; // default: 3 (the Codex CLI per-session default); running leaf-worker concurrency; fixed fleet safety ceilings separately bound durable identities and queued dispatches
 	modelPins?: WorkerModelPinsSettings; // optional global/local role pins; absent preserves adaptive routing exactly
 	thinking?: WorkerThinkingPolicy; // default: step_down; worker thinking relative to the foreground when no authority or profile pins it
+	account?: WorkerAccountPolicy; // default: other; fresh workers run on a provider the foreground is not using when one is authenticated
+	routeProviders?: string[]; // ordered routing candidates, `provider` or `provider/modelId`; other authenticated providers follow
 }
 
 export type ResolvedWorkerDelegationSettings = Required<
-	Omit<WorkerDelegationSettings, "orchestrationProfile" | "modelPins" | "thinking">
+	Omit<WorkerDelegationSettings, "orchestrationProfile" | "modelPins" | "thinking" | "account" | "routeProviders">
 > &
 	Pick<WorkerDelegationSettings, "orchestrationProfile">;
 
@@ -1078,6 +1096,34 @@ function normalizeWorkerDelegationLayer(
 				reportDiagnostic,
 				"maxConcurrent",
 				`a safe integer between 1 and ${MAX_WORKER_DELEGATION_MAX_CONCURRENT}`,
+			);
+		}
+	}
+	if (Object.hasOwn(value, "account")) {
+		if (typeof value.account === "string" && WORKER_ACCOUNT_POLICIES.includes(value.account as WorkerAccountPolicy)) {
+			normalized.account = value.account as WorkerAccountPolicy;
+		} else {
+			reportInvalidWorkerDelegationField(
+				reportDiagnostic,
+				"account",
+				`one of ${WORKER_ACCOUNT_POLICIES.join(", ")}`,
+			);
+		}
+	}
+	if (Object.hasOwn(value, "routeProviders")) {
+		if (
+			Array.isArray(value.routeProviders) &&
+			value.routeProviders.length <= MAX_WORKER_ROUTE_PROVIDERS &&
+			value.routeProviders.every(
+				(entry) => typeof entry === "string" && entry.trim().length > 0 && entry.length <= 200,
+			)
+		) {
+			normalized.routeProviders = (value.routeProviders as string[]).map((entry) => entry.trim());
+		} else {
+			reportInvalidWorkerDelegationField(
+				reportDiagnostic,
+				"routeProviders",
+				`an array of at most ${MAX_WORKER_ROUTE_PROVIDERS} nonempty strings (provider or provider/modelId)`,
 			);
 		}
 	}
@@ -4268,6 +4314,15 @@ export class SettingsManager {
 	getWorkerThinkingPolicy(): WorkerThinkingPolicy {
 		const configured = normalizeWorkerDelegationLayer(this.settings.workerDelegation) ?? {};
 		return configured.thinking ?? DEFAULT_WORKER_DELEGATION_THINKING;
+	}
+
+	/** Which account fresh workers run on and the ordered routing candidates. */
+	getWorkerAccountRouting(): WorkerAccountRouting {
+		const configured = normalizeWorkerDelegationLayer(this.settings.workerDelegation) ?? {};
+		return {
+			account: configured.account ?? DEFAULT_WORKER_DELEGATION_ACCOUNT,
+			routeProviders: configured.routeProviders ?? [],
+		};
 	}
 
 	getWorkerModelPinPolicy(): WorkerModelPinPolicy {

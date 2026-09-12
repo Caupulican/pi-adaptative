@@ -98,6 +98,7 @@ function compactionSupportFixture(options: {
 	const registry = {
 		getAll: () => models,
 		hasConfiguredAuth: (entry: Model<"openai-completions">) => authed.has(`${entry.provider}/${entry.id}`),
+		getAvailable: () => [],
 	} as unknown as ModelRegistry;
 	const exhausted = new Set(options.exhausted ?? []);
 	const warnings: string[] = [];

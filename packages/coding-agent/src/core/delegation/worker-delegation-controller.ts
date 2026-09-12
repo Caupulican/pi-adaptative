@@ -675,6 +675,7 @@ export class WorkerDelegationController {
 			...(foregroundModel ? { foregroundModel } : {}),
 			foregroundThinkingLevel: this.deps.getForegroundThinkingLevel?.(),
 			foregroundThinkingPolicy: this.deps.getSettingsManager().getWorkerThinkingPolicy(),
+			accountRouting: this.deps.getSettingsManager().getWorkerAccountRouting(),
 			...(this.deps.getForegroundToolNames ? { foregroundToolNames: this.deps.getForegroundToolNames() } : {}),
 			...(this.deps.getCapabilityEnvelope() ? { foregroundEnvelope: this.deps.getCapabilityEnvelope() } : {}),
 			cwd: this.deps.getCwd(),

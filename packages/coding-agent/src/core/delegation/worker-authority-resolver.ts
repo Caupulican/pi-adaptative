@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { Api, Model } from "@caupulican/pi-ai";
+import type { Api, KnownProvider, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { lendableToolSurface, mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
@@ -10,6 +10,7 @@ import {
 	WORKER_ROOT_MEMORY_TOOL_NAMES,
 } from "../memory/worker-memory-tools.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import { defaultModelPerProvider } from "../model-resolver.ts";
 import {
 	type HarnessCapability,
 	ORCHESTRATION_SCHEMA_VERSION,
@@ -20,7 +21,12 @@ import {
 } from "../orchestration/contracts.ts";
 import { CLASSIFIED_LANE_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
 import { resolvePinnedOrchestrationModel } from "../orchestration/model-binding.ts";
-import { DEFAULT_WORKER_DELEGATION_THINKING, type WorkerThinkingPolicy } from "../settings-manager.ts";
+import {
+	DEFAULT_WORKER_DELEGATION_ACCOUNT,
+	DEFAULT_WORKER_DELEGATION_THINKING,
+	type WorkerAccountRouting,
+	type WorkerThinkingPolicy,
+} from "../settings-manager.ts";
 import {
 	capabilitySurvivesReadOnly,
 	envelopeHasToolCapability,
@@ -75,6 +81,8 @@ export interface WorkerAuthorityResolutionInput {
 	foregroundThinkingLevel?: OrchestrationThinkingLevel;
 	/** How an inherited foreground thinking level is applied to the worker; default `step_down`. */
 	foregroundThinkingPolicy?: WorkerThinkingPolicy;
+	/** Which account a fresh, unpinned worker runs on; default routes away from the foreground's. */
+	accountRouting?: WorkerAccountRouting;
 	foregroundToolNames?: readonly string[];
 	foregroundEnvelope?: CapabilityEnvelope;
 	cwd?: string;
@@ -142,6 +150,51 @@ export function stepDownThinkingLevel(level: OrchestrationThinkingLevel): Orches
 	return ORCHESTRATION_THINKING_LEVELS[index - 1]!;
 }
 
+/**
+ * The model a fresh, unpinned worker runs on under `account: "other"`: the first routing candidate
+ * (`provider` or `provider/modelId`, in the configured order, then every other authenticated
+ * provider in catalog order) that is not the foreground's provider, has configured auth, and is not
+ * exhausted. Undefined when no alternative exists, in which case the worker inherits the foreground.
+ */
+export function selectRoutedWorkerModel(input: {
+	foregroundModel: Model<Api>;
+	routing: WorkerAccountRouting;
+	modelRegistry: ModelRegistry;
+	isModelExhausted: (model: Model<Api>) => boolean;
+}): Model<Api> | undefined {
+	if (input.routing.account !== "other") return undefined;
+	const { foregroundModel, modelRegistry } = input;
+	const available = modelRegistry.getAvailable();
+	// Automatic candidates are ACCOUNTS: providers with a stored credential (OAuth or API key). A
+	// provider that merely needs no auth (a local llama-cpp server, a models.json entry with a
+	// placeholder key) is not a separate budget and would swallow a worker wave the owner never
+	// pointed at it; the owner can still name such a provider explicitly in `routeProviders`.
+	const isAccount = (provider: string): boolean => modelRegistry.authStorage.hasAuth(provider);
+	const candidate = (provider: string, modelId?: string): Model<Api> | undefined => {
+		if (provider === foregroundModel.provider) return undefined;
+		const model = modelId
+			? modelRegistry.find(provider, modelId)
+			: (modelRegistry.find(provider, defaultModelPerProvider[provider as KnownProvider] ?? "") ??
+				available.find((entry) => entry.provider === provider));
+		if (!model || !modelRegistry.hasConfiguredAuth(model) || input.isModelExhausted(model)) return undefined;
+		return model;
+	};
+	for (const entry of input.routing.routeProviders) {
+		const slash = entry.indexOf("/");
+		const found = slash > 0 ? candidate(entry.slice(0, slash), entry.slice(slash + 1)) : candidate(entry);
+		if (found) return found;
+	}
+	const seen = new Set<string>();
+	for (const model of available) {
+		if (seen.has(model.provider)) continue;
+		seen.add(model.provider);
+		if (!isAccount(model.provider)) continue;
+		const found = candidate(model.provider);
+		if (found) return found;
+	}
+	return undefined;
+}
+
 function selectModelBinding(
 	modelPin: OrchestrationModelBinding | undefined,
 	authority: WorkerDelegationAuthorityRequest | undefined,
@@ -150,8 +203,28 @@ function selectModelBinding(
 	foregroundThinkingLevel: OrchestrationThinkingLevel | undefined,
 	foregroundThinkingPolicy: WorkerThinkingPolicy,
 	modelRegistry: ModelRegistry,
+	accountRouting: WorkerAccountRouting,
+	isModelExhausted: (model: Model<Api>) => boolean,
 ): OrchestrationModelBinding | undefined {
 	if (modelPin) return { ...modelPin };
+	// Routing applies only to a fresh worker nothing has bound: no pin, no authority model, no
+	// profile binding. An authored choice is never moved to another account.
+	if (!authority?.model && !base && foregroundModel) {
+		const routed = selectRoutedWorkerModel({
+			foregroundModel,
+			routing: accountRouting,
+			modelRegistry,
+			isModelExhausted,
+		});
+		if (routed) {
+			const inherited = foregroundThinkingLevel ?? resolveModelThinkingLevel(foregroundModel, undefined);
+			const level =
+				foregroundThinkingPolicy === "inherit"
+					? resolveModelThinkingLevel(routed, inherited)
+					: resolveModelThinkingLevel(routed, stepDownThinkingLevel(inherited));
+			return { provider: routed.provider, modelId: routed.id, thinkingLevel: level };
+		}
+	}
 	const provider = authority?.model?.provider ?? base?.modelBinding.provider ?? foregroundModel?.provider;
 	const modelId = authority?.model?.modelId ?? base?.modelBinding.modelId ?? foregroundModel?.id;
 	if (!provider || !modelId) return undefined;
@@ -196,6 +269,8 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		input.foregroundThinkingLevel,
 		input.foregroundThinkingPolicy ?? DEFAULT_WORKER_DELEGATION_THINKING,
 		input.modelRegistry,
+		input.accountRouting ?? { account: DEFAULT_WORKER_DELEGATION_ACCOUNT, routeProviders: [] },
+		input.isModelExhausted,
 	);
 	if (!binding) return { ok: false, reason: "orchestration_model_required" };
 	const resolvedModel = resolvePinnedOrchestrationModel(binding, input.modelRegistry, input.isModelExhausted);

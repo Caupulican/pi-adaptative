@@ -22,6 +22,7 @@ const models = new Map([foreground, requested, pinned].map((model) => [model.id,
 const modelRegistry = {
 	find: (provider: string, modelId: string) => (provider === "faux" ? models.get(modelId) : undefined),
 	hasConfiguredAuth: () => true,
+	getAvailable: () => [],
 } as unknown as ModelRegistry;
 
 const luna = { provider: "faux", modelId: "pinned", thinkingLevel: "high" as const };

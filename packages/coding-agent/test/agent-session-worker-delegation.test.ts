@@ -2279,6 +2279,7 @@ describe("AgentSession worker delegation", () => {
 		const modelRegistry = {
 			find: () => ({ id: "m1", provider: "faux" }),
 			hasConfiguredAuth: () => true,
+			getAvailable: () => [],
 		} as any;
 		const resolution = resolveWorkerAuthority({
 			authority: undefined,
@@ -2318,6 +2319,7 @@ describe("AgentSession worker delegation", () => {
 		const modelRegistry = {
 			find: () => ({ id: "m1", provider: "faux" }),
 			hasConfiguredAuth: () => true,
+			getAvailable: () => [],
 		} as any;
 		const resolve = (maxTokens?: number) =>
 			resolveWorkerAuthority({
@@ -2404,6 +2406,7 @@ describe("AgentSession worker delegation", () => {
 		const modelRegistry = {
 			find: () => ({ id: "m1", provider: "faux" }),
 			hasConfiguredAuth: () => true,
+			getAvailable: () => [],
 		} as any;
 		const aliases = resolveWorkerAuthority({
 			authority: {

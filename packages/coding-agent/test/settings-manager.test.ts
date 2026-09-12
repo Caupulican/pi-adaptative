@@ -107,6 +107,39 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("workerDelegation.account routing", () => {
+		it("defaults to another account with no ordered candidates, keeps valid settings and ignores junk", () => {
+			expect(SettingsManager.create(projectDir, agentDir).getWorkerAccountRouting()).toEqual({
+				account: "other",
+				routeProviders: [],
+			});
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					workerDelegation: {
+						account: "same",
+						routeProviders: [" openrouter/inclusionai/ling-3.0-flash-fin:free ", "xai"],
+					},
+				}),
+			);
+			expect(SettingsManager.create(projectDir, agentDir).getWorkerAccountRouting()).toEqual({
+				account: "same",
+				routeProviders: ["openrouter/inclusionai/ling-3.0-flash-fin:free", "xai"],
+			});
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ workerDelegation: { account: "elsewhere", routeProviders: ["", 7] } }),
+			);
+			expect(SettingsManager.create(projectDir, agentDir).getWorkerAccountRouting()).toEqual({
+				account: "other",
+				routeProviders: [],
+			});
+			expect(SettingsManager.create(projectDir, agentDir).getWorkerDelegationSettings()).not.toHaveProperty(
+				"account",
+			);
+		});
+	});
+
 	describe("providerAdmission settings", () => {
 		it("caps no provider by default, keeps valid overrides, drops 0 entries and ignores junk", () => {
 			expect(SettingsManager.create(projectDir, agentDir).getProviderAdmissionSettings()).toEqual({

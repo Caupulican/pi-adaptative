@@ -254,6 +254,7 @@ describe("background-lane-controller: model-fitness reportId + laneKind", () => 
 			getModelRegistry: () => ({
 				getAll: () => [model],
 				hasConfiguredAuth: () => true,
+				getAvailable: () => [],
 			}),
 			getSettingsManager: () => ({ getModelCapabilitySettings: () => ({ mode: "auto" }) }),
 			runIsolatedCompletion: isolated,

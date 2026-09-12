@@ -451,8 +451,14 @@ the grant anchor could silently add a new share. Pinned by
 `packages/coding-agent/test/worker-execution-policy.test.ts`, and
 `packages/coding-agent/test/session-worker-directories.test.ts`.
 
-**A worker inherits the foreground thinking level one notch down; authored levels are never
-moved.** When neither the delegation authority nor the profile binding pins a thinking level, the
+**A fresh, unpinned worker runs on another account than the foreground when one is authenticated,
+and inherits the foreground thinking level one notch down; authored choices are never moved.**
+Routing (`workerDelegation.account`, default `other`) takes the first candidate of
+`routeProviders` (`provider` or `provider/modelId`), then every other authenticated provider in
+catalog order, skipping the foreground's provider and exhausted models, and falls back to the
+foreground model when nothing else is authenticated. An authority model, a model pin and a profile
+binding stay exactly as written. Why: measured 2026-09-11, a worker wave landed on the same
+account as the owner's turn and competed with it for one subscription's budget. When neither the delegation authority nor the profile binding pins a thinking level, the
 worker runs one step below the owner's live level (`xhigh` -> `high`), with `minimal` as the floor
 and `off` staying off; `workerDelegation.thinking: "inherit"` restores the copy. An authority pin,
 a profile binding and a model pin are authored choices and are applied exactly as written. Why:

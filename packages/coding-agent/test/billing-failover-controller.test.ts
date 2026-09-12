@@ -45,6 +45,7 @@ function registry(subscription: boolean, includeFallback = true): ModelRegistry 
 					? fallback
 					: undefined,
 		hasConfiguredAuth: () => true,
+		getAvailable: () => [],
 		isUsingSubscription: () => subscription,
 	} as unknown as ModelRegistry;
 }
@@ -96,6 +97,7 @@ describe("BillingFailoverController", () => {
 						? fallback
 						: undefined,
 			hasConfiguredAuth: () => true,
+			getAvailable: () => [],
 			isUsingOAuth: () => true,
 			isUsingSubscription: () => false,
 		} as unknown as ModelRegistry;

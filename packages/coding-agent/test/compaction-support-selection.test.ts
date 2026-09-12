@@ -42,6 +42,7 @@ function createSupport(opts: {
 	const registry = {
 		getAll: () => [cheap, session],
 		hasConfiguredAuth: () => true,
+		getAvailable: () => [],
 	} as unknown as ModelRegistry;
 	const settings = {
 		getCompactionModel: () => opts.explicitModel ?? "auto",
