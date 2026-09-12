@@ -491,6 +491,43 @@ describe("resolveWorkerAuthority", () => {
 		).toMatchObject({
 			provider: "openai-codex",
 		});
+		// A live machine-wide limit on a candidate's account skips it for this dispatch.
+		expect(
+			(() => {
+				const resolution = resolveWorkerAuthority({
+					authority: { path: "/repo" },
+					foregroundModel: foreground,
+					foregroundToolNames: ["read"],
+					foregroundEnvelope: { id: "parent", capabilities: ["filesystem.read"] },
+					accountRouting: { account: "other", routeProviders: ["openrouter", "openai-codex"] },
+					modelRegistry: registry,
+					isModelExhausted: () => false,
+					isModelLimited: (m) => m.provider === "openrouter",
+				});
+				if (!resolution.ok) throw new Error(resolution.reason);
+				return resolution.shipment.modelBinding.provider;
+			})(),
+		).toBe("openai-codex");
+		// A per-role list replaces the general order for that role only.
+		const byRole = (role: "explorer" | "verifier") => {
+			const resolution = resolveWorkerAuthority({
+				authority: { path: "/repo", role },
+				foregroundModel: foreground,
+				foregroundToolNames: ["read"],
+				foregroundEnvelope: { id: "parent", capabilities: ["filesystem.read"] },
+				accountRouting: {
+					account: "other",
+					routeProviders: ["openrouter"],
+					routeProvidersByRole: { verifier: ["openai-codex"] },
+				},
+				modelRegistry: registry,
+				isModelExhausted: () => false,
+			});
+			if (!resolution.ok) throw new Error(resolution.reason);
+			return resolution.shipment.modelBinding.provider;
+		};
+		expect(byRole("verifier")).toBe("openai-codex");
+		expect(byRole("explorer")).toBe("openrouter");
 		// `same` keeps the foreground account.
 		expect(resolve({ account: "same", routeProviders: ["openai-codex"] })).toMatchObject({
 			provider: "xai",

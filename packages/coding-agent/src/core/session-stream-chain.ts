@@ -15,7 +15,11 @@ import {
 } from "./models/perf-profile.ts";
 import { resolveProviderAccountKey } from "./provider-admission/account-key.ts";
 import { isEmergencyStopEngaged } from "./provider-admission/emergency-stop.ts";
-import { PROVIDER_ADMISSION_CUSTOM_TYPE, withProviderAdmission } from "./provider-admission/gate.ts";
+import {
+	PROVIDER_ADMISSION_CUSTOM_TYPE,
+	type ProviderAdmissionWaitEvent,
+	withProviderAdmission,
+} from "./provider-admission/gate.ts";
 import type { ProviderAdmissionLedger } from "./provider-admission/ledger.ts";
 import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -59,6 +63,8 @@ export interface SessionStreamChainInput {
 	agentDir: string;
 	/** Credentials, so limits and in-flight counts key on provider plus account (see account-key.ts). */
 	authStorage: { get(provider: string): AuthCredential | undefined };
+	/** Live wait notifications for the operator's activity lane. */
+	onWait?: (event: ProviderAdmissionWaitEvent) => void;
 	/** The output repetition guard's threshold follows the model's capability tier. */
 	getRepetitionGuardRepeats: () => number;
 	/** Test-only stream-idle override, read per request (see `setStreamIdleOptionsForTests`). */
@@ -98,6 +104,7 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 		limits: input.providerLimitStore,
 		isEmergencyStopEngaged: () => isEmergencyStopEngaged(input.agentDir),
 		getAccountKey: (provider) => resolveProviderAccountKey(input.authStorage, provider),
+		...(input.onWait ? { onWait: input.onWait } : {}),
 		getPolicy: () => settingsManager.getProviderAdmissionSettings(),
 		record: (record) => {
 			try {

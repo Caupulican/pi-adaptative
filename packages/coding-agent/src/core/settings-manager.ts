@@ -331,6 +331,8 @@ const MAX_WORKER_ROUTE_PROVIDERS = 16;
 export interface WorkerAccountRouting {
 	account: WorkerAccountPolicy;
 	routeProviders: string[];
+	/** Per worker role, an ordered candidate list that replaces `routeProviders` for that role. */
+	routeProvidersByRole?: Record<string, string[]>;
 }
 export const WORKER_THINKING_POLICIES: readonly WorkerThinkingPolicy[] = ["inherit", "step_down"];
 export const DEFAULT_WORKER_DELEGATION_THINKING: WorkerThinkingPolicy = "step_down";
@@ -346,10 +348,14 @@ export interface WorkerDelegationSettings {
 	thinking?: WorkerThinkingPolicy; // default: step_down; worker thinking relative to the foreground when no authority or profile pins it
 	account?: WorkerAccountPolicy; // default: other; fresh workers run on a provider the foreground is not using when one is authenticated
 	routeProviders?: string[]; // ordered routing candidates, `provider` or `provider/modelId`; other authenticated providers follow
+	routeProvidersByRole?: Record<string, string[]>; // per role (explorer, implementer, verifier, ...): candidates that replace routeProviders for that role
 }
 
 export type ResolvedWorkerDelegationSettings = Required<
-	Omit<WorkerDelegationSettings, "orchestrationProfile" | "modelPins" | "thinking" | "account" | "routeProviders">
+	Omit<
+		WorkerDelegationSettings,
+		"orchestrationProfile" | "modelPins" | "thinking" | "account" | "routeProviders" | "routeProvidersByRole"
+	>
 > &
 	Pick<WorkerDelegationSettings, "orchestrationProfile">;
 
@@ -1124,6 +1130,32 @@ function normalizeWorkerDelegationLayer(
 				reportDiagnostic,
 				"routeProviders",
 				`an array of at most ${MAX_WORKER_ROUTE_PROVIDERS} nonempty strings (provider or provider/modelId)`,
+			);
+		}
+	}
+	if (Object.hasOwn(value, "routeProvidersByRole")) {
+		const byRole: Record<string, string[]> = {};
+		let valid = isPlainRecord(value.routeProvidersByRole);
+		if (valid) {
+			for (const [role, entries] of Object.entries(value.routeProvidersByRole as Record<string, unknown>)) {
+				if (
+					!role.trim() ||
+					!Array.isArray(entries) ||
+					entries.length > MAX_WORKER_ROUTE_PROVIDERS ||
+					!entries.every((entry) => typeof entry === "string" && entry.trim().length > 0 && entry.length <= 200)
+				) {
+					valid = false;
+					break;
+				}
+				byRole[role.trim()] = (entries as string[]).map((entry) => entry.trim());
+			}
+		}
+		if (valid) normalized.routeProvidersByRole = byRole;
+		else {
+			reportInvalidWorkerDelegationField(
+				reportDiagnostic,
+				"routeProvidersByRole",
+				"an object of role -> array of provider or provider/modelId strings",
 			);
 		}
 	}
@@ -4322,6 +4354,7 @@ export class SettingsManager {
 		return {
 			account: configured.account ?? DEFAULT_WORKER_DELEGATION_ACCOUNT,
 			routeProviders: configured.routeProviders ?? [],
+			...(configured.routeProvidersByRole ? { routeProvidersByRole: configured.routeProvidersByRole } : {}),
 		};
 	}
 

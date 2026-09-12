@@ -39,8 +39,23 @@ export interface ProviderAdmissionWaitRecord {
 	limitedUntil?: number;
 }
 
+/** Live notification that a request is waiting (or stopped waiting) at admission; for the UI, not durable. */
+export interface ProviderAdmissionWaitEvent {
+	phase: "start" | "end";
+	provider: string;
+	account?: string;
+	lane: ProviderRequestLane;
+	reason: ProviderAdmissionWaitReason;
+	/** Expected wait when known at start (a recorded limit's reset); the actual wait at end. */
+	expectedMs?: number;
+	waitedMs?: number;
+	limitedUntil?: number;
+}
+
 export interface ProviderAdmissionGateDeps {
 	ledger: ProviderAdmissionLedger;
+	/** Live wait notifications for the operator's activity lane; every `start` is followed by one `end`. */
+	onWait?(event: ProviderAdmissionWaitEvent): void;
 	getPolicy(): ProviderAdmissionPolicy;
 	/** Shared "provider limited until T" state; omitted disables limit checks and result observation. */
 	limits?: ProviderLimitStore;
@@ -123,6 +138,7 @@ export async function admitProviderRequest(
 	if (lane !== "foreground" && deps.isEmergencyStopEngaged?.()) {
 		const startedAt = now();
 		const inflightAtStart = inflightNow();
+		deps.onWait?.({ ...base, phase: "start", reason: "emergency_stop" });
 		while (deps.isEmergencyStopEngaged?.()) {
 			const waitedMs = now() - startedAt;
 			if (waitedMs >= policy.maxWaitMs) {
@@ -134,6 +150,7 @@ export async function admitProviderRequest(
 					waitedMs,
 					timedOut: true,
 				});
+				deps.onWait?.({ ...base, phase: "end", reason: "emergency_stop", waitedMs });
 				throw new EmergencyStopError(waitedMs);
 			}
 			await sleep(Math.min(EMERGENCY_STOP_POLL_MS, Math.max(1, policy.maxWaitMs - waitedMs)), signal);
@@ -146,6 +163,7 @@ export async function admitProviderRequest(
 			waitedMs: now() - startedAt,
 			timedOut: false,
 		});
+		deps.onWait?.({ ...base, phase: "end", reason: "emergency_stop", waitedMs: now() - startedAt });
 		signal?.throwIfAborted();
 	}
 
@@ -168,7 +186,18 @@ export async function admitProviderRequest(
 		}
 		if (remainingMs > 0) {
 			const inflightAtStart = inflightNow();
-			await sleep(remainingMs, signal);
+			deps.onWait?.({
+				...base,
+				phase: "start",
+				reason: "provider_limit",
+				expectedMs: remainingMs,
+				limitedUntil: recorded.limitedUntil,
+			});
+			try {
+				await sleep(remainingMs, signal);
+			} finally {
+				deps.onWait?.({ ...base, phase: "end", reason: "provider_limit", waitedMs: now() - startedAt });
+			}
 			deps.record?.({
 				...base,
 				reason: "provider_limit",
@@ -188,8 +217,19 @@ export async function admitProviderRequest(
 	const startedAt = now();
 	let inflightAtStart: number | undefined;
 	let pollMs = FIRST_POLL_MS;
+	let waiting = false;
+	const endWait = (): void => {
+		if (!waiting) return;
+		waiting = false;
+		deps.onWait?.({ ...base, phase: "end", reason: "capacity", waitedMs: now() - startedAt });
+	};
 	for (;;) {
-		signal?.throwIfAborted();
+		try {
+			signal?.throwIfAborted();
+		} catch (error) {
+			endWait();
+			throw error;
+		}
 		const attempt = deps.ledger.tryAcquire(key, lane, limit);
 		inflightAtStart ??= attempt.inflight;
 		const waitedMs = now() - startedAt;
@@ -210,9 +250,19 @@ export async function admitProviderRequest(
 					timedOut,
 				});
 			}
+			endWait();
 			return hold.release;
 		}
-		await sleep(Math.min(pollMs, Math.max(1, policy.maxWaitMs - waitedMs)), signal);
+		if (!waiting) {
+			waiting = true;
+			deps.onWait?.({ ...base, phase: "start", reason: "capacity" });
+		}
+		try {
+			await sleep(Math.min(pollMs, Math.max(1, policy.maxWaitMs - waitedMs)), signal);
+		} catch (error) {
+			endWait();
+			throw error;
+		}
 		pollMs = Math.min(MAX_POLL_MS, pollMs * 2);
 	}
 }

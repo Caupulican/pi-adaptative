@@ -446,6 +446,7 @@ export class AgentSession {
 			providerLimitStore,
 			agentDir,
 			authStorage: config.modelRegistry.authStorage,
+			onWait: (event) => this._emit({ type: "provider_admission_wait", ...event }),
 			getRepetitionGuardRepeats: () => this.getCapabilityTierPolicy().repetitionGuardRepeats,
 			getStreamIdleOptionsOverride: () => streamIdleOptionsOverride,
 		});

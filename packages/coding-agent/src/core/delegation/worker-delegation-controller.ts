@@ -676,6 +676,11 @@ export class WorkerDelegationController {
 			foregroundThinkingLevel: this.deps.getForegroundThinkingLevel?.(),
 			foregroundThinkingPolicy: this.deps.getSettingsManager().getWorkerThinkingPolicy(),
 			accountRouting: this.deps.getSettingsManager().getWorkerAccountRouting(),
+			isModelLimited: (model) => {
+				this.providerLimitStore ??= new ProviderLimitStore(this.deps.getAgentDir());
+				const key = resolveProviderAccountKey(this.deps.getModelRegistry().authStorage, model.provider);
+				return this.providerLimitStore.read(key) !== undefined;
+			},
 			...(this.deps.getForegroundToolNames ? { foregroundToolNames: this.deps.getForegroundToolNames() } : {}),
 			...(this.deps.getCapabilityEnvelope() ? { foregroundEnvelope: this.deps.getCapabilityEnvelope() } : {}),
 			cwd: this.deps.getCwd(),

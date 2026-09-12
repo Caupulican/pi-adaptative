@@ -27,6 +27,13 @@ export interface NormalizedProviderError {
 	/** True when `message` already contains the body (no separate body to add). */
 	messageCarriesBody: boolean;
 	/**
+	 * Delay the provider asked for before the next attempt, from `retry-after-ms` / `retry-after`
+	 * response headers or a structured `availability.retry_after` body field. Surfaced in the
+	 * formatted text as "retry after N seconds" so a classifier that only sees the message still
+	 * learns the true reset instead of guessing one.
+	 */
+	retryAfterMs?: number;
+	/**
 	 * Transport reason behind a failure that never produced an HTTP response, read from the
 	 * `cause` chain (undici's `fetch failed` → `ECONNRESET: socket hang up`, Bun's `ConnectionClosed`,
 	 * DNS failures). SDKs collapse all of these into "Connection error.", which leaves a session
@@ -42,7 +49,44 @@ type SdkErrorShape = Error & {
 	error?: unknown;
 	$metadata?: { httpStatusCode?: unknown };
 	$response?: { statusCode?: unknown; body?: unknown };
+	headers?: unknown;
 };
+
+function headerValue(headers: unknown, name: string): string | undefined {
+	if (!headers) return undefined;
+	if (typeof (headers as { get?: unknown }).get === "function") {
+		const value = (headers as { get(name: string): string | null }).get(name);
+		return value ?? undefined;
+	}
+	if (typeof headers === "object") {
+		const entry = Object.entries(headers as Record<string, unknown>).find(([key]) => key.toLowerCase() === name);
+		return typeof entry?.[1] === "string" ? entry[1] : undefined;
+	}
+	return undefined;
+}
+
+/** Provider-requested delay from headers or a structured body, in milliseconds; undefined when none. */
+function extractRetryAfterMs(sdkError: SdkErrorShape, nowMs = Date.now()): number | undefined {
+	const retryAfterMs = headerValue(sdkError.headers, "retry-after-ms");
+	if (retryAfterMs !== undefined) {
+		const value = Number.parseFloat(retryAfterMs);
+		if (Number.isFinite(value) && value >= 0) return value;
+	}
+	const retryAfter = headerValue(sdkError.headers, "retry-after");
+	if (retryAfter !== undefined) {
+		const seconds = Number.parseFloat(retryAfter);
+		const delayMs = Number.isNaN(seconds) ? Date.parse(retryAfter) - nowMs : seconds * 1000;
+		if (Number.isFinite(delayMs) && delayMs >= 0) return delayMs;
+	}
+	const body = sdkError.error;
+	if (body && typeof body === "object") {
+		const record = body as { availability?: unknown; error?: { availability?: unknown } };
+		const availability = (record.availability ?? record.error?.availability) as { retry_after?: unknown } | undefined;
+		const seconds = availability?.retry_after;
+		if (typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+	}
+	return undefined;
+}
 
 export function normalizeProviderError(error: unknown): NormalizedProviderError {
 	if (!(error instanceof Error)) {
@@ -54,6 +98,7 @@ export function normalizeProviderError(error: unknown): NormalizedProviderError 
 	const body = extractBody(sdkError);
 	const messageCarriesBody = body === undefined || error.message.includes(body);
 	const cause = status === undefined ? extractCauseChain(error) : undefined;
+	const retryAfterMs = extractRetryAfterMs(sdkError);
 
 	return {
 		status,
@@ -61,6 +106,7 @@ export function normalizeProviderError(error: unknown): NormalizedProviderError 
 		message: error.message,
 		messageCarriesBody,
 		...(cause !== undefined ? { cause } : {}),
+		...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
 	} satisfies NormalizedProviderError;
 }
 
@@ -156,12 +202,24 @@ function isNonEmptyObject(value: unknown): boolean {
  * - prefix:    `"<prefix> (<status>): <body>"`
  */
 export function formatProviderError(norm: NormalizedProviderError, prefix?: string): string {
+	let text: string;
 	if (norm.messageCarriesBody || norm.status === undefined || norm.body === undefined) {
 		const message =
 			norm.cause && !norm.message.includes(norm.cause) ? `${norm.message} [${norm.cause}]` : norm.message;
-		return prefix !== undefined && norm.status !== undefined ? `${prefix} (${norm.status}): ${message}` : message;
+		text = prefix !== undefined && norm.status !== undefined ? `${prefix} (${norm.status}): ${message}` : message;
+	} else {
+		text = prefix !== undefined ? `${prefix} (${norm.status}): ${norm.body}` : `${norm.status}: ${norm.body}`;
 	}
-	return prefix !== undefined ? `${prefix} (${norm.status}): ${norm.body}` : `${norm.status}: ${norm.body}`;
+	return appendRetryAfter(text, norm.retryAfterMs);
+}
+
+const RETRY_AFTER_PHRASE = /\b(?:retry|try)(?:\s+your\s+request)?(?:\s+again)?\s+(?:after|in)\s+\d/i;
+
+/** Append the provider's stated delay unless the text already states one. */
+function appendRetryAfter(text: string, retryAfterMs: number | undefined): string {
+	if (retryAfterMs === undefined || RETRY_AFTER_PHRASE.test(text)) return text;
+	const seconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+	return `${text.replace(/[.\s]+$/, "")}; retry after ${seconds} seconds.`;
 }
 
 export function truncateErrorText(text: string, maxChars: number): string {

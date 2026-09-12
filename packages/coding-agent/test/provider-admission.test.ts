@@ -535,6 +535,57 @@ describe("emergency stop", () => {
 	});
 });
 
+describe("admission wait events", () => {
+	it("brackets a capacity wait and a recorded-limit wait with start and end events", async () => {
+		const dir = agentDir();
+		let now = 0;
+		const ledger = new ProviderAdmissionLedger(dir, { heartbeatMs: 60_000, now: () => now });
+		const limits = new ProviderLimitStore(dir, { now: () => now, pid: 5 });
+		const owner = ledger.acquire("openai-codex", "foreground");
+		const events: string[] = [];
+		const policy: ProviderAdmissionPolicy = {
+			enabled: true,
+			limits: { "openai-codex": 1 },
+			maxWaitMs: 10_000,
+			foregroundLimitWaitMs: 60_000,
+		};
+		const onWait = (event: { phase: string; reason: string; expectedMs?: number }) =>
+			events.push(`${event.phase}:${event.reason}${event.expectedMs !== undefined ? `:${event.expectedMs}` : ""}`);
+		let sleeps = 0;
+		const release = await admitProviderRequest("openai-codex", {
+			ledger,
+			limits,
+			getPolicy: () => policy,
+			getLane: () => "worker",
+			now: () => now,
+			onWait,
+			sleep: async (ms) => {
+				sleeps += 1;
+				now += ms;
+				if (sleeps === 2) owner.release();
+			},
+		});
+		release();
+		expect(events).toEqual(["start:capacity", "end:capacity"]);
+
+		events.length = 0;
+		limits.record("openai-codex", { limitedUntil: now + 3_000, reason: "rate_limit" });
+		const admitted = await admitProviderRequest("openai-codex", {
+			ledger,
+			limits,
+			getPolicy: () => policy,
+			getLane: () => "foreground",
+			now: () => now,
+			onWait,
+			sleep: async (ms) => {
+				now += ms;
+			},
+		});
+		admitted();
+		expect(events).toEqual(["start:provider_limit:3000", "end:provider_limit"]);
+	});
+});
+
 describe("provider account keys", () => {
 	it("derives a non-secret identity from each credential shape and keys per account", () => {
 		expect(providerAccountKey("xai", undefined)).toBe("xai");

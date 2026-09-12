@@ -90,6 +90,8 @@ export interface WorkerAuthorityResolutionInput {
 	executionCwd?: string;
 	modelRegistry: ModelRegistry;
 	isModelExhausted(model: Model<Api>): boolean;
+	/** True while the model's account has a live machine-wide limit (see provider-admission/limit-state.ts). */
+	isModelLimited?(model: Model<Api>): boolean;
 }
 
 export type WorkerAuthorityResolution =
@@ -159,11 +161,17 @@ export function stepDownThinkingLevel(level: OrchestrationThinkingLevel): Orches
 export function selectRoutedWorkerModel(input: {
 	foregroundModel: Model<Api>;
 	routing: WorkerAccountRouting;
+	/** The worker's role; a `routeProvidersByRole` list for it replaces `routeProviders`. */
+	role?: string;
 	modelRegistry: ModelRegistry;
 	isModelExhausted: (model: Model<Api>) => boolean;
+	isModelLimited?: (model: Model<Api>) => boolean;
 }): Model<Api> | undefined {
 	if (input.routing.account !== "other") return undefined;
 	const { foregroundModel, modelRegistry } = input;
+	const ordered =
+		(input.role !== undefined ? input.routing.routeProvidersByRole?.[input.role] : undefined) ??
+		input.routing.routeProviders;
 	const available = modelRegistry.getAvailable();
 	// Automatic candidates are ACCOUNTS: providers with a stored credential (OAuth or API key). A
 	// provider that merely needs no auth (a local llama-cpp server, a models.json entry with a
@@ -177,9 +185,12 @@ export function selectRoutedWorkerModel(input: {
 			: (modelRegistry.find(provider, defaultModelPerProvider[provider as KnownProvider] ?? "") ??
 				available.find((entry) => entry.provider === provider));
 		if (!model || !modelRegistry.hasConfiguredAuth(model) || input.isModelExhausted(model)) return undefined;
+		// A candidate whose account is limited right now (a 429 a sibling saw, an exhausted window)
+		// is skipped for this dispatch: the ledger is a scheduler input, not only a wait.
+		if (input.isModelLimited?.(model)) return undefined;
 		return model;
 	};
-	for (const entry of input.routing.routeProviders) {
+	for (const entry of ordered) {
 		const slash = entry.indexOf("/");
 		const found = slash > 0 ? candidate(entry.slice(0, slash), entry.slice(slash + 1)) : candidate(entry);
 		if (found) return found;
@@ -205,6 +216,7 @@ function selectModelBinding(
 	modelRegistry: ModelRegistry,
 	accountRouting: WorkerAccountRouting,
 	isModelExhausted: (model: Model<Api>) => boolean,
+	isModelLimited: ((model: Model<Api>) => boolean) | undefined,
 ): OrchestrationModelBinding | undefined {
 	if (modelPin) return { ...modelPin };
 	// Routing applies only to a fresh worker nothing has bound: no pin, no authority model, no
@@ -213,8 +225,10 @@ function selectModelBinding(
 		const routed = selectRoutedWorkerModel({
 			foregroundModel,
 			routing: accountRouting,
+			role: authority?.role ?? "implementer",
 			modelRegistry,
 			isModelExhausted,
+			isModelLimited,
 		});
 		if (routed) {
 			const inherited = foregroundThinkingLevel ?? resolveModelThinkingLevel(foregroundModel, undefined);
@@ -271,6 +285,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		input.modelRegistry,
 		input.accountRouting ?? { account: DEFAULT_WORKER_DELEGATION_ACCOUNT, routeProviders: [] },
 		input.isModelExhausted,
+		input.isModelLimited,
 	);
 	if (!binding) return { ok: false, reason: "orchestration_model_required" };
 	const resolvedModel = resolvePinnedOrchestrationModel(binding, input.modelRegistry, input.isModelExhausted);

@@ -137,6 +137,26 @@ describe("SettingsManager", () => {
 			expect(SettingsManager.create(projectDir, agentDir).getWorkerDelegationSettings()).not.toHaveProperty(
 				"account",
 			);
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					workerDelegation: { routeProvidersByRole: { verifier: ["openai-codex"], explorer: [""] } },
+				}),
+			);
+			// One invalid role list invalidates the whole map; nothing is half-applied.
+			expect(SettingsManager.create(projectDir, agentDir).getWorkerAccountRouting()).toEqual({
+				account: "other",
+				routeProviders: [],
+			});
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ workerDelegation: { routeProvidersByRole: { verifier: [" openai-codex "] } } }),
+			);
+			expect(SettingsManager.create(projectDir, agentDir).getWorkerAccountRouting()).toEqual({
+				account: "other",
+				routeProviders: [],
+				routeProvidersByRole: { verifier: ["openai-codex"] },
+			});
 		});
 	});
 

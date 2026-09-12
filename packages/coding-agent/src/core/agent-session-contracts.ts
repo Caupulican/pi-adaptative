@@ -33,6 +33,7 @@ import type { GoalRuntimeSnapshot } from "./goals/goal-runtime-snapshot.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { LocalRuntimeDeps } from "./models/local-runtime.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
+import type { ProviderAdmissionWaitEvent } from "./provider-admission/gate.ts";
 import type { ResearchRunResult } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
@@ -68,6 +69,8 @@ export type AgentSessionEvent =
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	/** A provider request is waiting (or stopped waiting) at machine-wide admission: a recorded limit, the in-flight cap, or the emergency stop. */
+	| ({ type: "provider_admission_wait" } & ProviderAdmissionWaitEvent)
 	/** UI-only bracket around foreground routing/preparation. Always paired with `routing_end`. */
 	| { type: "routing_start" }
 	| { type: "routing_end" }

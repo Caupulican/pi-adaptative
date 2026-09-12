@@ -476,6 +476,27 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			break;
 		}
 
+		case "provider_admission_wait": {
+			const id = `runtime:admission:${event.provider}${event.account ? `#${event.account}` : ""}`;
+			if (event.phase === "start") {
+				const where = event.account ? `${event.provider} (account ${event.account.slice(0, 8)})` : event.provider;
+				const why =
+					event.reason === "provider_limit"
+						? `rate-limited${event.expectedMs !== undefined ? `, resets in ${Math.ceil(event.expectedMs / 1000)}s` : ""}`
+						: event.reason === "emergency_stop"
+							? "emergency stop engaged"
+							: "at its in-flight limit";
+				host.activityLane?.wait({ id, kind: "runtime", label: `${event.lane} request waiting: ${where} ${why}` });
+			} else {
+				host.activityLane?.finish(id, "neutral", {
+					id,
+					kind: "runtime",
+					label: `${event.provider} admitted after ${Math.ceil((event.waitedMs ?? 0) / 1000)}s`,
+				});
+			}
+			host.ui.requestRender();
+			break;
+		}
 		case "auto_retry_end":
 			clearRetryControls(host);
 			host.activityLane?.finish("runtime:retry", event.success ? "success" : "failure", {
