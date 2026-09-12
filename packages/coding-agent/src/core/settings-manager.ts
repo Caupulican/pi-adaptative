@@ -398,6 +398,27 @@ export interface ToolExecutionSettings {
 export type ResolvedToolExecutionSettings = Required<ToolExecutionSettings>;
 
 /**
+ * Machine-wide per-provider admission for worker and background provider requests; see
+ * `core/provider-admission/`. The foreground lane never waits. Measured 2026-09-11: with another
+ * Codex request in flight from any process on the box, generation fell from 97.7 to 62.2 tokens
+ * per second, so the default caps Codex at two in flight for non-foreground lanes and leaves every
+ * other provider unbounded (xAI showed no per-account slowdown at up to eight in flight).
+ */
+export interface ProviderAdmissionSettings {
+	enabled?: boolean; // default: true
+	limits?: Record<string, number>; // per provider id: in-flight cap for non-foreground lanes; 0 removes a default cap; merged over DEFAULT_PROVIDER_ADMISSION_LIMITS
+	maxWaitMs?: number; // default: 120000; a waiting request is admitted regardless after this long (recorded as timedOut)
+}
+
+export type ResolvedProviderAdmissionSettings = Required<ProviderAdmissionSettings>;
+
+export const DEFAULT_PROVIDER_ADMISSION_ENABLED = true;
+export const DEFAULT_PROVIDER_ADMISSION_LIMITS: Readonly<Record<string, number>> = Object.freeze({ "openai-codex": 2 });
+export const DEFAULT_PROVIDER_ADMISSION_MAX_WAIT_MS = 120_000;
+const MAX_PROVIDER_ADMISSION_MAX_WAIT_MS = 3_600_000;
+const MAX_PROVIDER_ADMISSION_LIMIT = 10_000;
+
+/**
  * Source charsets the user states for files the project itself does not declare, as EditorConfig
  * globs relative to the working directory. The harness resolves an undeclared file from its own
  * bytes through the managed Python codec, so this is for the cases content cannot settle: a tree
@@ -708,6 +729,7 @@ export interface Settings {
 	windowsShell?: WindowsShellSettings; // Windows shell contract engine tier (core/tools/windows-shell-engine); on by default
 	backgroundTool?: BackgroundToolSettings; // Clock-based backgrounding of long foreground tool calls (core/background-tool-task-controller); off by default
 	toolExecution?: ToolExecutionSettings; // Parallel tool batch pool width (packages/agent refill pool); 8 by default
+	providerAdmission?: ProviderAdmissionSettings; // Machine-wide per-provider in-flight admission for worker/background lanes (core/provider-admission); on by default
 	fileEncodings?: FileEncodingsSettings; // Source charset per EditorConfig-style glob; overrides .editorconfig, loses to an explicit encoding argument
 	edge?: EdgeSettings; // Standing grants for the edge classes that would otherwise ask the operator (core/autonomy/edge-policy)
 	learningPolicy?: LearningPolicySettings; // Default-on audited learning policy; destructive supersessions remain proposal-gated
@@ -4109,6 +4131,36 @@ export class SettingsManager {
 		return {
 			pythonEngine: configured.pythonEngine !== false,
 			gnuToolsDir: sanitizeGnuToolsDirSetting(configured.gnuToolsDir),
+		};
+	}
+
+	getProviderAdmissionSettings(): ResolvedProviderAdmissionSettings {
+		const configured = isPlainRecord(this.settings.providerAdmission) ? this.settings.providerAdmission : {};
+		const limits: Record<string, number> = { ...DEFAULT_PROVIDER_ADMISSION_LIMITS };
+		if (isPlainRecord(configured.limits)) {
+			for (const [provider, value] of Object.entries(configured.limits)) {
+				if (!provider.trim()) continue;
+				if (
+					typeof value !== "number" ||
+					!Number.isSafeInteger(value) ||
+					value < 0 ||
+					value > MAX_PROVIDER_ADMISSION_LIMIT
+				) {
+					continue;
+				}
+				if (value === 0) delete limits[provider];
+				else limits[provider] = value;
+			}
+		}
+		return {
+			enabled: typeof configured.enabled === "boolean" ? configured.enabled : DEFAULT_PROVIDER_ADMISSION_ENABLED,
+			limits,
+			maxWaitMs: sanitizeIntegerSetting(
+				configured.maxWaitMs,
+				DEFAULT_PROVIDER_ADMISSION_MAX_WAIT_MS,
+				0,
+				MAX_PROVIDER_ADMISSION_MAX_WAIT_MS,
+			),
 		};
 	}
 

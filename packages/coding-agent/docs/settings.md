@@ -464,6 +464,27 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 }
 ```
 
+### Provider Admission
+
+Every pi process on the machine (owner sessions, their delegated workers, background lanes such as reflection and research) registers each provider request it has in flight under `~/.pi/agent/state/provider-admission/`, one small file per request, removed when the stream settles and pruned by every reader when its owner process is gone or its heartbeat is stale. A request from the owner's own turn (the foreground lane) is always admitted at once. A worker or background request to a provider whose machine-wide in-flight count has reached its limit waits for a slot, polling with a doubling interval, and is admitted regardless after `maxWaitMs` so a wedged sibling can never starve it. Each wait is recorded in the owner session as a `provider_admission` entry (provider, lane, wait, whether it timed out).
+
+Measured 2026-09-11 on one box running several pi sessions, Codex CLI and Claude Code: with another Codex request in flight from any process, Codex generation fell from 97.7 to 62.2 tokens per second and first-token latency rose 40% at two or more, while xAI showed no per-account slowdown at up to eight in flight. The default therefore caps Codex at two non-foreground requests machine-wide and leaves every other provider unbounded. Raising a limit trades the owner's foreground latency for aggregate worker throughput; a value of `0` lifts a default cap.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `providerAdmission.enabled` | boolean | `true` | Register in-flight requests and gate worker/background lanes; `false` disables both |
+| `providerAdmission.limits` | object | `{ "openai-codex": 2 }` | Per provider id, how many requests may be in flight machine-wide before worker and background lanes wait; merged over the default, `0` removes a cap |
+| `providerAdmission.maxWaitMs` | number | `120000` | Longest a waiting request holds back before it is admitted anyway (recorded as `timedOut`) |
+
+```json
+{
+  "providerAdmission": {
+    "limits": { "openai-codex": 3, "xai": 6 },
+    "maxWaitMs": 60000
+  }
+}
+```
+
 ### Output Cap
 
 | Setting | Type | Default | Description |

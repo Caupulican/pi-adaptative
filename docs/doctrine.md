@@ -462,6 +462,21 @@ single source of shared-account load (277 of the 334 xAI requests that overlappe
 workers), while the owner's own request waited behind them. Pinned by
 `packages/coding-agent/test/worker-authority-resolver.test.ts`.
 
+**The owner's foreground request never waits for a shared account; workers and background lanes
+yield at the provider's machine-wide cap.** Every pi process on the machine registers each
+in-flight provider request under `state/provider-admission/` (one file per request, released when
+its stream settles, pruned by any reader once its owner's pid is gone or its heartbeat is stale).
+A foreground request is registered and admitted at once. A worker or background request to a
+provider at its configured limit (`providerAdmission.limits`, default Codex at two) waits for a
+slot, deciding and registering under one lock so the last slot is taken exactly once, and is
+admitted regardless after `maxWaitMs` so a wedged sibling can never starve it; every wait is a
+`provider_admission` record in the owner session. The gate sits outside the idle watchdog and the
+perf profiler, so waiting is neither a connect stall nor time to first token. Why: measured
+2026-09-04..11 across several pi sessions, Codex CLI and Claude Code on one box, a second Codex
+request in flight from any process cut generation from 97.7 to 62.2 tokens per second, and no
+process knew what its siblings were sending. Pinned by
+`packages/coding-agent/test/provider-admission.test.ts`.
+
 **Queue validation cannot substitute a directory or start an attempt twice.** Fresh worker and
 verifier contracts capture native directory identity before durable dispatch. Queued and resumed
 execution revalidates that identity with bounded cancellation before provider execution; capacity

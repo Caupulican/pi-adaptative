@@ -165,6 +165,8 @@ import {
 } from "./pipelines/index.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
+import { PROVIDER_ADMISSION_CUSTOM_TYPE, withProviderAdmission } from "./provider-admission/gate.ts";
+import { ProviderAdmissionLedger } from "./provider-admission/ledger.ts";
 import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
 import { ReflectionController } from "./reflection-controller.ts";
@@ -331,6 +333,7 @@ export class AgentSession {
 		return this._mutationScopeKey;
 	}
 	private _agentDir: string;
+	private readonly _providerAdmissionLedger: ProviderAdmissionLedger;
 	private _collectWorkspaceSources: typeof collectWorkspaceSources;
 	private readonly _localRuntimeController: LocalRuntimeController;
 	private readonly _localPrefixWarm: LocalPrefixWarmController;
@@ -466,29 +469,50 @@ export class AgentSession {
 		// `this.settingsManager` is assigned below; the resolver closes over the config reference
 		// because the wrapper must be installed before that assignment runs.
 		const stallSettingsSource = config.settingsManager;
+		// Machine-wide admission sits OUTSIDE the idle watchdog and the perf profiler: time spent
+		// waiting for a shared-account slot is neither a connect stall nor the model's time to first
+		// token. The owner's foreground lane never waits; worker and background lanes yield.
+		const providerAdmissionLedger = new ProviderAdmissionLedger(agentDir, {
+			sessionId: config.sessionManager.getSessionId(),
+		});
+		this._providerAdmissionLedger = providerAdmissionLedger;
+		const admittedStreamFn = (watched: StreamFn): StreamFn =>
+			withProviderAdmission(watched, {
+				ledger: providerAdmissionLedger,
+				getPolicy: () => stallSettingsSource.getProviderAdmissionSettings(),
+				record: (record) => {
+					try {
+						config.sessionManager.appendCustomEntry(PROVIDER_ADMISSION_CUSTOM_TYPE, record);
+					} catch {
+						// A failed diagnostic write must never fail the request it observes.
+					}
+				},
+			});
 		this.agent.streamFn = tagRawness(
-			withStreamIdleWatchdog(profiledStreamFn, (model, context) => {
-				const configured = {
-					// Local/managed models and cloud providers draw on separate budgets; see
-					// resolveStreamStallBudget.
-					...resolveStreamStallBudget(model, stallSettingsSource).base,
-					// The output repetition guard's threshold follows the model's capability tier.
-					outputRepetitionRepeats: this.getCapabilityTierPolicy().repetitionGuardRepeats,
-					...streamIdleOptionsOverride,
-				};
-				const httpIdleTimeoutMs = stallSettingsSource.getHttpIdleTimeoutMs();
-				const httpBounded = constrainStreamIdleToHttpTimeout(configured, httpIdleTimeoutMs);
-				const profile = modelAdaptationStore.get(formatModelRouterModel(model)).perf;
-				const adaptive = resolveAdaptiveStreamIdleOptions({
-					base: httpBounded.options,
-					profile,
-					promptTokens: estimateContextPromptTokens(context),
-					localClass: isWarmableLocalModel(model),
-					provider: model.provider,
-					ceilingMs: httpBounded.adaptiveCeilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
-				});
-				return { ...httpBounded.options, ...adaptive };
-			}),
+			admittedStreamFn(
+				withStreamIdleWatchdog(profiledStreamFn, (model, context) => {
+					const configured = {
+						// Local/managed models and cloud providers draw on separate budgets; see
+						// resolveStreamStallBudget.
+						...resolveStreamStallBudget(model, stallSettingsSource).base,
+						// The output repetition guard's threshold follows the model's capability tier.
+						outputRepetitionRepeats: this.getCapabilityTierPolicy().repetitionGuardRepeats,
+						...streamIdleOptionsOverride,
+					};
+					const httpIdleTimeoutMs = stallSettingsSource.getHttpIdleTimeoutMs();
+					const httpBounded = constrainStreamIdleToHttpTimeout(configured, httpIdleTimeoutMs);
+					const profile = modelAdaptationStore.get(formatModelRouterModel(model)).perf;
+					const adaptive = resolveAdaptiveStreamIdleOptions({
+						base: httpBounded.options,
+						profile,
+						promptTokens: estimateContextPromptTokens(context),
+						localClass: isWarmableLocalModel(model),
+						provider: model.provider,
+						ceilingMs: httpBounded.adaptiveCeilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
+					});
+					return { ...httpBounded.options, ...adaptive };
+				}),
+			),
 			baseStreamFn === streamSimple,
 		);
 		this.sessionManager = config.sessionManager;
@@ -2217,6 +2241,9 @@ export class AgentSession {
 	dispose(): void {
 		if (this._disposed) return;
 		this._disposed = true;
+		// Every in-flight admission entry this session still owns is released; a sibling process
+		// would otherwise count it until the heartbeat went stale.
+		this._providerAdmissionLedger.releaseAll();
 		const { safely, track, trackRequired, finish } = createSessionShutdownTracker();
 
 		safely(() => this._backgroundLanes.clearGoalAutoContinueTimer());

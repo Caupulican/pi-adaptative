@@ -107,6 +107,40 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("providerAdmission settings", () => {
+		it("caps Codex at two by default, merges valid overrides, lets 0 lift a default cap and ignores junk", () => {
+			expect(SettingsManager.create(projectDir, agentDir).getProviderAdmissionSettings()).toEqual({
+				enabled: true,
+				limits: { "openai-codex": 2 },
+				maxWaitMs: 120_000,
+			});
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					providerAdmission: {
+						enabled: false,
+						maxWaitMs: 5_000,
+						limits: { "openai-codex": 0, xai: 4, anthropic: -1, "": 3, openrouter: 2.5 },
+					},
+				}),
+			);
+			expect(SettingsManager.create(projectDir, agentDir).getProviderAdmissionSettings()).toEqual({
+				enabled: false,
+				limits: { xai: 4 },
+				maxWaitMs: 5_000,
+			});
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ providerAdmission: { maxWaitMs: -5, limits: 7 } }),
+			);
+			expect(SettingsManager.create(projectDir, agentDir).getProviderAdmissionSettings()).toEqual({
+				enabled: true,
+				limits: { "openai-codex": 2 },
+				maxWaitMs: 120_000,
+			});
+		});
+	});
+
 	describe("preserves externally added settings", () => {
 		it("should preserve enabledModels when changing thinking level", async () => {
 			// Create initial settings file

@@ -68,6 +68,7 @@ import type {
 	StructuredReflectionWrite,
 } from "./memory/providers/file-store.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { providerLaneForIsolatedLaneKind, runInProviderLane } from "./provider-admission/lane-context.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
@@ -855,6 +856,15 @@ export class ReflectionController {
 	 * act, and a model-level error is returned rather than thrown.
 	 */
 	async runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult> {
+		// Every provider request this call starts is attributed to its admission lane (worker lanes
+		// to `worker`, everything else to `background`) so the machine-wide admission gate can let
+		// the owner's foreground turn go first; see core/provider-admission/.
+		return runInProviderLane(providerLaneForIsolatedLaneKind(opts.laneKind), () =>
+			this.runIsolatedCompletionInLane(opts),
+		);
+	}
+
+	private async runIsolatedCompletionInLane(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult> {
 		if (opts.maxTurns !== undefined && (!Number.isSafeInteger(opts.maxTurns) || opts.maxTurns <= 0)) {
 			throw new Error("runIsolatedCompletion: maxTurns must be a positive safe integer when provided");
 		}
