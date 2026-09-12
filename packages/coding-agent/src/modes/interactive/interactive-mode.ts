@@ -103,6 +103,7 @@ import * as historyReloadMath from "./history-reload-math.ts";
 import { handleInteractiveEvent, type InteractiveEventHost } from "./interactive-event-controller.ts";
 import { type InteractiveLayoutHost, mountInteractiveLayout } from "./interactive-layout.ts";
 import * as keyHandlers from "./key-handlers.ts";
+import { handleEstopCommand, handleLoadCommand } from "./load-commands.ts";
 import { type LoadedResourcesViewOptions, renderLoadedResources } from "./loaded-resources-view.ts";
 import * as localModelCommands from "./local-model-commands.ts";
 import { handleMemoryCommand } from "./memory-commands.ts";
@@ -1417,6 +1418,16 @@ export class InteractiveMode {
 			if (text === "/edge" || text.startsWith("/edge ")) {
 				this.editor.setText("");
 				await handleEdgeCommand(this.edgeHost(), text);
+				return;
+			}
+			if (text === "/load" || text.startsWith("/load ")) {
+				this.editor.setText("");
+				await handleLoadCommand(this.loadHost(), text);
+				return;
+			}
+			if (text === "/estop" || text.startsWith("/estop ")) {
+				this.editor.setText("");
+				await handleEstopCommand(this.loadHost(), text);
 				return;
 			}
 
@@ -3086,6 +3097,14 @@ export class InteractiveMode {
 			getAutoLearnTenantKey: () => this.getAutoLearnTenantKey(),
 			getAutoLearnDataDir: () => this.getAutoLearnDataDir(),
 			getAutoLearnTenantDataDir: () => this.getAutoLearnTenantDataDir(),
+		};
+	}
+
+	private loadHost() {
+		return {
+			getLoadView: () => this.session.getProviderLoadView(),
+			setEmergencyStop: (engaged: boolean, reason?: string) => this.session.setEmergencyStop(engaged, reason),
+			...this.operatorCommandOutput(),
 		};
 	}
 

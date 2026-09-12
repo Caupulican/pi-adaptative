@@ -23,6 +23,14 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "memory", description: "Managed memory files: /memory drift · accept <target> · restore <target>" },
 	{ name: "edge", description: "The edge: /edge [list] · allow <class> [note] · revoke <class>" },
 	{
+		name: "load",
+		description: "Machine-wide provider load: in-flight requests, recorded limits, provider windows, emergency stop",
+	},
+	{
+		name: "estop",
+		description: "Emergency stop for new worker/background work on this machine: /estop [status|on [reason]|off]",
+	},
+	{
 		name: "models",
 		description: "Local model lifecycle: /models [list|suggest|add <ref>|remove <ref> confirm|stop]",
 	},

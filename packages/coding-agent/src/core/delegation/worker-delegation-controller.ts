@@ -54,6 +54,7 @@ import {
 	verifierWorkerExecutionContract,
 } from "../orchestration/worker-execution-contract.ts";
 import { resolveWorkerModelPin, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
+import { emergencyStopPath, isEmergencyStopEngaged } from "../provider-admission/emergency-stop.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
@@ -1394,6 +1395,13 @@ export class WorkerDelegationController {
 		const contract = attempt.dispatch.executionContract;
 		const admission = this.resolveWorkerAdmission(request, contract);
 		if (!admission.ok) return { action: "cancel", reasonCode: admission.skipReason };
+		if (isEmergencyStopEngaged(this.deps.getAgentDir())) {
+			return {
+				action: "wait",
+				reason: "capacity",
+				detail: `paused by the machine-wide emergency stop (${emergencyStopPath(this.deps.getAgentDir())})`,
+			};
+		}
 		if (!this.hasWorkerCapacity(admission.settings)) {
 			return {
 				action: "wait",

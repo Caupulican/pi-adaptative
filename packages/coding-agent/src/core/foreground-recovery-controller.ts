@@ -37,6 +37,8 @@ export interface ForegroundRecoveryControllerDeps {
 	modelRegistry: ModelRegistry;
 	failureCorpus: FailureCorpusRecorder;
 	getContextWindow(): number;
+	/** Directory the exhausted-provider registry shares with sibling processes; omitted keeps it process-local. */
+	exhaustedStoreDir?: string;
 	emit(event: ForegroundRecoveryEvent): void;
 	checkCompaction(message: AssistantMessage): Promise<boolean>;
 	onSuccessfulAssistant(): void;
@@ -78,7 +80,7 @@ export class ForegroundRecoveryController {
 		this.billingFailover = new BillingFailoverController({
 			agent: deps.agent,
 			modelRegistry: deps.modelRegistry,
-			exhausted: new ExhaustedProviderRegistry(),
+			exhausted: new ExhaustedProviderRegistry(deps.exhaustedStoreDir),
 			subscriptionHop: deps.settingsManager.getFailoverSettings().subscriptionHop,
 			emit: (event) => deps.emit(event),
 			recordFailure: (record) => deps.failureCorpus.record(record),

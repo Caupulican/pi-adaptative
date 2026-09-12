@@ -12,8 +12,10 @@ import {
 	resolveAdaptiveStreamIdleOptions,
 	withModelPerfProfile,
 } from "./models/perf-profile.ts";
+import { isEmergencyStopEngaged } from "./provider-admission/emergency-stop.ts";
 import { PROVIDER_ADMISSION_CUSTOM_TYPE, withProviderAdmission } from "./provider-admission/gate.ts";
 import type { ProviderAdmissionLedger } from "./provider-admission/ledger.ts";
+import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { resolveStreamStallBudget } from "./stream-stall-budget.ts";
 
@@ -22,8 +24,10 @@ import { resolveStreamStallBudget } from "./stream-stall-budget.ts";
  *
  *  1. perf profile: one sample per provider stream (request-to-first-token, stalls);
  *  2. idle watchdog: a silently dead connection is aborted and surfaced as a retryable stall;
- *  3. machine-wide admission: worker and background lanes wait at a provider's configured limit,
- *     the owner's foreground lane never does.
+ *  3. machine-wide admission: every lane honours a recorded provider limit (a 429 or exhausted
+ *     window another process saw), worker and background lanes wait at a provider's configured
+ *     in-flight limit and while the emergency stop is engaged; the owner's foreground lane is never
+ *     held for capacity or the stop.
  *
  * Admission sits OUTSIDE the watchdog and the profiler on purpose: time spent waiting for a
  * shared-account slot is neither a connect stall nor the model's time to first token. The chain
@@ -48,6 +52,9 @@ export interface SessionStreamChainInput {
 	sessionManager: SessionManager;
 	modelAdaptationStore: ModelAdaptationStore;
 	providerAdmissionLedger: ProviderAdmissionLedger;
+	providerLimitStore: ProviderLimitStore;
+	/** The agent directory whose ESTOP sentinel pauses new worker and background requests. */
+	agentDir: string;
 	/** The output repetition guard's threshold follows the model's capability tier. */
 	getRepetitionGuardRepeats: () => number;
 	/** Test-only stream-idle override, read per request (see `setStreamIdleOptionsForTests`). */
@@ -84,6 +91,8 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 	});
 	const admitted = withProviderAdmission(watched, {
 		ledger: providerAdmissionLedger,
+		limits: input.providerLimitStore,
+		isEmergencyStopEngaged: () => isEmergencyStopEngaged(input.agentDir),
 		getPolicy: () => settingsManager.getProviderAdmissionSettings(),
 		record: (record) => {
 			try {

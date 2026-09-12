@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Agent } from "@caupulican/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
@@ -109,6 +112,30 @@ describe("BillingFailoverController", () => {
 		// Classified as metered, not subscription: halts and asks instead of silently hopping models.
 		expect(agent.state.model.id).toBe("codex-spark");
 		expect(warnings[0]).toContain("switch models (/model), wait for the limit window, or re-send to retry");
+	});
+
+	it("shares an expiring exhaustion with every registry on the same store directory", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-exhausted-"));
+		try {
+			const first = new ExhaustedProviderRegistry(dir);
+			const second = new ExhaustedProviderRegistry(dir);
+			first.markExhausted("openai-codex/gpt-5.6-sol", Date.now() + 60_000);
+			expect(second.isExhausted("openai-codex/gpt-5.6-sol")).toBe(true);
+			expect(second.snapshot()).toEqual(["openai-codex/gpt-5.6-sol"]);
+			// Provider scope covers every model reached through that credential.
+			first.markExhausted("xai/grok-4.6", Date.now() + 60_000, "provider");
+			expect(second.isExhausted("xai/grok-4.7")).toBe(true);
+			expect(second.snapshot()).toContain("xai/*");
+			// An entry without an expiry stays process-local.
+			first.markExhausted("anthropic/claude");
+			expect(first.isExhausted("anthropic/claude")).toBe(true);
+			expect(second.isExhausted("anthropic/claude")).toBe(false);
+			// An expired shared entry is forgotten by every reader.
+			first.markExhausted("openrouter/x", Date.now() - 1);
+			expect(second.isExhausted("openrouter/x")).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("does not re-hop into an exhausted fallback", async () => {

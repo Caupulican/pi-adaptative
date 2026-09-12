@@ -3,6 +3,7 @@ import type { SessionManager, SessionMessageBatchEntry } from "@caupulican/pi-ag
 import type { AssistantMessage, Message } from "@caupulican/pi-ai";
 import { ForegroundLifecycleController, type ProviderRetryLifecycleEvent } from "./foreground-lifecycle-controller.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
+import { type ProviderLimitStore, providerLimitFromFailure } from "./provider-admission/limit-state.ts";
 
 /**
  * Host-side adapter for the foreground lifecycle boundary.
@@ -14,6 +15,7 @@ import type { ModelRouterController } from "./model-router-controller.ts";
 export class ForegroundLifecycleAdapter {
 	private readonly lifecycle: ForegroundLifecycleController;
 	private readonly sessionManager: SessionManager;
+	private readonly providerLimitStore: ProviderLimitStore | undefined;
 	private pendingWarnings: string[] = [];
 
 	/**
@@ -26,8 +28,10 @@ export class ForegroundLifecycleAdapter {
 		modelRouter: ModelRouterController,
 		getMutationScope?: () => string,
 		getAnnouncer?: () => string,
+		providerLimitStore?: ProviderLimitStore,
 	) {
 		this.sessionManager = sessionManager;
+		this.providerLimitStore = providerLimitStore;
 		this.lifecycle = new ForegroundLifecycleController({
 			agent,
 			sessionManager,
@@ -70,8 +74,22 @@ export class ForegroundLifecycleAdapter {
 		this.lifecycle.recordTransportTelemetry(message);
 	}
 
+	/**
+	 * Persist the retry event and, for a rate limit or overload, publish the retry controller's
+	 * delay machine-wide: it is the exact wait the provider or the backoff dictated, so sibling
+	 * processes stop sending to the same account until it passes.
+	 */
 	recordRetryEvent(event: ProviderRetryLifecycleEvent, model?: { provider: string; id: string }): void {
 		this.lifecycle.recordRetryEvent(event, model);
+		if (event.type !== "auto_retry_start" || !model || !this.providerLimitStore) return;
+		const now = Date.now();
+		const limit = providerLimitFromFailure(model.provider, event.errorMessage, now, event.delayMs);
+		if (!limit) return;
+		try {
+			this.providerLimitStore.record(model.provider, limit);
+		} catch {
+			// Shared-state bookkeeping must never fail the retry it observes.
+		}
 	}
 
 	appendMessageBatch(batch: readonly SessionMessageBatchEntry[]): string[] {

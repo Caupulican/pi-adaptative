@@ -462,11 +462,18 @@ single source of shared-account load (277 of the 334 xAI requests that overlappe
 workers), while the owner's own request waited behind them. Pinned by
 `packages/coding-agent/test/worker-authority-resolver.test.ts`.
 
-**The owner's foreground request never waits for a shared account; workers and background lanes
-yield at the provider's machine-wide cap.** Every pi process on the machine registers each
-in-flight provider request under `state/provider-admission/` (one file per request, released when
-its stream settles, pruned by any reader once its owner's pid is gone or its heartbeat is stale).
-A foreground request is registered and admitted at once. A worker or background request to a
+**A provider limit one process learns is a limit every process honours; the owner's foreground
+request never waits for capacity or the stop; workers and background lanes yield at the provider's
+machine-wide cap.** Every pi process on the machine registers each in-flight provider request under
+`state/provider-admission/` (one file per request, released when its stream settles, pruned by any
+reader once its owner's pid is gone or its heartbeat is stale). The first process to see a 429, an
+overload, or a fully used subscription window records the reset time under
+`state/provider-admission/limits/`; before sending, every lane waits out a recorded limit that fits
+its budget and otherwise refuses the request unsent with a message the reliability classifier
+reads as a rate limit carrying the remaining delay, so no retry ladder rediscovers a limit at the
+account's expense. A success clears a rate-limit or overload record. The emergency stop
+(`<agentDir>/ESTOP`) holds new worker and background requests in every process and never the
+foreground. A foreground request is otherwise registered and admitted at once. A worker or background request to a
 provider at its configured limit (`providerAdmission.limits`; no provider is capped by default,
 matching the Codex CLI, which applies no per-account cap) waits for a slot, deciding and registering under one lock so the last slot is taken exactly once, and is
 admitted regardless after `maxWaitMs` so a wedged sibling can never starve it; every wait is a

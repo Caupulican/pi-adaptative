@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import type { CompactionResult, CompactionSettings } from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
@@ -157,7 +157,10 @@ import {
 } from "./pipelines/index.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
-import { ProviderAdmissionLedger } from "./provider-admission/ledger.ts";
+import { engageEmergencyStop, liftEmergencyStop } from "./provider-admission/emergency-stop.ts";
+import { ProviderAdmissionLedger, providerAdmissionDir } from "./provider-admission/ledger.ts";
+import { ProviderLimitStore } from "./provider-admission/limit-state.ts";
+import { buildProviderLoadView, type ProviderLoadView } from "./provider-admission/load-view.ts";
 import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
 import { ReflectionController } from "./reflection-controller.ts";
@@ -305,6 +308,7 @@ export class AgentSession {
 	}
 	private _agentDir: string;
 	private readonly _providerAdmissionLedger: ProviderAdmissionLedger;
+	private readonly _providerLimitStore: ProviderLimitStore;
 	private _collectWorkspaceSources: typeof collectWorkspaceSources;
 	private readonly _localRuntimeController: LocalRuntimeController;
 	private readonly _localPrefixWarm: LocalPrefixWarmController;
@@ -431,12 +435,16 @@ export class AgentSession {
 			sessionId: config.sessionManager.getSessionId(),
 		});
 		this._providerAdmissionLedger = providerAdmissionLedger;
+		const providerLimitStore = new ProviderLimitStore(agentDir, { sessionId: config.sessionManager.getSessionId() });
+		this._providerLimitStore = providerLimitStore;
 		this.agent.streamFn = buildSessionStreamFn({
 			baseStreamFn: this.agent.streamFn,
 			settingsManager: config.settingsManager,
 			sessionManager: config.sessionManager,
 			modelAdaptationStore,
 			providerAdmissionLedger,
+			providerLimitStore,
+			agentDir,
 			getRepetitionGuardRepeats: () => this.getCapabilityTierPolicy().repetitionGuardRepeats,
 			getStreamIdleOptionsOverride: () => streamIdleOptionsOverride,
 		});
@@ -804,6 +812,7 @@ export class AgentSession {
 			settingsManager: this.settingsManager,
 			failureCorpus: this._failureCorpus,
 			getContextWindow: () => this.model?.contextWindow ?? 0,
+			exhaustedStoreDir: join(providerAdmissionDir(this._agentDir), "exhausted"),
 			emit: (event) => {
 				// Retry lifecycle events are persisted before they reach the UI so a retried-and-
 				// recovered provider failure leaves a session record a census can count.
@@ -883,6 +892,7 @@ export class AgentSession {
 			this._modelRouter,
 			() => this.mutationScope,
 			() => this._shellSessionKey,
+			this._providerLimitStore,
 		);
 		this._foregroundLifecycle.start();
 		this._reflection = new ReflectionController({
@@ -3864,6 +3874,25 @@ export class AgentSession {
 	/** Run one explicit isolated completion for bounded host-owned consumers. */
 	async runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult> {
 		return this._reflection.runIsolatedCompletion(opts);
+	}
+
+	/** Machine-wide provider load: in-flight requests, recorded limits, provider windows, the stop. */
+	getProviderLoadView(): ProviderLoadView {
+		return buildProviderLoadView({
+			agentDir: this._agentDir,
+			ledger: this._providerAdmissionLedger,
+			limits: this._providerLimitStore,
+			configuredLimits: this.settingsManager.getProviderAdmissionSettings().limits,
+		});
+	}
+
+	/** Engage or lift the machine-wide emergency stop (`<agentDir>/ESTOP`). Returns true when the state changed. */
+	setEmergencyStop(engaged: boolean, reason?: string): boolean {
+		if (engaged) {
+			engageEmergencyStop(this._agentDir, reason);
+			return true;
+		}
+		return liftEmergencyStop(this._agentDir);
 	}
 
 	/**

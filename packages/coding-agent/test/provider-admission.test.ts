@@ -2,10 +2,19 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { StreamFn } from "@caupulican/pi-agent-core";
+import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import { type Api, createAssistantMessageEventStream, fauxAssistantMessage, type Model } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	emergencyStopPath,
+	engageEmergencyStop,
+	isEmergencyStopEngaged,
+	liftEmergencyStop,
+	readEmergencyStop,
+} from "../src/core/provider-admission/emergency-stop.ts";
+import {
 	admitProviderRequest,
+	EmergencyStopError,
 	type ProviderAdmissionPolicy,
 	type ProviderAdmissionWaitRecord,
 	withProviderAdmission,
@@ -16,6 +25,13 @@ import {
 	runInProviderLane,
 } from "../src/core/provider-admission/lane-context.ts";
 import { ProviderAdmissionLedger, providerAdmissionDir } from "../src/core/provider-admission/ledger.ts";
+import {
+	observeProviderResult,
+	ProviderLimitedError,
+	ProviderLimitStore,
+	providerLimitFromFailure,
+	usageWindowLimit,
+} from "../src/core/provider-admission/limit-state.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -100,6 +116,7 @@ describe("admitProviderRequest", () => {
 		enabled: true,
 		limits: { "openai-codex": 1 },
 		maxWaitMs: 10_000,
+		foregroundLimitWaitMs: 60_000,
 		...overrides,
 	});
 
@@ -146,6 +163,7 @@ describe("admitProviderRequest", () => {
 			{
 				provider: "openai-codex",
 				lane: "worker",
+				reason: "capacity",
 				limit: 1,
 				inflightAtStart: 1,
 				inflightAtAdmission: 0,
@@ -238,7 +256,7 @@ describe("withProviderAdmission", () => {
 		const streamFn: StreamFn = () => inner;
 		const wrapped = withProviderAdmission(streamFn, {
 			ledger,
-			getPolicy: () => ({ enabled: true, limits: {}, maxWaitMs: 1_000 }),
+			getPolicy: () => ({ enabled: true, limits: {}, maxWaitMs: 1_000, foregroundLimitWaitMs: 60_000 }),
 			getLane: () => "worker",
 		});
 		const stream = await wrapped(model, { systemPrompt: "", messages: [], tools: [] }, {});
@@ -257,7 +275,7 @@ describe("withProviderAdmission", () => {
 			() => {
 				throw new Error("connect failed");
 			},
-			{ ledger, getPolicy: () => ({ enabled: true, limits: {}, maxWaitMs: 1_000 }) },
+			{ ledger, getPolicy: () => ({ enabled: true, limits: {}, maxWaitMs: 1_000, foregroundLimitWaitMs: 60_000 }) },
 		);
 		await expect(wrapped(model, { systemPrompt: "", messages: [], tools: [] }, {})).rejects.toThrow("connect failed");
 		expect(ledger.countInflight("openai-codex").total).toBe(0);
@@ -280,5 +298,234 @@ describe("provider lane context", () => {
 		expect(providerLaneForIsolatedLaneKind("worker-compaction")).toBe("worker");
 		expect(providerLaneForIsolatedLaneKind("reflection")).toBe("background");
 		expect(providerLaneForIsolatedLaneKind(undefined)).toBe("background");
+	});
+});
+
+describe("ProviderLimitStore", () => {
+	it("records the later reset, expires on read, clears only matching reasons and lists live limits", () => {
+		const dir = agentDir();
+		let now = 1_000_000;
+		const store = new ProviderLimitStore(dir, { now: () => now, pid: 4242, sessionId: "s1" });
+		expect(store.read("openai-codex")).toBeUndefined();
+		const first = store.record("openai-codex", {
+			limitedUntil: now + 30_000,
+			reason: "rate_limit",
+			detail: "429 slow down",
+		});
+		expect(first).toMatchObject({ provider: "openai-codex", reason: "rate_limit", pid: 4242, sessionId: "s1" });
+		// An earlier reset never shortens a live record; a later one replaces it.
+		expect(store.record("openai-codex", { limitedUntil: now + 10_000, reason: "overloaded" }).limitedUntil).toBe(
+			now + 30_000,
+		);
+		expect(store.record("openai-codex", { limitedUntil: now + 90_000, reason: "usage_window" }).reason).toBe(
+			"usage_window",
+		);
+		expect(store.clear("openai-codex", ["rate_limit", "overloaded"])).toBe(false);
+		expect(store.list().map((r) => r.provider)).toEqual(["openai-codex"]);
+		expect(store.clear("openai-codex")).toBe(true);
+		store.record("xai", { limitedUntil: now + 5_000, reason: "rate_limit" });
+		now += 5_001;
+		expect(store.read("xai")).toBeUndefined();
+		expect(store.list()).toEqual([]);
+	});
+
+	it("derives a limit only from a rate limit or overload with a known reset", () => {
+		const now = 5_000;
+		expect(providerLimitFromFailure("xai", "429 Too Many Requests; retry after 12 seconds", now)).toMatchObject({
+			reason: "rate_limit",
+			limitedUntil: now + 12_000,
+		});
+		// A bare overload publishes nothing on its own; the retry policy's chosen delay does.
+		expect(providerLimitFromFailure("xai", "Provider overloaded", now)).toBeUndefined();
+		expect(providerLimitFromFailure("xai", "Provider overloaded", now, 2_000)).toMatchObject({
+			reason: "overloaded",
+			limitedUntil: now + 2_000,
+		});
+		expect(providerLimitFromFailure("xai", "Connection error. [fetch failed]", now, 2_000)).toBeUndefined();
+	});
+	it("turns a fully used Codex window into a usage_window limit and persists the snapshots", () => {
+		const dir = agentDir();
+		const now = 1_700_000_000_000;
+		const store = new ProviderLimitStore(dir, { now: () => now });
+		const rateLimits = [
+			{
+				limitId: "codex",
+				limitName: "codex",
+				primary: { usedPercent: 100, windowMinutes: 300, resetsAt: Math.floor(now / 1000) + 3_600 },
+				secondary: { usedPercent: 40, windowMinutes: 10_080 },
+			},
+		];
+		expect(usageWindowLimit(rateLimits, now)).toMatchObject({ limitedUntil: now + 3_600_000 });
+		expect(usageWindowLimit([{ limitId: "codex", primary: { usedPercent: 99 } }], now)).toBeUndefined();
+		observeProviderResult(
+			store,
+			{
+				...fauxAssistantMessage("ok"),
+				provider: "openai-codex",
+				diagnostics: [{ type: "openai_codex_subscription_rate_limits", timestamp: now, details: { rateLimits } }],
+			},
+			now,
+		);
+		expect(store.read("openai-codex")).toMatchObject({ reason: "usage_window", limitedUntil: now + 3_600_000 });
+		expect(store.readUsage("openai-codex")?.rateLimits).toEqual(rateLimits);
+	});
+
+	it("records a limit from a rate-limited result that states its reset and clears it on the next success", () => {
+		const dir = agentDir();
+		const now = 10_000;
+		const store = new ProviderLimitStore(dir, { now: () => now });
+		const failed = (errorMessage: string) => ({
+			...fauxAssistantMessage(""),
+			provider: "xai",
+			stopReason: "error" as const,
+			errorMessage,
+		});
+		observeProviderResult(store, failed("429 rate limit exceeded"), now);
+		expect(store.read("xai")).toBeUndefined();
+		observeProviderResult(store, failed("429 rate limit; retry after 45 seconds"), now);
+		expect(store.read("xai")).toMatchObject({ reason: "rate_limit", limitedUntil: now + 45_000 });
+		observeProviderResult(store, { ...fauxAssistantMessage("served"), provider: "xai" }, now);
+		expect(store.read("xai")).toBeUndefined();
+	});
+});
+
+describe("admission against a recorded provider limit", () => {
+	const policy: ProviderAdmissionPolicy = {
+		enabled: true,
+		limits: {},
+		maxWaitMs: 10_000,
+		foregroundLimitWaitMs: 60_000,
+	};
+
+	it("waits out a short limit in every lane and records the wait", async () => {
+		const dir = agentDir();
+		let now = 0;
+		const ledger = new ProviderAdmissionLedger(dir, { heartbeatMs: 60_000, now: () => now });
+		const limits = new ProviderLimitStore(dir, { now: () => now, pid: 99 });
+		limits.record("xai", { limitedUntil: 4_000, reason: "rate_limit" });
+		const records: ProviderAdmissionWaitRecord[] = [];
+		const slept: number[] = [];
+		const release = await admitProviderRequest("xai", {
+			ledger,
+			limits,
+			getPolicy: () => policy,
+			getLane: () => "worker",
+			now: () => now,
+			record: (record) => records.push(record),
+			sleep: async (ms) => {
+				slept.push(ms);
+				now += ms;
+			},
+		});
+		expect(slept).toEqual([4_000]);
+		expect(records).toEqual([
+			expect.objectContaining({
+				reason: "provider_limit",
+				lane: "worker",
+				waitedMs: 4_000,
+				timedOut: false,
+				limitedUntil: 4_000,
+			}),
+		]);
+		expect(ledger.countInflight("xai").total).toBe(1);
+		release();
+	});
+
+	it("refuses without sending when the limit outlasts the lane's budget, in a form the classifier reads as a rate limit", async () => {
+		const dir = agentDir();
+		const ledger = new ProviderAdmissionLedger(dir, { heartbeatMs: 60_000, now: () => 0 });
+		const limits = new ProviderLimitStore(dir, { now: () => 0, pid: 7 });
+		limits.record("openai-codex", {
+			limitedUntil: 3_600_000,
+			reason: "usage_window",
+			detail: "codex primary window 100% used",
+		});
+		const records: ProviderAdmissionWaitRecord[] = [];
+		let thrown: unknown;
+		try {
+			await admitProviderRequest("openai-codex", {
+				ledger,
+				limits,
+				getPolicy: () => policy,
+				getLane: () => "foreground",
+				now: () => 0,
+				record: (record) => records.push(record),
+				sleep: async () => {
+					throw new Error("must not sleep");
+				},
+			});
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(ProviderLimitedError);
+		const message = (thrown as Error).message;
+		const classified = classifyFailure({ message, provider: "openai-codex" });
+		expect(classified.reason).toBe("rate_limit");
+		expect(classified.retryAfterMs).toBe(3_600_000);
+		expect(message).toContain("recorded by pid 7");
+		expect(records).toEqual([expect.objectContaining({ reason: "provider_limit", timedOut: true, waitedMs: 0 })]);
+		expect(ledger.countInflight("openai-codex").total).toBe(0);
+	});
+});
+
+describe("emergency stop", () => {
+	it("engages, reads, lifts, and counts an unreadable sentinel as engaged", () => {
+		const dir = agentDir();
+		expect(isEmergencyStopEngaged(dir)).toBe(false);
+		expect(readEmergencyStop(dir)).toMatchObject({ engaged: false, path: emergencyStopPath(dir) });
+		const engaged = engageEmergencyStop(dir, "account hammered", () => 1_700_000_000_000);
+		expect(engaged).toMatchObject({
+			engaged: true,
+			reason: "account hammered",
+			engagedAt: "2023-11-14T22:13:20.000Z",
+		});
+		expect(readEmergencyStop(dir)).toMatchObject({ engaged: true, reason: "account hammered" });
+		writeFileSync(emergencyStopPath(dir), "");
+		expect(readEmergencyStop(dir)).toMatchObject({ engaged: true });
+		expect(liftEmergencyStop(dir)).toBe(true);
+		expect(liftEmergencyStop(dir)).toBe(false);
+		expect(isEmergencyStopEngaged(dir)).toBe(false);
+	});
+
+	it("holds worker and background lanes while engaged, never the foreground, and refuses after the wait budget", async () => {
+		const dir = agentDir();
+		let now = 0;
+		let engaged = true;
+		const ledger = new ProviderAdmissionLedger(dir, { heartbeatMs: 60_000, now: () => now });
+		const policy: ProviderAdmissionPolicy = {
+			enabled: true,
+			limits: {},
+			maxWaitMs: 5_000,
+			foregroundLimitWaitMs: 60_000,
+		};
+		const records: ProviderAdmissionWaitRecord[] = [];
+		const deps = (lane: "foreground" | "worker") => ({
+			ledger,
+			getPolicy: () => policy,
+			getLane: () => lane,
+			isEmergencyStopEngaged: () => engaged,
+			now: () => now,
+			record: (record: ProviderAdmissionWaitRecord) => records.push(record),
+			sleep: async (ms: number) => {
+				now += ms;
+				if (now >= 4_000) engaged = false;
+			},
+		});
+		(await admitProviderRequest("xai", deps("foreground")))();
+		expect(records).toEqual([]);
+		(await admitProviderRequest("xai", deps("worker")))();
+		expect(records).toEqual([expect.objectContaining({ reason: "emergency_stop", lane: "worker", timedOut: false })]);
+		expect(records[0]!.waitedMs).toBeGreaterThanOrEqual(4_000);
+
+		engaged = true;
+		now = 0;
+		const stuck = {
+			...deps("worker"),
+			sleep: async (ms: number) => {
+				now += ms;
+			},
+		};
+		await expect(admitProviderRequest("xai", stuck)).rejects.toBeInstanceOf(EmergencyStopError);
+		expect(ledger.countInflight("xai").total).toBe(0);
 	});
 });

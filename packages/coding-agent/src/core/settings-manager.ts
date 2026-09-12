@@ -414,6 +414,7 @@ export interface ProviderAdmissionSettings {
 	enabled?: boolean; // default: true
 	limits?: Record<string, number>; // per provider id: in-flight cap for non-foreground lanes; none by default; 0 removes an entry
 	maxWaitMs?: number; // default: 120000; a waiting request is admitted regardless after this long (recorded as timedOut)
+	foregroundLimitWaitMs?: number; // default: 60000; longest the foreground waits for a machine-wide recorded provider limit before the request is refused with the reset time
 }
 
 export type ResolvedProviderAdmissionSettings = Required<ProviderAdmissionSettings>;
@@ -421,6 +422,7 @@ export type ResolvedProviderAdmissionSettings = Required<ProviderAdmissionSettin
 export const DEFAULT_PROVIDER_ADMISSION_ENABLED = true;
 export const DEFAULT_PROVIDER_ADMISSION_LIMITS: Readonly<Record<string, number>> = Object.freeze({});
 export const DEFAULT_PROVIDER_ADMISSION_MAX_WAIT_MS = 120_000;
+export const DEFAULT_PROVIDER_ADMISSION_FOREGROUND_LIMIT_WAIT_MS = 60_000;
 const MAX_PROVIDER_ADMISSION_MAX_WAIT_MS = 3_600_000;
 const MAX_PROVIDER_ADMISSION_LIMIT = 10_000;
 
@@ -4164,6 +4166,12 @@ export class SettingsManager {
 			maxWaitMs: sanitizeIntegerSetting(
 				configured.maxWaitMs,
 				DEFAULT_PROVIDER_ADMISSION_MAX_WAIT_MS,
+				0,
+				MAX_PROVIDER_ADMISSION_MAX_WAIT_MS,
+			),
+			foregroundLimitWaitMs: sanitizeIntegerSetting(
+				configured.foregroundLimitWaitMs,
+				DEFAULT_PROVIDER_ADMISSION_FOREGROUND_LIMIT_WAIT_MS,
 				0,
 				MAX_PROVIDER_ADMISSION_MAX_WAIT_MS,
 			),

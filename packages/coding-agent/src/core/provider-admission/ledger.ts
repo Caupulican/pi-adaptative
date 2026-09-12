@@ -132,6 +132,12 @@ export class ProviderAdmissionLedger {
 		return this.withLock(() => this.countLocked(provider));
 	}
 
+	/** Every live in-flight request across the machine, after pruning abandoned entries. */
+	listInflight(): ProviderAdmissionEntry[] {
+		if (!existsSync(this.dir)) return [];
+		return this.withLock(() => this.collectLocked());
+	}
+
 	/** Release every hold this ledger still owns (session disposal). */
 	releaseAll(): void {
 		for (const release of [...this.holds.values()]) release();
@@ -192,11 +198,21 @@ export class ProviderAdmissionLedger {
 	private countLocked(provider: string): ProviderInflightCount {
 		const byLane: Record<ProviderRequestLane, number> = { foreground: 0, worker: 0, background: 0 };
 		let total = 0;
+		for (const entry of this.collectLocked()) {
+			if (entry.provider !== provider) continue;
+			total += 1;
+			byLane[entry.lane] += 1;
+		}
+		return { total, byLane };
+	}
+
+	private collectLocked(): ProviderAdmissionEntry[] {
+		const live: ProviderAdmissionEntry[] = [];
 		let names: string[];
 		try {
 			names = readdirSync(this.dir);
 		} catch (error) {
-			if (isMissingFileError(error)) return { total, byLane };
+			if (isMissingFileError(error)) return live;
 			throw error;
 		}
 		const nowMs = this.now();
@@ -224,10 +240,8 @@ export class ProviderAdmissionLedger {
 				rmSync(path, { force: true });
 				continue;
 			}
-			if (entry.provider !== provider) continue;
-			total += 1;
-			byLane[entry.lane] += 1;
+			live.push(entry);
 		}
-		return { total, byLane };
+		return live.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
 	}
 }

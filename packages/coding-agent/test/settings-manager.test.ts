@@ -113,6 +113,7 @@ describe("SettingsManager", () => {
 				enabled: true,
 				limits: {},
 				maxWaitMs: 120_000,
+				foregroundLimitWaitMs: 60_000,
 			});
 			writeFileSync(
 				join(agentDir, "settings.json"),
@@ -128,6 +129,7 @@ describe("SettingsManager", () => {
 				enabled: false,
 				limits: { xai: 4 },
 				maxWaitMs: 5_000,
+				foregroundLimitWaitMs: 60_000,
 			});
 			writeFileSync(
 				join(agentDir, "settings.json"),
@@ -137,6 +139,7 @@ describe("SettingsManager", () => {
 				enabled: true,
 				limits: {},
 				maxWaitMs: 120_000,
+				foregroundLimitWaitMs: 60_000,
 			});
 		});
 	});
