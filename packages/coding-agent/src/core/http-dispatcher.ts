@@ -107,6 +107,9 @@ export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TI
 			allowH2: false,
 			bodyTimeout: normalizedTimeoutMs,
 			headersTimeout: normalizedTimeoutMs,
+			// Undici 8.7 stopped tunnelling plain-HTTP origins through the proxy's CONNECT; keep
+			// every origin on a tunnel as before (hand-ported from upstream 23842b1e6, #8134).
+			proxyTunnel: true,
 		}),
 	);
 	// Keep fetch and the dispatcher on the same undici implementation. Node 26.0's

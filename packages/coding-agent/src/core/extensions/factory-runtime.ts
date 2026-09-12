@@ -173,6 +173,14 @@ export function createExtensionAPI(
 		},
 		registerTool(tool: ToolDefinition): void {
 			runtime.assertActive();
+			// A malformed parameter schema used to be accepted here and only failed later, inside
+			// provider request serialization, taking every tool of the request down with it.
+			// Hand-ported from upstream acaa253cc (#9300).
+			if (typeof tool.parameters !== "object" || tool.parameters === null || Array.isArray(tool.parameters)) {
+				throw new Error(
+					`Tool "${tool.name}" registered by extension "${extension.path}" must define an object parameter schema.`,
+				);
+			}
 			extension.tools.set(tool.name, { definition: tool, sourceInfo: extension.sourceInfo });
 			runtime.refreshTools();
 		},

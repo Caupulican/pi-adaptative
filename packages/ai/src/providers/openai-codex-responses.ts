@@ -704,6 +704,14 @@ function buildRequestBody(
 				...(lite ? { context: options?.reasoningContext ?? "all_turns" } : {}),
 			};
 		}
+	} else if (model.reasoning && model.thinkingLevelMap?.off !== null) {
+		// No effort requested: say "off" explicitly. Left unset, the Codex backend applies its own
+		// default effort (medium), so a request nobody asked to reason on paid for reasoning anyway.
+		// Hand-ported from upstream e86102f18 (#9191).
+		body.reasoning = {
+			effort: model.thinkingLevelMap?.off ?? "none",
+			...(lite ? { context: options?.reasoningContext ?? "all_turns" } : {}),
+		};
 	}
 
 	return body;

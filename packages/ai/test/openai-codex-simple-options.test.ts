@@ -35,7 +35,9 @@ describe("Codex simple options ownership", () => {
 	});
 
 	it.each([
-		[undefined, undefined],
+		// An unset level is sent as an explicit "none": left out, the Codex backend reasons at its
+		// own default effort (see buildRequestBody).
+		[undefined, { effort: "none" }],
 		["off", { effort: "none" }],
 		["ultra", { effort: "high", summary: "auto" }],
 	] satisfies Array<[SimpleStreamOptions["reasoning"], unknown]>)(
