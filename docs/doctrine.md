@@ -460,7 +460,8 @@ measured on the owner's sessions of 2026-09-04..11, workers inherited `xhigh`, a
 to seven workers each spending the foreground's full reasoning budget at once was the largest
 single source of shared-account load (277 of the 334 xAI requests that overlapped another were
 workers), while the owner's own request waited behind them. Pinned by
-`packages/coding-agent/test/worker-authority-resolver.test.ts`.
+`packages/coding-agent/test/worker-authority-resolver.test.ts` and
+`packages/coding-agent/test/native-worker-autonomy.test.ts`.
 
 **A provider limit one process learns is a limit every process honours; the owner's foreground
 request never waits for capacity or the stop; workers and background lanes yield at the provider's

@@ -111,7 +111,9 @@ describe("native worker autonomy", () => {
 			const worker = firstExecutionContract(harness);
 			const machineRoots = workerMachinePathRoots(harness.tempDir);
 			expect(machineRoots).toContain(parse(resolve(harness.tempDir)).root);
-			expect(worker?.modelBinding).toMatchObject({ modelId: "foreground", thinkingLevel: "high" });
+			// The worker inherits the foreground model and runs one thinking notch below the foreground's
+			// "high" (workerDelegation.thinking step_down); a profile-bound level stays as authored.
+			expect(worker?.modelBinding).toMatchObject({ modelId: "foreground", thinkingLevel: "medium" });
 			expect(worker?.authority).toMatchObject({
 				cwd: resolve(harness.tempDir),
 				readPaths: machineRoots,
