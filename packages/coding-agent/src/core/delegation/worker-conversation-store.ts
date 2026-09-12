@@ -23,6 +23,7 @@ import {
 	type SessionContext,
 	SessionManager,
 } from "@caupulican/pi-agent-core/session";
+import type { ProviderRequestSnapshotContext } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessageDiagnostic, Message, Usage } from "@caupulican/pi-ai";
 import { orchestrationSessionsDir, workerConversationSessionsDir } from "../agent-paths.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
@@ -32,6 +33,7 @@ import {
 	normalizeWorkerContextForkReference,
 	type WorkerContextForkReference,
 } from "../orchestration/worker-context-fork-reference.ts";
+import { buildRequestSnapshotInput } from "../request-snapshot-fingerprints.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedTextFileSync } from "../util/bounded-file.ts";
@@ -1384,6 +1386,19 @@ export class WorkerConversation {
 	appendMessage(message: WorkerTranscriptMessage): string {
 		return this.appendSessionEntry((sessionManager) =>
 			sessionManager.appendMessage(structuredClone(workerMessageForPersistence(message))),
+		);
+	}
+
+	/**
+	 * Record one accepted provider request of this worker as a `request_snapshot` entry, the same
+	 * bounded shape the owner session writes (see request-snapshot-fingerprints.ts). Lifecycle
+	 * entries are not transcript messages: transcript reconciliation (`commitTranscript`) and the
+	 * provider projection skip them, so a snapshot may sit anywhere between two messages. Without
+	 * it a worker's request start time and reasoning level were unrecoverable from its conversation.
+	 */
+	appendRequestSnapshot(context: ProviderRequestSnapshotContext): string {
+		return this.appendSessionEntry((sessionManager) =>
+			sessionManager.appendRequestSnapshot(buildRequestSnapshotInput(context, sessionManager)),
 		);
 	}
 

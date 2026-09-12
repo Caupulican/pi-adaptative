@@ -252,6 +252,42 @@ describe("worker attempt executor", () => {
 		expect(requestCaps).toEqual([DEFAULT_WORKER_MAX_OUTPUT_TOKENS]);
 	});
 
+	it("records one request_snapshot in the worker conversation per accepted provider request", async () => {
+		const harness = createExecutorHarness(async (options) => {
+			await options.onProviderRequestSnapshot?.(
+				{
+					requestId: "worker-req-1",
+					model: { api: "faux", provider: "faux", id: "faux-1" },
+					reasoning: "off",
+					maxTokens: 64,
+					attempt: 0,
+					context: { systemPrompt: options.systemPrompt, tools: [], messages: options.history ?? [] },
+				} as never,
+				undefined,
+			);
+			const finalAssistant = fauxAssistantMessage('{"summary":"snapshot recorded","status":"completed"}');
+			await options.onMessage?.(finalAssistant);
+			return {
+				text: '{"summary":"snapshot recorded","status":"completed"}',
+				usage: ZERO_USAGE,
+				stopReason: "stop",
+				messages: [...(options.history ?? []), finalAssistant],
+			};
+		});
+		const snapshots: string[] = [];
+		const appendRequestSnapshot = harness.conversation.appendRequestSnapshot.bind(harness.conversation);
+		harness.conversation.appendRequestSnapshot = (context) => {
+			snapshots.push(context.requestId);
+			return appendRequestSnapshot(context);
+		};
+
+		const result = await harness.executor.run();
+
+		expect(result.rawOutcome.accepted).toBe(true);
+		expect(snapshots).toEqual(["worker-req-1"]);
+		expect(harness.conversation.getProviderContext().messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+	});
+
 	it("threads final worker context into the isolated system prompt", async () => {
 		let capturedSystemPrompt = "";
 		const harness = createExecutorHarness(

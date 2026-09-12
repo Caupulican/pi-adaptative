@@ -565,6 +565,12 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 									maxTokens: Math.min(workerOutputTokenCeiling, availableTokens ?? Number.POSITIVE_INFINITY),
 									tools: options.toolSurface.tools,
 									requestPreflight: () => providerTurn.requestPreflight(),
+									// One durable request_snapshot per accepted provider request, so the worker's
+									// request start and reasoning level survive in its own conversation.
+									onProviderRequestSnapshot: (context) => {
+										signal.throwIfAborted();
+										options.conversation.appendRequestSnapshot(context);
+									},
 									beforeToolCall: async (context, toolSignal) => {
 										try {
 											signal.throwIfAborted();

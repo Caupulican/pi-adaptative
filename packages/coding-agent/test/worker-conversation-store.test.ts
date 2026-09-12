@@ -115,6 +115,48 @@ describe("WorkerConversationStore", () => {
 		expect(reopened.getProviderContext().messages).toEqual([userMessage("start worker task")]);
 	});
 
+	it("records request snapshots between messages without disturbing transcript reconciliation", () => {
+		const options = createOptions();
+		const conversation = new WorkerConversationStore().create(options);
+		const snapshotContext = (requestId: string, reasoning: string) =>
+			({
+				requestId,
+				model: { api: "openai", provider: "openai", id: "gpt-test" },
+				reasoning,
+				maxTokens: 256,
+				attempt: 0,
+				context: { systemPrompt: "worker", tools: [], messages: conversation.getProviderMessages() },
+			}) as never;
+
+		conversation.appendMessage(userMessage("start worker task"));
+		conversation.appendRequestSnapshot(snapshotContext("req-1", "medium"));
+		const first = assistantMessage("first reply");
+		expect(commitNewMessages(conversation, [userMessage("start worker task"), first])).toBe(1);
+
+		// A snapshot written while a transcript commit cursor is open, as the executor does: the
+		// assistant message is callback-persisted, then the commit finds it already durable.
+		const cursor = conversation.captureTranscriptCommitCursor();
+		conversation.appendRequestSnapshot(snapshotContext("req-2", "medium"));
+		const second = assistantMessage("second reply");
+		conversation.appendMessage(second);
+		expect(conversation.commitTranscript(cursor, [second])).toBe(0);
+
+		const reopened = new WorkerConversationStore().open({
+			agentDir: options.agentDir,
+			resumeContext: conversation.getResumeContext(),
+		});
+		expect(reopened.getProviderContext().messages).toEqual([userMessage("start worker task"), first, second]);
+		const entries = readFileSync(conversation.getResumeContext().sessionFile!, "utf-8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as { type: string; requestId?: string; reason?: string; reasoning?: string });
+		const snapshots = entries.filter((entry) => entry.type === "request_snapshot");
+		expect(snapshots.map((entry) => [entry.requestId, entry.reason, entry.reasoning])).toEqual([
+			["req-1", "initial", "medium"],
+			["req-2", "resume", "medium"],
+		]);
+	});
+
 	it("rejects oversized worker metadata before parsing or cloning it", () => {
 		const options = createOptions();
 		const store = new WorkerConversationStore();

@@ -954,6 +954,7 @@ export class ReflectionController {
 				getFollowUpMessages: opts.getFollowUpMessages,
 				transformContext: opts.transformContext,
 				requestPreflight: opts.requestPreflight,
+				onProviderRequestSnapshot: opts.onProviderRequestSnapshot,
 				...(maxTurns === undefined
 					? {}
 					: {

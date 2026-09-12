@@ -277,6 +277,12 @@ export interface IsolatedCompletionOptions {
 	transformContext?: AgentLoopConfig["transformContext"];
 	/** Request-local budget/authority check, invoked immediately before every child provider transport. */
 	requestPreflight?: AgentLoopConfig["requestPreflight"];
+	/**
+	 * Durable per-request boundary, invoked once per accepted child provider request with the exact
+	 * materialization sent. A child conversation that owns a transcript records its own
+	 * `request_snapshot` here, the same way the foreground lifecycle boundary does for the owner.
+	 */
+	onProviderRequestSnapshot?: AgentLoopConfig["onProviderRequestSnapshot"];
 	signal?: AbortSignal;
 	/** Required cache policy; isolated calls never inherit a provider default implicitly. */
 	cacheRetention: CacheRetention;
