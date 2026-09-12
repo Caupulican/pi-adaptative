@@ -16,6 +16,13 @@ vi.mock("../src/core/python-runtime.ts", () => ({
 	})),
 }));
 
+/**
+ * Bounded by the file's test budget, not an arbitrary ten seconds: loading native iconv symbols
+ * through the Python fixture took over 10 s on a loaded Windows CI runner (a 192 s shard) and the
+ * child was killed, while the same fixture finishes in under three seconds on an idle host.
+ */
+const FIXTURE_TIMEOUT_MS = 25_000;
+
 describe("packaged iconv recovery", () => {
 	it("recovers through loaded native iconv symbols when the command is missing", async (context) => {
 		const fixture = fileURLToPath(new URL("./fixtures/file-codec/iconv-recovery.test.py", import.meta.url));
@@ -24,7 +31,7 @@ describe("packaged iconv recovery", () => {
 			process.platform === "win32" ? "python" : "python3",
 			["-I", "-S", "-B", fixture, helper, "--native-library"],
 			process.cwd(),
-			{ timeout: 10_000, maxBuffer: 64 * 1024 },
+			{ timeout: FIXTURE_TIMEOUT_MS, maxBuffer: 64 * 1024 },
 		);
 		expect(result, result.stderr).toMatchObject({
 			code: 0,
@@ -44,7 +51,7 @@ describe("packaged iconv recovery", () => {
 			process.platform === "win32" ? "python" : "python3",
 			["-I", "-S", "-B", fixture, helper],
 			process.cwd(),
-			{ timeout: 10_000, maxBuffer: 64 * 1024 },
+			{ timeout: FIXTURE_TIMEOUT_MS, maxBuffer: 64 * 1024 },
 		);
 		expect(result, result.stderr).toMatchObject({
 			code: 0,
