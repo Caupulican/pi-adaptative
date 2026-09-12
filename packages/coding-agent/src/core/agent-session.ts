@@ -4,7 +4,7 @@ import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import type { CompactionResult, CompactionSettings } from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
 import { type CustomMessage, createCustomMessage } from "@caupulican/pi-agent-core/messages";
-import { type StreamIdleOptions, withStreamIdleWatchdog } from "@caupulican/pi-agent-core/reliability";
+import type { StreamIdleOptions } from "@caupulican/pi-agent-core/reliability";
 import type { BranchSummaryEntry, SessionManager } from "@caupulican/pi-agent-core/session";
 import { NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR } from "@caupulican/pi-agent-core/tool-protocol-residue";
 import type {
@@ -27,7 +27,6 @@ import {
 import type { Api, AssistantMessage, ImageContent, Message, Model, TextContent, Usage } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
-import { streamSimple } from "@caupulican/pi-ai/stream";
 import { getAgentDir, VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
 import { resourceDir, stateFile } from "./agent-paths.ts";
 import { createSessionBackgroundToolTasks } from "./agent-session-background-tasks.ts";
@@ -121,14 +120,13 @@ import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
 import { type ExplicitGoalStartAuthority, parseExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
 import { HostTurnReasoningController } from "./host-turn-reasoning.ts";
-import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
 import { HumanInputController } from "./human-input-controller.ts";
 import { DURABLE_LEARNING_MEMORY_POLICY_VERSION, DurableLearningState } from "./learning/durable-learning-state.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
 import type { DemandSignals, ReflectionResult } from "./learning/reflection-engine.ts";
 import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
 import { type CurationProposals, SkillCurator } from "./learning/skill-curator.ts";
-import { isWarmableLocalModel, LocalPrefixWarmController } from "./local-prefix-warm-controller.ts";
+import { LocalPrefixWarmController } from "./local-prefix-warm-controller.ts";
 import { LocalRuntimeController } from "./local-runtime-controller.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
 import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "./memory/providers/file-store.ts";
@@ -148,12 +146,6 @@ import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
-import {
-	DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
-	estimateContextPromptTokens,
-	resolveAdaptiveStreamIdleOptions,
-	withModelPerfProfile,
-} from "./models/perf-profile.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import { PendingInputQueueController, type QueuedInput } from "./pending-input-queue-controller.ts";
@@ -165,7 +157,6 @@ import {
 } from "./pipelines/index.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
-import { PROVIDER_ADMISSION_CUSTOM_TYPE, withProviderAdmission } from "./provider-admission/gate.ts";
 import { ProviderAdmissionLedger } from "./provider-admission/ledger.ts";
 import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
@@ -189,10 +180,10 @@ import { isWorkerSession } from "./session-role.ts";
 import { hasRunningBackgroundedToolCall, isSessionSettled } from "./session-settlement.ts";
 import { createSessionShutdownTracker } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
+import { buildSessionStreamFn, isRawStreamSimpleFn } from "./session-stream-chain.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
 import type { ResourceProfileFilterSettings, SettingsManager, SettingsScope } from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
-import { resolveStreamStallBudget } from "./stream-stall-budget.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
 import { captureSessionTaskDirectoryContext } from "./tasks/task-directory-context.ts";
@@ -211,17 +202,6 @@ import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-ses
 // Stream-idle watchdog wiring
 // ============================================================================
 
-/**
- * Marks a watchdog-wrapped stream fn whose inner base was the raw `streamSimple`.
- *
- * The session tests `streamFn === streamSimple` in three places to decide whether it must
- * inject request auth explicitly (the raw-provider path used in tests and no-key setups).
- * Wrapping the fn with the idle watchdog breaks that identity, so the wrapper carries this
- * marker and those checks go through `_isRawStreamSimple` instead. `Symbol.for` keeps the
- * key stable regardless of how many times this module is evaluated.
- */
-const RAW_STREAM_MARKER = Symbol.for("pi.rawStreamSimple");
-
 /** Test-only override of the stream-idle bounds. Read per-request by the wiring's resolver. */
 let streamIdleOptionsOverride: Partial<StreamIdleOptions> | undefined;
 
@@ -233,15 +213,6 @@ let streamIdleOptionsOverride: Partial<StreamIdleOptions> | undefined;
  */
 export function setStreamIdleOptionsForTests(opts: Partial<StreamIdleOptions> | undefined): void {
 	streamIdleOptionsOverride = opts;
-}
-
-/**
- * Tag a watchdog-wrapped stream fn with whether its inner base was the raw `streamSimple`,
- * so `_isRawStreamSimple` can see the raw-provider path through the wrapper.
- */
-function tagRawness(wrapped: StreamFn, innerIsRawStreamSimple: boolean): StreamFn {
-	Object.defineProperty(wrapped, RAW_STREAM_MARKER, { value: innerIsRawStreamSimple });
-	return wrapped;
 }
 
 export * from "./agent-session-contracts.ts";
@@ -435,19 +406,12 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
-		// Bound every provider stream this session starts against a silently dead connection: a
-		// stall aborts the inner request and surfaces as a retryable "stream stalled" error, which
-		// ForegroundRecoveryController routes into the existing auto-retry path. Wrapped exactly once, here.
-		// The wrapper reports the stall immediately and aborts the inner request; releasing the
-		// inner pump relies on the provider ending its stream after abort (real providers do — see
-		// withStreamIdleWatchdog's contract), so no extra drain is added at this wiring site.
-		// Wrapping also breaks the `streamFn === streamSimple` identity the auth-injection checks
-		// use, so the wrapper carries a rawness marker that _isRawStreamSimple reads.
+		// The provider stream chain (perf profile, idle watchdog, machine-wide admission) is built and
+		// installed exactly once, here; see session-stream-chain.ts.
 		const agentDir = config.agentDir ?? getAgentDir();
 		// Perf samples (one per provider stream) are deferred; everything else persists at once.
 		const modelAdaptationStore = ModelAdaptationStore.forAgentDir(agentDir, { deferPerfSamples: true });
 		this._modelAdaptationStore = modelAdaptationStore;
-		const baseStreamFn = this.agent.streamFn;
 		const previousResolveRequestReasoning = this.agent.resolveRequestReasoning?.bind(this.agent);
 		this.agent.resolveRequestReasoning = (reasoning, request) => {
 			const resolvedReasoning = previousResolveRequestReasoning
@@ -460,61 +424,22 @@ export class AgentSession {
 				request.maxTokens,
 			);
 		};
-		const profiledStreamFn = withModelPerfProfile(baseStreamFn, {
-			modelKey: (model) => formatModelRouterModel(model),
-			recordSample: (modelKey, sample) => {
-				modelAdaptationStore.recordPerfSample(modelKey, sample);
-			},
-		});
-		// `this.settingsManager` is assigned below; the resolver closes over the config reference
-		// because the wrapper must be installed before that assignment runs.
-		const stallSettingsSource = config.settingsManager;
-		// Machine-wide admission sits OUTSIDE the idle watchdog and the perf profiler: time spent
-		// waiting for a shared-account slot is neither a connect stall nor the model's time to first
-		// token. The owner's foreground lane never waits; worker and background lanes yield.
+		// `this.settingsManager` is assigned below; the chain closes over the config reference because
+		// it must be installed before that assignment runs. See session-stream-chain.ts for the order
+		// of the wrappers and why admission sits outside the watchdog.
 		const providerAdmissionLedger = new ProviderAdmissionLedger(agentDir, {
 			sessionId: config.sessionManager.getSessionId(),
 		});
 		this._providerAdmissionLedger = providerAdmissionLedger;
-		const admittedStreamFn = (watched: StreamFn): StreamFn =>
-			withProviderAdmission(watched, {
-				ledger: providerAdmissionLedger,
-				getPolicy: () => stallSettingsSource.getProviderAdmissionSettings(),
-				record: (record) => {
-					try {
-						config.sessionManager.appendCustomEntry(PROVIDER_ADMISSION_CUSTOM_TYPE, record);
-					} catch {
-						// A failed diagnostic write must never fail the request it observes.
-					}
-				},
-			});
-		this.agent.streamFn = tagRawness(
-			admittedStreamFn(
-				withStreamIdleWatchdog(profiledStreamFn, (model, context) => {
-					const configured = {
-						// Local/managed models and cloud providers draw on separate budgets; see
-						// resolveStreamStallBudget.
-						...resolveStreamStallBudget(model, stallSettingsSource).base,
-						// The output repetition guard's threshold follows the model's capability tier.
-						outputRepetitionRepeats: this.getCapabilityTierPolicy().repetitionGuardRepeats,
-						...streamIdleOptionsOverride,
-					};
-					const httpIdleTimeoutMs = stallSettingsSource.getHttpIdleTimeoutMs();
-					const httpBounded = constrainStreamIdleToHttpTimeout(configured, httpIdleTimeoutMs);
-					const profile = modelAdaptationStore.get(formatModelRouterModel(model)).perf;
-					const adaptive = resolveAdaptiveStreamIdleOptions({
-						base: httpBounded.options,
-						profile,
-						promptTokens: estimateContextPromptTokens(context),
-						localClass: isWarmableLocalModel(model),
-						provider: model.provider,
-						ceilingMs: httpBounded.adaptiveCeilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
-					});
-					return { ...httpBounded.options, ...adaptive };
-				}),
-			),
-			baseStreamFn === streamSimple,
-		);
+		this.agent.streamFn = buildSessionStreamFn({
+			baseStreamFn: this.agent.streamFn,
+			settingsManager: config.settingsManager,
+			sessionManager: config.sessionManager,
+			modelAdaptationStore,
+			providerAdmissionLedger,
+			getRepetitionGuardRepeats: () => this.getCapabilityTierPolicy().repetitionGuardRepeats,
+			getStreamIdleOptionsOverride: () => streamIdleOptionsOverride,
+		});
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
@@ -1340,10 +1265,10 @@ export class AgentSession {
 	/**
 	 * True when the session's stream fn is the raw `streamSimple` provider entry (directly, or as the
 	 * base wrapped by the idle watchdog at construction). Callers use this to decide whether request
-	 * auth must be injected explicitly — see {@link RAW_STREAM_MARKER}.
+	 * auth must be injected explicitly — see `isRawStreamSimpleFn`.
 	 */
 	private _isRawStreamSimple(fn: StreamFn): boolean {
-		return fn === streamSimple || (fn as { [RAW_STREAM_MARKER]?: boolean })[RAW_STREAM_MARKER] === true;
+		return isRawStreamSimpleFn(fn);
 	}
 
 	private async _getRequiredRequestAuth(model: Model<Api>): Promise<RequestAuth> {
