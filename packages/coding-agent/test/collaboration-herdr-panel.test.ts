@@ -836,68 +836,78 @@ describe("Herdr panel orchestration", () => {
 
 	it("preserves exact native args for agy with model and effort", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-herdr-exact-args-"));
-		let tool: ToolDefinition | undefined;
-		const api = {
-			registerTool: (t: ToolDefinition) => {
-				tool = t;
-			},
-			registerCommand: vi.fn(),
-			on: vi.fn(),
-			getActiveTools: () => ["pi_collaboration"],
-			getThinkingLevel: () => "high",
-			getEffectiveResourceProfile: () => ({}),
-			reportManagedLane: vi.fn(),
-			reportSpawnedUsage: vi.fn(),
-			sendMessage: vi.fn(),
-		} as unknown as ExtensionAPI;
+		const originalEnv = { ...process.env };
+		process.env.HERDR_ENV = "1";
+		process.env.HERDR_PANE_ID = "w9:pA";
+		process.env.HERDR_WORKSPACE_ID = "w9";
+		process.env.HERDR_TAB_ID = "w9:tA";
+		process.env.HERDR_SOCKET_PATH = "/home/caudev/.config/herdr/herdr.sock";
+		process.env.HERDR_BIN_PATH = "/home/caudev/.local/bin/herdr";
+		try {
+			let tool: ToolDefinition | undefined;
+			const api = {
+				registerTool: (t: ToolDefinition) => {
+					tool = t;
+				},
+				registerCommand: vi.fn(),
+				on: vi.fn(),
+				getActiveTools: () => ["pi_collaboration"],
+				getThinkingLevel: () => "high",
+				getEffectiveResourceProfile: () => ({}),
+				reportManagedLane: vi.fn(),
+				reportSpawnedUsage: vi.fn(),
+				sendMessage: vi.fn(),
+			} as unknown as ExtensionAPI;
 
-		const context = {
-			cwd: root,
-			hasUI: true,
-			sessionManager: { getSessionId: () => "parent", getSessionFile: () => join(root, "parent.jsonl") },
-			ui: { notify: vi.fn(), confirm: vi.fn() },
-		} as unknown as ExtensionContext;
+			const context = {
+				cwd: root,
+				hasUI: true,
+				sessionManager: { getSessionId: () => "parent", getSessionFile: () => join(root, "parent.jsonl") },
+				ui: { notify: vi.fn(), confirm: vi.fn() },
+			} as unknown as ExtensionContext;
 
-		piCollaborationExtension(api, {
-			stateDirectory: root,
-			backend: async () => createMockBackend().backend as unknown as CollaborationBackend,
-			launchTurn: async () => {},
-		});
+			piCollaborationExtension(api, {
+				stateDirectory: root,
+				backend: async () => createMockBackend().backend as unknown as CollaborationBackend,
+				launchTurn: async () => {},
+			});
 
-		const result = await tool!.execute(
-			"call-plan",
-			{
-				action: "workspace_plan",
-				placement: "current-pane",
-				agents: [
-					{
-						provider: "agy",
-						name: "native-specialist",
-						model: "gemini-3.8-flash-high",
-						args: ["--effort", "high"],
-					},
-				],
-			},
-			undefined,
-			undefined,
-			context,
-		);
+			const result = await tool!.execute(
+				"call-plan",
+				{
+					action: "workspace_plan",
+					placement: "current-pane",
+					agents: [
+						{
+							provider: "agy",
+							name: "native-specialist",
+							model: "gemini-3.8-flash-high",
+							args: ["--effort", "high"],
+						},
+					],
+				},
+				undefined,
+				undefined,
+				context,
+			);
 
-		expect(result.isError).toBeFalsy();
-		const textContent = result.content[0];
-		if (textContent.type !== "text") throw new Error("Expected text result");
-		const plan = JSON.parse(textContent.text).job as CollaborationJob;
-		expect(plan).toBeDefined();
-		const agent = plan.agents[0];
-		expect(agent.args).toEqual([
-			"--effort",
-			"high",
-			"--model",
-			"gemini-3.8-flash-high",
-			"--dangerously-skip-permissions",
-		]);
-
-		await rm(root, { recursive: true, force: true });
+			expect(result.isError).toBeFalsy();
+			const textContent = result.content[0];
+			if (textContent.type !== "text") throw new Error("Expected text result");
+			const plan = JSON.parse(textContent.text).job as CollaborationJob;
+			expect(plan).toBeDefined();
+			const agent = plan.agents[0];
+			expect(agent.args).toEqual([
+				"--effort",
+				"high",
+				"--model",
+				"gemini-3.8-flash-high",
+				"--dangerously-skip-permissions",
+			]);
+		} finally {
+			process.env = originalEnv;
+			await rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("same-agent follow-up reaches same native agent and publishes terminal notification once", async () => {
@@ -1123,6 +1133,7 @@ describe("Herdr panel orchestration", () => {
 		process.env.HERDR_WORKSPACE_ID = "w9";
 		process.env.HERDR_TAB_ID = "w9:tA";
 		process.env.HERDR_SOCKET_PATH = "/home/caudev/.config/herdr/herdr.sock";
+		process.env.HERDR_BIN_PATH = "/home/caudev/.local/bin/herdr";
 
 		try {
 			const launchedResult = await tool!.execute(

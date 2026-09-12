@@ -1,4 +1,8 @@
-import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
+import {
+	createBranchSummaryMessage,
+	createCompactionSummaryMessage,
+	createCustomMessage,
+} from "@caupulican/pi-agent-core/messages";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
@@ -7,14 +11,17 @@ import {
 	TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE,
 	type TaskAutomationContextPlan,
 } from "../src/core/automation/task-automation-runtime-adapter.ts";
+import type { EdgeGrantView } from "../src/core/autonomy/edge-policy.ts";
 import { applyContextGc } from "../src/core/context-gc.ts";
 import {
 	ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
+	AUTHORITY_CONTEXT_CLEARED_TEXT,
+	AUTHORITY_CONTEXT_CUSTOM_TYPE,
 	PATH_ALIAS_LEGEND_CUSTOM_TYPE,
 	ProviderRequestContextController,
 	type ProviderRequestContextControllerDeps,
 } from "../src/core/provider-request-context-controller.ts";
-import type { SkillVaultController } from "../src/core/skill-vault.ts";
+import { SkillVaultController } from "../src/core/skill-vault.ts";
 import {
 	TASK_DIRECTORY_CONTEXT_CLEARED,
 	TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE,
@@ -238,6 +245,158 @@ describe("ProviderRequestContextController", () => {
 		expect(cleared[0]?.content).toContain("ACTIVE SKILL CONTEXT: none");
 		revision = 0;
 		expect(skillRecords((await controller.plan(history, 0)).transientMessages)).toEqual([]);
+	});
+
+	function createTestController(
+		options: { getEdgeGrants?: () => readonly EdgeGrantView[]; skillVault?: SkillVaultController } = {},
+	) {
+		const skillVault =
+			options.skillVault ??
+			new SkillVaultController({
+				getSkills: () => [],
+			});
+		return new ProviderRequestContextController({
+			transformExtensions: async (msgs) => ({ messages: msgs, transientMessages: [] }),
+			runContextAudit: () => ({}) as ReturnType<ProviderRequestContextControllerDeps["runContextAudit"]>,
+			runPromptPolicyPlanning: () =>
+				({}) as ReturnType<ProviderRequestContextControllerDeps["runPromptPolicyPlanning"]>,
+			runMemoryRetrieval: async () =>
+				({}) as Awaited<ReturnType<ProviderRequestContextControllerDeps["runMemoryRetrieval"]>>,
+			applyContextGc: (msgs) => ({
+				messages: msgs,
+				report: {} as ReturnType<ProviderRequestContextControllerDeps["applyContextGc"]>["report"],
+				isCurrent: () => true,
+				commit: () => {},
+			}),
+			correlatePromptPolicyWithContextGc: () => {},
+			runPromptEnforcement: (msgs) => ({
+				messages: msgs,
+				report: {} as ReturnType<ProviderRequestContextControllerDeps["runPromptEnforcement"]>["report"],
+			}),
+			enqueueRelevanceCuration: () => {},
+			maybeDrainBrainCuration: () => {},
+			appendMemoryEvidence: (msgs) => msgs,
+			previewReflectionCue: () => undefined,
+			getGoalState: () => undefined,
+			skillVault,
+			getEdgeGrants: options.getEdgeGrants,
+			applyPathAliases: (msgs) => ({ messages: msgs }),
+		});
+	}
+
+	it("omits initial authority and skill context projections on pristine session with no edge grants and no skills", async () => {
+		const controller = createTestController({
+			getEdgeGrants: () => [],
+		});
+		const pristineHistory: AgentMessage[] = [{ role: "user", content: "hello", timestamp: 1 }];
+		const plan = await controller.plan(pristineHistory, 0);
+
+		const authorityRecord = plan.transientMessages?.find(
+			(m) => m.role === "custom" && m.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE,
+		);
+		const skillRecord = plan.transientMessages?.find(
+			(m) => m.role === "custom" && m.customType === ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
+		);
+
+		expect(authorityRecord).toBeUndefined();
+		expect(skillRecord).toBeUndefined();
+	});
+
+	it("conservatively clears authority and active skill after compactionSummary or branchSummary on restart", async () => {
+		const compactionHistory: AgentMessage[] = [
+			createCompactionSummaryMessage("compacted history summary", 1000, "2026-01-01T00:00:00.000Z"),
+			{ role: "user", content: "continue after compaction", timestamp: 2 },
+		];
+
+		const freshController = createTestController({
+			getEdgeGrants: () => [],
+		});
+		const plan = await freshController.plan(compactionHistory, 0);
+
+		const authorityRecord = plan.transientMessages?.find(
+			(m) => m.role === "custom" && m.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE,
+		);
+		const skillRecord = plan.transientMessages?.find(
+			(m) => m.role === "custom" && m.customType === ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
+		);
+
+		expect(authorityRecord).toBeDefined();
+		expect((authorityRecord as { content: string }).content).toContain(AUTHORITY_CONTEXT_CLEARED_TEXT);
+		expect(skillRecord).toBeDefined();
+		expect((skillRecord as { content: string }).content).toContain("ACTIVE SKILL CONTEXT: none");
+
+		const branchHistory: AgentMessage[] = [
+			createBranchSummaryMessage("branch summary", "parent-branch", "2026-01-01T00:00:00.000Z"),
+			{ role: "user", content: "continue after branch", timestamp: 2 },
+		];
+		const branchPlan = await createTestController({ getEdgeGrants: () => [] }).plan(branchHistory, 0);
+		const branchAuthority = branchPlan.transientMessages?.find(
+			(m) => m.role === "custom" && m.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE,
+		);
+		const branchSkill = branchPlan.transientMessages?.find(
+			(m) => m.role === "custom" && m.customType === ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
+		);
+		expect(branchAuthority).toBeDefined();
+		expect((branchAuthority as { content: string }).content).toContain(AUTHORITY_CONTEXT_CLEARED_TEXT);
+		expect(branchSkill).toBeDefined();
+		expect((branchSkill as { content: string }).content).toContain("ACTIVE SKILL CONTEXT: none");
+	});
+
+	it("clears authority and skill context when history contains prior custom records and current state is empty", async () => {
+		const controller = createTestController({ getEdgeGrants: () => [] });
+		const historyWithPriorRecords: AgentMessage[] = [
+			createCustomMessage(
+				AUTHORITY_CONTEXT_CUSTOM_TYPE,
+				"Active edge grants...",
+				false,
+				undefined,
+				"2026-01-01T00:00:00Z",
+			),
+			createCustomMessage(
+				ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
+				"ACTIVE SKILL test\n...",
+				false,
+				undefined,
+				"2026-01-01T00:00:00Z",
+			),
+			{ role: "user", content: "work", timestamp: 2 },
+		];
+		const plan = await controller.plan(historyWithPriorRecords, 0);
+
+		const authorityRecord = plan.transientMessages?.find(
+			(m) => m.role === "custom" && m.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE,
+		);
+		const skillRecord = plan.transientMessages?.find(
+			(m) => m.role === "custom" && m.customType === ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
+		);
+
+		expect(authorityRecord).toBeDefined();
+		expect((authorityRecord as { content: string }).content).toContain(AUTHORITY_CONTEXT_CLEARED_TEXT);
+		expect(skillRecord).toBeDefined();
+		expect((skillRecord as { content: string }).content).toContain("ACTIVE SKILL CONTEXT: none");
+	});
+
+	it("preserves pure plan generation across rejected/discarded plans without process-local state leakage", async () => {
+		let grants: EdgeGrantView[] = [{ class: "git.publish", source: "instructions" }];
+		const controller = createTestController({ getEdgeGrants: () => grants });
+
+		const pristineHistory: AgentMessage[] = [{ role: "user", content: "hello", timestamp: 1 }];
+
+		// First plan observes active grants
+		const plan1 = await controller.plan(pristineHistory, 0);
+		expect(
+			plan1.transientMessages?.find((m) => m.role === "custom" && m.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE),
+		).toBeDefined();
+
+		// Plan is discarded (never committed), grants revoked:
+		grants = [];
+		// With pure history (pristine history without committed authority record and no summary marker),
+		// the controller must NOT retain process-local state that would pollute pristine history!
+		const plan2 = await controller.plan(pristineHistory, 0);
+		const authorityRecord2 = plan2.transientMessages?.find(
+			(m) => m.role === "custom" && m.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE,
+		);
+		expect(authorityRecord2).toBeUndefined();
 	});
 });
 

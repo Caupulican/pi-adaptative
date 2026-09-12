@@ -249,11 +249,15 @@ export class SkillVaultController {
 		if (!sm) return;
 		const currentSessionId = sm.getSessionId();
 		if (this.cachedSessionId !== currentSessionId) {
+			const isInitialBind = this.cachedSessionId === undefined;
+			const hadPriorState = this.slots.size > 0 || this.exclusions.size > 0;
 			this.slots.clear();
 			this.exclusions.clear();
 			this.cachedSessionId = currentSessionId;
 			this.lastReplayedIndex = 0;
-			this.contextRevision++;
+			if (!isInitialBind || hadPriorState) {
+				this.contextRevision++;
+			}
 		}
 		const currentCount = sm.getEntryCount();
 		if (currentCount < this.lastReplayedIndex) {

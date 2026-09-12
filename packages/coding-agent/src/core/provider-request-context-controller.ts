@@ -196,21 +196,33 @@ function appendPathAliasLegend(transientMessages: AgentMessage[], legend: string
 	];
 }
 
+export function hasConversationSummaryMarker(
+	messages: readonly AgentMessage[],
+	extensionMessages?: readonly AgentMessage[],
+): boolean {
+	const isSummary = (message: AgentMessage) =>
+		message.role === "compactionSummary" || message.role === "branchSummary";
+	return messages.some(isSummary) || (extensionMessages?.some(isSummary) ?? false);
+}
+
 function resolveAuthorityContext(
 	getEdgeGrants: (() => readonly EdgeGrantView[]) | undefined,
 	messages: readonly AgentMessage[],
 	extensionMessages: readonly AgentMessage[],
 ): string | undefined {
-	if (getEdgeGrants !== undefined) {
-		const grants = getEdgeGrants();
-		return grants.length > 0 ? formatAuthorityContext(grants) : AUTHORITY_CONTEXT_CLEARED_TEXT;
+	const grants = getEdgeGrants?.();
+	if (grants && grants.length > 0) {
+		return formatAuthorityContext(grants);
 	}
 	const hasAuthorityRecordInHistory =
 		messages.some((message) => message.role === "custom" && message.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE) ||
 		extensionMessages.some(
 			(message) => message.role === "custom" && message.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE,
 		);
-	return hasAuthorityRecordInHistory ? AUTHORITY_CONTEXT_CLEARED_TEXT : undefined;
+	if (hasAuthorityRecordInHistory || hasConversationSummaryMarker(messages, extensionMessages)) {
+		return AUTHORITY_CONTEXT_CLEARED_TEXT;
+	}
+	return undefined;
 }
 
 /** Coordinates replay-safe request context planning and accepted-plan lifecycle commit. */
@@ -313,6 +325,7 @@ export class ProviderRequestContextController {
 			extensionPlan.messages.some(
 				(message) => message.role === "custom" && message.customType === ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
 			);
+		const hasSummaryMarkerInHistory = hasConversationSummaryMarker(messages, extensionPlan.messages);
 		let skillContext: string | undefined;
 		if (skillSection && exclusionReminder) {
 			skillContext = `${skillSection}\n\n${exclusionReminder}`;
@@ -320,7 +333,7 @@ export class ProviderRequestContextController {
 			skillContext = skillSection;
 		} else if (exclusionReminder) {
 			skillContext = `${ACTIVE_SKILL_CONTEXT_CLEARED_TEXT}\n\n${exclusionReminder}`;
-		} else if (skillRevision > 0 || hasActiveSkillRecordInHistory) {
+		} else if (skillRevision > 0 || hasActiveSkillRecordInHistory || hasSummaryMarkerInHistory) {
 			skillContext = ACTIVE_SKILL_CONTEXT_CLEARED_TEXT;
 		}
 

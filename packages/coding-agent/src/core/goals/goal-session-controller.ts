@@ -203,9 +203,6 @@ export class GoalSessionController {
 				`Goal state persisted but durable worker reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
-		if (isGoalExecutionActive(state.status) || isSystemBlockedGoal(state)) {
-			this.deps.scheduleGoalAutoContinueFromIdle();
-		}
 		return entryId;
 	}
 
