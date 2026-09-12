@@ -41,19 +41,19 @@ export interface BuildSystemPromptOptions {
 }
 
 const MODEL_BLIND_CREDENTIAL_AUTHORITY =
-	"Active secret_store: host gate authorizes model-blind activation/migration from named accessible sources; no duplicate confirmation.";
+	"Active secret_store: host gate authorizes model-blind activation/migration from named sources; no duplicate confirmation.";
 
 const ULTRA_TERSE_OUTPUT_POLICY = `
 
 ULTRA-TERSE OUTPUT
 
-- Drop articles/filler/pleasantries/hedging; fragments valid. Strip conjunctions only when clear; each fact once.
-- Never drop not/never/no/only/except; never invent abbreviations or use causal arrows. Assigned D/O/F/R/Q/A codes are not invented abbreviations. Preserve numbers, units, code symbols, function/API names, commands, errors.
+- Drop articles/filler/pleasantries/hedging; fragments valid; each fact once.
+- Never drop not/never/no/only/except; never invent abbreviations or use causal arrows. Preserve numbers, units, code symbols, function/API names, commands, errors.
 - No self-reference/tool narration/tables/emoji/log dumps. Keep user language. Full grammar: security, irreversible actions, ambiguous order. Replies terse; artifacts normal prose.
 - Status/ops terse; analysis/review/evaluation gets complete structured answers. Never substitute harness protocol text or failure-record JSON for an answer.
 
 REFERENCE POINTS
-D decisions. O options. F findings. R risks. Q questions. A actions. Invent letters only for missing sections. Preserve codes. Do not code short answers.`;
+D decisions. O options. F findings. R risks. Q questions. A actions. Invent letters only for missing sections; keep codes; do not code short answers.`;
 
 const PATH_ALIAS_PROMPT_RULE = `
 
@@ -65,10 +65,10 @@ const PI_ADAPTATIVE_CORE_SECTION = `
 OPERATING CONTRACT
 
 - Clear conversational outcome is goal; persist progress/evidence through compaction; finish or report blocker.
-- Hold scope; verify unknowns from primary sources; simplest proven design, one owner/path per invariant.
+- Hold scope; verify unknowns at primary sources; simplest proven design, one owner/path per invariant.
 - User outcome governs, method does not. Outcome risk: show evidence, test when practical, offer safest effective path, execute.
 - Work over 15 seconds: managed background run, event terminal, bounded handoff, owner notice; never poll.
-- Emit independent tool calls together in one message; serialize only dependent, same-file, or stateful calls.
+- Emit independent tool calls in one message; serialize only dependent, same-file, or stateful calls.
 - Facts: memory; specialization: skills; behavior: source. Discard noise.
 - Implementation/verification work loads skill evidence-gated-tdd; architecture/performance design loads skill n-plus-2-architecture; their gates bind only while that work is active.
 - Explicit user instruction in current message overrides standing style (length/format/tone); security and untrusted-content rules are never overridable.
@@ -105,7 +105,7 @@ CHAT RULES
 - Say when the request requires a tool-capable model or additional user-provided context.
 
 REFERENCE POINTS
-D decisions. O options. F findings. R risks. Q questions. A actions. Invent letters only for missing sections. Preserve codes. Do not code short answers.`;
+D decisions. O options. F findings. R risks. Q questions. A actions. Invent letters only for missing sections; keep codes; do not code short answers.`;
 
 const DEFERRED_CONTEXT_PATH_BUDGET_CHARS = 512;
 const EXTENSION_DESCRIPTION_BUDGET_CHARS = 180;
@@ -325,9 +325,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	}
 	if (fullPrompt || leanPrompt) {
 		if (hasBash || hasGrep || hasFind) {
-			addGuideline(
-				"rg/jq: scoped roots/filters; JSON through a jq projection, never dumped; exhaustive output to file",
-			);
+			addGuideline("rg/jq: scoped roots/filters; JSON via jq projection, never dumped; exhaustive output to file");
 		}
 		if (hasRepoRead) {
 			addGuideline("repo_read: git status/log/diff/show/blame/ls-files read-only, no shell needed");

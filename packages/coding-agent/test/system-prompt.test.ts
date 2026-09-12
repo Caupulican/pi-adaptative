@@ -112,6 +112,25 @@ describe("buildSystemPrompt", () => {
 			expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(3_300);
 		});
 
+		test("keeps the core contract under its byte budget on a long hosted checkout path", () => {
+			// The prompt embeds two host paths (PI DOCS root and the cwd). The budget must hold for a
+			// deterministic long checkout, not just this machine: a hosted runner nests the repository
+			// name twice and the temp cwd can be deeper still.
+			const longCheckout =
+				"/home/runner/work/pi-adaptative-release-candidate/pi-adaptative-release-candidate/packages/coding-agent";
+			const previousPackageDir = process.env.PI_PACKAGE_DIR;
+			process.env.PI_PACKAGE_DIR = longCheckout;
+			try {
+				const prompt = buildSystemPrompt({ contextFiles: [], skills: [], cwd: `${longCheckout}/worktrees/lane-a` });
+				expect(prompt).toContain(`PI DOCS: root=${longCheckout}.`);
+				expect(prompt).toContain(`Current working directory: ${longCheckout}/worktrees/lane-a`);
+				expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(3_300);
+			} finally {
+				if (previousPackageDir === undefined) delete process.env.PI_PACKAGE_DIR;
+				else process.env.PI_PACKAGE_DIR = previousPackageDir;
+			}
+		});
+
 		test("applies ultra-terse output without dropping meaning-bearing words or exact technical text", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],

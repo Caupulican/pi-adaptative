@@ -308,7 +308,15 @@ this session* at the prompt) or by the machine (`edge.allow` in settings) never 
 instruction grant is a durable record on the session branch and lasts until revoked, so a full grant
 covers the whole work, and a commit is ordinary work that never asks. An ungranted class asks the
 interactive operator once with one key and the tool call waits for the answer; a headless or child
-session blocks it with a reason that names every way to grant. Pinned by
+session blocks it with a reason that names every way to grant. The former keyword `risk_assessment`
+gate (regular expressions over command text that turned "token", "clean", "delete" or a Python
+`subprocess`/`shutil` mention into a block under a capability envelope) is gone on purpose: it
+asked questions the owner had already answered with the handoff. What remains is structural — the
+capability envelope (a tool without its capability, a denied or unlisted tool, a path outside the
+allowed roots) and the literal edge classes above — and `bash`/`python` stay explicit host-trust
+execution boundaries (`session-role.ts`): no gate reads Python source or shell text for intent, and
+none claims to contain arbitrary process code. Pinned by
+`packages/coding-agent/test/python-tool-registration.test.ts`,
 `packages/coding-agent/test/edge-policy.test.ts` and
 `packages/coding-agent/test/agent-session-edge.test.ts`.
 
@@ -644,11 +652,17 @@ Usage and active time flush once at response/end boundaries. Orientation, reques
 and implementation have different workloads. Existing explicit in-scope authorization is reused.
 Goal continuation bounded recovery rearms transient provider failures once per streak, or waits when
 independent in-flight workers or background tool tasks are active for that goal; repeated failures
-without verified progress block until operator intervention. The failure streak resets strictly on
+without verified progress block until the owner prompts. The failure streak resets strictly on
 verified host completion matching the pre-state turn ordinal (`completionTurn === continuationTurnsUsed + 1`),
-so stale or duplicate receipts cannot replenish retries, and runaway recovery signatures remain durable
-and distinct from provider transport failures.
-These contracts retain the 3,200-byte core prompt limit. Pinned by
+so stale or duplicate receipts cannot replenish retries. Runaway/stagnant guard stops are accounted
+separately in one durable bounded collection of consumed signatures (`consumedRunawaySignatures`,
+at most 16): each signature earns exactly one automatic resume, alternating signatures (A, B, A)
+cannot re-earn one, a full collection refuses further automatic recovery rather than evicting, and
+neither provider successes nor trusted evidence reopen a consumed signature. Only the owner's own
+prompt resets both allowances: it resumes any system-blocked goal (`resume_goal` without
+`source: "system"`) and clears the streak and the collection; automatic resumes never impersonate
+owner intent. Explicit owner pause, block, stop and `autoContinueGoal: false` are untouched.
+These contracts fit the 3,300-byte core prompt budget (the full-profile pin in `system-prompt.test.ts`, measured with the live package root and cwd, including a deterministic long hosted checkout) and the 4,096-character minimal-profile ceiling (`agent-session-model-capability.test.ts`, measured with a long live cwd). Pinned by
 `packages/coding-agent/test/goal-execution-budget.test.ts`,
 `packages/coding-agent/test/agent-session-goal-continuation-loop.test.ts`, and
 `packages/coding-agent/test/system-prompt.test.ts`.
@@ -688,5 +702,5 @@ measurement gains no new surface.
 | 2026-09-08 | A goal continuation turn that ends in a provider error (after the session's own retries) blocks the goal with the classified reason and stops the loop with `turn_errored`; the blocked decision names that reason. An owner abort still leaves the goal active and untouched. A silently active goal after an outage was the failure this replaces. |
 | 2026-09-08 | A bounded harness guard (stagnant cycle, runaway loop) resumes the goal automatically once per signature; the same signature stopping the run again leaves the goal blocked with that reason until the owner prompts, and the warning says so. The Windows shell engine's `sed` supports addresses, `-n`, `-e`, `-E`, `p`, `d`, and `s///`; Git-Bash `/c/…` and WSL `/mnt/c/…` drive roots are rewritten to `C:/…` in the router and the engine; a worker timeout names its wall-clock cap and the setting behind it; binding a task directory with the workspace's own absolute path is accepted. |
 | 2026-09-08 | Windows shell parity: with the engine on, every bash call runs on the shell engine (the PowerShell floor serves only `windowsShell.pythonEngine: false` and a runtime outage); coreutils names dispatch to Git for Windows' real GNU binaries before any engine reimplementation, with the GNU directory first on those tools' own PATH; the engine grammar covers functions, `case`, `[[ ]]`, brace expansion, the bash parameter operators, `set -e/-u/-x/-o pipefail` and `command -v`, and names arrays, indirection, `select` and process substitution as refusals. The regression wall `test/windows-shell-corpus.test.ts` replays every sanitized command shape of the measured Windows sessions (`test/fixtures/windows-shell-corpus/commands.json`) through the router, the grammar and the executor with real GNU tools on Linux and Windows; its refusal budget for supported families is zero, a live Windows shell failure is added there as its failing shape before its fix lands, and the replay leg carries a timeout matching its own single-process spawn bound (vitest's 30 s default cut a defect-free 25 s replay off under a parallel suite run). The corpus is produced and replayed by one harness-owned tool (`pi-shell-engine/corpus.py`, driven by `scripts/windows-shell-corpus.mjs`): harvest sanitizes every `bash` call of any session transcript with a hard leak guard and records the real command's grammar verdict, replay classifies defects, and the wall test consumes the same replay, so the fixture is reproducible from transcripts on any machine and never carries a private command. |
-| 2026-09-12 | Toolkit script authority is a host-owned edge class (`toolkit.script`) with cryptographic scope keys derived from `(cwd, scriptPath, runner, scriptName, argv)`; grants persist across compaction and reload, mutating script registration invalidates the grant, and owner authorization is reused without model confirmation prompts. Goal continuation bounded recovery rearms transient provider failures once per streak or waits on in-flight work, resetting failure streaks only on verified host completion with matching pre-state turn ordinals. |
+| 2026-09-12 | Toolkit script authority is a host-owned edge class (`toolkit.script`) with cryptographic scope keys derived from `(cwd, scriptPath, runner, scriptName, argv)`; grants persist across compaction and reload, mutating script registration invalidates the grant, and owner authorization is reused without model confirmation prompts. Goal continuation bounded recovery rearms transient provider failures once per streak or waits on in-flight work, resetting failure streaks only on verified host completion with matching pre-state turn ordinals. Runaway signatures live in one bounded durable collection (once per signature, A,B,A stays blocked, full collection refuses, owner prompt resets) — this restates the 2026-09-08 row, it does not weaken it. The keyword `risk_assessment` gate is removed in favour of the structural envelope and the literal edge classes; `run_toolkit_script` drops its model `confirm` flag for the host authorizer; the core prompt renders standing owner authorization exactly once per capability class and keeps deterministic long-checkout headroom under the unchanged 3,300-byte and 4,096-character budgets. The runaway/stagnant guard identity stored by the consumed-signature collection names the guard and the signature only; the repeat count stays in the `runaway_stop` record and the warning, so a loop that trips at a different threshold is still the same loop. |
 | 2026-09-12 | Tool surfaces aggregate ceiling recalibrates from 4,850 to 5,570 tokens (4,500 base + 350 task_directory + 720 task_automation) for deterministic task automation (681 measured, 720 ceiling), with feature deltas for versioned skill inspection/repair/exclusion (150 measured, 160 ceiling) and narrow toolkit grant selectors (295 measured, 305 ceiling). Core tools measure 4,218 tokens under the unchanged 4,500 base. |

@@ -210,6 +210,43 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 		}
 	});
 
+	it("blocks the second stop of the same signature even when the guard trips at a different repeat count", async () => {
+		const harness = await createHarness();
+		try {
+			harness.session.saveGoalStateSnapshot(
+				applyGoalEvent(createGoalState({ goalId: "goal-repeat-count", userGoal: "Finish the audit", now: "T0" }), {
+					type: "add_requirement",
+					id: "audit",
+					text: "Audit the target",
+					now: "T0",
+				}),
+			);
+			for (const repeats of [3, 4]) {
+				harness.session.agent.onRunawayStop?.({
+					reason: "repeated_tool_call",
+					signature: "bash:unchanged-failure",
+					repeats,
+				});
+			}
+			const blocked = harness.session.getGoalStateSnapshot();
+			expect(blocked?.status).toBe("blocked");
+			expect(blocked?.consumedRunawaySignatures).toHaveLength(1);
+			expect(blocked?.blockedReason).toContain("bash:unchanged-failure");
+			// The repeat count still reaches the durable guard record and the warning.
+			const stops = harness.sessionManager
+				.getEntries()
+				.filter(
+					(entry): entry is CustomEntry =>
+						entry.type === "custom" && entry.customType === RUNAWAY_STOP_CUSTOM_TYPE,
+				)
+				.map((entry) => (entry.data as RunawayStopRecord).repeats);
+			expect(stops).toEqual([3, 4]);
+			expect(harness.eventsOfType("warning").some((event) => event.message.includes("4 times in a row"))).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("does not require an owner chat turn after automatic runaway recovery", async () => {
 		const harness = await createHarness();
 		try {

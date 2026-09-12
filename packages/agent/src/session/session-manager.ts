@@ -224,6 +224,20 @@ interface SessionContextCache {
 	context: SessionContext;
 }
 
+/**
+ * Per-custom-type memo of the last `getLatestCustomEntryOnBranch` answer for the current leaf. A
+ * miss is remembered too: without it every request that asks for an absent record type (task
+ * automation, task directory) walked the whole branch again. Keyed by the `byId` index it was
+ * computed against, so any index replacement (reload, fork, branch rebuild, new session) drops it
+ * whole; bounded to a few live types, never one slot per historical entry.
+ */
+interface LatestCustomEntryCache {
+	readonly byId: Map<string, SessionEntry>;
+	readonly perType: Map<string, { leafId: string | null; match: CustomEntry | undefined }>;
+}
+
+const MAX_LATEST_CUSTOM_ENTRY_CACHE_TYPES = 32;
+
 interface LifecycleActiveCache {
 	leafId: string | null;
 	currentRequestId?: string;
@@ -1193,6 +1207,7 @@ export class SessionManager {
 	private indexedSessionFileBytes = 0;
 	private sessionContextCache: SessionContextCache | undefined;
 	private lifecycleActiveCache: LifecycleActiveCache | undefined;
+	private latestCustomEntryCache: LatestCustomEntryCache | undefined;
 	private persistenceStateUncertain = false;
 	private inheritedSessionIds = new Set<string>();
 
@@ -1351,6 +1366,7 @@ export class SessionManager {
 		this.labelTimestampsById.clear();
 		this.leafId = null;
 		this.lifecycleActiveCache = undefined;
+		this.latestCustomEntryCache = undefined;
 		this.flushed = false;
 		this.persistenceStateUncertain = false;
 		this._invalidateSessionContextCache();
@@ -1423,6 +1439,7 @@ export class SessionManager {
 		this.labelTimestampsById = labelTimestampsById;
 		this.leafId = leafId;
 		this.lifecycleActiveCache = undefined;
+		this.latestCustomEntryCache = undefined;
 		for (const id of this.coldPayloadEntryIds) {
 			if (!byId.has(id)) this.coldPayloadEntryIds.delete(id);
 		}
@@ -2482,15 +2499,56 @@ export class SessionManager {
 	 * Payload-agnostic: returns the raw entry, callers own decoding/validating `data`.
 	 */
 	getLatestCustomEntryOnBranch(customType: string, fromId?: string): CustomEntry | undefined {
-		const startId = fromId ?? this.leafId;
-		const start = startId ? this.byId.get(startId) : undefined;
+		if (fromId !== undefined) {
+			// Explicit resume points (a caller rejecting an invalid payload and walking past it) stay
+			// on the plain ancestry walk; only the current-leaf query is memoized.
+			return this._findLatestCustomEntry(customType, this.byId.get(fromId), undefined);
+		}
+		const cache = this._latestCustomEntryCacheForIndex();
+		const cached = cache.perType.get(customType);
+		if (cached && cached.leafId === this.leafId) return cached.match;
+		const leaf = this.leafId ? this.byId.get(this.leafId) : undefined;
+		const match = this._findLatestCustomEntry(customType, leaf, cached);
+		// Re-insert so the map's insertion order doubles as a least-recently-refreshed order.
+		cache.perType.delete(customType);
+		cache.perType.set(customType, { leafId: this.leafId, match });
+		if (cache.perType.size > MAX_LATEST_CUSTOM_ENTRY_CACHE_TYPES) {
+			const oldest = cache.perType.keys().next().value;
+			if (oldest !== undefined) cache.perType.delete(oldest);
+		}
+		return match;
+	}
+
+	private _latestCustomEntryCacheForIndex(): LatestCustomEntryCache {
+		if (this.latestCustomEntryCache?.byId !== this.byId) {
+			this.latestCustomEntryCache = { byId: this.byId, perType: new Map() };
+		}
+		return this.latestCustomEntryCache;
+	}
+
+	/**
+	 * Walk the ancestry from `start` for the newest `customType` entry. When `cached` names a leaf
+	 * that turns out to be an ancestor of `start` (the ordinary append-only case), the walk stops
+	 * there and reuses the cached answer for everything below it; a leaf that is not encountered
+	 * (a branch switch) means the answer is recomputed from the full ancestry.
+	 */
+	private _findLatestCustomEntry(
+		customType: string,
+		start: SessionEntry | undefined,
+		cached: { leafId: string | null; match: CustomEntry | undefined } | undefined,
+	): CustomEntry | undefined {
 		let match: CustomEntry | undefined;
+		let reachedCachedLeaf = false;
 		visitSessionAncestry(start, this.byId, (entry) => {
+			if (cached !== undefined && entry.id === cached.leafId) {
+				reachedCachedLeaf = true;
+				return false;
+			}
 			if (entry.type !== "custom" || entry.customType !== customType) return;
 			match = entry;
 			return false;
 		});
-		return match;
+		return reachedCachedLeaf ? cached!.match : match;
 	}
 
 	/**
@@ -2877,6 +2935,7 @@ export class SessionManager {
 		this.labelTimestampsById = branched.labelTimestampsById;
 		this.leafId = branched.leafId;
 		this.lifecycleActiveCache = undefined;
+		this.latestCustomEntryCache = undefined;
 		this.persistenceStateUncertain = branched.persistenceStateUncertain;
 		this.inheritedSessionIds = new Set(branched.inheritedSessionIds);
 		this.coldPayloadEntryIds.clear();

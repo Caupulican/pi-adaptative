@@ -553,7 +553,7 @@ describe("agent-session task automation integration", () => {
 			await harness.session.prompt("Register shell-gated");
 
 			// Direct shell execution of the registered script path must be gated
-			const directCmd = isWin ? `powershell .\\${scriptRelPath} test` : `bash ./${scriptRelPath} test`;
+			const directCmd = isWin ? `powershell -File ./${scriptRelPath} test` : `bash ./${scriptRelPath} test`;
 			harness.setResponses([
 				fauxAssistantMessage(
 					[
@@ -592,6 +592,83 @@ describe("agent-session task automation integration", () => {
 		}
 	});
 
+	it("gates registered spellings only: unquoted backslashes are POSIX escapes, quoted ones are platform paths", async () => {
+		const harness = await createHarness();
+		const scriptRelPath = writeCalcScript(harness.tempDir);
+		try {
+			harness.setResponses([
+				fauxAssistantMessage(
+					[
+						fauxToolCall("task_automation", {
+							action: "spec",
+							name: "spelling-gated",
+							description: "Script to test path spellings at the direct shell gate",
+							runner,
+							path: scriptRelPath,
+							contract: {
+								inputs: [],
+								outputs: { format: "text", description: "res", contains: "result=" },
+								preconditions: ["exists"],
+								effects: ["runs"],
+								failure: ["fails"],
+								verifier: {
+									args: ["ok"],
+									expectedExitCode: 0,
+									expectedOutput: "result=ok",
+									negativeControls: [
+										{
+											description: "neg",
+											args: ["invalid"],
+											expectedExitCode: 1,
+											expectedError: "invalid arg",
+										},
+									],
+								},
+							},
+						}),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Spec registered"),
+			]);
+			await harness.session.prompt("Register spelling-gated");
+
+			const adapter = new TaskAutomationRuntimeAdapter({
+				getCwd: () => harness.tempDir,
+				getSessionManager: () => harness.session.sessionManager,
+			});
+			const backslashPath = `.\\${scriptRelPath.replace(/\//g, "\\")}`;
+
+			// The registered forward-slash spellings are gated on every platform.
+			expect(
+				adapter.checkDirectScriptExecution(`powershell -File ./${scriptRelPath} test`, harness.tempDir),
+			).toMatchObject({ block: true });
+			expect(adapter.checkDirectScriptExecution(`bash ./${scriptRelPath} test`, harness.tempDir)).toMatchObject({
+				block: true,
+			});
+
+			// Negative control: the bash tool's grammar is POSIX on every platform
+			// (shell-command-parser.ts), so an UNQUOTED `.\scripts\calc.ps1` is the escape sequence
+			// for `.scriptscalc.ps1` — a different name, not the registered script. The gate must
+			// not match it, and the shell would not run the registered script either. This is the
+			// malformed spelling the first Windows CI candidate exercised.
+			expect(
+				adapter.checkDirectScriptExecution(`powershell ${backslashPath} test`, harness.tempDir),
+			).toBeUndefined();
+
+			// Quoting preserves the backslashes. On Windows that is the registered script's own path
+			// and stays gated; on POSIX a literal-backslash filename is a distinct file and ordinary work.
+			const quotedVerdict = adapter.checkDirectScriptExecution(
+				`powershell -File '${backslashPath}' test`,
+				harness.tempDir,
+			);
+			if (isWin) expect(quotedVerdict).toMatchObject({ block: true });
+			else expect(quotedVerdict).toBeUndefined();
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
 	it("gates direct shell execution when an extension hook rewrites benign arguments to registered script", async () => {
 		let scriptRelPath = "";
 		const harness = await createHarness({
@@ -600,7 +677,9 @@ describe("agent-session task automation integration", () => {
 					pi.on("tool_call", async (event) => {
 						if (event.toolName === "bash") {
 							// Rewrite safe echo into direct script execution
-							const directCmd = isWin ? `powershell .\\${scriptRelPath} test` : `bash ./${scriptRelPath} test`;
+							const directCmd = isWin
+								? `powershell -File ./${scriptRelPath} test`
+								: `bash ./${scriptRelPath} test`;
 							(event.input as { command: string }).command = directCmd;
 						}
 					});

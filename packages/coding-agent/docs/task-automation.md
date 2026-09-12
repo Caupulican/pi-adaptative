@@ -81,6 +81,7 @@ To prevent bypassing validation and host controls, explicitly recognized executi
   - PowerShell interpreters: `powershell`, `pwsh` with flags or `-File` (e.g. `powershell -File script.ps1`).
   - Package runners: `uv run` (e.g. `uv run script.py`).
   - Path executions: Direct relative or absolute paths (e.g. `./scripts/run.sh`, `scripts\\run.ps1`).
+- **POSIX Source Grammar**: the `bash` tool's command text is tokenized with the POSIX shell grammar on every platform (`shell-command-parser.ts`), so an unquoted backslash is an escape: `powershell .\scripts\calc.ps1` names `.scriptscalc.ps1`, not the registered `scripts/calc.ps1`, and is neither gated nor an execution of it. Quote Windows paths (`powershell -File '.\scripts\calc.ps1'`) or use forward slashes (`powershell -File ./scripts/calc.ps1`); both are gated on Windows, and a quoted literal-backslash filename stays a distinct ordinary file on POSIX.
 - **Nested Command Parsing**: Commands nested within shell `-c` invocations are recursively parsed using shell command AST tokenization without loose regex splitting.
 - **Post-Hook Evaluation**: Gating evaluates `finalArgs` after extension hooks run. If an extension hook mutates a benign command (`echo`) into a registered script path, the post-hook check intercepts and gates execution relative to the execution working directory.
 - **Scope Limits**: This gate intercepts explicitly recognized invocation forms using AST tokenization. It does not provide arbitrary shell equivalence, command obfuscation parsing, or operating system containment.

@@ -89,12 +89,19 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 					}),
 				);
 				const prompt = builder.rebuildSystemPrompt(["read", "bash"]);
+				// Standing owner authorization has exactly one owner (the core operating contract);
+				// the autonomy block must not repeat its sentences.
 				expect(prompt.split("Reuse explicit owner grants in scope.")).toHaveLength(2);
-				expect(prompt).toContain("Ask only if missing:");
+				expect(prompt.split("Owner instructions override conflicting skill/memory approval rules.")).toHaveLength(
+					2,
+				);
+				expect(prompt.split("Ask only if missing:")).toHaveLength(2);
 				expect(prompt).toContain("publish/push/tag/release");
-				expect(prompt).toContain("explicit human approval required");
+				expect(prompt).toContain("owner authorization required");
 				expect(prompt).not.toContain("Always ask before publish");
 				expect(prompt).not.toContain("Hard stop for publish");
+				// The skill-conflict rule rides once, in the autonomy block.
+				expect(prompt.split("Skill conflicting with owner instructions:")).toHaveLength(2);
 			}
 		},
 	);
@@ -340,7 +347,7 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		expect(prompt.match(new RegExp(duplicateRule, "g"))).toHaveLength(1);
 		expect(prompt).not.toContain("early-low-priority-63");
 		expect(prompt).toContain("Ask only if missing: destruction");
-		expect(prompt).toContain("explicit human approval required");
+		expect(prompt).toContain("owner authorization required");
 	});
 
 	it.each(["lean", "minimal"] as const)(

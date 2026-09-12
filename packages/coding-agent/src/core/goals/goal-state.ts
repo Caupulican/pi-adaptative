@@ -15,6 +15,20 @@ export type GoalEvidenceOutcome = "succeeded" | "failed" | "canceled";
 
 export const MAX_GOAL_OBJECTIVE_LENGTH = 4_000;
 export const MAX_GOAL_EVENT_HISTORY = 128;
+/**
+ * Upper bound of the durable runaway-signature allowance. A goal that has already consumed this many
+ * distinct automatic recoveries since the last owner intervention gets no further automatic resume:
+ * the collection refuses, it never evicts an older signature (eviction would reopen that loop).
+ */
+export const MAX_CONSUMED_RUNAWAY_SIGNATURES = 16;
+
+/** A system stop reason produced by a bounded harness guard (runaway/stagnant tool loop). */
+export function isRunawayStopReason(reason: string | undefined): boolean {
+	return (
+		typeof reason === "string" &&
+		(reason.startsWith("runaway_tool_loop:") || reason.startsWith("stagnant_tool_cycle:"))
+	);
+}
 
 /** One shared lifecycle classification for tools, runtime, persistence, and UI. */
 export function isGoalExecutionActive(status: GoalStatus): boolean {
@@ -89,8 +103,14 @@ export interface GoalState {
 	 * error strings do not reset this counter.
 	 */
 	systemFailureStreak?: number;
-	/** Durable runaway signature that was already granted autonomous system recovery. */
-	runawayRecoverySignature?: string;
+	/**
+	 * Runaway/stagnant stop reasons that already received their one automatic recovery since the last
+	 * owner intervention. Bounded by {@link MAX_CONSUMED_RUNAWAY_SIGNATURES}; only an owner resume
+	 * clears it (automatic resumes, provider successes and evidence never do), so a signature that
+	 * stops the run again stays blocked until the owner prompts, and alternating signatures cannot
+	 * re-earn recovery.
+	 */
+	consumedRunawaySignatures?: readonly string[];
 }
 
 export interface Requirement {
@@ -378,8 +398,14 @@ export function isGoalState(value: unknown): value is GoalState {
 			(typeof value.systemFailureStreak === "number" &&
 				Number.isSafeInteger(value.systemFailureStreak) &&
 				value.systemFailureStreak >= 0)) &&
-		hasOptionalString(value, "runawayRecoverySignature")
+		isValidConsumedRunawaySignatures(value.consumedRunawaySignatures)
 	);
+}
+
+function isValidConsumedRunawaySignatures(value: unknown): boolean {
+	if (value === undefined) return true;
+	if (!isStringArray(value) || value.length > MAX_CONSUMED_RUNAWAY_SIGNATURES) return false;
+	return new Set(value).size === value.length && value.every(isRunawayStopReason);
 }
 
 function cloneRequirement(requirement: Requirement): Requirement {
@@ -411,6 +437,7 @@ function cloneGoalState(state: GoalState): GoalState {
 		requirements: state.requirements.map(cloneRequirement),
 		evidence: state.evidence.map(cloneGoalEvidenceRef),
 		events: state.events.map(cloneGoalEvent),
+		...(state.consumedRunawaySignatures ? { consumedRunawaySignatures: [...state.consumedRunawaySignatures] } : {}),
 	};
 }
 
@@ -444,6 +471,7 @@ export function createGoalState(args: {
 		continuationSpendUsd: 0,
 		continuationWorkerSpendUsd: 0,
 		systemFailureStreak: 0,
+		consumedRunawaySignatures: [],
 	};
 }
 
@@ -589,10 +617,12 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			} else {
 				newState.evidence = [...newState.evidence, newEvidence];
 			}
+			// Trusted progress resets the provider-failure streak only. Consumed runaway signatures
+			// are cleared by an owner resume alone: a loop that already burned its recovery must not
+			// re-earn one from the model's own progress.
 			if (isTrustedGoalEvidence(newEvidence) && !isPreviouslyTrustedReceiptReplay(state.evidence, newEvidence)) {
 				newState.progressRevision = (state.progressRevision ?? 0) + 1;
 				newState.systemFailureStreak = 0;
-				newState.runawayRecoverySignature = undefined;
 			}
 			break;
 		}
@@ -665,16 +695,21 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			newState.lastProgressAt = event.now;
 			newState.stallTurns = 0;
 			if (event.source === "system") {
+				// An automatic resume consumes the stop's runaway signature. The collection is bounded
+				// and never evicts: at capacity the reducer records nothing more and the controller
+				// refuses further automatic recovery until the owner intervenes.
+				const consumed = state.consumedRunawaySignatures ?? [];
 				if (
-					state.blockedReason &&
-					(state.blockedReason.startsWith("runaway_tool_loop:") ||
-						state.blockedReason.startsWith("stagnant_tool_cycle:"))
+					isRunawayStopReason(state.blockedReason) &&
+					!consumed.includes(state.blockedReason!) &&
+					consumed.length < MAX_CONSUMED_RUNAWAY_SIGNATURES
 				) {
-					newState.runawayRecoverySignature = state.blockedReason;
+					newState.consumedRunawaySignatures = [...consumed, state.blockedReason!];
 				}
 			} else {
+				// Owner intent: the recovery allowance starts over.
 				newState.systemFailureStreak = 0;
-				newState.runawayRecoverySignature = undefined;
+				newState.consumedRunawaySignatures = [];
 			}
 			break;
 		}
@@ -686,8 +721,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 				const isNonProviderSystemStop =
 					event.reason.startsWith("goal_tool_unavailable:") ||
 					event.reason.startsWith("provider_turn_limit:") ||
-					event.reason.startsWith("runaway_tool_loop:") ||
-					event.reason.startsWith("stagnant_tool_cycle:");
+					isRunawayStopReason(event.reason);
 				if (!isNonProviderSystemStop) {
 					newState.systemFailureStreak = (state.systemFailureStreak ?? 0) + 1;
 				}

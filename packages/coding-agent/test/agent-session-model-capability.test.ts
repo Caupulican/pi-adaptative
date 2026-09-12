@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
@@ -114,6 +114,37 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(2_000);
 		} finally {
 			harness.cleanup();
+		}
+	});
+
+	it("keeps the minimal prompt under its 4,096-character budget on a long live checkout path", async () => {
+		// The minimal prompt embeds the live cwd (lean drops it; minimal keeps it). Hosted runners
+		// nest the repository name twice and Windows temp roots are deeper still, so measure the
+		// budget against a genuinely long, existing cwd rather than this machine's temp dir. The
+		// path is not stripped: the prompt must still print it.
+		const longCwd = join(
+			mkdtempSync(join(tmpdir(), "pi-minimal-long-checkout-")),
+			"runner-work-pi-adaptative-release-candidate",
+			"pi-adaptative-release-candidate",
+			"packages",
+			"coding-agent",
+			"worktrees",
+			"lane-a",
+		);
+		mkdirSync(longCwd, { recursive: true });
+		const harness = await createHarness({
+			cwd: longCwd,
+			models: [{ id: "small-model", contextWindow: 8_192 }],
+			settings: { researchLane: { enabled: true }, autonomy: { mode: "balanced" } },
+		});
+		try {
+			expect(harness.session.getModelCapabilityProfile().class).toBe("minimal");
+			expect(harness.session.systemPrompt).toContain(`Current working directory: ${longCwd.replace(/\\/g, "/")}`);
+			expect(longCwd.length).toBeGreaterThanOrEqual(120);
+			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(4_096);
+		} finally {
+			harness.cleanup();
+			rmSync(longCwd, { recursive: true, force: true });
 		}
 	});
 

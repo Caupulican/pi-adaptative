@@ -7,7 +7,13 @@ import {
 	resumeGoal,
 	stopGoalFromSystem,
 } from "../src/core/goals/goal-lifecycle.ts";
-import { applyGoalEvent, createGoalState, isGoalEvent, isGoalState } from "../src/core/goals/goal-state.ts";
+import {
+	applyGoalEvent,
+	createGoalState,
+	isGoalEvent,
+	isGoalState,
+	MAX_CONSUMED_RUNAWAY_SIGNATURES,
+} from "../src/core/goals/goal-state.ts";
 
 function expectState(result: ReturnType<typeof pauseGoal>) {
 	expect(result.ok).toBe(true);
@@ -284,13 +290,13 @@ describe("goal lifecycle authority", () => {
 		// Runaway stop does NOT increment provider failure streak
 		expect(state.systemFailureStreak).toBe(1);
 
-		// Resume again by system: records runawayRecoverySignature
+		// Resume again by system: consumes the runaway signature
 		state = applyGoalEvent(state, {
 			type: "resume_goal",
 			source: "system",
 			now: "T5",
 		});
-		expect(state.runawayRecoverySignature).toBe("runaway_tool_loop: signature sig1 3 times without progress");
+		expect(state.consumedRunawaySignatures).toEqual(["runaway_tool_loop: signature sig1 3 times without progress"]);
 
 		// Stale / missing completionTurn on active goal CANNOT reset systemFailureStreak
 		const staleActivePass = applyGoalEvent(state, {
@@ -305,7 +311,7 @@ describe("goal lifecycle authority", () => {
 		});
 		expect(staleActivePass.systemFailureStreak).toBe(1);
 
-		// Authoritative healthy continuation turn with expected ordinal (1) resets systemFailureStreak but NOT runawayRecoverySignature
+		// Authoritative healthy continuation turn with expected ordinal (1) resets systemFailureStreak but NOT the consumed runaway signatures
 		state = applyGoalEvent(state, {
 			type: "record_continuation_budget",
 			turns: 1,
@@ -317,7 +323,7 @@ describe("goal lifecycle authority", () => {
 			now: "T6",
 		});
 		expect(state.systemFailureStreak).toBe(0);
-		expect(state.runawayRecoverySignature).toBe("runaway_tool_loop: signature sig1 3 times without progress");
+		expect(state.consumedRunawaySignatures).toEqual(["runaway_tool_loop: signature sig1 3 times without progress"]);
 
 		// Replaying the old ordinal (1) CANNOT reset streak after another error occurs
 		state = applyGoalEvent(state, {
@@ -375,6 +381,84 @@ describe("goal lifecycle authority", () => {
 			now: "T3",
 		});
 		expect(state.systemFailureStreak).toBe(1);
+	});
+
+	it("consumes runaway signatures in one bounded durable collection that only an owner resume clears", () => {
+		const runaway = (signature: string) => `runaway_tool_loop: repeated tool-call signature ${signature}`;
+		let state = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
+		expect(state.consumedRunawaySignatures).toEqual([]);
+
+		// A, then B: each automatic resume records its signature once, in order.
+		for (const signature of ["A", "B", "A"]) {
+			state = applyGoalEvent(state, {
+				type: "system_stop_goal",
+				status: "blocked",
+				reason: runaway(signature),
+				now: "T",
+			});
+			state = applyGoalEvent(state, { type: "resume_goal", source: "system", now: "T" });
+		}
+		expect(state.consumedRunawaySignatures).toEqual([runaway("A"), runaway("B")]);
+		// Runaway stops never touch the provider streak.
+		expect(state.systemFailureStreak).toBe(0);
+
+		// Trusted progress resets the provider streak but never re-opens a consumed signature.
+		state = applyGoalEvent(state, { type: "system_stop_goal", status: "blocked", reason: "network: lost", now: "T" });
+		state = applyGoalEvent(state, { type: "resume_goal", source: "system", now: "T" });
+		expect(state.systemFailureStreak).toBe(1);
+		state = applyGoalEvent(state, {
+			type: "add_evidence",
+			id: "ev-1",
+			kind: "test",
+			summary: "tests pass",
+			verified: true,
+			outcome: "succeeded",
+			now: "T",
+		});
+		expect(state.systemFailureStreak).toBe(0);
+		expect(state.consumedRunawaySignatures).toEqual([runaway("A"), runaway("B")]);
+
+		// A provider-transient resume consumes nothing.
+		expect(state.consumedRunawaySignatures).toHaveLength(2);
+
+		// The collection is bounded and refuses instead of evicting.
+		for (let index = 0; index < MAX_CONSUMED_RUNAWAY_SIGNATURES + 3; index++) {
+			state = applyGoalEvent(state, {
+				type: "system_stop_goal",
+				status: "blocked",
+				reason: runaway(`bulk-${index}`),
+				now: "T",
+			});
+			state = applyGoalEvent(state, { type: "resume_goal", source: "system", now: "T" });
+		}
+		expect(state.consumedRunawaySignatures).toHaveLength(MAX_CONSUMED_RUNAWAY_SIGNATURES);
+		expect(state.consumedRunawaySignatures?.slice(0, 2)).toEqual([runaway("A"), runaway("B")]);
+		expect(isGoalState(state)).toBe(true);
+
+		// Owner resume (explicit source or legacy absent source) restarts the allowance.
+		state = applyGoalEvent(state, { type: "system_stop_goal", status: "blocked", reason: runaway("A"), now: "T" });
+		state = applyGoalEvent(state, { type: "resume_goal", source: "owner", now: "T" });
+		expect(state.consumedRunawaySignatures).toEqual([]);
+		state = applyGoalEvent(state, { type: "system_stop_goal", status: "blocked", reason: runaway("A"), now: "T" });
+		state = applyGoalEvent(state, { type: "resume_goal", source: "system", now: "T" });
+		state = applyGoalEvent(state, { type: "system_stop_goal", status: "blocked", reason: runaway("A"), now: "T" });
+		state = applyGoalEvent(state, { type: "resume_goal", now: "T" });
+		expect(state.consumedRunawaySignatures).toEqual([]);
+
+		// Validation: bounded, unique, runaway-shaped strings only; legacy absence accepted.
+		const valid = createGoalState({ goalId: "g2", userGoal: "Ship", now: "T0" });
+		expect(isGoalState({ ...valid, consumedRunawaySignatures: undefined })).toBe(true);
+		expect(isGoalState({ ...valid, consumedRunawaySignatures: [runaway("A"), runaway("A")] })).toBe(false);
+		expect(isGoalState({ ...valid, consumedRunawaySignatures: ["network: lost"] })).toBe(false);
+		expect(
+			isGoalState({
+				...valid,
+				consumedRunawaySignatures: Array.from({ length: MAX_CONSUMED_RUNAWAY_SIGNATURES + 1 }, (_, i) =>
+					runaway(`s${i}`),
+				),
+			}),
+		).toBe(false);
+		expect(isGoalState({ ...valid, consumedRunawaySignatures: "A" as never })).toBe(false);
 	});
 
 	it("strictly validates systemFailureStreak and resume_goal source", () => {

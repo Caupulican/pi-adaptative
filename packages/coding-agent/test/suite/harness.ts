@@ -67,6 +67,8 @@ export function getAssistantTexts(harness: Harness): string[] {
 }
 
 export interface HarnessOptions {
+	/** Session working directory; defaults to the harness temp dir. Must exist. */
+	cwd?: string;
 	models?: FauxModelDefinition[];
 	fauxProvider?: Pick<RegisterFauxProviderOptions, "api" | "provider" | "onRequest">;
 	settings?: Partial<Settings>;
@@ -243,7 +245,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		agent,
 		sessionManager,
 		settingsManager,
-		cwd: tempDir,
+		cwd: options.cwd ?? tempDir,
 		agentDir: tempDir,
 		modelRegistry,
 		resourceLoader,

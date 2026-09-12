@@ -89,6 +89,15 @@ describe("goal continuation interruption containment", () => {
 			reasonCode: "goal_blocked",
 			message: expect.stringContaining("getaddrinfo ETIMEOUT"),
 		});
+
+		// The owner's next prompt resumes the goal and restarts the transient-failure allowance.
+		harness.setResponses([fauxAssistantMessage("resumed by the owner")]);
+		await harness.session.prompt("continue the task", { autoContinueGoal: false });
+		expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+			status: "active",
+			systemFailureStreak: 0,
+			blockedReason: undefined,
+		});
 	});
 
 	it("resets failure streak on healthy continuation turn without legacy evidence so subsequent transient error recovers", async () => {

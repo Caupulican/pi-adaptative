@@ -29,8 +29,8 @@ import { buildProjectInstructionIsolationPrompt } from "./project-instruction-is
 import {
 	CHAT_WORK_LIFECYCLE_SYSTEM_RULE,
 	DELEGATION_DECISION_RULE,
-	OWNER_PRECEDENCE_POLICY,
 	SKILL_CONFLICT_RESOLUTION_RULE,
+	SKILL_CONFLICT_RESOLUTION_RULE_COMPACT,
 	WORK_LIFECYCLE_SYSTEM_RULE,
 } from "./provider-prompt-contracts.ts";
 import { normalizeProviderPromptGuidelines, normalizeProviderPromptSnippet } from "./provider-tool-text.ts";
@@ -264,19 +264,20 @@ export class SystemPromptBuilder {
 			return undefined;
 		}
 
+		// Standing owner authorization (precedence, limits, grant reuse, ask-only-if-missing) is
+		// rendered once by the core operating contract (OWNER_AUTHORIZATION_RULE in system-prompt.ts)
+		// for every capability class; this block adds only the autonomy grant, the reflection
+		// contract and the skill-conflict rule.
 		const reflectionContract = isCurrentSessionReflectionEnabled(autoLearn)
 			? "ROOT REFLECTION: decide and apply warranted durable learning only in the single host-scheduled reflection turn after completed work; do not schedule additional reflection turns or delegate it."
 			: "Root reflection is disabled.";
 		if (profile.class !== "full") {
-			const reflection = isCurrentSessionReflectionEnabled(autoLearn)
-				? "Root reflection: host-scheduled turn only."
-				: "Reflection disabled.";
-			return `PI AUTONOMY ${autonomy.mode}: ${reflection} Active task primary. ${OWNER_PRECEDENCE_POLICY} On conflict: invoke skill exclude with exact name and reason, continue work; repair if configured eligible. Workers report conflict to parent. Preserve limits and release conditions; reuse in-scope grants. Ask if missing: destruction, credentials/auth, publish/push/tag/release, broader scope.`;
+			return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Active task primary. ${SKILL_CONFLICT_RESOLUTION_RULE_COMPACT}`;
 		}
 		if (autonomy.mode === "full") {
-			return `PI AUTONOMY full (standing): ${reflectionContract} Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; validation plus rollback evidence. ${OWNER_PRECEDENCE_POLICY} ${SKILL_CONFLICT_RESOLUTION_RULE} Preserve explicit limits and release conditions. Reuse explicit owner grants in scope. Owner authorization required for publish/release/push/tag, credential disclosure/provider authentication/out-of-grant secret operations, destructive user-data deletion, exposed services, or more authority. Current-turn evidence is a cue, not proof; active task stays primary.`;
+			return `PI AUTONOMY full (standing): ${reflectionContract} Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; validation plus rollback evidence. ${SKILL_CONFLICT_RESOLUTION_RULE} Owner authorization required for publish/release/push/tag, credential disclosure/provider authentication/out-of-grant secret operations, destructive user-data deletion, exposed services, or more authority. Current-turn evidence is a cue, not proof; active task stays primary.`;
 		}
-		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Query memory and use bounded tools already available in this session. ${OWNER_PRECEDENCE_POLICY} ${SKILL_CONFLICT_RESOLUTION_RULE} Explicit handoff authorizes ordinary prerequisites and granted work, retaining scope and conditions. Ask only if missing: destruction, credentials/auth, publish/push/tag/release, broader scope. Active task primary.`;
+		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Query memory and use bounded tools already available in this session. ${SKILL_CONFLICT_RESOLUTION_RULE} Explicit handoff authorizes ordinary prerequisites and granted work, retaining scope and conditions. Active task primary.`;
 	}
 
 	private _buildWorkLifecyclePrompt(toolNames: readonly string[]): string | undefined {

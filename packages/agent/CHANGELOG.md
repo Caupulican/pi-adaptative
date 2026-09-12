@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- `SessionManager.getLatestCustomEntryOnBranch` no longer walks the whole branch on every request for a custom type that is absent or unchanged. Each type keeps one bounded memo (its last answer and the leaf it was computed for, hit or miss); a same-leaf query is answered from it and an append-only session walks only the new suffix. A branch switch to a leaf that does not descend from the memoized one recomputes from the full ancestry, an explicit `fromId` always walks, and the memo is dropped whenever the entry index is replaced (reload, new session, branched session with reused entry ids), so branch and reload answers are unchanged.
+
 ## [0.99.19] - 2026-09-12
 
 ## [0.99.18] - 2026-09-11

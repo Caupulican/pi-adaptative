@@ -242,7 +242,11 @@ jobs:
         env:
           NODE_OPTIONS: --conditions=pi-source
           PI_VITEST_ISOLATE_CORPUS: "1"
-        run: node ../../node_modules/vitest/dist/cli.js --run --bail=1 --shard=${{ matrix.shard }}/4
+        # --bail=0 on the shard: every failure in the shard is reported in one run. With --bail=1
+        # each red shard showed exactly one failure and the next push found the next one
+        # (2026-09-12: two candidates, nine red jobs each, seven distinct causes). The local
+        # inner loop keeps its own defaults (package.json `test` still bails).
+        run: node ../../node_modules/vitest/dist/cli.js --run --bail=0 --shard=${{ matrix.shard }}/4
 
       - name: Test the Windows shell corpus wall alone
         if: matrix.shard == 1

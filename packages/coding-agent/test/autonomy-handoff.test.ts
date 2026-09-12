@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
+import { createCompactionSummaryMessage } from "@caupulican/pi-agent-core/messages";
 import { type CustomEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import { describe, expect, it } from "vitest";
 import {
@@ -584,9 +585,9 @@ describe("compaction, fork host context projection, and edge grants authority", 
 		expect((authorityMsg1 as { content: string })?.content).toContain("git.publish");
 		expect((authorityMsg1 as { content: string })?.content).toContain('quote: "deploy to staging branch"');
 
-		// After compaction, previous conversation turns are replaced by a summary
+		// After compaction, previous conversation turns are replaced by a compaction summary
 		const afterCompaction: AgentMessage[] = [
-			{ role: "user", content: "Conversation summary: deploy approved.", timestamp: 3 },
+			createCompactionSummaryMessage("Conversation summary: deploy approved.", 1000, "2026-01-01T00:00:00.000Z"),
 		];
 
 		// Plan after compaction STILL receives host projection of edge grants
@@ -1188,9 +1189,10 @@ describe("skill tool exclude and repair actions with self-evolution gating", () 
 		);
 		expect((authMsg2 as { content: string })?.content).toContain("staging deployment");
 
-		// 4. Revocation: grants cleared -> projects cleared text
+		// 4. Revocation: grants cleared -> projects cleared text when prior grant is recorded in history
+		const historyWithGrant: AgentMessage[] = [...messages, authMsg2!];
 		grants = [];
-		const preview4 = await controller2.plan(messages, 0);
+		const preview4 = await controller2.plan(historyWithGrant, 0);
 		const authMsg3 = preview4.transientMessages?.find(
 			(m) => m.role === "custom" && m.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE,
 		);

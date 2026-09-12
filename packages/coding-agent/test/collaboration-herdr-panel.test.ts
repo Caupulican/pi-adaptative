@@ -162,6 +162,31 @@ function createMockBackend(initialPanes?: CollaborationPane[]) {
 	return { backend, panes, states };
 }
 
+const HERDR_ENV_KEYS = [
+	"HERDR_ENV",
+	"HERDR_PANE_ID",
+	"HERDR_WORKSPACE_ID",
+	"HERDR_TAB_ID",
+	"HERDR_SOCKET_PATH",
+	"HERDR_BIN_PATH",
+] as const;
+
+/** Snapshot only the Herdr keys; tests restore them one by one instead of replacing process.env. */
+function snapshotHerdrEnv(): Record<(typeof HERDR_ENV_KEYS)[number], string | undefined> {
+	return Object.fromEntries(HERDR_ENV_KEYS.map((key) => [key, process.env[key]])) as Record<
+		(typeof HERDR_ENV_KEYS)[number],
+		string | undefined
+	>;
+}
+
+function restoreHerdrEnv(snapshot: ReturnType<typeof snapshotHerdrEnv>): void {
+	for (const key of HERDR_ENV_KEYS) {
+		const value = snapshot[key];
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+}
+
 describe("Herdr panel orchestration", () => {
 	it("detectHerdrCallerContext detects and validates environment variables", () => {
 		const validEnv = {
@@ -169,14 +194,14 @@ describe("Herdr panel orchestration", () => {
 			HERDR_PANE_ID: "w9:pA",
 			HERDR_WORKSPACE_ID: "w9",
 			HERDR_TAB_ID: "w9:tA",
-			HERDR_SOCKET_PATH: "/home/caudev/.config/herdr/herdr.sock",
+			HERDR_SOCKET_PATH: "/tmp/pi-herdr-fixture/herdr.sock",
 		};
 		const detected = detectHerdrCallerContext(validEnv);
 		expect(detected).toBeDefined();
 		expect(detected?.paneId).toBe("w9:pA");
 		expect(detected?.workspaceId).toBe("w9");
 		expect(detected?.tabId).toBe("w9:tA");
-		expect(detected?.socketPath).toBe("/home/caudev/.config/herdr/herdr.sock");
+		expect(detected?.socketPath).toBe("/tmp/pi-herdr-fixture/herdr.sock");
 
 		// Missing HERDR_ENV
 		expect(detectHerdrCallerContext({ ...validEnv, HERDR_ENV: "0" })).toBeUndefined();
@@ -288,7 +313,7 @@ describe("Herdr panel orchestration", () => {
 				createdAt: Date.now(),
 				deadlineSeconds: 1200,
 				placement: "current-pane",
-				socketPath: "/home/caudev/.config/herdr/herdr.sock",
+				socketPath: "/tmp/pi-herdr-fixture/herdr.sock",
 				callerPaneId: "w9:pA",
 				callerWorkspaceId: "w9",
 				callerTabId: "w9:tA",
@@ -426,7 +451,7 @@ describe("Herdr panel orchestration", () => {
 					createdAt: Date.now(),
 					deadlineSeconds: 1200,
 					placement: "current-pane",
-					socketPath: "/home/caudev/.config/herdr/herdr.sock",
+					socketPath: "/tmp/pi-herdr-fixture/herdr.sock",
 					callerPaneId: "w9:pA",
 					callerWorkspaceId: "stale-workspace",
 					callerTabId: "w9:tA",
@@ -498,7 +523,7 @@ describe("Herdr panel orchestration", () => {
 					createdAt: Date.now(),
 					deadlineSeconds: 1200,
 					placement: "current-pane",
-					socketPath: "/home/caudev/.config/herdr/herdr.sock",
+					socketPath: "/tmp/pi-herdr-fixture/herdr.sock",
 					callerPaneId: "w9:pA",
 					callerWorkspaceId: "w9",
 					callerTabId: "w9:tA",
@@ -568,7 +593,7 @@ describe("Herdr panel orchestration", () => {
 		createMockBackend([callerPane]);
 
 		// Pre-populate store with a running job with saved socketPath
-		const savedSocketPath = "/home/caudev/.config/herdr/saved.sock";
+		const savedSocketPath = "/tmp/pi-herdr-fixture/saved.sock";
 		const job: CollaborationJob = store.create({
 			id: "job-env-test",
 			parentSessionId: "parent",
@@ -610,7 +635,7 @@ describe("Herdr panel orchestration", () => {
 		});
 
 		// Now tamper with / delete host environment
-		const originalEnv = { ...process.env };
+		const originalEnv = snapshotHerdrEnv();
 		delete process.env.HERDR_ENV;
 		delete process.env.HERDR_SOCKET_PATH;
 		delete process.env.HERDR_PANE_ID;
@@ -701,7 +726,7 @@ describe("Herdr panel orchestration", () => {
 			expect(managedEnvs.length).toBeGreaterThan(0);
 			expect(managedEnvs[0].HERDR_SOCKET_PATH).toBeUndefined();
 		} finally {
-			process.env = originalEnv;
+			restoreHerdrEnv(originalEnv);
 			await rm(root, { recursive: true, force: true });
 		}
 	});
@@ -836,13 +861,13 @@ describe("Herdr panel orchestration", () => {
 
 	it("preserves exact native args for agy with model and effort", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-herdr-exact-args-"));
-		const originalEnv = { ...process.env };
+		const originalEnv = snapshotHerdrEnv();
 		process.env.HERDR_ENV = "1";
 		process.env.HERDR_PANE_ID = "w9:pA";
 		process.env.HERDR_WORKSPACE_ID = "w9";
 		process.env.HERDR_TAB_ID = "w9:tA";
-		process.env.HERDR_SOCKET_PATH = "/home/caudev/.config/herdr/herdr.sock";
-		process.env.HERDR_BIN_PATH = "/home/caudev/.local/bin/herdr";
+		process.env.HERDR_SOCKET_PATH = "/tmp/pi-herdr-fixture/herdr.sock";
+		process.env.HERDR_BIN_PATH = "/tmp/pi-herdr-fixture/bin/herdr";
 		try {
 			let tool: ToolDefinition | undefined;
 			const api = {
@@ -905,7 +930,7 @@ describe("Herdr panel orchestration", () => {
 				"--dangerously-skip-permissions",
 			]);
 		} finally {
-			process.env = originalEnv;
+			restoreHerdrEnv(originalEnv);
 			await rm(root, { recursive: true, force: true });
 		}
 	});
@@ -943,7 +968,7 @@ describe("Herdr panel orchestration", () => {
 				createdAt: Date.now(),
 				deadlineSeconds: 1200,
 				placement: "current-pane",
-				socketPath: "/home/caudev/.config/herdr/herdr.sock",
+				socketPath: "/tmp/pi-herdr-fixture/herdr.sock",
 				callerPaneId: "w9:pA",
 				callerWorkspaceId: "w9",
 				callerTabId: "w9:tA",
@@ -1039,7 +1064,7 @@ describe("Herdr panel orchestration", () => {
 				createdAt: Date.now(),
 				deadlineSeconds: 1200,
 				placement: "current-pane",
-				socketPath: "/home/caudev/.config/herdr/herdr.sock",
+				socketPath: "/tmp/pi-herdr-fixture/herdr.sock",
 				callerPaneId: "w9:pA",
 				callerWorkspaceId: "w9",
 				callerTabId: "w9:tA",
@@ -1127,13 +1152,13 @@ describe("Herdr panel orchestration", () => {
 		});
 
 		// Launch in current-pane
-		const originalEnv = { ...process.env };
+		const originalEnv = snapshotHerdrEnv();
 		process.env.HERDR_ENV = "1";
 		process.env.HERDR_PANE_ID = "w9:pA";
 		process.env.HERDR_WORKSPACE_ID = "w9";
 		process.env.HERDR_TAB_ID = "w9:tA";
-		process.env.HERDR_SOCKET_PATH = "/home/caudev/.config/herdr/herdr.sock";
-		process.env.HERDR_BIN_PATH = "/home/caudev/.local/bin/herdr";
+		process.env.HERDR_SOCKET_PATH = "/tmp/pi-herdr-fixture/herdr.sock";
+		process.env.HERDR_BIN_PATH = "/tmp/pi-herdr-fixture/bin/herdr";
 
 		try {
 			const launchedResult = await tool!.execute(
@@ -1181,7 +1206,7 @@ describe("Herdr panel orchestration", () => {
 			// Caller pane is still present
 			expect(panes.has("w9:pA")).toBe(true);
 		} finally {
-			process.env = originalEnv;
+			restoreHerdrEnv(originalEnv);
 			await rm(root, { recursive: true, force: true });
 		}
 	});
@@ -1429,7 +1454,7 @@ describe("Herdr panel orchestration", () => {
 	});
 
 	it("preserves validated HERDR_BIN_PATH with saved job and avoids routing managed binary to live server", async () => {
-		const customBin = "/home/caudev/.local/bin/herdr";
+		const customBin = "/tmp/pi-herdr-fixture/bin/herdr";
 		const caller = detectHerdrCallerContext({
 			HERDR_ENV: "1",
 			HERDR_PANE_ID: "w9:pA",
@@ -2717,24 +2742,24 @@ describe("Herdr panel orchestration", () => {
 					),
 				).rejects.toThrow("Placement 'current-pane' requires a valid caller executable (HERDR_BIN_PATH).");
 
-				// Negative 3: HERDR_BIN_PATH with null byte
-				process.env.HERDR_BIN_PATH = "/usr/bin/herdr\0malicious";
-				await expect(
-					tool!.execute(
-						"call-nul-bin",
-						{
-							action: "workspace_plan",
-							placement: "current-pane",
-							agents: [{ provider: "agy", name: "w1", args: ["--effort", "high"] }],
-						},
-						undefined,
-						undefined,
-						context,
-					),
-				).rejects.toThrow("Placement 'current-pane' requires a valid caller executable (HERDR_BIN_PATH).");
+				// Negative 3: HERDR_BIN_PATH with an embedded null byte. The real process environment
+				// cannot carry a NUL (Node truncates the value at it, so `process.env` would silently
+				// yield "/usr/bin/herdr" and admit it); the earlier version of this test only "passed"
+				// because a sibling test had replaced process.env with a plain object. Exercise the
+				// validator through its explicit env parameter instead.
+				expect(
+					detectHerdrCallerContext({
+						HERDR_ENV: "1",
+						HERDR_PANE_ID: "w9:pA",
+						HERDR_WORKSPACE_ID: "w9",
+						HERDR_TAB_ID: "w9:tA",
+						HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+						HERDR_BIN_PATH: "/usr/bin/herdr\0malicious",
+					})?.binPath,
+				).toBeUndefined();
 
 				// Valid caller control: Absolute HERDR_BIN_PATH succeeds and persists exactly
-				const validBin = "/home/caudev/.local/bin/herdr";
+				const validBin = "/tmp/pi-herdr-fixture/bin/herdr";
 				process.env.HERDR_BIN_PATH = validBin;
 				const successResult = await tool!.execute(
 					"call-valid-bin",

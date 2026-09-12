@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { GoalSessionController } from "../src/core/goals/goal-session-controller.ts";
-import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
+import { applyGoalEvent, createGoalState, MAX_CONSUMED_RUNAWAY_SIGNATURES } from "../src/core/goals/goal-state.ts";
 import {
 	appendGoalClearedSnapshot,
 	appendGoalStateSnapshot,
@@ -390,7 +390,7 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 		expect(controller.getState()?.status).toBe("active");
 	});
 
-	it("preserves systemFailureStreak and runawayRecoverySignature across serialization and replay", () => {
+	it("preserves systemFailureStreak and consumedRunawaySignatures across serialization and replay", () => {
 		const sessionManager = SessionManager.inMemory();
 		let state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
 		state = applyGoalEvent(state, {
@@ -416,13 +416,15 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 			source: "system",
 			now: "T3",
 		});
-		expect(state.runawayRecoverySignature).toBe("runaway_tool_loop: signature sig1 3 times without progress");
+		expect(state.consumedRunawaySignatures).toEqual(["runaway_tool_loop: signature sig1 3 times without progress"]);
 
 		appendGoalStateSnapshot(sessionManager, state);
 		const restored = getLatestGoalStateSnapshot(sessionManager);
 
 		expect(restored?.systemFailureStreak).toBe(1);
-		expect(restored?.runawayRecoverySignature).toBe("runaway_tool_loop: signature sig1 3 times without progress");
+		expect(restored?.consumedRunawaySignatures).toEqual([
+			"runaway_tool_loop: signature sig1 3 times without progress",
+		]);
 	});
 
 	it("keeps repeated runaway blocked across restart even after intervening provider-success accounting event", () => {
@@ -431,7 +433,7 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 		const state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
 		controller.saveState(state);
 
-		const runawayReason = "runaway_tool_loop: repeated tool-call signature sig1 3 times without progress";
+		const runawayReason = "runaway_tool_loop: repeated tool-call signature sig1 without progress";
 
 		// First runaway guard stop: auto-resumes once
 		const firstRecovery = controller.recoverFromHarnessGuard({
@@ -441,10 +443,10 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 		});
 		expect(firstRecovery).toBe("resumed");
 		expect(controller.getState()?.status).toBe("active");
-		expect(controller.getState()?.runawayRecoverySignature).toBe(runawayReason);
+		expect(controller.getState()?.consumedRunawaySignatures).toEqual([runawayReason]);
 
 		// Intervening successful provider continuation turn without legacy evidence
-		// resets failure streak to 0, but leaves runawayRecoverySignature intact
+		// resets failure streak to 0, but leaves the consumed runaway signature intact
 		let current = controller.getState()!;
 		current = applyGoalEvent(current, {
 			type: "record_continuation_budget",
@@ -458,7 +460,7 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 		});
 		controller.saveState(current);
 		expect(controller.getState()?.systemFailureStreak).toBe(0);
-		expect(controller.getState()?.runawayRecoverySignature).toBe(runawayReason);
+		expect(controller.getState()?.consumedRunawaySignatures).toEqual([runawayReason]);
 
 		// Second runaway with same signature: must stay blocked, refusing recovery
 		const secondRecovery = controller.recoverFromHarnessGuard({
@@ -486,8 +488,8 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 		helper.recordContinuationFailure(new Error("network error: connection lost"));
 		expect(controller.getState()?.status).toBe("active");
 		expect(controller.getState()?.systemFailureStreak).toBe(1);
-		// Prior network resume must NOT set or exhaust runawayRecoverySignature
-		expect(controller.getState()?.runawayRecoverySignature).toBeUndefined();
+		// Prior network resume must NOT consume any runaway signature
+		expect(controller.getState()?.consumedRunawaySignatures).toEqual([]);
 
 		// 2. Runaway tool loop occurs for the first time: must still be admitted and resumed!
 		const runawayRecovery = controller.recoverFromHarnessGuard({
@@ -497,9 +499,9 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 		});
 		expect(runawayRecovery).toBe("resumed");
 		expect(controller.getState()?.status).toBe("active");
-		expect(controller.getState()?.runawayRecoverySignature).toBe(
-			"runaway_tool_loop: repeated tool-call signature loop-sig 3 times without progress",
-		);
+		expect(controller.getState()?.consumedRunawaySignatures).toEqual([
+			"runaway_tool_loop: repeated tool-call signature loop-sig without progress",
+		]);
 		// Runaway recovery must NOT increment provider failure streak
 		expect(controller.getState()?.systemFailureStreak).toBe(1);
 	});
@@ -526,7 +528,7 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 		};
 		controller.saveState(truncatedState);
 		expect(controller.getState()?.events.length).toBe(0);
-		expect(controller.getState()?.runawayRecoverySignature).toBeDefined();
+		expect(controller.getState()?.consumedRunawaySignatures).toHaveLength(1);
 
 		// Second runaway with same signature: must stay blocked, refusing recovery even with empty event history
 		const secondRecovery = controller.recoverFromHarnessGuard({
@@ -544,13 +546,111 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 		expect(restartController.getState()?.status).toBe("blocked");
 	});
 
+	it("grants one automatic recovery per runaway signature: A, B, A blocks and survives restart", () => {
+		const sessionManager = SessionManager.inMemory();
+		const { controller } = createTestController({ sessionManager });
+		controller.saveState(createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" }));
+		const guard = (signature: string) =>
+			controller.recoverFromHarnessGuard({ reason: "repeated_tool_call", signature, repeats: 3 });
+
+		expect(guard("A")).toBe("resumed");
+		expect(guard("B")).toBe("resumed");
+		expect(controller.getState()?.consumedRunawaySignatures).toHaveLength(2);
+
+		// The third stop repeats A: its recovery was already consumed even though B fired in between.
+		expect(guard("A")).toBe("blocked");
+		expect(controller.getState()?.status).toBe("blocked");
+		expect(controller.getState()?.consumedRunawaySignatures).toHaveLength(2);
+
+		// Automatic paths cannot impersonate the owner: system resume and restart both refuse.
+		expect(controller.resumeSystemBlockedGoal()).toBeUndefined();
+		const restarted = createTestController({ sessionManager }).controller;
+		expect(restarted.restoreAfterResume()).toBe(false);
+		expect(restarted.getState()?.status).toBe("blocked");
+		expect(restarted.getState()?.consumedRunawaySignatures).toHaveLength(2);
+
+		// The owner's prompt resumes it and restarts the allowance, so A may recover once more.
+		expect(restarted.resumeSystemBlockedGoal(undefined, "owner")).toBe("g1");
+		expect(restarted.getState()).toMatchObject({ status: "active", consumedRunawaySignatures: [] });
+		expect(restarted.recoverFromHarnessGuard({ reason: "repeated_tool_call", signature: "A", repeats: 3 })).toBe(
+			"resumed",
+		);
+	});
+
+	it("keeps one guard identity per signature when the repeat count changes between stops", () => {
+		// A loop that trips the guard at 3 repeats and later at 4 is the same loop. The blocked
+		// reason (the durable identity the collection stores) must not carry the count, otherwise
+		// the second stop looks new and re-earns a recovery. Both bounded guards are covered.
+		for (const reason of ["repeated_tool_call", "stagnant_tool_cycle"] as const) {
+			const { controller } = createTestController();
+			controller.saveState(createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" }));
+			expect(controller.recoverFromHarnessGuard({ reason, signature: "bash:unchanged-failure", repeats: 3 })).toBe(
+				"resumed",
+			);
+			expect(controller.recoverFromHarnessGuard({ reason, signature: "bash:unchanged-failure", repeats: 4 })).toBe(
+				"blocked",
+			);
+			const state = controller.getState();
+			expect(state?.status).toBe("blocked");
+			expect(state?.consumedRunawaySignatures).toHaveLength(1);
+			expect(state?.blockedReason).not.toMatch(/\d+ times/);
+			expect(state?.blockedReason).toContain("bash:unchanged-failure");
+			// A genuinely different signature still earns its own single recovery.
+			expect(controller.resumeSystemBlockedGoal(undefined, "owner")).toBe("g1");
+			expect(controller.recoverFromHarnessGuard({ reason, signature: "bash:other", repeats: 7 })).toBe("resumed");
+		}
+	});
+
+	it("refuses further automatic runaway recovery once the signature collection is full, without evicting", () => {
+		const { controller } = createTestController();
+		controller.saveState(createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" }));
+		for (let index = 0; index < MAX_CONSUMED_RUNAWAY_SIGNATURES; index++) {
+			expect(
+				controller.recoverFromHarnessGuard({ reason: "repeated_tool_call", signature: `sig-${index}`, repeats: 3 }),
+			).toBe("resumed");
+		}
+		const full = controller.getState()?.consumedRunawaySignatures ?? [];
+		expect(full).toHaveLength(MAX_CONSUMED_RUNAWAY_SIGNATURES);
+
+		// A brand-new signature is refused: the collection does not evict sig-0 to make room.
+		expect(
+			controller.recoverFromHarnessGuard({ reason: "repeated_tool_call", signature: "sig-new", repeats: 3 }),
+		).toBe("blocked");
+		expect(controller.getState()?.status).toBe("blocked");
+		expect(controller.getState()?.consumedRunawaySignatures).toEqual(full);
+		expect(controller.resumeSystemBlockedGoal()).toBeUndefined();
+
+		// Only the owner restarts the allowance.
+		expect(controller.resumeSystemBlockedGoal(undefined, "owner")).toBe("g1");
+		expect(controller.getState()?.consumedRunawaySignatures).toEqual([]);
+	});
+
+	it("lets the owner prompt resume a goal blocked by a repeated transient provider failure", () => {
+		const { controller } = createTestController();
+		controller.saveState(createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" }));
+		const helper = controller as unknown as { recordContinuationFailure(e: unknown): void };
+		helper.recordContinuationFailure(new Error("rate_limit: 429 Too Many Requests"));
+		helper.recordContinuationFailure(new Error("rate_limit: 429 Too Many Requests"));
+		expect(controller.getState()).toMatchObject({ status: "blocked", systemFailureStreak: 2 });
+
+		// Automatic recovery is exhausted for this streak.
+		expect(controller.resumeSystemBlockedGoal()).toBeUndefined();
+		expect(controller.getState()?.status).toBe("blocked");
+
+		// The owner prompt resumes and clears the streak; the next transient failure recovers again.
+		expect(controller.resumeSystemBlockedGoal(undefined, "owner")).toBe("g1");
+		expect(controller.getState()).toMatchObject({ status: "active", systemFailureStreak: 0 });
+		helper.recordContinuationFailure(new Error("rate_limit: 429 Too Many Requests"));
+		expect(controller.getState()).toMatchObject({ status: "active", systemFailureStreak: 1 });
+	});
+
 	it("resets provider streak only on fresh completion turn ordinal after system resume while preserving runaway fence and resisting replayed ordinals", () => {
 		const sessionManager = SessionManager.inMemory();
 		const { controller } = createTestController({ sessionManager });
 		const initialState = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
 		controller.saveState(initialState);
 
-		// 1. Runaway stop and auto-resume sets runawayRecoverySignature
+		// 1. Runaway stop and auto-resume consumes the runaway signature
 		const firstRecovery = controller.recoverFromHarnessGuard({
 			reason: "repeated_tool_call",
 			signature: "sig-active-replay",
@@ -558,16 +658,15 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 		});
 		expect(firstRecovery).toBe("resumed");
 		expect(controller.getState()?.status).toBe("active");
-		const expectedSignature =
-			"runaway_tool_loop: repeated tool-call signature sig-active-replay 3 times without progress";
-		expect(controller.getState()?.runawayRecoverySignature).toBe(expectedSignature);
+		const expectedSignature = "runaway_tool_loop: repeated tool-call signature sig-active-replay without progress";
+		expect(controller.getState()?.consumedRunawaySignatures).toEqual([expectedSignature]);
 
 		// 2. Transient network failure triggers auto-resume, leaving state active with failure streak 1
 		const helper = controller as unknown as { recordContinuationFailure(e: unknown): void };
 		helper.recordContinuationFailure(new Error("network error: connection lost"));
 		expect(controller.getState()?.status).toBe("active");
 		expect(controller.getState()?.systemFailureStreak).toBe(1);
-		expect(controller.getState()?.runawayRecoverySignature).toBe(expectedSignature);
+		expect(controller.getState()?.consumedRunawaySignatures).toEqual([expectedSignature]);
 
 		// 3. Stale / invalid completionTurn (0) on active goal does NOT reset failure streak
 		let current = controller.getState()!;
@@ -583,7 +682,7 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 		});
 		expect(staleReplay.systemFailureStreak).toBe(1);
 
-		// 4. Expected ordinal (1) resets failure streak, but leaves runawayRecoverySignature intact
+		// 4. Expected ordinal (1) resets failure streak, but leaves the consumed runaway signature intact
 		current = applyGoalEvent(current, {
 			type: "record_continuation_budget",
 			turns: 1,
@@ -595,7 +694,7 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 			now: "T2",
 		});
 		expect(current.systemFailureStreak).toBe(0);
-		expect(current.runawayRecoverySignature).toBe(expectedSignature);
+		expect(current.consumedRunawaySignatures).toEqual([expectedSignature]);
 		expect(current.continuationTurnsUsed).toBe(1);
 		controller.saveState(current);
 
@@ -639,14 +738,14 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 			now: "T4",
 		});
 		expect(freshNextOrdinal.systemFailureStreak).toBe(0);
-		expect(freshNextOrdinal.runawayRecoverySignature).toBe(expectedSignature);
+		expect(freshNextOrdinal.consumedRunawaySignatures).toEqual([expectedSignature]);
 		expect(freshNextOrdinal.continuationTurnsUsed).toBe(2);
 		controller.saveState(freshNextOrdinal);
 
 		// 9. Restart check: create a NEW GoalSessionController on the same SessionManager
 		const restartController = createTestController({ sessionManager }).controller;
 		expect(restartController.getState()?.systemFailureStreak).toBe(0);
-		expect(restartController.getState()?.runawayRecoverySignature).toBe(expectedSignature);
+		expect(restartController.getState()?.consumedRunawaySignatures).toEqual([expectedSignature]);
 		expect(restartController.getState()?.continuationTurnsUsed).toBe(2);
 	});
 

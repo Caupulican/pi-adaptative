@@ -31,7 +31,13 @@ import {
 	type GoalRuntimeSnapshot,
 	type GoalRuntimeSnapshotSettings,
 } from "./goal-runtime-snapshot.ts";
-import { applyGoalEvent, type GoalState, isGoalExecutionActive, isGoalUnfinishedStatus } from "./goal-state.ts";
+import {
+	applyGoalEvent,
+	type GoalState,
+	isGoalExecutionActive,
+	isGoalUnfinishedStatus,
+	MAX_CONSUMED_RUNAWAY_SIGNATURES,
+} from "./goal-state.ts";
 import { applyGoalAction } from "./goal-tool-core.ts";
 import {
 	type ExplicitGoalStartAuthority,
@@ -226,29 +232,36 @@ export class GoalSessionController {
 	 * A bounded runaway/provider-turn guard stops one autonomous run, not the owner's durable intent.
 	 * Resume that narrow class immediately or during restoration while preserving deliberate blocks,
 	 * terminal tool failures, pauses, and quota/budget stops.
+	 *
+	 * `source: "system"` (automatic) honours the recovery allowance: a runaway signature resumes once
+	 * (the durable consumed-signature collection refuses a repeat and refuses everything once full)
+	 * and a transient provider failure resumes once per streak. `source: "owner"` is the owner's own
+	 * prompt: it always resumes a system block and the reducer restarts the allowance. Only the owner
+	 * prompt path may pass it; automatic callers never impersonate owner intent.
 	 */
-	resumeSystemBlockedGoal(now = new Date().toISOString()): string | undefined {
+	resumeSystemBlockedGoal(now = new Date().toISOString(), source: "system" | "owner" = "system"): string | undefined {
 		const current = this.getState();
 		if (!current || !isSystemBlockedGoal(current) || !current.blockedReason) return undefined;
 
 		const prefix = getAutoResumableReasonPrefix(current.blockedReason);
 		if (!prefix) return undefined;
 
-		// Bounded watchdog: do not resume if repeated failure occurred without intervening progress.
-		// For runaway tool loops, check exact reason matches durable runawayRecoverySignature.
-		// For transient provider failures, check durable failure streak (> 1).
-		if (prefix === "runaway_tool_loop:" || prefix === "stagnant_tool_cycle:") {
-			if (current.runawayRecoverySignature === current.blockedReason) {
-				return undefined;
-			}
-		} else {
-			if ((current.systemFailureStreak ?? 0) > 1) return undefined;
-		}
+		if (source === "system" && !this.isAutomaticRecoveryAllowed(current, prefix)) return undefined;
 
-		const resumed = resumeGoal(current, now, "system");
+		const resumed = resumeGoal(current, now, source);
 		if (!resumed.ok) return undefined;
 		this.saveState(resumed.state, getGoalStateRevision(current));
 		return resumed.state.goalId;
+	}
+
+	private isAutomaticRecoveryAllowed(current: GoalState, prefix: string): boolean {
+		if (prefix === "runaway_tool_loop:" || prefix === "stagnant_tool_cycle:") {
+			const consumed = current.consumedRunawaySignatures ?? [];
+			if (consumed.includes(current.blockedReason ?? "")) return false;
+			return consumed.length < MAX_CONSUMED_RUNAWAY_SIGNATURES;
+		}
+		// Transient provider failures: exactly one automatic resume per unrecovered streak.
+		return (current.systemFailureStreak ?? 0) <= 1;
 	}
 
 	/**
@@ -626,18 +639,24 @@ export class GoalSessionController {
 	}
 
 	recoverFromHarnessGuard(info: AgentRunawayStopInfo): GoalGuardRecovery {
+		// The blocked reason is the guard's durable identity: it is what the consumed-signature
+		// collection stores and compares. It therefore names the guard and the signature only. The
+		// repeat count varies between stops of the same loop (a later stop trips at a different
+		// threshold) and would turn one loop into "distinct" signatures; it stays in the runaway_stop
+		// record and the warning (agent-session-guards.ts), not in the identity.
 		const reason =
 			info.reason === "provider_turn_limit"
 				? `provider_turn_limit: reached the explicit ${info.repeats}-request provider-turn limit`
 				: info.reason === "stagnant_tool_cycle"
-					? `stagnant_tool_cycle: repeated tool-call signature ${info.signature} ${info.repeats} times with identical results`
-					: `runaway_tool_loop: repeated tool-call signature ${info.signature} ${info.repeats} times without progress`;
+					? `stagnant_tool_cycle: repeated tool-call signature ${info.signature} with identical results`
+					: `runaway_tool_loop: repeated tool-call signature ${info.signature} without progress`;
 		// One automatic resume per guard signature. A second identical stop means the recovery cue
 		// did not change the model's behavior; resuming again bought a runaway text loop live. The
 		// goal stays blocked with the reason until the owner prompts, which resumes system blocks.
-		const state = this.getState();
+		// The durable consumed-signature collection (goal-state.ts) is the single authority: it
+		// survives event truncation and restart, and alternating signatures cannot re-earn a resume.
 		const alreadyResumedForSignature =
-			info.reason !== "provider_turn_limit" && state?.runawayRecoverySignature === reason;
+			info.reason !== "provider_turn_limit" && (this.getState()?.consumedRunawaySignatures ?? []).includes(reason);
 		if (!this.stopActiveGoal("blocked", reason)) return "no_goal";
 		if (alreadyResumedForSignature) return "blocked";
 		return this.resumeSystemBlockedGoal() !== undefined ? "resumed" : "blocked";

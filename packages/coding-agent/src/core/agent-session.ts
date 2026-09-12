@@ -2718,7 +2718,9 @@ export class AgentSession {
 			this._foregroundPromptLease = submission.lease;
 
 			if (!options?.internalContextType) {
-				const recoveredGoalId = this._goals.resumeSystemBlockedGoal();
+				// The owner's own prompt: a system-blocked goal always resumes here and its automatic
+				// recovery allowance restarts (goal-state.ts `resume_goal` without source "system").
+				const recoveredGoalId = this._goals.resumeSystemBlockedGoal(undefined, "owner");
 				const startedGoalId = this._goals.startOwnerChatGoal(expandedText, this.agent.state.messages);
 				admittedGoalId = startedGoalId ?? recoveredGoalId ?? admittedGoalId;
 			}

@@ -12,7 +12,15 @@
 ### Changed
 
 - Collaboration lifecycle controls: removed redundant model confirmation latches on owned panel actions (`collaboration_stop_job`, `collaboration_dismiss_job`), resolving ambiguous duplicate titles on stop, supporting non-mutating previews via `dryRun: true` on dismissal, and propagating `AbortSignal` cancellations without invoking script executors.
-- Bounded goal continuation recovery: provider failure streaks reset only on verified host completion with matching pre-state ordinals (`completionTurn === continuationTurnsUsed + 1`), preventing stale or duplicate receipts from replenishing retry budgets while keeping runaway recovery signatures distinct from provider transport failures.
+- Goal continuation recovery is bounded: a transient provider failure resumes the goal once per streak, and a runaway or stagnant tool loop resumes once per signature (at most 16 signatures, regardless of how many repeats tripped the guard). A repeated signature or a repeated transient failure leaves the goal blocked until the owner's next prompt, which resumes it and restarts both allowances.
+- The system prompt states standing owner authorization once; the autonomy block, loaded skill bodies and constrained profiles no longer repeat it, and the core prose was trimmed so the 3,300-byte (full) and 4,096-character (minimal) budgets hold on long checkout paths.
+- `run_toolkit_script` no longer takes a model-supplied `confirm` flag; dangerous scripts run only through the host toolkit authorizer (`toolkit.script` edge grant), and a missing authorizer keeps them unexecuted.
+- Plain-text worker completions now go through the same terminal finalization as structured claims: a plain-text worker over its `maxUsd` reports `budget_exhausted` with a `partial` claim instead of `succeeded`.
+- `task_automation` is added to `WORKER_FORBIDDEN_TOOLS` and to the lean-profile blocked tools; workers and constrained models never see it.
+
+### Removed
+
+- The keyword `risk_assessment` tool gate. Under a capability envelope it blocked `bash`/`powershell`/`python` calls whose text matched release, credential, destructive or self-modification words (for example `subprocess.run(["git","status"])` or `shutil.rmtree`), contradicting an explicit owner handoff. Consent for edge operations now comes from the session edge (literal classes, one question, durable grants); the capability envelope still rejects a tool without its capability, a denied or unlisted tool, or a path outside its roots. No gate reads Python source or shell text for intent: `bash` and `python` are explicit host-trust execution boundaries, and no envelope is an OS sandbox.
 
 ## [0.99.19] - 2026-09-12
 

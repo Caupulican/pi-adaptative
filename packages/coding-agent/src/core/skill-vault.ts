@@ -2,7 +2,7 @@ import { type Stats, statSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { composeRequestSystemPrompt } from "@caupulican/pi-agent-core/provider-request-planner";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
-import { OWNER_PRECEDENCE_POLICY, SKILL_CONFLICT_RESOLUTION_RULE } from "./provider-prompt-contracts.ts";
+import { OWNER_PRECEDENCE_POLICY } from "./provider-prompt-contracts.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import {
 	appendSessionSkillExclusion,
@@ -165,7 +165,9 @@ function activeSkillContext(skill: Skill, body: string): string {
 	return [
 		`ACTIVE SKILL ${skill.name}`,
 		`BASE ${skill.baseDir}`,
-		`${OWNER_PRECEDENCE_POLICY.replace(/\.$/, "")}: ${SKILL_CONFLICT_RESOLUTION_RULE}`,
+		// One short precedence line per loaded body; the full conflict rule lives once in the autonomy
+		// block and the skill tool description (provider-prompt-contracts.ts).
+		`${OWNER_PRECEDENCE_POLICY.replace(/\.$/, "")}: on conflict, skill exclude (exact name, reason).`,
 		body,
 	].join("\n");
 }
