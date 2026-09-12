@@ -233,8 +233,19 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The Windows shell corpus wall runs for over a minute on Windows and shares a shard with
+      # tests holding second-scale budgets; three of those failed on time alone while it ran
+      # beside them (2026-09-12). It is excluded from every shard and run by itself, after shard
+      # 1's own tests have finished, so no budgeted test ever competes with it for the runner.
       - name: Test coding-agent shard
         working-directory: packages/coding-agent
         env:
           NODE_OPTIONS: --conditions=pi-source
-        run: node ../../node_modules/vitest/dist/cli.js --run --bail=1 --shard=${{ matrix.shard }}/4
+        run: node ../../node_modules/vitest/dist/cli.js --run --bail=1 --shard=${{ matrix.shard }}/4 --exclude test/windows-shell-corpus.test.ts
+
+      - name: Test the Windows shell corpus wall alone
+        if: matrix.shard == 1
+        working-directory: packages/coding-agent
+        env:
+          NODE_OPTIONS: --conditions=pi-source
+        run: node ../../node_modules/vitest/dist/cli.js --run --bail=1 test/windows-shell-corpus.test.ts

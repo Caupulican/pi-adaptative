@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Changed
+
+- A provider error's formatted text carries the provider's stated reset as "retry after N seconds" when a `retry-after-ms` or `retry-after` response header, or a structured `availability.retry_after` body field, gave one (`NormalizedProviderError.retryAfterMs`), so a classifier that only sees the message learns the true delay instead of guessing.
+- The Codex Responses adapter sends reasoning effort `off` explicitly when no level was requested; left unset, the backend applied its own default effort (hand-ported from upstream).
+
 ## [0.99.18] - 2026-09-11
 
 ### Added
