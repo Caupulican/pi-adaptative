@@ -47,6 +47,10 @@ const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url
 const defaultTestExcludes = [
 	...configDefaults.exclude,
 	...(process.env.PI_RUN_SCRATCH === "1" ? [] : ["**/scratch-*.test.ts"]),
+	// CI runs the Windows shell corpus wall (over a minute on Windows) by itself, after a shard's
+	// own tests: beside second-scale budgets in a parallel shard it made three of them fail on
+	// time alone (2026-09-12). The isolated step runs the file explicitly without this flag.
+	...(process.env.PI_VITEST_ISOLATE_CORPUS === "1" ? ["test/windows-shell-corpus.test.ts"] : []),
 	// The destructive suite (test:destructive) is its own separate vitest config
 	// (vitest.destructive.config.ts) and must never run as part of the default `vitest --run` /
 	// `npm test` — see destructive-testing-blueprint.md §0.4. This exclusion is the only change this

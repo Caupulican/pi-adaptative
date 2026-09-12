@@ -241,7 +241,8 @@ jobs:
         working-directory: packages/coding-agent
         env:
           NODE_OPTIONS: --conditions=pi-source
-        run: node ../../node_modules/vitest/dist/cli.js --run --bail=1 --shard=${{ matrix.shard }}/4 --exclude test/windows-shell-corpus.test.ts
+          PI_VITEST_ISOLATE_CORPUS: "1"
+        run: node ../../node_modules/vitest/dist/cli.js --run --bail=1 --shard=${{ matrix.shard }}/4
 
       - name: Test the Windows shell corpus wall alone
         if: matrix.shard == 1
