@@ -108,10 +108,10 @@ describe("SettingsManager", () => {
 	});
 
 	describe("providerAdmission settings", () => {
-		it("caps Codex at two by default, merges valid overrides, lets 0 lift a default cap and ignores junk", () => {
+		it("caps no provider by default, keeps valid overrides, drops 0 entries and ignores junk", () => {
 			expect(SettingsManager.create(projectDir, agentDir).getProviderAdmissionSettings()).toEqual({
 				enabled: true,
-				limits: { "openai-codex": 2 },
+				limits: {},
 				maxWaitMs: 120_000,
 			});
 			writeFileSync(
@@ -135,7 +135,7 @@ describe("SettingsManager", () => {
 			);
 			expect(SettingsManager.create(projectDir, agentDir).getProviderAdmissionSettings()).toEqual({
 				enabled: true,
-				limits: { "openai-codex": 2 },
+				limits: {},
 				maxWaitMs: 120_000,
 			});
 		});

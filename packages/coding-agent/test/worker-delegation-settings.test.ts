@@ -19,7 +19,8 @@ describe("worker delegation settings", () => {
 		expect(resolved.orchestrationProfile).toBeUndefined();
 		expect(resolved.maxUsd).toBe(DEFAULT_WORKER_DELEGATION_MAX_USD);
 		expect(resolved.maxWallClockMs).toBe(DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS);
-		expect(resolved.maxConcurrent).toBe(20);
+		// The Codex CLI per-session default: 4 concurrent threads including the root, so 3 subagents.
+		expect(resolved.maxConcurrent).toBe(3);
 		expect(resolved.writeEnabled).toBe(true);
 		expect("writePaths" in resolved).toBe(false);
 	});

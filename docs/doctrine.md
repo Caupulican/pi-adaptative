@@ -467,14 +467,15 @@ yield at the provider's machine-wide cap.** Every pi process on the machine regi
 in-flight provider request under `state/provider-admission/` (one file per request, released when
 its stream settles, pruned by any reader once its owner's pid is gone or its heartbeat is stale).
 A foreground request is registered and admitted at once. A worker or background request to a
-provider at its configured limit (`providerAdmission.limits`, default Codex at two) waits for a
-slot, deciding and registering under one lock so the last slot is taken exactly once, and is
+provider at its configured limit (`providerAdmission.limits`; no provider is capped by default,
+matching the Codex CLI, which applies no per-account cap) waits for a slot, deciding and registering under one lock so the last slot is taken exactly once, and is
 admitted regardless after `maxWaitMs` so a wedged sibling can never starve it; every wait is a
 `provider_admission` record in the owner session. The gate sits outside the idle watchdog and the
 perf profiler, so waiting is neither a connect stall nor time to first token. Why: measured
 2026-09-04..11 across several pi sessions, Codex CLI and Claude Code on one box, a second Codex
 request in flight from any process cut generation from 97.7 to 62.2 tokens per second, and no
-process knew what its siblings were sending. Pinned by
+process knew what its siblings were sending; the census did not measure the count at which a cap
+pays for itself, so the ledger records by default and a limit is the owner's choice. Pinned by
 `packages/coding-agent/test/provider-admission.test.ts`.
 
 **Queue validation cannot substitute a directory or start an attempt twice.** Fresh worker and

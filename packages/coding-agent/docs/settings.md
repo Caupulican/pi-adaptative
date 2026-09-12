@@ -246,7 +246,7 @@ Direct `write`/`edit` calls use review-after-apply semantics. The compiled grant
 | `workerDelegation.orchestrationProfile` | string | - | Optional default execution preset; agents may replace its defaults within inherited authority |
 | `workerDelegation.maxUsd` | number | `0` | USD ceiling for one worker task; `0` is unbounded and a positive value explicitly enables the ceiling |
 | `workerDelegation.maxWallClockMs` | number | `0` | Active wall-clock ceiling for one worker task; `0` is unbounded and a positive value explicitly enables the ceiling |
-| `workerDelegation.maxConcurrent` | number | `20` | Global running-agent concurrency inside the fixed fleet and queue bounds |
+| `workerDelegation.maxConcurrent` | number | `3` | Global running-agent concurrency inside the fixed fleet and queue bounds; the default is the Codex CLI's per-session limit (4 threads including the root) |
 | `workerDelegation.writeEnabled` | boolean | `true` | Expose direct `write`/`edit`; explicit `false` revokes them for newly admitted work and narrows resumed grants |
 | `workerDelegation.modelPins` | object | - | Optional exact `default` and per-role provider/model/thinking bindings for fresh workers; malformed or unavailable applicable pins fail closed |
 | `workerDelegation.thinking` | `"step_down"` \| `"inherit"` | `"step_down"` | How a worker derives its thinking level when no authority, profile or pin sets one: one notch below the foreground level (`xhigh` -> `high`, floor `minimal`, `off` stays off) or an exact copy |
@@ -468,12 +468,12 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 
 Every pi process on the machine (owner sessions, their delegated workers, background lanes such as reflection and research) registers each provider request it has in flight under `~/.pi/agent/state/provider-admission/`, one small file per request, removed when the stream settles and pruned by every reader when its owner process is gone or its heartbeat is stale. A request from the owner's own turn (the foreground lane) is always admitted at once. A worker or background request to a provider whose machine-wide in-flight count has reached its limit waits for a slot, polling with a doubling interval, and is admitted regardless after `maxWaitMs` so a wedged sibling can never starve it. Each wait is recorded in the owner session as a `provider_admission` entry (provider, lane, wait, whether it timed out).
 
-Measured 2026-09-11 on one box running several pi sessions, Codex CLI and Claude Code: with another Codex request in flight from any process, Codex generation fell from 97.7 to 62.2 tokens per second and first-token latency rose 40% at two or more, while xAI showed no per-account slowdown at up to eight in flight. The default therefore caps Codex at two non-foreground requests machine-wide and leaves every other provider unbounded. Raising a limit trades the owner's foreground latency for aggregate worker throughput; a value of `0` lifts a default cap.
+Measured 2026-09-11 on one box running several pi sessions, Codex CLI and Claude Code: with another Codex request in flight from any process, Codex generation fell from 97.7 to 62.2 tokens per second and first-token latency rose 40% at two or more, while xAI showed no per-account slowdown at up to eight in flight. The census did not measure the in-flight count at which a cap pays for itself, and the Codex CLI applies no per-account cap of its own (its only concurrency control is the per-session thread limit mirrored by `workerDelegation.maxConcurrent`), so no provider is capped by default: the ledger records what is in flight and a limit is an owner choice. Raising a limit trades the owner's foreground latency for aggregate worker throughput.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `providerAdmission.enabled` | boolean | `true` | Register in-flight requests and gate worker/background lanes; `false` disables both |
-| `providerAdmission.limits` | object | `{ "openai-codex": 2 }` | Per provider id, how many requests may be in flight machine-wide before worker and background lanes wait; merged over the default, `0` removes a cap |
+| `providerAdmission.limits` | object | `{}` | Per provider id, how many requests may be in flight machine-wide before worker and background lanes wait; no provider is capped by default, `0` removes an entry |
 | `providerAdmission.maxWaitMs` | number | `120000` | Longest a waiting request holds back before it is admitted anyway (recorded as `timedOut`) |
 
 ```json

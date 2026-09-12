@@ -158,9 +158,11 @@ describe("leaf worker orchestration", () => {
 			expect(first).toMatchObject({
 				agentId: run.record.laneId,
 				cursor: 0,
-				nextCursor: 2,
 				omittedMessages: 0,
 			});
+			// The cursor is an opaque raw-entry index: lifecycle entries (the worker's request_snapshot,
+			// attempt usage boundaries) sit between messages, so it advances past more than one entry.
+			expect(first.nextCursor).toBeGreaterThan(0);
 			expect(first.messages).toHaveLength(1);
 			expect(first.serializedBytes).toBe(Buffer.byteLength(JSON.stringify(first.messages), "utf8"));
 			expect(first.messages[0]).toMatchObject({ role: "user" });

@@ -299,7 +299,12 @@ export type ResolvedResearchLaneSettings = Required<Omit<ResearchLaneSettings, "
 export const DEFAULT_WORKER_DELEGATION_ENABLED = true;
 export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0;
 export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 0;
-export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT = 20;
+/**
+ * The Codex CLI default: `multi_agent_v2.max_concurrent_threads_per_session` is 4 threads per
+ * session including the root, so three concurrently running subagents. Adopted verbatim rather
+ * than measured here; raise it in settings when the account and the box can take more.
+ */
+export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT = 3;
 export const DEFAULT_WORKER_DELEGATION_WRITE_ENABLED = true;
 export const MAX_WORKER_DELEGATION_MAX_USD = Number.MAX_SAFE_INTEGER;
 export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = Number.MAX_SAFE_INTEGER;
@@ -320,7 +325,7 @@ export interface WorkerDelegationSettings {
 	maxUsd?: number; // default: 0 (unbounded); a positive value caps spend for one worker task
 	maxWallClockMs?: number; // default: 0 (unbounded); a positive value caps one worker task's cumulative active time
 	writeEnabled?: boolean; // default: true; explicit false revokes direct write/edit tools
-	maxConcurrent?: number; // default: 20; running leaf-worker concurrency; fixed fleet safety ceilings separately bound durable identities and queued dispatches
+	maxConcurrent?: number; // default: 3 (the Codex CLI per-session default); running leaf-worker concurrency; fixed fleet safety ceilings separately bound durable identities and queued dispatches
 	modelPins?: WorkerModelPinsSettings; // optional global/local role pins; absent preserves adaptive routing exactly
 	thinking?: WorkerThinkingPolicy; // default: step_down; worker thinking relative to the foreground when no authority or profile pins it
 }
@@ -399,21 +404,22 @@ export type ResolvedToolExecutionSettings = Required<ToolExecutionSettings>;
 
 /**
  * Machine-wide per-provider admission for worker and background provider requests; see
- * `core/provider-admission/`. The foreground lane never waits. Measured 2026-09-11: with another
- * Codex request in flight from any process on the box, generation fell from 97.7 to 62.2 tokens
- * per second, so the default caps Codex at two in flight for non-foreground lanes and leaves every
- * other provider unbounded (xAI showed no per-account slowdown at up to eight in flight).
+ * `core/provider-admission/`. The foreground lane never waits. No provider is capped by default:
+ * the Codex CLI itself applies no per-account request cap (its only concurrency control is the
+ * per-session thread limit mirrored by `workerDelegation.maxConcurrent`), and the 2026-09-11
+ * census measured per-stream slowdown under shared load but not the number at which a cap pays
+ * for itself. By default the ledger only records what is in flight; a limit is an owner choice.
  */
 export interface ProviderAdmissionSettings {
 	enabled?: boolean; // default: true
-	limits?: Record<string, number>; // per provider id: in-flight cap for non-foreground lanes; 0 removes a default cap; merged over DEFAULT_PROVIDER_ADMISSION_LIMITS
+	limits?: Record<string, number>; // per provider id: in-flight cap for non-foreground lanes; none by default; 0 removes an entry
 	maxWaitMs?: number; // default: 120000; a waiting request is admitted regardless after this long (recorded as timedOut)
 }
 
 export type ResolvedProviderAdmissionSettings = Required<ProviderAdmissionSettings>;
 
 export const DEFAULT_PROVIDER_ADMISSION_ENABLED = true;
-export const DEFAULT_PROVIDER_ADMISSION_LIMITS: Readonly<Record<string, number>> = Object.freeze({ "openai-codex": 2 });
+export const DEFAULT_PROVIDER_ADMISSION_LIMITS: Readonly<Record<string, number>> = Object.freeze({});
 export const DEFAULT_PROVIDER_ADMISSION_MAX_WAIT_MS = 120_000;
 const MAX_PROVIDER_ADMISSION_MAX_WAIT_MS = 3_600_000;
 const MAX_PROVIDER_ADMISSION_LIMIT = 10_000;
