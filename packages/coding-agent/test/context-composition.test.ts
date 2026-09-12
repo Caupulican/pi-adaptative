@@ -141,6 +141,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"skill",
 					"skill_audit",
 					"skillify",
+					"task_automation",
 					"task_directory",
 					"task_steps",
 					"tool_task",
@@ -150,33 +151,38 @@ describe("AgentSession.getContextCompositionReport", () => {
 				].sort(),
 			);
 			// Ceilings are bloat guards. Persistent project routing deliberately adds task_directory
-			// (340 measured tokens, 350 ceiling including the bounded status cursor) to the previous
-			// 4,500-token aggregate allowance. Account for that addition
-			// separately: the pre-existing tool surface keeps its original budget, not extra slack.
+			// (132 measured tokens, 350 ceiling including the bounded status cursor) to the previous
+			// 4,500-token aggregate allowance. Task-local deterministic automation deliberately adds
+			// task_automation (681 measured tokens, 720 ceiling preserving roughly 5.7% headroom)
+			// covering action-discriminated lifecycle contracts (spec, validate, run, bind, status).
+			// Account for those deliberate additions separately: the pre-existing tool surface keeps
+			// its original budget, not extra slack.
 			// Earlier ceilings were recalibrated after
 			// provider-tool-projection.ts stopped deleting `type` from enum-bearing schema
 			// properties (providers whose function-declaration schema requires `type` per property,
 			// e.g. Google's OpenAPI subset, reject the whole tool list with a 400 otherwise — see
 			// compactRedundantEnumConstraints). Default surface now also includes skillify,
 			// skill_audit, improvement_loop, and the three lifecycle goal tools. Delegate's
-			// enum-heavy surface measures 844 tokens. task_steps now measures 1,120 after adding
-			// authoritative pipeline linkage and action-discriminated admission; its 1,200-token
-			// ceiling preserves roughly 7.1% headroom. skill measures 97 after the names array
-			// (several skills load in one call, so a setup no longer costs one turn per skill); its
-			// 105-token ceiling preserves roughly 8% headroom (annotations are stripped at the
-			// provider boundary, so there is no prose to trim).
+			// enum-heavy surface measures 864 tokens (875 ceiling). task_steps measures 607 tokens
+			// (1,200 ceiling). skill measures 150 tokens (160 ceiling, roughly 6.7% headroom) after
+			// deliberate additions for inspect, versioned repair with versionToken, and session-wide
+			// exclude with reason. goal measures 295 tokens (305 ceiling, roughly 3.4% headroom)
+			// after adding narrow toolkit grant selectors (toolkitScript, toolkitArgs) to grant_edge.
 			expect(
 				report.toolSchemaTokens,
 				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),
-			).toBeLessThanOrEqual(4_500 + 350);
+			).toBeLessThanOrEqual(4_500 + 350 + 720);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("task_directory")).toBeLessThanOrEqual(350);
-			expect(report.toolSchemaTokens - toolTokens.get("task_directory")!).toBeLessThanOrEqual(4_500);
-			expect(toolTokens.get("skill")).toBeLessThanOrEqual(105);
+			expect(toolTokens.get("task_automation")).toBeLessThanOrEqual(720);
+			expect(
+				report.toolSchemaTokens - toolTokens.get("task_directory")! - toolTokens.get("task_automation")!,
+			).toBeLessThanOrEqual(4_500);
+			expect(toolTokens.get("skill")).toBeLessThanOrEqual(160);
 			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);
 			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(1_200);
 			expect(toolTokens.get("secret_store")).toBeLessThanOrEqual(330);
-			expect(toolTokens.get("goal")).toBeLessThanOrEqual(280);
+			expect(toolTokens.get("goal")).toBeLessThanOrEqual(305);
 			expect(toolTokens.get("pipeline")).toBeLessThanOrEqual(220);
 			// sorted heaviest-first
 			for (let index = 1; index < report.tools.length; index++) {

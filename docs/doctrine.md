@@ -173,16 +173,21 @@ the messages in every prompt, so ordinary turns must not churn disclosed schemas
 commits a new tool generation, and provider-specific tools follow the active model; those intentional
 transitions can invalidate the prompt cache and do not promise a cache hit. The root default surface
 includes `runtime_update` and `webfetch` within their existing schema-token ceilings. Persistent
-multi-project control deliberately adds `task_directory`: its separate ceiling is 350 schema tokens,
-and every pre-existing tool together retains the 4,500-token aggregate limit. This explicitly replaces
-the old whole-surface 4,500-token ceiling with 4,850, not an allowance for unrelated schema growth.
-The bounded status cursor brings this tool to 340 measured tokens: every status or mutation response
-pages whole rows within 128 KiB instead of returning the reproduced 1,970,171-byte registry. The byte
-budget retains a complete maximum-size JSON-escaped active path and a full row. Cursors identify the
-snapshot, task and session; changed state requires restarting the listing, while unchanged replay is
-read-only. This moves only the new tool's prior 330-token ceiling, not the existing-tool budget.
-The addition addresses reproduced wrong-directory execution with durable model-controlled pins;
-directory changes do not churn schemas or widen worker grants. Pinned by
+multi-project control deliberately adds `task_directory` (132 measured tokens against its separate 350
+ceiling): every status or mutation response pages whole rows within 128 KiB instead of returning the
+reproduced 1,970,171-byte registry, and the byte budget retains a complete maximum-size JSON-escaped
+active path and a full row. Cursors identify the snapshot, task and session; changed state requires
+restarting the listing, while unchanged cursor replay is read-only. Task-local deterministic automation
+deliberately adds `task_automation` (681 measured tokens against a dedicated 720 ceiling) covering
+action-discriminated contracts (`spec`, `validate`, `run`, `bind`, `status`). Deliberate feature additions
+recalibrate individual tool budgets: `skill` rises from 105 to 160 (150 measured tokens, 6.7% headroom)
+for `inspect`, versioned `repair` with `versionToken`, and session-wide `exclude` with `reason`; `goal` rises
+from 280 to 305 (295 measured tokens, 3.4% headroom) for narrow toolkit selectors (`toolkitScript`, `toolkitArgs`)
+in `grant_edge`. Live provider projection measures 5,031 total schema tokens against an aggregate ceiling
+of 5,570 (4,500 base + 350 task_directory + 720 task_automation), while core tools excluding automation
+and directory measure 4,218 tokens, strictly under the unchanged 4,500 base limit. The additions address
+reproduced wrong-directory execution and safe task automation without widening worker grants or introducing
+per-turn schema churn. Pinned by
 `packages/coding-agent/test/context-composition.test.ts`,
 `packages/coding-agent/test/session-task-directories.test.ts`,
 `packages/coding-agent/test/task-directory-status.test.ts`,
@@ -684,3 +689,4 @@ measurement gains no new surface.
 | 2026-09-08 | A bounded harness guard (stagnant cycle, runaway loop) resumes the goal automatically once per signature; the same signature stopping the run again leaves the goal blocked with that reason until the owner prompts, and the warning says so. The Windows shell engine's `sed` supports addresses, `-n`, `-e`, `-E`, `p`, `d`, and `s///`; Git-Bash `/c/…` and WSL `/mnt/c/…` drive roots are rewritten to `C:/…` in the router and the engine; a worker timeout names its wall-clock cap and the setting behind it; binding a task directory with the workspace's own absolute path is accepted. |
 | 2026-09-08 | Windows shell parity: with the engine on, every bash call runs on the shell engine (the PowerShell floor serves only `windowsShell.pythonEngine: false` and a runtime outage); coreutils names dispatch to Git for Windows' real GNU binaries before any engine reimplementation, with the GNU directory first on those tools' own PATH; the engine grammar covers functions, `case`, `[[ ]]`, brace expansion, the bash parameter operators, `set -e/-u/-x/-o pipefail` and `command -v`, and names arrays, indirection, `select` and process substitution as refusals. The regression wall `test/windows-shell-corpus.test.ts` replays every sanitized command shape of the measured Windows sessions (`test/fixtures/windows-shell-corpus/commands.json`) through the router, the grammar and the executor with real GNU tools on Linux and Windows; its refusal budget for supported families is zero, a live Windows shell failure is added there as its failing shape before its fix lands, and the replay leg carries a timeout matching its own single-process spawn bound (vitest's 30 s default cut a defect-free 25 s replay off under a parallel suite run). The corpus is produced and replayed by one harness-owned tool (`pi-shell-engine/corpus.py`, driven by `scripts/windows-shell-corpus.mjs`): harvest sanitizes every `bash` call of any session transcript with a hard leak guard and records the real command's grammar verdict, replay classifies defects, and the wall test consumes the same replay, so the fixture is reproducible from transcripts on any machine and never carries a private command. |
 | 2026-09-12 | Toolkit script authority is a host-owned edge class (`toolkit.script`) with cryptographic scope keys derived from `(cwd, scriptPath, runner, scriptName, argv)`; grants persist across compaction and reload, mutating script registration invalidates the grant, and owner authorization is reused without model confirmation prompts. Goal continuation bounded recovery rearms transient provider failures once per streak or waits on in-flight work, resetting failure streaks only on verified host completion with matching pre-state turn ordinals. |
+| 2026-09-12 | Tool surfaces aggregate ceiling recalibrates from 4,850 to 5,570 tokens (4,500 base + 350 task_directory + 720 task_automation) for deterministic task automation (681 measured, 720 ceiling), with feature deltas for versioned skill inspection/repair/exclusion (150 measured, 160 ceiling) and narrow toolkit grant selectors (295 measured, 305 ceiling). Core tools measure 4,218 tokens under the unchanged 4,500 base. |
