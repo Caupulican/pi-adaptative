@@ -1,3 +1,4 @@
+import { join, resolve, sep } from "node:path";
 import { describe, expect, test } from "vitest";
 import { ORIENTATION_SURVEY_RULE } from "../src/core/provider-prompt-contracts.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
@@ -116,14 +117,27 @@ describe("buildSystemPrompt", () => {
 			// The prompt embeds two host paths (PI DOCS root and the cwd). The budget must hold for a
 			// deterministic long checkout, not just this machine: a hosted runner nests the repository
 			// name twice and the temp cwd can be deeper still.
-			const longCheckout =
-				"/home/runner/work/pi-adaptative-release-candidate/pi-adaptative-release-candidate/packages/coding-agent";
+			// Built with native path utilities: on POSIX this is /home/runner/..., on Windows the same
+			// segments under the current drive (D:\home\runner\...), which is the spelling the package
+			// root resolves to and prints. The cwd line is deliberately slash-normalized by the prompt.
+			const longCheckout = resolve(
+				sep,
+				"home",
+				"runner",
+				"work",
+				"pi-adaptative-release-candidate",
+				"pi-adaptative-release-candidate",
+				"packages",
+				"coding-agent",
+			);
+			const longCwd = join(longCheckout, "worktrees", "lane-a");
+			expect(longCheckout.length).toBeGreaterThanOrEqual(100);
 			const previousPackageDir = process.env.PI_PACKAGE_DIR;
 			process.env.PI_PACKAGE_DIR = longCheckout;
 			try {
-				const prompt = buildSystemPrompt({ contextFiles: [], skills: [], cwd: `${longCheckout}/worktrees/lane-a` });
+				const prompt = buildSystemPrompt({ contextFiles: [], skills: [], cwd: longCwd });
 				expect(prompt).toContain(`PI DOCS: root=${longCheckout}.`);
-				expect(prompt).toContain(`Current working directory: ${longCheckout}/worktrees/lane-a`);
+				expect(prompt).toContain(`Current working directory: ${longCwd.replace(/\\/g, "/")}`);
 				expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(3_300);
 			} finally {
 				if (previousPackageDir === undefined) delete process.env.PI_PACKAGE_DIR;

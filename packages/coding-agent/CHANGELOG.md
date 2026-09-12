@@ -18,6 +18,10 @@
 - Plain-text worker completions now go through the same terminal finalization as structured claims: a plain-text worker over its `maxUsd` reports `budget_exhausted` with a `partial` claim instead of `succeeded`.
 - `task_automation` is added to `WORKER_FORBIDDEN_TOOLS` and to the lean-profile blocked tools; workers and constrained models never see it.
 
+### Fixed
+
+- A gated tool call recorded its capability-envelope outcome twice (once before and once after extension hooks), doubling `gate_outcome` telemetry and history even for a plain read with no hook. The envelope is still evaluated on the raw arguments and again on the arguments the hooks hand to the tool, but one outcome is published per call: the pre-hook denial when it rejects, otherwise the final post-hook outcome; a cancellation after an evaluation completed keeps that decision on record, and a call cancelled before any evaluation completes publishes none.
+
 ### Removed
 
 - The keyword `risk_assessment` tool gate. Under a capability envelope it blocked `bash`/`powershell`/`python` calls whose text matched release, credential, destructive or self-modification words (for example `subprocess.run(["git","status"])` or `shutil.rmtree`), contradicting an explicit owner handoff. Consent for edge operations now comes from the session edge (literal classes, one question, durable grants); the capability envelope still rejects a tool without its capability, a denied or unlisted tool, or a path outside its roots. No gate reads Python source or shell text for intent: `bash` and `python` are explicit host-trust execution boundaries, and no envelope is an OS sandbox.

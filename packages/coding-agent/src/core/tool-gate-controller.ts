@@ -64,12 +64,18 @@ export class ToolGateController {
 			return escalation;
 		}
 
-		// 1. Pre-hook capability envelope & path bounds check on raw args
+		// The capability envelope is evaluated twice per call - once on the raw arguments before any
+		// extension hook can see them, once on the arguments the hooks actually hand to the tool (a
+		// hook may rewrite a path in place) - but it is PUBLISHED once: the pre-hook denial when it
+		// rejects, otherwise the final post-hook outcome. The `finally` below is the single owner of
+		// that publication, so an early hook block, hook failure or later cancellation still leaves
+		// exactly one record - the last envelope decision that actually completed. A call cancelled
+		// before any evaluation completes leaves none (there is no decision to record).
 		const envelope = structuredClone(this.deps.getCapabilityEnvelope());
 		const scopeCwd = this.deps.getCwd();
-		const evaluateEnvelope = async (currentArgs: unknown): Promise<BeforeToolCallResult | undefined> => {
+		const evaluateEnvelope = async (currentArgs: unknown): Promise<GateOutcome> => {
 			signal?.throwIfAborted();
-			const gateResult = await evaluateToolGateAsync({
+			return evaluateToolGateAsync({
 				toolName: toolCall.name,
 				args: currentArgs,
 				cwd: executionContext?.cwd ?? scopeCwd,
@@ -78,62 +84,70 @@ export class ToolGateController {
 				pathAuthority,
 				signal,
 			});
-			if (envelope) this.deps.recordGateOutcome(gateResult);
-			if (gateResult.outcome === "block") {
-				return {
-					block: true,
-					reason: `Tool execution blocked by autonomy gate [${gateResult.gate}]: ${gateResult.message} (${gateResult.reasonCode})`,
-				};
-			}
-			return undefined;
 		};
+		const blockedBy = (gateResult: GateOutcome): BeforeToolCallResult | undefined =>
+			gateResult.outcome === "block"
+				? {
+						block: true,
+						reason: `Tool execution blocked by autonomy gate [${gateResult.gate}]: ${gateResult.message} (${gateResult.reasonCode})`,
+					}
+				: undefined;
 
-		const denied = await evaluateEnvelope(args);
-		if (denied) return denied;
+		// 1. Pre-hook capability envelope & path bounds check on raw args
+		let terminalOutcome = await evaluateEnvelope(args);
+		try {
+			const denied = blockedBy(terminalOutcome);
+			if (denied) return denied;
 
-		// 2. Extension tool_call hooks
-		const runner = this.deps.getExtensionRunner();
-		let extensionResult: BeforeToolCallResult | undefined;
-		if (runner.hasHandlers("tool_call")) {
-			try {
-				extensionResult = await runner.emitToolCall(
-					{
-						type: "tool_call",
-						toolName: toolCall.name,
-						toolCallId: toolCall.id,
-						input: args as Record<string, unknown>,
-					},
-					executionContext,
-				);
-			} catch (err) {
-				if (err instanceof Error) {
-					throw err;
+			// 2. Extension tool_call hooks
+			const runner = this.deps.getExtensionRunner();
+			let extensionResult: BeforeToolCallResult | undefined;
+			if (runner.hasHandlers("tool_call")) {
+				try {
+					extensionResult = await runner.emitToolCall(
+						{
+							type: "tool_call",
+							toolName: toolCall.name,
+							toolCallId: toolCall.id,
+							input: args as Record<string, unknown>,
+						},
+						executionContext,
+					);
+				} catch (err) {
+					if (err instanceof Error) {
+						throw err;
+					}
+					throw new Error(`Extension failed, blocking execution: ${String(err)}`);
 				}
-				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
+				if (extensionResult?.block) return extensionResult;
 			}
-			if (extensionResult?.block) return extensionResult;
-		}
 
-		// 3. Post-hook arguments & envelope re-check
-		const finalArgs = (extensionResult as { args?: unknown })?.args ?? args;
-		const effectiveCwd = executionContext?.cwd ?? scopeCwd;
-		if (this.deps.checkDirectScriptExecution) {
-			const directCheck = this.deps.checkDirectScriptExecution(toolCall.name, finalArgs, effectiveCwd);
-			if (directCheck) {
-				return directCheck;
+			// 3. Post-hook arguments: direct-script gate, then the envelope on what will really run
+			const finalArgs = (extensionResult as { args?: unknown })?.args ?? args;
+			const effectiveCwd = executionContext?.cwd ?? scopeCwd;
+			if (this.deps.checkDirectScriptExecution) {
+				const directCheck = this.deps.checkDirectScriptExecution(toolCall.name, finalArgs, effectiveCwd);
+				if (directCheck) {
+					return directCheck;
+				}
 			}
+			terminalOutcome = await evaluateEnvelope(finalArgs);
+			const deniedAfterHook = blockedBy(terminalOutcome);
+			if (deniedAfterHook) return deniedAfterHook;
+
+			// 4. Single edge authorization on the actual final operation
+			const edge = await this.deps.checkEdge?.(toolCall.name, finalArgs, executionContext?.cwd, signal);
+			if (edge) return edge;
+
+			if (extensionResult) return extensionResult;
+
+			this.deps.getToolSelectionController?.()?.begin(toolCall.id, toolCall.name, finalArgs);
+			return undefined;
+		} finally {
+			// A later abort does not invalidate a decision the envelope already made; the pre-hook
+			// evaluation above either completed (and is published) or threw before this block exists.
+			if (envelope) this.deps.recordGateOutcome(terminalOutcome);
 		}
-		const deniedAfterHook = await evaluateEnvelope(finalArgs);
-		if (deniedAfterHook) return deniedAfterHook;
-
-		// 4. Single edge authorization on the actual final operation
-		const edge = await this.deps.checkEdge?.(toolCall.name, finalArgs, executionContext?.cwd, signal);
-		if (edge) return edge;
-
-		if (extensionResult) return extensionResult;
-
-		this.deps.getToolSelectionController?.()?.begin(toolCall.id, toolCall.name, finalArgs);
-		return undefined;
 	};
 
 	readonly afterToolCall: AfterToolCall = async ({ toolCall, args, result, isError, executionContext }) => {

@@ -48,6 +48,7 @@ beforeEach(() => {
 				backendName: "native",
 				terminalId: "terminal",
 				turnId: "turn",
+				status: "running",
 				deadlineAt: Date.now() + 30000,
 				prompt: "work",
 			},
@@ -99,3 +100,46 @@ it("keeps uncertain native work fenced when delivery and cleanup both fail", asy
 	expect(ports.finish).not.toHaveBeenCalled();
 	expect(ports.release).toHaveBeenCalledTimes(1);
 });
+
+function loadedAgent(overrides: Record<string, unknown>) {
+	return {
+		sessionName: "session",
+		peerCommand: "pi --collaboration-peer",
+		deadlineSeconds: 30,
+		agents: [
+			{
+				id: "agent",
+				backendName: "native",
+				terminalId: "terminal",
+				turnId: "turn",
+				status: "running",
+				deadlineAt: Date.now() + 30000,
+				prompt: "work",
+				...overrides,
+			},
+		],
+	};
+}
+
+it.each([
+	["a superseded turn id", { turnId: "turn-2" }],
+	["a turn that is no longer running", { status: "stopped" }],
+	[
+		"a turn with steering admitted",
+		{ steering: { requestId: "steer-1", priorTurnId: "turn", prompt: "next", answering: false, admittedAt: 1 } },
+	],
+])(
+	"never stops another turn's native work after an uncertain delivery when the record shows %s",
+	async (_label, overrides) => {
+		// The claimed record is the running turn while the prompt is delivered; by the time delivery
+		// fails, the store says the turn is owned by something else. Cleanup must not touch it.
+		ports.load.mockReturnValueOnce(loadedAgent({})).mockReturnValue(loadedAgent(overrides));
+		ports.execute.mockRejectedValue(new Error("delivery unknown"));
+		await runCollaborationWorker(args);
+		expect(ports.execute).toHaveBeenCalledTimes(1);
+		expect(ports.stop).not.toHaveBeenCalled();
+		expect(ports.finish).not.toHaveBeenCalled();
+		expect(ports.release).toHaveBeenCalledTimes(1);
+		expect(process.exitCode).toBe(1);
+	},
+);

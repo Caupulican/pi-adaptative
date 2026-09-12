@@ -53,12 +53,15 @@ function createTestScripts(): ToolkitScript[] {
 }
 
 function writeHarmlessScripts(tempDir: string): void {
+	// Echo the raw argv. A PowerShell `param($a, $b)` block does not bind a `--prod` token: real
+	// powershell.exe (-NoProfile -ExecutionPolicy Bypass -File script.ps1 --prod) leaves $a/$b empty
+	// and puts the token in the automatic $args, so the fixture reads $args (bash: "$@").
 	const scriptContent = isWin
-		? 'param($a, $b)\nWrite-Output "safe-output $a $b"\n'
-		: '#!/usr/bin/env bash\necho "safe-output $1 $2"\n';
+		? "Write-Output \"safe-output $($args -join ' ')\"\n"
+		: '#!/usr/bin/env bash\necho "safe-output $*"\n';
 	const otherContent = isWin
-		? 'param($a, $b)\nWrite-Output "other-output $a $b"\n'
-		: '#!/usr/bin/env bash\necho "other-output $1 $2"\n';
+		? "Write-Output \"other-output $($args -join ' ')\"\n"
+		: '#!/usr/bin/env bash\necho "other-output $*"\n';
 
 	writeFileSync(join(tempDir, scriptFilename), scriptContent, { mode: 0o755 });
 	writeFileSync(join(tempDir, otherScriptFilename), otherContent, { mode: 0o755 });
