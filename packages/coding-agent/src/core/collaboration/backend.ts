@@ -68,6 +68,14 @@ export interface CollaborationQuestionAnswer {
 	timeoutMs: number;
 }
 
+export interface CollaborationEvent {
+	type: "agent_status_changed" | "pane_exited" | "pane_closed" | "pane_agent_detected" | "connection_closed";
+	paneId?: string;
+	terminalId?: string;
+	status?: CollaborationAgentStatus;
+	raw?: unknown;
+}
+
 export interface CollaborationBackend {
 	readonly id: string;
 	readonly session: string;
@@ -75,6 +83,7 @@ export interface CollaborationBackend {
 	splitPane(
 		input: CollaborationLocation & { paneId: string; direction?: "right" | "down" },
 	): Promise<CollaborationPane>;
+	getPane(paneId: string): Promise<CollaborationPane>;
 	startAgent(input: CollaborationStart): Promise<CollaborationAgent>;
 	getAgent(target: string): Promise<CollaborationAgent>;
 	listAgents(): Promise<CollaborationAgent[]>;
@@ -90,6 +99,12 @@ export interface CollaborationBackend {
 		tokens: Readonly<Record<string, string | null>>,
 		sequence: number,
 	): Promise<void>;
+	subscribeEvents?(
+		paneId: string,
+		listener: (event: CollaborationEvent) => void,
+		signal?: AbortSignal,
+	): Promise<() => void>;
+	sendKeys?(target: string, keys: readonly string[]): Promise<void>;
 }
 
 export class CollaborationBackendError extends Error {

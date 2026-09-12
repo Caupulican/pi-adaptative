@@ -335,7 +335,7 @@ describe("WebFetch content and artifact boundary", () => {
 	it("degrades excessive HTML depth to the plain-text extract instead of refusing", async () => {
 		await expectHtmlComplexityDegraded(`${"<div>".repeat(129)}body${"</div>".repeat(129)}`);
 	});
-	it.each(["<!-- hidden -->".repeat(50_001), `${"<p>" + "y".repeat(1024) + "</p>"}`.repeat(4000)])(
+	it.each(["<!-- hidden -->".repeat(50_001), `<p>${"y".repeat(1024)}</p>`.repeat(4000)])(
 		"degrades wide sibling fan-out over large text, which Turndown folds quadratically (%#)",
 		async (content) => {
 			// Measured: 4,000 siblings over 4 MB take 17 s in Turndown; the budget models exactly that

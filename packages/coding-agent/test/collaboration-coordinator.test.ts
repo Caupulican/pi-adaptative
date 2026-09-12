@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import type { CollaborationBackend } from "../src/core/collaboration/backend.ts";
 import { CollaborationCoordinator, stopCollaborationAgent } from "../src/core/collaboration/coordinator.ts";
-import { CollaborationJobStore } from "../src/core/collaboration/job-store.ts";
+import { type CollaborationJob, CollaborationJobStore } from "../src/core/collaboration/job-store.ts";
+import { collaborationFixture } from "./helpers/collaboration-fixture.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -31,6 +32,7 @@ it("a stopped peer's question wakes its parent while another peer keeps working,
 			args: [],
 			env: {},
 			backendName: id,
+			paneId: `pane-${id}`,
 			terminalId: id,
 			profile: { identity: id, allowedTools: ["read", "bash"], writePaths: [] },
 		})),
@@ -103,7 +105,7 @@ async function controlledTeam() {
 	const backend = { getAgent, closePane, closeWorkspace } as unknown as CollaborationBackend;
 	const report = vi.fn();
 	const launchTurn = vi.fn(async () => {});
-	const backendFactory = vi.fn(async (_session: string, _create?: boolean) => backend);
+	const backendFactory = vi.fn(async (_job: CollaborationJob, _create?: boolean) => backend);
 	const coordinator = new CollaborationCoordinator({ store, backend: backendFactory, report, launchTurn });
 	const one = store.reserveTurn("team", "one", "first");
 	const two = store.reserveTurn("team", "two", "second");
@@ -129,7 +131,10 @@ it("a deadline stop is fenced to one exact turn and leaves other peers running",
 	expect(f.closePane).not.toHaveBeenCalled();
 	expect(await f.coordinator.stopAgent("team", "one", f.one.turnId)).toBe(true);
 	expect(f.closePane).toHaveBeenCalledExactlyOnceWith("pane-one");
-	expect(f.backendFactory).toHaveBeenCalledExactlyOnceWith("pi-team", false);
+	expect(f.backendFactory).toHaveBeenCalledExactlyOnceWith(
+		expect.objectContaining({ id: "team", sessionName: "pi-team" }),
+		false,
+	);
 	expect(f.closeWorkspace).not.toHaveBeenCalled();
 	expect(f.store.load("team").agents[1].status).toBe("reserved");
 	expect(f.report).toHaveBeenCalledExactlyOnceWith(
@@ -215,7 +220,10 @@ it("passes the immutable structured executable to native agent startup", async (
 	});
 	const agents = [{ ...f.input.agents[0], executable: "/opt/provider wrapper" }];
 	await f.coordinator.launch({ ...f.input, id: "new-job", agents });
-	expect(f.backendFactory).toHaveBeenCalledExactlyOnceWith("pi-team", true);
+	expect(f.backendFactory).toHaveBeenCalledExactlyOnceWith(
+		expect.objectContaining({ id: "new-job", sessionName: "pi-team" }),
+		true,
+	);
 	expect(startAgent).toHaveBeenCalledWith(expect.objectContaining({ executable: "/opt/provider wrapper", args: [] }));
 	expect(() =>
 		f.store.update("new-job", (job) => {
@@ -249,4 +257,66 @@ it("rejects duplicate durable admission before creating any backend process", as
 	await expect(f.coordinator.launch(f.input)).rejects.toThrow(/already exists/);
 	expect(f.backendFactory).not.toHaveBeenCalled();
 	expect(f.store.load("team").agents.map((agent) => agent.status)).toEqual(["reserved", "reserved"]);
+});
+
+it("shared fixture defaults to managed-workspace and verifies explicit current-pane never falls back", async () => {
+	const f = await collaborationFixture();
+	try {
+		// Default execute call applies managed-workspace placement
+		await f.execute({
+			action: "launch_workspace",
+			launchKey: "default-placement",
+			agents: [{ provider: "pi" }],
+		});
+		expect(f.store.load("default-placement").placement).toBe("managed-workspace");
+
+		// When Herdr caller environment is modeled, explicit current-pane preserves current-pane
+		// and never falls back to managed-workspace (fails on unmodeled caller pane in fixture backend)
+		const savedEnv = {
+			HERDR_ENV: process.env.HERDR_ENV,
+			HERDR_PANE_ID: process.env.HERDR_PANE_ID,
+			HERDR_WORKSPACE_ID: process.env.HERDR_WORKSPACE_ID,
+			HERDR_TAB_ID: process.env.HERDR_TAB_ID,
+			HERDR_SOCKET_PATH: process.env.HERDR_SOCKET_PATH,
+			HERDR_BIN_PATH: process.env.HERDR_BIN_PATH,
+		};
+		try {
+			process.env.HERDR_ENV = "1";
+			process.env.HERDR_PANE_ID = "pane-caller";
+			process.env.HERDR_WORKSPACE_ID = "workspace-caller";
+			process.env.HERDR_TAB_ID = "tab-caller";
+			process.env.HERDR_SOCKET_PATH = "/tmp/herdr-fixture.sock";
+			process.env.HERDR_BIN_PATH = "/bin/herdr";
+
+			await expect(
+				f.execute({
+					action: "launch_workspace",
+					launchKey: "explicit-current-pane",
+					placement: "current-pane",
+					agents: [{ provider: "pi" }],
+				}),
+			).rejects.toThrow("Missing fixture pane");
+
+			// When outside Herdr (HERDR_ENV=0), explicit current-pane refuses without fallback
+			process.env.HERDR_ENV = "0";
+			await expect(
+				f.execute({
+					action: "launch_workspace",
+					launchKey: "explicit-current-pane-no-herdr",
+					placement: "current-pane",
+					agents: [{ provider: "pi" }],
+				}),
+			).rejects.toThrow(/Placement 'current-pane' requires a running Herdr environment/);
+		} finally {
+			for (const [key, val] of Object.entries(savedEnv)) {
+				if (val === undefined) {
+					delete process.env[key];
+				} else {
+					process.env[key] = val;
+				}
+			}
+		}
+	} finally {
+		await f.cleanup();
+	}
 });

@@ -13,6 +13,7 @@ import { sameFileVersion } from "./util/bounded-file.ts";
 
 /** Discovery retains only this bounded metadata prefix, never the whole skill body. */
 export const MAX_SKILL_FRONTMATTER_BYTES = 16 * 1024;
+export const MAX_ACTIVE_SKILL_BODY_BYTES = 64 * 1024;
 const SKILL_FRONTMATTER_READ_CHUNK_BYTES = 1024;
 
 export const MAX_SKILL_NAME_LENGTH = 64;

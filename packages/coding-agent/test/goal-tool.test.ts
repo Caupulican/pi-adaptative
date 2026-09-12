@@ -2,7 +2,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
-import { describe, expect, it } from "vitest";
+import type { ImageContent, TextContent } from "@caupulican/pi-ai";
+import { describe, expect, it, vi } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { cancelPersistedGoal } from "../src/core/goals/goal-lifecycle.ts";
 import type { GoalState } from "../src/core/goals/goal-state.ts";
@@ -15,6 +16,18 @@ import {
 } from "../src/core/tools/goal.ts";
 
 const ctx = undefined as unknown as ExtensionContext;
+
+function getToolResultText(result: { content?: readonly (TextContent | ImageContent)[] }): string {
+	const parts: string[] = [];
+	if (result.content) {
+		for (const part of result.content) {
+			if (part.type === "text") {
+				parts.push(part.text);
+			}
+		}
+	}
+	return parts.join("\n");
+}
 
 /** A file URL that is well-formed on every platform and resolves to nothing. */
 const missingFile = (name: string) => pathToFileURL(join(tmpdir(), "pi-goal-test-missing", name)).href;
@@ -687,5 +700,313 @@ describe("goal setup in one call", () => {
 			"two",
 		]);
 		expect(getState()?.requirements.map((requirement) => requirement.status)).toEqual(["satisfied"]);
+	});
+});
+
+describe("goal grant_edge with narrow toolkit selectors", () => {
+	it("grants narrow toolkit operation with resolved scopeKey and verified user quote", async () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({
+			role: "user",
+			content: "run the dev database migrations now",
+			timestamp: 1000,
+		});
+
+		const grantEdge = vi.fn();
+		const resolveToolkitScriptScope = vi.fn((script: string, args: readonly string[]) => {
+			if (script === "update-db" && args.length === 1 && args[0] === "--preview") {
+				return { scopeKey: "scope-update-db-preview-hash" };
+			}
+			return { error: `unknown script: ${script}` };
+		});
+
+		const tool = createGoalToolDefinition({
+			getGoalState: () => undefined,
+			saveGoalState: () => {},
+			resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri),
+			grantEdge,
+			resolveToolkitScriptScope,
+		});
+
+		const result = await tool.execute(
+			"call-grant",
+			{
+				action: "grant_edge",
+				edgeClass: "toolkit.script",
+				toolkitScript: "update-db",
+				toolkitArgs: ["--preview"],
+				quote: "run the dev database migrations now",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(result.isError).toBeFalsy();
+		expect(resolveToolkitScriptScope).toHaveBeenCalledWith("update-db", ["--preview"]);
+		expect(grantEdge).toHaveBeenCalledWith({
+			class: "toolkit.script",
+			quote: "run the dev database migrations now",
+			messageEntryId: expect.any(String),
+			scopeKey: "scope-update-db-preview-hash",
+		});
+		expect(result.details).toMatchObject({
+			action: "grant_edge",
+			applied: true,
+			edgeClass: "toolkit.script",
+			scopeKey: "scope-update-db-preview-hash",
+		});
+		expect(getToolResultText(result)).toContain("update-db");
+	});
+
+	it("grants broad class when toolkitScript and toolkitArgs are omitted", async () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({
+			role: "user",
+			content: "you have full permission to run any registered toolkit scripts",
+			timestamp: 1000,
+		});
+
+		const grantEdge = vi.fn();
+		const resolveToolkitScriptScope = vi.fn();
+
+		const tool = createGoalToolDefinition({
+			getGoalState: () => undefined,
+			saveGoalState: () => {},
+			resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri),
+			grantEdge,
+			resolveToolkitScriptScope,
+		});
+
+		const result = await tool.execute(
+			"call-grant-broad",
+			{
+				action: "grant_edge",
+				edgeClass: "toolkit.script",
+				quote: "you have full permission to run any registered toolkit scripts",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(result.isError).toBeFalsy();
+		expect(resolveToolkitScriptScope).not.toHaveBeenCalled();
+		expect(grantEdge).toHaveBeenCalledWith({
+			class: "toolkit.script",
+			quote: "you have full permission to run any registered toolkit scripts",
+			messageEntryId: expect.any(String),
+		});
+		expect((result.details as GoalToolDetails).scopeKey).toBeUndefined();
+	});
+
+	it("rejects toolkitArgs when toolkitScript is omitted without recording a grant", async () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({
+			role: "user",
+			content: "run whatever script with fast flag",
+			timestamp: 1000,
+		});
+
+		const grantEdge = vi.fn();
+		const tool = createGoalToolDefinition({
+			getGoalState: () => undefined,
+			saveGoalState: () => {},
+			resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri),
+			grantEdge,
+		});
+
+		const result = await tool.execute(
+			"call-invalid-args",
+			{
+				action: "grant_edge",
+				edgeClass: "toolkit.script",
+				toolkitArgs: ["--fast"],
+				quote: "run whatever script with fast flag",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(result.isError).toBe(true);
+		expect(grantEdge).not.toHaveBeenCalled();
+		expect(getToolResultText(result)).toContain("toolkitArgs requires toolkitScript");
+	});
+
+	it("rejects toolkit selectors for non-toolkit edge class without recording a grant", async () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({
+			role: "user",
+			content: "publish package to registry",
+			timestamp: 1000,
+		});
+
+		const grantEdge = vi.fn();
+		const tool = createGoalToolDefinition({
+			getGoalState: () => undefined,
+			saveGoalState: () => {},
+			resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri),
+			grantEdge,
+		});
+
+		const result = await tool.execute(
+			"call-invalid-class",
+			{
+				action: "grant_edge",
+				edgeClass: "package.publish",
+				toolkitScript: "prepare-db",
+				quote: "publish package to registry",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(result.isError).toBe(true);
+		expect(grantEdge).not.toHaveBeenCalled();
+		expect(getToolResultText(result)).toContain("only valid for edgeClass 'toolkit.script'");
+	});
+
+	it("rejects empty toolkitScript without recording a grant", async () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({
+			role: "user",
+			content: "run the script",
+			timestamp: 1000,
+		});
+
+		const grantEdge = vi.fn();
+		const tool = createGoalToolDefinition({
+			getGoalState: () => undefined,
+			saveGoalState: () => {},
+			resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri),
+			grantEdge,
+		});
+
+		const result = await tool.execute(
+			"call-empty-script",
+			{
+				action: "grant_edge",
+				edgeClass: "toolkit.script",
+				toolkitScript: "   ",
+				quote: "run the script",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(result.isError).toBe(true);
+		expect(grantEdge).not.toHaveBeenCalled();
+		expect(getToolResultText(result)).toContain("toolkitScript cannot be empty");
+	});
+
+	it("rejects narrow selector with actionable error when resolveToolkitScriptScope port is missing", async () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({
+			role: "user",
+			content: "run update-db",
+			timestamp: 1000,
+		});
+
+		const grantEdge = vi.fn();
+		const tool = createGoalToolDefinition({
+			getGoalState: () => undefined,
+			saveGoalState: () => {},
+			resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri),
+			grantEdge,
+		});
+
+		const result = await tool.execute(
+			"call-missing-port",
+			{
+				action: "grant_edge",
+				edgeClass: "toolkit.script",
+				toolkitScript: "update-db",
+				quote: "run update-db",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(result.isError).toBe(true);
+		expect(grantEdge).not.toHaveBeenCalled();
+		expect(getToolResultText(result)).toContain("resolveToolkitScriptScope is unavailable");
+	});
+
+	it("rejects when scope resolution returns an error without recording a grant", async () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({
+			role: "user",
+			content: "run nonexistent script",
+			timestamp: 1000,
+		});
+
+		const grantEdge = vi.fn();
+		const resolveToolkitScriptScope = vi.fn(() => ({
+			error: "ambiguous request: matches 'prepare-db' and 'update-db'",
+		}));
+
+		const tool = createGoalToolDefinition({
+			getGoalState: () => undefined,
+			saveGoalState: () => {},
+			resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri),
+			grantEdge,
+			resolveToolkitScriptScope,
+		});
+
+		const result = await tool.execute(
+			"call-ambiguous-resolution",
+			{
+				action: "grant_edge",
+				edgeClass: "toolkit.script",
+				toolkitScript: "db",
+				quote: "run nonexistent script",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(result.isError).toBe(true);
+		expect(resolveToolkitScriptScope).toHaveBeenCalledWith("db", []);
+		expect(grantEdge).not.toHaveBeenCalled();
+		expect(getToolResultText(result)).toContain("ambiguous request");
+	});
+
+	it("rejects when quote does not verify even if narrow selector is valid", async () => {
+		const sessionManager = SessionManager.inMemory();
+
+		const grantEdge = vi.fn();
+		const resolveToolkitScriptScope = vi.fn(() => ({
+			scopeKey: "scope-key-valid",
+		}));
+
+		const tool = createGoalToolDefinition({
+			getGoalState: () => undefined,
+			saveGoalState: () => {},
+			resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri),
+			grantEdge,
+			resolveToolkitScriptScope,
+		});
+
+		const result = await tool.execute(
+			"call-unverified-quote",
+			{
+				action: "grant_edge",
+				edgeClass: "toolkit.script",
+				toolkitScript: "update-db",
+				quote: "user never said this phrase",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(result.isError).toBe(true);
+		expect(grantEdge).not.toHaveBeenCalled();
+		expect(getToolResultText(result)).toContain("no user message on the active branch matches");
 	});
 });

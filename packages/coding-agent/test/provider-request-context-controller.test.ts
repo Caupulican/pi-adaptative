@@ -2,6 +2,11 @@ import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
+import {
+	TASK_AUTOMATION_CONTEXT_CLEARED,
+	TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE,
+	type TaskAutomationContextPlan,
+} from "../src/core/automation/task-automation-runtime-adapter.ts";
 import { applyContextGc } from "../src/core/context-gc.ts";
 import {
 	ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
@@ -340,4 +345,85 @@ describe("directory request-plan projection", () => {
 		]);
 		expect(JSON.stringify(second.transientMessages)).toBe(JSON.stringify(first.transientMessages));
 	});
+});
+
+describe("task automation request-plan projection", () => {
+	function controller(preview: () => TaskAutomationContextPlan) {
+		return new ProviderRequestContextController({
+			transformExtensions: async (messages) => ({ messages, transientMessages: [] }),
+			runContextAudit: () => ({}) as ReturnType<ProviderRequestContextControllerDeps["runContextAudit"]>,
+			runPromptPolicyPlanning: () =>
+				({}) as ReturnType<ProviderRequestContextControllerDeps["runPromptPolicyPlanning"]>,
+			runMemoryRetrieval: async () =>
+				({}) as Awaited<ReturnType<ProviderRequestContextControllerDeps["runMemoryRetrieval"]>>,
+			applyContextGc: (messages) => ({
+				messages,
+				report: {} as ReturnType<ProviderRequestContextControllerDeps["applyContextGc"]>["report"],
+				isCurrent: () => true,
+				commit: () => {},
+			}),
+			correlatePromptPolicyWithContextGc: () => {},
+			runPromptEnforcement: (messages) => ({
+				messages,
+				report: {} as ReturnType<ProviderRequestContextControllerDeps["runPromptEnforcement"]>["report"],
+			}),
+			enqueueRelevanceCuration: () => {},
+			maybeDrainBrainCuration: () => {},
+			appendMemoryEvidence: (messages) => messages,
+			previewTaskAutomationContext: preview,
+			getGoalState: () => undefined,
+			skillVault: {
+				previewSystemPromptSection: () => undefined,
+				commitSystemPromptSection: () => undefined,
+				getContextRevision: () => 0,
+			} as unknown as SkillVaultController,
+			applyPathAliases: (messages) => ({ messages }),
+		});
+	}
+
+	it("rejects a stale task automation plan at acceptance and commit, with a current-plan control", async () => {
+		let current = true;
+		const planner = controller(() => ({ content: "synthetic automation", isCurrent: () => current }));
+		const accepted = await planner.plan([], 0);
+		expect(accepted.isCurrent?.()).toBe(true);
+		expect(accepted.prepareCommit?.()).toBe(true);
+		expect(() => accepted.commit?.()).not.toThrow();
+		const stale = await planner.plan([], 0);
+		current = false;
+		expect(stale.isCurrent?.()).toBe(false);
+		expect(stale.prepareCommit?.()).toBe(false);
+		expect(() => stale.commit?.()).toThrow("diverged");
+	});
+
+	it.each([false, true])(
+		"clears missing branch state only when an earlier task automation context record exists (%s)",
+		async (previous) => {
+			const history = previous
+				? [
+						createCustomMessage(
+							TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE,
+							"older automation pin",
+							false,
+							undefined,
+							"2026-01-01T00:00:00Z",
+						),
+					]
+				: [];
+			const plan = await controller(() => ({ content: undefined, isCurrent: () => true })).plan(
+				history,
+				history.length,
+			);
+			expect(plan.messages).toEqual(history);
+			expect(plan.transientMessages).toEqual(
+				previous
+					? [
+							expect.objectContaining({
+								customType: TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE,
+								content: TASK_AUTOMATION_CONTEXT_CLEARED,
+							}),
+						]
+					: [],
+			);
+		},
+	);
 });

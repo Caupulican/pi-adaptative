@@ -1,4 +1,4 @@
-import type { AgentTool } from "@caupulican/pi-agent-core";
+import type { AgentTool, BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import type { TSchema } from "typebox";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
@@ -46,25 +46,40 @@ export function wrapToolWithCapabilityEnvelopeGate<TParameters extends TSchema, 
 	cwd: string,
 	envelope: CapabilityEnvelope | undefined,
 	scopeCwd = cwd,
+	checkEdge?: (
+		toolName: string,
+		args: unknown,
+		cwd: string | undefined,
+		signal: AbortSignal | undefined,
+	) => Promise<BeforeToolCallResult | undefined>,
 ): AgentTool<TParameters, TDetails> {
-	if (!envelope) return tool;
+	if (!envelope && !checkEdge) return tool;
 	return wrapToolExecution(tool, (executor, executionContext, pathAuthority) => ({
 		...executor,
 		async execute(toolCallId, params, signal, onUpdate) {
-			const outcome = await evaluateToolGateAsync({
-				toolName: tool.name,
-				args: params,
-				cwd: executionContext?.cwd ?? cwd,
-				scopeCwd,
-				envelope,
-				pathAuthority,
-				signal,
-			});
-			signal?.throwIfAborted();
-			if (outcome.outcome === "block" || outcome.outcome === "ask-user") {
-				throw new Error(
-					`Tool '${tool.name}' execution blocked by autonomy gate [${outcome.gate}]: ${outcome.message ?? "denied"} (${outcome.reasonCode})`,
-				);
+			if (envelope) {
+				const outcome = await evaluateToolGateAsync({
+					toolName: tool.name,
+					args: params,
+					cwd: executionContext?.cwd ?? cwd,
+					scopeCwd,
+					envelope,
+					pathAuthority,
+					signal,
+				});
+				signal?.throwIfAborted();
+				if (outcome.outcome === "block" || outcome.outcome === "ask-user") {
+					throw new Error(
+						`Tool '${tool.name}' execution blocked by autonomy gate [${outcome.gate}]: ${outcome.message ?? "denied"} (${outcome.reasonCode})`,
+					);
+				}
+			}
+			if (checkEdge) {
+				const edge = await checkEdge(tool.name, params, executionContext?.cwd ?? cwd, signal);
+				signal?.throwIfAborted();
+				if (edge?.block) {
+					throw new Error(`Tool '${tool.name}' execution blocked by edge: ${edge.reason ?? "denied"}`);
+				}
 			}
 			return executor.execute(toolCallId, params, signal, onUpdate);
 		},

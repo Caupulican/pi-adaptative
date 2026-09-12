@@ -59,7 +59,19 @@ const goalSchema = Type.Object(
 		edgeClass: Type.Optional(
 			Type.String({
 				description:
-					"grant_edge: git.publish | package.publish | package.install | destructive.fs | settings.authority",
+					"grant_edge: git.publish | package.publish | package.install | destructive.fs | settings.authority | toolkit.script",
+			}),
+		),
+		toolkitScript: Type.Optional(
+			Type.String({
+				description:
+					"grant_edge: exact registered canonical script name or unambiguous alias when the operator authorized one concrete toolkit script. Omit for broad class grant.",
+			}),
+		),
+		toolkitArgs: Type.Optional(
+			Type.Array(Type.String(), {
+				description:
+					"grant_edge: exact argv passed to the authorized toolkit script (default []). Requires toolkitScript.",
 			}),
 		),
 		quote: Type.Optional(
@@ -172,6 +184,8 @@ export interface GoalToolDetails {
 	/** Set on 'grant_edge': the class the operator's words granted, and the message they came from. */
 	edgeClass?: EdgeClass;
 	messageEntryId?: string;
+	/** Set on 'grant_edge' when a narrow toolkit operation scope was resolved and granted. */
+	scopeKey?: string;
 	/** Set on 'dispatch_worker' when a worker lane actually started; mirrors the requirement's
 	 * new `boundLaneId`. The in-process route by default, or a real persistent collaboration lane when
 	 * `dispatchTarget:"collaboration"` was selected and routed -- see {@link GoalToolDependencies.dispatchCollaborationWorker}. */
@@ -287,7 +301,12 @@ export interface GoalToolDependencies {
 	 * grant_edge: record that the operator's instructions cover an edge class. Only called after the
 	 * quote resolved verbatim to a user message; absent when the host has no edge (tests, SDK).
 	 */
-	grantEdge?: (grant: { class: EdgeClass; quote: string; messageEntryId: string }) => void;
+	grantEdge?: (grant: { class: EdgeClass; quote: string; messageEntryId: string; scopeKey?: string }) => void;
+	/**
+	 * Narrow operation scope resolver for toolkit.script grants. Resolves registered script name
+	 * and exact argv to an internal scope key using host registry and execution context.
+	 */
+	resolveToolkitScriptScope?: (script: string, args: readonly string[]) => { scopeKey: string } | { error: string };
 	/**
 	 * Resolve the producing call and its authoritative outcome on the active branch. Test evidence
 	 * additionally requires a trusted passing verification receipt; answered calls alone are not proof.
@@ -516,6 +535,37 @@ function executeGrantEdge(
 		isError: true,
 	});
 	if (!edgeClass || !isEdgeClass(edgeClass)) return fail(`edgeClass must be one of ${EDGE_CLASSES.join(", ")}.`);
+
+	const hasToolkitScript = input.toolkitScript !== undefined;
+	const hasToolkitArgs = input.toolkitArgs !== undefined;
+
+	if ((hasToolkitScript || hasToolkitArgs) && edgeClass !== "toolkit.script") {
+		return fail("toolkitScript and toolkitArgs selectors are only valid for edgeClass 'toolkit.script'.");
+	}
+
+	const trimmedScript = input.toolkitScript?.trim();
+	if (hasToolkitScript && (!trimmedScript || trimmedScript.length === 0)) {
+		return fail("toolkitScript cannot be empty.");
+	}
+
+	if (hasToolkitArgs && !trimmedScript) {
+		return fail("toolkitArgs requires toolkitScript to be specified.");
+	}
+
+	let scopeKey: string | undefined;
+	if (trimmedScript) {
+		if (!deps.resolveToolkitScriptScope) {
+			return fail(
+				"resolveToolkitScriptScope is unavailable in this session; cannot resolve narrow toolkit scope without host port.",
+			);
+		}
+		const resolvedScope = deps.resolveToolkitScriptScope(trimmedScript, input.toolkitArgs ?? []);
+		if ("error" in resolvedScope) {
+			return fail(resolvedScope.error);
+		}
+		scopeKey = resolvedScope.scopeKey;
+	}
+
 	if (!quote) return fail("quote the operator's complete words that grant it.");
 	if (!deps.resolveUserEvidence || !deps.grantEdge) return fail("edge grants are unavailable in this session.");
 	const resolved = deps.resolveUserEvidence(quote);
@@ -524,15 +574,29 @@ function executeGrantEdge(
 			`${resolved.reason ?? "the quote did not resolve to a user message"}. A grant rests on the operator's exact words; a paraphrase or a sentence they did not write grants nothing. If they have not said it, ask them or continue without the operation.`,
 		);
 	}
-	deps.grantEdge({ class: edgeClass, quote, messageEntryId: resolved.messageEntryId });
+	deps.grantEdge({
+		class: edgeClass,
+		quote,
+		messageEntryId: resolved.messageEntryId,
+		...(scopeKey !== undefined ? { scopeKey } : {}),
+	});
 	return {
 		content: [
 			{
 				type: "text" as const,
-				text: `edge granted: ${edgeClass} from the operator's words ("${quote}"); it will not ask.`,
+				text:
+					scopeKey !== undefined
+						? `edge granted: ${edgeClass} [${trimmedScript}] from the operator's words ("${quote}"); it will not ask.`
+						: `edge granted: ${edgeClass} from the operator's words ("${quote}"); it will not ask.`,
 			},
 		],
-		details: { action: "grant_edge" as const, applied: true, edgeClass, messageEntryId: resolved.messageEntryId },
+		details: {
+			action: "grant_edge" as const,
+			applied: true,
+			edgeClass,
+			messageEntryId: resolved.messageEntryId,
+			...(scopeKey !== undefined ? { scopeKey } : {}),
+		},
 	};
 }
 
@@ -549,7 +613,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			"After bounded read-only survey, make the project-relative delivery contract explicit in the goal requirements: POC/MVP proves the requested capability; complete means full integration across affected project surfaces.",
 			"Plans: task_steps. Workers: delegate. Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
 			"increment satisfies the current open requirement from unused evidence, or completes when none remain.",
-			"grant_edge: when the operator's instructions authorize an edge operation (git push/tag/release, publishing, adding a dependency, deleting outside the task, settings), record it with edgeClass and their exact words before the operation; a granted class never asks, an ungranted one asks the operator once.",
+			"grant_edge: when the operator's instructions authorize an edge operation (git push/tag/release, publishing, adding a dependency, deleting outside the task, settings, toolkit script), record it with edgeClass and their exact words before the operation; a granted class never asks, an ungranted one asks the operator once. When the operator authorized one concrete toolkit script and arguments, specify toolkitScript and toolkitArgs; omit them for a broad class grant only when their instruction covers the class.",
 			"complete needs current authoritative evidence, no remaining work, no active goal-owned lanes, no open task_steps, no goal-owned or cited running tool_task, and no active pipeline. Failed or canceled tool_task results are terminal and stop blocking liveness, but never become verified evidence automatically. block_requirement/block_goal only when the same verified owner/approval boundary or capability impossibility persists for 3 consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; otherwise keep working.",
 		],
 		parameters: goalSchema,

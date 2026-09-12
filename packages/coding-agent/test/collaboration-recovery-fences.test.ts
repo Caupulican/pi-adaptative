@@ -28,8 +28,8 @@ function fixture(count = 1) {
 	const pending = jobs.map(() => Promise.withResolvers<CollaborationAgent[]>());
 	let active = 0;
 	let maximum = 0;
-	const backend = vi.fn(async (session: string, _create?: boolean) => {
-		const index = jobs.findIndex((job) => job.sessionName === session);
+	const backend = vi.fn(async (job: CollaborationJob, _create?: boolean) => {
+		const index = jobs.findIndex((j) => j.id === job.id);
 		active++;
 		maximum = Math.max(maximum, active);
 		return {

@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import nodePath from "node:path";
 import type { SessionEntry } from "@caupulican/pi-agent-core/node";
 import { getAgentDir } from "../../config.ts";
+import { matchToolkitScript, type ToolkitScript } from "../toolkit/script-registry.ts";
 import { expandPath } from "../tools/path-utils.ts";
 import { parseShellCommandSequence, stripShellInvocationPrefixes } from "../tools/shell-command-parser.ts";
 import { isPathWithinScope } from "./path-scope.ts";
@@ -11,12 +13,12 @@ import { isPathWithinScope } from "./path-scope.ts";
  *
  * Autonomy is provided by the harness and the agent; the human is enforced at the edge. The edge
  * is a short list of operation classes — publishing a repository, publishing or adding packages,
- * deleting outside the task, changing the harness's own authority — and whether one actually
- * stops depends on what the operator said. A class granted by the task instructions (recorded by
- * the model with the operator's exact words), by the operator in this session (`/edge allow`) or
- * by the machine's settings (`edge.allow`) never asks. An ungranted class asks once, structurally:
- * the tool call waits for a one-key answer in the workbench, or is blocked with the reason when no
- * one is at the keyboard. Nothing else in the tool layer ever asks.
+ * deleting outside the task, changing the harness's own authority, or running dangerous toolkit scripts —
+ * and whether one actually stops depends on what the operator said. A class granted by the task
+ * instructions (recorded by the model with the operator's exact words), by the operator in this
+ * session (`/edge allow`) or by the machine's settings (`edge.allow`) never asks. An ungranted class
+ * asks once, structurally: the tool call waits for a one-key answer in the workbench, or is blocked with the
+ * reason when no one is at the keyboard. Nothing else in the tool layer ever asks.
  *
  * Classification is deliberately narrow and literal: a real risk names itself; anything unknown
  * is ordinary work and runs.
@@ -27,6 +29,7 @@ export const EDGE_CLASSES = [
 	"package.install",
 	"destructive.fs",
 	"settings.authority",
+	"toolkit.script",
 ] as const;
 export type EdgeClass = (typeof EDGE_CLASSES)[number];
 
@@ -36,6 +39,7 @@ export const EDGE_CLASS_DESCRIPTIONS: Readonly<Record<EdgeClass, string>> = {
 	"package.install": "adding a dependency or installing a package globally",
 	"destructive.fs": "irreversible deletion outside the task directory, or discarding uncommitted work",
 	"settings.authority": "changing the harness's own settings, credentials or authority files",
+	"toolkit.script": "running registered dangerous toolkit scripts",
 };
 
 export function isEdgeClass(value: unknown): value is EdgeClass {
@@ -48,6 +52,8 @@ export interface EdgeOperation {
 	operation: string;
 	/** Why it is on the edge. */
 	reason: string;
+	/** Optional exact operation scope key (e.g. deterministic digest for narrow toolkit approvals). */
+	scopeKey?: string;
 }
 
 export interface ClassifyEdgeInput {
@@ -84,6 +90,12 @@ const MUTATING_FILE_TOOLS = new Set([
 
 function lower(token: string | undefined): string {
 	return (token ?? "").toLowerCase();
+}
+
+function commandTool(token: string | undefined): string {
+	const raw = lower(token);
+	const base = nodePath.basename(raw).replace(/\.exe$/i, "");
+	return base || raw;
 }
 
 function isOption(token: string): boolean {
@@ -176,7 +188,7 @@ function isAuthorityFile(target: string, cwd: string, agentDir: string): boolean
 	const base = nodePath.basename(resolved).toLowerCase();
 	if (!AUTHORITY_FILES.has(base)) return false;
 	const parent = nodePath.basename(nodePath.dirname(resolved)).toLowerCase();
-	return isPathWithinScope(resolved, agentDir) || parent === ".pi" || parent === "agent";
+	return isPathWithinScope(resolved, agentDir) || parent === ".pi" || parent === "agent" || parent === ".agent";
 }
 
 function classifyGit(argv: readonly string[], joined: string): EdgeOperation | undefined {
@@ -246,7 +258,7 @@ function classifyGit(argv: readonly string[], joined: string): EdgeOperation | u
 }
 
 function classifyPackageManager(argv: readonly string[], joined: string): EdgeOperation | undefined {
-	const tool = lower(argv[0]);
+	const tool = commandTool(argv[0]);
 	const subcommand = lower(argv[1]);
 	const rest = argv.slice(2);
 	const options = rest.filter(isOption).map((token) => token.toLowerCase());
@@ -341,7 +353,7 @@ function classifyDeletion(
 	cwd: string,
 	scopeCwd: string,
 ): EdgeOperation | undefined {
-	const tool = lower(argv[0]);
+	const tool = commandTool(argv[0]);
 	const rest = argv.slice(1);
 	const targets = positional(rest);
 	if (tool === "rm" || tool === "unlink" || tool === "shred") {
@@ -398,7 +410,7 @@ function classifyAuthorityWrite(
 	cwd: string,
 	agentDir: string,
 ): EdgeOperation | undefined {
-	const tool = lower(argv[0]);
+	const tool = commandTool(argv[0]);
 	const mutating = MUTATING_FILE_TOOLS.has(tool) || />|\btee\b/.test(raw);
 	if (!mutating) return undefined;
 	const target = [...argv.slice(1), ...raw.split(/\s+/)].find((token) => isAuthorityFile(token, cwd, agentDir));
@@ -406,40 +418,72 @@ function classifyAuthorityWrite(
 	return { class: "settings.authority", operation: joined, reason: `writes ${nodePath.basename(target)}` };
 }
 
-/** Classify one tool call; undefined means ordinary work. */
-export function classifyEdgeOperation(input: ClassifyEdgeInput): EdgeOperation | undefined {
+function classifyInvokedArgv(
+	argv: readonly string[],
+	raw: string,
+	cwd: string,
+	scopeCwd: string,
+	agentDir: string,
+): EdgeOperation[] {
+	if (argv.length === 0) return [];
+	const joined = argv.join(" ");
+	const tool = commandTool(argv[0]);
+	const operations: EdgeOperation[] = [];
+	const candidates: (EdgeOperation | undefined)[] = [
+		tool === "git" ? classifyGit(argv, joined) : undefined,
+		tool === "gh" && ["release", "pr", "repo"].includes(lower(argv[1])) && lower(argv[2]) !== "list"
+			? classifyGh(argv, joined)
+			: undefined,
+		classifyPackageManager(argv, joined),
+		classifyDeletion(argv, joined, cwd, scopeCwd),
+		classifyAuthorityWrite(argv, raw, joined, cwd, agentDir),
+	];
+	for (const candidate of candidates) {
+		if (candidate) operations.push(candidate);
+	}
+	return operations;
+}
+
+/** Classify all edge operations in a tool call; empty array means ordinary work. */
+export function classifyAllEdgeOperations(input: ClassifyEdgeInput): EdgeOperation[] {
 	const args = input.args && typeof input.args === "object" ? (input.args as Record<string, unknown>) : {};
 	const agentDir = input.agentDir ?? getAgentDir();
 	const name = input.toolName.toLowerCase();
 	if (name === "write" || name === "edit" || name === "edit-diff") {
 		const path = typeof args.path === "string" ? args.path : typeof args.file_path === "string" ? args.file_path : "";
 		if (path && isAuthorityFile(path, input.cwd, agentDir)) {
-			return {
-				class: "settings.authority",
-				operation: `${name} ${path}`,
-				reason: `writes ${nodePath.basename(path)}`,
-			};
+			return [
+				{
+					class: "settings.authority",
+					operation: `${name} ${path}`,
+					reason: `writes ${nodePath.basename(path)}`,
+				},
+			];
 		}
-		return undefined;
+		return [];
 	}
-	if (name !== "bash" && name !== "powershell" && name !== "shell") return undefined;
+	if (name === "run_process" || name === "run-process") {
+		const executable = typeof args.executable === "string" ? args.executable.trim() : "";
+		if (!executable) return [];
+		const processArgs = Array.isArray(args.args)
+			? args.args.filter((item): item is string => typeof item === "string")
+			: [];
+		const argv = [executable, ...processArgs];
+		return classifyInvokedArgv(argv, "", input.cwd, input.scopeCwd, agentDir);
+	}
+	if (name !== "bash" && name !== "powershell" && name !== "shell") return [];
 	const command = typeof args.command === "string" ? args.command : "";
-	if (!command.trim()) return undefined;
+	if (!command.trim()) return [];
+	const operations: EdgeOperation[] = [];
 	for (const argv of shellInvocations(command)) {
-		const joined = argv.join(" ");
-		const tool = lower(argv[0]);
-		const raw = command;
-		const classified =
-			(tool === "git" ? classifyGit(argv, joined) : undefined) ??
-			(tool === "gh" && ["release", "pr", "repo"].includes(lower(argv[1])) && lower(argv[2]) !== "list"
-				? classifyGh(argv, joined)
-				: undefined) ??
-			classifyPackageManager(argv, joined) ??
-			classifyDeletion(argv, joined, input.cwd, input.scopeCwd) ??
-			classifyAuthorityWrite(argv, raw, joined, input.cwd, agentDir);
-		if (classified) return classified;
+		operations.push(...classifyInvokedArgv(argv, command, input.cwd, input.scopeCwd, agentDir));
 	}
-	return undefined;
+	return operations;
+}
+
+/** Classify the first edge operation for display callers; undefined means ordinary work. */
+export function classifyEdgeOperation(input: ClassifyEdgeInput): EdgeOperation | undefined {
+	return classifyAllEdgeOperations(input)[0];
 }
 
 function classifyGh(argv: readonly string[], joined: string): EdgeOperation | undefined {
@@ -474,12 +518,16 @@ export interface EdgeGrantRecord {
 	messageEntryId?: string;
 	/** Free note (operator). */
 	note?: string;
+	/** Optional exact operation scope key for narrow grants. */
+	scopeKey?: string;
 	grantedAt: string;
 }
 
 export interface EdgeRevokeRecord {
 	version: 1;
 	class: EdgeClass;
+	/** Optional scope key to revoke a specific narrow grant; if omitted, revokes all grants for the class. */
+	scopeKey?: string;
 	revokedAt: string;
 }
 
@@ -488,17 +536,141 @@ export interface EdgeGrantView {
 	source: EdgeGrantSource;
 	quote?: string;
 	note?: string;
+	scopeKey?: string;
 	grantedAt?: string;
+	messageEntryId?: string;
+}
+
+export interface ToolkitScriptScopeInput {
+	cwd: string;
+	scriptPath: string;
+	runner: string;
+	scriptName: string;
+	argv: readonly string[];
+}
+
+/** Derives a deterministic scope key from execution cwd, script path, runner, script name, and exact argv. */
+export function deriveToolkitScriptScopeKey(input: ToolkitScriptScopeInput): string {
+	const resolvedCwd = nodePath.resolve(input.cwd);
+	const resolvedPath = nodePath.isAbsolute(input.scriptPath)
+		? nodePath.resolve(input.scriptPath)
+		: nodePath.resolve(resolvedCwd, input.scriptPath);
+	const runner = input.runner.trim();
+	const scriptName = input.scriptName.trim();
+	const normalizedArgv = [...input.argv];
+	const payload = JSON.stringify([resolvedCwd, resolvedPath, runner, scriptName, normalizedArgv]);
+	const digest = createHash("sha256").update(payload).digest("hex");
+	return `toolkit:${scriptName}:${digest}`;
+}
+
+export interface ToolkitScriptIdentity {
+	name: string;
+	runner: string;
+	path: string;
+}
+
+export interface BuildToolkitScriptOperationOptions {
+	cwd: string;
+	script: ToolkitScriptIdentity;
+	args: readonly string[];
+}
+
+/** Canonical constructor for toolkit.script edge operations, ensuring identical identity across runtime, goal, and workers. */
+export function buildToolkitScriptOperation(options: BuildToolkitScriptOperationOptions): EdgeOperation {
+	const scopeKey = deriveToolkitScriptScopeKey({
+		cwd: options.cwd,
+		scriptPath: options.script.path,
+		runner: options.script.runner,
+		scriptName: options.script.name,
+		argv: options.args,
+	});
+	return {
+		class: "toolkit.script",
+		operation: `${options.script.name}${options.args.length > 0 ? ` ${options.args.join(" ")}` : ""}`,
+		reason: `running dangerous toolkit script "${options.script.name}"`,
+		scopeKey,
+	};
+}
+
+/** Resolves a requested toolkit script and argv against registered scripts into a canonical scope key. */
+export function resolveToolkitScriptScope(
+	scriptName: string,
+	args: readonly string[],
+	scripts: readonly ToolkitScript[],
+	cwd: string,
+): { scopeKey: string } | { error: string } {
+	if (!scriptName || scriptName.trim().length === 0) {
+		return { error: "toolkit script name must be non-empty." };
+	}
+	if (scripts.length === 0) {
+		return { error: "no toolkit scripts registered in settings." };
+	}
+	const match = matchToolkitScript(scriptName, [...scripts]);
+	if (match.kind === "none") {
+		return { error: `toolkit script "${scriptName}" is unknown.` };
+	}
+	if (match.kind === "ambiguous") {
+		return {
+			error: `toolkit script "${scriptName}" is ambiguous (${match.shortlist.map((s) => s.name).join(", ")}).`,
+		};
+	}
+	const op = buildToolkitScriptOperation({
+		cwd,
+		script: match.script,
+		args,
+	});
+	return { scopeKey: op.scopeKey! };
+}
+
+/** Check whether an edge operation is covered by active grants (broad class grant or exact scopeKey). */
+export function isEdgeOperationGranted(operation: EdgeOperation, grants: readonly EdgeGrantView[]): boolean {
+	return grants.some((grant) => {
+		if (grant.class !== operation.class) return false;
+		if (grant.scopeKey === undefined) return true;
+		return operation.scopeKey !== undefined && grant.scopeKey === operation.scopeKey;
+	});
 }
 
 /** The branch entries the store reads: every session entry qualifies; only custom ones carry grants. */
 export type EdgeGrantSourceEntry = { type: string; customType?: string; data?: unknown } | SessionEntry;
+
+export type ParsedEdgeScope =
+	| { valid: true; narrow: false; scopeKey: undefined }
+	| { valid: true; narrow: true; scopeKey: string }
+	| { valid: false };
+
+/**
+ * Validate and parse a narrow or broad edge scope key.
+ * Undefined is valid broad. Non-empty string is valid narrow (trimmed).
+ * Empty string, whitespace-only, and non-string values are invalid.
+ */
+export function parseEdgeScope(value: unknown): ParsedEdgeScope {
+	if (value === undefined) {
+		return { valid: true, narrow: false, scopeKey: undefined };
+	}
+	if (typeof value === "string") {
+		const trimmed = value.trim();
+		if (trimmed.length > 0) {
+			return { valid: true, narrow: true, scopeKey: trimmed };
+		}
+	}
+	return { valid: false };
+}
+
+function parseRecordScope(record: Record<string, unknown>): ParsedEdgeScope {
+	if (!("scopeKey" in record)) {
+		return { valid: true, narrow: false, scopeKey: undefined };
+	}
+	return parseEdgeScope(record.scopeKey);
+}
 
 function grantRecord(data: unknown): EdgeGrantRecord | undefined {
 	if (!data || typeof data !== "object") return undefined;
 	const record = data as Record<string, unknown>;
 	if (record.version !== 1 || !isEdgeClass(record.class)) return undefined;
 	if (record.source !== "instructions" && record.source !== "operator") return undefined;
+	const scope = parseRecordScope(record);
+	if (!scope.valid) return undefined;
 	return {
 		version: 1,
 		class: record.class,
@@ -506,37 +678,71 @@ function grantRecord(data: unknown): EdgeGrantRecord | undefined {
 		...(typeof record.quote === "string" ? { quote: record.quote } : {}),
 		...(typeof record.messageEntryId === "string" ? { messageEntryId: record.messageEntryId } : {}),
 		...(typeof record.note === "string" ? { note: record.note } : {}),
+		...(scope.narrow ? { scopeKey: scope.scopeKey } : {}),
 		grantedAt: typeof record.grantedAt === "string" ? record.grantedAt : "",
+	};
+}
+
+function revokeRecord(data: unknown): EdgeRevokeRecord | undefined {
+	if (!data || typeof data !== "object") return undefined;
+	const record = data as Record<string, unknown>;
+	if (record.version !== 1 || !isEdgeClass(record.class)) return undefined;
+	const scope = parseRecordScope(record);
+	if (!scope.valid) return undefined;
+	return {
+		version: 1,
+		class: record.class,
+		...(scope.narrow ? { scopeKey: scope.scopeKey } : {}),
+		revokedAt: typeof record.revokedAt === "string" ? record.revokedAt : "",
 	};
 }
 
 /**
  * Replay the branch's grant and revoke records over the machine's standing grants. A revoke removes
  * a session or instruction grant; a settings grant is the machine's and stays until the setting
- * changes.
+ * changes. Supports multiple scoped grants for one class, broad class grants, and scoped revocation.
  */
 export function collectEdgeGrants(
 	entries: readonly EdgeGrantSourceEntry[],
 	settingsAllow: readonly string[],
 ): EdgeGrantView[] {
-	const grants = new Map<EdgeClass, EdgeGrantView>();
-	for (const cls of settingsAllow) if (isEdgeClass(cls)) grants.set(cls, { class: cls, source: "settings" });
+	const grants = new Map<string, EdgeGrantView>();
+	for (const cls of settingsAllow) {
+		if (isEdgeClass(cls)) {
+			grants.set(`${cls}:*`, { class: cls, source: "settings" });
+		}
+	}
 	for (const entry of entries) {
 		if (entry.type !== "custom") continue;
 		const custom = entry as { customType?: string; data?: unknown };
 		if (custom.customType === EDGE_GRANT_CUSTOM_TYPE) {
 			const record = grantRecord(custom.data);
-			if (!record || grants.get(record.class)?.source === "settings") continue;
-			grants.set(record.class, {
+			if (!record) continue;
+			const key = `${record.class}:${record.scopeKey ?? "*"}`;
+			if (grants.get(key)?.source === "settings") continue;
+			grants.set(key, {
 				class: record.class,
 				source: record.source,
 				...(record.quote ? { quote: record.quote } : {}),
 				...(record.note ? { note: record.note } : {}),
+				...(record.scopeKey !== undefined ? { scopeKey: record.scopeKey } : {}),
+				...(record.messageEntryId ? { messageEntryId: record.messageEntryId } : {}),
 				grantedAt: record.grantedAt,
 			});
 		} else if (custom.customType === EDGE_REVOKE_CUSTOM_TYPE) {
-			const data = custom.data as { class?: unknown } | undefined;
-			if (isEdgeClass(data?.class) && grants.get(data.class)?.source !== "settings") grants.delete(data.class);
+			const record = revokeRecord(custom.data);
+			if (!record) continue;
+			const cls = record.class;
+			if (record.scopeKey !== undefined) {
+				const key = `${cls}:${record.scopeKey}`;
+				if (grants.get(key)?.source !== "settings") grants.delete(key);
+			} else {
+				for (const [key, grant] of grants.entries()) {
+					if (grant.class === cls && grant.source !== "settings") {
+						grants.delete(key);
+					}
+				}
+			}
 		}
 	}
 	return [...grants.values()];
@@ -549,6 +755,7 @@ export interface EdgeConfirmationRequest {
 	operation: string;
 	reason: string;
 	toolName: string;
+	scopeKey?: string;
 }
 
 export type EdgeConfirmationHandler = (request: EdgeConfirmationRequest, signal?: AbortSignal) => Promise<EdgeDecision>;

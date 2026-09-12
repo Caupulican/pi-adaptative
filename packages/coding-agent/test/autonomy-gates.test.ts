@@ -209,24 +209,24 @@ describe("Autonomy Gates", () => {
 			expect(outcome.outcome).toBe("allow");
 		});
 
-		it("returns ask-user or block for bash mutating/destructive command", () => {
+		it("bounds gate allows bash command within capability envelope, deferring operation consent to session edge", () => {
 			const outcome = evaluateToolGate({
 				toolName: "bash",
 				args: { command: "rm -rf /tmp/foo" },
 				cwd: tempDir,
 				envelope: emptyEnvelope,
 			});
-			expect(["ask-user", "block"]).toContain(outcome.outcome);
+			expect(outcome.outcome).toBe("allow");
 		});
 
-		it("returns ask-user or block for mutating settings/prompts/tools operation", () => {
+		it("bounds gate allows operation command within envelope, deferring operation consent to session edge", () => {
 			const outcome = evaluateToolGate({
 				toolName: "bash",
 				args: { command: "Update agent skills" },
 				cwd: tempDir,
 				envelope: emptyEnvelope,
 			});
-			expect(["ask-user", "block"]).toContain(outcome.outcome);
+			expect(outcome.outcome).toBe("allow");
 		});
 	});
 
@@ -384,11 +384,10 @@ describe("Autonomy Gates", () => {
 			expect(outcome.outcome).toBe("allow");
 		});
 
-		it("envelope with process.exec still asks before a destructive bash command", () => {
+		it("envelope with process.exec allows bash command, leaving operation consent to session edge", () => {
 			const envelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["process.exec"] };
 			const outcome = evaluateToolGate({ toolName: "bash", args: { command: "rm -rf /" }, cwd: "/tmp", envelope });
-			expect(["ask-user", "block"]).toContain(outcome.outcome);
-			expect(outcome.gate).toBe("risk_assessment");
+			expect(outcome.outcome).toBe("allow");
 		});
 
 		it("denied tool overrides present capability", () => {

@@ -8,6 +8,8 @@ function recoveryIdentity(job: CollaborationJob): string {
 			JSON.stringify([
 				job.createdAt,
 				job.sessionName,
+				job.placement,
+				job.socketPath,
 				job.dismissed,
 				job.agents.map((agent) => [
 					agent.id,
@@ -16,6 +18,7 @@ function recoveryIdentity(job: CollaborationJob): string {
 					agent.paneId,
 					agent.terminalId,
 					agent.closed,
+					agent.steering?.requestId,
 				]),
 			]),
 		)
@@ -38,7 +41,7 @@ export async function reconcileCollaborationSessions(
 				const identity = recoveryIdentity(job);
 				let failure: string | undefined;
 				try {
-					const native = await (await backend(job.sessionName, false)).listAgents();
+					const native = await (await backend(job, false)).listAgents();
 					for (const expected of job.agents) {
 						if (expected.closed) continue;
 						const actual = native.find((agent) => agent.name === expected.backendName);
@@ -52,6 +55,11 @@ export async function reconcileCollaborationSessions(
 							actual.kind !== expected.provider
 						)
 							throw new Error(`Saved agent ${expected.id} is missing or its native identity changed.`);
+						if (expected.steering) {
+							throw new Error(
+								`Saved agent ${expected.id} has pending steering (turn ${expected.turnId}); successor intent: "${expected.steering.prompt.slice(0, 100)}".`,
+							);
+						}
 					}
 				} catch (error) {
 					failure = `Saved collaboration session could not be reattached: ${String(error).slice(0, 400)}`;

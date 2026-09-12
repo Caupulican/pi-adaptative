@@ -250,4 +250,159 @@ describe("GoalAutoContinueController idle autosteer", () => {
 		expect(callCount).toBe(1);
 		expect(vi.getTimerCount()).toBe(0);
 	});
+
+	it("marks goal tool unavailable and avoids repeated zero-turn timers when goal tool is inactive", async () => {
+		let markUnavailableCount = 0;
+		let loopCallCount = 0;
+		let currentStatus: "active" | "blocked" = "active";
+
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => false,
+			getSettingsManager: () =>
+				({
+					getAutonomySettings: () => AUTONOMY_SETTINGS,
+				}) as never,
+			getGoalRuntimeSnapshot: () => {
+				const base = activeSnapshot();
+				if (currentStatus === "blocked") {
+					const blockedState = {
+						...base.goalState!,
+						status: "blocked" as const,
+						blockedReason: "goal_tool_unavailable: test",
+					};
+					return {
+						...base,
+						goalState: blockedState,
+						continuation: evaluateGoalContinuation({
+							state: blockedState,
+							settings: { maxStallTurns: AUTONOMY_SETTINGS.maxStallTurns },
+						}),
+					};
+				}
+				return base;
+			},
+			hasInFlightLaneForGoal: () => false,
+			continueGoalLoop: async () => {
+				loopCallCount++;
+				return {
+					turnsSubmitted: 1,
+					stopReason: "max_turns_reached",
+					finalSnapshot: activeSnapshot(),
+				};
+			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {
+				markUnavailableCount++;
+				currentStatus = "blocked";
+			},
+			emit: () => {},
+		});
+
+		controller.scheduleFromIdle();
+		await vi.runAllTimersAsync();
+
+		expect(markUnavailableCount).toBe(1);
+		expect(loopCallCount).toBe(0);
+		expect(controller.hasPendingContinuation()).toBe(false);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("automatically rearms after host-resumed transient throw at common settled boundary", async () => {
+		let calls = 0;
+		let action: "continue" | "stop" = "continue";
+
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getSettingsManager: () =>
+				({
+					getAutonomySettings: () => ({
+						...AUTONOMY_SETTINGS,
+						goalAutoContinueDelayMs: 10,
+					}),
+				}) as never,
+			getGoalRuntimeSnapshot: () => {
+				const base = activeSnapshot();
+				return {
+					...base,
+					continuation: {
+						...base.continuation,
+						action,
+					},
+				};
+			},
+			hasInFlightLaneForGoal: () => false,
+			continueGoalLoop: async () => {
+				calls++;
+				if (calls === 1) {
+					// Simulates host resuming a transient failure while turn is running
+					controller.scheduleFromIdle();
+					throw new Error("network: ECONNRESET after bounded provider retry");
+				}
+				action = "stop";
+				return {
+					turnsSubmitted: 1,
+					stopReason: "continuation_not_allowed",
+					finalSnapshot: activeSnapshot(),
+				};
+			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {},
+			emit: () => {},
+		});
+
+		controller.scheduleFromIdle();
+		await vi.runAllTimersAsync();
+
+		expect(calls).toBe(2);
+		expect(controller.hasPendingContinuation()).toBe(false);
+	});
+
+	it("does not rearm after throw if owner stopped the goal", async () => {
+		let calls = 0;
+		let action: "continue" | "stop" = "continue";
+
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getSettingsManager: () =>
+				({
+					getAutonomySettings: () => ({
+						...AUTONOMY_SETTINGS,
+						goalAutoContinueDelayMs: 10,
+					}),
+				}) as never,
+			getGoalRuntimeSnapshot: () => {
+				const base = activeSnapshot();
+				return {
+					...base,
+					continuation: {
+						...base.continuation,
+						action,
+					},
+				};
+			},
+			hasInFlightLaneForGoal: () => false,
+			continueGoalLoop: async () => {
+				calls++;
+				// Simulates owner stop
+				action = "stop";
+				controller.scheduleFromIdle();
+				throw new Error("network: ECONNRESET after bounded provider retry");
+			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {},
+			emit: () => {},
+		});
+
+		controller.scheduleFromIdle();
+		await vi.runAllTimersAsync();
+
+		expect(calls).toBe(1);
+		expect(controller.hasPendingContinuation()).toBe(false);
+	});
 });

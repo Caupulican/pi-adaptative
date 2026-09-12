@@ -134,12 +134,20 @@ const nativeStrategies: readonly NativeProviderStrategy[] = [
 		executable: "agy",
 		presenceArgs: ["--help"],
 		authArgs: () => ["models"],
-		parseAuth: (result) => ({
-			authenticated: result.stdout
-				.split(/\r?\n/)
-				.some((line) => /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\t[^\t\r\n]{1,256}$/.test(line)),
-			launchArgs: [],
-		}),
+		parseAuth: (result, selection) => {
+			const models = new Set<string>();
+			for (const line of result.stdout.split(/\r?\n/)) {
+				const trimmed = line.trimStart();
+				const match = /^([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\t[^\t\r\n]{1,256}$/.exec(trimmed);
+				if (match) models.add(match[1]);
+			}
+			const hasCatalog = models.size > 0;
+			const authenticated = Boolean(hasCatalog && (!selection.model || models.has(selection.model)));
+			return {
+				authenticated,
+				launchArgs: [],
+			};
+		},
 	},
 ];
 

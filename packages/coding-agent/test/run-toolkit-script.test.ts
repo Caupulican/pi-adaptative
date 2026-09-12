@@ -5,7 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type ArtifactStore, createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
 import type { ToolkitScript } from "../src/core/toolkit/script-registry.ts";
 import { buildScriptArgv, executeToolkitScript, type ScriptExecution } from "../src/core/toolkit/script-runner.ts";
-import { createRunToolkitScriptToolDefinition } from "../src/core/tools/run-toolkit-script.ts";
+import {
+	createRunToolkitScriptToolDefinition,
+	type ToolkitScriptAuthorizer,
+} from "../src/core/tools/run-toolkit-script.ts";
 
 const SCRIPTS: ToolkitScript[] = [
 	{ name: "prepare-db", description: "Prepare the dev database schema", runner: "uv", path: "toolkit/prepare_db.py" },
@@ -25,10 +28,13 @@ function ok(stdout = "hello"): ScriptExecution {
 
 async function runTool(
 	input: Record<string, unknown>,
-	execute = vi.fn(async () => ok()),
+	execute: (script: ToolkitScript, args: readonly string[], signal?: AbortSignal) => Promise<ScriptExecution> = vi.fn(
+		async () => ok(),
+	),
 	artifactStore?: ArtifactStore,
+	authorize?: ToolkitScriptAuthorizer,
 ) {
-	const tool = createRunToolkitScriptToolDefinition({ getScripts: () => SCRIPTS, execute, artifactStore });
+	const tool = createRunToolkitScriptToolDefinition({ getScripts: () => SCRIPTS, execute, artifactStore, authorize });
 	const result = (await tool.execute(
 		"call-1",
 		input as never,
@@ -90,14 +96,147 @@ describe("run_toolkit_script tool", () => {
 		expect(result.content[0]?.text).toContain("backup missing");
 	});
 
-	it("never runs dangerous scripts without confirm: true", async () => {
+	it("dangerous script without host authorizer remains unexecuted even if confirm: true is provided", async () => {
 		const { result, execute } = await runTool({ script: "restore-db" });
 		expect(execute).not.toHaveBeenCalled();
 		expect(result.details.outcome).toBe("confirmation_required");
+		expect(result.isError).toBe(true);
 
 		const { result: confirmed, execute: execute2 } = await runTool({ script: "restore-db", confirm: true });
-		expect(execute2).toHaveBeenCalledOnce();
-		expect(confirmed.details.outcome).toBe("executed");
+		expect(execute2).not.toHaveBeenCalled();
+		expect(confirmed.details.outcome).toBe("confirmation_required");
+		expect(confirmed.isError).toBe(true);
+		expect(confirmed.content[0]?.text).toContain("requires host authorization");
+	});
+
+	it("authorized toolkit operation executes without duplicate confirmation question", async () => {
+		const authorize = vi.fn(async () => ({ authorized: true }));
+		const execute = vi.fn(async () => ok());
+		const { result } = await runTool({ script: "restore-db" }, execute, undefined, authorize);
+		expect(authorize).toHaveBeenCalledOnce();
+		expect(execute).toHaveBeenCalledOnce();
+		expect(result.details.outcome).toBe("executed");
+	});
+
+	it("absence or denial by host authorizer leaves script unexecuted", async () => {
+		const authorize = vi.fn(async () => ({ authorized: false, reason: "Operator denied restore-db." }));
+		const execute = vi.fn(async () => ok());
+		const { result } = await runTool({ script: "restore-db" }, execute, undefined, authorize);
+		expect(authorize).toHaveBeenCalledOnce();
+		expect(execute).not.toHaveBeenCalled();
+		expect(result.details.outcome).toBe("confirmation_required");
+		expect(result.content[0]?.text).toContain("Operator denied restore-db.");
+	});
+
+	it("caller cannot forge grant when host authorizer denies", async () => {
+		const authorize = vi.fn(async () => ({ authorized: false, reason: "No standing grant for dangerous script." }));
+		const execute = vi.fn(async () => ok());
+		const { result } = await runTool({ script: "restore-db", confirm: true }, execute, undefined, authorize);
+		expect(authorize).toHaveBeenCalledWith(
+			{
+				script: expect.objectContaining({ name: "restore-db" }),
+				args: [],
+			},
+			undefined,
+		);
+		expect(execute).not.toHaveBeenCalled();
+		expect(result.details.outcome).toBe("confirmation_required");
+		expect(result.content[0]?.text).toContain("No standing grant for dangerous script.");
+	});
+
+	it("freezes immutable script and argv snapshot before awaiting authorization and executes that exact snapshot", async () => {
+		let capturedReq: { script: ToolkitScript; args: readonly string[] } | undefined;
+		const authorize = vi.fn(async (req) => {
+			capturedReq = req;
+			return { authorized: true };
+		});
+		let executedScript: ToolkitScript | undefined;
+		let executedArgs: readonly string[] | undefined;
+		const execute = vi.fn(async (s: ToolkitScript, a: readonly string[]) => {
+			executedScript = s;
+			executedArgs = a;
+			return ok();
+		});
+
+		const args = ["--initial-flag"];
+		const { result } = await runTool({ script: "restore-db", args }, execute, undefined, authorize);
+		expect(result.details.outcome).toBe("executed");
+		expect(capturedReq).toBeDefined();
+		expect(Object.isFrozen(capturedReq!.script)).toBe(true);
+		expect(Object.isFrozen(capturedReq!.args)).toBe(true);
+		expect(executedScript).toBe(capturedReq!.script);
+		expect(executedArgs).toBe(capturedReq!.args);
+		expect(executedArgs).toEqual(["--initial-flag"]);
+	});
+
+	it("cancellation during authorization prevents execution even if authorizer returns yes", async () => {
+		const controller = new AbortController();
+		let resolveAuthorizer: (decision: { authorized: boolean }) => void;
+		const authorizePromise = new Promise<{ authorized: boolean }>((resolve) => {
+			resolveAuthorizer = resolve;
+		});
+		const authorize = vi.fn(async () => authorizePromise);
+		const execute = vi.fn(async () => ok());
+
+		const tool = createRunToolkitScriptToolDefinition({
+			getScripts: () => SCRIPTS,
+			execute,
+			authorize,
+		});
+
+		const executionPromise = tool.execute(
+			"call-1",
+			{ script: "restore-db" },
+			controller.signal,
+			undefined as never,
+			undefined as never,
+		);
+
+		// Signal is aborted while authorize is pending
+		controller.abort();
+		// Authorizer completes with authorized: true
+		resolveAuthorizer!({ authorized: true });
+
+		await expect(executionPromise).rejects.toThrow();
+		expect(authorize).toHaveBeenCalledOnce();
+		expect(execute).not.toHaveBeenCalled();
+	});
+
+	it("authorizer validates exact script identity and argv without silently covering changes", async () => {
+		const authorize = vi.fn(async (req) => {
+			if (req.args.includes("--dangerous-unauthorized-flag")) {
+				return { authorized: false, reason: "Flag --dangerous-unauthorized-flag is prohibited." };
+			}
+			return { authorized: true };
+		});
+		const execute = vi.fn(async () => ok());
+		const { result } = await runTool(
+			{ script: "restore-db", args: ["--dangerous-unauthorized-flag"] },
+			execute,
+			undefined,
+			authorize,
+		);
+		expect(authorize).toHaveBeenCalledWith(
+			expect.objectContaining({
+				script: expect.objectContaining({ name: "restore-db" }),
+				args: ["--dangerous-unauthorized-flag"],
+			}),
+			undefined,
+		);
+		expect(execute).not.toHaveBeenCalled();
+		expect(result.details.outcome).toBe("confirmation_required");
+		expect(result.content[0]?.text).toContain("Flag --dangerous-unauthorized-flag is prohibited.");
+	});
+
+	it("ambiguous match preserves ambiguity and does not consult authorizer or execute", async () => {
+		const authorize = vi.fn(async () => ({ authorized: true }));
+		const execute = vi.fn(async () => ok());
+		const { result } = await runTool({ script: "the db one" }, execute, undefined, authorize);
+		expect(authorize).not.toHaveBeenCalled();
+		expect(execute).not.toHaveBeenCalled();
+		expect(result.details.outcome).toBe("ambiguous");
+		expect(result.details.shortlist).toContain("prepare-db");
+		expect(result.details.shortlist).toContain("update-db");
 	});
 
 	it("reports unknown scripts as not_found errors with candidates", async () => {

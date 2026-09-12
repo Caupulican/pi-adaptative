@@ -284,19 +284,27 @@ and `packages/coding-agent/test/phone-filesystem-workflow.test.ts`.
 ## Guards
 
 **The edge asks once; instructions, the session or the machine grant it, and nothing else in the
-tool layer ever asks.** The operations that can need the operator are five named classes —
+tool layer ever asks.** The operations that can need the operator are six named classes —
 `git.publish` (push, tag, release), `package.publish`, `package.install` (adding a dependency or a
 global install), `destructive.fs` (deleting outside the task directory or discarding uncommitted
-work), `settings.authority` (the harness's own settings and credential files) — classified
-literally from the tool call; anything unknown is ordinary work and runs. A class granted by the
+work), `settings.authority` (the harness's own settings and credential files), and `toolkit.script`
+(executing registered dangerous toolkit scripts) — classified literally from the tool call;
+anything unknown is ordinary work and runs. Toolkit script authority is a host-owned edge: dangerous
+toolkit script operations are classified into `toolkit.script` with a narrow scope key derived
+cryptographically from `(cwd, scriptPath, runner, scriptName, argv)` (`toolkit:<scriptName>:<digest>`).
+A narrow grant persists across session compaction and reload, but changing script registration
+(altering script path or runner under a fixed script name and argv) invalidates the scope key and denies
+unconfirmed execution until restored. Explicit owner authorization is reused directly without artificial
+model confirmation prompts. A class granted by the
 task instructions (`goal grant_edge` with the operator's exact words, verified verbatim against a
-user message on the branch — a paraphrase grants nothing), by the operator in this session
-(`/edge allow <class…|all>`, or *allow for this session* at the prompt) or by the machine
-(`edge.allow` in settings) never asks; a session or instruction grant is a durable record on the
-session branch and lasts until revoked, so a full grant covers the whole work, and a commit is
-ordinary work that never asks. An ungranted class asks the interactive operator once with one key and the
-tool call waits for the answer; a headless or child session blocks it with a reason that names
-every way to grant. Pinned by `packages/coding-agent/test/edge-policy.test.ts` and
+user message on the branch — a paraphrase grants nothing, and scoped toolkit script grants match on
+their derived scope key), by the operator in this session (`/edge allow <class…|all>`, or *allow for
+this session* at the prompt) or by the machine (`edge.allow` in settings) never asks; a session or
+instruction grant is a durable record on the session branch and lasts until revoked, so a full grant
+covers the whole work, and a commit is ordinary work that never asks. An ungranted class asks the
+interactive operator once with one key and the tool call waits for the answer; a headless or child
+session blocks it with a reason that names every way to grant. Pinned by
+`packages/coding-agent/test/edge-policy.test.ts` and
 `packages/coding-agent/test/agent-session-edge.test.ts`.
 
 **A failed admission cannot erase already-executed work.** The scheduler drains dispatched siblings
@@ -629,6 +637,12 @@ batch cannot evict a member of that same batch. Pinned by
 a foreground run acquires that run's lease at creation; earlier unrelated usage stays outside it.
 Usage and active time flush once at response/end boundaries. Orientation, requested evaluation,
 and implementation have different workloads. Existing explicit in-scope authorization is reused.
+Goal continuation bounded recovery rearms transient provider failures once per streak, or waits when
+independent in-flight workers or background tool tasks are active for that goal; repeated failures
+without verified progress block until operator intervention. The failure streak resets strictly on
+verified host completion matching the pre-state turn ordinal (`completionTurn === continuationTurnsUsed + 1`),
+so stale or duplicate receipts cannot replenish retries, and runaway recovery signatures remain durable
+and distinct from provider transport failures.
 These contracts retain the 3,200-byte core prompt limit. Pinned by
 `packages/coding-agent/test/goal-execution-budget.test.ts`,
 `packages/coding-agent/test/agent-session-goal-continuation-loop.test.ts`, and
@@ -669,3 +683,4 @@ measurement gains no new surface.
 | 2026-09-08 | A goal continuation turn that ends in a provider error (after the session's own retries) blocks the goal with the classified reason and stops the loop with `turn_errored`; the blocked decision names that reason. An owner abort still leaves the goal active and untouched. A silently active goal after an outage was the failure this replaces. |
 | 2026-09-08 | A bounded harness guard (stagnant cycle, runaway loop) resumes the goal automatically once per signature; the same signature stopping the run again leaves the goal blocked with that reason until the owner prompts, and the warning says so. The Windows shell engine's `sed` supports addresses, `-n`, `-e`, `-E`, `p`, `d`, and `s///`; Git-Bash `/c/…` and WSL `/mnt/c/…` drive roots are rewritten to `C:/…` in the router and the engine; a worker timeout names its wall-clock cap and the setting behind it; binding a task directory with the workspace's own absolute path is accepted. |
 | 2026-09-08 | Windows shell parity: with the engine on, every bash call runs on the shell engine (the PowerShell floor serves only `windowsShell.pythonEngine: false` and a runtime outage); coreutils names dispatch to Git for Windows' real GNU binaries before any engine reimplementation, with the GNU directory first on those tools' own PATH; the engine grammar covers functions, `case`, `[[ ]]`, brace expansion, the bash parameter operators, `set -e/-u/-x/-o pipefail` and `command -v`, and names arrays, indirection, `select` and process substitution as refusals. The regression wall `test/windows-shell-corpus.test.ts` replays every sanitized command shape of the measured Windows sessions (`test/fixtures/windows-shell-corpus/commands.json`) through the router, the grammar and the executor with real GNU tools on Linux and Windows; its refusal budget for supported families is zero, a live Windows shell failure is added there as its failing shape before its fix lands, and the replay leg carries a timeout matching its own single-process spawn bound (vitest's 30 s default cut a defect-free 25 s replay off under a parallel suite run). The corpus is produced and replayed by one harness-owned tool (`pi-shell-engine/corpus.py`, driven by `scripts/windows-shell-corpus.mjs`): harvest sanitizes every `bash` call of any session transcript with a hard leak guard and records the real command's grammar verdict, replay classifies defects, and the wall test consumes the same replay, so the fixture is reproducible from transcripts on any machine and never carries a private command. |
+| 2026-09-12 | Toolkit script authority is a host-owned edge class (`toolkit.script`) with cryptographic scope keys derived from `(cwd, scriptPath, runner, scriptName, argv)`; grants persist across compaction and reload, mutating script registration invalidates the grant, and owner authorization is reused without model confirmation prompts. Goal continuation bounded recovery rearms transient provider failures once per streak or waits on in-flight work, resetting failure streaks only on verified host completion with matching pre-state turn ordinals. |

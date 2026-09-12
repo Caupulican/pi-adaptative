@@ -45,7 +45,7 @@ describe("goal continuation interruption containment", () => {
 		});
 	});
 
-	it("blocks the goal with the provider's reason after an errored turn instead of leaving it active", async () => {
+	it("recovers first transient provider error to active and bounds repeated failure to blocked", async () => {
 		const harness = await createHarness();
 		seedOpenGoal(harness);
 		harness.settingsManager.setAutonomySettings({ goalAutoContinue: false });
@@ -58,21 +58,84 @@ describe("goal continuation interruption containment", () => {
 			),
 		);
 
-		const result = await harness.session.continueGoalLoop({
+		// Turn 1: transient network error is recorded and host auto-resumes to active with streak 1
+		const firstResult = await harness.session.continueGoalLoop({
 			maxTurns: 20,
 			maxStallTurns: 20,
 			maxWallClockMinutes: 0,
 		});
 
-		expect(result).toMatchObject({ stopReason: "turn_errored", turnsSubmitted: 1 });
+		expect(firstResult).toMatchObject({ stopReason: "turn_errored", turnsSubmitted: 1 });
+		expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+			status: "active",
+			systemFailureStreak: 1,
+		});
+
+		// Turn 2: second consecutive transient network error exceeds streak allowance and stops as blocked
+		const secondResult = await harness.session.continueGoalLoop({
+			maxTurns: 20,
+			maxStallTurns: 20,
+			maxWallClockMinutes: 0,
+		});
+
+		expect(secondResult).toMatchObject({ stopReason: "turn_errored", turnsSubmitted: 1 });
 		expect(harness.session.getGoalStateSnapshot()).toMatchObject({
 			status: "blocked",
+			systemFailureStreak: 2,
 			blockedReason: expect.stringContaining("getaddrinfo ETIMEOUT cli-chat-proxy.grok.com"),
 		});
-		expect(result.finalSnapshot.continuation).toMatchObject({
+		expect(secondResult.finalSnapshot.continuation).toMatchObject({
 			action: "ask-user",
 			reasonCode: "goal_blocked",
 			message: expect.stringContaining("getaddrinfo ETIMEOUT"),
+		});
+	});
+
+	it("resets failure streak on healthy continuation turn without legacy evidence so subsequent transient error recovers", async () => {
+		const harness = await createHarness();
+		seedOpenGoal(harness);
+		harness.settingsManager.setAutonomySettings({ goalAutoContinue: false });
+
+		// Turn 1: transient failure -> host recovers to active with streak = 1
+		harness.setResponses(
+			Array.from({ length: 10 }, () =>
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					errorMessage: "Request timed out. [getaddrinfo ETIMEOUT cli-chat-proxy.grok.com]",
+				}),
+			),
+		);
+		const res1 = await harness.session.continueGoalLoop({ maxTurns: 1, maxStallTurns: 20, maxWallClockMinutes: 0 });
+		expect(res1.stopReason).toBe("turn_errored");
+		expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+			status: "active",
+			systemFailureStreak: 1,
+		});
+
+		// Turn 2: healthy completion -> resets streak to 0 without any legacy evidence!
+		harness.setResponses([fauxAssistantMessage("healthy turn completed successfully")]);
+		const res2 = await harness.session.continueGoalLoop({ maxTurns: 1, maxStallTurns: 20, maxWallClockMinutes: 0 });
+		expect(res2.stopReason).toBe("max_turns_reached");
+		expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+			status: "active",
+			systemFailureStreak: 0,
+		});
+		expect(harness.session.getGoalStateSnapshot()?.evidence.length).toBe(0);
+
+		// Turn 3: later unrelated transient error -> still recovers because streak was reset!
+		harness.setResponses(
+			Array.from({ length: 10 }, () =>
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					errorMessage: "Request timed out. [getaddrinfo ETIMEOUT cli-chat-proxy.grok.com]",
+				}),
+			),
+		);
+		const res3 = await harness.session.continueGoalLoop({ maxTurns: 1, maxStallTurns: 20, maxWallClockMinutes: 0 });
+		expect(res3.stopReason).toBe("turn_errored");
+		expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+			status: "active",
+			systemFailureStreak: 1,
 		});
 	});
 

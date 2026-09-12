@@ -1,5 +1,19 @@
 import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
-import type { GoalState } from "./goal-state.ts";
+import { isSystemBlockedGoal } from "./goal-lifecycle.ts";
+import type { GoalState, Requirement } from "./goal-state.ts";
+
+function getBoundInFlightRequirements(
+	requirements: readonly Requirement[],
+	inFlightGoalLaneIds: ReadonlySet<string> | undefined,
+): Requirement[] {
+	if (!inFlightGoalLaneIds) return [];
+	return requirements.filter(
+		(requirement) =>
+			requirement.status === "open" &&
+			requirement.boundLaneId !== undefined &&
+			inFlightGoalLaneIds.has(requirement.boundLaneId),
+	);
+}
 
 export type GoalContinuationAction = "continue" | "ask-user" | "finalize" | "stop" | "waiting";
 export type GoalContinuationReasonCode =
@@ -150,6 +164,39 @@ export function evaluateGoalContinuation(args: {
 	}
 
 	if (state.status === "blocked") {
+		// Explicit owner blocks stay distinguishable and prompt the operator immediately.
+		if (!isSystemBlockedGoal(state)) {
+			return {
+				...baseDecision,
+				action: "ask-user",
+				reasonCode: "goal_blocked",
+				message: state.blockedReason
+					? `The goal is blocked: ${state.blockedReason}`
+					: "The goal is explicitly blocked.",
+			};
+		}
+
+		// A system-originated block (transient provider failure, runaway guard, temporary tool
+		// unavailability) is recoverable. If independent work is running, wait on it.
+		const boundInFlightRequirements = getBoundInFlightRequirements(state.requirements, args.inFlightGoalLaneIds);
+		if (boundInFlightRequirements.length > 0) {
+			return {
+				...baseDecision,
+				action: "waiting",
+				reasonCode: "worker_in_flight",
+				message:
+					"A system interruption occurred, but a worker is dispatched against an open requirement; waiting for it before stopping.",
+			};
+		}
+		if (args.inFlightToolTaskIds && args.inFlightToolTaskIds.size > 0) {
+			return {
+				...baseDecision,
+				action: "waiting",
+				reasonCode: "tool_task_in_flight",
+				message: `A system interruption occurred, but background tool_task(s) ${[...args.inFlightToolTaskIds].join(", ")} are still running; waiting before continuing.`,
+			};
+		}
+
 		return {
 			...baseDecision,
 			action: "ask-user",
@@ -247,7 +294,7 @@ export function evaluateGoalContinuation(args: {
 				...baseDecision,
 				action: "continue",
 				reasonCode: "verification_repair_required",
-				message: `Verification obligation(s) ${args.activeVerificationIds.join(", ")} are red. Read the failing output, find why it broke, repair the owning code, then rerun the same check in the same directory; the goal completes only after it passes. If the failure is environmental (missing toolchain, network, permissions), say so: the operator dismisses it with /verify.`,
+				message: `Verification obligation(s) ${args.activeVerificationIds.join(", ")} are red. Read the failing output, find why it broke, repair the owning code, then rerun the same check in the same directory; the goal completes only after it passes. If the failure is environmental (missing toolchain, package, network, permissions), attempt authorized recovery within granted capabilities first; ask the operator or request /verify dismissal only when authorized recovery is exhausted, ungranted, or requires a proven owner/approval boundary.`,
 			};
 		}
 		return {
@@ -306,15 +353,7 @@ export function evaluateGoalContinuation(args: {
 	// for it rather than submit a hollow pass or let the stall counter judge the goal unproductive.
 	// Checked BEFORE the stall check so an in-flight worker always wins over an accumulated stall
 	// count: the goal isn't stalled, it's actively being worked by something other than this loop.
-	const inFlightGoalLaneIds = args.inFlightGoalLaneIds;
-	const boundInFlightRequirements = inFlightGoalLaneIds
-		? state.requirements.filter(
-				(requirement) =>
-					requirement.status === "open" &&
-					requirement.boundLaneId !== undefined &&
-					inFlightGoalLaneIds.has(requirement.boundLaneId),
-			)
-		: [];
+	const boundInFlightRequirements = getBoundInFlightRequirements(state.requirements, args.inFlightGoalLaneIds);
 
 	if (boundInFlightRequirements.length > 0) {
 		// Never-hang backstop: a worker alive-but-hung past its deadline must return control to the

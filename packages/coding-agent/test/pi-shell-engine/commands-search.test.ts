@@ -240,7 +240,7 @@ describe("pi-shell-engine commands/search.py", () => {
 		});
 
 		it("prints an address range with -n, the way transcripts page files", () => {
-			const text = Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join("\n") + "\n";
+			const text = `${Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join("\n")}\n`;
 			const r = runBuiltin(python, "search.cmd_sed", { argv: ["sed", "-n", "2,4p"], stdin: text }) as Result;
 			expect(r.stdout).toBe("line2\nline3\nline4\n");
 			const tail = runBuiltin(python, "search.cmd_sed", { argv: ["sed", "-n", "9,$p"], stdin: text }) as Result;

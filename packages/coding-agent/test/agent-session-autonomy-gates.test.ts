@@ -249,7 +249,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 			.filter((part): part is { type: "text"; text: string } => part.type === "text")
 			.map((part) => part.text)
 			.join("\n");
-		expect(text).toContain("blocked by autonomy gate [risk_assessment]");
+		expect(text).toContain("destructive.fs");
 
 		await harness.cleanup();
 	});

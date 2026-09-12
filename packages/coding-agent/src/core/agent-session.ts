@@ -33,6 +33,7 @@ import { createSessionBackgroundToolTasks } from "./agent-session-background-tas
 import {
 	type EdgeGrantDetails,
 	enforceSessionEdge,
+	enforceSessionEdgeOperation,
 	recordEdgeGrant,
 	recordEdgeRevoke,
 	type SessionEdgeDeps,
@@ -485,11 +486,9 @@ export class AgentSession {
 		this._durableLearningState = this._isChildSession ? undefined : DurableLearningState.forAgentDir(agentDir);
 		this._skillVault = new SkillVaultController({
 			getSkills: () => this._resourceLoader.getActiveSkills(),
+			getFullSkills: () => this._resourceLoader.getSkills().skills,
 			refreshSkills: () => this._resourceLoader.refreshSkills?.(),
-			getSkillDiagnostics: () =>
-				this._resourceLoader
-					.getSkills()
-					.diagnostics.map((diagnostic) => `${diagnostic.path}: ${diagnostic.message}`),
+			getSkillDiagnostics: () => this._resourceLoader.getSkills().diagnostics.map((d) => `${d.path}: ${d.message}`),
 			getMaxBodyBytes: () =>
 				Math.min(
 					resolveActiveSkillBodyByteLimit(this.model?.contextWindow),
@@ -498,6 +497,7 @@ export class AgentSession {
 			onSkillUsed: (skill) => {
 				if (skill.promoted) this._skillCurator.recordUse(skill.name, Date.now());
 			},
+			getSessionManager: () => this.sessionManager,
 		});
 		this._toolProtocol = new ToolProtocolController({
 			agent: this.agent,
@@ -625,6 +625,7 @@ export class AgentSession {
 			getForegroundToolNames: () => this.getActiveToolNames(),
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
+			getEdgeGrants: () => this.getEdgeGrants(),
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			emit: (event) => this._emit(event),
@@ -770,8 +771,10 @@ export class AgentSession {
 			appendMemoryEvidence: (messages, report) => this._maybeAppendMemoryEvidenceBlock(messages, report),
 			previewReflectionCue: () => this._reflection.previewCurrentTurnCue(),
 			previewTaskDirectoryContext: () => captureSessionTaskDirectoryContext(this.sessionManager),
+			previewTaskAutomationContext: () => this._runtimeBuilder.previewTaskAutomationContext(),
 			getGoalState: () => this.getGoalStateSnapshot(),
 			skillVault: this._skillVault,
+			getEdgeGrants: () => this.getEdgeGrants(),
 			applyPathAliases: (messages) => this._pipeline.applyPathAliases(messages),
 			commitPathAliasLegend: (ids) => this._pipeline.commitPathAliasLegend(ids),
 		});
@@ -1032,6 +1035,7 @@ export class AgentSession {
 			saveGoalStateSnapshot: (state, expected) => this.saveGoalStateSnapshot(state, expected),
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
 			grantEdgeFromInstructions: (grant) => this.grantEdge(grant.class, "instructions", grant),
+			enforceEdgeOperation: (op, signal) => enforceSessionEdgeOperation(this._edgeDeps(), op, undefined, signal),
 			authorizeGoalStartFromTool: (input) => this._goals.authorizeStartFromTool(input),
 			getTaskStepsStateSnapshot: () => this.getTaskStepsStateSnapshot(),
 			saveTaskStepsStateSnapshot: (state) => this.saveTaskStepsStateSnapshot(state),
@@ -1227,14 +1231,7 @@ export class AgentSession {
 			isCandidateAllowed: (toolName) => {
 				const envelope = this.capabilityEnvelope;
 				if (!envelope) return true;
-				return (
-					evaluateToolGate({
-						toolName,
-						args: {},
-						cwd: this._cwd,
-						envelope,
-					}).outcome === "allow"
-				);
+				return evaluateToolGate({ toolName, args: {}, cwd: this._cwd, envelope }).outcome === "allow";
 			},
 		});
 		this._toolGate = new ToolGateController({
@@ -1245,8 +1242,9 @@ export class AgentSession {
 			recordGateOutcome: (outcome) => this._recordGateOutcome(outcome),
 			getExtensionRunner: () => this._extensionRunner,
 			getToolSelectionController: () => this._toolSelection,
-			checkEdge: (toolName, args, executionCwd, signal) =>
-				enforceSessionEdge(this._edgeDeps(), toolName, args, executionCwd, signal),
+			checkEdge: (tool, args, cwd, signal) => enforceSessionEdge(this._edgeDeps(), tool, args, cwd, signal),
+			checkDirectScriptExecution: (toolName, args, cwd) =>
+				this._runtimeBuilder.checkDirectScriptExecution(toolName, args, cwd),
 		});
 
 		// Always subscribe to agent events for internal handling
@@ -1496,6 +1494,10 @@ export class AgentSession {
 
 	revokeEdge(edgeClass: EdgeClass): boolean {
 		return recordEdgeRevoke(this._edgeDeps(), edgeClass);
+	}
+
+	getSkillVault(): SkillVaultController {
+		return this._skillVault;
 	}
 
 	/** Preserve active verification identities and setup-repair proof inside the compaction checkpoint. */
@@ -3683,6 +3685,8 @@ export class AgentSession {
 
 	/** Save native task-step state to the active session log. */
 	saveTaskStepsStateSnapshot(state: TaskStepsState): string {
+		const prev = this.getTaskStepsStateSnapshot();
+		this._runtimeBuilder.assertTaskStepsTransition(prev?.steps, state.steps);
 		return appendTaskStepsStateSnapshot(this.sessionManager, state);
 	}
 

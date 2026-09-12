@@ -1,10 +1,11 @@
+import { watch } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { getAgentDir } from "../config.ts";
 import type { CollaborationBackend } from "../core/collaboration/backend.ts";
+import { resolveCollaborationBackend } from "../core/collaboration/backend-resolver.ts";
 import { stopCollaborationAgent } from "../core/collaboration/coordinator.ts";
-import { createHerdrBackend } from "../core/collaboration/herdr-runtime.ts";
 import { CollaborationJobStore } from "../core/collaboration/job-store.ts";
 import { executeCollaborationTurn } from "../core/collaboration/turn-runner.ts";
 import { acquireWorkRun } from "../utils/work-directory.ts";
@@ -52,7 +53,23 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 		if (!agent.backendName || !agent.terminalId || !job.peerCommand)
 			throw new Error("Collaboration agent identity is incomplete.");
 		const timeoutMs = Math.max(1, Math.min(job.deadlineSeconds * 1000, (agent.deadlineAt ?? 0) - Date.now()));
-		backend = await createHerdrBackend({ session: job.sessionName, ensureRunning: false });
+		backend = await resolveCollaborationBackend(job, { ensureRunning: false });
+		const subscribeReport = (listener: () => void) => {
+			const watcher = watch(directory, { persistent: false }, (_event, file) => {
+				if (file === null || file.toString().endsWith(".json")) listener();
+			});
+			watcher.on("error", (err) => {
+				cancellation.abort(
+					new Error(`Filesystem watcher failed: ${err instanceof Error ? err.message : String(err)}`),
+				);
+				listener();
+			});
+			return () => {
+				try {
+					watcher.close();
+				} catch {}
+			};
+		};
 		const result = await executeCollaborationTurn(
 			backend,
 			{
@@ -70,22 +87,31 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 			() =>
 				store!.load(jobId).agents.find((member) => member.id === agentId && member.turnId === turnId)
 					?.pendingQuestion,
+			subscribeReport,
+			() => {
+				const current = store!.load(jobId).agents.find((member) => member.id === agentId);
+				return current?.turnId === turnId && current?.status === "running" && !current?.steering;
+			},
 		);
 		store.finishTurn(jobId, agentId, turnId, result.status, result.evidence, result.usage);
 	} catch (error) {
 		if (claimed && store) {
-			try {
-				await stopCollaborationAgent(
-					store,
-					(session) =>
-						backend ? Promise.resolve(backend) : createHerdrBackend({ session, ensureRunning: false }),
-					jobId,
-					agentId,
-					turnId,
-					cancellation.signal.aborted ? undefined : String(error).slice(0, 2000),
-				);
-			} catch {
-				/* The parent's exact-turn watchdog retains control; no false stopped-work claim. */
+			const current = store.load(jobId).agents.find((member) => member.id === agentId);
+			const isSuperseded = current?.turnId !== turnId || current?.status !== "running" || Boolean(current?.steering);
+			if (!isSuperseded) {
+				try {
+					await stopCollaborationAgent(
+						store,
+						(j) =>
+							backend ? Promise.resolve(backend) : resolveCollaborationBackend(j, { ensureRunning: false }),
+						jobId,
+						agentId,
+						turnId,
+						cancellation.signal.aborted ? undefined : String(error).slice(0, 2000),
+					);
+				} catch {
+					/* The parent's exact-turn watchdog retains control; no false stopped-work claim. */
+				}
 			}
 		}
 		process.exitCode = 1;

@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+### Added
+
+- Task-local deterministic automation (`task_automation`): deterministic automation contract registration (`spec`), verifier fixture and negative-control validation (`validate`), production execution (`run`), exact step binding (`bind`), and status inspection. Enforces finite literal assertions (`outputs.contains`, `verifier.expectedOutput`, `negativeControls[].expectedError`) without regular expression execution, bounds script file reads to 2 MB without unbounded memory allocation, validates workspace containment against sibling paths and symlink escapes, verifies exact argv and SHA-256 disk hash invariants across pipelines and session snapshots, guards against scope-switch fallback with immutable provenance symbols, and supports native background handoffs via `tool_task`.
+- Herdr sibling-panel integration: configuration templates (`herdr-sibling-panels.json`), backend resolution (`backend-resolver.ts`), and session lifecycle management for peer sibling panels, featuring Esc and readiness steering, neutral common team objective synthesis in `fire_task`, and acknowledged terminal handoffs.
+- Granular edge authority grants and host projection: `goal grant_edge` supports narrow `toolkitScript` and `toolkitArgs` selectors with cryptographic scope key derivation (`cwd`, `scriptPath`, `runner`, `scriptName`, `argv`). `authority_context` formats explicit narrow scopes alongside broad class-wide grants, preserving full bounded quotes and release conditions across auto-compaction and invalidating unconfirmed executions if script definitions mutate.
+- Session-wide skill exclusion policy and conflict resolution: `session_skill_policy` (`action: "exclude"` with reason, or `vault.exclude()`) unloads excluded active slots, purges excluded skills from discovery and search, isolates session forks, and guides model conflict recognition via an actionable resolution rule (`SKILL_CONFLICT_RESOLUTION_RULE`) across autonomy prompt tiers and tool definitions.
+- Versioned skill inspection and safe repair: `SkillVaultController` and `skill-repair.ts` provide `action: "inspect"` and `action: "repair"`, returning digest version tokens without activation and verifying against concurrent or timestamp-restored modifications (`stale_source`) before applying frontmatter-preserving updates, gated strictly by settings auto-learn authorization.
+- Structured worker evidence retention: workers construct bounded failure and rejection evidence bundles (`buildWorkerEvidenceBundle`) across model errors, malformed claim envelopes, and verifier rejections, preventing silent loss of diagnostic findings under budget caps.
+
+### Changed
+
+- Collaboration lifecycle controls: removed redundant model confirmation latches on owned panel actions (`collaboration_stop_job`, `collaboration_dismiss_job`), resolving ambiguous duplicate titles on stop, supporting non-mutating previews via `dryRun: true` on dismissal, and propagating `AbortSignal` cancellations without invoking script executors.
+- Bounded goal continuation recovery: provider failure streaks reset only on verified host completion with matching pre-state ordinals (`completionTurn === continuationTurnsUsed + 1`), preventing stale or duplicate receipts from replenishing retry budgets while keeping runaway recovery signatures distinct from provider transport failures.
+
 ## [0.99.19] - 2026-09-12
 
 ### Added

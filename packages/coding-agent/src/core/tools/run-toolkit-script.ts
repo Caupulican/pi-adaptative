@@ -13,11 +13,6 @@ const runToolkitScriptSchema = Type.Object(
 				"The toolkit script to run: its registered name, a taught alias, or a natural request (e.g. 'restore-db' or 'restore the database'). Ambiguous requests return a shortlist instead of executing.",
 		}),
 		args: Type.Optional(Type.Array(Type.String(), { description: "Arguments passed to the script as-is." })),
-		confirm: Type.Optional(
-			Type.Boolean({
-				description: "Required true to run a script flagged danger: scripts marked dangerous never run without it.",
-			}),
-		),
 	},
 	{ additionalProperties: false },
 );
@@ -33,6 +28,25 @@ export interface RunToolkitScriptDetails {
 	artifactId?: string;
 }
 
+export interface ToolkitScriptAuthorizationRequest {
+	/** Exact registered script selected by the resolver. */
+	readonly script: ToolkitScript;
+	/** Exact normalized arguments passed to the script. */
+	readonly args: readonly string[];
+}
+
+export interface ToolkitScriptAuthorizationDecision {
+	/** Whether execution is authorized by an existing host grant or verified intent. */
+	authorized: boolean;
+	/** Actionable explanation if denied or requiring confirmation. */
+	reason?: string;
+}
+
+export type ToolkitScriptAuthorizer = (
+	request: ToolkitScriptAuthorizationRequest,
+	signal?: AbortSignal,
+) => Promise<ToolkitScriptAuthorizationDecision> | ToolkitScriptAuthorizationDecision;
+
 export interface RunToolkitScriptDependencies {
 	getScripts: () => ToolkitScript[];
 	execute: (script: ToolkitScript, args: readonly string[], signal?: AbortSignal) => Promise<ScriptExecution>;
@@ -44,6 +58,12 @@ export interface RunToolkitScriptDependencies {
 	 * contract apply identically to brain-selected scripts.
 	 */
 	interpret?: (request: string, scripts: readonly ToolkitScript[]) => Promise<ReflexPlan | undefined>;
+	/**
+	 * Canonical host execution authorizer (edge/grant owner): reuses prior task authorization
+	 * to prevent duplicate user confirmation, and ensures caller-supplied confirm flags cannot
+	 * forge authority for dangerous scripts without a valid host grant.
+	 */
+	authorize?: ToolkitScriptAuthorizer;
 }
 
 export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDependencies): ToolDefinition {
@@ -55,7 +75,7 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 		promptSnippet: "Run registered toolkit script by name/alias; structured output/errors.",
 		promptGuidelines: [
 			"Prefer exact name. Shortlist: ask owner; pick only if request clearly names one.",
-			"Dangerous script needs explicit user confirmation, then confirm:true.",
+			"Dangerous scripts require host authorization; they will not execute without an approved host grant.",
 			"Report real output/exitCode; never claim success for nonzero exitCode.",
 		],
 		parameters: runToolkitScriptSchema,
@@ -120,25 +140,56 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 				};
 			}
 
-			const script = interpreted?.script ?? (match as { script: ToolkitScript }).script;
-			if (script.danger && input.confirm !== true) {
+			const matchedScript = interpreted?.script ?? (match as { script: ToolkitScript }).script;
+			const finalArgs = input.args ?? interpreted?.args ?? [];
+			// Freeze/copy the selected script and arguments before awaiting authorization; execute that exact snapshot.
+			const immutableScript: ToolkitScript = Object.freeze({ ...matchedScript });
+			const immutableArgs: readonly string[] = Object.freeze([...finalArgs]);
+
+			if (deps.authorize) {
+				const decision = await deps.authorize(
+					{
+						script: immutableScript,
+						args: immutableArgs,
+					},
+					signal,
+				);
+				signal?.throwIfAborted();
+				if (!decision.authorized) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text:
+									decision.reason ??
+									`"${immutableScript.name}" execution is not authorized by the host policy. Confirm with the operator before running.`,
+							},
+						],
+						details: { outcome: "confirmation_required", scriptName: immutableScript.name },
+						isError: true,
+					};
+				}
+			} else if (immutableScript.danger) {
 				return {
 					content: [
 						{
 							type: "text" as const,
-							text: `"${script.name}" is flagged DANGEROUS (${script.description}). It was NOT run. Confirm with the user, then call again with confirm: true.`,
+							text: `"${immutableScript.name}" is flagged DANGEROUS (${immutableScript.description}) and requires host authorization. No host authorizer is wired; execution remains unexecuted.`,
 						},
 					],
-					details: { outcome: "confirmation_required", scriptName: script.name },
+					details: { outcome: "confirmation_required", scriptName: immutableScript.name },
+					isError: true,
 				};
 			}
 
+			signal?.throwIfAborted();
+
 			// Explicit args from the caller win; a brain-extracted arg list fills in for fuzzy requests.
-			const execution = await deps.execute(script, input.args ?? interpreted?.args ?? [], signal);
+			const execution = await deps.execute(immutableScript, immutableArgs, signal);
 			const failed = execution.exitCode !== 0 || execution.timedOut;
 			const header = failed
-				? `FAILED: ${script.name} exited ${execution.timedOut ? "by timeout" : execution.exitCode} after ${execution.durationMs}ms`
-				: `${script.name} succeeded in ${execution.durationMs}ms`;
+				? `FAILED: ${immutableScript.name} exited ${execution.timedOut ? "by timeout" : execution.exitCode} after ${execution.durationMs}ms`
+				: `${immutableScript.name} succeeded in ${execution.durationMs}ms`;
 			const rawBody = [
 				header,
 				execution.stdout.trim() ? `stdout:\n${execution.stdout.trim()}` : "stdout: (empty)",
@@ -149,8 +200,8 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 			const packed = packToolOutput(
 				{
 					toolName: "run_toolkit_script",
-					command: script.name,
-					path: script.path,
+					command: immutableScript.name,
+					path: immutableScript.path,
 					rawContent: rawBody,
 					reproducible: false,
 					truncation: { maxLines: 400, maxBytes: 8 * 1024 },
@@ -169,7 +220,7 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 						? { interpreter: { script: interpreted.script.name, confidence: interpreted.confidence } }
 						: {}),
 					outcome: failed ? "failed" : "executed",
-					scriptName: script.name,
+					scriptName: immutableScript.name,
 					exitCode: execution.exitCode,
 					durationMs: execution.durationMs,
 					...(packed.artifactId ? { artifactId: packed.artifactId } : {}),

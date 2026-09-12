@@ -20,6 +20,7 @@ import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { GoalBudgetExhaustedError } from "./goal-execution-errors.ts";
 import {
 	type GoalStateRevision,
+	getAutoResumableReasonPrefix,
 	getGoalStateRevision,
 	isSystemBlockedGoal,
 	resumeGoal,
@@ -202,6 +203,9 @@ export class GoalSessionController {
 				`Goal state persisted but durable worker reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+		if (isGoalExecutionActive(state.status) || isSystemBlockedGoal(state)) {
+			this.deps.scheduleGoalAutoContinueFromIdle();
+		}
 		return entryId;
 	}
 
@@ -228,8 +232,23 @@ export class GoalSessionController {
 	 */
 	resumeSystemBlockedGoal(now = new Date().toISOString()): string | undefined {
 		const current = this.getState();
-		if (!current || !isSystemBlockedGoal(current)) return undefined;
-		const resumed = resumeGoal(current, now);
+		if (!current || !isSystemBlockedGoal(current) || !current.blockedReason) return undefined;
+
+		const prefix = getAutoResumableReasonPrefix(current.blockedReason);
+		if (!prefix) return undefined;
+
+		// Bounded watchdog: do not resume if repeated failure occurred without intervening progress.
+		// For runaway tool loops, check exact reason matches durable runawayRecoverySignature.
+		// For transient provider failures, check durable failure streak (> 1).
+		if (prefix === "runaway_tool_loop:" || prefix === "stagnant_tool_cycle:") {
+			if (current.runawayRecoverySignature === current.blockedReason) {
+				return undefined;
+			}
+		} else {
+			if ((current.systemFailureStreak ?? 0) > 1) return undefined;
+		}
+
+		const resumed = resumeGoal(current, now, "system");
 		if (!resumed.ok) return undefined;
 		this.saveState(resumed.state, getGoalStateRevision(current));
 		return resumed.state.goalId;
@@ -324,6 +343,8 @@ export class GoalSessionController {
 		goalId: string;
 		progressRevision: number;
 		stallTurns: number;
+		outcome?: GoalContinuationTurnOutcome["outcome"];
+		completionTurn?: number;
 	}): void {
 		// The execution lease already persisted active time, including failed/interrupted turns.
 		// The loop owns pass/stall telemetry and must not charge the same interval again.
@@ -333,7 +354,7 @@ export class GoalSessionController {
 	private persistContinuationPass(
 		pass: { turns: number; wallClockMs: number } & Partial<
 			Pick<GoalState, "goalId" | "progressRevision" | "stallTurns">
-		>,
+		> & { outcome?: GoalContinuationTurnOutcome["outcome"]; completionTurn?: number },
 	): void {
 		const state = this.getState();
 		if (!state) return;
@@ -350,6 +371,8 @@ export class GoalSessionController {
 			wallClockMs: pass.wallClockMs,
 			tokens: 0,
 			spendUsd: 0,
+			outcome: pass.outcome,
+			completionTurn: pass.completionTurn,
 			now,
 		});
 		if (
@@ -615,9 +638,9 @@ export class GoalSessionController {
 		// One automatic resume per guard signature. A second identical stop means the recovery cue
 		// did not change the model's behavior; resuming again bought a runaway text loop live. The
 		// goal stays blocked with the reason until the owner prompts, which resumes system blocks.
+		const state = this.getState();
 		const alreadyResumedForSignature =
-			info.reason !== "provider_turn_limit" &&
-			(this.getState()?.events ?? []).some((event) => event.type === "system_stop_goal" && event.reason === reason);
+			info.reason !== "provider_turn_limit" && state?.runawayRecoverySignature === reason;
 		if (!this.stopActiveGoal("blocked", reason)) return "no_goal";
 		if (alreadyResumedForSignature) return "blocked";
 		return this.resumeSystemBlockedGoal() !== undefined ? "resumed" : "blocked";
@@ -654,13 +677,56 @@ export class GoalSessionController {
 		return resumedGoalId !== undefined;
 	}
 
+	private hasInFlightWorkForGoal(state: GoalState): boolean {
+		const laneRecords = this.deps.getLaneRecords();
+		const inFlightLanes = new Set(
+			laneRecords
+				.filter((r) => r.goalId === state.goalId && (r.status === "queued" || r.status === "running"))
+				.map((r) => r.laneId),
+		);
+		if (state.requirements.some((r) => r.boundLaneId !== undefined && inFlightLanes.has(r.boundLaneId))) {
+			return true;
+		}
+		const bgTasks = this.deps.getBackgroundToolTasks();
+		if (bgTasks.some((t) => t.goalId === state.goalId && t.status === "running")) {
+			return true;
+		}
+		return false;
+	}
+
 	private recordContinuationFailure(error: unknown): void {
 		const state = this.getState();
 		if (!state || !isGoalExecutionActive(state.status)) return;
 		const message = error instanceof Error ? error.message : String(error);
 		const classified = classifyFailure({ message, provider: this.deps.getModelProvider() });
 		const status = classified.reason === "billing_or_quota" ? "usage_limited" : "blocked";
-		this.stopActiveGoal(status, `${classified.reason}: ${message}`);
+		const reason = `${classified.reason}: ${message}`;
+
+		if (status === "usage_limited") {
+			this.stopActiveGoal("usage_limited", reason);
+			return;
+		}
+
+		const isTransient = classified.retryable || getAutoResumableReasonPrefix(reason) !== undefined;
+		const hasInFlightWork = this.hasInFlightWorkForGoal(state);
+		const currentStreak = state.systemFailureStreak ?? 0;
+
+		if (!this.stopActiveGoal("blocked", reason)) return;
+
+		// If independent background work is running for this goal, keep the goal active so background
+		// workers can finish and deliver their completion events.
+		if (hasInFlightWork) {
+			this.resumeSystemBlockedGoal();
+			return;
+		}
+
+		// Watchdog ceiling: allow exactly one automatic resume per transient failure streak.
+		// A repeated failure without intervening trusted progress stays blocked and requires operator assistance.
+		if (isTransient && currentStreak < 1) {
+			if (this.resumeSystemBlockedGoal() !== undefined) {
+				this.deps.scheduleGoalAutoContinueFromIdle();
+			}
+		}
 	}
 
 	private markBudgetLimited(reason: string): void {

@@ -16,12 +16,17 @@ import { PI_ORCHESTRATION_AGENT_ID_ENV } from "../process-identity.ts";
 import { isComplexShellCommand, parseCommandPrefixes } from "../tools/shell-command-parser.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
 import type { CollaborationBackend } from "./backend.ts";
+import { detectHerdrCallerContext, resolveCollaborationBackend } from "./backend-resolver.ts";
 import { CollaborationControlHandoffs } from "./control-handoffs.ts";
 import { CollaborationCoordinator } from "./coordinator.ts";
 import { CollaborationDeadlines, reserveCollaborationCleanupAttempt } from "./deadlines.ts";
 import { provisionHerdr } from "./herdr-provision.ts";
-import { createHerdrBackend } from "./herdr-runtime.ts";
-import { CollaborationJobStore, collaborationLaneId, type NewCollaborationJob } from "./job-store.ts";
+import {
+	type CollaborationJob,
+	CollaborationJobStore,
+	collaborationLaneId,
+	type NewCollaborationJob,
+} from "./job-store.ts";
 import { buildLaunchProfileFlags, deriveWorkerLaunchProfile } from "./launch-profile.ts";
 import { NativeProviderRegistry, nativeCollaborationLaunchArgs } from "./native-provider.ts";
 import { normalizeNativeProviderSelection } from "./native-selection.ts";
@@ -33,6 +38,7 @@ const agentSpec = Type.Object({
 	provider: Type.Optional(Type.String({ pattern: "^[a-z][a-z0-9_-]{0,31}$" })),
 	name: Type.Optional(text),
 	task: Type.Optional(Type.String({ minLength: 1, maxLength: 8192 })),
+	direction: Type.Optional(Type.Union([Type.Literal("right"), Type.Literal("down")])),
 	command: Type.Optional(text),
 	args: Type.Optional(Type.Array(text, { maxItems: 128 })),
 	env: Type.Optional(Type.Record(Type.String(), text, { maxProperties: 64 })),
@@ -78,6 +84,7 @@ const parameters = Type.Object({
 			"stop_session",
 		]),
 	),
+	placement: Type.Optional(Type.Union([Type.Literal("current-pane"), Type.Literal("managed-workspace")])),
 	agents: Type.Optional(Type.Array(agentSpec, { minItems: 1, maxItems: 12 })),
 	task: Type.Optional(Type.String({ maxLength: 32768 })),
 	body: Type.Optional(Type.String({ maxLength: 32768 })),
@@ -99,7 +106,7 @@ const parameters = Type.Object({
 	deadlineSeconds: Type.Optional(Type.Integer({ minimum: 5, maximum: 86400 })),
 	dryRun: Type.Optional(Type.Boolean()),
 	force: Type.Optional(Type.Boolean()),
-	confirm: Type.Optional(text),
+	steer: Type.Optional(Type.Boolean()),
 	answer: Type.Optional(
 		Type.Object({
 			text: Type.Optional(text),
@@ -111,7 +118,7 @@ type Params = Static<typeof parameters>;
 
 export interface CollaborationExtensionOptions {
 	providers?: NativeProviderRegistry;
-	backend?: (session: string, create?: boolean) => Promise<CollaborationBackend>;
+	backend?: (target: CollaborationJob | string, create?: boolean) => Promise<CollaborationBackend>;
 	launchTurn?: typeof launchCollaborationTurnProcess;
 	stateDirectory?: string;
 	provision?: typeof provisionHerdr;
@@ -157,15 +164,14 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		| undefined;
 	const backend =
 		options.backend ??
-		((session, create = false) => {
+		((job: CollaborationJob, create = false) => {
 			const owner = binding;
-			return createHerdrBackend({
-				session,
+			return resolveCollaborationBackend(job, {
 				ensureRunning: create,
 				onTerminal: (terminal) => {
 					if (!owner) return;
 					for (const job of owner.store.list()) {
-						if (job.sessionName !== session || job.agents.every((agent) => agent.closed)) continue;
+						if (job.sessionName !== terminal.session || job.agents.every((agent) => agent.closed)) continue;
 						owner.controls.record(
 							job.id,
 							"server",
@@ -330,6 +336,18 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 					task: "Review the scoped task for correctness, failure recovery, ownership and security. Do not edit files. Send evidence-backed findings to the builder.",
 				},
 			];
+		const caller = detectHerdrCallerContext();
+		const requestedPlacement = params.placement;
+		if (requestedPlacement === "current-pane" && !caller) {
+			throw new Error(
+				"Placement 'current-pane' requires a running Herdr environment (HERDR_ENV=1, valid pane, workspace, tab and socket).",
+			);
+		}
+		const placement = requestedPlacement ?? (caller ? "current-pane" : "managed-workspace");
+		const isCurrentPane = placement === "current-pane";
+		if (isCurrentPane && !caller?.binPath) {
+			throw new Error("Placement 'current-pane' requires a valid caller executable (HERDR_BIN_PATH).");
+		}
 		const id = params.launchKey ?? `job-${randomUUID()}`;
 		const cwd = resolve(ctx.cwd, params.cwd ?? ".");
 		const result: NewCollaborationJob = {
@@ -345,6 +363,12 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 			createdAt: Date.now(),
 			deadlineSeconds: params.deadlineSeconds ?? template?.deadlineSeconds ?? 1200,
 			goalId: params.goalId,
+			placement,
+			socketPath: isCurrentPane && caller ? caller.socketPath : undefined,
+			binPath: isCurrentPane && caller ? caller.binPath : undefined,
+			callerPaneId: isCurrentPane && caller ? caller.paneId : undefined,
+			callerWorkspaceId: isCurrentPane && caller ? caller.workspaceId : undefined,
+			callerTabId: isCurrentPane && caller ? caller.tabId : undefined,
 			agents: [],
 		};
 		for (let index = 0; index < specs.length; index++) {
@@ -424,6 +448,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				id: agentId,
 				name: spec.name ?? provider,
 				task: spec.task,
+				direction: spec.direction,
 				provider: readiness?.kind ?? provider,
 				cwd: agentCwd,
 				args: [...invocation.argsPrefix, ...args],
@@ -444,10 +469,12 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		promptSnippet: "Persistent multi-provider subagents with terminal/question-only handoffs.",
 		promptGuidelines: [
 			"Use delegate for in-process workers; use pi_collaboration for persistent native CLI environments.",
+			"When running inside Herdr, placement defaults to current-pane (spawns sibling panels in the user's active workspace/tab). Set placement: managed-workspace for a private isolated daemon.",
 			"Only terminal handoffs and questions are returned automatically. Never poll/read panes for progress or re-submit an uncertain prompt.",
 			"Claude/agy use --dangerously-skip-permissions; Codex uses --dangerously-bypass-approvals-and-sandbox by explicit user policy. External CLI permissions and token budgets are not Pi-enforced.",
+			"External CLIs specify reasoning effort via args (e.g. agy with model: gemini-3.8-flash-high and args: ['--effort', 'high']); thinkingLevel is Pi-only.",
 			"Answer a stopped agent's question with answer_question on the same jobId/agentId. New tasks use send_followup. Review evidence before treating reported success as verified.",
-			"Every task, answer, environment, and result may persist; never include secrets. Stop actions preview by default; confirm=yes-collaboration-stop for actual termination.",
+			"Every task, answer, environment, and result may persist; never include secrets. Stop actions terminate exact owned agent panes; pass dryRun: true to preview without mutating.",
 		],
 		async execute(_id, input, signal, _update, ctx) {
 			const params = input as Params;
@@ -474,8 +501,22 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				const plan = await prepare(ctx, params, action !== "workspace_plan" && params.dryRun !== true);
 				if (action === "workspace_plan" || params.dryRun) details = { dryRun: true, job: plan };
 				else {
-					const task = params.task ?? params.body;
-					if (action === "fire_task" && !task?.trim()) throw new Error("fire_task requires a task.");
+					let task = params.task ?? params.body;
+					if (action === "fire_task" && !task?.trim()) {
+						const agentTasks = plan.agents.map((a) => a.task?.trim());
+						if (
+							agentTasks.length > 0 &&
+							agentTasks.every((t) => Boolean(t)) &&
+							new Set(agentTasks).size === agentTasks.length
+						) {
+							task =
+								agentTasks.length === 1
+									? agentTasks[0]!
+									: params.title?.trim() || "Execute assigned team responsibilities.";
+						} else {
+							throw new Error("fire_task requires a task or distinct per-agent tasks for every agent.");
+						}
+					}
 					if (params.force && existsSync(store.path(plan.id))) {
 						if (store.load(plan.id).agents.some((agent) => !agent.closed))
 							throw new Error("Stop the existing team's native sessions before reusing its launchKey.");
@@ -486,15 +527,21 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 					details = { job: launched };
 				}
 			} else {
-				const job = params.jobId
-					? store.load(params.jobId)
-					: store
+				let job: CollaborationJob | undefined;
+				if (params.jobId) {
+					job = store.load(params.jobId);
+				} else {
+					const target = params.workspaceName ?? params.title;
+					if (target) {
+						const matches = store
 							.list()
-							.find(
-								(item) =>
-									item.title === (params.workspaceName ?? params.title) ||
-									item.sessionName === params.workspaceName,
-							);
+							.filter((item) => item.title === target || item.sessionName === params.workspaceName);
+						if (matches.length > 1) {
+							throw new Error(`Multiple owned collaboration jobs match "${target}". Specify an exact jobId.`);
+						}
+						job = matches[0];
+					}
+				}
 				if (!job) throw new Error("An owned jobId or exact owned workspace is required.");
 				if (action === "job_status") {
 					await recover();
@@ -521,18 +568,28 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 					if (!task.trim()) throw new Error("send_followup requires a nonempty task.");
 					details = params.dryRun
 						? { dryRun: true, jobId: job.id }
-						: await coordinator.followup(job.id, params.agentId, task, answering ? params.answer : undefined);
+						: await coordinator.followup(
+								job.id,
+								params.agentId,
+								task,
+								answering ? params.answer : undefined,
+								params.steer !== undefined ? { steer: params.steer } : undefined,
+							);
 				} else if (["stop_job", "stop_session", "dismiss"].includes(action)) {
-					if (action !== "dismiss" && params.dryRun !== false)
-						details = { dryRun: true, jobId: job.id, session: job.sessionName };
+					if (params.dryRun === true)
+						details = {
+							dryRun: true,
+							action,
+							jobId: job.id,
+							session: job.sessionName,
+							placement: job.placement ?? "managed-workspace",
+						};
 					else {
-						if (action !== "dismiss" && params.confirm !== "yes-collaboration-stop")
-							throw new Error("Real stop requires confirm=yes-collaboration-stop.");
 						await coordinator.stop(job.id, action === "dismiss");
 						details = store.load(job.id);
 					}
 				} else if (action === "notify") {
-					await (await backend(job.sessionName)).notify(
+					await (await backend(job)).notify(
 						params.title ?? "Pi collaboration",
 						(params.body ?? "Attention required").slice(0, 2000),
 					);
@@ -541,7 +598,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 					const key = params.statusKey ?? "status";
 					const value = action === "clear_status" ? null : (params.status ?? params.body ?? "");
 					if (!job.workspaceId) throw new Error("Workspace is not running.");
-					await (await backend(job.sessionName)).reportMetadata(job.workspaceId, { [key]: value }, Date.now());
+					await (await backend(job)).reportMetadata(job.workspaceId, { [key]: value }, Date.now());
 					details = { key, value };
 				} else throw new Error(`Unsupported collaboration action: ${action}`);
 			}
@@ -559,7 +616,9 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				],
 				details: {
 					action,
-					...(action === "fire_task" && details && typeof details === "object" ? details : {}),
+					...((action === "fire_task" || action === "launch_workspace") && details && typeof details === "object"
+						? details
+						: {}),
 					...(action === "guard" ? { guard: { allowed: true } } : {}),
 				},
 			};

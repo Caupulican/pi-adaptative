@@ -2,6 +2,12 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
 import type { AgentContextPlan, AgentMessage } from "@caupulican/pi-agent-core/types";
+import {
+	TASK_AUTOMATION_CONTEXT_CLEARED,
+	TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE,
+	type TaskAutomationContextPlan,
+} from "./automation/task-automation-runtime-adapter.ts";
+import type { EdgeGrantView } from "./autonomy/edge-policy.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";
 import type { PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import type { PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
@@ -45,8 +51,11 @@ export interface ProviderRequestContextControllerDeps {
 	appendMemoryEvidence(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[];
 	previewReflectionCue?(): CurrentTurnReflectionCuePlan | undefined;
 	previewTaskDirectoryContext?(): TaskDirectoryContextPlan;
+	previewTaskAutomationContext?(): TaskAutomationContextPlan;
 	getGoalState(): GoalState | undefined;
 	skillVault: SkillVaultController;
+	/** Edge authority grants active on the session; projected after compaction or whenever active. */
+	getEdgeGrants?(): readonly EdgeGrantView[];
 	applyPathAliases(messages: AgentMessage[]): {
 		messages: AgentMessage[];
 		legend?: string;
@@ -113,6 +122,64 @@ function appendActiveSkillContext(transientMessages: AgentMessage[], context: st
 	];
 }
 
+/** Durable record kind carrying the session authority and active edge grants projection. */
+export const AUTHORITY_CONTEXT_CUSTOM_TYPE = "authority_context";
+export const AUTHORITY_CONTEXT_CLEARED_TEXT =
+	"AUTHORITY CONTEXT: none. No active recorded edge grants; verify specific owner instructions or recorded grants before assuming delegated authority.";
+
+export const MAX_AUTHORITY_GRANT_FIELD_CHARS = 1000;
+
+export function formatAuthorityContext(grants: readonly EdgeGrantView[]): string {
+	const lines = ["AUTHORITY CONTEXT: Active edge grants (respect explicit conditions and scope):"];
+	for (const grant of grants) {
+		const cleanScopeKey = grant.scopeKey?.trim();
+		const scopePart = cleanScopeKey
+			? `, scope: narrow (only exact registered script/argv authorized, never broad class), scopeKey: ${cleanScopeKey}`
+			: ", scope: broad class-wide authorization";
+		const parts = [`- ${grant.class} (source: ${grant.source}${scopePart}`];
+		if (grant.quote) {
+			const cleanQuote = grant.quote.trim().replace(/[\r\n]+/g, " ");
+			if (cleanQuote.length <= MAX_AUTHORITY_GRANT_FIELD_CHARS) {
+				parts.push(`, quote: "${cleanQuote}"`);
+			} else {
+				parts.push(
+					`, quote exceeds context projection capacity (do not assume unconditioned authority; inspect durable entry ${grant.messageEntryId ?? grant.grantedAt ?? "record"} for full conditions and scope)`,
+				);
+			}
+		}
+		if (grant.note) {
+			const cleanNote = grant.note.trim().replace(/[\r\n]+/g, " ");
+			if (cleanNote.length <= MAX_AUTHORITY_GRANT_FIELD_CHARS) {
+				parts.push(`, note: "${cleanNote}"`);
+			} else {
+				parts.push(
+					`, note exceeds context projection capacity; see durable entry ${grant.messageEntryId ?? grant.grantedAt ?? "record"} for full text)`,
+				);
+			}
+		}
+		if (grant.grantedAt) {
+			parts.push(`, grantedAt: ${grant.grantedAt}`);
+		}
+		parts.push(")");
+		lines.push(parts.join(""));
+	}
+	return lines.join("\n");
+}
+
+function appendAuthorityContext(transientMessages: AgentMessage[], context: string | undefined): AgentMessage[] {
+	if (context === undefined) return transientMessages;
+	return [
+		...transientMessages,
+		createCustomMessage(
+			AUTHORITY_CONTEXT_CUSTOM_TYPE,
+			context,
+			false,
+			undefined,
+			deterministicTransientTimestamp(context),
+		),
+	];
+}
+
 function appendPathAliasLegend(transientMessages: AgentMessage[], legend: string | undefined): AgentMessage[] {
 	if (!legend) return transientMessages;
 	return [
@@ -127,6 +194,23 @@ function appendPathAliasLegend(transientMessages: AgentMessage[], legend: string
 			deterministicTransientTimestamp(legend),
 		),
 	];
+}
+
+function resolveAuthorityContext(
+	getEdgeGrants: (() => readonly EdgeGrantView[]) | undefined,
+	messages: readonly AgentMessage[],
+	extensionMessages: readonly AgentMessage[],
+): string | undefined {
+	if (getEdgeGrants !== undefined) {
+		const grants = getEdgeGrants();
+		return grants.length > 0 ? formatAuthorityContext(grants) : AUTHORITY_CONTEXT_CLEARED_TEXT;
+	}
+	const hasAuthorityRecordInHistory =
+		messages.some((message) => message.role === "custom" && message.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE) ||
+		extensionMessages.some(
+			(message) => message.role === "custom" && message.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE,
+		);
+	return hasAuthorityRecordInHistory ? AUTHORITY_CONTEXT_CLEARED_TEXT : undefined;
 }
 
 /** Coordinates replay-safe request context planning and accepted-plan lifecycle commit. */
@@ -151,6 +235,18 @@ export class ProviderRequestContextController {
 			)
 				? TASK_DIRECTORY_CONTEXT_CLEARED
 				: undefined);
+		const automationPlan = this.deps.previewTaskAutomationContext?.();
+		const rawAutomationContent = automationPlan?.isCurrent() ? automationPlan.content : undefined;
+		const hasPriorAutomationContext =
+			messages.some(
+				(message) => message.role === "custom" && message.customType === TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE,
+			) ||
+			extensionPlan.messages.some(
+				(message) => message.role === "custom" && message.customType === TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE,
+			);
+		const automationContent =
+			rawAutomationContent ??
+			(hasPriorAutomationContext && automationPlan?.isCurrent() ? TASK_AUTOMATION_CONTEXT_CLEARED : undefined);
 		const providerTransients = [
 			...extensionPlan.transientMessages,
 			...(reflectionCuePlan ? [reflectionCuePlan.message] : []),
@@ -162,6 +258,17 @@ export class ProviderRequestContextController {
 							false,
 							undefined,
 							deterministicTransientTimestamp(directoryContent),
+						),
+					]
+				: []),
+			...(automationContent
+				? [
+						createCustomMessage(
+							TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE,
+							automationContent,
+							false,
+							undefined,
+							deterministicTransientTimestamp(automationContent),
 						),
 					]
 				: []),
@@ -198,19 +305,39 @@ export class ProviderRequestContextController {
 		const legend = pathAliasPlan.legend;
 		const skillSection = this.deps.skillVault.previewSystemPromptSection();
 		const skillRevision = this.deps.skillVault.getContextRevision();
-		// A vault that has projected skills before and holds none now clears the record explicitly.
-		const skillContext = skillSection ?? (skillRevision > 0 ? ACTIVE_SKILL_CONTEXT_CLEARED_TEXT : undefined);
-		const transientMessages = appendPathAliasLegend(
-			appendActiveSkillContext(beforeSkill.slice(compactableMessages.length), skillContext),
-			legend,
-		);
+		const exclusionReminder = this.deps.skillVault.previewExclusionReminder?.();
+		const hasActiveSkillRecordInHistory =
+			messages.some(
+				(message) => message.role === "custom" && message.customType === ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
+			) ||
+			extensionPlan.messages.some(
+				(message) => message.role === "custom" && message.customType === ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
+			);
+		let skillContext: string | undefined;
+		if (skillSection && exclusionReminder) {
+			skillContext = `${skillSection}\n\n${exclusionReminder}`;
+		} else if (skillSection) {
+			skillContext = skillSection;
+		} else if (exclusionReminder) {
+			skillContext = `${ACTIVE_SKILL_CONTEXT_CLEARED_TEXT}\n\n${exclusionReminder}`;
+		} else if (skillRevision > 0 || hasActiveSkillRecordInHistory) {
+			skillContext = ACTIVE_SKILL_CONTEXT_CLEARED_TEXT;
+		}
+
+		const authorityContext = resolveAuthorityContext(this.deps.getEdgeGrants, messages, extensionPlan.messages);
+
+		const withAuthority = appendAuthorityContext(beforeSkill.slice(compactableMessages.length), authorityContext);
+		const transientMessages = appendPathAliasLegend(appendActiveSkillContext(withAuthority, skillContext), legend);
+
 		const dependenciesCurrent = () =>
 			extensionPlan.isCurrent?.() !== false &&
 			reflectionCuePlan?.isCurrent() !== false &&
 			directoryPlan?.isCurrent() !== false &&
+			automationPlan?.isCurrent() !== false &&
 			this.deps.skillVault.getContextRevision() === skillRevision &&
 			// The goal snapshot is one shared frozen value per journal position (session-goal-state.ts).
-			this.deps.getGoalState() === goalState;
+			this.deps.getGoalState() === goalState &&
+			resolveAuthorityContext(this.deps.getEdgeGrants, messages, extensionPlan.messages) === authorityContext;
 		// One projection serves preview, currency check and commit. The plan is a pure function of the
 		// durable messages (same array, same objects), the dependencies `dependenciesCurrent` tracks,
 		// and the curator digests the GC pass looked up -- which `previewGc.isCurrent()` re-resolves.
@@ -219,7 +346,8 @@ export class ProviderRequestContextController {
 		const planCurrent = () =>
 			dependenciesCurrent() &&
 			previewGc.isCurrent() &&
-			this.deps.skillVault.previewSystemPromptSection() === skillSection;
+			this.deps.skillVault.previewSystemPromptSection() === skillSection &&
+			this.deps.skillVault.previewExclusionReminder?.() === exclusionReminder;
 
 		return {
 			messages: compactableMessages,

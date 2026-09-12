@@ -15,8 +15,12 @@ import { type CollaborationJob, CollaborationJobStore } from "../../src/core/col
 import { NativeProviderRegistry } from "../../src/core/collaboration/native-provider.ts";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "../../src/core/extensions/types.ts";
 
+export interface CollaborationFixtureOptions extends Pick<CollaborationExtensionOptions, "watch"> {
+	placement?: "current-pane" | "managed-workspace";
+}
+
 /** Native I/O is replaced at the backend port; durable turns and the packaged extension remain real. */
-export async function collaborationFixture(options: Pick<CollaborationExtensionOptions, "watch"> = {}) {
+export async function collaborationFixture(options: CollaborationFixtureOptions = {}) {
 	const root = await mkdtemp(join(tmpdir(), "pi-collaboration-regression-"));
 	const store = new CollaborationJobStore(root, "parent");
 	const states = new Map<string, CollaborationAgent>();
@@ -42,6 +46,11 @@ export async function collaborationFixture(options: Pick<CollaborationExtensionO
 			rootPane: createPane(),
 		})),
 		splitPane: vi.fn(async () => createPane()),
+		getPane: vi.fn(async (paneId: string) => {
+			const target = panes.get(paneId);
+			if (!target) throw new Error("Missing fixture pane");
+			return { ...target };
+		}),
 		startAgent: vi.fn(async (input: CollaborationStart) => {
 			const target = panes.get(input.paneId);
 			if (!target) throw new Error("Missing fixture pane");
@@ -167,7 +176,11 @@ export async function collaborationFixture(options: Pick<CollaborationExtensionO
 		},
 		execute: (input: unknown) => {
 			if (!tool) throw new Error("Tool not registered");
-			return tool.execute("call", input, undefined, undefined, context);
+			const defaultedInput =
+				input && typeof input === "object" && !Array.isArray(input)
+					? { placement: options.placement ?? "managed-workspace", ...input }
+					: input;
+			return tool.execute("call", defaultedInput, undefined, undefined, context);
 		},
 		start: () => handlers.get("session_start")?.({}, context),
 		shutdown: () => handlers.get("session_shutdown")?.({}, context),

@@ -1,10 +1,15 @@
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { checkSkillEvolutionEligibility } from "../session-skill-policy.ts";
+import type { SettingsManager } from "../settings-manager.ts";
 import {
 	MAX_LOADED_SKILLS,
 	MAX_PINNED_SKILLS,
+	type SkillExcludeResult,
+	type SkillInspectResult,
 	type SkillLoadResult,
 	type SkillReadResult,
+	type SkillRepairResult,
 	type SkillSearchResult,
 	type SkillVaultController,
 	type SkillVaultStatus,
@@ -13,8 +18,16 @@ import {
 const skillSchema = Type.Object(
 	{
 		action: Type.Union(
-			[Type.Literal("search"), Type.Literal("load"), Type.Literal("unload"), Type.Literal("status")],
-			{ description: "search | load | unload | status" },
+			[
+				Type.Literal("search"),
+				Type.Literal("load"),
+				Type.Literal("unload"),
+				Type.Literal("status"),
+				Type.Literal("exclude"),
+				Type.Literal("inspect"),
+				Type.Literal("repair"),
+			],
+			{ description: "search | load | unload | status | exclude | inspect | repair" },
 		),
 		query: Type.Optional(Type.String({ description: "search query" })),
 		name: Type.Optional(Type.String({ description: "exact skill name; unload without it unloads all" })),
@@ -30,6 +43,26 @@ const skillSchema = Type.Object(
 				description: `prioritize retention while loaded; at most ${MAX_PINNED_SKILLS} pins, further requests load unpinned`,
 			}),
 		),
+		reason: Type.Optional(
+			Type.String({
+				description: "exact explanation of conflict with owner instructions (required for exclude)",
+			}),
+		),
+		body: Type.Optional(
+			Type.String({
+				description: "repaired markdown body without frontmatter (required for repair)",
+			}),
+		),
+		description: Type.Optional(
+			Type.String({
+				description: "optional replacement description for repair",
+			}),
+		),
+		expectedVersion: Type.Optional(
+			Type.String({
+				description: "expected source version token from inspect (required for repair)",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -39,7 +72,10 @@ export type SkillToolDetails =
 	| { action: "search"; result: SkillSearchResult }
 	| { action: "load"; result: SkillLoadResult; results?: SkillLoadResult[] }
 	| { action: "unload"; result: { ok: true; unloaded: string[] } }
-	| { action: "status"; result: SkillVaultStatus };
+	| { action: "status"; result: SkillVaultStatus }
+	| { action: "exclude"; result: SkillExcludeResult; evolution?: { eligible: boolean; reason: string } }
+	| { action: "inspect"; result: SkillInspectResult }
+	| { action: "repair"; result: SkillRepairResult };
 
 export interface ReadOnlySkillBroker {
 	search(query: string): SkillSearchResult;
@@ -67,8 +103,8 @@ export function createReadOnlySkillToolDefinition(
 		name: "skill",
 		label: "Skill (read-only)",
 		description:
-			"Search and read eligible skill guidance through a bounded host broker. This worker surface cannot mutate the skill vault.",
-		promptSnippet: "Search/read skill guidance.",
+			"Search and read eligible skill guidance through a bounded host broker. This worker surface cannot mutate the skill vault. When a skill conflicts with owner instructions, report the conflicting skill to the parent rather than pausing on an approval latch.",
+		promptSnippet: "Search/read skill guidance; report conflicts to parent.",
 		parameters: readOnlySkillSchema,
 		async execute(_toolCallId, input) {
 			if (input.action === "search") {
@@ -129,24 +165,42 @@ function loadText(result: Extract<SkillLoadResult, { ok: true }>): string {
 }
 
 function statusText(result: SkillVaultStatus): string {
-	if (result.slots.length === 0) return `skill state: unloaded${result.reason ? `, ${result.reason}` : ""}`;
-	return result.slots
-		.map((slot) => {
+	const lines: string[] = [];
+	if (result.slots.length === 0) {
+		lines.push(`skill state: unloaded${result.reason ? `, ${result.reason}` : ""}`);
+	} else {
+		for (const slot of result.slots) {
 			const pin = slot.pinned ? " (pinned)" : "";
-			return slot.state === "loaded_pending"
-				? `skill state: loaded_pending, ${slot.name}${pin}, activates next request`
-				: `skill state: active, ${slot.name}${pin}, idle ${Math.round(slot.idleForMs ?? 0)}ms, expires ${Math.round(slot.expiresInMs ?? 0)}ms`;
-		})
-		.join("\n");
+			lines.push(
+				slot.state === "loaded_pending"
+					? `skill state: loaded_pending, ${slot.name}${pin}, activates next request`
+					: `skill state: active, ${slot.name}${pin}, idle ${Math.round(slot.idleForMs ?? 0)}ms, expires ${Math.round(slot.expiresInMs ?? 0)}ms`,
+			);
+		}
+	}
+	if (result.exclusions && result.exclusions.length > 0) {
+		lines.push("exclusions (conflict with owner instructions):");
+		for (const exclusion of result.exclusions) {
+			lines.push(`- ${exclusion.name}: ${exclusion.reason}`);
+		}
+	}
+	return lines.join("\n");
+}
+
+export interface SkillVaultToolOptions {
+	getSettingsManager?: () => SettingsManager | undefined;
 }
 
 /** One compact agent surface over the host-owned skill lifecycle. */
-export function createSkillVaultToolDefinition(vault: SkillVaultController): ToolDefinition<typeof skillSchema> {
+export function createSkillVaultToolDefinition(
+	vault: SkillVaultController,
+	options?: SkillVaultToolOptions,
+): ToolDefinition<typeof skillSchema> {
 	return {
 		name: "skill",
 		label: "Skill",
-		description: `Skill vault, up to ${MAX_LOADED_SKILLS} concurrent skills under one byte budget. Search, then load exact names before work. A batch loads every requested skill or rejects without partial admission. Load may evict previously loaded skills and reports them, preferring the oldest unpinned. Pin prioritizes retention; pinned skills still expire idle. Host injects bodies starting next request; unload one name or all.`,
-		promptSnippet: "Search/load skill.",
+		description: `Skill vault, up to ${MAX_LOADED_SKILLS} concurrent skills under one byte budget. Search, then load exact names before work. A batch loads every requested skill or rejects without partial admission. Load may evict previously loaded skills and reports them, preferring the oldest unpinned. Pin prioritizes retention; pinned skills still expire idle. Host injects bodies starting next request; unload one name or all. On detecting a loaded or available skill conflicts with owner instructions: invoke skill exclude with exact name and reason immediately (unloads skill and excludes from session skill mapping), continue authorized work; optional repair only if configured eligible.`,
+		promptSnippet: "Search/load/exclude skill. Exclude immediately on conflict with owner instructions.",
 		parameters: skillSchema,
 		async execute(_toolCallId, input) {
 			switch (input.action) {
@@ -204,6 +258,178 @@ export function createSkillVaultToolDefinition(vault: SkillVaultController): Too
 					return {
 						content: [{ type: "text" as const, text: statusText(result) }],
 						details: { action: "status" as const, result },
+					};
+				}
+				case "exclude": {
+					if (!input.name?.trim()) {
+						return {
+							content: [{ type: "text" as const, text: "skill exclude requires exact name" }],
+							details: {
+								action: "exclude" as const,
+								result: { ok: false, reason: "invalid_name", message: "Skill exclude requires an exact name." },
+							},
+							isError: true,
+						};
+					}
+					if (!input.reason?.trim()) {
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: "skill exclude requires reason explaining conflict with owner instructions",
+								},
+							],
+							details: {
+								action: "exclude" as const,
+								result: {
+									ok: false,
+									reason: "invalid_reason",
+									message: "Skill exclude requires a reason explaining conflict with owner instructions.",
+								},
+							},
+							isError: true,
+						};
+					}
+					const result = vault.exclude(input.name.trim(), input.reason.trim());
+					let evolution: { eligible: boolean; reason: string } | undefined;
+					const settingsManager = options?.getSettingsManager?.();
+					if (settingsManager) {
+						const autonomyMode = settingsManager.getAutonomySettings().mode;
+						const autoLearn = settingsManager.getAutoLearnSettings();
+						evolution = checkSkillEvolutionEligibility(autonomyMode, autoLearn);
+					}
+					if (!result.ok) {
+						return {
+							content: [{ type: "text" as const, text: `skill exclude failed: ${result.message}` }],
+							details: { action: "exclude" as const, result, ...(evolution ? { evolution } : {}) },
+							isError: true,
+						};
+					}
+					const already = result.alreadyExcluded ? " (already excluded)" : "";
+					const evoText = evolution
+						? `\nSkill evolution: ${evolution.eligible ? "eligible" : "ineligible"} (${evolution.reason}).`
+						: "";
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `skill excluded${already}: ${result.name} (${result.reason}). Unloaded and excluded from this session.${evoText}`,
+							},
+						],
+						details: { action: "exclude" as const, result, ...(evolution ? { evolution } : {}) },
+					};
+				}
+				case "inspect": {
+					if (!input.name?.trim()) {
+						return {
+							content: [{ type: "text" as const, text: "skill inspect requires exact name" }],
+							details: {
+								action: "inspect" as const,
+								result: { ok: false, reason: "not_found", message: "Skill inspect requires an exact name." },
+							},
+							isError: true,
+						};
+					}
+					const result = vault.inspect(input.name.trim());
+					if (!result.ok) {
+						return {
+							content: [{ type: "text" as const, text: `skill inspect failed: ${result.message}` }],
+							details: { action: "inspect" as const, result },
+							isError: true,
+						};
+					}
+					const excludedNote = vault.isExcluded(result.name) ? " [EXCLUDED in this session]" : "";
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `skill: ${result.name} (version ${result.version})${excludedNote}\n${result.description}\n\n${result.body}`,
+							},
+						],
+						details: { action: "inspect" as const, result },
+					};
+				}
+				case "repair": {
+					if (!input.name?.trim()) {
+						return {
+							content: [{ type: "text" as const, text: "skill repair requires exact name" }],
+							details: {
+								action: "repair" as const,
+								result: { ok: false, reason: "not_found", message: "Skill repair requires an exact name." },
+							},
+							isError: true,
+						};
+					}
+					if (!input.body?.trim()) {
+						return {
+							content: [{ type: "text" as const, text: "skill repair requires repaired body content" }],
+							details: {
+								action: "repair" as const,
+								result: { ok: false, reason: "invalid_body", message: "Skill repair requires body content." },
+							},
+							isError: true,
+						};
+					}
+					const settingsManager = options?.getSettingsManager?.();
+					const autonomyMode = settingsManager?.getAutonomySettings().mode ?? "off";
+					const autoLearn = settingsManager?.getAutoLearnSettings();
+					const evolution = checkSkillEvolutionEligibility(autonomyMode, autoLearn);
+					if (!evolution.eligible) {
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: `skill repair rejected: skill evolution is not permitted (${evolution.reason})`,
+								},
+							],
+							details: {
+								action: "repair" as const,
+								result: {
+									ok: false,
+									reason: "write_failed",
+									message: `Skill evolution is not permitted: ${evolution.reason}`,
+								},
+							},
+							isError: true,
+						};
+					}
+					if (!input.expectedVersion?.trim()) {
+						return {
+							content: [{ type: "text" as const, text: "skill repair requires expectedVersion from inspect" }],
+							details: {
+								action: "repair" as const,
+								result: {
+									ok: false,
+									reason: "stale_source",
+									message: "Skill repair requires expectedVersion from inspect.",
+								},
+							},
+							isError: true,
+						};
+					}
+					const result = vault.repairSkill({
+						name: input.name.trim(),
+						body: input.body,
+						expectedVersion: input.expectedVersion.trim(),
+						description: input.description?.trim(),
+					});
+					if (!result.ok) {
+						return {
+							content: [{ type: "text" as const, text: `skill repair failed: ${result.message}` }],
+							details: { action: "repair" as const, result },
+							isError: true,
+						};
+					}
+					const isCurrentlyExcluded = vault.isExcluded(result.name);
+					const exclusionNote = isCurrentlyExcluded ? " Note: skill remains excluded in this session." : "";
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `skill repaired: ${result.name} (version ${result.version}) on disk at ${result.filePath}.${exclusionNote}`,
+							},
+						],
+						details: { action: "repair" as const, result },
 					};
 				}
 			}

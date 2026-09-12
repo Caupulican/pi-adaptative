@@ -1,5 +1,5 @@
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
-import type { EvidenceRef, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
+import type { EvidenceBundle, EvidenceRef, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
 import {
 	type EvidenceFindingDraft,
 	normalizeEvidenceFinding,
@@ -197,8 +197,8 @@ function isWorkerStatus(value: unknown): value is ParsedWorkerOutput["status"] {
  * Plain-text fallback is for output that never attempted the worker claim envelope. A JSON object
  * with a claim summary but malformed typed fields is a contract failure, never an implicit success.
  */
-function hasMalformedWorkerClaimEnvelope(text: string): boolean {
-	return workerOutputRecords(text).some((record) => {
+function extractMalformedWorkerRecord(text: string): Record<string, unknown> | undefined {
+	return workerOutputRecords(text).find((record) => {
 		if (typeof record.summary !== "string" || record.summary.trim().length === 0) return false;
 		if (!isWorkerStatus(record.status)) return true;
 		if (record.verdict !== undefined && record.verdict !== "accepted" && record.verdict !== "rejected") return true;
@@ -208,6 +208,16 @@ function hasMalformedWorkerClaimEnvelope(text: string): boolean {
 				record.reasonCodes.some((reasonCode) => typeof reasonCode !== "string" || reasonCode.trim().length === 0))
 		);
 	});
+}
+
+function extractWorkerFindingDrafts(rawFindings: unknown): EvidenceFindingDraft[] {
+	if (!Array.isArray(rawFindings)) return [];
+	const findings: EvidenceFindingDraft[] = [];
+	for (let index = 0; index < rawFindings.length && index < MAX_WORKER_FINDINGS; index++) {
+		const finding = normalizeEvidenceFinding(rawFindings[index], MAX_WORKER_FINDING_CHARS);
+		if (finding) findings.push(finding);
+	}
+	return findings;
 }
 
 export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined {
@@ -231,13 +241,7 @@ export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined 
 					.slice(0, MAX_WORKER_CLAIM_BLOCKERS)
 					.map((blocker) => blocker.trim().slice(0, MAX_WORKER_CLAIM_BLOCKER_CHARS))
 			: [];
-		const findings: EvidenceFindingDraft[] = [];
-		if (Array.isArray(record.findings)) {
-			for (let index = 0; index < record.findings.length && index < MAX_WORKER_FINDINGS; index++) {
-				const finding = normalizeEvidenceFinding(record.findings[index], MAX_WORKER_FINDING_CHARS);
-				if (finding) findings.push(finding);
-			}
-		}
+		const findings = extractWorkerFindingDrafts(record.findings);
 		const verdict = record.verdict === "accepted" || record.verdict === "rejected" ? record.verdict : undefined;
 		const reasonCodes = Array.isArray(record.reasonCodes)
 			? record.reasonCodes
@@ -262,25 +266,43 @@ export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined 
 	return undefined;
 }
 
-function buildWorkerEvidence(request: WorkerRequest, findings: ParsedWorkerOutput["findings"]) {
-	if (findings.length === 0) return undefined;
+function buildWorkerEvidenceBundle(args: {
+	request: WorkerRequest;
+	findings?: readonly EvidenceFindingDraft[];
+	rawText?: string;
+	summary?: string;
+}): EvidenceBundle | undefined {
+	const raw = args.rawText?.trim();
+	const drafts: EvidenceFindingDraft[] = [];
+	if (args.findings && args.findings.length > 0) {
+		drafts.push(...args.findings.slice(0, MAX_WORKER_FINDINGS));
+	} else if (raw && raw.length > 0) {
+		const usefulSummary = args.summary?.trim() || raw;
+		drafts.push({
+			summary: clipWorkerClaimSummary(usefulSummary).slice(0, MAX_WORKER_FINDING_CHARS),
+		});
+	} else {
+		return undefined;
+	}
+
 	const instructionsRef: EvidenceRef = {
 		id: "src-instructions",
 		kind: "user",
 		title: "Delegated task instructions",
 		trusted: true,
-		excerpt: request.instructions.slice(0, 2000),
+		excerpt: args.request.instructions.slice(0, 2000),
 	};
 	const synthesisRef: EvidenceRef = {
 		id: "src-worker",
 		kind: "tool",
-		title: "Delegated worker synthesis",
+		title: raw ? "Delegated worker report" : "Delegated worker synthesis",
 		trusted: false,
+		...(raw ? { excerpt: raw.slice(0, 8_000) } : {}),
 	};
 	return createEvidenceBundle({
-		query: `worker:${request.id}`,
+		query: `worker:${args.request.id}`,
 		sources: [instructionsRef, synthesisRef],
-		findings: projectEvidenceFindings(findings, synthesisRef.id),
+		findings: projectEvidenceFindings(drafts, synthesisRef.id),
 	});
 }
 
@@ -304,6 +326,43 @@ function finishOutcome(args: {
 		...(args.reasonDetail ? { reasonDetail: args.reasonDetail } : {}),
 		costUsd: args.costUsd,
 	};
+}
+
+function finalizeTerminalClaim(args: {
+	request: WorkerRequest;
+	claim: WorkerClaim;
+	defaultReasonCode: string;
+	costUsd: number;
+	maxUsd?: number;
+	cwd?: string;
+}): WorkerRunOutcome {
+	if (args.claim.status === "blocked") {
+		return finishOutcome({
+			request: args.request,
+			cwd: args.cwd,
+			claim: args.claim,
+			laneStatus: "blocked",
+			reasonCode: "worker_blocked",
+			costUsd: args.costUsd,
+		});
+	}
+
+	const overBudget = args.maxUsd !== undefined && args.costUsd > args.maxUsd;
+	const finalClaim: WorkerClaim = overBudget
+		? {
+				...args.claim,
+				status: "partial",
+				blockers: [...(args.claim.blockers ?? []), "cost_budget_exceeded"],
+			}
+		: args.claim;
+	return finishOutcome({
+		request: args.request,
+		cwd: args.cwd,
+		claim: finalClaim,
+		laneStatus: overBudget ? "budget_exhausted" : "succeeded",
+		reasonCode: overBudget ? "cost_budget_exceeded" : args.defaultReasonCode,
+		costUsd: args.costUsd,
+	});
 }
 
 export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRunOutcome> {
@@ -362,6 +421,12 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 						? " (the cap is workerDelegation.maxWallClockMs; raise it or narrow the task)"
 						: ""
 				}`;
+		const failureEvidence = bounded.completion?.text?.trim()
+			? buildWorkerEvidenceBundle({
+					request: options.request,
+					rawText: bounded.completion.text,
+				})
+			: undefined;
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
@@ -371,6 +436,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				status,
 				summary,
 				...(blockers.length > 0 ? { blockers } : {}),
+				...(failureEvidence ? { evidence: failureEvidence } : {}),
 			},
 			laneStatus: bounded.failure.status,
 			reasonCode: bounded.failure.reasonCode,
@@ -392,10 +458,21 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	const completionChangedFiles = mergedChangedFilesReport.values;
 	const completionBaseClaim = { ...baseClaim, changedFiles: completionChangedFiles };
 	if (!completion || completion.stopReason === "error" || completion.stopReason === "aborted") {
+		const modelErrorEvidence = completion?.text?.trim()
+			? buildWorkerEvidenceBundle({
+					request: options.request,
+					rawText: completion.text,
+				})
+			: undefined;
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
-			claim: { ...completionBaseClaim, status: "failed", summary: "Worker model call failed." },
+			claim: {
+				...completionBaseClaim,
+				status: "failed",
+				summary: "Worker model call failed.",
+				...(modelErrorEvidence ? { evidence: modelErrorEvidence } : {}),
+			},
 			laneStatus: "failed",
 			reasonCode: "model_error",
 			costUsd,
@@ -404,7 +481,19 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 
 	const parsed = parseWorkerOutput(completion.text);
 	if (!parsed) {
-		if (hasMalformedWorkerClaimEnvelope(completion.text)) {
+		const malformedRecord = extractMalformedWorkerRecord(completion.text);
+		if (malformedRecord) {
+			const malformedFindings = extractWorkerFindingDrafts(malformedRecord.findings);
+			const malformedSummary =
+				typeof malformedRecord.summary === "string" && malformedRecord.summary.trim().length > 0
+					? malformedRecord.summary
+					: undefined;
+			const malformedEvidence = buildWorkerEvidenceBundle({
+				request: options.request,
+				rawText: completion.text,
+				findings: malformedFindings.length > 0 ? malformedFindings : undefined,
+				summary: malformedSummary,
+			});
 			return finishOutcome({
 				request: options.request,
 				cwd: options.cwd,
@@ -412,6 +501,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 					...completionBaseClaim,
 					status: "failed",
 					summary: "Worker output used a malformed structured claim envelope.",
+					...(malformedEvidence ? { evidence: malformedEvidence } : {}),
 				},
 				laneStatus: "failed",
 				reasonCode: "unparseable_output",
@@ -438,23 +528,23 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 					: `\n\n[Worker output ended with stop reason '${completion.stopReason}'; verify completeness.]`;
 			const summary = clipWorkerClaimSummary(completion.text.trim(), incompleteNote);
 			const blocked = completionBlockers.length > 0;
-			return finishOutcome({
+			const claim: WorkerClaim = {
+				...completionBaseClaim,
+				status: blocked ? "blocked" : "completed",
+				outputFormat: "plain_text",
+				summary,
+				...(blocked ? { blockers: completionBlockers } : {}),
+			};
+			return finalizeTerminalClaim({
 				request: options.request,
 				cwd: options.cwd,
-				claim: {
-					...completionBaseClaim,
-					status: blocked ? "blocked" : "completed",
-					outputFormat: "plain_text",
-					summary,
-					...(blocked ? { blockers: completionBlockers } : {}),
-				},
-				laneStatus: blocked ? "blocked" : "succeeded",
-				reasonCode: blocked
-					? "worker_blocked"
-					: completion.stopReason === "stop"
+				claim,
+				defaultReasonCode:
+					completion.stopReason === "stop"
 						? "worker_completed_plain_text"
 						: "worker_completed_plain_text_incomplete",
 				costUsd,
+				maxUsd: options.maxUsd,
 			});
 		}
 		// A provider length stop is a truncation, not a format failure: the worker was cut off before
@@ -462,6 +552,13 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		// reported as invalid JSON). Name the real cause so the parent re-runs with a tighter ask
 		// instead of blaming the worker's output format.
 		const truncated = completion.stopReason === "length";
+		const unparseableEvidence =
+			completion.text.trim().length > 0
+				? buildWorkerEvidenceBundle({
+						request: options.request,
+						rawText: completion.text,
+					})
+				: undefined;
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
@@ -478,6 +575,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 							],
 						}
 					: {}),
+				...(unparseableEvidence ? { evidence: unparseableEvidence } : {}),
 			},
 			laneStatus: "failed",
 			reasonCode: truncated ? "output_truncated" : "unparseable_output",
@@ -485,16 +583,23 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		});
 	}
 
-	const evidence = buildWorkerEvidence(options.request, parsed.findings);
+	const evidence = buildWorkerEvidenceBundle({ request: options.request, findings: parsed.findings });
 	if (parsed.actionRejection) {
+		const rejectionEvidence = buildWorkerEvidenceBundle({
+			request: options.request,
+			findings: parsed.findings,
+			rawText: completion.text,
+			summary: parsed.summary,
+		});
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
 			claim: {
 				...completionBaseClaim,
 				status: "failed",
-				summary: "Worker output contained invalid structured actions.",
+				summary: clipWorkerClaimSummary(parsed.summary.trim()),
 				blockers: [parsed.actionRejection.reasonCode],
+				...(rejectionEvidence ? { evidence: rejectionEvidence } : {}),
 			},
 			laneStatus: "failed",
 			reasonCode: "unparseable_output",
@@ -502,6 +607,12 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		});
 	}
 	if (options.verificationSubjectTaskId && (!parsed.verdict || parsed.reasonCodes.length === 0)) {
+		const verifierEvidence = buildWorkerEvidenceBundle({
+			request: options.request,
+			findings: parsed.findings.length > 0 ? parsed.findings : undefined,
+			rawText: completion.text,
+			summary: parsed.summary,
+		});
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
@@ -509,6 +620,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				...completionBaseClaim,
 				status: "failed",
 				summary: "Verifier output omitted its typed verdict or reasonCodes.",
+				...(verifierEvidence ? { evidence: verifierEvidence } : {}),
 			},
 			laneStatus: "failed",
 			reasonCode: "invalid_verifier_result",
@@ -579,37 +691,16 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 			: {}),
 	};
 
-	if (claim.status === "blocked") {
-		return finishOutcome({
-			request: options.request,
-			cwd: options.cwd,
-			claim,
-			laneStatus: "blocked",
-			reasonCode: "worker_blocked",
-			costUsd,
-		});
-	}
-
-	const overBudget = options.maxUsd !== undefined && costUsd > options.maxUsd;
-	const finalClaim: WorkerClaim = overBudget
-		? {
-				...claim,
-				status: "partial",
-				blockers: [...(claim.blockers ?? []), "cost_budget_exceeded"],
-			}
-		: claim;
-	return finishOutcome({
+	return finalizeTerminalClaim({
 		request: options.request,
 		cwd: options.cwd,
-		claim: finalClaim,
-		laneStatus: overBudget ? "budget_exhausted" : "succeeded",
-		reasonCode: overBudget
-			? "cost_budget_exceeded"
-			: claim.verification
-				? claim.verification.verdict === "accepted"
-					? "verification_accepted"
-					: "verification_rejected"
-				: "worker_completed",
+		claim,
+		defaultReasonCode: claim.verification
+			? claim.verification.verdict === "accepted"
+				? "verification_accepted"
+				: "verification_rejected"
+			: "worker_completed",
 		costUsd,
+		maxUsd: options.maxUsd,
 	});
 }

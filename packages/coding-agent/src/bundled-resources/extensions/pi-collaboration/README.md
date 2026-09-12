@@ -14,7 +14,7 @@ Pi dialog questions retain bounded authenticated question/choice context separat
 
 `job_status`, `list_jobs`, `set_variable`, and `list_variables` expose bounded state. `notify`, `set_status`, and `clear_status` affect display metadata, not task completion. `list_templates` and `show_template` load the single JSON template source.
 
-`stop_job`/`stop_session` preview by default; use `dryRun:false, confirm:"yes-collaboration-stop"` to close the exact owned agent panes, not unrelated terminals or the whole daemon. `dismiss` ends tracking without terminating an idle native CLI; active work must first stop. Closing a controller alone is not proof that its worker stopped.
+`stop_job`/`stop_session` terminate exact owned agent panes directly; pass `dryRun: true` to preview termination targets without closing panes. `dismiss` ends tracking without terminating an idle native CLI; active work must first stop. Closing a controller alone is not proof that its worker stopped.
 
 Team launches require distinct per-agent `task` responsibilities. Native workers receive a portable, authenticated peer mailbox command; queued messages reuse the same turn owner once a recipient is idle. Herdr client detach (`Ctrl+B`, then `q`) and reattach (`herdr --session <sessionName>`) preserve live agents. Server termination is a separate failure boundary; an uncertain task is never blindly resubmitted. See the packaged `docs/pi-collaboration.md` for recovery and retention limits.
 

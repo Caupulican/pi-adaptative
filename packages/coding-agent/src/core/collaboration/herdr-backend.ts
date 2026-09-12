@@ -2,8 +2,10 @@ import { isAbsolute } from "node:path";
 import { Value } from "typebox/value";
 import {
 	type CollaborationAgent,
+	type CollaborationAgentStatus,
 	type CollaborationBackend,
 	CollaborationBackendError,
+	type CollaborationEvent,
 	type CollaborationLocation,
 	type CollaborationPane,
 	type CollaborationPrompt,
@@ -46,10 +48,11 @@ function locationArgs(input: CollaborationLocation): string[] {
 
 export interface HerdrBackendOptions {
 	executable: string;
-	session: string;
+	session?: string;
 	configPath?: string;
 	run?: CollaborationCommandRunner;
 	socketPath?: string;
+	shared?: boolean;
 	connect?: (path: string, signal: AbortSignal) => Promise<HerdrEventChannel>;
 }
 
@@ -57,14 +60,25 @@ export interface HerdrBackendOptions {
 export class HerdrBackend implements CollaborationBackend {
 	readonly id = "herdr";
 	readonly session: string;
+	readonly shared: boolean;
 	private readonly options: HerdrBackendOptions;
 	private readonly run: CollaborationCommandRunner;
 
 	constructor(options: HerdrBackendOptions) {
-		if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(options.session))
-			throw new Error("An explicit named Herdr session is required.");
+		this.shared = Boolean(options.shared);
+		if (this.shared) {
+			if (
+				!options.socketPath ||
+				(!isAbsolute(options.socketPath) && !options.socketPath.startsWith("\\\\.\\pipe\\"))
+			)
+				throw new Error("A valid socket path is required for a shared Herdr backend.");
+			this.session = options.session ?? "";
+		} else {
+			if (!options.session || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(options.session))
+				throw new Error("An explicit named Herdr session is required for an isolated backend.");
+			this.session = options.session;
+		}
 		this.options = options;
-		this.session = options.session;
 		this.run = options.run ?? runCollaborationCommand;
 	}
 
@@ -80,10 +94,20 @@ export class HerdrBackend implements CollaborationBackend {
 				"Collaboration command cancelled before submission.",
 				"not-submitted",
 			);
-		const output = await this.run(this.options.executable, ["--session", this.session, ...args], {
+		const sessionArgs = this.session ? ["--session", this.session] : [];
+		const env: NodeJS.ProcessEnv = {
+			...process.env,
+			...(this.options.configPath ? { HERDR_CONFIG_PATH: this.options.configPath } : {}),
+		};
+		if (this.options.socketPath) {
+			env.HERDR_SOCKET_PATH = this.options.socketPath;
+		} else {
+			delete env.HERDR_SOCKET_PATH;
+		}
+		const output = await this.run(this.options.executable, [...sessionArgs, ...args], {
 			timeoutMs,
 			signal,
-			env: { ...process.env, ...(this.options.configPath ? { HERDR_CONFIG_PATH: this.options.configPath } : {}) },
+			env,
 		});
 		if (output.reason !== "exited")
 			throw new CollaborationBackendError(
@@ -404,6 +428,14 @@ export class HerdrBackend implements CollaborationBackend {
 		}
 	}
 
+	async sendKeys(targetValue: string, keys: readonly string[]): Promise<void> {
+		if (keys.length === 0) return;
+		for (const key of keys) {
+			if (!/^[a-zA-Z0-9+_-]{1,32}$/.test(key)) throw new Error("Invalid key for send-keys.");
+		}
+		await this.request(["agent", "send-keys", target(targetValue), ...keys], undefined);
+	}
+
 	async readAgent(value: string, lines = 120): Promise<CollaborationRead> {
 		if (!Number.isInteger(lines) || lines < 1 || lines > 2000)
 			throw new Error("Collaboration read lines must be between 1 and 2000.");
@@ -449,14 +481,85 @@ export class HerdrBackend implements CollaborationBackend {
 		};
 	}
 
+	async getPane(paneId: string): Promise<CollaborationPane> {
+		return pane((await this.request(["pane", "get", target(paneId)], "pane_info")).pane);
+	}
+
 	async closePane(paneId: string): Promise<void> {
 		await this.request(["pane", "close", target(paneId)], undefined);
 	}
 	async closeWorkspace(workspaceId: string): Promise<void> {
+		if (this.shared)
+			throw new CollaborationBackendError(
+				"shared_workspace_protected",
+				"Cannot close workspace on a shared Herdr session; the shared session is not owned by this job.",
+				"not-submitted",
+			);
 		await this.request(["workspace", "close", target(workspaceId)], undefined);
 	}
 	async stopSession(): Promise<void> {
+		if (this.shared)
+			throw new CollaborationBackendError(
+				"shared_session_protected",
+				"Cannot stop server on a shared Herdr session; close owned job panes instead.",
+				"not-submitted",
+			);
 		await this.request(["server", "stop"], undefined);
+	}
+
+	async subscribeEvents(
+		paneId: string,
+		listener: (event: CollaborationEvent) => void,
+		signal?: AbortSignal,
+	): Promise<() => void> {
+		if (!this.options.socketPath) return () => {};
+		const abortSignal = signal ?? new AbortController().signal;
+		const connection = await (this.options.connect ?? connectHerdrChannel)(this.options.socketPath, abortSignal);
+		try {
+			const unsubscribe = connection.onEvent((value) => {
+				const event = record(value);
+				if (event.error) {
+					listener({ type: "connection_closed" });
+					return;
+				}
+				const data = record(event.data);
+				if (data.pane_id && data.pane_id !== paneId) return;
+				if (event.event === "pane_exited") {
+					listener({ type: "pane_exited", paneId: typeof data.pane_id === "string" ? data.pane_id : undefined });
+				} else if (event.event === "pane_closed") {
+					listener({ type: "pane_closed", paneId: typeof data.pane_id === "string" ? data.pane_id : undefined });
+				} else if (event.event === "pane_agent_detected") {
+					listener({
+						type: "pane_agent_detected",
+						paneId: typeof data.pane_id === "string" ? data.pane_id : undefined,
+					});
+				} else if (event.event === "pane.agent_status_changed") {
+					listener({
+						type: "agent_status_changed",
+						paneId: typeof data.pane_id === "string" ? data.pane_id : undefined,
+						status:
+							typeof data.agent_status === "string"
+								? (data.agent_status as CollaborationAgentStatus)
+								: undefined,
+					});
+				}
+			});
+			await connection.request("events.subscribe", {
+				subscriptions: [
+					{ type: "pane.agent_status_changed", pane_id: paneId },
+					{ type: "pane.exited" },
+					{ type: "pane.closed" },
+					{ type: "pane.agent_detected" },
+				],
+			});
+			return () => {
+				unsubscribe();
+				connection.close();
+			};
+		} catch (error) {
+			connection.close();
+			throw error;
+		}
 	}
 
 	async notify(title: string, body: string): Promise<void> {

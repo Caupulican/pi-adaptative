@@ -415,6 +415,22 @@ describe("runWorker", () => {
 		expect(outcome.reasonCode).toBe("cost_budget_exceeded");
 	});
 
+	it("treats an explicit zero-dollar budget as a hard ceiling for plain-text fallback", async () => {
+		const outcome = await runWorker(
+			runnerOptions({
+				maxUsd: 0,
+				complete: async () => completionOf("plain prose result", 0.05),
+			}),
+		);
+		expect(outcome.claim.status).toBe("partial");
+		expect(outcome.claim.outputFormat).toBe("plain_text");
+		expect(outcome.claim.summary).toBe("plain prose result");
+		expect(outcome.claim.blockers).toContain("cost_budget_exceeded");
+		expect(outcome.laneStatus).toBe("budget_exhausted");
+		expect(outcome.reasonCode).toBe("cost_budget_exceeded");
+		expect(outcome.costUsd).toBe(0.05);
+	});
+
 	it.each([
 		[
 			"attempt token",
@@ -704,5 +720,106 @@ describe("worker write lane (G2)", () => {
 		expect(outcome.claim.blockers).toContain(
 			"action requires workspace/evidence inspection (src/a.ts, unknown): worker_action_outcome_unknown",
 		);
+	});
+});
+
+describe("worker report retention in failed and partial evidence", () => {
+	it("preserves bounded untrusted report in evidence when structured claim envelope is malformed", async () => {
+		const malformed = JSON.stringify({
+			summary: "Analyzed memory leak in websocket coordinator",
+			status: "done",
+			findings: [{ summary: "Websocket ping timer leaks listener on reconnect", confidence: 0.85 }],
+		});
+		const outcome = await runWorker(
+			runnerOptions({
+				complete: async () => completionOf(malformed),
+			}),
+		);
+
+		expect(outcome.claim.status).toBe("failed");
+		expect(outcome.reasonCode).toBe("unparseable_output");
+		expect(outcome.accepted).toBe(false);
+		expect(outcome.claim.evidence).toBeDefined();
+		expect(outcome.claim.evidence?.findings).toHaveLength(1);
+		expect(outcome.claim.evidence?.findings[0]?.summary).toBe("Websocket ping timer leaks listener on reconnect");
+		expect(outcome.claim.evidence?.findings[0]?.confidence).toBe(0.85);
+		expect(outcome.claim.evidence?.sources.some((s) => s.id === "src-worker" && !s.trusted)).toBe(true);
+	});
+
+	it("preserves diagnostic report in evidence when write-capable worker stops without an envelope and zero mutations", async () => {
+		const report = "Diagnostic scan complete: discovered 3 stale lock files in /tmp/cache. No mutations performed.";
+		const outcome = await runWorker(
+			runnerOptions({
+				request: workerRequest({
+					envelope: {
+						id: "worker-env-diag",
+						capabilities: ["filesystem.read", "filesystem.write"],
+						allowedPaths: ["src"],
+						maxEstimatedUsd: 0.5,
+						createdAt: "2026-07-01T00:00:00.000Z",
+					},
+				}),
+				applyActions: () => ({ changedFiles: [], refused: [], failed: [], inspectionRequired: [] }),
+				complete: async () => completionOf(report),
+			}),
+		);
+
+		expect(outcome.claim.status).toBe("failed");
+		expect(outcome.reasonCode).toBe("unparseable_output");
+		expect(outcome.accepted).toBe(false);
+		expect(outcome.claim.evidence).toBeDefined();
+		expect(outcome.claim.evidence?.findings[0]?.summary).toContain("Diagnostic scan complete");
+		expect(outcome.claim.evidence?.sources.some((s) => s.excerpt?.includes("discovered 3 stale lock files"))).toBe(
+			true,
+		);
+	});
+
+	it("negative control: malformed structured actions are never executed while preserving untrusted report", async () => {
+		const applyActions = vi.fn();
+		const malformedActions = JSON.stringify({
+			summary: "Tried dangerous write",
+			status: "completed",
+			actions: [{ op: "write", path: "x".repeat(2_049), content: "malicious" }],
+			findings: [{ summary: "Observed unsafe path length" }],
+		});
+
+		const outcome = await runWorker(
+			runnerOptions({
+				request: workerRequest({
+					envelope: {
+						id: "worker-env-write",
+						capabilities: ["filesystem.read", "filesystem.write"],
+						allowedPaths: ["src"],
+						maxEstimatedUsd: 0.5,
+						createdAt: "2026-07-01T00:00:00.000Z",
+					},
+				}),
+				applyActions,
+				complete: async () => completionOf(malformedActions),
+			}),
+		);
+
+		expect(applyActions).not.toHaveBeenCalled();
+		expect(outcome.claim.status).toBe("failed");
+		expect(outcome.accepted).toBe(false);
+		expect(outcome.claim.evidence).toBeDefined();
+		expect(outcome.claim.evidence?.findings[0]?.summary).toBe("Observed unsafe path length");
+	});
+
+	it("negative control: verifier omitting verdict is rejected while preserving report", async () => {
+		const verifierProse = "I looked at the code and everything seems fine to me.";
+		const outcome = await runWorker(
+			runnerOptions({
+				verificationSubjectTaskId: "worker-subject-123",
+				complete: async () => completionOf(verifierProse),
+			}),
+		);
+
+		expect(outcome.claim.status).toBe("failed");
+		expect(outcome.reasonCode).toBe("unparseable_output");
+		expect(outcome.accepted).toBe(false);
+		expect(outcome.claim.verification).toBeUndefined();
+		expect(outcome.claim.evidence).toBeDefined();
+		expect(outcome.claim.evidence?.findings[0]?.summary).toContain("everything seems fine");
 	});
 });

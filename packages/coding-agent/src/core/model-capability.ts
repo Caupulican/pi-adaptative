@@ -78,6 +78,7 @@ export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = [
 	"model_fitness",
 	"context_scout",
 	"pi_collaboration",
+	"task_automation",
 ];
 export const MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS: readonly string[] = [
 	"read",

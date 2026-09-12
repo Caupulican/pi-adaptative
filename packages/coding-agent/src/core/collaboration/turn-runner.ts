@@ -2,12 +2,8 @@ import type { Usage } from "@caupulican/pi-ai";
 import { MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/types.ts";
 import type { CollaborationBackend, CollaborationQuestionAnswer } from "./backend.ts";
 import { boundCollaborationEvidence, type CollaborationTerminal } from "./job-store.ts";
-import {
-	type CollaborationPendingQuestion,
-	type CollaborationResultClaim,
-	validateCollaborationPendingQuestion,
-	validateCollaborationResultClaim,
-} from "./result-claim.ts";
+import type { CollaborationPendingQuestion, CollaborationResultClaim } from "./result-claim.ts";
+import { waitForTurnSettlement } from "./turn-settlement.ts";
 
 export interface CollaborationTurnInput {
 	target: string;
@@ -39,6 +35,8 @@ export async function executeCollaborationTurn(
 	answer?: Pick<CollaborationQuestionAnswer, "text" | "keys">,
 	readClaim?: () => CollaborationResultClaim | undefined,
 	readQuestion?: () => CollaborationPendingQuestion | undefined,
+	subscribeReport?: (listener: () => void) => () => void,
+	isTurnActive?: () => boolean,
 ): Promise<{ status: CollaborationTerminal; evidence: string; usage?: Usage }> {
 	signal?.throwIfAborted();
 	let nativeQuestion = false;
@@ -54,7 +52,9 @@ export async function executeCollaborationTurn(
 		)
 			throw new Error("Collaboration textual question requires a stopped agent and a text answer without keys.");
 	}
-	const stopped = nativeQuestion
+
+	const startTime = Date.now();
+	const initialStopped = nativeQuestion
 		? await backend.answerQuestion(
 				{ ...answer, target: input.target, terminalId: input.terminalId, timeoutMs: input.timeoutMs },
 				signal,
@@ -74,51 +74,53 @@ export async function executeCollaborationTurn(
 				signal,
 			);
 	signal?.throwIfAborted();
-	if (!["idle", "done", "blocked"].includes(stopped.status))
-		throw new Error("Collaboration agent has not stopped working.");
-	if (stopped.terminalId !== input.terminalId) throw new Error("Collaboration pane occupant changed.");
-	let claim = readClaim?.();
-	try {
-		if (claim) validateCollaborationResultClaim(claim);
-		if (claim?.turnId !== input.turnId) claim = undefined;
-	} catch {
-		claim = undefined;
-	}
-	let question = stopped.status === "blocked" ? readQuestion?.() : undefined;
-	try {
-		if (question) validateCollaborationPendingQuestion(question);
-		if (question?.turnId !== input.turnId) question = undefined;
-	} catch {
-		question = undefined;
-	}
+	if (initialStopped.terminalId !== input.terminalId) throw new Error("Collaboration pane occupant changed.");
+
+	const settlement = await waitForTurnSettlement({
+		backend,
+		target: input.target,
+		terminalId: input.terminalId,
+		paneId: initialStopped.paneId,
+		turnId: input.turnId,
+		initialAgent: initialStopped,
+		timeoutMs: input.timeoutMs,
+		startTime,
+		signal,
+		readClaim,
+		readQuestion,
+		subscribeReport,
+		isTurnActive,
+	});
+
+	signal?.throwIfAborted();
+	const finalSettled = settlement.agent;
+	const claim = settlement.claim;
+	const question = settlement.question;
+
 	const read = await backend.readAgent(input.target, 200);
-	if (read.paneId !== stopped.paneId) throw new Error("Collaboration evidence belongs to another pane.");
+	if (read.paneId !== finalSettled.paneId) throw new Error("Collaboration evidence belongs to another pane.");
 	const current = await backend.getAgent(input.target);
 	signal?.throwIfAborted();
 	if (
-		current.terminalId !== stopped.terminalId ||
-		current.paneId !== stopped.paneId ||
-		current.stateChangeSequence !== stopped.stateChangeSequence ||
-		current.status !== stopped.status ||
-		current.question !== stopped.question ||
-		current.launchPending ||
-		// Agent metadata revisions are comparable to each other, not to a terminal snapshot's
-		// revision (Herdr 0.8.2 agent.read returns an unversioned placeholder of zero).
-		current.revision < stopped.revision
+		current.terminalId !== finalSettled.terminalId ||
+		current.paneId !== finalSettled.paneId ||
+		current.stateChangeSequence !== finalSettled.stateChangeSequence ||
+		current.status !== finalSettled.status ||
+		current.question !== finalSettled.question ||
+		current.revision < finalSettled.revision
 	)
 		throw new Error("Collaboration stopped state changed during evidence capture.");
 	if (question && JSON.stringify(readQuestion?.()) !== JSON.stringify(question))
 		throw new Error("Collaboration pending question changed during evidence capture.");
-	// Attribution belongs to the managed lane envelope; prefixing a maximum-size question loses choices.
 	if (question) return { status: "blocked", evidence: question.evidence, usage: claim?.usage };
 	const evidence = read.text.slice(-16000);
-	if (claim && (stopped.status !== "blocked" || claim.status === "blocked"))
+	if (claim && (finalSettled.status !== "blocked" || claim.status === "blocked"))
 		return { status: claim.status, evidence: claim.evidence, usage: claim.usage };
 	return {
 		status: "blocked",
 		usage: claim?.usage,
 		evidence: boundCollaborationEvidence(
-			`Worker needs review or an answer before continuation. ${claim ? "Native agent remains blocked despite its report. " : "No authenticated final report for this dispatch. "}${read.truncated ? "Pane evidence was truncated. " : ""}\n${stopped.status === "blocked" && stopped.question ? `Native agent question (peer-provided):\n${stopped.question}\n\nCaptured stopped pane:\n` : ""}${evidence}`,
+			`Worker needs review or an answer before continuation. ${claim ? "Native agent remains blocked despite its report. " : "No authenticated final report for this dispatch. "}${read.truncated ? "Pane evidence was truncated. " : ""}\n${finalSettled.status === "blocked" && finalSettled.question ? `Native agent question (peer-provided):\n${finalSettled.question}\n\nCaptured stopped pane:\n` : ""}${evidence}`,
 		),
 	};
 }

@@ -29,6 +29,8 @@ import { buildProjectInstructionIsolationPrompt } from "./project-instruction-is
 import {
 	CHAT_WORK_LIFECYCLE_SYSTEM_RULE,
 	DELEGATION_DECISION_RULE,
+	OWNER_PRECEDENCE_POLICY,
+	SKILL_CONFLICT_RESOLUTION_RULE,
 	WORK_LIFECYCLE_SYSTEM_RULE,
 } from "./provider-prompt-contracts.ts";
 import { normalizeProviderPromptGuidelines, normalizeProviderPromptSnippet } from "./provider-tool-text.ts";
@@ -246,6 +248,13 @@ export class SystemPromptBuilder {
 		});
 	}
 
+	/**
+	 * Autonomy guardrail block.
+	 *
+	 * Emitted for interactive root sessions when autonomy mode is not "off" or auto-learn is enabled.
+	 * Reflects the session's standing autonomy grant and the single reflection-turn contract. Child
+	 * sessions inherit their parent's scope and never reflect independently, so they omit this block.
+	 */
 	private _buildAutonomyPrompt(profile: ModelCapabilityProfile): string | undefined {
 		if (this.deps.isChildSession()) return undefined;
 		const settingsManager = this.deps.getSettingsManager();
@@ -259,12 +268,15 @@ export class SystemPromptBuilder {
 			? "ROOT REFLECTION: decide and apply warranted durable learning only in the single host-scheduled reflection turn after completed work; do not schedule additional reflection turns or delegate it."
 			: "Root reflection is disabled.";
 		if (profile.class !== "full") {
-			return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Active task primary. Observations are evidence; bound changes. Approval: publish/push/tag/release, credential/authentication changes outside active secret_store authority, destructive deletion, broader authority.`;
+			const reflection = isCurrentSessionReflectionEnabled(autoLearn)
+				? "Root reflection: host-scheduled turn only."
+				: "Reflection disabled.";
+			return `PI AUTONOMY ${autonomy.mode}: ${reflection} Active task primary. ${OWNER_PRECEDENCE_POLICY} On conflict: invoke skill exclude with exact name and reason, continue work; repair if configured eligible. Workers report conflict to parent. Preserve limits and release conditions; reuse in-scope grants. Ask if missing: destruction, credentials/auth, publish/push/tag/release, broader scope.`;
 		}
 		if (autonomy.mode === "full") {
-			return `PI AUTONOMY full (standing): ${reflectionContract} Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; validation plus rollback evidence. Owner authorization required for publish/release/push/tag, credential disclosure/provider authentication/out-of-grant secret operations, destructive user-data deletion, exposed services, or more authority. Current-turn evidence is a cue, not proof; active task stays primary.`;
+			return `PI AUTONOMY full (standing): ${reflectionContract} Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; validation plus rollback evidence. ${OWNER_PRECEDENCE_POLICY} ${SKILL_CONFLICT_RESOLUTION_RULE} Preserve explicit limits and release conditions. Reuse explicit owner grants in scope. Owner authorization required for publish/release/push/tag, credential disclosure/provider authentication/out-of-grant secret operations, destructive user-data deletion, exposed services, or more authority. Current-turn evidence is a cue, not proof; active task stays primary.`;
 		}
-		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Query memory and use bounded tools already available in this session. Auto-apply configured high-confidence memory and clean additive skill promotions; code/prompt/extension/settings changes need approval. Evidence is cue, never proof; active task primary.`;
+		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Query memory and use bounded tools already available in this session. ${OWNER_PRECEDENCE_POLICY} ${SKILL_CONFLICT_RESOLUTION_RULE} Explicit handoff authorizes ordinary prerequisites and granted work, retaining scope and conditions. Ask only if missing: destruction, credentials/auth, publish/push/tag/release, broader scope. Active task primary.`;
 	}
 
 	private _buildWorkLifecyclePrompt(toolNames: readonly string[]): string | undefined {
@@ -298,6 +310,8 @@ export class SystemPromptBuilder {
 		return `PI DELEGATION
 - ${DELEGATION_DECISION_RULE}
 - For useful delegation, start or reuse a suitable idle worker before doing its task yourself. Give scope, expected evidence, and write ownership; do not duplicate running or queued work.
+- Use targeted assignments for specific worker tasks; broadcast is for common coordination evidence only.
+- Worker memory access is read-only via the memory_read broker; root memory owns mutation and lifecycle.
 - Respect explicit user restrictions and granted authority; do not ask for redundant permission. Never bypass admission or change settings to force a worker. If admission fails, use the reported reason to choose safe local progress or report a genuine blocker.
 - Continue parent work while workers run; wait only at a true dependency, then inspect status and handoffs event-driven.
 - Parent owns integration, verification, security and approval decisions, and writes unless authority explicitly grants worker writes.
@@ -351,7 +365,7 @@ export class SystemPromptBuilder {
 			this._buildToolApplicabilityPrompt(validToolNames, activeExtensions, modelCapability),
 			// Memory subsystem: static, frozen-per-session block (e.g. file-store MEMORY.md/USER.md).
 			this._buildStaticMemoryPrompt(modelCapability),
-			...loaderAppendSystemPrompt,
+			...(loaderAppendSystemPrompt ?? []),
 		].filter((part): part is string => Boolean(part));
 		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
 		const loadedContextFiles = this.deps.getResourceLoader().getAgentsFiles().agentsFiles;

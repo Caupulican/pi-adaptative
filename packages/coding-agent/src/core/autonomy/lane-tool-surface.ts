@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { AgentLoopConfig, AgentTool } from "@caupulican/pi-agent-core";
+import type { AgentLoopConfig, AgentTool, BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
@@ -97,6 +97,12 @@ export interface LaneToolSurfaceOptions {
 	workerToolAdapters?: WorkerToolAdapterRegistry;
 	/** Host-owned immutable task binding, installed before execution guards. */
 	bindTool?: (tool: AgentTool) => AgentTool;
+	/** Optional edge authorization port for checking operations against admitted parent authority. */
+	checkEdge?: (
+		toolName: string,
+		args: unknown,
+		cwd: string,
+	) => Promise<BeforeToolCallResult | undefined> | BeforeToolCallResult | undefined;
 }
 
 function strictLaneProfilePatterns(profile: NormalizedProfile | undefined): {
@@ -325,7 +331,6 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				}
 				try {
 					gateway.authorizeToolCall(manifest, toolCall.name, args);
-					return undefined;
 				} catch (error) {
 					if (error instanceof CapabilityGatewayDeniedError) {
 						if (error.status === "budget_exhausted") throw error;
@@ -333,18 +338,25 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					}
 					throw error;
 				}
+			} else {
+				const outcome = evaluateToolGate({
+					toolName: toolCall.name,
+					args,
+					cwd: options.cwd,
+					envelope: WRITE_LANE_TOOL_NAME_SET.has(toolCall.name) ? writeEnvelope : readEnvelope,
+				});
+				if (outcome.outcome !== "allow") {
+					return {
+						block: true,
+						reason: `Lane tool blocked (${outcome.reasonCode}): ${outcome.message ?? "capability gate denied it"}`,
+					};
+				}
 			}
-			const outcome = evaluateToolGate({
-				toolName: toolCall.name,
-				args,
-				cwd: options.cwd,
-				envelope: WRITE_LANE_TOOL_NAME_SET.has(toolCall.name) ? writeEnvelope : readEnvelope,
-			});
-			if (outcome.outcome === "allow") return undefined;
-			return {
-				block: true,
-				reason: `Lane tool blocked (${outcome.reasonCode}): ${outcome.message ?? "capability gate denied it"}`,
-			};
+			if (options.checkEdge) {
+				const edgeOutcome = await options.checkEdge(toolCall.name, args, options.cwd);
+				if (edgeOutcome?.block) return edgeOutcome;
+			}
+			return undefined;
 		},
 		...(gateway ? { gateway } : {}),
 	};

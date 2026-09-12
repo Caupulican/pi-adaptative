@@ -11,6 +11,13 @@ import type {
 	WorkerDelegationRunOutcome,
 } from "../agent-session-contracts.ts";
 import type { CapabilityEnvelope, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
+import {
+	buildToolkitScriptOperation,
+	classifyAllEdgeOperations,
+	type EdgeGrantView,
+	edgeBlockReason,
+	isEdgeOperationGranted,
+} from "../autonomy/edge-policy.ts";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.ts";
@@ -211,6 +218,8 @@ export interface WorkerDelegationControllerDeps {
 		opts: { label?: string; sourceSessionId?: string; reportId: string },
 	): string | undefined;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
+	/** Parent admitted edge grants for worker edge authorization without interactive prompts. */
+	getEdgeGrants?(): readonly EdgeGrantView[];
 }
 
 type WorkerAdmission =
@@ -2312,6 +2321,24 @@ export class WorkerDelegationController {
 							: {}),
 						signal,
 					}),
+				authorize: (request) => {
+					if (!request.script.danger) {
+						return { authorized: true };
+					}
+					const operation = buildToolkitScriptOperation({
+						cwd: executionPlan.cwd,
+						script: request.script,
+						args: request.args,
+					});
+					const parentGrants = this.deps.getEdgeGrants?.() ?? [];
+					if (isEdgeOperationGranted(operation, parentGrants)) {
+						return { authorized: true };
+					}
+					return {
+						authorized: false,
+						reason: edgeBlockReason(operation, false),
+					};
+				},
 			};
 		}
 		const workerToolAdapters: WorkerToolAdapterRegistry | undefined =
@@ -2338,6 +2365,21 @@ export class WorkerDelegationController {
 			grant,
 			toolManifests: executionPlan.toolManifests,
 			...(workerToolAdapters ? { workerToolAdapters } : {}),
+			checkEdge: (toolName, args, executionCwd) => {
+				const parentGrants = this.deps.getEdgeGrants?.() ?? [];
+				const operations = classifyAllEdgeOperations({
+					toolName,
+					args,
+					cwd: executionCwd,
+					scopeCwd: this.deps.getCwd(),
+				});
+				for (const operation of operations) {
+					if (!isEdgeOperationGranted(operation, parentGrants)) {
+						return { block: true, reason: edgeBlockReason(operation, false) };
+					}
+				}
+				return undefined;
+			},
 			initialUsage,
 			sharedBudget,
 		});

@@ -51,6 +51,7 @@ describe("model capability auto-detection", () => {
 				"update_goal",
 				"task_steps",
 				"task_directory",
+				"task_automation",
 				"pipeline",
 				"ask_question",
 				"secret_store",

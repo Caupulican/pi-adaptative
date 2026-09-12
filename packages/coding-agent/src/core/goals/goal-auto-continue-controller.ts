@@ -114,22 +114,25 @@ export class GoalAutoContinueController {
 		if (!goalAutoContinue) return;
 		const snapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
 		if (snapshot.continuation.action !== "continue") return;
+		let interrupted = false;
 		try {
 			const result = await this.continueExclusive({
 				maxTurns: goalContinueTurns,
 				maxStallTurns,
 				maxWallClockMinutes: goalContinueMaxWallClockMinutes,
 			});
-			if (result.stopReason === "turn_interrupted" || result.stopReason === "turn_errored") return;
-			if (!this.deps.isDisposed()) {
-				const nextSnapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
-				if (nextSnapshot.continuation.action === "continue") {
-					this.scheduleFromIdle();
-				}
+			if (result.stopReason === "turn_interrupted") {
+				interrupted = true;
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.deps.emit({ type: "warning", message: `Goal auto-continuation failed: ${message}` });
+		}
+		if (!interrupted && !this.deps.isDisposed()) {
+			const nextSnapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
+			if (nextSnapshot.continuation.action === "continue") {
+				this.scheduleFromIdle();
+			}
 		}
 	}
 

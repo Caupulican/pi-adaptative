@@ -1,8 +1,8 @@
 import { killTree } from "@caupulican/pi-agent-core/process-tree";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { getSelfLaunchTarget } from "../process-matrix/self-launch-target.ts";
+import { resolveCollaborationBackend } from "./backend-resolver.ts";
 import { type CollaborationAnswer, stopCollaborationAgent } from "./coordinator.ts";
-import { createHerdrBackend } from "./herdr-runtime.ts";
 import type { CollaborationAgent, CollaborationJob, CollaborationJobStore } from "./job-store.ts";
 
 /** Detached finite control helper; native model CLIs remain interactive in the backend's PTYs. */
@@ -79,7 +79,7 @@ export async function launchCollaborationTurnProcess(
 					return;
 				await stopCollaborationAgent(
 					store,
-					(session) => createHerdrBackend({ session, ensureRunning: false }),
+					(j) => resolveCollaborationBackend(j, { ensureRunning: false }),
 					job.id,
 					agent.id,
 					agent.turnId,

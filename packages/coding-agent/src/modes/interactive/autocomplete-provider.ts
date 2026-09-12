@@ -141,6 +141,7 @@ export function createBaseAutocompleteProvider(host: AutocompleteProviderHost): 
 	const skillCommandList: SlashCommand[] = [];
 	if (host.settingsManager.getEnableSkillCommands()) {
 		for (const skill of host.session.resourceLoader.getActiveSkills()) {
+			if (host.session.getSkillVault?.().isExcluded(skill.name)) continue;
 			const commandName = `skill:${skill.name}`;
 			host.skillCommands.set(commandName, skill.filePath);
 			skillCommandList.push({

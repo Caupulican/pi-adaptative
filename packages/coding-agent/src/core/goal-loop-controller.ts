@@ -72,6 +72,8 @@ export interface GoalLoopControllerDeps {
 		goalId: string;
 		progressRevision: number;
 		stallTurns: number;
+		outcome?: GoalContinuationTurnOutcome["outcome"];
+		completionTurn?: number;
 	}): void;
 	/** Persist an exhausted/non-retryable continuation failure as a stopped goal state. */
 	recordGoalContinuationFailure(error: unknown): void;
@@ -154,6 +156,7 @@ export class GoalLoopController {
 				goalId: beforeGoal.goalId,
 				progressRevision: beforeGoal.progressRevision ?? 0,
 				stallTurns: beforeGoal.stallTurns,
+				completionTurn: (beforeGoal.continuationTurnsUsed ?? 0) + 1,
 			};
 			let result: GoalContinuationOnceResult;
 			try {
@@ -174,7 +177,11 @@ export class GoalLoopController {
 			}
 			if (result.submitted) {
 				turnsSubmitted++;
-				this.deps.recordGoalContinuationPass({ ...passAccounting, wallClockMs: now() - passStartedAt });
+				this.deps.recordGoalContinuationPass({
+					...passAccounting,
+					wallClockMs: now() - passStartedAt,
+					outcome: result.turnOutcome,
+				});
 			}
 
 			let afterSnapshot = snapshot();

@@ -50,9 +50,18 @@ import type {
 	IsolatedCompletionResult,
 	WorkerDelegationRunOutcome,
 } from "./agent-session-contracts.ts";
+import {
+	type TaskAutomationContextPlan,
+	TaskAutomationRuntimeAdapter,
+} from "./automation/task-automation-runtime-adapter.ts";
 import { deriveCompositeChildEnvelope, wrapToolWithCapabilityEnvelopeGate } from "./autonomy/composite-tool-gate.ts";
 import type { CapabilityEnvelope, WorkerClaim } from "./autonomy/contracts.ts";
-import type { EdgeClass } from "./autonomy/edge-policy.ts";
+import {
+	buildToolkitScriptOperation,
+	type EdgeClass,
+	type EdgeOperation,
+	resolveToolkitScriptScope,
+} from "./autonomy/edge-policy.ts";
 import { isPathWithinEnvelope, wrapToolWithEnvelopeScope } from "./autonomy/envelope-enforcement.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import { buildWorkerSessionPrivatePathEnvelope } from "./autonomy/worker-session-private-scope.ts";
@@ -135,7 +144,6 @@ import type { TaskStepsState } from "./tasks/task-state.ts";
 import { getToolCapabilityPolicy } from "./tool-capability-policy.ts";
 import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
 import { runReflexInterpreterCompletion } from "./toolkit/reflex-interpreter.ts";
-import { executeToolkitScript } from "./toolkit/script-runner.ts";
 import { createAskQuestionToolDefinition } from "./tools/ask-question.ts";
 import { buildShellSessionContext } from "./tools/bash.ts";
 import { dispatchCollaborationWorker } from "./tools/collaboration-dispatch.ts";
@@ -346,7 +354,17 @@ export interface RuntimeBuilderDeps {
 	/** Trusted active verification identities reconstructed by the session owner. */
 	getActiveVerificationIds?(): readonly string[];
 	/** Record an edge grant the model cited from the operator's own words (goal grant_edge). */
-	grantEdgeFromInstructions?(grant: { class: EdgeClass; quote: string; messageEntryId: string }): void;
+	grantEdgeFromInstructions?(grant: {
+		class: EdgeClass;
+		quote: string;
+		messageEntryId: string;
+		scopeKey?: string;
+	}): void;
+	/** Enforce an edge operation against host policy/interactive confirmation. */
+	enforceEdgeOperation?(
+		operation: EdgeOperation,
+		signal?: AbortSignal,
+	): Promise<{ authorized: boolean; reason?: string }>;
 	/** Authorize model-facing goal creation and its exact owner-requested token ceiling. */
 	authorizeGoalStartFromTool?(
 		input: Pick<GoalToolInput, "userGoal" | "tokenBudget">,
@@ -456,6 +474,7 @@ export class RuntimeBuilder {
 	private readonly _fileMutationIntents: FileMutationIntentController;
 	private readonly _workerSessionPrivatePathEnvelope: CapabilityEnvelope | undefined;
 	private readonly _taskDirectories: TaskDirectoryRuntime;
+	private readonly _taskAutomationAdapter: TaskAutomationRuntimeAdapter;
 
 	private readonly deps: RuntimeBuilderDeps;
 
@@ -509,6 +528,28 @@ export class RuntimeBuilder {
 		// The group lock is the worktree's (shared with every session working in it); emission order is per session.
 		this._fileMutationIntents = new FileMutationIntentController({
 			mutationScope: mutationScopeForWorktree(deps.getCwd()),
+		});
+		this._taskAutomationAdapter = new TaskAutomationRuntimeAdapter({
+			getCwd: () => this._taskDirectories.cwd,
+			getSessionManager: () => deps.getSessionManager(),
+			authorize: async (request, signal) => {
+				const executionCwd = this._taskDirectories.cwd;
+				if (!request.script.danger) {
+					return { authorized: true };
+				}
+				const operation = buildToolkitScriptOperation({
+					cwd: executionCwd,
+					script: request.script,
+					args: request.args,
+				});
+				if (deps.enforceEdgeOperation) {
+					return deps.enforceEdgeOperation(operation, signal);
+				}
+				return {
+					authorized: false,
+					reason: `Dangerous script "${request.script.name}" requires host authorization.`,
+				};
+			},
 		});
 	}
 
@@ -1074,7 +1115,9 @@ export class RuntimeBuilder {
 				if (definition) this._baseToolDefinitions.set(definition.name, definition);
 			}
 			if (toolAccess.allows("skill")) {
-				const definition = createSkillVaultToolDefinition(this.deps.getSkillVault());
+				const definition = createSkillVaultToolDefinition(this.deps.getSkillVault(), {
+					getSettingsManager: () => this.deps.getSettingsManager(),
+				});
 				this._baseToolDefinitions.set(definition.name, definition);
 			}
 			if (toolAccess.allows("run_process")) {
@@ -1127,6 +1170,13 @@ export class RuntimeBuilder {
 					grantEdge: this.deps.grantEdgeFromInstructions
 						? (grant) => this.deps.grantEdgeFromInstructions?.(grant)
 						: undefined,
+					resolveToolkitScriptScope: (script: string, args: readonly string[]) =>
+						resolveToolkitScriptScope(
+							script,
+							args,
+							this._taskAutomationAdapter.getCombinedScripts(this.deps.getSettingsManager().getToolkitScripts()),
+							this._taskDirectories.cwd,
+						),
 					authorizeStart: (input) =>
 						this.deps.authorizeGoalStartFromTool ? this.deps.authorizeGoalStartFromTool(input) : null,
 					saveGoalState: (state, expected) => {
@@ -1224,9 +1274,7 @@ export class RuntimeBuilder {
 			if (toolAccess.allows("task_steps")) {
 				const taskStepsToolDefinition = createTaskStepsToolDefinition({
 					getTaskStepsState: () => this.deps.getTaskStepsStateSnapshot(),
-					saveTaskStepsState: (state) => {
-						this.deps.saveTaskStepsStateSnapshot(state);
-					},
+					saveTaskStepsState: (state) => this.deps.saveTaskStepsStateSnapshot(state),
 					getActivePipelineScope: () => {
 						const run = resolveCurrentProjectPipelineRun(
 							this._taskDirectories.cwd,
@@ -1247,6 +1295,12 @@ export class RuntimeBuilder {
 					taskStepsToolDefinition.name,
 					this.bindNativeDefinition(() => taskStepsToolDefinition),
 				);
+			}
+			if (toolAccess.allows("task_automation")) {
+				const taskAutomationToolDefinition = this.bindNativeDefinition(() =>
+					this._taskAutomationAdapter.createToolDefinition(),
+				);
+				this._baseToolDefinitions.set(taskAutomationToolDefinition.name, taskAutomationToolDefinition);
 			}
 			if (toolAccess.allows("pipeline")) {
 				const pipelineToolDefinition = createPipelineToolDefinition({
@@ -1358,11 +1412,47 @@ export class RuntimeBuilder {
 				this._baseToolDefinitions.set("improvement_loop", improvementLoopTool);
 			}
 			if (toolAccess.allows("run_toolkit_script")) {
+				const authorizedScriptCwds = new WeakMap<object, string>();
 				const runToolkitScriptToolDefinition = createRunToolkitScriptToolDefinition({
-					getScripts: () => this.deps.getSettingsManager().getToolkitScripts(),
-					execute: (script, scriptArgs, signal) =>
-						executeToolkitScript({ script, scriptArgs, cwd: this._taskDirectories.cwd, signal }),
+					getScripts: () => [
+						...this._taskAutomationAdapter.getCombinedScripts(this.deps.getSettingsManager().getToolkitScripts()),
+					],
+					execute: (script, scriptArgs, signal) => {
+						const executionCwd = this._taskDirectories.cwd;
+						const authorizedCwd = authorizedScriptCwds.get(script);
+						if (script.danger && authorizedCwd && authorizedCwd !== executionCwd) {
+							throw new Error(
+								`Execution cwd changed from authorized "${authorizedCwd}" to "${executionCwd}". Reauthorization required.`,
+							);
+						}
+						return this._taskAutomationAdapter.executeScript(script, scriptArgs, signal);
+					},
 					artifactStore: toolArtifactStore,
+					authorize: (request, signal) => {
+						const executionCwd = this._taskDirectories.cwd;
+						authorizedScriptCwds.set(request.script, executionCwd);
+						return this._taskAutomationAdapter.authorizeToolkitScript(
+							request,
+							async (req, sig) => {
+								if (!req.script.danger) {
+									return { authorized: true };
+								}
+								const operation = buildToolkitScriptOperation({
+									cwd: executionCwd,
+									script: req.script,
+									args: req.args,
+								});
+								if (this.deps.enforceEdgeOperation) {
+									return this.deps.enforceEdgeOperation(operation, sig);
+								}
+								return {
+									authorized: false,
+									reason: `Dangerous script "${req.script.name}" requires host authorization.`,
+								};
+							},
+							signal,
+						);
+					},
 					// Reflex brain (fitness-gated local model): resolves ambiguous requests into a
 					// registry pick. Best-effort — absent/unfit brain keeps the shortlist behavior.
 					interpret: async (request, scripts) => {
@@ -1878,6 +1968,46 @@ export class RuntimeBuilder {
 			await this._recoverLiveExtensionFailure();
 			throw error;
 		}
+	}
+
+	checkDirectScriptExecution(
+		toolName: string,
+		args: unknown,
+		cwd?: string,
+	): { block: true; reason: string } | undefined {
+		if (toolName === "bash" || toolName === "shell" || toolName === "powershell") {
+			const command =
+				typeof (args as { command?: unknown })?.command === "string"
+					? (args as { command: string }).command
+					: undefined;
+			if (command) {
+				return this._taskAutomationAdapter.checkDirectScriptExecution(command, cwd);
+			}
+		}
+		if (toolName === "run_process") {
+			const executable =
+				typeof (args as { executable?: unknown })?.executable === "string"
+					? (args as { executable: string }).executable
+					: undefined;
+			const processArgs = Array.isArray((args as { args?: unknown })?.args)
+				? (args as { args: string[] }).args.filter((a): a is string => typeof a === "string")
+				: [];
+			if (executable) {
+				return this._taskAutomationAdapter.checkDirectProcessExecution(executable, processArgs, cwd);
+			}
+		}
+		return undefined;
+	}
+
+	assertTaskStepsTransition(
+		previous: readonly { id: string; status?: string }[] | undefined,
+		next: readonly { id: string; status?: string }[],
+	): void {
+		this._taskAutomationAdapter.assertTaskStepsTransition(previous, next);
+	}
+
+	previewTaskAutomationContext(): TaskAutomationContextPlan {
+		return this._taskAutomationAdapter.previewContext();
 	}
 }
 

@@ -27,6 +27,7 @@ describe("edge policy classification", () => {
 			"package.install",
 			"destructive.fs",
 			"settings.authority",
+			"toolkit.script",
 		]);
 	});
 

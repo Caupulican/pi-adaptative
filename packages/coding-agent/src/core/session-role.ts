@@ -69,4 +69,5 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	"context_scout",
 	"runtime_update",
 	"image_generate",
+	"task_automation",
 ]);

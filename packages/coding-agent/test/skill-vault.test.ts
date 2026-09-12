@@ -753,7 +753,7 @@ describe("SkillVaultController", () => {
 		const primer = generateTextToolProtocolPrimer(projectToolsForProvider([tool]));
 
 		expect(primer).toContain(
-			"skill(action:search|load|unload|status, query:string?, name:string?, names:string[]?, pin:bool?)",
+			"skill(action:search|load|unload|status|exclude|inspect|repair, query:string?, name:string?, names:string[]?, pin:bool?, reason:string?, body:string?, description:string?, expectedVersion:string?)",
 		);
 		expect(primer).not.toContain("filePath");
 	});

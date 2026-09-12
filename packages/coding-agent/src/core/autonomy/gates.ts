@@ -12,7 +12,6 @@ import {
 	extractToolPathArguments,
 	type PathEnvelopeAssessment,
 } from "./envelope-enforcement.ts";
-import { assessOperationRisk } from "./risk-assessment.ts";
 
 function isGateOutcomeKind(value: unknown): value is GateOutcomeKind {
 	return (
@@ -175,51 +174,7 @@ function pathBlockOutcome(targetPath: string, reasonCode: "path_denied" | "path_
 	};
 }
 
-function finalizeGateOutcome(input: EvaluateToolGateInput, paths: string[], envelope: CapabilityEnvelope): GateOutcome {
-	let command = "";
-	if (
-		input.toolName === "bash" ||
-		input.toolName === "powershell" ||
-		input.toolName === "shell" ||
-		input.toolName === "python"
-	) {
-		const argsObj = input.args as Record<string, unknown>;
-		if (argsObj && typeof argsObj.command === "string") command = argsObj.command;
-		else if (input.toolName === "python" && argsObj && typeof argsObj.code === "string") command = argsObj.code;
-		else if (input.toolName === "python" && argsObj && typeof argsObj.scriptPath === "string") {
-			command = `python ${argsObj.scriptPath}`;
-		}
-	} else if (input.toolName === "secret_store") {
-		const argsObj = input.args as Record<string, unknown>;
-		if (argsObj && typeof argsObj.action === "string") command = argsObj.action;
-	}
-
-	const riskResult = assessOperationRisk({
-		operation: `Tool ${input.toolName}`,
-		toolName: input.toolName,
-		command,
-		paths,
-		capabilities: envelope.capabilities,
-	});
-
-	if (riskResult.requiresApproval) {
-		return {
-			outcome: "ask-user",
-			gate: "risk_assessment",
-			reasonCode: riskResult.reasonCode,
-			message: `Operation requires approval: ${riskResult.reasons.join(", ")}`,
-		};
-	}
-
-	if (riskResult.risk === "high-impact") {
-		return {
-			outcome: "ask-user",
-			gate: "risk_assessment",
-			reasonCode: riskResult.reasonCode,
-			message: `High-impact operation requires review: ${riskResult.reasons.join(", ")}`,
-		};
-	}
-
+function finalizeGateOutcome(): GateOutcome {
 	return {
 		outcome: "allow",
 		gate: "tool_gate",
@@ -256,7 +211,7 @@ export function evaluateToolGate(input: EvaluateToolGateInput): GateOutcome {
 	);
 	if (blocked) return blocked;
 
-	return finalizeGateOutcome(input, checked.paths, envelope);
+	return finalizeGateOutcome();
 }
 
 export async function evaluateToolGateAsync(input: EvaluateToolGateInput): Promise<GateOutcome> {
@@ -276,5 +231,5 @@ export async function evaluateToolGateAsync(input: EvaluateToolGateInput): Promi
 		}
 	}
 
-	return finalizeGateOutcome(input, checked.paths, envelope);
+	return finalizeGateOutcome();
 }

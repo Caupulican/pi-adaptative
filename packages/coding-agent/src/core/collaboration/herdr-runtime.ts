@@ -10,8 +10,9 @@ import { writeFileAtomic } from "../util/atomic-file.ts";
 import { CollaborationBackendError } from "./backend.ts";
 import { runCollaborationCommand } from "./command-runner.ts";
 import { HerdrBackend } from "./herdr-backend.ts";
-import { connectHerdrChannel } from "./herdr-channel.ts";
+import { connectHerdrChannel, type HerdrEventChannel } from "./herdr-channel.ts";
 import { ensureHerdrManagedConfiguration } from "./herdr-managed-config.ts";
+import { isSupportedHerdrProtocol } from "./herdr-protocol.ts";
 import { provisionHerdr } from "./herdr-provision.ts";
 
 export interface HerdrServerTerminal {
@@ -29,11 +30,17 @@ export interface HerdrRuntimeOptions {
 	onTerminal?: (terminal: HerdrServerTerminal) => void;
 }
 
-async function probeSocket(socketPath: string): Promise<void> {
-	const channel = await connectHerdrChannel(socketPath, AbortSignal.timeout(5000));
+export type HerdrChannelConnector = (path: string, signal: AbortSignal) => Promise<HerdrEventChannel>;
+
+export async function probeHerdrSocket(
+	socketPath: string,
+	connect: HerdrChannelConnector = connectHerdrChannel,
+	timeoutMs = 5000,
+): Promise<void> {
+	const channel = await connect(socketPath, AbortSignal.timeout(timeoutMs));
 	try {
 		const reply = await channel.request("ping", {});
-		if (typeof reply !== "object" || reply === null || !("protocol" in reply) || reply.protocol !== 20)
+		if (!isSupportedHerdrProtocol(reply))
 			throw new CollaborationBackendError(
 				"unsupported_protocol",
 				"The installed Herdr server does not expose the supported collaboration protocol.",
@@ -80,7 +87,7 @@ export async function createHerdrBackend(options: HerdrRuntimeOptions): Promise<
 		);
 	const backend = new HerdrBackend({ executable, session: options.session, configPath, socketPath });
 	try {
-		await probeSocket(socketPath);
+		await probeHerdrSocket(socketPath);
 		return backend;
 	} catch (error) {
 		if (error instanceof CollaborationBackendError && error.code === "unsupported_protocol") throw error;
@@ -95,19 +102,32 @@ export async function createHerdrBackend(options: HerdrRuntimeOptions): Promise<
 	await mkdir(sessionDir, { recursive: true, mode: 0o700 });
 	const terminalPath = join(sessionDir, "pi-server-terminal.json");
 	let probeActive = false;
+	let probePending = false;
 	let ready = false;
+	let closed = false;
 	let resolveReady: (() => void) | undefined;
 	let rejectReady: ((error: Error) => void) | undefined;
 	const readiness = new Promise<void>((resolve, reject) => {
 		resolveReady = resolve;
 		rejectReady = reject;
 	});
+	const failReadiness = (error: Error) => {
+		if (closed || ready) return;
+		closed = true;
+		probePending = false;
+		rejectReady?.(error);
+	};
 	const probe = () => {
-		if (probeActive || ready) return;
+		if (closed || ready) return;
+		if (probeActive) {
+			probePending = true;
+			return;
+		}
 		probeActive = true;
-		void probeSocket(socketPath)
+		void probeHerdrSocket(socketPath)
 			.then(
 				() => {
+					if (closed || ready) return;
 					ready = true;
 					resolveReady?.();
 				},
@@ -115,11 +135,19 @@ export async function createHerdrBackend(options: HerdrRuntimeOptions): Promise<
 			)
 			.finally(() => {
 				probeActive = false;
+				if (closed || ready) {
+					probePending = false;
+					return;
+				}
+				if (probePending) {
+					probePending = false;
+					probe();
+				}
 			});
 	};
 	// Install before spawn; readiness is triggered by socket/session filesystem creation, not output polling.
 	const watcher = watch(canonicalizeWatchDir(sessionDir), probe);
-	watcher.on("error", (error) => rejectReady?.(error));
+	watcher.on("error", (error) => failReadiness(error));
 	const child = spawnProcess(executable, ["--session", options.session, "server"], {
 		env,
 		detached: true,
@@ -130,6 +158,7 @@ export async function createHerdrBackend(options: HerdrRuntimeOptions): Promise<
 	void terminal
 		.then(
 			async (code) => {
+				failReadiness(new Error("Herdr server terminated before readiness."));
 				const record: HerdrServerTerminal = {
 					session: options.session,
 					status: code === 0 ? "exited" : "failed",
@@ -138,16 +167,15 @@ export async function createHerdrBackend(options: HerdrRuntimeOptions): Promise<
 				};
 				await writeFileAtomic(terminalPath, JSON.stringify(record), { mode: 0o600 });
 				options.onTerminal?.(record);
-				if (!ready) rejectReady?.(new Error("Herdr server terminated before readiness."));
 			},
-			(error) => rejectReady?.(error instanceof Error ? error : new Error("Herdr server failed to start.")),
+			(error) => failReadiness(error instanceof Error ? error : new Error("Herdr server failed to start.")),
 		)
 		.catch((error) => {
 			process.stderr.write(
 				`Collaboration server terminal handoff failed: ${error instanceof Error ? error.message.slice(0, 256) : "unknown failure"}\n`,
 			);
 		});
-	const deadline = setTimeout(() => rejectReady?.(new Error("Herdr server readiness deadline exceeded.")), 30000);
+	const deadline = setTimeout(() => failReadiness(new Error("Herdr server readiness deadline exceeded.")), 30000);
 	probe();
 	try {
 		await readiness;
@@ -162,6 +190,8 @@ export async function createHerdrBackend(options: HerdrRuntimeOptions): Promise<
 			);
 		throw error;
 	} finally {
+		closed = true;
+		probePending = false;
 		clearTimeout(deadline);
 		watcher.close();
 	}

@@ -79,6 +79,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["context_scout", policy([["filesystem.read"]], "path-scope")],
 	["pi_collaboration", policy([["process.exec"], ["workflow.delegate"]], "process-launcher")],
 	["improvement_loop", policy([["process.exec", "tests.execute"]], "process-launcher")],
+	["task_automation", policy([["process.exec", "tests.execute"]], "process-launcher")],
 ]);
 
 const NON_CANONICAL_POLICY_TOOL_NAMES: ReadonlySet<string> = new Set(["edit-diff", "powershell", "shell"]);

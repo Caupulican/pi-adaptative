@@ -65,6 +65,12 @@ const AUTO_RESUMABLE_SYSTEM_STOP_REASON_PREFIXES = [
 	"stagnant_tool_cycle:",
 	"runaway_tool_loop:",
 	"provider_turn_limit:",
+	"overloaded:",
+	"rate_limit:",
+	"server_error:",
+	"network:",
+	"stream_stall:",
+	"goal_tool_unavailable:",
 ] as const;
 
 /** True only when a bounded runaway/provider-turn guard caused the block, not owner/model/terminal intent. */
@@ -90,6 +96,11 @@ export function isSystemBlockedGoal(state: GoalState | undefined): boolean {
 		}
 	}
 	return false;
+}
+
+export function getAutoResumableReasonPrefix(reason: string | undefined): string | undefined {
+	if (!reason) return undefined;
+	return AUTO_RESUMABLE_SYSTEM_STOP_REASON_PREFIXES.find((prefix) => reason.startsWith(prefix));
 }
 
 /** Minimal durable seam shared by CLI, tools, and in-process session restoration. */
@@ -121,7 +132,7 @@ export function pauseGoal(current: GoalState | undefined, now: string): GoalActi
 	return { ok: true, state: applyGoalEvent(current, { type: "pause_goal", now }) };
 }
 
-export function resumeGoal(current: GoalState | undefined, now: string): GoalActionResult {
+export function resumeGoal(current: GoalState | undefined, now: string, source?: "owner" | "system"): GoalActionResult {
 	if (!current) return missingGoal("resume");
 	if (!isGoalResumableStatus(current.status)) {
 		return {
@@ -129,7 +140,7 @@ export function resumeGoal(current: GoalState | undefined, now: string): GoalAct
 			error: `Goal '${current.goalId}' is ${current.status}; only paused, blocked, or usage-limited goals can be resumed.`,
 		};
 	}
-	return { ok: true, state: applyGoalEvent(current, { type: "resume_goal", now }) };
+	return { ok: true, state: applyGoalEvent(current, { type: "resume_goal", now, ...(source ? { source } : {}) }) };
 }
 
 export function editGoal(

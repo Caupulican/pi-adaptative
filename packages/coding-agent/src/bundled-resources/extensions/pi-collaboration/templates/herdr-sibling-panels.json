@@ -1,0 +1,28 @@
+{
+  "name": "herdr-sibling-panels",
+  "description": "Interactive sibling panels in caller workspace/tab: Agy Gemini 3.8 Flash (High effort) builder and validator. Designed for Herdr current-pane placement.",
+  "deadlineSeconds": 1800,
+  "agents": [
+    {
+      "provider": "agy",
+      "name": "gemini-builder",
+      "task": "Own implementation edits and focused regression tests. Produce concrete diffs and verified test results.",
+      "direction": "right",
+      "model": "gemini-3.8-flash-high",
+      "args": ["--effort", "high"]
+    },
+    {
+      "provider": "agy",
+      "name": "gemini-validator",
+      "task": "Run targeted validation and adversarial checks. Verify edge cases and report concrete findings.",
+      "direction": "down",
+      "model": "gemini-3.8-flash-high",
+      "args": ["--effort", "high"]
+    }
+  ],
+  "notes": [
+    "Uses placement: current-pane automatically when invoked inside Herdr (HERDR_ENV=1).",
+    "Spawns native agy with --model gemini-3.8-flash-high --effort high --dangerously-skip-permissions.",
+    "Panels are split directly in the caller's active tab without focusing away or creating an isolated daemon."
+  ]
+}

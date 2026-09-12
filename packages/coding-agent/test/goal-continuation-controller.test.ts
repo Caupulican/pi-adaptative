@@ -569,4 +569,60 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 		expect(state.requirements).toEqual(originalRequirements);
 		expect(state.requirements[0]).toEqual(originalReq1);
 	});
+
+	it("explicit owner block prompts user immediately without system interruption labeling even if work is in flight", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
+		state = applyGoalEvent(state, {
+			type: "dispatch_worker",
+			id: "req-1",
+			instructions: "do it",
+			laneId: "lane-1",
+			now: "T1",
+		});
+		state = applyGoalEvent(state, {
+			type: "block_goal",
+			reason: "operator decided to halt",
+			now: "T2",
+		});
+
+		const decision = evaluateGoalContinuation({
+			state,
+			settings: { maxStallTurns: 3 },
+			inFlightGoalLaneIds: new Set(["lane-1"]),
+		});
+
+		expect(decision.action).toBe("ask-user");
+		expect(decision.reasonCode).toBe("goal_blocked");
+		expect(decision.message).toContain("operator decided to halt");
+		expect(decision.message).not.toContain("system interruption");
+	});
+
+	it("system interruption waits on in-flight worker before stopping", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
+		state = applyGoalEvent(state, {
+			type: "dispatch_worker",
+			id: "req-1",
+			instructions: "do it",
+			laneId: "lane-1",
+			now: "T1",
+		});
+		state = applyGoalEvent(state, {
+			type: "system_stop_goal",
+			status: "blocked",
+			reason: "rate_limit: 429 Too Many Requests",
+			now: "T2",
+		});
+
+		const decision = evaluateGoalContinuation({
+			state,
+			settings: { maxStallTurns: 3 },
+			inFlightGoalLaneIds: new Set(["lane-1"]),
+		});
+
+		expect(decision.action).toBe("waiting");
+		expect(decision.reasonCode).toBe("worker_in_flight");
+		expect(decision.message).toContain("A system interruption occurred");
+	});
 });

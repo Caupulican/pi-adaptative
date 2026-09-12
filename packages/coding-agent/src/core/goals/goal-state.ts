@@ -83,6 +83,14 @@ export interface GoalState {
 	continuationWorkerSpendUsd?: number;
 	/** Durable acceptance override; avoids depending on an unbounded historical event scan. */
 	acceptanceOverride?: boolean;
+	/**
+	 * Consecutive unrecovered system failure count. Reset only on trusted actual progress
+	 * or explicit owner resume. Unverified progress, adding/reopening requirements, and alternating
+	 * error strings do not reset this counter.
+	 */
+	systemFailureStreak?: number;
+	/** Durable runaway signature that was already granted autonomous system recovery. */
+	runawayRecoverySignature?: string;
 }
 
 export interface Requirement {
@@ -171,13 +179,17 @@ export type GoalEvent =
 			tokens: number;
 			/** Exact model spend attributed to the goal-owned execution. */
 			spendUsd: number;
+			/** Host-observed outcome of the submitted continuation turn. */
+			outcome?: "completed" | "interrupted" | "errored";
+			/** Authoritative turn ordinal captured before pass submission to prevent replay. */
+			completionTurn?: number;
 			now: string;
 	  }
 	| { type: "complete_goal"; acceptanceOverride?: boolean; now: string }
 	| { type: "complete_goal_manually"; now: string }
 	| { type: "block_goal"; reason: string; now: string }
 	| { type: "pause_goal"; now: string }
-	| { type: "resume_goal"; now: string }
+	| { type: "resume_goal"; source?: "owner" | "system"; now: string }
 	| { type: "system_stop_goal"; status: "blocked" | "usage_limited" | "budget_limited"; reason: string; now: string }
 	| { type: "cancel_goal"; now: string };
 
@@ -303,9 +315,10 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 			return hasOptionalBoolean(value, "acceptanceOverride");
 		case "complete_goal_manually":
 		case "pause_goal":
-		case "resume_goal":
 		case "cancel_goal":
 			return true;
+		case "resume_goal":
+			return value.source === undefined || value.source === "owner" || value.source === "system";
 		case "block_goal":
 			return typeof value.reason === "string";
 		case "system_stop_goal":
@@ -322,7 +335,12 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 				typeof value.tokens === "number" &&
 				Number.isFinite(value.tokens) &&
 				typeof value.spendUsd === "number" &&
-				Number.isFinite(value.spendUsd)
+				Number.isFinite(value.spendUsd) &&
+				(value.outcome === undefined ||
+					value.outcome === "completed" ||
+					value.outcome === "interrupted" ||
+					value.outcome === "errored") &&
+				hasOptionalFiniteNumber(value, "completionTurn")
 			);
 		default:
 			return false;
@@ -355,7 +373,12 @@ export function isGoalState(value: unknown): value is GoalState {
 		hasOptionalFiniteNumber(value, "continuationWallClockMs") &&
 		hasOptionalFiniteNumber(value, "continuationSpendUsd") &&
 		hasOptionalFiniteNumber(value, "continuationWorkerSpendUsd") &&
-		hasOptionalBoolean(value, "acceptanceOverride")
+		hasOptionalBoolean(value, "acceptanceOverride") &&
+		(value.systemFailureStreak === undefined ||
+			(typeof value.systemFailureStreak === "number" &&
+				Number.isSafeInteger(value.systemFailureStreak) &&
+				value.systemFailureStreak >= 0)) &&
+		hasOptionalString(value, "runawayRecoverySignature")
 	);
 }
 
@@ -420,6 +443,7 @@ export function createGoalState(args: {
 		continuationWallClockMs: 0,
 		continuationSpendUsd: 0,
 		continuationWorkerSpendUsd: 0,
+		systemFailureStreak: 0,
 	};
 }
 
@@ -429,6 +453,20 @@ function updateRequirement(state: GoalState, id: string, update: (requirement: R
 	const requirements = [...state.requirements];
 	requirements[index] = update(requirements[index]);
 	state.requirements = requirements;
+}
+
+function isPreviouslyTrustedReceiptReplay(
+	existingEvidence: readonly GoalEvidenceRef[],
+	newEvidence: GoalEvidenceRef,
+): boolean {
+	return existingEvidence.some((prev) => {
+		if (!isTrustedGoalEvidence(prev)) return false;
+		if (prev.kind !== newEvidence.kind || prev.outcome !== newEvidence.outcome) return false;
+		if (newEvidence.uri !== undefined && newEvidence.uri.length > 0) {
+			return prev.uri === newEvidence.uri;
+		}
+		return prev.id === newEvidence.id;
+	});
 }
 
 export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
@@ -534,6 +572,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 
 		case "add_evidence": {
 			const existingIndex = newState.evidence.findIndex((evidence) => evidence.id === event.id);
+			const existing = existingIndex >= 0 ? newState.evidence[existingIndex] : undefined;
 			const newEvidence: GoalEvidenceRef = {
 				id: event.id,
 				kind: event.kind,
@@ -541,7 +580,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 				uri: event.uri,
 				verified: event.verified,
 				outcome: event.outcome,
-				createdAt: existingIndex >= 0 ? newState.evidence[existingIndex].createdAt : event.now,
+				createdAt: existing !== undefined ? existing.createdAt : event.now,
 			};
 			if (existingIndex >= 0) {
 				const updatedEvidence = [...newState.evidence];
@@ -550,8 +589,10 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			} else {
 				newState.evidence = [...newState.evidence, newEvidence];
 			}
-			if (isTrustedGoalEvidence(newEvidence)) {
+			if (isTrustedGoalEvidence(newEvidence) && !isPreviouslyTrustedReceiptReplay(state.evidence, newEvidence)) {
 				newState.progressRevision = (state.progressRevision ?? 0) + 1;
+				newState.systemFailureStreak = 0;
+				newState.runawayRecoverySignature = undefined;
 			}
 			break;
 		}
@@ -569,10 +610,21 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 		}
 
 		case "record_continuation_budget": {
+			const expectedTurn = (state.continuationTurnsUsed ?? 0) + 1;
 			newState.continuationTurnsUsed = (state.continuationTurnsUsed ?? 0) + event.turns;
 			newState.continuationWallClockMs = (state.continuationWallClockMs ?? 0) + event.wallClockMs;
 			newState.continuationSpendUsd = (state.continuationSpendUsd ?? 0) + Math.max(0, event.spendUsd);
 			newState.tokensUsed = (state.tokensUsed ?? 0) + Math.max(0, event.tokens);
+			if (
+				isGoalExecutionActive(state.status) &&
+				event.outcome === "completed" &&
+				typeof event.completionTurn === "number" &&
+				Number.isSafeInteger(event.completionTurn) &&
+				event.completionTurn > 0 &&
+				event.completionTurn === expectedTurn
+			) {
+				newState.systemFailureStreak = 0;
+			}
 			break;
 		}
 
@@ -612,12 +664,34 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			newState.blockedReason = undefined;
 			newState.lastProgressAt = event.now;
 			newState.stallTurns = 0;
+			if (event.source === "system") {
+				if (
+					state.blockedReason &&
+					(state.blockedReason.startsWith("runaway_tool_loop:") ||
+						state.blockedReason.startsWith("stagnant_tool_cycle:"))
+				) {
+					newState.runawayRecoverySignature = state.blockedReason;
+				}
+			} else {
+				newState.systemFailureStreak = 0;
+				newState.runawayRecoverySignature = undefined;
+			}
 			break;
 		}
 
 		case "system_stop_goal": {
 			newState.status = event.status;
 			newState.blockedReason = event.reason;
+			if (event.status === "blocked") {
+				const isNonProviderSystemStop =
+					event.reason.startsWith("goal_tool_unavailable:") ||
+					event.reason.startsWith("provider_turn_limit:") ||
+					event.reason.startsWith("runaway_tool_loop:") ||
+					event.reason.startsWith("stagnant_tool_cycle:");
+				if (!isNonProviderSystemStop) {
+					newState.systemFailureStreak = (state.systemFailureStreak ?? 0) + 1;
+				}
+			}
 			break;
 		}
 

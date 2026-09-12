@@ -46,6 +46,8 @@ export interface ToolGateControllerDeps {
 	 * (see file-mutation-queue.ts). Omitted retires in the process-wide default scope.
 	 */
 	getMutationScope?(): string;
+	/** Direct script execution gate: intercepts shell/process execution of registered automation scripts. */
+	checkDirectScriptExecution?(toolName: string, args: unknown, cwd?: string): BeforeToolCallResult | undefined;
 }
 
 export class ToolGateController {
@@ -62,10 +64,10 @@ export class ToolGateController {
 			return escalation;
 		}
 
-		// Autonomy tool gating
+		// 1. Pre-hook capability envelope & path bounds check on raw args
 		const envelope = structuredClone(this.deps.getCapabilityEnvelope());
 		const scopeCwd = this.deps.getCwd();
-		const evaluate = async (currentArgs: unknown = args): Promise<BeforeToolCallResult | undefined> => {
+		const evaluateEnvelope = async (currentArgs: unknown): Promise<BeforeToolCallResult | undefined> => {
 			signal?.throwIfAborted();
 			const gateResult = await evaluateToolGateAsync({
 				toolName: toolCall.name,
@@ -77,7 +79,7 @@ export class ToolGateController {
 				signal,
 			});
 			if (envelope) this.deps.recordGateOutcome(gateResult);
-			if (gateResult.outcome === "block" || gateResult.outcome === "ask-user") {
+			if (gateResult.outcome === "block") {
 				return {
 					block: true,
 					reason: `Tool execution blocked by autonomy gate [${gateResult.gate}]: ${gateResult.message} (${gateResult.reasonCode})`,
@@ -85,11 +87,11 @@ export class ToolGateController {
 			}
 			return undefined;
 		};
-		const denied = await evaluate();
-		if (denied) return denied;
-		const edge = await this.deps.checkEdge?.(toolCall.name, args, executionContext?.cwd, signal);
-		if (edge) return edge;
 
+		const denied = await evaluateEnvelope(args);
+		if (denied) return denied;
+
+		// 2. Extension tool_call hooks
 		const runner = this.deps.getExtensionRunner();
 		let extensionResult: BeforeToolCallResult | undefined;
 		if (runner.hasHandlers("tool_call")) {
@@ -109,20 +111,28 @@ export class ToolGateController {
 				}
 				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
 			}
-			// Hooks may edit arguments, but cannot move this call outside its admitted grant.
-			if (!extensionResult?.block) {
-				const hookArgs = (extensionResult as { args?: unknown })?.args ?? args;
-				const deniedAfterHook = await evaluate(hookArgs);
-				if (deniedAfterHook) return deniedAfterHook;
+			if (extensionResult?.block) return extensionResult;
+		}
+
+		// 3. Post-hook arguments & envelope re-check
+		const finalArgs = (extensionResult as { args?: unknown })?.args ?? args;
+		const effectiveCwd = executionContext?.cwd ?? scopeCwd;
+		if (this.deps.checkDirectScriptExecution) {
+			const directCheck = this.deps.checkDirectScriptExecution(toolCall.name, finalArgs, effectiveCwd);
+			if (directCheck) {
+				return directCheck;
 			}
 		}
+		const deniedAfterHook = await evaluateEnvelope(finalArgs);
+		if (deniedAfterHook) return deniedAfterHook;
+
+		// 4. Single edge authorization on the actual final operation
+		const edge = await this.deps.checkEdge?.(toolCall.name, finalArgs, executionContext?.cwd, signal);
+		if (edge) return edge;
+
 		if (extensionResult) return extensionResult;
-		// begin()'s return value is intentionally unused here: it tracks the pending observation
-		// internally (keyed by toolCall.id) and afterToolCall's complete() call below retrieves it
-		// from there, records observe-mode agreement/hint-efficacy stats, and feeds the durable
-		// evidence-gated promotion surfaced in system-prompt-builder.ts and getReport(). This is
-		// a side-effecting call, not a discarded decision.
-		this.deps.getToolSelectionController?.()?.begin(toolCall.id, toolCall.name, args);
+
+		this.deps.getToolSelectionController?.()?.begin(toolCall.id, toolCall.name, finalArgs);
 		return undefined;
 	};
 
