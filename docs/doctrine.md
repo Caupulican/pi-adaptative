@@ -472,7 +472,9 @@ overload, or a fully used subscription window records the reset time under
 `state/provider-admission/limits/`; before sending, every lane waits out a recorded limit that fits
 its budget and otherwise refuses the request unsent with a message the reliability classifier
 reads as a rate limit carrying the remaining delay, so no retry ladder rediscovers a limit at the
-account's expense. A success clears a rate-limit or overload record. The emergency stop
+account's expense; a worker's own retry ladder publishes its wait the same way. Counts and limits
+are keyed by provider plus credential identity (`<provider>#<identity>`, never a secret), so two
+accounts on one provider are two budgets. A success clears a rate-limit or overload record. The emergency stop
 (`<agentDir>/ESTOP`) holds new worker and background requests in every process and never the
 foreground. A foreground request is otherwise registered and admitted at once. A worker or background request to a
 provider at its configured limit (`providerAdmission.limits`; no provider is capped by default,

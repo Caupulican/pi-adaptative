@@ -1,4 +1,5 @@
 import type { StreamFn } from "@caupulican/pi-agent-core";
+import { splitProviderAccountKey } from "./account-key.ts";
 import { currentProviderLane, type ProviderRequestLane } from "./lane-context.ts";
 import type { ProviderAdmissionHold, ProviderAdmissionLedger } from "./ledger.ts";
 import { observeProviderResult, ProviderLimitedError, type ProviderLimitStore } from "./limit-state.ts";
@@ -25,6 +26,8 @@ export type ProviderAdmissionWaitReason = "capacity" | "provider_limit" | "emerg
 
 export interface ProviderAdmissionWaitRecord {
 	provider: string;
+	/** Credential identity the request runs under, when the deps key by account. */
+	account?: string;
 	lane: ProviderRequestLane;
 	reason: ProviderAdmissionWaitReason;
 	limit: number;
@@ -43,6 +46,8 @@ export interface ProviderAdmissionGateDeps {
 	limits?: ProviderLimitStore;
 	/** Machine-wide emergency stop; omitted means never engaged. */
 	isEmergencyStopEngaged?(): boolean;
+	/** Provider account key for `provider` (see account-key.ts); omitted keys on the bare provider id. */
+	getAccountKey?(provider: string): string;
 	getLane?(): ProviderRequestLane;
 	record?(record: ProviderAdmissionWaitRecord): void;
 	now?(): number;
@@ -110,7 +115,10 @@ export async function admitProviderRequest(
 	const now = deps.now ?? Date.now;
 	const sleep = deps.sleep ?? sleepAbortable;
 	const limit = policy.limits[provider] ?? 0;
-	const inflightNow = (): number => deps.ledger.countInflight(provider).total;
+	const key = deps.getAccountKey?.(provider) ?? provider;
+	const account = splitProviderAccountKey(key).account;
+	const inflightNow = (): number => deps.ledger.countInflight(key).total;
+	const base = { provider, ...(account ? { account } : {}), lane, limit } as const;
 
 	if (lane !== "foreground" && deps.isEmergencyStopEngaged?.()) {
 		const startedAt = now();
@@ -119,10 +127,8 @@ export async function admitProviderRequest(
 			const waitedMs = now() - startedAt;
 			if (waitedMs >= policy.maxWaitMs) {
 				deps.record?.({
-					provider,
-					lane,
+					...base,
 					reason: "emergency_stop",
-					limit,
 					inflightAtStart,
 					inflightAtAdmission: inflightNow(),
 					waitedMs,
@@ -133,10 +139,8 @@ export async function admitProviderRequest(
 			await sleep(Math.min(EMERGENCY_STOP_POLL_MS, Math.max(1, policy.maxWaitMs - waitedMs)), signal);
 		}
 		deps.record?.({
-			provider,
-			lane,
+			...base,
 			reason: "emergency_stop",
-			limit,
 			inflightAtStart,
 			inflightAtAdmission: inflightNow(),
 			waitedMs: now() - startedAt,
@@ -145,17 +149,15 @@ export async function admitProviderRequest(
 		signal?.throwIfAborted();
 	}
 
-	const recorded = deps.limits?.read(provider);
+	const recorded = deps.limits?.read(key);
 	if (recorded) {
 		const startedAt = now();
 		const remainingMs = recorded.limitedUntil - startedAt;
 		const budgetMs = lane === "foreground" ? policy.foregroundLimitWaitMs : policy.maxWaitMs;
 		if (remainingMs > budgetMs) {
 			deps.record?.({
-				provider,
-				lane,
+				...base,
 				reason: "provider_limit",
-				limit,
 				inflightAtStart: inflightNow(),
 				inflightAtAdmission: inflightNow(),
 				waitedMs: 0,
@@ -168,10 +170,8 @@ export async function admitProviderRequest(
 			const inflightAtStart = inflightNow();
 			await sleep(remainingMs, signal);
 			deps.record?.({
-				provider,
-				lane,
+				...base,
 				reason: "provider_limit",
-				limit,
 				inflightAtStart,
 				inflightAtAdmission: inflightNow(),
 				waitedMs: now() - startedAt,
@@ -183,29 +183,27 @@ export async function admitProviderRequest(
 	}
 
 	if (lane === "foreground" || !(limit > 0)) {
-		return deps.ledger.acquire(provider, lane).release;
+		return deps.ledger.acquire(key, lane).release;
 	}
 	const startedAt = now();
 	let inflightAtStart: number | undefined;
 	let pollMs = FIRST_POLL_MS;
 	for (;;) {
 		signal?.throwIfAborted();
-		const attempt = deps.ledger.tryAcquire(provider, lane, limit);
+		const attempt = deps.ledger.tryAcquire(key, lane, limit);
 		inflightAtStart ??= attempt.inflight;
 		const waitedMs = now() - startedAt;
 		let hold: ProviderAdmissionHold | undefined = attempt.hold;
 		let timedOut = false;
 		if (!hold && waitedMs >= policy.maxWaitMs) {
-			hold = deps.ledger.acquire(provider, lane);
+			hold = deps.ledger.acquire(key, lane);
 			timedOut = true;
 		}
 		if (hold) {
 			if (waitedMs > 0 || timedOut) {
 				deps.record?.({
-					provider,
-					lane,
+					...base,
 					reason: "capacity",
-					limit,
 					inflightAtStart,
 					inflightAtAdmission: attempt.inflight,
 					waitedMs,
@@ -248,7 +246,12 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 				releaseOnce();
 				if (deps.limits) {
 					try {
-						observeProviderResult(deps.limits, message, (deps.now ?? Date.now)());
+						observeProviderResult(
+							deps.limits,
+							message,
+							(deps.now ?? Date.now)(),
+							deps.getAccountKey?.(model.provider) ?? model.provider,
+						);
 					} catch {
 						// Shared-state bookkeeping must never fail the request it observes.
 					}

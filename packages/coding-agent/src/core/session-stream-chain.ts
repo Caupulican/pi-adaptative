@@ -2,6 +2,7 @@ import type { StreamFn } from "@caupulican/pi-agent-core";
 import { type StreamIdleOptions, withStreamIdleWatchdog } from "@caupulican/pi-agent-core/reliability";
 import type { SessionManager } from "@caupulican/pi-agent-core/session";
 import { streamSimple } from "@caupulican/pi-ai/stream";
+import type { AuthCredential } from "./auth-storage.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
 import { isWarmableLocalModel } from "./local-prefix-warm-controller.ts";
 import { formatModelRouterModel } from "./model-router-controller.ts";
@@ -12,6 +13,7 @@ import {
 	resolveAdaptiveStreamIdleOptions,
 	withModelPerfProfile,
 } from "./models/perf-profile.ts";
+import { resolveProviderAccountKey } from "./provider-admission/account-key.ts";
 import { isEmergencyStopEngaged } from "./provider-admission/emergency-stop.ts";
 import { PROVIDER_ADMISSION_CUSTOM_TYPE, withProviderAdmission } from "./provider-admission/gate.ts";
 import type { ProviderAdmissionLedger } from "./provider-admission/ledger.ts";
@@ -55,6 +57,8 @@ export interface SessionStreamChainInput {
 	providerLimitStore: ProviderLimitStore;
 	/** The agent directory whose ESTOP sentinel pauses new worker and background requests. */
 	agentDir: string;
+	/** Credentials, so limits and in-flight counts key on provider plus account (see account-key.ts). */
+	authStorage: { get(provider: string): AuthCredential | undefined };
 	/** The output repetition guard's threshold follows the model's capability tier. */
 	getRepetitionGuardRepeats: () => number;
 	/** Test-only stream-idle override, read per request (see `setStreamIdleOptionsForTests`). */
@@ -93,6 +97,7 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 		ledger: providerAdmissionLedger,
 		limits: input.providerLimitStore,
 		isEmergencyStopEngaged: () => isEmergencyStopEngaged(input.agentDir),
+		getAccountKey: (provider) => resolveProviderAccountKey(input.authStorage, provider),
 		getPolicy: () => settingsManager.getProviderAdmissionSettings(),
 		record: (record) => {
 			try {

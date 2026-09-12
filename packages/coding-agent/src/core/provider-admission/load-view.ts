@@ -1,5 +1,6 @@
+import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";
 import { type EmergencyStopState, readEmergencyStop } from "./emergency-stop.ts";
-import type { ProviderAdmissionEntry, ProviderAdmissionLedger } from "./ledger.ts";
+import { entryKey, type ProviderAdmissionEntry, type ProviderAdmissionLedger } from "./ledger.ts";
 import type { ProviderLimitRecord, ProviderLimitStore, ProviderUsageRecord } from "./limit-state.ts";
 
 /** One machine-wide snapshot of provider load: what is in flight, what is limited, what the provider reports, and the stop. */
@@ -47,14 +48,16 @@ export function formatProviderLoadView(view: ProviderLoadView): string {
 	const lines: string[] = [];
 	const byProvider = new Map<string, ProviderAdmissionEntry[]>();
 	for (const entry of view.inflight) {
-		const list = byProvider.get(entry.provider) ?? [];
+		const key = entryKey(entry);
+		const list = byProvider.get(key) ?? [];
 		list.push(entry);
-		byProvider.set(entry.provider, list);
+		byProvider.set(key, list);
 	}
 	lines.push(
 		`Provider load — ${view.inflight.length} request${view.inflight.length === 1 ? "" : "s"} in flight machine-wide`,
 	);
-	for (const [provider, entries] of [...byProvider.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+	for (const [key, entries] of [...byProvider.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+		const provider = splitProviderAccountKey(key).provider;
 		const lanes = { foreground: 0, worker: 0, background: 0 };
 		const pids = new Set<number>();
 		for (const entry of entries) {
@@ -64,7 +67,7 @@ export function formatProviderLoadView(view: ProviderLoadView): string {
 		const cap = view.configuredLimits[provider];
 		const oldest = Math.min(...entries.map((entry) => Date.parse(entry.startedAt)));
 		lines.push(
-			`  ${provider}: ${entries.length} in flight (${lanes.foreground} foreground, ${lanes.worker} worker, ${lanes.background} background) ` +
+			`  ${describeProviderAccountKey(key)}: ${entries.length} in flight (${lanes.foreground} foreground, ${lanes.worker} worker, ${lanes.background} background) ` +
 				`across ${pids.size} process${pids.size === 1 ? "" : "es"}${cap ? `, limit ${cap}` : ""}, oldest ${seconds(view.at - oldest)} ago`,
 		);
 	}
@@ -72,7 +75,7 @@ export function formatProviderLoadView(view: ProviderLoadView): string {
 		lines.push("Limited:");
 		for (const limit of view.limits) {
 			lines.push(
-				`  ${limit.provider}: ${limit.reason.replace("_", " ")} until ${new Date(limit.limitedUntil).toISOString()} ` +
+				`  ${describeProviderAccountKey(limit.provider)}: ${limit.reason.replace("_", " ")} until ${new Date(limit.limitedUntil).toISOString()} ` +
 					`(${seconds(limit.limitedUntil - view.at)} left, recorded by pid ${limit.pid}${limit.detail ? `: ${limit.detail}` : ""})`,
 			);
 		}
@@ -88,7 +91,9 @@ export function formatProviderLoadView(view: ProviderLoadView): string {
 				const parts = [describeWindow(s.primary), describeWindow(s.secondary)].filter(Boolean);
 				if (parts.length === 0) continue;
 				const name = typeof s.limitName === "string" ? s.limitName : String(s.limitId ?? "window");
-				lines.push(`  ${usage.provider} ${name}: ${parts.join("; ")} (seen ${seconds(view.at - usage.at)} ago)`);
+				lines.push(
+					`  ${describeProviderAccountKey(usage.provider)} ${name}: ${parts.join("; ")} (seen ${seconds(view.at - usage.at)} ago)`,
+				);
 			}
 		}
 	}

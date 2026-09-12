@@ -6,6 +6,11 @@ import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import { type Api, createAssistantMessageEventStream, fauxAssistantMessage, type Model } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	describeProviderAccountKey,
+	providerAccountKey,
+	splitProviderAccountKey,
+} from "../src/core/provider-admission/account-key.ts";
+import {
 	emergencyStopPath,
 	engageEmergencyStop,
 	isEmergencyStopEngaged,
@@ -527,5 +532,72 @@ describe("emergency stop", () => {
 		};
 		await expect(admitProviderRequest("xai", stuck)).rejects.toBeInstanceOf(EmergencyStopError);
 		expect(ledger.countInflight("xai").total).toBe(0);
+	});
+});
+
+describe("provider account keys", () => {
+	it("derives a non-secret identity from each credential shape and keys per account", () => {
+		expect(providerAccountKey("xai", undefined)).toBe("xai");
+		expect(
+			providerAccountKey("openai-codex", {
+				type: "oauth",
+				access: "a.b.c",
+				refresh: "r",
+				expires: 1,
+				accountId: "acct-1",
+			} as never),
+		).toBe("openai-codex#acct-1");
+		const payload = Buffer.from(JSON.stringify({ sub: "user-77" })).toString("base64url");
+		expect(
+			providerAccountKey("xai", { type: "oauth", access: `h.${payload}.s`, refresh: "r", expires: 1 } as never),
+		).toBe("xai#user-77");
+		const keyed = providerAccountKey("openrouter", { type: "api_key", key: "sk-secret-value" });
+		expect(keyed).toMatch(/^openrouter#[0-9a-f]{12}$/);
+		expect(keyed).not.toContain("secret");
+		expect(splitProviderAccountKey("openai-codex#acct-1")).toEqual({
+			key: "openai-codex#acct-1",
+			provider: "openai-codex",
+			account: "acct-1",
+		});
+		expect(describeProviderAccountKey("openai-codex#9dcc3287-3098-4604")).toBe("openai-codex (account 9dcc3287…)");
+		expect(describeProviderAccountKey("xai")).toBe("xai");
+	});
+
+	it("counts and limits per account, not per provider", async () => {
+		const dir = agentDir();
+		const ledger = new ProviderAdmissionLedger(dir, { heartbeatMs: 60_000 });
+		const limits = new ProviderLimitStore(dir, { now: () => 0 });
+		const accounts: Record<string, string> = { "openai-codex": "openai-codex#acct-A" };
+		const policy: ProviderAdmissionPolicy = {
+			enabled: true,
+			limits: { "openai-codex": 1 },
+			maxWaitMs: 1_000,
+			foregroundLimitWaitMs: 60_000,
+		};
+		ledger.acquire("openai-codex#acct-B", "worker");
+		limits.record("openai-codex#acct-B", { limitedUntil: 3_600_000, reason: "usage_window" });
+		// Account A is neither at its cap nor limited even though account B on the same provider is both.
+		const release = await admitProviderRequest("openai-codex", {
+			ledger,
+			limits,
+			getPolicy: () => policy,
+			getLane: () => "worker",
+			getAccountKey: (provider) => accounts[provider] ?? provider,
+			now: () => 0,
+			sleep: async () => {
+				throw new Error("must not wait");
+			},
+		});
+		expect(ledger.countInflight("openai-codex#acct-A").total).toBe(1);
+		expect(
+			ledger
+				.listInflight()
+				.map((entry) => [entry.provider, entry.account, entry.lane])
+				.sort((a, b) => String(a[1]).localeCompare(String(b[1]))),
+		).toEqual([
+			["openai-codex", "acct-A", "worker"],
+			["openai-codex", "acct-B", "worker"],
+		]);
+		release();
 	});
 });

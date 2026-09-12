@@ -39,6 +39,16 @@ export interface WorkerRecoveryCoordinatorOptions {
 	recoverSessionRootReplies(): void;
 	/** Wake the scheduler and UI after a retained retry deadline becomes eligible. */
 	retryReady?(): void;
+	/**
+	 * Publish a rate limit or overload this worker's retry ladder is about to wait out, so sibling
+	 * processes on the same account stop sending until the same reset (see provider-admission/).
+	 */
+	publishProviderLimit?(input: {
+		provider: string;
+		reason: "rate_limit" | "overloaded";
+		delayMs: number;
+		detail?: string;
+	}): void;
 	now?(): number;
 	warn(message: string): void;
 }
@@ -214,6 +224,18 @@ export class WorkerRecoveryCoordinator {
 			...(args.maxAttempts !== undefined ? { maxAttempts: args.maxAttempts } : {}),
 		});
 		if (!decision.retry) return { scheduled: false, reason: decision.reason };
+		if (decision.reason === "rate_limit" || decision.reason === "overloaded") {
+			try {
+				this.options.publishProviderLimit?.({
+					provider: args.provider,
+					reason: decision.reason,
+					delayMs: decision.delayMs,
+					...(args.outcome.reasonDetail ? { detail: args.outcome.reasonDetail } : {}),
+				});
+			} catch {
+				// Shared-state bookkeeping must never fail the retry it observes.
+			}
+		}
 		const nextRetriesUsed = retriesUsed + 1;
 		const notBefore = new Date(this.now() + decision.delayMs).toISOString();
 		let suspended: AttemptRuntimeState;

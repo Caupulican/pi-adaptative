@@ -54,7 +54,9 @@ import {
 	verifierWorkerExecutionContract,
 } from "../orchestration/worker-execution-contract.ts";
 import { resolveWorkerModelPin, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
+import { resolveProviderAccountKey } from "../provider-admission/account-key.ts";
 import { emergencyStopPath, isEmergencyStopEngaged } from "../provider-admission/emergency-stop.ts";
+import { ProviderLimitStore } from "../provider-admission/limit-state.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
@@ -282,6 +284,8 @@ export class WorkerDelegationController {
 	private taskProfileStore: SessionTaskProfileStore | undefined;
 	private taskProfileWriter: TaskProfileWriter | undefined;
 	private readonly recovery: WorkerRecoveryCoordinator;
+	/** Lazily created; publishes the worker retry ladder's rate-limit waits machine-wide. */
+	private providerLimitStore: ProviderLimitStore | undefined;
 	private readonly notifications: WorkerNotificationCoordinator;
 	private readonly scheduler: WorkerDispatchScheduler;
 	private readonly laneAbortControllers = new Map<string, AbortController>();
@@ -341,6 +345,16 @@ export class WorkerDelegationController {
 			dispatchVerification: (recovery) => this.dispatchRecoveredVerification(recovery),
 			recoverTaskBearingMailboxTurns: () => this.agentControl.reconcileTaskBearingMailboxTurns(),
 			recoverSessionRootReplies: () => this.agentControl.reconcileSessionRootReplies(),
+			publishProviderLimit: (input) => {
+				this.providerLimitStore ??= new ProviderLimitStore(this.deps.getAgentDir());
+				const store = this.providerLimitStore;
+				const key = resolveProviderAccountKey(this.deps.getModelRegistry().authStorage, input.provider);
+				store.record(key, {
+					limitedUntil: Date.now() + input.delayMs,
+					reason: input.reason,
+					...(input.detail ? { detail: input.detail } : {}),
+				});
+			},
 			retryReady: () => {
 				if (this.deps.isDisposed()) return;
 				this.scheduler.drain();

@@ -99,8 +99,13 @@ function startWorkerInLifecycle(args: {
 	};
 }
 
-function recovery(lifecycle: WorkerLifecycle, enqueue = vi.fn()): WorkerRecoveryCoordinator {
+function recovery(
+	lifecycle: WorkerLifecycle,
+	enqueue = vi.fn(),
+	extra: Partial<ConstructorParameters<typeof WorkerRecoveryCoordinator>[0]> = {},
+): WorkerRecoveryCoordinator {
 	return new WorkerRecoveryCoordinator({
+		...extra,
 		lifecycle,
 		scheduler: { enqueue },
 		recoverWriteReservations: vi.fn(),
@@ -119,6 +124,51 @@ const transientFailure = {
 };
 
 describe("durable worker retry recovery", () => {
+	it("publishes a rate-limit or overload wait machine-wide and stays silent for other transients", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-09-12T10:00:00.000Z"));
+		const agentDir = root();
+		const published: unknown[] = [];
+		const started = startWorker({ agentDir, sessionId: "session-publish-limit", maxAttempts: 4 });
+		const owner = recovery(started.lifecycle, vi.fn(), { publishProviderLimit: (input) => published.push(input) });
+		try {
+			const overloaded = owner.scheduleAttemptRetry({
+				laneId: started.laneId,
+				agentId: started.agentId,
+				ownerId: "owner:retry-test",
+				request: started.request,
+				outcome: { laneStatus: "failed", reasonCode: "completion_error", reasonDetail: "429 rate limit exceeded" },
+				provider: "faux",
+				maxAttempts: 4,
+			});
+			expect(overloaded.scheduled).toBe(true);
+			expect(published).toEqual([
+				expect.objectContaining({ provider: "faux", reason: "rate_limit", detail: "429 rate limit exceeded" }),
+			]);
+			expect((published[0] as { delayMs: number }).delayMs).toBeGreaterThan(0);
+			owner.dispose();
+			if (!overloaded.scheduled) throw new Error("unreachable");
+			await vi.advanceTimersByTimeAsync(Date.parse(overloaded.notBefore) - Date.now());
+			started.lifecycle.resumeAgent(started.laneId, started.agentId, 90_000, "owner:retry-test");
+			const second = recovery(started.lifecycle, vi.fn(), {
+				publishProviderLimit: (input) => published.push(input),
+			});
+			second.scheduleAttemptRetry({
+				laneId: started.laneId,
+				agentId: started.agentId,
+				ownerId: "owner:retry-test",
+				request: started.request,
+				outcome: transientFailure,
+				provider: "faux",
+				maxAttempts: 4,
+			});
+			second.dispose();
+			expect(published).toHaveLength(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("rejects non-canonical retry deadlines before suspension", () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-08-07T10:00:00.000Z"));

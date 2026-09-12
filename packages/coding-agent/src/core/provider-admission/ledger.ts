@@ -4,6 +4,7 @@ import { stateFile } from "../agent-paths.ts";
 import { isProcessAlive } from "../process-liveness.ts";
 import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { splitProviderAccountKey } from "./account-key.ts";
 import type { ProviderRequestLane } from "./lane-context.ts";
 
 /**
@@ -23,6 +24,8 @@ import type { ProviderRequestLane } from "./lane-context.ts";
 export interface ProviderAdmissionEntry {
 	id: string;
 	provider: string;
+	/** Credential identity the request runs under (see account-key.ts); absent when unkeyed. */
+	account?: string;
 	lane: ProviderRequestLane;
 	pid: number;
 	sessionId?: string;
@@ -61,6 +64,11 @@ export function providerAdmissionDir(agentDir: string): string {
 	return stateFile(agentDir, "provider-admission");
 }
 
+/** The account key an entry was registered under. */
+export function entryKey(entry: Pick<ProviderAdmissionEntry, "provider" | "account">): string {
+	return entry.account ? `${entry.provider}#${entry.account}` : entry.provider;
+}
+
 function safeSegment(value: string): string {
 	return value.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64) || "provider";
 }
@@ -70,6 +78,7 @@ function isEntry(value: unknown): value is ProviderAdmissionEntry {
 		isPlainRecord(value) &&
 		typeof value.id === "string" &&
 		typeof value.provider === "string" &&
+		(value.account === undefined || typeof value.account === "string") &&
 		typeof value.lane === "string" &&
 		LANES.includes(value.lane as ProviderRequestLane) &&
 		Number.isSafeInteger(value.pid) &&
@@ -102,10 +111,13 @@ export class ProviderAdmissionLedger {
 		this.staleMs = options.staleMs ?? PROVIDER_ADMISSION_STALE_MS;
 	}
 
-	/** Register one in-flight request unconditionally. */
-	acquire(provider: string, lane: ProviderRequestLane): ProviderAdmissionHold {
+	/**
+	 * Register one in-flight request unconditionally. `key` is a provider account key
+	 * (`<provider>` or `<provider>#<identity>`, see account-key.ts); counting is per key.
+	 */
+	acquire(key: string, lane: ProviderRequestLane): ProviderAdmissionHold {
 		this.ensureDir();
-		return this.withLock(() => this.writeHold(provider, lane));
+		return this.withLock(() => this.writeHold(key, lane));
 	}
 
 	/**
@@ -114,22 +126,22 @@ export class ProviderAdmissionLedger {
 	 * last free slot. Returns the observed count when the request has to wait.
 	 */
 	tryAcquire(
-		provider: string,
+		key: string,
 		lane: ProviderRequestLane,
 		limit: number,
 	): { hold: ProviderAdmissionHold; inflight: number } | { hold?: undefined; inflight: number } {
 		this.ensureDir();
 		return this.withLock(() => {
-			const inflight = this.countLocked(provider).total;
+			const inflight = this.countLocked(key).total;
 			if (inflight >= limit) return { inflight };
-			return { hold: this.writeHold(provider, lane), inflight };
+			return { hold: this.writeHold(key, lane), inflight };
 		});
 	}
 
-	/** Live requests to `provider` from every process, after pruning entries whose owner is gone. */
-	countInflight(provider: string): ProviderInflightCount {
+	/** Live requests under `key` from every process, after pruning entries whose owner is gone. */
+	countInflight(key: string): ProviderInflightCount {
 		if (!existsSync(this.dir)) return { total: 0, byLane: { foreground: 0, worker: 0, background: 0 } };
-		return this.withLock(() => this.countLocked(provider));
+		return this.withLock(() => this.countLocked(key));
 	}
 
 	/** Every live in-flight request across the machine, after pruning abandoned entries. */
@@ -151,14 +163,16 @@ export class ProviderAdmissionLedger {
 		return withFileLockSync(this.lockPath, fn);
 	}
 
-	private writeHold(provider: string, lane: ProviderRequestLane): ProviderAdmissionHold {
+	private writeHold(key: string, lane: ProviderRequestLane): ProviderAdmissionHold {
+		const { provider, account } = splitProviderAccountKey(key);
 		this.sequence += 1;
-		const id = `${safeSegment(provider)}--${this.pid}--${this.now().toString(36)}-${this.sequence.toString(36)}`;
+		const id = `${safeSegment(key)}--${this.pid}--${this.now().toString(36)}-${this.sequence.toString(36)}`;
 		const path = join(this.dir, `${id}${ENTRY_SUFFIX}`);
 		const startedAt = new Date(this.now()).toISOString();
 		const entry: ProviderAdmissionEntry = {
 			id,
 			provider,
+			...(account ? { account } : {}),
 			lane,
 			pid: this.pid,
 			...(this.sessionId ? { sessionId: this.sessionId } : {}),
@@ -195,11 +209,11 @@ export class ProviderAdmissionLedger {
 		return { id, release };
 	}
 
-	private countLocked(provider: string): ProviderInflightCount {
+	private countLocked(key: string): ProviderInflightCount {
 		const byLane: Record<ProviderRequestLane, number> = { foreground: 0, worker: 0, background: 0 };
 		let total = 0;
 		for (const entry of this.collectLocked()) {
-			if (entry.provider !== provider) continue;
+			if (entryKey(entry) !== key) continue;
 			total += 1;
 			byLane[entry.lane] += 1;
 		}

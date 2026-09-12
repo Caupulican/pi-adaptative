@@ -445,6 +445,7 @@ export class AgentSession {
 			providerAdmissionLedger,
 			providerLimitStore,
 			agentDir,
+			authStorage: config.modelRegistry.authStorage,
 			getRepetitionGuardRepeats: () => this.getCapabilityTierPolicy().repetitionGuardRepeats,
 			getStreamIdleOptionsOverride: () => streamIdleOptionsOverride,
 		});

@@ -10,6 +10,12 @@ export interface RetryPolicy {
 	jitterRatio: number;
 }
 
+/**
+ * Evidence for the caps (2026-09-12 census of the owner's failure corpus, 986 classified provider
+ * failures): none carried a provider-stated retry delay, so `maxRetryAfterMs` never bound; with the
+ * default three attempts at a 2 s base the local backoff peaks at 8 s, so `maxDelayMs` cannot bind
+ * either. The values stay as documented ceilings, not tuned constants.
+ */
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {
 	maxAttempts: 3,
 	baseDelayMs: 2000,

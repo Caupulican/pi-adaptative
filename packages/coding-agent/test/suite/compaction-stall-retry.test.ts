@@ -80,7 +80,10 @@ describe("compaction stall retry", () => {
 		const result = await harness.session.compact();
 		expect(result.summary).toBe(recoveredSummary);
 		expect(harness.sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
-	}, 5000);
+		// Bounded by the file default, not a fixed five seconds: the stall budgets above are 300 ms
+		// each and the retries near-immediate, but on a loaded CI runner (four workers, a 76 s
+		// shell-corpus file on the same Windows shard) this took 8.5 s and failed on time alone.
+	});
 
 	it("a transient provider response failure retries the same summarization attempt", async () => {
 		const harness = await createHarness({

@@ -78,6 +78,14 @@ function verifiedWriteWorkerProfiles(): {
 	};
 }
 
+/**
+ * Dispatch here is asynchronous through the scheduler drain and the fake provider; on a loaded CI
+ * runner (four vitest workers, a 76 s shell-corpus file on the same Windows shard) the default one
+ * second `vi.waitFor` budget expired while a dependent worker was still starting. The wait is bounded
+ * by the test timeout, not by an arbitrary second.
+ */
+const WAIT = { timeout: 15_000 };
+
 describe("worker controller dependency dispatch", () => {
 	it("revalidates dynamic verifier queue demand when a write reservation forces an immediate worker to queue", async () => {
 		const profiles = verifiedWriteWorkerProfiles();
@@ -107,7 +115,7 @@ describe("worker controller dependency dispatch", () => {
 				authority: { path: workspace },
 			});
 			if (!first.started) throw new Error(first.skipReason);
-			await vi.waitFor(() => expect(providerCalls).toBe(1));
+			await vi.waitFor(() => expect(providerCalls).toBe(1), WAIT);
 
 			const scheduler = controls._getWorkerController().scheduler;
 			for (let index = 0; index < DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches - 2; index += 1) {
@@ -165,7 +173,7 @@ describe("worker controller dependency dispatch", () => {
 				instructions: "Negative control after storage recovers.",
 			});
 			expect(accepted).toMatchObject({ started: true, record: { laneId, status: "running" } });
-			await vi.waitFor(() => expect(lifecycle.getRecord(laneId)?.status).toBe("succeeded"));
+			await vi.waitFor(() => expect(lifecycle.getRecord(laneId)?.status).toBe("succeeded"), WAIT);
 		} finally {
 			harness.cleanup();
 		}
@@ -229,7 +237,7 @@ describe("worker controller dependency dispatch", () => {
 			);
 			if (!dependent.started || !dependent.record) throw new Error(dependent.skipReason ?? "dependent not queued");
 
-			await vi.waitFor(() => expect(providerCalls).toBe(1));
+			await vi.waitFor(() => expect(providerCalls).toBe(1), WAIT);
 			let snapshot = controls._getWorkerLifecycle().getTaskRuntimeSnapshot();
 			const dependentAttemptId = snapshot.tasks[dependent.record.laneId]?.attemptIds[0];
 			expect(dependentAttemptId).toBeDefined();
@@ -239,7 +247,7 @@ describe("worker controller dependency dispatch", () => {
 			expect(dependentAttempt?.grant).toBeUndefined();
 
 			releasePrerequisite(fauxAssistantMessage('{"summary":"prerequisite complete","status":"completed"}'));
-			await vi.waitFor(() => expect(providerCalls).toBe(2));
+			await vi.waitFor(() => expect(providerCalls).toBe(2), WAIT);
 			snapshot = controls._getWorkerLifecycle().getTaskRuntimeSnapshot();
 			expect(dependentAttemptId ? snapshot.attempts[dependentAttemptId]?.status : undefined).toMatch(
 				/^(leased|running)$/,
@@ -249,7 +257,7 @@ describe("worker controller dependency dispatch", () => {
 			await vi.waitFor(() => {
 				const current = controls._getWorkerLifecycle().getTaskRuntimeSnapshot();
 				expect(dependentAttemptId ? current.attempts[dependentAttemptId]?.status : undefined).toBe("completed");
-			});
+			}, WAIT);
 		} finally {
 			releasePrerequisite?.(fauxAssistantMessage('{"summary":"cleanup"}'));
 			releaseDependent?.(fauxAssistantMessage('{"summary":"cleanup"}'));

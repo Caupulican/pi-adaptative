@@ -4,6 +4,7 @@ import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";
 import { providerAdmissionDir } from "./ledger.ts";
 
 /**
@@ -23,6 +24,7 @@ import { providerAdmissionDir } from "./ledger.ts";
 export type ProviderLimitReason = "rate_limit" | "overloaded" | "usage_window";
 
 export interface ProviderLimitRecord {
+	/** The provider account key this limit applies to (`<provider>` or `<provider>#<identity>`). */
 	provider: string;
 	limitedUntil: number;
 	reason: ProviderLimitReason;
@@ -76,6 +78,8 @@ function isUsageRecord(value: unknown): value is ProviderUsageRecord {
 	);
 }
 
+export { splitProviderAccountKey };
+
 /**
  * Thrown instead of sending when a provider is limited for longer than the lane may wait. The
  * message is shaped for the reliability classifier: it names the rate limit and carries the
@@ -91,7 +95,7 @@ export class ProviderLimitedError extends Error {
 		const retryAfterMs = Math.max(0, record.limitedUntil - nowMs);
 		const seconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
 		super(
-			`Provider ${record.provider} is rate-limited machine-wide until ${new Date(record.limitedUntil).toISOString()} ` +
+			`Provider ${describeProviderAccountKey(record.provider)} is rate-limited machine-wide until ${new Date(record.limitedUntil).toISOString()} ` +
 				`(${record.reason.replace("_", " ")} recorded by pid ${record.pid}` +
 				`${record.detail ? `: ${record.detail}` : ""}); retry after ${seconds} seconds.`,
 		);
@@ -285,10 +289,15 @@ export function usageWindowLimit(
  * limit, a success clears those two, and Codex subscription window snapshots are persisted and
  * turn into a usage-window limit when a window is fully used.
  */
-export function observeProviderResult(store: ProviderLimitStore, message: AssistantMessage, nowMs: number): void {
-	const provider = message.provider;
+export function observeProviderResult(
+	store: ProviderLimitStore,
+	message: AssistantMessage,
+	nowMs: number,
+	key: string = message.provider,
+): void {
+	const provider = key;
 	if (message.stopReason === "error") {
-		const limit = providerLimitFromFailure(provider, message.errorMessage ?? "", nowMs);
+		const limit = providerLimitFromFailure(message.provider, message.errorMessage ?? "", nowMs);
 		if (limit) store.record(provider, limit);
 	} else if (message.stopReason !== "aborted") {
 		store.clear(provider, ["rate_limit", "overloaded"]);
