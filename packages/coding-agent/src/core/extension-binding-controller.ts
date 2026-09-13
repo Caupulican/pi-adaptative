@@ -84,6 +84,8 @@ export interface ExtensionBindingControllerDeps {
 		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
 	): string | undefined;
 	recordManagedLane(event: ManagedLaneEvent): void;
+	/** Bounded applicable owner working preferences for a handoff an extension starts. */
+	getHandoffPersonaGuidance?(): string | undefined;
 	isForegroundBusy(): boolean;
 	getPendingMessageCount(): number;
 	isStreaming(): boolean;
@@ -307,6 +309,7 @@ export class ExtensionBindingController {
 				reportManagedLane: (event) => {
 					this.deps.recordManagedLane(event);
 				},
+				getHandoffPersonaGuidance: () => this.deps.getHandoffPersonaGuidance?.(),
 			},
 			{
 				getModel: () => this.deps.getModel(),

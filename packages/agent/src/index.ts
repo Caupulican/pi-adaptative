@@ -27,6 +27,8 @@ export * from "./tool-invocation-receipt.ts";
 export * from "./tool-invocation-report.ts";
 // Native tool-call markup that escaped as assistant text
 export * from "./tool-protocol-residue.ts";
+// Host contract for append-on-change transient records (the module itself stays kernel-internal)
+export { HOST_TRANSIENT_CLEARED_DETAILS, TRANSIENT_RECORD_SUPERSEDING_NOTE } from "./transient-records.ts";
 // Types
 export * from "./types.ts";
 export * from "./usage.ts";

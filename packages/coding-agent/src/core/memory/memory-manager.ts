@@ -210,17 +210,45 @@ export class MemoryManager {
 		}
 	}
 
+	private static budgetKey(budget?: MemoryPromptBudget): string {
+		return budget === undefined
+			? "none"
+			: `${budget.enabled}:${budget.compact}:${budget.maxLines}:${budget.maxEstimatedTokens}:${budget.maxChars}`;
+	}
+
+	/** The cached static block for a budget; composed on a miss, never announced to providers as installed. */
 	public buildSystemPromptBlock(budget?: MemoryPromptBudget): string {
-		const key =
-			budget === undefined
-				? "none"
-				: `${budget.enabled}:${budget.compact}:${budget.maxLines}:${budget.maxEstimatedTokens}:${budget.maxChars}`;
+		const key = MemoryManager.budgetKey(budget);
 		if (this.systemPromptBlockCache !== undefined && this.systemPromptBlockCache.key === key) {
 			return this.systemPromptBlockCache.text;
 		}
-
 		const text = this._composeSystemPromptBlock(budget);
 		this.systemPromptBlockCache = { key, text };
+		return text;
+	}
+
+	/**
+	 * The static block the system-prompt builder is about to install. Same cache as
+	 * {@link buildSystemPromptBlock}, plus one thing a cached read must never do: tell each provider
+	 * what the installed prefix renders (`onSystemPromptBlockFrozen`), so a provider measures later
+	 * mutations against what the model actually sees. A read with another budget (the compact
+	 * retrieval fallback) does not install a prompt and therefore never moves that snapshot.
+	 */
+	public freezeSystemPromptBlock(budget?: MemoryPromptBudget): string {
+		const key = MemoryManager.budgetKey(budget);
+		const text =
+			this.systemPromptBlockCache !== undefined && this.systemPromptBlockCache.key === key
+				? this.systemPromptBlockCache.text
+				: this._composeSystemPromptBlock(budget);
+		this.systemPromptBlockCache = { key, text };
+		for (const p of this.providers) {
+			if (!this.activeProviders.has(p.name) || !p.onSystemPromptBlockFrozen) continue;
+			try {
+				p.onSystemPromptBlockFrozen(text);
+			} catch (err) {
+				console.error(`Memory provider ${p.name} failed to observe the frozen system prompt block:`, err);
+			}
+		}
 		return text;
 	}
 

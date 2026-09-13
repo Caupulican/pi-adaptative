@@ -517,6 +517,13 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 							throw new Error("fire_task requires a task or distinct per-agent tasks for every agent.");
 						}
 					}
+					if (action === "fire_task" && task?.trim()) {
+						// Applicable owner working preferences travel with the objective every agent receives:
+						// behavioral guidance for the handoff, never a grant and never raw memory.
+						const guidance =
+							typeof pi.getHandoffPersonaGuidance === "function" ? pi.getHandoffPersonaGuidance() : undefined;
+						if (guidance) task = `${task}\n\n${guidance}`;
+					}
 					if (params.force && existsSync(store.path(plan.id))) {
 						if (store.load(plan.id).agents.some((agent) => !agent.closed))
 							throw new Error("Stop the existing team's native sessions before reusing its launchKey.");
@@ -566,12 +573,19 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 						params.body ??
 						(answering ? (params.answer?.text ?? "Answer the pending question using the supplied keys.") : "");
 					if (!task.trim()) throw new Error("send_followup requires a nonempty task.");
+					// A new task to a persistent agent carries the CURRENT applicable preferences, not the
+					// snapshot its launch briefing had; an answer to a pending question is not a new task.
+					const followupGuidance =
+						!answering && typeof pi.getHandoffPersonaGuidance === "function"
+							? pi.getHandoffPersonaGuidance()
+							: undefined;
+					const followupTask = followupGuidance ? `${task}\n\n${followupGuidance}` : task;
 					details = params.dryRun
-						? { dryRun: true, jobId: job.id }
+						? { dryRun: true, jobId: job.id, task: followupTask }
 						: await coordinator.followup(
 								job.id,
 								params.agentId,
-								task,
+								followupTask,
 								answering ? params.answer : undefined,
 								params.steer !== undefined ? { steer: params.steer } : undefined,
 							);

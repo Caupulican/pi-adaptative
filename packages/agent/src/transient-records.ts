@@ -22,9 +22,28 @@ import type { AgentContext, AgentMessage } from "./types.ts";
  * the path-alias legend).
  */
 
-const TRANSIENT_RECORD_SUPERSEDING_NOTE =
+export const TRANSIENT_RECORD_SUPERSEDING_NOTE =
 	"\n\n(This record supersedes any earlier message of the same kind in this conversation. If one " +
 	"appears above, it is stale - only the LAST occurrence of a given kind is current.)";
+
+/**
+ * `details` a host puts on a transient `custom` message to say "this kind currently has nothing
+ * active to say; if an instance of it is on record, append THIS text once to clear it". Adapted by
+ * `adaptHostTransients` into a slot with `content: undefined` and the message text as
+ * `clearedText`, so a host reuses the same reconciliation index as the kernel's own kinds instead
+ * of scanning history itself to learn whether a record of the kind ever existed. The message text
+ * never reaches the wire on its own: it is recorded only as that one cleared record.
+ */
+export const HOST_TRANSIENT_CLEARED_DETAILS = { transientCleared: true } as const;
+
+function isClearedHostTransient(message: AgentMessage): boolean {
+	return (
+		message.role === "custom" &&
+		typeof message.details === "object" &&
+		message.details !== null &&
+		(message.details as { transientCleared?: unknown }).transientCleared === true
+	);
+}
 
 /**
  * One transient's current state for this request, keyed by a stable identity (`kind`) that must
@@ -415,6 +434,10 @@ export function adaptHostTransients(transientMessages: readonly AgentMessage[]):
 	for (const message of transientMessages) {
 		const text = customMessageText(message);
 		if (message.role === "custom" && text !== undefined) {
+			if (isClearedHostTransient(message)) {
+				slots.push({ kind: message.customType, content: undefined, clearedText: text });
+				continue;
+			}
 			slots.push({
 				kind: message.customType,
 				content: text,

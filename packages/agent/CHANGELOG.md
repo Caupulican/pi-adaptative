@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `HOST_TRANSIENT_CLEARED_DETAILS` and `TRANSIENT_RECORD_SUPERSEDING_NOTE` are exported. A host marks a transient `custom` message with the former to say "this kind currently has nothing active to say"; `adaptHostTransients` turns it into a content-less slot whose text is recorded once, only over an earlier record of the same kind, through the same reconciliation index as the kernel's own kinds. The latter lets a host size a record for the wire.
+
 ### Fixed
 
 - `SessionManager.getLatestCustomEntryOnBranch` no longer walks the whole branch on every request for a custom type that is absent or unchanged. Each type keeps one bounded memo (its last answer and the leaf it was computed for, hit or miss); a same-leaf query is answered from it and an append-only session walks only the new suffix. A branch switch to a leaf that does not descend from the memoized one recomputes from the full ancestry, an explicit `fromId` always walks, and the memo is dropped whenever the entry index is replaced (reload, new session, branched session with reused entry ids), so branch and reload answers are unchanged.

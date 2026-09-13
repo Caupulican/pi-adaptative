@@ -31,4 +31,11 @@ export interface MemoryProvider {
 	onSessionEnd?(): Promise<void>;
 	getToolDefinitions?(): ToolDefinition[];
 	getContextMarkers?(): string[];
+	/**
+	 * Called each time the memory manager freezes the static system-prompt block for installation
+	 * into the system prompt, with the block text as installed (after budget fitting). Lets a
+	 * provider remember what the frozen prefix actually renders so later mutations can be delivered
+	 * as records instead of prefix churn. Cached reads and fresh composes never call it.
+	 */
+	onSystemPromptBlockFrozen?(renderedBlock: string): void;
 }

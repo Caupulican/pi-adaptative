@@ -80,3 +80,35 @@ describe("transient record pointers and cumulative kinds", () => {
 		expect((next[0] as { content: string }).content).toBe("PATH ALIASES (cumulative)\np/b=two");
 	});
 });
+
+describe("host cleared markers", () => {
+	it("adapts a cleared marker into a content-less slot whose text is recorded once, only over a prior record", async () => {
+		const { adaptHostTransients, HOST_TRANSIENT_CLEARED_DETAILS } = await import("../src/transient-records.ts");
+		const marker = createCustomMessage(
+			"persona",
+			"persona cleared",
+			false,
+			HOST_TRANSIENT_CLEARED_DETAILS,
+			"2026-01-01T00:00:00.000Z",
+		);
+		const { slots, passThrough } = adaptHostTransients([marker]);
+		expect(passThrough).toEqual([]);
+		expect(slots).toEqual([{ kind: "persona", content: undefined, clearedText: "persona cleared" }]);
+
+		// No record of the kind: the marker says nothing.
+		let history: AgentMessage[] = [user("one")];
+		expect(reconcileTransientRecords(history, slots)).toEqual([]);
+		// A record exists: the cleared text is appended exactly once, then it is the fixed point.
+		const active = adaptHostTransients([
+			createCustomMessage("persona", "persona P1", false, undefined, "2026-01-01T00:00:00.000Z"),
+		]).slots;
+		const [record] = reconcileTransientRecords(history, active);
+		history = [...history, record];
+		const [cleared] = reconcileTransientRecords(history, slots);
+		expect(cleared.role === "custom" && cleared.content).toContain("persona cleared");
+		history = [...history, cleared];
+		expect(reconcileTransientRecords(history, slots)).toEqual([]);
+		// New content after a clear is a new record again.
+		expect(kinds(reconcileTransientRecords(history, active))).toEqual(["persona"]);
+	});
+});

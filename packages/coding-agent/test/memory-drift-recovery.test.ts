@@ -45,15 +45,17 @@ describe("managed memory drift recovery", () => {
 		const healed = readFileSync(memoryPath, "utf8");
 		expect(healed).toContain("Entry one");
 		expect(healed).toContain("Entry two");
-		expect(provider.drainHealNotices()).toEqual([expect.stringContaining("MEMORY.md was empty on disk; restored")]);
-		expect(provider.drainHealNotices()).toEqual([]);
+		expect(provider.drainManagedNotices().map((notice) => notice.message)).toEqual([
+			expect.stringContaining("MEMORY.md was empty on disk; restored"),
+		]);
+		expect(provider.drainManagedNotices()).toEqual([]);
 
 		// A fresh session over an emptied file heals at start, before the prompt block is built.
 		writeFileSync(memoryPath, "", "utf8");
 		const second = await start();
 		expect(readFileSync(memoryPath, "utf8")).toContain("Entry two");
 		expect(second.provider.systemPromptBlock()).toContain("Entry two");
-		expect(second.provider.drainHealNotices()).toHaveLength(1);
+		expect(second.provider.drainManagedNotices()).toHaveLength(1);
 	});
 
 	it("refuses a real external edit with the operator's two commands, and honours accept and restore", async () => {

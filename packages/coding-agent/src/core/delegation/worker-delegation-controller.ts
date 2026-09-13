@@ -206,6 +206,8 @@ export interface WorkerDelegationControllerDeps {
 	getCurrentSubmissionEpoch?(): number | undefined;
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;
 	readMemoryForLane(query: string): Promise<string>;
+	/** Bounded applicable owner working preferences for a handoff, or undefined when there are none. */
+	getHandoffPersonaGuidance?(): string | undefined;
 	/** Session-owned artifact store broker; worker adapters receive fresh retrieval tools only. */
 	getArtifactStore?(): ArtifactStore;
 	/** Host-owned read-only skill broker; no SkillVaultController crosses this boundary. */
@@ -2486,6 +2488,10 @@ export class WorkerDelegationController {
 			usageReportId,
 			processCapable: executionPlan.processEnabled,
 			projectContextFiles: this.deps.getSettingsManager().getProjectContextFiles(),
+			...(() => {
+				const personaGuidance = this.deps.getHandoffPersonaGuidance?.();
+				return personaGuidance ? { personaGuidance } : {};
+			})(),
 			...(request.verificationOfTaskId ? { verificationSubjectTaskId: request.verificationOfTaskId } : {}),
 			...(recoveredTerminal ? { recoveredTerminal } : {}),
 			...(retentionPolicy ? { retentionPolicy } : {}),

@@ -331,6 +331,7 @@ export class ExtensionRunner {
 		this.runtime.registerContextMemoryProvider = actions.registerContextMemoryProvider;
 		this.runtime.reportSpawnedUsage = actions.reportSpawnedUsage;
 		this.runtime.reportManagedLane = actions.reportManagedLane;
+		this.runtime.getHandoffPersonaGuidance = actions.getHandoffPersonaGuidance;
 
 		// Context actions (required)
 		this.getModel = contextActions.getModel;

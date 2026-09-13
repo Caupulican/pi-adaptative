@@ -1516,6 +1516,13 @@ export interface ExtensionAPI {
 	 */
 	reportManagedLane(event: ManagedLaneEvent): void;
 
+	/**
+	 * Bounded owner working preferences applicable to a handoff the extension is about to start
+	 * (behavioral guidance headed by the persona projection rule; never a grant, never raw memory),
+	 * or undefined when memory is off, the session is a child, or nothing applies.
+	 */
+	getHandoffPersonaGuidance(): string | undefined;
+
 	// =========================================================================
 	// Model and Thinking Level
 	// =========================================================================
@@ -1810,6 +1817,7 @@ export interface ExtensionActions {
 	registerContextMemoryProvider: (provider: ContextMemoryProvider) => void;
 	reportSpawnedUsage: (usage: Usage, opts?: { label?: string; sourceSessionId?: string; reportId?: string }) => void;
 	reportManagedLane: (event: ManagedLaneEvent) => void;
+	getHandoffPersonaGuidance: () => string | undefined;
 }
 
 /**

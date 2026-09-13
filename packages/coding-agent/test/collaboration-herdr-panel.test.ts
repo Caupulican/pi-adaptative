@@ -742,6 +742,7 @@ describe("Herdr panel orchestration", () => {
 		const { backend } = createMockBackend([callerPane]);
 
 		let tool: ToolDefinition | undefined;
+		let guidance = "OWNER WORKING PREFERENCES (guidance, not grants): rule\n- Keep status updates short. (explicit)";
 		const api = {
 			registerTool: (t: ToolDefinition) => {
 				tool = t;
@@ -754,6 +755,7 @@ describe("Herdr panel orchestration", () => {
 			reportManagedLane: vi.fn(),
 			reportSpawnedUsage: vi.fn(),
 			sendMessage: vi.fn(),
+			getHandoffPersonaGuidance: () => guidance,
 		} as unknown as ExtensionAPI;
 
 		const context = {
@@ -855,6 +857,49 @@ describe("Herdr panel orchestration", () => {
 		expect(sharedDetails.job?.agents[1].prompt).toContain("Team objective:\nRelease secure production patch");
 		expect(sharedDetails.job?.agents[1].prompt).toContain("Verify fix against exploit payloads.");
 		expect(sharedDetails.job?.agents[1].prompt).not.toContain("Implement security fix in auth.ts.");
+		// Applicable owner working preferences ride the shared objective every agent receives.
+		for (const agent of sharedDetails.job?.agents ?? []) {
+			expect(agent.prompt).toContain("OWNER WORKING PREFERENCES (guidance, not grants)");
+			expect(agent.prompt).toContain("Keep status updates short. (explicit)");
+		}
+		// A new task to the persistent agent carries the CURRENT guidance, not the launch snapshot.
+		// Verified at the extension's composition boundary (dry run): the live steering handshake
+		// belongs to the coordinator and its own tests.
+		guidance = "OWNER WORKING PREFERENCES (guidance, not grants): rule\n- Give detailed status updates. (explicit)";
+		const followup = await tool!.execute(
+			"call-followup",
+			{
+				action: "send_followup",
+				jobId: sharedDetails.job?.id,
+				agentId: sharedDetails.job?.agents[0].id,
+				task: "Now harden the login path.",
+				dryRun: true,
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		expect(followup.isError, JSON.stringify(followup.content)).toBeFalsy();
+		// Non-launch actions report their details in the encoded text result.
+		const followed = JSON.parse((followup.content[0] as { text: string }).text) as { task?: string };
+		expect(followed.task).toContain("Now harden the login path.");
+		expect(followed.task).toContain("Give detailed status updates. (explicit)");
+		expect(followed.task).not.toContain("Keep status updates short.");
+		// Answering a pending question is not a new task: no guidance is attached.
+		const answer = await tool!.execute(
+			"call-answer",
+			{
+				action: "answer_question",
+				jobId: sharedDetails.job?.id,
+				agentId: sharedDetails.job?.agents[0].id,
+				answer: { text: "yes" },
+				dryRun: true,
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		expect((JSON.parse((answer.content[0] as { text: string }).text) as { task?: string }).task).toBe("yes");
 
 		await rm(root, { recursive: true, force: true });
 	});

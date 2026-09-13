@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { okfMemoryDir } from "../../agent-paths.ts";
 import { formatOkfMemoryDocument, parseOkfMemoryDocument } from "../../context/okf-memory.ts";
 import { hasInvisibleUnicode, scanContextFileThreats } from "../../security/context-threat-scanner.ts";
+import { collectUserPreferenceEntries } from "../user-preference-metadata.ts";
 
 const ARCHIVE_DIR_NAME = "user-preferences";
 const ARCHIVE_INDEX_NAME = "index.okf.md";
@@ -138,6 +139,21 @@ export class UserMemoryArchive {
 		await this.archiveBody(body);
 		await this.rebuildIndex();
 		return { userContent: USER_ARCHIVE_POINTER, archiveChanged: true };
+	}
+
+	/**
+	 * Preference lines held by the archive shards, in shard order, bounded, each with the heading
+	 * path it was archived under (headings travel with the body into the shard). Blanks skipped.
+	 */
+	async archivedEntries(limit = 400): Promise<Array<{ line: string; section?: string }>> {
+		const entries: Array<{ line: string; section?: string }> = [];
+		for (const shard of await this.shardFiles()) {
+			for (const entry of collectUserPreferenceEntries(shard.body)) {
+				entries.push(entry);
+				if (entries.length >= limit) return entries;
+			}
+		}
+		return entries;
 	}
 
 	private validateArchiveContent(body: string): void {

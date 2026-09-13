@@ -607,6 +607,7 @@ export class AgentSession {
 			goals: this._goals,
 			getExtensionRunner: () => this._extensionRunner,
 			getPromptTemplates: () => this.promptTemplates,
+			noteOwnerAuthoredMessage: (message, originalText) => this._reflection.markOwnerInput(message, originalText),
 		});
 		this._backgroundLanes = new BackgroundLaneController({
 			isDisposed: () => this._disposed,
@@ -639,6 +640,7 @@ export class AgentSession {
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
 			saveWorkerClaimSnapshot: (claim, request) => this.saveWorkerClaimSnapshot(claim, request),
 			readMemoryForLane: (query) => this._memory.readMemoryForLane(query),
+			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
 			getArtifactStore: () => this._getToolArtifactStore(),
 			getSkillReadBroker: () => ({
 				search: (query) => this._skillVault.search(query),
@@ -668,6 +670,8 @@ export class AgentSession {
 			refreshToolRegistry: () => this._refreshToolRegistry(),
 			getContextWindow: () => this.model?.contextWindow,
 			getGoalState: () => this.getGoalStateSnapshot(),
+			emitWarning: (message) => this._foregroundLifecycle.warn(message),
+			admitUserPreference: (request) => this._reflection.admitUserPreference(request),
 		});
 		this._compactionSupport = new CompactionSupport({
 			getModel: () => this.model,
@@ -768,7 +772,7 @@ export class AgentSession {
 			runPromptEnforcement: (messages, report) => this._runPromptEnforcement(messages, report),
 			enqueueRelevanceCuration: (messages, report) => this._enqueueRelevanceCuration(messages, report),
 			maybeDrainBrainCuration: () => this._maybeDrainBrainCuration(),
-			appendMemoryEvidence: (messages, report) => this._maybeAppendMemoryEvidenceBlock(messages, report),
+			appendMemoryEvidence: (messages, report) => this._memory.appendPromptMemory(messages, report),
 			previewReflectionCue: () => this._reflection.previewCurrentTurnCue(),
 			previewTaskDirectoryContext: () => captureSessionTaskDirectoryContext(this.sessionManager),
 			previewTaskAutomationContext: () => this._runtimeBuilder.previewTaskAutomationContext(),
@@ -898,6 +902,9 @@ export class AgentSession {
 			() => this.mutationScope,
 			() => this._shellSessionKey,
 			this._providerLimitStore,
+			(message, entryId) => this._reflection.noteOwnerInputPersisted(message, entryId),
+			() =>
+				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,
 		);
 		this._foregroundLifecycle.start();
 		this._reflection = new ReflectionController({
@@ -1098,6 +1105,7 @@ export class AgentSession {
 			registerContextMemoryProvider: (provider) => this.registerContextMemoryProvider(provider),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			recordManagedLane: (event) => this._backgroundLanes.recordManagedLane(event),
+			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
 			isForegroundBusy: () => this._foregroundRecovery.isBusy,
 			getPendingMessageCount: () => this.pendingMessageCount,
 			isStreaming: () => this.isStreaming,
@@ -1419,22 +1427,18 @@ export class AgentSession {
 	}
 
 	/** Managed memory files against their managed revisions (operator recovery view). */
-	async memoryDriftReport(): Promise<ManagedMemoryDriftEntry[]> {
-		return (await this._memory.getFileStoreWriter()?.driftReport()) ?? [];
+	memoryDriftReport(): Promise<ManagedMemoryDriftEntry[]> {
+		return this._memory.memoryDriftReport();
 	}
 
 	/** Operator authority: adopt the on-disk memory file as the managed revision. */
-	async memoryAcceptDrift(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
-		const writer = this._memory.getFileStoreWriter();
-		if (!writer) return { ok: false, message: "Managed memory is not available in this session." };
-		return writer.acceptDrift(target);
+	memoryAcceptDrift(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
+		return this._memory.memoryAcceptDrift(target);
 	}
 
 	/** Operator authority: restore the last managed content of a memory file. */
-	async memoryRestoreManaged(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
-		const writer = this._memory.getFileStoreWriter();
-		if (!writer) return { ok: false, message: "Managed memory is not available in this session." };
-		return writer.restoreManaged(target);
+	memoryRestoreManaged(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
+		return this._memory.memoryRestoreManaged(target);
 	}
 
 	/** Every active verification obligation with what the operator can read about it. */
@@ -1769,14 +1773,6 @@ export class AgentSession {
 	/** Read-only inspection of the latest memory-retrieval report, for tests/debugging. */
 	getMemoryRetrievalReport(): MemoryRetrievalReport {
 		return this._memory.getMemoryRetrievalReport();
-	}
-
-	/**
-	 * Provider-plan hot-path delegation to {@link MemoryController.maybeAppendMemoryEvidenceBlock}.
-	 * Kept as a one-line method so the request context controller owns pass ordering.
-	 */
-	private _maybeAppendMemoryEvidenceBlock(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[] {
-		return this._memory.maybeAppendMemoryEvidenceBlock(messages, report);
 	}
 
 	/** Read-only inspection of the latest memory-prompt-inclusion decision, for tests/debugging and context_audit. */
@@ -2706,10 +2702,11 @@ export class AgentSession {
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
 				}
+				const ownerOriginalText = !options.internalContextType && options.source !== "extension" ? text : undefined;
 				if (options.streamingBehavior === "followUp") {
-					this._pendingQueue.queueFollowUp(expandedText, currentImages, goalToolStartAuthority);
+					this._pendingQueue.queueFollowUp(expandedText, currentImages, goalToolStartAuthority, ownerOriginalText);
 				} else {
-					this._pendingQueue.queueSteer(expandedText, currentImages, goalToolStartAuthority);
+					this._pendingQueue.queueSteer(expandedText, currentImages, goalToolStartAuthority, ownerOriginalText);
 				}
 				this._emitQueueUpdate();
 				preflightResult?.(true);
@@ -2756,6 +2753,7 @@ export class AgentSession {
 					content: userContent,
 					timestamp: Date.now(),
 				};
+				if (options?.source !== "extension") this._reflection.markOwnerInput(userMessage, text);
 				promptMessage = userMessage;
 				this._earlyDisplayedUserMessages.add(userMessage);
 				this._emit({ type: "message_start", message: userMessage });
@@ -3044,7 +3042,7 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async steer(text: string, images?: ImageContent[]): Promise<void> {
-		this._pendingQueue.queueSteer(this._pendingQueue.prepareQueuedMessageText(text), images);
+		this._pendingQueue.queueSteer(this._pendingQueue.prepareQueuedMessageText(text), images, undefined, text);
 		this._emitQueueUpdate();
 	}
 
@@ -3056,7 +3054,7 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async followUp(text: string, images?: ImageContent[]): Promise<void> {
-		this._pendingQueue.queueFollowUp(this._pendingQueue.prepareQueuedMessageText(text), images);
+		this._pendingQueue.queueFollowUp(this._pendingQueue.prepareQueuedMessageText(text), images, undefined, text);
 		this._emitQueueUpdate();
 	}
 

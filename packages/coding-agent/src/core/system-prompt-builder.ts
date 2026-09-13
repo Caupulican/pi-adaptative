@@ -202,7 +202,7 @@ export class SystemPromptBuilder {
 			profile.class !== "full" && profile.contextWindow !== undefined
 				? resolveMemoryPromptBudget({ contextWindow: profile.contextWindow, configuredMaxResults: 3 })
 				: undefined;
-		return this.deps.getMemoryManager().buildSystemPromptBlock(budget) || undefined;
+		return this.deps.getMemoryManager().freezeSystemPromptBlock(budget) || undefined;
 	}
 
 	private _buildModelAdaptationPrompt(): string | undefined {

@@ -165,9 +165,18 @@ describe("context_audit: safe local-memory diagnostics (no leakage, read-only)",
 		});
 		harnesses.push(harness);
 
-		const internals = harness.session as unknown as {
-			_maybeAppendMemoryEvidenceBlock: (messages: AgentMessage[], report: MemoryRetrievalReport) => AgentMessage[];
-		};
+		// The evidence block's own entry point on the memory controller (the session's plan delegates
+		// to `appendPromptMemory`, which wraps it with the persona record).
+		const internals = (
+			harness.session as unknown as {
+				_memory: {
+					maybeAppendMemoryEvidenceBlock: (
+						messages: AgentMessage[],
+						report: MemoryRetrievalReport,
+					) => AgentMessage[];
+				};
+			}
+		)._memory;
 
 		const rejectedSummaryReport: MemoryRetrievalReport = {
 			request: { query: "x", maxResults: 5 },
@@ -186,7 +195,7 @@ describe("context_audit: safe local-memory diagnostics (no leakage, read-only)",
 				},
 			],
 		};
-		internals._maybeAppendMemoryEvidenceBlock([], rejectedSummaryReport);
+		internals.maybeAppendMemoryEvidenceBlock([], rejectedSummaryReport);
 		expect(harness.session.getMemoryPromptInclusionReport().status).toBe("empty_block");
 
 		const throwingReport = {
@@ -197,7 +206,7 @@ describe("context_audit: safe local-memory diagnostics (no leakage, read-only)",
 				throw new Error("boom");
 			},
 		} as unknown as MemoryRetrievalReport;
-		internals._maybeAppendMemoryEvidenceBlock([], throwingReport);
+		internals.maybeAppendMemoryEvidenceBlock([], throwingReport);
 		expect(harness.session.getMemoryPromptInclusionReport().status).toBe("failed");
 	});
 

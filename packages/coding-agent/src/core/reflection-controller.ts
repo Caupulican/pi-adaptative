@@ -7,12 +7,12 @@
  * durable effect goes through the bundled memory tool, the session log (via deps), or the skills dir.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent } from "@caupulican/pi-agent-core/agent";
 import { runAgentLoop, startAgentProviderRequest } from "@caupulican/pi-agent-core/agent-loop";
-import type { SessionManager } from "@caupulican/pi-agent-core/session";
+import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AgentContext, AgentLoopConfig, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type {
@@ -51,8 +51,8 @@ import {
 	proposalFromReflectionWrite,
 	rollbackPlanForReflectionWrite,
 } from "./learning/learning-audit.ts";
-import { evaluateLearningDecision } from "./learning/learning-gate.ts";
-import { ObservationStore, observationKey } from "./learning/observation-store.ts";
+import { type DurableChangeLayer, evaluateLearningDecision } from "./learning/learning-gate.ts";
+import { type EvidenceReceipt, ObservationStore, observationKey } from "./learning/observation-store.ts";
 import {
 	type DemandSignals,
 	decideDemand,
@@ -60,16 +60,36 @@ import {
 	type ReflectionResult,
 	type ReflectionWrite,
 } from "./learning/reflection-engine.ts";
-import { analyzeReflectionTurn, type ReflectionTurnAnalysis } from "./learning/reflection-turn-analysis.ts";
+import {
+	analyzeReflectionTurn,
+	CORRECTION_SIGNAL,
+	EXPLICIT_DURABLE_SIGNAL,
+	type ReflectionTurnAnalysis,
+} from "./learning/reflection-turn-analysis.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type {
 	StructuredReflectionApplyResult,
 	StructuredReflectionRollback,
 	StructuredReflectionWrite,
 } from "./memory/providers/file-store.ts";
+import {
+	formatUserPreferenceScope,
+	newUserPreferenceId,
+	type UserPreferenceAdmissionRequest,
+	type UserPreferenceAdmissionResult,
+	type UserPreferenceCommitReport,
+	type UserPreferenceMetadata,
+} from "./memory/user-preference-metadata.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { providerLaneForIsolatedLaneKind, runInProviderLane } from "./provider-admission/lane-context.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
+import { redactKnownSecrets } from "./security/secret-text.ts";
+import {
+	appendSessionSnapshot,
+	decodeSessionSnapshotPayload,
+	getSessionSnapshots,
+	type SessionSnapshotCodec,
+} from "./session-snapshot.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
 import { DEFAULT_BOUNDED_SKILL_AUDIT_LIMITS, runSkillAudit } from "./tools/skill-audit.ts";
@@ -154,6 +174,147 @@ export const CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE = "reflection_cue_state";
 /** `internalContextType` of the one dedicated end-of-work reflection turn. */
 export const REFLECTION_TURN_TRIGGER_CUSTOM_TYPE = "reflection_turn_trigger";
 
+/**
+ * Durable mark that one persisted user message was genuine owner input (typed or sent by the
+ * operator through the session's prompt boundary), not an internal prompt, an extension message,
+ * a worker report, a tool result or recalled text. The record carries identity only; the words
+ * stay in the message entry it names, so the ledger is rebuilt from the branch after a restart
+ * and survives compaction (custom entries are not messages).
+ */
+export const OWNER_EVIDENCE_CUSTOM_TYPE = "owner_evidence";
+
+export interface OwnerEvidenceRecord {
+	/** `<session id prefix>/<session entry id>`: the citation a preference write carries. */
+	sourceId: string;
+	entryId: string;
+	/**
+	 * The owner's ORIGINAL words, bounded: what they typed before any input transform, skill or
+	 * template expansion rewrote the message the model received. Never reconstructed from the
+	 * persisted message content.
+	 */
+	text: string;
+	/** sha256 prefix of `text` as stored; a record whose text does not match on load is dropped. */
+	digest: string;
+	/** Length of the full original input (may exceed the stored bound). */
+	chars: number;
+	createdAt: string;
+}
+
+export interface OwnerEvidenceEntry extends Pick<OwnerEvidenceRecord, "sourceId" | "entryId" | "createdAt" | "text"> {}
+
+const MAX_OWNER_EVIDENCE_ENTRIES = 64;
+const MAX_OWNER_EVIDENCE_TEXT_CHARS = 4_000;
+const MAX_CUE_EVIDENCE_SOURCES = 3;
+const MAX_CUE_EVIDENCE_EXCERPT_CHARS = 100;
+const MAX_CITATIONS_PER_WRITE = 16;
+
+function evidenceTextDigest(text: string): string {
+	return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
+}
+
+/** Shape and integrity: the stored words must carry the digest they were recorded with. */
+function isOwnerEvidenceRecord(value: unknown): value is OwnerEvidenceRecord {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	return (
+		typeof record.sourceId === "string" &&
+		record.sourceId.length > 0 &&
+		typeof record.entryId === "string" &&
+		typeof record.text === "string" &&
+		record.text.length <= MAX_OWNER_EVIDENCE_TEXT_CHARS &&
+		typeof record.digest === "string" &&
+		record.digest === evidenceTextDigest(record.text) &&
+		typeof record.chars === "number" &&
+		Number.isSafeInteger(record.chars) &&
+		record.chars >= record.text.length &&
+		typeof record.createdAt === "string"
+	);
+}
+
+const OWNER_EVIDENCE_CODEC: SessionSnapshotCodec<OwnerEvidenceRecord, "evidence"> = {
+	customType: OWNER_EVIDENCE_CUSTOM_TYPE,
+	valueKey: "evidence",
+	isValue: isOwnerEvidenceRecord,
+	clone: (record) => ({ ...record }),
+};
+
+export function getOwnerEvidenceSnapshots(entries: readonly SessionEntry[]): OwnerEvidenceRecord[] {
+	return getSessionSnapshots(entries, OWNER_EVIDENCE_CODEC);
+}
+
+/** Lowercase, plain quotes, collapsed horizontal whitespace; newlines are kept so line structure survives. */
+function normalizeQuoteText(text: string): string {
+	return text
+		.toLowerCase()
+		.replace(/[\u2018\u2019]/g, "'")
+		.replace(/[\u201c\u201d]/g, '"')
+		.replace(/\r\n?/g, "\n")
+		.split("\n")
+		.map((line) => line.replace(/[ \t]+/g, " ").trim())
+		.join("\n");
+}
+
+/**
+ * Whether a span of the owner's text is text the owner SHOWED rather than said: inside quotation
+ * marks or backticks, inside a fenced block, or on a blockquote line. A pasted excerpt is evidence
+ * of what the owner showed, never automatically of what they believe; this is the host's
+ * deterministic half of that judgment. The semantic half stays model work.
+ */
+function isShownSpan(haystack: string, start: number, end: number): boolean {
+	const before = haystack.slice(0, start);
+	const fences = (before.match(/```/g) ?? []).length;
+	if ((fences & 1) === 1) return true;
+	const inlineTicks = (before.replace(/```/g, "").match(/`/g) ?? []).length;
+	if ((inlineTicks & 1) === 1) return true;
+	if (((before.match(/"/g) ?? []).length & 1) === 1) return true;
+	// Blockquote: any line the span touches starts with ">".
+	let lineStart = before.lastIndexOf("\n") + 1;
+	while (lineStart <= end && lineStart < haystack.length) {
+		if (haystack.slice(lineStart).startsWith(">")) return true;
+		const next = haystack.indexOf("\n", lineStart);
+		if (next < 0) break;
+		lineStart = next + 1;
+	}
+	return false;
+}
+
+/**
+ * Where a cited quote sits in the owner's words. Every occurrence is tried: a quote that appears
+ * first inside shown text and later as the owner's own statement is found as stated. Returns the
+ * sentence around the first stated occurrence for the explicit/corrective wording check.
+ */
+function locateQuote(ownerText: string, quote: string): { found: boolean; shown: boolean; sentence: string } {
+	const haystack = normalizeQuoteText(ownerText);
+	const needle = normalizeQuoteText(quote)
+		.replace(/\n/g, " ")
+		.replace(/^["'`]+|["'`.,;:!?]+$/g, "");
+	if (needle.length === 0) return { found: false, shown: false, sentence: "" };
+	// Newlines count as spaces for matching only; positions are preserved one to one.
+	const flat = haystack.replace(/\n/g, " ");
+	let index = flat.indexOf(needle);
+	let sawShown = false;
+	while (index >= 0) {
+		const end = index + needle.length;
+		if (!isShownSpan(haystack, index, end)) {
+			const before = haystack.slice(0, index);
+			const sentenceStart =
+				Math.max(
+					before.lastIndexOf("."),
+					before.lastIndexOf("!"),
+					before.lastIndexOf("?"),
+					before.lastIndexOf("\n"),
+				) + 1;
+			const after = haystack.slice(end);
+			const stop = after.search(/[.!?\n]/);
+			const sentenceEnd = stop < 0 ? haystack.length : end + stop;
+			return { found: true, shown: false, sentence: haystack.slice(sentenceStart, sentenceEnd).trim() };
+		}
+		sawShown = true;
+		index = flat.indexOf(needle, index + 1);
+	}
+	return { found: sawShown, shown: sawShown, sentence: "" };
+}
+
 export type CurrentTurnReflectionTrigger = "root-turn" | "version-change" | Exclude<DemandSignals["trigger"], "none">;
 
 export interface CurrentTurnReflectionCueState {
@@ -197,6 +358,7 @@ const CURRENT_TURN_REFLECTION_CUE = [
 	"- When warranted, confront existing memory first, then use this root session's memory or skill tools now.",
 	"- Route canonical project semantics and evidence to OKF; keep ICM/workflow context as status plus OKF references, never duplicated project truth.",
 	"- Route stable collaborator preferences to USER, compact hot facts to MEMORY, and reusable procedures to skills.",
+	"- A USER preference write names its scope (global, or project for a choice tied to this repository), its basis (explicit only when the owner's own words ask for it; otherwise inferred), and evidence: owner source ids from the list below with a verbatim quote. Cite what the owner said, never text they pasted, a worker reported or a tool returned. A one-off instruction for the current task is not a preference.",
 	"- Do not defer reflection, ask for a further turn, call an isolated completion, or launch a background learner or worker for it. This turn is the whole budget.",
 	"- When nothing durable is warranted, say so in one short line and stop. Do not resume, restate, or extend the previous work.",
 ].join("\n");
@@ -329,6 +491,18 @@ export class ReflectionController {
 	private activeRunToken: string | undefined;
 	/** True only while the one dedicated reflection turn is running; gates cue visibility entirely. */
 	private reflectionTurnInFlight = false;
+	/** Bounded owner-evidence ledger for this branch; undefined until first read (rebuilt from entries). */
+	private ownerEvidence: OwnerEvidenceEntry[] | undefined;
+	/**
+	 * User messages the operator authored through the session's own prompt boundary (typed,
+	 * queued, or sent by an SDK caller as the operator), mapped to the operator's ORIGINAL words:
+	 * the text before any input-extension transform, skill or template expansion rewrote what the
+	 * model receives. Internal prompts, extension messages, worker reports, tool results and
+	 * recalled text never enter this map; only these messages become owner evidence when
+	 * persisted, and the evidence is the original text, never the expanded message content.
+	 */
+	private readonly ownerInputOriginals = new WeakMap<AgentMessage, string>();
+	private userPreferenceAuditSequence = 0;
 
 	constructor(deps: ReflectionControllerDeps) {
 		this.deps = deps;
@@ -396,6 +570,7 @@ export class ReflectionController {
 		}
 		this.cueStateCacheInitialized = false;
 		this.cueStateCache = undefined;
+		this.ownerEvidence = undefined;
 	}
 
 	private persistCurrentTurnCueState(state: CurrentTurnReflectionCueState): void {
@@ -687,7 +862,7 @@ export class ReflectionController {
 			content: [
 				{
 					type: "text",
-					text: `${CURRENT_TURN_REFLECTION_CUE}\n- Pending evidence classes: ${current.triggers.join(", ")}.${versionLine}`,
+					text: `${CURRENT_TURN_REFLECTION_CUE}\n- Pending evidence classes: ${current.triggers.join(", ")}.${versionLine}${this.describeOwnerEvidenceForCue()}`,
 				},
 			],
 			display: false,
@@ -832,6 +1007,361 @@ export class ReflectionController {
 	}
 
 	/** Pure completed-turn projection used only by deterministic memory synchronization. */
+	/** G3: learning-gate outcome telemetry. Codes/numbers only, never the proposal summary or memory text. */
+	private emitLearningDecisionTelemetry(decision: LearningDecision, layer: DurableChangeLayer): void {
+		this.deps.emitAutonomyTelemetry({
+			type: AUTONOMY_TELEMETRY_EVENT_TYPES.learningDecision,
+			timestamp: new Date().toISOString(),
+			payload: {
+				kind: decision.kind,
+				reasonCode: decision.reasonCode,
+				layer,
+				confidence: decision.confidence,
+				requiresApproval: decision.requiresApproval,
+			},
+		});
+	}
+
+	private ownerSourcePrefix(): string {
+		return this.deps.getSessionManager().getSessionId().slice(0, 8);
+	}
+
+	/** The session admitted `message` as the operator's own input; `originalText` is what they typed. */
+	markOwnerInput(message: AgentMessage, originalText: string): void {
+		this.ownerInputOriginals.set(message, originalText);
+	}
+
+	/**
+	 * Persistence hook: a message reached durable history under `entryId`. Owner evidence is
+	 * recorded exactly here, with the original words; a withdrawn queued message is never
+	 * persisted and therefore never becomes evidence. Non-owner messages are ignored.
+	 */
+	noteOwnerInputPersisted(message: AgentMessage, entryId: string | undefined): void {
+		if (!entryId || message.role !== "user") return;
+		const originalText = this.ownerInputOriginals.get(message);
+		if (originalText === undefined || !originalText.trim()) return;
+		this.recordOwnerEvidence(entryId, originalText);
+	}
+
+	/**
+	 * Mark one persisted user message as genuine owner input and return its source id. Called by
+	 * the session at the persistence boundary of a prompt that came through its own owner input
+	 * path (never for internal, extension, worker, tool or recalled messages).
+	 */
+	recordOwnerEvidence(entryId: string, originalText: string): string {
+		const sourceId = `${this.ownerSourcePrefix()}/${entryId}`;
+		// Load before appending: a first read that scans the branch must not see this record twice.
+		const ledger = this.loadOwnerEvidence();
+		// Strictly increasing within the session, so evidence order is total even inside one millisecond.
+		let createdAtMs = Date.now();
+		const last = ledger.at(-1);
+		if (last) {
+			const lastMs = Date.parse(last.createdAt);
+			if (Number.isFinite(lastMs) && createdAtMs <= lastMs) createdAtMs = lastMs + 1;
+		}
+		const createdAt = new Date(createdAtMs).toISOString();
+		const text = originalText.slice(0, MAX_OWNER_EVIDENCE_TEXT_CHARS);
+		const record: OwnerEvidenceRecord = {
+			sourceId,
+			entryId,
+			text,
+			digest: evidenceTextDigest(text),
+			chars: originalText.length,
+			createdAt,
+		};
+		try {
+			appendSessionSnapshot(this.deps.getSessionManager(), OWNER_EVIDENCE_CODEC, record);
+		} catch {
+			this.warnOnce("owner-evidence-persist-failed", "Owner evidence could not be recorded durably for this turn.");
+		}
+		if (!ledger.some((entry) => entry.sourceId === sourceId)) {
+			ledger.push({ sourceId, entryId, text, createdAt });
+			if (ledger.length > MAX_OWNER_EVIDENCE_ENTRIES) ledger.splice(0, ledger.length - MAX_OWNER_EVIDENCE_ENTRIES);
+		}
+		return sourceId;
+	}
+
+	/** The owner evidence this branch knows, oldest first, bounded. */
+	listOwnerEvidence(): readonly OwnerEvidenceEntry[] {
+		return [...this.loadOwnerEvidence()];
+	}
+
+	/**
+	 * One pass over the branch on first use (then incremental through `recordOwnerEvidence`):
+	 * owner marks name message entries, whose text is read back from the same branch, so the
+	 * ledger is identical after a reopen and unaffected by compaction.
+	 */
+	private loadOwnerEvidence(): OwnerEvidenceEntry[] {
+		if (this.ownerEvidence) return this.ownerEvidence;
+		const records: OwnerEvidenceRecord[] = [];
+		let entries: readonly SessionEntry[] = [];
+		try {
+			entries = this.deps.getSessionManager().getBranch();
+		} catch {
+			entries = [];
+		}
+		for (const entry of entries) {
+			if (entry.type !== "custom" || entry.customType !== OWNER_EVIDENCE_CUSTOM_TYPE) continue;
+			// The codec verifies shape and the stored digest; a tampered or legacy record is skipped.
+			const record = decodeSessionSnapshotPayload(entry.data, OWNER_EVIDENCE_CODEC);
+			if (record && !records.some((seen) => seen.sourceId === record.sourceId)) records.push(record);
+		}
+		this.ownerEvidence = records.slice(-MAX_OWNER_EVIDENCE_ENTRIES).map((record) => ({
+			sourceId: record.sourceId,
+			entryId: record.entryId,
+			text: record.text,
+			createdAt: record.createdAt,
+		}));
+		return this.ownerEvidence;
+	}
+
+	/** The cue's bounded evidence list: the newest owner sources, by id, with a short excerpt. */
+	private describeOwnerEvidenceForCue(): string {
+		const recent = this.loadOwnerEvidence().slice(-MAX_CUE_EVIDENCE_SOURCES);
+		if (recent.length === 0) return "";
+		const lines = recent.map((entry) => {
+			const excerpt = redactKnownSecrets(entry.text).replace(/\s+/g, " ").trim();
+			const shown =
+				excerpt.length > MAX_CUE_EVIDENCE_EXCERPT_CHARS
+					? `${excerpt.slice(0, MAX_CUE_EVIDENCE_EXCERPT_CHARS - 1)}…`
+					: excerpt;
+			return `  ${entry.sourceId}: «${shown}»`;
+		});
+		return `\n- Owner evidence sources this session (cite by id; quote verbatim):\n${lines.join("\n")}`;
+	}
+
+	/**
+	 * Admission for one USER.md preference write, at the existing observation, gate and audit
+	 * owners. Host-checked and deterministic:
+	 * - Only a citation whose quote is found in the owner's own words, outside shown text, counts;
+	 *   an unknown source, a missing quote, an absent quote or a shown span contributes nothing.
+	 * - An explicit basis needs at least one counted quote whose sentence carries explicit or
+	 *   corrective wording; otherwise the write is inferred.
+	 * - Evidence not newer than the accepted line's own `evidenceAt` (written on commit) is a
+	 *   replay of a superseded instruction and contributes nothing; a fresh owner instruction can
+	 *   change a preference back, and a correction whose commit failed can be retried.
+	 * - Counted receipts are stored at once, per scope and value, in the observation store; the
+	 *   decision uses the store's distinct sources, so candidates accumulate across sessions while
+	 *   a replayed source stays one. Supporting evidence belongs to the current value only: a
+	 *   correction starts from its own receipts, never from the superseded value's.
+	 * - An inferred write never overrides an explicit or legacy line; an explicit supported write
+	 *   applies without a second confirmation, also when automatic learning is off.
+	 * The decision is audited here only as a candidate; an admitted write is audited by the
+	 * storage owner's commit report (`commit`), after the bytes actually landed. What a quoted
+	 * sentence means is model work and is not judged here.
+	 */
+	async admitUserPreference(request: UserPreferenceAdmissionRequest): Promise<UserPreferenceAdmissionResult> {
+		const settingsManager = this.deps.getSettingsManager();
+		const policy = settingsManager.getLearningPolicySettings();
+		const autoLearn = resolveAutoLearnSettings(
+			settingsManager.getAutonomySettings().mode,
+			settingsManager.getAutoLearnSettings(),
+		);
+		const store = ObservationStore.forAgentDir(this.deps.getAgentDir());
+		const existingMeta = request.existing?.metadata;
+		const id = existingMeta?.id ?? newUserPreferenceId(request.text || request.existing?.text || "", request.scope);
+		// The accepted line is the authority for the freshness fence: its `evidenceAt` was written by
+		// the storage owner on commit, so a correction whose commit failed leaves the fence where it
+		// was and the owner's still-valid correction can be retried.
+		const fenceAt = existingMeta?.evidenceAt;
+		const ledger = new Map(this.loadOwnerEvidence().map((entry) => [entry.sourceId, entry]));
+		const counted: EvidenceReceipt[] = [];
+		const notes: string[] = [];
+		let explicitVerified = false;
+		for (const citation of request.evidence.slice(0, MAX_CITATIONS_PER_WRITE)) {
+			const entry = ledger.get(citation.source);
+			if (!entry) {
+				notes.push(`${citation.source}: not an owner source of this session`);
+				continue;
+			}
+			if (citation.quote === undefined) {
+				notes.push(`${citation.source}: no cited span`);
+				continue;
+			}
+			const location = locateQuote(entry.text, citation.quote);
+			if (!location.found) {
+				notes.push(`${citation.source}: quote not found in the owner's words`);
+				continue;
+			}
+			if (location.shown) {
+				notes.push(`${citation.source}: quote is text the owner showed, not stated`);
+				continue;
+			}
+			if (fenceAt !== undefined && entry.createdAt <= fenceAt) {
+				notes.push(`${citation.source}: predates the evidence that set the current preference (replay)`);
+				continue;
+			}
+			if (!counted.some((receipt) => receipt.source === citation.source)) {
+				counted.push({ source: citation.source, at: entry.createdAt });
+			}
+			if (
+				EXPLICIT_DURABLE_SIGNAL.test(location.sentence) ||
+				CORRECTION_SIGNAL.test(location.sentence) ||
+				EXPLICIT_DURABLE_SIGNAL.test(citation.quote) ||
+				CORRECTION_SIGNAL.test(citation.quote)
+			) {
+				explicitVerified = true;
+			} else
+				notes.push(`${citation.source}: the owner's sentence carries no explicit preference or correction wording`);
+		}
+		const basis: "explicit" | "inferred" = request.basis === "explicit" && explicitVerified ? "explicit" : "inferred";
+		if (request.basis === "explicit" && !explicitVerified)
+			notes.push("explicit basis unverified; treated as inferred");
+		const scopeKey = formatUserPreferenceScope(request.scope);
+		const valueText = request.text.toLowerCase().replace(/\s+/g, " ").trim();
+		const valueKey = observationKey("user-preference", `${scopeKey}\0${valueText}`);
+		// Receipts are kept the moment they are validated, before the value is eligible, so a later
+		// session's independent observation can complete what this one started.
+		let supporting: EvidenceReceipt[] = counted;
+		if (request.action !== "remove" && valueText.length > 0) {
+			try {
+				supporting = store.recordEvidenceReceipts(valueKey, counted);
+			} catch {
+				supporting = counted;
+			}
+			// Receipts for this value that predate the fact's current fence supported a value that was
+			// since corrected away: history, not support for coming back to it now.
+			if (fenceAt !== undefined) supporting = supporting.filter((receipt) => receipt.at > fenceAt);
+		}
+		const sources = supporting.map((receipt) => receipt.source);
+		const observations = sources.length;
+		const revision = (existingMeta?.revision ?? 0) + 1;
+		const subject = request.text || request.existing?.text || "";
+		const summary = `${request.action} USER preference: ${subject}`;
+		const proposalId = `user-pref-${id}-r${revision}`;
+		const protectedExisting =
+			request.existing !== undefined && (existingMeta === undefined || existingMeta.basis === "explicit");
+		const proposal = (reasonCode: string, confidence: number): LearningDecision => ({
+			kind: "proposal",
+			reasonCode,
+			confidence,
+			summary: summary.slice(0, 240),
+			requiresApproval: false,
+		});
+		let decision: LearningDecision;
+		if (basis === "inferred" && protectedExisting) {
+			decision = proposal("inferred_cannot_override_explicit", policy.reflectionSourceConfidence);
+		} else if (basis === "explicit") {
+			decision = {
+				kind: "apply",
+				reasonCode: "explicit_owner_preference",
+				confidence: 100,
+				summary: summary.slice(0, 240),
+				requiresApproval: false,
+			};
+		} else if (!policy.enabled || !autoLearn.enabled) {
+			decision = proposal("learning_disabled", policy.reflectionSourceConfidence);
+		} else {
+			decision = evaluateLearningDecision({
+				proposal: {
+					id: proposalId,
+					layer: "memory",
+					summary,
+					evidenceIds: sources,
+					rollbackPlan: "Restore the previous USER.md line, or remove the added one.",
+				},
+				confidence: policy.reflectionSourceConfidence,
+				observations,
+				contradictions: request.existing ? 1 : 0,
+				settings: {
+					enabled: true,
+					autoApplyEnabled: policy.autoApplyEnabled,
+					confidenceThreshold: policy.confidenceThreshold,
+					// An inferred pattern needs two independent owner observations, whatever the generic floor.
+					minObservations: Math.max(2, policy.minObservations),
+					allowedAutoApplyLayers: policy.allowedAutoApplyLayers,
+					requireRollbackPlan: policy.requireRollbackPlan,
+					requireEvidence: true,
+					autoApplySupersessions: policy.autoApplySupersessions,
+				},
+			});
+			// The generic gate asks the operator; here an ineligible inferred write stays a durable candidate.
+			decision = { ...decision, requiresApproval: false };
+		}
+		const applied = decision.kind === "apply";
+		// The newest evidence supporting the admitted value. It travels in the metadata and becomes the
+		// fence only when the storage owner commits that line; until then nothing is consumed.
+		const evidenceAt = supporting
+			.map((receipt) => receipt.at)
+			.sort()
+			.at(-1);
+		try {
+			this.deps.saveLearningDecisionSnapshot(decision);
+			this.emitLearningDecisionTelemetry(decision, "memory");
+		} catch {
+			// Telemetry and decision snapshots never block the write decision.
+		}
+		const auditSummary = `${summary} [${basis}; ${observations} source${observations === 1 ? "" : "s"}${
+			notes.length > 0 ? `; ${notes.join("; ")}` : ""
+		}`.slice(0, 600);
+		const audit = (action: "apply" | "apply_failed" | "propose", reasonCode: string, withRollback: boolean) => {
+			this.userPreferenceAuditSequence += 1;
+			try {
+				appendLearningAuditSnapshot(this.deps.getSessionManager(), {
+					id: `audit-user-${this.userPreferenceAuditSequence}-${id}-r${revision}`,
+					proposalId,
+					layer: "memory",
+					action,
+					summary: auditSummary,
+					reasonCode,
+					decision,
+					rollback: withRollback
+						? request.action === "remove"
+							? {
+									kind: "memory_add",
+									previous: request.existing?.text,
+									instructions: "Re-add the removed USER.md preference line.",
+								}
+							: request.existing
+								? {
+										kind: "memory_restore",
+										target: request.text,
+										previous: request.existing.text,
+										instructions: "Replace the new USER.md preference with the line it superseded.",
+									}
+								: {
+										kind: "memory_remove",
+										target: request.text,
+										instructions: "Remove the added USER.md preference line.",
+									}
+						: undefined,
+					createdAt: new Date().toISOString(),
+				});
+			} catch {
+				this.warnOnce("user-preference-audit-failed", "A USER preference learning decision could not be audited.");
+			}
+		};
+		if (!applied) {
+			audit("propose", decision.reasonCode, false);
+			return {
+				outcome: "candidate",
+				reasonCode: decision.reasonCode,
+				message: `${basis} basis, ${observations} independent owner source${observations === 1 ? "" : "s"}${
+					notes.length > 0 ? `; ${notes.join("; ")}` : ""
+				}.`,
+			};
+		}
+		const metadata: UserPreferenceMetadata = {
+			id,
+			scope: request.scope,
+			basis,
+			observations,
+			revision,
+			sources,
+			...(evidenceAt ? { evidenceAt } : {}),
+		};
+		// Publication happens once, with the storage owner's actual result; nothing claims an apply
+		// (or a rollback-eligible change) before the bytes landed.
+		let published = false;
+		const commit = (report: UserPreferenceCommitReport): void => {
+			if (published) return;
+			published = true;
+			if (report.persisted) audit("apply", decision.reasonCode, true);
+			else audit("apply_failed", APPLY_WRITE_REFUSED_REASON_CODE, false);
+		};
+		return { outcome: "apply", metadata, reasonCode: decision.reasonCode, commit };
+	}
+
 	analyzeCompletedTurn(messages: AgentMessage[]): ReflectionTurnAnalysis {
 		const settingsManager = this.deps.getSettingsManager();
 		const settings = resolveAutoLearnSettings(
@@ -1268,18 +1798,7 @@ export class ReflectionController {
 			}
 
 			this.deps.saveLearningDecisionSnapshot(decision);
-			// G3: learning-gate outcome. Codes/numbers only — never the proposal summary/memory text.
-			this.deps.emitAutonomyTelemetry({
-				type: AUTONOMY_TELEMETRY_EVENT_TYPES.learningDecision,
-				timestamp: new Date().toISOString(),
-				payload: {
-					kind: decision.kind,
-					reasonCode: decision.reasonCode,
-					layer: proposal.layer,
-					confidence: decision.confidence,
-					requiresApproval: decision.requiresApproval,
-				},
-			});
+			this.emitLearningDecisionTelemetry(decision, proposal.layer);
 			// G8: a proposal that needs human sign-off is an approval REQUEST. Codes/layer only —
 			// never the proposal summary/memory text (those live only in the audit snapshot).
 			if (decision.requiresApproval) {

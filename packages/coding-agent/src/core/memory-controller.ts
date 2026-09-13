@@ -20,7 +20,7 @@
 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { type AgentMessage, createCustomMessage } from "@caupulican/pi-agent-core";
+import { type AgentMessage, createCustomMessage, HOST_TRANSIENT_CLEARED_DETAILS } from "@caupulican/pi-agent-core";
 import { configFile, okfMemoryDir, projectMemoryDir } from "./agent-paths.ts";
 import { collectCurrentWorkMemory } from "./context/current-work-memory.ts";
 import { createFileStoreMemoryProvider } from "./context/file-store-memory-provider.ts";
@@ -48,11 +48,18 @@ import type { MemoryProvider } from "./memory/memory-provider.ts";
 import {
 	FILE_STORE_MEMORY_SYSTEM_NOTE,
 	FileStoreProvider,
+	type ManagedMemoryDriftEntry,
+	type ManagedMemoryTarget,
 	type StructuredReflectionApplyResult,
 	type StructuredReflectionRollback,
 	type StructuredReflectionWrite,
+	USER_PERSONA_CUSTOM_TYPE,
 } from "./memory/providers/file-store.ts";
 import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
+import type {
+	UserPreferenceAdmissionRequest,
+	UserPreferenceAdmissionResult,
+} from "./memory/user-preference-metadata.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { getDirectoryResourceProfileInfo, type SettingsManager } from "./settings-manager.ts";
 
@@ -124,6 +131,13 @@ export interface MemoryControllerDeps {
 	getContextWindow(): number | undefined;
 	/** Latest active goal state, used for short-term current-work memory. */
 	getGoalState(): GoalState | undefined;
+	/** The session's operator-facing warning path; managed-memory notices are reported through it. */
+	emitWarning(message: string): void;
+	/**
+	 * Admission owner for USER.md preference writes (the reflection controller: owner evidence,
+	 * gate, audit). Absent only in narrow hosts; the file-store then labels writes unverified.
+	 */
+	admitUserPreference?(request: UserPreferenceAdmissionRequest): Promise<UserPreferenceAdmissionResult>;
 }
 
 /** Extension-contributed memory state staged across an atomic runtime reload. */
@@ -155,6 +169,8 @@ export class MemoryController {
 	private _pendingContextMemoryProviders: ContextMemoryProvider[] = [];
 	/** Serializes provider write hooks without delaying the foreground turn. */
 	private _lifecycleTail: Promise<void> = Promise.resolve();
+	/** The on-disk revision last reported per managed target and notice kind (bounded: one entry per key). */
+	private readonly _reportedManagedNotices = new Map<string, string>();
 	private _shutdownPromise: Promise<void> | undefined;
 
 	private readonly deps: MemoryControllerDeps;
@@ -505,6 +521,88 @@ export class MemoryController {
 		return this._latestMemoryPromptInclusionReport ?? defaultMemoryPromptInclusionReport();
 	}
 
+	/** The plan's memory transients in pass order: the evidence block, then the persona record. */
+	appendPromptMemory(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[] {
+		return this.maybeAppendUserPersonaRecord(this.maybeAppendMemoryEvidenceBlock(messages, report));
+	}
+
+	/** Managed memory files against their managed revisions (operator recovery view). */
+	async memoryDriftReport(): Promise<ManagedMemoryDriftEntry[]> {
+		return (await this.getFileStoreWriter()?.driftReport()) ?? [];
+	}
+
+	/** Operator authority: adopt the on-disk memory file as the managed revision. */
+	async memoryAcceptDrift(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
+		const writer = this.getFileStoreWriter();
+		if (!writer) return { ok: false, message: "Managed memory is not available in this session." };
+		return writer.acceptDrift(target);
+	}
+
+	/** Operator authority: restore the last managed content of a memory file. */
+	async memoryRestoreManaged(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }> {
+		const writer = this.getFileStoreWriter();
+		if (!writer) return { ok: false, message: "Managed memory is not available in this session." };
+		return writer.restoreManaged(target);
+	}
+
+	/**
+	 * Fresh USER.md guidance for the NEXT provider request, as one `custom`/"user_persona" host
+	 * transient. The static memory block is frozen for the whole session (prompt-cache stability),
+	 * so a preference the owner adds, replaces or removes mid-session used to reach the model only
+	 * at the next session. The file-store provider measures its current committed USER.md against
+	 * what the installed block renders: when they differ, the record carries the current lines
+	 * bounded to the memory prompt budget (or says the file is empty, so a removed preference cannot
+	 * be resurrected by the static block). When they agree again, or memory is disabled or excluded
+	 * from the prompt, the message is a cleared marker (`HOST_TRANSIENT_CLEARED_DETAILS`): the
+	 * planner records its text once, only over an earlier persona record, through the same
+	 * append-on-change index as the kernel's own kinds; nothing here scans history or reads disk.
+	 * Content is deterministic per revision, so an unchanged snapshot is never re-sent. Child
+	 * sessions, whose static block is empty as well, contribute nothing.
+	 */
+	maybeAppendUserPersonaRecord(messages: AgentMessage[]): AgentMessage[] {
+		try {
+			const writer = this.getFileStoreWriter();
+			if (writer === undefined) return messages;
+			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+			if (!settings.enabled || !settings.includeInPrompt) {
+				return [
+					...messages,
+					this._personaMessage(
+						"USER PERSONA: memory is disabled or excluded from the prompt in this session; earlier persona records are stale.",
+						true,
+					),
+				];
+			}
+			const budget = this._memoryBudget(settings.maxResults);
+			const projection = writer.userPersonaProjection(
+				budget.enabled || budget.reason !== "missing_context_window" ? budget : undefined,
+			);
+			if (projection === undefined) return messages;
+			if (!projection.changed) {
+				return projection.content === undefined
+					? messages
+					: [...messages, this._personaMessage(projection.content, true)];
+			}
+			if (projection.content !== undefined) return [...messages, this._personaMessage(projection.content, false)];
+			const overBudget = `USER PERSONA: USER.md changed (revision ${projection.revision}) beyond this model's memory budget; earlier persona records are stale. Read USER.md when preferences matter.`;
+			return [...messages, this._personaMessage(overBudget, true)];
+		} catch {
+			return messages;
+		}
+	}
+
+	/** A persona record (content) or cleared marker, with a content-derived timestamp so retries are byte-identical. */
+	private _personaMessage(text: string, cleared: boolean): AgentMessage {
+		const digest = createHash("sha256").update(text).digest();
+		return createCustomMessage(
+			USER_PERSONA_CUSTOM_TYPE,
+			text,
+			false,
+			cleared ? HOST_TRANSIENT_CLEARED_DETAILS : undefined,
+			new Date(digest.readUIntBE(0, 6)).toISOString(),
+		);
+	}
+
 	/**
 	 * Combines the already-stored, no-arg latest reports (never re-queries the provider or
 	 * touches the OKF directory) into the safe, allow-list-projected shape context_audit
@@ -575,6 +673,18 @@ export class MemoryController {
 		} catch {
 			return "";
 		}
+	}
+
+	/**
+	 * Applicable owner working preferences for a handoff (in-process worker or external team),
+	 * headed by the persona projection rule; undefined when memory is off or excluded from the
+	 * prompt, in a child session, or when nothing applies here. Behavioral guidance only: never a
+	 * grant, never MEMORY.md, OKF or recall.
+	 */
+	getHandoffPersonaGuidance(): string | undefined {
+		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+		if (!settings.enabled || !settings.includeInPrompt) return undefined;
+		return this.getFileStoreWriter()?.getHandoffPersonaGuidance();
 	}
 
 	/** Bounded, read-only memory view for an explicitly authorized delegated worker. */
@@ -649,12 +759,14 @@ export class MemoryController {
 			this._localGraphProvider = undefined;
 			this._localGraphResolved = false;
 			const manager = new MemoryManager();
+			const admitUserPreference = this.deps.admitUserPreference;
 			const fileStoreWriter = new FileStoreProvider({
 				onDurableMemoryChanged: () => {
 					// OKF providers cache one bounded directory load. A USER.md overflow can create or
 					// update a shard during this session, so discard only that read cache generation.
 					this._memoryOkfProvider = undefined;
 				},
+				...(admitUserPreference ? { admitUserPreference: (request) => admitUserPreference(request) } : {}),
 			});
 			manager.registerProvider(fileStoreWriter);
 			// Bundled read-only cross-session recall (R3): indexes past-session transcripts and answers
@@ -676,12 +788,32 @@ export class MemoryController {
 			this._fileStoreWriter = manager.getToolDefinitions().some((tool) => tool.name === "memory")
 				? fileStoreWriter
 				: undefined;
+			this._reportManagedNotices(fileStoreWriter);
 			// Surface memory tools + the frozen memory block now that providers are initialized.
 			// refreshToolRegistry() ends in setActiveToolsByName(), which rebuilds AND assigns the
 			// system prompt (including the memory block), so no explicit _rebuildSystemPrompt is needed.
 			this.deps.refreshToolRegistry();
 		} catch (error) {
 			console.error("Memory subsystem init failed:", error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	/**
+	 * Managed-file notices (a healed empty file, a drifted file whose writes are now refused) go to
+	 * the operator through the session warning path once per active revision: a reload re-initializes
+	 * the provider and would otherwise repeat the same fact, while a different on-disk revision of the
+	 * same file is a new fact, including a return to an earlier revision (A, B, A reports A twice:
+	 * the file changed again). The map holds one entry per target and kind, never a history. Child
+	 * sessions render no memory and report nothing.
+	 */
+	private _reportManagedNotices(writer: FileStoreProvider): void {
+		const notices = writer.drainManagedNotices();
+		if (this.deps.isChildSession()) return;
+		for (const notice of notices) {
+			const key = `${notice.target}:${notice.kind}`;
+			if (this._reportedManagedNotices.get(key) === notice.revision) continue;
+			this._reportedManagedNotices.set(key, notice.revision);
+			this.deps.emitWarning(notice.message);
 		}
 	}
 

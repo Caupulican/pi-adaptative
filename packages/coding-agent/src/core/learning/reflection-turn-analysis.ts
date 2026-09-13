@@ -4,9 +4,9 @@ import type { DemandSignals } from "./reflection-engine.ts";
 
 const REFLECTION_TURN_MAX_CHARS = 12_000;
 const REFLECTION_ROLE_MAX_CHARS = 6_000;
-const CORRECTION_SIGNAL =
+export const CORRECTION_SIGNAL =
 	/\b(next time|for future|from now on|remember this|don't|do not|avoid|instead|you should|should have|you forgot|you missed|not what i asked|wrong again)\b/i;
-const EXPLICIT_DURABLE_SIGNAL =
+export const EXPLICIT_DURABLE_SIGNAL =
 	/\b(remember|store (?:this|that)|keep (?:this|that) in memory|my preference|i prefer|standing rule|always use|never use)\b/i;
 const DURABLE_WORK_SIGNAL =
 	/\b(confirmed root cause|root cause (?:is|was)|fixed|implemented|regression|invariant|durable decision|repeatable workaround)\b/i;

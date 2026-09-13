@@ -65,6 +65,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		registerContextMemoryProvider: notInitialized,
 		reportSpawnedUsage: notInitialized,
 		reportManagedLane: notInitialized,
+		getHandoffPersonaGuidance: notInitialized,
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
 		assertActive,
@@ -292,6 +293,10 @@ export function createExtensionAPI(
 		reportManagedLane(event): void {
 			runtime.assertActive();
 			runtime.reportManagedLane(event);
+		},
+		getHandoffPersonaGuidance(): string | undefined {
+			runtime.assertActive();
+			return runtime.getHandoffPersonaGuidance();
 		},
 		setModel(model) {
 			runtime.assertActive();

@@ -32,7 +32,7 @@ function makeDeps(overrides: Partial<SystemPromptBuilderDeps> = {}): SystemPromp
 		getAgentsFiles: () => ({ agentsFiles: [] }),
 	} as unknown as ResourceLoader;
 	const memoryManager = {
-		buildSystemPromptBlock: () => "",
+		freezeSystemPromptBlock: () => "",
 	} as unknown as MemoryManager;
 
 	return {

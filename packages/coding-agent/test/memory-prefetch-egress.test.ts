@@ -107,6 +107,7 @@ describe("memory retrieval egress policy", () => {
 			refreshToolRegistry: () => {},
 			getContextWindow: () => 4096,
 			getGoalState: () => undefined,
+			emitWarning: () => {},
 		});
 		controllers.push(controller);
 		return controller;

@@ -26,10 +26,32 @@ interface ObservationEntry {
 	lastAt: string;
 }
 
+/** One host-validated owner source supporting a preference value: its id and when the owner said it. */
+export interface EvidenceReceipt {
+	source: string;
+	at: string;
+}
+
+interface EvidenceReceiptEntry {
+	sources: EvidenceReceipt[];
+	lastAt: string;
+}
+
 interface ObservationStoreFile {
 	version: 1;
 	/** observationKey -> accumulated evidence for that lesson. */
 	observations: Record<string, ObservationEntry>;
+	/** value key (scope + preference text) -> validated owner-source receipts, first-seen order. */
+	evidence?: Record<string, EvidenceReceiptEntry>;
+}
+
+/** Cap validated receipts per preference value and the number of tracked values/facts. */
+const MAX_RECEIPTS_PER_VALUE = 8;
+const MAX_EVIDENCE_KEYS = 200;
+const MAX_RECEIPT_FIELD_CHARS = 96;
+
+function isIsoLike(value: unknown): value is string {
+	return typeof value === "string" && value.length > 0 && value.length <= 64;
 }
 
 /**
@@ -69,6 +91,29 @@ export class ObservationStore {
 				// Sanitize per-entry so a partially-mangled file still yields a usable store rather than
 				// leaking NaN/undefined counts into the gate.
 				const clean: ObservationStoreFile = { version: 1, observations: {} };
+				if (parsed.evidence && typeof parsed.evidence === "object" && !Array.isArray(parsed.evidence)) {
+					clean.evidence = {};
+					for (const [key, value] of Object.entries(parsed.evidence)) {
+						const entry = value as Partial<EvidenceReceiptEntry> | undefined;
+						if (!entry || !Array.isArray(entry.sources) || !isIsoLike(entry.lastAt)) continue;
+						const sources: EvidenceReceipt[] = [];
+						for (const receipt of entry.sources) {
+							const candidate = receipt as Partial<EvidenceReceipt> | undefined;
+							if (
+								candidate &&
+								typeof candidate.source === "string" &&
+								candidate.source.length > 0 &&
+								candidate.source.length <= MAX_RECEIPT_FIELD_CHARS &&
+								isIsoLike(candidate.at) &&
+								!sources.some((seen) => seen.source === candidate.source)
+							) {
+								sources.push({ source: candidate.source, at: candidate.at });
+							}
+							if (sources.length >= MAX_RECEIPTS_PER_VALUE) break;
+						}
+						if (sources.length > 0) clean.evidence[key] = { sources, lastAt: entry.lastAt };
+					}
+				}
 				for (const [key, value] of Object.entries(parsed.observations)) {
 					if (
 						value &&
@@ -135,5 +180,51 @@ export class ObservationStore {
 	/** Current observation count for `key` (0 if never observed). */
 	get(key: string): number {
 		return this.load().observations[key]?.count ?? 0;
+	}
+
+	private static evictByLastAt<T extends { lastAt: string }>(table: Record<string, T>, max: number): void {
+		const keys = Object.keys(table);
+		if (keys.length <= max) return;
+		keys.sort((a, b) => (table[a]!.lastAt < table[b]!.lastAt ? -1 : table[a]!.lastAt > table[b]!.lastAt ? 1 : 0));
+		for (const key of keys.slice(0, keys.length - max)) delete table[key];
+	}
+
+	/** Validated owner-source receipts recorded for a preference value (empty if none). */
+	getEvidenceReceipts(valueKey: string): EvidenceReceipt[] {
+		return (this.load().evidence?.[valueKey]?.sources ?? []).map((receipt) => ({ ...receipt }));
+	}
+
+	/**
+	 * Record host-validated receipts for a preference value the moment they are validated (a first
+	 * candidate's evidence is kept before the value becomes eligible), deduplicated by source so a
+	 * replayed source across restarts or sessions stays one, bounded per value and in the number of
+	 * tracked values. When the bound is exceeded the OLDEST receipts are dropped, so the newest
+	 * validated evidence is always retained. Returns the receipts that now support the value,
+	 * oldest first.
+	 */
+	recordEvidenceReceipts(valueKey: string, receipts: readonly EvidenceReceipt[], at?: string): EvidenceReceipt[] {
+		const merge = (file: ObservationStoreFile): EvidenceReceipt[] => {
+			const union = [...(file.evidence?.[valueKey]?.sources ?? [])];
+			for (const receipt of receipts) {
+				if (receipt.source.length === 0 || receipt.source.length > MAX_RECEIPT_FIELD_CHARS) continue;
+				if (!union.some((seen) => seen.source === receipt.source))
+					union.push({ source: receipt.source, at: receipt.at });
+			}
+			union.sort((left, right) => (left.at < right.at ? -1 : left.at > right.at ? 1 : 0));
+			return union.length > MAX_RECEIPTS_PER_VALUE ? union.slice(union.length - MAX_RECEIPTS_PER_VALUE) : union;
+		};
+		if (this.readOnly) return merge(this.load());
+		const now = at ?? new Date().toISOString();
+		return withFileLockSync(this.filePath, () => {
+			const file = this.load();
+			const union = merge(file);
+			if (union.length > 0) {
+				file.evidence ??= {};
+				file.evidence[valueKey] = { sources: union, lastAt: now };
+				ObservationStore.evictByLastAt(file.evidence, MAX_EVIDENCE_KEYS);
+				this.save(file);
+			}
+			return union;
+		});
 	}
 }

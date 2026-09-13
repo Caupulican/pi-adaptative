@@ -101,6 +101,7 @@ describe("MemoryController context retrieval", () => {
 			refreshToolRegistry: () => {},
 			getContextWindow: () => 4096,
 			getGoalState: () => undefined,
+			emitWarning: () => {},
 		});
 		const context = provider("context-provider", calls);
 		controller.registerMemoryProvider(legacy);
@@ -126,6 +127,7 @@ describe("MemoryController context retrieval", () => {
 			refreshToolRegistry: () => {},
 			getContextWindow: () => 4096,
 			getGoalState: () => undefined,
+			emitWarning: () => {},
 		});
 		controller.registerContextMemoryProvider(provider("custom-memory", calls));
 
@@ -152,6 +154,7 @@ describe("MemoryController context retrieval", () => {
 			refreshToolRegistry: () => {},
 			getContextWindow: () => 1024,
 			getGoalState: () => undefined,
+			emitWarning: () => {},
 		});
 
 		const report = await controller.runMemoryRetrieval([userMessage("hello")]);
@@ -182,6 +185,7 @@ describe("MemoryController context retrieval", () => {
 			refreshToolRegistry: () => {},
 			getContextWindow: () => 4096,
 			getGoalState: () => undefined,
+			emitWarning: () => {},
 		});
 		controller.registerContextMemoryProvider(
 			provider("graph-provider", calls, { source: "external_provider", graph: true, localOnly: false }),
@@ -217,6 +221,7 @@ describe("MemoryController context retrieval", () => {
 			refreshToolRegistry: () => {},
 			getContextWindow: () => 4096,
 			getGoalState: () => undefined,
+			emitWarning: () => {},
 		});
 		controller.registerContextMemoryProvider(
 			provider("graph-provider", calls, { source: "external_provider", graph: true, localOnly: false }),
@@ -272,6 +277,7 @@ describe("MemoryController context retrieval", () => {
 			refreshToolRegistry: () => {},
 			getContextWindow: () => 4096,
 			getGoalState: () => undefined,
+			emitWarning: () => {},
 		});
 		controller.registerContextMemoryProvider(
 			provider("external-memory", externalCalls, { source: "external_provider", localOnly: false }),
@@ -320,6 +326,7 @@ describe("MemoryController context retrieval", () => {
 			refreshToolRegistry: () => {},
 			getContextWindow: () => 4096,
 			getGoalState: () => undefined,
+			emitWarning: () => {},
 		});
 		controller.registerContextMemoryProvider(provider("local-memory", localCalls));
 
@@ -378,6 +385,7 @@ describe("MemoryController context retrieval", () => {
 			refreshToolRegistry: () => {},
 			getContextWindow: () => 4096,
 			getGoalState: () => undefined,
+			emitWarning: () => {},
 		});
 		controller.registerContextMemoryProvider(provider("local-memory", localCalls));
 
@@ -430,6 +438,7 @@ describe("MemoryController context retrieval", () => {
 			refreshToolRegistry: () => {},
 			getContextWindow: () => 4096,
 			getGoalState: () => undefined,
+			emitWarning: () => {},
 		});
 		controller.registerContextMemoryProvider(provider("local-memory", localCalls));
 
@@ -472,6 +481,7 @@ describe("MemoryController context retrieval", () => {
 				lastProgressAt: "2026-07-09T00:00:00Z",
 				stallTurns: 0,
 			}),
+			emitWarning: () => {},
 		});
 
 		const messages = controller.maybeAppendMemoryEvidenceBlock([], {
@@ -511,6 +521,7 @@ describe("MemoryController context retrieval", () => {
 			refreshToolRegistry: () => {},
 			getContextWindow: () => 4096,
 			getGoalState: () => undefined,
+			emitWarning: () => {},
 		});
 		await controller.initialize();
 
@@ -553,6 +564,7 @@ describe("MemoryController context retrieval", () => {
 			refreshToolRegistry: () => {},
 			getContextWindow: () => 4096,
 			getGoalState: () => undefined,
+			emitWarning: () => {},
 		});
 
 		const snapshot = controller.getFreshOkfMemoryForReflection();

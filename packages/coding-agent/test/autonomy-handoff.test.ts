@@ -122,7 +122,7 @@ describe("owner handoff precedence", () => {
 					getAgentsFiles: () => ({ agentsFiles: [] }),
 					getActiveSkills: () => [],
 				}) as never,
-			getMemoryManager: () => ({ buildSystemPromptBlock: () => undefined }) as never,
+			getMemoryManager: () => ({ freezeSystemPromptBlock: () => undefined }) as never,
 			hasTool: (name) => name === "delegate",
 			getToolPromptSnippet: () => undefined,
 			getToolPromptGuidelines: () => undefined,

@@ -97,8 +97,13 @@ describe("FileStoreProvider USER.md sharding", () => {
 		const report = loadOkfMemoryBundle({ rootDir: join(agentDir, "okf-memory") });
 		expect(report.diagnostics).toEqual([]);
 		expect(report.entries.some((entry) => entry.parsed.item?.kind === "user_preference")).toBe(true);
-		expect(provider.systemPromptBlock().length).toBeLessThan(1800);
-		expect(provider.systemPromptBlock()).not.toContain(originalFacts[0]);
+		// Archived preferences stay in the projection within the USER budget: the block renders the
+		// applicable lines (not the archive pointer), capped at the write-side budget plus the rule.
+		const block = provider.systemPromptBlock();
+		const userSection = block.slice(block.indexOf("## USER.md:"));
+		expect(userSection.length).toBeLessThan(1375 + 400);
+		expect(block).toContain(originalFacts[0]);
+		expect(block).not.toContain("Archived preferences:");
 	});
 
 	it("updates and removes facts after they have moved into a shard", async () => {

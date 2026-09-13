@@ -16,11 +16,17 @@ export class ForegroundLifecycleAdapter {
 	private readonly lifecycle: ForegroundLifecycleController;
 	private readonly sessionManager: SessionManager;
 	private readonly providerLimitStore: ProviderLimitStore | undefined;
+	private readonly observeMessagePersisted: ((message: Message, entryId: string) => void) | undefined;
+	private readonly liveWarningSink: (() => ((message: string) => void) | undefined) | undefined;
 	private pendingWarnings: string[] = [];
 
 	/**
 	 * `getMutationScope` names the session whose group lock these emission-order announcements order
 	 * (see tools/file-mutation-queue.ts). Omitted keeps the process-wide default scope.
+	 * `observeMessagePersisted` sees every message this adapter persists, single or batched, with
+	 * the entry id it received (owner-evidence bookkeeping hangs off it). `liveWarningSink`
+	 * returns the session's warning emitter while a subscriber exists, else undefined: `warn`
+	 * delivers through it or holds the message with the startup warnings for the first subscriber.
 	 */
 	constructor(
 		agent: Agent,
@@ -29,9 +35,13 @@ export class ForegroundLifecycleAdapter {
 		getMutationScope?: () => string,
 		getAnnouncer?: () => string,
 		providerLimitStore?: ProviderLimitStore,
+		observeMessagePersisted?: (message: Message, entryId: string) => void,
+		liveWarningSink?: () => ((message: string) => void) | undefined,
 	) {
 		this.sessionManager = sessionManager;
 		this.providerLimitStore = providerLimitStore;
+		this.observeMessagePersisted = observeMessagePersisted;
+		this.liveWarningSink = liveWarningSink;
 		this.lifecycle = new ForegroundLifecycleController({
 			agent,
 			sessionManager,
@@ -67,6 +77,7 @@ export class ForegroundLifecycleAdapter {
 	appendMessage(message: Message): string {
 		const entryId = this.sessionManager.appendMessage(message);
 		this.lifecycle.onMessagePersisted(message, entryId);
+		this.observeMessagePersisted?.(message, entryId);
 		return entryId;
 	}
 
@@ -96,9 +107,29 @@ export class ForegroundLifecycleAdapter {
 		const entryIds = this.sessionManager.appendMessageBatch(batch);
 		for (let index = 0; index < batch.length; index += 1) {
 			const item = batch[index]!;
-			if (item.kind === "message") this.lifecycle.onMessagePersisted(item.message, entryIds[index]!);
+			if (item.kind !== "message") continue;
+			this.lifecycle.onMessagePersisted(item.message, entryIds[index]!);
+			this.observeMessagePersisted?.(item.message, entryIds[index]!);
 		}
 		return entryIds;
+	}
+
+	/**
+	 * Deliver a warning now through `deliver`, or hold it with the startup warnings when the session
+	 * has no subscriber yet (`deliver` undefined): the first `subscribe` flushes it. One owner for
+	 * "warned before anyone listened", shared by the lifecycle repair and the memory subsystem.
+	 */
+	emitWarning(message: string, deliver: ((message: string) => void) | undefined): void {
+		if (deliver) deliver(message);
+		else this.pendingWarnings.push(message);
+	}
+
+	/**
+	 * Warn through the live session sink, or hold the message when nobody listens yet: memory
+	 * initializes before an SDK caller can subscribe, and its notices must reach the first subscriber.
+	 */
+	warn(message: string): void {
+		this.emitWarning(message, this.liveWarningSink?.());
 	}
 
 	drainWarnings(): string[] {

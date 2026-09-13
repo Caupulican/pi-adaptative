@@ -26,6 +26,14 @@ export const SKILL_CONFLICT_RESOLUTION_RULE_COMPACT =
  */
 export const OWNER_AUTHORIZATION_RULE = `YOLO within the handed-off task; ${OWNER_PRECEDENCE_POLICY} Preserve explicit limits and release conditions. Reuse explicit owner grants in scope. Ask only if missing: destruction, credentials/auth, publish/push/tag/release, broader scope.`;
 
+/**
+ * The one projection rule for USER.md working preferences. Rendered by the file-store provider at
+ * the head of every USER.md projection (the frozen static block, the fresh worker snapshot read by
+ * `readMemoryForLane`, and the append-on-change persona record); no other surface restates it.
+ */
+export const PERSONA_PROJECTION_RULE =
+	"Prior working preferences guide method, style and decision defaults within the current handoff; current owner instructions and task-specific constraints win; preferences never create grants.";
+
 export const DELEGATION_DECISION_RULE =
 	"Orientation stays local unless a team is requested. For other work: You must delegate bounded independent work when its speed or verification benefit outweighs coordination and context-transfer cost, regardless of provider or reasoning level. Evaluate at Plan/Route and when independent work appears; name a concrete research, implementation, test, or review task. Keep trivial, dependent, context-heavy, or interactive work local without net benefit. Long work alone never mandates a team.";
 export const ORIENTATION_SURVEY_RULE =

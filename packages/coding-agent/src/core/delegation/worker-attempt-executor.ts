@@ -152,6 +152,8 @@ export interface WorkerAttemptExecutorOptions {
 	processCapable: boolean;
 	/** Parent projectContextFiles mode. Omitted defaults to off. */
 	projectContextFiles?: "off" | "on-demand";
+	/** Applicable owner working preferences for this handoff; see buildWorkerSystemPrompt. */
+	personaGuidance?: string;
 	verificationSubjectTaskId?: string;
 	recoveredTerminal?: RecoveredWorkerTerminalCompletion;
 	retentionPolicy?: WorkerConversationRetentionPolicy;
@@ -557,6 +559,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										agentDir: options.agentDir,
 										model: options.model,
 										projectContextFiles: options.projectContextFiles,
+										...(options.personaGuidance ? { personaGuidance: options.personaGuidance } : {}),
 									}),
 									history,
 									messages: [],

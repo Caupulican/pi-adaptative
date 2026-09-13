@@ -68,7 +68,7 @@ describe("native reflection pass — write application + accounting", () => {
 		if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("applies a replace targeting USER content to USER.md, not MEMORY.md, and accounts cost once", async () => {
+	it("an uncited engine replace of a legacy USER line is a candidate: USER.md and MEMORY.md untouched, cost accounted once", async () => {
 		const session = await newSession();
 		// The reflection's isolated completion replaces a USER fact — its target lives only in USER.md.
 		(session.agent as unknown as { streamFn: unknown }).streamFn = async () =>
@@ -95,10 +95,11 @@ describe("native reflection pass — write application + accounting", () => {
 		});
 
 		expect(result).not.toBeNull();
-		// Applied to USER.md (the file that actually contained the target)...
-		expect(readFileSync(join(agentDir, "USER.md"), "utf-8")).toContain("User prefers spaces");
-		expect(readFileSync(join(agentDir, "USER.md"), "utf-8")).not.toContain("User prefers tabs");
-		// ...and MEMORY.md was NOT touched by the memory-first fallback.
+		// The engine cites no owner source, so the USER write is an inferred candidate and a legacy
+		// (unannotated) line is never overridden by inference: the target file stays as it was...
+		expect(readFileSync(join(agentDir, "USER.md"), "utf-8")).toContain("User prefers tabs");
+		expect(readFileSync(join(agentDir, "USER.md"), "utf-8")).not.toContain("User prefers spaces");
+		// ...and MEMORY.md was NOT touched by the memory-first fallback either.
 		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).toContain("Deploy with npm run release:patch");
 
 		// Cost accounted once via the cost-aggregation surface.

@@ -72,6 +72,7 @@ describe("ExtensionRunner", () => {
 		registerContextMemoryProvider: () => {},
 		reportSpawnedUsage: () => {},
 		reportManagedLane: () => {},
+		getHandoffPersonaGuidance: () => undefined,
 	};
 
 	const extensionContextActions: ExtensionContextActions = {

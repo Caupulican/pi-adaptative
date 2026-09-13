@@ -27,6 +27,11 @@ export interface PendingInputQueueDeps {
 	 * so it must be read through a thunk rather than captured by value. */
 	getExtensionRunner(): ExtensionRunner;
 	getPromptTemplates(): ReadonlyArray<PromptTemplate>;
+	/**
+	 * A queued message the operator authored (not an extension), with the operator's ORIGINAL
+	 * words before skill/template expansion: owner evidence once the message is persisted.
+	 */
+	noteOwnerAuthoredMessage?(message: AgentMessage, originalText: string): void;
 }
 
 /**
@@ -152,23 +157,35 @@ export class PendingInputQueueController {
 		text: string,
 		images: ImageContent[] | undefined,
 		queuedGoalAuthority: ExplicitGoalStartAuthority | undefined,
+		ownerOriginalText: string | undefined,
 	): AgentMessage {
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }, ...(images ?? [])];
 		const message: AgentMessage = { role: "user", content, timestamp: Date.now() };
 		if (queuedGoalAuthority) this.deps.goals.queueOwnerChatGoal(message, text, queuedGoalAuthority);
+		if (ownerOriginalText !== undefined) this.deps.noteOwnerAuthoredMessage?.(message, ownerOriginalText);
 		return message;
 	}
 
 	/** Queue a steering message (already expanded, no extension command check). */
-	queueSteer(text: string, images?: ImageContent[], queuedGoalAuthority?: ExplicitGoalStartAuthority): void {
+	queueSteer(
+		text: string,
+		images?: ImageContent[],
+		queuedGoalAuthority?: ExplicitGoalStartAuthority,
+		ownerOriginalText?: string,
+	): void {
 		this._steering.push({ text, images });
-		this.deps.agent.steer(this._createQueuedUserMessage(text, images, queuedGoalAuthority));
+		this.deps.agent.steer(this._createQueuedUserMessage(text, images, queuedGoalAuthority, ownerOriginalText));
 	}
 
 	/** Queue a follow-up message (already expanded, no extension command check). */
-	queueFollowUp(text: string, images?: ImageContent[], queuedGoalAuthority?: ExplicitGoalStartAuthority): void {
+	queueFollowUp(
+		text: string,
+		images?: ImageContent[],
+		queuedGoalAuthority?: ExplicitGoalStartAuthority,
+		ownerOriginalText?: string,
+	): void {
 		this._followUp.push({ text, images });
-		this.deps.agent.followUp(this._createQueuedUserMessage(text, images, queuedGoalAuthority));
+		this.deps.agent.followUp(this._createQueuedUserMessage(text, images, queuedGoalAuthority, ownerOriginalText));
 	}
 
 	/** Queue an extension command to execute after the current agent run. */

@@ -147,4 +147,13 @@ describe("worker-system-prompt", () => {
 		expect(prompt).toContain("NO PROJECT INSTRUCTIONS.");
 		expect(prompt).not.toContain("PI PROJECT INSTRUCTION ISOLATION");
 	});
+
+	it("carries owner working preferences as bounded guidance, never as a grant or raw memory", () => {
+		const guidance =
+			"OWNER WORKING PREFERENCES (guidance, not grants): rule\n- Keep status updates short. (explicit)";
+		const prompt = buildWorkerSystemPrompt({ rolePrompt: "Do the task.", personaGuidance: guidance });
+		expect(prompt).toContain("Keep status updates short. (explicit)");
+		expect(prompt.indexOf("Do the task.")).toBeLessThan(prompt.indexOf("OWNER WORKING PREFERENCES"));
+		expect(buildWorkerSystemPrompt({ rolePrompt: "Do the task." })).not.toContain("OWNER WORKING PREFERENCES");
+	});
 });

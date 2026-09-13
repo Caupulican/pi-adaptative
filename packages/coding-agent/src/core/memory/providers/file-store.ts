@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, join } from "node:path";
+import { TRANSIENT_RECORD_SUPERSEDING_NOTE } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
 import {
 	configFile,
@@ -8,6 +9,7 @@ import {
 	managedProjectMemoryStateFile,
 	projectMemoryDir,
 } from "../../agent-paths.ts";
+import { estimateTokensFromText } from "../../context/context-item.ts";
 import type { MemoryPromptBudget } from "../../context/memory-prompt-budget.ts";
 import {
 	OKF_MEMORY_LIMITS,
@@ -16,6 +18,7 @@ import {
 	validateOkfMemoryDocumentInput,
 } from "../../context/okf-memory.ts";
 import type { AgentToolResult, ToolDefinition } from "../../extensions/types.ts";
+import { PERSONA_PROJECTION_RULE } from "../../provider-prompt-contracts.ts";
 import {
 	hasInvisibleUnicode,
 	scanContextFileThreats,
@@ -26,8 +29,29 @@ import { jaccard, tokenize } from "../../tools/skill-audit.ts";
 import { isMissingFileError, withFileLock, writeFileAtomic } from "../../util/atomic-file.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
 import { OkfProjectMemoryStore } from "../okf-project-memory-store.ts";
+import {
+	collectUserPreferenceEntries,
+	formatUserPreferenceLine,
+	formatUserPreferenceScope,
+	isUserPreferenceApplicable,
+	newUserPreferenceId,
+	type ParsedUserPreferenceLine,
+	parseUserPreferenceLine,
+	parseUserPreferenceScope,
+	renderUserPreferenceForPrompt,
+	sameUserPreferenceScope,
+	stripUserPreferenceMetadata,
+	type UserPreferenceAdmissionRequest,
+	type UserPreferenceAdmissionResult,
+	type UserPreferenceCommitReport,
+	type UserPreferenceEvidenceCitation,
+	type UserPreferenceMetadata,
+	type UserPreferenceScope,
+} from "../user-preference-metadata.ts";
 import { ROOT_MEMORY_TOOL_NAME } from "../worker-memory-tools.ts";
-import { UserMemoryArchive } from "./user-memory-archive.ts";
+import { USER_ARCHIVE_POINTER, UserMemoryArchive } from "./user-memory-archive.ts";
+
+const NEAR_DUP_THRESHOLD = 0.6;
 
 /**
  * Confront-before-write (anti append-rot): if `content` is a near-duplicate of an existing
@@ -35,7 +59,6 @@ import { UserMemoryArchive } from "./user-memory-archive.ts";
  * place and return the rewritten file; otherwise return null (the caller appends normally).
  */
 export function supersedeNearDuplicateLine(existing: string, content: string): string | null {
-	const NEAR_DUP_THRESHOLD = 0.6;
 	const contentTokens = tokenize(content);
 	if (contentTokens.length === 0) return null;
 	const lines = existing.split("\n");
@@ -102,7 +125,34 @@ const memoryFields = Type.Object({
 			description: "Structured OKF summary (required when target is 'okf')",
 		}),
 	),
-	scope: Type.Optional(Type.Literal("project", { description: "Structured OKF records are project-scoped" })),
+	scope: Type.Optional(
+		Type.Union([Type.Literal("project"), Type.Literal("global")], {
+			description:
+				"Structured OKF records are project-scoped. For target 'user': 'global' (default) applies everywhere, 'project' only inside this repository",
+		}),
+	),
+	basis: Type.Optional(
+		Type.Union([Type.Literal("explicit"), Type.Literal("inferred")], {
+			description:
+				"Target 'user' only: 'explicit' when the owner's own cited words ask for the preference, otherwise 'inferred'",
+		}),
+	),
+	evidence: Type.Optional(
+		Type.Array(
+			Type.Object({
+				source: Type.String({
+					minLength: 1,
+					maxLength: 96,
+					description: "Owner evidence source id from the reflection cue",
+				}),
+				quote: Type.Optional(Type.String({ minLength: 1, maxLength: 400, description: "Verbatim owner words" })),
+			}),
+			{ maxItems: 16, description: "Target 'user' only: owner sources supporting the preference" },
+		),
+	),
+	expectedRevision: Type.Optional(
+		Type.Integer({ minimum: 1, description: "Target 'user' replace/remove: the revision the write is based on" }),
+	),
 	tags: Type.Optional(
 		Type.Array(Type.String({ minLength: 1, maxLength: OKF_MEMORY_LIMITS.tagChars }), {
 			maxItems: OKF_MEMORY_LIMITS.tagCount,
@@ -166,6 +216,11 @@ type MemoryParams = Static<typeof memoryFields>;
 
 export interface FileStoreProviderOptions {
 	onDurableMemoryChanged?: () => void;
+	/**
+	 * Admission for a USER.md preference write (the reflection controller). Absent in narrow hosts:
+	 * the write then lands labelled `unverified`, never as an evidence-backed fact.
+	 */
+	admitUserPreference?: (request: UserPreferenceAdmissionRequest) => Promise<UserPreferenceAdmissionResult>;
 	/** Test seam between loss-safe OKF creation and exact hot-memory removal. */
 	beforeOrganizeHotRemoval?: () => void | Promise<void>;
 }
@@ -248,6 +303,37 @@ export interface ManagedMemoryDriftEntry {
 	managedChars?: number;
 	stateStatus: ManagedMemoryStateRead["status"];
 }
+
+/**
+ * A fact the provider learned about a managed file while starting or repairing it, drained by the
+ * memory controller and reported once per target and revision through the session warning path.
+ */
+export interface ManagedMemoryNotice {
+	target: ManagedMemoryTarget;
+	kind: "healed" | "drift";
+	/** Digest of the on-disk content the notice describes; the dedupe key beside target and kind. */
+	revision: string;
+	message: string;
+}
+
+/** The current USER.md working preferences, ready for one provider request (see `userPersonaProjection`). */
+export interface UserPersonaProjection {
+	/** Short digest of the current USER.md preference lines. */
+	revision: string;
+	/** True when the current preferences differ from what the installed static block renders. */
+	changed: boolean;
+	/**
+	 * When `changed`: the bounded record text, or undefined when not even a one-line record fits the
+	 * budget. When unchanged: the text that clears an earlier record (only recorded over one).
+	 */
+	content: string | undefined;
+}
+
+/** How much of USER.md the installed static block renders: everything, a truncated head, or nothing. */
+type FrozenUserCoverage = "full" | "partial" | "omitted";
+
+export const USER_PERSONA_CUSTOM_TYPE = "user_persona";
+const USER_SECTION_HEADER = "## USER.md:";
 
 type ManagedMemoryStateRead =
 	| { status: "missing" }
@@ -464,7 +550,12 @@ export class FileStoreProvider implements MemoryProvider {
 	private lastWrittenMemory = "";
 	private lastWrittenUser = "";
 	private lastWrittenProjectMemory = "";
-	private readonly healNotices: string[] = [];
+	private readonly managedNotices: ManagedMemoryNotice[] = [];
+	/** USER.md as the installed static block renders it; undefined until the block is first frozen. */
+	private frozenUser: { content: string; coverage: FrozenUserCoverage } | undefined;
+	/** Preference lines held by the USER archive shards (with their heading context), refreshed at init and after any archive change. */
+	private archivedUserEntries: Array<{ line: string; section?: string }> = [];
+	private static readonly HANDOFF_GUIDANCE_MAX_CHARS = 800;
 	private userArchive?: UserMemoryArchive;
 	private okfStore?: OkfProjectMemoryStore;
 	private readonly options: FileStoreProviderOptions;
@@ -505,10 +596,20 @@ export class FileStoreProvider implements MemoryProvider {
 		await fs.mkdir(projectMemoryDir(ctx.agentDir, identity.hash), { recursive: true });
 		this.okfStore = new OkfProjectMemoryStore(ctx.agentDir, ctx.cwd);
 		[this.lastWrittenMemory, this.lastWrittenUser, this.lastWrittenProjectMemory] = await Promise.all([
-			this.initializeManagedFile(this.memoryFilePath, this.memoryStatePath),
-			this.initializeManagedFile(this.userFilePath, this.userStatePath),
-			this.initializeManagedFile(this.projectMemoryFilePath, this.projectMemoryStatePath),
+			this.initializeManagedFile("memory", this.memoryFilePath, this.memoryStatePath),
+			this.initializeManagedFile("user", this.userFilePath, this.userStatePath),
+			this.initializeManagedFile("project", this.projectMemoryFilePath, this.projectMemoryStatePath),
 		]);
+		this.frozenUser = undefined;
+		await this.refreshArchivedUserLines();
+	}
+
+	private async refreshArchivedUserLines(): Promise<void> {
+		try {
+			this.archivedUserEntries = this.userArchive ? await this.userArchive.archivedEntries() : [];
+		} catch {
+			this.archivedUserEntries = [];
+		}
 	}
 
 	/** Where this session's project memory lives, for hosts that render or protect it. */
@@ -521,13 +622,20 @@ export class FileStoreProvider implements MemoryProvider {
 		return this.lastWrittenMemory.length > FileStoreProvider.BUDGET_MEMORY;
 	}
 
-	private async initializeManagedFile(filePath: string, statePath: string): Promise<string> {
+	private async initializeManagedFile(
+		target: ManagedMemoryTarget,
+		filePath: string,
+		statePath: string,
+	): Promise<string> {
 		return withFileLock(filePath, async () => {
 			const healed = await healEmptyManagedFile(filePath, statePath);
 			if (healed !== undefined) {
-				this.healNotices.push(
-					`${basename(filePath)} was empty on disk; restored ${healed.length} chars from the managed revision.`,
-				);
+				this.managedNotices.push({
+					target,
+					kind: "healed",
+					revision: contentDigest(healed),
+					message: `${basename(filePath)} was empty on disk; restored ${healed.length} chars from the managed revision.`,
+				});
 				return healed;
 			}
 			let current = "";
@@ -562,13 +670,270 @@ export class FileStoreProvider implements MemoryProvider {
 			if (reconciled.recognized && (reconciled.changed || stateRead.state.committedContent !== current)) {
 				await writeManagedMemoryState(statePath, { ...reconciled.state, committedContent: current });
 			}
+			if (!reconciled.recognized) {
+				// Drift is fenced, never adopted: the on-disk bytes are rendered as they are and every
+				// write to this target is refused until the operator decides. The notice is the
+				// operator's only signal; the refusal itself surfaces only inside the model's tool errors.
+				const stored = storedManagedContent(stateRead.state);
+				this.managedNotices.push({
+					target,
+					kind: "drift",
+					revision: currentDigest,
+					message: `${basename(filePath)} differs from its managed revision (on disk ${currentDigest.slice(0, 8)}, managed ${stateRead.state.committedDigest.slice(0, 8)}${stored === undefined ? ", managed content not stored" : ""}); writes to memory target '${target}' are refused until /memory accept ${target} adopts the file${stored === undefined ? "" : ` or /memory restore ${target} brings the managed content back`}.`,
+				});
+			}
 			return current;
 		});
 	}
 
-	/** Notices the provider produced while repairing its own files; drained by whoever reports them. */
-	drainHealNotices(): string[] {
-		return this.healNotices.splice(0);
+	/** Notices the provider produced while starting or repairing its files; drained by whoever reports them. */
+	drainManagedNotices(): ManagedMemoryNotice[] {
+		return this.managedNotices.splice(0);
+	}
+
+	/**
+	 * The memory manager is installing `renderedBlock` as the static system-prompt block. From here
+	 * on `userPersonaProjection` measures USER.md against what that block renders: everything, a
+	 * truncated head (a constrained budget kept only the top of the block), or nothing (a compact
+	 * budget omitted the block). Cached reads with another budget never call this.
+	 */
+	onSystemPromptBlockFrozen(renderedBlock: string): void {
+		if (this.ctx?.isChildSession) return;
+		const selection = this.selectApplicablePreferenceLines();
+		const usr = selection.text;
+		const content = selection.kept.join("\n");
+		let coverage: FrozenUserCoverage = "full";
+		if (usr.trim()) {
+			if (!renderedBlock.includes(FileStoreProvider.userSection(usr))) {
+				coverage = renderedBlock.includes(USER_SECTION_HEADER) ? "partial" : "omitted";
+			}
+		}
+		this.frozenUser = { content, coverage };
+	}
+
+	/**
+	 * USER.md as the next provider request should see it. `changed` compares the current committed
+	 * preference lines (kept in memory by every write, accept and restore; never re-read from disk
+	 * here) with the lines the installed static block renders: none when that block omitted or
+	 * truncated USER.md. The record text carries the projection rule and the current lines, bounded
+	 * to whole lines within the memory prompt budget (the planner's superseding note counts against
+	 * it), or says that USER.md is empty so a removed preference cannot be resurrected by the static
+	 * block. When nothing changed, `content` is the text that clears an earlier record. Child
+	 * sessions have no persona projection.
+	 */
+	userPersonaProjection(budget?: MemoryPromptBudget): UserPersonaProjection | undefined {
+		if (!this.ctx || this.ctx.isChildSession) return undefined;
+		const currentLines = this.selectApplicablePreferenceLines().kept;
+		const current = currentLines.join("\n");
+		const revision = contentDigest(current).slice(0, 8);
+		const frozen = this.frozenUser ?? { content: "", coverage: "omitted" as const };
+		const frozenRendered =
+			frozen.coverage === "full" ? FileStoreProvider.preferenceLines(frozen.content).join("\n") : "";
+		if (current === frozenRendered) {
+			const cleared =
+				current === ""
+					? `USER PERSONA: USER.md is empty (revision ${revision}); no standing preferences apply and earlier persona records are stale.`
+					: `USER PERSONA: the USER.md section of the static memory block is current again (revision ${revision}); earlier persona records are stale. ${PERSONA_PROJECTION_RULE}`;
+			return {
+				revision,
+				changed: false,
+				content: FileStoreProvider.fitsPersonaBudget(cleared, budget) ? cleared : undefined,
+			};
+		}
+		if (currentLines.length === 0) {
+			const empty = `USER PERSONA (USER.md revision ${revision}): USER.md is empty; no standing preferences apply and the USER.md section of the static memory block is superseded. ${PERSONA_PROJECTION_RULE}`;
+			return {
+				revision,
+				changed: true,
+				content: FileStoreProvider.fitsPersonaBudget(empty, budget) ? empty : undefined,
+			};
+		}
+		const header = [
+			`USER PERSONA (USER.md revision ${revision}): ${PERSONA_PROJECTION_RULE}`,
+			frozen.coverage === "omitted"
+				? "The static memory block carries no USER.md section on this model; these are the current preferences."
+				: "This record supersedes the USER.md section of the static memory block.",
+		];
+		return { revision, changed: true, content: FileStoreProvider.boundPersonaRecord(header, currentLines, budget) };
+	}
+
+	/** Non-empty, trimmed, threat-sanitized USER.md lines: the unit a preference is compared and delivered in. */
+	private static preferenceLines(content: string): string[] {
+		return FileStoreProvider.sanitizeMemory(content)
+			.split("\n")
+			.map((line) => line.trim())
+			.filter((line) => line.length > 0);
+	}
+
+	/** The record on the wire is `content` plus the planner's superseding note; both count. */
+	private static fitsPersonaBudget(content: string, budget: MemoryPromptBudget | undefined): boolean {
+		if (budget === undefined) return true;
+		if (!budget.enabled) return false;
+		const wire = `${content}${TRANSIENT_RECORD_SUPERSEDING_NOTE}`;
+		return (
+			wire.split("\n").length <= budget.maxLines &&
+			Buffer.byteLength(wire, "utf8") <= budget.maxChars &&
+			estimateTokensFromText(wire) <= budget.maxEstimatedTokens
+		);
+	}
+
+	/**
+	 * Whole preference lines only, in file order, as many as the budget admits after the header;
+	 * a line never appears cut in half as a misleading partial instruction. Omitted lines are
+	 * counted so the model knows USER.md holds more. Without a budget the write-side cap applies.
+	 */
+	private static boundPersonaRecord(
+		header: string[],
+		lines: string[],
+		budget: MemoryPromptBudget | undefined,
+	): string | undefined {
+		if (budget === undefined) {
+			return FileStoreProvider.capMemory(
+				[...header, ...lines].join("\n"),
+				FileStoreProvider.BUDGET_USER + header.join("\n").length + 1,
+			);
+		}
+		const omittedNote = (count: number) =>
+			`(${count} more preference line${count === 1 ? "" : "s"} on disk; not shown within this model's memory budget)`;
+		const noneNote = (count: number) =>
+			`(USER.md holds ${count} preference line${count === 1 ? "" : "s"} that exceed this model's memory budget; read USER.md when preferences matter.)`;
+		const render = (kept: string[]) =>
+			[
+				...header,
+				...kept,
+				...(kept.length < lines.length
+					? [kept.length === 0 ? noneNote(lines.length) : omittedNote(lines.length - kept.length)]
+					: []),
+			].join("\n");
+		for (let keep = lines.length; keep >= 0; keep--) {
+			const candidate = render(lines.slice(0, keep));
+			if (FileStoreProvider.fitsPersonaBudget(candidate, budget)) return candidate;
+		}
+		return undefined;
+	}
+
+	/** The USER.md section of the static block, headed by the projection rule. */
+	private static userSection(renderedUser: string): string {
+		return `${USER_SECTION_HEADER}\n${PERSONA_PROJECTION_RULE}\n${renderedUser}`;
+	}
+
+	/** Preference lines of a USER.md body with the heading path each sits under; blanks and the archive pointer skipped. */
+	private static activePreferenceEntries(content: string): Array<{ line: string; section?: string }> {
+		const body = content.startsWith(USER_ARCHIVE_POINTER) ? content.slice(USER_ARCHIVE_POINTER.length) : content;
+		return collectUserPreferenceEntries(body);
+	}
+
+	/** Every preference this session can see (active file plus archive shards), parsed, in file order. */
+	private allPreferences(): Array<{ parsed: ParsedUserPreferenceLine; section?: string }> {
+		return [...FileStoreProvider.activePreferenceEntries(this.lastWrittenUser), ...this.archivedUserEntries].map(
+			(entry) => ({
+				parsed: parseUserPreferenceLine(entry.line),
+				...(entry.section ? { section: entry.section } : {}),
+			}),
+		);
+	}
+
+	/** Host-checked applicability: global lines plus the lines scoped to this project's key. */
+	private applicablePreferences(): Array<{ parsed: ParsedUserPreferenceLine; section?: string }> {
+		return this.allPreferences().filter((entry) =>
+			isUserPreferenceApplicable(entry.parsed.metadata, this.projectKey),
+		);
+	}
+
+	/**
+	 * Whole lines within a character bound, framing included: as many leading lines as fit beside
+	 * the footer that counts the rest. A line is never cut in half into a misleading partial
+	 * instruction; the caller sees exactly which lines were kept.
+	 */
+	private static selectWholeLines(
+		lines: readonly string[],
+		limit: number,
+		framing: { header?: string; footer: (omitted: number) => string },
+	): { kept: string[]; omitted: number; text: string } {
+		for (let keep = lines.length; keep >= 0; keep--) {
+			const omitted = lines.length - keep;
+			const parts = [
+				...(framing.header ? [framing.header] : []),
+				...lines.slice(0, keep),
+				...(omitted > 0 ? [framing.footer(omitted)] : []),
+			];
+			const text = parts.join("\n");
+			if (text.length <= limit) return { kept: lines.slice(0, keep), omitted, text };
+		}
+		return { kept: [], omitted: lines.length, text: "" };
+	}
+
+	private static preferenceFooter(omitted: number): string {
+		return `(${omitted} more preference line${omitted === 1 ? "" : "s"} in USER.md)`;
+	}
+
+	/**
+	 * The one selection every USER.md projection shares (static block, worker snapshot, persona
+	 * record): applicable preferences as sanitized prompt lines with an honest strength label,
+	 * trailers removed, whole lines within the write budget, the rest counted.
+	 */
+	private selectApplicablePreferenceLines(): { kept: string[]; omitted: number; text: string } {
+		const rendered = this.applicablePreferences()
+			.map((entry) => renderUserPreferenceForPrompt(entry.parsed, entry.section))
+			.join("\n");
+		const lines = rendered.length === 0 ? [] : FileStoreProvider.sanitizeMemory(rendered).split("\n");
+		return FileStoreProvider.selectWholeLines(lines, FileStoreProvider.BUDGET_USER, {
+			footer: FileStoreProvider.preferenceFooter,
+		});
+	}
+
+	/** The USER.md text of the static block: the selected whole lines plus the footer when lines were left out. */
+	private renderUserMemory(): string {
+		return this.selectApplicablePreferenceLines().text;
+	}
+
+	/**
+	 * Applicable owner working preferences for a handoff: the rule, then explicit, well-supported
+	 * inferred (two or more independent observations) and legacy lines, whole lines within a fixed
+	 * bound. Unverified and single-observation inferred lines stay out of a handoff.
+	 */
+	getHandoffPersonaGuidance(): string | undefined {
+		if (!this.ctx || this.ctx.isChildSession) return undefined;
+		const lines = this.applicablePreferences()
+			.filter(
+				({ parsed }) =>
+					parsed.metadata === undefined ||
+					parsed.metadata.basis === "explicit" ||
+					(parsed.metadata.basis === "inferred" && parsed.metadata.observations >= 2),
+			)
+			.map((entry) => renderUserPreferenceForPrompt(entry.parsed, entry.section));
+		if (lines.length === 0) return undefined;
+		const header = `OWNER WORKING PREFERENCES (guidance, not grants): ${PERSONA_PROJECTION_RULE}`;
+		const selection = FileStoreProvider.selectWholeLines(
+			FileStoreProvider.sanitizeMemory(lines.join("\n")).split("\n"),
+			FileStoreProvider.HANDOFF_GUIDANCE_MAX_CHARS,
+			{ header, footer: FileStoreProvider.preferenceFooter },
+		);
+		// Header and footer count against the bound; with no room for even one line there is no guidance.
+		return selection.kept.length > 0 ? selection.text : undefined;
+	}
+
+	private static sanitizeMemory(content: string): string {
+		// Strip hidden/bidi-control chars before injecting memory into the prompt (defence in depth: the
+		// write path already blocks them, but a file edited out-of-band could carry them). Strip #31.
+		const lines = stripInvisibleUnicode(content).cleaned.split("\n");
+		const sanitizedLines = lines.map((line) => {
+			const threats = scanContextFileThreats(line);
+			if (threats.length > 0) {
+				return `[BLOCKED: potential threat detected (${threats.join(", ")})]`;
+			}
+			return line;
+		});
+		return sanitizedLines.join("\n");
+	}
+
+	// Read-time budget guard (cost): the memory tool already caps writes at BUDGET_*, but a file edited
+	// externally (or by any path that bypasses the tool) could be arbitrarily large and would then
+	// bloat the system prompt on EVERY turn. Cap the injected view to the same budget so the per-turn
+	// cost stays bounded; the file on disk is untouched and the model is told it was truncated.
+	private static capMemory(content: string, limit: number): string {
+		if (content.length <= limit) return content;
+		return `${content.slice(0, limit)}\n[…truncated to ${limit} chars for the prompt; full file is on disk]`;
 	}
 
 	private managedTargets(): Array<{
@@ -704,32 +1069,15 @@ export class FileStoreProvider implements MemoryProvider {
 
 	public systemPromptBlock(budget?: MemoryPromptBudget): string {
 		if (this.ctx?.isChildSession) return "";
-		const sanitize = (content: string) => {
-			// Strip hidden/bidi-control chars before injecting memory into the prompt (defence in depth: the
-			// write path already blocks them, but a file edited out-of-band could carry them). Strip #31.
-			const lines = stripInvisibleUnicode(content).cleaned.split("\n");
-			const sanitizedLines = lines.map((line) => {
-				const threats = scanContextFileThreats(line);
-				if (threats.length > 0) {
-					return `[BLOCKED: potential threat detected (${threats.join(", ")})]`;
-				}
-				return line;
-			});
-			return sanitizedLines.join("\n");
-		};
-
-		// Read-time budget guard (cost): the memory tool already caps writes at BUDGET_*, but a file edited
-		// externally (or by any path that bypasses the tool) could be arbitrarily large and would then
-		// bloat the system prompt on EVERY turn. Cap the injected view to the same budget so the per-turn
-		// cost stays bounded; the file on disk is untouched and the model is told it was truncated.
-		const cap = (content: string, limit: number) => {
-			if (content.length <= limit) return content;
-			return `${content.slice(0, limit)}\n[…truncated to ${limit} chars for the prompt; full file is on disk]`;
-		};
-
-		const mem = cap(sanitize(this.lastWrittenMemory), FileStoreProvider.BUDGET_MEMORY);
-		const proj = cap(sanitize(this.lastWrittenProjectMemory), FileStoreProvider.BUDGET_PROJECT);
-		const usr = cap(sanitize(this.lastWrittenUser), FileStoreProvider.BUDGET_USER);
+		const mem = FileStoreProvider.capMemory(
+			FileStoreProvider.sanitizeMemory(this.lastWrittenMemory),
+			FileStoreProvider.BUDGET_MEMORY,
+		);
+		const proj = FileStoreProvider.capMemory(
+			FileStoreProvider.sanitizeMemory(this.lastWrittenProjectMemory),
+			FileStoreProvider.BUDGET_PROJECT,
+		);
+		const usr = this.renderUserMemory();
 
 		const blocks: string[] = [];
 		if (mem.trim()) {
@@ -739,7 +1087,9 @@ export class FileStoreProvider implements MemoryProvider {
 			blocks.push(`## MEMORY.md (project ${basename(this.projectRoot) || this.projectKey}):\n${proj}`);
 		}
 		if (usr.trim()) {
-			blocks.push(`## USER.md:\n${usr}`);
+			// The projection rule travels with the preferences themselves: every reader of this block
+			// (the frozen root prompt, the fresh worker snapshot) gets the same single sentence.
+			blocks.push(FileStoreProvider.userSection(usr));
 		}
 
 		if (blocks.length === 0) {
@@ -842,6 +1192,174 @@ export class FileStoreProvider implements MemoryProvider {
 		}
 	}
 
+	/**
+	 * The USER.md write transaction with learning metadata. Locates the line a write supersedes (the
+	 * line holding `oldContent`, or for an add the near-duplicate by text with trailers ignored),
+	 * refuses a stale revision, asks the admission owner, and only then hands the archive one
+	 * line-level mutation so the preference and its trailer land together. A candidate outcome
+	 * changes nothing and says so. Without an admission owner the line is labelled unverified.
+	 */
+	private async applyUserPreferenceWrite(input: {
+		action: "add" | "replace" | "remove";
+		currentOnDisk: string;
+		content: string | undefined;
+		oldContent: string | undefined;
+		requestedScope: "global" | "project" | undefined;
+		requestedBasis: "explicit" | "inferred" | undefined;
+		requestedEvidence: UserPreferenceEvidenceCitation[];
+		expectedRevision: number | undefined;
+		budget: number;
+	}): Promise<
+		| {
+				kind: "applied";
+				userContent: string;
+				archiveChanged: boolean;
+				preference: UserPreferenceMetadata | undefined;
+				/** The admission owner's publication boundary; called once with the terminal result. */
+				commit: ((report: UserPreferenceCommitReport) => void) | undefined;
+		  }
+		| { kind: "refused"; result: AgentToolResult<Record<string, unknown>> }
+	> {
+		if (!this.userArchive) throw new Error("User memory archive is not initialized.");
+		const { action, currentOnDisk, content, oldContent } = input;
+		if (action !== "remove" && content === undefined) {
+			throw new Error(`Parameter 'content' is required for action '${action}'.`);
+		}
+		if (action !== "add" && oldContent === undefined) {
+			throw new Error(`Parameter 'oldContent' is required for action '${action}'.`);
+		}
+		const text = action === "remove" ? "" : stripUserPreferenceMetadata(content ?? "").trim();
+		// The caller holds the USER.md lock: read the archive as it is NOW, not as this provider last
+		// saw it, so a peer session's archive change cannot make a write match a stale line.
+		await this.refreshArchivedUserLines();
+		// Literal lines: matching and mutation never see the rendered, heading-qualified form.
+		const candidates = [...FileStoreProvider.activePreferenceEntries(currentOnDisk), ...this.archivedUserEntries].map(
+			(entry) => entry.line,
+		);
+		const requestedScope =
+			input.requestedScope !== undefined
+				? parseUserPreferenceScope(input.requestedScope, this.projectKey)
+				: undefined;
+		const lineScope = (line: string): UserPreferenceScope =>
+			parseUserPreferenceLine(line).metadata?.scope ?? { kind: "global" };
+		// Scope identity: a fact belongs to one applicability set. An add supersedes only a line of the
+		// scope it targets (global by default; legacy lines are global); a replace or remove never
+		// touches another project's line just because the words match.
+		const inScope = (line: string): boolean => {
+			const scope = lineScope(line);
+			if (requestedScope) return sameUserPreferenceScope(scope, requestedScope);
+			return scope.kind === "global" || scope.projectKey === this.projectKey;
+		};
+		let existingLine: string | undefined;
+		if (action === "add") {
+			const target: UserPreferenceScope = requestedScope ?? { kind: "global" };
+			const tokens = tokenize(text);
+			let best = NEAR_DUP_THRESHOLD;
+			for (const line of candidates) {
+				if (!sameUserPreferenceScope(lineScope(line), target)) continue;
+				const score = jaccard(tokens, tokenize(stripUserPreferenceMetadata(line)));
+				if (score >= best) {
+					best = score;
+					existingLine = line;
+				}
+			}
+		} else {
+			const needle = stripUserPreferenceMetadata(oldContent ?? "").trim();
+			const scoped = candidates.filter(inScope);
+			const matches =
+				scoped.filter((line) => line === oldContent).length > 0
+					? scoped.filter((line) => line === oldContent)
+					: scoped.filter((line) => stripUserPreferenceMetadata(line) === needle).length > 0
+						? scoped.filter((line) => stripUserPreferenceMetadata(line) === needle)
+						: scoped.filter((line) => line.includes(needle));
+			if (matches.length === 0) {
+				throw new Error(`The content to ${action} ('oldContent') was not found in the file or its archive.`);
+			}
+			if (
+				matches.length > 1 &&
+				new Set(matches.map((line) => formatUserPreferenceScope(lineScope(line)))).size > 1
+			) {
+				throw new Error(
+					`The content to ${action} ('oldContent') matches both a global and a project preference; pass scope to name the one you mean.`,
+				);
+			}
+			existingLine = matches[0];
+		}
+		const existing = existingLine === undefined ? undefined : parseUserPreferenceLine(existingLine);
+		if (
+			input.expectedRevision !== undefined &&
+			existing?.metadata !== undefined &&
+			existing.metadata.revision !== input.expectedRevision
+		) {
+			return {
+				kind: "refused",
+				result: memoryFailure(
+					"Stale revision",
+					`Error: USER.md preference ${existing.metadata.id} is at revision ${existing.metadata.revision}, not ${input.expectedRevision}; re-read it before updating. Nothing changed.`,
+					{ reasonCode: "stale_revision", currentRevision: existing.metadata.revision },
+				),
+			};
+		}
+		const scope: UserPreferenceScope = requestedScope ?? existing?.metadata?.scope ?? { kind: "global" };
+		const request: UserPreferenceAdmissionRequest = {
+			action,
+			text,
+			...(existing ? { existing } : {}),
+			scope,
+			basis: input.requestedBasis ?? "inferred",
+			evidence: input.requestedEvidence,
+		};
+		const admission: UserPreferenceAdmissionResult = this.options.admitUserPreference
+			? await this.options.admitUserPreference(request)
+			: {
+					outcome: "apply",
+					reasonCode: "no_admission_owner",
+					metadata: {
+						id: existing?.metadata?.id ?? newUserPreferenceId(text || existing?.text || "", scope),
+						scope,
+						basis: "unverified",
+						observations: 0,
+						revision: (existing?.metadata?.revision ?? 0) + 1,
+						sources: [],
+					},
+				};
+		if (admission.outcome === "candidate") {
+			return {
+				kind: "refused",
+				result: memoryFailure(
+					"Learning candidate",
+					`Not applied: recorded as a learning candidate (${admission.reasonCode}): ${admission.message} USER.md is unchanged; no approval is requested.`,
+					{ candidate: true, reasonCode: admission.reasonCode },
+				),
+			};
+		}
+		const newLine = action === "remove" ? undefined : formatUserPreferenceLine(text, admission.metadata);
+		const mutation =
+			existingLine !== undefined
+				? newLine !== undefined
+					? { action: "replace" as const, oldContent: existingLine, content: newLine }
+					: { action: "remove" as const, oldContent: existingLine }
+				: newLine !== undefined
+					? { action: "add" as const, content: newLine }
+					: undefined;
+		if (mutation === undefined) throw new Error("The content to remove ('oldContent') was not found in the file.");
+		// Near-duplicate supersession was resolved above with trailers ignored; the archive applies one exact mutation.
+		let result: Awaited<ReturnType<UserMemoryArchive["apply"]>>;
+		try {
+			result = await this.userArchive.apply(currentOnDisk, mutation, input.budget, () => null);
+		} catch (error) {
+			admission.commit?.({ persisted: false, error: String(error) });
+			throw error;
+		}
+		return {
+			kind: "applied",
+			userContent: result.userContent,
+			archiveChanged: result.archiveChanged,
+			preference: action === "remove" ? undefined : admission.metadata,
+			commit: admission.commit,
+		};
+	}
+
 	/** Reflection-owned structured write. Organization is OKF-first, then exact hot-memory removal. */
 	public async applyStructuredReflectionWrite(
 		write: StructuredReflectionWrite,
@@ -938,6 +1456,7 @@ export class FileStoreProvider implements MemoryProvider {
 				promptSnippet: "Persist verified facts; route durable project knowledge to structured OKF records.",
 				promptGuidelines: [
 					"OKF=project decisions/rules/findings with type,title,summary,body,evidenceRefs; MEMORY=hot facts; USER=preferences.",
+					"USER writes carry scope (global|project), basis (explicit only for the owner's own cited words, else inferred) and evidence [{source, quote}] from the owner evidence ids in the reflection cue; a one-off task instruction is not a preference.",
 					"Workers gather evidence read-only; only the parent or its reflection writes memory. Repeatable procedures become skills via skillify.",
 				],
 				parameters: memorySchema,
@@ -947,6 +1466,9 @@ export class FileStoreProvider implements MemoryProvider {
 						target: requestedTarget,
 						content,
 						oldContent,
+						basis: requestedBasis,
+						evidence: requestedEvidence,
+						expectedRevision,
 						title,
 						type,
 						description,
@@ -1192,6 +1714,9 @@ export class FileStoreProvider implements MemoryProvider {
 							: target === "project"
 								? FileStoreProvider.BUDGET_PROJECT
 								: FileStoreProvider.BUDGET_USER;
+					// The admitted USER write's publication boundary: reported once, after the bytes landed
+					// or the write failed, so the learning audit never claims an apply that did not persist.
+					let pendingCommit: ((report: UserPreferenceCommitReport) => void) | undefined;
 					// A hint, never a reroute: the model decides, the harness names the better target.
 					const projectHint =
 						target === "memory" &&
@@ -1205,9 +1730,12 @@ export class FileStoreProvider implements MemoryProvider {
 						return await withFileLock(filePath, async () => {
 							const healed = await healEmptyManagedFile(filePath, statePath);
 							if (healed !== undefined)
-								this.healNotices.push(
-									`${basename(filePath)} was empty on disk; restored ${healed.length} chars from the managed revision.`,
-								);
+								this.managedNotices.push({
+									target,
+									kind: "healed",
+									revision: contentDigest(healed),
+									message: `${basename(filePath)} was empty on disk; restored ${healed.length} chars from the managed revision.`,
+								});
 							const { currentOnDisk, managedState, stateChanged, revision } = await inspectManagedMemoryFile(
 								filePath,
 								statePath,
@@ -1239,45 +1767,26 @@ export class FileStoreProvider implements MemoryProvider {
 
 							let newContent = currentOnDisk;
 							let archiveChanged = false;
+							let preference: UserPreferenceMetadata | undefined;
 							if (target === "user") {
 								if (!this.userArchive) throw new Error("User memory archive is not initialized.");
-								if (action === "add") {
-									if (content === undefined)
-										throw new Error("Parameter 'content' is required for action 'add'.");
-									const result = await this.userArchive.apply(
-										currentOnDisk,
-										{ action, content },
-										budget,
-										supersedeNearDuplicateLine,
-									);
-									newContent = result.userContent;
-									archiveChanged = result.archiveChanged;
-								} else if (action === "replace") {
-									if (content === undefined || oldContent === undefined) {
-										throw new Error(
-											"Parameters 'content' and 'oldContent' are required for action 'replace'.",
-										);
-									}
-									const result = await this.userArchive.apply(
-										currentOnDisk,
-										{ action, content, oldContent },
-										budget,
-										supersedeNearDuplicateLine,
-									);
-									newContent = result.userContent;
-									archiveChanged = result.archiveChanged;
-								} else {
-									if (oldContent === undefined)
-										throw new Error("Parameter 'oldContent' is required for action 'remove'.");
-									const result = await this.userArchive.apply(
-										currentOnDisk,
-										{ action, oldContent },
-										budget,
-										supersedeNearDuplicateLine,
-									);
-									newContent = result.userContent;
-									archiveChanged = result.archiveChanged;
-								}
+								const outcome = await this.applyUserPreferenceWrite({
+									action,
+									currentOnDisk,
+									content,
+									oldContent,
+									requestedScope: scope,
+									requestedBasis,
+									requestedEvidence: requestedEvidence ?? [],
+									expectedRevision,
+									budget,
+								});
+								if (outcome.kind === "refused") return outcome.result;
+								pendingCommit = outcome.commit;
+								newContent = outcome.userContent;
+								archiveChanged = outcome.archiveChanged;
+								if (archiveChanged) await this.refreshArchivedUserLines();
+								preference = outcome.preference;
 							} else if (action === "add") {
 								if (content === undefined) {
 									throw new Error("Parameter 'content' is required for action 'add'.");
@@ -1311,6 +1820,8 @@ export class FileStoreProvider implements MemoryProvider {
 
 							const overBudget = newContent.length > budget;
 							if (overBudget && newContent.length >= currentOnDisk.length) {
+								pendingCommit?.({ persisted: false, error: "Memory budget exceeded" });
+								pendingCommit = undefined;
 								return memoryFailure(
 									"Memory budget exceeded",
 									`Error: Memory budget exceeded. ${fileLabel} limit is ${budget} characters. Current operation would result in ${newContent.length} characters. Remove or shorten an existing line first; already-over-budget content must strictly shrink on each repair.`,
@@ -1325,6 +1836,11 @@ export class FileStoreProvider implements MemoryProvider {
 							else if (target === "project") this.lastWrittenProjectMemory = newContent;
 							else this.lastWrittenUser = newContent;
 							if (archiveChanged || newContent !== currentOnDisk) this.options.onDurableMemoryChanged?.();
+							// The managed file and its state are committed; the archive (when touched) was written
+							// before them. A crash between those writes is recovered by the drift/heal protocol,
+							// not by this report, which only ever describes what completed.
+							pendingCommit?.({ persisted: true });
+							pendingCommit = undefined;
 
 							return {
 								content: [
@@ -1333,10 +1849,28 @@ export class FileStoreProvider implements MemoryProvider {
 										text: `Successfully updated ${fileLabel}.${projectHint}${overBudget ? `\nMemory is still over budget (${newContent.length}/${budget} chars); continue removing or shortening migrated facts.` : ""}`,
 									},
 								],
-								details: { success: true, overBudget, currentChars: newContent.length, budgetChars: budget },
+								details: {
+									success: true,
+									overBudget,
+									currentChars: newContent.length,
+									budgetChars: budget,
+									...(preference
+										? {
+												preference: {
+													id: preference.id,
+													scope: formatUserPreferenceScope(preference.scope),
+													basis: preference.basis,
+													observations: preference.observations,
+													revision: preference.revision,
+												},
+											}
+										: {}),
+								},
 							};
 						});
 					} catch (err) {
+						pendingCommit?.({ persisted: false, error: String(err) });
+						pendingCommit = undefined;
 						return memoryFailure(String(err), `Error: Failed to perform memory operation: ${String(err)}`);
 					}
 				},

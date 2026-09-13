@@ -47,6 +47,12 @@ export interface BuildWorkerSystemPromptOptions {
 	model?: Model<any>;
 	/** Parent projectContextFiles mode. Omitted defaults to off. */
 	projectContextFiles?: ProjectContextFilesMode;
+	/**
+	 * Bounded owner working preferences applicable to this handoff (behavioral guidance headed by
+	 * the persona projection rule), composed by the parent's memory controller. Never a grant and
+	 * never raw memory: only applicable USER.md preference lines, trailers stripped.
+	 */
+	personaGuidance?: string;
 }
 
 /** Formats provider and model ID into standard modelRef key. */
@@ -150,6 +156,7 @@ export function buildWorkerSystemPrompt(options: BuildWorkerSystemPromptOptions)
 		options.workerResourceSystemPrompt,
 		modelGuidancePrompt,
 		contextPrompt,
+		options.personaGuidance,
 	].filter((part): part is string => Boolean(part && part.trim().length > 0));
 
 	const systemPrompt = composeSubagentSystemPrompt({
