@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+## [0.99.21] - 2026-09-13
+
+### Added
+
+- Reversible `memorySystem: "okf" | "icm"` selection and `/memory system` commands. ICM uses existing workspace and pipeline files on demand, disables legacy memory providers and automatic reflection, and preserves existing files and transcript history.
+- Fully idle memory-system switching with a held submission lease, activation checks, persistence-error handling, and rollback to the previous mode.
+
+### Changed
+
+- General and project memory storage now uses a separate 512,000 UTF-8 byte safety ceiling instead of the former 1,200/2,200-character prompt quotas. Prompt views remain bounded using approximate token accounting, whole facts, and omission notices.
+- Relevant facts omitted from static prompt views remain searchable through the existing file-store provider. Normal-window fallback excludes already installed lines and USER.md; Unicode matching and distinct project references preserve scoped recall.
+- ICM pipeline context supplies file references rather than eagerly injecting working-file bodies. Provider requests exclude inactive generated context without deleting durable history.
+
+### Fixed
+
+- Managed-memory writes consistently commit their content and revision state while preserving drift checks and strict-shrink recovery for oversized files.
+
 ## [0.99.20] - 2026-09-13
 
 ### Added
