@@ -1,9 +1,14 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../../src/core/reflection-controller.ts";
+import {
+	CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
+	getOwnerEvidenceSnapshots,
+	OWNER_EVIDENCE_CUSTOM_TYPE,
+} from "../../src/core/reflection-controller.ts";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
@@ -164,6 +169,7 @@ describe("AgentSession bash and persistence characterization", () => {
 			"custom_message",
 			"custom",
 			"message",
+			"custom",
 			"request_snapshot",
 			"message",
 			"foreground_tool_start",
@@ -173,6 +179,28 @@ describe("AgentSession bash and persistence characterization", () => {
 			"message",
 			"custom",
 		]);
+		// The owner's prompt is persisted (entry 2) and immediately followed by its owner-evidence
+		// record (entry 3): the session marks the message as operator input and the reflection
+		// controller records the original words at persistence, bound to that message's entry id.
+		const ownerMessage = entries[2];
+		const ownerEvidence = entries[3];
+		if (ownerMessage?.type !== "message" || ownerMessage.message.role !== "user") {
+			throw new Error("expected the persisted owner prompt at entry 2");
+		}
+		expect(ownerEvidence).toMatchObject({ type: "custom", customType: OWNER_EVIDENCE_CUSTOM_TYPE });
+		const [evidence, ...moreEvidence] = getOwnerEvidenceSnapshots(entries);
+		expect(moreEvidence).toEqual([]);
+		expect(evidence).toMatchObject({
+			entryId: ownerMessage.id,
+			sourceId: `${harness.sessionManager.getSessionId().slice(0, 8)}/${ownerMessage.id}`,
+			text: "start",
+			chars: "start".length,
+			digest: createHash("sha256").update("start", "utf8").digest("hex").slice(0, 16),
+		});
+		// The custom "note" message is not owner input and produced no evidence record.
+		expect(
+			entries.filter((entry) => entry.type === "custom" && entry.customType === OWNER_EVIDENCE_CUSTOM_TYPE),
+		).toHaveLength(1);
 		// Two provider requests, and the reflection cue was delivered on neither: it is queued `pending`
 		// when the turn starts and only becomes `due` at the turn's end-of-work boundary, to be carried
 		// by the next ordinary request. No `consumed` state is written here because nothing consumed it.
