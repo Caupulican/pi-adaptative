@@ -56,6 +56,7 @@ import { SessionImageStore } from "../../core/session-image-store.ts";
 import type {
 	AutoLearnSettings,
 	AutonomyMode,
+	MemorySystem,
 	SelfModificationSettings,
 	SettingsScope,
 } from "../../core/settings-manager.ts";
@@ -3142,6 +3143,8 @@ export class InteractiveMode {
 			memoryDriftReport: () => this.session.memoryDriftReport(),
 			memoryAcceptDrift: (target: ManagedMemoryTarget) => this.session.memoryAcceptDrift(target),
 			memoryRestoreManaged: (target: ManagedMemoryTarget) => this.session.memoryRestoreManaged(target),
+			getMemorySystem: () => this.session.getMemorySystem(),
+			setMemorySystem: (system: MemorySystem) => this.session.setMemorySystem(system),
 			...this.operatorCommandOutput(),
 		};
 	}

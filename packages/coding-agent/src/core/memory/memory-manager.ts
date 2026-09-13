@@ -85,6 +85,11 @@ export class MemoryManager {
 		return this.lifecycleDiagnostics.map((diagnostic) => ({ ...diagnostic }));
 	}
 
+	/** Activation truth, including providers whose availability check returned false. */
+	public isProviderActive(name: string): boolean {
+		return this.activeProviders.has(name);
+	}
+
 	private recordLifecycleDiagnostic(diagnostic: MemoryLifecycleDiagnostic): void {
 		if (this.lifecycleDiagnostics.length >= MAX_LIFECYCLE_DIAGNOSTICS) {
 			this.lifecycleDiagnostics.shift();

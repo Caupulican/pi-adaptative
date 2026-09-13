@@ -11,6 +11,7 @@ import {
 } from "../../agent-paths.ts";
 import { estimateTokensFromText } from "../../context/context-item.ts";
 import type { MemoryPromptBudget } from "../../context/memory-prompt-budget.ts";
+import { memoryTextFitsBudget } from "../../context/memory-prompt-budget.ts";
 import {
 	OKF_MEMORY_LIMITS,
 	PI_OKF_TYPES,
@@ -270,8 +271,7 @@ export interface StructuredReflectionRollback {
 
 export const FILE_STORE_MEMORY_SYSTEM_NOTE =
 	"[System Note: Below is a snapshot of persistent memory. Record verified reusable facts with the 'memory' tool by scope: target 'memory' = general facts true in any repo or task; target 'project' (the default) = facts true only for this project (paths, tickets, branches, build steps); target 'user' = preferences; target 'okf' = durable structured records (decisions, architecture, findings). A memory write that names a path, ticket key or branch belongs in 'project'. Never store transient noise.]";
-const FILE_STORE_MEMORY_TRIAGE_NOTE =
-	"[Memory triage: MEMORY.md (general) is over budget; move project-specific lines to target 'project' with memory replace/remove and keep the general lines. Never delete a line you did not move.]";
+/** Generous UTF-8 byte safety ceiling for stored memory files; rejects only resource-overflow writes. */
 const MEMORY_DRIFT_RECOVERY =
 	"The file was edited outside the managed write protocol. Repeating a mutation cannot reconcile drift and managed-state metadata must not be edited. The operator resolves it: /memory drift lists the managed files, /memory accept <memory|project|user> adopts the on-disk content as the managed revision, /memory restore <target> brings the last managed content back (the drifted file is kept as a backup). Tell the operator which one the edit deserves; do not retry.";
 /** Content that reads as project-specific: a ticket key, an absolute or drive path, or a branch. */
@@ -505,34 +505,6 @@ async function commitManagedMemoryContent(
 	await writeManagedMemoryState(statePath, { version: 1, committedDigest: newDigest, committedContent: newContent });
 }
 
-function fitMemoryBlockToBudget(block: string, budget: MemoryPromptBudget | undefined): string {
-	if (budget === undefined) return block;
-	if (!budget.enabled || budget.maxLines <= 0 || budget.maxChars <= 0) return "";
-	if (block.split("\n").length <= budget.maxLines && block.length <= budget.maxChars) return block;
-	// Micro-context profiles deliberately omit a block that cannot fit whole. Larger constrained
-	// profiles retain a bounded head and say explicitly that more memory exists on disk.
-	if (budget.compact) return "";
-
-	const marker = "[…memory truncated for capability budget; full files remain on disk]";
-	if (budget.maxLines < 2 || budget.maxChars <= marker.length + 1) return "";
-	const lines: string[] = [];
-	let chars = 0;
-	const contentCharLimit = budget.maxChars - marker.length - 1;
-	for (const line of block.split("\n")) {
-		if (lines.length >= budget.maxLines - 1) break;
-		const separatorChars = lines.length > 0 ? 1 : 0;
-		const remaining = contentCharLimit - chars - separatorChars;
-		if (remaining <= 0) break;
-		const rendered = line.length <= remaining ? line : `${line.slice(0, Math.max(0, remaining - 1))}…`;
-		lines.push(rendered);
-		chars += separatorChars + rendered.length;
-		if (rendered.length !== line.length) break;
-	}
-	if (lines.length === 0) return "";
-	lines.push(marker);
-	return lines.join("\n");
-}
-
 export class FileStoreProvider implements MemoryProvider {
 	public readonly name = "file-store";
 	public readonly egress = "local";
@@ -553,19 +525,24 @@ export class FileStoreProvider implements MemoryProvider {
 	private readonly managedNotices: ManagedMemoryNotice[] = [];
 	/** USER.md as the installed static block renders it; undefined until the block is first frozen. */
 	private frozenUser: { content: string; coverage: FrozenUserCoverage } | undefined;
+	/** Trimmed MEMORY.md lines from the installed frozen static prompt block; undefined before freeze/reset. */
+	private frozenPromptLines: ReadonlySet<string> | undefined;
 	/** Preference lines held by the USER archive shards (with their heading context), refreshed at init and after any archive change. */
 	private archivedUserEntries: Array<{ line: string; section?: string }> = [];
-	private static readonly HANDOFF_GUIDANCE_MAX_CHARS = 800;
 	private userArchive?: UserMemoryArchive;
 	private okfStore?: OkfProjectMemoryStore;
 	private readonly options: FileStoreProviderOptions;
 
-	// Character budgets
-	/** The general file holds facts true in any task; project facts have their own file (measured live:
-	 * one 2,200-char global file filled with ticket and build facts refused four writes in a row). */
-	private static readonly BUDGET_MEMORY = 1200;
-	private static readonly BUDGET_PROJECT = 2200;
-	private static readonly BUDGET_USER = 1375;
+	/**
+	 * Prompt allocation budgets: estimated-token caps for prompt views.
+	 * Storage capacity is governed by RESOURCE_CEILING (512000 UTF-8 bytes).
+	 * USER retains a chars quota (1375) for write-admission compatibility.
+	 */
+	public static readonly BUDGET_MEMORY = { tokens: 300 };
+	public static readonly BUDGET_PROJECT = { tokens: 550 };
+	public static readonly BUDGET_USER = { tokens: 344, chars: 1375 };
+	/** Generous UTF-8 byte resource ceiling for stored memory files; rejects only resource-overflow writes. */
+	public static readonly RESOURCE_CEILING = 512_000;
 
 	constructor(options: FileStoreProviderOptions = {}) {
 		this.options = options;
@@ -601,6 +578,7 @@ export class FileStoreProvider implements MemoryProvider {
 			this.initializeManagedFile("project", this.projectMemoryFilePath, this.projectMemoryStatePath),
 		]);
 		this.frozenUser = undefined;
+		this.frozenPromptLines = undefined;
 		await this.refreshArchivedUserLines();
 	}
 
@@ -617,9 +595,15 @@ export class FileStoreProvider implements MemoryProvider {
 		return this.projectMemoryFilePath;
 	}
 
-	/** The general file is over its budget: project lines must move to the project file. */
+	/**
+	 * Compatibility alias: documented as prompt overflow, not storage capacity.
+	 * With the resource-separation design, the general file is no longer capped
+	 * the prompt view selects whole fact lines under the
+	 * approximate token budget. Returns true when the general file content
+	 * exceeds the approximate token budget for the prompt view.
+	 */
 	generalMemoryOverBudget(): boolean {
-		return this.lastWrittenMemory.length > FileStoreProvider.BUDGET_MEMORY;
+		return estimateTokensFromText(this.lastWrittenMemory) > FileStoreProvider.BUDGET_MEMORY.tokens;
 	}
 
 	private async initializeManagedFile(
@@ -709,6 +693,28 @@ export class FileStoreProvider implements MemoryProvider {
 			}
 		}
 		this.frozenUser = { content, coverage };
+		const lines = new Set<string>();
+		let inMemorySection = false;
+		for (const line of renderedBlock.split("\n")) {
+			const trimmed = line.trim();
+			if (trimmed.startsWith("## MEMORY.md")) {
+				inMemorySection = true;
+				continue;
+			}
+			if (trimmed.startsWith("## ")) {
+				inMemorySection = false;
+				continue;
+			}
+			if (inMemorySection && trimmed.length > 0 && !trimmed.startsWith("[")) {
+				lines.add(trimmed);
+			}
+		}
+		this.frozenPromptLines = lines;
+	}
+
+	/** Returns the trimmed MEMORY.md lines from the installed frozen static prompt block, or undefined before freeze/reset. */
+	getFrozenPromptLines(): ReadonlySet<string> | undefined {
+		return this.frozenPromptLines;
 	}
 
 	/**
@@ -767,14 +773,15 @@ export class FileStoreProvider implements MemoryProvider {
 
 	/** The record on the wire is `content` plus the planner's superseding note; both count. */
 	private static fitsPersonaBudget(content: string, budget: MemoryPromptBudget | undefined): boolean {
-		if (budget === undefined) return true;
-		if (!budget.enabled) return false;
-		const wire = `${content}${TRANSIENT_RECORD_SUPERSEDING_NOTE}`;
-		return (
-			wire.split("\n").length <= budget.maxLines &&
-			Buffer.byteLength(wire, "utf8") <= budget.maxChars &&
-			estimateTokensFromText(wire) <= budget.maxEstimatedTokens
-		);
+		const effective = budget ?? {
+			enabled: true,
+			compact: false,
+			maxLines: 20,
+			maxEstimatedTokens: FileStoreProvider.BUDGET_USER.tokens,
+			maxChars: FileStoreProvider.RESOURCE_CEILING,
+			maxResults: 10,
+		};
+		return memoryTextFitsBudget(`${content}${TRANSIENT_RECORD_SUPERSEDING_NOTE}`, effective);
 	}
 
 	/**
@@ -787,12 +794,6 @@ export class FileStoreProvider implements MemoryProvider {
 		lines: string[],
 		budget: MemoryPromptBudget | undefined,
 	): string | undefined {
-		if (budget === undefined) {
-			return FileStoreProvider.capMemory(
-				[...header, ...lines].join("\n"),
-				FileStoreProvider.BUDGET_USER + header.join("\n").length + 1,
-			);
-		}
 		const omittedNote = (count: number) =>
 			`(${count} more preference line${count === 1 ? "" : "s"} on disk; not shown within this model's memory budget)`;
 		const noneNote = (count: number) =>
@@ -841,16 +842,17 @@ export class FileStoreProvider implements MemoryProvider {
 	}
 
 	/**
-	 * Whole lines within a character bound, framing included: as many leading lines as fit beside
-	 * the footer that counts the rest. A line is never cut in half into a misleading partial
+	 * Whole lines within a token/char bound, framing included: as many leading lines as fit
+	 * beside the footer that counts the rest. A line is never cut in half into a misleading partial
 	 * instruction; the caller sees exactly which lines were kept.
 	 */
 	private static selectWholeLines(
 		lines: readonly string[],
-		limit: number,
+		budget: MemoryPromptBudget,
 		framing: { header?: string; footer: (omitted: number) => string },
 	): { kept: string[]; omitted: number; text: string } {
-		for (let keep = lines.length; keep >= 0; keep--) {
+		const maxKeep = Math.min(lines.length, budget.maxLines);
+		for (let keep = maxKeep; keep >= 0; keep--) {
 			const omitted = lines.length - keep;
 			const parts = [
 				...(framing.header ? [framing.header] : []),
@@ -858,7 +860,7 @@ export class FileStoreProvider implements MemoryProvider {
 				...(omitted > 0 ? [framing.footer(omitted)] : []),
 			];
 			const text = parts.join("\n");
-			if (text.length <= limit) return { kept: lines.slice(0, keep), omitted, text };
+			if (memoryTextFitsBudget(text, budget)) return { kept: lines.slice(0, keep), omitted, text };
 		}
 		return { kept: [], omitted: lines.length, text: "" };
 	}
@@ -877,9 +879,20 @@ export class FileStoreProvider implements MemoryProvider {
 			.map((entry) => renderUserPreferenceForPrompt(entry.parsed, entry.section))
 			.join("\n");
 		const lines = rendered.length === 0 ? [] : FileStoreProvider.sanitizeMemory(rendered).split("\n");
-		return FileStoreProvider.selectWholeLines(lines, FileStoreProvider.BUDGET_USER, {
-			footer: FileStoreProvider.preferenceFooter,
-		});
+		return FileStoreProvider.selectWholeLines(
+			lines,
+			{
+				enabled: true,
+				compact: false,
+				maxLines: 20,
+				maxEstimatedTokens: FileStoreProvider.BUDGET_USER.tokens,
+				maxChars: FileStoreProvider.RESOURCE_CEILING,
+				maxResults: 10,
+			},
+			{
+				footer: FileStoreProvider.preferenceFooter,
+			},
+		);
 	}
 
 	/** The USER.md text of the static block: the selected whole lines plus the footer when lines were left out. */
@@ -906,7 +919,14 @@ export class FileStoreProvider implements MemoryProvider {
 		const header = `OWNER WORKING PREFERENCES (guidance, not grants): ${PERSONA_PROJECTION_RULE}`;
 		const selection = FileStoreProvider.selectWholeLines(
 			FileStoreProvider.sanitizeMemory(lines.join("\n")).split("\n"),
-			FileStoreProvider.HANDOFF_GUIDANCE_MAX_CHARS,
+			{
+				enabled: true,
+				compact: false,
+				maxLines: 20,
+				maxEstimatedTokens: 200,
+				maxChars: FileStoreProvider.RESOURCE_CEILING,
+				maxResults: 5,
+			},
 			{ header, footer: FileStoreProvider.preferenceFooter },
 		);
 		// Header and footer count against the bound; with no room for even one line there is no guidance.
@@ -931,9 +951,45 @@ export class FileStoreProvider implements MemoryProvider {
 	// externally (or by any path that bypasses the tool) could be arbitrarily large and would then
 	// bloat the system prompt on EVERY turn. Cap the injected view to the same budget so the per-turn
 	// cost stays bounded; the file on disk is untouched and the model is told it was truncated.
-	private static capMemory(content: string, limit: number): string {
-		if (content.length <= limit) return content;
-		return `${content.slice(0, limit)}\n[…truncated to ${limit} chars for the prompt; full file is on disk]`;
+	// Read-time budget guard (cost): the memory tool already caps writes at BUDGET_*, but a file edited
+	// externally (or by any path that bypasses the tool) could be arbitrarily large and would then
+	// bloat the system prompt on EVERY turn. Cap the injected view to the same budget so the per-turn
+	// cost stays bounded; the file on disk is untouched and the model is told it was truncated.
+	// Reuses selectWholeLines when practical; never truncates mid-line.
+	private static selectWholeFacts(content: string, budget: MemoryPromptBudget): { text: string; omitted: number } {
+		const lines = FileStoreProvider.sanitizeMemory(content).split("\n");
+		const result = FileStoreProvider.selectWholeLines(lines, budget, {
+			header: undefined,
+			footer: (omitted) =>
+				`(${omitted} more fact line${omitted === 1 ? "" : "s"} on disk; not shown within this model's approximate token budget)`,
+		});
+		return { text: result.text, omitted: result.omitted };
+	}
+
+	/**
+	 * Fit a block of text within the memory prompt budget using memoryTextFitsBudget.
+	 * Fits the FULL final text including the omitted-count footer, never truncates mid-line,
+	 * and restores compact-budget all-or-nothing behavior when nothing fits.
+	 */
+	private static fitMemoryBlockToBudget(block: string, budget: MemoryPromptBudget | undefined): string {
+		if (budget === undefined) return block;
+		if (!budget.enabled || budget.maxLines <= 0) return "";
+		if (memoryTextFitsBudget(block, budget)) return block;
+		if (budget.compact) return "";
+
+		const lines = block.split("\n");
+		// Fit the complete text including footer against the full budget; a line is never
+		// cut in half as a misleading partial instruction. Returns "" when even one line
+		// exceeds the compact budget (all-or-nothing).
+		const result = FileStoreProvider.selectWholeLines(lines, budget, {
+			footer: (omitted) =>
+				`(${omitted} more fact line${omitted === 1 ? "" : "s"} on disk; not shown within this model's approximate token budget)`,
+		});
+		return result.text;
+	}
+
+	private static capMemory(content: string, budget: MemoryPromptBudget): string {
+		return FileStoreProvider.selectWholeFacts(content, budget).text;
 	}
 
 	private managedTargets(): Array<{
@@ -1007,7 +1063,7 @@ export class FileStoreProvider implements MemoryProvider {
 				this.options.onDurableMemoryChanged?.();
 				return {
 					ok: true,
-					message: `${entry.label}: adopted the on-disk content (${drift.currentOnDisk.length} chars) as the managed revision.`,
+					message: `${entry.label}: adopted the on-disk content (${Buffer.byteLength(drift.currentOnDisk, "utf8")} bytes) as the managed revision.`,
 				};
 			},
 		);
@@ -1037,7 +1093,7 @@ export class FileStoreProvider implements MemoryProvider {
 				this.options.onDurableMemoryChanged?.();
 				return {
 					ok: true,
-					message: `${entry.label}: restored the managed revision (${content.length} chars)${currentOnDisk !== "" ? "; the drifted content is kept beside it as a backup" : ""}.`,
+					message: `${entry.label}: restored the managed revision (${Buffer.byteLength(content, "utf8")} bytes)${currentOnDisk !== "" ? "; the drifted content is kept beside it as a backup" : ""}.`,
 				};
 			},
 		);
@@ -1069,14 +1125,22 @@ export class FileStoreProvider implements MemoryProvider {
 
 	public systemPromptBlock(budget?: MemoryPromptBudget): string {
 		if (this.ctx?.isChildSession) return "";
-		const mem = FileStoreProvider.capMemory(
-			FileStoreProvider.sanitizeMemory(this.lastWrittenMemory),
-			FileStoreProvider.BUDGET_MEMORY,
-		);
-		const proj = FileStoreProvider.capMemory(
-			FileStoreProvider.sanitizeMemory(this.lastWrittenProjectMemory),
-			FileStoreProvider.BUDGET_PROJECT,
-		);
+		const mem = FileStoreProvider.capMemory(FileStoreProvider.sanitizeMemory(this.lastWrittenMemory), {
+			enabled: true,
+			compact: false,
+			maxLines: 20,
+			maxEstimatedTokens: FileStoreProvider.BUDGET_MEMORY.tokens,
+			maxChars: FileStoreProvider.RESOURCE_CEILING,
+			maxResults: 10,
+		});
+		const proj = FileStoreProvider.capMemory(FileStoreProvider.sanitizeMemory(this.lastWrittenProjectMemory), {
+			enabled: true,
+			compact: false,
+			maxLines: 20,
+			maxEstimatedTokens: FileStoreProvider.BUDGET_PROJECT.tokens,
+			maxChars: FileStoreProvider.RESOURCE_CEILING,
+			maxResults: 10,
+		});
 		const usr = this.renderUserMemory();
 
 		const blocks: string[] = [];
@@ -1096,9 +1160,8 @@ export class FileStoreProvider implements MemoryProvider {
 			return "";
 		}
 
-		const triage = this.generalMemoryOverBudget() ? `\n${FILE_STORE_MEMORY_TRIAGE_NOTE}` : "";
-		const block = `=== Persistent Memory (file-store) ===\n${FILE_STORE_MEMORY_SYSTEM_NOTE}${triage}\n\n${blocks.join("\n\n")}`;
-		return fitMemoryBlockToBudget(block, budget);
+		const block = `=== Persistent Memory (file-store) ===\n${FILE_STORE_MEMORY_SYSTEM_NOTE}\n\n${blocks.join("\n\n")}`;
+		return FileStoreProvider.fitMemoryBlockToBudget(block, budget);
 	}
 
 	public async prefetch(_query: string): Promise<string> {
@@ -1633,27 +1696,20 @@ export class FileStoreProvider implements MemoryProvider {
 					}
 					if (action === "list") {
 						const rows = [
-							[
-								"memory",
-								"MEMORY.md (general)",
-								this.memoryFilePath,
-								this.memoryStatePath,
-								FileStoreProvider.BUDGET_MEMORY,
-							],
+							["memory", "MEMORY.md (general)", this.memoryFilePath, this.memoryStatePath],
 							[
 								"project",
 								`MEMORY.md (project ${basename(this.projectRoot) || this.projectKey})`,
 								this.projectMemoryFilePath,
 								this.projectMemoryStatePath,
-								FileStoreProvider.BUDGET_PROJECT,
 							],
-							["user", "USER.md", this.userFilePath, this.userStatePath, FileStoreProvider.BUDGET_USER],
+							["user", "USER.md", this.userFilePath, this.userStatePath],
 						] as const;
 						try {
 							const files = await Promise.all(
 								rows
 									.filter(([scope]) => requestedTarget === undefined || scope === requestedTarget)
-									.map(async ([target, label, filePath, statePath, budgetChars]) =>
+									.map(async ([target, label, filePath, statePath]) =>
 										withFileLock(filePath, async () => {
 											const { currentOnDisk, revision } = await inspectManagedMemoryFile(
 												filePath,
@@ -1666,16 +1722,24 @@ export class FileStoreProvider implements MemoryProvider {
 														? this.lastWrittenProjectMemory
 														: this.lastWrittenUser;
 											const promptDigest = contentDigest(prompt);
+											const promptTokens =
+												target === "memory"
+													? FileStoreProvider.BUDGET_MEMORY.tokens
+													: target === "project"
+														? FileStoreProvider.BUDGET_PROJECT.tokens
+														: FileStoreProvider.BUDGET_USER.tokens;
 											const revisionText = `Current revision: ${revision.currentDigest}; managed revision: ${revision.managedDigest ?? revision.stateStatus}; pending revision: ${revision.pendingDigest ?? "none"}; prompt snapshot: ${promptDigest}.`;
 											return {
-												text: `## ${label} (${currentOnDisk.length}/${budgetChars} chars)\n${revisionText}\n${revision.drift ? `Drift detected. ${MEMORY_DRIFT_RECOVERY}\n` : ""}${currentOnDisk.trim() || "(empty)"}`,
+												text: `## ${label} (${Buffer.byteLength(currentOnDisk, "utf8")} bytes, ${estimateTokensFromText(currentOnDisk)} approximate tokens, prompt allocation ${promptTokens} tokens, resource ceiling ${FileStoreProvider.RESOURCE_CEILING} bytes)\n${revisionText}\n${revision.drift ? `Drift detected. ${MEMORY_DRIFT_RECOVERY}\n` : ""}${currentOnDisk.trim() || "(empty)"}`,
 												details: {
 													target,
 													path: filePath,
 													...revision,
 													promptDigest,
-													currentChars: currentOnDisk.length,
-													budgetChars,
+													currentBytes: Buffer.byteLength(currentOnDisk, "utf8"),
+													currentChars: Buffer.byteLength(currentOnDisk, "utf8"),
+													promptTokens,
+													resourceCeilingBytes: FileStoreProvider.RESOURCE_CEILING,
 												},
 											};
 										}),
@@ -1710,10 +1774,10 @@ export class FileStoreProvider implements MemoryProvider {
 								: this.userStatePath;
 					const budget =
 						target === "memory"
-							? FileStoreProvider.BUDGET_MEMORY
+							? FileStoreProvider.RESOURCE_CEILING
 							: target === "project"
-								? FileStoreProvider.BUDGET_PROJECT
-								: FileStoreProvider.BUDGET_USER;
+								? FileStoreProvider.RESOURCE_CEILING
+								: FileStoreProvider.BUDGET_USER.chars;
 					// The admitted USER write's publication boundary: reported once, after the bytes landed
 					// or the write failed, so the learning audit never claims an apply that did not persist.
 					let pendingCommit: ((report: UserPreferenceCommitReport) => void) | undefined;
@@ -1818,13 +1882,16 @@ export class FileStoreProvider implements MemoryProvider {
 								newContent = currentOnDisk.replace(oldContent, "");
 							}
 
-							const overBudget = newContent.length > budget;
-							if (overBudget && newContent.length >= currentOnDisk.length) {
-								pendingCommit?.({ persisted: false, error: "Memory budget exceeded" });
+							const overBudget = Buffer.byteLength(newContent, "utf8") > FileStoreProvider.RESOURCE_CEILING;
+							if (
+								overBudget &&
+								Buffer.byteLength(newContent, "utf8") >= Buffer.byteLength(currentOnDisk, "utf8")
+							) {
+								pendingCommit?.({ persisted: false, error: "Resource overflow" });
 								pendingCommit = undefined;
 								return memoryFailure(
-									"Memory budget exceeded",
-									`Error: Memory budget exceeded. ${fileLabel} limit is ${budget} characters. Current operation would result in ${newContent.length} characters. Remove or shorten an existing line first; already-over-budget content must strictly shrink on each repair.`,
+									"Resource overflow",
+									`Error: Resource overflow. ${fileLabel} storage ceiling is ${FileStoreProvider.RESOURCE_CEILING} UTF-8 bytes. Current operation would result in ${Buffer.byteLength(newContent, "utf8")} bytes. Remove or shorten an existing line first; already-over-budget content must strictly shrink on each repair.`,
 								);
 							}
 
@@ -1846,14 +1913,14 @@ export class FileStoreProvider implements MemoryProvider {
 								content: [
 									{
 										type: "text",
-										text: `Successfully updated ${fileLabel}.${projectHint}${overBudget ? `\nMemory is still over budget (${newContent.length}/${budget} chars); continue removing or shortening migrated facts.` : ""}`,
+										text: `Successfully updated ${fileLabel}.${projectHint}${overBudget ? `\nResource ceiling exceeded (${Buffer.byteLength(newContent, "utf8")}/${FileStoreProvider.RESOURCE_CEILING} bytes); the file on disk is preserved; remove or shorten facts to comply.` : ""}`,
 									},
 								],
 								details: {
 									success: true,
 									overBudget,
-									currentChars: newContent.length,
-									budgetChars: budget,
+									currentBytes: Buffer.byteLength(newContent, "utf8"),
+									resourceCeilingBytes: FileStoreProvider.RESOURCE_CEILING,
 									...(preference
 										? {
 												preference: {

@@ -1313,6 +1313,10 @@ export class RuntimeBuilder {
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
 					getOpenTaskSteps: () => deriveOpenTaskStepRefs(this.deps.getTaskStepsStateSnapshot()),
 					getBackgroundToolTasks: () => this.deps.getToolTaskDependencies?.().list() ?? [],
+					getContextMode: () => {
+						const memorySystem = this.deps.getSettingsManager().getMemorySystem();
+						return memorySystem === "icm" ? "on-demand" : "inline";
+					},
 				});
 				this._baseToolDefinitions.set(pipelineToolDefinition.name, pipelineToolDefinition);
 			}

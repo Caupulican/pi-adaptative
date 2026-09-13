@@ -5,6 +5,7 @@ import {
 	type AssembledLayer,
 	type AssembledStageContext,
 	type ContextLayer,
+	type ContextMode,
 	isPipelineRunActive,
 	MAX_LAYER_FILE_CHARS,
 	MAX_STAGE_CONTEXT_CHARS,
@@ -72,6 +73,7 @@ export function assembleStageContext(
 	definition: PipelineDefinition,
 	run: PipelineRun,
 	stage?: PipelineStage,
+	contextMode: ContextMode = "inline",
 ): AssembledStageContext {
 	const currentStage = stage ?? currentPipelineStage(definition, run);
 	if (!currentStage) {
@@ -93,11 +95,31 @@ export function assembleStageContext(
 		if (input.kind === "reference") {
 			const path = resolveUnder(definitionStageDir, definition.rootDir, input.path);
 			if (!path) continue;
-			remaining = pushLayer(layers, 3, path, definition.rootDir, `L3 ${input.path}`, remaining);
+			if (contextMode === "on-demand") {
+				layers.push({
+					layer: 3,
+					path,
+					label: `L3 ${input.path}`,
+					text: "(on-demand: scoped read required)",
+					truncated: false,
+				});
+			} else {
+				remaining = pushLayer(layers, 3, path, definition.rootDir, `L3 ${input.path}`, remaining);
+			}
 		} else {
 			const path = resolveUnder(runStageDir, run.runRoot, input.path);
 			if (!path) continue;
-			remaining = pushLayer(layers, 4, path, run.runRoot, `L4 ${input.path}`, remaining);
+			if (contextMode === "on-demand") {
+				layers.push({
+					layer: 4,
+					path,
+					label: `L4 ${input.path}`,
+					text: "(on-demand: scoped read required)",
+					truncated: false,
+				});
+			} else {
+				remaining = pushLayer(layers, 4, path, run.runRoot, `L4 ${input.path}`, remaining);
+			}
 		}
 	}
 
@@ -110,6 +132,7 @@ export function assembleStageContext(
 		layers,
 		text,
 		tokenEstimate: Math.ceil(text.length / CHARS_PER_TOKEN),
+		contextMode,
 	};
 }
 
@@ -130,9 +153,13 @@ export function formatPipelineContext(
 	return `${PIPELINE_CONTEXT_OPEN} revision=${run.revision}>\n${lines.join("\n")}\n</pipeline_context>`;
 }
 
-export function formatActivePipelineContext(definition: PipelineDefinition, run: PipelineRun): string | undefined {
+export function formatActivePipelineContext(
+	definition: PipelineDefinition,
+	run: PipelineRun,
+	contextMode: ContextMode = "inline",
+): string | undefined {
 	if (!isPipelineRunActive(run)) return undefined;
-	return formatPipelineContext(definition, run, assembleStageContext(definition, run));
+	return formatPipelineContext(definition, run, assembleStageContext(definition, run, undefined, contextMode));
 }
 
 const PIPELINE_CONTEXT_OPEN = "<pipeline_context";

@@ -24,6 +24,8 @@ export type ContextLayer = 0 | 1 | 2 | 3 | 4;
 
 export type InputKind = "working" | "reference";
 
+export type ContextMode = "inline" | "on-demand";
+
 export interface PipelineInputRef {
 	kind: InputKind;
 	path: string;
@@ -106,6 +108,7 @@ export interface AssembledStageContext {
 	layers: readonly AssembledLayer[];
 	text: string;
 	tokenEstimate: number;
+	contextMode: ContextMode;
 }
 
 export const PIPELINE_RUN_CUSTOM_TYPE = "pipeline_run";

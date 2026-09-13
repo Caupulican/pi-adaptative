@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { advanceTaskSteps } from "../src/core/pipelines/increment.ts";
 import {
@@ -887,5 +887,122 @@ parentPort.postMessage({ done: true });
 			writeFileSync(join(countOutput, `file-${String(index).padStart(4, "0")}.txt`), "x");
 		}
 		expect(scanStageOutput(countOutput).outputFiles).toHaveLength(1_000);
+	});
+});
+
+describe("pipeline on-demand context mode", () => {
+	let tempDir: string;
+	let cwd: string;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-pipeline-ondemand-"));
+		cwd = tempDir;
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	function writeDefinition(root: string): void {
+		mkdirSync(join(root, "stages", "01_research", "output"), { recursive: true });
+		mkdirSync(join(root, "stages", "02_draft", "output"), { recursive: true });
+		mkdirSync(join(root, "_shared"), { recursive: true });
+		writeFileSync(join(root, "AGENTS.md"), "# Research pipeline\n\nGo to stages/01_research/CONTEXT.md.\n");
+		writeFileSync(
+			join(root, "CONTEXT.md"),
+			`---\nname: research\nform: pipeline\ndescription: Research then draft\n---\n# research — the pipeline\n`,
+		);
+		writeFileSync(join(root, "_shared", "rules.md"), "Be brief.\n");
+		writeFileSync(join(root, "stages", "01_research", "CONTEXT.md"), STAGE_ONE);
+		writeFileSync(join(root, "stages", "02_draft", "CONTEXT.md"), STAGE_TWO);
+	}
+
+	it("default inline mode loads L3 reference content", () => {
+		const definitionRoot = join(cwd, ".pi", "pipelines", "research");
+		writeDefinition(definitionRoot);
+		const definition = loadPipelineDefinition(definitionRoot);
+		expect(definition).toBeDefined();
+		const run = instantiatePipelineRun({
+			definition: definition!,
+			runId: "test-run",
+			runRoot: join(cwd, ".pi", "pipeline-runs", "test-run"),
+			now: new Date().toISOString(),
+		});
+		const assembled = assembleStageContext(definition!, run, undefined, "inline");
+		const l3Layer = assembled.layers.find((l) => l.layer === 3);
+		expect(l3Layer?.text).not.toBe("(on-demand: scoped read required)");
+	});
+
+	it("on-demand mode does NOT read L3 reference file content", () => {
+		const definitionRoot = join(cwd, ".pi", "pipelines", "research");
+		writeDefinition(definitionRoot);
+		const definition = loadPipelineDefinition(definitionRoot);
+		expect(definition).toBeDefined();
+		const run = instantiatePipelineRun({
+			definition: definition!,
+			runId: "test-run",
+			runRoot: join(cwd, ".pi", "pipeline-runs", "test-run"),
+			now: new Date().toISOString(),
+		});
+		const assembled = assembleStageContext(definition!, run, undefined, "on-demand");
+		const l3Layer = assembled.layers.find((l) => l.layer === 3);
+		expect(l3Layer?.text).toBe("(on-demand: scoped read required)");
+	});
+
+	it("on-demand mode provides scope-validated pointer for L4 working input", () => {
+		const definitionRoot = join(cwd, ".pi", "pipelines", "research");
+		writeDefinition(definitionRoot);
+		const definition = loadPipelineDefinition(definitionRoot);
+		expect(definition).toBeDefined();
+		const runRoot = join(cwd, ".pi", "pipeline-runs", "test-run");
+		const run = instantiatePipelineRun({
+			definition: definition!,
+			runId: "test-run",
+			runRoot,
+			now: new Date().toISOString(),
+		});
+		const workingPath = join(stageOutputDir(runRoot, definition!.stages[0]!), "research.md");
+		writeFileSync(workingPath, "Research body must stay on disk.");
+		const next = incrementPipelineRun(definition!, run, "T1").run;
+		const assembled = assembleStageContext(definition!, next, undefined, "on-demand");
+		const l4Layer = assembled.layers.find((l) => l.layer === 4);
+		expect(l4Layer?.text).toBe("(on-demand: scoped read required)");
+		expect(l4Layer?.path).toBe(workingPath);
+		expect(assembled.text).not.toContain("Research body must stay on disk.");
+	});
+
+	it("on-demand mode still provides scope-validated paths for L3/L4", () => {
+		const definitionRoot = join(cwd, ".pi", "pipelines", "research");
+		writeDefinition(definitionRoot);
+		const definition = loadPipelineDefinition(definitionRoot);
+		expect(definition).toBeDefined();
+		const run = instantiatePipelineRun({
+			definition: definition!,
+			runId: "test-run",
+			runRoot: join(cwd, ".pi", "pipeline-runs", "test-run"),
+			now: new Date().toISOString(),
+		});
+		const assembled = assembleStageContext(definition!, run, undefined, "on-demand");
+		const l3Layer = assembled.layers.find((l) => l.layer === 3);
+		expect(l3Layer?.path).toBeDefined();
+		expect(l3Layer?.path.length).toBeGreaterThan(0);
+	});
+
+	it("large reference file is not loaded/truncated in on-demand mode", () => {
+		const definitionRoot = join(cwd, ".pi", "pipelines", "research");
+		writeDefinition(definitionRoot);
+		const bigContent = "A".repeat(10_000);
+		writeFileSync(join(definitionRoot, "_shared", "rules.md"), bigContent);
+		const definition = loadPipelineDefinition(definitionRoot);
+		expect(definition).toBeDefined();
+		const run = instantiatePipelineRun({
+			definition: definition!,
+			runId: "test-run",
+			runRoot: join(cwd, ".pi", "pipeline-runs", "test-run"),
+			now: new Date().toISOString(),
+		});
+		const assembled = assembleStageContext(definition!, run, undefined, "on-demand");
+		const l3Layer = assembled.layers.find((l) => l.layer === 3);
+		expect(l3Layer?.text).toBe("(on-demand: scoped read required)");
 	});
 });

@@ -73,6 +73,7 @@ export interface PipelineToolDependencies {
 	getBackgroundToolTasks?: () => readonly BackgroundToolTaskRef[];
 	now?: () => string;
 	createRunId?: () => string;
+	getContextMode?: () => "inline" | "on-demand";
 }
 
 function errorResult(action: PipelineToolAction, error: string, run?: PipelineRun) {
@@ -86,6 +87,10 @@ function errorResult(action: PipelineToolAction, error: string, run?: PipelineRu
 function resolveRun(deps: PipelineToolDependencies, cwd: string, runId: string | undefined): PipelineRun | undefined {
 	if (runId?.trim()) return loadPipelineRunById(cwd, runId.trim());
 	return resolveCurrentProjectPipelineRun(cwd, deps.getPipelineRun());
+}
+
+function getContextMode(deps: PipelineToolDependencies): "inline" | "on-demand" {
+	return deps.getContextMode?.() ?? "inline";
 }
 
 function saveSessionSnapshot(deps: PipelineToolDependencies, run: PipelineRun): string | undefined {
@@ -223,7 +228,7 @@ export function createPipelineToolDefinition(deps: PipelineToolDependencies): To
 					const run = admission.run;
 					const snapshotWarning = saveSessionSnapshot(deps, run);
 					const stage = definition.stages[0]!;
-					const assembled = assembleStageContext(definition, run, stage);
+					const assembled = assembleStageContext(definition, run, stage, getContextMode(deps));
 					const text = [
 						`pipeline start recorded. Run ${run.runId} at ${stage.id}.`,
 						formatPipelineContext(definition, run, assembled),
@@ -248,7 +253,7 @@ export function createPipelineToolDefinition(deps: PipelineToolDependencies): To
 					if (!definition) {
 						return errorResult("status", `Pipeline definition '${current.pipelineName}' is missing.`, current);
 					}
-					const assembled = assembleStageContext(definition, current);
+					const assembled = assembleStageContext(definition, current, undefined, getContextMode(deps));
 					return {
 						content: [
 							{
@@ -302,7 +307,7 @@ export function createPipelineToolDefinition(deps: PipelineToolDependencies): To
 						} satisfies PipelineToolDetails,
 					};
 				}
-				const assembled = assembleStageContext(mutation.definition, mutation.run);
+				const assembled = assembleStageContext(mutation.definition, mutation.run, undefined, getContextMode(deps));
 				return {
 					content: [
 						{

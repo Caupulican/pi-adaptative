@@ -7,17 +7,21 @@
  */
 import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "../../core/memory/providers/file-store.ts";
 
+import type { MemorySystem } from "../../core/settings-manager.ts";
+
 export interface MemoryCommandHost {
 	memoryDriftReport(): Promise<ManagedMemoryDriftEntry[]>;
 	memoryAcceptDrift(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }>;
 	memoryRestoreManaged(target: ManagedMemoryTarget): Promise<{ ok: boolean; message: string }>;
+	getMemorySystem(): MemorySystem;
+	setMemorySystem(system: MemorySystem): Promise<{ ok: boolean; message: string }>;
 	showStatus(message: string): void;
 	showError(message: string): void;
 	showText(text: string): void;
 }
 
 export const MEMORY_COMMAND_USAGE =
-	"/memory drift · /memory accept <memory|project|user> · /memory restore <memory|project|user>";
+	"/memory drift · /memory accept <memory|project|user> · /memory restore <memory|project|user> · /memory system [okf|icm]";
 
 const TARGETS = new Set<ManagedMemoryTarget>(["memory", "project", "user"]);
 
@@ -64,6 +68,20 @@ export async function handleMemoryCommand(host: MemoryCommandHost, text: string)
 			action === "accept"
 				? await host.memoryAcceptDrift(target as ManagedMemoryTarget)
 				: await host.memoryRestoreManaged(target as ManagedMemoryTarget);
+		if (result.ok) host.showStatus(result.message);
+		else host.showError(result.message);
+		return;
+	}
+	if (action === "system") {
+		if (target === undefined) {
+			host.showStatus(`Memory system: ${host.getMemorySystem()}`);
+			return;
+		}
+		if (target !== "okf" && target !== "icm") {
+			host.showError(MEMORY_COMMAND_USAGE);
+			return;
+		}
+		const result = await host.setMemorySystem(target as MemorySystem);
 		if (result.ok) host.showStatus(result.message);
 		else host.showError(result.message);
 		return;

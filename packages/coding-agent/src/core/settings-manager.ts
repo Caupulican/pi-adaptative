@@ -689,6 +689,7 @@ export interface Settings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: ThinkingLevel;
+	memorySystem?: MemorySystem;
 	/** Provider-scoped fast-mode preferences. Concrete providers own the meaning of enabled. */
 	fastMode?: Record<string, boolean>;
 	transport?: TransportSetting; // default: "auto"
@@ -1186,7 +1187,14 @@ function mergeWorkerDelegationLayers(...layers: unknown[]): WorkerDelegationSett
 	return merged;
 }
 
+export type MemorySystem = "okf" | "icm";
+
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+
+/** Validate a memory system value; returns true only for known, allowed values. */
+export function isValidMemorySystem(value: unknown): value is MemorySystem {
+	return typeof value === "string" && (value === "okf" || value === "icm");
+}
 
 export interface ProfileDefinitionInput {
 	name?: string;
@@ -3715,6 +3723,32 @@ export class SettingsManager {
 	setEnableSkillCommands(enabled: boolean): void {
 		this.globalSettings.enableSkillCommands = enabled;
 		this.markModified("enableSkillCommands");
+		this.save();
+	}
+
+	getMemorySystem(): MemorySystem {
+		return isValidMemorySystem(this.settings.memorySystem) ? this.settings.memorySystem : "okf";
+	}
+
+	setMemorySystem(system: MemorySystem, scope: SettingsScope = "global"): void {
+		if (!isValidMemorySystem(system)) {
+			throw new Error(`Invalid memory system '${system}'. Must be 'okf' or 'icm'.`);
+		}
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.memorySystem = system;
+			this.markProjectModified("memorySystem");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+		if (scope === "directoryProfile") {
+			this.persistDirectoryProfiles((settings) => {
+				settings.memorySystem = system;
+			});
+			return;
+		}
+		this.globalSettings.memorySystem = system;
+		this.markModified("memorySystem");
 		this.save();
 	}
 

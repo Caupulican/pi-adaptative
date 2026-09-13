@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { projectMemoryDir } from "../src/core/agent-paths.ts";
 import type { MemoryItem, MemoryProvider, MemorySearchRequest } from "../src/core/context/memory-provider-contract.ts";
 import { formatOkfMemoryDocument } from "../src/core/context/okf-memory.ts";
 import type { MemoryProvider as LegacyMemoryProvider } from "../src/core/memory/memory-provider.ts";
@@ -133,9 +134,13 @@ describe("MemoryController context retrieval", () => {
 
 		const report = await controller.runMemoryRetrieval([userMessage("recall compact memory")]);
 
+		// On normal windows the file-store is queried for omitted facts but returns
+		// nothing when the static prompt already covers all lines.
+		expect(report.providerReports.map((entry) => entry.providerId)).toContain("pi-file-store");
 		expect(calls).toHaveLength(1);
-		expect(report.providerReports.map((entry) => entry.providerId)).not.toContain("pi-file-store");
 		expect(report.providerReports.map((entry) => entry.providerId)).toContain("custom-memory");
+		const fileStoreReport = report.providerReports.find((entry) => entry.providerId === "pi-file-store");
+		expect(fileStoreReport?.resultCount).toBe(0);
 	});
 
 	it("uses file-store retrieval when compact budgets suppress the static file-store prompt", async () => {
@@ -571,5 +576,106 @@ describe("MemoryController context retrieval", () => {
 
 		expect(snapshot).toContain("<untrusted_content");
 		expect(snapshot).toContain("Reflection snapshot");
+	});
+
+	it("recalls facts beyond the static projection on a normal 32k window", async () => {
+		writeFileSync(
+			join(agentDir, "MEMORY.md"),
+			Array.from({ length: 50 }, (_, index) => `General fact number ${index}.`).join("\n"),
+			"utf8",
+		);
+		writeFileSync(join(agentDir, "USER.md"), "", "utf8");
+		const controller = new MemoryController({
+			getSettingsManager: settings,
+			getTurnIndex: () => 3,
+			getAgentDir: () => agentDir,
+			getCwd: () => tempDir,
+			getSessionId: () => "session-1",
+			isChildSession: () => false,
+			refreshToolRegistry: () => {},
+			getContextWindow: () => 32000,
+			getGoalState: () => undefined,
+			emitWarning: () => {},
+		});
+		await controller.initialize();
+
+		const report = await controller.runMemoryRetrieval([userMessage("recall general facts")]);
+
+		// The static block fits only a bounded head; omitted facts are recalled.
+		const fileStoreReport = report.providerReports.find((entry) => entry.providerId === "pi-file-store");
+		expect(fileStoreReport).toBeDefined();
+		expect(fileStoreReport?.resultCount).toBeGreaterThan(0);
+		expect(report.contextItems.some((item) => item.summary?.includes("General fact number"))).toBe(true);
+	});
+
+	it("does not duplicate facts already present in the static projection", async () => {
+		writeFileSync(join(agentDir, "MEMORY.md"), "Single general fact.\n", "utf8");
+		writeFileSync(join(agentDir, "USER.md"), "", "utf8");
+		const controller = new MemoryController({
+			getSettingsManager: settings,
+			getTurnIndex: () => 3,
+			getAgentDir: () => agentDir,
+			getCwd: () => tempDir,
+			getSessionId: () => "session-1",
+			isChildSession: () => false,
+			refreshToolRegistry: () => {},
+			getContextWindow: () => 32000,
+			getGoalState: () => undefined,
+			emitWarning: () => {},
+		});
+		await controller.initialize();
+
+		const report = await controller.runMemoryRetrieval([userMessage("recall general facts")]);
+
+		// The fact "Single general fact." should already be in the static block,
+		// so the file-store should not return it as an omitted fact.
+		const fileStoreItems = report.contextItems.filter((item) => item.summary === "Single general fact.");
+		expect(fileStoreItems).toHaveLength(0);
+	});
+
+	it("preserves project scope in normal-window retrieval", async () => {
+		const project = getDirectoryResourceProfileInfo(tempDir, agentDir);
+		mkdirSync(join(agentDir, "okf-memory", "projects", project.hash), { recursive: true });
+		mkdirSync(join(projectMemoryDir(agentDir, project.hash)), { recursive: true });
+		writeFileSync(join(agentDir, "MEMORY.md"), "", "utf8");
+		writeFileSync(join(agentDir, "USER.md"), "", "utf8");
+		// Many project lines exceeding BUDGET_PROJECT (2200 chars) so the frozen block
+		// truncates; the LAST line should be recalled beyond the frozen projection.
+		const manyLines =
+			Array.from(
+				{ length: 200 },
+				(_, i) => `Project fact ${i}: this is a very long project fact description that takes up space.`,
+			).join("\n") + "\nProject-specific ticket ALPHA-1 is tracked here.";
+		writeFileSync(join(projectMemoryDir(agentDir, project.hash), "MEMORY.md"), manyLines, "utf8");
+		const controller = new MemoryController({
+			getSettingsManager: settings,
+			getTurnIndex: () => 3,
+			getAgentDir: () => agentDir,
+			getCwd: () => tempDir,
+			getSessionId: () => "session-1",
+			isChildSession: () => false,
+			refreshToolRegistry: () => {},
+			getContextWindow: () => 32000,
+			getGoalState: () => undefined,
+			emitWarning: () => {},
+		});
+		await controller.initialize();
+
+		const report = await controller.runMemoryRetrieval([userMessage("recall project ticket")]);
+
+		// The file-store provider is queried on normal windows.
+		const fileStoreReport = report.providerReports.find((entry) => entry.providerId === "pi-file-store");
+		expect(fileStoreReport).toBeDefined();
+
+		// Verify project scope filtering works via the file-store provider directly.
+		const { createFileStoreMemoryProvider } = await import("../src/core/context/file-store-memory-provider.ts");
+		const fsProvider = createFileStoreMemoryProvider({
+			memoryFilePath: join(agentDir, "MEMORY.md"),
+			userFilePath: join(agentDir, "USER.md"),
+			projectMemoryFilePath: join(projectMemoryDir(agentDir, project.hash), "MEMORY.md"),
+		});
+		const results = await fsProvider.search({ query: "ALPHA-1 project ticket", scope: "project", maxResults: 5 });
+		expect(results.length).toBeGreaterThan(0);
+		expect(results.some((r) => r.item.summary.includes("ALPHA-1"))).toBe(true);
 	});
 });

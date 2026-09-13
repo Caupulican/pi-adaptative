@@ -47,6 +47,23 @@ describe("file-store context memory provider", () => {
 		expect(standingUserHits.map((hit) => hit.item.summary)).toEqual(["User prefers concise technical answers."]);
 	});
 
+	it("normal-window fallback never reads USER.md", async () => {
+		writeFileSync(memoryFilePath, "Useful architecture fact.\n");
+		writeFileSync(userFilePath, "Private persona line.\n");
+		const options = {
+			memoryFilePath,
+			get userFilePath(): string {
+				throw new Error("USER source accessed");
+			},
+			compact: false,
+		};
+		const provider = createFileStoreMemoryProvider(options);
+		expect(await provider.search({ query: "architecture", maxResults: 5 })).toHaveLength(1);
+		// Negative control: compact fallback really accesses USER, so the tripwire is live.
+		options.compact = true;
+		expect(() => createFileStoreMemoryProvider(options)).toThrow("USER source accessed");
+	});
+
 	it("filters structural headings and threat-like lines", async () => {
 		writeFileSync(
 			memoryFilePath,
@@ -58,6 +75,27 @@ describe("file-store context memory provider", () => {
 
 		const hits = await provider.search({ query: "artifact instructions", maxResults: 10 });
 		expect(hits.map((hit) => hit.item.summary)).toEqual(["Safe artifact note."]);
+	});
+
+	it("safely ignores oversized source files", async () => {
+		// Create a file larger than the 512_000 byte limit.
+		const bigContent = "A".repeat(512_001);
+		writeFileSync(memoryFilePath, bigContent, "utf8");
+		writeFileSync(userFilePath, "", "utf8");
+		const provider = createFileStoreMemoryProvider({ memoryFilePath, userFilePath });
+
+		const hits = await provider.search({ query: "anything", maxResults: 10 });
+		expect(hits).toHaveLength(0);
+	});
+
+	it("matches Unicode tokens in memory lines", async () => {
+		writeFileSync(memoryFilePath, "Les résumés sont café et naïve.\n", "utf8");
+		writeFileSync(userFilePath, "", "utf8");
+		const provider = createFileStoreMemoryProvider({ memoryFilePath, userFilePath });
+
+		const hits = await provider.search({ query: "café", scope: "global", maxResults: 5 });
+		expect(hits.length).toBeGreaterThanOrEqual(1);
+		expect(hits[0]?.item.summary).toContain("café");
 	});
 });
 
@@ -82,6 +120,13 @@ describe("file-store context memory provider project source", () => {
 			});
 			const globalHits = await provider.search({ query: "Alpha make", scope: "global", maxResults: 5 });
 			expect(globalHits.map((hit) => hit.item.summary)).not.toContain("Project: Alpha builds with make");
+			const mixed = await provider.search({ query: "git Alpha", maxResults: 5 });
+			expect(mixed).toHaveLength(2);
+			expect(new Set(mixed.map(({ item }) => item.id)).size).toBe(2);
+			for (const { item } of mixed) expect(await provider.fetch(item.refs[0]!)).toEqual(item);
+			const projectRef = projectHits[0]!.item.refs[0]!;
+			expect(projectRef.uri).toBe("file-store:project/MEMORY.md#line-1");
+			expect(await provider.fetch({ ...projectRef, scope: "global" })).toBeUndefined();
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

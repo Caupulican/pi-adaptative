@@ -3,7 +3,7 @@
  * but still budget-gated, and only ever takes effect when `enabled` (retrieval itself) is true. Proves the
  * injected block is (a) additive-only (never mutates existing messages), (b) wrapped in
  * the existing untrusted-content boundary with a correct source label, (c) bounded by
- * memory-prompt-block.ts's character caps, and (d) never written to the transcript.
+ * the shared estimated-token prompt budget without clipping facts, and (d) never written to the transcript.
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -203,12 +203,12 @@ describe("AgentSession live memory prompt inclusion (safe-auto, budget-gated)", 
 		expect(lastText).toContain("Local memory");
 	});
 
-	it("R5: an oversized OKF description is truncated in the actual injected block", async () => {
+	it("R5: a long OKF description that fits the token budget reaches the model whole", async () => {
 		const harness = await createHarness({
 			settings: { contextPolicy: { memory: { enabled: true, maxResults: 5, includeInPrompt: true } } },
 		});
 		harnesses.push(harness);
-		const hugeDescription = `Widget rollout plan details: ${"x".repeat(MEMORY_PROMPT_BLOCK_MAX_CHARS_PER_ITEM * 3)}`;
+		const hugeDescription = `Widget rollout plan details: ${"x".repeat(MEMORY_PROMPT_BLOCK_MAX_CHARS_PER_ITEM * 3)}. Exception: production is excluded.`;
 		writeOkfFile(harness, "note.okf.md", okfDocument("Widget rollout plan", hugeDescription, "Body."));
 
 		let captured: Context | undefined;
@@ -221,8 +221,8 @@ describe("AgentSession live memory prompt inclusion (safe-auto, budget-gated)", 
 		await harness.session.prompt("what was the widget rollout plan?");
 
 		const lastText = contextUserTexts(captured as Context).at(-1) ?? "";
-		expect(lastText).toContain("…");
-		expect(lastText.length).toBeLessThan(hugeDescription.length);
+		expect(lastText).toContain(hugeDescription);
+		expect(lastText).toContain("Exception: production is excluded.");
 	});
 
 	it("R6: maxResults caps the number of items surfaced in the injected block", async () => {

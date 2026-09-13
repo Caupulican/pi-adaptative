@@ -489,6 +489,11 @@ export class ReflectionController {
 	private cueStateCacheInitialized = false;
 	private cueStateCache: CurrentTurnReflectionCueState | undefined;
 	private activeRunToken: string | undefined;
+	/** True when the memory system is ICM — gates legacy OKF/USER/MEMORY I/O and automatic reflection. */
+	private isIcmMode(): boolean {
+		return this.deps.getSettingsManager().getMemorySystem?.() === "icm";
+	}
+
 	/** True only while the one dedicated reflection turn is running; gates cue visibility entirely. */
 	private reflectionTurnInFlight = false;
 	/** Bounded owner-evidence ledger for this branch; undefined until first read (rebuilt from entries). */
@@ -518,6 +523,8 @@ export class ReflectionController {
 	}
 
 	private isAutomaticReflectionEnabled(): boolean {
+		// ICM mode disables all legacy automatic reflection jobs and OKF/legacy memory I/O.
+		if (this.isIcmMode()) return false;
 		const settingsManager = this.deps.getSettingsManager();
 		const settings = resolveAutoLearnSettings(
 			settingsManager.getAutonomySettings().mode,
@@ -1151,6 +1158,12 @@ export class ReflectionController {
 	 * sentence means is model work and is not judged here.
 	 */
 	async admitUserPreference(request: UserPreferenceAdmissionRequest): Promise<UserPreferenceAdmissionResult> {
+		if (this.isIcmMode())
+			return {
+				outcome: "candidate",
+				reasonCode: "icm_memory_offline",
+				message: "Legacy preference admission is offline in ICM.",
+			};
 		const settingsManager = this.deps.getSettingsManager();
 		const policy = settingsManager.getLearningPolicySettings();
 		const autoLearn = resolveAutoLearnSettings(
@@ -1672,6 +1685,8 @@ export class ReflectionController {
 		/** True only when every turn in this pass explicitly asked Pi to remember durable information. */
 		explicitUserMemoryInstruction?: boolean;
 	}): Promise<ReflectionResult | null> {
+		// ICM mode: zero legacy MEMORY.md/USER.md/OKF reads/writes and no automatic reflection jobs.
+		if (this.isIcmMode()) return null;
 		if (this.deps.isChildSession() || this.deps.isDisposed()) return null;
 		const plan = decideDemand(input.signals);
 		if (plan.act === "skip") return null;
@@ -1881,6 +1896,7 @@ export class ReflectionController {
 	 * the change history stays complete and a change cannot be rolled back twice.
 	 */
 	async rollbackLearningWrite(auditId: string): Promise<{ ok: boolean; reason: string }> {
+		if (this.isIcmMode()) return { ok: false, reason: "icm_memory_offline" };
 		if (this.deps.isDisposed()) return { ok: false, reason: "session_disposed" };
 
 		const audits = this.getLearningAuditRecords();
@@ -1927,6 +1943,8 @@ export class ReflectionController {
 				break;
 			}
 			case "okf_remove": {
+				// ICM mode: zero legacy OKF reads/writes.
+				if (this.isIcmMode()) return { ok: false, reason: "icm_mode_no_legacy_okf" };
 				const target = parseOkfRollbackTarget(rollback.target);
 				if (!target) return { ok: false, reason: "missing_rollback_target" };
 				const applied = await this.deps.rollbackStructuredReflectionWrite({
@@ -1938,6 +1956,7 @@ export class ReflectionController {
 				break;
 			}
 			case "okf_organize": {
+				if (this.isIcmMode()) return { ok: false, reason: "icm_mode_no_legacy_okf" };
 				if (!rollback.target || rollback.previous === undefined) {
 					return { ok: false, reason: "missing_rollback_target" };
 				}
@@ -1985,6 +2004,18 @@ export class ReflectionController {
 	 * of recording a success that never happened.
 	 */
 	private async _applyReflectionWrite(write: ReflectionWrite, signal?: AbortSignal): Promise<ReflectionApplyResult> {
+		// ICM mode: zero legacy MEMORY.md/USER.md/OKF reads/writes. Promote_skill still lands
+		// under the skills dir (ICM reference), never OKF bookkeeping.
+		if (
+			this.isIcmMode() &&
+			(write.kind === "okf_add" ||
+				write.kind === "okf_organize" ||
+				write.kind === "memory_add" ||
+				write.kind === "memory_replace" ||
+				write.kind === "memory_remove")
+		) {
+			return { applied: false };
+		}
 		// R7 memory-to-behavior: a recurring procedure is compiled into an executable skill file rather
 		// than stored as a flat fact. Written under the agent skills dir so it loads like any user skill.
 		if (write.kind === "promote_skill") {

@@ -365,6 +365,7 @@ export {
 	type DirectoryResourceProfileInfo,
 	getDirectoryResourceProfileInfo,
 	type ImageSettings,
+	type MemorySystem,
 	matchesResourceProfilePattern,
 	type PackageSource,
 	type ResourceProfileFilterSettings,

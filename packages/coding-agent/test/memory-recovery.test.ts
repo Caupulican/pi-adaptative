@@ -232,7 +232,7 @@ describe("FileStoreProvider recovery evidence", () => {
 	it.each(["remove", "replace"] as const)(
 		"allows a strict %s reduction of legacy over-budget content",
 		async (action) => {
-			const original = `${"x".repeat(1400)}\nobsolete fact\n`;
+			const original = `${"x".repeat(512_000)}\nobsolete fact\n`;
 			writeFileSync(memoryPath, original);
 			const provider = await initialize();
 			const result = await execute(provider, {
@@ -243,16 +243,22 @@ describe("FileStoreProvider recovery evidence", () => {
 			});
 			const reduced = original.replace("obsolete fact", action === "replace" ? "short" : "");
 			expect(result).toMatchObject({
-				details: { success: true, overBudget: true, currentChars: reduced.length, budgetChars: 1200 },
+				details: {
+					success: true,
+					overBudget: true,
+					currentBytes: Buffer.byteLength(reduced, "utf8"),
+					resourceCeilingBytes: 512000,
+				},
 			});
 			expect(result.isError).not.toBe(true);
-			expect(text(result)).toContain("still over budget");
+			expect(text(result)).toContain("Resource ceiling exceeded");
 			expect(readFileSync(memoryPath, "utf8")).toBe(reduced);
 			expect(provider.generalMemoryOverBudget()).toBe(true);
 			expect(
 				(await execute(provider, { action: "remove", target: "memory", oldContent: "x".repeat(300) })).details,
 			).toMatchObject({ success: true, overBudget: false });
-			expect(provider.generalMemoryOverBudget()).toBe(false);
+			expect(Buffer.byteLength(readFileSync(memoryPath, "utf8"), "utf8")).toBeLessThan(512_000);
+			expect(provider.generalMemoryOverBudget()).toBe(true); // Prompt view remains bounded separately.
 		},
 	);
 
@@ -262,12 +268,12 @@ describe("FileStoreProvider recovery evidence", () => {
 		{ action: "replace", oldContent: "x", content: "longer" },
 		{ action: "remove", oldContent: "" },
 	])("rejects non-reducing over-budget intent $action $content without changing state", async (params) => {
-		const original = "x".repeat(1400);
+		const original = "x".repeat(512_001);
 		writeFileSync(memoryPath, original);
 		const provider = await initialize();
 		const state = readFileSync(statePath, "utf8");
 		const result = await execute(provider, { target: "memory", ...params });
-		expect(result).toMatchObject({ isError: true, details: { success: false, error: "Memory budget exceeded" } });
+		expect(result).toMatchObject({ isError: true, details: { success: false, error: "Resource overflow" } });
 		expect(readFileSync(memoryPath, "utf8")).toBe(original);
 		expect(readFileSync(statePath, "utf8")).toBe(state);
 	});

@@ -1,4 +1,4 @@
-import { estimateTokensFromChars } from "./context-item.ts";
+import { estimateLineCount, estimateTokensFromChars, estimateTokensFromText } from "./context-item.ts";
 
 export interface MemoryPromptBudgetInput {
 	contextWindow?: number | null;
@@ -25,6 +25,9 @@ const NORMAL_MAX_TOKENS = 800;
 const DEFAULT_MAX_RESULTS = 5;
 const MIN_MEMORY_LINE_CHARS = 48;
 
+/** Generous bounded safety ceiling for maxChars, independent of token/line budget. */
+const GENEROUS_MAX_CHARS = 64_000;
+
 function disabled(reason: string, compact = false): MemoryPromptBudget {
 	return {
 		enabled: false,
@@ -37,8 +40,33 @@ function disabled(reason: string, compact = false): MemoryPromptBudget {
 	};
 }
 
-function conservativeCharsForTokens(tokens: number): number {
-	return Math.max(0, tokens * 4);
+/**
+ * Checks whether a text fits within a memory prompt budget.
+ *
+ * Enforces:
+ * - `budget.enabled`
+ * - `maxLines` via `estimateLineCount`
+ * - `maxEstimatedTokens` via `estimateTokensFromText`
+ * - `maxChars` strictly as a JS-character count (NOT UTF-8 bytes)
+ *
+ * The `estimateTokensFromText` estimator is approximate (chars / 4);
+ * no model tokenizer is used here. It must never be treated as
+ * semantically critical.
+ */
+export function memoryTextFitsBudget(text: string, budget: MemoryPromptBudget): boolean {
+	if (!budget.enabled) return false;
+	if (
+		[budget.maxLines, budget.maxEstimatedTokens, budget.maxChars].some(
+			(limit) => !Number.isFinite(limit) || limit < 0,
+		)
+	) {
+		return false;
+	}
+	if (estimateLineCount(text) > budget.maxLines) return false;
+	if (estimateTokensFromText(text) > budget.maxEstimatedTokens) return false;
+	// maxChars is a JS-character compatibility/resource bound, NOT UTF-8 bytes.
+	if (text.length > budget.maxChars) return false;
+	return true;
 }
 
 export function resolveMemoryPromptBudget(input: MemoryPromptBudgetInput): MemoryPromptBudget {
@@ -47,15 +75,17 @@ export function resolveMemoryPromptBudget(input: MemoryPromptBudgetInput): Memor
 
 	const compact = contextWindow <= COMPACT_CONTEXT_WINDOW_MAX;
 	const currentPromptTokens = Math.max(0, Math.trunc(input.currentPromptTokens ?? 0));
+	if (!Number.isFinite(currentPromptTokens) || currentPromptTokens < 0)
+		return disabled("invalid_current_prompt_tokens");
 	const reservedTokens = Math.max(0, Math.trunc(input.reservedTokens ?? 0));
+	if (!Number.isFinite(reservedTokens) || reservedTokens < 0) return disabled("invalid_reserved_tokens");
 	const availableTokens = Math.floor(contextWindow) - currentPromptTokens - reservedTokens;
 	if (availableTokens <= 0) return disabled("no_context_headroom", compact);
 
 	const configuredMaxResults = Math.max(1, Math.trunc(input.configuredMaxResults ?? DEFAULT_MAX_RESULTS));
 	if (compact) {
 		const maxEstimatedTokens = Math.min(COMPACT_MAX_TOKENS, Math.max(0, availableTokens));
-		const maxChars = conservativeCharsForTokens(maxEstimatedTokens);
-		if (maxEstimatedTokens < estimateTokensFromChars(MIN_MEMORY_LINE_CHARS) || maxChars < MIN_MEMORY_LINE_CHARS) {
+		if (maxEstimatedTokens < estimateTokensFromChars(MIN_MEMORY_LINE_CHARS)) {
 			return disabled("memory_block_cannot_fit_minimum_line", true);
 		}
 		return {
@@ -63,14 +93,13 @@ export function resolveMemoryPromptBudget(input: MemoryPromptBudgetInput): Memor
 			compact: true,
 			maxLines: COMPACT_MAX_LINES,
 			maxEstimatedTokens,
-			maxChars,
+			maxChars: GENEROUS_MAX_CHARS,
 			maxResults: Math.min(configuredMaxResults, 3),
 		};
 	}
 
 	const percentCap = Math.max(200, Math.floor(contextWindow * 0.03));
 	const maxEstimatedTokens = Math.min(NORMAL_MAX_TOKENS, percentCap, availableTokens);
-	const maxChars = conservativeCharsForTokens(maxEstimatedTokens);
 	if (maxEstimatedTokens < estimateTokensFromChars(MIN_MEMORY_LINE_CHARS)) {
 		return disabled("memory_block_cannot_fit_minimum_line", false);
 	}
@@ -79,7 +108,7 @@ export function resolveMemoryPromptBudget(input: MemoryPromptBudgetInput): Memor
 		compact: false,
 		maxLines: NORMAL_MAX_LINES,
 		maxEstimatedTokens,
-		maxChars,
+		maxChars: GENEROUS_MAX_CHARS,
 		maxResults: Math.min(configuredMaxResults, 10),
 	};
 }

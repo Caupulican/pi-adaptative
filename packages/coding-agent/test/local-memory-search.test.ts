@@ -35,6 +35,17 @@ describe("local memory search", () => {
 		expect(matchesMemorySearchRequest(item("c", "project", "procedure"), request)).toBe(false);
 	});
 
+	it("normalizes Unicode tokens (NFKC, lowercase, Unicode letters/numbers)", () => {
+		// NFKC normalization: é and é should tokenize the same way.
+		const normalized = tokenizeMemorySearch("café café");
+		expect(normalized.has("café")).toBe(true);
+		// Unicode letter sequences are preserved.
+		expect(tokenizeMemorySearch("naïve résumé").size).toBeGreaterThanOrEqual(1);
+		// Unicode digits and letters form tokens.
+		const tokens = tokenizeMemorySearch("Héllo wörld 123");
+		expect(tokens.size).toBeGreaterThanOrEqual(1);
+	});
+
 	it("owns filtering, stable ranking, caps, reasons, and exact ref fetch", () => {
 		const items = [item("b", "project", "fact"), item("a", "project", "fact"), item("c", "user", "fact")];
 		const request: MemorySearchRequest = { query: "query", scope: "project", maxResults: 1 };

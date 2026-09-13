@@ -19,6 +19,7 @@ import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import type { Extension } from "./extensions/types.ts";
 import { isCurrentSessionReflectionEnabled, resolveAutoLearnSettings } from "./learning/auto-learn-settings.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
+import { ICM_MEMORY_GUIDANCE } from "./memory/providers/icm.ts";
 import {
 	enforceModelCapabilitySystemPromptBudget,
 	MODEL_CAPABILITY_TOOL_GUIDELINES_MAX_CHARS,
@@ -198,6 +199,8 @@ export class SystemPromptBuilder {
 	}
 
 	private _buildStaticMemoryPrompt(profile: ModelCapabilityProfile): string | undefined {
+		// ICM mode: avoid reading legacy MEMORY.md/USER.md/OKF bodies automatically.
+		if (this.isIcmMode()) return ICM_MEMORY_GUIDANCE;
 		const budget =
 			profile.class !== "full" && profile.contextWindow !== undefined
 				? resolveMemoryPromptBudget({ contextWindow: profile.contextWindow, configuredMaxResults: 3 })
@@ -241,6 +244,11 @@ export class SystemPromptBuilder {
 		return "PI TOOL APPLICABILITY: active means available, not required. Use extension/project/account tools only when the current request explicitly asks for them or genuinely depends on their data/action; cwd, repository, prior session, wildcard profile, or tool guidance alone are not triggers. Missing optional credentials never block unrelated work or justify speculative secret_store use.";
 	}
 
+	/** True when the configured memory system is ICM (Interleaved Context Memory). */
+	private isIcmMode(): boolean {
+		return this.deps.getSettingsManager().getMemorySystem?.() === "icm";
+	}
+
 	private _buildProjectInstructionIsolationPrompt(profile: ModelCapabilityProfile): string | undefined {
 		return buildProjectInstructionIsolationPrompt({
 			mode: this.deps.getSettingsManager().getProjectContextFiles?.(),
@@ -268,16 +276,18 @@ export class SystemPromptBuilder {
 		// rendered once by the core operating contract (OWNER_AUTHORIZATION_RULE in system-prompt.ts)
 		// for every capability class; this block adds only the autonomy grant, the reflection
 		// contract and the skill-conflict rule.
-		const reflectionContract = isCurrentSessionReflectionEnabled(autoLearn)
-			? "ROOT REFLECTION: decide and apply warranted durable learning only in the single host-scheduled reflection turn after completed work; do not schedule additional reflection turns or delegate it."
-			: "Root reflection is disabled.";
+		// ICM leaves legacy automatic reflection offline, including its scheduling guidance.
+		const reflectionContract =
+			!this.isIcmMode() && isCurrentSessionReflectionEnabled(autoLearn)
+				? "ROOT REFLECTION: decide and apply warranted durable learning only in the single host-scheduled reflection turn after completed work; do not schedule additional reflection turns or delegate it."
+				: "Root reflection is disabled.";
 		if (profile.class !== "full") {
 			return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Active task primary. ${SKILL_CONFLICT_RESOLUTION_RULE_COMPACT}`;
 		}
 		if (autonomy.mode === "full") {
 			return `PI AUTONOMY full (standing): ${reflectionContract} Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; validation plus rollback evidence. ${SKILL_CONFLICT_RESOLUTION_RULE} Owner authorization required for publish/release/push/tag, credential disclosure/provider authentication/out-of-grant secret operations, destructive user-data deletion, exposed services, or more authority. Current-turn evidence is a cue, not proof; active task stays primary.`;
 		}
-		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Query memory and use bounded tools already available in this session. ${SKILL_CONFLICT_RESOLUTION_RULE} Explicit handoff authorizes ordinary prerequisites and granted work, retaining scope and conditions. Active task primary.`;
+		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} ${this.isIcmMode() ? "Read workspace artifacts on demand" : "Query memory"} and use bounded tools already available in this session. ${SKILL_CONFLICT_RESOLUTION_RULE} Explicit handoff authorizes ordinary prerequisites and granted work, retaining scope and conditions. Active task primary.`;
 	}
 
 	private _buildWorkLifecyclePrompt(toolNames: readonly string[]): string | undefined {

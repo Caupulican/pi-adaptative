@@ -8,15 +8,16 @@ import { DEFAULT_HTTP_IDLE_TIMEOUT_MS } from "../src/core/http-dispatcher.ts";
 import {
 	DEFAULT_TOOL_EXECUTION_CONCURRENCY,
 	getDirectoryResourceProfileInfo,
+	isValidMemorySystem,
 	SettingsManager,
 } from "../src/core/settings-manager.ts";
 import { validateSkillName } from "../src/core/skills.ts";
 
-describe("SettingsManager", () => {
-	const testDir = join(process.cwd(), "test-settings-tmp");
-	const agentDir = join(testDir, "agent");
-	const projectDir = join(testDir, "project");
+const testDir = join(process.cwd(), "test-settings-tmp");
+const agentDir = join(testDir, "agent");
+const projectDir = join(testDir, "project");
 
+describe("SettingsManager", () => {
 	beforeEach(() => {
 		// Clean up and create fresh directories
 		if (existsSync(testDir)) {
@@ -2199,6 +2200,16 @@ describe("SettingsManager", () => {
 });
 
 describe("workbench settings", () => {
+	beforeEach(() => {
+		if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+		mkdirSync(agentDir, { recursive: true });
+		mkdirSync(join(projectDir, ".pi"), { recursive: true });
+	});
+
+	afterEach(() => {
+		if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+	});
+
 	it("gives the workbench the mouse by default and persists a hand-over to the terminal", () => {
 		const manager = SettingsManager.inMemory({});
 		expect(manager.getWorkbenchSettings()).toEqual({
@@ -2252,6 +2263,83 @@ describe("workbench settings", () => {
 		).toEqual({
 			hostTurn: undefined,
 			bookkeeping: "inherit",
+		});
+	});
+
+	describe("memory system", () => {
+		it("defaults to okf", () => {
+			const manager = SettingsManager.inMemory({});
+			expect(manager.getMemorySystem()).toBe("okf");
+		});
+
+		it("reads icm when set", () => {
+			const manager = SettingsManager.inMemory({ memorySystem: "icm" });
+			expect(manager.getMemorySystem()).toBe("icm");
+		});
+
+		it("persists okf from disk", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ memorySystem: "okf" }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getMemorySystem()).toBe("okf");
+		});
+
+		it("persists icm from disk", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ memorySystem: "icm" }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getMemorySystem()).toBe("icm");
+		});
+
+		it("setMemorySystem persists globally and round-trips", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setMemorySystem("icm");
+			await manager.flush();
+			expect(manager.getMemorySystem()).toBe("icm");
+			const saved = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
+			expect(saved.memorySystem).toBe("icm");
+		});
+
+		it("setMemorySystem('okf') switches back to okf", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setMemorySystem("icm");
+			await manager.flush();
+			manager.setMemorySystem("okf");
+			await manager.flush();
+			expect(manager.getMemorySystem()).toBe("okf");
+		});
+
+		it("setMemorySystem throws on invalid values", () => {
+			const manager = SettingsManager.inMemory({});
+			expect(() => manager.setMemorySystem("unknown" as unknown as "okf")).toThrow("Invalid memory system");
+		});
+
+		it("project scope stores memorySystem in project settings", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setMemorySystem("icm", "project");
+			await manager.flush();
+			const saved = JSON.parse(readFileSync(join(projectDir, ".pi", "settings.json"), "utf-8"));
+			expect(saved.memorySystem).toBe("icm");
+		});
+
+		it("round-trips memorySystem through get/set for both directions", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ memorySystem: "okf" }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setMemorySystem("icm");
+			await manager.flush();
+			expect(manager.getMemorySystem()).toBe("icm");
+			manager.setMemorySystem("okf");
+			await manager.flush();
+			expect(manager.getMemorySystem()).toBe("okf");
+		});
+
+		it("isValidMemorySystem validates only okf and icm", () => {
+			expect(isValidMemorySystem("okf")).toBe(true);
+			expect(isValidMemorySystem("icm")).toBe(true);
+			expect(isValidMemorySystem("unknown")).toBe(false);
+			expect(isValidMemorySystem(undefined)).toBe(false);
+			expect(isValidMemorySystem(123)).toBe(false);
 		});
 	});
 });

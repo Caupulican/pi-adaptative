@@ -165,12 +165,12 @@ describe("learning apply policy — audit and rollback", () => {
 			reflectionSourceConfidence: 50,
 		});
 
-		// Fill MEMORY.md to the edge of the file-store's budget (2200 chars) so the gate's "apply"
+		// Fill MEMORY.md near the file-store's resource ceiling (512_000 UTF-8 bytes) so the gate's "apply"
 		// decision cannot actually land on disk — the memory tool refuses with details.success:false
-		// ("Memory budget exceeded") rather than throwing.
+		// ("Resource overflow") rather than throwing.
 		const fact = "Speculative fact that will not fit in the remaining budget";
-		const budgetMemory = 2200; // mirrors FileStoreProvider's private BUDGET_MEMORY
-		const fillerLength = budgetMemory + 3 - fact.length; // post-add content lands 5 chars over budget
+		const budgetMemory = 512_000; // mirrors FileStoreProvider's public RESOURCE_CEILING
+		const fillerLength = budgetMemory - fact.length - 1; // post-add content exceeds the resource ceiling
 		writeFileSync(join(agentDir, "MEMORY.md"), `${"x".repeat(fillerLength)}\n`, "utf-8");
 
 		scriptReflection(session, [{ kind: "memory_add", section: "MEMORY", text: fact }]);
@@ -202,8 +202,8 @@ describe("learning apply policy — audit and rollback", () => {
 		const session = await newSession({ enabled: false });
 
 		const fact = "Legacy fact that will not fit in the remaining budget";
-		const budgetMemory = 2200;
-		const fillerLength = budgetMemory + 3 - fact.length;
+		const budgetMemory = 512_000;
+		const fillerLength = budgetMemory - fact.length - 1;
 		writeFileSync(join(agentDir, "MEMORY.md"), `${"x".repeat(fillerLength)}\n`, "utf-8");
 
 		scriptReflection(session, [{ kind: "memory_add", section: "MEMORY", text: fact }]);

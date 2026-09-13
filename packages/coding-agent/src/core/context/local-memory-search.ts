@@ -6,7 +6,12 @@ export interface LocalMemorySearchStrategy {
 }
 
 export function tokenizeMemorySearch(text: string): Set<string> {
-	return new Set(text.toLowerCase().match(/[a-z0-9_/-]+/g) ?? []);
+	return new Set(
+		text
+			.normalize("NFKC")
+			.toLowerCase()
+			.match(/[\p{L}\p{N}][\p{L}\p{N}_/-]*/gu) ?? [],
+	);
 }
 
 export function tokenOverlapScore(queryTokens: ReadonlySet<string>, textParts: Array<string | undefined>): number {

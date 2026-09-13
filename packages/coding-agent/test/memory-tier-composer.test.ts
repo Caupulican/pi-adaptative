@@ -46,24 +46,51 @@ describe("composeTieredMemoryPromptBlock", () => {
 		expect(lines[3]).toContain("memory:automata");
 	});
 
-	it("omits stale/conflicting/secret-like candidates and truncates oversized summaries", () => {
+	it("omits stale/conflicting/secret-like candidates and does NOT truncate oversized summaries", () => {
 		const budget = resolveMemoryPromptBudget({ contextWindow: 1024 });
 		const result = composeTieredMemoryPromptBlock(
 			[
 				candidate({ id: "ok", tier: "standing", summary: "safe preference" }),
 				candidate({ id: "stale", stale: true, summary: "old" }),
 				candidate({ id: "conflict", conflict: "current instruction wins", summary: "bad" }),
-				candidate({ id: "secret", summary: "api_key=abc123" }),
+				candidate({ id: "secret", summary: "api_key=sk-12345678" }),
 				candidate({ id: "huge", summary: "x".repeat(2000) }),
 			],
 			budget,
 		);
 
-		expect(result.includedCount).toBe(2);
+		expect(result.includedCount).toBe(1);
 		expect(result.text).toContain("safe preference");
-		expect(result.text).toContain("…");
-		expect(result.diagnostics.map((diagnostic) => diagnostic.reason)).toEqual(
-			expect.arrayContaining(["stale_or_conflicting", "secret_like"]),
+		expect(result.text).not.toContain("…"); // No truncation: facts are never cut midway
+		const reasons = result.diagnostics.map((diagnostic) => diagnostic.reason);
+		expect(reasons).toContain("stale_or_conflicting");
+		expect(reasons).toContain("secret_like");
+		expect(reasons).toContain("oversized_item");
+	});
+
+	it("allows entire facts that fit the shared budget, never truncates them", () => {
+		const budget = resolveMemoryPromptBudget({ contextWindow: 32_000 });
+		const longSummary = "x".repeat(500); // Previously capped at 300 chars, now allowed if it fits the budget
+		const result = composeTieredMemoryPromptBlock(
+			[candidate({ id: "long", tier: "standing", summary: longSummary })],
+			budget,
 		);
+
+		expect(result.includedCount).toBe(1);
+		expect(result.text).toContain(longSummary);
+		expect(result.text).not.toContain("…"); // No truncation
+	});
+
+	it("uses memoryTextFitsBudget with JS character count, not UTF-8 bytes", () => {
+		const budget = resolveMemoryPromptBudget({ contextWindow: 32_000 });
+		// Multi-byte UTF-8: "é" is 1 JS char but 2 UTF-8 bytes
+		const text = "é".repeat(100); // 100 JS chars
+		const result = composeTieredMemoryPromptBlock(
+			[candidate({ id: "unicode", tier: "standing", summary: text })],
+			budget,
+		);
+
+		// Should include because 100 JS chars fits within the budget
+		expect(result.includedCount).toBe(1);
 	});
 });

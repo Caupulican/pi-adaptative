@@ -406,7 +406,17 @@ Semantic memory packing only targets tool results and Automata/Mind custom conte
 }
 ```
 
-### Context Memory
+### Memory system
+
+`memorySystem` selects one active system: `"okf"` (the backward-compatible default) or `"icm"`. This is separate from retrieval controls. The inactive system is offline, not deleted.
+
+Use `/memory system` to inspect the selected system, `/memory system icm` to switch to ICM, and `/memory system okf` to return. Switching applies to the current directory profile and requires an idle session; it rebuilds memory providers and tools rather than requiring a process restart. A failed switch is reported as a failure, not as successful activation.
+
+**ICM mode** uses ordinary Markdown workspaces and existing folder pipelines. Only routing and scoped path pointers are surfaced automatically; references and working artifacts are read or searched on demand with native tools. Large files remain on disk and can be read in pages. Read-response and model-context limits are resource controls, not storage quotas. Reference contents remain evidence, not tool authority or new security instructions.
+
+Legacy file-store, OKF, transcript recall, memory CRUD, and automatic memory-reflection paths are inactive in ICM mode. Existing legacy files are preserved unchanged; switching does not migrate or delete them. Switching back restores their availability. Historical generated legacy recall is excluded from the active ICM provider view without deleting the session transcript.
+
+### Context Memory (OKF mode)
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -415,7 +425,7 @@ Semantic memory packing only targets tool results and Automata/Mind custom conte
 | `contextPolicy.memory.maxResults` | number | `5` | Maximum retrieval results before tier/budget pruning; clamped to 1-20 |
 | `contextPolicy.memory.allowExternalEgress` | boolean | `false` | Explicitly allow eligible external memory providers to receive bounded, non-secret-like query text |
 
-For models with `contextWindow <= 2048`, provider-visible memory is capped to 10 lines and about 200 estimated tokens total. If standing/current-work/long-term memory cannot fit that cap, Pi skips the memory block rather than overflowing context. `MEMORY.md`/`USER.md` stay in the static file-store prompt on normal windows; Pi uses the retrieval view for those files only when that static block cannot fit a compact model budget, avoiding duplicate prompt content. Custom local memory layers, such as Automata, should register a context provider with `pi.registerContextMemoryProvider`; core ships only local file-store and OKF readers. Legacy providers must declare `egress: "local"` to participate in safe-auto recall; omitted classifications fail closed as external. External memory egress requires the visible `/settings` consent or `allowExternalEgress: true`, remains bounded to 2,000 characters, and rejects labeled credentials, bearer/basic tokens, common raw provider tokens, private keys, and signed URLs. Every legacy provider recall page is centrally source-labeled and fenced as untrusted data. Live extension load/unload immediately rebuilds the memory generation, activating new providers and shutting down/removing only those owned by the unloaded extension.
+For models with `contextWindow <= 2048`, provider-visible memory is capped to 10 lines and about 200 estimated tokens total. If standing/current-work/long-term memory cannot fit that cap, Pi skips the memory block rather than overflowing context. `MEMORY.md`/`USER.md` retain bounded static prompt views. Normal-window retrieval can also find general/project facts omitted from the installed prompt snapshot, excluding exact lines already included; compact windows retain the file-store fallback. Custom local memory layers, such as Automata, should register a context provider with `pi.registerContextMemoryProvider`; core ships only local file-store and OKF readers. Legacy providers must declare `egress: "local"` to participate in safe-auto recall; omitted classifications fail closed as external. External memory egress requires the visible `/settings` consent or `allowExternalEgress: true`, remains bounded to 2,000 characters, and rejects labeled credentials, bearer/basic tokens, common raw provider tokens, private keys, and signed URLs. Every legacy provider recall page is centrally source-labeled and fenced as untrusted data. Live extension load/unload immediately rebuilds the memory generation, activating new providers and shutting down/removing only those owned by the unloaded extension.
 
 ```json
 {
@@ -429,6 +439,16 @@ For models with `contextWindow <= 2048`, provider-visible memory is capped to 10
   }
 }
 ```
+
+#### Durable storage versus prompt allocation (OKF mode)
+
+General and project `MEMORY.md` files retain complete facts beyond the former 1,200/2,200-character quotas. Managed writes use a **512,000 UTF-8 byte resource ceiling per file**, separate from prompt allocation. Existing larger files are not deleted or silently shortened; an over-ceiling repair must reduce their byte size. Locking, drift recovery, and write-admission rules still apply.
+
+Prompt views select whole lines under estimated-token allocations: 300 for general memory, 550 for project memory, and 344 for user preferences. Model capability limits may narrow the complete block further. Omission notices count against the budget; omitted text remains on disk. `USER.md` continues to archive overflow into existing OKF preference shards: its small index threshold is not total preference-storage capacity. No migration is required.
+
+Memory renderers share estimated-token fit checks. Estimates currently use JavaScript string length divided by four, rounded up; **they are not model-tokenizer counts**. The retrieved-memory character guard is a separate 64,000-character resource bound, not a token count or storage quota.
+
+Local matching normalizes Unicode and uses lexical overlap; it does not guarantee recall for paraphrases. Exact facts excluded from search because they are already in the installed prompt remain fetchable. Retrieval and prompt surfacing still respect `contextPolicy.memory.enabled` and `includeInPrompt`.
 
 #### USER.md working preferences
 

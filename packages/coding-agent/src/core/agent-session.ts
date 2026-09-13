@@ -186,7 +186,12 @@ import { createSessionShutdownTracker } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { buildSessionStreamFn, isRawStreamSimpleFn } from "./session-stream-chain.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
-import type { ResourceProfileFilterSettings, SettingsManager, SettingsScope } from "./settings-manager.ts";
+import type {
+	MemorySystem,
+	ResourceProfileFilterSettings,
+	SettingsManager,
+	SettingsScope,
+} from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
@@ -661,6 +666,23 @@ export class AgentSession {
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
 		});
 		this._memory = new MemoryController({
+			acquireSystemSwitchLease: () => {
+				if (
+					this._disposed ||
+					this._isChildSession ||
+					this.isRetrying ||
+					this._reflectionTurnLifecycle.inFlight ||
+					!isSessionSettled(this, this._backgroundLanes.hasPendingIdleContinuation()) ||
+					this._pendingNextTurnMessages.length > 0 ||
+					this._backgroundLanes
+						.getLaneRecords()
+						.some((lane) => lane.status === "queued" || lane.status === "running") ||
+					hasRunningBackgroundedToolCall(this._backgroundToolTasks.list())
+				)
+					return undefined;
+				const lease = this._foregroundRecovery.tryAcquireSubmission();
+				return lease ? () => this._foregroundRecovery.releaseSubmission(lease) : undefined;
+			},
 			getSettingsManager: () => this.settingsManager,
 			getTurnIndex: () => this._turnIndex,
 			getAgentDir: () => this._agentDir,
@@ -756,13 +778,7 @@ export class AgentSession {
 			onCompactionSettled: () => this._foregroundRecovery?.wakeIdleWaiters(),
 		});
 		const providerRequestContext = new ProviderRequestContextController({
-			transformExtensions: async (messages) => {
-				const runner = this._extensionRunner;
-				const projection = runner.hasHandlers("context")
-					? await runner.emitContext(messages)
-					: { messages, transientMessages: [] };
-				return { ...projection, isCurrent: () => this._extensionRunner === runner };
-			},
+			transformExtensions: this._memory.createContextProjection(() => this._extensionRunner),
 			runContextAudit: (messages) => this._runContextAudit(messages),
 			runPromptPolicyPlanning: (report) => this._runPromptPolicyPlanning(report),
 			runMemoryRetrieval: (messages) => this._runMemoryRetrieval(messages),
@@ -2819,27 +2835,17 @@ export class AgentSession {
 			// Build messages array (recall page, then custom message if any, then user message)
 			messages = [];
 
-			// Every custom context message built below anchors to this same turn-owning timestamp
-			// instead of its own fresh Date.now()/toISOString() read. Each is built once per turn and
-			// then persists verbatim in durable history for every later request, so a fresh wall-clock
-			// read here would just be noise; anchoring to the triggering message's own timestamp keeps
-			// it a real, meaningful instant (this turn's start) without inventing a second one.
+			// Stable turn-owned timestamps preserve the prompt prefix across requests.
 			const turnTimestamp = new Date(promptMessage.timestamp).toISOString();
 
-			// Cross-session similarity recall. For a substantive turn, ask the memory providers to
-			// prefetch a relevant <memory_context> page from past sessions and prepend it as data ahead of
-			// the user message. Best-effort and gated: trivial turns are skipped, and providers return ""
-			// (no page) when nothing is relevant — so it stays net-negative and the GC packs stale pages.
+			// Recall is data, gated before I/O; ICM and trivial turns skip it.
 			if (!options?.internalContextType && this._memory.shouldAttemptRecall(expandedText)) {
 				try {
 					const recall = await this._memory.prefetchRecall(expandedText);
 					if (recall) {
 						injectedRecall = recall;
 						recallQuery = expandedText;
-						// Inject as a GC-managed custom context message (role "custom", customType
-						// "memory_context"), NOT a persisted user message: the semantic-memory context-GC packs
-						// stale recall pages so they don't accumulate forever, and the transcript index
-						// only re-reads user/assistant text so recalled snippets can't recirculate.
+						// Custom context prevents recalled snippets recirculating through transcript indexing.
 						messages.push(createCustomMessage("memory_context", recall, false, undefined, turnTimestamp));
 					}
 				} catch {
@@ -2861,13 +2867,7 @@ export class AgentSession {
 				messages.push(msg);
 			}
 
-			// Unlike memory_context/pipeline_context above, task_steps state is cheap to compute (a
-			// snapshot read + pure string format, no recall/search) and is exactly what an internal
-			// continuation turn most needs to see: which step it is mid-way through. It must NOT be
-			// gated on internalContextType the way those are -- see the turn-economics B6 investigation
-			// and compact-goal-context.ts's doc comment for the B1-shaped defect this closes (a
-			// continuation used to have no way to see current step state short of a voluntary,
-			// instruction-driven tool call).
+			// Cheap task-step state must also reach internal continuations (turn-economics B6).
 			const taskStepsState = this.getTaskStepsStateSnapshot();
 			const taskStepsContext = taskStepsState ? formatTaskStepsContext(taskStepsState, 12) : undefined;
 			if (taskStepsState && taskStepsContext) {
@@ -2882,14 +2882,16 @@ export class AgentSession {
 				);
 			}
 
-			const pipelineContextMessage = options?.internalContextType
-				? undefined
-				: createActivePipelineContextMessage({
-						options: { agentPipelinesDir: resourceDir("pipelines", this._agentDir), cwd: this._cwd },
-						snapshot: this.getPipelineRunSnapshot(),
-						onError: (message) => this._emit({ type: "warning", message }),
-						timestamp: turnTimestamp,
-					});
+			const pipelineContextMessage =
+				options?.internalContextType && this.getMemorySystem() !== "icm"
+					? undefined
+					: createActivePipelineContextMessage({
+							options: { agentPipelinesDir: resourceDir("pipelines", this._agentDir), cwd: this._cwd },
+							snapshot: this.getPipelineRunSnapshot(),
+							contextMode: this.getMemorySystem() === "icm" ? "on-demand" : "inline",
+							onError: (message) => this._emit({ type: "warning", message }),
+							timestamp: turnTimestamp,
+						});
 			if (pipelineContextMessage) messages.push(pipelineContextMessage);
 
 			// Emit before_agent_start extension event
@@ -3421,14 +3423,17 @@ export class AgentSession {
 		return this.settingsManager.getCompactionEnabled();
 	}
 
-	/**
-	 * Activate bundled memory providers (file-store + transcript recall) so the `memory` tool can
-	 * register. SDK create calls this before returning; {@link bindExtensions} re-runs it after
-	 * extensions have registered additional providers. Profile and orchestration grants still decide
-	 * whether the tool activates.
-	 */
+	/** SDK startup and extension rebinding activate the selected provider generation. */
 	initializeMemory(): Promise<void> {
 		return this._memory.initialize();
+	}
+
+	getMemorySystem(): MemorySystem {
+		return this.settingsManager.getMemorySystem();
+	}
+
+	setMemorySystem(system: MemorySystem): Promise<{ ok: boolean; message: string }> {
+		return this._memory.setMemorySystem(system);
 	}
 
 	/** Public entry point delegating to {@link ExtensionBindingController.bindExtensions}. */

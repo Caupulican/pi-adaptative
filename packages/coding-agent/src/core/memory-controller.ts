@@ -55,13 +55,19 @@ import {
 	type StructuredReflectionWrite,
 	USER_PERSONA_CUSTOM_TYPE,
 } from "./memory/providers/file-store.ts";
+import { IcmProvider } from "./memory/providers/icm.ts";
 import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
 import type {
 	UserPreferenceAdmissionRequest,
 	UserPreferenceAdmissionResult,
 } from "./memory/user-preference-metadata.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
-import { getDirectoryResourceProfileInfo, type SettingsManager } from "./settings-manager.ts";
+import {
+	getDirectoryResourceProfileInfo,
+	isValidMemorySystem,
+	type MemorySystem,
+	type SettingsManager,
+} from "./settings-manager.ts";
 
 /**
  * Text of the most recent user message, or "" if there is none (e.g. goal-continuation
@@ -127,6 +133,8 @@ export interface MemoryControllerDeps {
 	isChildSession(): boolean;
 	/** Re-derive the tool registry after (re)init so the newly-surfaced memory tools take effect. */
 	refreshToolRegistry(): void;
+	/** Acquire the existing foreground submission lease only when all session work is idle. */
+	acquireSystemSwitchLease?(): (() => void) | undefined;
 	/** Active model context window, used to cap prompt-visible memory. */
 	getContextWindow(): number | undefined;
 	/** Latest active goal state, used for short-term current-work memory. */
@@ -172,11 +180,109 @@ export class MemoryController {
 	/** The on-disk revision last reported per managed target and notice kind (bounded: one entry per key). */
 	private readonly _reportedManagedNotices = new Map<string, string>();
 	private _shutdownPromise: Promise<void> | undefined;
+	private _activeMemorySystem: MemorySystem | undefined;
+	private _memoryGeneration = 0;
+	private _transitioning = false;
+	private _initializationFailed = false;
 
 	private readonly deps: MemoryControllerDeps;
 
 	constructor(deps: MemoryControllerDeps) {
 		this.deps = deps;
+	}
+
+	getActiveMemorySystem(): MemorySystem | undefined {
+		return this._activeMemorySystem;
+	}
+
+	/** Operator switch: activation and persistence must both succeed under the session's lease. */
+	async setMemorySystem(system: MemorySystem): Promise<{ ok: boolean; message: string }> {
+		if (!isValidMemorySystem(system)) return { ok: false, message: "Memory system must be okf or icm." };
+		const release = this.deps.acquireSystemSwitchLease?.();
+		if (!release) return { ok: false, message: "Memory system can only change while the session is fully idle." };
+		const settings = this.deps.getSettingsManager();
+		const previous = settings.getMemorySystem();
+		const activate = async (selected: MemorySystem) => {
+			settings.setMemorySystem(selected, "directoryProfile");
+			await this.initialize();
+			await settings.flush();
+			const errors = settings.drainErrors();
+			if (errors.length) throw new Error(errors.map(({ error }) => error.message).join("; "));
+			if (this._activeMemorySystem !== selected) throw new Error(`${selected} memory did not activate`);
+		};
+		try {
+			if (previous === system && this._activeMemorySystem === system) {
+				return { ok: true, message: `Memory system already active: ${system}.` };
+			}
+			try {
+				await activate(system);
+				return {
+					ok: true,
+					message: `Memory system switched to ${system} for this directory profile. Existing memory files and transcript preserved.`,
+				};
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				try {
+					await activate(previous);
+					return { ok: false, message: `Memory switch failed: ${reason}. Restored ${previous}.` };
+				} catch (rollbackError) {
+					return {
+						ok: false,
+						message: `Memory switch failed: ${reason}. Rollback could not be verified: ${String(rollbackError)}.`,
+					};
+				}
+			}
+		} finally {
+			release();
+		}
+	}
+
+	/** Bind extension projection to one memory generation; never mutate durable history. */
+	createContextProjection(getRunner: () => import("./extensions/index.ts").ExtensionRunner) {
+		return async (messages: AgentMessage[]) => {
+			const runner = getRunner();
+			const generation = this._memoryGeneration;
+			const filtered = this.filterProviderContext(messages);
+			const projection = runner.hasHandlers("context")
+				? await runner.emitContext(filtered)
+				: { messages: filtered, transientMessages: [] };
+			return {
+				messages: this.filterProviderContext(projection.messages),
+				transientMessages: this.filterProviderContext(projection.transientMessages),
+				isCurrent: () => getRunner() === runner && this._memoryGeneration === generation,
+			};
+		};
+	}
+
+	/** Omit inactive generated context from provider requests, never from durable history. */
+	filterProviderContext(messages: AgentMessage[]): AgentMessage[] {
+		const icm = this.deps.getSettingsManager().getMemorySystem?.() === "icm";
+		return messages.filter((message) => {
+			if (message.role !== "custom") return true;
+			if (message.customType === "pipeline_context") {
+				const mode = (message.details as { contextMode?: string } | undefined)?.contextMode ?? "inline";
+				return mode === (icm ? "on-demand" : "inline");
+			}
+			return (
+				!icm ||
+				![
+					"memory_context",
+					"memory_evidence",
+					"user_persona",
+					"reflection_cue",
+					"reflection_turn_trigger",
+				].includes(message.customType)
+			);
+		});
+	}
+
+	private _legacyMemoryEnabled(): boolean {
+		return (
+			!this._transitioning &&
+			!this._initializationFailed &&
+			this._activeMemorySystem !== "icm" &&
+			this.deps.getSettingsManager().getMemorySystem?.() !== "icm"
+		);
 	}
 
 	/** The live memory manager. Callers reach prefetch / tool-definitions / markers / shutdown through it. */
@@ -186,12 +292,12 @@ export class MemoryController {
 
 	/** The bundled file-store writer, for operator recovery commands; undefined in child sessions or before init. */
 	getFileStoreWriter(): FileStoreProvider | undefined {
-		return this.deps.isChildSession() ? undefined : this._fileStoreWriter;
+		return !this._legacyMemoryEnabled() || this.deps.isChildSession() ? undefined : this._fileStoreWriter;
 	}
 
 	/** Queue one completed turn for provider-owned durable synchronization. Raw tool output is excluded by the caller. */
 	scheduleTurnSync(userText: string, assistantText: string): void {
-		if (!userText.trim() && !assistantText.trim()) return;
+		if (!this._legacyMemoryEnabled() || (!userText.trim() && !assistantText.trim())) return;
 		const manager = this._memoryManager;
 		this._lifecycleTail = this._lifecycleTail
 			.then(() => manager.syncTurn(userText, assistantText))
@@ -205,16 +311,24 @@ export class MemoryController {
 
 	/** Wait for prior turn writes, then collect one bounded provider handoff for the whole compaction run. */
 	async onPreCompress(): Promise<string> {
+		if (!this._legacyMemoryEnabled()) return "";
+		const generation = this._memoryGeneration;
 		await this._lifecycleTail;
-		return boundPreCompressMemory(await this._memoryManager.onPreCompress());
+		if (!this._legacyMemoryEnabled() || generation !== this._memoryGeneration) return "";
+		const result = await this._memoryManager.onPreCompress();
+		return this._legacyMemoryEnabled() && generation === this._memoryGeneration ? boundPreCompressMemory(result) : "";
 	}
 
 	/** Flush write-side lifecycle hooks before releasing provider resources. Idempotent per session. */
 	shutdown(): Promise<void> {
 		this._shutdownPromise ??= (async () => {
+			const legacy = this._legacyMemoryEnabled();
+			this._memoryGeneration++;
 			this._fileStoreWriter = undefined;
+			this._activeMemorySystem = undefined;
+			this._transitioning = true;
 			await this._lifecycleTail;
-			await this._memoryManager.onSessionEnd();
+			if (legacy) await this._memoryManager.onSessionEnd();
 			await this._memoryManager.shutdownAll();
 		})();
 		return this._shutdownPromise;
@@ -246,12 +360,15 @@ export class MemoryController {
 		return this._memoryOkfProvider;
 	}
 
-	private _getFileStoreMemoryProvider(): ContextMemoryProvider {
+	private _getFileStoreMemoryProvider(budget: MemoryPromptBudget): ContextMemoryProvider {
 		const project = getDirectoryResourceProfileInfo(this.deps.getCwd(), this.deps.getAgentDir());
-		this._fileStoreMemoryProvider ??= createFileStoreMemoryProvider({
+		const frozenLines = this._fileStoreWriter?.getFrozenPromptLines();
+		this._fileStoreMemoryProvider = createFileStoreMemoryProvider({
 			memoryFilePath: configFile(this.deps.getAgentDir(), "MEMORY.md"),
 			userFilePath: configFile(this.deps.getAgentDir(), "USER.md"),
 			projectMemoryFilePath: join(projectMemoryDir(this.deps.getAgentDir(), project.hash), "MEMORY.md"),
+			frozenPromptLines: frozenLines,
+			compact: budget.compact,
 		});
 		return this._fileStoreMemoryProvider;
 	}
@@ -275,12 +392,15 @@ export class MemoryController {
 	}
 
 	private _shouldQueryFileStoreFallback(budget: MemoryPromptBudget): boolean {
-		// MEMORY.md/USER.md are already injected through the static file-store prompt on
-		// normal windows, so querying them again would duplicate provider-visible memory.
-		// In compact windows the static block can be omitted because it does not fit; only
-		// then use the retrieval view to surface a few budget-pruned lines.
-		if (!budget.enabled || !budget.compact) return false;
-		return this._memoryManager.buildSystemPromptBlock(budget).trim().length === 0;
+		if (!budget.enabled) return false;
+		// Compact windows: only query if the frozen static block is empty (omitted).
+		if (budget.compact) {
+			const frozenLines = this._fileStoreWriter?.getFrozenPromptLines();
+			return frozenLines === undefined || frozenLines.size === 0;
+		}
+		// Normal windows: the static block is installed but may omit lines beyond the
+		// budget. Query the file-store for omitted general/project facts only.
+		return true;
 	}
 
 	/**
@@ -295,6 +415,8 @@ export class MemoryController {
 	 * failure (including a provider search error) degrades to an empty report.
 	 */
 	async runMemoryRetrieval(messages: AgentMessage[]): Promise<MemoryRetrievalReport> {
+		if (!this._legacyMemoryEnabled()) return emptyMemoryRetrievalReport(0);
+		const generation = this._memoryGeneration;
 		let queriedLongTerm = false;
 		try {
 			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
@@ -316,7 +438,7 @@ export class MemoryController {
 			queriedLongTerm = longTermDecision.shouldQuery && lastMessageIsUserTurn(messages);
 			this._lastLongTermQueryAttempted = queriedLongTerm;
 			const queryFileStore = this._shouldQueryFileStoreFallback(budget);
-			const providers = queryFileStore ? [this._getFileStoreMemoryProvider()] : [];
+			const providers = queryFileStore ? [this._getFileStoreMemoryProvider(budget)] : [];
 			if (queriedLongTerm) {
 				providers.push(
 					this._getMemoryOkfProvider(),
@@ -343,15 +465,19 @@ export class MemoryController {
 						: DEFAULT_EXTERNAL_MEMORY_EGRESS_POLICY,
 				},
 			);
+			if (!this._legacyMemoryEnabled() || generation !== this._memoryGeneration)
+				return emptyMemoryRetrievalReport(0);
 			if (
 				queriedLongTerm ||
 				this._latestMemoryRetrievalReport === undefined ||
-				(queryFileStore && (report.contextItems.length > 0 || report.providerReports.length > 0))
+				(queryFileStore && report.contextItems.length > 0)
 			) {
 				this._latestMemoryRetrievalReport = report;
 			}
 			return report;
 		} catch {
+			if (!this._legacyMemoryEnabled() || generation !== this._memoryGeneration)
+				return emptyMemoryRetrievalReport(0);
 			this._lastLongTermQueryAttempted = queriedLongTerm;
 			const report = emptyMemoryRetrievalReport(0);
 			if (queriedLongTerm || this._latestMemoryRetrievalReport === undefined) {
@@ -423,6 +549,7 @@ export class MemoryController {
 	 * are unchanged by this recording.
 	 */
 	maybeAppendMemoryEvidenceBlock(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[] {
+		if (!this._legacyMemoryEnabled()) return messages;
 		try {
 			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 			const candidates = this._memoryCandidates(report);
@@ -626,7 +753,8 @@ export class MemoryController {
 	 * filter — this just avoids the index query on turns that obviously don't warrant it.
 	 */
 	shouldAttemptRecall(text: string): boolean {
-		if (!this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled) return false;
+		if (!this._legacyMemoryEnabled() || !this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled)
+			return false;
 		const t = text.trim();
 		if (t.length < 12 || t.startsWith("/")) return false;
 		const words = t.split(/\s+/).filter((w) => w.length >= 3);
@@ -640,17 +768,21 @@ export class MemoryController {
 
 	/** Legacy recall prefetch with the same hard-off and explicit external-egress policy as context retrieval. */
 	async prefetchRecall(query: string): Promise<string> {
+		if (!this._legacyMemoryEnabled()) return "";
+		const generation = this._memoryGeneration;
 		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 		if (!settings.enabled) return "";
-		return this._memoryManager.prefetch(query, {
+		const result = await this._memoryManager.prefetch(query, {
 			externalEgressPolicy: settings.allowExternalEgress
 				? ENABLED_EXTERNAL_MEMORY_EGRESS_POLICY
 				: DEFAULT_EXTERNAL_MEMORY_EGRESS_POLICY,
 		});
+		return this._legacyMemoryEnabled() && generation === this._memoryGeneration ? result : "";
 	}
 
 	/** Fresh bounded OKF snapshot for reflection's confront-before-write pass. */
 	getFreshOkfMemoryForReflection(): string {
+		if (!this._legacyMemoryEnabled()) return "";
 		try {
 			const project = getDirectoryResourceProfileInfo(this.deps.getCwd(), this.deps.getAgentDir());
 			const entries = loadOkfMemoryBundle({
@@ -689,6 +821,8 @@ export class MemoryController {
 
 	/** Bounded, read-only memory view for an explicitly authorized delegated worker. */
 	async readMemoryForLane(query: string): Promise<string> {
+		if (!this._legacyMemoryEnabled()) return "ICM: legacy memory is offline; use scoped native file reads.";
+		const generation = this._memoryGeneration;
 		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 		if (!settings.enabled) return "Memory retrieval is disabled by policy.";
 		const budget = this._memoryBudget(settings.maxResults);
@@ -707,6 +841,7 @@ export class MemoryController {
 				},
 			),
 		]);
+		if (!this._legacyMemoryEnabled() || generation !== this._memoryGeneration) return "Legacy memory is offline.";
 		const okf = okfReport.results
 			.map(({ item }) => `[OKF ${item.title ?? item.id}] ${item.summary}\n${item.content ?? ""}`)
 			.join("\n\n");
@@ -724,7 +859,7 @@ export class MemoryController {
 		write: StructuredReflectionWrite,
 		signal?: AbortSignal,
 	): Promise<StructuredReflectionApplyResult> {
-		if (this.deps.isChildSession() || this._fileStoreWriter === undefined) {
+		if (!this._legacyMemoryEnabled() || this.deps.isChildSession() || this._fileStoreWriter === undefined) {
 			return { applied: false, created: false, error: "Structured memory writes are unavailable." };
 		}
 		return this._fileStoreWriter.applyStructuredReflectionWrite(write, signal);
@@ -735,7 +870,8 @@ export class MemoryController {
 		rollback: StructuredReflectionRollback,
 		signal?: AbortSignal,
 	): Promise<boolean> {
-		if (this.deps.isChildSession() || this._fileStoreWriter === undefined) return false;
+		if (!this._legacyMemoryEnabled() || this.deps.isChildSession() || this._fileStoreWriter === undefined)
+			return false;
 		return this._fileStoreWriter.rollbackStructuredReflectionWrite(rollback, signal);
 	}
 
@@ -749,53 +885,93 @@ export class MemoryController {
 	 * file-store + any extension-contributed providers, initialize, then surface the memory tools and
 	 * the frozen system-prompt block. Best-effort: never throws into the session lifecycle.
 	 */
-	async initialize(): Promise<void> {
-		try {
-			this._fileStoreWriter = undefined;
-			await this._lifecycleTail;
-			// Release the previous generation's providers (locks/handles) before recreating, so a
-			// reload does not orphan the old MemoryManager. No-op on first init / for file-store.
-			await this._memoryManager.shutdownAll().catch(() => {});
-			this._localGraphProvider = undefined;
-			this._localGraphResolved = false;
-			const manager = new MemoryManager();
-			const admitUserPreference = this.deps.admitUserPreference;
-			const fileStoreWriter = new FileStoreProvider({
-				onDurableMemoryChanged: () => {
-					// OKF providers cache one bounded directory load. A USER.md overflow can create or
-					// update a shard during this session, so discard only that read cache generation.
-					this._memoryOkfProvider = undefined;
-				},
-				...(admitUserPreference ? { admitUserPreference: (request) => admitUserPreference(request) } : {}),
-			});
-			manager.registerProvider(fileStoreWriter);
-			// Bundled read-only cross-session recall (R3): indexes past-session transcripts and answers
-			// prefetch() with a <memory_context> page. Never writes.
-			manager.registerProvider(new TranscriptRecallProvider());
-			for (const provider of this._pendingMemoryProviders) {
+	initialize(): Promise<void> {
+		const generation = ++this._memoryGeneration;
+		const system = this.deps.getSettingsManager().getMemorySystem?.() ?? "okf";
+		const previous = this._memoryManager;
+		const manager = new MemoryManager();
+		this._memoryManager = manager;
+		this._activeMemorySystem = undefined;
+		this._fileStoreWriter = undefined;
+		this._transitioning = true;
+		this._initializationFailed = false;
+		this._shutdownPromise = undefined;
+		this._memoryOkfProvider = undefined;
+		this._fileStoreMemoryProvider = undefined;
+		this._localGraphProvider = undefined;
+		this._localGraphResolved = false;
+		this._latestMemoryRetrievalReport = undefined;
+		this._latestMemoryPromptInclusionReport = undefined;
+		this._lastLongTermQueryAttempted = false;
+		this._reportedManagedNotices.clear();
+		// Reuse the write-side lifecycle queue: a switch drains prior writes before releasing providers.
+		this._lifecycleTail = this._lifecycleTail
+			.then(async () => {
 				try {
-					manager.registerProvider(provider);
-				} catch {
-					// Duplicate name or reserved-tool collision — skip this provider, keep the rest.
+					await previous.shutdownAll();
+					if (generation !== this._memoryGeneration) return;
+					let writer: FileStoreProvider | undefined;
+					if (system === "icm") {
+						manager.registerProvider(new IcmProvider());
+					} else {
+						const admitUserPreference = this.deps.admitUserPreference;
+						writer = new FileStoreProvider({
+							onDurableMemoryChanged: () => {
+								this._memoryOkfProvider = undefined;
+							},
+							...(admitUserPreference ? { admitUserPreference: (request) => admitUserPreference(request) } : {}),
+						});
+						manager.registerProvider(writer);
+						manager.registerProvider(new TranscriptRecallProvider());
+						for (const provider of this._pendingMemoryProviders) {
+							try {
+								manager.registerProvider(provider);
+							} catch {
+								/* Keep valid providers on duplicate registrations. */
+							}
+						}
+					}
+					await manager.initializeAll(this.deps.getSessionId(), {
+						agentDir: this.deps.getAgentDir(),
+						cwd: this.deps.getCwd(),
+						isChildSession: this.deps.isChildSession(),
+					});
+					const required = system === "icm" ? "icm" : "file-store";
+					if (!manager.isProviderActive(required)) {
+						const diagnostic = manager.getLifecycleDiagnostics().find((entry) => entry.provider === required);
+						throw new Error(diagnostic?.message ?? `${required} provider did not activate`);
+					}
+					if (generation !== this._memoryGeneration) {
+						await manager.shutdownAll();
+						return;
+					}
+					this._activeMemorySystem = system;
+					this._fileStoreWriter = writer;
+					if (writer) this._reportManagedNotices(writer);
+				} catch (error) {
+					await manager.shutdownAll().catch(() => {});
+					if (generation === this._memoryGeneration) {
+						this._memoryManager = new MemoryManager();
+						this._activeMemorySystem = undefined;
+						this._fileStoreWriter = undefined;
+						this._initializationFailed = true;
+					}
+					console.error("Memory subsystem init failed:", error instanceof Error ? error.message : String(error));
+				} finally {
+					if (generation === this._memoryGeneration) {
+						this._transitioning = false;
+						this.deps.refreshToolRegistry();
+					}
 				}
-			}
-			this._memoryManager = manager;
-			await manager.initializeAll(this.deps.getSessionId(), {
-				agentDir: this.deps.getAgentDir(),
-				cwd: this.deps.getCwd(),
-				isChildSession: this.deps.isChildSession(),
+			})
+			.catch((error) => {
+				if (generation === this._memoryGeneration) {
+					this._activeMemorySystem = undefined;
+					this._initializationFailed = true;
+				}
+				console.error("Memory registry refresh failed:", error instanceof Error ? error.message : String(error));
 			});
-			this._fileStoreWriter = manager.getToolDefinitions().some((tool) => tool.name === "memory")
-				? fileStoreWriter
-				: undefined;
-			this._reportManagedNotices(fileStoreWriter);
-			// Surface memory tools + the frozen memory block now that providers are initialized.
-			// refreshToolRegistry() ends in setActiveToolsByName(), which rebuilds AND assigns the
-			// system prompt (including the memory block), so no explicit _rebuildSystemPrompt is needed.
-			this.deps.refreshToolRegistry();
-		} catch (error) {
-			console.error("Memory subsystem init failed:", error instanceof Error ? error.message : String(error));
-		}
+		return this._lifecycleTail;
 	}
 
 	/**

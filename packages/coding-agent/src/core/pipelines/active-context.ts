@@ -2,7 +2,7 @@ import { createCustomMessage } from "@caupulican/pi-agent-core";
 import { formatActivePipelineContext } from "./context.ts";
 import { type DiscoverPipelineOptions, resolvePipelineDefinitionForRun } from "./discover.ts";
 import { resolveCurrentProjectPipelineRun } from "./run-state.ts";
-import type { PipelineRun } from "./types.ts";
+import type { ContextMode, PipelineRun } from "./types.ts";
 
 export interface ActivePipelineContext {
 	run: PipelineRun;
@@ -13,12 +13,13 @@ export interface ActivePipelineContext {
 export function resolveActivePipelineContext(
 	options: DiscoverPipelineOptions,
 	snapshot?: PipelineRun,
+	contextMode: ContextMode = "inline",
 ): ActivePipelineContext | undefined {
 	const run = resolveCurrentProjectPipelineRun(options.cwd, snapshot);
 	if (!run) return undefined;
 	const definition = resolvePipelineDefinitionForRun(options, run);
 	if (!definition) return undefined;
-	const text = formatActivePipelineContext(definition, run);
+	const text = formatActivePipelineContext(definition, run, contextMode);
 	return text ? { run, text } : undefined;
 }
 
@@ -34,18 +35,19 @@ export function createActivePipelineContextMessage(args: {
 	 * without a second independent wall-clock read racing the rest of the turn's messages.
 	 */
 	timestamp: string;
+	contextMode?: ContextMode;
 }): ReturnType<typeof createCustomMessage> | undefined {
 	try {
-		const context = resolveActivePipelineContext(args.options, args.snapshot);
-		return context
-			? createCustomMessage(
-					"pipeline_context",
-					context.text,
-					false,
-					{ revision: context.run.revision },
-					args.timestamp,
-				)
-			: undefined;
+		const mode = args.contextMode ?? "inline";
+		const context = resolveActivePipelineContext(args.options, args.snapshot, mode);
+		if (!context) return undefined;
+		return createCustomMessage(
+			"pipeline_context",
+			context.text,
+			false,
+			{ revision: context.run.revision, contextMode: mode },
+			args.timestamp,
+		);
 	} catch (error) {
 		args.onError(`Pipeline context unavailable: ${error instanceof Error ? error.message : String(error)}`);
 		return undefined;

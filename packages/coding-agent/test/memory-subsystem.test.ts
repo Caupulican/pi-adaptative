@@ -467,7 +467,7 @@ describe("Memory Subsystem - FileStoreProvider", () => {
 		const memoryTool = tools.find((t) => t.name === "memory");
 
 		// USER.md overflow migrates to OKF shards; MEMORY.md remains a deliberately bounded hot store.
-		const hugeContent = "x".repeat(2300);
+		const hugeContent = "x".repeat(512_001);
 		const result = await memoryTool!.execute(
 			"call-huge",
 			{ action: "add", target: "memory", content: hugeContent },
@@ -477,7 +477,7 @@ describe("Memory Subsystem - FileStoreProvider", () => {
 		);
 
 		expect((result as any).details.success).toBe(false);
-		expect((result as any).details.error).toContain("Memory budget exceeded");
+		expect((result as any).details.error).toContain("Resource overflow");
 		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8").trim()).toBe("");
 	});
 
@@ -820,14 +820,14 @@ describe("memory budget as an operation outcome", () => {
 			const memoryTool = provider.getToolDefinitions().find((t) => t.name === "memory");
 			const result = await memoryTool!.execute(
 				"call-budget",
-				{ action: "add", target: "memory", content: "x".repeat(3000) },
+				{ action: "add", target: "memory", content: "x".repeat(512_001) },
 				undefined,
 				undefined,
 				{} as any,
 			);
 			expect((result as any).isError).toBe(true);
 			expect((result as any).errorKind).toBe("operation_outcome");
-			expect((result as any).content[0].text).toContain("Memory budget exceeded");
+			expect((result as any).content[0].text).toContain("Resource overflow");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -901,36 +901,50 @@ describe("project-scoped hot memory", () => {
 			const listed = await memoryTool.execute("g3", { action: "list" }, undefined, undefined, {} as any);
 			const text = (listed as any).content[0].text as string;
 			expect(text).toContain("## MEMORY.md (general)");
-			expect(text).toContain("/1200 chars");
+			expect(text).toContain("approximate tokens");
+			expect(text).toContain("bytes");
 			expect(text).toContain("## MEMORY.md (project gamma)");
-			expect(text).toContain("/2200 chars");
+
 			expect(text).toContain("## USER.md");
 			const over = await memoryTool.execute(
 				"g4",
-				{ action: "add", target: "memory", content: "y".repeat(1300) },
+				{ action: "add", target: "memory", content: "y".repeat(512000) },
 				undefined,
 				undefined,
 				{} as any,
 			);
 			expect((over as any).isError).toBe(true);
-			expect((over as any).content[0].text).toContain("MEMORY.md (general) limit is 1200");
+			expect((over as any).content[0].text).toContain("Resource overflow");
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
 
-	it("tells the model to triage when the general file is over budget, without deleting anything", async () => {
-		const root = join(tmpdir(), `pi-mem-triage-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	it("rejects resource-overflow writes without emitting a triage prompt", async () => {
+		const root = join(tmpdir(), `pi-mem-resource-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		try {
 			const agentDirLocal = join(root, "agent");
 			mkdirSync(agentDirLocal, { recursive: true });
-			const bloated = `${"project fact ".repeat(120)}\n`;
-			writeFileSync(join(agentDirLocal, "MEMORY.md"), bloated);
+			const oversized = `${"project fact ".repeat(40000)}\n`;
+			writeFileSync(join(agentDirLocal, "MEMORY.md"), oversized);
 			const provider = new FileStoreProvider();
-			await provider.initialize("triage", { agentDir: agentDirLocal, cwd: root, isChildSession: false });
-			expect(provider.generalMemoryOverBudget()).toBe(true);
-			expect(provider.systemPromptBlock()).toContain("[Memory triage:");
-			expect(readFileSync(join(agentDirLocal, "MEMORY.md"), "utf-8")).toBe(bloated);
+			await provider.initialize("resource-guard", { agentDir: agentDirLocal, cwd: root, isChildSession: false });
+			const memoryTool = provider.getToolDefinitions().find((t) => t.name === "memory")!;
+			const addResult = await memoryTool.execute(
+				"overflow-check",
+				{
+					action: "add",
+					target: "memory",
+					content: "Too much new content that would overflow the resource ceiling",
+				},
+				undefined,
+				undefined,
+				{} as any,
+			);
+			expect(addResult.details).toMatchObject({ success: false });
+			expect((addResult as any).content[0].text).toContain("Resource overflow");
+			expect((addResult as any).content[0].text).toContain("512000");
+			expect(provider.systemPromptBlock()).not.toContain("triage");
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
