@@ -1,3 +1,5 @@
+## [Unreleased]
+
 ## [0.99.21] - 2026-09-13
 
 - Lockstep release with pi-adaptative 0.99.21; no package-specific API changes.
