@@ -18,7 +18,7 @@ import { TRANSIENT_RECORD_SUPERSEDING_NOTE } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveMemoryPromptBudget } from "../../src/core/context/memory-prompt-budget.ts";
+import { memoryTextFitsBudget, resolveMemoryPromptBudget } from "../../src/core/context/memory-prompt-budget.ts";
 import { getLearningAuditSnapshots } from "../../src/core/learning/learning-audit.ts";
 import { FileStoreProvider } from "../../src/core/memory/providers/file-store.ts";
 import { parseUserPreferenceLine } from "../../src/core/memory/user-preference-metadata.ts";
@@ -328,8 +328,9 @@ describe("USER.md persona delivery to the next provider request", () => {
 	});
 
 	it("a constrained model receives a record bounded to the existing memory prompt budget, note included", async () => {
-		// 8k context: the harness system prompt still fits and the memory budget (3% of the window,
-		// 980 chars) is smaller than ten preference lines. Such a model has no memory tool (lean
+		// 8k context: static memory shares the system-prompt allowance; omitted preferences
+		// arrive as a persona record. Its 3% context budget is smaller than ten lines.
+		// Such a model has no memory tool (minimal
 		// capability class), so the mutation arrives through operator authority: an external edit
 		// adopted with /memory accept, which commits USER.md exactly like a tool write does.
 		const contextWindow = 8192;
@@ -345,24 +346,27 @@ describe("USER.md persona delivery to the next provider request", () => {
 				`Preference ${index}: communicate progress with concise engineering evidence and clear verification details.`,
 		);
 		writeFileSync(userPath, `${preferences.join("\n")}\n`, "utf8");
-		expect((await harness.session.memoryAcceptDrift("user")).ok).toBe(true);
+		expect(await harness.session.memoryAcceptDrift("user")).toMatchObject({ ok: true });
 		await runPlainTurn(harness, "now with many preferences");
 		expect(payloads).toHaveLength(2);
-		expect(personaRecords(payloads[0])).toEqual([]);
+		expect(payloads[0].systemPrompt.length).toBeLessThanOrEqual(4096);
+		expect(personaRecords(payloads[0])).toHaveLength(1);
+		expect(personaRecords(payloads[0])[0]).toContain(INITIAL);
 		const records = personaRecords(payloads[1]);
-		expect(records).toHaveLength(1);
+		expect(records).toHaveLength(2);
+		const current = records[1];
 		const budget = resolveMemoryPromptBudget({ contextWindow });
-		expect(records[0].endsWith(TRANSIENT_RECORD_SUPERSEDING_NOTE)).toBe(true);
-		expect(Buffer.byteLength(records[0])).toBeLessThanOrEqual(budget.maxChars);
-		expect(records[0].split("\n").length).toBeLessThanOrEqual(budget.maxLines);
-		expect(records[0]).toContain(PERSONA_PROJECTION_RULE);
-		const shown = records[0]
+		expect(current.endsWith(TRANSIENT_RECORD_SUPERSEDING_NOTE)).toBe(true);
+		expect(memoryTextFitsBudget(current, budget)).toBe(true);
+		expect(current).toContain(PERSONA_PROJECTION_RULE);
+		expect(current).not.toContain(INITIAL);
+		const shown = current
 			.split("\n")
 			.filter((line) => line.startsWith("- Preference "))
 			.map((line) => line.slice(2));
 		for (const line of shown) expect(preferences).toContain(line);
 		expect(shown.length).toBeGreaterThan(0);
-		expect(records[0]).toContain(`(${10 - shown.length} more preference lines on disk; not shown`);
+		expect(current).toContain(`(${10 - shown.length} more preference lines on disk; not shown`);
 		// The static prefix did not move for the mutation.
 		expect(payloads[1].systemPrompt).toBe(payloads[0].systemPrompt);
 	});

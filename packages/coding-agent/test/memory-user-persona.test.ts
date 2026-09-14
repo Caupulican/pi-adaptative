@@ -191,6 +191,61 @@ describe("USER.md persona projection (file-store owner)", () => {
 		expect(content).not.toContain("not shown");
 	});
 
+	it("charges record framing to a model budget only: the write-side allowance measures the lines alone", async () => {
+		// Regression: the no-budget allowance charged the two header lines, the omitted-count note and
+		// the planner's superseding note against the same BUDGET_USER.tokens the write path spends on
+		// preference lines, so a USER.md the write path accepted whole projected as a truncated record.
+		const { provider } = await start();
+		writeFileSync(join(agentDir, "USER.md"), TEN_PREFERENCES, "utf8");
+		await provider.acceptDrift("user");
+
+		// The static block is the write-side view: whatever it keeps, the unbudgeted record keeps too.
+		const written = provider
+			.systemPromptBlock()
+			.split("\n")
+			.filter((line) => line.startsWith("- Preference "));
+		const projected = (provider.userPersonaProjection()?.content ?? "")
+			.split("\n")
+			.filter((line) => line.startsWith("- Preference "));
+		expect(written).toHaveLength(10);
+		expect(projected).toEqual(written);
+
+		// A model budget still pays for the whole wire, framing and superseding note included: the
+		// header and that note alone are ~121 estimated tokens, so 240 admits only some of the lines.
+		const budget = { ...resolveMemoryPromptBudget({ contextWindow: 200_000 }), maxEstimatedTokens: 240 };
+		const bounded = provider.userPersonaProjection(budget)?.content;
+		if (bounded === undefined) throw new Error("expected a bounded record");
+		const wire = `${bounded}${TRANSIENT_RECORD_SUPERSEDING_NOTE}`;
+		expect(Math.ceil(wire.length / 4)).toBeLessThanOrEqual(budget.maxEstimatedTokens);
+		const boundedLines = bounded.split("\n").filter((line) => line.startsWith("- Preference "));
+		expect(boundedLines.length).toBeLessThan(10);
+		expect(bounded).toContain(`(${10 - boundedLines.length} more preference lines on disk; not shown`);
+	});
+
+	it("still bounds an unbudgeted record: a USER.md past the write-side cap keeps whole lines and counts the rest", async () => {
+		// Negative control for the fix above: removing framing from the MEASUREMENT must not remove the
+		// bound. Thirty long preferences exceed BUDGET_USER.tokens on the lines alone, so the shared
+		// write-side selection drops the tail and the static block counts it; the record mirrors exactly
+		// that selection instead of applying a second, different cut.
+		const { provider } = await start();
+		const many = Array.from(
+			{ length: 30 },
+			(_, index) => `Preference ${index}: ${"detail ".repeat(12)}recorded for the projection bound.`,
+		).join("\n");
+		writeFileSync(join(agentDir, "USER.md"), many, "utf8");
+		await provider.acceptDrift("user");
+		const block = provider.systemPromptBlock();
+		const written = block.split("\n").filter((line) => line.startsWith("- Preference "));
+		expect(written.length).toBeGreaterThan(0);
+		expect(written.length).toBeLessThan(30);
+		expect(block).toContain(`(${30 - written.length} more preference lines in USER.md)`);
+		const content = provider.userPersonaProjection()?.content ?? "";
+		const shown = content.split("\n").filter((line) => line.startsWith("- Preference "));
+		expect(shown).toEqual(written);
+		// Whole lines only: every shown line appears verbatim in the file.
+		for (const line of shown) expect(many.split("\n")).toContain(line.slice(2));
+	});
+
 	it("sanitizes a threat line in the record exactly as the static block does", async () => {
 		const { provider, freeze } = await start();
 		freeze();
@@ -461,6 +516,21 @@ describe("USER.md persona delivery (memory controller owner)", () => {
 		expect((await writer.acceptDrift("user")).ok).toBe(true);
 		await controller.initialize();
 		expect(warnings).toHaveLength(3);
+	});
+
+	it("keeps the per-revision notice history across repeated reloads of the same memory system", async () => {
+		// Regression: initialize() cleared the reported-notice map, so every reload re-announced the
+		// same drifted revision the operator had already been told about.
+		const controller = createController();
+		await controller.initialize();
+		await writeUser(controller, { action: "add", target: "user", content: "Prefers tabs." });
+		writeFileSync(join(agentDir, "USER.md"), "Hand-edited preference\n", "utf8");
+		await controller.initialize();
+		expect(warnings).toHaveLength(1);
+		for (let reload = 0; reload < 4; reload++) await controller.initialize();
+		expect(warnings).toHaveLength(1);
+		// The map stays bounded to one entry per target and kind, never a history of reloads.
+		expect(warnings[0]).toContain("USER.md differs from its managed revision");
 	});
 
 	it("negative control: a child session drains notices but reports none", async () => {

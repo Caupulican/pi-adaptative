@@ -406,3 +406,24 @@ Claude reviewed through the persistent Herdr agent launched with
 `claude --dangerously-skip-permissions`. Its unpushed-candidate finding was rejected: discovery
 reads only `origin/main`. Broader historical ordering remains unproven, not silently classified
 as fixed.
+
+The exact-source GitHub matrix exposed additional integration failures before publication.
+Most transcript fixtures implicitly depended on an empty authority policy; they now select that
+policy explicitly, while the dedicated default-policy regression still proves YOLO execution.
+Memory-provider report expectations now include the file-store fallback added by the pending
+version. The closed goal vocabulary adds 28 schema tokens after annotation stripping and enum
+compaction; its individual ceiling retains the previous 10-token headroom and the aggregate stays
+unchanged. These were stale characterizations, not permission failures.
+
+Three memory/prompt defects were reproduced: independent block budgets overflowed the final
+minimal prompt and disabled initialization; persona framing consumed a second allowance over
+already selected preference lines; reload discarded the bounded notice identities and repeated
+the same drift warning. Prompt assembly now measures mandatory content before allocating static
+memory, preserving authority and caller instructions. Omitted USER.md content uses the existing
+persona record. Forced constrained profiles retain this allocation even when their context window
+is unknown; review reproduced that bypass with a known-window negative control. Explicit model
+budgets still charge the persona record's full wire content. The memory owner keeps
+notice identities across reloads and uses one preference allowance. Negative controls retain
+oversized caller-prompt failure, whole-line bounds, explicit model limits, and changed-revision
+notifications. Claude reproduced the memory failures independently and implemented the memory
+owner corrections through the requested persistent Herdr agent.

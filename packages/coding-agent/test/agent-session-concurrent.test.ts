@@ -207,6 +207,8 @@ describe("AgentSession concurrent prompt guard", () => {
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		// Isolate prompt ownership from the independent authority-context record.
+		settingsManager.applyOverrides({ edge: { allow: [] } });
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");

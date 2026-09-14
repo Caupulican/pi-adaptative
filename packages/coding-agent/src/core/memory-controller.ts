@@ -888,6 +888,7 @@ export class MemoryController {
 	initialize(): Promise<void> {
 		const generation = ++this._memoryGeneration;
 		const system = this.deps.getSettingsManager().getMemorySystem?.() ?? "okf";
+		const previousSystem = this._activeMemorySystem;
 		const previous = this._memoryManager;
 		const manager = new MemoryManager();
 		this._memoryManager = manager;
@@ -903,7 +904,12 @@ export class MemoryController {
 		this._latestMemoryRetrievalReport = undefined;
 		this._latestMemoryPromptInclusionReport = undefined;
 		this._lastLongTermQueryAttempted = false;
-		this._reportedManagedNotices.clear();
+		// Managed notices are deduped per target and kind by the on-disk revision they describe and must
+		// SURVIVE a reload: re-initializing the same memory system re-reads the same files, so clearing
+		// here re-announced a drift the operator had already been told about (see _reportManagedNotices).
+		// Only a real storage switch starts a new reporting history, because the previous system's
+		// revisions say nothing about the files the new one manages.
+		if (previousSystem !== undefined && previousSystem !== system) this._reportedManagedNotices.clear();
 		// Reuse the write-side lifecycle queue: a switch drains prior writes before releasing providers.
 		this._lifecycleTail = this._lifecycleTail
 			.then(async () => {

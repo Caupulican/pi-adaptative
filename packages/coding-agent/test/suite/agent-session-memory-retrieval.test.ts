@@ -162,6 +162,7 @@ describe("AgentSession live local memory retrieval", () => {
 
 		const report = harness.session.getMemoryRetrievalReport();
 		expect(report.providerReports).toEqual([
+			expect.objectContaining({ providerId: "pi-file-store", status: "queried", resultCount: 0 }),
 			expect.objectContaining({ providerId: "pi-okf", status: "queried", resultCount: 1 }),
 		]);
 		expect(report.contextItems).toHaveLength(1);
@@ -204,7 +205,10 @@ describe("AgentSession live local memory retrieval", () => {
 		expect(report).toEqual(firstReport);
 		expect(report.request.query).toBe("");
 		expect(report.results).toEqual([]);
-		expect(report.providerReports).toEqual([]);
+		// The file-store fallback is consulted independently; an empty query yields no facts.
+		expect(report.providerReports).toEqual([
+			expect.objectContaining({ providerId: "pi-file-store", status: "queried", resultCount: 0 }),
+		]);
 	});
 
 	it("a malformed OKF file does not throw or block the turn; a valid sibling is still returned", async () => {

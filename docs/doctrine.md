@@ -182,10 +182,12 @@ deliberately adds `task_automation` (681 measured tokens against a dedicated 720
 action-discriminated contracts (`spec`, `validate`, `run`, `bind`, `status`). Deliberate feature additions
 recalibrate individual tool budgets: `skill` rises from 105 to 160 (150 measured tokens, 6.7% headroom)
 for `inspect`, versioned `repair` with `versionToken`, and session-wide `exclude` with `reason`; `goal` rises
-from 280 to 305 (295 measured tokens, 3.4% headroom) for narrow toolkit selectors (`toolkitScript`, `toolkitArgs`)
-in `grant_edge`. Live provider projection measures 5,031 total schema tokens against an aggregate ceiling
+from 280 to 305 for narrow toolkit selectors (`toolkitScript`, `toolkitArgs`) and then 333
+(323 measured tokens, retaining 10 tokens of headroom) for the six literal `edgeClass` values.
+The latter adds exactly 28 tokens; schema annotations are already removed and unions compacted,
+so retaining those validation values is deliberate. Live provider projection measures 5,059 total schema tokens against an aggregate ceiling
 of 5,570 (4,500 base + 350 task_directory + 720 task_automation), while core tools excluding automation
-and directory measure 4,218 tokens, strictly under the unchanged 4,500 base limit. The additions address
+and directory measure 4,246 tokens, strictly under the unchanged 4,500 base limit. The additions address
 reproduced wrong-directory execution and safe task automation without widening worker grants or introducing
 per-turn schema churn. Pinned by
 `packages/coding-agent/test/context-composition.test.ts`,
@@ -646,6 +648,16 @@ and `packages/coding-agent/test/lane-private-paths.test.ts`.
 
 **A managed memory file can always be recovered, and only the operator adopts an external edit.** The managed state stores the committed content with its digest; an empty file against a non-empty managed revision is restored on start and before a write (nothing of anyone's is in an empty file); any other drift refuses the model's write and names `/memory accept` and `/memory restore`, which only the operator can run. Pinned by `packages/coding-agent/test/memory-drift-recovery.test.ts`.
 
+**Memory projections share the final prompt allowance.** Static memory receives only the capacity
+left after the core contract, tool surface, paths, and caller instructions. The 4,096-character
+minimal limit remains unchanged; omitted preferences arrive through the existing persona record,
+whose model budget charges its complete wire framing. Without a model budget, static and persona
+projections select the same whole preference lines. Reload retains the bounded notice identity for
+each target and kind, so an unchanged drift revision is reported once. Pinned by
+`packages/coding-agent/test/system-prompt-builder-tool-selection.test.ts`,
+`packages/coding-agent/test/memory-user-persona.test.ts`, and
+`packages/coding-agent/test/suite/agent-session-user-persona.test.ts`.
+
 **Memory and skill admission preserve ownership.** Bounded OKF discovery visits the selected
 project first without crossing symlink boundaries. External memory edits remain protected by
 revision checks. A skill batch validates its entire requested set before one commit; an accepted
@@ -683,6 +695,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-13 | CI follow-up: memory shares final prompt capacity; persona framing cannot consume the unbudgeted preference allowance; reload deduplicates unchanged drift notices. Transcript fixtures explicitly select empty grants while default-authority tests exercise YOLO. The closed goal edge vocabulary adds 28 schema tokens; the aggregate ceiling stays fixed. |
 | 2026-09-13 | Omitted edge policy grants YOLO execution across registered classes; explicit restricted policies retain their meaning. The edge contract fixtures select restricted mode explicitly, and dedicated regressions prove default grants, worker intersections, reload/compaction, and diagnostic recovery from unreadable policies. |
 | 2026-09-07 | Whole-row task-directory status pagination replaces megabyte-scale responses, preserves complete escaped paths, and rejects stale cursors. Its measured 340-token schema receives a 350-token ceiling; the pre-existing 4,500-token aggregate remains unchanged. |
 | 2026-09-07 | Worker and verifier identity survives queued dispatch and resume; asynchronous probes retain queue ownership, recheck policy, and reject stale completions. Mailbox recovery precedes the start transition. Historical path-only recovery remains explicit and cannot bypass a saved identity. |

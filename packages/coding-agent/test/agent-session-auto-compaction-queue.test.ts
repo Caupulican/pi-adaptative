@@ -137,6 +137,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		sessionManager = SessionManager.inMemory();
 		settingsManager = SettingsManager.create(tempDir, tempDir);
+		// This fixture measures compaction messages without authority-context injection.
+		settingsManager.applyOverrides({ edge: { allow: [] } });
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);

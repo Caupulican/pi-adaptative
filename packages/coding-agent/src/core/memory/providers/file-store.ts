@@ -269,6 +269,13 @@ export interface StructuredReflectionRollback {
 	removeRecord: boolean;
 }
 
+/**
+ * Tail of the read-time omitted-fact note. The prompt view selects WHOLE fact lines and counts the
+ * rest: nothing is cut mid-line, so a reader is told what is missing rather than shown a fragment.
+ * Exported so a consumer pins this contract instead of a copied literal.
+ */
+export const MEMORY_OMITTED_FACTS_NOTE = "not shown within this model's approximate token budget";
+
 export const FILE_STORE_MEMORY_SYSTEM_NOTE =
 	"[System Note: Below is a snapshot of persistent memory. Record verified reusable facts with the 'memory' tool by scope: target 'memory' = general facts true in any repo or task; target 'project' (the default) = facts true only for this project (paths, tickets, branches, build steps); target 'user' = preferences; target 'okf' = durable structured records (decisions, architecture, findings). A memory write that names a path, ticket key or branch belongs in 'project'. Never store transient noise.]";
 /** Generous UTF-8 byte safety ceiling for stored memory files; rejects only resource-overflow writes. */
@@ -771,9 +778,13 @@ export class FileStoreProvider implements MemoryProvider {
 			.filter((line) => line.length > 0);
 	}
 
-	/** The record on the wire is `content` plus the planner's superseding note; both count. */
-	private static fitsPersonaBudget(content: string, budget: MemoryPromptBudget | undefined): boolean {
-		const effective = budget ?? {
+	/**
+	 * The write-side allowance every USER.md projection shares when no model budget applies: the same
+	 * token cap `selectApplicablePreferenceLines` spends on preference lines, with storage as the byte
+	 * ceiling. One owner, so the read and write sides cannot drift apart.
+	 */
+	private static personaWriteAllowance(): MemoryPromptBudget {
+		return {
 			enabled: true,
 			compact: false,
 			maxLines: 20,
@@ -781,7 +792,26 @@ export class FileStoreProvider implements MemoryProvider {
 			maxChars: FileStoreProvider.RESOURCE_CEILING,
 			maxResults: 10,
 		};
-		return memoryTextFitsBudget(`${content}${TRANSIENT_RECORD_SUPERSEDING_NOTE}`, effective);
+	}
+
+	/**
+	 * Does a persona record fit? A MODEL budget must cover everything actually sent, so `content`
+	 * plus the planner's superseding note is charged against it in full.
+	 *
+	 * Without a model budget the write-side allowance applies to `measured` — the preference lines
+	 * alone for a bounded record. The header, the omitted-count note and the superseding note are
+	 * harness framing, and charging them against the same BUDGET_USER.tokens the write side spends on
+	 * lines alone made a legally written USER.md unprojectable: ten 103-char preferences are 258
+	 * estimated tokens (accepted by the write path) but 379 once framed, so the record silently
+	 * dropped to seven lines and claimed the rest were over budget.
+	 */
+	private static fitsPersonaBudget(
+		content: string,
+		budget: MemoryPromptBudget | undefined,
+		measured: string = content,
+	): boolean {
+		if (budget === undefined) return memoryTextFitsBudget(measured, FileStoreProvider.personaWriteAllowance());
+		return memoryTextFitsBudget(`${content}${TRANSIENT_RECORD_SUPERSEDING_NOTE}`, budget);
 	}
 
 	/**
@@ -807,8 +837,10 @@ export class FileStoreProvider implements MemoryProvider {
 					: []),
 			].join("\n");
 		for (let keep = lines.length; keep >= 0; keep--) {
-			const candidate = render(lines.slice(0, keep));
-			if (FileStoreProvider.fitsPersonaBudget(candidate, budget)) return candidate;
+			const kept = lines.slice(0, keep);
+			const candidate = render(kept);
+			// Framing counts against a model budget and never against the write-side allowance.
+			if (FileStoreProvider.fitsPersonaBudget(candidate, budget, kept.join("\n"))) return candidate;
 		}
 		return undefined;
 	}
@@ -879,20 +911,9 @@ export class FileStoreProvider implements MemoryProvider {
 			.map((entry) => renderUserPreferenceForPrompt(entry.parsed, entry.section))
 			.join("\n");
 		const lines = rendered.length === 0 ? [] : FileStoreProvider.sanitizeMemory(rendered).split("\n");
-		return FileStoreProvider.selectWholeLines(
-			lines,
-			{
-				enabled: true,
-				compact: false,
-				maxLines: 20,
-				maxEstimatedTokens: FileStoreProvider.BUDGET_USER.tokens,
-				maxChars: FileStoreProvider.RESOURCE_CEILING,
-				maxResults: 10,
-			},
-			{
-				footer: FileStoreProvider.preferenceFooter,
-			},
-		);
+		return FileStoreProvider.selectWholeLines(lines, FileStoreProvider.personaWriteAllowance(), {
+			footer: FileStoreProvider.preferenceFooter,
+		});
 	}
 
 	/** The USER.md text of the static block: the selected whole lines plus the footer when lines were left out. */
@@ -947,21 +968,21 @@ export class FileStoreProvider implements MemoryProvider {
 		return sanitizedLines.join("\n");
 	}
 
+	/** The note that counts fact lines the prompt view left on disk; one owner for every read-time cap. */
+	private static factFooter(omitted: number): string {
+		return `(${omitted} more fact line${omitted === 1 ? "" : "s"} on disk; ${MEMORY_OMITTED_FACTS_NOTE})`;
+	}
+
 	// Read-time budget guard (cost): the memory tool already caps writes at BUDGET_*, but a file edited
 	// externally (or by any path that bypasses the tool) could be arbitrarily large and would then
 	// bloat the system prompt on EVERY turn. Cap the injected view to the same budget so the per-turn
-	// cost stays bounded; the file on disk is untouched and the model is told it was truncated.
-	// Read-time budget guard (cost): the memory tool already caps writes at BUDGET_*, but a file edited
-	// externally (or by any path that bypasses the tool) could be arbitrarily large and would then
-	// bloat the system prompt on EVERY turn. Cap the injected view to the same budget so the per-turn
-	// cost stays bounded; the file on disk is untouched and the model is told it was truncated.
+	// cost stays bounded; the file on disk is untouched and the omitted lines are counted for the model.
 	// Reuses selectWholeLines when practical; never truncates mid-line.
 	private static selectWholeFacts(content: string, budget: MemoryPromptBudget): { text: string; omitted: number } {
 		const lines = FileStoreProvider.sanitizeMemory(content).split("\n");
 		const result = FileStoreProvider.selectWholeLines(lines, budget, {
 			header: undefined,
-			footer: (omitted) =>
-				`(${omitted} more fact line${omitted === 1 ? "" : "s"} on disk; not shown within this model's approximate token budget)`,
+			footer: FileStoreProvider.factFooter,
 		});
 		return { text: result.text, omitted: result.omitted };
 	}
@@ -982,8 +1003,7 @@ export class FileStoreProvider implements MemoryProvider {
 		// cut in half as a misleading partial instruction. Returns "" when even one line
 		// exceeds the compact budget (all-or-nothing).
 		const result = FileStoreProvider.selectWholeLines(lines, budget, {
-			footer: (omitted) =>
-				`(${omitted} more fact line${omitted === 1 ? "" : "s"} on disk; not shown within this model's approximate token budget)`,
+			footer: FileStoreProvider.factFooter,
 		});
 		return result.text;
 	}

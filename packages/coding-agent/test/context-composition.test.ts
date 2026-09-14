@@ -166,8 +166,10 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// enum-heavy surface measures 864 tokens (875 ceiling). task_steps measures 607 tokens
 			// (1,200 ceiling). skill measures 150 tokens (160 ceiling, roughly 6.7% headroom) after
 			// deliberate additions for inspect, versioned repair with versionToken, and session-wide
-			// exclude with reason. goal measures 295 tokens (305 ceiling, roughly 3.4% headroom)
-			// after adding narrow toolkit grant selectors (toolkitScript, toolkitArgs) to grant_edge.
+			// exclude with reason. goal measures 323 tokens (333 ceiling, retaining 10 tokens of
+			// headroom). Its closed edgeClass enum adds 28 tokens to the prior 295-token surface;
+			// provider projection already strips descriptions and compacts literal unions. Those
+			// six exact values prevent invented grants; the aggregate allowance remains unchanged.
 			expect(
 				report.toolSchemaTokens,
 				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),
@@ -182,7 +184,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);
 			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(1_200);
 			expect(toolTokens.get("secret_store")).toBeLessThanOrEqual(330);
-			expect(toolTokens.get("goal")).toBeLessThanOrEqual(305);
+			expect(toolTokens.get("goal")).toBeLessThanOrEqual(333);
 			expect(toolTokens.get("pipeline")).toBeLessThanOrEqual(220);
 			// sorted heaviest-first
 			for (let index = 1; index < report.tools.length; index++) {

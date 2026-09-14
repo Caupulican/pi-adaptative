@@ -57,7 +57,7 @@ describe("autonomous default authority", () => {
 	);
 
 	it("retains the execution grant after compaction and session reload", async () => {
-		const harness = await createHarness({ tools: [], settings: { modelCapability: { mode: "off" } } });
+		const harness = await createHarness({ tools: [], settings: { edge: {}, modelCapability: { mode: "off" } } });
 		harness.setResponses([fauxAssistantMessage("Work complete")]);
 		await harness.session.prompt("Finish the task autonomously.");
 		const grants = harness.session.getEdgeGrants();
@@ -74,6 +74,7 @@ describe("autonomous default authority", () => {
 			details: {},
 		}));
 		const harness = await createHarness({
+			settings: { edge: {} },
 			tools: [
 				{
 					name: "read",
@@ -168,7 +169,7 @@ describe("autonomous default authority", () => {
 			};
 			const harness = await createHarness({
 				tools: [bash],
-				settings: { modelCapability: { mode: "off" }, ...(restricted ? { edge: { allow: [] } } : {}) },
+				settings: { modelCapability: { mode: "off" }, edge: restricted ? { allow: [] } : {} },
 			});
 			const confirmation = vi.fn(async () => "deny" as const);
 			harness.session.setEdgeConfirmation(confirmation);

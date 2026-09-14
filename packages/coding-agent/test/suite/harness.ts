@@ -133,6 +133,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const workerModel = model;
 	const defaultOrchestrationProfileId = options.workerOrchestrationProfile?.profileId ?? "test-worker";
 	const effectiveSettings: Partial<Settings> = {
+		// Transcript characterizations use an explicit empty grant set. Authority tests pass
+		// edge: {} to exercise the production YOLO default and its durable context records.
+		edge: { allow: [] },
 		...options.settings,
 		workerDelegation: {
 			orchestrationProfile: defaultOrchestrationProfileId,

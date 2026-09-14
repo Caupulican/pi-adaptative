@@ -12,6 +12,7 @@ import {
 	createAgentSessionServices,
 } from "../../../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
+import { SettingsManager } from "../../../src/core/settings-manager.ts";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionFactory } from "../../../src/index.ts";
 
 function getText(message: AgentSession["messages"][number]): string {
@@ -50,6 +51,8 @@ describe("regression #2860: replaced session callbacks", () => {
 		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				cwd,
+				// Hold authority context fixed while testing replacement-session callbacks.
+				settingsManager: SettingsManager.inMemory({ edge: { allow: [] } }),
 				agentDir: tempDir,
 				authStorage,
 				resourceLoaderOptions: {

@@ -15,6 +15,7 @@
 import { existsSync } from "node:fs";
 import { MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT } from "@caupulican/pi-agent-core";
 import { resolvePath } from "../utils/paths.ts";
+import { estimateTokensFromChars } from "./context/context-item.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import type { Extension } from "./extensions/types.ts";
 import { isCurrentSessionReflectionEnabled, resolveAutoLearnSettings } from "./learning/auto-learn-settings.ts";
@@ -193,13 +194,27 @@ export class SystemPromptBuilder {
 		return `PI SELF-MODIFICATION: source=${sourceStatus}. Edit core/harness only there; never patch installed/generated output as source of truth. Restate scope; inspect source/docs; preserve concurrent changes; make the smallest auditable edit; run focused then proportionate checks; reload only after saved evidence.`;
 	}
 
-	private _buildStaticMemoryPrompt(profile: ModelCapabilityProfile): string | undefined {
+	private _buildStaticMemoryPrompt(profile: ModelCapabilityProfile, availableChars?: number): string | undefined {
 		// ICM mode: avoid reading legacy MEMORY.md/USER.md/OKF bodies automatically.
 		if (this.isIcmMode()) return ICM_MEMORY_GUIDANCE;
-		const budget =
+		let budget =
 			profile.class !== "full" && profile.contextWindow !== undefined
 				? resolveMemoryPromptBudget({ contextWindow: profile.contextWindow, configuredMaxResults: 3 })
 				: undefined;
+		if (availableChars !== undefined) {
+			// Forced constrained profiles can have no known context window. The measured
+			// prompt capacity still bounds memory; it is not an inferred context window.
+			budget = budget
+				? { ...budget, maxChars: Math.min(budget.maxChars, availableChars) }
+				: {
+						enabled: true,
+						compact: false,
+						maxChars: availableChars,
+						maxLines: availableChars + 1,
+						maxEstimatedTokens: estimateTokensFromChars(availableChars),
+						maxResults: 3,
+					};
+		}
 		return this.deps.getMemoryManager().freezeSystemPromptBlock(budget) || undefined;
 	}
 
@@ -369,26 +384,35 @@ export class SystemPromptBuilder {
 			this._buildModelAdaptationPrompt(),
 			this._buildToolSelectionHintPrompt(),
 			this._buildToolApplicabilityPrompt(validToolNames, activeExtensions, modelCapability),
-			// Memory subsystem: static, frozen-per-session block (e.g. file-store MEMORY.md/USER.md).
-			this._buildStaticMemoryPrompt(modelCapability),
-			...(loaderAppendSystemPrompt ?? []),
 		].filter((part): part is string => Boolean(part));
-		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
 		const loadedContextFiles = this.deps.getResourceLoader().getAgentsFiles().agentsFiles;
 
-		return {
+		const options: BuildSystemPromptOptions = {
 			modelCapability,
 			cwd: this.deps.getCwd(),
 			contextFiles: loadedContextFiles,
 			// Metadata remains available to extension hooks, but buildSystemPrompt never renders it.
 			skills: [...this.deps.getResourceLoader().getActiveSkills()],
 			customPrompt: loaderSystemPrompt,
-			appendSystemPrompt,
+			appendSystemPrompt:
+				[...appendSystemPromptParts, ...(loaderAppendSystemPrompt ?? [])].join("\n\n") || undefined,
 			selectedTools: validToolNames,
 			toolSnippets,
 			promptGuidelines,
 			extensions: [...activeExtensions],
 		};
+		// A memory allowance is part of the final prompt, not extra capacity on top of it.
+		// Measure the mandatory prefix first, including caller guidance and paths; retain its
+		// existing failure behavior if it alone cannot fit. Freeze only the admitted memory view.
+		const availableChars =
+			modelCapability.systemPromptMaxChars === undefined
+				? undefined
+				: Math.max(0, modelCapability.systemPromptMaxChars - buildSystemPrompt(options).length - 2);
+		const memory = this._buildStaticMemoryPrompt(modelCapability, availableChars);
+		options.appendSystemPrompt =
+			[...appendSystemPromptParts, ...(memory ? [memory] : []), ...(loaderAppendSystemPrompt ?? [])].join("\n\n") ||
+			undefined;
+		return options;
 	}
 
 	rebuildSystemPrompt(toolNames: string[]): string {

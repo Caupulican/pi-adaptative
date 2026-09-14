@@ -24,7 +24,7 @@ export const SKILL_CONFLICT_RESOLUTION_RULE_COMPACT =
  * contract (system-prompt.ts) renders it once per capability class; no other block repeats its
  * sentences (pinned by system-prompt-builder-tool-selection.test.ts).
  */
-export const OWNER_AUTHORIZATION_RULE = `YOLO within the handed-off task; ${OWNER_PRECEDENCE_POLICY} Preserve explicit limits and release conditions. Reuse explicit owner grants in scope. Active settings grants are standing owner authorization: execute covered work without confirmation. Ask only if missing: destruction, credentials/auth, publish/push/tag/release, broader scope.`;
+export const OWNER_AUTHORIZATION_RULE = `YOLO within the handed-off task; ${OWNER_PRECEDENCE_POLICY} Preserve explicit limits and release conditions. Owner and settings grants are standing owner authorization: execute in scope without confirmation; ask only for missing authority.`;
 
 /**
  * The one projection rule for USER.md working preferences. Rendered by the file-store provider at

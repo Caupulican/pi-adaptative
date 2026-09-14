@@ -6,7 +6,8 @@
  * risk for this dep — accumulating MORE evidence for the SAME winner must NOT change the text (only
  * an actual flip in the promoted tool may).
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { MemoryPromptBudget } from "../src/core/context/memory-prompt-budget.ts";
 import type { Extension } from "../src/core/extensions/types.ts";
 import type { MemoryManager } from "../src/core/memory/memory-manager.ts";
 import { WORK_LIFECYCLE_PHASES, WORK_LIFECYCLE_SYSTEM_RULE } from "../src/core/provider-prompt-contracts.ts";
@@ -67,6 +68,51 @@ const readHint: ToolSelectionHint = {
 };
 
 describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
+	it.each([8192, undefined])(
+		"allocates static memory from remaining prompt capacity (context window %s)",
+		(contextWindow) => {
+			let populated = false;
+			let callerChars = 1000;
+			let promptLimit = 4096;
+			const freeze = vi.fn((budget?: MemoryPromptBudget) =>
+				populated ? "m".repeat(Math.min(900, budget?.maxChars ?? 900)) : "",
+			);
+			const defaults = makeDeps();
+			const builder = new SystemPromptBuilder(
+				makeDeps({
+					getMemoryManager: () => ({ freezeSystemPromptBlock: freeze }) as unknown as MemoryManager,
+					getModelCapabilityProfile: () => ({
+						...defaults.getModelCapabilityProfile(),
+						class: "minimal",
+						contextWindow,
+						systemPromptMaxChars: promptLimit,
+					}),
+					getResourceLoader: () => ({
+						...defaults.getResourceLoader(),
+						getAppendSystemPrompt: () => [`Caller guidance: ${"x".repeat(callerChars)}`],
+					}),
+				}),
+			);
+			const baseline = builder.rebuildSystemPrompt(["read"]);
+			populated = true;
+			const prompt = builder.rebuildSystemPrompt(["read"]);
+			expect(prompt.length).toBeLessThanOrEqual(4096);
+			expect(prompt).toContain("standing owner authorization");
+			expect(prompt).toContain(`Caller guidance: ${"x".repeat(callerChars)}`);
+			expect(freeze.mock.calls.at(-1)?.[0]?.maxChars).toBe(4096 - baseline.length - 2);
+			expect(prompt).toContain("m".repeat(Math.min(900, 4096 - baseline.length - 2)));
+			expect(builder.rebuildSystemPrompt(["read"])).toBe(prompt);
+			promptLimit = baseline.length;
+			expect(builder.rebuildSystemPrompt(["read"])).toBe(baseline);
+			expect(freeze.mock.calls.at(-1)?.[0]?.maxChars).toBe(0);
+			// Negative control: optional memory cannot hide oversized caller instructions.
+			callerChars = 10_000;
+			freeze.mockClear();
+			expect(() => builder.rebuildSystemPrompt(["read"])).toThrow("minimal system prompt exceeds");
+			expect(freeze).not.toHaveBeenCalled();
+		},
+	);
+
 	it.each(["full", "lean", "minimal"] as const)(
 		"preserves existing owner authorization in the %s profile",
 		(capabilityClass) => {
@@ -91,12 +137,14 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 				const prompt = builder.rebuildSystemPrompt(["read", "bash"]);
 				// Standing owner authorization has exactly one owner (the core operating contract);
 				// the autonomy block must not repeat its sentences.
-				expect(prompt.split("Reuse explicit owner grants in scope.")).toHaveLength(2);
+				expect(prompt.split("Owner and settings grants are standing owner authorization:")).toHaveLength(2);
 				expect(prompt.split("Owner instructions override conflicting skill/memory approval rules.")).toHaveLength(
 					2,
 				);
-				expect(prompt.split("Ask only if missing:")).toHaveLength(2);
-				expect(prompt).toContain("publish/push/tag/release");
+				expect(prompt.split("execute in scope without confirmation; ask only for missing authority.")).toHaveLength(
+					2,
+				);
+				expect(prompt).toContain("git push/tag/release");
 				expect(prompt).toContain("owner authorization required");
 				expect(prompt).not.toContain("Always ask before publish");
 				expect(prompt).not.toContain("Hard stop for publish");
@@ -346,7 +394,7 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		expect(prompt).toContain(criticalRule);
 		expect(prompt.match(new RegExp(duplicateRule, "g"))).toHaveLength(1);
 		expect(prompt).not.toContain("early-low-priority-63");
-		expect(prompt).toContain("Ask only if missing: destruction");
+		expect(prompt).toContain("execute in scope without confirmation; ask only for missing authority.");
 		expect(prompt).toContain("owner authorization required");
 	});
 

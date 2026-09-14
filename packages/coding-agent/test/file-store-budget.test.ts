@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveMemoryPromptBudget } from "../src/core/context/memory-prompt-budget.ts";
-import { FileStoreProvider } from "../src/core/memory/providers/file-store.ts";
+import { FileStoreProvider, MEMORY_OMITTED_FACTS_NOTE } from "../src/core/memory/providers/file-store.ts";
 
 /**
  * Read-time budget guard (cost, bug #24): the memory tool caps writes, but a MEMORY.md/USER.md bloated
@@ -33,9 +33,11 @@ describe("FileStoreProvider.systemPromptBlock read-time cap", () => {
 		await provider.initialize("s1", { agentDir, cwd: tempDir, isChildSession: false });
 		const block = provider.systemPromptBlock();
 
-		// Bounded (well under the raw 50k), and the model is told it was truncated.
+		// Bounded (well under the raw 50k), and the model is told which lines stayed on disk. Whole
+		// lines are selected, so the note counts them instead of showing a cut fragment.
 		expect(block.length).toBeLessThan(5_000);
-		expect(block).toContain("truncated");
+		expect(block).toContain(MEMORY_OMITTED_FACTS_NOTE);
+		expect(block).toContain("- fact");
 		// The file on disk is untouched.
 		const onDisk = await import("node:fs").then((m) => m.readFileSync(join(agentDir, "MEMORY.md"), "utf-8"));
 		expect(onDisk.length).toBe(huge.length);
@@ -47,7 +49,7 @@ describe("FileStoreProvider.systemPromptBlock read-time cap", () => {
 		await provider.initialize("s1", { agentDir, cwd: tempDir, isChildSession: false });
 		const block = provider.systemPromptBlock();
 		expect(block).toContain("npm run release:patch");
-		expect(block).not.toContain("truncated");
+		expect(block).not.toContain(MEMORY_OMITTED_FACTS_NOTE);
 	});
 
 	it("honors the normal capability budget used by an 8k model", async () => {

@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Static memory shares the final model prompt allowance, preventing memory initialization failures on constrained models. Omitted preferences use the existing persona record; unbudgeted projections preserve their whole-line allowance, and reload no longer repeats unchanged drift notices.
 - Test bootstrap clears inherited launcher metadata before package configuration is imported.
 - Environment-prefixed test commands retain verification receipts, including executable paths and Windows env wrappers. Collection failures can be repaired by an executed matching check; package/environment changes and contradictory summaries retain distinct evidence.
 - Goal edge grants advertise the authoritative edge-class vocabulary in their tool schema.
