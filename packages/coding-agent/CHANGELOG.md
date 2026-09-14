@@ -1,10 +1,23 @@
-## [Unreleased]
+## [0.99.21] - 2026-09-13
 
 ### Added
 
+- Reversible `memorySystem: "okf" | "icm"` selection and `/memory system` commands. ICM uses existing workspace and pipeline files on demand, disables legacy memory providers and automatic reflection, and preserves existing files and transcript history.
+- Fully idle memory-system switching with a held submission lease, activation checks, persistence-error handling, and rollback to the previous mode.
+
 - Release status and adoption commands for recovering a manually prepared, untagged lockstep version without another version bump. Adoption validates workspace and lockfile versions and retains the existing CI and destructive-test publication gates.
 
+### Changed
+
+- General and project memory storage now uses a separate 512,000 UTF-8 byte safety ceiling instead of the former 1,200/2,200-character prompt quotas. Prompt views remain bounded using approximate token accounting, whole facts, and omission notices.
+- Relevant facts omitted from static prompt views remain searchable through the existing file-store provider. Normal-window fallback excludes already installed lines and USER.md; Unicode matching and distinct project references preserve scoped recall.
+- ICM pipeline context supplies file references rather than eagerly injecting working-file bodies. Provider requests exclude inactive generated context without deleting durable history.
+
+- Execution defaults to YOLO standing grants for every registered edge class, independently of the learning/autonomy preset. Explicit `edge.allow` arrays still select restricted execution. Foreground, workers, and provider context share the same resolved grants; unreadable policy files cannot silently widen authority.
+
 ### Fixed
+
+- Managed-memory writes consistently commit their content and revision state while preserving drift checks and strict-shrink recovery for oversized files.
 
 - Static memory shares the final model prompt allowance, preventing memory initialization failures on constrained models. Omitted preferences use the existing persona record; unbudgeted projections preserve their whole-line allowance, and reload no longer repeats unchanged drift notices.
 - Test bootstrap clears inherited launcher metadata before package configuration is imported.
@@ -14,27 +27,6 @@
 - Failed worker responses containing partial tool calls persist their terminal evidence and usage without waiting for callbacks that cannot occur. Handoff guidance distinguishes delivery from execution correctness.
 - Removed competing settings, publication, and Python approval instructions; model authority context reuses the host's standing grants without requesting duplicate permission.
 - Release preparation and publication share complete Linux/Windows CI matrix proof. Existing local tags cannot bypass provenance; interrupted adoption recovers exact candidate changelog edits without including another session's work.
-
-### Changed
-
-- Execution defaults to YOLO standing grants for every registered edge class, independently of the learning/autonomy preset. Explicit `edge.allow` arrays still select restricted execution. Foreground, workers, and provider context share the same resolved grants; unreadable policy files cannot silently widen authority.
-
-## [0.99.21] - 2026-09-13
-
-### Added
-
-- Reversible `memorySystem: "okf" | "icm"` selection and `/memory system` commands. ICM uses existing workspace and pipeline files on demand, disables legacy memory providers and automatic reflection, and preserves existing files and transcript history.
-- Fully idle memory-system switching with a held submission lease, activation checks, persistence-error handling, and rollback to the previous mode.
-
-### Changed
-
-- General and project memory storage now uses a separate 512,000 UTF-8 byte safety ceiling instead of the former 1,200/2,200-character prompt quotas. Prompt views remain bounded using approximate token accounting, whole facts, and omission notices.
-- Relevant facts omitted from static prompt views remain searchable through the existing file-store provider. Normal-window fallback excludes already installed lines and USER.md; Unicode matching and distinct project references preserve scoped recall.
-- ICM pipeline context supplies file references rather than eagerly injecting working-file bodies. Provider requests exclude inactive generated context without deleting durable history.
-
-### Fixed
-
-- Managed-memory writes consistently commit their content and revision state while preserving drift checks and strict-shrink recovery for oversized files.
 
 ## [0.99.20] - 2026-09-13
 
