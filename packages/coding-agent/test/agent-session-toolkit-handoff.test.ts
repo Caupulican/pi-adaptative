@@ -71,6 +71,7 @@ describe("agent-session toolkit handoff integration", () => {
 	it("proves owner exact quote grants narrow toolkit scope and executes without confirmation", async () => {
 		const harness = await createHarness({
 			settings: {
+				edge: { allow: [] },
 				toolkit: {
 					scripts: createTestScripts(),
 				},
@@ -162,6 +163,7 @@ describe("agent-session toolkit handoff integration", () => {
 	it("proves the same selector reuses grant on follow-up execution", async () => {
 		const harness = await createHarness({
 			settings: {
+				edge: { allow: [] },
 				toolkit: {
 					scripts: createTestScripts(),
 				},
@@ -235,6 +237,7 @@ describe("agent-session toolkit handoff integration", () => {
 	it("proves changed argv or ungranted script name does not inherit the narrow grant", async () => {
 		const harness = await createHarness({
 			settings: {
+				edge: { allow: [] },
 				toolkit: {
 					scripts: createTestScripts(),
 				},
@@ -360,6 +363,7 @@ describe("agent-session toolkit handoff integration", () => {
 	it("proves mutating registered script path or runner under fixed name and argv denies execution until restored", async () => {
 		const harness = await createHarness({
 			settings: {
+				edge: { allow: [] },
 				toolkit: {
 					scripts: createTestScripts(),
 				},
@@ -506,6 +510,7 @@ describe("agent-session toolkit handoff integration", () => {
 	it("proves alias resolves exact canonical identity across grant and execution", async () => {
 		const harness = await createHarness({
 			settings: {
+				edge: { allow: [] },
 				toolkit: {
 					scripts: createTestScripts(),
 				},
@@ -604,6 +609,7 @@ describe("agent-session toolkit handoff integration", () => {
 	it("proves revocation and compaction/reload preserve correct scope", async () => {
 		const harness = await createHarness({
 			settings: {
+				edge: { allow: [] },
 				toolkit: {
 					scripts: createTestScripts(),
 				},

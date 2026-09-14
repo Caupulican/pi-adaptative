@@ -234,7 +234,7 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 			"risk, uncertainty, urgency, reversibility, invariant sensitivity, test strength/cost, and cognitive load",
 		);
 		expect(root).toContain("Local commit follows green checks");
-		expect(root).toContain("push/tag/release/publish stays owner-gated");
+		expect(root).toContain("publish under active owner grants and release conditions");
 		expect(root).toContain("goal owns outcome/contract, task_steps owns plan, delegate owns workers");
 
 		const splitGoalSurface = new SystemPromptBuilder(makeDeps()).rebuildSystemPrompt([

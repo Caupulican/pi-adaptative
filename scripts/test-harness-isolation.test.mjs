@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { completeCiJobs } from "./test-fixtures/release-ci-jobs.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const harnessPath = join(repositoryRoot, "test.sh");
@@ -426,7 +427,7 @@ test("the mandatory root check owns the isolated release-test harness contract",
 	assert.doesNotMatch(source, /^\s*(?:export\s+)?PATH=/m);
 	assert.equal(
 		packageJson.scripts["check:test-harness-isolation"],
-		"node --test scripts/test-harness-isolation.test.mjs scripts/release-staging.test.mjs scripts/workspace-test-plan.test.mjs scripts/ci-workflow-performance.test.mjs",
+		"node --test scripts/test-harness-isolation.test.mjs scripts/release-staging.test.mjs scripts/release-ci-proof.test.mjs scripts/release-adoption.test.mjs scripts/release-adoption-execution.test.mjs scripts/workspace-test-plan.test.mjs scripts/ci-workflow-performance.test.mjs",
 	);
 	assert.match(packageJson.scripts.check, /npm run check:test-harness-isolation/);
 	assert.equal(packageJson.scripts.test, "node scripts/run-workspace-tests.mjs");
@@ -566,9 +567,7 @@ function createReleaseExecutionProofFixture(context, ciConclusion) {
 		const sha = git(["rev-parse", "HEAD"]).trim();
 		writeFileSync(
 			fakeGhPath,
-			`#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(
-				JSON.stringify([{ headSha: sha, status: "completed", conclusion }]),
-			)});\n`,
+			`#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv[3] === 'view' ? ${JSON.stringify({ jobs: completeCiJobs() })} : ${JSON.stringify([{ headSha: sha, databaseId: 1, status: "completed", conclusion }])}));\n`,
 		);
 		chmodSync(fakeGhPath, 0o755);
 		return sha;

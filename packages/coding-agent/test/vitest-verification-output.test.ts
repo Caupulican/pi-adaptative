@@ -10,7 +10,10 @@ describe("Vitest verification output", () => {
 		["Tests 1 passed (1)", 1, "executed"],
 		["Tests 1 passed (1)\nNo test files found, exiting with code 1", 2, "executed"],
 		["No test files found, exiting with code 1", 2, "unconfirmed"],
-		["Test Files 1 failed (1)\nTests no tests", 1, "unconfirmed"],
+		// Complete collection failure is repairable setup; failed assertions remain executed.
+		["Test Files 1 failed (1)\nTests no tests", 1, "setup_failed"],
+		["Test Files 1 failed (1)\nTests no tests", 2, "unconfirmed"],
+		["Test Files 1 failed | 1 passed (2)\nTests no tests", 1, "unconfirmed"],
 		["Tests 1 passed (2)\nTests no tests", 1, "unconfirmed"],
 		[`No test files found, exiting with code 1\n${"x".repeat(20_000)}`, 1, "unconfirmed"],
 	] as const)(

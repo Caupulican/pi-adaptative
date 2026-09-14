@@ -641,11 +641,10 @@ describe("MemoryController context retrieval", () => {
 		writeFileSync(join(agentDir, "USER.md"), "", "utf8");
 		// Many project lines exceeding BUDGET_PROJECT (2200 chars) so the frozen block
 		// truncates; the LAST line should be recalled beyond the frozen projection.
-		const manyLines =
-			Array.from(
-				{ length: 200 },
-				(_, i) => `Project fact ${i}: this is a very long project fact description that takes up space.`,
-			).join("\n") + "\nProject-specific ticket ALPHA-1 is tracked here.";
+		const manyLines = `${Array.from(
+			{ length: 200 },
+			(_, i) => `Project fact ${i}: this is a very long project fact description that takes up space.`,
+		).join("\n")}\nProject-specific ticket ALPHA-1 is tracked here.`;
 		writeFileSync(join(projectMemoryDir(agentDir, project.hash), "MEMORY.md"), manyLines, "utf8");
 		const controller = new MemoryController({
 			getSettingsManager: settings,

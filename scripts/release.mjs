@@ -7,6 +7,8 @@
  *   node scripts/release.mjs <x.y.z>
  *   node scripts/release.mjs repair
  *   node scripts/release.mjs promote
+ *   node scripts/release.mjs adopt
+ *   node scripts/release.mjs status
  *
  * The release flow is split into two gated phases so a CI failure never costs a version number:
  *
@@ -45,12 +47,16 @@
 import { execSync } from "child_process";
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
+import { requireCiProof, requireReleaseCiProof } from "./release-ci-proof.mjs";
 import {
 	interpretHeadWorkflow,
 	matchesReleaseCandidateSubject,
 	partitionReleaseChanges,
 	pickWorkflowConclusion,
 	stripEmptyUnreleasedSection,
+	prepareAdoptedChangelog,
+	validateAdoptionVersions,
+	collectChangedPaths,
 } from "./release-staging.mjs";
 
 const RELEASE_TARGET = process.argv[2];
@@ -58,9 +64,10 @@ const BUMP_TYPES = new Set(["major", "minor", "patch"]);
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 const isPrepareTarget = BUMP_TYPES.has(RELEASE_TARGET) || SEMVER_RE.test(RELEASE_TARGET);
 const isRepairTarget = RELEASE_TARGET === "repair";
+const isAdoptTarget = RELEASE_TARGET === "adopt";
 
-if (RELEASE_TARGET !== "promote" && !isPrepareTarget && !isRepairTarget) {
-	console.error("Usage: node scripts/release.mjs <major|minor|patch|x.y.z|repair|promote>");
+if (RELEASE_TARGET !== "promote" && !isPrepareTarget && !isRepairTarget && !isAdoptTarget && RELEASE_TARGET !== "status") {
+	console.error("Usage: node scripts/release.mjs <major|minor|patch|x.y.z|repair|adopt|status|promote>");
 	process.exit(1);
 }
 
@@ -258,7 +265,7 @@ function assertTagIsFree(version) {
 }
 
 // All preflight checks are read-only (no local or remote mutation), so failures exit directly.
-function preflight(prospectiveVersion) {
+function preflight(prospectiveVersion, recoveredPaths = new Set()) {
 	console.log("Running preflight checks...");
 
 	const branch = run("git rev-parse --abbrev-ref HEAD", { silent: true }).trim();
@@ -268,7 +275,7 @@ function preflight(prospectiveVersion) {
 	}
 
 	const status = run("git status --porcelain", { silent: true });
-	if (status && status.trim()) {
+	if (status && collectChangedPaths(status).some((path) => !recoveredPaths.has(path))) {
 		console.error("Error: Uncommitted changes detected. Commit or stash first.");
 		console.error(status);
 		process.exit(1);
@@ -310,6 +317,7 @@ function assertHeadCiSucceeded(sha) {
 		process.exit(1);
 	}
 	console.log(`  HEAD ${sha} already has a successful ${CI_WORKFLOW} run`);
+	requireCiProof(sha, repo);
 }
 
 function rollbackToPreflightSha(preflightSha) {
@@ -336,34 +344,7 @@ function prepareRelease() {
 		updateChangelogsForRelease(version);
 		console.log();
 
-		// 5. Run checks. Binary packaging and installer verification happen in the tag workflow.
-		console.log("Running checks...");
-		run("npm run check");
-		console.log();
-
-		// 6. Commit and push (no tag yet - see promoteRelease)
-		console.log("Committing release...");
-		stageChangedFiles();
-		run(`git commit -m "Release v${version}"`);
-		console.log();
-
-		console.log("Pushing release commit to origin/main...");
-		run("git push origin main");
-		console.log();
-
-		// 7. Add new [Unreleased] sections for the next cycle
-		console.log("Adding [Unreleased] sections for next cycle...");
-		addUnreleasedSection();
-		console.log();
-
-		console.log("Committing changelog updates...");
-		stageChangedFiles();
-		run(`git commit -m "Add [Unreleased] section for next cycle"`);
-		console.log();
-
-		console.log("Pushing next-cycle commit to origin/main...");
-		run("git push origin main");
-		console.log();
+		finishPreparedRelease(`Release v${version}`);
 
 		return version;
 	} catch (error) {
@@ -384,6 +365,40 @@ function findReleaseCandidateSha(version, includeRepairs = true) {
 		if (includeRepairs ? matchesReleaseCandidateSubject(subject, version) : subject === `Release v${version}`) return sha;
 	}
 	return undefined;
+}
+
+function adoptRelease() {
+	const version = getVersion();
+	// Recover only bytes this deterministic transformation would have written from HEAD.
+	// An unrelated edit, including another session's changelog note, still fails preflight.
+	const recoveredPaths = new Set();
+	for (const path of getChangelogs()) {
+		const original = run(`git show ${shellQuote(`HEAD:${path}`)}`, { silent: true });
+		const expected = prepareAdoptedChangelog(original, version);
+		if (readFileSync(path, "utf8") === expected) recoveredPaths.add(path);
+	}
+	preflight(version, recoveredPaths);
+	if (findReleaseCandidateSha(version)) throw new Error("A canonical candidate already exists; use release:repair or release:promote.");
+	validateAdoptionVersions(".", version);
+	const updates = getChangelogs().map((path) => ({ path, content: prepareAdoptedChangelog(readFileSync(path, "utf8"), version) }));
+	if (updates.length === 0) throw new Error("No changelogs found for release adoption.");
+	console.log(`Adopting prepared version ${version} without another version bump...`);
+	for (const update of updates) writeFileSync(update.path, update.content);
+	// On failure, retain the bounded edits for inspection. Never reset a shared worktree.
+	finishPreparedRelease(`Release v${version}`);
+	return version;
+}
+
+function finishPreparedRelease(subject) {
+	console.log("Running checks...");
+	run("npm run check");
+	stageChangedFiles();
+	run(`git commit -m ${shellQuote(subject)}`);
+	run("git push origin main");
+	addUnreleasedSection();
+	stageChangedFiles();
+	run('git commit -m "Add [Unreleased] section for next cycle"');
+	run("git push origin main");
 }
 
 function prepareReleaseRepair() {
@@ -407,31 +422,7 @@ function prepareReleaseRepair() {
 		removeEmptyUnreleasedSections(version);
 		console.log();
 
-		console.log("Running checks...");
-		run("npm run check");
-		console.log();
-
-		console.log("Committing repaired release candidate...");
-		stageChangedFiles();
-		run(`git commit -m "Repair release v${version}"`);
-		console.log();
-
-		console.log("Pushing repaired release candidate to origin/main...");
-		run("git push origin main");
-		console.log();
-
-		console.log("Adding [Unreleased] sections for next cycle...");
-		addUnreleasedSection();
-		console.log();
-
-		console.log("Committing changelog updates...");
-		stageChangedFiles();
-		run('git commit -m "Add [Unreleased] section for next cycle"');
-		console.log();
-
-		console.log("Pushing next-cycle commit to origin/main...");
-		run("git push origin main");
-		console.log();
+		finishPreparedRelease(`Repair release v${version}`);
 
 		return version;
 	} catch (error) {
@@ -513,12 +504,6 @@ async function promoteRelease(versionArg) {
 	const tag = `v${version}`;
 
 	const existingLocalTag = run(`git tag -l ${shellQuote(tag)}`, { silent: true });
-	if (existingLocalTag && existingLocalTag.trim()) {
-		console.log(`  ${tag} already exists locally.`);
-		ensureTagPushed(tag);
-		console.log(`\n=== ${tag} already promoted ===\n`);
-		return;
-	}
 
 	const releaseSha = findReleaseCandidateSha(version);
 	if (!releaseSha) {
@@ -528,6 +513,10 @@ async function promoteRelease(versionArg) {
 		);
 	}
 	console.log(`  Release candidate: ${releaseSha}`);
+	if (existingLocalTag?.trim()) {
+		const taggedSha = run(`git rev-parse ${shellQuote(`${tag}^{commit}`)}`, { silent: true }).trim();
+		if (taggedSha !== releaseSha) throw new Error(`Existing ${tag} does not name release candidate ${releaseSha}.`);
+	}
 
 	const conclusion = await waitForCi(releaseSha);
 	if (conclusion !== "success") {
@@ -537,6 +526,7 @@ async function promoteRelease(versionArg) {
 		);
 	}
 
+	requireReleaseCiProof(releaseSha, getRepoSlug());
 	const destructive = await waitForDestructive(releaseSha, version);
 	if (destructive !== "success") {
 		throw new Error(
@@ -545,6 +535,11 @@ async function promoteRelease(versionArg) {
 		);
 	}
 
+	if (existingLocalTag?.trim()) {
+		ensureTagPushed(tag);
+		console.log(`\n=== ${tag} already promoted ===\n`);
+		return;
+	}
 	console.log(`  CI succeeded for ${releaseSha}. Tagging ${tag}...`);
 	try {
 		// Release tags are plain lightweight refs. Disable host-level forced tag
@@ -564,7 +559,14 @@ async function promoteRelease(versionArg) {
 console.log("\n=== Release Script ===\n");
 
 try {
-	if (RELEASE_TARGET === "promote") {
+	if (RELEASE_TARGET === "status") {
+		const version = getVersion();
+		const repo = getRepoSlug();
+		const sha = run("git rev-parse HEAD", { silent: true }).trim();
+		console.log(JSON.stringify({ version, repo, sha, workingTree: run("git status --porcelain", { silent: true }).trim(), remoteTag: run(`git ls-remote --tags origin ${shellQuote(`v${version}`)}`, { silent: true }).trim() }, null, 2));
+	} else if (RELEASE_TARGET === "adopt") {
+		await promoteRelease(adoptRelease());
+	} else if (RELEASE_TARGET === "promote") {
 		await promoteRelease();
 	} else if (isRepairTarget) {
 		const version = prepareReleaseRepair();

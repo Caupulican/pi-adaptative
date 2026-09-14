@@ -8,6 +8,7 @@ import {
 import {
 	isChangeDirectoryInvocation,
 	parseShellCommandSequence,
+	parseShellInvocationPrefixes,
 	type ShellCommandSequence,
 	tokenizeShellCommand,
 } from "./shell-command-parser.ts";
@@ -62,7 +63,19 @@ function isTestScriptName(token: string | undefined): boolean {
 	return TEST_NAME_SEGMENT_RE.test(token.toLowerCase());
 }
 
-function isTestInvocation(args: string[], allowCheckScript = false): boolean {
+function verificationArguments(invocation: string[]): string[] {
+	const parsed = parseShellInvocationPrefixes(invocation);
+	// Queries and env options can avoid execution or change cwd/argv. Keep those opaque.
+	if (
+		parsed.nonExecutingQuery ||
+		parsed.prefixes.some((arg) => arg !== parsed.envExecutable && !ENV_ASSIGNMENT_RE.test(arg))
+	)
+		return [];
+	return parsed.args;
+}
+
+function isTestInvocation(invocation: string[], allowCheckScript = false): boolean {
+	const args = verificationArguments(invocation);
 	if (args.length === 0) return false;
 	const executable = executableStem(args[0]);
 	if (executable === "test" || executable === "[") return false;
@@ -122,10 +135,7 @@ function commandArguments(command: string): string[] | undefined {
 		if (token.kind === "arg") args.push(token.value);
 	}
 
-	let start = 0;
-	if (executableStem(args[start] ?? "") === "env") start++;
-	while (start < args.length && ENV_ASSIGNMENT_RE.test(args[start])) start++;
-	return args.slice(start);
+	return args;
 }
 
 /** Conservatively identifies commands whose stdout is owned by a test runner. */
@@ -249,8 +259,22 @@ export function classifyShellVerificationCommand(
 		if (workspaceRoot !== undefined && paths.isAbsolute(workspaceRoot)) {
 			const relative = paths.relative(workspaceRoot, executionCwd);
 			if (relative !== ".." && !relative.startsWith(`..${paths.sep}`) && !paths.isAbsolute(relative)) {
+				// Environment values select package/configuration identity. Workspace containment
+				// cannot prove equivalent package roots, so preserve every assignment.
+				const repairInvocations = stages.invocations.map((invocation) => {
+					const { args, prefixes, envExecutable } = parseShellInvocationPrefixes(invocation);
+					const retained = prefixes.filter((prefix) => prefix !== envExecutable);
+					return [...retained, ...args];
+				});
 				repairGroup = `shell-repair-${createHash("sha256")
-					.update(JSON.stringify({ version: 1, workspace: paths.normalize(workspaceRoot), ...stages }))
+					.update(
+						JSON.stringify({
+							version: 1,
+							workspace: paths.normalize(workspaceRoot),
+							...stages,
+							invocations: repairInvocations,
+						}),
+					)
 					.digest("base64url")}`;
 			}
 		}
@@ -259,7 +283,8 @@ export function classifyShellVerificationCommand(
 		kind: "test",
 		runners: sequence.invocations
 			.filter((args) => isTestInvocation(args, true))
-			.map((args): VerificationRunner => {
+			.map((invocation): VerificationRunner => {
+				const args = verificationArguments(invocation);
 				const executable = executableStem(args[0] ?? "");
 				if (executable === "node" && args.slice(1).some((arg) => arg === "--test" || arg.startsWith("--test=")))
 					return "node-test";

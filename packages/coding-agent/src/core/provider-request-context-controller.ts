@@ -130,7 +130,10 @@ export const AUTHORITY_CONTEXT_CLEARED_TEXT =
 export const MAX_AUTHORITY_GRANT_FIELD_CHARS = 1000;
 
 export function formatAuthorityContext(grants: readonly EdgeGrantView[]): string {
-	const lines = ["AUTHORITY CONTEXT: Active edge grants (respect explicit conditions and scope):"];
+	const lines = [
+		"AUTHORITY CONTEXT: Active edge grants (respect explicit conditions and scope):",
+		"Do not ask for permission again for covered work; these grants already authorize execution. Continue task prerequisites and recoverable failures autonomously.",
+	];
 	for (const grant of grants) {
 		const cleanScopeKey = grant.scopeKey?.trim();
 		const scopePart = cleanScopeKey

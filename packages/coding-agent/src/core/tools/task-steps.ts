@@ -436,9 +436,9 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			"Track the session's ordered multi-step checklist with status, notes, and evidence. Use goal for durable outcomes and delegate for workers.",
 		promptSnippet: "Track multi-step session work.",
 		promptGuidelines: [
-			"Use for multi-step work; keep one in_progress step.",
+			"Use for multi-step work; keep one in_progress step while runnable work remains. Leave blocked steps blocked until their condition changes.",
 			"For project changes, establish Plan/Route before first mutation and link steps to the goal contract; task_steps owns execution detail, never a second outcome state.",
-			'Finish several steps in one call with update + updates: [{id: "3", status, note}, …] (id is the step number), never one call per step; work the first open step; record blockers; skip unchanged narration.',
+			'Finish several steps in one call with update + updates: [{id: "3", status, note}, …] (id is the step number), never one call per step; work the first pending step; record blockers; skip unchanged narration.',
 			"Notes are one short line; long evidence belongs in goal add_evidence cited by toolCallId.",
 			"intake keeps every item; link goal requirementIds.",
 			"update's id is optional: omit it to target the active step. Completing the active step auto-starts the next pending one.",

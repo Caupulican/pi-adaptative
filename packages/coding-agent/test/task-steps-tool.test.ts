@@ -518,7 +518,9 @@ describe("task_steps tool", () => {
 		// task-steps.ts, and task-steps-tool-concurrency.test.ts for the correctness proof.
 		expect(createHarness().tool.executionMode).toBeUndefined();
 		expect(harnessGuidelines(createHarness().tool)).toContain("one in_progress step");
-		expect(harnessGuidelines(createHarness().tool)).toContain("first open step");
+		// Blocked work remains open but must not be offered as runnable.
+		expect(harnessGuidelines(createHarness().tool)).toContain("first pending step");
+		expect(harnessGuidelines(createHarness().tool)).toContain("Leave blocked steps blocked");
 		expect(harnessGuidelines(createHarness().tool)).toContain("Before final");
 		expect(harnessGuidelines(createHarness().tool)).toContain("requirementIds");
 		expect(harnessGuidelines(createHarness().tool)).not.toContain("pipelineRunId");

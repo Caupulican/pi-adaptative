@@ -144,13 +144,16 @@ export function tokenizeShellCommand(
 
 export interface ShellInvocationPrefixResult {
 	args: string[];
+	prefixes: string[];
 	nonExecutingQuery: boolean;
+	envExecutable?: string;
 }
 
 /** Parse shell environment assignments and supported command/env wrappers from one invocation. */
 export function parseShellInvocationPrefixes(args: string[]): ShellInvocationPrefixResult {
 	let index = 0;
 	let nonExecutingQuery = false;
+	let envExecutable: string | undefined;
 	while (index < args.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(args[index] ?? "")) index++;
 	if (args[index] === "command") {
 		index++;
@@ -159,7 +162,8 @@ export function parseShellInvocationPrefixes(args: string[]): ShellInvocationPre
 			index++;
 		}
 	}
-	if (args[index] === "env") {
+	if (/(?:^|[\\/])env(?:\.(?:exe|cmd|bat))?$/iu.test(args[index] ?? "")) {
+		envExecutable = args[index];
 		index++;
 		while (index < args.length) {
 			const arg = args[index];
@@ -182,7 +186,7 @@ export function parseShellInvocationPrefixes(args: string[]): ShellInvocationPre
 			break;
 		}
 	}
-	return { args: args.slice(index), nonExecutingQuery };
+	return { args: args.slice(index), prefixes: args.slice(0, index), nonExecutingQuery, envExecutable };
 }
 
 /** Strip shell environment assignments and the supported command/env wrappers from one invocation. */

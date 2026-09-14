@@ -3,7 +3,7 @@
  *
  * Pure logic only: given the current task_steps state and the prior consecutive-violation streak,
  * decides whether the workflow contract described in the task_steps tool's `promptGuidelines`
- * (`tools/task-steps.ts`) — at most one in_progress step, and an in_progress step whenever open
+ * (`tools/task-steps.ts`) — at most one in_progress step, and an in_progress step whenever pending
  * steps remain — has been broken for N consecutive turns, and if so returns a ONE-LINE harness
  * note. No model calls, no I/O, no session access: the caller (`AutoLearnController`) owns reading
  * the task_steps state, persisting the returned streak across turns, and delivering the note
@@ -11,7 +11,7 @@
  * enforcement gate.
  */
 
-import type { TaskStepsState } from "./task-state.ts";
+import { findNextPendingStep, type TaskStepsState } from "./task-state.ts";
 
 /** Consecutive violating turns required before a harness note fires. */
 export const TASK_CONTRACT_VIOLATION_THRESHOLD = 3;
@@ -36,16 +36,15 @@ export interface TaskContractCheckResult {
 }
 
 /**
- * True when the task_steps contract is broken: more than one step is in_progress, or open
- * (non-terminal) steps remain with none in_progress. An absent state (no task list ever created)
+ * True when the task_steps contract is broken: more than one step is in_progress, or pending
+ * steps remain with none in_progress. Blocked work is not runnable. An absent state (no task list ever created)
  * is never a violation — there is nothing to enforce.
  */
 export function isTaskStepsContractViolation(state: TaskStepsState | undefined): boolean {
 	if (!state) return false;
 	const inProgressCount = state.steps.filter((step) => step.status === "in_progress").length;
 	if (inProgressCount > 1) return true;
-	const openCount = state.steps.filter((step) => step.status !== "completed" && step.status !== "cancelled").length;
-	return openCount > 0 && inProgressCount === 0;
+	return findNextPendingStep(state.steps) !== undefined && inProgressCount === 0;
 }
 
 function buildTaskContractNote(state: TaskStepsState | undefined, consecutiveViolations: number): string {
@@ -53,8 +52,8 @@ function buildTaskContractNote(state: TaskStepsState | undefined, consecutiveVio
 	const reason =
 		inProgressCount > 1
 			? `${inProgressCount} steps are in_progress at once`
-			: "open task_steps have none in_progress";
-	return `Harness note: task_steps contract violated for ${consecutiveViolations} consecutive turns (${reason}) — set exactly one open step to in_progress before continuing.`;
+			: "pending task_steps have none in_progress";
+	return `Harness note: task_steps contract violated for ${consecutiveViolations} consecutive turns (${reason}) — set exactly one runnable step to in_progress before continuing.`;
 }
 
 /**

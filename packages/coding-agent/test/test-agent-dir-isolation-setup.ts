@@ -1,9 +1,10 @@
+import "./test-launch-env-setup.ts";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import { HARNESS_LAUNCH_ENV_KEYS } from "../src/core/harness-environment.ts";
+import { launchEnvBackup } from "./test-launch-env-setup.ts";
 
 interface AgentDirIsolationState {
 	originalAgentDir: string | undefined;
@@ -20,14 +21,6 @@ if (!isolationState) {
 			rmSync(path, { recursive: true, force: true });
 		}
 	});
-}
-
-// Tests that run inside pi must not inherit pi's own launch variables (the theme loader would
-// resolve assets from the installed generation instead of this checkout).
-const launchEnvBackup = new Map<string, string | undefined>();
-for (const key of HARNESS_LAUNCH_ENV_KEYS) {
-	launchEnvBackup.set(key, process.env[key]);
-	delete process.env[key];
 }
 
 const isolatedAgentDir = realpathSync.native(mkdtempSync(join(realpathSync.native(tmpdir()), "pi-agent-test-")));

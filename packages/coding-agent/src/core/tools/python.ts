@@ -277,7 +277,6 @@ export function createPythonToolDefinition(
 			"Small exact source edits: read/edit/write. Python transforms: preserve encoding/newlines, write atomically, verify diff.",
 			"Scope roots/filters; never scan home/filesystem recursively. Raise timeout only for justified bounded work.",
 			"Never inspect/print credentials; use activated environment only through credential consumer.",
-			"Explicit approval required: destructive deletion, publish/push/release, long-running services.",
 		],
 		parameters: pythonSchema,
 		backgroundRequested: (input) => input.background === true,

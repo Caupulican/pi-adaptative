@@ -235,21 +235,10 @@ test("direct tag publication proves a full tested tree and exact-commit destruct
 	const releaseJob = releaseWorkflow.slice(releaseStart);
 	assert.match(provenanceJob, /^      actions: read$/mu);
 	assert.match(provenanceJob, /git rev-parse "\$\{RELEASE_TAG\}\^\{commit\}"/u);
-	assert.match(provenanceJob, /release_subject=/u);
-	assert.match(provenanceJob, /tested_sha=.*git rev-parse "\$\{release_sha\}\^"/u);
-	assert.match(
-		provenanceJob,
-		/node scripts\/verify-release-metadata-diff\.mjs "\$tested_sha" "\$release_sha"/u,
-	);
+	assert.match(provenanceJob, /node scripts\/release-ci-proof\.mjs "\$release_sha" "\$GITHUB_REPOSITORY"/u);
 	assert.doesNotMatch(provenanceJob, /git diff --name-only -z/u);
-	assert.match(provenanceJob, /gh run view "\$run_id"[\s\S]*--json jobs/u);
-	assert.match(provenanceJob, /Build, check, test \(ubuntu-latest\)/u);
-	assert.match(provenanceJob, /Build, check, test \(windows-latest\)/u);
-	assert.match(provenanceJob, /Verification-harness coverage gate/u);
-	assert.match(provenanceJob, /Test non-coding-agent workspaces/u);
-	assert.match(provenanceJob, /Test coding-agent shard/u);
-	assert.match(provenanceJob, /\[ "\$coding_shards" -eq 8 \]/u);
-	assert.match(provenanceJob, /verify_full_ci "\$tested_sha"/u);
+	assert.match(releaseScript, /requireCiProof\(sha, repo\)/u);
+	assert.match(releaseScript, /requireReleaseCiProof\(releaseSha, getRepoSlug\(\)\)/u);
 	assert.match(provenanceJob, /verify_workflow destructive\.yml "\$release_sha"/u);
 	assert.match(provenanceJob, /\.headSha == \$sha/u);
 	assert.match(provenanceJob, /\.status == "completed"/u);

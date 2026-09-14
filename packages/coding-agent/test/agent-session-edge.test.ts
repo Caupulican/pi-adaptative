@@ -35,7 +35,7 @@ function lastToolResultText(harness: Awaited<ReturnType<typeof createHarness>>):
 describe("the edge in a session", () => {
 	it("blocks an ungranted edge operation when nobody can answer, and names every way to grant it", async () => {
 		const bash = bashSpy();
-		const harness = await createHarness({ tools: [bash.tool] });
+		const harness = await createHarness({ tools: [bash.tool], settings: { edge: { allow: [] } } });
 		try {
 			harness.setResponses([
 				fauxAssistantMessage([fauxToolCall("bash", { command: "git push origin main" })], {
@@ -56,7 +56,7 @@ describe("the edge in a session", () => {
 
 	it("runs ordinary work and granted classes without asking", async () => {
 		const bash = bashSpy();
-		const harness = await createHarness({ tools: [bash.tool] });
+		const harness = await createHarness({ tools: [bash.tool], settings: { edge: { allow: [] } } });
 		let asked = 0;
 		harness.session.setEdgeConfirmation(async () => {
 			asked++;
@@ -95,7 +95,7 @@ describe("the edge in a session", () => {
 
 	it("asks the interactive host once: deny blocks, allow once runs, allow for the session records a grant", async () => {
 		const bash = bashSpy();
-		const harness = await createHarness({ tools: [bash.tool] });
+		const harness = await createHarness({ tools: [bash.tool], settings: { edge: { allow: [] } } });
 		const requests: EdgeConfirmationRequest[] = [];
 		const answers: Array<"deny" | "allow-once" | "allow-session"> = ["deny", "allow-once", "allow-session"];
 		harness.session.setEdgeConfirmation(async (request) => {
@@ -147,7 +147,7 @@ describe("the edge in a session", () => {
 	});
 
 	it("records an instruction grant only from the operator's exact words", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ settings: { edge: { allow: [] } } });
 		try {
 			harness.setResponses([
 				fauxAssistantMessage(

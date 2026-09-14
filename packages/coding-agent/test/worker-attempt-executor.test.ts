@@ -229,6 +229,36 @@ turn context
 (none)`;
 
 describe("worker attempt executor", () => {
+	it("persists a failed partial tool call as terminal evidence without waiting for tool execution", async () => {
+		const assistant: AssistantMessage = {
+			...assistantToolRequest(17),
+			stopReason: "error",
+			errorMessage: "Output runaway detected",
+		};
+		const harness = createExecutorHarness(async (options) => {
+			await options.onMessage?.(assistant);
+			return {
+				text: "",
+				usage: assistant.usage,
+				stopReason: "error",
+				errorMessage: assistant.errorMessage,
+				messages: [...(options.history ?? []), assistant],
+			};
+		});
+		const result = await harness.executor.run();
+		expect(result.rawOutcome).toMatchObject({
+			accepted: false,
+			reasonCode: "completion_error",
+			reasonDetail: "Output runaway detected",
+		});
+		expect(result.usage).toMatchObject({ inputTokens: 17, totalTokens: 17 });
+		expect(harness.events).not.toContain("gate");
+		expect(harness.conversation.getRawTranscript().at(-1)).toMatchObject({
+			role: "assistant",
+			stopReason: "error",
+			content: assistant.content,
+		});
+	});
 	it("caps a worker turn at the model output limit, never the lane summary cap", async () => {
 		// Measured live (session 01a07461): the 2048-token lane cap cut two complete claim envelopes
 		// at stopReason "length" and the runner reported them as invalid JSON. With no declared model

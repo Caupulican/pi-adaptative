@@ -6,6 +6,25 @@ function classifyShellVerificationCommand(command: string, cwd: string, workspac
 }
 
 describe("shell verification classifier", () => {
+	it("preserves environment identity even for package directories within the workspace", () => {
+		const classify = (prefix: string) =>
+			classifyShellVerificationCommand(`${prefix}vitest run test/a.test.ts`, "/workspace", "/workspace");
+		const direct = classify("");
+		for (const prefix of ["env ", "env.exe ", "/usr/bin/env "]) {
+			expect(classify(prefix)?.repairGroup).toBe(direct?.repairGroup);
+			expect(classify(prefix)?.id).not.toBe(direct?.id);
+		}
+		for (const prefix of [
+			"PI_PACKAGE_DIR=/workspace/packages/coding-agent ",
+			"env PI_PACKAGE_DIR=/workspace ",
+			"PI_PACKAGE_DIR=relative ",
+			"PI_PACKAGE_DIR=/workspace-sibling ",
+			"PI_PACKAGE_DIR=/external ",
+			"NODE_ENV=test ",
+		]) {
+			expect(classify(prefix)?.repairGroup).not.toBe(direct?.repairGroup);
+		}
+	});
 	it("groups explicit setup corrections only within the host workspace and identical verification stages", () => {
 		const command = "npx vitest run test/focused.test.ts --pool=forks";
 		const original = classifyShellVerificationCommand(
@@ -36,7 +55,6 @@ describe("shell verification classifier", () => {
 			[command, "/workspace/project-sibling", "/workspace/project"],
 			[`cd ../external && ${command}`, "/workspace/project", "/workspace/project"],
 			["vitest run $TEST_FILTER", "/workspace/project", "/workspace/project"],
-			["NODE_ENV=test vitest run test/focused.test.ts", "/workspace/project", "/workspace/project"],
 		]) {
 			expect(classifyShellVerificationCommand(source, initialCwd, workspace)?.repairGroup).toBeUndefined();
 		}
@@ -139,6 +157,10 @@ describe("shell verification classifier", () => {
 	});
 
 	it.each([
+		"env -C /elsewhere vitest run test/a.test.ts",
+		"env -S 'vitest run test/a.test.ts'",
+		"command -v vitest",
+		"command vitest run test/a.test.ts",
 		"echo 'npm test'",
 		"rg 'vitest --run' packages/coding-agent",
 		"false",

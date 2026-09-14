@@ -57,10 +57,10 @@ const goalSchema = Type.Object(
 			{ description: "Goal record action." },
 		),
 		edgeClass: Type.Optional(
-			Type.String({
-				description:
-					"grant_edge: git.publish | package.publish | package.install | destructive.fs | settings.authority | toolkit.script",
-			}),
+			Type.Union(
+				EDGE_CLASSES.map((edgeClass) => Type.Literal(edgeClass)),
+				{ description: "grant_edge: authorized operation class." },
+			),
 		),
 		toolkitScript: Type.Optional(
 			Type.String({

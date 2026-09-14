@@ -304,7 +304,14 @@ model confirmation prompts. A class granted by the
 task instructions (`goal grant_edge` with the operator's exact words, verified verbatim against a
 user message on the branch — a paraphrase grants nothing, and scoped toolkit script grants match on
 their derived scope key), by the operator in this session (`/edge allow <class…|all>`, or *allow for
-this session* at the prompt) or by the machine (`edge.allow` in settings) never asks; a session or
+this session* at the prompt) or by the machine (`edge.allow` in settings) never asks. An omitted
+`edge.allow` resolves to all registered classes: YOLO is executable standing authority, independently
+of the learning preset. An explicit list, including `[]`, replaces that default. Malformed or
+unreadable policies withhold standing grants while ordinary diagnostic requests remain available;
+reload and compaction preserve the resolved authority. Provider context reuses those grants and
+tool/self-modification prose cannot introduce another confirmation. The edge contract's restricted
+fixtures now explicitly select `edge.allow: []`; they still prove that missing authority blocks and
+that worker grants remain bounded. A session or
 instruction grant is a durable record on the session branch and lasts until revoked, so a full grant
 covers the whole work, and a commit is ordinary work that never asks. An ungranted class asks the
 interactive operator once with one key and the tool call waits for the answer; a headless or child
@@ -318,7 +325,8 @@ execution boundaries (`session-role.ts`): no gate reads Python source or shell t
 none claims to contain arbitrary process code. Pinned by
 `packages/coding-agent/test/python-tool-registration.test.ts`,
 `packages/coding-agent/test/edge-policy.test.ts` and
-`packages/coding-agent/test/agent-session-edge.test.ts`.
+`packages/coding-agent/test/agent-session-edge.test.ts` and
+`packages/coding-agent/test/autonomy-default-authority.test.ts`.
 
 **A failed admission cannot erase already-executed work.** The scheduler drains dispatched siblings
 before terminating after reservation failure or cancellation. Completed tool results remain in
@@ -675,6 +683,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-13 | Omitted edge policy grants YOLO execution across registered classes; explicit restricted policies retain their meaning. The edge contract fixtures select restricted mode explicitly, and dedicated regressions prove default grants, worker intersections, reload/compaction, and diagnostic recovery from unreadable policies. |
 | 2026-09-07 | Whole-row task-directory status pagination replaces megabyte-scale responses, preserves complete escaped paths, and rejects stale cursors. Its measured 340-token schema receives a 350-token ceiling; the pre-existing 4,500-token aggregate remains unchanged. |
 | 2026-09-07 | Worker and verifier identity survives queued dispatch and resume; asynchronous probes retain queue ownership, recheck policy, and reject stale completions. Mailbox recovery precedes the start transition. Historical path-only recovery remains explicit and cannot bypass a saved identity. |
 | 2026-09-07 | Fresh workers capture admitted task cwd; explicit relative intent uses that directory while configured presets and default permission roots retain their original anchors. Queueing and foreground selection cannot retarget admitted work. |

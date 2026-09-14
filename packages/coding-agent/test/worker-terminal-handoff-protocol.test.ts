@@ -108,12 +108,14 @@ describe("worker terminal handoff protocol", () => {
 			},
 		});
 
-		expect(content).toContain("CAVEMAN MODE - MANDATORY: completion_error means a worker execution failed");
-		expect(content).toContain("Tool timeout, provider/model/API/network/WebSocket/fetch/overload");
-		expect(content).toContain("NEVER call any of them harness failure");
-		expect(content).toContain("NEVER stop, cancel, or interrupt healthy siblings for them");
-		expect(content).toContain("A delivered terminal handoff proves persistence and delivery worked");
-		expect(content).toContain("continue or replan");
+		expect(content).toContain("CAVEMAN MODE - MANDATORY: completion_error records a failed worker execution");
+		expect(content).toContain("inspect reasonDetail and retained evidence");
+		expect(content).toContain("Investigate worker_protocol_error at the harness boundary");
+		expect(content).toContain(
+			"NEVER stop, cancel, or interrupt healthy siblings solely because another worker failed",
+		);
+		expect(content).toContain("A delivered terminal handoff establishes delivery only");
+		expect(content).toContain("Continue or replan from the evidence");
 	});
 
 	it("keeps a foreground completion error separate from harness health and preserves healthy siblings", () => {
@@ -121,11 +123,13 @@ describe("worker terminal handoff protocol", () => {
 			{ laneId: "worker-1", status: "failed", reasonCode: "completion_error" },
 		]);
 
-		expect(content).toContain("CAVEMAN MODE - MANDATORY: completion_error means a worker execution failed");
-		expect(content).toContain("Tool timeout, provider/model/API/network/WebSocket/fetch/overload");
-		expect(content).toContain("NEVER call any of them harness failure");
-		expect(content).toContain("NEVER stop, cancel, or interrupt healthy siblings for them");
-		expect(content).toContain("A delivered terminal handoff proves persistence and delivery worked");
-		expect(content).toContain("continue or replan");
+		expect(content).toContain("CAVEMAN MODE - MANDATORY: completion_error records a failed worker execution");
+		expect(content).toContain("inspect reasonDetail and retained evidence");
+		expect(content).toContain("Investigate worker_protocol_error at the harness boundary");
+		expect(content).toContain(
+			"NEVER stop, cancel, or interrupt healthy siblings solely because another worker failed",
+		);
+		expect(content).toContain("A delivered terminal handoff establishes delivery only");
+		expect(content).toContain("Continue or replan from the evidence");
 	});
 });

@@ -164,10 +164,6 @@ export interface WorkerAttemptExecutorOptions {
 	warn(message: string): void;
 }
 
-function isToolRequest(message: Message): boolean {
-	return message.role === "assistant" && message.content.some((content) => content.type === "toolCall");
-}
-
 function workerCompletionCallbackFailure(error: unknown): Error {
 	if (
 		error instanceof WorkerCompletionProtocolError ||
@@ -625,7 +621,14 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 									onMessage: (message, origin) => {
 										try {
 											signal.throwIfAborted();
-											if (message.role === "assistant" && isToolRequest(message)) {
+											// Failed/aborted streams can retain partial tool calls, but the loop never
+											// executes them. Their terminal callback must account and persist the response now.
+											if (
+												message.role === "assistant" &&
+												message.stopReason !== "error" &&
+												message.stopReason !== "aborted" &&
+												message.content.some((content) => content.type === "toolCall")
+											) {
 												// Known calls are normalized before beforeToolCall and persist from that hook.
 												// Retain the request only so immediate unknown/malformed results can close the
 												// transcript without freezing pre-repair arguments into durable history.

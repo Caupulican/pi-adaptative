@@ -122,6 +122,54 @@ export function matchesReleaseCandidateSubject(subject, version) {
 	return subject === `Release v${version}` || subject === `Repair release v${version}`;
 }
 
+/** Fold new notes into an already versioned, untagged candidate; older sections stay byte-identical. */
+export function prepareAdoptedChangelog(content, version) {
+	const headings = [...content.matchAll(/^## \[([^\]\r\n]+)\][^\r\n]*\r?$/gm)];
+	if (headings[0]?.[1] === version && headings.filter((heading) => heading[1] === version).length === 1 &&
+		!headings.some((heading) => heading[1] === "Unreleased")) return content;
+	if (headings[0]?.[1] !== "Unreleased" || headings[1]?.[1] !== version ||
+		headings.filter((heading) => heading[1] === version).length !== 1 ||
+		headings.filter((heading) => heading[1] === "Unreleased").length !== 1) {
+		throw new Error(`Adoption requires Unreleased followed by exactly one [${version}] section.`);
+	}
+	const next = headings[2]?.index ?? content.length;
+	const notes = content.slice(headings[0].index + headings[0][0].length, headings[1].index);
+	if (!notes.trim()) return stripEmptyUnreleasedSection(content);
+	const parseSections = (body) => {
+		const sections = new Map();
+		let name;
+		for (const line of body.split(/\r?\n/)) {
+			const heading = /^### (Breaking Changes|Added|Changed|Fixed|Removed)$/.exec(line);
+			if (heading) {
+				name = heading[1];
+				if (sections.has(name)) throw new Error(`Duplicate changelog subsection: ${name}`);
+				sections.set(name, []);
+			} else if (name && !line.startsWith("### ")) sections.get(name).push(line);
+			else if (line.trim()) throw new Error("Adoption requires standard changelog subsections.");
+		}
+		return sections;
+	};
+	const existing = parseSections(content.slice(headings[1].index + headings[1][0].length, next));
+	for (const [name, lines] of parseSections(notes)) {
+		const previous = existing.get(name) ?? [];
+		existing.set(name, [previous.join("\n").trim(), lines.join("\n").trim()].filter(Boolean).join("\n\n").split("\n"));
+	}
+	const body = [...existing].map(([name, lines]) => `### ${name}\n\n${lines.join("\n").trim()}`).join("\n\n");
+	return content.slice(0, headings[0].index) + headings[1][0] + `\n\n${body}\n\n` + content.slice(next);
+}
+
+/** Validate every workspace manifest before adopting its existing version. */
+export function validateAdoptionVersions(repoRoot, version) {
+	const directories = workspacePackageRelDirs(repoRoot).filter((directory) => existsSync(join(repoRoot, directory, "package.json")));
+	if (directories.length === 0) throw new Error("No workspace packages found for release adoption.");
+	const lock = JSON.parse(readFileSync(join(repoRoot, "package-lock.json"), "utf8"));
+	for (const directory of directories) {
+		const manifest = JSON.parse(readFileSync(join(repoRoot, directory, "package.json"), "utf8"));
+		if (manifest.version !== version || lock.packages?.[directory]?.version !== version)
+			throw new Error(`Release adoption requires ${directory} and its lock metadata at ${version}.`);
+	}
+}
+
 /** Remove the next-cycle marker only when it contains no release notes. */
 export function stripEmptyUnreleasedSection(content) {
 	const marker = /^## \[Unreleased\][ \t]*\r?$/m.exec(content);

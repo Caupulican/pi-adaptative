@@ -9,7 +9,7 @@ import { normalizePath, resolvePath } from "../utils/paths.ts";
 import type { GnuToolsDirSetting } from "../utils/shell.ts";
 import { stripBom } from "../utils/text.ts";
 import { configFile, directoryProfilesDir } from "./agent-paths.ts";
-import { type EdgeClass, isEdgeClass } from "./autonomy/edge-policy.ts";
+import { EDGE_CLASSES, type EdgeClass, isEdgeClass } from "./autonomy/edge-policy.ts";
 import { DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS } from "./background-tool-task-controller.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
 import { type CostGuardSettings, DEFAULT_COST_GUARD_SETTINGS } from "./cost-guard.ts";
@@ -468,7 +468,7 @@ const MAX_BACKGROUND_TOOL_CALL_AFTER_MS = 3_600_000;
 
 /** The edge (`src/core/autonomy/edge-policy.ts`): operation classes this machine grants standing. */
 export interface EdgeSettings {
-	allow?: string[]; // default: [] -- edge classes (git.publish, package.publish, package.install, destructive.fs, settings.authority) that never ask on this machine; unknown names are ignored
+	allow?: string[]; // default: all EDGE_CLASSES (YOLO); an explicit list, including [], replaces the default; unknown names are ignored
 }
 
 export interface ResolvedEdgeSettings {
@@ -1326,6 +1326,7 @@ export interface SettingsReloadSnapshot {
 	modifiedProjectNestedFields: Map<keyof Settings, Set<string>>;
 	globalSettingsLoadError: Error | null;
 	projectSettingsLoadError: Error | null;
+	directoryProfileSettingsLoadError: Error | null;
 	directoryProfileInfo: DirectoryResourceProfileInfo | null;
 	errors: SettingsError[];
 }
@@ -1491,6 +1492,7 @@ export class SettingsManager {
 	private modifiedProjectNestedFields = new Map<keyof Settings, Set<string>>(); // Track project nested field modifications
 	private globalSettingsLoadError: Error | null = null; // Track if global settings file had parse errors
 	private projectSettingsLoadError: Error | null = null; // Track if project settings file had parse errors
+	private directoryProfileSettingsLoadError: Error | null = null;
 	private directoryProfileInfo: DirectoryResourceProfileInfo | null = null;
 	private profileRegistry!: ProfileRegistry;
 	private writeQueue: Promise<void> = Promise.resolve();
@@ -1507,6 +1509,7 @@ export class SettingsManager {
 		initialErrors: SettingsError[] = [],
 		projectTrusted = true,
 		directoryProfileInfo: DirectoryResourceProfileInfo | null = null,
+		directoryProfileLoadError: Error | null = null,
 	) {
 		this.storage = storage;
 		this.globalSettings = initialGlobal;
@@ -1515,6 +1518,7 @@ export class SettingsManager {
 		this.projectTrusted = projectTrusted;
 		this.globalSettingsLoadError = globalLoadError;
 		this.projectSettingsLoadError = projectLoadError;
+		this.directoryProfileSettingsLoadError = directoryProfileLoadError;
 		this.directoryProfileInfo = directoryProfileInfo;
 		this.errors = [...initialErrors];
 		this.reportWorkerDelegationDiagnostics("global", this.globalSettings);
@@ -1727,6 +1731,7 @@ export class SettingsManager {
 			initialErrors,
 			projectTrusted,
 			directoryProfileLoad.info,
+			directoryProfileLoad.error,
 		);
 	}
 
@@ -2104,6 +2109,7 @@ export class SettingsManager {
 
 		const directoryProfileLoad = SettingsManager.tryLoadDirectoryProfileFromStorage(this.storage);
 		this.directoryProfileInfo = directoryProfileLoad.info;
+		this.directoryProfileSettingsLoadError = directoryProfileLoad.error;
 		if (!directoryProfileLoad.error) {
 			this.directoryProfileSettings = directoryProfileLoad.settings;
 			this.reportWorkerDelegationDiagnostics("directoryProfile", this.directoryProfileSettings);
@@ -2132,6 +2138,7 @@ export class SettingsManager {
 			modifiedProjectNestedFields: this.cloneModifiedNestedFields(this.modifiedProjectNestedFields),
 			globalSettingsLoadError: this.globalSettingsLoadError,
 			projectSettingsLoadError: this.projectSettingsLoadError,
+			directoryProfileSettingsLoadError: this.directoryProfileSettingsLoadError,
 			directoryProfileInfo: this.directoryProfileInfo ? { ...this.directoryProfileInfo } : null,
 			errors: [...this.errors],
 		};
@@ -2154,6 +2161,7 @@ export class SettingsManager {
 		this.modifiedProjectNestedFields = this.cloneModifiedNestedFields(snapshot.modifiedProjectNestedFields);
 		this.globalSettingsLoadError = snapshot.globalSettingsLoadError;
 		this.projectSettingsLoadError = snapshot.projectSettingsLoadError;
+		this.directoryProfileSettingsLoadError = snapshot.directoryProfileSettingsLoadError;
 		this.directoryProfileInfo = snapshot.directoryProfileInfo ? { ...snapshot.directoryProfileInfo } : null;
 		this.errors = [...snapshot.errors];
 		this.refreshProfileRegistry();
@@ -4337,8 +4345,16 @@ export class SettingsManager {
 	}
 
 	getEdgeSettings(): ResolvedEdgeSettings {
+		const loadError =
+			this.globalSettingsLoadError ?? this.projectSettingsLoadError ?? this.directoryProfileSettingsLoadError;
+		// Load diagnostics already report the file error. Withhold standing grants, but keep
+		// provider planning and ordinary tools available so the session can diagnose and repair it.
+		if (loadError || (this.settings.edge !== undefined && !isPlainRecord(this.settings.edge))) return { allow: [] };
 		const configured = this.settings.edge?.allow;
-		const allow = Array.isArray(configured) ? configured.filter(isEdgeClass) : [];
+		// Resolve once here: foreground, worker inheritance and provider authority context all
+		// consume these grants. Autonomy/learning presets never narrow execution authority.
+		const allow =
+			configured === undefined ? EDGE_CLASSES : Array.isArray(configured) ? configured.filter(isEdgeClass) : [];
 		return { allow: [...new Set(allow)] };
 	}
 

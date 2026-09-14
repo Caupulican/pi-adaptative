@@ -248,13 +248,15 @@ describe("delegate status", () => {
 		);
 
 		expect(result.content[0]?.text).toContain(
-			"CAVEMAN MODE - MANDATORY: completion_error means a worker execution failed",
+			"CAVEMAN MODE - MANDATORY: completion_error records a failed worker execution",
 		);
-		expect(result.content[0]?.text).toContain("Tool timeout, provider/model/API/network/WebSocket/fetch/overload");
-		expect(result.content[0]?.text).toContain("NEVER call any of them harness failure");
-		expect(result.content[0]?.text).toContain("NEVER stop, cancel, or interrupt healthy siblings for them");
-		expect(result.content[0]?.text).toContain("A delivered terminal handoff proves persistence and delivery worked");
-		expect(result.content[0]?.text).toContain("continue or replan");
+		expect(result.content[0]?.text).toContain("inspect reasonDetail and retained evidence");
+		expect(result.content[0]?.text).toContain("Investigate worker_protocol_error at the harness boundary");
+		expect(result.content[0]?.text).toContain(
+			"NEVER stop, cancel, or interrupt healthy siblings solely because another worker failed",
+		);
+		expect(result.content[0]?.text).toContain("A delivered terminal handoff establishes delivery only");
+		expect(result.content[0]?.text).toContain("Continue or replan from the evidence");
 	});
 
 	it("names a retired agent on its lane instead of hiding the lane", () => {

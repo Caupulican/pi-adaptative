@@ -417,17 +417,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           release_sha="$(git rev-parse "${RELEASE_TAG}^{commit}")"
-          release_subject="$(git show -s --format=%s "$release_sha")"
-
-          # Release/repair commits contain version and changelog metadata only. Their
-          # parent is the immutable tree that release.mjs required the complete CI
-          # matrix to prove before it created that metadata commit.
-          tested_sha="$release_sha"
-          case "$release_subject" in
-            "Release v"*|"Repair release v"*)
-              tested_sha="$(git rev-parse "${release_sha}^")"
-              node scripts/verify-release-metadata-diff.mjs "$tested_sha" "$release_sha" ;;
-          esac
+          node scripts/release-ci-proof.mjs "$release_sha" "$GITHUB_REPOSITORY"
 
           successful_run_ids() {
             workflow="$1"
@@ -450,43 +440,6 @@ jobs:
             fi
           }
 
-          verify_full_ci() {
-            sha="$1"
-            run_ids="$(successful_run_ids ci.yml "$sha")"
-            for run_id in $run_ids; do
-              jobs="$(gh run view "$run_id" --repo "${GITHUB_REPOSITORY}" --json jobs)"
-              linux_quality="$(
-                printf '%s' "$jobs" | jq '[.jobs[] | select(
-                  .name == "Build, check, test (ubuntu-latest)" and
-                  .status == "completed" and .conclusion == "success" and
-                  any(.steps[]; .name == "Verification-harness coverage gate" and .conclusion == "success") and
-                  any(.steps[]; .name == "Test non-coding-agent workspaces" and .conclusion == "success")
-                )] | length'
-              )"
-              windows_quality="$(
-                printf '%s' "$jobs" | jq '[.jobs[] | select(
-                  .name == "Build, check, test (windows-latest)" and
-                  .status == "completed" and .conclusion == "success" and
-                  any(.steps[]; .name == "Test non-coding-agent workspaces" and .conclusion == "success") and
-                  any(.steps[]; .name == "Test native incident collector with Windows PowerShell 5.1" and .conclusion == "success")
-                )] | length'
-              )"
-              coding_shards="$(
-                printf '%s' "$jobs" | jq '[.jobs[] | select(
-                  (.name | startswith("Coding-agent test (")) and
-                  .status == "completed" and .conclusion == "success" and
-                  any(.steps[]; .name == "Test coding-agent shard" and .conclusion == "success")
-                )] | length'
-              )"
-              if [ "$linux_quality" -eq 1 ] && [ "$windows_quality" -eq 1 ] && [ "$coding_shards" -eq 8 ]; then
-                return 0
-              fi
-            done
-            echo "::error::ci.yml has no successful complete Linux/Windows matrix for tested commit ${sha}" >&2
-            exit 1
-          }
-
-          verify_full_ci "$tested_sha"
           verify_workflow destructive.yml "$release_sha"
 
   release:

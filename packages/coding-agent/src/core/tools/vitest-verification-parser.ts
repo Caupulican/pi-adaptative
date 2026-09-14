@@ -12,12 +12,20 @@ export class VitestVerificationParser implements VerificationOutputParser {
 	private finished = false;
 	private executed = false;
 	private expectedSummaries = 0;
+	private collectionFailed = false;
+	private filesPassed = false;
 
 	/** Setup repair requires one complete empty invocation, never a partially executed compound. */
 	get executionOutcome(): NonNullable<VerificationRecord["outcome"]> {
 		if (!this.finished || this.incomplete) return "unconfirmed";
 		if (this.executed) return "executed";
-		if (this.expectedSummaries === 1 && this.noFilesNotice && !this.failed) return "setup_failed";
+		if (
+			this.expectedSummaries === 1 &&
+			this.noFilesNotice &&
+			!this.filesPassed &&
+			(!this.failed || this.collectionFailed)
+		)
+			return "setup_failed";
 		return "unconfirmed";
 	}
 
@@ -63,6 +71,9 @@ export class VitestVerificationParser implements VerificationOutputParser {
 			if (executed > 0) this.executed = true;
 			if (executed === 0) this.empty = true;
 			this.summaries = Math.min(this.summaries + 1, 1_001);
+		} else {
+			if (seen.has("failed")) this.collectionFailed = true;
+			if (seen.has("passed")) this.filesPassed = true;
 		}
 	}
 }

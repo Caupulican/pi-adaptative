@@ -24,7 +24,7 @@ export const SKILL_CONFLICT_RESOLUTION_RULE_COMPACT =
  * contract (system-prompt.ts) renders it once per capability class; no other block repeats its
  * sentences (pinned by system-prompt-builder-tool-selection.test.ts).
  */
-export const OWNER_AUTHORIZATION_RULE = `YOLO within the handed-off task; ${OWNER_PRECEDENCE_POLICY} Preserve explicit limits and release conditions. Reuse explicit owner grants in scope. Ask only if missing: destruction, credentials/auth, publish/push/tag/release, broader scope.`;
+export const OWNER_AUTHORIZATION_RULE = `YOLO within the handed-off task; ${OWNER_PRECEDENCE_POLICY} Preserve explicit limits and release conditions. Reuse explicit owner grants in scope. Active settings grants are standing owner authorization: execute covered work without confirmation. Ask only if missing: destruction, credentials/auth, publish/push/tag/release, broader scope.`;
 
 /**
  * The one projection rule for USER.md working preferences. Rendered by the file-store provider at
@@ -41,7 +41,7 @@ export const ORIENTATION_SURVEY_RULE =
 
 /** Five named phases only; existing goal/task/delegate/evidence owners implement every phase. */
 export const WORK_LIFECYCLE_PHASES = ["Survey", "Contract", "Plan/Route", "Execute", "Prove/Deliver"] as const;
-export const WORK_LIFECYCLE_SYSTEM_RULE = `${WORK_LIFECYCLE_PHASES.join(" → ")}. Scale phases to the requested outcome. Bounded read-only survey first; contract is project-relative: POC/MVP proves requested capability, complete means full project integration across affected interfaces, callers, configuration, tests, documentation, compatibility/migration, and cleanup. Plan before mutation; scale solo/team routing, independent review, and verification to risk, uncertainty, urgency, reversibility, invariant sensitivity, test strength/cost, and cognitive load; loop until accepted. Local commit follows green checks; push/tag/release/publish stays owner-gated.`;
+export const WORK_LIFECYCLE_SYSTEM_RULE = `${WORK_LIFECYCLE_PHASES.join(" → ")}. Scale phases to the outcome. Bounded read-only survey first; contract is project-relative: POC/MVP proves requested capability, complete means full project integration across affected interfaces, callers, configuration, tests, documentation, compatibility/migration, and cleanup. Plan before mutation; scale solo/team routing, independent review, and verification to risk, uncertainty, urgency, reversibility, invariant sensitivity, test strength/cost, and cognitive load; loop until accepted. Local commit follows green checks; publish under active owner grants and release conditions.`;
 export const CHAT_WORK_LIFECYCLE_SYSTEM_RULE = "Survey→Contract(scope)→Plan/Route→Execute→Prove/Deliver.";
 
 export const SUBAGENT_CORE_SYSTEM_PROMPT = [

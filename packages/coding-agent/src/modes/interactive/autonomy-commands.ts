@@ -42,7 +42,17 @@ export interface AutonomyHost {
 	getAutoLearnTenantDataDir(): string;
 }
 
-export function formatAutonomyStatus(host: AutonomyHost): string {
+export function formatAutonomyStatus(
+	host: Pick<
+		AutonomyHost,
+		| "settingsManager"
+		| "getEffectiveAutoLearnSettings"
+		| "getPrunedAutoLearnState"
+		| "getAutoLearnTenantKey"
+		| "getAutoLearnDataDir"
+		| "getAutoLearnTenantDataDir"
+	>,
+): string {
 	const autonomy = host.settingsManager.getAutonomySettings();
 	const settings = host.getEffectiveAutoLearnSettings();
 	const autoLearnState = host.getPrunedAutoLearnState();
@@ -51,7 +61,7 @@ export function formatAutonomyStatus(host: AutonomyHost): string {
 	const otherTenantRunning = Object.values(autoLearnState.runs ?? {}).filter((run) => run.tenant !== tenant).length;
 	const safety =
 		autonomy.mode === "full"
-			? "standing grant for memory, skills, user/project extensions, autonomy/autoLearn tuning, and authorized selfModification.sourcePath edits; hard stops still require explicit foreground approval"
+			? "standing grant for memory, skills, user/project extensions, autonomy/autoLearn tuning, and authorized selfModification.sourcePath edits"
 			: "proposal-gated outside configured high-confidence memory policy";
 	const reflectionLine =
 		autonomy.mode === "full"
@@ -67,7 +77,8 @@ export function formatAutonomyStatus(host: AutonomyHost): string {
 		`Running tenant learners: ${running.length}/${settings.maxConcurrentLearners}`,
 		`Other tenant learners: ${otherTenantRunning}`,
 		"History retention: 7 days for internal Auto Learn prompts/logs/sessions",
-		`Standing authority: ${safety}`,
+		`Learning authority: ${safety}`,
+		"Execution authority: /edge list (independent of learning preset)",
 		`Audit/log dir: ${host.getAutoLearnDataDir()}`,
 		`Tenant artifact dir: ${host.getAutoLearnTenantDataDir()}`,
 		"Use /autonomy off|safe|balanced|full to switch presets. Advanced overrides remain in /settings → Auto Learn Advanced.",

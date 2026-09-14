@@ -52,7 +52,9 @@ test("lockstep workspace package files are on the release allowlist", () => {
 
 test("release provenance delegates metadata paths to the release-staging owner", () => {
 	const workflow = readFileSync(join(repoRoot, ".github", "workflows", "build-binaries.yml"), "utf8");
-	assert.match(workflow, /node scripts\/verify-release-metadata-diff\.mjs "\$tested_sha" "\$release_sha"/);
+	assert.match(workflow, /node scripts\/release-ci-proof\.mjs "\$release_sha" "\$GITHUB_REPOSITORY"/);
+	const proof = readFileSync(join(repoRoot, "scripts", "release-ci-proof.mjs"), "utf8");
+	assert.match(proof, /verify-release-metadata-diff\.mjs/u);
 	assert.doesNotMatch(workflow, /mapfile -d '' changed_paths/);
 
 	const releasePaths = [

@@ -616,9 +616,14 @@ export function formatTaskStepsContext(state: TaskStepsState, maxItems = 12): st
 	const open = state.steps.filter((step) => step.status !== "completed" && step.status !== "cancelled");
 	if (open.length === 0) return undefined;
 	const limit = Math.max(1, Math.min(MAX_TASK_STEPS, Math.floor(maxItems)));
+	const active = open.find((step) => step.status === "in_progress");
+	const pending = findNextPendingStep(open);
+	const selected = active ?? pending;
+	const visible = open.slice(0, limit);
+	if (selected && !visible.includes(selected)) visible[visible.length - 1] = selected;
 	const lines = [
 		"TASK STEPS",
-		...open.slice(0, limit).map((step) => {
+		...visible.map((step) => {
 			const label = step.activeForm || step.content;
 			const requirementIds = step.requirementIds?.length ? ` requirements=${step.requirementIds.join(",")}` : "";
 			const pipeline =
@@ -630,11 +635,12 @@ export function formatTaskStepsContext(state: TaskStepsState, maxItems = 12): st
 		}),
 	];
 	if (open.length > limit) lines.push(`- omitted=${open.length - limit}`);
-	const active = open.find((step) => step.status === "in_progress");
 	lines.push(
 		active
 			? `FIRST: continue in_progress step: ${active.activeForm || active.content}. Evidence known: set completed/blocked/cancelled.`
-			: `No in_progress step. Start first: ${open[0].activeForm || open[0].content}.`,
+			: pending
+				? `No in_progress step. Start first: ${pending.activeForm || pending.content}.`
+				: "Remaining steps are blocked. Resume only when their blocking condition changes.",
 		"Keep task_steps current; no stale in_progress before final.",
 	);
 	if (hasUnverifiedCompletedStep(state)) {

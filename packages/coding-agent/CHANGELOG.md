@@ -1,5 +1,23 @@
 ## [Unreleased]
 
+### Added
+
+- Release status and adoption commands for recovering a manually prepared, untagged lockstep version without another version bump. Adoption validates workspace and lockfile versions and retains the existing CI and destructive-test publication gates.
+
+### Fixed
+
+- Test bootstrap clears inherited launcher metadata before package configuration is imported.
+- Environment-prefixed test commands retain verification receipts, including executable paths and Windows env wrappers. Collection failures can be repaired by an executed matching check; package/environment changes and contradictory summaries retain distinct evidence.
+- Goal edge grants advertise the authoritative edge-class vocabulary in their tool schema.
+- Task guidance and contract monitoring select pending work and leave blocked steps waiting for their condition to change. Bounded context keeps the selected runnable step and its id visible.
+- Failed worker responses containing partial tool calls persist their terminal evidence and usage without waiting for callbacks that cannot occur. Handoff guidance distinguishes delivery from execution correctness.
+- Removed competing settings, publication, and Python approval instructions; model authority context reuses the host's standing grants without requesting duplicate permission.
+- Release preparation and publication share complete Linux/Windows CI matrix proof. Existing local tags cannot bypass provenance; interrupted adoption recovers exact candidate changelog edits without including another session's work.
+
+### Changed
+
+- Execution defaults to YOLO standing grants for every registered edge class, independently of the learning/autonomy preset. Explicit `edge.allow` arrays still select restricted execution. Foreground, workers, and provider context share the same resolved grants; unreadable policy files cannot silently widen authority.
+
 ## [0.99.21] - 2026-09-13
 
 ### Added

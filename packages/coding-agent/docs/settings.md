@@ -108,7 +108,7 @@ When disabled, the system prompt tells the agent not to edit Pi core, the instal
 }
 ```
 
-The agent is instructed to edit only that source checkout, preserve unrelated changes, and validate before reporting success. Settings changes remain explicit-approval gated unless `autonomy.mode` is `full` and the change is limited to autonomy/Auto Learn tuning; publishing, pushing, tagging, and releasing always require explicit foreground approval.
+The agent is instructed to edit only that source checkout, preserve unrelated changes, and validate before reporting success. Task-required settings changes and publication use the same active edge grants as other execution; self-modification adds no separate approval prompt.
 
 ### Autonomy
 
@@ -119,7 +119,17 @@ The agent is instructed to edit only that source checkout, preserve unrelated ch
 
 Use `/settings` → **Autonomy** to choose one preset and the foreground goal-loop round budget, or `/autonomy off|safe|balanced|full` to switch the preset while preserving the configured round budget. Main-session reflection is enabled in every mode, including `off`; eligible turns queue a durable root-only cue for the orchestrator's next ordinary current-session provider turn. It does not create a separate or background model request, and increasing autonomy never disables learning. `full` additionally grants standing authority for broader user/project skill, extension/tool, autonomy-setting, and authorized self-modification work when validation and rollback evidence are recorded.
 
-Hard stops still require explicit foreground approval even in `full`: GitHub release publication, git push, tag creation, credential disclosure or provider-auth changes, destructive user-data deletion, network-exposed services, or authority expansion beyond this policy. An active user-plane `secret_store` grant is the narrow exception: model-blind activation and migration from named accessible sources require no duplicate confirmation. `/autonomy status` shows the active grant and the Auto Learn audit/log directory.
+Execution uses YOLO defaults independently of the learning preset: all registered edge classes have standing grants when `edge.allow` is omitted. Foreground tools, delegated workers, and model authority context consume the same grants. The agent executes covered work without asking again, while retaining the task's explicit scope, restrictions, and release conditions. `/autonomy status` shows learning policy; `/edge list` shows execution grants.
+
+#### Execution authority
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `edge.allow` | string[] | All registered edge classes | Standing grants: `git.publish`, `package.publish`, `package.install`, `destructive.fs`, `settings.authority`, `toolkit.script`. An explicit array replaces the default; `[]` opts into confirmation for ungranted edge operations. Unknown names are ignored. |
+
+No per-operation `goal grant_edge` call or `/edge allow all` command is needed with the default policy. Settings grants survive reload and compaction. To restrict execution, set `edge.allow` explicitly in the desired settings scope; `/edge revoke` removes session and instruction grants, while standing settings grants are changed in settings. An unreadable settings file reports its load error and withholds standing grants until repaired and reloaded. Provider turns and ordinary diagnostic tools remain available; the error never silently replaces restrictions with defaults.
+
+These grants control operation approval. Explicit tool/path restrictions, worker ownership, credential-value protection, cancellation, and verification of results still apply. A failed check calls for repair and re-verification; a grant never converts failure into success. Optional extension-provided permission dialogs belong to the extension and are not governed by `edge.allow`.
 
 ```json
 {

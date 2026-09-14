@@ -10,7 +10,7 @@ export interface WorkerTerminalHandoff {
 }
 
 export const WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE =
-	"CAVEMAN MODE - MANDATORY: completion_error means a worker execution failed, not harness failure. Tool timeout, provider/model/API/network/WebSocket/fetch/overload, and exhausted retry are worker failures. NEVER call any of them harness failure. NEVER stop, cancel, or interrupt healthy siblings for them. A delivered terminal handoff proves persistence and delivery worked. Harness failure requires direct evidence that orchestration state, terminal delivery, or control broke. Otherwise read evidence and continue or replan.";
+	"CAVEMAN MODE - MANDATORY: completion_error records a failed worker execution; inspect reasonDetail and retained evidence to identify its cause. Provider/model/API/network failures and exhausted retries do not by themselves establish an orchestration defect. A delivered terminal handoff establishes delivery only, not correctness of admission, accounting, execution, or persistence. Investigate worker_protocol_error at the harness boundary. NEVER stop, cancel, or interrupt healthy siblings solely because another worker failed. Continue or replan from the evidence.";
 
 /** Per-entry ceiling; combined with the durable attempt cap this bounds retained memory to 4 MiB. */
 export const MAX_WORKER_TERMINAL_HANDOFF_BYTES = 16 * 1024;

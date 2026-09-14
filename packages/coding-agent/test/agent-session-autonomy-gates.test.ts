@@ -215,7 +215,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 		await harness.cleanup();
 	});
 
-	it("blocks bash when command is destructive", async () => {
+	it("blocks bash when command is destructive and the owner selected restricted edges", async () => {
 		let executed = false;
 		const customBashTool = {
 			...bashTool,
@@ -224,7 +224,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 				return { content: [{ type: "text" as const, text: "ok" }], details: {} };
 			},
 		};
-		const harness = await createHarness({ tools: [customBashTool] });
+		const harness = await createHarness({ tools: [customBashTool], settings: { edge: { allow: [] } } });
 
 		harness.session.capabilityEnvelope = {
 			id: "env-1",

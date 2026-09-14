@@ -26,7 +26,7 @@
 		"check:model-catalog": "node packages/ai/scripts/check-model-catalog.mjs",
 		"check:pinned-deps": "node --test scripts/dependency-security-policy.test.mjs && node scripts/check-pinned-deps.mjs",
 		"check:release-binary-benchmark": "node --test scripts/install-standalone.test.mjs scripts/install-standalone-windows.test.mjs scripts/release-binary-rpc-benchmark.test.mjs scripts/release-binary-performance-gate.test.mjs",
-		"check:test-harness-isolation": "node --test scripts/test-harness-isolation.test.mjs scripts/release-staging.test.mjs scripts/workspace-test-plan.test.mjs scripts/ci-workflow-performance.test.mjs",
+		"check:test-harness-isolation": "node --test scripts/test-harness-isolation.test.mjs scripts/release-staging.test.mjs scripts/release-ci-proof.test.mjs scripts/release-adoption.test.mjs scripts/release-adoption-execution.test.mjs scripts/workspace-test-plan.test.mjs scripts/ci-workflow-performance.test.mjs",
 		"coverage:verification-harness": "npm run coverage:verification-harness --workspace=packages/agent && npm run coverage:verification-harness --workspace=packages/coding-agent",
 		"check:typescript-toolchain": "node --test scripts/typescript-toolchain.test.mjs",
 		"check:ts-imports": "node scripts/check-ts-relative-imports.mjs",
@@ -54,6 +54,8 @@
 		"release:major": "node scripts/release.mjs major",
 		"release:promote": "node scripts/release.mjs promote",
 		"release:repair": "node scripts/release.mjs repair",
+		"release:adopt": "node scripts/release.mjs adopt",
+		"release:status": "node scripts/release.mjs status",
 		"prepare": "husky"
 	},
 	"devDependencies": {
