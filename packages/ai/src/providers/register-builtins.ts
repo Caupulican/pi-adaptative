@@ -14,6 +14,10 @@ import type { BedrockOptions } from "./amazon-bedrock.ts";
 import type { AnthropicOptions } from "./anthropic.ts";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses.ts";
 import type { GoogleOptions } from "./google.ts";
+import { streamAntigravity, streamSimpleAntigravity } from "./google-antigravity.ts";
+
+export { streamAntigravity, streamSimpleAntigravity } from "./google-antigravity.ts";
+
 import type { GoogleVertexOptions } from "./google-vertex.ts";
 import type { MistralOptions } from "./mistral.ts";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses.ts";
@@ -331,6 +335,11 @@ const streamBedrockLazy = createLazyStream(loadBedrockProviderModule, (module) =
 const streamSimpleBedrockLazy = createLazyStream(loadBedrockProviderModule, (module) => module.streamSimple);
 
 export function registerBuiltInApiProviders(): void {
+	registerApiProvider({
+		api: "google-antigravity",
+		stream: streamAntigravity,
+		streamSimple: streamSimpleAntigravity,
+	});
 	registerApiProvider({
 		api: "anthropic-messages",
 		stream: streamAnthropic,

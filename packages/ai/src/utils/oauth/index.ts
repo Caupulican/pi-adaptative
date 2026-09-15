@@ -18,6 +18,7 @@ export {
 	normalizeDomain,
 	refreshGitHubCopilotToken,
 } from "./github-copilot.ts";
+export { antigravityOAuthProvider } from "./google-antigravity.ts";
 export { kimiCodingOAuthProvider, loginKimiCoding } from "./kimi-coding.ts";
 // OpenAI Codex (ChatGPT OAuth)
 export {
@@ -39,6 +40,7 @@ export { loginXai, refreshXaiToken, xaiOAuthProvider } from "./xai.ts";
 import { SourceRegistry } from "../source-registry.ts";
 import { anthropicOAuthProvider } from "./anthropic.ts";
 import { githubCopilotOAuthProvider } from "./github-copilot.ts";
+import { antigravityOAuthProvider } from "./google-antigravity.ts";
 import { kimiCodingOAuthProvider } from "./kimi-coding.ts";
 import { openaiCodexOAuthProvider } from "./openai-codex.ts";
 import { openRouterOAuthProvider } from "./openrouter.ts";
@@ -47,6 +49,7 @@ import { xaiOAuthProvider } from "./xai.ts";
 
 const BUILT_IN_OAUTH_PROVIDERS: OAuthProviderInterface[] = [
 	anthropicOAuthProvider,
+	antigravityOAuthProvider,
 	githubCopilotOAuthProvider,
 	openaiCodexOAuthProvider,
 	xaiOAuthProvider,

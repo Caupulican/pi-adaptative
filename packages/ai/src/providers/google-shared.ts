@@ -15,7 +15,7 @@ import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import { joinTextContent, transformMessages } from "./transform-messages.ts";
 
-type GoogleApiType = "google-generative-ai" | "google-vertex";
+export type GoogleApiType = "google-generative-ai" | "google-vertex" | "google-antigravity";
 
 /**
  * Thinking level for Gemini 3 models.

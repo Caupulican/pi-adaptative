@@ -13,7 +13,7 @@ import { formatProviderError, normalizeProviderError } from "../utils/error-body
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap } from "../utils/tool-names.ts";
-import type { GoogleThinkingEffort, GoogleThinkingLevel } from "./google-shared.ts";
+import type { GoogleApiType, GoogleThinkingEffort, GoogleThinkingLevel } from "./google-shared.ts";
 import {
 	convertMessages,
 	convertTools,
@@ -34,7 +34,9 @@ import {
 } from "./provider-runtime.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
-type GoogleApi = "google-generative-ai" | "google-vertex";
+export interface GoogleGenAiClient {
+	models: Pick<GoogleGenAI["models"], "generateContentStream">;
+}
 
 export interface GoogleGenAiOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any";
@@ -45,11 +47,11 @@ export interface GoogleGenAiOptions extends StreamOptions {
 	};
 }
 
-export function streamGoogleGenAi<TApi extends GoogleApi>(
+export function streamGoogleGenAi<TApi extends GoogleApiType>(
 	model: Model<TApi>,
 	context: Context,
 	options: GoogleGenAiOptions | undefined,
-	createClient: () => GoogleGenAI,
+	createClient: () => GoogleGenAiClient,
 ): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 
@@ -197,7 +199,7 @@ export function streamGoogleGenAi<TApi extends GoogleApi>(
 	return stream;
 }
 
-export function buildGoogleGenerateContentParameters<TApi extends GoogleApi>(
+export function buildGoogleGenerateContentParameters<TApi extends GoogleApiType>(
 	model: Model<TApi>,
 	context: Context,
 	options: GoogleGenAiOptions = {},
@@ -255,7 +257,7 @@ export function buildGoogleGenerateContentParameters<TApi extends GoogleApi>(
 	};
 }
 
-export function buildGoogleSimpleOptions<TApi extends GoogleApi>(
+export function buildGoogleSimpleOptions<TApi extends GoogleApiType>(
 	model: Model<TApi>,
 	options: SimpleStreamOptions | undefined,
 	apiKey: string | undefined,
