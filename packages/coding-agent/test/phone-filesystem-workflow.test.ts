@@ -571,7 +571,9 @@ describe("non-native phone filesystem workflow", () => {
 			(context) => {
 				const prompt = readableContext(context);
 				expect(prompt).toContain('"failure_code":"file_not_found"');
-				expect(prompt).toContain("If the goal requires this exact missing file and its content is known");
+				expect(prompt).toContain("Path not found:");
+				expect(prompt).not.toContain("If the goal requires this exact missing file and its content is known");
+				expect(prompt).not.toContain("If the failed tool invited creation of this exact missing file");
 				recoveryTeachingObserved = true;
 				return phoneCall("write", { path: missingPath, content });
 			},
@@ -635,7 +637,9 @@ describe("non-native phone filesystem workflow", () => {
 				"The operation is readmitted after another tool succeeds or a new user turn.",
 			);
 			expect(blockedContext).not.toContain("never repeat the same call");
-			expect(blockedContext).toContain("If the goal requires this exact missing file and its content is known");
+			expect(blockedContext).toContain("Path not found:");
+			expect(blockedContext).not.toContain("If the goal requires this exact missing file and its content is known");
+			expect(blockedContext).not.toContain("If the failed tool invited creation of this exact missing file");
 			expect(blockedContext).not.toContain('"failure_code":"repeated_failed_operation"');
 			expect(harness.responseIndex).toBe(responses.length);
 			expect(await readFile(unrelatedPath, "utf8")).toBe("unrelated");

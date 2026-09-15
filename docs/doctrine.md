@@ -288,6 +288,13 @@ after an omission, the server prompt cache still hit almost fully; the omission 
 without the transport delta, not a re-prefill. Pinned by `packages/agent/test/tool-failure-memory.test.ts`
 and `packages/coding-agent/test/phone-filesystem-workflow.test.ts`.
 
+**A read miss locates; it does not invite create.** `read` file_not_found publishes
+`filesystem.file.exists` plus ancestor locate evidence. Write-create is
+`filesystem.file.missing.create` and is not loaded from that observation. A later same-path write
+is still a different tool and can re-admit the read. Pinned by
+`packages/coding-agent/test/phone-filesystem-workflow.test.ts` and
+`packages/coding-agent/test/tool-failure-recovery-contract.test.ts`.
+
 ## Guards
 
 **The edge asks once; instructions, the session or the machine grant it, and nothing else in the
@@ -697,6 +704,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-15 | Read miss locates via `filesystem.file.exists`; write-create is a separate kind and is not loaded from that observation. Phone filesystem workflow asserts locate evidence, not create teaching. |
 | 2026-09-13 | CI follow-up: memory shares final prompt capacity; persona framing cannot consume the unbudgeted preference allowance; reload deduplicates unchanged drift notices. Transcript fixtures explicitly select empty grants while default-authority tests exercise YOLO. The closed goal edge vocabulary adds 28 schema tokens; the aggregate ceiling stays fixed. |
 | 2026-09-13 | Omitted edge policy grants YOLO execution across registered classes; explicit restricted policies retain their meaning. The edge contract fixtures select restricted mode explicitly, and dedicated regressions prove default grants, worker intersections, reload/compaction, and diagnostic recovery from unreadable policies. |
 | 2026-09-07 | Whole-row task-directory status pagination replaces megabyte-scale responses, preserves complete escaped paths, and rejects stale cursors. Its measured 340-token schema receives a 350-token ceiling; the pre-existing 4,500-token aggregate remains unchanged. |

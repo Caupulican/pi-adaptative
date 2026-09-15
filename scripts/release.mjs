@@ -126,6 +126,8 @@ function shellQuote(value) {
 }
 
 function getRepoSlug() {
+	const fromEnv = process.env.GH_REPO?.trim();
+	if (fromEnv) return fromEnv;
 	const url = run("git remote get-url origin", { silent: true }).trim();
 	try {
 		return parseGithubOriginSlug(url);

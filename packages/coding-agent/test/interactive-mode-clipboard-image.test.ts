@@ -30,7 +30,7 @@ type ClipboardPasteContext = {
 		resolveReferences: ReturnType<typeof vi.fn>;
 	};
 	editor: { handleInput: ReturnType<typeof vi.fn>; insertTextAtCursor: ReturnType<typeof vi.fn> };
-	ui: { requestRender: ReturnType<typeof vi.fn> };
+	ui: { requestRender: ReturnType<typeof vi.fn>; pasteText?: ReturnType<typeof vi.fn> };
 	settingsManager: { getImageAutoResize: () => boolean; getBlockImages: () => boolean };
 	showStatus: ReturnType<typeof vi.fn>;
 	showWarning: ReturnType<typeof vi.fn>;
@@ -84,6 +84,19 @@ describe("InteractiveMode clipboard image paste", () => {
 		await (InteractiveMode.prototype as unknown as InteractiveModePrivate).handleClipboardImagePaste.call(context);
 
 		expect(context.editor.handleInput).toHaveBeenCalledWith("\x1b[200~plain text\x1b[201~");
+		expect(context.ui.requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("uses TUI pasteText when the focused host accepts clipboard text", async () => {
+		mocks.readClipboardImage.mockResolvedValueOnce(null);
+		mocks.readClipboardText.mockResolvedValueOnce("plain text");
+		const context = createContext();
+		context.ui.pasteText = vi.fn(() => true);
+
+		await (InteractiveMode.prototype as unknown as InteractiveModePrivate).handleClipboardImagePaste.call(context);
+
+		expect(context.ui.pasteText).toHaveBeenCalledWith("plain text");
+		expect(context.editor.handleInput).not.toHaveBeenCalled();
 		expect(context.ui.requestRender).toHaveBeenCalledTimes(1);
 	});
 

@@ -85,7 +85,9 @@ export async function handleClipboardImagePaste(host: ClipboardInputHost): Promi
 		if (!image) {
 			const text = await readClipboardText();
 			if (text) {
-				if (!host.ui.pasteText(text)) pasteIntoEditor(host.editor, text);
+				if (typeof host.ui.pasteText !== "function" || !host.ui.pasteText(text)) {
+					pasteIntoEditor(host.editor, text);
+				}
 				host.ui.requestRender();
 			}
 			return;

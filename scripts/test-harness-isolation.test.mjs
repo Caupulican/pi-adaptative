@@ -584,6 +584,7 @@ function createReleaseExecutionProofFixture(context, ciConclusion) {
 	const releaseEnv = {
 		...gitEnv,
 		PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+		GH_REPO: "example/fixture",
 		PI_RELEASE_NPM_CAPTURE: npmCapture,
 		PI_RELEASE_TEST_SH_CAPTURE: testShCapture,
 	};

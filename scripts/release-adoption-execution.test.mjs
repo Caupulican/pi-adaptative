@@ -22,6 +22,7 @@ for (const scenario of ["failure", "cancelled", "skipped", "pending", "missing",
 			...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
 			GIT_AUTHOR_NAME: "fixture", GIT_AUTHOR_EMAIL: "fixture@example.com",
 			GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@example.com",
+			GH_REPO: "example/fixture",
 			PATH: `${bin}:${process.env.PATH}`,
 		};
 		const git = (...args) => {

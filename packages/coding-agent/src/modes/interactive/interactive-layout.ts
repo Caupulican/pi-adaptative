@@ -95,7 +95,7 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 				host.activityLane?.announce("Clipboard has no text to paste", "neutral");
 				return;
 			}
-			if (host.ui.pasteText(text)) return;
+			if (typeof host.ui.pasteText === "function" && host.ui.pasteText(text)) return;
 			if (!host.editor.insertTextAtCursor) {
 				host.activityLane?.announce("This editor cannot take a pasted selection", "failure");
 				return;
