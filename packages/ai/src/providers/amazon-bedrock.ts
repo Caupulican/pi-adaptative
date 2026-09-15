@@ -113,11 +113,11 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 
 		const blocks = output.content as Block[];
 
-		const config: BedrockRuntimeClientConfig = {
-			profile: options.profile?.trim() || undefined,
-		};
 		const configuredRegion = getConfiguredBedrockRegion(options);
 		const configuredProfile = getConfiguredBedrockProfile(options);
+		const config: BedrockRuntimeClientConfig = {
+			profile: configuredProfile,
+		};
 		const recoveryProfile = configuredProfile ?? "default";
 		const hasConfiguredProfile = configuredProfile !== undefined;
 		const endpointRegion = getStandardBedrockEndpointRegion(model.baseUrl);
@@ -287,6 +287,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 						}))
 					) {
 						ssoRecoveryAttempted = true;
+						config.profile = recoveryProfile;
 						continue;
 					}
 					throw error;

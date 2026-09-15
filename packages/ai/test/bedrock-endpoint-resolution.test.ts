@@ -119,6 +119,7 @@ describe("bedrock endpoint resolution", () => {
 
 		expect(config.endpoint).toBe("https://bedrock-runtime.eu-central-1.amazonaws.com");
 		expect(config.region).toBe("eu-central-1");
+		expect(config.profile).toBeUndefined();
 	});
 
 	it("still passes custom Bedrock endpoints through to the SDK client", async () => {
@@ -243,6 +244,40 @@ describe("bedrock SSO recovery", () => {
 		expect(bedrockMock.constructorCalls).toHaveLength(2);
 		expect(bedrockMock.send).toHaveBeenCalledTimes(2);
 	});
+
+	it.each([
+		{ profile: undefined, environmentProfile: "original-sso", expectedProfile: "original-sso" },
+		{ profile: "explicit-sso", environmentProfile: "original-sso", expectedProfile: "explicit-sso" },
+		{ profile: undefined, environmentProfile: undefined, expectedProfile: "default" },
+	])(
+		"keeps $expectedProfile bound across environment changes during recovery",
+		async ({ profile, environmentProfile, expectedProfile }) => {
+			if (environmentProfile) process.env.AWS_PROFILE = environmentProfile;
+			const expired = new Error("The SSO session has expired; run aws sso login");
+			const resolvedProfiles: unknown[] = [];
+			bedrockMock.send.mockImplementation(async () => {
+				const config = bedrockMock.constructorCalls.at(-1)!;
+				resolvedProfiles.push(config.profile ?? process.env.AWS_PROFILE ?? "default");
+				if (resolvedProfiles.length === 1) throw expired;
+				return successfulResponse();
+			});
+			const recovery = vi.fn(async () => {
+				process.env.AWS_PROFILE = "other-account";
+				return true;
+			});
+			const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+			const result = await streamBedrock(model, context, {
+				profile,
+				cacheRetention: "none",
+				onInteractiveAuthRecovery: recovery,
+			}).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(recovery).toHaveBeenCalledWith(expect.objectContaining({ profile: expectedProfile }));
+			expect(resolvedProfiles).toEqual([expectedProfile, expectedProfile]);
+		},
+	);
 
 	it("recovers when the SDK wraps the SSO credential failure as a cause", async () => {
 		process.env.AWS_PROFILE = "work-sso";
