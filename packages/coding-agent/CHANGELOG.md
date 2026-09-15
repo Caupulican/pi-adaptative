@@ -2,6 +2,10 @@
 
 ### Fixed
 
+- Successful edit/write no longer run Biome format on the success path; requested bytes are written unchanged. The formatter helper remains for explicit/failure-path use.
+- Collaboration turn admission no longer throws when Bun's IPC `child.channel` exists without `unref`.
+- Python credential screening preserves matching quote boundaries, avoiding oversized source fragments being probed as filenames and retaining protection for paths containing quotes.
+- Credential redaction preserves structured execution-error classification across duplicate runtime module instances.
 - Python completed non-zero exits are operation outcomes, matching bash, so they keep output without a MUST ledger. Timeout and abort stay incomplete tool failures.
 - Skill load of an excluded or ineligible name is a discarded policy refusal, so identical retry does not count as an execution miss.
 

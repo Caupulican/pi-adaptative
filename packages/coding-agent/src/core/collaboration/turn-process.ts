@@ -66,7 +66,8 @@ export async function launchCollaborationTurnProcess(
 			clearTimeout(timer);
 			child.off("message", onMessage);
 			child.unref();
-			child.channel?.unref();
+			const channel = child.channel;
+			if (channel && typeof channel.unref === "function") channel.unref();
 			resolve();
 		};
 		child.on("message", onMessage);

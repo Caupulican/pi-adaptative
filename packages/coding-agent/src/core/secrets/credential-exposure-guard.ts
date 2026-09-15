@@ -4,6 +4,7 @@ import {
 	type AgentToolResult,
 	type ExecutionContext,
 	type ExecutionPathAuthority,
+	readAgentToolExecutionError,
 } from "@caupulican/pi-agent-core";
 import type { TSchema } from "typebox";
 import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
@@ -15,6 +16,7 @@ import { isMissingPathError } from "../util/filesystem-errors.ts";
 import { mockCredentialContent, mockProtectedSearchLines } from "./credential-content-mock.ts";
 import type { CredentialPathPolicy, CredentialPathProbe, CredentialPathProtection } from "./credential-path-policy.ts";
 import { createCredentialPathPolicy } from "./native-credential-path-probe.ts";
+import { pythonCredentialPathCandidates } from "./python-credential-literals.ts";
 
 const DIRECT_PATH_TOOLS = new Set(["read", "edit", "write", "ls", "image_generate"]);
 
@@ -53,7 +55,6 @@ const SHELL_SECRET_READ_RE =
 	/\b(?:cat|head|tail|less|more|sed|awk|grep|rg|type|get-content|select-string|source)\b[^\n;&|]*(?:^|[\\/])?\.env(?:\.[A-Za-z0-9._-]+)?\b/i;
 const PYTHON_SECRET_READ_RE = /\b(?:open|read_text|read_bytes)\s*\([^\n)]*(?:^|[\\/])?\.env(?:\.[A-Za-z0-9._-]+)?\b/i;
 const PYTHON_INSPECTION_RE = /\b(?:open|read_text|read_bytes)\b/;
-const QUOTED_TEXT_RE = /(["'])([^"'\\]*(?:\\.[^"'\\]*)*)\1/g;
 const MAX_REDACTED_DETAIL_DEPTH = 8;
 const MAX_REDACTED_DETAIL_NODES = 10_000;
 const JQ_OPTIONS_WITH_ONE_OPERAND = new Set(["-L", "--indent"]);
@@ -394,11 +395,8 @@ async function contentSearchCredentialRiskAsync(
 
 function pythonInspectsCredentialPath(code: string, paths: CredentialPathPolicy): boolean {
 	if (!PYTHON_INSPECTION_RE.test(code)) return false;
-	QUOTED_TEXT_RE.lastIndex = 0;
-	for (const match of code.matchAll(QUOTED_TEXT_RE)) {
-		if (/^\s+(?:not\s+)?in\b/u.test(code.slice(match.index + match[0].length))) continue;
-		const candidate = match[2]?.replace(/\\([\\"'])/g, "$1");
-		if (candidate && paths.isProtectedToken(candidate)) return true;
+	for (const candidate of pythonCredentialPathCandidates(code)) {
+		if (paths.isProtectedToken(candidate)) return true;
 	}
 	return false;
 }
@@ -409,12 +407,9 @@ async function pythonInspectsCredentialPathAsync(
 	signal?: AbortSignal,
 ): Promise<boolean> {
 	if (!PYTHON_INSPECTION_RE.test(code)) return false;
-	QUOTED_TEXT_RE.lastIndex = 0;
-	for (const match of code.matchAll(QUOTED_TEXT_RE)) {
+	for (const candidate of pythonCredentialPathCandidates(code)) {
 		signal?.throwIfAborted();
-		if (/^\s+(?:not\s+)?in\b/u.test(code.slice(match.index + match[0].length))) continue;
-		const candidate = match[2]?.replace(/\\([\\"'])/g, "$1");
-		if (candidate && (await paths.isProtectedTokenAsync(candidate, signal))) return true;
+		if (await paths.isProtectedTokenAsync(candidate, signal)) return true;
 	}
 	return false;
 }
@@ -855,13 +850,16 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 				if (signal?.aborted || (signal?.reason !== undefined && error === signal.reason)) throw error;
 				const redact = (text: string): string =>
 					boundary ? boundary.redactSensitiveText(text) : redactKnownSecrets(text);
-				if (error instanceof Error) {
-					const message = redact(error.message);
-					if (error instanceof AgentToolExecutionError) {
-						throw new AgentToolExecutionError(message, error.failureCode, error.outputSignature, error.errorKind);
-					}
-					throw new Error(message);
+				const classified = readAgentToolExecutionError(error);
+				if (classified) {
+					throw new AgentToolExecutionError(
+						redact(classified.message),
+						classified.failureCode,
+						classified.outputSignature,
+						classified.errorKind,
+					);
 				}
+				if (error instanceof Error) throw new Error(redact(error.message));
 				// A thrown non-Error is the live shape of a cancellation: `signal.throwIfAborted()` throws
 				// the abort REASON, and a named abort's reason is a plain string. Reporting only that the
 				// value was lost left the model, the failure ledger and the operator with no cause at all.

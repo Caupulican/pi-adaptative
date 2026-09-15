@@ -24,8 +24,8 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
-function fixture() {
-	const child = Object.assign(new EventEmitter(), { unref: vi.fn(), kill: vi.fn(), channel: { unref: vi.fn() } });
+function fixture(channel: { unref?: unknown } | null | undefined = { unref: vi.fn() }) {
+	const child = Object.assign(new EventEmitter(), { unref: vi.fn(), kill: vi.fn(), channel });
 	ports.spawn.mockReturnValue(child as unknown as ChildProcess);
 	const agent = { id: "one", turnId: "turn", status: "reserved" } as CollaborationAgent;
 	const job = { id: "job", cwd: "/work", agents: [agent] } as CollaborationJob;
@@ -37,6 +37,19 @@ function fixture() {
 	return { child, agent, job, store, start: () => launchCollaborationTurnProcess(store, job, agent) };
 }
 
+it.each([{}, { unref: undefined }, { unref: null }, { unref: true }, null])(
+	"admits ready when the IPC channel has no callable unref: %j",
+	async (channel) => {
+		const f = fixture(channel);
+		const started = f.start();
+		f.child.emit("message", { type: "ready", turnId: "turn" });
+		await started;
+		expect(f.child.unref).toHaveBeenCalledTimes(1);
+		expect(f.child.listenerCount("message")).toBe(0);
+		expect(vi.getTimerCount()).toBe(0);
+	},
+);
+
 it("admits one exact ready event and never treats a duplicate as another admission", async () => {
 	const f = fixture();
 	const started = f.start();
@@ -46,6 +59,7 @@ it("admits one exact ready event and never treats a duplicate as another admissi
 	await started;
 	f.child.emit("message", { type: "ready", turnId: "turn" });
 	expect(f.child.unref).toHaveBeenCalledTimes(1);
+	expect(f.child.channel?.unref).toHaveBeenCalledTimes(1);
 	f.agent.status = "done";
 	f.child.emit("exit", 0);
 	await Promise.resolve();

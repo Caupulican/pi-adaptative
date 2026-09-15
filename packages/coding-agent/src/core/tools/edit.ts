@@ -36,7 +36,6 @@ import {
 	selectFileFailureRecoveryAuthority,
 	WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
 } from "./file-failure-recovery.ts";
-import { formatMutatedSourceText } from "./file-mutation-format.ts";
 import {
 	FileMutationIdentityError,
 	FileMutationIntentController,
@@ -720,11 +719,9 @@ export function createEditToolDefinition(
 						}
 						throwIfAborted();
 
-						const formattedSource = recovered
-							? applied.sourceContent
-							: formatMutatedSourceText(applied.sourceContent, absolutePath, cwd);
-						const reportedNewContent = recovered ? applied.newContent : normalizeToLF(formattedSource);
-						const finalContent = recovered ? await recovered.encode(applied.splices) : bom + formattedSource;
+						const finalContent = recovered
+							? await recovered.encode(applied.splices)
+							: bom + applied.sourceContent;
 						if (recovered?.detected && sourceMtimeMs !== undefined) {
 							rememberDetectedFileEncoding(absolutePath, sourceMtimeMs, recovered.encoding);
 						}
@@ -752,7 +749,7 @@ export function createEditToolDefinition(
 						throwIfAborted();
 						return {
 							baseContent: applied.baseContent,
-							newContent: reportedNewContent,
+							newContent: applied.newContent,
 							finalContent,
 							...(recovered
 								? {
@@ -768,9 +765,9 @@ export function createEditToolDefinition(
 								: {}),
 							matchPlanReused,
 							diffResult:
-								matchPlanReused && cachedForInput && reportedNewContent === applied.newContent
+								matchPlanReused && cachedForInput
 									? { diff: cachedForInput.diff, firstChangedLine: cachedForInput.firstChangedLine }
-									: generateDiffString(applied.baseContent, reportedNewContent),
+									: generateDiffString(applied.baseContent, applied.newContent),
 						};
 					};
 

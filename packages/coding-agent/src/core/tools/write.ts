@@ -12,7 +12,6 @@ import {
 	WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
 	WRITE_RETARGET_RECOVERY_TARGET_KIND,
 } from "./file-failure-recovery.ts";
-import { formatMutatedSourceText } from "./file-mutation-format.ts";
 import {
 	type FileContentReference,
 	FileMutationIntentController,
@@ -403,9 +402,8 @@ export function createWriteToolDefinition(
 						let contentReference: FileContentReference;
 						try {
 							if (content !== undefined) {
-								const formatted = formatMutatedSourceText(content, absolutePath, cwd);
-								await ops.createFile(absolutePath, formatted);
-								contentReference = intentController.rememberContent(absolutePath, formatted);
+								await ops.createFile(absolutePath, content);
+								contentReference = intentController.rememberContent(absolutePath, content);
 							} else if (contentRef !== undefined) {
 								contentReference = await intentController.copyReferencedContent(
 									contentRef,
