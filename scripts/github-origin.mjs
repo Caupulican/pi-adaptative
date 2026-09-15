@@ -3,39 +3,18 @@
  * Pin `gh` to this clone's origin. Forks of earendil-works/pi otherwise resolve
  * Actions/releases to the parent when there is no TTY and no set-default.
  * Writes only git config (`remote.origin.gh-resolved`); no GitHub API.
+ * Parser ownership is packages/coding-agent/src/core/github-origin-pin.ts.
  */
 import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+	githubOriginPinPlan,
+	parseGhResolvedMap,
+	parseGithubOriginSlug,
+} from "../packages/coding-agent/src/core/github-origin-pin.ts";
 
-const GH_RESOLVED_LINE = /^remote\.(.+)\.gh-resolved(?:\s+(.*))?$/;
-
-export function parseGithubOriginSlug(url) {
-	const trimmed = String(url ?? "").trim();
-	const match = trimmed.match(
-		/^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/]+)\/([^/]+?)(?:\.git)?\/?$/i,
-	);
-	if (!match) {
-		throw new Error(`Not a GitHub origin URL: ${url}`);
-	}
-	return `${match[1]}/${match[2]}`;
-}
-
-export function parseGhResolvedMap(configText) {
-	const map = {};
-	for (const line of String(configText ?? "").split("\n")) {
-		const match = GH_RESOLVED_LINE.exec(line.trim());
-		if (match) map[match[1]] = match[2] ?? "";
-	}
-	return map;
-}
-
-/** Plan a pin: origin is the only gh default; other remotes lose gh-resolved. */
-export function githubOriginPinPlan(originUrl, resolvedByRemote = {}) {
-	parseGithubOriginSlug(originUrl);
-	const unset = Object.keys(resolvedByRemote).filter((remote) => remote !== "origin");
-	return { setOrigin: resolvedByRemote.origin !== "base", unset };
-}
+export { githubOriginPinPlan, parseGhResolvedMap, parseGithubOriginSlug };
 
 export function pinGithubOriginGhDefault({ cwd, git } = {}) {
 	const run =
