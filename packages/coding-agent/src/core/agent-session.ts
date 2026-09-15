@@ -114,6 +114,7 @@ import { ForegroundLifecycleAdapter } from "./foreground-lifecycle-adapter.ts";
 import { ForegroundRecoveryController, type ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import { ForegroundTerminalHandoffController } from "./foreground-terminal-handoff-controller.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
+import { githubOriginPinDiagnostic, pinGithubOriginForSession } from "./github-origin-pin.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
@@ -488,6 +489,16 @@ export class AgentSession {
 		this._cwd = config.cwd;
 		this._agentDir = agentDir;
 		this._isChildSession = (config.isChildSession ?? process.env.PI_CHILD_SESSION === "1") || isWorkerSession();
+		if (!this._isChildSession) {
+			const pin = pinGithubOriginForSession(this._cwd);
+			const diagnostic = githubOriginPinDiagnostic(pin);
+			if (diagnostic) {
+				this.sessionManager.appendCustomMessageEntry("github_origin_pin", diagnostic, true, {
+					status: pin.status,
+					reason: pin.status === "failed" ? pin.reason : undefined,
+				});
+			}
+		}
 		this._durableLearningState = this._isChildSession ? undefined : DurableLearningState.forAgentDir(agentDir);
 		this._skillVault = new SkillVaultController({
 			getSkills: () => this._resourceLoader.getActiveSkills(),

@@ -264,6 +264,227 @@ describe("tool-failure recovery restore", () => {
 		expect(providerMessages[1]).toContain(command);
 	});
 
+	it("keeps a duck-typed operation outcome from being rewritten into a harness record", async () => {
+		const schema = Type.Object({ command: Type.String() });
+		const testOutput = "FAILED (errors=2)\nValueError: duck-typed class identity was lost";
+		const bash: AgentTool<typeof schema> = {
+			name: "bash",
+			label: "bash",
+			description: "Run a shell command",
+			parameters: schema,
+			async execute() {
+				throw {
+					name: "AgentToolExecutionError",
+					message: `${testOutput}\n\nCommand exited with code 1\ncwd: /repo`,
+					failureCode: "exit_1",
+					outputSignature: "b".repeat(43),
+					errorKind: "operation_outcome",
+				};
+			},
+		};
+		let turn = 0;
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "run tests", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [bash] },
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				() => {
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						turn++;
+						const message =
+							turn === 1
+								? assistantCall("bash-1", "bash", { command: "python3 -m unittest" })
+								: assistantMessage([{ type: "text", text: "tests are red" }], "stop");
+						stream.push({
+							type: "done",
+							reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
+							message,
+						});
+					});
+					return stream;
+				},
+			),
+		);
+		const firstResult = events.find((event) => event.type === "message_end" && event.message.role === "toolResult");
+		if (firstResult?.type !== "message_end" || firstResult.message.role !== "toolResult") {
+			throw new Error("Expected a tool result");
+		}
+		expect(firstResult.message.errorKind).toBe("operation_outcome");
+		const firstText = firstResult.message.content
+			.filter((block) => block.type === "text")
+			.map((block) => block.text)
+			.join("\n");
+		expect(firstText).toContain("duck-typed class identity was lost");
+		expect(firstText).not.toContain("[harness]");
+	});
+
+	it("does not let a hostile thrown object escape failure finalization", async () => {
+		const schema = Type.Object({ command: Type.String() });
+		const bash: AgentTool<typeof schema> = {
+			name: "bash",
+			label: "bash",
+			description: "Run a shell command",
+			parameters: schema,
+			async execute() {
+				throw {
+					get name(): string {
+						throw new Error("hostile name");
+					},
+					message: "should not leak",
+				};
+			},
+		};
+		let turn = 0;
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "run tests", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [bash] },
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				() => {
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						turn++;
+						const message =
+							turn === 1
+								? assistantCall("bash-1", "bash", { command: "true" })
+								: assistantMessage([{ type: "text", text: "stopped" }], "stop");
+						stream.push({
+							type: "done",
+							reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
+							message,
+						});
+					});
+					return stream;
+				},
+			),
+		);
+		const firstResult = events.find((event) => event.type === "message_end" && event.message.role === "toolResult");
+		if (firstResult?.type !== "message_end" || firstResult.message.role !== "toolResult") {
+			throw new Error("Expected a tool result");
+		}
+		const firstText = firstResult.message.content
+			.filter((block) => block.type === "text")
+			.map((block) => block.text)
+			.join("\n");
+		expect(firstText).toContain("Tool execution failed.");
+		expect(firstText).not.toContain("hostile name");
+	});
+
+	it("finalizes a genuine Error whose message getter throws", async () => {
+		const schema = Type.Object({ command: Type.String() });
+		const bash: AgentTool<typeof schema> = {
+			name: "bash",
+			label: "bash",
+			description: "Run a shell command",
+			parameters: schema,
+			async execute() {
+				const error = new Error("should not leak");
+				Object.defineProperty(error, "message", {
+					get() {
+						throw new Error("hostile-message");
+					},
+				});
+				throw error;
+			},
+		};
+		let turn = 0;
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "run tests", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [bash] },
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				() => {
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						turn++;
+						const message =
+							turn === 1
+								? assistantCall("bash-1", "bash", { command: "true" })
+								: assistantMessage([{ type: "text", text: "stopped" }], "stop");
+						stream.push({
+							type: "done",
+							reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
+							message,
+						});
+					});
+					return stream;
+				},
+			),
+		);
+		const firstResult = events.find((event) => event.type === "message_end" && event.message.role === "toolResult");
+		if (firstResult?.type !== "message_end" || firstResult.message.role !== "toolResult") {
+			throw new Error("Expected a tool result");
+		}
+		const firstText = firstResult.message.content
+			.filter((block) => block.type === "text")
+			.map((block) => block.text)
+			.join("\n");
+		expect(firstText).toContain("Tool execution failed.");
+		expect(firstText).not.toContain("hostile-message");
+		expect(firstResult.message.isError).toBe(true);
+	});
+
+	it("finalizes a prepareArguments throw whose name getter throws", async () => {
+		const schema = Type.Object({ command: Type.String() });
+		const bash: AgentTool<typeof schema> = {
+			name: "bash",
+			label: "bash",
+			description: "Run a shell command",
+			parameters: schema,
+			prepareArguments() {
+				const error = new Error("bad args");
+				Object.defineProperty(error, "name", {
+					get() {
+						throw new Error("hostile-name");
+					},
+				});
+				throw error;
+			},
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }], details: {} };
+			},
+		};
+		let turn = 0;
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "run tests", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [bash] },
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				() => {
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						turn++;
+						const message =
+							turn === 1
+								? assistantCall("bash-1", "bash", { command: "true" })
+								: assistantMessage([{ type: "text", text: "stopped" }], "stop");
+						stream.push({
+							type: "done",
+							reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
+							message,
+						});
+					});
+					return stream;
+				},
+			),
+		);
+		const firstResult = events.find((event) => event.type === "message_end" && event.message.role === "toolResult");
+		if (firstResult?.type !== "message_end" || firstResult.message.role !== "toolResult") {
+			throw new Error("Expected a tool result");
+		}
+		const firstText = firstResult.message.content
+			.filter((block) => block.type === "text")
+			.map((block) => block.text)
+			.join("\n");
+		expect(firstText).not.toContain("hostile-name");
+		expect(firstResult.message.isError).toBe(true);
+	});
+
 	it("re-admits a failed operation once anything else succeeds, however often it has failed", () => {
 		const schema = Type.Object({ command: Type.String() });
 		const args = { command: "run focused tests" };

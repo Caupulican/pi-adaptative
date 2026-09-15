@@ -47,7 +47,7 @@ import {
 	selectFileFailureRecoveryAuthority,
 } from "./file-failure-recovery.ts";
 import { decodeReadText, decodeTextChunks } from "./file-text-decoder.ts";
-import { resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
+import { formatMissingPathLocateEvidence, resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
 import { type ReadLine, type ReadLineWindowDetails, readLineWindow } from "./read-line-window.ts";
 import { getTextOutput, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { isPiSessionJsonlPath, projectPiSessionJsonlLine } from "./session-transcript-read.ts";
@@ -550,6 +550,10 @@ export function createReadToolDefinition(
 		promptGuidelines: ["Use read to examine files instead of cat or sed."],
 		parameters: readSchema,
 		failureRecovery: {
+			getFailureEvidence: (params, failure) =>
+				localFileSystem && failure.failureCode === "file_not_found"
+					? formatMissingPathLocateEvidence(params.path, cwd, pathOptions)
+					: undefined,
 			getFailureTargets: (params, failure) =>
 				failure.failureCode === "file_not_found" && failureRecoveryAuthority
 					? [

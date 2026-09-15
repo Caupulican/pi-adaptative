@@ -9,6 +9,8 @@ import type { PathInputOptions } from "../../utils/paths.ts";
 import { resolveToCwd } from "./path-utils.ts";
 
 export const FILE_EXISTS_RECOVERY_TARGET_KIND = "filesystem.file.exists";
+/** Invited file creation. Observation kinds such as `filesystem.file.exists` must not load this. */
+export const FILE_MISSING_CREATE_RECOVERY_TARGET_KIND = "filesystem.file.missing.create";
 export const FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND = "filesystem.file.current-text";
 export const FILE_ENCODING_RECOVERY_TARGET_KIND = "filesystem.file.encoding-preserved";
 export const WORKSPACE_MUTATED_RECOVERY_TARGET_KIND = "filesystem.workspace.mutated";

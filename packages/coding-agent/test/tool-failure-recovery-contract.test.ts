@@ -14,6 +14,7 @@ import {
 	EDIT_RETARGET_RECOVERY_TARGET_KIND,
 	FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
 	FILE_EXISTS_RECOVERY_TARGET_KIND,
+	FILE_MISSING_CREATE_RECOVERY_TARGET_KIND,
 	WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
 	WRITE_RETARGET_RECOVERY_TARGET_KIND,
 } from "../src/core/tools/file-failure-recovery.ts";
@@ -183,24 +184,51 @@ describe("tool-owned failure recovery contracts", () => {
 		).toEqual([]);
 	});
 
-	it("pairs write's file-exists repair action with read's missing-file target", async () => {
+	it("does not list host ancestors for a custom-backend read miss", async () => {
+		const cwd = await createTemporaryRoot("pi-read-custom-locate-");
+		await writeFile(join(cwd, "host-only.txt"), "visible-on-host");
+		const read = createReadTool(cwd, {
+			operations: {
+				access: async () => {
+					throw Object.assign(new Error("missing"), { code: "ENOENT" });
+				},
+				readFile: async () => {
+					throw Object.assign(new Error("missing"), { code: "ENOENT" });
+				},
+			},
+		});
+		expect(
+			read.failureRecovery?.getFailureEvidence?.(
+				{ path: "missing.txt" },
+				{ failureCode: "file_not_found", message: "file not found" },
+			),
+		).toBeUndefined();
+	});
+
+	it("does not pair write create with a read miss; ls locates the missing path", async () => {
 		const cwd = await createTemporaryRoot("pi-write-recovery-contract-");
 		const read = createReadTool(cwd);
 		const write = createWriteTool(cwd);
-		const input = { path: "nested/../created.txt", content: "created" };
+		const ls = createLsTool(cwd);
 		const target = read.failureRecovery?.getFailureTargets?.(
 			{ path: "./created.txt" },
 			{ failureCode: "file_not_found" },
 		)?.[0];
-		const result = await write.execute("write-recovery", input);
-		const action = write.failureRecovery?.actions?.find(
-			(candidate) => candidate.kind === "repair" && candidate.targetKind === FILE_EXISTS_RECOVERY_TARGET_KIND,
+		const writeCreate = write.failureRecovery?.actions?.find(
+			(candidate) =>
+				candidate.kind === "repair" && candidate.targetKind === FILE_MISSING_CREATE_RECOVERY_TARGET_KIND,
 		);
-		if (action?.kind !== "repair") throw new Error("Expected write file-exists repair action");
+		const lsLocate = ls.failureRecovery?.actions?.find(
+			(candidate) => candidate.kind === "correct" && candidate.targetKind === FILE_EXISTS_RECOVERY_TARGET_KIND,
+		);
+		if (writeCreate?.kind !== "repair") throw new Error("Expected write create action on the create kind");
+		if (lsLocate?.kind !== "correct") throw new Error("Expected ls locate action");
 
 		expect(target).toMatchObject({ kind: FILE_EXISTS_RECOVERY_TARGET_KIND, scope: join(cwd, "created.txt") });
-		expect(action.authority).toBe(target?.authority);
-		expect(result.details).toMatchObject({ phase: "written" });
+		expect(writeCreate.targetKind).not.toBe(target?.kind);
+		expect(writeCreate.authority).toBe(target?.authority);
+		expect(lsLocate.authority).toBe(target?.authority);
+		expect(lsLocate.targetKind).toBe(target?.kind);
 	});
 
 	it("declares changed-operation guidance without granting repair evidence", async () => {
@@ -281,7 +309,7 @@ describe("tool-owned failure recovery contracts", () => {
 		).toEqual([]);
 		expect(
 			write.failureRecovery?.actions?.find(
-				(action) => action.kind === "repair" && action.targetKind === FILE_EXISTS_RECOVERY_TARGET_KIND,
+				(action) => action.kind === "repair" && action.targetKind === FILE_MISSING_CREATE_RECOVERY_TARGET_KIND,
 			),
 		).toBeUndefined();
 		expect(
@@ -334,11 +362,13 @@ describe("tool-owned failure recovery contracts", () => {
 			{ failureCode: "file_not_found" },
 		)?.[0];
 		const action = write.failureRecovery?.actions?.find(
-			(candidate) => candidate.kind === "repair" && candidate.targetKind === FILE_EXISTS_RECOVERY_TARGET_KIND,
+			(candidate) =>
+				candidate.kind === "repair" && candidate.targetKind === FILE_MISSING_CREATE_RECOVERY_TARGET_KIND,
 		);
 		if (!target || !action || action.kind !== "repair") throw new Error("Expected shared recovery contract");
 
 		expect(action.authority).toBe(target.authority);
+		expect(action.targetKind).not.toBe(target.kind);
 		const shellTarget = bash.failureRecovery?.getFailureTargets?.(
 			{ command: "test-command" },
 			{ failureCode: "exit_1" },

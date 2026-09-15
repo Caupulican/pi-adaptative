@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Single-line Input treats unframed multi-character paste containing newlines or tabs as paste instead of silently dropping it. TUI `pasteText` routes clipboard text to the focused component.
+
 ## [0.99.23] - 2026-09-15
 
 ## [0.99.22] - 2026-09-15

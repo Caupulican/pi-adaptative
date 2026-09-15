@@ -16,7 +16,10 @@ export interface AuthorizationRaceOptions {
 }
 
 export function parseAuthorizationInput(input: string): AuthorizationInput {
-	const value = input.trim();
+	const value = input
+		.trim()
+		.replace(/^['"]+|['"]+$/g, "")
+		.trim();
 	if (!value) return {};
 
 	try {

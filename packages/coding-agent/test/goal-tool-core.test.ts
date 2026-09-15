@@ -1,7 +1,19 @@
+import {
+	MAX_TOOL_FAILURE_EVIDENCE_CHARS,
+	rememberToolFailure,
+	sanitizeToolFailureEvidence,
+} from "@caupulican/pi-agent-core/tool-failure-memory";
 import { describe, expect, it } from "vitest";
 import { cancelGoal, resumeGoal } from "../src/core/goals/goal-lifecycle.ts";
 import { createGoalState, parseGoalState, serializeGoalState } from "../src/core/goals/goal-state.ts";
-import { applyGoalAction, completeGoalManually, summarizeGoalState } from "../src/core/goals/goal-tool-core.ts";
+import {
+	applyGoalAction,
+	completeGoalManually,
+	formatGoalEvidenceCatalog,
+	formatGoalRecoveryCatalogs,
+	formatGoalRequirementCatalog,
+	summarizeGoalState,
+} from "../src/core/goals/goal-tool-core.ts";
 
 describe("applyGoalAction (goal producer core)", () => {
 	it.each([undefined, "failed", "canceled", "succeeded"] as const)(
@@ -653,5 +665,125 @@ describe("evidence on a blocked goal", () => {
 		if (!reopen.ok) expect(reopen.error).toContain("Lifecycle changes are owner/system controlled");
 		const complete = applyGoalAction(state, { action: "complete" }, "T9");
 		expect(complete.ok).toBe(false);
+	});
+
+	it("lists live requirement ids when satisfy omits the id", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Fix the harness", now: "T0" });
+		state = expectOk(
+			applyGoalAction(state, { action: "add_requirement", requirementId: "req-live", text: "Tests pass" }, "T1"),
+		);
+		const missing = applyGoalAction(state, { action: "satisfy_requirement", requirementId: "" }, "T2");
+		expect(missing.ok).toBe(false);
+		if (!missing.ok) {
+			expect(missing.error).toContain("satisfy_requirement requires a non-empty requirementId");
+			expect(missing.error).toContain("req-live (open)");
+		}
+	});
+
+	it("lists live evidence ids when a cited evidence id is unknown", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Fix the harness", now: "T0" });
+		state = expectOk(
+			applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Tests pass" }, "T1"),
+		);
+		state = expectOk(
+			applyGoalAction(
+				state,
+				{
+					action: "add_evidence",
+					evidenceId: "ev-live",
+					kind: "file",
+					summary: "Focused test",
+				},
+				"T2",
+			),
+		);
+		const unknown = applyGoalAction(
+			state,
+			{ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["ev-missing"] },
+			"T3",
+		);
+		expect(unknown.ok).toBe(false);
+		if (!unknown.ok) {
+			expect(unknown.error).toContain("Unknown evidence 'ev-missing'");
+			expect(unknown.error).toContain("ev-live");
+		}
+	});
+
+	it("bounds live catalogs without splitting an id", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Fix the harness", now: "T0" });
+		for (let index = 0; index < 40; index++) {
+			state = expectOk(
+				applyGoalAction(
+					state,
+					{
+						action: "add_requirement",
+						requirementId: `req-${index}-abcdefghijklmnopqrstuvwxyz0123456789`,
+						text: `Requirement ${index}`,
+					},
+					`T${index + 1}`,
+				),
+			);
+		}
+		const catalog = formatGoalRequirementCatalog(state);
+		expect(catalog.startsWith("Requirements:")).toBe(true);
+		expect(catalog).toMatch(/more omitted\)\.$/);
+		expect(catalog.includes(" (open)")).toBe(true);
+		expect(catalog.length).toBeLessThanOrEqual(1600);
+		expect(formatGoalEvidenceCatalog(state)).toBe("Evidence: none.");
+	});
+
+	it("keeps combined recovery catalogs within the sanitizer budget with whole ids", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Fix the harness", now: "T0" });
+		for (let index = 0; index < 40; index++) {
+			state = expectOk(
+				applyGoalAction(
+					state,
+					{
+						action: "add_requirement",
+						requirementId: `req-${index}-abcdefghijklmnopqrstuvwxyz0123456789`,
+						text: `Requirement ${index}`,
+					},
+					`T${index + 1}`,
+				),
+			);
+			state = expectOk(
+				applyGoalAction(
+					state,
+					{
+						action: "add_evidence",
+						evidenceId: `ev-${index}-abcdefghijklmnopqrstuvwxyz0123456789`,
+						kind: "file",
+						summary: `Evidence ${index}`,
+					},
+					`E${index + 1}`,
+				),
+			);
+		}
+		const combined = formatGoalRecoveryCatalogs(state);
+		expect(combined.length).toBeLessThanOrEqual(MAX_TOOL_FAILURE_EVIDENCE_CHARS);
+		expect(combined).toContain("Requirements:");
+		expect(combined).toContain("Evidence:");
+		expect(combined).toMatch(/more omitted|none\./);
+		const sanitized = sanitizeToolFailureEvidence(combined);
+		expect(sanitized).toBe(combined);
+		const record = rememberToolFailure(
+			new Map(),
+			"goal",
+			{ action: "satisfy_requirement", requirementId: "missing" },
+			"failed",
+			"unknown_requirement",
+			"Use a live requirement id from the recovery catalog.",
+			"Unknown requirement 'missing'.",
+			"execution",
+			combined,
+		);
+		expect(record.evidence).toBe(combined);
+		expect(record.evidence?.includes("req-0-abcdefghijklmnopqrstuvwxyz0123456789") ?? false).toBe(true);
+		expect(
+			(record.evidence?.match(/req-[0-9]+-abcdefghijklmnopqrstuvwxyz0123456789/g) ?? []).every((id) =>
+				combined.includes(id),
+			),
+		).toBe(true);
+		expect(record.evidence?.endsWith("…") ?? false).toBe(false);
 	});
 });

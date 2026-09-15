@@ -3,7 +3,12 @@ import { accessSync, constants, mkdtempSync, readdirSync, rmdirSync, unlinkSync,
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { expandPath, resolveReadPath, resolveToCwd } from "../src/core/tools/path-utils.ts";
+import {
+	expandPath,
+	formatMissingPathLocateEvidence,
+	resolveReadPath,
+	resolveToCwd,
+} from "../src/core/tools/path-utils.ts";
 
 vi.mock("node:fs", async (importOriginal) => {
 	const original = await importOriginal<typeof fs>();
@@ -198,6 +203,28 @@ describe("path-utils", () => {
 				[exact, constants.F_OK],
 				[alternate, constants.F_OK],
 			]);
+		});
+	});
+
+	describe("formatMissingPathLocateEvidence", () => {
+		let locateDir: string;
+
+		beforeEach(() => {
+			locateDir = mkdtempSync(join(tmpdir(), "pi-path-locate-"));
+			writeFileSync(join(locateDir, "visible.txt"), "ok");
+		});
+
+		afterEach(() => {
+			unlinkSync(join(locateDir, "visible.txt"));
+			rmdirSync(locateDir);
+		});
+
+		it("lists the existing ancestor without rewriting a spaced path", () => {
+			const evidence = formatMissingPathLocateEvidence("missing/nested.txt", locateDir);
+			expect(evidence).toContain("Path not found:");
+			expect(evidence).toContain("Existing ancestor");
+			expect(evidence).toContain("visible.txt");
+			expect(evidence).not.toMatch(/rewrit|normalized to/i);
 		});
 	});
 });

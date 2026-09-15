@@ -955,6 +955,73 @@ export class AgentToolExecutionError extends Error {
 	}
 }
 
+/**
+ * Recover a structured execution error without `instanceof`.
+ * Runtime copies (jiti transforms, duplicate packages) can break class identity while keeping
+ * `name`, `message`, `failureCode`, `errorKind`, and `outputSignature`.
+ */
+export function readAgentToolExecutionError(error: unknown): AgentToolExecutionError | undefined {
+	if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
+	try {
+		const name = Reflect.get(error, "name");
+		const message = Reflect.get(error, "message");
+		const failureCode = Reflect.get(error, "failureCode");
+		const outputSignature = Reflect.get(error, "outputSignature");
+		const errorKind = Reflect.get(error, "errorKind");
+		if (name !== "AgentToolExecutionError") return undefined;
+		if (typeof message !== "string" || message.length === 0) return undefined;
+		if (typeof failureCode !== "string" || failureCode.length === 0) return undefined;
+		if (typeof outputSignature !== "string") return undefined;
+		if (errorKind !== "tool_failure" && errorKind !== "operation_outcome") return undefined;
+		return new AgentToolExecutionError(message, failureCode, outputSignature, errorKind);
+	} catch {
+		return undefined;
+	}
+}
+
+function describeUnknownError(
+	error: unknown,
+	fallbackMessage: string,
+): {
+	message: string;
+	errorClass: string;
+} {
+	try {
+		if (typeof error === "string" && error.length > 0) return { message: error, errorClass: "string" };
+		if (error !== null && (typeof error === "object" || typeof error === "function")) {
+			let message = fallbackMessage;
+			let errorClass: string = typeof error;
+			const rawMessage = Reflect.get(error, "message");
+			if (typeof rawMessage === "string" && rawMessage.length > 0) message = rawMessage;
+			const rawName = Reflect.get(error, "name");
+			if (typeof rawName === "string" && rawName.length > 0) errorClass = rawName;
+			return { message, errorClass };
+		}
+	} catch {
+		// Keep the fallback when getters or proxies throw.
+	}
+	return { message: fallbackMessage, errorClass: typeof error };
+}
+
+/** Read an error message without unguarded property or prototype inspection. Does not construct AgentToolExecutionError. */
+export function safeErrorMessage(error: unknown, fallback = ""): string {
+	return describeUnknownError(error, fallback).message;
+}
+
+/** Snapshot a thrown tool error without unguarded property or prototype inspection. */
+export function describeThrownToolError(error: unknown): {
+	structured: AgentToolExecutionError | undefined;
+	message: string;
+	errorClass: string;
+} {
+	const structured = readAgentToolExecutionError(error);
+	if (structured) {
+		return { structured, message: structured.message, errorClass: structured.name };
+	}
+	const fallback = describeUnknownError(error, "Tool execution failed.");
+	return { structured: undefined, ...fallback };
+}
+
 /** Final or partial result produced by a tool. */
 export interface AgentToolResult<T> {
 	/** Text or image content returned to the model. */

@@ -116,6 +116,70 @@ function evidenceExists(state: GoalState, evidenceId: string): boolean {
 	return state.evidence.some((evidence) => evidence.id === evidenceId);
 }
 
+export const MAX_GOAL_RECOVERY_EVIDENCE_CHARS = 1_600;
+const OMISSION_RESERVE = 28;
+
+function formatBoundedCatalog(label: string, entries: readonly string[], maxChars: number): string {
+	if (entries.length === 0) return `${label}: none.`;
+	const omittedAll = `${label}: (${entries.length} omitted).`;
+	if (maxChars < omittedAll.length) return omittedAll;
+	const kept: string[] = [];
+	let used = label.length + 2;
+	for (let index = 0; index < entries.length; index++) {
+		const entry = entries[index]!;
+		const piece = (kept.length === 0 ? "" : ", ") + entry;
+		const remainingAfter = entries.length - kept.length - 1;
+		const notice = remainingAfter > 0 ? ` (${remainingAfter} more omitted)` : "";
+		if (used + piece.length + (remainingAfter > 0 ? Math.max(notice.length, OMISSION_RESERVE) : 1) > maxChars) {
+			return kept.length === 0
+				? omittedAll
+				: `${label}: ${kept.join(", ")} (${entries.length - kept.length} more omitted).`;
+		}
+		kept.push(entry);
+		used += piece.length;
+	}
+	return `${label}: ${kept.join(", ")}.`;
+}
+
+export function formatGoalRequirementCatalog(
+	state: GoalState,
+	maxChars = Math.floor(MAX_GOAL_RECOVERY_EVIDENCE_CHARS / 2),
+): string {
+	return formatBoundedCatalog(
+		"Requirements",
+		state.requirements.map((requirement) => `${requirement.id} (${requirement.status})`),
+		maxChars,
+	);
+}
+
+export function formatGoalEvidenceCatalog(
+	state: GoalState,
+	maxChars = Math.floor(MAX_GOAL_RECOVERY_EVIDENCE_CHARS / 2),
+): string {
+	return formatBoundedCatalog(
+		"Evidence",
+		state.evidence.map((evidence) => evidence.id),
+		maxChars,
+	);
+}
+
+export function formatGoalRecoveryCatalogs(state: GoalState, maxChars = MAX_GOAL_RECOVERY_EVIDENCE_CHARS): string {
+	const reqEntries = state.requirements.map((requirement) => `${requirement.id} (${requirement.status})`);
+	const evEntries = state.evidence.map((evidence) => evidence.id);
+	const reqBudget = Math.max(24, Math.floor((maxChars - 1) / 2));
+	const requirements = formatBoundedCatalog("Requirements", reqEntries, reqBudget);
+	const evidence = formatBoundedCatalog("Evidence", evEntries, Math.max(24, maxChars - 1 - requirements.length));
+	return `${requirements}\n${evidence}`;
+}
+
+function liveRequirementCatalog(state: GoalState): string {
+	return formatGoalRequirementCatalog(state);
+}
+
+function liveEvidenceCatalog(state: GoalState): string {
+	return formatGoalEvidenceCatalog(state);
+}
+
 /**
  * Apply one agent-facing goal action to the current ledger state.
  *
@@ -189,7 +253,7 @@ export function applyGoalAction(
 				const requirementState = firstPending.status === "open" ? "open" : "unproven";
 				return {
 					ok: false,
-					error: `Cannot increment goal: ${requirementState} requirement '${firstPending.id}' has no unused evidence${evidenceKind}. Record evidence, then increment.`,
+					error: `Cannot increment goal: ${requirementState} requirement '${firstPending.id}' has no unused evidence${evidenceKind}. Record evidence, then increment. ${formatGoalEvidenceCatalog(current)} ${formatGoalRequirementCatalog(current)}`,
 				};
 			}
 			return applyGoalAction(
@@ -244,9 +308,14 @@ function toGoalEvent(
 		}
 		case "satisfy_requirement": {
 			const id = action.requirementId.trim();
-			if (!id) return { ok: false, error: "satisfy_requirement requires a non-empty requirementId." };
+			if (!id) {
+				return {
+					ok: false,
+					error: `satisfy_requirement requires a non-empty requirementId. ${liveRequirementCatalog(state)}`,
+				};
+			}
 			if (!requirementExists(state, id)) {
-				return { ok: false, error: `Unknown requirement '${id}'.` };
+				return { ok: false, error: `Unknown requirement '${id}'. ${liveRequirementCatalog(state)}` };
 			}
 			const requireVerified = options?.requireVerifiedEvidenceForCompletion !== false;
 			let evidenceIds = action.evidenceIds ?? [];
@@ -254,7 +323,7 @@ function toGoalEvent(
 				if (!evidenceExists(state, evidenceId)) {
 					return {
 						ok: false,
-						error: `Unknown evidence '${evidenceId}'. Record it with action 'add_evidence' first.`,
+						error: `Unknown evidence '${evidenceId}'. Record it with action 'add_evidence' first. ${liveEvidenceCatalog(state)}`,
 					};
 				}
 			}

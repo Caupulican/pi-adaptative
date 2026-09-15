@@ -20,6 +20,7 @@ import {
 } from "../goals/goal-state.ts";
 import {
 	applyGoalAction,
+	formatGoalRecoveryCatalogs,
 	type GoalAction,
 	type GoalActionName,
 	type OpenTaskStepRef,
@@ -617,6 +618,22 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			"complete needs current authoritative evidence, no remaining work, no active goal-owned lanes, no open task_steps, no goal-owned or cited running tool_task, and no active pipeline. Failed or canceled tool_task results are terminal and stop blocking liveness, but never become verified evidence automatically. block_requirement/block_goal only when the same verified owner/approval boundary or capability impossibility persists for 3 consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; otherwise keep working.",
 		],
 		parameters: goalSchema,
+		failureRecovery: {
+			getFailureEvidence: (params) => {
+				const state = deps.getGoalState();
+				if (!state) return undefined;
+				const action = (params as { action?: string }).action;
+				if (
+					action !== "satisfy_requirement" &&
+					action !== "increment" &&
+					action !== "block_requirement" &&
+					action !== "reopen_requirement"
+				) {
+					return undefined;
+				}
+				return formatGoalRecoveryCatalogs(state);
+			},
+		},
 		renderShell: "self",
 		renderCall() {
 			return emptyOrchestrationCall();

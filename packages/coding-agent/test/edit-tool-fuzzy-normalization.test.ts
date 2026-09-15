@@ -55,12 +55,15 @@ describe("edit tool fuzzy matching", () => {
 		await writeFile(filePath, "alpha — one\r\nbeta\r\n", "utf8");
 
 		const tool = createEditTool(dir);
-		await tool.execute("tool-1", {
+		const result = await tool.execute("tool-1", {
 			path: "crlf.txt",
 			edits: [{ oldText: "alpha - one", newText: "alpha - two" }],
 		});
 
 		expect(await readFile(filePath, "utf8")).toBe("alpha - two\r\nbeta\r\n");
+		const diff = typeof result.details?.diff === "string" ? result.details.diff : "";
+		expect(diff).toContain("alpha - two");
+		expect(diff).not.toMatch(/^[+-]\s*\d+ beta\r?$/m);
 	});
 
 	it("counts duplicates in the same space that matched the edit", async () => {
@@ -89,5 +92,44 @@ describe("edit tool fuzzy matching", () => {
 				edits: [{ oldText: "x - y", newText: "changed" }],
 			}),
 		).rejects.toThrow("Found 2 occurrences");
+	});
+
+	it("applies a unique indent-only rematch after exact and fuzzy fail", async () => {
+		const dir = await createTempDir();
+		const filePath = join(dir, "indent.ts");
+		await writeFile(filePath, "function f() {\n\tconst x = 1;\n}\n", "utf8");
+		const tool = createEditTool(dir);
+		const result = await tool.execute("tool-1", {
+			path: "indent.ts",
+			edits: [{ oldText: "const x = 1;", newText: "const x = 2;" }],
+		});
+		expect(result.isError).not.toBe(true);
+		expect(await readFile(filePath, "utf8")).toContain("const x = 2;");
+	});
+
+	it("rejects indent rematch when two blocks collapse to the same text", async () => {
+		const dir = await createTempDir();
+		const filePath = join(dir, "indent-dup.ts");
+		await writeFile(filePath, "\tconst x = 1;\n\t\tconst x = 1;\n", "utf8");
+		const tool = createEditTool(dir);
+		await expect(
+			tool.execute("tool-1", {
+				path: "indent-dup.ts",
+				edits: [{ oldText: "const x = 1;", newText: "const x = 2;" }],
+			}),
+		).rejects.toThrow(/Found 2 occurrences/);
+	});
+
+	it("does not indent-rematch outside the requested line range", async () => {
+		const dir = await createTempDir();
+		const filePath = join(dir, "indent-range.ts");
+		await writeFile(filePath, "function a() {\n\tconst x = 1;\n}\nfunction b() {\n\tconst y = 1;\n}\n", "utf8");
+		const tool = createEditTool(dir);
+		await expect(
+			tool.execute("tool-1", {
+				path: "indent-range.ts",
+				edits: [{ oldText: "const y = 1;", newText: "const y = 2;", range: { startLine: 1, endLine: 3 } }],
+			}),
+		).rejects.toThrow(/Could not find the exact text/);
 	});
 });

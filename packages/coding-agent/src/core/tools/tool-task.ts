@@ -117,6 +117,7 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 					content: [{ type: "text" as const, text: `${input.action} requires a valid taskId.` }],
 					details: { kind: "error" as const, reason: "invalid_task_id" },
 					isError: true,
+					errorKind: "tool_failure" as const,
 				};
 			}
 
@@ -172,6 +173,7 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 					content: [{ type: "text" as const, text: reason }],
 					details: { kind: "error" as const, taskId, reason },
 					isError: true,
+					errorKind: "tool_failure" as const,
 				};
 			}
 		},

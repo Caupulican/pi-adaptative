@@ -177,6 +177,13 @@ export class Input implements Component, Focusable {
 			return;
 		}
 
+		// Unframed clipboard paste arrives as one chunk. A trailing newline or tab
+		// must not drop the whole payload as a control sequence.
+		if (data.length > 1 && /[\r\n\t]/.test(data) && !data.includes("\x1b")) {
+			this.handlePaste(data);
+			return;
+		}
+
 		// Regular character input - accept printable characters including Unicode,
 		// but reject control characters (C0: 0x00-0x1F, DEL: 0x7F, C1: 0x80-0x9F)
 		const hasControlChars = [...data].some((ch) => {

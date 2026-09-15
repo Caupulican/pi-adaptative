@@ -37,7 +37,7 @@ export interface ClipboardQueueHost extends ClipboardQueueState {
 
 export interface ClipboardInputHost extends ClipboardQueueHost {
 	readonly editor: Pick<EditorComponent, "handleInput" | "insertTextAtCursor" | "pasteText">;
-	readonly ui: Pick<TUI, "requestRender">;
+	readonly ui: Pick<TUI, "requestRender" | "pasteText">;
 	readonly autoResizeImages: boolean;
 	readonly blockImages: boolean;
 	readonly blockImagesReason?: string;
@@ -85,7 +85,7 @@ export async function handleClipboardImagePaste(host: ClipboardInputHost): Promi
 		if (!image) {
 			const text = await readClipboardText();
 			if (text) {
-				pasteIntoEditor(host.editor, text);
+				if (!host.ui.pasteText(text)) pasteIntoEditor(host.editor, text);
 				host.ui.requestRender();
 			}
 			return;

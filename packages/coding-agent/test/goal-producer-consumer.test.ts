@@ -91,4 +91,36 @@ describe("goal producer feeds the continuation consumer", () => {
 		expect(snapshot.continuation.action).toBe("ask-user");
 		expect(snapshot.continuation.reasonCode).toBe("missing_goal_state");
 	});
+
+	it("exposes live catalogs through failureRecovery evidence", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const tool = createGoalToolDefinition({
+			getGoalState: () => getLatestGoalStateSnapshot(sessionManager),
+			saveGoalState: (state) => {
+				appendGoalStateSnapshot(sessionManager, state);
+			},
+			now: () => "T0",
+			resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri),
+		});
+		await tool.execute(
+			"call",
+			{ action: "start", goalId: "g1", userGoal: "Ship feature" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		await tool.execute(
+			"call",
+			{ action: "add_requirement", requirementId: "r1", text: "Implement X" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		const catalog = tool.failureRecovery?.getFailureEvidence?.(
+			{ action: "satisfy_requirement", requirementId: "missing" },
+			{ failureCode: "tool_error", message: "Unknown requirement" },
+		);
+		expect(catalog).toContain("r1 (open)");
+		expect(catalog).toContain("Evidence: none.");
+	});
 });

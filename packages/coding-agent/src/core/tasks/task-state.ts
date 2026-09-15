@@ -408,10 +408,16 @@ export function addTaskStep(state: TaskStepsState, input: TaskStepInput, now: st
  */
 const ORDINAL_NOISE_RE = /^[\s-]*(?:\([^)]*\)|[0-9a-f-]*[a-f][0-9a-f-]{5,}|[a-z][\w-]*)$/i;
 
+export interface TaskStepSelectorContext {
+	archive?: TaskStepsArchive;
+	nextStepNumber?: number;
+}
+
 export function resolveTaskStepSelector(
 	steps: readonly TaskStep[],
 	selector: string,
 	onNormalized?: (note: string) => void,
+	context?: TaskStepSelectorContext,
 ): TaskStep {
 	const normalized = selector.trim().toLocaleLowerCase();
 	if (!normalized) throw new TaskStepsError("Task step selector is required.");
@@ -470,8 +476,18 @@ export function resolveTaskStepSelector(
 	// Name what can be selected: a refusal that only repeats the bad selector left the model guessing.
 	const open = steps.filter((step) => step.status !== "completed" && step.status !== "cancelled");
 	const choices = open.length > 0 ? open : steps;
+	const ordinalMiss = /^(?:#|s|step)?[\s-]*(\d+)$/.exec(normalized);
+	const archivedCount = (context?.archive?.completed ?? 0) + (context?.archive?.cancelled ?? 0);
+	const compacted =
+		ordinalMiss &&
+		context?.nextStepNumber !== undefined &&
+		Number(ordinalMiss[1]) > 0 &&
+		Number(ordinalMiss[1]) < context.nextStepNumber &&
+		archivedCount > 0
+			? `step-${Number(ordinalMiss[1])} is not among current steps. Archive counts completed=${context.archive?.completed ?? 0} cancelled=${context.archive?.cancelled ?? 0} (that id's historical status is unknown). `
+			: "";
 	throw new TaskStepsError(
-		`Task step not found for selector: ${selector}. ${
+		`${compacted}Task step not found for selector: ${selector}. ${
 			choices.length > 0
 				? `${open.length > 0 ? "Open steps" : "Steps"}: ${choices.map((step) => `${step.id} (${step.status})`).join(", ")}. Use an id, a unique id prefix, an ordinal like 2, or current.`
 				: "There are no task steps yet; add one first."
@@ -495,7 +511,10 @@ export function updateTaskStep(
 	update: TaskStepUpdate,
 	now: string,
 ): TaskStepsState {
-	const selected = resolveTaskStepSelector(state.steps, selector);
+	const selected = resolveTaskStepSelector(state.steps, selector, undefined, {
+		archive: state.archive,
+		nextStepNumber: state.nextStepNumber,
+	});
 	const selectedIndex = state.steps.findIndex((step) => step.id === selected.id);
 	const steps = state.steps.map(cloneTaskStep);
 	const current = steps[selectedIndex];

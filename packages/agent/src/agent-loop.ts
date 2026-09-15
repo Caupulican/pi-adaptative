@@ -13,7 +13,6 @@ import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/type
 import {
 	formatToolValidationEnrichment,
 	type ToolArgumentExecutionOutcome,
-	ToolArgumentValidationError,
 	type ToolArgumentValidationTelemetryEvent,
 	validateToolArguments,
 } from "@caupulican/pi-ai/validation";
@@ -66,10 +65,11 @@ import type {
 	ToolCallStartContext,
 } from "./types.ts";
 import {
-	AgentToolExecutionError,
 	DEFAULT_MAX_PROVIDER_TURNS,
 	DEFAULT_MAX_REPEATED_FAILURES,
 	DEFAULT_MAX_STALL_TURNS,
+	describeThrownToolError,
+	safeErrorMessage,
 } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
 import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
@@ -292,11 +292,7 @@ function createLoopFailureMessage(
 	aborted: boolean,
 	abortReason?: unknown,
 ): AssistantMessage {
-	const errorMessage = abortedErrorMessage(
-		error instanceof Error ? error.message : String(error),
-		aborted,
-		abortReason,
-	);
+	const errorMessage = abortedErrorMessage(describeThrownToolError(error).message, aborted, abortReason);
 	return {
 		role: "assistant",
 		content: [{ type: "text", text: "" }],
@@ -1547,9 +1543,12 @@ function abortedToolCallText(abortReason?: unknown, toolMessage?: string): strin
 	const reason =
 		typeof abortReason === "string" && abortReason.length > 0
 			? abortReason
-			: abortReason instanceof Error && abortReason.message.length > 0
-				? abortReason.message
-				: undefined;
+			: abortReason === undefined || abortReason === null
+				? undefined
+				: (() => {
+						const message = safeErrorMessage(abortReason, "");
+						return message.length > 0 ? message : undefined;
+					})();
 	const headline = reason ? `Operation aborted (${reason})` : "Operation aborted";
 	const detail = toolMessage?.trim();
 	// A tool that rethrew the abort reason itself has nothing to add: only a message that says
@@ -1700,15 +1699,29 @@ function resolveToolConcurrency(config: AgentLoopConfig): number {
 	return DEFAULT_TOOL_CONCURRENCY;
 }
 
-function isToolArgumentValidationError(error: unknown): error is ToolArgumentValidationError {
-	return (
-		error instanceof ToolArgumentValidationError ||
-		(error instanceof Error &&
-			error.name === "ToolArgumentValidationError" &&
-			typeof (error as { toolName?: unknown }).toolName === "string" &&
-			typeof (error as { signature?: unknown }).signature === "string" &&
-			typeof (error as { enrichment?: unknown }).enrichment === "string")
-	);
+function readToolArgumentValidationError(error: unknown):
+	| {
+			message: string;
+			toolName: string;
+			signature: string;
+			enrichment: string;
+	  }
+	| undefined {
+	if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
+	try {
+		if (Reflect.get(error, "name") !== "ToolArgumentValidationError") return undefined;
+		const message = Reflect.get(error, "message");
+		const toolName = Reflect.get(error, "toolName");
+		const signature = Reflect.get(error, "signature");
+		const enrichment = Reflect.get(error, "enrichment");
+		if (typeof message !== "string" || message.length === 0) return undefined;
+		if (typeof toolName !== "string" || typeof signature !== "string" || typeof enrichment !== "string") {
+			return undefined;
+		}
+		return { message, toolName, signature, enrichment };
+	} catch {
+		return undefined;
+	}
 }
 
 function recordValidationBounce(
@@ -1752,7 +1765,7 @@ function recordValidationBounce(
 }
 
 function handleValidationFailure(
-	error: ToolArgumentValidationError,
+	error: { message: string; toolName: string; signature: string; enrichment: string },
 	config: AgentLoopConfig,
 	tracker: ToolValidationFailureTracker,
 	parserDiagnostic?: string,
@@ -2010,23 +2023,24 @@ async function prepareToolCall(
 		};
 	} catch (error) {
 		const parserDiagnostic = parserDiagnosticFromRawArguments(toolCall);
-		const validationFailure = isToolArgumentValidationError(error)
-			? handleValidationFailure(error, config, validationFailureTracker, parserDiagnostic)
+		const validationError = readToolArgumentValidationError(error);
+		const validationFailure = validationError
+			? handleValidationFailure(validationError, config, validationFailureTracker, parserDiagnostic)
 			: undefined;
-		const message = validationFailure?.message ?? (error instanceof Error ? error.message : String(error));
+		const message = validationFailure?.message ?? describeThrownToolError(error).message;
 		return {
 			kind: "immediate",
 			result: createErrorToolResult(message),
 			isError: true,
-			phase: isToolArgumentValidationError(error) ? "validation" : "preflight",
-			failureCode: isToolArgumentValidationError(error) ? "invalid_arguments" : "preflight_error",
+			phase: validationError ? "validation" : "preflight",
+			failureCode: validationError ? "invalid_arguments" : "preflight_error",
 			executionScope: binding?.executionScope,
-			correction: isToolArgumentValidationError(error)
+			correction: validationError
 				? [validationFailureCorrection(validationEvent, toolCall.name), parserDiagnostic]
 						.filter((part): part is string => part !== undefined)
 						.join(" ")
 				: toolFailureCorrection(message, "rejected", "preflight"),
-			diagnostic: isToolArgumentValidationError(error) ? undefined : message,
+			diagnostic: validationError ? undefined : message,
 			...(validationFailure?.providerFeedback ? { providerFeedback: validationFailure.providerFeedback } : {}),
 			validationEvent,
 		};
@@ -2288,8 +2302,9 @@ async function executePreparedToolCall(
 				: {}),
 		};
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		const toolFailure = error instanceof AgentToolExecutionError ? error : undefined;
+		const described = describeThrownToolError(error);
+		const toolFailure = described.structured;
+		const message = described.message;
 		// The run was stopped: whatever the tool threw on its way out is the shape of a cancellation,
 		// not a mistake the model made. Classifying it as one cost a ledger entry, a kind-mistake count
 		// and a correction the model could not act on, for an operation nobody asked it to finish.
@@ -2300,7 +2315,7 @@ async function executePreparedToolCall(
 				result: createErrorToolResult(cancellationText),
 				operationCompleted: false,
 				isError: true,
-				errorClass: error instanceof Error ? error.name : typeof error,
+				errorClass: described.errorClass,
 				failureMessage: cancellationText,
 				failureCode: "aborted",
 				errorKind: "tool_failure",
@@ -2310,7 +2325,7 @@ async function executePreparedToolCall(
 				result: createErrorToolResult(message),
 				operationCompleted: toolFailure?.errorKind === "operation_outcome",
 				isError: true,
-				errorClass: error instanceof Error ? error.name : typeof error,
+				errorClass: described.errorClass,
 				failureMessage: message,
 				errorKind: toolFailure?.errorKind ?? "tool_failure",
 				...(toolFailure

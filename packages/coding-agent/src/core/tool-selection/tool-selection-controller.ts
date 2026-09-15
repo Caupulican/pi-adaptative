@@ -188,11 +188,20 @@ function candidateFor(
 	};
 }
 
+export function recoveryToolsForFailedTool(failedTool: string): readonly string[] {
+	if (failedTool === "read") return ["ls"];
+	if (failedTool === "edit") return ["read"];
+	if (failedTool === "bash") return ["read", "edit"];
+	if (failedTool === "goal" || failedTool === "task_steps") return [failedTool];
+	return [];
+}
+
 export class ToolSelectionController {
 	private readonly deps: ToolSelectionControllerDeps;
 	private readonly pending = new Map<string, ToolSelectionPendingObservation>();
 	private readonly timings = new ToolPhaseTimings();
 	private firstToolInTurn = true;
+	private readonly recoveryBoost = new Set<string>();
 	/** Kill switch: observe/stats recording, default ON. `PI_TOOL_SELECTION_OBSERVE=0` disables it. */
 	private readonly observeEnabled: boolean;
 
@@ -203,6 +212,14 @@ export class ToolSelectionController {
 
 	startTurn(): void {
 		this.firstToolInTurn = true;
+	}
+
+	noteRecoveryTools(tools: readonly string[]): void {
+		this.recoveryBoost.clear();
+		for (const tool of tools) {
+			if (this.recoveryBoost.size >= 4) break;
+			if (tool && tool !== "write") this.recoveryBoost.add(tool);
+		}
 	}
 
 	begin(toolCallId: string, toolName: string, args: unknown): ToolSelectionPendingObservation {
@@ -223,14 +240,17 @@ export class ToolSelectionController {
 		const intentClass = classifyToolIntent(actualTool);
 		const intentStats = this.deps.store.getStatsForIntent(modelRef, intentClass);
 		const statsByTool = new Map(intentStats.map((stats) => [stats.tool, stats]));
-		const candidates = activeTools.map((tool) =>
-			candidateFor(
+		const recoveryBoost = this.recoveryBoost;
+		const candidates = activeTools.map((tool) => {
+			const candidate = candidateFor(
 				intentClass,
 				tool.name === toolName ? tool : { ...tool, pathValidated: false },
 				toolName,
 				statsByTool.get(tool.name),
-			),
-		);
+			);
+			return recoveryBoost.has(tool.name) ? { ...candidate, value: Math.min(1, candidate.value + 0.3) } : candidate;
+		});
+		this.recoveryBoost.clear();
 		if (!candidates.some((candidate) => candidate.tool === toolName)) {
 			candidates.push(candidateFor(intentClass, actualTool, toolName, statsByTool.get(toolName)));
 		}
@@ -276,6 +296,7 @@ export class ToolSelectionController {
 		const completedAt = performance.now();
 		const latencyMs = Math.max(0, completedAt - pending.startedAt);
 		this.timings.record("execution", latencyMs);
+		if (!succeeded) this.noteRecoveryTools(recoveryToolsForFailedTool(pending.key.tool));
 		if (!this.observeEnabled) return;
 		const execution: ToolExecutionObservation = {
 			key: pending.key,

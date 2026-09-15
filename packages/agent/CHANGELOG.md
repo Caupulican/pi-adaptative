@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Thrown tool errors are classified from duck-typed fields, not `instanceof`, so completed command outcomes are not rewritten into MUST ledger records.
+
 ## [0.99.23] - 2026-09-15
 
 ## [0.99.22] - 2026-09-15

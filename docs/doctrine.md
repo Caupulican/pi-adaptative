@@ -588,10 +588,12 @@ removed, so an identical failure is identical. Why: measured live, one invented 
 failed 28 times in 22 minutes inside batches whose other calls varied, and no guard fired. A slip
 the resolver can name normalizes instead of refusing: an ordinal prefix followed by uuid-like or
 parenthetical noise resolves to the one step carrying that number and the result says so; a short
-numeric fragment still refuses with the open-step list. Pinned by
+numeric fragment still refuses with the open-step list. A compacted ordinal that is no longer among current steps names archive counts and says that id's historical status is unknown; it does not redirect to another step. Goal unknown-requirement and unknown-evidence refusals name the live catalogs. `tool_task` wait/invalid-id errors classify `errorKind` so completed waits stay operation outcomes and lookup misses stay tool failures. Why (2026-09-15): a live session spent 29 tool errors retrying selector `7` after compact, citing unknown evidence, and treating vitest/biome exits as MUST ledger mistakes. Pinned by
 `packages/agent/test/runaway-loop.test.ts`, `packages/agent/test/tool-failure-memory.test.ts`
-(envelope-stable signatures, corrective diagnostic tail) and
-`packages/coding-agent/test/task-state.test.ts`.
+(envelope-stable signatures, corrective diagnostic tail),
+`packages/coding-agent/test/task-state.test.ts`,
+`packages/coding-agent/test/goal-tool-core.test.ts`, and
+`packages/coding-agent/test/tool-task.test.ts`.
 
 **An alias names a path that exists, or it does not exist.** A candidate is minted only when it
 resolves to something on disk from the table's cwd; git refs, revision ranges, numeric or

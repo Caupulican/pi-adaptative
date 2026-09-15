@@ -387,8 +387,15 @@ export class AskQuestionDialog implements Component {
 			editor: {
 				handleInput: (data) => input.handleInput(data),
 				insertTextAtCursor: (text) => input.insertTextAtCursor(text),
+				pasteText: (text) => input.insertTextAtCursor(text),
 			},
-			ui: { requestRender: () => this.refresh() },
+			ui: {
+				requestRender: () => this.refresh(),
+				pasteText: (text) => {
+					input.insertTextAtCursor(text);
+					return true;
+				},
+			},
 			autoResizeImages: this.clipboard.autoResizeImages,
 			blockImages: this.clipboard.blockImages,
 			blockImagesReason: this.clipboard.blockImagesReason,

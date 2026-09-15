@@ -157,6 +157,42 @@ describe("task step state", () => {
 		state = compactTaskSteps(state, "T2");
 		expect(state.steps.map((step) => step.content)).toEqual(["Blocked"]);
 		expect(state.archive).toEqual({ completed: 1, cancelled: 1, compactedAt: "T2" });
+		expect(() =>
+			resolveTaskStepSelector(state.steps, "1", undefined, {
+				archive: state.archive,
+				nextStepNumber: state.nextStepNumber,
+			}),
+		).toThrow(
+			/step-1 is not among current steps\. Archive counts completed=1 cancelled=1 \(that id's historical status is unknown\)/,
+		);
+		expect(() =>
+			resolveTaskStepSelector(state.steps, "1", undefined, {
+				archive: state.archive,
+				nextStepNumber: state.nextStepNumber,
+			}),
+		).toThrow(/Open steps: step-2 \(blocked\)/);
+	});
+
+	it("does not claim a replaced pending ordinal was compacted or completed", () => {
+		let state = setTaskSteps(
+			createTaskStepsState("T0"),
+			[{ content: "Done", status: "completed" }, { content: "Pending" }],
+			"T1",
+		);
+		state = compactTaskSteps(state, "T2");
+		state = setTaskSteps(state, [{ content: "Replacement", status: "in_progress" }], "T3");
+		expect(() =>
+			resolveTaskStepSelector(state.steps, "2", undefined, {
+				archive: state.archive,
+				nextStepNumber: state.nextStepNumber,
+			}),
+		).toThrow(/historical status is unknown/);
+		expect(() =>
+			resolveTaskStepSelector(state.steps, "2", undefined, {
+				archive: state.archive,
+				nextStepNumber: state.nextStepNumber,
+			}),
+		).not.toThrow(/compacted or completed/);
 	});
 
 	it("builds a bounded hidden context reminder from open steps", () => {

@@ -67,6 +67,11 @@ export interface Component {
 	handleInput?(data: string): void;
 
 	/**
+	 * Optional clipboard/text paste when this component is focused.
+	 */
+	pasteText?(text: string): void;
+
+	/**
 	 * If true, component receives key release events (Kitty protocol).
 	 * Default is false - release events are filtered out.
 	 */
@@ -841,6 +846,15 @@ export class TUI extends Container {
 
 		this.terminal.showCursor();
 		this.terminal.stop();
+	}
+
+	/** Paste into the focused component when it accepts clipboard text. */
+	pasteText(text: string): boolean {
+		const focused = this.focusedComponent;
+		if (!focused || typeof focused.pasteText !== "function") return false;
+		focused.pasteText(text);
+		this.requestRender();
+		return true;
 	}
 
 	requestRender(force = false): void {

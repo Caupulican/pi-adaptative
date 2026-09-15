@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- OAuth authorization input accepts quoted callback URLs and trailing newlines.
+
 ## [0.99.23] - 2026-09-15
 
 ## [0.99.22] - 2026-09-15

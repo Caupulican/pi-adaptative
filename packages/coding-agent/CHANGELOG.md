@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Google Antigravity login paste: Ctrl+V / focused clipboard paste inserts the authorization code or callback URL into the login field; unframed paste with a trailing newline is no longer dropped.
+- Tool execution recovery: duck-typed thrown errors stay operation outcomes; write-create no longer attaches to a read miss; goal/task-step misses include live catalogs; compacted step ordinals report archive counts; local missing-path locate evidence; diagnostics-only empty-checker notice; unique indent rematch for edits; biome format of included src/test files; recovery-tool boost after failures; runtime GitHub origin pin with a failed-pin diagnostic.
+
 ## [0.99.23] - 2026-09-15
 
 ### Added

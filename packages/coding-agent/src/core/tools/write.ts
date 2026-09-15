@@ -6,12 +6,13 @@ import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts"
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import {
-	FILE_EXISTS_RECOVERY_TARGET_KIND,
+	FILE_MISSING_CREATE_RECOVERY_TARGET_KIND,
 	type FileFailureRecoveryAuthority,
 	selectFileFailureRecoveryAuthority,
 	WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
 	WRITE_RETARGET_RECOVERY_TARGET_KIND,
 } from "./file-failure-recovery.ts";
+import { formatMutatedSourceText } from "./file-mutation-format.ts";
 import {
 	type FileContentReference,
 	FileMutationIntentController,
@@ -351,9 +352,9 @@ export function createWriteToolDefinition(
 							{
 								kind: "repair" as const,
 								authority: failureRecoveryAuthority.contractAuthority,
-								targetKind: FILE_EXISTS_RECOVERY_TARGET_KIND,
+								targetKind: FILE_MISSING_CREATE_RECOVERY_TARGET_KIND,
 								instruction:
-									"If the goal requires this exact missing file and its content is known, create it with write.",
+									"If the failed tool invited creation of this exact missing file and its content is known, create it with write.",
 							},
 							{
 								kind: "repair" as const,
@@ -402,8 +403,9 @@ export function createWriteToolDefinition(
 						let contentReference: FileContentReference;
 						try {
 							if (content !== undefined) {
-								await ops.createFile(absolutePath, content);
-								contentReference = intentController.rememberContent(absolutePath, content);
+								const formatted = formatMutatedSourceText(content, absolutePath, cwd);
+								await ops.createFile(absolutePath, formatted);
+								contentReference = intentController.rememberContent(absolutePath, formatted);
 							} else if (contentRef !== undefined) {
 								contentReference = await intentController.copyReferencedContent(
 									contentRef,

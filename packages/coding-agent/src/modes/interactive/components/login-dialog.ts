@@ -1,5 +1,6 @@
 import { getOAuthProviders, type OAuthDeviceCodeInfo } from "@caupulican/pi-ai/oauth";
 import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import { readClipboardText } from "../../../utils/clipboard.ts";
 import { openBrowser } from "../../../utils/open-browser.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -211,6 +212,10 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.tui.requestRender();
 	}
 
+	pasteText(text: string): void {
+		this.input.pasteText(text);
+	}
+
 	handleInput(data: string): void {
 		const kb = getKeybindings();
 
@@ -219,7 +224,19 @@ export class LoginDialogComponent extends Container implements Focusable {
 			return;
 		}
 
+		if (kb.matches(data, "app.clipboard.pasteImage")) {
+			void this.pasteClipboard();
+			return;
+		}
+
 		// Pass to input
 		this.input.handleInput(data);
+	}
+
+	private async pasteClipboard(): Promise<void> {
+		const text = await readClipboardText();
+		if (!text) return;
+		this.input.pasteText(text);
+		this.tui.requestRender();
 	}
 }

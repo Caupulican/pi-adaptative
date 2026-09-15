@@ -230,6 +230,7 @@ export function createSkillVaultToolDefinition(
 							content: [{ type: "text" as const, text: `skill load failed: ${result.message}` }],
 							details: { action: "load" as const, result },
 							isError: true,
+							errorKind: "tool_failure" as const,
 						};
 					}
 					const results = result.results;

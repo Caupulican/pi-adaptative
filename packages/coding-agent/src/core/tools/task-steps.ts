@@ -262,9 +262,10 @@ function resolveUpdateSelector(
 	steps: readonly TaskStep[],
 	selector: string,
 	onNormalized: (note: string) => void,
+	context?: { archive: TaskStepsState["archive"]; nextStepNumber: number },
 ): TaskStep {
 	try {
-		return resolveTaskStepSelector(steps, selector, onNormalized);
+		return resolveTaskStepSelector(steps, selector, onNormalized, context);
 	} catch (error) {
 		if (error instanceof TaskStepsError && looksLikeFoldedUpdate(selector)) throw foldedUpdateError(selector);
 		throw error;
@@ -570,7 +571,10 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 							// "current"/"active" resolution (including its "no in_progress step" error naming
 							// the open steps) instead of duplicating that logic here.
 							const selector = selectorInput?.trim() || "current";
-							const selected = resolveUpdateSelector(state.steps, selector, (note) => selectorNotes.push(note));
+							const selected = resolveUpdateSelector(state.steps, selector, (note) => selectorNotes.push(note), {
+								archive: state.archive,
+								nextStepNumber: state.nextStepNumber,
+							});
 							// An update that carries no field changes nothing; reporting it as "recorded" hid five
 							// status-less calls in a row until the stagnant-cycle guard ended the run (measured
 							// live). Refuse once and name the fields so the retry is right the first time.
@@ -635,7 +639,10 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 							input.updates.forEach((item, index) => {
 								let stepId: string;
 								try {
-									stepId = resolveUpdateSelector(before.steps, item.id, (note) => selectorNotes.push(note)).id;
+									stepId = resolveUpdateSelector(before.steps, item.id, (note) => selectorNotes.push(note), {
+										archive: before.archive,
+										nextStepNumber: before.nextStepNumber,
+									}).id;
 								} catch (error) {
 									problems.push(
 										`updates[${index}]: ${error instanceof Error ? error.message : String(error)}`,

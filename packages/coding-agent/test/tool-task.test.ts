@@ -415,6 +415,7 @@ describe("tool_task", () => {
 		const invalid = await tool.execute("call", { action: "wait" }, undefined, undefined, extensionContext);
 		expect(invalid.details).toMatchObject({ kind: "error", reason: "invalid_task_id" });
 		expect(invalid.isError).toBe(true);
+		expect(invalid.errorKind).toBe("tool_failure");
 
 		const rejected = await tool.execute(
 			"call",
@@ -425,6 +426,7 @@ describe("tool_task", () => {
 		);
 		expect(rejected.details).toMatchObject({ kind: "error", taskId: "tool-task-missing" });
 		expect(rejected.isError).toBe(true);
+		expect(rejected.errorKind).toBe("tool_failure");
 	});
 
 	it("requests cancellation only for an addressed task", async () => {

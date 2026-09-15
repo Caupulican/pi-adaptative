@@ -6,6 +6,7 @@ import type { ExtensionRunner } from "../src/core/extensions/index.ts";
 import { ToolGateController } from "../src/core/tool-gate-controller.ts";
 import { ToolPerformanceStore } from "../src/core/tool-selection/tool-performance-store.ts";
 import {
+	recoveryToolsForFailedTool,
 	ToolSelectionController,
 	type ToolSelectionControllerDeps,
 	type ToolSelectionTool,
@@ -224,5 +225,12 @@ describe("ToolGateController selector integration", () => {
 		});
 		expect(started).toEqual(["allowed"]);
 		expect(completed).toEqual([{ id: "allowed", success: true }]);
+	});
+
+	it("maps failed tools to recovery tools and never write after a read miss", () => {
+		expect(recoveryToolsForFailedTool("read")).toEqual(["ls"]);
+		expect(recoveryToolsForFailedTool("edit")).toEqual(["read"]);
+		expect(recoveryToolsForFailedTool("bash")).toEqual(["read", "edit"]);
+		expect(recoveryToolsForFailedTool("read")).not.toContain("write");
 	});
 });

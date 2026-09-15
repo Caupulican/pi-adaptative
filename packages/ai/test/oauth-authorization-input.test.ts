@@ -29,6 +29,13 @@ describe("OAuth authorization input", () => {
 		});
 	});
 
+	it("parses quoted Antigravity callback URLs and trailing newlines", () => {
+		expect(
+			parseAuthorizationInput('"https://antigravity.google/oauth-callback?code=ag-code&state=ag-state"\n'),
+		).toEqual({ code: "ag-code", state: "ag-state" });
+		expect(parseAuthorizationInput("4/0AanRRrs-plain\n")).toEqual({ code: "4/0AanRRrs-plain" });
+	});
+
 	it("accepts the callback without waiting for an unresolved manual input", async () => {
 		const result = await raceAuthorizationInput({
 			manualInput: () => new Promise<string>(() => {}),

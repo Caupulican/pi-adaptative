@@ -117,6 +117,26 @@ export interface EditSourceSplice {
  * Fuzzy matching searches normalized text, but returned spans still refer to
  * the original content so replacement does not normalize unrelated text.
  */
+function collapseLeadingIndent(text: string): { collapsed: string; indexMap: number[] } {
+	const indexMap: number[] = [];
+	let collapsed = "";
+	let i = 0;
+	while (i < text.length) {
+		while (i < text.length && (text[i] === " " || text[i] === "\t")) i++;
+		while (i < text.length && text[i] !== "\n") {
+			indexMap.push(i);
+			collapsed += text[i];
+			i++;
+		}
+		if (i < text.length && text[i] === "\n") {
+			indexMap.push(i);
+			collapsed += "\n";
+			i++;
+		}
+	}
+	return { collapsed, indexMap };
+}
+
 export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResult {
 	// Try exact match first
 	const exactIndex = content.indexOf(oldText);
@@ -344,6 +364,20 @@ function validateRange(
 	};
 }
 
+function collapsedWindow(indexMap: readonly number[], original: MatchWindow, collapsedLength: number): MatchWindow {
+	let start = 0;
+	while (start < indexMap.length && indexMap[start]! < original.start) start++;
+	let end = start;
+	while (end < indexMap.length && indexMap[end]! < original.end) end++;
+	return { start, end: Math.min(end, collapsedLength) };
+}
+
+function includeLeadingIndent(content: string, start: number): number {
+	let index = start;
+	while (index > 0 && (content[index - 1] === " " || content[index - 1] === "\t")) index--;
+	return index;
+}
+
 function findWithin(content: string, oldText: string, window: MatchWindow): number {
 	if (oldText.length === 0 || oldText.length > window.end - window.start) return -1;
 	const index = content.indexOf(oldText, window.start);
@@ -372,7 +406,7 @@ export function planEditsToNormalizedContent(normalizedContent: string, edits: E
 	for (let i = 0; i < edits.length; i++) {
 		const sourceEdit = edits[i];
 		const oldText = normalizeToLF(sourceEdit.oldText);
-		const newText = normalizeToLF(sourceEdit.newText);
+		let newText = normalizeToLF(sourceEdit.newText);
 		if (!newText.isWellFormed() || newText.includes("\0")) {
 			throw new Error(
 				`Invalid replacement Unicode in ${path}; encoding-preserving text edits cannot insert malformed or NUL-bearing text.`,
@@ -409,18 +443,40 @@ export function planEditsToNormalizedContent(normalizedContent: string, edits: E
 			);
 			const fuzzyIndex = findWithin(fuzzyContent, fuzzyOldText, fuzzyWindow);
 			if (fuzzyIndex === -1) {
-				throw getNotFoundError(path, i, edits.length, normalizedContent, oldText, sourceEdit.range);
+				const indentContent = collapseLeadingIndent(normalizedContent);
+				const indentOld = collapseLeadingIndent(oldText);
+				if (indentOld.collapsed.length === 0) {
+					throw getNotFoundError(path, i, edits.length, normalizedContent, oldText, sourceEdit.range);
+				}
+				const indentWindow = collapsedWindow(indentContent.indexMap, exactWindow, indentContent.collapsed.length);
+				const indentIndex = findWithin(indentContent.collapsed, indentOld.collapsed, indentWindow);
+				if (indentIndex === -1) {
+					throw getNotFoundError(path, i, edits.length, normalizedContent, oldText, sourceEdit.range);
+				}
+				occurrences = countExactOccurrences(indentContent.collapsed, indentOld.collapsed);
+				const origStart = indentContent.indexMap[indentIndex];
+				const origLast = indentContent.indexMap[indentIndex + indentOld.collapsed.length - 1];
+				if (origStart === undefined || origLast === undefined) {
+					throw getNotFoundError(path, i, edits.length, normalizedContent, oldText, sourceEdit.range);
+				}
+				const indentStart = includeLeadingIndent(normalizedContent, origStart);
+				matchIndex = indentStart;
+				matchLength = origLast + 1 - indentStart;
+				if (indentStart < origStart && !/^[ \t]/.test(oldText)) {
+					newText = `${normalizedContent.slice(indentStart, origStart)}${newText.replace(/^[ \t]+/, "")}`;
+				}
+			} else {
+				occurrences = countExactOccurrences(fuzzyContent, fuzzyOldText);
+				const replacementSpan = mapFuzzySpanToOriginal(
+					normalizedContent,
+					originalLineStarts,
+					fuzzyLineStarts,
+					fuzzyIndex,
+					fuzzyOldText.length,
+				);
+				matchIndex = replacementSpan.index;
+				matchLength = replacementSpan.length;
 			}
-			occurrences = countExactOccurrences(fuzzyContent, fuzzyOldText);
-			const replacementSpan = mapFuzzySpanToOriginal(
-				normalizedContent,
-				originalLineStarts,
-				fuzzyLineStarts,
-				fuzzyIndex,
-				fuzzyOldText.length,
-			);
-			matchIndex = replacementSpan.index;
-			matchLength = replacementSpan.length;
 		}
 
 		if (occurrences > 1) {

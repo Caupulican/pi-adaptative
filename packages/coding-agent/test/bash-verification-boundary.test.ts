@@ -256,4 +256,46 @@ describe("bash verification boundary", () => {
 		const direct = await tool.execute("direct-verification", { command: "./verification.sh" });
 		expect(direct.details?.piVerification?.status).toBe("passed");
 	});
+
+	it("annotates checker coverage when no files were processed", async () => {
+		const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-bash-coverage-")));
+		cleanupDirectories.push(root);
+		const tool = createBashTool(root, {
+			platform: "linux",
+			pathFlavor: process.platform === "win32" ? "win32" : "posix",
+			operations: {
+				exec: async (_command, cwd, options) => {
+					options.onData(Buffer.from("Checked 0 files in 2ms. No files were processed in the specified paths.\n"));
+					return { exitCode: 1, cwd };
+				},
+			},
+		});
+		await expect(
+			tool.execute("biome-ignored", { command: "npx biome check scripts/github-origin.mjs" }),
+		).rejects.toMatchObject({
+			name: "AgentToolExecutionError",
+			errorKind: "operation_outcome",
+			message: expect.stringContaining("Inspect path existence and the checker's include/ignore rules."),
+		});
+	});
+
+	it("does not annotate checker coverage for non-diagnostic commands", async () => {
+		const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-bash-coverage-echo-")));
+		cleanupDirectories.push(root);
+		const tool = createBashTool(root, {
+			platform: "linux",
+			pathFlavor: process.platform === "win32" ? "win32" : "posix",
+			operations: {
+				exec: async (_command, cwd, options) => {
+					options.onData(Buffer.from("No files were processed in the specified paths.\n"));
+					return { exitCode: 1, cwd };
+				},
+			},
+		});
+		await expect(tool.execute("echo-phrase", { command: "echo ignored" })).rejects.toMatchObject({
+			name: "AgentToolExecutionError",
+			errorKind: "operation_outcome",
+			message: expect.not.stringContaining("Inspect path existence"),
+		});
+	});
 });
