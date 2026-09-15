@@ -2,13 +2,13 @@
  * Shared utilities for Google Generative AI and Google Vertex providers.
  */
 
-import {
-	type Content,
+import type {
+	Content,
 	FinishReason,
 	FunctionCallingConfigMode,
 	ThinkingLevel as GenAiThinkingLevel,
-	type Part,
-	type ThinkingConfig,
+	Part,
+	ThinkingConfig,
 } from "@google/genai";
 import type { Context, ImageContent, Model, StopReason, ThinkingBudgets, Tool } from "../types.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
@@ -21,21 +21,13 @@ export type GoogleApiType = "google-generative-ai" | "google-vertex" | "google-a
  * Thinking level for Gemini 3 models.
  * Mirrors Google's ThinkingLevel enum values.
  */
-export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+export type GoogleThinkingLevel = `${GenAiThinkingLevel}`;
 export type GoogleThinkingEffort = "minimal" | "low" | "medium" | "high";
 
 export interface GoogleThinkingConfigFields {
 	thinkingLevel?: GoogleThinkingLevel;
 	thinkingBudget?: number;
 }
-
-const GOOGLE_THINKING_LEVEL_MAP: Record<GoogleThinkingLevel, GenAiThinkingLevel> = {
-	THINKING_LEVEL_UNSPECIFIED: GenAiThinkingLevel.THINKING_LEVEL_UNSPECIFIED,
-	MINIMAL: GenAiThinkingLevel.MINIMAL,
-	LOW: GenAiThinkingLevel.LOW,
-	MEDIUM: GenAiThinkingLevel.MEDIUM,
-	HIGH: GenAiThinkingLevel.HIGH,
-};
 
 function isGemma4Model(modelId: string): boolean {
 	return /gemma-?4/.test(modelId.toLowerCase());
@@ -158,7 +150,8 @@ export function toGoogleGenAiThinkingConfig(
 ): ThinkingConfig {
 	return {
 		...(includeThoughts ? { includeThoughts: true } : {}),
-		...(fields.thinkingLevel ? { thinkingLevel: GOOGLE_THINKING_LEVEL_MAP[fields.thinkingLevel] } : {}),
+		// The SDK's nominal string enum has exactly the wire values derived by GoogleThinkingLevel.
+		...(fields.thinkingLevel ? { thinkingLevel: fields.thinkingLevel as GenAiThinkingLevel } : {}),
 		...(fields.thinkingBudget !== undefined ? { thinkingBudget: fields.thinkingBudget } : {}),
 	};
 }
@@ -452,16 +445,9 @@ export function convertTools(
  * Map tool choice string to Gemini FunctionCallingConfigMode.
  */
 export function mapToolChoice(choice: string): FunctionCallingConfigMode {
-	switch (choice) {
-		case "auto":
-			return FunctionCallingConfigMode.AUTO;
-		case "none":
-			return FunctionCallingConfigMode.NONE;
-		case "any":
-			return FunctionCallingConfigMode.ANY;
-		default:
-			return FunctionCallingConfigMode.AUTO;
-	}
+	const mode: `${FunctionCallingConfigMode}` = choice === "none" ? "NONE" : choice === "any" ? "ANY" : "AUTO";
+	// Checked against SDK enum values above; no SDK runtime is needed to serialize the wire value.
+	return mode as FunctionCallingConfigMode;
 }
 
 /**
@@ -469,26 +455,26 @@ export function mapToolChoice(choice: string): FunctionCallingConfigMode {
  */
 export function mapStopReason(reason: FinishReason): StopReason {
 	switch (reason) {
-		case FinishReason.STOP:
+		case "STOP":
 			return "stop";
-		case FinishReason.MAX_TOKENS:
+		case "MAX_TOKENS":
 			return "length";
-		case FinishReason.BLOCKLIST:
-		case FinishReason.PROHIBITED_CONTENT:
-		case FinishReason.SPII:
-		case FinishReason.SAFETY:
-		case FinishReason.IMAGE_SAFETY:
-		case FinishReason.IMAGE_PROHIBITED_CONTENT:
-		case FinishReason.IMAGE_RECITATION:
-		case FinishReason.IMAGE_OTHER:
-		case FinishReason.RECITATION:
-		case FinishReason.FINISH_REASON_UNSPECIFIED:
-		case FinishReason.OTHER:
-		case FinishReason.LANGUAGE:
-		case FinishReason.MALFORMED_FUNCTION_CALL:
-		case FinishReason.UNEXPECTED_TOOL_CALL:
-		case FinishReason.TOO_MANY_TOOL_CALLS:
-		case FinishReason.NO_IMAGE:
+		case "BLOCKLIST":
+		case "PROHIBITED_CONTENT":
+		case "SPII":
+		case "SAFETY":
+		case "IMAGE_SAFETY":
+		case "IMAGE_PROHIBITED_CONTENT":
+		case "IMAGE_RECITATION":
+		case "IMAGE_OTHER":
+		case "RECITATION":
+		case "FINISH_REASON_UNSPECIFIED":
+		case "OTHER":
+		case "LANGUAGE":
+		case "MALFORMED_FUNCTION_CALL":
+		case "UNEXPECTED_TOOL_CALL":
+		case "TOO_MANY_TOOL_CALLS":
+		case "NO_IMAGE":
 			return "error";
 		default: {
 			const _exhaustive: never = reason;

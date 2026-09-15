@@ -1,4 +1,4 @@
-import { type GenerateContentParameters, GenerateContentResponse } from "@google/genai";
+import type { GenerateContentParameters } from "@google/genai";
 import type { Model, SimpleStreamOptions, StreamFunction } from "../types.ts";
 import {
 	ANTIGRAVITY_ENDPOINT,
@@ -11,6 +11,7 @@ import {
 	buildGoogleSimpleOptions,
 	type GoogleGenAiClient,
 	type GoogleGenAiOptions,
+	type GoogleGenAiResponse,
 	streamGoogleGenAi,
 } from "./google-streaming.ts";
 
@@ -27,7 +28,7 @@ async function* generateAntigravityContent(
 	model: Model<"google-antigravity">,
 	options: GoogleGenAiOptions,
 	params: GenerateContentParameters,
-): AsyncGenerator<GenerateContentResponse> {
+): AsyncGenerator<GoogleGenAiResponse> {
 	const token = options.apiKey;
 	if (!token?.trim()) throw new Error("Missing Antigravity credentials. Sign in with /login.");
 	if (model.baseUrl !== ANTIGRAVITY_ENDPOINT) throw new Error("Antigravity requires its trusted service endpoint");
@@ -74,7 +75,7 @@ async function* generateAntigravityContent(
 	let data: string[] = [];
 	let size = 0;
 	let sawTerminal = false;
-	function consume(line: string): GenerateContentResponse | undefined {
+	function consume(line: string): GoogleGenAiResponse | undefined {
 		if (line.startsWith("data:")) {
 			const value = line.slice(5).replace(/^ /, "");
 			size += value.length + 1;
@@ -139,16 +140,16 @@ async function* generateAntigravityContent(
 			if (((usage.cachedContentTokenCount as number) ?? 0) > ((usage.promptTokenCount as number) ?? 0))
 				throw new Error("Invalid Antigravity cached usage");
 		}
-		const event = new GenerateContentResponse();
-		event.candidates = raw.candidates as GenerateContentResponse["candidates"];
-		event.usageMetadata = raw.usageMetadata as GenerateContentResponse["usageMetadata"];
-		event.responseId =
-			typeof envelope.traceId === "string"
-				? envelope.traceId
-				: typeof raw.responseId === "string"
-					? raw.responseId
-					: undefined;
-		return event;
+		return {
+			candidates: raw.candidates as GoogleGenAiResponse["candidates"],
+			usageMetadata: raw.usageMetadata as GoogleGenAiResponse["usageMetadata"],
+			responseId:
+				typeof envelope.traceId === "string"
+					? envelope.traceId
+					: typeof raw.responseId === "string"
+						? raw.responseId
+						: undefined,
+		};
 	}
 	try {
 		while (true) {

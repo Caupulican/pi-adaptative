@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { createEmptyUsage } from "../src/usage.ts";
+import { calculateCost as catalogCalculateCost } from "../src/models.ts";
+import { calculateCost, createEmptyUsage } from "../src/usage.ts";
 
 describe("usage zero state", () => {
+	it("shares the cost calculator with the model catalog entrypoint", () => {
+		expect(catalogCalculateCost).toBe(calculateCost);
+	});
 	it("creates independent complete zero states for every package consumer", () => {
 		const first = createEmptyUsage();
 		const second = createEmptyUsage();

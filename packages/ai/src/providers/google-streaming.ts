@@ -1,5 +1,5 @@
-import type { GenerateContentConfig, GenerateContentParameters, GoogleGenAI } from "@google/genai";
-import { calculateCost, clampThinkingLevel } from "../models.ts";
+import type { GenerateContentConfig, GenerateContentParameters, GenerateContentResponse } from "@google/genai";
+import { clampThinkingLevel } from "../model-capabilities.ts";
 import type {
 	Context,
 	Model,
@@ -9,6 +9,7 @@ import type {
 	ThinkingContent,
 	ToolCall,
 } from "../types.ts";
+import { calculateCost } from "../usage.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
@@ -34,8 +35,13 @@ import {
 } from "./provider-runtime.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
+// The stream consumes wire fields, not SDK response getters or client implementation details.
+export type GoogleGenAiResponse = Pick<GenerateContentResponse, "candidates" | "usageMetadata" | "responseId">;
+
 export interface GoogleGenAiClient {
-	models: Pick<GoogleGenAI["models"], "generateContentStream">;
+	models: {
+		generateContentStream: (params: GenerateContentParameters) => Promise<AsyncIterable<GoogleGenAiResponse>>;
+	};
 }
 
 export interface GoogleGenAiOptions extends StreamOptions {

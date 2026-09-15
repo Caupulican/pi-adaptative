@@ -8,6 +8,7 @@
 
 - Subscription OAuth authorization, callback-state isolation, refresh-token retention, and request compatibility.
 - Bedrock credential resolution and SSO recovery consistently use the selected AWS profile.
+- Antigravity registration and lean entry points no longer load unused provider SDKs or the full model catalog at startup.
 
 ## [0.99.21] - 2026-09-13
 

@@ -10,6 +10,7 @@ const leanEntryUrls = [
 	new URL("../src/stream.ts", import.meta.url).href,
 	new URL("../src/types.ts", import.meta.url).href,
 	new URL("../src/usage.ts", import.meta.url).href,
+	new URL("../src/providers/google-antigravity.ts", import.meta.url).href,
 	new URL("../src/utils/event-stream.ts", import.meta.url).href,
 	new URL("../src/utils/json-parse.ts", import.meta.url).href,
 	new URL("../src/utils/overflow.ts", import.meta.url).href,
@@ -126,6 +127,7 @@ describe("lazy provider module loading", () => {
 		}
 
 		const result = runProbe("", leanEntryUrls);
+		expect(result.loadedSpecifiers).toEqual([]);
 		expect(
 			result.loadedLocalModules.filter((url) => HEAVY_MODULE_FRAGMENTS.some((part) => url.includes(part))),
 		).toEqual([]);
@@ -134,6 +136,30 @@ describe("lazy provider module loading", () => {
 	it("keeps the heavy-module probe sensitive to the batteries-included root barrel", () => {
 		const result = runProbe("");
 		expect(result.loadedLocalModules.some((url) => url.includes("/src/models.generated.ts"))).toBe(true);
+	});
+
+	it("dispatches Antigravity without loading an SDK or catalog and fails missing auth before network I/O", () => {
+		const result = runProbe(
+			`
+			globalThis.fetch = () => { throw new Error("Unexpected network I/O"); };
+			const model = {
+				id: "gemini-fixture", name: "Fixture", api: "google-antigravity",
+				provider: "google-antigravity", baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+				reasoning: false, input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 32000, maxTokens: 1024,
+			};
+			const response = await mod.streamSimple(model, { messages: [] }, { apiKey: "" }).result();
+			if (response.stopReason !== "error" || !response.errorMessage?.includes("Missing Antigravity credentials")) {
+				throw new Error("Expected the independent Antigravity credential guard");
+			}
+		`,
+			leanEntryUrls[0],
+		);
+		expect(result.loadedSpecifiers).toEqual([]);
+		expect(
+			result.loadedLocalModules.filter((url) => HEAVY_MODULE_FRAGMENTS.some((part) => url.includes(part))),
+		).toEqual([]);
 	});
 
 	it("does not load provider SDKs when importing the root barrel", () => {
