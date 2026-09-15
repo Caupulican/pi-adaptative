@@ -11,10 +11,15 @@ const XAI_TOKEN_URL = "https://auth.x.ai/oauth2/token";
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const DEFAULT_TOKEN_LIFETIME_SECONDS = 3600;
 const XAI_CLI_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
+const XAI_CLI_VERSION_HEADERS = { "x-grok-client-version": "1.0.30" } as const;
+const XAI_DEVICE_FLOW_HEADERS = {
+	...XAI_CLI_VERSION_HEADERS,
+	"x-grok-client-surface": "cli",
+} as const;
 const XAI_CLI_PROXY_HEADERS = {
+	...XAI_CLI_VERSION_HEADERS,
 	"X-XAI-Token-Auth": "xai-grok-cli",
 	"x-authenticateresponse": "authenticate-response",
-	"x-grok-client-version": "1.0.13",
 	"x-grok-client-identifier": "grok-shell",
 	"x-grok-client-mode": "headless",
 } as const;
@@ -65,12 +70,18 @@ function validateVerificationUri(raw: string): string {
 	return url.href;
 }
 
-async function postForm(url: string, fields: Record<string, string>, signal?: AbortSignal): Promise<OAuthHttpResponse> {
+async function postForm(
+	url: string,
+	fields: Record<string, string>,
+	options: { signal?: AbortSignal; headers?: Record<string, string> } = {},
+): Promise<OAuthHttpResponse> {
+	const { signal } = options;
 	let response: Response;
 	try {
 		response = await fetch(url, {
 			method: "POST",
 			headers: {
+				...options.headers,
 				Accept: "application/json",
 				"Content-Type": "application/x-www-form-urlencoded",
 			},
@@ -136,7 +147,7 @@ async function requestDeviceCode(signal?: AbortSignal): Promise<XaiDeviceCode> {
 	const response = await postForm(
 		XAI_DEVICE_CODE_URL,
 		{ client_id: XAI_CLIENT_ID, scope: XAI_SCOPE, referrer: "pi" },
-		signal,
+		{ signal, headers: XAI_DEVICE_FLOW_HEADERS },
 	);
 	if (!response.ok) throw requestFailure("device authorization", response);
 	return parseDeviceCode(response.body);
@@ -156,7 +167,7 @@ async function pollForTokens(device: XaiDeviceCode, signal?: AbortSignal): Promi
 					client_id: XAI_CLIENT_ID,
 					device_code: device.deviceCode,
 				},
-				signal,
+				{ signal, headers: XAI_DEVICE_FLOW_HEADERS },
 			);
 			if (response.ok) return { status: "complete", value: credentialsFromTokenResponse(response.body) };
 

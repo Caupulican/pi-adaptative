@@ -93,6 +93,64 @@ describe("subscription OAuth providers", () => {
 		expect(deviceCode?.verificationUri).toBe("https://auth.x.ai/activate?user_code=ABCD-EFGH");
 	});
 
+	it("keeps device-flow metadata across retries and out of token refresh", async () => {
+		vi.useFakeTimers();
+		const requests: Array<{ url: string; headers: Headers; fields: Record<string, string> }> = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const fields = Object.fromEntries(new URLSearchParams(String(init?.body)));
+			requests.push({ url: String(input), headers: new Headers(init?.headers), fields });
+			if (requests.length === 1) {
+				return Response.json({
+					device_code: "device",
+					user_code: "ABCD-EFGH",
+					verification_uri: "https://auth.x.ai/activate",
+					interval: 1,
+					expires_in: 600,
+				});
+			}
+			if (requests.length === 2) return Response.json({ error: "authorization_pending" }, { status: 400 });
+			if (requests.length === 3) return Response.json({ error: "slow_down", interval: 6 }, { status: 400 });
+			return Response.json({ access_token: "access", refresh_token: "refresh", expires_in: 3600 });
+		});
+		try {
+			const login = xaiOAuthProvider.login(callbacks());
+			await vi.advanceTimersByTimeAsync(8000);
+			expect(await login).toMatchObject({ access: "access", refresh: "refresh" });
+			await refreshXaiToken("refresh");
+			expect(requests).toHaveLength(5);
+			expect(requests[0].url).toBe("https://auth.x.ai/oauth2/device/code");
+			expect(requests[0].fields).toEqual({
+				client_id: "b1a00492-073a-47ea-816f-4c329264a828",
+				scope: "openid profile email offline_access grok-cli:access api:access",
+				referrer: "pi",
+			});
+			for (const request of requests.slice(0, 4)) {
+				expect(request.headers.get("x-grok-client-version")).toBe("1.0.30");
+				expect(request.headers.get("x-grok-client-surface")).toBe("cli");
+				expect(request.headers.get("content-type")).toBe("application/x-www-form-urlencoded");
+				expect(request.headers.get("x-xai-token-auth")).toBeNull();
+				expect(request.headers.get("authorization")).toBeNull();
+			}
+			for (const request of requests.slice(1, 4)) {
+				expect(request.url).toBe("https://auth.x.ai/oauth2/token");
+				expect(request.fields).toEqual({
+					grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+					client_id: "b1a00492-073a-47ea-816f-4c329264a828",
+					device_code: "device",
+				});
+			}
+			expect(requests[4].url).toBe("https://auth.x.ai/oauth2/token");
+			expect(requests[4].fields).toEqual({
+				grant_type: "refresh_token",
+				client_id: "b1a00492-073a-47ea-816f-4c329264a828",
+				refresh_token: "refresh",
+			});
+			expect(requests[4].headers.get("x-grok-client-surface")).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("rejects a non-https verification_uri_complete", async () => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 			const url = String(input);

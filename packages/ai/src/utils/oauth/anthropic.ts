@@ -27,7 +27,7 @@ let nodeApisPromise: Promise<NodeApis> | null = null;
 
 const decode = (s: string) => atob(s);
 const CLIENT_ID = decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
-const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
+const AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize";
 const TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 const CALLBACK_HOST = process.env.PI_OAUTH_CALLBACK_HOST || "127.0.0.1";
 const CALLBACK_PORT = 53692;
@@ -205,7 +205,8 @@ export async function loginAnthropic(options: {
 	onManualCodeInput?: () => Promise<string>;
 }): Promise<OAuthCredentials> {
 	const { verifier, challenge } = await generatePKCE();
-	const server = await startCallbackServer(verifier);
+	const expectedState = crypto.randomUUID();
+	const server = await startCallbackServer(expectedState);
 
 	let code: string | undefined;
 	let state: string | undefined;
@@ -220,7 +221,7 @@ export async function loginAnthropic(options: {
 			scope: SCOPES,
 			code_challenge: challenge,
 			code_challenge_method: "S256",
-			state: verifier,
+			state: expectedState,
 		});
 
 		options.onAuth({
@@ -234,12 +235,12 @@ export async function loginAnthropic(options: {
 				manualInput: options.onManualCodeInput,
 				waitForCallback: server.waitForCode,
 				cancelWait: server.cancelWait,
-				expectedState: verifier,
+				expectedState,
 				stateMismatchMessage: "OAuth state mismatch",
 			});
 			if (authorization) {
 				code = authorization.code;
-				state = authorization.state ?? verifier;
+				state = authorization.state ?? expectedState;
 				if (authorization.source === "callback") redirectUriForExchange = REDIRECT_URI;
 			}
 		} else {
@@ -257,11 +258,11 @@ export async function loginAnthropic(options: {
 				placeholder: REDIRECT_URI,
 			});
 			const parsed = parseAuthorizationInput(input);
-			if (parsed.state && parsed.state !== verifier) {
+			if (parsed.state && parsed.state !== expectedState) {
 				throw new Error("OAuth state mismatch");
 			}
 			code = parsed.code;
-			state = parsed.state ?? verifier;
+			state = parsed.state ?? expectedState;
 		}
 
 		if (!code) {
@@ -294,11 +295,11 @@ export async function refreshAnthropicToken(refreshToken: string): Promise<OAuth
 		throw new Error(`Anthropic token refresh request failed. url=${TOKEN_URL}; details=${formatErrorDetails(error)}`);
 	}
 
-	let data: { access_token: string; refresh_token: string; expires_in: number; scope?: string };
+	let data: { access_token: string; refresh_token?: string; expires_in: number; scope?: string };
 	try {
 		data = JSON.parse(responseBody) as {
 			access_token: string;
-			refresh_token: string;
+			refresh_token?: string;
 			expires_in: number;
 			scope?: string;
 		};
@@ -309,7 +310,7 @@ export async function refreshAnthropicToken(refreshToken: string): Promise<OAuth
 	}
 
 	return {
-		refresh: data.refresh_token,
+		refresh: data.refresh_token === undefined ? refreshToken : data.refresh_token,
 		access: data.access_token,
 		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
 	};
