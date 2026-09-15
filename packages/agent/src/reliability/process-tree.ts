@@ -23,22 +23,58 @@ export function isProcessAlive(pid: number): boolean {
 	}
 }
 
-function signalTree(pid: number, signal: NodeJS.Signals): boolean {
+/**
+ * What a signal attempt established about the target, never what it did to it.
+ * - `delivered`: the signal was accepted for delivery. It says nothing about termination.
+ * - `gone`: every attempt answered ESRCH, the only error that proves absence.
+ * - `failed`: the signal could not be sent (EPERM, or any unclassified error). The target's state
+ *   is unknown and must stay that way.
+ */
+type SignalDelivery = "delivered" | "gone" | "failed";
+
+function classifySignalError(error: unknown): "gone" | "failed" {
+	return (error as NodeJS.ErrnoException).code === "ESRCH" ? "gone" : "failed";
+}
+
+/**
+ * Signal the process group, falling back to the pid itself.
+ *
+ * `gone` requires BOTH attempts to answer ESRCH. A missing group followed by a denied direct signal
+ * (or vice versa) is a contradiction, not proof of death: the surviving evidence says the pid is
+ * still there and merely unreachable, so the result stays `failed` and the caller keeps its
+ * uncertainty.
+ */
+function signalTree(pid: number, signal: NodeJS.Signals): SignalDelivery {
+	let groupOutcome: "gone" | "failed";
 	try {
 		process.kill(-pid, signal);
-		return true;
-	} catch {
-		try {
-			process.kill(pid, signal);
-			return true;
-		} catch {
-			return false;
-		}
+		return "delivered";
+	} catch (err) {
+		groupOutcome = classifySignalError(err);
+	}
+	try {
+		process.kill(pid, signal);
+		return "delivered";
+	} catch (err) {
+		return groupOutcome === "gone" && classifySignalError(err) === "gone" ? "gone" : "failed";
 	}
 }
 
 function isChildTerminal(child: ChildProcess): boolean {
 	return child.exitCode !== null || child.signalCode !== null;
+}
+
+/**
+ * The single rule both platforms settle by once a signal has been sent and no exit event arrived.
+ *
+ * Only the child's own terminal state or a liveness probe may end the wait; the fact that a signal
+ * was sent, or that an error event fired, is never evidence of termination. win32 and POSIX have
+ * identical semantics here, so this lives in one place rather than being duplicated as a fallback.
+ */
+function settleFromEvidence(child: ChildProcess, pid: number, escalated: boolean): KillTreeOutcome {
+	if (isChildTerminal(child)) return escalated ? "killed" : "terminated";
+	if (isProcessAlive(pid)) return "failed";
+	return escalated ? "killed" : "terminated";
 }
 
 export interface KillTreeOptions {
@@ -79,7 +115,12 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 			resolve(outcome);
 		};
 		const onExit = () => settle(escalated ? "killed" : "terminated");
-		const onError = () => settle(escalated ? "killed" : "already_dead");
+		// A child "error" event is a failure to spawn/signal/communicate, never an exit: exitCode and
+		// signalCode both stay null. Settle from evidence instead of reading it as a death.
+		const onError = (err: Error) => {
+			opts?.onDiagnostic?.(`Process tree ${pid} reported an error while terminating: ${err.message}`);
+			settle(settleFromEvidence(child, pid, escalated));
+		};
 
 		child.once("exit", onExit);
 		child.once("error", onError);
@@ -96,23 +137,26 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 			}
 			acknowledgementTimer = setTimeout(() => {
 				child.unref();
-				if (isChildTerminal(child)) {
-					settle("killed");
-				} else if (isProcessAlive(pid)) {
-					if (outcome.success) {
-						opts?.onDiagnostic?.(`Windows taskkill reported success but PID ${pid} remains alive`);
-					}
-					settle("failed");
-				} else {
-					settle("killed");
+				const settlement = settleFromEvidence(child, pid, escalated);
+				if (settlement === "failed" && outcome.success) {
+					opts?.onDiagnostic?.(`Windows taskkill reported success but PID ${pid} remains alive`);
 				}
+				settle(settlement);
 			}, KILL_ACKNOWLEDGEMENT_MS);
 			acknowledgementTimer.unref();
 			return;
 		}
 
-		if (!signalTree(pid, "SIGTERM")) {
+		const termDelivery = signalTree(pid, "SIGTERM");
+		if (termDelivery === "gone") {
 			settle("already_dead");
+			return;
+		}
+		if (termDelivery === "failed") {
+			// The signal could not be sent, so nothing was established about the tree. Reporting a
+			// death here would be a claim the caller cannot check.
+			opts?.onDiagnostic?.(`Failed to send SIGTERM to process tree ${pid}; termination is unproven`);
+			settle("failed");
 			return;
 		}
 		const graceMs = Math.max(0, opts?.graceMs ?? 5000);
@@ -123,13 +167,19 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 				return;
 			}
 			escalated = true;
-			if (!signalTree(pid, "SIGKILL")) {
-				settle("terminated");
+			const killDelivery = signalTree(pid, "SIGKILL");
+			if (killDelivery !== "delivered") {
+				if (killDelivery === "failed") {
+					opts?.onDiagnostic?.(`Failed to send SIGKILL to process tree ${pid}; termination is unproven`);
+				}
+				settle(settleFromEvidence(child, pid, escalated));
 				return;
 			}
 			acknowledgementTimer = setTimeout(() => {
 				child.unref();
-				settle("killed");
+				// A delivered SIGKILL is not an exit. The win32 branch already re-checks liveness here;
+				// this is the same rule, not a second implementation of it.
+				settle(settleFromEvidence(child, pid, escalated));
 			}, KILL_ACKNOWLEDGEMENT_MS);
 			acknowledgementTimer.unref();
 		}, graceMs);
@@ -154,6 +204,8 @@ export function killTreeNow(pid: number): KillTreeNowResult {
 		}
 		return { success: true };
 	}
-	const success = signalTree(pid, "SIGKILL");
+	// `success` means the signal was delivered, never that the tree is proven gone; the caller still
+	// owns confirming termination.
+	const success = signalTree(pid, "SIGKILL") === "delivered";
 	return { success, ...(success ? {} : { error: "Failed to send SIGKILL" }) };
 }

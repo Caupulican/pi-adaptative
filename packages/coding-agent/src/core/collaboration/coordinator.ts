@@ -249,6 +249,10 @@ export class CollaborationCoordinator {
 					member.terminalId = pane.terminalId;
 					member.backendName = name;
 				});
+				// Pane creation is a real round trip, so a cancellation can land while it is in flight.
+				// Re-check only AFTER the pane is recorded above: the catch block's cleanup finds owned
+				// panes through the store, so checking any earlier would abandon the one just acquired.
+				this.assertActive(signal);
 				const started = await backend.startAgent({
 					name,
 					kind: agent.provider,

@@ -51,6 +51,10 @@ export async function launchHerdrCommand(
 							"The custom command launched an unexpected agent.",
 						);
 					if (!isStoppedCandidate(current)) return;
+					// The launch may have gone terminal while this read was outstanding. `ready` is
+					// already settled, so renaming now would mutate an agent whose admission was
+					// abandoned, on a connection the caller's finally is closing.
+					if (terminal) return;
 					const named = parseHerdrAgent(
 						herdrRecord(await connection.request("agent.rename", { target: before.paneId, name: input.name }))
 							.agent,
@@ -128,6 +132,15 @@ export async function launchHerdrCommand(
 		const currentPane = herdrRecord(
 			herdrRecord(await connection.request("pane.get", { pane_id: before.paneId })).pane,
 		);
+		// A pane_closed/pane_exited or connection error may have arrived while this re-read was in
+		// flight, which makes the reply stale however valid it looks. Nothing has been written yet, so
+		// this is a proven non-submission and must be reported as one.
+		if (terminal)
+			throw new CollaborationBackendError(
+				"occupant_changed",
+				"The shell pane terminated before the custom launch command was sent.",
+				"not-submitted",
+			);
 		if (parseHerdrPane(currentPane).terminalId !== before.terminalId || currentPane.agent)
 			throw new CollaborationBackendError(
 				"pane_busy",

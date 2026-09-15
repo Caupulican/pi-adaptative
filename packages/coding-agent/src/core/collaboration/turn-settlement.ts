@@ -109,29 +109,6 @@ export async function waitForAgentEventCondition<T>(options: AgentEventWaitOptio
 
 	signal?.throwIfAborted();
 
-	let current: CollaborationAgent;
-	try {
-		current = await backend.getAgent(target);
-	} catch (err) {
-		signal?.throwIfAborted();
-		throw err;
-	}
-	signal?.throwIfAborted();
-	if (current.terminalId !== terminalId || current.paneId !== paneId) {
-		throw new Error("Collaboration pane occupant changed.");
-	}
-	const initialCheck = await check(current);
-	signal?.throwIfAborted();
-	if (initialCheck?.settled) {
-		return initialCheck.value as T;
-	}
-
-	signal?.throwIfAborted();
-
-	if (!backend.subscribeEvents && !subscribeReport) {
-		throw new Error("No event sources available for event-driven waiting.");
-	}
-
 	let unsubscribeBackend: (() => void) | undefined;
 	let unsubscribeReport: (() => void) | undefined;
 	let settled = false;
@@ -186,7 +163,15 @@ export async function waitForAgentEventCondition<T>(options: AgentEventWaitOptio
 			})();
 		};
 
-		const doCheck = async () => {
+		/**
+		 * One read-and-predicate pass. `entry` is the very first pass, which runs before any event
+		 * source exists and therefore reports the pre-wait occupant-change wording.
+		 *
+		 * Every await is followed by a `settled` recheck: once the abort listener or the deadline above
+		 * has settled this wait, a late-arriving backend reply must not call the predicate, resolve, or
+		 * reject a second time.
+		 */
+		const doCheck = async (entry = false) => {
 			if (settled) return;
 			if (signal?.aborted) {
 				cleanup();
@@ -197,14 +182,20 @@ export async function waitForAgentEventCondition<T>(options: AgentEventWaitOptio
 			try {
 				current = await backend.getAgent(target);
 			} catch (err) {
+				if (settled) return;
 				cleanup();
 				reject(err);
 				return;
 			}
+			if (settled) return;
 
 			if (current.terminalId !== terminalId || current.paneId !== paneId) {
 				cleanup();
-				reject(new Error("Collaboration pane occupant changed during wait."));
+				reject(
+					new Error(
+						entry ? "Collaboration pane occupant changed." : "Collaboration pane occupant changed during wait.",
+					),
+				);
 				return;
 			}
 
@@ -222,54 +213,75 @@ export async function waitForAgentEventCondition<T>(options: AgentEventWaitOptio
 			}
 		};
 
-		try {
-			if (backend.subscribeEvents) {
-				backend
-					.subscribeEvents(
-						paneId,
-						(event) => {
-							if (settled) return;
-							if (
-								event.type === "pane_exited" ||
-								event.type === "pane_closed" ||
-								event.type === "connection_closed"
-							) {
-								cleanup();
-								reject(new Error(`Collaboration agent terminated unexpectedly (${event.type}).`));
+		void (async () => {
+			// The entry read and predicate run inside this lifecycle, so the abort listener and the
+			// deadline installed above already cover them. A backend read or predicate that never
+			// settles no longer strands the caller.
+			await doCheck(true);
+			if (settled) return;
+
+			// Only reached when the entry pass did not settle: a wait that is already satisfied needs
+			// no event source and must not install one.
+			if (!backend.subscribeEvents && !subscribeReport) {
+				cleanup();
+				reject(new Error("No event sources available for event-driven waiting."));
+				return;
+			}
+
+			try {
+				if (backend.subscribeEvents) {
+					backend
+						.subscribeEvents(
+							paneId,
+							(event) => {
+								if (settled) return;
+								if (
+									event.type === "pane_exited" ||
+									event.type === "pane_closed" ||
+									event.type === "connection_closed"
+								) {
+									cleanup();
+									reject(new Error(`Collaboration agent terminated unexpectedly (${event.type}).`));
+									return;
+								}
+								// A replacement occupant is reported as a detection with no status change of
+								// its own. It is not itself proof of anything: re-read and let the identity
+								// fence in doCheck decide.
+								if (event.type === "agent_status_changed" || event.type === "pane_agent_detected") {
+									triggerCheck();
+								}
+							},
+							signal,
+						)
+						.then((unsub) => {
+							if (settled) {
+								unsub();
 								return;
 							}
-							if (event.type === "agent_status_changed") {
-								triggerCheck();
-							}
-						},
-						signal,
-					)
-					.then((unsub) => {
-						if (settled) {
-							unsub();
-							return;
-						}
-						unsubscribeBackend = unsub;
+							unsubscribeBackend = unsub;
+							// Closes the race between subscribing and the state the subscription reports.
+							triggerCheck();
+						})
+						.catch((err) => {
+							if (settled) return;
+							cleanup();
+							reject(err);
+						});
+				}
+
+				if (subscribeReport) {
+					unsubscribeReport = subscribeReport(() => {
 						triggerCheck();
-					})
-					.catch((err) => {
-						if (settled) return;
-						cleanup();
-						reject(err);
 					});
-			}
+				}
 
-			if (subscribeReport) {
-				unsubscribeReport = subscribeReport(() => {
-					triggerCheck();
-				});
+				triggerCheck();
+			} catch (err) {
+				if (settled) return;
+				cleanup();
+				reject(err);
 			}
-
-			triggerCheck();
-		} catch (err) {
-			cleanup();
-			reject(err);
-		}
+		})();
 	});
 }
 
