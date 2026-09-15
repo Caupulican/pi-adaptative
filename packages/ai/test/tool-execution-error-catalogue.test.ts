@@ -43,6 +43,8 @@ describe("tool execution error catalogue", () => {
 			ownerAuthorizationRequired:
 				"goal start failed: goal start requires explicit owner authorization in the current prompt.",
 			exclusiveArguments: "Provide exactly one of code or scriptPath.",
+			skillExcluded:
+				'skill load failed: Skill "autonomous-execution" is excluded in this session: conflicts with owner instructions.',
 			skillNotEligible: 'skill load failed: No eligible skill named "emil-design-engineering".',
 		};
 
@@ -127,6 +129,27 @@ describe("tool execution error catalogue", () => {
 			unchangedRetryLimit: 0,
 			guidance:
 				"The file's bytes could not be edited safely in the resolved encoding (see diagnostic); fix the replacement characters or declare the real encoding, never retype the edit.",
+		});
+	});
+
+	it("discards excluded and ineligible skill-load attempts as policy refusals", () => {
+		expect(
+			getToolExecutionErrorPolicy(
+				'skill load failed: Skill "autonomous-execution" is excluded in this session: conflicts with owner instructions.',
+			),
+		).toMatchObject({
+			name: "skillExcluded",
+			phase: "policy",
+			failureCode: "skill_excluded",
+			attemptMemory: "discard",
+		});
+		expect(
+			getToolExecutionErrorPolicy('skill load failed: No eligible skill named "emil-design-engineering".'),
+		).toMatchObject({
+			name: "skillNotEligible",
+			phase: "policy",
+			failureCode: "skill_not_eligible",
+			attemptMemory: "discard",
 		});
 	});
 

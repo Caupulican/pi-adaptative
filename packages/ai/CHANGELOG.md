@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Skill load of an excluded or ineligible name is a discarded policy refusal.
+
 ## [0.99.24] - 2026-09-15
 
 ### Fixed

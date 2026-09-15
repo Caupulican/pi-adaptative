@@ -435,9 +435,22 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		},
 	},
 	{
+		name: "skillExcluded",
+		phase: "policy",
+		failureCode: "skill_excluded",
+		attemptMemory: "discard",
+		retainDiagnostic: true,
+		guidance:
+			"Skill is excluded for this session. Do not retry load. Search for another skill or continue without it.",
+		matches(message: string): boolean {
+			return /skill load failed:[\s\S]*is excluded in this session/i.test(message);
+		},
+	},
+	{
 		name: "skillNotEligible",
 		phase: "policy",
 		failureCode: "skill_not_eligible",
+		attemptMemory: "discard",
 		guidance:
 			"Skill name is not eligible after a rescan of the skill roots. Search with different words or fix the SKILL.md frontmatter (name, description). Do not retry the same name.",
 		matches(message: string): boolean {

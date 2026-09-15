@@ -1,6 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
-import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { TruncationResult } from "@caupulican/pi-agent-core/node";
+import { type AgentTool, AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
 import { Text } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
@@ -496,7 +496,12 @@ export function createPythonToolDefinition(
 					const termination = execution.signal
 						? `signal ${execution.signal}`
 						: `code ${execution.exitCode ?? "unknown"}`;
-					throw new Error(`${text}\n\nPython exited with ${termination}`);
+					throw new AgentToolExecutionError(
+						`${text}\n\nPython exited with ${termination}`,
+						execution.exitCode === null ? "exit_unknown" : `exit_${execution.exitCode}`,
+						`${stdout.getOutputSignature()}:${stderr.getOutputSignature()}`,
+						"operation_outcome",
+					);
 				}
 				return {
 					content: [{ type: "text", text }],

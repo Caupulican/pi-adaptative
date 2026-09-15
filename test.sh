@@ -122,7 +122,33 @@ unset NPM_CONFIG_NODE_OPTIONS
 
 if [ "$#" -gt 0 ]; then
     echo "Running targeted test(s) with isolated state: $*"
-    node ./node_modules/vitest/dist/cli.js --run --bail=1 "$@"
+    tui_node_tests=()
+    vitest_tests=()
+    for arg in "$@"; do
+        case "$arg" in
+            packages/tui/test/*)
+                if [ "${arg##*/}" = "wrap-ansi.test.ts" ]; then
+                    vitest_tests+=("$arg")
+                else
+                    tui_node_tests+=("$arg")
+                fi
+                ;;
+            *)
+                vitest_tests+=("$arg")
+                ;;
+        esac
+    done
+    if [ ${#tui_node_tests[@]} -gt 0 ]; then
+        tui_rel=()
+        for arg in "${tui_node_tests[@]}"; do
+            tui_rel+=("${arg#packages/tui/}")
+        done
+        echo "Running TUI node:test file(s): ${tui_node_tests[*]}"
+        (cd packages/tui && node --test "${tui_rel[@]}")
+    fi
+    if [ ${#vitest_tests[@]} -gt 0 ]; then
+        node ./node_modules/vitest/dist/cli.js --run --bail=1 "${vitest_tests[@]}"
+    fi
 else
     echo "Running tests with isolated state and without API keys..."
     npm run build

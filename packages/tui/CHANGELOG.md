@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Targeted `./test.sh packages/tui/test/*.test.ts` runs node:test TUI files through `node --test` instead of Vitest, which has no suite for those files.
+
 ## [0.99.24] - 2026-09-15
 
 ### Fixed

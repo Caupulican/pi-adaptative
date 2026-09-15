@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Python completed non-zero exits are operation outcomes, matching bash, so they keep output without a MUST ledger. Timeout and abort stay incomplete tool failures.
+- Skill load of an excluded or ineligible name is a discarded policy refusal, so identical retry does not count as an execution miss.
+
 ## [0.99.24] - 2026-09-15
 
 ### Fixed

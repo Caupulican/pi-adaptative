@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	createPythonToolDefinition,
@@ -173,6 +174,54 @@ describe("native python tool", () => {
 			await expect(tool.execute(reason, { code: "pass" }, undefined, undefined, undefined as never)).rejects.toThrow(
 				expected,
 			);
+		}
+	});
+
+	it("classifies a completed non-zero python exit as an operation outcome", async () => {
+		const cwd = await createTempDirectory();
+		const tool = createPythonToolDefinition(cwd, {
+			resolveRuntime: readyRuntime,
+			operations: operation(async (request) => {
+				request.onStderr(Buffer.from("failure detail\n"));
+				return { exitCode: 7, reason: "exited", signal: null };
+			}),
+			outputDirectory: cwd,
+		});
+		try {
+			await tool.execute("exited", { code: "pass" }, undefined, undefined, undefined as never);
+			throw new Error("expected python to throw");
+		} catch (error) {
+			expect(error).toBeInstanceOf(AgentToolExecutionError);
+			expect(error).toMatchObject({
+				errorKind: "operation_outcome",
+				failureCode: "exit_7",
+			});
+			expect((error as Error).message).toMatch(/exited with code 7/);
+		}
+	});
+
+	it("keeps python timeout and abort as incomplete tool failures", async () => {
+		const cwd = await createTempDirectory();
+		for (const [reason, expected] of [
+			["timeout", /timed out after 30 seconds/],
+			["aborted", /aborted/],
+		] as const) {
+			const tool = createPythonToolDefinition(cwd, {
+				resolveRuntime: readyRuntime,
+				operations: operation(async () => ({
+					exitCode: null,
+					reason,
+					signal: "SIGTERM",
+				})),
+				outputDirectory: cwd,
+			});
+			try {
+				await tool.execute(reason, { code: "pass" }, undefined, undefined, undefined as never);
+				throw new Error(`expected python ${reason} to throw`);
+			} catch (error) {
+				expect(error).not.toBeInstanceOf(AgentToolExecutionError);
+				expect((error as Error).message).toMatch(expected);
+			}
 		}
 	});
 
