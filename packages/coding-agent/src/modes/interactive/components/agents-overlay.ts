@@ -111,17 +111,59 @@ export function isRetainedWorkerLane(record: LaneRecord): boolean {
 	return (record.type === "worker" || record.type === "tmux-worker") && record.agentStatus !== "retired";
 }
 
+/** One retained specialist and the single lane it is working on right now, if any. */
+export interface SpecialistLaneProjection {
+	/** Durable identity owning these lanes; absent for a one-shot lane with no persistent agent. */
+	agentId?: string;
+	/** Queued or running lane this specialist currently owns, or its own record when it is one-shot. */
+	current?: LaneRecord;
+	/** Every retained lane this specialist owns, newest last, exactly as the durable projection gave them. */
+	records: readonly LaneRecord[];
+}
+
+/**
+ * Group retained lanes by the specialist that owns them. A persistent specialist runs one task at a
+ * time and keeps its finished tasks as history, so its "current" lane is the queued or running one;
+ * when it has none it is idle and available, which is a fact about the agent rather than a row of
+ * work. A lane with no owning specialist is its own agent, so its record stays current either way.
+ *
+ * Selection never depends on the order the records arrive in: the current lane is the one the
+ * durable projection still reports as active.
+ */
+export function projectSpecialistLanes(records: readonly LaneRecord[]): SpecialistLaneProjection[] {
+	const grouped = new Map<string, LaneRecord[]>();
+	for (const record of records.filter(isRetainedWorkerLane)) {
+		const owner = record.agentId ?? record.laneId;
+		const existing = grouped.get(owner);
+		if (existing) existing.push(record);
+		else grouped.set(owner, [record]);
+	}
+	return [...grouped.values()].map((owned) => {
+		const active = owned.find((record) => ACTIVE_WORKER_STATUSES.has(record.status));
+		const current = active ?? (owned[0]?.agentId === undefined ? owned[0] : undefined);
+		return {
+			...(owned[0]?.agentId !== undefined ? { agentId: owned[0].agentId } : {}),
+			...(current ? { current } : {}),
+			records: owned,
+		};
+	});
+}
+
 interface WorkActivityProjection {
-	workers: LaneRecord[];
+	specialists: SpecialistLaneProjection[];
+	/** One lane per specialist: what it is doing now, never what it finished earlier. */
+	currentLanes: LaneRecord[];
 	activeWorkers: LaneRecord[];
 	rows: OrchestrationPanelRow[];
 	summary: string[];
 }
 
 function projectWorkActivity(snapshot: AgentsOverlaySnapshot, nowMs: number): WorkActivityProjection {
-	const workers = snapshot.laneRecords.filter(isRetainedWorkerLane);
-	const activeWorkers = workers.filter((record) => ACTIVE_WORKER_STATUSES.has(record.status));
-	const finishedWorkers = workers
+	const specialists = projectSpecialistLanes(snapshot.laneRecords);
+	const currentLanes = specialists.flatMap((specialist) => (specialist.current ? [specialist.current] : []));
+	const idleSpecialists = specialists.length - currentLanes.length;
+	const activeWorkers = currentLanes.filter((record) => ACTIVE_WORKER_STATUSES.has(record.status));
+	const finishedWorkers = currentLanes
 		.filter((record) => !ACTIVE_WORKER_STATUSES.has(record.status))
 		.sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
 		.slice(0, MAX_FINISHED_WORKERS);
@@ -131,7 +173,8 @@ function projectWorkActivity(snapshot: AgentsOverlaySnapshot, nowMs: number): Wo
 	const running = activeWorkers.filter((record) => record.status === "running").length;
 	const queued = activeWorkers.length - running;
 	return {
-		workers,
+		specialists,
+		currentLanes,
 		activeWorkers,
 		rows: [
 			...activeWorkers.map((record) => workerRow(record, nowMs)),
@@ -141,6 +184,7 @@ function projectWorkActivity(snapshot: AgentsOverlaySnapshot, nowMs: number): Wo
 		summary: [
 			running > 0 ? `${running} running` : undefined,
 			queued > 0 ? `${queued} queued` : undefined,
+			idleSpecialists > 0 ? `${idleSpecialists} idle` : undefined,
 			backgroundTools.length > 0
 				? `${backgroundTools.length} background tool${backgroundTools.length === 1 ? "" : "s"}`
 				: undefined,
@@ -153,7 +197,8 @@ export function buildAgentsPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: nu
 	const shown = activity.rows.slice(0, MAX_ROWS);
 	return {
 		label: "Agents",
-		status: activity.workers.some((record) => record.status === "failed") ? "error" : "info",
+		// A specialist's own current state, never a task it finished several tasks ago.
+		status: activity.currentLanes.some((record) => record.status === "failed") ? "error" : "info",
 		summary: activity.summary,
 		rows: shown,
 		hiddenRowCount: activity.rows.length - shown.length,
@@ -184,7 +229,7 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 		status:
 			goal?.status === "blocked" ||
 			goal?.status === "paused" ||
-			activity.workers.some((record) => record.status === "failed")
+			activity.currentLanes.some((record) => record.status === "failed")
 				? "warning"
 				: activity.activeWorkers.length > 0 || task?.steps.some((step) => step.status === "in_progress")
 					? "running"

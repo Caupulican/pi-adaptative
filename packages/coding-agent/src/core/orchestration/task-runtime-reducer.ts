@@ -16,6 +16,7 @@ import {
 	MAX_ORCHESTRATION_NOTIFICATIONS,
 	MAX_ORCHESTRATION_OBJECTIVES,
 	MAX_ORCHESTRATION_TASKS,
+	type ManagedLaneLifetime,
 	type ObjectiveContract,
 	type ObjectiveStatus,
 	ORCHESTRATION_SCHEMA_VERSION,
@@ -36,6 +37,7 @@ import {
 	evidenceFromPayload,
 	executionGrantFromValue,
 	leaseFromPayload,
+	managedLaneLifetimeFromValue,
 	number,
 	objectiveFromPayload,
 	resultFromPayload,
@@ -557,6 +559,40 @@ function assertEventAggregateId(event: OrchestrationEvent, expectedId: string, l
 	if (event.aggregateId !== expectedId) {
 		throw new DurableTaskRuntimeError(`${label} '${expectedId}' does not match aggregate '${event.aggregateId}'.`);
 	}
+}
+
+/**
+ * Managed lifetime statements are fenced on the exact external generation they were observed
+ * against: the attempt must be managed-process work, its logical lane and dispatch sequence must
+ * match the report, and a retirement is final for that generation. Reviving a retired process is
+ * only possible through a positively newer real dispatch, which mints its own attempt.
+ */
+export function assertManagedLifetimeTransition(
+	state: TaskRuntimeProjection,
+	attemptId: string,
+	input: { logicalLaneId: string; dispatchSequence: number; lifetime: ManagedLaneLifetime },
+): AttemptRuntimeState {
+	const attempt = state.attempts[attemptId];
+	if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+	if (attempt.dispatch.executionKind !== "managed-process") {
+		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' is not managed-process work.`);
+	}
+	if (attempt.dispatch.logicalLaneId !== input.logicalLaneId) {
+		throw new DurableTaskRuntimeError(
+			`Attempt '${attemptId}' does not belong to managed lane '${input.logicalLaneId}'.`,
+		);
+	}
+	if ((attempt.dispatch.dispatchSequence ?? 1) !== input.dispatchSequence) {
+		throw new DurableTaskRuntimeError(
+			`Managed lane '${input.logicalLaneId}' lifetime sequence ${input.dispatchSequence} does not match its dispatch.`,
+		);
+	}
+	if (attempt.managedLifetime === "retired" && input.lifetime !== "retired") {
+		throw new DurableTaskRuntimeError(
+			`Managed lane '${input.logicalLaneId}' turn ${input.dispatchSequence} is retired; only a newer dispatch can host a live process.`,
+		);
+	}
+	return attempt;
 }
 
 export function assertAttemptFinishTransition(
@@ -1444,6 +1480,26 @@ export function reduceOrchestrationEvent(
 				};
 			}
 			releaseAttemptAgent(agents, attempt, event.occurredAt);
+			break;
+		}
+		case "managed.lifecycle": {
+			const attemptId = string(event.payload.attemptId, "managed.lifecycle.attemptId");
+			assertEventAggregateId(event, attemptId, "Managed lifetime attempt");
+			const lifetime = managedLaneLifetimeFromValue(event.payload.lifetime, "managed.lifecycle.lifetime");
+			if (!lifetime) throw new DurableTaskRuntimeError("managed.lifecycle.lifetime is required.");
+			const dispatchSequence = event.payload.dispatchSequence;
+			if (!Number.isSafeInteger(dispatchSequence) || Number(dispatchSequence) < 1) {
+				throw new DurableTaskRuntimeError("managed.lifecycle.dispatchSequence is invalid.");
+			}
+			const attempt = assertManagedLifetimeTransition(state, attemptId, {
+				logicalLaneId: string(event.payload.logicalLaneId, "managed.lifecycle.logicalLaneId"),
+				dispatchSequence: Number(dispatchSequence),
+				lifetime,
+			});
+			// A repeated statement about the same generation carries no new fact: the attempt keeps its
+			// result, usage and outbox exactly as they were.
+			if (attempt.managedLifetime === lifetime) break;
+			attempts[attemptId] = { ...attempt, managedLifetime: lifetime, updatedAt: event.occurredAt };
 			break;
 		}
 		case "attempt.finished": {

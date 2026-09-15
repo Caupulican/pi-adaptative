@@ -59,6 +59,12 @@ export interface LaneRecord {
 	 */
 	agentStatus?: AgentBindingStatus;
 	/**
+	 * Durable identity of the logical agent that owns this lane's selected attempt. A persistent
+	 * specialist owns one lane per task it has taken, so this is what groups those lanes into one
+	 * agent. Absent for a lane whose attempt never belonged to a logical agent.
+	 */
+	agentId?: string;
+	/**
 	 * Process-local, never persisted: why a `queued` lane has not been dispatched by this controller
 	 * generation (capacity, dependencies, a write reservation held elsewhere, …). Absent for lanes that
 	 * are not queued or whose scheduler has not evaluated them yet.
@@ -117,6 +123,7 @@ export function isLaneRecord(value: unknown): value is LaneRecord {
 	) {
 		return false;
 	}
+	if (!isOptionalString(record.agentId)) return false;
 	if (!isOptionalString(record.waitReason)) return false;
 	return true;
 }

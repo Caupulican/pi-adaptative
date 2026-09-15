@@ -88,6 +88,10 @@ const agentSchema = Type.Object(
 		helperPid: Type.Optional(Type.Integer({ minimum: 1 })),
 		deadlineAt: Type.Optional(Type.Number()),
 		notifiedTurn: Type.Integer({ minimum: 0, maximum: 128 }),
+		/** The member's persistent CLI closure has been published to the durable lane projection. A
+		 * closure is a fact about the agent, not about a turn, so turn-based deduplication cannot
+		 * suppress it and cannot republish it either. */
+		notifiedClosure: Type.Optional(Type.Boolean()),
 		steering: Type.Optional(steeringRequestSchema),
 	},
 	{ additionalProperties: false },
@@ -345,6 +349,10 @@ export class CollaborationJobStore {
 	}
 	private reserve(current: CollaborationJob, agentId: string, prompt: string, answering: boolean): CollaborationAgent {
 		const agent = assertOperableAgent(current, agentId);
+		// An outstanding backend request means nobody has observed the resource this turn would run on.
+		// Guard before any mutation below, so a rejected reservation leaves the member untouched.
+		if (agent.acquiring)
+			throw new Error("Collaboration agent has an unresolved resource acquisition; await its settlement.");
 		if (agent.steering) {
 			if (agent.status !== "stopped") {
 				throw new Error("Collaboration agent steering in progress; await steering settlement.");
@@ -663,17 +671,26 @@ export class CollaborationJobStore {
 			return agent;
 		});
 	}
+	/**
+	 * `closed` is the durable cleanup proof consumed by archive, dismiss and the UI. It may only be
+	 * set for a member whose backend resources have been observed, so an unresolved acquisition holds
+	 * it back: the stop intent still settles, but the member stays uncertain until whoever obtained
+	 * positive evidence resolves the acquisition through `finishAcquisition`.
+	 */
 	finishStop(id: string, agentId: string, turnId: string, status: "stopped" | "failed", evidence: string): boolean {
 		return this.updateAgent(id, agentId, (agent) => {
 			if (!agent || agent.turnId !== turnId || !agent.stopping || agent.closed) return false;
-			agent.closed = true;
+			if (!agent.acquiring) agent.closed = true;
 			delete agent.stopping;
-			delete agent.acquiring;
 			delete agent.steering;
 			releaseTurnProcess(agent);
 			if (["idle", "reserved", "running"].includes(agent.status)) {
 				agent.status = status;
-				agent.evidence = boundCollaborationEvidence(evidence);
+				agent.evidence = boundCollaborationEvidence(
+					agent.acquiring
+						? `${evidence} Resource acquisition is unresolved; live work may remain active.`
+						: evidence,
+				);
 			}
 			return true;
 		});

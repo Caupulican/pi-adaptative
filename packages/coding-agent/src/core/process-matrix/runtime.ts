@@ -737,6 +737,27 @@ async function startWorkerBranch(
 	};
 
 	/**
+	 * This runtime owns an entry only while the record is still its own pid AND its own generation.
+	 * A recycled pid or a restarted runtime in the same process both produce a different `startedAt`,
+	 * so pid alone is not ownership.
+	 */
+	const ownsGeneration = (candidate: ProcessMatrixEntry | undefined): candidate is ProcessMatrixEntry =>
+		candidate !== undefined && candidate.pid === process.pid && candidate.startedAt === generationStartedAt;
+
+	/**
+	 * Ownership has moved to another generation. Stand down completely: no timer, no exit hook, no
+	 * further notice, exit request or write may touch the new owner's record.
+	 */
+	const relinquishOwnership = (): void => {
+		if (stopped) return;
+		stopped = true;
+		if (timer) clearInterval(timer);
+		timer = undefined;
+		process.off("exit", closeOnExit);
+		config.onDiagnostic?.("process-matrix: worker entry ownership moved to a newer process generation");
+	};
+
+	/**
 	 * The single fenced mutation gate for this branch. A watcher tick that was already awaiting a read
 	 * when `stop()` ran must not write, mutate in-memory state, or authorize a follow-on transition:
 	 * `closeWorker` has by then persisted the terminal record, and `closed` is terminal.
@@ -752,6 +773,14 @@ async function startWorkerBranch(
 		failureContext: string,
 	): Promise<boolean> => {
 		if (stopped) return false;
+		// The watcher ticks hand a FRESH stored record here as `expected`, so the compare-and-swap
+		// would match whatever is on disk and succeed on its first try. The generation gate therefore
+		// has to run before the write, not only in the CAS-failure branch below: otherwise a directive
+		// written by a newer generation is executed by this one, overwriting its record.
+		if (!ownsGeneration(expected)) {
+			relinquishOwnership();
+			return false;
+		}
 		try {
 			if (await store.writeEntryIfUnchanged(config.agentDir, expected.entryId, expected, next)) {
 				if (stopped) return false;
@@ -759,14 +788,11 @@ async function startWorkerBranch(
 				return true;
 			}
 			const current = await store.readEntry(config.agentDir, expected.entryId);
-			if (current?.pid === process.pid) entry = current;
-			else {
-				stopped = true;
-				if (timer) clearInterval(timer);
-				timer = undefined;
-				process.off("exit", closeOnExit);
-				config.onDiagnostic?.("process-matrix: worker entry ownership moved to a newer process generation");
-			}
+			if (stopped) return false;
+			// Same gate on the re-read: a same-generation directive is adopted, anything else is a
+			// newer owner whose record this runtime must not touch.
+			if (ownsGeneration(current)) entry = current;
+			else relinquishOwnership();
 		} catch (error) {
 			config.onDiagnostic?.(`process-matrix: ${failureContext}: ${describeError(error)}`);
 		}
@@ -803,6 +829,7 @@ async function startWorkerBranch(
 	};
 
 	const startHealthyWatch = (): void => {
+		if (stopped) return;
 		timer = setInterval(() => runWatchTick(healthyTick), config.settings.watcherPollMs);
 		timer.unref?.();
 	};
@@ -858,6 +885,7 @@ async function startWorkerBranch(
 	};
 
 	const startGraceWatch = (): void => {
+		if (stopped) return;
 		const graceDeadline = now() + config.settings.adoptionGraceMs;
 		timer = setInterval(() => runWatchTick(() => graceTick(graceDeadline)), config.settings.watcherPollMs);
 		timer.unref?.();
@@ -882,10 +910,6 @@ async function startWorkerBranch(
 					))
 				)
 					return;
-				emitRuntimeNotice(
-					config,
-					`process-matrix: adopted by a new parent (pid ${directive.parentPid}). Resuming.`,
-				);
 				currentParentPid = directive.parentPid;
 				currentParentSessionId = fresh.parentSessionId;
 				preserveResumableOnExit = false;
@@ -894,6 +918,10 @@ async function startWorkerBranch(
 					timer = undefined;
 				}
 				startHealthyWatch();
+				emitRuntimeNotice(
+					config,
+					`process-matrix: adopted by a new parent (pid ${directive.parentPid}). Resuming.`,
+				);
 				return;
 			}
 			if (directive.code === "user_cleanup") {

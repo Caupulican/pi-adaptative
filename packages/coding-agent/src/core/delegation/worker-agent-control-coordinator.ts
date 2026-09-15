@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { UserMessage } from "@caupulican/pi-ai";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
@@ -23,6 +24,7 @@ import {
 import type { WorkerClaimSnapshotPayload } from "./session-worker-claim.ts";
 import {
 	normalizeWorkerAgentDependencyTaskIds,
+	normalizeWorkerAgentNewTaskCorrelation,
 	type SessionRootWorkerAgentMessageOptions,
 	type WorkerAgentActivity,
 	type WorkerAgentBroadcastOptions,
@@ -33,6 +35,7 @@ import {
 	WorkerAgentMailbox,
 	type WorkerAgentMessage,
 	type WorkerAgentMessageOptions,
+	type WorkerAgentNewTaskCorrelation,
 	type WorkerAgentReplyResult,
 	type WorkerAgentRetireOptions,
 	type WorkerAgentRetireResult,
@@ -496,10 +499,27 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (!candidate) return { started: false, steering: false, messageId: "", skipReason: "unknown_agent" };
 		const agent = this.requireControllableAgent(canonicalAgentId, options);
 		const dependsOnTaskIds = normalizeWorkerAgentDependencyTaskIds(options.dependsOnTaskIds);
+		// Bounded ids only: what rides the durable mailbox must survive a restart without carrying a
+		// copy of the goal state, whose own durable objective is admitted below before the message is.
+		const newTask = normalizeWorkerAgentNewTaskCorrelation(
+			options.newTask === undefined
+				? undefined
+				: {
+						...(options.newTask.goal ? { goalId: options.newTask.goal.goalId } : {}),
+						...(options.newTask.requirementIds ? { requirementIds: options.newTask.requirementIds } : {}),
+						...(options.newTask.acceptanceCriterionIds
+							? { acceptanceCriterionIds: options.newTask.acceptanceCriterionIds }
+							: {}),
+					},
+		);
 		if (options.idempotencyKey !== undefined) {
-			const replay = this.replayWorkerAgentTask(agent, message, options.idempotencyKey, dependsOnTaskIds);
+			const replay = this.replayWorkerAgentTask(agent, message, options.idempotencyKey, dependsOnTaskIds, newTask);
 			if (replay) return replay;
 		}
+		// The goal's acceptance criteria are durable orchestration state, and a new task may only cite
+		// criteria its objective already carries. Admit them before the message exists, so a recovery
+		// that has only the persisted ids still finds them.
+		if (options.newTask?.goal) this.options.getLifecycle().synchronizeGoalState(options.newTask.goal);
 		const activity = this.activityForAgent(agent);
 		if (activity !== "idle") {
 			return { started: false, steering: false, messageId: "", skipReason: `worker_${activity}` };
@@ -512,6 +532,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			message,
 			options.idempotencyKey === undefined ? {} : { idempotencyKey: options.idempotencyKey },
 			dependsOnTaskIds,
+			newTask,
 		);
 	}
 
@@ -520,6 +541,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		message: string,
 		idempotencyKey: string,
 		dependsOnTaskIds: readonly string[],
+		newTask?: WorkerAgentNewTaskCorrelation,
 	): { started: boolean; steering: false; messageId: string; record?: LaneRecord; skipReason?: string } | undefined {
 		this.assertIdempotencyTarget(agent.agentId, idempotencyKey);
 		const messageId = workerAgentMessageId(this.options.parentSessionId, idempotencyKey);
@@ -530,6 +552,17 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				throw new Error("Worker control idempotency identity conflicts with its durable dispatch.");
 			}
 			this.assertAttemptDependencyIdentity(correlatedAttempt, dependsOnTaskIds);
+			// A replay that re-files the same instructions under a different goal is different work,
+			// and the ledger would reject it. Report that rather than handing back the original start
+			// as if the caller's correlation had been honoured.
+			if (!this.hasMatchingNewTaskCorrelation(correlatedAttempt, newTask)) {
+				return {
+					started: false,
+					steering: false,
+					messageId,
+					skipReason: "worker_task_new_task_correlation_conflict",
+				};
+			}
 			const record = this.options.getLifecycle().getRecord(correlatedAttempt.taskId);
 			if (!record) {
 				return {
@@ -558,6 +591,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			task: {
 				kind: "agent_turn",
 				...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
+				...(newTask ? { newTask } : {}),
 			},
 		});
 		if (acceptance.status === "completed_replay") {
@@ -608,6 +642,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		message: string,
 		options: WorkerAgentMessageOptions,
 		dependsOnTaskIds: readonly string[] = [],
+		newTask?: WorkerAgentNewTaskCorrelation,
 	): { started: boolean; steering: false; messageId: string; record?: LaneRecord; skipReason?: string } {
 		if (!this.isAcceptedControlReplay(agent.agentId, options.idempotencyKey)) {
 			const headroomSkipReason = this.options.taskStartHeadroomSkipReason?.(agent);
@@ -619,6 +654,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const queued = this.enqueuePeerMessage(agent, "follow_up", message, options, {
 			kind: "agent_turn",
 			...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
+			...(newTask ? { newTask } : {}),
 		});
 		if (queued.status === "completed_replay") {
 			return {
@@ -637,6 +673,22 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			...(reconciliation.record ? { record: reconciliation.record } : {}),
 			...(reconciliation.skipReason ? { skipReason: reconciliation.skipReason } : {}),
 		};
+	}
+
+	/** Does a durable attempt already carry exactly the correlation this start is asking for? */
+	private hasMatchingNewTaskCorrelation(
+		attempt: AttemptRuntimeState,
+		newTask: WorkerAgentNewTaskCorrelation | undefined,
+	): boolean {
+		if (!newTask) return true;
+		const task = this.options.getLifecycle().getTask(attempt.taskId)?.task;
+		if (!task) return false;
+		const objectiveId = newTask.goalId ? `goal:${newTask.goalId}` : `session:${this.options.parentSessionId}`;
+		return (
+			task.objectiveId === objectiveId &&
+			isDeepStrictEqual([...(attempt.dispatch.requirementIds ?? [])], [...(newTask.requirementIds ?? [])]) &&
+			isDeepStrictEqual([...task.acceptanceCriterionIds], [...(newTask.acceptanceCriterionIds ?? [])])
+		);
 	}
 
 	private assertAttemptDependencyIdentity(attempt: AttemptRuntimeState, dependsOnTaskIds: readonly string[]): void {
@@ -1675,12 +1727,26 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				}
 				try {
 					this.enableAttemptAccountingForNextTask(agent);
+					const newTask = message.task?.kind === "agent_turn" ? message.task.newTask : undefined;
 					const prepared = this.options.getLifecycle().prepareAgentTurn({
 						agentId: agent.agentId,
 						instructions: message.content,
 						controlMessageId: message.messageId,
 						...(message.task?.kind === "agent_turn" && message.task.dependsOnTaskIds
 							? { dependsOnTaskIds: message.task.dependsOnTaskIds }
+							: {}),
+						// The persisted declaration of new work, read back from the mailbox: the process that
+						// enqueued it may be long gone, and no caller repeats it after a restart.
+						...(newTask
+							? {
+									...(newTask.goalId ? { goalId: newTask.goalId } : {}),
+									taskContext: {
+										...(newTask.requirementIds ? { requirementIds: newTask.requirementIds } : {}),
+										...(newTask.acceptanceCriterionIds
+											? { acceptanceCriterionIds: newTask.acceptanceCriterionIds }
+											: {}),
+									},
+								}
 							: {}),
 					});
 					// `created` is the ledger's own decision, not a reconstruction of it -- a replayed

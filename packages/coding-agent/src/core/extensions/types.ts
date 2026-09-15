@@ -1318,6 +1318,17 @@ export type ManagedLaneEvent =
 			 * `phase: "dispatch"`.
 			 */
 			usage?: Usage;
+	  })
+	| (ManagedLaneEventBase & {
+			/**
+			 * Lifetime of the external process itself, which is a different fact from the lifetime of the
+			 * work it ran: a turn can reach terminal on a process that stays open, and a process can close
+			 * long after its last turn settled. Reported separately so a closure never re-finishes a task.
+			 */
+			phase: "lifecycle";
+			/** Dispatch turn this statement was observed against; a stale generation is rejected. */
+			dispatchSequence?: number;
+			agentLifecycle: "retained" | "retired";
 	  });
 
 /**

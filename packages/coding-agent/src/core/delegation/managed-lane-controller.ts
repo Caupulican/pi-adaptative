@@ -187,6 +187,16 @@ export class ManagedLaneController {
 			return prepared.record;
 		}
 
+		if (event.phase === "lifecycle") {
+			// "retained" is the state every dispatched lane already starts in, so only a closure carries
+			// new information. Nothing here touches the turn: no claim, no usage, no parent handoff.
+			if (event.agentLifecycle !== "retired") return undefined;
+			const record = this.lifecycle.retireManaged(event.laneId, event.dispatchSequence);
+			if (record) appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
+			this.releaseRegistration(event.laneId);
+			return record;
+		}
+
 		const attempt = this.lifecycle.getManagedAttempt(event.laneId);
 		const handle = this.lifecycle.getManagedHandle(event.laneId);
 		if (!attempt || !handle) throw new Error(`Unknown managed worker '${event.laneId}'.`);

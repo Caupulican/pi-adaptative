@@ -23,6 +23,7 @@ import {
 	MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE,
 	MAX_ORCHESTRATION_OBJECTIVES,
 	MAX_ORCHESTRATION_TASKS,
+	type ManagedLaneLifetime,
 	type ObjectiveContract,
 	type ObjectiveStatus,
 	ORCHESTRATION_SCHEMA_VERSION,
@@ -72,6 +73,7 @@ import {
 	assertAttemptLeaseRenewalTransition,
 	assertAttemptLeaseTransition,
 	assertAttemptStartTransition,
+	assertManagedLifetimeTransition,
 	assertNotificationTarget,
 	assertObjectiveStatusTransition,
 	assertRetryBackoffElapsedAt,
@@ -739,6 +741,34 @@ export class DurableTaskRuntime {
 			payload: toJsonObject({ ...args, reasonCode: args.reasonCode.trim() }),
 		});
 		return structuredClone(this.state.tasks[args.taskId]!);
+	}
+
+	/**
+	 * Record the observed lifetime of the external process behind one managed-process attempt. This
+	 * never touches the attempt's result, usage, notifications or task status: an already terminal
+	 * turn keeps everything it reported, and only the process's retained/retired state changes.
+	 */
+	recordManagedLifetime(
+		attemptId: string,
+		input: { logicalLaneId: string; dispatchSequence: number; lifetime: ManagedLaneLifetime },
+	): AttemptRuntimeState {
+		this.refresh();
+		const attempt = assertManagedLifetimeTransition(this.state, attemptId, input);
+		if (attempt.managedLifetime !== input.lifetime) {
+			this.commit({
+				type: "managed.lifecycle",
+				aggregateId: attemptId,
+				actor: "runtime",
+				idempotencyKey: `managed-lifetime:${attemptId}:${input.dispatchSequence}:${input.lifetime}`,
+				payload: toJsonObject({
+					attemptId,
+					logicalLaneId: input.logicalLaneId,
+					dispatchSequence: input.dispatchSequence,
+					lifetime: input.lifetime,
+				}),
+			});
+		}
+		return structuredClone(this.state.attempts[attemptId]!);
 	}
 
 	cancelAttempt(attemptId: string, reasonCode: string): AttemptRuntimeState {

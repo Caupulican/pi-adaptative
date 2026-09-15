@@ -11,7 +11,7 @@ import {
 	type AgentsOverlaySnapshot,
 	buildWorkPanelModel,
 	compactWorkPanel,
-	isRetainedWorkerLane,
+	projectSpecialistLanes,
 } from "./components/agents-overlay.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
 import {
@@ -510,16 +510,21 @@ export function buildWorkbenchSections(snapshot: AgentsOverlaySnapshot, nowMs: n
 		rows.push(`  ${theme.fg("dim", "/edge list · revoke <class>")}`);
 		sections.push({ title: EDGE_SECTION, meta: `${edge.length} granted`, body: rows });
 	}
-	if (teamRows.length) {
+	// The team is its specialists, not its task history: a specialist with three finished tasks and
+	// nothing running is one idle agent, and it keeps its section even though it contributes no row.
+	const specialists = projectSpecialistLanes(snapshot.laneRecords);
+	if (teamRows.length || specialists.length) {
 		const team = compactWorkPanel({ ...model, rows: teamRows }, 4);
 		const shown = team.rows ?? [];
-		const workers = snapshot.laneRecords.filter(isRetainedWorkerLane);
+		const workers = specialists.flatMap((specialist) => (specialist.current ? [specialist.current] : []));
 		const active = workers.filter((record) => ACTIVE_WORKER.has(record.status)).length;
-		const meta = active ? `${active} active` : `${workers.length} ${workers.length === 1 ? "agent" : "agents"}`;
+		const meta = active
+			? `${active} active`
+			: `${specialists.length} ${specialists.length === 1 ? "agent" : "agents"}`;
 		const body: Component | string[] = shown.length
 			? rowsComponent({ ...team, rows: shown.map((row) => ({ ...row, section: undefined })) })
 			: [
-					`  ${theme.fg("success", "✓")} ${theme.fg("muted", `Team idle · ${workers.length} ${workers.length === 1 ? "session" : "sessions"} retained`)}`,
+					`  ${theme.fg("success", "✓")} ${theme.fg("muted", `Team idle · ${specialists.length} ${specialists.length === 1 ? "session" : "sessions"} retained`)}`,
 				];
 		sections.push({ title: TEAM_SECTION, meta, body });
 	}

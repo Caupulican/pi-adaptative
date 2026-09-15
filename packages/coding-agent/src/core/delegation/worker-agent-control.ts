@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 import type { Message } from "@caupulican/pi-ai";
 import { workerAgentMailboxFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { GoalState } from "../goals/goal-state.ts";
 import { parseBoundedStringArray } from "../orchestration/bounded-string-array.ts";
 import {
 	type AgentBindingStatus,
@@ -28,6 +30,8 @@ const MAX_ORDINARY_MAILBOX_BYTES = 128 * 1024;
 const MAX_MAILBOX_MESSAGE_ID_CHARS = 512;
 const MAX_MAILBOX_TIMESTAMP_CHARS = 128;
 const MAX_MAILBOX_IDENTITY_CHARS = 512;
+/** Requirement/criterion ids one new-task correlation may carry; the mailbox stays a bounded file. */
+const MAX_MAILBOX_CORRELATION_IDS = 32;
 const MAX_MAILBOX_IDEMPOTENCY_KEY_CHARS = 2_048;
 const MAX_ORDINARY_RETAINED_MESSAGES = MAX_MAILBOX_MESSAGES * 2;
 const MAX_MANDATORY_RETAINED_MESSAGES = MAX_MAILBOX_MESSAGES;
@@ -48,6 +52,17 @@ const MAX_ENCODED_MANDATORY_MESSAGE_BYTES =
 			task: {
 				kind: "terminal_handoff",
 				sourceAttemptId: `a${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
+				newTask: {
+					goalId: `g${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
+					requirementIds: Array.from(
+						{ length: MAX_MAILBOX_CORRELATION_IDS },
+						(_, index) => `${index}${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
+					),
+					acceptanceCriterionIds: Array.from(
+						{ length: MAX_MAILBOX_CORRELATION_IDS },
+						(_, index) => `${index}${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
+					),
+				},
 			},
 			createdAt: MAX_MAILBOX_TRANSITION_TIMESTAMP,
 			deliveredAt: MAX_MAILBOX_TRANSITION_TIMESTAMP,
@@ -68,8 +83,20 @@ const assertWorkerAgentMailboxBounds = createReplaySafeMailboxBounder(
 
 export type WorkerAgentMessageKind = "steer" | "follow_up";
 
+/**
+ * Correlation of a genuinely NEW task queued onto an existing specialist. Present means the caller
+ * owns this turn's work correlation: whatever it omits is empty, never inherited from the task the
+ * specialist happened to run before. Ids only -- the goal's own durable objective is admitted
+ * before the message is enqueued, so recovery after a restart needs no copy of the goal state.
+ */
+export interface WorkerAgentNewTaskCorrelation {
+	goalId?: string;
+	requirementIds?: readonly string[];
+	acceptanceCriterionIds?: readonly string[];
+}
+
 export type WorkerAgentTaskMetadata =
-	| { kind: "agent_turn"; dependsOnTaskIds?: readonly string[] }
+	| { kind: "agent_turn"; dependsOnTaskIds?: readonly string[]; newTask?: WorkerAgentNewTaskCorrelation }
 	| { kind: "terminal_handoff"; sourceAttemptId: string };
 
 export interface WorkerAgentMessage {
@@ -188,6 +215,16 @@ export interface WorkerAgentTaskStartOptions extends WorkerAgentControlScope {
 	idempotencyKey?: string;
 	/** Existing same-objective durable tasks that must complete before this turn may run. */
 	dependsOnTaskIds?: readonly string[];
+	/**
+	 * Declares this start as NEW work with its own correlation rather than a continuation of the
+	 * specialist's prior task. An empty object is still a declaration: work that belongs to no goal
+	 * is bound to session scope, never to the goal this specialist happened to run first.
+	 */
+	newTask?: {
+		goal?: GoalState;
+		requirementIds?: readonly string[];
+		acceptanceCriterionIds?: readonly string[];
+	};
 }
 
 export interface WorkerAgentTranscriptOptions extends WorkerAgentControlScope {
@@ -515,12 +552,16 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 			const taskRecord = message.task as Record<string, unknown>;
 			if (
 				taskRecord.kind === "agent_turn" &&
-				Object.keys(taskRecord).every((field) => field === "kind" || field === "dependsOnTaskIds")
+				Object.keys(taskRecord).every(
+					(field) => field === "kind" || field === "dependsOnTaskIds" || field === "newTask",
+				)
 			) {
 				const dependsOnTaskIds = normalizeWorkerAgentDependencyTaskIds(taskRecord.dependsOnTaskIds);
+				const newTask = parsedNewTaskCorrelation(taskRecord.newTask);
 				task = {
 					kind: "agent_turn",
 					...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
+					...(newTask ? { newTask } : {}),
 				};
 			} else if (
 				taskRecord.kind === "terminal_handoff" &&
@@ -802,6 +843,34 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 	return { version: 1, parentSessionId, agentId, messages, replyAcknowledgements, replayReceipts };
 }
 
+/** Persisted correlation record: an unknown field or a malformed id is a corrupt mailbox, not a default. */
+function parsedNewTaskCorrelation(value: unknown): WorkerAgentNewTaskCorrelation | undefined {
+	if (value === undefined) return undefined;
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error("Worker agent mailbox contains invalid new-task correlation metadata.");
+	}
+	const correlation = value as Record<string, unknown>;
+	if (
+		!Object.keys(correlation).every(
+			(field) => field === "goalId" || field === "requirementIds" || field === "acceptanceCriterionIds",
+		)
+	) {
+		throw new Error("Worker agent mailbox contains invalid new-task correlation metadata.");
+	}
+	if (correlation.goalId !== undefined && typeof correlation.goalId !== "string") {
+		throw new Error("Worker agent mailbox contains invalid new-task correlation metadata.");
+	}
+	return normalizeWorkerAgentNewTaskCorrelation({
+		...(correlation.goalId === undefined ? {} : { goalId: correlation.goalId as string }),
+		...(correlation.requirementIds === undefined
+			? {}
+			: { requirementIds: correlation.requirementIds as readonly string[] }),
+		...(correlation.acceptanceCriterionIds === undefined
+			? {}
+			: { acceptanceCriterionIds: correlation.acceptanceCriterionIds as readonly string[] }),
+	});
+}
+
 function normalizeOptionalIdentity(value: string | undefined, label: string): string | undefined {
 	if (value === undefined) return undefined;
 	const normalized = value.trim();
@@ -809,6 +878,35 @@ function normalizeOptionalIdentity(value: string | undefined, label: string): st
 		throw new TypeError(`Worker control ${label} is invalid.`);
 	}
 	return normalized;
+}
+
+function normalizeWorkerAgentCorrelationIds(value: unknown, label: string): readonly string[] {
+	return parseBoundedStringArray(value === undefined ? [] : value, {
+		maxEntries: MAX_MAILBOX_CORRELATION_IDS,
+		maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+		trim: true,
+		invalidMessage: `Worker ${label} must contain bounded, non-empty strings.`,
+		duplicateMessage: `Worker ${label} must contain unique strings.`,
+		createError: (message) => new TypeError(message),
+	});
+}
+
+/** Normalize one new-task correlation, or `undefined` when the turn is an intentional continuation. */
+export function normalizeWorkerAgentNewTaskCorrelation(
+	value: WorkerAgentNewTaskCorrelation | undefined,
+): WorkerAgentNewTaskCorrelation | undefined {
+	if (value === undefined) return undefined;
+	const goalId = normalizeOptionalIdentity(value.goalId, "new task goal id");
+	const requirementIds = normalizeWorkerAgentCorrelationIds(value.requirementIds, "new task requirement ids");
+	const acceptanceCriterionIds = normalizeWorkerAgentCorrelationIds(
+		value.acceptanceCriterionIds,
+		"new task acceptance criterion ids",
+	);
+	return {
+		...(goalId ? { goalId } : {}),
+		...(requirementIds.length > 0 ? { requirementIds } : {}),
+		...(acceptanceCriterionIds.length > 0 ? { acceptanceCriterionIds } : {}),
+	};
 }
 
 export function normalizeWorkerAgentDependencyTaskIds(value: unknown): readonly string[] {
@@ -826,9 +924,11 @@ function normalizeTaskMetadata(task: WorkerAgentTaskMetadata | undefined): Worke
 	if (task === undefined) return undefined;
 	if (task.kind === "agent_turn") {
 		const dependsOnTaskIds = normalizeWorkerAgentDependencyTaskIds(task.dependsOnTaskIds);
+		const newTask = normalizeWorkerAgentNewTaskCorrelation(task.newTask);
 		return {
 			kind: "agent_turn",
 			...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
+			...(newTask ? { newTask } : {}),
 		};
 	}
 	const sourceAttemptId = normalizeOptionalIdentity(task.sourceAttemptId, "terminal source attempt id");
@@ -846,7 +946,8 @@ function sameTaskMetadata(
 		const rightDependencies = right.dependsOnTaskIds ?? [];
 		return (
 			leftDependencies.length === rightDependencies.length &&
-			leftDependencies.every((dependencyId, index) => dependencyId === rightDependencies[index])
+			leftDependencies.every((dependencyId, index) => dependencyId === rightDependencies[index]) &&
+			isDeepStrictEqual(left.newTask, right.newTask)
 		);
 	}
 	if (left?.kind === "terminal_handoff" && right?.kind === "terminal_handoff") {

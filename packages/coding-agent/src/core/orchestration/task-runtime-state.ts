@@ -11,6 +11,7 @@ import type {
 	AttemptStatus,
 	EvidenceContract,
 	ExecutionGrant,
+	ManagedLaneLifetime,
 	ObjectiveContract,
 	ObjectiveStatus,
 	OrchestrationDispatchRequest,
@@ -52,6 +53,11 @@ export interface AttemptRuntimeState {
 	retry?: AttemptRetryState;
 	checkpointIds: readonly string[];
 	result?: WorkerResultContract;
+	/**
+	 * Managed-process attempts only: lifetime of the external process this turn was dispatched to,
+	 * as last observed by its owner. Absent means retained, which is every attempt's initial state.
+	 */
+	managedLifetime?: ManagedLaneLifetime;
 	createdAt: string;
 	updatedAt: string;
 }

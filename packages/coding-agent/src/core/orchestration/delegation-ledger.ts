@@ -74,6 +74,24 @@ export interface PrepareAgentTurnInput {
 	instructions: string;
 	controlMessageId?: string;
 	dependsOnTaskIds?: readonly string[];
+	/**
+	 * Goal this turn's work belongs to. Supplying it (or `taskContext`) declares NEW work: the caller
+	 * owns the whole correlation and nothing is inherited from the task this specialist happened to
+	 * run before. Omitting both declares an intentional continuation of the prior task's work.
+	 */
+	goal?: GoalState;
+	/**
+	 * Goal this turn's work belongs to when the caller carries only its identity -- a recovered
+	 * mailbox turn, whose goal objective was admitted durably before the message was enqueued.
+	 * Declares new work exactly like `goal` does.
+	 */
+	goalId?: string;
+	/**
+	 * Requirements, acceptance criteria, resources and dependencies of this turn's own work. Any
+	 * field left out of a new-work turn is empty, never refilled from the prior task -- a reused
+	 * specialist must not drag its first goal along forever.
+	 */
+	taskContext?: Partial<WorkerDelegationTaskContext>;
 }
 
 function activeAttempt(attempt: AttemptRuntimeState): boolean {
@@ -187,15 +205,39 @@ export class DelegationOrchestrationLedger {
 		}
 		const priorTask = snapshot.tasks[prior.taskId]?.task;
 		if (!priorTask) throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' has no prior durable task.`);
+		// New work owns its own correlation; a continuation inherits the prior task's. The
+		// discriminator is explicit so an omitted field means "this work has none", not "reuse the
+		// last one" -- and so a `follow_up` is never silently reclassified as new work.
+		const declaresNewWork = input.goal !== undefined || input.goalId !== undefined || input.taskContext !== undefined;
+		const goalId = input.goal?.goalId ?? input.goalId;
+		const objectiveId = declaresNewWork
+			? goalId
+				? goalObjectiveId(goalId)
+				: `session:${this.sessionId}`
+			: priorTask.objectiveId;
+		const requirementIds = declaresNewWork
+			? (input.taskContext?.requirementIds ?? [])
+			: (prior.dispatch.requirementIds ?? []);
+		const acceptanceCriterionIds = declaresNewWork
+			? (input.taskContext?.acceptanceCriterionIds ?? [])
+			: priorTask.acceptanceCriterionIds;
+		const resourcePointerIds = declaresNewWork
+			? (input.taskContext?.resourcePointerIds ?? [])
+			: prior.dispatch.resourcePointerIds;
 		const dependencyTaskIds = validateTaskDependencyIds(
 			snapshot.tasks,
-			existingTask?.objectiveId ?? priorTask.objectiveId,
-			input.dependsOnTaskIds,
+			existingTask?.objectiveId ?? objectiveId,
+			declaresNewWork ? (input.taskContext?.dependsOnTaskIds ?? input.dependsOnTaskIds) : input.dependsOnTaskIds,
 		);
 		if (existingTask && controlMessageId) {
+			// The receipt's identity covers the work's correlation as well as its text: a replay that
+			// re-files the same instructions under another goal is a different task, and it is rejected
+			// here -- before the fast replay path below hands the original attempt back.
 			if (
 				existingTask.description !== instructions ||
 				existingTask.role !== agent.role ||
+				existingTask.objectiveId !== objectiveId ||
+				!isDeepStrictEqual([...existingTask.acceptanceCriterionIds], [...acceptanceCriterionIds]) ||
 				existingTask.dependsOn.length !== dependencyTaskIds.length ||
 				existingTask.dependsOn.some((dependencyId, index) => dependencyId !== dependencyTaskIds[index])
 			) {
@@ -211,7 +253,9 @@ export class DelegationOrchestrationLedger {
 					!attempt ||
 					attempt.dispatch.logicalLaneId !== agentId ||
 					attempt.dispatch.controlMessageId !== controlMessageId ||
-					attempt.dispatch.instructions !== instructions
+					attempt.dispatch.instructions !== instructions ||
+					!isDeepStrictEqual([...(attempt.dispatch.requirementIds ?? [])], [...requirementIds]) ||
+					!isDeepStrictEqual([...attempt.dispatch.resourcePointerIds], [...resourcePointerIds])
 				) {
 					throw new DurableTaskRuntimeError(
 						`Worker control message '${controlMessageId}' has conflicting dispatch evidence.`,
@@ -241,14 +285,13 @@ export class DelegationOrchestrationLedger {
 				role: agent.role,
 				requiredCapabilities: contract.worker.authority.capabilities,
 				riskBudget: contract.worker.profile.budget,
-				...(priorTask.objectiveId.startsWith("goal:")
-					? { goalId: priorTask.objectiveId.slice("goal:".length) }
-					: {}),
+				...(declaresNewWork && input.goal ? { goal: input.goal } : {}),
+				...(objectiveId.startsWith("goal:") ? { goalId: objectiveId.slice("goal:".length) } : {}),
 				taskContext: {
-					requirementIds: prior.dispatch.requirementIds ?? [],
+					requirementIds,
 					dependsOnTaskIds: dependencyTaskIds,
-					acceptanceCriterionIds: priorTask.acceptanceCriterionIds,
-					resourcePointerIds: prior.dispatch.resourcePointerIds,
+					acceptanceCriterionIds,
+					resourcePointerIds,
 				},
 				executionContract: contract,
 				dispatchMetadata: {

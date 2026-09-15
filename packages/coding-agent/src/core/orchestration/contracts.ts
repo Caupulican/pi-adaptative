@@ -513,6 +513,15 @@ export interface ApprovalResolutionContract {
 	resolvedAt: string;
 }
 
+/**
+ * Lifetime of the external process behind a managed-process attempt. This is a fact about the
+ * process, not about its work: a turn can reach terminal on a process that stays open, and a
+ * process can close long after its last turn settled. Retirement is final for the generation that
+ * observed it; a later real dispatch mints a new attempt, which starts retained again.
+ */
+export const MANAGED_LANE_LIFETIMES = ["retained", "retired"] as const;
+export type ManagedLaneLifetime = (typeof MANAGED_LANE_LIFETIMES)[number];
+
 export const ORCHESTRATION_EVENT_TYPES = [
 	"objective.created",
 	"objective.updated",
@@ -542,6 +551,7 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"attempt.cancelled",
 	"attempt.finished",
 	"attempt.lease_expired",
+	"managed.lifecycle",
 	"approval.requested",
 	"approval.resolved",
 	"notification.enqueued",

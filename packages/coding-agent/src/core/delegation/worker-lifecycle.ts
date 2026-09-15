@@ -217,6 +217,26 @@ export class WorkerLifecycle {
 		return { record, attempt: this.ledger.runtime.getSnapshot().attempts[attempt.attemptId]!, handle, created: true };
 	}
 
+	/**
+	 * Record that the external process behind a managed lane closed. This is a statement about the
+	 * process, never about its work: the turn that already reached terminal keeps its result, usage
+	 * and accounting, and only the binding's retained/retired lifetime changes. A closure reported
+	 * against a superseded dispatch generation is rejected instead of retiring the current one.
+	 */
+	retireManaged(laneId: string, dispatchSequence?: number): LaneRecord | undefined {
+		const attempt = selectedManagedWorkerAttempt(this.ledger.runtime.getSnapshot(), laneId);
+		// A closure observed before any turn was ever admitted has no durable generation to attach to.
+		// The lane genuinely holds nothing, so this is settled, not pending: reporting it again would
+		// retry forever against work that does not exist.
+		if (!attempt) return undefined;
+		this.ledger.runtime.recordManagedLifetime(attempt.attemptId, {
+			logicalLaneId: laneId,
+			dispatchSequence: dispatchSequence ?? attempt.dispatch.dispatchSequence ?? 1,
+			lifetime: "retired",
+		});
+		return this.getManagedRecord(laneId);
+	}
+
 	synchronizeGoalState(goal: GoalState): LaneRecord[] {
 		const before = new Map(this.getRecords().map((record) => [record.laneId, record.status]));
 		this.ledger.synchronizeGoalState(goal);

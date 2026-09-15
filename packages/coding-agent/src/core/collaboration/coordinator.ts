@@ -241,6 +241,14 @@ export class CollaborationCoordinator {
 					? new CurrentPanePlacementStrategy(backend, job, store)
 					: new ManagedWorkspacePlacementStrategy(backend, job, store, peers.environments);
 
+			// A managed workspace is created by `init()`, before any member reaches the per-member
+			// acquisition below. Without a durable marker, a lost or late reply leaves every member
+			// with no paneId and no outstanding acquisition, which the cleanup below would read as
+			// proof that nothing was created. Current-pane placement only reads the caller's existing
+			// pane, so it creates nothing here.
+			if (job.placement === "managed-workspace")
+				for (const agent of job.agents) store.beginAcquisition(job.id, agent.id);
+
 			const init = await strategy.init();
 			workspaceId = init.workspaceId;
 
@@ -361,6 +369,11 @@ export class CollaborationCoordinator {
 			for (const agent of stopping) {
 				if (!agent) continue;
 				if (cleanedAgentIds.has(agent.id)) {
+					// Membership in this set IS the evidence about the member's resource: a verified pane
+					// close, a positively closed owned workspace, or a failure proven `not-submitted`.
+					// Resolving the acquisition here is what lets the store record durable closure; the
+					// store itself never resolves one on the caller's word.
+					store.finishAcquisition(job.id, agent.id);
 					store.finishStop(job.id, agent.id, agent.turnId, "failed", detail);
 				} else {
 					store.update(job.id, (current) => {
@@ -495,29 +508,56 @@ export class CollaborationCoordinator {
 		const store = this.deps.store;
 		for (const job of store.list()) {
 			for (const agent of job.agents) {
-				if (
-					agent.stopping ||
-					agent.turn === 0 ||
-					agent.notifiedTurn >= agent.turn ||
-					["idle", "reserved", "running"].includes(agent.status)
-				)
-					continue;
-				this.deps.report({
-					laneId: collaborationLaneId(job.id, agent.id),
-					phase: "terminal",
-					status: agent.status,
-					dispatchSequence: agent.turn,
-					summary: boundCollaborationEvidence(agent.evidence),
-					usage: agent.usage,
-					reasonCode: agent.status === "blocked" ? "collaboration_question_or_blocker" : "collaboration_terminal",
-				});
-				// The host persisted its terminal/outbox before returning. This is only duplicate suppression.
-				store.update(job.id, (current) => {
-					const member = current.agents.find((item) => item.id === agent.id);
-					if (member?.turnId === agent.turnId) member.notifiedTurn = agent.turn;
-				});
+				this.publishTurnTerminal(job, agent);
+				this.publishAgentClosure(job, agent.id);
 			}
 		}
+	}
+	/** One durable turn terminal, published at most once per turn. */
+	private publishTurnTerminal(job: CollaborationJob, agent: CollaborationAgent): void {
+		const store = this.deps.store;
+		if (
+			agent.stopping ||
+			agent.turn === 0 ||
+			agent.notifiedTurn >= agent.turn ||
+			["idle", "reserved", "running"].includes(agent.status)
+		)
+			return;
+		this.deps.report({
+			laneId: collaborationLaneId(job.id, agent.id),
+			phase: "terminal",
+			status: agent.status,
+			dispatchSequence: agent.turn,
+			summary: boundCollaborationEvidence(agent.evidence),
+			usage: agent.usage,
+			reasonCode: agent.status === "blocked" ? "collaboration_question_or_blocker" : "collaboration_terminal",
+		});
+		// The host persisted its terminal/outbox before returning. This is only duplicate suppression.
+		store.update(job.id, (current) => {
+			const member = current.agents.find((item) => item.id === agent.id);
+			if (member?.turnId === agent.turnId) member.notifiedTurn = agent.turn;
+		});
+	}
+	/**
+	 * The persistent CLI's own closure. A turn reaching terminal does not close the agent behind it,
+	 * and closing the agent does not advance its turn, so this is published as a distinct lifetime
+	 * statement -- never by re-finishing a completed turn -- and only once the member's last turn has
+	 * already been published, so the work's terminal always precedes the process's closure.
+	 */
+	private publishAgentClosure(job: CollaborationJob, agentId: string): void {
+		const store = this.deps.store;
+		const agent = store.load(job.id).agents.find((member) => member.id === agentId);
+		if (!agent?.closed || agent.notifiedClosure || agent.notifiedTurn < agent.turn) return;
+		this.deps.report({
+			laneId: collaborationLaneId(job.id, agent.id),
+			phase: "lifecycle",
+			...(agent.turn > 0 ? { dispatchSequence: agent.turn } : {}),
+			agentLifecycle: "retired",
+		});
+		store.update(job.id, (current) => {
+			const member = current.agents.find((item) => item.id === agent.id);
+			if (member) member.notifiedClosure = true;
+		});
 	}
 	async stopAgent(jobId: string, agentId: string, turnId?: string, failure?: string): Promise<boolean> {
 		const stopped = await stopCollaborationAgent(this.deps.store, this.deps.backend, jobId, agentId, turnId, failure);

@@ -17,6 +17,7 @@ import {
 	type ExecutionGrant,
 	isHarnessCapability,
 	isResourcePointerKind,
+	MANAGED_LANE_LIFETIMES,
 	MAX_ORCHESTRATION_AGENT_BINDINGS,
 	MAX_ORCHESTRATION_APPROVALS,
 	MAX_ORCHESTRATION_ATTEMPTS,
@@ -34,6 +35,7 @@ import {
 	MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES,
 	MAX_WORKER_RESOURCE_PATH_LENGTH,
 	MAX_WORKER_RESOURCE_POINTERS,
+	type ManagedLaneLifetime,
 	OBJECTIVE_STATUSES,
 	type ObjectiveContract,
 	type ObjectiveStatus,
@@ -758,6 +760,15 @@ export function executionGrantFromValue(value: unknown, label: string): Executio
 	};
 }
 
+export function managedLaneLifetimeFromValue(value: unknown, label: string): ManagedLaneLifetime | undefined {
+	if (value === undefined) return undefined;
+	const lifetime = string(value, label);
+	if (!MANAGED_LANE_LIFETIMES.some((candidate) => candidate === lifetime)) {
+		throw new DurableTaskRuntimeError(`${label} is invalid.`);
+	}
+	return lifetime as ManagedLaneLifetime;
+}
+
 function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRuntimeState {
 	const attempt = exactRecord(value, label, [
 		"attemptId",
@@ -772,6 +783,7 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		"retry",
 		"checkpointIds",
 		"result",
+		"managedLifetime",
 		"createdAt",
 		"updatedAt",
 	]);
@@ -780,6 +792,13 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		throw new DurableTaskRuntimeError(`${label}.status is invalid.`);
 	}
 	const grant = attempt.grant === undefined ? undefined : executionGrantFromValue(attempt.grant, `${label}.grant`);
+	const managedLifetime = managedLaneLifetimeFromValue(attempt.managedLifetime, `${label}.managedLifetime`);
+	if (
+		managedLifetime &&
+		dispatchFromValue(attempt.dispatch, `${label}.dispatch`).executionKind !== "managed-process"
+	) {
+		throw new DurableTaskRuntimeError(`${label}.managedLifetime is only defined for managed-process work.`);
+	}
 	const createdAt = isoDate(attempt.createdAt, `${label}.createdAt`);
 	const updatedAt = isoDate(attempt.updatedAt, `${label}.updatedAt`);
 	if (Date.parse(updatedAt) < Date.parse(createdAt)) {
@@ -804,6 +823,7 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 			`${label}.checkpointIds`,
 		),
 		...(attempt.result === undefined ? {} : { result: resultFromValue(attempt.result, `${label}.result`) }),
+		...(managedLifetime ? { managedLifetime } : {}),
 		createdAt,
 		updatedAt,
 	};

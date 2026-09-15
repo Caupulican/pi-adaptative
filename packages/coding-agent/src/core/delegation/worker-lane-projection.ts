@@ -51,7 +51,15 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 	// Retire keeps the binding, the transcript, and this record. The binding status lets the Team
 	// blocks tell a retained session from a retired one without dropping the lane for status, review,
 	// worker evidence, or recovery, which all resolve lanes through this projection.
-	const agentStatus = attempt.agentId ? snapshot.agents[attempt.agentId]?.status : undefined;
+	// An in-process worker's lifetime is its durable agent binding. A managed lane has no such
+	// binding -- the host never launches or resumes that process -- so its lifetime is the one the
+	// lane's owner observed and recorded on this exact dispatch generation.
+	const agentStatus =
+		attempt.managedLifetime === "retired"
+			? "retired"
+			: attempt.agentId
+				? snapshot.agents[attempt.agentId]?.status
+				: undefined;
 	const objective = snapshot.objectives[task.task.objectiveId];
 	const awaitingVerification =
 		attempt.result?.nextAction === "independent_verification_required" && task.verification === undefined;
@@ -75,9 +83,14 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 	const goalId = objective?.objective.objectiveId.startsWith("goal:")
 		? objective.objective.objectiveId.slice("goal:".length)
 		: undefined;
+	// The durable identity that owns this lane: bound by the lease while an attempt runs, and carried
+	// on the dispatch for a queued turn that no process has taken yet. Without it every consumer
+	// counts tasks where it means specialists.
+	const agentId = attempt.agentId ?? attempt.dispatch.logicalLaneId;
 	return {
 		laneId: managed ? (attempt.dispatch.logicalLaneId ?? taskId) : taskId,
 		type: managed ? "tmux-worker" : "worker",
+		...(agentId ? { agentId } : {}),
 		status,
 		label,
 		profileId: attempt.dispatch.profileId,
