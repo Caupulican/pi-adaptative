@@ -2199,6 +2199,27 @@ describe("SettingsManager", () => {
 	});
 });
 
+describe("model favorites settings", () => {
+	it("normalizes provider/model identity, persists toggles, and preserves collisions", async () => {
+		const manager = SettingsManager.inMemory({
+			modelFavorites: [
+				{ provider: "openai", modelId: "gpt-4o" },
+				{ provider: "openai", modelId: "gpt-4o" },
+				{ provider: "openai/v1", modelId: "gpt-4o" },
+			],
+		});
+
+		expect(manager.getModelFavorites()).toEqual([
+			{ provider: "openai", modelId: "gpt-4o" },
+			{ provider: "openai/v1", modelId: "gpt-4o" },
+		]);
+		expect(manager.isModelFavorite("openai", "gpt-4o")).toBe(true);
+		manager.toggleModelFavorite("openai", "gpt-4o");
+		await manager.flush();
+		expect(manager.getModelFavorites()).toEqual([{ provider: "openai/v1", modelId: "gpt-4o" }]);
+	});
+});
+
 describe("workbench settings", () => {
 	beforeEach(() => {
 		if (existsSync(testDir)) rmSync(testDir, { recursive: true });

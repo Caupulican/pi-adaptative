@@ -1,4 +1,4 @@
-import type { Component } from "@caupulican/pi-tui";
+import { type Component, visibleWidth } from "@caupulican/pi-tui";
 import { theme } from "../theme/theme.ts";
 
 /**
@@ -20,6 +20,8 @@ export class DynamicBorder implements Component {
 	}
 
 	render(width: number): string[] {
-		return [this.color("─".repeat(Math.max(1, width)))];
+		const columns = Math.max(0, width);
+		const glyphWidth = visibleWidth("─");
+		return [this.color("─".repeat(Math.floor(columns / glyphWidth)) + " ".repeat(columns % glyphWidth))];
 	}
 }

@@ -548,6 +548,11 @@ export interface BedrockScopeSettings {
 	verification: BedrockScopeVerification;
 }
 
+export interface ModelFavorite {
+	provider: string;
+	modelId: string;
+}
+
 const MAX_BEDROCK_SCOPE_MODEL_IDS = 16;
 const MAX_BEDROCK_MODEL_ID_CHARS = 512;
 
@@ -689,6 +694,8 @@ export interface Settings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: ThinkingLevel;
+	/** Globally pinned model identities. Identity is the provider and model id pair, not id alone. */
+	modelFavorites?: ModelFavorite[];
 	memorySystem?: MemorySystem;
 	/** Provider-scoped fast-mode preferences. Concrete providers own the meaning of enabled. */
 	fastMode?: Record<string, boolean>;
@@ -1656,6 +1663,10 @@ export class SettingsManager {
 	private mergeEffectiveSettings(): Settings {
 		let merged = deepMergeSettings(this.globalSettings, this.projectSettings);
 		merged = deepMergeSettings(merged, this.directoryProfileSettings);
+		// Favorites are deliberately global user preferences; project and directory overlays must
+		// never shadow the canonical list or make a pin disappear when changing repositories.
+		if (this.globalSettings.modelFavorites !== undefined) merged.modelFavorites = this.globalSettings.modelFavorites;
+		else delete merged.modelFavorites;
 		const workerDelegation = mergeWorkerDelegationLayers(
 			this.globalSettings.workerDelegation,
 			this.projectSettings.workerDelegation,
@@ -3933,6 +3944,40 @@ export class SettingsManager {
 	setEnabledModels(patterns: string[] | undefined): void {
 		this.globalSettings.enabledModels = patterns;
 		this.markModified("enabledModels");
+		this.save();
+	}
+
+	getModelFavorites(): ModelFavorite[] {
+		const favorites = this.settings.modelFavorites;
+		if (!Array.isArray(favorites)) return [];
+		const seen = new Set<string>();
+		const result: ModelFavorite[] = [];
+		for (const favorite of favorites) {
+			if (!favorite || typeof favorite.provider !== "string" || typeof favorite.modelId !== "string") continue;
+			const provider = favorite.provider.trim();
+			const modelId = favorite.modelId.trim();
+			if (!provider || !modelId) continue;
+			const key = `${provider}\u0000${modelId}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			result.push({ provider, modelId });
+		}
+		return result;
+	}
+
+	isModelFavorite(provider: string, modelId: string): boolean {
+		return this.getModelFavorites().some(
+			(favorite) => favorite.provider === provider && favorite.modelId === modelId,
+		);
+	}
+
+	toggleModelFavorite(provider: string, modelId: string): void {
+		const favorites = this.getModelFavorites();
+		const index = favorites.findIndex((favorite) => favorite.provider === provider && favorite.modelId === modelId);
+		if (index >= 0) favorites.splice(index, 1);
+		else favorites.push({ provider, modelId });
+		this.globalSettings.modelFavorites = favorites;
+		this.markModified("modelFavorites");
 		this.save();
 	}
 

@@ -2,6 +2,7 @@ import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import { setKeybindings } from "@caupulican/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 import { ModelSelectorComponent } from "../src/modes/interactive/components/model-selector.ts";
 import { ThinkingSelectorComponent } from "../src/modes/interactive/components/thinking-selector.ts";
 import { handleThinkingCommand } from "../src/modes/interactive/session-flow-commands.ts";
@@ -123,7 +124,7 @@ describe("/thinking command and selector (P1b/P1c)", () => {
 		const selector = new ModelSelectorComponent(
 			{ requestRender: vi.fn() } as any,
 			mockModel as any,
-			{} as any,
+			SettingsManager.inMemory(),
 			{ refresh: vi.fn(), getAvailable: vi.fn().mockResolvedValue([mockModel]), getError: () => undefined } as any,
 			[],
 			onSelect,

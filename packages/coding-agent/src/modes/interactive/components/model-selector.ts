@@ -1,10 +1,19 @@
 import { type Model, modelsAreEqual } from "@caupulican/pi-ai";
-import { Container, type Focusable, getKeybindings, type Input, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import {
+	Container,
+	type Focusable,
+	getKeybindings,
+	type Input,
+	Spacer,
+	Text,
+	type TUI,
+	visibleWidth,
+} from "@caupulican/pi-tui";
 import type { ModelRegistry } from "../../../core/model-registry.ts";
 import type { SettingsManager } from "../../../core/settings-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { formatSelectorActionHints, keyHint } from "./keybinding-hints.ts";
+import { formatSelectorActionHints, keyHint, keyText } from "./keybinding-hints.ts";
 import {
 	advanceSelectorIndex,
 	filterSelectorItems,
@@ -24,7 +33,7 @@ interface ScopedModelItem {
 	thinkingLevel?: string;
 }
 
-type ModelScope = "all" | "scoped";
+type ModelScope = "all" | "favorites" | "scoped";
 
 /**
  * Component that renders a model selector with search
@@ -48,6 +57,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private selectedIndex: number = 0;
 	private currentModel?: Model<any>;
 	private modelRegistry: ModelRegistry;
+	private settingsManager: SettingsManager;
+	private favoriteKeys = new Set<string>();
 	private onSelectCallback: (model: Model<any>) => void;
 	private onSelectAsDefaultCallback?: (model: Model<any>) => void;
 	private onCancelCallback: () => void;
@@ -61,7 +72,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	constructor(
 		tui: TUI,
 		currentModel: Model<any> | undefined,
-		_settingsManager: SettingsManager,
+		settingsManager: SettingsManager,
 		modelRegistry: ModelRegistry,
 		scopedModels: ReadonlyArray<ScopedModelItem>,
 		onSelect: (model: Model<any>) => void,
@@ -73,7 +84,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 		this.tui = tui;
 		this.currentModel = currentModel;
+		this.settingsManager = settingsManager;
 		this.modelRegistry = modelRegistry;
+		this.refreshFavoriteKeys();
 		this.scopedModels = scopedModels;
 		this.scope = scopedModels.length > 0 ? "scoped" : "all";
 		this.onSelectCallback = onSelect;
@@ -85,15 +98,14 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 
 		// Add hint about model filtering
-		if (scopedModels.length > 0) {
-			this.scopeText = new Text(this.getScopeText(), 0, 0);
-			this.addChild(this.scopeText);
-			this.scopeHintText = new Text(this.getScopeHintText(), 0, 0);
-			this.addChild(this.scopeHintText);
-		} else {
+		if (scopedModels.length === 0) {
 			const hintText = "Only showing models from configured providers. Use /login to add providers.";
 			this.addChild(new Text(theme.fg("warning", hintText), 0, 0));
 		}
+		this.scopeText = new Text(this.getScopeText(), 0, 0);
+		this.addChild(this.scopeText);
+		this.scopeHintText = new Text(this.getScopeHintText(), 0, 0);
+		this.addChild(this.scopeHintText);
 		this.addChild(new Spacer(1));
 
 		this.searchSurface = SearchableListSurface.mount(this, initialSearchInput);
@@ -107,7 +119,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		};
 
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(formatSelectorActionHints(Boolean(onSelectAsDefault)), 1, 0));
+		this.addChild(
+			new Text(
+				`${formatSelectorActionHints(Boolean(onSelectAsDefault))}  ${keyHint("app.models.toggleFavorite", "pin/unpin")}`,
+				1,
+			),
+		);
 
 		// Add bottom border
 		this.addChild(new DynamicBorder());
@@ -163,7 +180,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			id: scoped.model.id,
 			model: scoped.model,
 		}));
-		this.activeModels = this.scope === "scoped" ? this.scopedModelItems : this.allModels;
+		this.activeModels = this.getActiveModels();
 		this.filteredModels = this.activeModels;
 		const currentIndex = this.filteredModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
 		this.selectedIndex =
@@ -172,46 +189,89 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	private sortModels(models: ModelItem[]): ModelItem[] {
 		const sorted = [...models];
-		// Sort: current model first, then by provider
+		// Sort: favorites first, then current model, provider, and id.
 		sorted.sort((a, b) => {
 			const aIsCurrent = modelsAreEqual(this.currentModel, a.model);
 			const bIsCurrent = modelsAreEqual(this.currentModel, b.model);
+			const aIsFavorite = this.isFavorite(a);
+			const bIsFavorite = this.isFavorite(b);
+			if (aIsFavorite !== bIsFavorite) return aIsFavorite ? -1 : 1;
 			if (aIsCurrent && !bIsCurrent) return -1;
 			if (!aIsCurrent && bIsCurrent) return 1;
-			return a.provider.localeCompare(b.provider);
+			return a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
 		});
 		return sorted;
 	}
 
+	private refreshFavoriteKeys(): void {
+		this.favoriteKeys = new Set(
+			this.settingsManager.getModelFavorites().map((favorite) => `${favorite.provider}\u0000${favorite.modelId}`),
+		);
+	}
+
+	private modelKey(item: ModelItem): string {
+		return `${item.provider}\u0000${item.id}`;
+	}
+
+	private isFavorite(item: ModelItem): boolean {
+		return this.favoriteKeys.has(this.modelKey(item));
+	}
+
+	private getActiveModels(): ModelItem[] {
+		if (this.scope === "scoped") return this.scopedModelItems;
+		if (this.scope === "favorites") return this.allModels.filter((item) => this.isFavorite(item));
+		return this.allModels;
+	}
+
 	private getScopeText(): string {
 		const allText = this.scope === "all" ? theme.fg("accent", "all") : theme.fg("muted", "all");
+		const favoritesText =
+			this.scope === "favorites" ? theme.fg("accent", "favorites") : theme.fg("muted", "favorites");
 		const scopedText = this.scope === "scoped" ? theme.fg("accent", "scoped") : theme.fg("muted", "scoped");
-		return `${theme.fg("muted", "Scope: ")}${allText}${theme.fg("muted", " | ")}${scopedText}`;
+		return `${theme.fg("muted", "Models: ")}${allText}${theme.fg("muted", " | ")}${favoritesText}${this.scopedModels.length > 0 ? theme.fg("muted", " | ") + scopedText : ""}`;
 	}
 
 	private getScopeHintText(): string {
-		return keyHint("tui.input.tab", "scope") + theme.fg("muted", " (all/scoped)");
+		return (
+			keyHint("app.models.toggleFavoritesTab", "tabs") +
+			theme.fg("muted", this.scopedModels.length > 0 ? " (all/favorites/scoped)" : " (all/favorites)")
+		);
 	}
 
 	private setScope(scope: ModelScope): void {
 		if (this.scope === scope) return;
+		const previousSelection = this.filteredModels[this.selectedIndex];
+		const previousKey = previousSelection ? this.modelKey(previousSelection) : undefined;
 		this.scope = scope;
-		this.activeModels = this.scope === "scoped" ? this.scopedModelItems : this.allModels;
+		this.activeModels = this.getActiveModels();
+		const previousIndex = previousKey
+			? this.activeModels.findIndex((item) => this.modelKey(item) === previousKey)
+			: -1;
 		const currentIndex = this.activeModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
-		this.selectedIndex = currentIndex >= 0 ? currentIndex : 0;
-		this.filterModels(this.searchInput.getValue());
+		this.selectedIndex = previousIndex >= 0 ? previousIndex : currentIndex >= 0 ? currentIndex : 0;
+		this.filterModels(this.searchInput.getValue(), previousKey);
 		if (this.scopeText) {
 			this.scopeText.setText(this.getScopeText());
 		}
 	}
 
-	private filterModels(query: string): void {
-		this.filteredModels = filterSelectorItems(
+	private filterModels(query: string, preferredKey?: string): void {
+		const matches = filterSelectorItems(
 			this.activeModels,
 			query,
 			({ id, provider }) => `${id} ${provider} ${provider}/${id} ${provider} ${id}`,
 		);
-		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
+		this.filteredModels = [
+			...matches.filter((item) => this.isFavorite(item)),
+			...matches.filter((item) => !this.isFavorite(item)),
+		];
+		const preferredIndex = preferredKey
+			? this.filteredModels.findIndex((item) => this.modelKey(item) === preferredKey)
+			: -1;
+		this.selectedIndex =
+			preferredIndex >= 0
+				? preferredIndex
+				: Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
 		this.updateList();
 	}
 
@@ -229,20 +289,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 			const isSelected = i === this.selectedIndex;
 			const isCurrent = modelsAreEqual(this.currentModel, item.model);
-
-			let line = "";
-			if (isSelected) {
-				const prefix = theme.fg("accent", "→ ");
-				const modelText = `${item.id}`;
-				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
-				line = `${prefix + theme.fg("accent", modelText)} ${providerBadge}${checkmark}`;
-			} else {
-				const modelText = `  ${item.id}`;
-				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
-				line = `${modelText} ${providerBadge}${checkmark}`;
-			}
+			const favoriteMark = this.isFavorite(item) ? theme.fg("accent", "★ ") : " ".repeat(visibleWidth("★ "));
+			const prefix = isSelected ? theme.fg("accent", "→ ") : " ".repeat(visibleWidth("→ "));
+			const modelText = isSelected ? theme.fg("accent", item.id) : item.id;
+			const providerBadge = theme.fg("muted", `[${item.provider}]`);
+			const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
+			const line = `${prefix}${favoriteMark}${modelText} ${providerBadge}${checkmark}`;
 
 			this.listContainer.addChild(new Text(line, 0, 0));
 		}
@@ -259,7 +311,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				this.listContainer.addChild(new Text(theme.fg("error", line), 0, 0));
 			}
 		} else if (this.filteredModels.length === 0) {
-			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
+			const emptyText =
+				this.scope === "favorites" && !this.searchInput.getValue()
+					? `  No pinned models. ${keyText("app.models.toggleFavorite")} pin/unpin a model in All.`
+					: "  No matching models";
+			this.listContainer.addChild(new Text(theme.fg("muted", emptyText), 0, 0));
 		} else {
 			const selected = this.filteredModels[this.selectedIndex];
 			this.listContainer.addChild(new Spacer(1));
@@ -269,13 +325,28 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
-		if (kb.matches(keyData, "tui.input.tab")) {
-			if (this.scopedModelItems.length > 0) {
-				const nextScope: ModelScope = this.scope === "all" ? "scoped" : "all";
-				this.setScope(nextScope);
-				if (this.scopeHintText) {
-					this.scopeHintText.setText(this.getScopeHintText());
-				}
+		if (kb.matches(keyData, "app.models.toggleFavoritesTab")) {
+			const nextScope: ModelScope =
+				this.scope === "all"
+					? "favorites"
+					: this.scope === "favorites"
+						? this.scopedModelItems.length > 0
+							? "scoped"
+							: "all"
+						: "all";
+			this.setScope(nextScope);
+			if (this.scopeHintText) this.scopeHintText.setText(this.getScopeHintText());
+			return;
+		}
+		if (kb.matches(keyData, "app.models.toggleFavorite")) {
+			const selected = this.filteredModels[this.selectedIndex];
+			if (selected) {
+				this.settingsManager.toggleModelFavorite(selected.provider, selected.id);
+				this.refreshFavoriteKeys();
+				const selectedKey = this.modelKey(selected);
+				this.allModels = this.sortModels(this.allModels);
+				this.activeModels = this.getActiveModels();
+				this.filterModels(this.searchInput.getValue(), selectedKey);
 			}
 			return;
 		}

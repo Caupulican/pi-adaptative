@@ -73,6 +73,8 @@ export interface AppKeybindings {
 	"app.models.save": true;
 	"app.models.enableAll": true;
 	"app.models.clearAll": true;
+	"app.models.toggleFavorite": true;
+	"app.models.toggleFavoritesTab": true;
 	"app.models.toggleProvider": true;
 	"app.models.reorderUp": true;
 	"app.models.reorderDown": true;
@@ -257,6 +259,14 @@ export const KEYBINDINGS = {
 	"app.models.clearAll": {
 		defaultKeys: "ctrl+x",
 		description: "Clear all models",
+	},
+	"app.models.toggleFavorite": {
+		defaultKeys: "ctrl+f",
+		description: "Pin or unpin selected model",
+	},
+	"app.models.toggleFavoritesTab": {
+		defaultKeys: "tab",
+		description: "Switch between all models and favorites",
 	},
 	"app.models.toggleProvider": {
 		defaultKeys: "ctrl+p",

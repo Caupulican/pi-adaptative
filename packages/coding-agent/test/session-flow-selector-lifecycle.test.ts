@@ -31,7 +31,7 @@ function createHost(
 			getUserMessagesForForking: () => [{ entryId: "entry-1", text: "Keep this message" }],
 			setSessionName: () => events.push("name"),
 		},
-		settingsManager: {},
+		settingsManager: { getModelFavorites: () => [], toggleModelFavorite: () => {} },
 		runtimeHost: { fork },
 		ui: { requestRender: () => events.push("render") },
 		editor: { setText: () => events.push("editor") },
