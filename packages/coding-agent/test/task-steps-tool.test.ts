@@ -7,15 +7,17 @@ import { createTaskStepsToolDefinition } from "../src/core/tools/task-steps.ts";
 function createHarness(activePipelineScope?: { runId: string; stageIds: readonly string[] }) {
 	let state: TaskStepsState | undefined;
 	let tick = 0;
+	let saveCount = 0;
 	const tool = createTaskStepsToolDefinition({
 		getTaskStepsState: () => state,
 		saveTaskStepsState: (next) => {
+			saveCount += 1;
 			state = next;
 		},
 		now: () => `T${tick++}`,
 		...(activePipelineScope ? { getActivePipelineScope: () => activePipelineScope } : {}),
 	});
-	return { tool, getState: () => state };
+	return { tool, getState: () => state, getSaveCount: () => saveCount };
 }
 
 async function execute(tool: ReturnType<typeof createTaskStepsToolDefinition>, input: Record<string, unknown>) {
@@ -533,3 +535,198 @@ describe("task_steps tool", () => {
 function harnessGuidelines(tool: ReturnType<typeof createTaskStepsToolDefinition>): string {
 	return (tool.promptGuidelines ?? []).join("\n");
 }
+
+/**
+ * Batch identity: a `updates[]` batch resolves every selector once against the state as it was on
+ * entry, then applies immutable step ids. Two items that name one step -- by any alias -- are one
+ * ambiguous instruction the harness must refuse rather than order for the caller.
+ *
+ * These are hardening cases found by reading the resolver, not a reconstruction of an observed
+ * failure: the duplicate-selector refusals seen in the field repeated one literal selector and were
+ * already caught by the raw-string gate that this block leaves untouched.
+ */
+describe("task_steps batch canonical identity", () => {
+	async function seed(stepCount: 2 | 3, secondContent = "Two") {
+		const harness = createHarness();
+		const steps = [{ content: "One", status: "in_progress" }, { content: secondContent }];
+		if (stepCount === 3) steps.push({ content: "Three" });
+		await execute(harness.tool, { action: "set", steps });
+		return harness;
+	}
+
+	function textOf(result: Awaited<ReturnType<typeof execute>>): string {
+		const first = result.content[0];
+		if (first?.type !== "text") throw new Error("Expected text task_steps result");
+		return first.text;
+	}
+
+	it("refuses a batch where 'current' and the active step's explicit id name one step", async () => {
+		const harness = await seed(2);
+		const before = harness.getState();
+		const saves = harness.getSaveCount();
+		const result = await execute(harness.tool, {
+			action: "update",
+			updates: [
+				{ id: "current", status: "completed" },
+				{ id: "step-1", status: "completed", note: "N" },
+			],
+		});
+		expect(result.details).toMatchObject({ action: "update", applied: false });
+		const text = textOf(result);
+		expect(text).toContain("Nothing applied.");
+		expect(text).toContain("step-1");
+		expect(text).toContain('"current"');
+		expect(harness.getState()).toBe(before);
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["in_progress", "pending"]);
+		expect(harness.getSaveCount()).toBe(saves);
+	});
+
+	it("refuses a batch where an ordinal and the full id name one step, rather than ordering the statuses", async () => {
+		const harness = await seed(2);
+		const before = harness.getState();
+		const result = await execute(harness.tool, {
+			action: "update",
+			updates: [
+				{ id: "2", status: "completed", note: "A" },
+				{ id: "step-2", status: "cancelled" },
+			],
+		});
+		expect(result.details).toMatchObject({ action: "update", applied: false });
+		expect(textOf(result)).toContain("step-2");
+		expect(harness.getState()).toBe(before);
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["in_progress", "pending"]);
+	});
+
+	it("refuses a batch where a content selector and an id name one step", async () => {
+		const harness = await seed(2, "Ship the release");
+		const before = harness.getState();
+		const result = await execute(harness.tool, {
+			action: "update",
+			updates: [
+				{ id: "step-2", status: "completed" },
+				{ id: "ship the release", note: "B" },
+			],
+		});
+		expect(result.details).toMatchObject({ action: "update", applied: false });
+		expect(textOf(result)).toContain("step-2");
+		expect(harness.getState()).toBe(before);
+	});
+
+	it("resolves 'current' against the state on entry, so an earlier completion cannot move the target", async () => {
+		// Without an entry snapshot the second item resolves after item one auto-promoted step-2,
+		// silently completing a step the caller never named.
+		const harness = await seed(3);
+		const before = harness.getState();
+		const result = await execute(harness.tool, {
+			action: "update",
+			updates: [
+				{ id: "step-1", status: "completed" },
+				{ id: "current", status: "completed" },
+			],
+		});
+		expect(result.details).toMatchObject({ action: "update", applied: false });
+		expect(textOf(result)).toContain("step-1");
+		expect(harness.getState()).toBe(before);
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["in_progress", "pending", "pending"]);
+	});
+
+	it("refuses every ordinal spelling that aliases one step", async () => {
+		for (const alias of ["#1", "step 1", "s1"]) {
+			const harness = await seed(2);
+			const before = harness.getState();
+			const result = await execute(harness.tool, {
+				action: "update",
+				updates: [
+					{ id: "1", status: "completed" },
+					{ id: alias, note: "x" },
+				],
+			});
+			expect(result.details, `alias ${alias}`).toMatchObject({ action: "update", applied: false });
+			expect(textOf(result), `alias ${alias}`).toContain("step-1");
+			expect(harness.getState(), `alias ${alias}`).toBe(before);
+		}
+	});
+
+	it("applies a batch of distinct steps and auto-starts the next pending step once", async () => {
+		const harness = await seed(3);
+		const result = await execute(harness.tool, {
+			action: "update",
+			updates: [
+				{ id: "1", status: "completed", note: "a" },
+				{ id: "step-3", status: "blocked" },
+			],
+		});
+		expect(result.details).toMatchObject({ action: "update", applied: true, autoPromotedStepId: "step-2" });
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["completed", "in_progress", "blocked"]);
+		expect(harness.getState()?.steps[0]?.notes).toEqual(["a"]);
+	});
+
+	it("binds 'current' to the step active on entry even when the batch has no duplicate target", async () => {
+		// Isolates snapshot binding from the duplicate gate: the two items name DIFFERENT steps, so
+		// the batch applies. Item one makes step-2 active, demoting step-1; an implementation that
+		// re-resolved "current" at apply time would attach the note to step-2 instead of step-1.
+		const harness = await seed(3);
+		const result = await execute(harness.tool, {
+			action: "update",
+			updates: [
+				{ id: "2", status: "in_progress" },
+				{ id: "current", note: "belongs to original active" },
+			],
+		});
+		expect(result.details).toMatchObject({ action: "update", applied: true });
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["pending", "in_progress", "pending"]);
+		expect(harness.getState()?.steps[0]?.notes).toEqual(["belongs to original active"]);
+		expect(harness.getState()?.steps[1]?.notes).toEqual([]);
+	});
+
+	it("keeps chained auto-promotion when a later item completes the step an earlier item promoted", async () => {
+		// The promotion guard reads each target's LIVE status, so completing step-2 (promoted by
+		// item one) still advances the cursor to step-3. Snapshot identity must not freeze status.
+		const harness = await seed(3);
+		const result = await execute(harness.tool, {
+			action: "update",
+			updates: [
+				{ id: "step-1", status: "completed" },
+				{ id: "step-2", status: "completed" },
+			],
+		});
+		expect(result.details).toMatchObject({ action: "update", applied: true, autoPromotedStepId: "step-3" });
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["completed", "completed", "in_progress"]);
+	});
+
+	it("persists nothing when the batch ends on an invalid item", async () => {
+		const harness = await seed(2);
+		const saves = harness.getSaveCount();
+		const before = harness.getState();
+		const result = await execute(harness.tool, {
+			action: "update",
+			updates: [
+				{ id: "step-1", status: "completed" },
+				{ id: "step-404", status: "completed" },
+			],
+		});
+		expect(result.details).toMatchObject({ action: "update", applied: false });
+		expect(textOf(result)).toContain("updates[1]");
+		expect(harness.getSaveCount()).toBe(saves);
+		expect(harness.getState()).toBe(before);
+		expect(harness.getState()?.steps.map((step) => step.status)).toEqual(["in_progress", "pending"]);
+	});
+
+	it("leaves single-update selector behaviour unchanged", async () => {
+		const omitted = await seed(3);
+		await execute(omitted.tool, { action: "update", status: "completed" });
+		expect(omitted.getState()?.steps.map((step) => step.status)).toEqual(["completed", "in_progress", "pending"]);
+
+		const explicitCurrent = await seed(3);
+		await execute(explicitCurrent.tool, { action: "update", id: "current", status: "completed" });
+		expect(explicitCurrent.getState()?.steps.map((step) => step.status)).toEqual([
+			"completed",
+			"in_progress",
+			"pending",
+		]);
+
+		const byId = await seed(3);
+		await execute(byId.tool, { action: "update", id: "step-2", status: "blocked" });
+		expect(byId.getState()?.steps.map((step) => step.status)).toEqual(["in_progress", "blocked", "pending"]);
+	});
+});

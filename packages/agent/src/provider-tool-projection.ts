@@ -272,6 +272,16 @@ function flattenRootObjectUnion(projected: Record<string, unknown>): {
 	const read = readObjectUnion(branches);
 	if (!read) return { schema: projected };
 	const { discriminator } = read;
+	const parentProperties = isRecord(projected.properties) ? projected.properties : undefined;
+	const parentRequired = branchRequired(projected);
+	const commonRequired = parentRequired.filter((key) => key !== discriminator);
+	const commonOptional = Object.keys(parentProperties ?? {}).filter(
+		(key) => key !== discriminator && !parentRequired.includes(key),
+	);
+	const commonArguments = [
+		...(commonRequired.length > 0 ? [`requires ${commonRequired.join(", ")}`] : []),
+		...(commonOptional.length > 0 ? [`accepts ${commonOptional.join(", ")}`] : []),
+	];
 	const values: string[] = [];
 	const shapes = new Map<string, { schemas: unknown[]; identities: Set<string> }>();
 	let sharedRequired: Set<string> | undefined;
@@ -299,7 +309,9 @@ function flattenRootObjectUnion(projected: Record<string, unknown>): {
 				...(required.length > 0 ? [`requires ${required.join(", ")}`] : []),
 				...(optional.length > 0 ? [`accepts ${optional.join(", ")}`] : []),
 			];
-			guidance.push(`${label} ${parts.length > 0 ? parts.join(", ") : "takes no other arguments"}`);
+			guidance.push(
+				`${label} ${parts.length > 0 ? parts.join(", ") : commonArguments.length > 0 ? "takes no additional arguments" : "takes no other arguments"}`,
+			);
 		} else {
 			const head = required.length > 0 ? required.join(", ") : "no required arguments";
 			guidance.push(optional.length > 0 ? `${head} (accepts ${optional.join(", ")})` : head);
@@ -310,19 +322,39 @@ function flattenRootObjectUnion(projected: Record<string, unknown>): {
 	for (const [key, shape] of shapes) {
 		properties[key] = shape.schemas.length === 1 ? shape.schemas[0] : { anyOf: shape.schemas };
 	}
+	// Parent fields constrain every alternative; they are not another union branch. In
+	// particular, optional parent-only fields must remain visible to the provider.
+	if (parentProperties) {
+		for (const [key, parentSchema] of Object.entries(parentProperties)) {
+			const branchSchema = properties[key];
+			properties[key] =
+				branchSchema === undefined || JSON.stringify(parentSchema) === JSON.stringify(branchSchema)
+					? parentSchema
+					: {
+							...(isRecord(parentSchema) && typeof parentSchema.type === "string"
+								? { type: parentSchema.type }
+								: {}),
+							allOf: [parentSchema, branchSchema],
+						};
+		}
+	}
 	const schema = createProviderRecord();
 	for (const key of Object.keys(projected)) {
 		if (key !== "anyOf" && key !== "type" && key !== "properties" && key !== "required") schema[key] = projected[key];
 	}
 	schema.type = "object";
 	schema.properties = properties;
-	const required = [...(discriminator ? [discriminator] : []), ...(sharedRequired ?? [])];
+	const required = [
+		...new Set([...(discriminator ? [discriminator] : []), ...(sharedRequired ?? []), ...parentRequired]),
+	];
 	if (required.length > 0) schema.required = required;
 	return {
 		schema,
-		guidance: discriminator
-			? `Arguments by ${discriminator}: ${guidance.join("; ")}.`
-			: `Accepted argument sets: ${guidance.join("; ")}.`,
+		guidance:
+			(commonArguments.length > 0 ? `Common arguments: ${commonArguments.join("; ")}. ` : "") +
+			(discriminator
+				? `Arguments by ${discriminator}: ${guidance.join("; ")}.`
+				: `Accepted argument sets: ${guidance.join("; ")}.`),
 	};
 }
 

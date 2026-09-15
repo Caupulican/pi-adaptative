@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- Independent Antigravity subscription provider with OAuth refresh, model discovery, streaming, and native tool-call handling.
+
+### Fixed
+
+- Subscription OAuth authorization, callback-state isolation, refresh-token retention, and request compatibility.
+- Bedrock credential resolution and SSO recovery consistently use the selected AWS profile.
+
 ## [0.99.21] - 2026-09-13
 
 - Lockstep release with pi-adaptative 0.99.21; no package-specific API changes.

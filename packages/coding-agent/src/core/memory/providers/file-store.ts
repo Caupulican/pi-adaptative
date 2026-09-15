@@ -179,9 +179,21 @@ const hotMemoryTarget = Type.Optional(
 );
 // Encode action requirements in the advertised schema so the shared tool preflight
 // classifies malformed calls as validation failures before invoking the storage adapter.
-// Keep an explicit object root: subscription providers reject root-level intersections.
+// Keep an explicit object root and parent properties for subscription-provider projection.
 const memorySchema = {
 	...memoryFields,
+	// Evidence has different authority in each target. Reject a misplaced citation instead
+	// of silently passing an empty evidence set to USER admission or discarding it from OKF.
+	allOf: [
+		{
+			if: Type.Object({ target: Type.Literal("user") }),
+			else: Type.Object({ evidence: Type.Optional(Type.Never()) }),
+		},
+		{
+			if: Type.Object({ target: Type.Literal("okf") }),
+			else: Type.Object({ evidenceRefs: Type.Optional(Type.Never()) }),
+		},
+	],
 	anyOf: [
 		Type.Object({ action: Type.Literal("list") }),
 		Type.Object({

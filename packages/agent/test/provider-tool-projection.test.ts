@@ -140,6 +140,41 @@ describe("root discriminated union projection", () => {
 		expect(projected.parameters).toMatchObject({ anyOf: [{ type: "object" }, { type: "string" }] });
 		expect(projected.description).toBe("Plan steps.");
 	});
+
+	it("retains parent fields, required keys, and intersecting constraints when flattening branches", () => {
+		const schema = {
+			...Type.Object({
+				owner: Type.String({ minLength: 1 }),
+				evidence: Type.Optional(Type.Array(Type.String())),
+				count: Type.Optional(Type.Integer({ maximum: 9 })),
+			}),
+			anyOf: [
+				Type.Object({ action: Type.Literal("set"), count: Type.Integer({ minimum: 1 }) }),
+				Type.Object({ action: Type.Literal("list") }),
+			],
+		};
+		const original = JSON.stringify(schema);
+		const projected = unionTool(schema);
+		expect(projected.description).toContain("Common arguments: requires owner; accepts evidence, count.");
+		expect(projected.description).toContain('"list" takes no additional arguments');
+		expect(projected.parameters).toMatchObject({
+			properties: {
+				owner: { type: "string", minLength: 1 },
+				evidence: { type: "array", items: { type: "string" } },
+			},
+			required: expect.arrayContaining(["owner", "action"]),
+		});
+		const validator = Compile(projected.parameters);
+		expect(validator.Check({ owner: "owner", action: "set", count: 3, evidence: ["receipt"] })).toBe(true);
+		for (const args of [
+			{ action: "set", count: 3 },
+			{ owner: "owner", action: "set", count: 0 },
+			{ owner: "owner", action: "set", count: 10 },
+			{ owner: "owner", action: "list", evidence: 1 },
+		])
+			expect(validator.Check(args)).toBe(false);
+		expect(JSON.stringify(schema)).toBe(original);
+	});
 });
 
 describe("provider tool projection", () => {

@@ -16,10 +16,73 @@ const okfAdd = {
 };
 
 describe("memory action preflight", () => {
+	it("does not teach a different memory target when rejecting misplaced evidence", () => {
+		try {
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "evidence-guidance",
+				name: "memory",
+				arguments: {
+					action: "add",
+					target: "user",
+					content: "Use concise updates.",
+					evidenceRefs: ["owner/entry"],
+				},
+			});
+			throw new Error("Expected misplaced evidence to be rejected");
+		} catch (error) {
+			expect(error).toBeInstanceOf(ToolArgumentValidationError);
+			if (!(error instanceof ToolArgumentValidationError)) throw error;
+			expect(error.message).toContain("evidenceRefs:");
+			expect(error.message).not.toContain("target: must equal");
+		}
+	});
+
+	it.each([true, false])("rejects cross-target evidence without dropping citations (repair=%s)", (repairEnabled) => {
+		for (const args of [
+			{ action: "add", target: "user", content: "Use concise updates.", evidenceRefs: ["owner/entry"] },
+			{ action: "add", target: "project", content: "A fact.", evidence: [{ source: "owner/entry" }] },
+			{ ...okfAdd, evidence: [{ source: "owner/entry" }] },
+		]) {
+			const original = structuredClone(args);
+			expect(() =>
+				validateToolArguments(
+					tool,
+					{ type: "toolCall", id: "cross-target", name: "memory", arguments: args },
+					{ repairEnabled },
+				),
+			).toThrow(ToolArgumentValidationError);
+			expect(args).toEqual(original);
+		}
+	});
+
+	it("keeps USER owner citations and OKF references as distinct valid contracts", () => {
+		for (const args of [
+			{
+				action: "add",
+				target: "user",
+				content: "Use concise updates.",
+				basis: "explicit",
+				evidence: [{ source: "owner/entry", quote: "Use concise updates." }],
+			},
+			okfAdd,
+			{ action: "add", target: "user", content: "An unverified preference.", basis: "inferred" },
+		]) {
+			expect(
+				validateToolArguments(tool, { type: "toolCall", id: "valid-evidence", name: "memory", arguments: args }),
+			).toEqual(args);
+		}
+	});
+
 	it("advertises an object root after provider projection", () => {
 		expect(projectToolSchemaForProvider(tool.parameters)).toMatchObject({
 			type: "object",
-			properties: { action: expect.any(Object) },
+			properties: {
+				action: expect.any(Object),
+				basis: { type: "string", enum: ["explicit", "inferred"] },
+				evidence: { type: "array", items: { properties: { source: { type: "string" } } } },
+				evidenceRefs: { type: "array", items: { type: "string" } },
+			},
 			required: ["action"],
 		});
 	});

@@ -201,6 +201,18 @@ export interface TaskStepsToolDependencies {
 	now?: () => string;
 }
 
+/**
+ * One `updates[]` item that resolved against the entry snapshot. Carries the canonical target
+ * alongside the item that named it, so the batch applies immutable ids and can still quote the
+ * caller's own selector when two items turn out to name one step.
+ */
+interface ValidatedBatchEntry {
+	index: number;
+	selector: string;
+	stepId: string;
+	update: TaskStepUpdate;
+}
+
 const TASK_STEP_UPDATE_FIELDS = [
 	"content",
 	"activeForm",
@@ -534,6 +546,25 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 						break;
 					case "update": {
 						const targeted = new Set<string>();
+						// Applies to an already-resolved, immutable step id. The promotion guard reads the
+						// target's LIVE status rather than the status captured at resolution time, so a batch
+						// item that completes the step an earlier item auto-promoted still advances the cursor.
+						const applyResolvedUpdate = (stepId: string, update: TaskStepUpdate): void => {
+							const live = state.steps.find((step) => step.id === stepId);
+							state = updateTaskStep(state, stepId, update, timestamp);
+							targeted.add(stepId);
+							// Completing the step that WAS active advances the cursor automatically -- the
+							// harness manages the step, so the model does not need a separate `advance` call
+							// for the common case. Guarded to the step that was in_progress before this update,
+							// so completing an unrelated pending/blocked step never disturbs the real cursor.
+							if (live?.status === "in_progress" && update.status === "completed") {
+								const promoted = findNextPendingStep(state.steps, stepId);
+								if (promoted) {
+									state = updateTaskStep(state, promoted.id, { status: "in_progress" }, timestamp);
+									autoPromotedStepId = promoted.id;
+								}
+							}
+						};
 						const applyUpdate = (selectorInput: string | undefined, update: TaskStepUpdate): void => {
 							// Omitted id targets the active step. Reuses resolveTaskStepSelector's own
 							// "current"/"active" resolution (including its "no in_progress step" error naming
@@ -565,19 +596,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 									clearingPipelineLink,
 								);
 							}
-							state = updateTaskStep(state, selected.id, update, timestamp);
-							targeted.add(selected.id);
-							// Completing the step that WAS active advances the cursor automatically -- the
-							// harness manages the step, so the model does not need a separate `advance` call
-							// for the common case. Guarded to the step that was in_progress before this update,
-							// so completing an unrelated pending/blocked step never disturbs the real cursor.
-							if (selected.status === "in_progress" && update.status === "completed") {
-								const promoted = findNextPendingStep(state.steps, selected.id);
-								if (promoted) {
-									state = updateTaskStep(state, promoted.id, { status: "in_progress" }, timestamp);
-									autoPromotedStepId = promoted.id;
-								}
-							}
+							applyResolvedUpdate(selected.id, update);
 						};
 						if (input.updates) {
 							// The batch owns every field: a top-level id or field beside `updates` is ambiguous
@@ -604,9 +623,19 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 									);
 								}
 							}
+							// Resolve every selector ONCE against the state as it was on entry. Resolving again
+							// during application would let an earlier item's auto-promotion move a later
+							// `current`, so the batch would apply to a step the pre-flight never validated.
+							// An item that resolves becomes one validated entry, so application never has to
+							// skip a hole: the only way out of this pass is a problem that aborts the batch.
+							const validated: ValidatedBatchEntry[] = [];
+							// Grouped during resolution rather than rebuilt afterwards; holds the same entry
+							// objects, so the refusal can name each alias without a second lookup.
+							const entriesByStepId = new Map<string, ValidatedBatchEntry[]>();
 							input.updates.forEach((item, index) => {
+								let stepId: string;
 								try {
-									resolveUpdateSelector(before.steps, item.id, () => {});
+									stepId = resolveUpdateSelector(before.steps, item.id, (note) => selectorNotes.push(note)).id;
 								} catch (error) {
 									problems.push(
 										`updates[${index}]: ${error instanceof Error ? error.message : String(error)}`,
@@ -618,11 +647,31 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 										`updates[${index}] (${item.id}) carried no changes; include status, note, or evidence.`,
 									);
 								}
+								const entry = {
+									index,
+									selector: item.id,
+									stepId,
+									update: { status: item.status, note: item.note, evidence: item.evidence },
+								};
+								const sharing = entriesByStepId.get(stepId);
+								if (sharing) sharing.push(entry);
+								else entriesByStepId.set(stepId, [entry]);
+								validated.push(entry);
 							});
-							if (problems.length > 0) throw new TaskStepsError(`Nothing applied. ${problems.join(" ")}`);
-							for (const item of input.updates) {
-								applyUpdate(item.id, { status: item.status, note: item.note, evidence: item.evidence });
+							// Distinct selectors can still name one step ("current" and "step-1", "2" and
+							// "step-2", a content match and an id). Two items on one step are two conflicting
+							// instructions with no defined order, so the batch is refused rather than reconciled:
+							// naming the canonical step and every alias lets the retry drop the right item.
+							for (const [stepId, entries] of entriesByStepId) {
+								if (entries.length < 2) continue;
+								const indexes = entries.map((entry) => entry.index).join(", ");
+								const aliases = entries.map((entry) => JSON.stringify(entry.selector)).join(", ");
+								problems.push(
+									`updates[] items ${indexes} all name ${stepId} (selectors ${aliases}); name each step exactly once.`,
+								);
 							}
+							if (problems.length > 0) throw new TaskStepsError(`Nothing applied. ${problems.join(" ")}`);
+							for (const entry of validated) applyResolvedUpdate(entry.stepId, entry.update);
 						} else {
 							applyUpdate(input.id, toTaskStepUpdate(input));
 						}

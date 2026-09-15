@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Added
+
+- Persistent favorite models, pinned above other matches, with All/Favorites model-selector tabs and configurable shortcuts.
+
+### Fixed
+
+- Memory argument validation rejects evidence fields belonging to a different target instead of silently discarding citations; owner-evidence admission requirements remain unchanged.
+- Task-step batches resolve selectors against one snapshot and reject aliases naming the same step, preventing later updates from silently moving to a different active step.
+- Goal evidence concurrency tests verify both completion orders deterministically on Linux and Windows.
+
 ## [0.99.21] - 2026-09-13
 
 ### Added

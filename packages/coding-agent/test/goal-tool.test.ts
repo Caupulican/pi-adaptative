@@ -1,10 +1,8 @@
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
+import type { GoalFileEvidenceResolution, GoalFileEvidenceResolver } from "../src/core/goals/file-evidence.ts";
 import { cancelPersistedGoal } from "../src/core/goals/goal-lifecycle.ts";
 import type { GoalState } from "../src/core/goals/goal-state.ts";
 import { resolveSessionUserEvidence } from "../src/core/goals/session-goal-evidence.ts";
@@ -29,10 +27,9 @@ function getToolResultText(result: { content?: readonly (TextContent | ImageCont
 	return parts.join("\n");
 }
 
-/** A file URL that is well-formed on every platform and resolves to nothing. */
-const missingFile = (name: string) => pathToFileURL(join(tmpdir(), "pi-goal-test-missing", name)).href;
-
-function createHarness(options: { getActiveVerificationIds?: () => readonly string[] } = {}) {
+function createHarness(
+	options: { getActiveVerificationIds?: () => readonly string[]; resolveFileEvidence?: GoalFileEvidenceResolver } = {},
+) {
 	const sessionManager = SessionManager.inMemory();
 	let state: GoalState | undefined;
 	let counter = 0;
@@ -50,6 +47,7 @@ function createHarness(options: { getActiveVerificationIds?: () => readonly stri
 		},
 		now: () => `T${counter++}`,
 		getActiveVerificationIds: options.getActiveVerificationIds,
+		resolveFileEvidence: options.resolveFileEvidence,
 		resolveUserEvidence: (summary, uri) => resolveSessionUserEvidence(sessionManager, summary, uri),
 	});
 	const run = async (input: GoalToolInput) => {
@@ -667,38 +665,52 @@ describe("goal setup in one call", () => {
 		expect(harness.getState()?.requirements).toHaveLength(1);
 	});
 
-	it("keeps every evidence call in a batch with an increment that lands mid-verification", async () => {
+	it.each([
+		["one", "two"],
+		["two", "one"],
+	])("keeps every evidence call with a mid-verification increment, settling %s then %s", async (first, second) => {
 		// Live census: a batch of add_evidence + increment refused every evidence call. The increment ran
 		// synchronously while the file verifications awaited, and the rebase then tolerated only other
 		// evidence. Requirement bookkeeping now replays under the same ancestry proof; calls stay parallel.
-		const { tool, run, getState, sessionManager } = createHarness();
+		// The ledger records verification completion order, not invocation order. Real filesystem
+		// scheduling made this conservation test intermittent; barriers prove both orders exactly.
+		const pending = new Map(
+			["one", "two"].map((name) => [name, Promise.withResolvers<GoalFileEvidenceResolution>()]),
+		);
+		const resolveFileEvidence = vi.fn((uri: string) => pending.get(uri)!.promise);
+		const { tool, run, getState, sessionManager } = createHarness({ resolveFileEvidence });
 		await run({ action: "start", goalId: "g1", userGoal: "Ship feature" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Ledger holds" });
 		sessionManager.appendMessage({ role: "user", content: "owner confirmed the ledger", timestamp: 1000 });
 		await run({ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "owner confirmed the ledger" });
-		const results = await Promise.all([
-			tool.execute(
-				"c1",
-				{ action: "add_evidence", kind: "file", summary: "one", uri: missingFile("one.ts") },
-				undefined,
-				undefined,
-				ctx,
-			),
-			tool.execute(
-				"c2",
-				{ action: "add_evidence", kind: "file", summary: "two", uri: missingFile("two.ts") },
-				undefined,
-				undefined,
-				ctx,
-			),
-			tool.execute("c3", { action: "increment" }, undefined, undefined, ctx),
-		]);
-		expect(results.map((result) => result.isError === true)).toEqual([false, false, false]);
+		const calls = new Map(
+			["one", "two"].map((name) => [
+				name,
+				tool.execute(
+					`call-${name}`,
+					{ action: "add_evidence", kind: "file", summary: name, uri: name },
+					undefined,
+					undefined,
+					ctx,
+				),
+			]),
+		);
+		expect(resolveFileEvidence.mock.calls.map(([uri]) => uri)).toEqual(["one", "two"]);
+		expect(getState()?.evidence.map((evidence) => evidence.summary)).toEqual(["owner confirmed the ledger"]);
+		expect(getState()?.requirements.map((requirement) => requirement.status)).toEqual(["open"]);
+		const increment = await tool.execute("c3", { action: "increment" }, undefined, undefined, ctx);
+		expect(increment.isError).not.toBe(true);
+		expect(getState()?.requirements.map((requirement) => requirement.status)).toEqual(["satisfied"]);
+		for (const name of [first, second]) {
+			pending.get(name)!.resolve({ verified: false, uri: `backend://${name}`, reason: "Missing fixture" });
+			expect((await calls.get(name)!).isError).not.toBe(true);
+		}
 		expect(getState()?.evidence.map((evidence) => evidence.summary)).toEqual([
 			"owner confirmed the ledger",
-			"one",
-			"two",
+			first,
+			second,
 		]);
+		expect(getState()?.evidence.map((evidence) => evidence.verified)).toEqual([true, false, false]);
 		expect(getState()?.requirements.map((requirement) => requirement.status)).toEqual(["satisfied"]);
 	});
 });

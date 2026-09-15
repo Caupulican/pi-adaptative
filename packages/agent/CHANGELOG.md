@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Tool-schema projection retains parent-declared fields, mandatory keys, and constraints when flattening action alternatives, including owner-evidence fields used by memory tools.
+
 ## [0.99.21] - 2026-09-13
 
 - Lockstep release with pi-adaptative 0.99.21; no package-specific API changes.
