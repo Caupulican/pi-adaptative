@@ -71,6 +71,11 @@ const agentSchema = Type.Object(
 		terminalId: Type.Optional(shortText),
 		backendName: Type.Optional(identity),
 		stopping: Type.Optional(Type.Boolean()),
+		/** A backend pane/workspace request is outstanding for this member and its outcome is unknown.
+		 * Durable because an absent paneId is not evidence that no resource exists: the reply may have
+		 * been lost after the resource was created. Cleared only by an acquisition outcome or a terminal
+		 * transition, never inferred. */
+		acquiring: Type.Optional(Type.Boolean()),
 		closed: Type.Optional(Type.Boolean()),
 		turn: Type.Integer({ minimum: 0, maximum: 128 }),
 		turnId: Type.String({ maxLength: 128 }),
@@ -626,6 +631,31 @@ export class CollaborationJobStore {
 			agent.evidence = boundCollaborationEvidence(`Steering interrupt failed: ${failure}; work state is uncertain.`);
 		});
 	}
+	/** Record that a backend resource request is outstanding for this member, before it is issued. */
+	beginAcquisition(id: string, agentId: string): void {
+		this.updateAgent(id, agentId, (agent) => {
+			if (!agent) return;
+			agent.acquiring = true;
+		});
+	}
+	/**
+	 * Resolve an outstanding acquisition. `pane` records the resource this member now owns, so a later
+	 * rollback can find and close it; omitting it resolves the acquisition without claiming a resource.
+	 */
+	finishAcquisition(
+		id: string,
+		agentId: string,
+		pane?: { paneId: string; terminalId: string; backendName: string },
+	): void {
+		this.updateAgent(id, agentId, (agent) => {
+			if (!agent) return;
+			delete agent.acquiring;
+			if (!pane) return;
+			agent.paneId = pane.paneId;
+			agent.terminalId = pane.terminalId;
+			agent.backendName = pane.backendName;
+		});
+	}
 	beginStop(id: string, agentId: string, turnId?: string): CollaborationAgent | undefined {
 		return this.updateAgent(id, agentId, (agent) => {
 			if (!agent || agent.closed || (turnId !== undefined && agent.turnId !== turnId)) return;
@@ -638,6 +668,7 @@ export class CollaborationJobStore {
 			if (!agent || agent.turnId !== turnId || !agent.stopping || agent.closed) return false;
 			agent.closed = true;
 			delete agent.stopping;
+			delete agent.acquiring;
 			delete agent.steering;
 			releaseTurnProcess(agent);
 			if (["idle", "reserved", "running"].includes(agent.status)) {
@@ -653,7 +684,11 @@ export class CollaborationJobStore {
 				const job = this.load(id);
 				if (
 					job.agents.some(
-						(agent) => agent.stopping || agent.steering || ["reserved", "running"].includes(agent.status),
+						(agent) =>
+							agent.stopping ||
+							agent.acquiring ||
+							agent.steering ||
+							["reserved", "running"].includes(agent.status),
 					)
 				)
 					throw new Error("Cannot archive an active collaboration job.");
@@ -683,7 +718,8 @@ export class CollaborationJobStore {
 		this.update(id, (job) => {
 			if (
 				job.agents.some(
-					(agent) => agent.stopping || agent.steering || ["reserved", "running"].includes(agent.status),
+					(agent) =>
+						agent.stopping || agent.acquiring || agent.steering || ["reserved", "running"].includes(agent.status),
 				)
 			)
 				throw new Error("Cannot dismiss active collaboration work; stop it first.");

@@ -8,6 +8,7 @@ import { resolveCollaborationBackend } from "../core/collaboration/backend-resol
 import { stopCollaborationAgent } from "../core/collaboration/coordinator.ts";
 import { CollaborationJobStore } from "../core/collaboration/job-store.ts";
 import { executeCollaborationTurn } from "../core/collaboration/turn-runner.ts";
+import { canonicalizeWatchDir } from "../utils/fs-watch.ts";
 import { acquireWorkRun } from "../utils/work-directory.ts";
 
 const answerSchema = Type.Union([
@@ -17,6 +18,31 @@ const answerSchema = Type.Union([
 		keys: Type.Optional(Type.Array(Type.String({ maxLength: 64 }), { maxItems: 32 })),
 	}),
 ]);
+
+/**
+ * Notify the parent over IPC. Best effort by contract: once `claimTurn` has durably admitted this
+ * turn, the parent's ability to hear about it can never abort the work or skip cleanup.
+ *
+ * Three failure modes are all contained here, because each of them otherwise escapes into a place
+ * with no handler: `process.send` can throw synchronously (closed channel, unserializable payload);
+ * it reports an asynchronous delivery failure through its completion callback, which Node would
+ * otherwise raise as a `process` 'error' event with no listener; and `onDelivered` itself can throw
+ * from inside that callback, where no try/finally is left to catch it.
+ */
+function notifyParent(message: { type: string; turnId: string }, onDelivered?: () => void): void {
+	try {
+		process.send?.(message, (error: Error | null) => {
+			try {
+				// A failed send means the channel is gone; there is nothing left to disconnect.
+				if (!error) onDelivered?.();
+			} catch {
+				// Best effort: a notification callback must never throw into the process emitter.
+			}
+		});
+	} catch {
+		// Best effort: an admitted turn is never abandoned because its parent could not be told.
+	}
+}
 
 /** Internal CLI mode, never a model headless run. Its only model input is an already-admitted turn. */
 export async function runCollaborationWorker(args: readonly string[]): Promise<void> {
@@ -47,7 +73,7 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 		store = new CollaborationJobStore(directory, parent);
 		claimed = store.claimTurn(jobId, agentId, turnId, process.pid);
 		if (!claimed) throw new Error("Collaboration turn already claimed or superseded; no prompt was sent.");
-		process.send?.({ type: "ready", turnId });
+		notifyParent({ type: "ready", turnId });
 		const job = store.load(jobId);
 		const agent = job.agents.find((item) => item.id === agentId)!;
 		if (!agent.backendName || !agent.terminalId || !job.peerCommand)
@@ -55,7 +81,9 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 		const timeoutMs = Math.max(1, Math.min(job.deadlineSeconds * 1000, (agent.deadlineAt ?? 0) - Date.now()));
 		backend = await resolveCollaborationBackend(job, { ensureRunning: false });
 		const subscribeReport = (listener: () => void) => {
-			const watcher = watch(directory, { persistent: false }, (_event, file) => {
+			// Every other directory watch in this package canonicalizes first; libuv hard-aborts the
+			// process on Windows when a watched directory is reached through a non-canonical alias.
+			const watcher = watch(canonicalizeWatchDir(directory), { persistent: false }, (_event, file) => {
 				if (file === null || file.toString().endsWith(".json")) listener();
 			});
 			watcher.on("error", (err) => {
@@ -116,7 +144,7 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 		}
 		process.exitCode = 1;
 	} finally {
-		process.send?.({ type: "terminal", turnId }, () => process.disconnect?.());
+		notifyParent({ type: "terminal", turnId }, () => process.disconnect?.());
 		process.off("SIGTERM", stop);
 		process.off("SIGINT", stop);
 		lease.release();

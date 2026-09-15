@@ -1,3 +1,5 @@
+import { probeProcessLiveness } from "@caupulican/pi-agent-core/process-tree";
+
 const MAX_OWNER_ID_CHARS = 256;
 const LOCAL_WORKER_OWNER_PATTERN =
 	/^pi-worker:([1-9]\d*):([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
@@ -9,14 +11,16 @@ export interface LocalWorkerProcessOwner {
 
 export type LocalWorkerProcessOwnerLiveness = "live" | "dead" | "unknown";
 
-/** Process liveness probe shared by lifecycle and reservation recovery. Permission denial means live. */
+/**
+ * Process liveness probe shared by lifecycle and reservation recovery. The raw OS classification is
+ * owned once, by `@caupulican/pi-agent-core/process-tree`; this is only its boolean view.
+ *
+ * BOUND: `false` means ESRCH — proven absence. `true` means "not proven absent": a live process, a
+ * process we may not signal (EPERM), or a probe that failed for an unclassified reason. Recovery must
+ * therefore treat `true` as "do not take over", never as evidence the owner is running.
+ */
 export function isLocalProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return typeof error === "object" && error !== null && (error as { code?: string }).code === "EPERM";
-	}
+	return probeProcessLiveness(pid) !== "dead";
 }
 
 /** Create the durable identity for one local pi worker process instance. */
@@ -43,6 +47,11 @@ export function parseLocalWorkerProcessOwnerId(ownerId: string): LocalWorkerProc
 /**
  * Resolve a local owner exactly once through the caller's liveness seam. Invalid identities and
  * liveness probe failures stay unknown so recovery cannot steal a potentially active worker.
+ *
+ * The seam is a boolean by contract, so a probe that could not classify its failure arrives here as
+ * `true` and is reported `live`. That is deliberate and conservative: only `dead` authorizes a
+ * takeover, so an unclassified probe withholds authority exactly like an explicitly unknown one. A
+ * seam that throws instead of answering is still reported `unknown`.
  */
 export function localWorkerProcessOwnerLiveness(
 	ownerId: string,

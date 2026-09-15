@@ -24,6 +24,7 @@
  */
 
 import { hostname as osHostname } from "node:os";
+import { isDeepStrictEqual } from "node:util";
 import { isAgentIdentity } from "../orchestration/agent-resume.ts";
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import { getParentPid, getParentSessionId, getProcessTaskRef } from "../process-identity.ts";
@@ -706,6 +707,26 @@ async function startWorkerBranch(
 					break;
 				}
 			}
+		} else {
+			// Wound down: the resumable payload must survive, so no terminal is written here. But a
+			// directive another writer left on THIS generation's entry (the sanctioned exception in this
+			// module's header -- e.g. an adoption whose `running` state only becomes true once this
+			// runtime confirms it) has no executor once we stop. Leaving it would present a stopped
+			// runtime as a live process. Restore only our own last-owned state, only while the stored
+			// record is still this generation's, and never a newer generation's.
+			for (let attempt = 0; attempt < 3; attempt++) {
+				try {
+					const current = await store.readEntry(config.agentDir, entry.entryId);
+					if (!current || current.pid !== process.pid || current.startedAt !== generationStartedAt) break;
+					if (isDeepStrictEqual(current, entry)) break;
+					if (await store.writeEntryIfUnchanged(config.agentDir, entry.entryId, current, entry)) break;
+				} catch (error) {
+					config.onDiagnostic?.(
+						`process-matrix: failed to restore worker resumable state: ${describeError(error)}`,
+					);
+					break;
+				}
+			}
 		}
 		process.off("exit", closeOnExit);
 	};
@@ -715,13 +736,25 @@ async function startWorkerBranch(
 		return stopTask;
 	};
 
+	/**
+	 * The single fenced mutation gate for this branch. A watcher tick that was already awaiting a read
+	 * when `stop()` ran must not write, mutate in-memory state, or authorize a follow-on transition:
+	 * `closeWorker` has by then persisted the terminal record, and `closed` is terminal.
+	 *
+	 * The post-await fence does not need to undo a write that raced the fence. Writes are
+	 * compare-and-swap under the store's own entry lock, so `closeWorker`'s retry loop re-reads and
+	 * re-applies the terminal state; disk converges on terminal either way. What must not happen is
+	 * this tick continuing as if it still owned the lifecycle.
+	 */
 	const persist = async (
 		expected: ProcessMatrixEntry,
 		next: ProcessMatrixEntry,
 		failureContext: string,
 	): Promise<boolean> => {
+		if (stopped) return false;
 		try {
 			if (await store.writeEntryIfUnchanged(config.agentDir, expected.entryId, expected, next)) {
+				if (stopped) return false;
 				entry = next;
 				return true;
 			}
@@ -741,6 +774,7 @@ async function startWorkerBranch(
 	};
 
 	const completeCooperativeCleanup = async (fresh: ProcessMatrixEntry): Promise<void> => {
+		if (stopped) return;
 		if (
 			!(await persist(
 				fresh,
@@ -788,19 +822,24 @@ async function startWorkerBranch(
 
 	const healthyTick = async (): Promise<void> => {
 		if (stopped) return;
-		if (!(await declaredParentIsAlive())) {
+		const parentIsAlive = await declaredParentIsAlive();
+		// The liveness read is asynchronous; `stop()` may have completed while it was outstanding, and
+		// its verdict describes a lifecycle this tick no longer owns.
+		if (stopped) return;
+		if (!parentIsAlive) {
 			await enterWindDown();
 			return;
 		}
 		// Still healthy: also poll for a master-initiated cooperative-cleanup directive.
 		const fresh = await store.readEntry(config.agentDir, entry.entryId);
-		if (!fresh) return;
+		if (stopped || !fresh) return;
 		const directive = pollWorkerDirective(fresh, currentParentPid, { isPidAlive: config.isProcessAlive });
 		if (directive.code !== "user_cleanup") return;
 		await completeCooperativeCleanup(fresh);
 	};
 
 	const enterWindDown = async (): Promise<void> => {
+		if (stopped) return;
 		const windDownAt = nowIso(now);
 		const expected = entry;
 		const resumable: ResumablePayload = { lastCode: "resumable", agent: structuredClone(config.agent) };
@@ -827,6 +866,9 @@ async function startWorkerBranch(
 	const graceTick = async (graceDeadline: number): Promise<void> => {
 		if (stopped) return;
 		const fresh = await store.readEntry(config.agentDir, entry.entryId);
+		// A stop that completed while this read was outstanding ends the grace window: neither an
+		// adoption nor a grace expiry may re-arm a timer, notify, or request exit after it.
+		if (stopped) return;
 		if (fresh) {
 			const directive = pollWorkerDirective(fresh, currentParentPid, { isPidAlive: config.isProcessAlive });
 			if (directive.code === "adopt" && fresh.parentSessionId) {

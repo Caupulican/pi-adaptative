@@ -349,6 +349,7 @@ export class HerdrBackend implements CollaborationBackend {
 					"not-submitted",
 				);
 			let submitted = false;
+			let terminal = false;
 			let observedChange = false;
 			let resolveSettled: (() => void) | undefined;
 			let rejectSettled: ((error: Error) => void) | undefined;
@@ -358,28 +359,47 @@ export class HerdrBackend implements CollaborationBackend {
 			});
 			// Install the listener before subscription acknowledgement and before the one input write.
 			const unsubscribe = connection.onEvent((value) => {
-				const event = record(value);
-				if (event.error)
-					return rejectSettled?.(
-						new CollaborationBackendError(
-							"connection_closed",
-							"Question answer wait ended without terminal evidence.",
-						),
-					);
-				if (!submitted) return;
-				const data = record(event.data);
-				if (data.pane_id !== before.paneId) return;
-				if (event.event === "pane_exited" || event.event === "pane_closed" || event.event === "pane_agent_detected")
-					return rejectSettled?.(
-						new CollaborationBackendError("occupant_changed", "Question answer agent exited or changed."),
-					);
-				if (event.event !== "pane.agent_status_changed") return;
-				observedChange ||= data.agent_status !== "blocked";
-				if (
-					observedChange &&
-					(data.agent_status === "idle" || data.agent_status === "done" || data.agent_status === "blocked")
-				)
-					resolveSettled?.();
+				// The channel validates only that an envelope has a truthy `event`; `data` is unvalidated,
+				// so parsing can throw. This callback is dispatched from a socket data handler with no
+				// try/catch of its own, so a throw here would become an uncaught host exception. Contain
+				// it and settle the wait exactly once instead.
+				try {
+					const event = record(value);
+					if (event.error) {
+						terminal = true;
+						return rejectSettled?.(
+							new CollaborationBackendError(
+								"connection_closed",
+								"Question answer wait ended without terminal evidence.",
+							),
+						);
+					}
+					const data = record(event.data);
+					if (data.pane_id !== before.paneId) return;
+					// Occupant termination is evidence whether or not the answer has been written yet: an
+					// answer must never be typed into a pane that is already gone.
+					if (
+						event.event === "pane_exited" ||
+						event.event === "pane_closed" ||
+						event.event === "pane_agent_detected"
+					) {
+						terminal = true;
+						return rejectSettled?.(
+							new CollaborationBackendError("occupant_changed", "Question answer agent exited or changed."),
+						);
+					}
+					if (!submitted) return;
+					if (event.event !== "pane.agent_status_changed") return;
+					observedChange ||= data.agent_status !== "blocked";
+					if (
+						observedChange &&
+						(data.agent_status === "idle" || data.agent_status === "done" || data.agent_status === "blocked")
+					)
+						resolveSettled?.();
+				} catch (error) {
+					terminal = true;
+					rejectSettled?.(error instanceof Error ? error : new Error("Malformed question answer event."));
+				}
 			});
 			// Rejections before we await the settlement must still be consumed.
 			void settled.catch(() => {});
@@ -401,6 +421,14 @@ export class HerdrBackend implements CollaborationBackend {
 					throw new CollaborationBackendError(
 						"question_changed",
 						"The question changed before answer submission.",
+						"not-submitted",
+					);
+				// A termination seen while the re-read was in flight makes that reply stale however valid
+				// it looks. Nothing has been written, so this is a proven non-submission.
+				if (terminal)
+					throw new CollaborationBackendError(
+						"occupant_changed",
+						"The question's pane terminated before the answer was submitted.",
 						"not-submitted",
 					);
 				submitted = true;
@@ -515,33 +543,57 @@ export class HerdrBackend implements CollaborationBackend {
 		if (!this.options.socketPath) return () => {};
 		const abortSignal = signal ?? new AbortController().signal;
 		const connection = await (this.options.connect ?? connectHerdrChannel)(this.options.socketPath, abortSignal);
+		let released = false;
+		let unsubscribeEvents: (() => void) | undefined;
+		/** Idempotent teardown: the returned unsubscribe and the malformed-event path share it. */
+		const release = (): void => {
+			if (released) return;
+			released = true;
+			unsubscribeEvents?.();
+			connection.close();
+		};
 		try {
-			const unsubscribe = connection.onEvent((value) => {
-				const event = record(value);
-				if (event.error) {
+			unsubscribeEvents = connection.onEvent((value) => {
+				// Dispatched from a socket data handler with no try/catch: a parse throw here would be an
+				// uncaught host exception. A payload this adapter cannot read also means the subscription
+				// can no longer be trusted, so release it and report the terminal event the owning wait
+				// already understands -- exactly once, through the same channel as a real closure.
+				try {
+					const event = record(value);
+					if (event.error) {
+						listener({ type: "connection_closed" });
+						return;
+					}
+					const data = record(event.data);
+					if (data.pane_id && data.pane_id !== paneId) return;
+					if (event.event === "pane_exited") {
+						listener({
+							type: "pane_exited",
+							paneId: typeof data.pane_id === "string" ? data.pane_id : undefined,
+						});
+					} else if (event.event === "pane_closed") {
+						listener({
+							type: "pane_closed",
+							paneId: typeof data.pane_id === "string" ? data.pane_id : undefined,
+						});
+					} else if (event.event === "pane_agent_detected") {
+						listener({
+							type: "pane_agent_detected",
+							paneId: typeof data.pane_id === "string" ? data.pane_id : undefined,
+						});
+					} else if (event.event === "pane.agent_status_changed") {
+						listener({
+							type: "agent_status_changed",
+							paneId: typeof data.pane_id === "string" ? data.pane_id : undefined,
+							status:
+								typeof data.agent_status === "string"
+									? (data.agent_status as CollaborationAgentStatus)
+									: undefined,
+						});
+					}
+				} catch {
+					release();
 					listener({ type: "connection_closed" });
-					return;
-				}
-				const data = record(event.data);
-				if (data.pane_id && data.pane_id !== paneId) return;
-				if (event.event === "pane_exited") {
-					listener({ type: "pane_exited", paneId: typeof data.pane_id === "string" ? data.pane_id : undefined });
-				} else if (event.event === "pane_closed") {
-					listener({ type: "pane_closed", paneId: typeof data.pane_id === "string" ? data.pane_id : undefined });
-				} else if (event.event === "pane_agent_detected") {
-					listener({
-						type: "pane_agent_detected",
-						paneId: typeof data.pane_id === "string" ? data.pane_id : undefined,
-					});
-				} else if (event.event === "pane.agent_status_changed") {
-					listener({
-						type: "agent_status_changed",
-						paneId: typeof data.pane_id === "string" ? data.pane_id : undefined,
-						status:
-							typeof data.agent_status === "string"
-								? (data.agent_status as CollaborationAgentStatus)
-								: undefined,
-					});
 				}
 			});
 			await connection.request("events.subscribe", {
@@ -552,12 +604,9 @@ export class HerdrBackend implements CollaborationBackend {
 					{ type: "pane.agent_detected" },
 				],
 			});
-			return () => {
-				unsubscribe();
-				connection.close();
-			};
+			return release;
 		} catch (error) {
-			connection.close();
+			release();
 			throw error;
 		}
 	}

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ManagedLaneEvent } from "../extensions/types.ts";
-import type { CollaborationBackend, CollaborationPane } from "./backend.ts";
+import { type CollaborationBackend, CollaborationBackendError, type CollaborationPane } from "./backend.ts";
 import {
 	boundCollaborationEvidence,
 	type CollaborationAgent,
@@ -37,6 +37,13 @@ export async function stopCollaborationAgent(
 	const job = store.load(jobId);
 	const agent = store.beginStop(jobId, agentId, turnId);
 	if (!agent) return false;
+	if (agent.acquiring) {
+		// The stop intent is now durable (`stopping`), which is what the outstanding acquisition's own
+		// owner fences against before it starts a worker. Claiming closure here would be a cleanup
+		// proof for a resource nobody has observed yet, and an absent paneId is not evidence that none
+		// exists. The launch's own catch owns the rollback once the acquisition resolves.
+		return false;
+	}
 	if (agent.paneId) {
 		if (!agent.backendName || !agent.terminalId)
 			throw new Error("Cannot verify collaboration agent identity before stopping.");
@@ -241,18 +248,22 @@ export class CollaborationCoordinator {
 				this.assertActive(signal);
 				const agent = store.load(job.id).agents[index];
 				if (agent.stopping || agent.closed) throw new Error("Collaboration launch was stopped.");
+				// Durable before the request is issued: a lost reply must not read as "no resource".
+				store.beginAcquisition(job.id, agent.id);
 				const pane = await strategy.createNextPane(index, agent, peers.environments[index]);
 				const name = `a-${agent.id.slice(0, 12)}-${randomUUID().slice(0, 12)}`;
-				store.update(job.id, (current) => {
-					const member = current.agents[index];
-					member.paneId = pane.paneId;
-					member.terminalId = pane.terminalId;
-					member.backendName = name;
+				store.finishAcquisition(job.id, agent.id, {
+					paneId: pane.paneId,
+					terminalId: pane.terminalId,
+					backendName: name,
 				});
-				// Pane creation is a real round trip, so a cancellation can land while it is in flight.
-				// Re-check only AFTER the pane is recorded above: the catch block's cleanup finds owned
-				// panes through the store, so checking any earlier would abandon the one just acquired.
+				// Pane creation is a real round trip, so a cancellation or an explicit stop can land while
+				// it is in flight. Re-check only AFTER the pane is recorded above: the catch block's
+				// cleanup finds owned panes through the store, so checking any earlier would abandon the
+				// one just acquired.
 				this.assertActive(signal);
+				const acquired = store.load(job.id).agents[index];
+				if (acquired.stopping || acquired.closed) throw new Error("Collaboration launch was stopped.");
 				const started = await backend.startAgent({
 					name,
 					kind: agent.provider,
@@ -286,6 +297,11 @@ export class CollaborationCoordinator {
 			return store.load(job.id);
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
+			// `unknown` delivery means the backend may have created the resource before the reply was
+			// lost. Only `not-submitted` proves nothing was created; anything else leaves an outstanding
+			// acquisition uncertain rather than cleanly closed.
+			const acquisitionOutcomeUnknown =
+				!(error instanceof CollaborationBackendError) || error.delivery !== "not-submitted";
 			const loaded = store.load(job.id);
 			const stopping = loaded.agents.map((agent) => store.beginStop(job.id, agent.id, agent.turnId));
 			const cleanedAgentIds = new Set<string>();
@@ -321,12 +337,14 @@ export class CollaborationCoordinator {
 							} catch {
 								// Cleanup failed; pane remains live or uncertain
 							}
-						} else if (!agent.paneId) {
+						} else if (!agent.paneId && !(agent.acquiring && acquisitionOutcomeUnknown)) {
 							cleanedAgentIds.add(agent.id);
 						}
 					}
 				} else {
-					for (const agent of loaded.agents) if (!agent.paneId) cleanedAgentIds.add(agent.id);
+					for (const agent of loaded.agents) {
+						if (!agent.paneId && !(agent.acquiring && acquisitionOutcomeUnknown)) cleanedAgentIds.add(agent.id);
+					}
 				}
 			} else if (workspaceId && backend) {
 				try {
@@ -336,7 +354,9 @@ export class CollaborationCoordinator {
 					// closeWorkspace failed
 				}
 			} else {
-				for (const agent of loaded.agents) if (!agent.paneId) cleanedAgentIds.add(agent.id);
+				for (const agent of loaded.agents) {
+					if (!agent.paneId && !(agent.acquiring && acquisitionOutcomeUnknown)) cleanedAgentIds.add(agent.id);
+				}
 			}
 			for (const agent of stopping) {
 				if (!agent) continue;

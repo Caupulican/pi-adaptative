@@ -13,14 +13,40 @@ import { join } from "node:path";
 
 const KILL_ACKNOWLEDGEMENT_MS = 1000;
 
-export function isProcessAlive(pid: number): boolean {
+/**
+ * What a `kill(pid, 0)` probe established. ESRCH is the ONLY answer that proves absence; every other
+ * failure means the probe could not determine anything, which is not the same as death.
+ */
+export type ProcessLivenessProbe = "alive" | "dead" | "unknown";
+
+/**
+ * The single raw OS liveness rule for this repository. Consumers that need to distinguish "could not
+ * tell" from "confirmed gone" — recovery, ownership takeover, termination claims — must read this
+ * rather than re-deriving the classification from `process.kill`.
+ */
+export function probeProcessLiveness(pid: number): ProcessLivenessProbe {
 	try {
 		process.kill(pid, 0);
-		return true;
+		return "alive";
 	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code === "ESRCH") return "dead";
 		// EPERM means it exists but we lack permission — still alive.
-		return (err as NodeJS.ErrnoException).code === "EPERM";
+		if (code === "EPERM") return "alive";
+		return "unknown";
 	}
+}
+
+/**
+ * Conservative boolean view of {@link probeProcessLiveness}.
+ *
+ * BOUND: `false` means ESRCH — proven absence. `true` means "not proven absent", which covers both a
+ * confirmed live process and a probe that failed for an unclassified reason. A caller must never read
+ * `true` as proof of liveness, and must never treat this boolean as authority to take over an owner;
+ * for that, read the three-valued probe and keep `unknown` unavailable.
+ */
+export function isProcessAlive(pid: number): boolean {
+	return probeProcessLiveness(pid) !== "dead";
 }
 
 /**
@@ -168,10 +194,16 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 			}
 			escalated = true;
 			const killDelivery = signalTree(pid, "SIGKILL");
-			if (killDelivery !== "delivered") {
-				if (killDelivery === "failed") {
-					opts?.onDiagnostic?.(`Failed to send SIGKILL to process tree ${pid}; termination is unproven`);
-				}
+			if (killDelivery === "failed") {
+				// The signal never reached the GROUP, so the descendants it targets were never observed.
+				// The root pid's own liveness has a narrower scope and cannot stand in for them: a group
+				// can still hold live children after its leader exits. Preserve the delivery verdict.
+				opts?.onDiagnostic?.(`Failed to send SIGKILL to process tree ${pid}; termination is unproven`);
+				settle("failed");
+				return;
+			}
+			if (killDelivery === "gone") {
+				// Every attempt answered ESRCH: that is positive absence for the group and the pid alike.
 				settle(settleFromEvidence(child, pid, escalated));
 				return;
 			}
