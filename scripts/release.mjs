@@ -47,6 +47,7 @@
 import { execSync } from "child_process";
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
+import { parseGithubOriginSlug } from "./github-origin.mjs";
 import { requireCiProof, requireReleaseCiProof } from "./release-ci-proof.mjs";
 import {
 	interpretHeadWorkflow,
@@ -126,11 +127,11 @@ function shellQuote(value) {
 
 function getRepoSlug() {
 	const url = run("git remote get-url origin", { silent: true }).trim();
-	const match = url.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/);
-	if (!match) {
+	try {
+		return parseGithubOriginSlug(url);
+	} catch {
 		throw new Error(`Could not parse a GitHub owner/repo from origin remote URL: ${url}`);
 	}
-	return match[1];
 }
 
 function stageChangedFiles() {

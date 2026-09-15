@@ -16,6 +16,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { pinGithubOriginGhDefault } from "./github-origin.mjs";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptsDir, "..");
@@ -158,6 +159,10 @@ export function main(argv = process.argv.slice(2)) {
 		return;
 	}
 	const started = Date.now();
+	const ghPin = pinGithubOriginGhDefault({ cwd: repoRoot });
+	if (ghPin.setOrigin || ghPin.unset.length) {
+		process.stdout.write(`precommit: gh default pinned to origin (${ghPin.slug})\n`);
+	}
 	run("info-exclude guard", process.execPath, [join(scriptsDir, "check-info-exclude-staged.mjs")]);
 	run("lockfile guard", process.execPath, [join(scriptsDir, "check-lockfile-commit.mjs")]);
 	if (plan.biome.length > 0) {

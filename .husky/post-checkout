@@ -1,0 +1,3 @@
+#!/bin/sh
+# Pin `gh` to origin after clone/checkout so fork-parent resolution cannot steal Actions.
+node scripts/github-origin.mjs
