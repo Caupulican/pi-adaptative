@@ -2239,6 +2239,9 @@ describe("workbench settings", () => {
 			collapsed: false,
 			inspector: "shown",
 			executionMaximized: false,
+			inspectorFraction: 0.3,
+			layout: "stacked",
+			conversationFraction: 0.5,
 			previews: 24,
 		});
 		manager.setWorkbenchSettings({ rows: 200, inspector: "hidden", executionMaximized: true, collapsed: true });
@@ -2250,6 +2253,11 @@ describe("workbench settings", () => {
 		});
 		manager.setWorkbenchSetting("mouse", "off");
 		expect(manager.getWorkbenchSettings().mouse).toBe("off");
+		manager.setWorkbenchSetting("inspectorFraction", 0.4);
+		expect(manager.getWorkbenchSettings().inspectorFraction).toBe(0.4);
+		expect(
+			SettingsManager.inMemory({ workbench: { inspectorFraction: 0.9 } }).getWorkbenchSettings().inspectorFraction,
+		).toBe(0.3);
 		expect(SettingsManager.inMemory({ workbench: { mouse: "off" } }).getWorkbenchSettings().mouse).toBe("off");
 	});
 

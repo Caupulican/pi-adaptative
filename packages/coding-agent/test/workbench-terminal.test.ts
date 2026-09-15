@@ -48,9 +48,7 @@ describe("Workbench terminal rendering", () => {
 			await terminal.waitForRender();
 			expect(view.conversationTop).toBe(start); // evidence never moves the conversation
 			expect(terminal.getViewport()[0]).toMatch(/^ pi\s*$/);
-			expect(terminal.getViewport()[1]).toMatch(
-				/^ Work plan .*1 \/ 2 {4}Execution .*File effects and command outcomes( · \d+-\d+\/\d+ ↕)?\s*$/,
-			);
+			expect(terminal.getViewport()[1]).toMatch(/^ Work plan .*1 \/ 2\s+Hide\s+Execution .*Maximize\s+Columns\s*$/);
 			expect(terminal.getViewport()[view.conversationTop - 1]).toMatch(
 				/^ Conversation · Following latest .* Copy conversation\s*$/,
 			);

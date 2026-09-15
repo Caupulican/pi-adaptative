@@ -642,7 +642,7 @@ export interface ToolRepairSettings {
 
 /** Operator-owned Workbench geometry and input ownership; nothing here auto-sizes or auto-folds. */
 export interface WorkbenchSettings {
-	/** "on": the workbench owns the mouse (wheel scroll, chips, drag-select that copies on release, right-click paste). "off": the terminal keeps it for its native gestures. */
+	/** "on": the workbench owns the mouse (wheel scroll, chips, drag-select that copies on release, drag edges to resize, click titles to hide or maximize, right-click paste). "off": the terminal keeps it for its native gestures. */
 	mouse?: "off" | "on";
 	/** Work-area rows the operator chose (2..60), or "half" for an even split; the conversation keeps its minimum regardless. */
 	rows?: number | "half";
@@ -652,6 +652,12 @@ export interface WorkbenchSettings {
 	inspector?: "shown" | "hidden";
 	/** Execution takes every row the conversation minimum leaves. */
 	executionMaximized?: boolean;
+	/** Inspector width as a fraction of the work area (0.2..0.45) when the panes sit side by side. */
+	inspectorFraction?: number;
+	/** stacked: work area above conversation (default). columns: conversation left, execution right. */
+	layout?: "stacked" | "columns";
+	/** Conversation column width in columns layout (0.3..0.7). */
+	conversationFraction?: number;
 	/** Previews Execution retains per cycle (4..200); the transcript keeps the complete record. */
 	previews?: number;
 }
@@ -662,6 +668,9 @@ export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> =
 	collapsed: false,
 	inspector: "shown",
 	executionMaximized: false,
+	inspectorFraction: 0.3,
+	layout: "stacked",
+	conversationFraction: 0.5,
 	previews: 24,
 });
 
@@ -3990,6 +3999,19 @@ export class SettingsManager {
 			collapsed: stored.collapsed ?? DEFAULT_WORKBENCH_SETTINGS.collapsed,
 			inspector: stored.inspector ?? DEFAULT_WORKBENCH_SETTINGS.inspector,
 			executionMaximized: stored.executionMaximized ?? DEFAULT_WORKBENCH_SETTINGS.executionMaximized,
+			inspectorFraction: sanitizeNumberSetting(
+				stored.inspectorFraction,
+				DEFAULT_WORKBENCH_SETTINGS.inspectorFraction,
+				0.2,
+				0.45,
+			),
+			layout: stored.layout === "columns" ? "columns" : DEFAULT_WORKBENCH_SETTINGS.layout,
+			conversationFraction: sanitizeNumberSetting(
+				stored.conversationFraction,
+				DEFAULT_WORKBENCH_SETTINGS.conversationFraction,
+				0.3,
+				0.7,
+			),
 			previews: sanitizeIntegerSetting(stored.previews, DEFAULT_WORKBENCH_SETTINGS.previews, 4, 200),
 		};
 	}

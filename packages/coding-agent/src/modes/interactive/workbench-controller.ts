@@ -55,6 +55,14 @@ export class WorkbenchController {
 	private selecting = false;
 	/** Left button went down inside the conversation; a drag from here selects, a plain click does not. */
 	private pressPoint?: { row: number; column: number };
+	/** Left button went down on a resize handle; a drag resizes, a still click on the divider toggles collapse. */
+	private geometryDrag?: {
+		kind: "rows" | "split" | "columns";
+		startRow: number;
+		startColumn: number;
+		moved: boolean;
+		origin: WorkbenchGeometry;
+	};
 	private snapshot?: AgentsOverlaySnapshot;
 	private workTitle?: string;
 	private disposed = false;
@@ -83,6 +91,7 @@ export class WorkbenchController {
 		this.view.conversation.reset();
 		this.view.setExecution(undefined);
 		this.view.setInspector([]);
+		this.geometryDrag = undefined;
 		this.publishHeadline();
 	}
 
@@ -257,6 +266,8 @@ export class WorkbenchController {
 		}
 		if (this.view.conversationHeight === 0) {
 			this.selecting = false;
+			this.pressPoint = undefined;
+			this.geometryDrag = undefined;
 			return isMouseSequence(data) ? { consume: true } : undefined;
 		}
 		if (keys.matches(data, "app.conversation.pageUp"))
@@ -282,12 +293,83 @@ export class WorkbenchController {
 				const delta = button === "wheelUp" ? -3 : 3;
 				if (hit === "conversation") conversation.scroll(delta);
 				else this.view.scrollUpper(column, row, delta);
+			} else if (this.geometryDrag && (action === "drag" || action === "up") && button === "left") {
+				const axisMoved =
+					this.geometryDrag.kind === "rows"
+						? row !== this.geometryDrag.startRow
+						: column !== this.geometryDrag.startColumn;
+				if (axisMoved) this.geometryDrag.moved = true;
+				if (this.geometryDrag.moved) {
+					const origin = this.geometryDrag.origin;
+					if (this.geometryDrag.kind === "rows") {
+						if (row === this.geometryDrag.startRow) {
+							this.view.applyGeometry({
+								...this.view.geometry(),
+								rows: origin.rows,
+								collapsed: origin.collapsed,
+								executionMaximized: origin.executionMaximized,
+							});
+						} else this.view.resizeUpperFromPointer(row);
+					} else if (this.geometryDrag.kind === "columns") {
+						if (column === this.geometryDrag.startColumn) {
+							this.view.resizeConversation(origin.conversationFraction ?? 0.5);
+						} else this.view.resizeConversationFromPointer(column);
+					} else if (column === this.geometryDrag.startColumn) {
+						this.view.resizeInspector(origin.inspectorFraction ?? 0.3);
+					} else this.view.resizeInspectorFromPointer(column);
+				}
+				if (action === "up") {
+					if (!this.geometryDrag.moved && this.geometryDrag.kind === "rows") {
+						this.changeGeometry(() => this.view.toggleUpper());
+					} else if (this.geometryDrag.moved) {
+						this.ports.geometry?.save(this.view.geometry());
+					}
+					this.geometryDrag = undefined;
+				}
 			} else if (action === "down" && button === "left" && hit === "conversationHeader") {
 				const headerAction = this.view.headerAction(column);
 				if (headerAction === "latest") conversation.latest();
-				else if (headerAction) void this.copy(headerAction === "copyAll");
+				else if (headerAction === "copyAll") void this.copy(true);
+				else if (headerAction === "layout") this.changeGeometry(() => this.view.toggleLayout());
 			} else if (action === "down" && button === "left" && hit === "divider") {
-				this.changeGeometry(() => this.view.toggleUpper());
+				this.geometryDrag = {
+					kind: "rows",
+					startRow: row,
+					startColumn: column,
+					moved: false,
+					origin: this.view.geometry(),
+				};
+			} else if (action === "down" && button === "left" && hit === "split") {
+				this.geometryDrag = {
+					kind: "split",
+					startRow: row,
+					startColumn: column,
+					moved: false,
+					origin: this.view.geometry(),
+				};
+			} else if (action === "down" && button === "left" && hit === "columnSplit") {
+				this.geometryDrag = {
+					kind: "columns",
+					startRow: row,
+					startColumn: column,
+					moved: false,
+					origin: this.view.geometry(),
+				};
+			} else if (action === "down" && button === "left" && (hit === "inspectorTitle" || hit === "executionTitle")) {
+				const titleAction = this.view.paneTitleAction(column, row);
+				if (titleAction === "hideInspector" || titleAction === "showInspector") {
+					this.changeGeometry(() => this.view.toggleInspector());
+				} else if (titleAction === "maximize") {
+					this.changeGeometry(() => this.view.toggleExecutionMaximized());
+				} else if (titleAction === "layout") {
+					this.changeGeometry(() => this.view.toggleLayout());
+				} else if (titleAction === undefined) {
+					if (hit === "inspectorTitle" && !this.view.inspectorHasTitleActions()) {
+						this.changeGeometry(() => this.view.toggleInspector());
+					} else if (hit === "executionTitle" && !this.view.executionHasTitleActions()) {
+						this.changeGeometry(() => this.view.toggleExecutionMaximized());
+					}
+				}
 			} else if (action === "down" && button === "right") {
 				// The terminal cannot paste while the workbench owns the mouse, so the workbench does.
 				void this.ports.paste?.();
@@ -334,7 +416,7 @@ export class WorkbenchController {
 		this.view.setMouseMode(enabled);
 		this.ports.notice(
 			enabled
-				? "Workbench owns the mouse: wheel scrolls, drag copies on release, right click pastes"
+				? "Workbench owns the mouse: wheel scrolls, drag copies on release, drag edges to resize, click titles to hide or maximize, right click pastes"
 				: "Terminal owns the mouse: native selection and paste; no wheel scrolling",
 		);
 	}

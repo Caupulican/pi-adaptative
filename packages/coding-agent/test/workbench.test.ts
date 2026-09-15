@@ -219,9 +219,7 @@ describe("Workbench layout", () => {
 			expect(frame).toHaveLength(30);
 			// Identity only on the title strip: no run-state badge lives outside the conversation zone.
 			expect(frame[0]).toMatch(/^ pi {2}sample-project\s*$/);
-			expect(frame[1]).toMatch(
-				/^ Work plan .*1 \/ 3 {4}Execution .*File effects and command outcomes( · \d+-\d+\/\d+ ↕)?\s*$/,
-			);
+			expect(frame[1]).toMatch(/^ Work plan .*1 \/ 3\s+Hide\s+Execution .*Maximize\s+Columns\s*$/);
 			expect(frame[11]).toMatch(/^─+ ↕ work area.*─+$/);
 			expect(frame[12]).toMatch(/^ Conversation · Following latest .* Copy conversation {2}$/);
 			expect(frame[top + 11]!.trimEnd()).toBe(" conversation body");
@@ -393,16 +391,40 @@ describe("Workbench layout", () => {
 		view.toggleExecutionMaximized();
 		view.render(110);
 		expect(view.upperHeight).toBe(10);
-		expect(view.geometry()).toEqual({ rows: 10, collapsed: false, inspector: "shown", executionMaximized: false });
+		expect(view.geometry()).toEqual({
+			rows: 10,
+			collapsed: false,
+			inspector: "shown",
+			executionMaximized: false,
+			inspectorFraction: 0.3,
+			layout: "stacked",
+			conversationFraction: 0.5,
+		});
 		view.applyGeometry({ rows: 4, collapsed: false, inspector: "hidden", executionMaximized: false });
 		const applied = view.render(110).map(stripAnsi);
 		expect(view.upperHeight).toBe(4);
 		expect(applied[1]).toMatch(/^ Execution /);
-		expect(view.geometry()).toEqual({ rows: 4, collapsed: false, inspector: "hidden", executionMaximized: false });
+		expect(view.geometry()).toEqual({
+			rows: 4,
+			collapsed: false,
+			inspector: "hidden",
+			executionMaximized: false,
+			inspectorFraction: 0.3,
+			layout: "stacked",
+			conversationFraction: 0.5,
+		});
 		// Maximizing a collapsed work area opens it; rows outside the clamp are clamped.
 		view.applyGeometry({ rows: 500, collapsed: true, inspector: "shown", executionMaximized: false });
 		view.toggleExecutionMaximized();
-		expect(view.geometry()).toEqual({ rows: 60, collapsed: false, inspector: "shown", executionMaximized: true });
+		expect(view.geometry()).toEqual({
+			rows: 60,
+			collapsed: false,
+			inspector: "shown",
+			executionMaximized: true,
+			inspectorFraction: 0.3,
+			layout: "stacked",
+			conversationFraction: 0.5,
+		});
 		// Resizing from the even split starts from the rows it currently has, then becomes explicit.
 		view.applyGeometry({ rows: "half", collapsed: false, inspector: "shown", executionMaximized: false });
 		view.render(110);
@@ -438,5 +460,72 @@ describe("Workbench layout", () => {
 		expect(frame.filter((line) => line.includes("●"))).toHaveLength(1);
 		expect(frame.join("\n")).not.toMatch(/WORKING|IDLE|WAITING/);
 		expect(view.render(80).map(stripAnsi)[0]).not.toMatch(/IDLE|WORKING/);
+	});
+	it("names title, split and divider hits after a side-by-side frame", () => {
+		const { view } = setup();
+		view.setInspector([{ title: "Work plan", meta: "1 / 3", body: ["active step"] }]);
+		view.setExecution(new Text("fn main() {}", 0, 0));
+		const title = stripAnsi(view.render(110)[1] ?? "");
+		expect(title).toContain("Hide");
+		expect(title).toContain("Maximize");
+		const split = [...Array(110).keys()].find((column) => view.hitTest(column, 5) === "split");
+		expect(view.hitTest(2, 1)).toBe("inspectorTitle");
+		expect(view.hitTest(80, 1)).toBe("executionTitle");
+		expect(split).toBeGreaterThan(20);
+		expect(view.hitTest(split!, 5)).toBe("split");
+		expect(view.hitTest(0, view.dividerRow)).toBe("divider");
+		expect(view.hitTest(2, 4)).toBe("upper");
+		expect(view.paneTitleAction(title.indexOf("Hide"), 1)).toBe("hideInspector");
+		expect(view.paneTitleAction(title.indexOf("Maximize"), 1)).toBe("maximize");
+		view.toggleInspector();
+		const hidden = stripAnsi(view.render(110)[1] ?? "");
+		expect([...Array(110).keys()].some((column) => view.hitTest(column, 5) === "split")).toBe(false);
+		expect(view.hitTest(2, 1)).toBe("executionTitle");
+		expect(hidden).toContain("Show plan");
+		expect(hidden).toContain("Maximize");
+		view.toggleExecutionMaximized();
+		expect(stripAnsi(view.render(110)[1] ?? "")).toContain("Restore");
+	});
+	it("resizes the work area and inspector split from a pointer without collapsing", () => {
+		const { view } = setup();
+		view.setInspector([{ title: "Work plan", body: ["active step"] }]);
+		view.setExecution(new Text("fn main() {}", 0, 0));
+		view.render(110);
+		view.resizeUpperFromPointer(view.upperTop + 14);
+		view.render(110);
+		expect(view.upperHeight).toBe(14);
+		expect(view.geometry().collapsed).toBe(false);
+		expect(view.geometry().executionMaximized).toBe(false);
+		view.resizeInspectorFromPointer(48);
+		expect(view.geometry().inspectorFraction).toBeCloseTo(48 / 110);
+		view.resizeInspectorFromPointer(0);
+		expect(view.geometry().inspectorFraction).toBeGreaterThanOrEqual(0.2);
+		view.resizeUpperFromPointer(view.upperTop);
+		expect(view.geometry().collapsed).toBe(true);
+	});
+	it("places Conversation left and Execution right in columns, with the plan hideable", () => {
+		const { view } = setup();
+		view.setInspector([{ title: "Work plan", meta: "1 / 3", body: ["active step"] }]);
+		view.setExecution(new Text("fn main() {}", 0, 0));
+		view.toggleLayout();
+		view.toggleInspector();
+		const frame = view.render(110).map(stripAnsi);
+		expect(view.geometry().layout).toBe("columns");
+		expect(view.geometry().inspector).toBe("hidden");
+		expect(frame[1]).toMatch(/^ Conversation /);
+		expect(frame[1]).toContain("Execution");
+		expect(frame[1]).not.toContain("Work plan");
+		expect(view.dividerRow).toBe(-1);
+		expect(view.conversationLeft).toBeLessThan(40);
+		expect(view.hitTest(2, 2)).toBe("conversation");
+		expect(view.hitTest(90, 1)).toBe("executionTitle");
+		const split = [...Array(110).keys()].find((column) => view.hitTest(column, 5) === "columnSplit");
+		expect(split).toBeGreaterThan(20);
+		view.resizeConversationFromPointer(40);
+		expect(view.geometry().conversationFraction).toBeCloseTo(40 / 110);
+		view.toggleLayout();
+		view.render(110);
+		expect(view.geometry().layout).toBe("stacked");
+		expect(view.dividerRow).toBeGreaterThan(0);
 	});
 });

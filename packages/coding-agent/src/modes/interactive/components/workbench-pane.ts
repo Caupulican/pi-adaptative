@@ -35,6 +35,17 @@ export function labelRow(title: string, meta: string, width: number): string {
 	return truncateToWidth(theme.bold(theme.fg("text", title)), width, "…", true);
 }
 
+export type WorkbenchPaneTitleAction = "showInspector" | "hideInspector" | "maximize" | "layout";
+
+export interface WorkbenchPaneTitleButton {
+	action: WorkbenchPaneTitleAction;
+	label: string;
+}
+
+export function titleChip(label: string): string {
+	return theme.fg("accent", ` ${label} `);
+}
+
 /** Small current-evidence viewport on a surface tone. It owns scroll position, not task/history state. */
 export class WorkbenchPane {
 	private offset = 0;
@@ -45,6 +56,7 @@ export class WorkbenchPane {
 	private height = 0;
 	/** The operator scrolled away from the newest rows; a following pane stops following. */
 	private pinned = false;
+	private titleActions: { action: WorkbenchPaneTitleAction; start: number; end: number }[] = [];
 
 	reset(): void {
 		this.offset = 0;
@@ -55,6 +67,19 @@ export class WorkbenchPane {
 	hide(): void {
 		this.width = 0;
 		this.height = 0;
+		this.titleActions = [];
+	}
+
+	containsTitle(column: number, row: number): boolean {
+		return this.height > 0 && row === this.y - 1 && column >= this.x - 1 && column < this.x + this.width + 1;
+	}
+
+	titleAction(column: number): WorkbenchPaneTitleAction | undefined {
+		return this.titleActions.find((button) => column >= button.start && column < button.end)?.action;
+	}
+
+	hasTitleActions(): boolean {
+		return this.titleActions.length > 0;
 	}
 
 	scrollAt(column: number, row: number, delta: number): boolean {
@@ -91,6 +116,7 @@ export class WorkbenchPane {
 		width: number,
 		height: number,
 		follow = false,
+		actions: readonly WorkbenchPaneTitleButton[] = [],
 	): string[] {
 		if (height <= 0 || width <= 0) {
 			this.hide();
@@ -101,13 +127,32 @@ export class WorkbenchPane {
 		this.width = Math.max(0, width - 2);
 		this.height = Math.max(0, height - 1);
 		this.count = lines.length;
+		this.titleActions = [];
 		const end = Math.max(0, lines.length - this.height);
 		this.offset = follow && !this.pinned ? end : Math.min(this.offset, end);
 		const range =
 			lines.length > this.height && this.height > 0
 				? `${this.offset + 1}-${Math.min(lines.length, this.offset + this.height)}/${lines.length} ↕`
 				: "";
-		const rows = [` ${labelRow(title, [meta, range].filter(Boolean).join(" · "), this.width)} `];
+		const combinedMeta = [meta, range].filter(Boolean).join(" · ");
+		const actionWidths = actions.map((action) => visibleWidth(action.label) + 2);
+		const actionTotal =
+			actionWidths.reduce((sum, actionWidth) => sum + actionWidth, 0) + Math.max(0, actions.length - 1) * 2;
+		let heading: string;
+		if (actions.length && visibleWidth(title) + 1 + actionTotal <= this.width) {
+			const titleWidth = this.width - actionTotal;
+			const parts: string[] = [];
+			let column = x + 1 + titleWidth;
+			actions.forEach((action, index) => {
+				this.titleActions.push({ action: action.action, start: column, end: column + actionWidths[index]! });
+				parts.push(titleChip(action.label));
+				column += actionWidths[index]! + 2;
+			});
+			heading = ` ${labelRow(title, combinedMeta, titleWidth)}${parts.join("  ")} `;
+		} else {
+			heading = ` ${labelRow(title, combinedMeta, this.width)} `;
+		}
+		const rows = [heading];
 		for (let row = 0; row < this.height; row++) {
 			rows.push(` ${fitRow(lines[this.offset + row] ?? "", this.width)} `);
 		}

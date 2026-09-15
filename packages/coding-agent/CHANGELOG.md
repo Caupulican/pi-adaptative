@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Workbench mouse geometry: **Hide** / **Show plan** / **Maximize** / **Restore** chips on the pane titles; **Columns** puts conversation left and execution right without replacing the default stacked layout (**Stacked** restores it); drag the work-area divider to change rows (a still click still collapses); drag the inspector/execution gap or the column gutter to change width. `workbench.inspectorFraction`, `workbench.layout`, and `workbench.conversationFraction` persist with the rest of the operator geometry.
+
 ## [0.99.22] - 2026-09-15
 
 ### Added

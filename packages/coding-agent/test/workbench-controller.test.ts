@@ -113,10 +113,42 @@ describe("Workbench input boundary", () => {
 		controller.handleInput("\x1bo");
 		// 40 rows: 37 in the budget, the even split is 17; the first resize makes it an explicit 18.
 		expect(saved).toEqual([
-			{ rows: "half", collapsed: false, inspector: "hidden", executionMaximized: false },
-			{ rows: "half", collapsed: false, inspector: "hidden", executionMaximized: true },
-			{ rows: 18, collapsed: false, inspector: "hidden", executionMaximized: true },
-			{ rows: 18, collapsed: true, inspector: "hidden", executionMaximized: true },
+			{
+				rows: "half",
+				collapsed: false,
+				inspector: "hidden",
+				executionMaximized: false,
+				inspectorFraction: 0.3,
+				layout: "stacked",
+				conversationFraction: 0.5,
+			},
+			{
+				rows: "half",
+				collapsed: false,
+				inspector: "hidden",
+				executionMaximized: true,
+				inspectorFraction: 0.3,
+				layout: "stacked",
+				conversationFraction: 0.5,
+			},
+			{
+				rows: 18,
+				collapsed: false,
+				inspector: "hidden",
+				executionMaximized: true,
+				inspectorFraction: 0.3,
+				layout: "stacked",
+				conversationFraction: 0.5,
+			},
+			{
+				rows: 18,
+				collapsed: true,
+				inspector: "hidden",
+				executionMaximized: true,
+				inspectorFraction: 0.3,
+				layout: "stacked",
+				conversationFraction: 0.5,
+			},
 		]);
 	});
 
@@ -511,5 +543,221 @@ describe("Workbench input boundary", () => {
 		expect(copies).toEqual(["hello", "hello"]);
 		expect(view.conversation.following).toBe(false);
 		controller.dispose();
+	});
+
+	function mouse(button: number, column: number, row: number, release = false): string {
+		return `\x1b[<${button};${column + 1};${row + 1}${release ? "m" : "M"}`;
+	}
+
+	function pointerWorkbench() {
+		const conversation = new Container();
+		conversation.addChild(new Text("hello world", 0, 0));
+		const view = new WorkbenchComponent({
+			conversation,
+			editor: new Container(),
+			dock: [],
+			brand: "pi",
+			viewportRows: () => 30,
+		});
+		const saved: unknown[] = [];
+		const controller = new WorkbenchController(view, {
+			keybindings: new KeybindingsManager(),
+			isInteractive: () => true,
+			requestRender() {},
+			messages: () => [],
+			copy: async () => {},
+			notice() {},
+			geometry: { save: (geometry) => saved.push({ ...geometry }) },
+		});
+		view.applyGeometry({ rows: 10, collapsed: false, inspector: "shown", executionMaximized: false });
+		view.setInspector([{ title: "Work plan", meta: "1 / 3", body: ["active step"] }]);
+		view.setExecution(new Text("fn main() {}", 0, 0));
+		view.render(110);
+		return { view, controller, saved };
+	}
+
+	it("hides the Work plan from Hide and restores it from Show plan", () => {
+		const { view, controller } = pointerWorkbench();
+		const shown = stripAnsi(view.render(110)[1] ?? "");
+		const hide = shown.indexOf("Hide");
+		expect(hide).toBeGreaterThan(0);
+		expect(controller.handleInput(mouse(0, hide, 1))).toEqual({ consume: true });
+		expect(view.geometry().inspector).toBe("hidden");
+		const title = stripAnsi(view.render(110)[1] ?? "");
+		const chip = title.indexOf("Show plan");
+		expect(chip).toBeGreaterThan(0);
+		controller.handleInput(mouse(0, chip, 1));
+		expect(view.geometry().inspector).toBe("shown");
+	});
+
+	it("maximizes Execution from Maximize and restores from Restore", () => {
+		const { view, controller } = pointerWorkbench();
+		const shown = stripAnsi(view.render(110)[1] ?? "");
+		const maximize = shown.indexOf("Maximize");
+		expect(maximize).toBeGreaterThan(0);
+		controller.handleInput(mouse(0, maximize, 1));
+		expect(view.geometry().executionMaximized).toBe(true);
+		expect(view.geometry().collapsed).toBe(false);
+		const restored = stripAnsi(view.render(110)[1] ?? "");
+		const restore = restored.indexOf("Restore");
+		expect(restore).toBeGreaterThan(0);
+		controller.handleInput(mouse(0, restore, 1));
+		expect(view.geometry().executionMaximized).toBe(false);
+	});
+
+	it("does not change geometry from title text outside a chip", () => {
+		const { view, controller, saved } = pointerWorkbench();
+		const title = stripAnsi(view.render(110)[1] ?? "");
+		const plan = title.indexOf("Work plan");
+		const execution = title.indexOf("Execution");
+		expect(plan).toBeGreaterThanOrEqual(0);
+		expect(execution).toBeGreaterThan(plan);
+		controller.handleInput(mouse(0, plan, 1));
+		controller.handleInput(mouse(0, execution, 1));
+		expect(view.geometry()).toMatchObject({ inspector: "shown", executionMaximized: false });
+		expect(saved).toEqual([]);
+	});
+
+	it("collapses on a divider click and resizes on a divider drag, persisting only on release", () => {
+		const { view, controller, saved } = pointerWorkbench();
+		const divider = view.dividerRow;
+		controller.handleInput(mouse(0, 0, divider));
+		controller.handleInput(mouse(0, 0, divider, true));
+		expect(view.geometry().collapsed).toBe(true);
+		controller.handleInput(mouse(0, 0, view.dividerRow));
+		controller.handleInput(mouse(0, 0, view.dividerRow, true));
+		expect(view.geometry().collapsed).toBe(false);
+		view.render(110);
+		saved.length = 0;
+		const start = view.dividerRow;
+		const height = view.upperHeight;
+		controller.handleInput(mouse(0, 0, start));
+		expect(saved).toEqual([]);
+		controller.handleInput(mouse(32, 0, start + 4));
+		view.render(110);
+		expect(view.upperHeight).toBe(height + 4);
+		expect(view.geometry().collapsed).toBe(false);
+		expect(saved).toEqual([]);
+		controller.handleInput(mouse(0, 0, start + 4, true));
+		expect(saved.at(-1)).toMatchObject({ rows: height + 4, collapsed: false });
+	});
+
+	it("drags the inspector split and keeps the fraction inside its clamps", () => {
+		const { view, controller, saved } = pointerWorkbench();
+		const split = [...Array(110).keys()].find((column) => view.hitTest(column, 5) === "split");
+		expect(split).toBeDefined();
+		const start = view.geometry().inspectorFraction ?? 0.3;
+		controller.handleInput(mouse(0, split!, 5));
+		controller.handleInput(mouse(32, split! + 16, 5));
+		expect(view.geometry().inspectorFraction).toBeGreaterThan(start);
+		expect(saved).toEqual([]);
+		controller.handleInput(mouse(32, 0, 5));
+		expect(view.geometry().inspectorFraction).toBeGreaterThanOrEqual(0.2);
+		controller.handleInput(mouse(0, 0, 5, true));
+		expect(saved.at(-1)).toMatchObject({
+			inspectorFraction: view.geometry().inspectorFraction,
+			inspector: "shown",
+		});
+	});
+
+	it("switches to columns from the Columns chip and resizes the conversation split on drag", () => {
+		const { view, controller, saved } = pointerWorkbench();
+		const shown = stripAnsi(view.render(110)[1] ?? "");
+		const columns = shown.indexOf("Columns");
+		expect(columns).toBeGreaterThan(0);
+		controller.handleInput(mouse(0, columns, 1));
+		expect(view.geometry().layout).toBe("columns");
+		view.toggleInspector();
+		view.render(110);
+		expect(stripAnsi(view.render(110)[1] ?? "")).toMatch(/Conversation.*Execution/);
+		expect(stripAnsi(view.render(110).join("\n"))).not.toContain("Work plan");
+		const split = [...Array(110).keys()].find((column) => view.hitTest(column, 5) === "columnSplit");
+		expect(split).toBeDefined();
+		saved.length = 0;
+		controller.handleInput(mouse(0, split!, 5));
+		controller.handleInput(mouse(32, split! + 10, 5));
+		expect(saved).toEqual([]);
+		controller.handleInput(mouse(0, split! + 10, 5, true));
+		expect(saved.at(-1)).toMatchObject({ layout: "columns" });
+		expect(view.geometry().conversationFraction).toBeGreaterThan(0.3);
+		const stacked = stripAnsi(view.render(110)[1] ?? "").indexOf("Stacked");
+		expect(stacked).toBeGreaterThan(0);
+		controller.handleInput(mouse(0, stacked, 1));
+		expect(view.geometry().layout).toBe("stacked");
+	});
+
+	it("does not apply a stacked inspector chip to the execution title row", () => {
+		const { view, controller } = pointerWorkbench();
+		view.render(60);
+		let executionRow = -1;
+		let inspectorRow = -1;
+		for (let row = 0; row < 20; row++) {
+			if (executionRow < 0 && view.hitTest(2, row) === "executionTitle") executionRow = row;
+			if (inspectorRow < 0 && view.hitTest(2, row) === "inspectorTitle") inspectorRow = row;
+		}
+		expect(executionRow).toBeGreaterThan(0);
+		expect(inspectorRow).toBeGreaterThan(executionRow);
+		const hide = stripAnsi(view.render(60)[inspectorRow] ?? "").indexOf("Hide");
+		expect(hide).toBeGreaterThan(0);
+		expect(view.hitTest(hide, executionRow)).toBe("executionTitle");
+		expect(view.paneTitleAction(hide, inspectorRow)).toBe("hideInspector");
+		expect(view.paneTitleAction(hide, executionRow)).not.toBe("hideInspector");
+		controller.handleInput(mouse(0, hide, executionRow));
+		expect(view.geometry()).toMatchObject({ executionMaximized: true, inspector: "shown" });
+	});
+
+	it("restores rows when a divider drag returns to its origin before release", () => {
+		const { view, controller, saved } = pointerWorkbench();
+		view.applyGeometry({ rows: 60, collapsed: false, inspector: "shown", executionMaximized: false });
+		view.render(110);
+		expect(view.upperHeight).toBeLessThan(60);
+		const start = view.dividerRow;
+		controller.handleInput(mouse(0, 0, start));
+		controller.handleInput(mouse(32, 0, start - 2));
+		view.render(110);
+		controller.handleInput(mouse(32, 0, start));
+		controller.handleInput(mouse(0, 0, start, true));
+		expect(view.geometry().rows).toBe(60);
+		expect(view.geometry().collapsed).toBe(false);
+		expect(saved.at(-1)).toMatchObject({ rows: 60, collapsed: false });
+	});
+
+	it("keeps the even-split row setting when a divider drag returns to its origin", () => {
+		const { view, controller, saved } = pointerWorkbench();
+		view.applyGeometry({ rows: "half", collapsed: false, inspector: "shown", executionMaximized: false });
+		view.render(110);
+		const start = view.dividerRow;
+		controller.handleInput(mouse(0, 0, start));
+		controller.handleInput(mouse(32, 0, start + 3));
+		view.render(110);
+		controller.handleInput(mouse(32, 0, start));
+		controller.handleInput(mouse(0, 0, start, true));
+		expect(view.geometry().rows).toBe("half");
+		expect(saved.at(-1)).toMatchObject({ rows: "half" });
+	});
+
+	it("ignores orthogonal motion on the inspector split", () => {
+		const { view, controller, saved } = pointerWorkbench();
+		const split = [...Array(110).keys()].find((column) => view.hitTest(column, 5) === "split");
+		expect(split).toBeDefined();
+		const fraction = view.geometry().inspectorFraction;
+		controller.handleInput(mouse(0, split!, 5));
+		controller.handleInput(mouse(32, split!, 8));
+		controller.handleInput(mouse(0, split!, 8, true));
+		expect(view.geometry().inspectorFraction).toBe(fraction);
+		expect(saved).toEqual([]);
+	});
+
+	it("does not change geometry from a pane-body click or a conversation drag", () => {
+		const { view, controller, saved } = pointerWorkbench();
+		const before = view.geometry();
+		controller.handleInput(mouse(0, 2, 4));
+		controller.handleInput(mouse(0, 2, 4, true));
+		expect(view.geometry()).toEqual(before);
+		controller.handleInput(mouse(0, 2, view.conversationTop));
+		controller.handleInput(mouse(32, 8, view.conversationTop));
+		controller.handleInput(mouse(0, 8, view.conversationTop, true));
+		expect(view.geometry()).toEqual(before);
+		expect(saved).toEqual([]);
 	});
 });
