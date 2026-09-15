@@ -15,6 +15,29 @@ export function githubOriginPinDiagnostic(result: GithubOriginPinResult): string
 	return result.status === "failed" ? `GitHub origin pin failed: ${result.reason}` : undefined;
 }
 
+export function reportGithubOriginPinForSession(
+	cwd: string,
+	isChildSession: boolean,
+	sessionManager: {
+		appendCustomMessageEntry(
+			customType: string,
+			content: string,
+			display: boolean,
+			details?: { status: GithubOriginPinResult["status"]; reason?: string },
+		): string;
+	},
+	git?: GithubOriginGitRunner,
+): void {
+	if (isChildSession) return;
+	const pin = pinGithubOriginForSession(cwd, git);
+	const diagnostic = githubOriginPinDiagnostic(pin);
+	if (!diagnostic) return;
+	sessionManager.appendCustomMessageEntry("github_origin_pin", diagnostic, true, {
+		status: pin.status,
+		reason: pin.status === "failed" ? pin.reason : undefined,
+	});
+}
+
 function boundedReason(reason: string): string {
 	return reason.length <= MAX_PIN_REASON_CHARS ? reason : `${reason.slice(0, MAX_PIN_REASON_CHARS - 1)}…`;
 }

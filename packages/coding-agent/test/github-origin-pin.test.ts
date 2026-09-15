@@ -3,8 +3,12 @@ import { unlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { githubOriginPinDiagnostic, pinGithubOriginForSession } from "../src/core/github-origin-pin.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	githubOriginPinDiagnostic,
+	pinGithubOriginForSession,
+	reportGithubOriginPinForSession,
+} from "../src/core/github-origin-pin.ts";
 
 const temporaryRoots: string[] = [];
 
@@ -146,5 +150,26 @@ describe("pinGithubOriginForSession", () => {
 		expect(githubOriginPinDiagnostic({ status: "already", slug: "Caupulican/pi-adaptative" })).toBeUndefined();
 		expect(githubOriginPinDiagnostic({ status: "skipped", reason: "not a GitHub origin" })).toBeUndefined();
 		expect(githubOriginPinDiagnostic({ status: "pinned", slug: "Caupulican/pi-adaptative" })).toBeUndefined();
+	});
+
+	it("does not pin or diagnose child sessions", () => {
+		const appendCustomMessageEntry = vi.fn();
+		reportGithubOriginPinForSession("/repo", true, { appendCustomMessageEntry }, () => {
+			throw new Error("child sessions must not run git");
+		});
+		expect(appendCustomMessageEntry).not.toHaveBeenCalled();
+	});
+
+	it("records a failed pin diagnostic on root sessions", () => {
+		const appendCustomMessageEntry = vi.fn(() => "id");
+		reportGithubOriginPinForSession("/repo", false, { appendCustomMessageEntry }, () => {
+			throw new Error("could not lock config file");
+		});
+		expect(appendCustomMessageEntry).toHaveBeenCalledWith(
+			"github_origin_pin",
+			"GitHub origin pin failed: could not lock config file",
+			true,
+			{ status: "failed", reason: "could not lock config file" },
+		);
 	});
 });

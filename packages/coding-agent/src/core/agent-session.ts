@@ -114,7 +114,7 @@ import { ForegroundLifecycleAdapter } from "./foreground-lifecycle-adapter.ts";
 import { ForegroundRecoveryController, type ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import { ForegroundTerminalHandoffController } from "./foreground-terminal-handoff-controller.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
-import { githubOriginPinDiagnostic, pinGithubOriginForSession } from "./github-origin-pin.ts";
+import { reportGithubOriginPinForSession } from "./github-origin-pin.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
@@ -215,12 +215,7 @@ import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-ses
 /** Test-only override of the stream-idle bounds. Read per-request by the wiring's resolver. */
 let streamIdleOptionsOverride: Partial<StreamIdleOptions> | undefined;
 
-/**
- * Test hook: override the stream-idle bounds so a stall can be provoked in-suite without a
- * multi-minute wait. Pass `undefined` to restore the user-locked defaults (connect 120s /
- * active 180s / quiet 600s, or the user's retry.stall settings). Applies per request — it
- * may be set or changed at any time before the request that should observe it.
- */
+/** Test hook: override stream-idle bounds. Pass undefined to restore user-locked defaults. */
 export function setStreamIdleOptionsForTests(opts: Partial<StreamIdleOptions> | undefined): void {
 	streamIdleOptionsOverride = opts;
 }
@@ -489,16 +484,7 @@ export class AgentSession {
 		this._cwd = config.cwd;
 		this._agentDir = agentDir;
 		this._isChildSession = (config.isChildSession ?? process.env.PI_CHILD_SESSION === "1") || isWorkerSession();
-		if (!this._isChildSession) {
-			const pin = pinGithubOriginForSession(this._cwd);
-			const diagnostic = githubOriginPinDiagnostic(pin);
-			if (diagnostic) {
-				this.sessionManager.appendCustomMessageEntry("github_origin_pin", diagnostic, true, {
-					status: pin.status,
-					reason: pin.status === "failed" ? pin.reason : undefined,
-				});
-			}
-		}
+		reportGithubOriginPinForSession(this._cwd, this._isChildSession, this.sessionManager);
 		this._durableLearningState = this._isChildSession ? undefined : DurableLearningState.forAgentDir(agentDir);
 		this._skillVault = new SkillVaultController({
 			getSkills: () => this._resourceLoader.getActiveSkills(),
