@@ -396,7 +396,8 @@ export class CollaborationJobStore {
 					if ((current.startReceipts?.length ?? 0) >= 128)
 						throw new Error("Collaboration start receipt limit reached.");
 					const owner = collaborationController(current);
-					if (owner.parentSessionId !== this.parentSessionId) {
+					if (owner.parentSessionId === this.parentSessionId) this.assertController(current);
+					if (owner.parentSessionId !== this.parentSessionId || owner.parentPid !== process.pid) {
 						if (owner.generation === Number.MAX_SAFE_INTEGER)
 							throw new Error("Collaboration controller generation exhausted.");
 						current.controller = {
@@ -404,7 +405,7 @@ export class CollaborationJobStore {
 							parentPid: process.pid,
 							generation: owner.generation + 1,
 						};
-					} else this.assertController(current);
+					}
 					if (task)
 						for (const agent of input.agents)
 							this.reserve(current, agent.id, collaborationAssignment(task, agent.task), false, {

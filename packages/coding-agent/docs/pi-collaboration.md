@@ -35,6 +35,8 @@ Pi workers inherit immutable eligible tools, resource filters and thinking level
 
 Native Pi tasks require an already-granted `bash` or `python` tool to submit peer/result commands (`bash` uses the platform's configured shell). Admission never adds that permission. A shell-free idle workspace may be opened, but cannot accept this command-dependent task protocol; use ordinary delegation for shell-free workers.
 
+Ordinary starts reuse a compatible idle team across parent sessions sharing the physical project and managed state. The whole team must be available, with its previous handoffs acknowledged. Busy or ambiguous matches refuse admission; `jobId` selects a compatible team explicitly. A separate concurrent context requires `parallelWork: { independent: true, justification: "..." }`. Matching includes provider, model, tools, resources, thinking, environment, and team membership. The controller transfer and new turn reservation share one locked write; old host views cannot mutate a transferred team. Launch provenance stays immutable, and authenticated Pi workers follow ownership changes without restarting their conversation. Reuse after a same-session process restart also refreshes supervision ownership.
+
 By explicit execution policy, Claude and agy receive `--dangerously-skip-permissions`; Codex receives `--dangerously-bypass-approvals-and-sandbox`. These are unrestricted host processes. Pi does not claim to enforce native foreign tools, token budgets or OS sandboxing.
 
 ## Work and question boundaries

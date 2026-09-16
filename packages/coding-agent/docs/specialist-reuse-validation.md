@@ -28,6 +28,14 @@ available for reuse; the active roster excludes idle specialists without deletin
 - Replayed starts preserve their declared fork mode and dependencies. Retrying an unchanged start
   remains inert after the parent's transcript grows; changing the recorded intent is refused.
 - Context projection after session disposal cannot reopen the SQLite path-alias index.
+- Interrupted initial setup recovers only after proven owner exit and absence of leases, registration,
+  pending mailbox work, or active transcript writes. The exact abandoned task is cancelled with its
+  bounded parent notification before the allocation is released.
+- A lost preparation or enrollment receipt preserves durable task identity and reusable context;
+  abandoned instructions are not replayed.
+- Herdr teams transfer their effective controller across project parent sessions without changing
+  launch provenance. Same-session process restarts refresh the supervisor, and generations fence
+  stale controllers while original authenticated peers can report the current turn.
 
 ## Evidence
 
@@ -72,10 +80,13 @@ owners; extracted binary code was not executed or copied into the runtime.
 ## Remaining boundaries
 
 - Native project transfer now has exclusive claims, transcript/mailbox fencing, and birth-bundle
-  deletion protection. Refused controls release only newly acquired, quiescent claims. Interrupted
-  allocation recovery still needs dedicated failure-path validation before release.
-- Managed Herdr teams reuse compatible idle teams within a parent. Transferring their parent
-  ownership remains separate work; live CLI parent/task flags cannot simply be relabeled.
+  deletion protection. Refused controls release only newly acquired, quiescent claims. Recovery
+  deliberately keeps leased, registered, or uncertain work excluded; owner death alone does not
+  prove resource cleanup. Older receipts without preparation evidence remain excluded.
+- Managed Herdr ownership transfer is covered through the real job store, authenticated peer context,
+  filesystem watcher, and process-matrix composition. Native provider inference remains untested;
+  no paid provider calls were made. Historical lane records remain evidence of prior tasks, not
+  evidence that a retained CLI is currently working for that parent.
 - Goal materialization and mailbox persistence span separate files. Deterministic admission refusal
   has no goal side effect, but an actual I/O failure between the two writes is not an atomic rollback.
 

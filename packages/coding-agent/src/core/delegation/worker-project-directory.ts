@@ -27,12 +27,19 @@ export interface WorkerProjectAllocation {
 	owner: SpecialistContextOwner;
 }
 
+export interface WorkerProjectPreparation {
+	logicalAgentId: string;
+	controlMessageId: string;
+}
+
 interface DirectoryEntry {
 	allocationId: string;
 	/** Only an allocation receipt, never a mirror of the transcript's current execution owner. */
 	allocatedBy: SpecialistContextOwner;
 	phase: "allocating" | "published";
 	reference?: WorkerProjectContextReference;
+	/** Null proves no task preparation; absence is an older receipt with unknown preparation. */
+	preparation?: WorkerProjectPreparation | null;
 }
 
 export type WorkerProjectAdmission =
@@ -65,23 +72,22 @@ export class WorkerProjectDirectory {
 			if (!input.independent) {
 				const recovery = new WorkerProjectSetupRecovery(this.agentDir, this.conversations);
 				for (const entry of [...entries]) {
-					if (!entry.reference) continue;
 					try {
-						recovery.settle(
-							{
-								specializationKey: input.specializationKey,
-								allocationId: entry.allocationId,
-								owner: entry.allocatedBy,
-							},
-							entry.reference,
-							(enrolled) => {
-								const index = entries.indexOf(entry);
-								const next = this.settledSetupEntry(entry, enrolled);
-								if (next) entries[index] = next;
-								else entries.splice(index, 1);
-								this.write(file, entries);
-							},
-						);
+						const allocation = {
+							specializationKey: input.specializationKey,
+							allocationId: entry.allocationId,
+							owner: entry.allocatedBy,
+						};
+						const publish = (enrolled: boolean) => {
+							const index = entries.indexOf(entry);
+							const next = this.settledSetupEntry(entry, enrolled);
+							if (next) entries[index] = next;
+							else entries.splice(index, 1);
+							this.write(file, entries);
+						};
+						if (entry.reference) recovery.settle(allocation, entry.reference, publish);
+						else if (entry.preparation !== undefined)
+							recovery.settleUnbound(allocation, entry.preparation, "owner_exit", () => publish(false));
 					} catch {
 						return { kind: "unavailable", reason: "worker_project_setup_recovery_unavailable" };
 					}
@@ -130,14 +136,30 @@ export class WorkerProjectDirectory {
 				return { kind: "unavailable", reason: "worker_project_directory_full" };
 			const owner = this.normalizeOwner(input.owner);
 			const allocationId = randomUUID();
-			this.write(file, [...entries, { allocationId, allocatedBy: owner, phase: "allocating" }]);
+			this.write(file, [...entries, { allocationId, allocatedBy: owner, phase: "allocating", preparation: null }]);
 			return { kind: "allocated", allocation: { specializationKey: input.specializationKey, allocationId, owner } };
+		});
+	}
+
+	/** Journal exact command identity BEFORE durable task preparation can leave executable work. */
+	notePreparation(allocation: WorkerProjectAllocation, preparation: WorkerProjectPreparation): void {
+		const normalized = this.normalizePreparation(preparation);
+		this.updateAllocation(allocation, (entry) => {
+			if (
+				entry.reference ||
+				entry.phase !== "allocating" ||
+				(entry.preparation && !isDeepStrictEqual(entry.preparation, normalized))
+			)
+				throw new Error("Worker allocation preparation identity changed.");
+			return { ...entry, preparation: normalized };
 		});
 	}
 
 	/** Persist the planned birth identity before the caller creates its transcript or task binding. */
 	bindAllocation(allocation: WorkerProjectAllocation, reference: WorkerProjectContextReference): void {
 		this.updateAllocation(allocation, (entry) => {
+			if (entry.preparation && entry.preparation.logicalAgentId !== reference.logicalAgentId)
+				throw new Error("Worker allocation preparation and transcript disagree.");
 			if (entry.reference && !isDeepStrictEqual(entry.reference, reference))
 				throw new Error("Worker allocation identity changed.");
 			return { ...entry, reference: this.normalizeReference(reference) };
@@ -163,13 +185,11 @@ export class WorkerProjectDirectory {
 		});
 	}
 
-	/** Only an unbound allocation can be withdrawn without transcript/ledger recovery evidence. */
+	/** Failed preparation may have committed before throwing; settle its exact command before withdrawal. */
 	cancelUnboundAllocation(allocation: WorkerProjectAllocation): void {
-		this.updateAllocation(allocation, (entry) => {
-			if (entry.reference || entry.phase !== "allocating")
-				throw new Error("Bound worker allocation requires reconciliation.");
-			return undefined;
-		});
+		this.withAllocation(allocation, (entry, save) =>
+			this.settleUnboundEntry(allocation, entry, () => save(undefined)),
+		);
 	}
 
 	/** Caller proves the prepared task is cancelled and has no agent binding or executor. */
@@ -180,8 +200,7 @@ export class WorkerProjectDirectory {
 		let sessionId: string | undefined;
 		this.withAllocation(allocation, (entry, save) => {
 			if (!entry.reference) {
-				if (entry.phase !== "allocating") throw new Error("Published worker allocation has no context.");
-				save(undefined);
+				this.settleUnboundEntry(allocation, entry, () => save(undefined));
 				return;
 			}
 			sessionId = entry.reference.resumeContext.sessionId;
@@ -191,6 +210,18 @@ export class WorkerProjectDirectory {
 			);
 		});
 		return sessionId;
+	}
+
+	private settleUnboundEntry(allocation: WorkerProjectAllocation, entry: DirectoryEntry, release: () => void): void {
+		if (entry.reference || entry.phase !== "allocating")
+			throw new Error("Bound worker allocation requires reconciliation.");
+		if (entry.preparation === undefined) throw new Error("Worker preparation evidence is missing.");
+		new WorkerProjectSetupRecovery(this.agentDir, this.conversations).settleUnbound(
+			allocation,
+			entry.preparation,
+			"preparation_failed",
+			release,
+		);
 	}
 
 	private settledSetupEntry(entry: DirectoryEntry, enrolled: boolean): DirectoryEntry | undefined {
@@ -230,6 +261,19 @@ export class WorkerProjectDirectory {
 		return {
 			parentSessionId: requireBoundedTrimmedText(value.parentSessionId, 512, "Worker parent"),
 			incarnation: requireBoundedTrimmedText(value.incarnation, 512, "Worker incarnation"),
+		};
+	}
+
+	private normalizePreparation(value: unknown): WorkerProjectPreparation {
+		if (
+			!isPlainRecord(value) ||
+			typeof value.logicalAgentId !== "string" ||
+			typeof value.controlMessageId !== "string"
+		)
+			throw new Error("Worker preparation is invalid.");
+		return {
+			logicalAgentId: requireBoundedTrimmedText(value.logicalAgentId, 512, "Worker preparation agent"),
+			controlMessageId: requireBoundedTrimmedText(value.controlMessageId, 512, "Worker preparation command"),
 		};
 	}
 
@@ -275,6 +319,11 @@ export class WorkerProjectDirectory {
 				allocationId,
 				allocatedBy: this.normalizeOwner(item.allocatedBy),
 				phase: item.phase,
+				...(item.preparation === undefined
+					? {}
+					: {
+							preparation: item.preparation === null ? null : this.normalizePreparation(item.preparation),
+						}),
 				...(reference ? { reference } : {}),
 			};
 		});

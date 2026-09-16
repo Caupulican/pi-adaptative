@@ -1,10 +1,17 @@
 import { existsSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
+import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { WorkerAgentMailbox } from "./worker-agent-control.ts";
 import type { WorkerConversationStore, WorkerProjectContextReference } from "./worker-conversation-store.ts";
 import { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { isLocalProcessAlive, isLocalWorkerProcessOwnerProvenDead } from "./worker-process-owner.ts";
-import type { WorkerProjectAllocation } from "./worker-project-directory.ts";
+import type { WorkerProjectAllocation, WorkerProjectPreparation } from "./worker-project-directory.ts";
+
+interface PreparedSetup {
+	lifecycle: WorkerLifecycle;
+	snapshot: TaskRuntimeProjection;
+	attempt?: AttemptRuntimeState;
+}
 
 /** Reconcile only interrupted initial setup. A leased task or registered agent has another lifecycle. */
 export class WorkerProjectSetupRecovery {
@@ -34,24 +41,9 @@ export class WorkerProjectSetupRecovery {
 			// that context has moved on; the transcript remains the sole source of current ownership.
 			if (binding && !isDeepStrictEqual(binding.ownership.claim, { ...allocation.owner, generation: 1 })) return;
 		}
-		const lifecycle = new WorkerLifecycle({ agentDir: this.agentDir, sessionId: reference.parentSessionId });
-		const snapshot = lifecycle.getTaskRuntimeSnapshot();
-		const task = snapshot.tasks[reference.logicalAgentId];
-		if (task?.attemptIds.length !== 1) return;
-		const attempt = snapshot.attempts[task.attemptIds[0]];
-		if (
-			!attempt ||
-			attempt.lease ||
-			attempt.agentId ||
-			!["queued", "cancelled"].includes(attempt.status) ||
-			Object.values(snapshot.agents).some(
-				(agent) =>
-					agent.agentId === reference.logicalAgentId ||
-					agent.resumeContext.sessionId === reference.resumeContext.sessionId ||
-					agent.resumeContext.sessionFile === reference.resumeContext.sessionFile,
-			)
-		)
-			return;
+		const setup = this.inspectSetup(reference.parentSessionId, reference.logicalAgentId, reference);
+		if (!setup?.attempt) return;
+		const attempt = setup.attempt;
 		const mailbox = new WorkerAgentMailbox({
 			agentDir: this.agentDir,
 			parentSessionId: reference.parentSessionId,
@@ -72,16 +64,85 @@ export class WorkerProjectSetupRecovery {
 						)
 					)
 						throw new Error("Worker setup task and transcript have different birth context.");
-					lifecycle.ledger.runtime.cancelAttempt(attempt.attemptId, "worker_setup_owner_exited", {
-						expectedLastOrdinal: snapshot.lastOrdinal,
-						unleasedOnly: true,
-					});
-					// Use the lifecycle's canonical bounded terminal outbox. A restarted parent receives
-					// the cancellation without ever replaying the abandoned task's instructions.
-					lifecycle.getPendingTerminalNotifications();
+					this.cancelPreparedSetup(setup, "worker_setup_owner_exited");
 				},
 			},
 			publish,
 		);
+	}
+
+	/** Caller holds the allocation lock, so no transcript can be bound until settlement finishes. */
+	settleUnbound(
+		allocation: WorkerProjectAllocation,
+		preparation: WorkerProjectPreparation | null,
+		reason: "owner_exit" | "preparation_failed",
+		release: () => void,
+	): void {
+		if (
+			reason === "owner_exit" &&
+			!isLocalWorkerProcessOwnerProvenDead(allocation.owner.incarnation, isLocalProcessAlive)
+		)
+			return;
+		if (preparation === null) {
+			release();
+			return;
+		}
+		const setup = this.inspectSetup(allocation.owner.parentSessionId, preparation.logicalAgentId);
+		if (!setup || (setup.attempt && setup.attempt.dispatch.controlMessageId !== preparation.controlMessageId))
+			throw new Error("Worker preparation cannot be proven quiescent for its exact command.");
+		const mailbox = new WorkerAgentMailbox({
+			agentDir: this.agentDir,
+			parentSessionId: allocation.owner.parentSessionId,
+			agentId: preparation.logicalAgentId,
+		});
+		if (
+			!mailbox.withQuiescentMailbox(() => {
+				this.cancelPreparedSetup(
+					setup,
+					reason === "owner_exit" ? "worker_setup_owner_exited" : "worker_setup_preparation_failed",
+				);
+				release();
+			})
+		)
+			throw new Error("Worker preparation has pending mailbox obligations.");
+	}
+
+	private inspectSetup(
+		parentSessionId: string,
+		logicalAgentId: string,
+		reference?: WorkerProjectContextReference,
+	): PreparedSetup | undefined {
+		const lifecycle = new WorkerLifecycle({ agentDir: this.agentDir, sessionId: parentSessionId });
+		const snapshot = lifecycle.getTaskRuntimeSnapshot();
+		const task = snapshot.tasks[logicalAgentId];
+		if ((task && task.attemptIds.length !== 1) || (!task && reference)) return;
+		const attempt = task ? snapshot.attempts[task.attemptIds[0]] : undefined;
+		if (
+			(task && !attempt) ||
+			(attempt &&
+				(attempt.lease ||
+					attempt.agentId ||
+					attempt.dispatch.executionKind === "managed-process" ||
+					!["queued", "cancelled"].includes(attempt.status))) ||
+			Object.values(snapshot.agents).some(
+				(agent) =>
+					agent.agentId === logicalAgentId ||
+					(reference !== undefined &&
+						(agent.resumeContext.sessionId === reference.resumeContext.sessionId ||
+							agent.resumeContext.sessionFile === reference.resumeContext.sessionFile)),
+			)
+		)
+			return;
+		return { lifecycle, snapshot, attempt };
+	}
+
+	private cancelPreparedSetup({ lifecycle, snapshot, attempt }: PreparedSetup, reasonCode: string): void {
+		if (!attempt) return;
+		lifecycle.ledger.runtime.cancelAttempt(attempt.attemptId, reasonCode, {
+			expectedLastOrdinal: snapshot.lastOrdinal,
+			unleasedOnly: true,
+		});
+		// Reuse the canonical bounded terminal outbox; never replay abandoned instructions.
+		lifecycle.getPendingTerminalNotifications();
 	}
 }

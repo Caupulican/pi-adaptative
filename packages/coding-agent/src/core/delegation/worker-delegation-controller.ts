@@ -1853,7 +1853,12 @@ export class WorkerDelegationController {
 			mode.kind === "none" ? [] : selectSanitizedContextFork(this.workerContextForkSource(request).messages, mode);
 		const project = this.projectSelections.get(request);
 		const prepare = (birthContextForkReference: WorkerContextForkReference, laneId: string) => {
-			const controlMessageId = this.controlMessageIdFor(request.messageReplayKey);
+			const allocation = project?.admission.kind === "allocated" ? project.admission.allocation : undefined;
+			const controlMessageId =
+				this.controlMessageIdFor(request.messageReplayKey) ??
+				(allocation ? `project-setup:${allocation.allocationId}` : undefined);
+			if (allocation && controlMessageId)
+				this.projectDirectory.notePreparation(allocation, { logicalAgentId: laneId, controlMessageId });
 			const value = lifecycle.prepare(
 				{
 					instructions: admission.instructions,

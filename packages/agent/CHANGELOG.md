@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Process-tree termination requires exit or absence evidence on Linux and Windows; signal delivery, child errors, and unknown liveness no longer falsely establish cleanup or authorize ownership recovery.
+
 ## [0.99.24] - 2026-09-15
 
 ### Fixed
