@@ -30,6 +30,16 @@ import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
 import { validateAttemptUsageSnapshot } from "../orchestration/attempt-usage.ts";
 import type { AgentResumeContext, AttemptUsageSnapshot, ResourcePointer } from "../orchestration/contracts.ts";
 import {
+	acquireSpecialistContext,
+	assertSpecialistContextClaim,
+	createSpecialistContextOwnership,
+	normalizeSpecialistContextOwnership,
+	releaseSpecialistContext,
+	type SpecialistContextClaim,
+	type SpecialistContextOwner,
+	type SpecialistContextOwnership,
+} from "../orchestration/specialist-context-ownership.ts";
+import {
 	normalizeWorkerContextForkReference,
 	type WorkerContextForkReference,
 } from "../orchestration/worker-context-fork-reference.ts";
@@ -37,6 +47,7 @@ import { buildRequestSnapshotInput } from "../request-snapshot-fingerprints.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedTextFileSync } from "../util/bounded-file.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import {
 	collectBoundedWorkerClaimChangedFiles,
 	MAX_WORKER_CLAIM_CHANGED_FILES,
@@ -57,6 +68,7 @@ import { projectWorkerTranscriptForInspection } from "./worker-transcript-projec
 const MAX_WORKER_CONVERSATION_METADATA_BYTES = 256 * 1024;
 const WORKER_CHANGED_FILE_CUSTOM_TYPE = "worker-changed-file";
 const WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE = "worker-attempt-usage-boundary";
+const WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE = "worker-project-enrollment-v1";
 const MAX_PERSISTED_WORKER_DIAGNOSTICS = 8;
 const MAX_WORKER_CONTROL_ENTRY_PREFIX_BYTES = 16 * 1024;
 export const MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES = 64;
@@ -104,12 +116,19 @@ export interface CreateWorkerConversationOptions {
 	contextPointers: readonly ResourcePointer[];
 	/** Immutable sanitized parent context captured before this logical agent is admitted. */
 	birthContextForkReference?: WorkerContextForkReference;
+	projectClaim?: SpecialistContextClaim;
 }
 
 interface OpenWorkerConversationOptions {
 	agentDir: string;
 	resumeContext: AgentResumeContext;
 	expectedLogicalAgentId?: string;
+	projectClaim?: SpecialistContextClaim;
+}
+
+interface WorkerProjectContext {
+	specializationKey: string;
+	ownership: SpecialistContextOwnership;
 }
 
 /**
@@ -154,6 +173,7 @@ interface WorkerConversationMetadata {
 	birthContextForkReference?: WorkerContextForkReference;
 	/** Version 1 makes a missing current-attempt boundary authoritative zero usage. */
 	usageAccountingVersion?: 1;
+	projectContext?: WorkerProjectContext;
 }
 
 interface WorkerConversationMetadataState {
@@ -473,8 +493,26 @@ function readWorkerConversationMetadata(metadataFile: string): WorkerConversatio
 				: "Worker conversation metadata is missing or invalid.",
 		);
 	}
-	if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+	if (!isPlainRecord(metadata)) {
 		throw new Error("Worker conversation metadata is invalid.");
+	}
+	let projectContext: WorkerProjectContext | undefined;
+	if ("format" in metadata) {
+		if (
+			metadata.format !== "worker-project-context-v1" ||
+			Object.keys(metadata).length !== 3 ||
+			!isPlainRecord(metadata.metadata) ||
+			!isPlainRecord(metadata.projectContext) ||
+			Object.keys(metadata.projectContext).length !== 2 ||
+			typeof metadata.projectContext.specializationKey !== "string" ||
+			!/^[a-f0-9]{64}$/.test(metadata.projectContext.specializationKey)
+		)
+			throw new Error("Worker project context metadata is invalid.");
+		projectContext = {
+			specializationKey: metadata.projectContext.specializationKey,
+			ownership: normalizeSpecialistContextOwnership(metadata.projectContext.ownership),
+		};
+		metadata = metadata.metadata;
 	}
 	const logicalAgentId = (metadata as { logicalAgentId?: unknown }).logicalAgentId;
 	const parentSessionId = (metadata as { parentSessionId?: unknown }).parentSessionId;
@@ -511,6 +549,7 @@ function readWorkerConversationMetadata(metadataFile: string): WorkerConversatio
 				? { birthContextForkReference: normalizedBirthContextForkReference }
 				: {}),
 			...(usageAccountingVersion === 1 ? { usageAccountingVersion } : {}),
+			...(projectContext ? { projectContext } : {}),
 		},
 	};
 }
@@ -658,7 +697,48 @@ function assertWorkerConversationMetadataContent(
 }
 
 function writeWorkerConversationMetadata(metadataFile: string, metadata: WorkerConversationMetadata): void {
-	writeFileAtomicSync(metadataFile, `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
+	const { projectContext, ...identity } = metadata;
+	const encoded = projectContext
+		? { format: "worker-project-context-v1", metadata: identity, projectContext }
+		: identity;
+	writeFileAtomicSync(metadataFile, `${JSON.stringify(encoded)}\n`, { mode: 0o600 });
+}
+
+const projectEnrollmentIndices = new WeakMap<SessionManager, { count: number; key?: string }>();
+
+/** Append-only enrollment makes dropping the metadata envelope a refusal, never a legacy fallback. */
+function projectEnrollmentKey(session: SessionManager): string | undefined {
+	let index = projectEnrollmentIndices.get(session);
+	if (!index || index.count > session.getEntryCount()) index = { count: 0 };
+	const current = index;
+	visitWorkerSessionEntries(session, current.count, session.getEntryCount(), (entry) => {
+		if (entry.type !== "custom" || entry.customType !== WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE) return;
+		if (
+			current.key ||
+			!isPlainRecord(entry.data) ||
+			typeof entry.data.specializationKey !== "string" ||
+			Object.keys(entry.data).length !== 1 ||
+			!/^[a-f0-9]{64}$/.test(entry.data.specializationKey)
+		)
+			throw new Error("Worker project enrollment is invalid.");
+		current.key = entry.data.specializationKey;
+	});
+	current.count = session.getEntryCount();
+	projectEnrollmentIndices.set(session, current);
+	return current.key;
+}
+
+function assertProjectConversationAccess(
+	metadata: WorkerConversationMetadata,
+	session: SessionManager,
+	claim?: SpecialistContextClaim,
+	intent: "mutation" | "inspection" = "mutation",
+): void {
+	const enrollment = projectEnrollmentKey(session);
+	if (enrollment !== metadata.projectContext?.specializationKey || (claim && !metadata.projectContext))
+		throw new Error("Worker project context enrollment is missing or changed.");
+	if (metadata.projectContext && intent === "mutation")
+		assertSpecialistContextClaim(metadata.projectContext.ownership, claim);
 }
 
 function openWorkerBirthContext(
@@ -871,12 +951,14 @@ export class WorkerConversation {
 	private readonly resumeContext: AgentResumeContext;
 	private readonly agentDir?: string;
 	private readonly metadataFile?: string;
+	private readonly projectClaim?: SpecialistContextClaim;
 
 	constructor(
 		sessionManager: SessionManager,
 		resumeContext: AgentResumeContext,
 		metadata?: WorkerConversationMetadataBinding,
 		sharedCore?: WorkerConversationCore,
+		projectClaim?: SpecialistContextClaim,
 	) {
 		this.core = sharedCore ?? {
 			sessionManager,
@@ -888,6 +970,16 @@ export class WorkerConversation {
 		this.resumeContext = cloneResumeContext(resumeContext);
 		this.agentDir = metadata?.agentDir;
 		this.metadataFile = metadata?.file;
+		this.projectClaim = projectClaim ? structuredClone(projectClaim) : undefined;
+	}
+
+	/** A view carries its original claim; refreshing a shared parsed core never grants new authority. */
+	getProjectClaim(): SpecialistContextClaim | undefined {
+		return this.projectClaim ? structuredClone(this.projectClaim) : undefined;
+	}
+
+	hasActiveTranscriptCommit(): boolean {
+		return this.core.activeTranscriptCursors > 0;
 	}
 
 	private get sessionManager(): SessionManager {
@@ -1208,6 +1300,7 @@ export class WorkerConversation {
 				currentMetadataState?.parentSessionId,
 				currentMetadataState?.birthContextForkReference,
 			);
+			assertProjectConversationAccess(metadata, this.sessionManager, this.projectClaim);
 			if (metadata.usageAccountingVersion !== 1) {
 				metadata = { ...metadata, usageAccountingVersion: 1 };
 				writeWorkerConversationMetadata(metadataFile, metadata);
@@ -1282,6 +1375,7 @@ export class WorkerConversation {
 		return this.withCanonicalSessionLock(
 			(sessionManager) => scanWorkerControlTranscript(sessionManager, expectations),
 			true,
+			"inspection",
 		);
 	}
 
@@ -1298,14 +1392,18 @@ export class WorkerConversation {
 		if (message.role !== "user" || typeof message.content !== "string" || message.content !== expectation.content) {
 			throw new TypeError("Worker control transcript message does not match its expectation.");
 		}
-		return this.withCanonicalSessionLock((sessionManager) => {
-			const delivered = scanWorkerControlTranscript(sessionManager, [expectation]).has(expectation.messageId);
-			if (delivered || !appendIfMissing) return { delivered, appended: false };
-			this.appendSessionEntryLocked(sessionManager, (owner) =>
-				owner.appendMessage(structuredClone(workerMessageForPersistence(message))),
-			);
-			return { delivered: true, appended: true };
-		}, true);
+		return this.withCanonicalSessionLock(
+			(sessionManager) => {
+				const delivered = scanWorkerControlTranscript(sessionManager, [expectation]).has(expectation.messageId);
+				if (delivered || !appendIfMissing) return { delivered, appended: false };
+				this.appendSessionEntryLocked(sessionManager, (owner) =>
+					owner.appendMessage(structuredClone(workerMessageForPersistence(message))),
+				);
+				return { delivered: true, appended: true };
+			},
+			true,
+			appendIfMissing ? "mutation" : "inspection",
+		);
 	}
 
 	/**
@@ -1558,6 +1656,7 @@ export class WorkerConversation {
 	private withCanonicalSessionLock<Result>(
 		operation: (sessionManager: SessionManager) => Result,
 		allowExternalAppend = false,
+		intent: "mutation" | "inspection" = "mutation",
 	): Result {
 		const sessionFile = this.resumeContext.sessionFile;
 		if (!sessionFile) return operation(this.sessionManager);
@@ -1568,6 +1667,12 @@ export class WorkerConversation {
 		return withFileLockSync(sessionFile, () => {
 			this.synchronizeCoreLocked(allowExternalAppend);
 			const sessionManager = this.sessionManager;
+			assertProjectConversationAccess(
+				readWorkerConversationMetadata(this.metadataFile!).metadata,
+				sessionManager,
+				this.projectClaim,
+				intent,
+			);
 			if (
 				sessionManager.getSessionId() !== this.resumeContext.sessionId ||
 				sessionManager.getCwd() !== resolve(this.resumeContext.cwd)
@@ -1698,6 +1803,63 @@ function assertApplicableCompactionResult(result: CompactionResult, preparation:
 export class WorkerConversationStore {
 	private readonly cachedCores = new Map<string, CachedWorkerConversationCore>();
 
+	/** Caller has positively admitted the specialization; transfer and writes share the transcript lock. */
+	claimProjectContext(
+		options: OpenWorkerConversationOptions & { owner: SpecialistContextOwner; specializationKey: string },
+	): WorkerConversation {
+		const context = options.resumeContext;
+		if (!context.sessionFile || !/^[a-f0-9]{64}$/.test(options.specializationKey))
+			throw new Error("Invalid project context claim.");
+		const sessionFile = assertWorkerConversationFile(options.agentDir, context.sessionFile, context.sessionId);
+		return withFileLockSync(sessionFile, () => {
+			const previous = this.openExisting(options, { recoverBirthContextPrefix: false });
+			if (previous.hasActiveTranscriptCommit()) throw new Error("Worker transcript commit is still active.");
+			const file = workerConversationMetadataFile(sessionFile);
+			const metadata = assertExactConversationMetadata(file, context, options.expectedLogicalAgentId);
+			const session = SessionManager.open(sessionFile, options.agentDir, dirname(sessionFile));
+			const enrollment = projectEnrollmentKey(session);
+			if (enrollment !== metadata.projectContext?.specializationKey)
+				throw new Error("Worker project enrollment changed.");
+			if (metadata.projectContext && metadata.projectContext.specializationKey !== options.specializationKey)
+				throw new Error("Worker project specialization changed.");
+			if (!metadata.projectContext && metadata.parentSessionId !== options.owner.parentSessionId)
+				throw new Error("Cannot enroll a foreign worker history.");
+			const ownership = metadata.projectContext
+				? acquireSpecialistContext(metadata.projectContext.ownership, options.owner)
+				: createSpecialistContextOwnership(options.owner);
+			writeWorkerConversationMetadata(file, {
+				...metadata,
+				projectContext: { specializationKey: options.specializationKey, ownership },
+			});
+			if (!enrollment)
+				session.appendCustomEntry(WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE, {
+					specializationKey: options.specializationKey,
+				});
+			this.cachedCores.delete(sessionFile);
+			return this.openExisting({ ...options, projectClaim: ownership.claim }, { recoverBirthContextPrefix: false });
+		});
+	}
+
+	/** Availability is published only by the executing view after its outer executor has settled. */
+	releaseProjectContext(conversation: WorkerConversation): void {
+		const context = conversation.getResumeContext();
+		const claim = conversation.getProjectClaim();
+		if (!context.sessionFile || !claim) throw new Error("Worker project claim is missing.");
+		withFileLockSync(context.sessionFile, () => {
+			if (conversation.hasActiveTranscriptCommit()) throw new Error("Worker transcript commit is still active.");
+			const file = workerConversationMetadataFile(context.sessionFile!);
+			const metadata = assertExactConversationMetadata(file, context);
+			if (!metadata.projectContext) throw new Error("Worker project enrollment is missing.");
+			writeWorkerConversationMetadata(file, {
+				...metadata,
+				projectContext: {
+					...metadata.projectContext,
+					ownership: releaseSpecialistContext(metadata.projectContext.ownership, claim),
+				},
+			});
+		});
+	}
+
 	clearCache(): void {
 		for (const cached of this.cachedCores.values()) {
 			if (cached.core.activeTranscriptCursors > 0) {
@@ -1750,6 +1912,8 @@ export class WorkerConversationStore {
 				options.logicalAgentId,
 				options.parentSessionId,
 			);
+			if (metadata.projectContext)
+				throw new Error("Enrolled worker transcript is missing; refusing to recreate it.");
 			if (
 				options.birthContextForkReference &&
 				metadata.birthContextForkReference &&
@@ -1781,12 +1945,19 @@ export class WorkerConversationStore {
 			});
 		}
 		writeFileAtomicSync(sessionFile, `${JSON.stringify(header)}\n`);
+		return this.recoverBirthContextLocked(options, resumeContext);
+	}
 
+	private recoverBirthContextLocked(
+		options: CreateWorkerConversationOptions,
+		resumeContext: AgentResumeContext,
+	): WorkerConversation {
 		return this.openExisting(
 			{
 				agentDir: options.agentDir,
 				resumeContext,
 				expectedLogicalAgentId: options.logicalAgentId,
+				projectClaim: options.projectClaim,
 			},
 			{
 				parentSessionId: options.parentSessionId,
@@ -1802,18 +1973,7 @@ export class WorkerConversationStore {
 		const sessionFile = resumeContext.sessionFile!;
 		return withFileLockSync(sessionFile, () => {
 			if (!existsSync(sessionFile)) return this.createLocked(options, resumeContext);
-			return this.openExisting(
-				{
-					agentDir: options.agentDir,
-					resumeContext,
-					expectedLogicalAgentId: options.logicalAgentId,
-				},
-				{
-					parentSessionId: options.parentSessionId,
-					birthContextForkReference: options.birthContextForkReference,
-					recoverBirthContextPrefix: true,
-				},
-			);
+			return this.recoverBirthContextLocked(options, resumeContext);
 		});
 	}
 
@@ -1852,6 +2012,13 @@ export class WorkerConversationStore {
 		}
 
 		const metadataFile = workerConversationMetadataFile(sessionFile);
+		if (birthContext.recoverBirthContextPrefix) {
+			assertProjectConversationAccess(
+				readWorkerConversationMetadata(metadataFile).metadata,
+				SessionManager.open(sessionFile, options.agentDir, sessionDir),
+				options.projectClaim,
+			);
+		}
 		const cached = this.cachedCores.get(sessionFile);
 		if (cached) {
 			if (!sameAgentResumeIdentity(cached.resumeContext, context)) {
@@ -2015,6 +2182,7 @@ export class WorkerConversationStore {
 				{ ...context, sessionDir, sessionFile, cwd: cached.core.sessionManager.getCwd() },
 				bindWorkerConversationMetadata(cached.metadataFile, cached.agentDir, metadataState),
 				cached.core,
+				options.projectClaim,
 			);
 			try {
 				conversation.refreshCachedCoreLocked();
@@ -2156,6 +2324,7 @@ export class WorkerConversationStore {
 			},
 			bindWorkerConversationMetadata(metadataFile, options.agentDir, metadataState),
 			core,
+			options.projectClaim,
 		);
 		this.cachedCores.set(sessionFile, {
 			core,
