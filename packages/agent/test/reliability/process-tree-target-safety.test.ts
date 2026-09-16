@@ -54,7 +54,10 @@ describe.each(["linux", "darwin", "win32"])("process-tree target protection on %
 		});
 		vi.mocked(spawnSync).mockClear();
 		for (const pid of targetPlatform === "win32" ? [17171] : [17171, 18181])
-			expect(killTreeNow(pid).success).toBe(false);
+			expect(killTreeNow(pid)).toMatchObject({
+				success: false,
+				error: expect.stringContaining("protected ancestor or process group"),
+			});
 		expect(signal).not.toHaveBeenCalled();
 		expect(vi.mocked(spawnSync).mock.calls.filter((call) => String(call[0]).endsWith("taskkill.exe"))).toHaveLength(
 			0,

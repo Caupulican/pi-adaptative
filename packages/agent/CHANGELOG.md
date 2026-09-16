@@ -5,6 +5,7 @@
 - Process-tree liveness probes reject non-positive PIDs without signalling and accept an injectable kill seam for deterministic tests.
 - Process-tree termination rejects malformed targets, the calling process, its ancestors, and their process groups, and refuses to signal when ancestry cannot be verified.
 - Windows ancestry snapshots distinguish an exited historical parent from a failed observation, preserving host protection without blocking cleanup of owned child processes.
+- Windows ancestry observation allows a bounded five seconds for concurrent process queries; refused termination now reports the specific observation or protected-target reason.
 
 ## [0.99.25] - 2026-09-16
 

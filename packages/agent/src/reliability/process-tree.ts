@@ -75,11 +75,22 @@ function classifySignalError(error: unknown): "gone" | "failed" {
 }
 
 /** Never turn a malformed PID into POSIX group/broadcast semantics or kill our own host. */
-function isProtectedTerminationTarget(pid: number): boolean {
-	if (!isPositiveSafePid(pid) || pid > 2_147_483_647 || pid === 1 || pid === process.pid || pid === process.ppid)
+function isProtectedTerminationTarget(pid: number, onDiagnostic?: (message: string) => void): boolean {
+	if (!isPositiveSafePid(pid) || pid > 2_147_483_647) {
+		onDiagnostic?.(`Process target ${pid} is not a valid termination PID`);
 		return true;
-	const protectedIds = readProcessTerminationProtection();
-	return protectedIds === undefined || protectedIds.has(pid);
+	}
+	if (pid === 1 || pid === process.pid || pid === process.ppid) {
+		onDiagnostic?.(`Process target ${pid} is the system root, calling process, or direct parent`);
+		return true;
+	}
+	const protectedIds = readProcessTerminationProtection(onDiagnostic);
+	if (protectedIds === undefined) return true;
+	if (protectedIds.has(pid)) {
+		onDiagnostic?.(`Process target ${pid} is a protected ancestor or process group`);
+		return true;
+	}
+	return false;
 }
 
 /**
@@ -142,7 +153,7 @@ export interface KillTreeNowResult {
 export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<KillTreeOutcome> {
 	const pid = child.pid;
 	if (pid === undefined || isChildTerminal(child)) return Promise.resolve("already_dead");
-	if (isProtectedTerminationTarget(pid)) {
+	if (isProtectedTerminationTarget(pid, opts?.onDiagnostic)) {
 		opts?.onDiagnostic?.(`Refusing to terminate protected, invalid, or unverified process target ${pid}`);
 		return Promise.resolve("failed");
 	}
@@ -246,8 +257,16 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 
 /** Immediate tree kill (SIGKILL / synchronous taskkill). */
 export function killTreeNow(pid: number): KillTreeNowResult {
-	if (isProtectedTerminationTarget(pid)) {
-		return { success: false, error: `Refusing to terminate protected, invalid, or unverified process target ${pid}` };
+	let protectionFailure: string | undefined;
+	if (
+		isProtectedTerminationTarget(pid, (message) => {
+			protectionFailure = message;
+		})
+	) {
+		return {
+			success: false,
+			error: `Refusing to terminate protected, invalid, or unverified process target ${pid}${protectionFailure ? `: ${protectionFailure}` : ""}`,
+		};
 	}
 	if (process.platform === "win32") {
 		const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");

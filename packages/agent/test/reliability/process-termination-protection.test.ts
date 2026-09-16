@@ -17,6 +17,39 @@ afterEach(() => {
 });
 
 describe("bounded ancestry protection", () => {
+	it.each([
+		[1800, true],
+		[2500, true],
+		[3500, true],
+		[5500, false],
+	] as const)(
+		"handles a Windows observer completing after %ims without accepting a timeout",
+		(observerMs, observed) => {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			vi.mocked(spawnSync).mockImplementation((_executable, _args, options) => {
+				const timedOut = observerMs > (options?.timeout ?? 0);
+				const stdout = JSON.stringify([{ ProcessId: process.pid, ParentProcessId: process.ppid }]);
+				return {
+					pid: 8181,
+					status: timedOut ? null : 0,
+					signal: null,
+					output: [null, stdout, ""],
+					stdout,
+					stderr: "",
+					...(timedOut ? { error: Object.assign(new Error("observer deadline"), { code: "ETIMEDOUT" }) } : {}),
+				};
+			});
+			const diagnostics: string[] = [];
+			const ids = createProcessTerminationProtectionReader()((message) => diagnostics.push(message));
+			expect(ids !== undefined).toBe(observed);
+			if (observed) {
+				expect(ids).toEqual(new Set([1, process.pid, process.ppid]));
+				expect(diagnostics).toEqual([]);
+			} else {
+				expect(diagnostics.join("\n")).toContain("ETIMEDOUT");
+			}
+		},
+	);
 	it("protects higher ancestors and a sibling group leader without protecting an ordinary child", () => {
 		const table = new Map([
 			[100, { pid: 100, parentPid: 90, groupId: 95 }],
@@ -86,7 +119,7 @@ describe("bounded ancestry protection", () => {
 			expect(read()?.has(7171)).toBe(true);
 			expect(spawnSync).toHaveBeenCalledOnce();
 			expect(vi.mocked(spawnSync).mock.calls[0]?.[2]).toMatchObject({
-				timeout: 2000,
+				timeout: targetPlatform === "win32" ? 5000 : 2000,
 				maxBuffer: 4 * 1024 * 1024,
 				windowsHide: true,
 			});
@@ -132,7 +165,23 @@ describe("bounded ancestry protection", () => {
 			stdout,
 			error: Object.assign(new Error(code), { code }),
 		});
-		expect(createProcessTerminationProtectionReader()()).toBeUndefined();
+		const diagnostics: string[] = [];
+		expect(createProcessTerminationProtectionReader()((message) => diagnostics.push(message))).toBeUndefined();
+		expect(diagnostics).toEqual([`Process ancestry snapshot failed: ${code} (limit 5000ms)`]);
+	});
+	it.each([
+		["cycle", 90, "Process ancestry contains a cycle at PID 100"],
+		["parent-mismatch", 80, "Process ancestry parent mismatch for PID 100: expected 90, observed 80"],
+	] as const)("explains a %s refusal without authorizing termination", (_reason, parentPid, expected) => {
+		const diagnostics: string[] = [];
+		const result = collectProtectedProcessIds(
+			100,
+			90,
+			(pid) => ({ pid, parentPid: pid === 100 ? parentPid : 100 }),
+			(message) => diagnostics.push(message),
+		);
+		expect(result).toBeUndefined();
+		expect(diagnostics).toEqual([expected]);
 	});
 	it.each([-1, 1.5])("refuses a malformed recorded Windows parent %s", (parentPid) => {
 		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
