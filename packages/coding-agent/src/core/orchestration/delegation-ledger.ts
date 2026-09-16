@@ -39,6 +39,7 @@ export interface PrepareDelegationInput {
 	instructions: string;
 	/** Durable identity of the caller turn that admitted this dispatch; replays resolve back to it. */
 	controlMessageId?: string;
+	controlForkMode?: string;
 	parentAgentId?: string;
 	executionContract: WorkerExecutionContract;
 	requiredCapabilities: readonly HarnessCapability[];
@@ -75,6 +76,7 @@ export interface PrepareAgentTurnInput {
 	agentId: string;
 	instructions: string;
 	controlMessageId?: string;
+	controlForkMode?: string;
 	dependsOnTaskIds?: readonly string[];
 	/**
 	 * Goal this turn's work belongs to. Supplying it (or `taskContext`) declares NEW work: the caller
@@ -159,6 +161,7 @@ export class DelegationOrchestrationLedger {
 			dispatchMetadata: {
 				logicalLaneId: input.laneId,
 				...(input.controlMessageId ? { controlMessageId: input.controlMessageId } : {}),
+				...(input.controlForkMode ? { controlForkMode: input.controlForkMode } : {}),
 				...(input.birthContextForkReference ? { birthContextForkReference: input.birthContextForkReference } : {}),
 			},
 		});
@@ -276,6 +279,7 @@ export class DelegationOrchestrationLedger {
 					attempt.dispatch.logicalLaneId !== agentId ||
 					attempt.dispatch.controlMessageId !== controlMessageId ||
 					attempt.dispatch.instructions !== instructions ||
+					attempt.dispatch.controlForkMode !== input.controlForkMode ||
 					(declaresNewWork &&
 						!isDeepStrictEqual([...(attempt.dispatch.requirementIds ?? [])], [...requirementIds])) ||
 					(declaresNewWork &&
@@ -322,6 +326,7 @@ export class DelegationOrchestrationLedger {
 					logicalLaneId: agentId,
 					dispatchSequence: sequence,
 					...(controlMessageId ? { controlMessageId } : {}),
+					...(input.controlForkMode ? { controlForkMode: input.controlForkMode } : {}),
 					...(prior.dispatch.birthContextForkReference
 						? { birthContextForkReference: prior.dispatch.birthContextForkReference }
 						: {}),
@@ -350,6 +355,7 @@ export class DelegationOrchestrationLedger {
 			| "logicalLaneId"
 			| "dispatchSequence"
 			| "controlMessageId"
+			| "controlForkMode"
 			| "provider"
 			| "authorizationId"
 			| "worktreeLaneKey"

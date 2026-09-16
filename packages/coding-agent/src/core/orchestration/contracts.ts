@@ -342,6 +342,8 @@ export interface OrchestrationDispatchRequest {
 	dispatchSequence?: number;
 	/** Durable mailbox message whose task-bearing intent owns this logical-agent turn. */
 	controlMessageId?: string;
+	/** Canonical host fork selection for this command, distinct from the worker's immutable birth snapshot. */
+	controlForkMode?: string;
 	/** External provider identity retained for routing and diagnostics. */
 	provider?: string;
 	/** Immutable profile identity used to audit the external launch authority. */

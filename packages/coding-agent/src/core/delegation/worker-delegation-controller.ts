@@ -1805,17 +1805,15 @@ export class WorkerDelegationController {
 		// A named target must be the specialist that actually owns the admitted task.
 		const admittedAgentId = admitted.agentId ?? admitted.dispatch.logicalLaneId;
 		if (request.reuseAgentId && request.reuseAgentId !== admittedAgentId) return false;
-		// An explicit request for a NEW parent snapshot is a different initialization than a task that
-		// never captured one.
-		if (
-			this.workerContextForkMode(request, admittedContract).kind !== "none" &&
-			admitted.dispatch.birthContextForkReference === undefined
-		) {
+		// Replay compares the admitted command's declaration, not a newly captured parent snapshot.
+		// Missing historical evidence cannot prove equality to a current command.
+		if (admitted.dispatch.controlForkMode !== JSON.stringify(this.workerContextForkMode(request, admittedContract))) {
 			return false;
 		}
 		const requested = request.taskContext;
 		const admittedTask = this.lifecycle.getTask(admitted.taskId)?.task;
 		return (
+			isDeepStrictEqual([...(admittedTask?.dependsOn ?? [])], [...(requested?.dependsOnTaskIds ?? [])]) &&
 			isDeepStrictEqual([...(admitted.dispatch.requirementIds ?? [])], [...(requested?.requirementIds ?? [])]) &&
 			isDeepStrictEqual(
 				[...(admittedTask?.acceptanceCriterionIds ?? [])],
@@ -1869,6 +1867,7 @@ export class WorkerDelegationController {
 								})(),
 								...(request.parentAgentId ? { parentAgentId: request.parentAgentId } : {}),
 								birthContextForkReference,
+								controlForkMode: JSON.stringify(mode),
 								executionContract: admission.executionContract,
 								requiredCapabilities: admission.executionPlan.requiredCapabilities,
 								...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
@@ -2253,6 +2252,7 @@ export class WorkerDelegationController {
 	private startReusedSpecialistTask(
 		agentId: string,
 		request: WorkerDelegationRequest,
+		contract: WorkerExecutionContract,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
 		const goal = this.deps.getGoalStateSnapshot();
 		const taskContext = request.taskContext;
@@ -2260,6 +2260,7 @@ export class WorkerDelegationController {
 			...(taskContext?.dependsOnTaskIds?.length ? { dependsOnTaskIds: taskContext.dependsOnTaskIds } : {}),
 			...(request.messageReplayKey ? { idempotencyKey: request.messageReplayKey } : {}),
 			newTask: {
+				controlForkMode: JSON.stringify(this.workerContextForkMode(request, contract)),
 				...(goal ? { goal } : {}),
 				...(taskContext?.requirementIds?.length ? { requirementIds: taskContext.requirementIds } : {}),
 				...(taskContext?.acceptanceCriterionIds?.length
@@ -2284,7 +2285,8 @@ export class WorkerDelegationController {
 		if (replayed.kind === "replay") return { started: true, record: replayed.record };
 		const reuse = await this.resolveSpecialistReuse(capturedRequest, shared, signal);
 		if (reuse.outcome === "unavailable") return { started: false, skipReason: reuse.skipReason };
-		if (reuse.outcome === "reuse") return this.startReusedSpecialistTask(reuse.agentId, capturedRequest);
+		if (reuse.outcome === "reuse")
+			return this.startReusedSpecialistTask(reuse.agentId, capturedRequest, shared.executionContract);
 		// Similar text remains an advisory signal. The specialization owner already distinguished the
 		// grants; text alone must not veto work under a different admitted grant.
 		const similar =
@@ -2465,7 +2467,7 @@ export class WorkerDelegationController {
 			const reuse = await this.resolveSpecialistReuse(request, shared);
 			if (reuse.outcome === "unavailable") return { started: false, skipReason: reuse.skipReason };
 			if (reuse.outcome === "reuse") {
-				const accepted = this.startReusedSpecialistTask(reuse.agentId, request);
+				const accepted = this.startReusedSpecialistTask(reuse.agentId, request, shared.executionContract);
 				if (!accepted.started) return accepted;
 				return this.completeReusedSpecialistTask(accepted.record, onStarted);
 			}

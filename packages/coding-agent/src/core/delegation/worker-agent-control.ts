@@ -104,6 +104,8 @@ export type WorkerAgentMessageKind = "steer" | "follow_up";
  * before the message is enqueued, so recovery after a restart needs no copy of the goal state.
  */
 export interface WorkerAgentNewTaskCorrelation {
+	/** Host-admitted command declaration; never re-derived from a later parent snapshot. */
+	controlForkMode?: string;
 	goalId?: string;
 	requirementIds?: readonly string[];
 	acceptanceCriterionIds?: readonly string[];
@@ -237,6 +239,7 @@ export interface WorkerAgentTaskStartOptions extends WorkerAgentControlScope {
 	 * is bound to session scope, never to the goal this specialist happened to run first.
 	 */
 	newTask?: {
+		controlForkMode?: string;
 		goal?: GoalState;
 		requirementIds?: readonly string[];
 		acceptanceCriterionIds?: readonly string[];
@@ -871,6 +874,7 @@ function parsedNewTaskCorrelation(value: unknown): WorkerAgentNewTaskCorrelation
 		!Object.keys(correlation).every(
 			(field) =>
 				field === "goalId" ||
+				field === "controlForkMode" ||
 				field === "requirementIds" ||
 				field === "acceptanceCriterionIds" ||
 				field === "resourcePointerIds",
@@ -882,6 +886,7 @@ function parsedNewTaskCorrelation(value: unknown): WorkerAgentNewTaskCorrelation
 		throw new Error("Worker agent mailbox contains invalid new-task correlation metadata.");
 	}
 	return normalizeWorkerAgentNewTaskCorrelation({
+		...(correlation.controlForkMode === undefined ? {} : { controlForkMode: correlation.controlForkMode as string }),
 		...(correlation.goalId === undefined ? {} : { goalId: correlation.goalId as string }),
 		...(correlation.requirementIds === undefined
 			? {}
@@ -926,6 +931,7 @@ export function normalizeWorkerAgentNewTaskCorrelation(
 ): WorkerAgentNewTaskCorrelation | undefined {
 	if (value === undefined) return undefined;
 	const goalId = normalizeOptionalIdentity(value.goalId, "new task goal id");
+	const controlForkMode = normalizeOptionalIdentity(value.controlForkMode, "new task fork mode");
 	const requirementIds = normalizeWorkerAgentCorrelationIds(value.requirementIds, "new task requirement ids");
 	const acceptanceCriterionIds = normalizeWorkerAgentCorrelationIds(
 		value.acceptanceCriterionIds,
@@ -937,6 +943,7 @@ export function normalizeWorkerAgentNewTaskCorrelation(
 	);
 	return {
 		...(goalId ? { goalId } : {}),
+		...(controlForkMode ? { controlForkMode } : {}),
 		...(requirementIds.length > 0 ? { requirementIds } : {}),
 		...(acceptanceCriterionIds.length > 0 ? { acceptanceCriterionIds } : {}),
 		...(resourcePointerIds.length > 0 ? { resourcePointerIds } : {}),

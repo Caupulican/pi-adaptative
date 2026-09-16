@@ -513,6 +513,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				? undefined
 				: {
 						...(options.newTask.goal ? { goalId: options.newTask.goal.goalId } : {}),
+						...(options.newTask.controlForkMode ? { controlForkMode: options.newTask.controlForkMode } : {}),
 						...(options.newTask.requirementIds ? { requirementIds: options.newTask.requirementIds } : {}),
 						...(options.newTask.acceptanceCriterionIds
 							? { acceptanceCriterionIds: options.newTask.acceptanceCriterionIds }
@@ -753,6 +754,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const objectiveId = newTask.goalId ? `goal:${newTask.goalId}` : `session:${this.options.parentSessionId}`;
 		return (
 			task.objectiveId === objectiveId &&
+			attempt.dispatch.controlForkMode === newTask.controlForkMode &&
 			isDeepStrictEqual([...(attempt.dispatch.requirementIds ?? [])], [...(newTask.requirementIds ?? [])]) &&
 			isDeepStrictEqual([...task.acceptanceCriterionIds], [...(newTask.acceptanceCriterionIds ?? [])]) &&
 			// The selected resources are part of the same declaration; a different selection is
@@ -1815,6 +1817,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 						...(newTask
 							? {
 									...(newTask.goalId ? { goalId: newTask.goalId } : {}),
+									...(newTask.controlForkMode ? { controlForkMode: newTask.controlForkMode } : {}),
 									taskContext: {
 										...(newTask.requirementIds ? { requirementIds: newTask.requirementIds } : {}),
 										...(newTask.acceptanceCriterionIds

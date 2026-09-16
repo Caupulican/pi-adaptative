@@ -295,6 +295,7 @@ const DISPATCH_FIELDS = new Set([
 	"logicalLaneId",
 	"dispatchSequence",
 	"controlMessageId",
+	"controlForkMode",
 	"provider",
 	"authorizationId",
 	"worktreeLaneKey",
@@ -312,6 +313,7 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 	}
 	const logicalLaneId = optionalDispatchIdentifier(dispatch.logicalLaneId, `${label}.logicalLaneId`);
 	const controlMessageId = optionalDispatchIdentifier(dispatch.controlMessageId, `${label}.controlMessageId`);
+	const controlForkMode = optionalDispatchIdentifier(dispatch.controlForkMode, `${label}.controlForkMode`);
 	const parentAgentId = optionalDispatchIdentifier(dispatch.parentAgentId, `${label}.parentAgentId`);
 	const provider = optionalDispatchIdentifier(
 		dispatch.provider,
@@ -359,6 +361,7 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 		...(logicalLaneId ? { logicalLaneId } : {}),
 		...(typeof dispatch.dispatchSequence === "number" ? { dispatchSequence: dispatch.dispatchSequence } : {}),
 		...(controlMessageId ? { controlMessageId } : {}),
+		...(controlForkMode ? { controlForkMode } : {}),
 		...(provider ? { provider } : {}),
 		...(authorizationId ? { authorizationId } : {}),
 		...(worktreeLaneKey ? { worktreeLaneKey } : {}),
