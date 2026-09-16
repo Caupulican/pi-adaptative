@@ -10,6 +10,8 @@
 - Cancelling a queued native worker or disposing its parent releases the settled project context without duplicating its transcript.
 - Failed native worker setup releases its project allocation after durable cancellation when the transcript is absent or unenrolled; uncertain ownership and active transcript writes retain exclusion.
 - A lost initial claim receipt or failed agent registration preserves the enrolled transcript for the next parent without replaying cancelled work; settlement requires the original claim and an empty mailbox.
+- Compatible Herdr teams retain their panes and CLI conversations across project parent sessions; controller generations reject stale host writes, and authenticated Pi workers follow the new process supervisor.
+- A proven-dead parent no longer strands an unregistered, never-leased specialist setup after its transcript identity was saved. Recovery cancels the abandoned task, records its parent notification, and preserves enrolled context; concurrent leases and pending resource obligations prevent release.
 - Python credential screening preserves matching quote boundaries, avoiding oversized source fragments being probed as filenames and retaining protection for paths containing quotes.
 - Credential redaction preserves structured execution-error classification across duplicate runtime module instances.
 - Python completed non-zero exits are operation outcomes, matching bash, so they keep output without a MUST ledger. Timeout and abort stay incomplete tool failures.

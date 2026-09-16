@@ -16,6 +16,7 @@ import type {
 	WorkerConversationStore,
 	WorkerProjectContextReference,
 } from "./worker-conversation-store.ts";
+import { WorkerProjectSetupRecovery } from "./worker-project-setup-recovery.ts";
 
 const MAX_DIRECTORY_BYTES = 4 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES = 128;
@@ -62,6 +63,29 @@ export class WorkerProjectDirectory {
 		return withFileLockSync(file, () => {
 			const entries = this.read(file);
 			if (!input.independent) {
+				const recovery = new WorkerProjectSetupRecovery(this.agentDir, this.conversations);
+				for (const entry of [...entries]) {
+					if (!entry.reference) continue;
+					try {
+						recovery.settle(
+							{
+								specializationKey: input.specializationKey,
+								allocationId: entry.allocationId,
+								owner: entry.allocatedBy,
+							},
+							entry.reference,
+							(enrolled) => {
+								const index = entries.indexOf(entry);
+								const next = this.settledSetupEntry(entry, enrolled);
+								if (next) entries[index] = next;
+								else entries.splice(index, 1);
+								this.write(file, entries);
+							},
+						);
+					} catch {
+						return { kind: "unavailable", reason: "worker_project_setup_recovery_unavailable" };
+					}
+				}
 				const idle: WorkerProjectContextReference[] = [];
 				let busy = false;
 				for (const entry of entries) {
@@ -163,13 +187,15 @@ export class WorkerProjectDirectory {
 			sessionId = entry.reference.resumeContext.sessionId;
 			this.conversations.settleCancelledProjectSetup(
 				{ agentDir: this.agentDir, reference: entry.reference, ...allocation, withQuiescence },
-				(enrolled) => {
-					if (!enrolled && entry.phase === "published") throw new Error("Published worker enrollment is missing.");
-					save(enrolled ? { ...entry, phase: "published" } : undefined);
-				},
+				(enrolled) => save(this.settledSetupEntry(entry, enrolled)),
 			);
 		});
 		return sessionId;
+	}
+
+	private settledSetupEntry(entry: DirectoryEntry, enrolled: boolean): DirectoryEntry | undefined {
+		if (!enrolled && entry.phase === "published") throw new Error("Published worker enrollment is missing.");
+		return enrolled ? { ...entry, phase: "published" } : undefined;
 	}
 
 	private updateAllocation(

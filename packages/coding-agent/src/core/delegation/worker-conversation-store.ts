@@ -1939,6 +1939,7 @@ export class WorkerConversationStore {
 			specializationKey: string;
 			owner: SpecialistContextOwner;
 			withQuiescence(operation: () => void): boolean;
+			beforeRelease?(conversation: WorkerConversation | undefined): void;
 		},
 		operation: (enrolled: boolean) => void,
 	): void {
@@ -1959,10 +1960,11 @@ export class WorkerConversationStore {
 							)
 						: undefined;
 					const project = metadata?.projectContext;
+					let conversation: WorkerConversation | undefined;
 					if (project && (!existsSync(file) || project.specializationKey !== input.specializationKey))
 						throw new Error("Worker allocation enrollment cannot be reconciled.");
 					if (existsSync(file)) {
-						const conversation = this.openExisting(
+						conversation = this.openExisting(
 							{ agentDir, resumeContext: context, expectedLogicalAgentId: reference.logicalAgentId },
 							{ parentSessionId: reference.parentSessionId, recoverBirthContextPrefix: false },
 						);
@@ -1974,17 +1976,17 @@ export class WorkerConversationStore {
 						)
 							throw new Error("Worker allocation enrollment evidence changed.");
 					}
-					if (project && metadata) {
-						const claim = { ...input.owner, generation: 1 };
-						// A retained receipt may complete after idle publication but before the directory write.
-						if (project.ownership.state !== "idle" || !isDeepStrictEqual(project.ownership.claim, claim)) {
-							assertSpecialistContextClaim(project.ownership, claim);
-							writeWorkerConversationMetadata(metadataFile, {
-								...metadata,
-								projectContext: { ...project, ownership: releaseSpecialistContext(project.ownership, claim) },
-							});
-						}
-					}
+					const claim = { ...input.owner, generation: 1 };
+					// A retained receipt may complete after idle publication but before the directory write.
+					const alreadyReleased =
+						project?.ownership.state === "idle" && isDeepStrictEqual(project.ownership.claim, claim);
+					if (project && !alreadyReleased) assertSpecialistContextClaim(project.ownership, claim);
+					input.beforeRelease?.(conversation);
+					if (project && metadata && !alreadyReleased)
+						writeWorkerConversationMetadata(metadataFile, {
+							...metadata,
+							projectContext: { ...project, ownership: releaseSpecialistContext(project.ownership, claim) },
+						});
 					operation(project !== undefined);
 				}),
 			);

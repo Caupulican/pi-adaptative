@@ -772,9 +772,17 @@ export class DurableTaskRuntime {
 		return structuredClone(this.state.attempts[attemptId]!);
 	}
 
-	cancelAttempt(attemptId: string, reasonCode: string): AttemptRuntimeState {
+	cancelAttempt(
+		attemptId: string,
+		reasonCode: string,
+		guard?: { expectedLastOrdinal: number; unleasedOnly: true },
+	): AttemptRuntimeState {
 		this.refresh();
 		const attempt = this.requireAttempt(attemptId);
+		// Setup recovery is conditional cancellation. The append's existing ordinal fence extends
+		// this proof through the durable write, so a competing lease/binding cannot be cancelled.
+		if (guard && (this.state.lastOrdinal !== guard.expectedLastOrdinal || attempt.lease))
+			throw new DurableTaskRuntimeError("Unleased cancellation evidence changed.");
 		if (terminalAttemptStatus(attempt.status)) return structuredClone(attempt);
 		if (!reasonCode.trim()) throw new DurableTaskRuntimeError("Cancellation reason is required.");
 		this.commit({
