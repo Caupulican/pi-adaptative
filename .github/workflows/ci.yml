@@ -149,7 +149,19 @@ jobs:
           (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
         env:
           NODE_OPTIONS: --conditions=pi-source
+          PI_VITEST_ISOLATE_NATIVE_PROCESS: "1"
         run: npm test -- packages/tui packages/ai packages/agent
+
+      # This is native OS success control, not a resource-contention test. Keep the same assertions
+      # on both platforms after parallel CPU/memory benchmarks; timeout refusal remains unit-tested.
+      - name: Test native process-tree control alone
+        if: >
+          inputs.skip_tests != true &&
+          (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
+        working-directory: packages/agent
+        env:
+          NODE_OPTIONS: --conditions=pi-source
+        run: node ../../node_modules/vitest/dist/cli.js --run --bail=0 test/reliability/process-tree-native-tree.test.ts
 
       - name: Test native incident collector with Windows PowerShell 5.1
         if: >

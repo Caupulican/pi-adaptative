@@ -3,8 +3,8 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const REQUIRED_JOBS = new Map([
-	["Build, check, test (ubuntu-latest)", ["Verification-harness coverage gate", "Test non-coding-agent workspaces"]],
-	["Build, check, test (windows-latest)", ["Test non-coding-agent workspaces", "Test native incident collector with Windows PowerShell 5.1"]],
+	["Build, check, test (ubuntu-latest)", ["Verification-harness coverage gate", "Test non-coding-agent workspaces", "Test native process-tree control alone"]],
+	["Build, check, test (windows-latest)", ["Test non-coding-agent workspaces", "Test native process-tree control alone", "Test native incident collector with Windows PowerShell 5.1"]],
 	...["ubuntu-latest", "windows-latest"].flatMap((os) => [1, 2, 3, 4].map((shard) => [
 		`Coding-agent test (${os}, shard ${shard}/4)`, ["Test coding-agent shard"],
 	])),

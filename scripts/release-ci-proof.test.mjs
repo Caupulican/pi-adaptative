@@ -17,6 +17,22 @@ test("full matrix proof rejects each missing, duplicate, pending or skipped job 
 	assert.equal(hasCompleteCiMatrix(Array.from({ length: 8 }, () => complete[2])), false);
 });
 
+test("release proof rejects omitted or unsuccessful native process controls on either operating system", () => {
+	const stepName = "Test native process-tree control alone";
+	const complete = completeCiJobs().map((job) => job.name.startsWith("Build, check, test")
+		? { ...job, steps: [...job.steps.filter((step) => step.name !== stepName), { name: stepName, conclusion: "success" }] }
+		: job);
+	assert.equal(hasCompleteCiMatrix(complete), true);
+	for (const os of ["ubuntu-latest", "windows-latest"]) {
+		for (const conclusion of [undefined, "skipped", "failure", "cancelled"]) {
+			const jobs = complete.map((job) => job.name === `Build, check, test (${os})`
+				? { ...job, steps: job.steps.flatMap((step) => step.name !== stepName ? [step] : conclusion ? [{ ...step, conclusion }] : []) }
+				: job);
+			assert.equal(hasCompleteCiMatrix(jobs), false, `${os} native control ${conclusion ?? "omitted"}`);
+		}
+	}
+});
+
 test("proof binds successful runs to the requested SHA and examines the complete jobs from one run", () => {
 	const sha = "a".repeat(40);
 	const complete = completeCiJobs();

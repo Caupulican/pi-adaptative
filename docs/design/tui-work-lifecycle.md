@@ -180,7 +180,15 @@ Repeated workspace-observation replacement or disposal after a failed Git spawn 
 
 Workspace queries now omit the native signal option and use the shared successful-spawn-fenced abort binding. Deterministic detached fixtures reject any attempt to kill an invalid handle; settled failures are negative controls, and a real owned child proves successful cancellation still works. Process-tree termination also rejects self, ancestors, and protected process groups, and test entrypoints remove inherited Herdr/worker ownership context.
 
-This is a confirmed signalling defect matching the observed termination. It does not establish which Herdr component received the original signal: the saved session contains no explicit Herdr shutdown command, and no original signal trace or OOM evidence was recovered. Numeric PID reuse and native non-Linux process ancestry remain separate validation limits.
+This is a confirmed signalling defect matching the observed termination. It does not establish which Herdr component received the original signal: the saved session contains no explicit Herdr shutdown command, and no original signal trace or OOM evidence was recovered. Numeric PID reuse and native macOS process ancestry remain separate validation limits.
+
+### Windows process-cleanup verification
+
+Native Windows probes confirmed that a complete process snapshot can retain a creator PID whose process has exited. The ancestry reader now distinguishes that historical absence from an observation failure and protects every recorded ancestor PID. A current snapshot cannot reconstruct surviving historical ancestors above that break.
+
+Concurrent Windows probes reproduced ancestry-query timeouts. The final five-second bound passed 16 concurrent observations in two batches alongside compilation, and both native termination APIs cleaned up owned child/grandchild trees with child-exit and named-pipe-close evidence. However, [CI run 35111952439](https://github.com/Caupulican/pi-adaptative/actions/runs/35111952439) confirmed that the five-second observation can still time out alongside the parallel CPU and large-file tests. This is a remaining cleanup-availability limitation: failed observation refuses termination and can leave owned work running; it never authorizes an unverified signal.
+
+The unchanged native adapter control runs in a mandatory isolated CI phase on both platforms. Deterministic timeout, malformed-observation, and no-signal tests remain in the parallel suite. Workflow regressions enforce that exclusion from the parallel phase requires the isolated phase, and release proof requires that phase to pass. These gates prove native cleanup when observation succeeds and safe refusal when it fails; they do not prove cleanup availability under arbitrary contention.
 
 ### Performance evidence
 

@@ -114,6 +114,43 @@ test("normal CI keeps small workspaces on the quality job and shards coding-agen
 	assert.doesNotMatch(workflow, /^\s+run: npm test\s*$/mu);
 });
 
+function assertNativeProcessPhase(source) {
+	const qualityJob = source.slice(0, source.indexOf("  coding-agent-test:"));
+	const steps = qualityJob.split(/^      - name: /mu).slice(1);
+	const parallel = steps.filter((step) => step.startsWith("Test non-coding-agent workspaces\n"));
+	const native = steps.filter((step) => step.startsWith("Test native process-tree control alone\n"));
+	assert.equal(parallel.length, 1);
+	assert.equal(native.length, 1, "native process control must remain a mandatory quality phase");
+	assert(steps.indexOf(native[0]) > steps.indexOf(parallel[0]), "native control must follow the parallel suite");
+	const condition = (step) => step.match(/\n        if: >\n([\s\S]*?)(?=\n        [a-z])/u)?.[1].trim();
+	assert.equal(condition(native[0]), condition(parallel[0]), "both OS jobs must run the native phase whenever the parallel suite runs");
+	assert.match(parallel[0], /PI_VITEST_ISOLATE_NATIVE_PROCESS: "1"/u);
+	assert.equal((source.match(/PI_VITEST_ISOLATE_NATIVE_PROCESS/gu) ?? []).length, 1, "exclusion must be scoped to the parallel step");
+	assert.doesNotMatch(native[0], /continue-on-error|PI_VITEST_ISOLATE_NATIVE_PROCESS/u);
+	assert.match(native[0], /working-directory: packages\/agent/u);
+	assert.match(native[0], /run: node \.\.\/\.\.\/node_modules\/vitest\/dist\/cli\.js --run --bail=0 test\/reliability\/process-tree-native-tree\.test\.ts\s*$/u);
+}
+
+test("CI pairs native-process exclusion with an unchanged mandatory control on both operating systems", () => {
+	assertNativeProcessPhase(workflow);
+	assert.throws(() => assertNativeProcessPhase(workflow.replace("Test native process-tree control alone", "Removed native control")));
+	assert.throws(() => assertNativeProcessPhase(workflow.replace("--bail=0 test/reliability/process-tree-native-tree.test.ts", "--bail=0 test/reliability/process-tree-target-safety.test.ts")));
+});
+
+test("agent config excludes only the native control when the parallel CI phase explicitly requests it", () => {
+	const fixture = fileURLToPath(new URL("./test-fixtures/agent-vitest-config.mjs", import.meta.url));
+	const snapshots = ["", "0", "true", "1"].map((flag) => {
+		const result = spawnSync(process.execPath, [fixture], { encoding: "utf8", env: { ...process.env, PI_VITEST_ISOLATE_NATIVE_PROCESS: flag } });
+		assert.equal(result.status, 0, result.stderr);
+		return JSON.parse(result.stdout);
+	});
+	const nativeFile = "test/reliability/process-tree-native-tree.test.ts";
+	assert.equal(snapshots[0].includes(nativeFile), false);
+	assert.deepEqual(snapshots[1], snapshots[0]);
+	assert.deepEqual(snapshots[2], snapshots[0]);
+	assert.deepEqual(snapshots[3], [...snapshots[0], nativeFile]);
+});
+
 test("CI keeps every matrix failure available for evidence collection", () => {
 	const jobSections = ["build-check-test", "coding-agent-test"].map((jobName, index, jobs) => {
 		const start = workflow.indexOf(`  ${jobName}:`);
