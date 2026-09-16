@@ -196,6 +196,22 @@ const clearedVariables = [
 	"PI_LOCAL_MODEL_BENCH_MODELS",
 ];
 const nodeOptionInjectionVariables = ["NODE_OPTIONS", "npm_config_node_options", "NPM_CONFIG_NODE_OPTIONS"];
+const inheritedAuthorityVariables = [
+	"HERDR_ENV",
+	"HERDR_SOCKET_PATH",
+	"HERDR_CONFIG_PATH",
+	"HERDR_PANE_ID",
+	"HERDR_SESSION",
+	"PI_COLLABORATION_STATE_DIR",
+	"PI_COLLABORATION_PEER_TOKEN",
+	"PI_PARENT_PID",
+	"PI_PARENT_SESSION",
+	"PI_SESSION_ROLE",
+	"PI_ORCHESTRATION_AGENT_ID",
+	"PI_TASK_REF",
+	"PI_WORKTREE_LANE",
+	"PI_WORKER_ALLOWED_PATHS",
+];
 const capturedVariables = [
 	"HOME",
 	"PATH",
@@ -215,6 +231,7 @@ const capturedVariables = [
 	"ComSpec",
 	...clearedVariables,
 	...nodeOptionInjectionVariables,
+	...inheritedAuthorityVariables,
 ];
 
 function createFixture(context) {
@@ -313,6 +330,7 @@ function runHarness(fixture, { emulateWindows = false, fail = false } = {}) {
 		});
 	}
 	for (const name of clearedVariables) env[name] = `must-clear-${name}`;
+	for (const name of inheritedAuthorityVariables) env[name] = `fixture-${name}`;
 	if (fail) env.PI_TEST_HARNESS_FAIL = "1";
 
 	const result = spawnSync("bash", [harnessPath], {
@@ -421,7 +439,7 @@ test("the mandatory root check owns the isolated release-test harness contract",
 		assertActiveLine(source, `export ${name}=`, name);
 	}
 	const shellClearedVariables = [...source.matchAll(/^unset ([A-Za-z0-9_]+)$/gm)].map((match) => match[1]);
-	assert.deepEqual(shellClearedVariables, [...clearedVariables, ...nodeOptionInjectionVariables]);
+	assert.deepEqual(shellClearedVariables, [...clearedVariables, ...nodeOptionInjectionVariables, "test_launch_key"]);
 	assert.doesNotMatch(source, /auth\.json\.bak|AUTH_BACKUP|Moved auth\.json|Restored auth\.json/);
 	assert.doesNotMatch(source, /\$HOME\/\.pi\/agent|~\/\.pi\/agent/);
 	assert.doesNotMatch(source, /^\s*(?:export\s+)?PATH=/m);
@@ -693,6 +711,21 @@ test(
 			.map((line) => JSON.parse(line));
 		assert.deepEqual(npmCalls, [["run", "check"]]);
 		assert.equal(readFileSync(changelogPath, "utf8"), nextCycleContent, "failed repair must roll back its edits");
+	},
+);
+
+test(
+	"test.sh removes host terminal and worker authority before starting a test runner",
+	{ skip: process.platform === "win32" },
+	(context) => {
+		const fixture = createFixture(context);
+		const { records, result } = runHarness(fixture);
+		assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+		assert.equal(records.length, 2);
+		for (const record of records) {
+			for (const name of inheritedAuthorityVariables) assert.equal(record.env[name], null, name);
+			assert.equal(record.env.PI_NO_LOCAL_LLM, "1");
+		}
 	},
 );
 

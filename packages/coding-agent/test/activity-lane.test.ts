@@ -47,9 +47,8 @@ describe("activity lane", () => {
 
 		expect(lines).toHaveLength(1);
 		expect(text).toContain("Implementing status lane");
-		// The one running worker is the subject of the turn slot; counts appear only with company.
-		expect(text).toMatch(/●\s+agent · Fast coder/);
-		expect(text).not.toContain("1 agent");
+		// Detached execution is explicitly named; the plan can reclaim the count's width.
+		expect(text).toMatch(/●\s+Background work/);
 		// The task owns the plan slot; the goal yields to it.
 		expect(text).not.toContain("Stabilize the harness");
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(62);
@@ -68,19 +67,22 @@ describe("activity lane", () => {
 		expect(text()).toMatch(/^\s*●\s+Working\.\.\. \(0s\)\s*$/);
 		now += 12_000;
 		lane.start({ id: "tool:1", kind: "tool", label: "Bash", tag: "bash" });
-		expect(text()).toMatch(/^\s*●\s+Bash \(0s\)\s*$/);
+		expect(text()).toContain("(12s");
+		expect(text()).toContain("1 bash");
 		now += 72_000;
-		expect(text()).toContain("Bash (1m12s)");
-		expect(text()).not.toContain("1 bash");
+		expect(text()).toContain("(1m24s");
+		expect(text()).toContain("1 bash");
 		lane.start({ id: "tool:2", kind: "tool", label: "Bash", tag: "bash" });
 		expect(text()).toContain("2 bash");
+		expect(text()).toContain("(1m24s");
 		expect(text()).not.toContain("Bash (");
 		lane.remove("tool:2");
-		expect(text()).toContain("Bash (1m12s)");
+		expect(text()).toContain("(1m24s");
+		expect(text()).toContain("1 bash");
 		lane.finish("tool:1", "success");
-		// The finished tool is the newest event for a moment; a generic turn label yields to it.
-		expect(text()).toMatch(/●\s+Bash\s*$/);
-		expect(text()).not.toContain("(1m");
+		// Finished tool is the newest event; the turn clock stays so live work does not look stuck.
+		expect(text()).toContain("(1m24s");
+		expect(text()).toContain("Bash");
 		lane.dispose();
 		expect(formatElapsed(59_999)).toBe("59s");
 		expect(formatElapsed(3_600_000 + 120_000)).toBe("1h02m");
@@ -320,6 +322,352 @@ describe("activity lane slots", () => {
 		initTheme("dark");
 	});
 
+	it("anchors active ages to monotonic time despite wall-clock corrections", () => {
+		let wall = 1_000_000;
+		let monotonic = 0;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => wall,
+			() => monotonic,
+		);
+		lane.replaceCanonical("session", {
+			laneRecords: [
+				{ laneId: "w", type: "worker", status: "running", startedAt: new Date(wall - 10_000).toISOString() },
+			],
+		});
+		monotonic += 5_000;
+		wall -= 60_000;
+		expect(stripAnsi(lane.render(100).join(""))).toContain("15s");
+		wall += 120_000;
+		monotonic += 5_000;
+		expect(stripAnsi(lane.render(100).join(""))).toContain("20s");
+		lane.dispose();
+	});
+
+	it("unchanged source snapshots are render no-ops and start only one ticker", () => {
+		vi.useFakeTimers();
+		const render = vi.fn();
+		const lane = new ActivityLaneComponent(theme, render);
+		const snapshot = { laneRecords: [{ laneId: "w", type: "worker" as const, status: "running" as const }] };
+		lane.replaceCanonical("session", snapshot);
+		render.mockClear();
+		lane.updateCanonical("session", snapshot);
+		expect(render).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(1);
+		lane.reconcileByPrefix("background-tool:", [{ id: "background-tool:a", kind: "tool", label: "A" }]);
+		render.mockClear();
+		lane.reconcileByPrefix("background-tool:", [{ id: "background-tool:a", kind: "tool", label: "A" }]);
+		expect(render).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(1);
+		lane.dispose();
+		expect(vi.getTimerCount()).toBe(0);
+		vi.useRealTimers();
+	});
+
+	it("settles preparation without agent_start and gives a new submission a fresh clock", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		lane.syncForegroundActivity({ sessionId: "s", epoch: 1, busy: true });
+		now += 12_000;
+		expect(stripAnsi(lane.render(100).join(""))).toContain("Preparing");
+		lane.syncForegroundActivity({ sessionId: "s", busy: false });
+		expect(lane.getItems().some((item) => item.id === "runtime:turn")).toBe(false);
+		lane.syncForegroundActivity({ sessionId: "s", epoch: 2, busy: true });
+		expect(stripAnsi(lane.render(100).join(""))).toContain("(0s)");
+		lane.dispose();
+	});
+
+	it("visibility changes keep the parent clock and independent background work", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		lane.syncForegroundActivity({ sessionId: "s", epoch: 1, busy: true });
+		lane.start({ id: "background-tool:a", kind: "tool", label: "Build" });
+		lane.setParentVisible(false);
+		now += 12_000;
+		expect(stripAnsi(lane.render(100).join(""))).not.toContain("Preparing");
+		expect(stripAnsi(lane.render(100).join(""))).toContain("Background work");
+		lane.setParentVisible(true);
+		expect(stripAnsi(lane.render(100).join(""))).toContain("12s");
+		lane.dispose();
+	});
+
+	it("running work outranks a parent wait while preserving the parent total clock", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		lane.syncForegroundActivity({ sessionId: "s", epoch: 1, busy: true });
+		now += 30_000;
+		lane.wait({ id: "runtime:retry", kind: "runtime", label: "Retry waiting" });
+		lane.start({ id: "tool:a", kind: "tool", label: "Build" });
+		const rendered = stripAnsi(lane.render(100).join(""));
+		expect(rendered).toMatch(/● Working/);
+		expect(rendered).toContain("30s");
+		lane.remove("tool:a");
+		expect(stripAnsi(lane.render(100).join(""))).toContain("Retry waiting");
+		lane.dispose();
+	});
+
+	it("shows Awaiting you for the blocked question invocation, leaving unrelated work active", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		lane.syncForegroundActivity({ sessionId: "s", epoch: 1, busy: true });
+		lane.start({ id: "tool:question", kind: "tool", label: "Question" });
+		lane.syncHumanInputActivity({ requestId: "q", toolCallId: "question", waiting: true });
+		now += 12_000;
+		expect(stripAnsi(lane.render(100).join(""))).toContain("Awaiting you");
+		lane.start({ id: "tool:build", kind: "tool", label: "Build" });
+		expect(stripAnsi(lane.render(100).join(""))).toMatch(/● Working/);
+		lane.syncHumanInputActivity({ requestId: "q", toolCallId: "question", waiting: false });
+		expect(stripAnsi(lane.render(100).join(""))).not.toContain("Awaiting you");
+		lane.dispose();
+	});
+
+	it("does not inherit first-observed clocks across sessions that reuse a lane ID", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		const snapshot = { laneRecords: [{ laneId: "w", type: "worker" as const, status: "running" as const }] };
+		lane.replaceCanonical("a", snapshot);
+		now += 60_000;
+		lane.replaceCanonical("a", snapshot);
+		expect(stripAnsi(lane.render(100).join(""))).toContain("observed 1m00s");
+		lane.replaceCanonical("b", snapshot);
+		expect(stripAnsi(lane.render(100).join(""))).toContain("observed 0s");
+		lane.dispose();
+	});
+
+	it("retains question wait semantics while the parent indicator is hidden", () => {
+		const lane = new ActivityLaneComponent(theme, () => {});
+		lane.syncForegroundActivity({ sessionId: "s", epoch: 1, busy: true });
+		lane.start({ id: "tool:q", kind: "tool", label: "Question" });
+		lane.syncHumanInputActivity({ requestId: "q", toolCallId: "q", waiting: true });
+		lane.setParentVisible(false);
+		expect(stripAnsi(lane.render(100).join(""))).toContain("Awaiting you");
+		lane.start({ id: "background-tool:b", kind: "tool", label: "Build" });
+		expect(stripAnsi(lane.render(100).join(""))).toContain("Background work");
+		lane.syncHumanInputActivity({ requestId: "q", toolCallId: "q", waiting: false });
+		expect(stripAnsi(lane.render(100).join(""))).not.toContain("Awaiting you");
+		lane.dispose();
+	});
+
+	it.each(["background", "worker"] as const)(
+		"retains %s admission waits across parent settlement, visibility and a new submission",
+		(scope) => {
+			vi.useFakeTimers();
+			let now = 1_000_000;
+			const lane = new ActivityLaneComponent(
+				theme,
+				() => {},
+				2_000,
+				() => now,
+			);
+			lane.syncForegroundActivity({ sessionId: "s", epoch: 1, busy: true });
+			lane.wait({ id: `runtime:admission:${scope}:provider`, kind: "runtime", scope, label: `${scope} waiting` });
+			lane.wait({ id: "runtime:retry", kind: "runtime", label: "Parent retry" });
+			now += 12_000;
+			lane.syncForegroundActivity({ sessionId: "s", busy: false });
+			lane.setParentVisible(false);
+			expect(lane.getItems().some((item) => item.id === "runtime:retry")).toBe(false);
+			expect(stripAnsi(lane.render(100).join(""))).toContain(`${scope} waiting (12s)`);
+			expect(vi.getTimerCount()).toBe(2); // one active ticker and the parent's bounded terminal transient
+			lane.syncForegroundActivity({ sessionId: "s", epoch: 2, busy: true });
+			expect(stripAnsi(lane.render(100).join(""))).toContain(`${scope} waiting (12s)`);
+			lane.remove(`runtime:admission:${scope}:provider`);
+			expect(stripAnsi(lane.render(100).join(""))).not.toContain(`${scope} waiting`);
+			expect(vi.getTimerCount()).toBe(1); // hidden parent does not tick
+			lane.dispose();
+			vi.useRealTimers();
+		},
+	);
+
+	it("does not claim Done while an independently owned wait remains", () => {
+		const lane = new ActivityLaneComponent(theme, () => {});
+		lane.syncForegroundActivity({ sessionId: "s", epoch: 1, busy: true });
+		lane.wait({
+			id: "runtime:admission:background:p",
+			kind: "runtime",
+			scope: "background",
+			label: "Background waiting",
+		});
+		lane.setForegroundOutcome("success", "Done");
+		lane.syncForegroundActivity({ sessionId: "s", busy: false });
+		expect(stripAnsi(lane.render(120).join(""))).toContain("Background waiting");
+		expect(stripAnsi(lane.render(120).join(""))).not.toContain("Done");
+		lane.remove("runtime:admission:background:p");
+		expect(stripAnsi(lane.render(120).join(""))).toContain("Done");
+		lane.dispose();
+	});
+
+	it.each(["background", "worker"] as const)(
+		"does not label a %s wait as Parent when only detached work runs",
+		(scope) => {
+			const lane = new ActivityLaneComponent(theme, () => {});
+			lane.start({ id: "background-tool:build", kind: "tool", label: "Build" });
+			lane.wait({ id: `runtime:admission:${scope}:p`, kind: "runtime", scope, label: `${scope} request waiting` });
+			const text = stripAnsi(lane.render(120).join(""));
+			expect(text).toContain("Background work");
+			expect(text).toContain(`${scope} request waiting`);
+			expect(text).not.toContain("Parent");
+			lane.dispose();
+		},
+	);
+
+	it("keeps a state and clock at narrow width and freezes terminal duration", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		lane.syncForegroundActivity({ sessionId: "s", epoch: 1, busy: true });
+		lane.update("runtime:turn", "非常に長い作業中のラベル");
+		now += 12_000;
+		expect(stripAnsi(lane.render(20).join(""))).toContain("12s");
+		expect(stripAnsi(lane.render(20).join(""))).toContain("Working");
+		lane.setForegroundOutcome("success", "Done");
+		lane.syncForegroundActivity({ sessionId: "s", busy: false });
+		now += 1_000;
+		expect(stripAnsi(lane.render(100).join(""))).toContain("Done (12s)");
+		lane.dispose();
+	});
+
+	it("resets the queued phase once on admission and gives a reused specialist a new lane clock", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		lane.replaceCanonical("s", {
+			laneRecords: [{ laneId: "w1", type: "worker", label: "Reviewer", status: "queued" }],
+		});
+		now += 30_000;
+		const snapshot = {
+			laneRecords: [
+				{
+					laneId: "w1",
+					type: "worker" as const,
+					label: "Reviewer",
+					status: "running" as const,
+					startedAt: new Date(now).toISOString(),
+				},
+			],
+		};
+		lane.updateCanonical("s", snapshot);
+		expect(stripAnsi(lane.render(100).join(""))).toContain("oldest 0s");
+		now += 10_000;
+		lane.updateCanonical("s", snapshot);
+		expect(stripAnsi(lane.render(100).join(""))).toContain("oldest 10s");
+		lane.updateCanonical("s", {
+			laneRecords: [{ ...snapshot.laneRecords[0], laneId: "w2", startedAt: new Date(now).toISOString() }],
+		});
+		expect(stripAnsi(lane.render(100).join(""))).toContain("oldest 0s");
+		lane.dispose();
+	});
+
+	it.each([undefined, "broken", new Date(2_000_000).toISOString()])(
+		"uses observed age for missing or invalid background origin %s",
+		(originAt) => {
+			let now = 1_000_000;
+			const lane = new ActivityLaneComponent(
+				theme,
+				() => {},
+				2_000,
+				() => now,
+			);
+			lane.reconcileByPrefix("background-tool:", [
+				{ id: "background-tool:a", kind: "tool", label: "Build", originAt },
+			]);
+			now += 12_000;
+			expect(stripAnsi(lane.render(100).join(""))).toContain("observed 12s");
+			lane.dispose();
+		},
+	);
+
+	it("preserves pre-handoff duration while rejecting malformed duration claims", () => {
+		const now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		lane.reconcileByPrefix("background-tool:", [
+			{
+				id: "background-tool:a",
+				kind: "tool",
+				label: "Build",
+				originAt: new Date(now - 10_000).toISOString(),
+				elapsedBeforeMs: 30_000,
+			},
+		]);
+		expect(stripAnsi(lane.render(100).join(""))).toContain("oldest 40s");
+		for (const elapsedBeforeMs of [-1, NaN, Infinity]) {
+			lane.reconcileByPrefix("background-tool:", [
+				{
+					id: `background-tool:${elapsedBeforeMs}`,
+					kind: "tool",
+					label: "Build",
+					originAt: new Date(now).toISOString(),
+					elapsedBeforeMs,
+				},
+			]);
+			expect(stripAnsi(lane.render(100).join(""))).toContain("observed 0s");
+		}
+		lane.dispose();
+	});
+
+	it.each([0, 1, 8, 32])("bounds timed refresh and unchanged reconciliation for %i active entities", (count) => {
+		vi.useFakeTimers();
+		const render = vi.fn();
+		const lane = new ActivityLaneComponent(theme, render);
+		const snapshot = {
+			laneRecords: Array.from({ length: count }, (_, index) => ({
+				laneId: `w${index}`,
+				type: "worker" as const,
+				status: "running" as const,
+			})),
+		};
+		lane.replaceCanonical("s", snapshot);
+		render.mockClear();
+		for (let i = 0; i < 100; i++) lane.updateCanonical("s", snapshot);
+		expect(render).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(count ? 1 : 0);
+		vi.advanceTimersByTime(1_000);
+		expect(render).toHaveBeenCalledTimes(count ? 1 : 0);
+		lane.dispose();
+		vi.advanceTimersByTime(2_000);
+		expect(vi.getTimerCount()).toBe(0);
+		vi.useRealTimers();
+	});
+
 	const runtimeTurn = (label: string) => ({
 		id: "runtime:turn",
 		kind: "runtime" as const,
@@ -473,5 +821,100 @@ describe("activity lane slots", () => {
 		expect(text).toContain("Step 1/1");
 		expect(text).toContain("Queued 2");
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(69);
+	});
+
+	it("keeps a worker clock after the parent turn ends", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		lane.replaceCanonical("review", {
+			laneRecords: [
+				{
+					laneId: "w1",
+					type: "worker",
+					status: "running",
+					label: "Review",
+					startedAt: new Date(now).toISOString(),
+				},
+			],
+		});
+		lane.start({ id: "runtime:turn", kind: "runtime", label: "Working..." });
+		now += 60_000;
+		expect(stripAnsi(lane.render(100).join("\n"))).toContain("(1m");
+		lane.finish("runtime:turn", "success");
+		now += 60_000;
+		const text = stripAnsi(lane.render(100).join("\n"));
+		expect(text).toContain("Background work");
+		expect(text).toContain("oldest 2m");
+		lane.dispose();
+	});
+
+	it("does not treat a pending plan as working", () => {
+		const taskState = addTaskStep(createTaskStepsState("T0"), { content: "Queued work", status: "pending" }, "T1");
+		const text = stripAnsi(
+			renderActivityLaneLine(theme, projectActivityLane({ taskState, laneRecords: [] }).active, 80).join("\n"),
+		);
+		expect(text).not.toContain("Working");
+		expect(text).not.toMatch(/\(\d+[smh]/);
+	});
+
+	it("preserves background-tool clocks across reconcile", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		lane.reconcileByPrefix("background-tool:", [
+			{
+				id: "background-tool:a",
+				kind: "tool",
+				label: "Long build",
+				tag: "bash",
+				originAt: new Date(now).toISOString(),
+			},
+		]);
+		now += 30_000;
+		lane.reconcileByPrefix("background-tool:", [
+			{
+				id: "background-tool:a",
+				kind: "tool",
+				label: "Long build",
+				tag: "bash",
+				originAt: new Date(now - 30_000).toISOString(),
+			},
+			{
+				id: "background-tool:b",
+				kind: "tool",
+				label: "Second build",
+				tag: "bash",
+				originAt: new Date(now).toISOString(),
+			},
+		]);
+		now += 10_000;
+		const text = stripAnsi(lane.render(100).join("\n"));
+		expect(text).toContain("oldest 40s");
+		lane.dispose();
+	});
+
+	it("labels an unknown worker origin as observed", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		lane.replaceCanonical("review", {
+			laneRecords: [{ laneId: "w1", type: "worker", status: "running", label: "Review" }],
+		});
+		now += 12_000;
+		expect(stripAnsi(lane.render(100).join("\n"))).toContain("observed 12s");
+		lane.dispose();
 	});
 });

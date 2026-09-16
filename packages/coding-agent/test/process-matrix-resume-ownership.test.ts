@@ -182,7 +182,7 @@ function createResumeHarness(): ResumeHarness {
 			agent: agentIdentity(MASTER_SESSION),
 			settings: { enabled: true, heartbeatMs: 3_600_000, adoptionGraceMs: 3_600_000, watcherPollMs: 3_600_000 },
 			// Only this master's own pid is alive: the stored worker and its old parent are both gone.
-			isProcessAlive: (pid: number) => pid === process.pid,
+			observeProcess: (pid: number) => (pid === process.pid ? "alive" : "dead"),
 			now: () => T0,
 			notify: (text: string) => {
 				notices.push(text);

@@ -77,10 +77,10 @@ export class RuntimeStatusController {
 		this.host.statusContainer.clear();
 		this.runtimeStatusLabel = undefined;
 		this.host.activityLane?.remove("runtime:routing");
-		this.host.activityLane?.remove("runtime:turn");
 	}
 
 	setWorkingVisible(visible: boolean): void {
+		this.host.activityLane?.setParentVisible(visible && this.host.hasHumanAudience && !this.workingIndicatorOptions);
 		if (!this.host.hasHumanAudience) {
 			this.workingVisible = false;
 			this.stopWorkingLoader();
@@ -100,11 +100,7 @@ export class RuntimeStatusController {
 				this.activeLoader = this.createWorkingLoader();
 				this.host.statusContainer.addChild(this.activeLoader);
 			} else {
-				this.host.activityLane?.start({
-					id: "runtime:turn",
-					kind: "runtime",
-					label: this.runtimeStatusLabel ?? this.getWorkingLoaderMessage(),
-				});
+				this.host.activityLane?.update("runtime:turn", this.runtimeStatusLabel ?? this.getWorkingLoaderMessage());
 			}
 		}
 		this.host.ui.requestRender();
@@ -112,12 +108,12 @@ export class RuntimeStatusController {
 
 	setWorkingIndicator(options?: LoaderIndicatorOptions): void {
 		this.workingIndicatorOptions = options;
+		this.host.activityLane?.setParentVisible(this.workingVisible && this.host.hasHumanAudience && !options);
 		if (!this.host.hasHumanAudience) {
 			this.stopWorkingLoader();
 			return;
 		}
 		if (options) {
-			this.host.activityLane?.remove("runtime:turn");
 			if (this.host.isStreaming() && this.workingVisible) {
 				const currentRuntimeStatus = this.runtimeStatusLabel;
 				this.stopWorkingLoader();
@@ -130,11 +126,7 @@ export class RuntimeStatusController {
 			this.activeLoader = undefined;
 			this.host.statusContainer.clear();
 			if (this.host.isStreaming() && this.workingVisible) {
-				this.host.activityLane?.start({
-					id: "runtime:turn",
-					kind: "runtime",
-					label: this.runtimeStatusLabel ?? this.getWorkingLoaderMessage(),
-				});
+				this.host.activityLane?.update("runtime:turn", this.runtimeStatusLabel ?? this.getWorkingLoaderMessage());
 			}
 		}
 		this.host.ui.requestRender();

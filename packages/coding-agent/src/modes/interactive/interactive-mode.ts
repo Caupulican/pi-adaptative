@@ -47,6 +47,7 @@ import {
 	MAX_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
 } from "../../core/goals/goal-continuation-defaults.ts";
 import { configureHttpDispatcher } from "../../core/http-dispatcher.ts";
+import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import type { ManagedMemoryTarget } from "../../core/memory/providers/file-store.ts";
 import type { PrismLlamaCppRuntime } from "../../core/models/llamacpp-runtime.ts";
@@ -255,7 +256,7 @@ export class InteractiveMode {
 	private lastStreamingUiUpdateAt = 0;
 
 	// Active execution identity. Completed actions are owned by the transcript.
-	private activeToolCalls = new ActiveToolCallRegistry();
+	private activeToolCalls = new ActiveToolCallRegistry(() => this.workbench?.refreshExecution());
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -269,6 +270,9 @@ export class InteractiveMode {
 
 	// Agent subscription unsubscribe function
 	private unsubscribe?: () => void;
+	private unsubscribeForegroundActivity?: () => void;
+	private unsubscribeHumanInputActivity?: () => void;
+	private subscriptionGeneration = 0;
 	private unsubscribeExtensionsChanged?: () => void;
 	private signalCleanupHandlers: Array<() => void> = [];
 
@@ -1090,8 +1094,13 @@ export class InteractiveMode {
 	}
 
 	private async rebindCurrentSession(): Promise<void> {
+		this.subscriptionGeneration++;
+		this.unsubscribeHumanInputActivity?.();
+		this.unsubscribeHumanInputActivity = undefined;
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		this.unsubscribeForegroundActivity?.();
+		this.unsubscribeForegroundActivity = undefined;
 		this.clipboardQueue.pendingClipboardImages = [];
 		this.clipboardQueue.clipboardImageCounter = 0;
 		const clipboardImageDirectory = this.settingsManager.getClipboardImageDirectory();
@@ -1234,10 +1243,12 @@ export class InteractiveMode {
 
 	private setWorkingVisible(visible: boolean): void {
 		this.runtimeStatus.setWorkingVisible(visible);
+		this.syncForegroundActivity();
 	}
 
 	private setWorkingIndicator(options?: LoaderIndicatorOptions): void {
 		this.runtimeStatus.setWorkingIndicator(options);
+		this.syncForegroundActivity();
 	}
 
 	private setHiddenThinkingLabel(label?: string): void {
@@ -1753,9 +1764,45 @@ export class InteractiveMode {
 	}
 
 	private subscribeToAgent(): void {
-		this.unsubscribe = this.session.subscribe(async (event) => {
+		const session = this.session;
+		const generation = ++this.subscriptionGeneration;
+		this.unsubscribe = session.subscribe(async (event) => {
+			if (generation !== this.subscriptionGeneration || session !== this.session) return;
 			await this.handleEvent(event);
 		});
+		this.unsubscribeForegroundActivity?.();
+		this.unsubscribeForegroundActivity = session.subscribeForegroundActivity(() => {
+			if (generation !== this.subscriptionGeneration || session !== this.session) return;
+			this.syncForegroundActivity();
+		});
+		this.syncForegroundActivity();
+		this.unsubscribeHumanInputActivity?.();
+		this.unsubscribeHumanInputActivity = subscribeHumanInputActivity(session.sessionManager, (activity) => {
+			if (generation !== this.subscriptionGeneration || session !== this.session) return;
+			this.activityLane?.syncHumanInputActivity({
+				requestId: activity.request.requestId,
+				toolCallId: activity.request.toolCallId,
+				waiting: activity.phase === "waiting",
+			});
+			this.loadingAnimation?.setMessage(
+				activity.phase === "waiting" ? "Awaiting you" : this.getWorkingLoaderMessage(),
+			);
+		});
+	}
+
+	private syncForegroundActivity(): void {
+		const activity = this.session.getForegroundActivity();
+		if (activity.busy && activity.epoch !== undefined) {
+			this.workbench?.beginCycle(this.session.sessionManager.getCwd(), activity.epoch);
+		}
+		this.activityLane?.setParentVisible(this.workingVisible && !this.workingIndicatorOptions);
+		this.activityLane?.syncForegroundActivity(activity);
+		if (activity.busy && this.workingVisible && this.workingIndicatorOptions && !this.loadingAnimation) {
+			this.loadingAnimation = this.createWorkingLoader();
+			this.statusContainer.addChild(this.loadingAnimation);
+		} else if (!activity.busy && this.loadingAnimation) {
+			this.stopWorkingLoader();
+		}
 	}
 
 	private handleEvent(event: AgentSessionEvent): Promise<void> {
@@ -3865,6 +3912,9 @@ export class InteractiveMode {
 	}
 
 	stop(): void {
+		this.subscriptionGeneration++;
+		this.unsubscribeHumanInputActivity?.();
+		this.unsubscribeHumanInputActivity = undefined;
 		this.workbenchInputCleanup?.();
 		this.workbenchInputCleanup = undefined;
 		this.workbench?.dispose();
@@ -3884,6 +3934,8 @@ export class InteractiveMode {
 		this.activityLane?.dispose();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();
+		this.unsubscribeForegroundActivity?.();
+		this.unsubscribeForegroundActivity = undefined;
 		if (this.unsubscribe) {
 			this.unsubscribe();
 		}

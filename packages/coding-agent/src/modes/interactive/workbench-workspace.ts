@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { readBoundedTextFile } from "../../core/util/bounded-file.ts";
+import { bindChildProcessAbort } from "../../utils/child-process.ts";
 
 interface WorkspaceSnapshot {
 	files: Map<string, string>;
@@ -31,12 +32,12 @@ interface ObservationScope {
 // Unlike the tool's git executor, UI observations never spill output or wait for long operations.
 function query(cwd: string, args: string[], signal: AbortSignal): Promise<string> {
 	return new Promise((resolveResult, reject) => {
-		execFile(
+		signal.throwIfAborted();
+		const child = execFile(
 			"git",
 			["--no-optional-locks", "--literal-pathspecs", "-c", "core.quotepath=false", ...args],
 			{
 				cwd,
-				signal,
 				timeout: 2000,
 				maxBuffer: 256 * 1024,
 				encoding: "utf8",
@@ -44,6 +45,7 @@ function query(cwd: string, args: string[], signal: AbortSignal): Promise<string
 			},
 			(error, stdout) => (error ? reject(error) : resolveResult(stdout)),
 		);
+		bindChildProcessAbort(child, signal);
 	});
 }
 

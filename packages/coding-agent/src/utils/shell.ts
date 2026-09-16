@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
+import { killTreeNow } from "@caupulican/pi-agent-core/process-tree";
 import { spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
 import { withoutHarnessLaunchEnv } from "../core/harness-environment.ts";
@@ -302,28 +303,5 @@ export function killTrackedDetachedChildren(): void {
  * event to ensure Node and OS handles have completed teardown before directory removal.
  */
 export function killProcessTree(pid: number): void {
-	if (process.platform === "win32") {
-		// Use taskkill on Windows to kill process tree synchronously.
-		try {
-			const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
-			spawnSync(taskkill, ["/F", "/T", "/PID", String(pid)], {
-				stdio: "ignore",
-				windowsHide: true,
-			});
-		} catch {
-			// Ignore errors if taskkill fails
-		}
-	} else {
-		// Use SIGKILL on Unix/Linux/Mac
-		try {
-			process.kill(-pid, "SIGKILL");
-		} catch {
-			// Fallback to killing just the child if process group kill fails
-			try {
-				process.kill(pid, "SIGKILL");
-			} catch {
-				// Process already dead
-			}
-		}
-	}
+	killTreeNow(pid);
 }

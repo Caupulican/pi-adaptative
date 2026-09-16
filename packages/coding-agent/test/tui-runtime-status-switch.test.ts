@@ -12,12 +12,13 @@ type RuntimeSwitchFixture = {
 		remove(id: string): void;
 		start(options: { id: string; kind: string; label: string }): void;
 		update(id: string, label: string): void;
+		setParentVisible(visible: boolean): void;
 	};
 };
 
 function createHost(): RuntimeSwitchFixture {
 	const loader = { stop: vi.fn() };
-	const activityLane = { remove: vi.fn(), start: vi.fn(), update: vi.fn() };
+	const activityLane = { remove: vi.fn(), start: vi.fn(), update: vi.fn(), setParentVisible: vi.fn() };
 	const host: RuntimeStatusControllerHost = {
 		ui: { requestRender: vi.fn() } as unknown as TUI,
 		statusContainer: new Container(),
@@ -42,15 +43,13 @@ describe("InteractiveMode runtime status renderer switches", () => {
 	test("preserves hidden-thinking status when switching to a loader and back", () => {
 		fixture.controller.setWorkingIndicator({ frames: [] });
 
-		expect(fixture.activityLane.remove).toHaveBeenCalledWith("runtime:turn");
+		expect(fixture.activityLane.setParentVisible).toHaveBeenCalledWith(false);
+		expect(fixture.activityLane.remove).not.toHaveBeenCalledWith("runtime:turn");
 
 		fixture.controller.setWorkingIndicator(undefined);
 
-		expect(fixture.activityLane.start).toHaveBeenCalledWith({
-			id: "runtime:turn",
-			kind: "runtime",
-			label: "Thinking...",
-		});
+		expect(fixture.activityLane.update).toHaveBeenCalledWith("runtime:turn", "Thinking...");
+		expect(fixture.activityLane.setParentVisible).toHaveBeenLastCalledWith(true);
 	});
 
 	test("preserves the current status while hiding and restoring the activity lane", () => {
@@ -58,10 +57,7 @@ describe("InteractiveMode runtime status renderer switches", () => {
 
 		fixture.controller.setWorkingVisible(true);
 
-		expect(fixture.activityLane.start).toHaveBeenCalledWith({
-			id: "runtime:turn",
-			kind: "runtime",
-			label: "Thinking...",
-		});
+		expect(fixture.activityLane.update).toHaveBeenCalledWith("runtime:turn", "Thinking...");
+		expect(fixture.activityLane.setParentVisible).toHaveBeenLastCalledWith(true);
 	});
 });

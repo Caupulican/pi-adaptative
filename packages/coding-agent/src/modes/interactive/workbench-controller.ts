@@ -16,7 +16,6 @@ import {
 import { fullConversationText } from "./components/question-conversation.ts";
 import {
 	CHECKS_SECTION,
-	EDGE_SECTION,
 	PLAN_SECTION,
 	TEAM_SECTION,
 	type WorkbenchComponent,
@@ -41,6 +40,8 @@ interface WorkbenchPorts {
 	paste?: () => Promise<void>;
 	/** Previews retained per cycle (`workbench.previews`); the default keeps a long cycle readable. */
 	previewLimit?: () => number;
+	activeForegroundCount?: () => number;
+	activeBackgroundCount?: () => number;
 }
 
 /** UI-only cycle, input and copy coordinator. Task/worker state is never mutated here. */
@@ -70,6 +71,7 @@ export class WorkbenchController {
 	private lastObservationNote?: string;
 	private observationReady?: Promise<void>;
 	private observationTurn = 0;
+	private submissionEpoch?: number;
 
 	constructor(view: WorkbenchComponent, ports: WorkbenchPorts, workspace = new WorkspaceObservation()) {
 		this.view = view;
@@ -81,6 +83,7 @@ export class WorkbenchController {
 		this.workspace.dispose();
 		this.observationReady = undefined;
 		this.observationTurn++;
+		this.submissionEpoch = undefined;
 		this.previews = [];
 		this.invocations.reset();
 		this.fileEffects = 0;
@@ -100,20 +103,25 @@ export class WorkbenchController {
 		this.reset();
 	}
 
-	beginCycle(cwd?: string): void {
+	beginCycle(cwd?: string, epoch?: number): void {
 		this.view.dismissUserShell();
+		if (epoch !== undefined && epoch === this.submissionEpoch) {
+			this.refreshExecution();
+			return;
+		}
+		if (epoch !== undefined) this.submissionEpoch = epoch;
 		this.workspace.dispose();
 		this.observationReady = undefined;
 		this.observationTurn++;
 		if (cwd) this.observationReady = this.workspace.begin(cwd);
 		this.staleEvidence = true;
 		this.lastObservationNote = undefined;
-		// A prior failed action remains a receipt; a new task is not evidence of recovery.
-		this.updateExecution();
+		this.invocations.beginCycle();
+		this.refreshExecution();
 	}
 
 	complete(): void {
-		this.updateExecution();
+		this.refreshExecution();
 	}
 
 	private previewLimit(): number {
@@ -126,7 +134,6 @@ export class WorkbenchController {
 		if (!this.staleEvidence) return;
 		this.staleEvidence = false;
 		this.previews = [];
-		this.invocations.beginCycle();
 		this.fileEffects = 0;
 	}
 
@@ -163,7 +170,7 @@ export class WorkbenchController {
 		this.previews.push({
 			render: (width) => {
 				preview ??= new Text(
-					theme.fg("accent", `Observed ${count} workspace changes`) +
+					theme.fg("toolTitle", `Observed ${count} workspace changes`) +
 						`\n${paths}\n` +
 						theme.fg("dim", "Current diff; may include prior or concurrent edits") +
 						`\n${patch.map((line) => theme.fg(line.startsWith("+") ? "toolDiffAdded" : line.startsWith("-") ? "toolDiffRemoved" : "toolDiffContext", line)).join("\n")}`,
@@ -177,7 +184,7 @@ export class WorkbenchController {
 			},
 		});
 		if (this.previews.length > this.previewLimit()) this.previews.shift();
-		this.updateExecution();
+		this.refreshExecution();
 	}
 
 	record(preview: Component | undefined, observation: ToolInvocationObservation): void {
@@ -188,20 +195,24 @@ export class WorkbenchController {
 			this.previews.push(preview);
 			if (this.previews.length > this.previewLimit()) this.previews.shift();
 		}
-		this.updateExecution();
+		this.refreshExecution();
 	}
 
 	recordBackground(message: AgentMessage): void {
 		if (message.role !== "custom") return;
 		const observations = backgroundToolInvocationObservations(message);
 		for (const observation of observations) this.invocations.record(observation, "background");
-		if (observations.length) this.updateExecution();
+		if (observations.length) this.refreshExecution();
 	}
 
-	private updateExecution(): void {
+	refreshExecution(): void {
+		if (this.disposed) return;
 		const { current, retained, partial } = this.invocations.snapshot();
-		if (!this.previews.length && !retained.calls && !partial) {
+		const inFlight = this.ports.activeForegroundCount?.() ?? 0;
+		const background = this.ports.activeBackgroundCount?.() ?? 0;
+		if (!this.previews.length && !retained.calls && !partial && !inFlight && !background) {
 			this.view.setExecution(undefined);
+			this.ports.requestRender();
 			return;
 		}
 		// The cycle's evidence stays in order, newest last; the pane follows it until the operator scrolls.
@@ -219,9 +230,20 @@ export class WorkbenchController {
 		const summary = details
 			? theme.fg(retained.errorResults || current.postprocessing || current.conflicts ? "warning" : "muted", details)
 			: "";
+		const completed = current.succeeded + current.negative;
+		const accounting = [
+			...(partial ? ["Partial"] : []),
+			...(inFlight ? [`In flight: ${inFlight}`] : []),
+			`Completed: ${completed}`,
+			...(current.notStarted ? [`Not started: ${current.notStarted}`] : []),
+			...(background ? [`Background: ${background}`] : []),
+			...(current.unknown ? [`Unknown: ${current.unknown}`] : []),
+			...(current.unclassified ? [`Unclassified: ${current.unclassified}`] : []),
+		].join(" · ");
 		this.view.setExecution(
 			{
 				render: (width) => [
+					...(this.staleEvidence && this.previews.length ? [theme.fg("dim", "Previous turn")] : []),
 					...this.previews.flatMap((preview, index) => [...(index ? [""] : []), ...preview.render(width)]),
 					...(summary ? [...(this.previews.length ? [""] : []), ...wrapTextWithAnsi(summary, width)] : []),
 				],
@@ -231,10 +253,7 @@ export class WorkbenchController {
 			},
 			false,
 			this.previews.at(-1),
-			theme.fg(
-				"muted",
-				`${partial ? "Partial cycle" : this.staleEvidence ? "Previous cycle" : "Cycle"}: ${current.calls} calls`,
-			),
+			theme.fg("muted", accounting),
 		);
 		this.ports.requestRender();
 	}
@@ -482,7 +501,7 @@ export function buildWorkbenchSections(snapshot: AgentsOverlaySnapshot, nowMs: n
 					rows: singleSection ? shown.map((row) => ({ ...row, section: undefined })) : shown,
 				})
 			: [
-					`  ${theme.fg("success", "✓")} ${theme.fg("muted", planRows.length ? `Work complete · ${planRows.length} steps` : "No open steps")}`,
+					`  ${theme.fg("success", "✓")} ${theme.fg("text", planRows.length ? `Work complete · ${planRows.length} steps` : "No open steps")}`,
 				];
 		sections.push({ title: PLAN_SECTION, meta, body });
 	}
@@ -497,18 +516,7 @@ export function buildWorkbenchSections(snapshot: AgentsOverlaySnapshot, nowMs: n
 		rows.push(`  ${theme.fg("dim", "rerun the same check, or /verify dismiss")}`);
 		sections.push({ title: CHECKS_SECTION, meta: `${checks.length} failing`, body: rows });
 	}
-	// What the operator has granted at the edge; everything not listed asks once.
-	const edge = snapshot.edge ?? [];
-	if (edge.length) {
-		const rows = edge.slice(0, 3).map((grant) => {
-			const from =
-				grant.source === "instructions" ? "instructions" : grant.source === "operator" ? "session" : "settings";
-			return `  ${theme.fg("success", "✓")} ${theme.fg("text", grant.class)} ${theme.fg("dim", `· ${from}`)}`;
-		});
-		if (edge.length > 3) rows.push(`  ${theme.fg("dim", `+${edge.length - 3} more`)}`);
-		rows.push(`  ${theme.fg("dim", "/edge list · revoke <class>")}`);
-		sections.push({ title: EDGE_SECTION, meta: `${edge.length} granted`, body: rows });
-	}
+	// Edge grants stay armed in the host; they are not a workbench inspector section.
 	// The team is its specialists, not its task history: a specialist with three finished tasks and
 	// nothing running is one idle agent, and it keeps its section even though it contributes no row.
 	const specialists = projectSpecialistLanes(snapshot.laneRecords);
@@ -523,7 +531,7 @@ export function buildWorkbenchSections(snapshot: AgentsOverlaySnapshot, nowMs: n
 		const body: Component | string[] = shown.length
 			? rowsComponent({ ...team, rows: shown.map((row) => ({ ...row, section: undefined })) })
 			: [
-					`  ${theme.fg("success", "✓")} ${theme.fg("muted", `Team idle · ${specialists.length} ${specialists.length === 1 ? "session" : "sessions"} retained`)}`,
+					`  ${theme.fg("success", "✓")} ${theme.fg("text", `Team idle · ${specialists.length} ${specialists.length === 1 ? "session" : "sessions"} retained`)}`,
 				];
 		sections.push({ title: TEAM_SECTION, meta, body });
 	}

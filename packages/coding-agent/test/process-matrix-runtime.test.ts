@@ -79,7 +79,7 @@ describe("getProcessTaskRef", () => {
 // startProcessMatrixRuntime -- behavioral coverage of the timer/watcher
 // composition, with only setInterval/clearInterval faked (fs I/O and the
 // settle() yields below run on real macrotasks) and every other dep injected:
-// the clock via `now`, liveness via `isProcessAlive`, the ask/notify/exit
+// the clock via `now`, liveness via `observeProcess`, the ask/notify/exit
 // seams via the config. Advancing the fake interval fires a tick; settle()
 // then lets the tick's real store I/O finish before asserting.
 // ---------------------------------------------------------------------------
@@ -143,7 +143,7 @@ function makeHarness(overrides: Partial<ProcessMatrixRuntimeConfig> = {}): Harne
 			},
 		}),
 		settings: { enabled: true, heartbeatMs: HEARTBEAT_MS, adoptionGraceMs: GRACE_MS, watcherPollMs: POLL_MS },
-		isProcessAlive: (pid) => harness.livePids.has(pid),
+		observeProcess: (pid) => (harness.livePids.has(pid) ? "alive" : "dead"),
 		now: () => harness.clock.ms,
 		notify: (text) => {
 			harness.notices.push(text);

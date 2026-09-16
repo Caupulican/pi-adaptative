@@ -146,6 +146,20 @@ export class ForegroundRecoveryController {
 		return this.submissionLease?.epoch;
 	}
 
+	getActivitySnapshot(sessionId: string): { sessionId: string; epoch?: number; busy: boolean } {
+		return { sessionId, epoch: this.getCurrentSubmissionEpoch(), busy: this.isBusy };
+	}
+
+	/** Attach before the caller checks aborted; preparation still needs the level-triggered run gate. */
+	bindSubmissionSignal(signal: AbortSignal): () => void {
+		const onAbort = () => {
+			this.abortRetry();
+			this.deps.agent.abort("submission superseded");
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		return () => signal.removeEventListener("abort", onAbort);
+	}
+
 	/** Observe authority changes; consumers still await waitForIdle before declaring settlement. */
 	subscribeActivity(listener: () => void): () => void {
 		this.activityListeners.add(listener);
@@ -333,7 +347,7 @@ export class ForegroundRecoveryController {
 	}
 
 	getFailoverStatus(): ModelRouterFailoverStatus {
-		return this.billingFailover.getStatus();
+		return { ...this.billingFailover.getStatus(), failureStats: this.deps.failureCorpus.stats() };
 	}
 
 	observeAssistant(message: AssistantMessage): void {

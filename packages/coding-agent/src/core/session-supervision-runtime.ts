@@ -1,3 +1,4 @@
+import type { ProcessObservation } from "@caupulican/pi-agent-core/process-tree";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeResource } from "./agent-session-runtime.ts";
 import { createCollaborationPeerContext } from "./collaboration/peer-context.ts";
@@ -38,7 +39,7 @@ async function stopSupervisionHandles(
 export interface SessionSupervisionRuntimeOptions {
 	agentDir: string;
 	orchestrationProfileId?: string;
-	isProcessAlive: (pid: number) => boolean;
+	observeProcess: (pid: number) => ProcessObservation;
 	resumeWorker: (payload: ResumablePayload, parentSessionId: string) => Promise<ResumeWorkerLaunchOutcome>;
 	onDiagnostic: (message: string) => void;
 	requestExit: () => Promise<void>;
@@ -113,7 +114,7 @@ export class SessionSupervisionRuntime implements AgentSessionRuntimeResource {
 					allowAutomaticRecovery: goal === undefined || isGoalExecutionActive(goal.status),
 					resumeWorker: (payload) => this.options.resumeWorker(payload, sessionId),
 					settings: session.settingsManager.getProcessMatrixSettings(),
-					isProcessAlive: this.options.isProcessAlive,
+					observeProcess: this.options.observeProcess,
 					notify: (text) => this.notify(session, "process-matrix-notice", text),
 					recordClockJump: (record) => void sessionManager.appendCustomEntry(CLOCK_JUMP_CUSTOM_TYPE, record),
 					onDiagnostic: this.options.onDiagnostic,

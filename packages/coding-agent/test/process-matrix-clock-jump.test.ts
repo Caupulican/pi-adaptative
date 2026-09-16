@@ -53,7 +53,7 @@ function makeHarness(): Harness {
 				},
 			},
 			settings: { enabled: true, heartbeatMs: HEARTBEAT_MS, adoptionGraceMs: 60_000, watcherPollMs: 1_000 },
-			isProcessAlive: () => true,
+			observeProcess: () => "alive",
 			now: () => clock.ms,
 			notify: () => {},
 			onDiagnostic: () => {},

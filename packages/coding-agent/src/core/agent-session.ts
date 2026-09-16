@@ -887,10 +887,7 @@ export class AgentSession {
 			appendSessionMessageBatch: (batch) => this._foregroundLifecycle.appendMessageBatch(batch),
 			getModelRegistry: () => this._modelRegistry,
 			isModelExhausted: (model) => this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`),
-			getFailoverStatus: () => ({
-				...this._foregroundRecovery.getFailoverStatus(),
-				failureStats: this._failureCorpus.stats(),
-			}),
+			getFailoverStatus: () => this._foregroundRecovery.getFailoverStatus(),
 			getAgentDir: () => this._agentDir,
 			getReflectionSignal: () => this._reflectionAbort.signal,
 			getBaseSystemPrompt: () => this._baseSystemPrompt,
@@ -2437,6 +2434,14 @@ export class AgentSession {
 		return this.sessionManager.getSessionId();
 	}
 
+	getForegroundActivity(): { sessionId: string; epoch?: number; busy: boolean } {
+		return this._foregroundRecovery.getActivitySnapshot(this.sessionManager.getSessionId());
+	}
+
+	subscribeForegroundActivity(listener: () => void): () => void {
+		return this._foregroundRecovery.subscribeActivity(listener);
+	}
+
 	/** Current session display name, if set */
 	get sessionName(): string | undefined {
 		return this.sessionManager.getSessionName();
@@ -2952,12 +2957,7 @@ export class AgentSession {
 		// run starts (see ForegroundRecoveryController.runAgentExecution). That read is the closing gate.
 		let releaseSubmissionSignal: (() => void) | undefined;
 		if (submissionSignal) {
-			const onAbort = () => {
-				this._foregroundRecovery.abortRetry();
-				this.agent.abort("submission superseded");
-			};
-			submissionSignal.addEventListener("abort", onAbort, { once: true });
-			releaseSubmissionSignal = () => submissionSignal.removeEventListener("abort", onAbort);
+			releaseSubmissionSignal = this._foregroundRecovery.bindSubmissionSignal(submissionSignal);
 			if (submissionSignal.aborted) {
 				releaseSubmissionSignal();
 				// Same unwind as the preflight-failure path above: the turn never reached the run, so the

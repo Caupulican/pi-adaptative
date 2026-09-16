@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- `tui.input.newLine` also binds `ctrl+j`, including kitty CSI-u `Ctrl+J`, so a line jump inserts a newline instead of being swallowed.
+
 ## [0.99.25] - 2026-09-16
 
 ### Fixed

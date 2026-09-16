@@ -143,7 +143,7 @@ function makeHarness(): Harness {
 		agentDir,
 		agent: agentIdentity(WORKER_SESSION),
 		settings: { enabled: true, heartbeatMs: HEARTBEAT_MS, adoptionGraceMs: GRACE_MS, watcherPollMs: POLL_MS },
-		isProcessAlive: (pid) => harness.livePids.has(pid),
+		observeProcess: (pid) => (harness.livePids.has(pid) ? "alive" : "dead"),
 		now: () => harness.clock.ms,
 		notify: (text) => {
 			harness.notices.push(text);

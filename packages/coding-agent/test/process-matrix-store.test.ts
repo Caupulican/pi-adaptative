@@ -172,6 +172,18 @@ describe("process-matrix store", () => {
 		expect(await readEntry(agentDir, entry.entryId)).toBeUndefined();
 	});
 
+	it("rejects non-positive process identities from recovery input", async () => {
+		const agentDir = tempAgentDir();
+		for (const pid of [0, -1]) {
+			await writeEntry(agentDir, masterEntry({ pid }));
+			expect(await readEntry(agentDir, "master-session-1")).toBeUndefined();
+		}
+		await writeEntry(agentDir, masterEntry({ pid: 1000, tmuxPanePid: 0 }));
+		expect(await readEntry(agentDir, "master-session-1")).toBeUndefined();
+		await writeEntry(agentDir, masterEntry({ pid: 1000 }));
+		expect(await readEntry(agentDir, "master-session-1")).toMatchObject({ pid: 1000 });
+	});
+
 	it("removeEntry deletes the file and is a no-op when already absent", async () => {
 		const agentDir = tempAgentDir();
 		const entry = masterEntry();

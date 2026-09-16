@@ -1,16 +1,13 @@
-export type ProcessLivenessProbe = (pid: number, signal: 0) => unknown;
+import { isPositiveSafePid, type ProcessKillProbe, probeProcessLiveness } from "@caupulican/pi-agent-core/process-tree";
 
-function probeCurrentProcess(pid: number, signal: 0): unknown {
-	return process.kill(pid, signal);
-}
+export type ProcessLivenessProbe = ProcessKillProbe;
 
-export function isProcessAlive(pid: number | undefined, probe: ProcessLivenessProbe = probeCurrentProcess): boolean {
-	if (pid === undefined || !Number.isFinite(pid) || pid <= 0) return false;
-	try {
-		probe(pid, 0);
-		return true;
-	} catch (error) {
-		if (!error || typeof error !== "object" || !("code" in error)) return false;
-		return String(error.code) === "EPERM";
-	}
+/**
+ * Boolean view of {@link probeProcessLiveness} for optional pids.
+ * Missing/invalid pid is not a live process for non-recovery callers. Unclassified probe errors
+ * never authorize takeover; recovery owners must read the three-valued observation instead.
+ */
+export function isProcessAlive(pid: number | undefined, probe?: ProcessLivenessProbe): boolean {
+	if (!isPositiveSafePid(pid)) return false;
+	return probeProcessLiveness(pid, probe) !== "dead";
 }

@@ -525,6 +525,14 @@ describe("Editor component", () => {
 			assert.strictEqual(text, "äöü\nÄÖÜ");
 		});
 
+		it("inserts a newline on kitty CSI-u Ctrl+J", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.handleInput("hello");
+			editor.handleInput("\x1b[106;5u");
+			editor.handleInput("world");
+			assert.strictEqual(editor.getText(), "hello\nworld");
+		});
+
 		it("replaces the entire document with unicode text via setText (paste simulation)", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 

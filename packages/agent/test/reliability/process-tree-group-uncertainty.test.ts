@@ -32,6 +32,10 @@ import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { killTree } from "../../src/reliability/process-tree.ts";
 
+vi.mock("../../src/reliability/process-termination-protection.ts", () => ({
+	readProcessTerminationProtection: () => new Set<number>(),
+}));
+
 // The only native-command boundary `process-tree.ts` has. It must never be crossed by this file.
 vi.mock("node:child_process", async (importOriginal) => {
 	const actual = await importOriginal<typeof NodeChildProcess>();

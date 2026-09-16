@@ -20,7 +20,7 @@
  * platform is guaranteed to emit any particular code - these describe what the boundary reports.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isProcessAlive } from "../../src/reliability/process-tree.ts";
+import { isProcessAlive, probeProcessLiveness } from "../../src/reliability/process-tree.ts";
 
 const PROBE_PID = 4242;
 
@@ -72,6 +72,13 @@ describe("isProcessAlive liveness classification", () => {
 		});
 
 		expect(probe()).toBe("dead");
+	});
+
+	it("does not probe non-positive pids", () => {
+		const kill = vi.fn();
+		expect(probeProcessLiveness(0, kill)).toBe("unknown");
+		expect(probeProcessLiveness(-1, kill)).toBe("unknown");
+		expect(kill).not.toHaveBeenCalled();
 	});
 
 	it.each([

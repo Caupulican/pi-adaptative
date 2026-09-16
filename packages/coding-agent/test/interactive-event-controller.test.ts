@@ -7,6 +7,34 @@ import {
 } from "../src/modes/interactive/interactive-event-controller.ts";
 
 describe("interactive delegate worker events", () => {
+	it("does not announce a foreground completion when an invocation hands off to background", async () => {
+		const remove = vi.fn();
+		const finish = vi.fn();
+		const host = {
+			isInitialized: true,
+			footer: { invalidate() {} },
+			ui: { requestRender() {} },
+			activityLane: { remove, finish },
+			activeToolCalls: { getActive: () => undefined },
+			toolActivityKind: () => "tool",
+			toolActivityLabel: () => "Bash",
+			toolActivityTerminalStatus: () => "success",
+		} as unknown as InteractiveEventHost;
+		await handleInteractiveEvent(host, {
+			type: "tool_execution_end",
+			toolName: "bash",
+			toolCallId: "call",
+			isError: false,
+			result: {
+				content: [],
+				details: {
+					piToolInvocation: { version: 1, requestId: "request", execution: "running", postprocessingFailures: [] },
+				},
+			},
+		});
+		expect(finish).not.toHaveBeenCalled();
+		expect(remove).toHaveBeenCalledWith("tool:call");
+	});
 	it("passes invocation identity and evidence, not only a display error flag, to reporting", async () => {
 		const record = vi.fn();
 		const details = {

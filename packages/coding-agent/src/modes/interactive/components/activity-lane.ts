@@ -8,6 +8,10 @@ import type { Theme, ThemeColor } from "../theme/theme.ts";
 export type ActivityLaneKind = "runtime" | "tool" | "task" | "worker" | "goal" | "queue" | "notice";
 export type ActivityLaneStatus = "active" | "waiting" | "success" | "warning" | "failure" | "neutral";
 
+function isActivityRunning(status: ActivityLaneStatus): boolean {
+	return status === "active";
+}
+
 export interface ActivityLaneItem {
 	id: string;
 	kind: ActivityLaneKind;
@@ -15,6 +19,9 @@ export interface ActivityLaneItem {
 	status: ActivityLaneStatus;
 	/** Short aggregation key (e.g. "bash", "python", "agent") for the concurrency slot. */
 	tag?: string;
+	toolCallId?: string;
+	phase?: "input";
+	scope?: "foreground" | "background" | "worker";
 	/** Epoch ms when the work began; the live row shows the elapsed time next to its subject. */
 	startedAt?: number;
 	/**
@@ -22,12 +29,26 @@ export interface ActivityLaneItem {
 	 * Belongs to the turn that owns `startedAt`: a fresh clock always begins unmarked.
 	 */
 	firstTokenAt?: number;
+	/** Frozen display-clock end, independent of terminal retention. */
+	completedAt?: number;
+	/** Producer wall-clock origin, converted once into `startedAt`. */
+	originAt?: string;
+	/** Validated milliseconds to subtract from `originAt` (background handoff). */
+	elapsedBeforeMs?: number;
+	/** `observed` means first-seen, not a trustworthy producer start. */
+	clockKind?: "known" | "observed";
+	timingRole?: "oldest";
 }
 
 export interface ActivityLaneCanonicalSnapshot {
 	goalState?: GoalState;
 	taskState?: TaskStepsState;
 	laneRecords: readonly LaneRecord[];
+}
+
+/** Input and external admission waits have independent owners, even when the parent is hidden or settled. */
+function isParentRuntimeItem(item: ActivityLaneItem): boolean {
+	return item.kind === "runtime" && item.phase !== "input" && item.scope !== "background" && item.scope !== "worker";
 }
 
 export interface ActivityLaneProjection {
@@ -55,6 +76,7 @@ export function formatElapsed(ms: number): string {
 }
 const MAX_ACTIVITY_LABEL_LENGTH = 240;
 const MAX_SEEN_TERMINALS = 512;
+const MAX_TRANSIENT_ITEMS = 32;
 
 export const BACKGROUND_TOOL_ACTIVITY_ID_PREFIX = "background-tool:";
 
@@ -183,6 +205,7 @@ function projectLaneRecords(records: readonly LaneRecord[]): ActivityLaneProject
 						: record.status === "queued"
 							? "agent queued"
 							: "agent running",
+				...(record.startedAt ? { originAt: record.startedAt } : {}),
 			}),
 		);
 	// Terminal workers are projected only after the foreground delivery owner resolves the
@@ -232,8 +255,11 @@ interface AggregateGroup {
 
 interface LaneSlots {
 	turn: ActivityLaneItem | undefined;
+	overlay: ActivityLaneItem | undefined;
+	externalWait: ActivityLaneItem | undefined;
 	/** The one live tool or worker when exactly one runs: it becomes the subject of the turn slot. */
 	soloTool: ActivityLaneItem | undefined;
+	running: ActivityLaneItem[];
 	plan: ActivityLaneItem | undefined;
 	groups: AggregateGroup[];
 	queue: ActivityLaneItem | undefined;
@@ -250,12 +276,15 @@ function normalizeActivityTag(tag: string | undefined, fallback: "tool" | "worke
 
 function classifySlots(items: readonly ActivityLaneItem[]): LaneSlots {
 	let turn: ActivityLaneItem | undefined;
+	let overlay: ActivityLaneItem | undefined;
+	let externalWait: ActivityLaneItem | undefined;
 	let plan: ActivityLaneItem | undefined;
 	let goal: ActivityLaneItem | undefined;
 	let queue: ActivityLaneItem | undefined;
 	let event: ActivityLaneItem | undefined;
 	const groups = new Map<string, AggregateGroup>();
 	const running: ActivityLaneItem[] = [];
+	const inputCalls = new Set(items.filter((item) => item.phase === "input").map((item) => `tool:${item.toolCallId}`));
 
 	for (const item of items) {
 		if (isTerminalStatus(item.status)) {
@@ -264,8 +293,10 @@ function classifySlots(items: readonly ActivityLaneItem[]): LaneSlots {
 		}
 		switch (item.kind) {
 			case "runtime":
-				// Waiting states (retry countdowns) outrank plain working states.
-				if (!turn || (item.status === "waiting" && turn.status !== "waiting")) turn = item;
+				if (isTurnActivityItem(item)) turn = item;
+				else if (item.scope === "background" || item.scope === "worker") externalWait ??= item;
+				else if (item.phase === "input" || !overlay || (item.status === "waiting" && overlay.phase !== "input"))
+					overlay = item;
 				break;
 			case "task":
 				plan ??= item;
@@ -278,11 +309,12 @@ function classifySlots(items: readonly ActivityLaneItem[]): LaneSlots {
 				break;
 			case "tool":
 			case "worker": {
-				running.push(item);
+				const waiting = item.status === "waiting" || inputCalls.has(item.id);
+				running.push(waiting ? { ...item, status: "waiting" } : item);
 				const tag = normalizeActivityTag(item.tag, item.kind);
 				const group = groups.get(tag) ?? { tag, count: 0, waiting: false };
 				group.count += 1;
-				if (item.status === "waiting") group.waiting = true;
+				if (waiting) group.waiting = true;
 				groups.set(tag, group);
 				break;
 			}
@@ -293,12 +325,101 @@ function classifySlots(items: readonly ActivityLaneItem[]): LaneSlots {
 
 	return {
 		turn,
+		overlay,
+		externalWait,
 		soloTool: running.length === 1 ? running[0] : undefined,
+		running,
 		plan: plan ?? goal,
 		groups: [...groups.values()],
 		queue,
 		event,
 	};
+}
+
+function oldestTimedItem(items: readonly ActivityLaneItem[]): ActivityLaneItem | undefined {
+	const active = items.filter((item) => isActivityRunning(item.status));
+	const candidates = active.length ? active : items;
+	const known = candidates.filter((item) => item.startedAt !== undefined && item.clockKind !== "observed");
+	const timed = known.length ? known : candidates.filter((item) => item.startedAt !== undefined);
+	if (timed.length === 0) {
+		const first = items[0];
+		return first ? { ...first, clockKind: first.clockKind ?? "observed" } : undefined;
+	}
+	const oldest = timed.reduce((current, item) =>
+		(item.startedAt ?? Number.POSITIVE_INFINITY) < (current.startedAt ?? Number.POSITIVE_INFINITY) ? item : current,
+	);
+	return {
+		...oldest,
+		timingRole:
+			oldest.clockKind === "observed" || (oldest.kind === "tool" && !isBackgroundToolActivityItem(oldest))
+				? undefined
+				: "oldest",
+	};
+}
+
+function resolveDisplayClock(
+	item: Omit<ActivityLaneItem, "status">,
+	now: number,
+	previous: ActivityLaneItem | undefined,
+	observedIfMissing: boolean,
+	wallNow = now,
+): Pick<ActivityLaneItem, "startedAt" | "clockKind"> {
+	if (
+		previous?.startedAt !== undefined &&
+		item.originAt === previous.originAt &&
+		item.elapsedBeforeMs === previous.elapsedBeforeMs &&
+		item.startedAt === undefined
+	) {
+		return { startedAt: previous.startedAt, clockKind: previous.clockKind };
+	}
+	const extra = item.elapsedBeforeMs;
+	if (extra !== undefined && (!Number.isFinite(extra) || extra < 0)) {
+		return { startedAt: previous?.startedAt ?? now, clockKind: "observed" };
+	}
+	if (item.originAt) {
+		const parsed = Date.parse(item.originAt);
+		if (!Number.isFinite(parsed)) return { startedAt: previous?.startedAt ?? now, clockKind: "observed" };
+		if (parsed > wallNow) return { startedAt: previous?.startedAt ?? now, clockKind: "observed" };
+		const origin = now - (wallNow - parsed + (extra ?? 0));
+		const startedAt = previous?.startedAt !== undefined ? Math.min(previous.startedAt, origin) : origin;
+		return { startedAt, clockKind: "known" };
+	}
+	if (item.startedAt !== undefined) {
+		if (!Number.isFinite(item.startedAt) || item.startedAt < 0 || item.startedAt > now) {
+			return { startedAt: previous?.startedAt ?? now, clockKind: "observed" };
+		}
+		const startedAt =
+			previous?.startedAt !== undefined ? Math.min(previous.startedAt, item.startedAt) : item.startedAt;
+		return { startedAt, clockKind: item.clockKind ?? previous?.clockKind ?? "known" };
+	}
+	if (previous?.startedAt !== undefined) {
+		return { startedAt: previous.startedAt, clockKind: previous.clockKind };
+	}
+	if (item.kind === "runtime" || item.kind === "tool" || item.kind === "worker") {
+		return { startedAt: now, clockKind: observedIfMissing ? "observed" : "known" };
+	}
+	return {};
+}
+
+function sameActivityItem(a: ActivityLaneItem | undefined, b: ActivityLaneItem): boolean {
+	return (
+		a !== undefined &&
+		a.id === b.id &&
+		a.kind === b.kind &&
+		a.label === b.label &&
+		a.status === b.status &&
+		a.tag === b.tag &&
+		a.toolCallId === b.toolCallId &&
+		a.phase === b.phase &&
+		a.scope === b.scope &&
+		a.startedAt === b.startedAt &&
+		a.firstTokenAt === b.firstTokenAt &&
+		a.completedAt === b.completedAt &&
+		a.originAt === b.originAt &&
+		a.elapsedBeforeMs === b.elapsedBeforeMs &&
+		a.clockKind === b.clockKind &&
+		a.timingRole === b.timingRole
+	);
 }
 
 function renderConcurrency(theme: Theme, groups: readonly AggregateGroup[]): string {
@@ -322,7 +443,9 @@ export function renderActivityLaneLine(
 	const safeWidth = Math.max(1, width);
 	if (items.length === 0 || safeWidth < 3) return [];
 	const slots = classifySlots(items);
-	if (!slots.turn && !slots.plan && slots.groups.length === 0 && !slots.queue && !slots.event) return [];
+	if (!slots.turn && !slots.overlay) slots.overlay = slots.externalWait;
+	if (!slots.turn && !slots.overlay && !slots.plan && slots.groups.length === 0 && !slots.queue && !slots.event)
+		return [];
 
 	const indent = " ";
 	const gap = " ".repeat(SLOT_GAP_WIDTH);
@@ -332,40 +455,67 @@ export function renderActivityLaneLine(
 	// renders exactly what it always did.
 	const elapsed = (item: ActivityLaneItem | undefined): string => {
 		if (item?.startedAt === undefined || now === undefined) return "";
-		const total = formatElapsed(now - item.startedAt);
-		if (!isTurnActivityItem(item)) return ` (${total})`;
+		const total = formatElapsed((item.completedAt ?? now) - item.startedAt);
+		const kind = item.clockKind === "observed" ? "observed " : item.timingRole === "oldest" ? "oldest " : "";
+		if (!isTurnActivityItem(item) || slots.overlay) return ` (${kind}${total})`;
 		const waitedMs = (item.firstTokenAt ?? now) - item.startedAt;
-		if (waitedMs < FIRST_TOKEN_NOTICE_MS) return ` (${total})`;
+		if (waitedMs < FIRST_TOKEN_NOTICE_MS) return ` (${kind}${total})`;
 		return item.firstTokenAt === undefined
-			? ` (${total}, no token yet)`
-			: ` (${total}, first ${formatElapsed(waitedMs)})`;
+			? ` (${kind}${total}, no token yet)`
+			: ` (${kind}${total}, first ${formatElapsed(waitedMs)})`;
 	};
 
 	// Turn slot: alive-anchor glyph plus the subject of the work and how long it has run. The one
-	// running tool is the subject when there is exactly one; otherwise the live runtime label is,
-	// and a generic Working... yields to a more specific plan, tool, queue, or event.
+	// running tool is the subject when there is exactly one; otherwise the live runtime label is.
+	// A generic Working... yields its words to concurrent work, but the turn clock stays.
 	let turnPart = "";
-	if (slots.turn || slots.soloTool) {
-		const status = slots.turn?.status === "waiting" || slots.soloTool?.status === "waiting" ? "waiting" : "active";
+	const backgroundSubject = !slots.turn && slots.running.length > 0 ? oldestTimedItem(slots.running) : undefined;
+	const externalRunning = slots.running.some((item) => isActivityRunning(item.status));
+	const wait = slots.overlay?.status === "waiting" ? slots.overlay : undefined;
+	const subject = slots.turn ?? backgroundSubject ?? slots.overlay;
+	if (subject) {
+		const status = externalRunning ? "active" : (wait?.status ?? subject.status);
 		const dotColor: ThemeColor = status === "waiting" ? "warning" : "accent";
-		// The timing suffix is the fact the slot exists for; a long subject yields width to it rather
-		// than swallowing it at the right edge.
 		const withTiming = (label: string, item: ActivityLaneItem): string => {
-			const suffix = elapsed(item);
-			const labelWidth = Math.max(TURN_TEXT_MIN_LABEL, TURN_TEXT_MAX - visibleWidth(suffix));
+			let suffix = elapsed(item);
+			const available = Math.max(0, safeWidth - 3);
+			if (
+				visibleWidth(suffix) + TURN_TEXT_MIN_LABEL > available &&
+				item.startedAt !== undefined &&
+				now !== undefined
+			) {
+				const kind = item.clockKind === "observed" ? "observed " : "";
+				suffix = ` (${kind}${formatElapsed((item.completedAt ?? now) - item.startedAt)})`;
+			}
+			if (!label) return suffix.trim();
+			const labelWidth = Math.max(0, Math.min(TURN_TEXT_MAX, available) - visibleWidth(suffix));
+			if (safeWidth < 24 && visibleWidth(label) > labelWidth) label = status === "waiting" ? "Waiting" : "Working";
 			return `${truncateToWidth(label, labelWidth, "…")}${suffix}`;
 		};
 		let text = "";
-		if (slots.soloTool) {
-			text = withTiming(slots.soloTool.label, slots.soloTool);
-		} else if (slots.turn) {
-			const normalized = slots.turn.label.trim().toLowerCase();
-			const generic = normalized === "working" || normalized === "working." || normalized === "working...";
-			const hasSpecific =
-				Boolean(slots.plan) || slots.groups.length > 0 || Boolean(slots.queue) || Boolean(slots.event);
-			text = generic && hasSpecific ? "" : withTiming(slots.turn.label, slots.turn);
+		if (slots.turn) {
+			text = withTiming(
+				wait ? (externalRunning ? "Working" : wait.label) : (slots.overlay?.label ?? slots.turn.label),
+				slots.turn,
+			);
+		} else if (slots.overlay && !externalRunning) {
+			text = withTiming(slots.overlay.label, slots.overlay);
+		} else if (backgroundSubject) {
+			const label =
+				backgroundSubject.status === "waiting"
+					? "Agents queued"
+					: slots.running.length === 1 &&
+							backgroundSubject.kind === "tool" &&
+							!isBackgroundToolActivityItem(backgroundSubject)
+						? backgroundSubject.label
+						: "Background work";
+			text = withTiming(label, backgroundSubject);
+		} else if (slots.overlay) {
+			text = withTiming(slots.overlay.label, slots.overlay);
 		}
 		turnPart = text ? `${theme.fg(dotColor, "●")} ${theme.fg("muted", text)}` : `${theme.fg(dotColor, "●")}`;
+	} else if (slots.plan) {
+		turnPart = theme.fg("muted", "Paused");
 	}
 
 	// Plan slot: task/goal only. Do not copy the turn label into the plan slot.
@@ -382,14 +532,29 @@ export function renderActivityLaneLine(
 	// Right-aligned slots at natural size. Events and concurrency drop before the plan
 	// shrinks below its preferred width; the user-owned queue state remains visible.
 	// The solo tool already names itself in the turn slot; a "1 bash" count would repeat it.
-	let concurrencyPart = slots.soloTool ? "" : renderConcurrency(theme, slots.groups);
-	const queuePart = slots.queue ? theme.fg("warning", truncateToWidth(slots.queue.label, QUEUE_TEXT_MAX, "…")) : "";
-	let eventPart = slots.event
-		? `${theme.fg(STATUS_COLORS[slots.event.status], "●")} ${theme.fg(
-				"muted",
-				truncateToWidth(slots.event.label, EVENT_TEXT_MAX, "…"),
-			)}`
-		: "";
+	let concurrencyPart =
+		!slots.turn && slots.soloTool?.kind === "tool" && !isBackgroundToolActivityItem(slots.soloTool)
+			? ""
+			: renderConcurrency(theme, slots.groups);
+	const secondary =
+		slots.queue?.label ??
+		(externalRunning && wait
+			? `${isParentRuntimeItem(wait) ? "Parent " : ""}${wait.label}`
+			: slots.externalWait !== slots.overlay
+				? slots.externalWait?.label
+				: undefined);
+	const queuePart = secondary ? theme.fg("warning", truncateToWidth(secondary, QUEUE_TEXT_MAX, "…")) : "";
+	let eventPart =
+		slots.event &&
+		!(
+			slots.event.kind === "runtime" &&
+			(slots.running.length > 0 || slots.turn || slots.overlay || slots.externalWait)
+		)
+			? `${theme.fg(STATUS_COLORS[slots.event.status], "●")} ${theme.fg(
+					"muted",
+					truncateToWidth(slots.event.label + elapsed(slots.event), EVENT_TEXT_MAX, "…"),
+				)}`
+			: "";
 
 	const leftBase = visibleWidth(indent) + (turnPart ? visibleWidth(turnPart) : 0);
 	const planGap = turnPart && planText ? SLOT_GAP_WIDTH : 0;
@@ -400,8 +565,9 @@ export function renderActivityLaneLine(
 		return safeWidth - leftBase - planGap - right;
 	};
 
-	if (planText && planBudget() < PLAN_TEXT_MIN && eventPart) eventPart = "";
-	if (planText && planBudget() < PLAN_TEXT_MIN && concurrencyPart) concurrencyPart = "";
+	const preferredPlanWidth = Math.max(PLAN_TEXT_MIN, Math.min(visibleWidth(planText), TURN_TEXT_MAX));
+	if (planText && planBudget() < preferredPlanWidth && eventPart) eventPart = "";
+	if (planText && planBudget() < preferredPlanWidth && concurrencyPart) concurrencyPart = "";
 
 	const planAvailable = Math.max(0, planBudget());
 	const planPart = planText ? theme.fg(planColor, truncateToWidth(planText, planAvailable, "…")) : "";
@@ -428,6 +594,10 @@ export class ActivityLaneComponent implements Component {
 	private readonly seenTerminalKeys = new Set<string>();
 	private transientSequence = 0;
 	private readonly now: () => number;
+	private readonly wallNow: () => number;
+	private foregroundEpoch?: number;
+	private foregroundOutcome?: { status: "success" | "failure" | "neutral"; label: string };
+	private parentVisible = true;
 	/** Runs only while timed work is live, so the elapsed figure advances; never keeps the process alive. */
 	private ticker?: ReturnType<typeof setInterval>;
 
@@ -435,20 +605,22 @@ export class ActivityLaneComponent implements Component {
 		theme: Theme,
 		requestRender: () => void,
 		terminalHoldMs = DEFAULT_TERMINAL_HOLD_MS,
-		now: () => number = Date.now,
+		wallNow: () => number = Date.now,
+		monotonicNow: () => number = wallNow === Date.now ? () => performance.now() : wallNow,
 	) {
 		this.theme = theme;
 		this.requestRender = requestRender;
 		this.terminalHoldMs = terminalHoldMs;
-		this.now = now;
-	}
-
-	private timedKind(kind: ActivityLaneKind): boolean {
-		return kind === "runtime" || kind === "tool" || kind === "worker";
+		this.wallNow = wallNow;
+		const wallAnchor = wallNow();
+		const monotonicAnchor = monotonicNow();
+		this.now = () => wallAnchor + Math.max(0, monotonicNow() - monotonicAnchor);
 	}
 
 	private syncTicker(): void {
-		const timed = [...this.live.values()].some((item) => item.startedAt !== undefined);
+		const timed = [...this.live.values(), ...this.canonical.values()]
+			.filter((item) => this.parentVisible || !isParentRuntimeItem(item))
+			.some((item) => item.startedAt !== undefined && (isActivityRunning(item.status) || item.status === "waiting"));
 		if (timed && !this.ticker) {
 			this.ticker = setInterval(() => this.requestRender(), ELAPSED_TICK_MS);
 			this.ticker.unref?.();
@@ -458,16 +630,24 @@ export class ActivityLaneComponent implements Component {
 		}
 	}
 
-	private setLive(item: Omit<ActivityLaneItem, "status">, status: "active" | "waiting"): void {
-		// A caller that supplies neither clock is continuing the live item it already started (the
-		// working indicator toggling, a label change); anything else begins a new turn. The first-token
-		// mark rides with the clock it measures, so a new turn always starts unmarked.
-		const carried = item.startedAt === undefined ? this.live.get(item.id) : undefined;
-		const startedAt = item.startedAt ?? carried?.startedAt ?? (this.timedKind(item.kind) ? this.now() : undefined);
-		const firstTokenAt = item.firstTokenAt ?? carried?.firstTokenAt;
-		this.live.set(item.id, { ...item, label: boundedLabel(item.label), status, startedAt, firstTokenAt });
-		this.syncTicker();
-		this.requestRender();
+	private setLive(item: Omit<ActivityLaneItem, "status">, status: "active" | "waiting", publish = true): boolean {
+		const previous = this.live.get(item.id);
+		const clock = resolveDisplayClock(item, this.now(), previous, isBackgroundToolActivityItem(item), this.wallNow());
+		const firstTokenAt = item.firstTokenAt ?? previous?.firstTokenAt;
+		const next = {
+			...item,
+			label: boundedLabel(item.label),
+			status,
+			...clock,
+			firstTokenAt,
+		};
+		if (sameActivityItem(previous, next)) return false;
+		this.live.set(item.id, next);
+		if (publish) {
+			this.syncTicker();
+			this.requestRender();
+		}
+		return true;
 	}
 
 	private rememberTerminal(key: string): void {
@@ -480,6 +660,13 @@ export class ActivityLaneComponent implements Component {
 	}
 
 	private addTransient(item: ActivityLaneItem): void {
+		while (this.transient.size >= MAX_TRANSIENT_ITEMS) {
+			const oldest = this.transient.keys().next().value;
+			if (oldest === undefined) break;
+			clearTimeout(this.transientTimers.get(oldest));
+			this.transient.delete(oldest);
+			this.transientTimers.delete(oldest);
+		}
 		const id = `${item.id}:${++this.transientSequence}`;
 		this.transient.set(id, { ...item, id });
 		const timer = setTimeout(() => {
@@ -491,22 +678,49 @@ export class ActivityLaneComponent implements Component {
 	}
 
 	private applyProjection(projection: ActivityLaneProjection, showNewTerminals: boolean): void {
-		this.canonical.clear();
-		for (const item of projection.active) this.canonical.set(item.id, item);
+		const keep = new Set<string>();
+		let changed = false;
+		for (const item of projection.active) {
+			keep.add(item.id);
+			const previous = this.canonical.get(item.id);
+			const phaseChanged =
+				previous !== undefined && (previous.status !== item.status || previous.originAt !== item.originAt);
+			const clock = resolveDisplayClock(item, this.now(), phaseChanged ? undefined : previous, true, this.wallNow());
+			const next = { ...item, ...clock };
+			if (!sameActivityItem(previous, next)) {
+				this.canonical.set(item.id, next);
+				changed = true;
+			}
+		}
+		for (const id of this.canonical.keys()) {
+			if (keep.has(id)) continue;
+			this.canonical.delete(id);
+			changed = true;
+		}
 		for (const item of projection.terminal.slice(-MAX_SEEN_TERMINALS)) {
-			if (showNewTerminals && !this.seenTerminalKeys.has(item.id)) this.addTransient(item);
+			if (showNewTerminals && !this.seenTerminalKeys.has(item.id)) {
+				this.addTransient(item);
+				changed = true;
+			}
 			this.rememberTerminal(item.id);
 		}
-		this.requestRender();
+		if (changed) {
+			this.syncTicker();
+			this.requestRender();
+		}
 	}
 
 	replaceCanonical(sessionKey: string, snapshot: ActivityLaneCanonicalSnapshot): void {
 		if (this.sessionKey !== sessionKey) {
 			this.clearTransient();
 			this.live.clear();
+			this.canonical.clear();
+			this.foregroundEpoch = undefined;
+			this.foregroundOutcome = undefined;
 			this.syncTicker();
 			this.seenTerminalKeys.clear();
 			this.sessionKey = sessionKey;
+			this.requestRender();
 		}
 		this.applyProjection(projectActivityLane(snapshot), false);
 	}
@@ -541,7 +755,7 @@ export class ActivityLaneComponent implements Component {
 
 	update(id: string, label: string): void {
 		const current = this.live.get(id);
-		if (!current) return;
+		if (!current || current.label === boundedLabel(label)) return;
 		this.live.set(id, { ...current, label: boundedLabel(label) });
 		this.requestRender();
 	}
@@ -553,9 +767,13 @@ export class ActivityLaneComponent implements Component {
 	}
 
 	removeByPrefix(prefix: string): void {
+		this.removeMatching((item) => item.id.startsWith(prefix));
+	}
+
+	private removeMatching(matches: (item: ActivityLaneItem) => boolean): void {
 		let removed = false;
-		for (const id of this.live.keys()) {
-			if (!id.startsWith(prefix)) continue;
+		for (const [id, item] of this.live) {
+			if (!matches(item)) continue;
 			this.live.delete(id);
 			removed = true;
 		}
@@ -564,11 +782,35 @@ export class ActivityLaneComponent implements Component {
 		this.requestRender();
 	}
 
+	reconcileByPrefix(prefix: string, items: readonly Omit<ActivityLaneItem, "status">[]): void {
+		const keep = new Set(items.map((item) => item.id));
+		let changed = false;
+		for (const id of [...this.live.keys()]) {
+			if (!id.startsWith(prefix) || keep.has(id)) continue;
+			this.live.delete(id);
+			changed = true;
+		}
+		for (const item of items) {
+			if (!item.id.startsWith(prefix)) continue;
+			changed = this.setLive(item, "active", false) || changed;
+		}
+		if (changed) {
+			this.syncTicker();
+			this.requestRender();
+		}
+	}
+
 	finish(id: string, status: "success" | "failure" | "neutral", fallback?: Omit<ActivityLaneItem, "status">): void {
 		const current = this.live.get(id) ?? fallback;
 		this.live.delete(id);
 		this.syncTicker();
-		if (current) this.addTransient({ ...current, label: boundedLabel(current.label), status });
+		if (current)
+			this.addTransient({
+				...current,
+				label: boundedLabel(fallback?.label ?? current.label),
+				status,
+				completedAt: this.now(),
+			});
 		this.requestRender();
 	}
 
@@ -588,8 +830,57 @@ export class ActivityLaneComponent implements Component {
 		return [...this.transient.values(), ...this.live.values(), ...this.canonical.values()];
 	}
 
+	/** Submission identity and settlement are owned by the existing foreground lease. */
+	syncForegroundActivity(activity: { sessionId: string; epoch?: number; busy: boolean }, label = "Preparing"): void {
+		if (this.sessionKey !== activity.sessionId) {
+			this.replaceCanonical(activity.sessionId, { laneRecords: [] });
+		}
+		if (activity.busy && activity.epoch !== undefined) {
+			if (this.foregroundEpoch === activity.epoch) return;
+			this.removeMatching(isParentRuntimeItem);
+			this.foregroundEpoch = activity.epoch;
+			this.foregroundOutcome = undefined;
+			this.start({ id: RUNTIME_TURN_ACTIVITY_ID, kind: "runtime", label });
+		} else if (!activity.busy && this.foregroundEpoch !== undefined) {
+			const outcome = this.foregroundOutcome ?? { status: "neutral" as const, label: "Stopped" };
+			this.finish(RUNTIME_TURN_ACTIVITY_ID, outcome.status, {
+				id: RUNTIME_TURN_ACTIVITY_ID,
+				kind: "runtime",
+				label: outcome.label,
+			});
+			this.removeMatching(isParentRuntimeItem);
+			this.foregroundEpoch = undefined;
+			this.foregroundOutcome = undefined;
+		}
+	}
+
+	setForegroundOutcome(status: "success" | "failure" | "neutral", label: string): void {
+		if (this.foregroundEpoch !== undefined) this.foregroundOutcome = { status, label };
+	}
+
+	syncHumanInputActivity(activity: { requestId: string; toolCallId?: string; waiting: boolean }): void {
+		const id = `runtime:input:${activity.requestId}`;
+		if (activity.waiting) {
+			this.wait({ id, kind: "runtime", phase: "input", toolCallId: activity.toolCallId, label: "Awaiting you" });
+		} else {
+			this.remove(id);
+		}
+	}
+
+	setParentVisible(visible: boolean): void {
+		if (this.parentVisible === visible) return;
+		this.parentVisible = visible;
+		this.syncTicker();
+		this.requestRender();
+	}
+
 	render(width: number): string[] {
-		return renderActivityLaneLine(this.theme, this.getItems(), width, this.now());
+		return renderActivityLaneLine(
+			this.theme,
+			this.getItems().filter((item) => this.parentVisible || !isParentRuntimeItem(item)),
+			width,
+			this.now(),
+		);
 	}
 
 	invalidate(): void {}

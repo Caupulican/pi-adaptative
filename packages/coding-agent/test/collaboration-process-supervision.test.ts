@@ -21,7 +21,7 @@ it.each([true, false])(
 		const requestExit = vi.fn(async () => {});
 		const supervision = new SessionSupervisionRuntime({
 			agentDir: f.root,
-			isProcessAlive: () => true,
+			observeProcess: () => "alive",
 			resumeWorker: async () => ({ started: false, reason: "No process replacement in this test" }),
 			onDiagnostic: () => {},
 			requestExit,

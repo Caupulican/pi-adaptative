@@ -20,8 +20,8 @@ export const verificationCwdFixture = {
 export const workbenchCounterFixture = {
 	firstCycle: [true, false],
 	secondCycle: [false],
-	firstSummary: "Cycle: 2 calls",
-	secondSummary: "Cycle: 1 calls",
+	firstSummary: "Unclassified: 2",
+	secondSummary: "Unclassified: 1",
 };
 
 export function workbenchToolObservation(toolCallId: string, isError = false): ToolInvocationObservation {

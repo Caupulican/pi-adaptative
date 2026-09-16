@@ -138,7 +138,7 @@ describe("Workbench review regressions", () => {
 				.join("\n"),
 		);
 		expect(text).toMatch(/first result[\s\S]*second result[\s\S]*third result/);
-		expect(text).toContain("Cycle: 3 calls");
+		expect(text).toContain("Completed: 3");
 		controller.record(
 			new Text(Array.from({ length: 30 }, (_, i) => `tail ${i}`).join("\n"), 0, 0),
 			workbenchToolObservation("tail"),

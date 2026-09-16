@@ -57,7 +57,7 @@ export function createWorkbenchToolPreview(name: string, args: unknown, result: 
 	return {
 		render(width) {
 			component ??= new Text(
-				theme.fg(failed ? "error" : "accent", `${failed ? "Failed · " : ""}${label}`) +
+				theme.fg(failed ? "error" : "toolTitle", `${failed ? "Failed · " : ""}${label}`) +
 					counts +
 					(bounded.trim() ? `\n${diff ? renderDiff(bounded) : theme.fg("toolOutput", bounded.trimEnd())}` : "") +
 					(truncated ? theme.fg("dim", "\n… full result in transcript") : ""),

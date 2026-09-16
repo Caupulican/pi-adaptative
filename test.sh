@@ -120,6 +120,17 @@ unset NODE_OPTIONS
 unset npm_config_node_options
 unset NPM_CONFIG_NODE_OPTIONS
 
+# Test runners and their subprocesses do not own the hosting terminal, parent session, or worker
+# grants. Home isolation alone does not disconnect an inherited absolute Herdr socket/state path.
+while IFS= read -r test_launch_key; do
+    case "$test_launch_key" in
+        HERDR_*|PI_COLLABORATION_*|PI_PARENT_*|PI_WORKTREE_*|PI_WORKER_*|PI_SESSION_ROLE|PI_ORCHESTRATION_AGENT_ID|PI_TASK_REF)
+            unset "$test_launch_key"
+            ;;
+    esac
+done < <(compgen -e)
+unset test_launch_key
+
 if [ "$#" -gt 0 ]; then
     echo "Running targeted test(s) with isolated state: $*"
     tui_node_tests=()

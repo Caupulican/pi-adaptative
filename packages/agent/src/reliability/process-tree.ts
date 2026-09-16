@@ -10,6 +10,7 @@
  */
 import { type ChildProcess, spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { readProcessTerminationProtection } from "./process-termination-protection.ts";
 
 const KILL_ACKNOWLEDGEMENT_MS = 1000;
 
@@ -18,15 +19,26 @@ const KILL_ACKNOWLEDGEMENT_MS = 1000;
  * failure means the probe could not determine anything, which is not the same as death.
  */
 export type ProcessLivenessProbe = "alive" | "dead" | "unknown";
+export type ProcessObservation = ProcessLivenessProbe;
+export type ProcessKillProbe = (pid: number, signal: 0) => unknown;
+
+/** Positive safe integers only. Zero, negatives, and non-integers must never reach `kill(pid, 0)`. */
+export function isPositiveSafePid(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
 
 /**
  * The single raw OS liveness rule for this repository. Consumers that need to distinguish "could not
  * tell" from "confirmed gone" — recovery, ownership takeover, termination claims — must read this
  * rather than re-deriving the classification from `process.kill`.
  */
-export function probeProcessLiveness(pid: number): ProcessLivenessProbe {
+export function probeProcessLiveness(
+	pid: number,
+	kill: ProcessKillProbe = (target) => process.kill(target, 0),
+): ProcessLivenessProbe {
+	if (!isPositiveSafePid(pid)) return "unknown";
 	try {
-		process.kill(pid, 0);
+		kill(pid, 0);
 		return "alive";
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException).code;
@@ -62,6 +74,14 @@ function classifySignalError(error: unknown): "gone" | "failed" {
 	return (error as NodeJS.ErrnoException).code === "ESRCH" ? "gone" : "failed";
 }
 
+/** Never turn a malformed PID into POSIX group/broadcast semantics or kill our own host. */
+function isProtectedTerminationTarget(pid: number): boolean {
+	if (!isPositiveSafePid(pid) || pid > 2_147_483_647 || pid === 1 || pid === process.pid || pid === process.ppid)
+		return true;
+	const protectedIds = readProcessTerminationProtection();
+	return protectedIds === undefined || protectedIds.has(pid);
+}
+
 /**
  * Signal the process group, falling back to the pid itself.
  *
@@ -71,6 +91,7 @@ function classifySignalError(error: unknown): "gone" | "failed" {
  * uncertainty.
  */
 function signalTree(pid: number, signal: NodeJS.Signals): SignalDelivery {
+	if (isProtectedTerminationTarget(pid)) return "failed";
 	let groupOutcome: "gone" | "failed";
 	try {
 		process.kill(-pid, signal);
@@ -121,6 +142,10 @@ export interface KillTreeNowResult {
 export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<KillTreeOutcome> {
 	const pid = child.pid;
 	if (pid === undefined || isChildTerminal(child)) return Promise.resolve("already_dead");
+	if (isProtectedTerminationTarget(pid)) {
+		opts?.onDiagnostic?.(`Refusing to terminate protected, invalid, or unverified process target ${pid}`);
+		return Promise.resolve("failed");
+	}
 
 	return new Promise((resolve) => {
 		let settled = false;
@@ -221,6 +246,9 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 
 /** Immediate tree kill (SIGKILL / synchronous taskkill). */
 export function killTreeNow(pid: number): KillTreeNowResult {
+	if (isProtectedTerminationTarget(pid)) {
+		return { success: false, error: `Refusing to terminate protected, invalid, or unverified process target ${pid}` };
+	}
 	if (process.platform === "win32") {
 		const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 		const result = spawnSync(taskkill, ["/F", "/T", "/PID", String(pid)], {

@@ -167,6 +167,8 @@ export interface BackgroundToolTaskLiveView {
 	toolCallId: string;
 	toolName: string;
 	description: string;
+	startedAt?: string;
+	elapsedBeforeHandoffMs?: number;
 }
 
 /** What a delivered wake-up actually read on the model's behalf. */
@@ -1181,6 +1183,8 @@ export class BackgroundToolTaskController {
 				toolCallId: state.record.toolCallId,
 				toolName: state.record.toolName,
 				description: state.record.summary,
+				startedAt: state.record.startedAt,
+				elapsedBeforeHandoffMs: state.record.elapsedBeforeHandoffMs,
 			}));
 		try {
 			this.deps.onLiveTasksChanged?.(tasks);

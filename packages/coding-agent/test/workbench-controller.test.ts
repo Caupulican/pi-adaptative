@@ -9,7 +9,7 @@ import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { buildWorkbenchSections, WorkbenchController } from "../src/modes/interactive/workbench-controller.ts";
 import { WorkspaceObservation } from "../src/modes/interactive/workbench-workspace.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
-import { workbenchCounterFixture } from "./fixtures/session-failures.ts";
+import { workbenchCounterFixture, workbenchToolObservation } from "./fixtures/session-failures.ts";
 
 function idleWorker(laneId: string, agentStatus: NonNullable<LaneRecord["agentStatus"]>): LaneRecord {
 	return {
@@ -294,7 +294,8 @@ describe("Workbench input boundary", () => {
 		controller.recordBackground(terminal);
 		for (const width of [40, 80, 110]) {
 			const rendered = stripAnsi(view.render(width).join("\n"));
-			expect(rendered).toContain("Cycle: 1 calls");
+			expect(rendered).toContain("Completed: 1");
+			expect(rendered).not.toContain("In flight:");
 			expect(rendered).toContain("retained: 1 error results");
 			expect(rendered).not.toContain("negative outcomes");
 			expect(rendered).not.toContain("running");
@@ -342,6 +343,40 @@ describe("Workbench input boundary", () => {
 		expect(next).not.toContain("file effects");
 		controller.dispose();
 	});
+	it("names in-flight foreground work separately from completed receipts", () => {
+		const view = new WorkbenchComponent({
+			conversation: new Container(),
+			editor: new Container(),
+			dock: [],
+			brand: "pi",
+			viewportRows: () => 30,
+		});
+		let inFlight = 2;
+		const controller = new WorkbenchController(view, {
+			keybindings: new KeybindingsManager(),
+			isInteractive: () => true,
+			requestRender() {},
+			messages: () => [],
+			copy: async () => {},
+			notice() {},
+			activeForegroundCount: () => inFlight,
+		});
+		controller.beginCycle("/repo", 1);
+		controller.record(new Text("done", 0, 0), workbenchToolObservation("one"));
+		let text = stripAnsi(view.render(110).join("\n"));
+		expect(text).toContain("In flight: 2");
+		expect(text).toContain("Completed: 1");
+		inFlight = 0;
+		controller.beginCycle("/repo", 1);
+		text = stripAnsi(view.render(110).join("\n"));
+		expect(text).toContain("Completed: 1");
+		expect(text).not.toContain("In flight:");
+		controller.beginCycle("/repo", 2);
+		text = stripAnsi(view.render(110).join("\n"));
+		expect(text).toContain("Completed: 0");
+		controller.dispose();
+	});
+
 	it("keeps evidence after completion, retains failure receipts, and collapses only on request", () => {
 		const view = new WorkbenchComponent({
 			conversation: new Container(),

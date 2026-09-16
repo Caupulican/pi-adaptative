@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+### Fixed
+
+- Cancelling or replacing workspace observations after Git fails to spawn no longer signals the hosting terminal process group. Abort handling waits for a successful child spawn and rejects invalid PIDs.
+- Test runners isolate inherited Herdr and worker ownership context from the live host session.
+- Process-matrix recovery uses three-valued process-tree observations: only ESRCH is death, unknown defers, and non-positive PIDs are rejected from recovery input.
+- Activity lane keeps the turn elapsed clock while concurrent tools, workers, or finished events are visible, so live work does not collapse to a static dot.
+- Worker and background-tool clocks survive snapshot refresh, parent-turn end, and handoff; unknown origins are labeled observed.
+- Execution pane reports in-flight, completed, and not-started counts instead of a single call total, and receipt cycles follow the foreground submission epoch.
+- Routing end no longer blanks the working indicator before the turn starts.
+- Custom loaders follow foreground submission settlement, while background admission and input waits retain their own lifecycle; unfinished work no longer shows a premature Done state.
+- Execution pane tool labels use conversation `toolTitle`/`toolOutput` colors instead of accent green.
+- Work plan and team idle item text uses the theme text color; headers keep pane accent.
+- Workbench inspector no longer lists Edge grants; host edge policy stays enabled in the background.
+
 ## [0.99.25] - 2026-09-16
 
 ### Fixed

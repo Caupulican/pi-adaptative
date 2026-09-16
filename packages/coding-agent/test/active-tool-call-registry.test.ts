@@ -7,6 +7,18 @@ function panel(id: number): ToolExecutionComponent {
 }
 
 describe("ActiveToolCallRegistry", () => {
+	it("notifies count changes once per identity and ignores replayed finishes", () => {
+		const counts: number[] = [];
+		const registry = new ActiveToolCallRegistry(() => counts.push(registry.size));
+		registry.register("one", panel(1));
+		registry.register("one", panel(2));
+		registry.register("two", panel(3));
+		registry.finish("one");
+		registry.finish("one");
+		registry.clearActive();
+		registry.clearActive();
+		expect(counts).toEqual([1, 2, 1, 0]);
+	});
 	it("tracks concurrent calls independently and forgets only the finished call", () => {
 		const registry = new ActiveToolCallRegistry();
 		const first = panel(1);

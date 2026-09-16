@@ -6,6 +6,7 @@
  */
 
 import { createInterface } from "node:readline";
+import { probeProcessLiveness } from "@caupulican/pi-agent-core/process-tree";
 import { assertValidSessionId, SessionManager } from "@caupulican/pi-agent-core/session";
 import { type ImageContent, modelsAreEqual } from "@caupulican/pi-ai";
 import { applyTerminalSettings, ProcessTerminal, setKeybindings, TUI } from "@caupulican/pi-tui";
@@ -64,7 +65,6 @@ import {
 	type ResumeWorkerLaunchOutcome,
 } from "./core/process-matrix/runtime.ts";
 import { getSelfLaunchTarget } from "./core/process-matrix/self-launch-target.ts";
-import { isReloadSessionProcessAlive } from "./core/reload-blockers.ts";
 import { parseResourceProfileInput } from "./core/resource-profile-blocks.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
@@ -1116,7 +1116,7 @@ export async function main(args: string[], options?: MainOptions) {
 		const supervision = new SessionSupervisionRuntime({
 			agentDir,
 			orchestrationProfileId: parsed.orchestrationProfile?.trim() || undefined,
-			isProcessAlive: isReloadSessionProcessAlive,
+			observeProcess: probeProcessLiveness,
 			resumeWorker: launchResumableWorker,
 			onDiagnostic: (message) => {
 				console.error(chalk.yellow(`Warning: ${message}`));

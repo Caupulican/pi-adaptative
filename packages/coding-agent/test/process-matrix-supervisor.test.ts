@@ -47,12 +47,12 @@ function worker(overrides: Partial<ProcessMatrixEntry> = {}): ProcessMatrixEntry
 	};
 }
 
-function alwaysAlive(): boolean {
-	return true;
+function alwaysAlive(): "alive" {
+	return "alive";
 }
 
-function neverAlive(): boolean {
-	return false;
+function neverAlive(): "dead" {
+	return "dead";
 }
 
 describe("process-matrix supervisor (pure)", () => {
@@ -125,32 +125,32 @@ describe("process-matrix supervisor (pure)", () => {
 	describe("detectOrphanedWorkers", () => {
 		it("flags a worker whose parentPid is dead", () => {
 			const entries = [worker({ parentPid: 999 })];
-			expect(detectOrphanedWorkers(entries, { isPidAlive: neverAlive })).toEqual(entries);
+			expect(detectOrphanedWorkers(entries, { observeProcess: neverAlive })).toEqual(entries);
 		});
 
 		it("does not flag a worker whose parentPid is alive", () => {
 			const entries = [worker({ parentPid: 999 })];
-			expect(detectOrphanedWorkers(entries, { isPidAlive: alwaysAlive })).toEqual([]);
+			expect(detectOrphanedWorkers(entries, { observeProcess: alwaysAlive })).toEqual([]);
 		});
 
 		it("never flags a master entry, regardless of liveness", () => {
 			const entries = [buildMasterEntry({ agent: agent("m1"), pid: 100, hostname: "host-a", now: NOW })];
-			expect(detectOrphanedWorkers(entries, { isPidAlive: neverAlive })).toEqual([]);
+			expect(detectOrphanedWorkers(entries, { observeProcess: neverAlive })).toEqual([]);
 		});
 
 		it("excludes this session's own entry even if it would otherwise match", () => {
 			const entries = [worker({ agent: agent("self"), entryId: "worker-self", parentPid: 999 })];
-			expect(detectOrphanedWorkers(entries, { isPidAlive: neverAlive, ownSessionId: "self" })).toEqual([]);
+			expect(detectOrphanedWorkers(entries, { observeProcess: neverAlive, ownSessionId: "self" })).toEqual([]);
 		});
 
 		it("excludes an already-closed worker", () => {
 			const entries = [worker({ status: "closed", parentPid: 999 })];
-			expect(detectOrphanedWorkers(entries, { isPidAlive: neverAlive })).toEqual([]);
+			expect(detectOrphanedWorkers(entries, { observeProcess: neverAlive })).toEqual([]);
 		});
 
 		it("excludes a worker with no recorded parentPid", () => {
 			const entries = [worker({ parentPid: undefined })];
-			expect(detectOrphanedWorkers(entries, { isPidAlive: neverAlive })).toEqual([]);
+			expect(detectOrphanedWorkers(entries, { observeProcess: neverAlive })).toEqual([]);
 		});
 	});
 
@@ -210,7 +210,7 @@ describe("process-matrix supervisor (pure)", () => {
 	describe("pollWorkerDirective", () => {
 		it("returns adopt when parentPid changed to a new, alive pid", () => {
 			const fresh = worker({ parentPid: 500 });
-			expect(pollWorkerDirective(fresh, 100, { isPidAlive: alwaysAlive })).toEqual({
+			expect(pollWorkerDirective(fresh, 100, { observeProcess: alwaysAlive })).toEqual({
 				code: "adopt",
 				parentPid: 500,
 			});
@@ -218,27 +218,27 @@ describe("process-matrix supervisor (pure)", () => {
 
 		it("returns none when parentPid changed but the new pid is dead", () => {
 			const fresh = worker({ parentPid: 500 });
-			expect(pollWorkerDirective(fresh, 100, { isPidAlive: neverAlive })).toEqual({ code: "none" });
+			expect(pollWorkerDirective(fresh, 100, { observeProcess: neverAlive })).toEqual({ code: "none" });
 		});
 
 		it("returns none when parentPid is unchanged", () => {
 			const fresh = worker({ parentPid: 100 });
-			expect(pollWorkerDirective(fresh, 100, { isPidAlive: alwaysAlive })).toEqual({ code: "none" });
+			expect(pollWorkerDirective(fresh, 100, { observeProcess: alwaysAlive })).toEqual({ code: "none" });
 		});
 
 		it("returns user_cleanup when windDownReason is user_cleanup, regardless of parentPid", () => {
 			const fresh = worker({ windDownReason: "user_cleanup" });
-			expect(pollWorkerDirective(fresh, 100, { isPidAlive: alwaysAlive })).toEqual({ code: "user_cleanup" });
+			expect(pollWorkerDirective(fresh, 100, { observeProcess: alwaysAlive })).toEqual({ code: "user_cleanup" });
 		});
 
 		it("user_cleanup takes priority even when parentPid also changed", () => {
 			const fresh = worker({ parentPid: 500, windDownReason: "user_cleanup" });
-			expect(pollWorkerDirective(fresh, 100, { isPidAlive: alwaysAlive })).toEqual({ code: "user_cleanup" });
+			expect(pollWorkerDirective(fresh, 100, { observeProcess: alwaysAlive })).toEqual({ code: "user_cleanup" });
 		});
 	});
 
 	describe("reconcileMatrix", () => {
-		const deps = { isPidAlive: alwaysAlive, now: Date.parse("2026-07-19T01:00:00.000Z"), resumableTtlMs: 60_000 };
+		const deps = { observeProcess: alwaysAlive, now: Date.parse("2026-07-19T01:00:00.000Z"), resumableTtlMs: 60_000 };
 
 		it("prunes closed entries without a pending terminal handoff", () => {
 			const entries = [worker({ status: "closed" })];
@@ -266,7 +266,7 @@ describe("process-matrix supervisor (pure)", () => {
 				worker({ status: "running", taskRef: "goal-1", taskSummary: "Ship goal 1" }),
 				worker({ entryId: "worker-w2", status: "winding_down" }),
 			];
-			const result = reconcileMatrix(entries, { ...deps, isPidAlive: neverAlive });
+			const result = reconcileMatrix(entries, { ...deps, observeProcess: neverAlive });
 			expect(result.kept.map((entry) => entry.status)).toEqual(["resumable", "resumable"]);
 			expect(result.kept.map((entry) => entry.resumable?.agent)).toEqual(entries.map((entry) => entry.agent));
 			expect(result.kept[0]?.resumable).toMatchObject({ taskRef: "goal-1", taskSummary: "Ship goal 1" });
@@ -289,7 +289,7 @@ describe("process-matrix supervisor (pure)", () => {
 					},
 				},
 			});
-			const result = reconcileMatrix([master, externalWorker], { ...deps, isPidAlive: neverAlive });
+			const result = reconcileMatrix([master, externalWorker], { ...deps, observeProcess: neverAlive });
 			expect(result.kept).toEqual([]);
 			expect(result.prunedEntryIds).toEqual(["master-m1", "worker-external"]);
 			expect(result.recoveredEntryIds).toEqual([]);
@@ -314,6 +314,20 @@ describe("process-matrix supervisor (pure)", () => {
 			const result = reconcileMatrix(entries, deps);
 			expect(result.kept).toEqual([]);
 			expect(result.prunedEntryIds).toEqual(["worker-w1"]);
+		});
+
+		it("does not treat unknown liveness as death", () => {
+			const entries = [worker({ status: "running" })];
+			const result = reconcileMatrix(entries, { ...deps, observeProcess: () => "unknown" });
+			expect(result.kept).toEqual(entries);
+			expect(result.prunedEntryIds).toEqual([]);
+			expect(result.recoveredEntryIds).toEqual([]);
+		});
+
+		it("does not orphan a worker whose parent observation is unknown", () => {
+			const entries = [worker({ parentPid: 7, parentSessionId: "other" })];
+			expect(detectOrphanedWorkers(entries, { observeProcess: () => "unknown" })).toEqual([]);
+			expect(detectOrphanedWorkers(entries, { observeProcess: neverAlive })).toEqual(entries);
 		});
 
 		it("prunes malformed-age recovery records instead of retaining them forever", () => {

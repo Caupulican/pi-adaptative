@@ -6,6 +6,12 @@ import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { isProcessAlive, killTree, killTreeNow } from "../../src/reliability/process-tree.ts";
 
+// These lifecycle fixtures script platform signalling; native-tree coverage retains the real
+// ancestry adapter and proves that owned children remain terminable.
+vi.mock("../../src/reliability/process-termination-protection.ts", () => ({
+	readProcessTerminationProtection: () => new Set<number>(),
+}));
+
 // killTree's win32 branch calls spawnSync internally to run taskkill. Mocking it here lets the
 // "failing taskkill" test force a deterministic failure on any platform/CI leg, instead of relying
 // on taskkill.exe being genuinely absent (true on Linux/macOS dev boxes, false on real Windows CI).
@@ -154,16 +160,18 @@ describe("process-tree", () => {
 
 	it("does not report a kill when taskkill returns status 0 but the PID remains alive", async () => {
 		const originalPlatform = process.platform;
+		const probe = vi.spyOn(process, "kill").mockReturnValue(true);
 		vi.useFakeTimers();
 		try {
 			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
 			vi.mocked(spawnSync).mockReturnValueOnce({ status: 0 } as ReturnType<typeof spawnSync>);
 
-			const outcome = killTree(mockChild(process.pid));
+			const outcome = killTree(mockChild(4242));
 			await vi.advanceTimersByTimeAsync(1000);
 
 			expect(await outcome).toBe("failed");
 		} finally {
+			probe.mockRestore();
 			vi.useRealTimers();
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 		}

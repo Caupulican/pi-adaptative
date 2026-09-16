@@ -20,6 +20,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { killTree, killTreeNow } from "../../src/reliability/process-tree.ts";
 
+// This suite scripts signal evidence; target authorization has its own OS-adapter regressions.
+vi.mock("../../src/reliability/process-termination-protection.ts", () => ({
+	readProcessTerminationProtection: () => new Set<number>(),
+}));
+
 vi.mock("node:child_process", async (importOriginal) => {
 	const actual = await importOriginal<typeof NodeChildProcess>();
 	return { ...actual, spawnSync: vi.fn(actual.spawnSync) };

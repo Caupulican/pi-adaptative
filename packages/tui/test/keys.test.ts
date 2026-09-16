@@ -327,6 +327,11 @@ describe("matchesKey", () => {
 			setKittyProtocolActive(false);
 		});
 
+		it("should parse kitty CSI-u Ctrl+J as ctrl+j", () => {
+			assert.strictEqual(parseKey("\x1b[106;5u"), "ctrl+j");
+			assert.strictEqual(matchesKey("\x1b[106;5u", "ctrl+j"), true);
+		});
+
 		it("should parse ctrl+space", () => {
 			setKittyProtocolActive(false);
 			assert.strictEqual(matchesKey("\x00", "ctrl+space"), true);

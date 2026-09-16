@@ -6,6 +6,7 @@
  * real processes. `runtime.ts` is the only caller that supplies real deps and real I/O.
  */
 
+import type { ProcessObservation } from "@caupulican/pi-agent-core/process-tree";
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import type {
 	ProcessMatrixEntry,
@@ -75,7 +76,7 @@ export function applyHeartbeat(entry: ProcessMatrixEntry, now: string): ProcessM
 }
 
 export interface DetectOrphanedWorkersDeps {
-	isPidAlive: (pid: number) => boolean;
+	observeProcess: (pid: number) => ProcessObservation;
 	/** This session's own sessionId -- never treat yourself as an orphan you found. */
 	ownSessionId?: string;
 }
@@ -93,7 +94,7 @@ export function detectOrphanedWorkers(
 		if (entry.status === "closed") return false;
 		if (deps.ownSessionId !== undefined && entry.agent.resumeContext.sessionId === deps.ownSessionId) return false;
 		if (entry.parentPid === undefined) return false;
-		return !deps.isPidAlive(entry.parentPid);
+		return deps.observeProcess(entry.parentPid) === "dead";
 	});
 }
 
@@ -139,7 +140,7 @@ export function applyAdoption(entry: ProcessMatrixEntry, adoption: AdoptionFacts
 }
 
 export interface PollWorkerDirectiveDeps {
-	isPidAlive: (pid: number) => boolean;
+	observeProcess: (pid: number) => ProcessObservation;
 }
 
 /**
@@ -158,7 +159,7 @@ export function pollWorkerDirective(
 	if (
 		freshEntry.parentPid !== undefined &&
 		freshEntry.parentPid !== knownParentPid &&
-		deps.isPidAlive(freshEntry.parentPid)
+		deps.observeProcess(freshEntry.parentPid) === "alive"
 	) {
 		return { code: "adopt", parentPid: freshEntry.parentPid };
 	}
@@ -166,7 +167,7 @@ export function pollWorkerDirective(
 }
 
 export interface ReconcileMatrixDeps {
-	isPidAlive: (pid: number) => boolean;
+	observeProcess: (pid: number) => ProcessObservation;
 	/** Epoch ms "now", compared against a resumable/adopted entry's `heartbeatAt`. */
 	now: number;
 	resumableTtlMs: number;
@@ -190,7 +191,12 @@ export function reconcileMatrix(entries: ProcessMatrixEntry[], deps: ReconcileMa
 			continue;
 		}
 		if (entry.status === "running" || entry.status === "winding_down") {
-			if (!deps.isPidAlive(entry.pid)) {
+			const observation = deps.observeProcess(entry.pid);
+			if (observation === "unknown") {
+				kept.push(entry);
+				continue;
+			}
+			if (observation === "dead") {
 				if (entry.role === "worker" && entry.agent.resumeContext.provider === "pi") {
 					const payload: ResumablePayload = {
 						agent: structuredClone(entry.agent),

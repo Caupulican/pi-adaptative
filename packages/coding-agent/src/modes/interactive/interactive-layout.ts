@@ -9,7 +9,7 @@ import { expandMessageTextForDisplay } from "../../core/context/path-alias-displ
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
-import type { ActivityLaneComponent } from "./components/activity-lane.ts";
+import { type ActivityLaneComponent, isBackgroundToolActivityItem } from "./components/activity-lane.ts";
 import type { FooterComponent } from "./components/footer.ts";
 import { isConversationMessage } from "./components/question-conversation.ts";
 import { WorkbenchComponent } from "./components/workbench.ts";
@@ -36,6 +36,7 @@ export interface InteractiveLayoutHost {
 	streamingMessage?: AssistantMessage;
 	workbench?: WorkbenchController;
 	workbenchInputCleanup?: () => void;
+	activeToolCalls: { readonly size: number; hasActive(toolCallId: string): boolean };
 }
 
 export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
@@ -79,6 +80,21 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		copy: copyToClipboard,
 		notice: (text, error) => host.activityLane?.announce(text, error ? "failure" : "neutral"),
 		previewLimit: () => host.session.settingsManager.getWorkbenchSettings().previews,
+		activeForegroundCount: () => {
+			const handedOff = new Set(
+				host.activityLane
+					?.getItems()
+					.flatMap((item) =>
+						isBackgroundToolActivityItem(item) &&
+						item.toolCallId &&
+						host.activeToolCalls.hasActive(item.toolCallId)
+							? [item.toolCallId]
+							: [],
+					),
+			);
+			return host.activeToolCalls.size - handedOff.size;
+		},
+		activeBackgroundCount: () => host.activityLane?.getItems().filter(isBackgroundToolActivityItem).length ?? 0,
 		// The terminal owns the mouse unless the operator hands it over; the choice persists.
 		mouse: {
 			enabled: () => host.settingsManager.getWorkbenchSettings().mouse === "on",

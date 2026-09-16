@@ -1,4 +1,4 @@
-import type { AgentMessage, ToolCallRepairInfo } from "@caupulican/pi-agent-core";
+import { type AgentMessage, retainedToolInvocation, type ToolCallRepairInfo } from "@caupulican/pi-agent-core";
 import { createCompactionSummaryMessage } from "@caupulican/pi-agent-core/messages";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { isFirstTokenEvent } from "@caupulican/pi-ai/event-stream";
@@ -130,31 +130,34 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			break;
 
 		case "routing_end":
-			host.stopWorkingLoader();
+			host.activityLane?.remove("runtime:routing");
+			if (!host.session.isStreaming && host.loadingAnimation && !host.session.getForegroundActivity().busy)
+				host.stopWorkingLoader();
 			host.ui.requestRender();
 			break;
 
-		case "agent_start":
-			if (host.workbench) host.workbench.beginCycle(host.session.sessionManager.getCwd());
+		case "agent_start": {
+			const activity = host.session.getForegroundActivity();
+			if (activity.busy && activity.epoch !== undefined) {
+				host.workbench?.beginCycle(host.session.sessionManager.getCwd(), activity.epoch);
+			}
+			host.activityLane?.syncForegroundActivity(activity);
+			host.activityLane?.update(RUNTIME_TURN_ACTIVITY_ID, host.getWorkingLoaderMessage());
 			host.clearActiveToolCalls();
 			if (host.settingsManager.getShowTerminalProgress()) host.ui.terminal.setProgress(true);
 			clearRetryControls(host);
 			host.activityLane?.remove("runtime:retry");
-			host.stopWorkingLoader();
 			if (host.workingVisible) {
 				if (host.workingIndicatorOptions) {
-					host.loadingAnimation = host.createWorkingLoader();
-					host.statusContainer.addChild(host.loadingAnimation);
-				} else {
-					host.activityLane?.start({
-						id: "runtime:turn",
-						kind: "runtime",
-						label: host.getWorkingLoaderMessage(),
-					});
+					if (!host.loadingAnimation) {
+						host.loadingAnimation = host.createWorkingLoader();
+						host.statusContainer.addChild(host.loadingAnimation);
+					}
 				}
 			}
 			host.ui.requestRender();
 			break;
+		}
 
 		case "queue_update":
 			host.updatePendingMessagesDisplay();
@@ -186,15 +189,24 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			break;
 
 		case "background_tools":
-			host.activityLane?.removeByPrefix(BACKGROUND_TOOL_ACTIVITY_ID_PREFIX);
 			for (const task of event.tasks) {
-				host.activityLane?.start({
+				if (task.toolCallId) host.activityLane?.remove(`tool:${task.toolCallId}`);
+			}
+			host.activityLane?.reconcileByPrefix(
+				BACKGROUND_TOOL_ACTIVITY_ID_PREFIX,
+				event.tasks.map((task) => ({
 					id: backgroundToolActivityId(task.taskId),
-					kind: "tool",
+					toolCallId: task.toolCallId,
+					kind: "tool" as const,
 					label: task.description.trim() || `${task.toolName} · ${task.taskId}`,
 					tag: task.toolName,
-				});
-			}
+					...(task.startedAt ? { originAt: task.startedAt } : {}),
+					...(typeof task.elapsedBeforeHandoffMs === "number"
+						? { elapsedBeforeMs: task.elapsedBeforeHandoffMs }
+						: {}),
+				})),
+			);
+			host.workbench?.refreshExecution();
 			host.ui.requestRender();
 			break;
 
@@ -309,10 +321,11 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 
 		case "tool_execution_end": {
 			const toolActivityId = `tool:${event.toolCallId}`;
+			const handedOff = retainedToolInvocation(event.result.details)?.execution === "running";
 			if (host.activityLane) {
 				const toolKind = host.toolActivityKind(event.toolName);
 				const terminalStatus = host.toolActivityTerminalStatus(event.isError, event.result.details);
-				if (toolKind === "tool" || terminalStatus !== "success") {
+				if (!handedOff && (toolKind === "tool" || terminalStatus !== "success")) {
 					host.activityLane.finish(toolActivityId, terminalStatus, {
 						id: toolActivityId,
 						kind: toolKind,
@@ -351,20 +364,14 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			if (host.isNativeReflectionEnabled()) host.maybeRunNativeReflection(event.messages);
 			else if (!host.maybeStartAutoLearn()) host.maybeStartAutonomyReview(event.messages);
 			if (host.settingsManager.getShowTerminalProgress()) host.ui.terminal.setProgress(false);
-			if (event.willRetry) {
-				host.activityLane?.remove("runtime:turn");
-			} else {
+			if (!event.willRetry) {
 				const finalAssistant = event.messages.findLast(
 					(message): message is AssistantMessage => message.role === "assistant",
 				);
 				const failed = finalAssistant?.stopReason === "error" || finalAssistant?.stopReason === "aborted";
-				host.activityLane?.finish("runtime:turn", failed ? "failure" : "success", {
-					id: "runtime:turn",
-					kind: "runtime",
-					label: failed ? "Turn failed" : "Done",
-				});
+				host.activityLane?.setForegroundOutcome(failed ? "failure" : "success", failed ? "Turn failed" : "Done");
 			}
-			if (host.loadingAnimation) {
+			if (host.loadingAnimation && !host.session.getForegroundActivity().busy) {
 				host.loadingAnimation.stop();
 				host.loadingAnimation = undefined;
 				host.statusContainer.clear();
@@ -385,13 +392,18 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			if (host.settingsManager.getShowTerminalProgress()) host.ui.terminal.setProgress(true);
 			host.autoCompactionEscapeHandler = host.defaultEditor.onEscape;
 			host.defaultEditor.onEscape = () => host.session.abortCompaction();
-			host.stopWorkingLoader();
+			if (!host.loadingAnimation) host.stopWorkingLoader();
 			const cancelHint = `(${keyText("app.interrupt")} to cancel)`;
 			const label =
 				event.reason === "manual"
 					? `Compacting context ${cancelHint}`
 					: `${event.reason === "overflow" ? "Context overflow · " : ""}Auto-compacting ${cancelHint}`;
+			if (!host.loadingAnimation && host.workingVisible && host.workingIndicatorOptions) {
+				host.loadingAnimation = host.createWorkingLoader();
+				host.statusContainer.addChild(host.loadingAnimation);
+			}
 			host.activityLane?.start({ id: "runtime:compaction", kind: "runtime", label });
+			host.loadingAnimation?.setMessage(label);
 			host.ui.requestRender();
 			break;
 		}
@@ -449,6 +461,11 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				});
 			}
 			void host.flushCompactionQueue({ willRetry: event.willRetry });
+			if (host.loadingAnimation) {
+				if (host.session.getForegroundActivity().busy)
+					host.loadingAnimation.setMessage(host.getWorkingLoaderMessage());
+				else host.stopWorkingLoader();
+			}
 			host.ui.requestRender();
 			break;
 		}
@@ -464,10 +481,15 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				kind: "runtime",
 				label: retryMessage(Math.ceil(event.delayMs / 1000)),
 			});
+			host.loadingAnimation?.setMessage(retryMessage(Math.ceil(event.delayMs / 1000)));
 			host.retryCountdown = new CountdownTimer(
 				event.delayMs,
 				host.ui,
-				(seconds) => host.activityLane?.update("runtime:retry", retryMessage(seconds)),
+				(seconds) => {
+					const label = retryMessage(seconds);
+					host.activityLane?.update("runtime:retry", label);
+					host.loadingAnimation?.setMessage(label);
+				},
 				() => {
 					host.retryCountdown = undefined;
 				},
@@ -477,7 +499,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 		}
 
 		case "provider_admission_wait": {
-			const id = `runtime:admission:${event.provider}${event.account ? `#${event.account}` : ""}`;
+			const id = `runtime:admission:${event.lane}:${event.provider}${event.account ? `#${event.account}` : ""}`;
 			if (event.phase === "start") {
 				const where = event.account ? `${event.provider} (account ${event.account.slice(0, 8)})` : event.provider;
 				const why =
@@ -486,19 +508,23 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 						: event.reason === "emergency_stop"
 							? "emergency stop engaged"
 							: "at its in-flight limit";
-				host.activityLane?.wait({ id, kind: "runtime", label: `${event.lane} request waiting: ${where} ${why}` });
+				const label = `${event.lane} request waiting: ${where} ${why}`;
+				host.activityLane?.wait({ id, kind: "runtime", scope: event.lane, label });
+				if (event.lane === "foreground") host.loadingAnimation?.setMessage(label);
 			} else {
 				host.activityLane?.finish(id, "neutral", {
 					id,
 					kind: "runtime",
 					label: `${event.provider} admitted after ${Math.ceil((event.waitedMs ?? 0) / 1000)}s`,
 				});
+				if (event.lane === "foreground") host.loadingAnimation?.setMessage(host.getWorkingLoaderMessage());
 			}
 			host.ui.requestRender();
 			break;
 		}
 		case "auto_retry_end":
 			clearRetryControls(host);
+			host.loadingAnimation?.setMessage(host.getWorkingLoaderMessage());
 			host.activityLane?.finish("runtime:retry", event.success ? "success" : "failure", {
 				id: "runtime:retry",
 				kind: "runtime",

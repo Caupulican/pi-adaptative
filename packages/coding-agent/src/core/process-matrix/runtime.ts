@@ -25,6 +25,7 @@
 
 import { hostname as osHostname } from "node:os";
 import { isDeepStrictEqual } from "node:util";
+import type { ProcessObservation } from "@caupulican/pi-agent-core/process-tree";
 import { isAgentIdentity } from "../orchestration/agent-resume.ts";
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import { getParentPid, getParentSessionId, getProcessTaskRef } from "../process-identity.ts";
@@ -104,7 +105,7 @@ export interface ProcessMatrixRuntimeConfig {
 	/** Canonical logical identity for this process and any exact-session resume. */
 	agent: AgentIdentityContract;
 	settings: ResolvedProcessMatrixSettings;
-	isProcessAlive: (pid: number) => boolean;
+	observeProcess: (pid: number) => ProcessObservation;
 	now?: () => number;
 	/** Structural notice injection into the running session (host `sendCustomMessage` seam). */
 	notify: (text: string) => void | Promise<void>;
@@ -341,7 +342,7 @@ async function reconcileAndRunOrphanScan(
 	}
 	if (signal.aborted) return;
 	const reconciled = reconcileMatrix(entries, {
-		isPidAlive: (pid) => pid === process.pid || config.isProcessAlive(pid),
+		observeProcess: (pid) => (pid === process.pid ? "alive" : config.observeProcess(pid)),
 		now: now(),
 		resumableTtlMs: PROCESS_MATRIX_RESUMABLE_RETENTION_MS,
 	});
@@ -427,7 +428,7 @@ async function runOrphanScan(
 	signal: AbortSignal,
 ): Promise<void> {
 	const orphans = detectOrphanedWorkers(entries, {
-		isPidAlive: config.isProcessAlive,
+		observeProcess: config.observeProcess,
 		ownSessionId: config.agent.resumeContext.sessionId,
 	});
 	if (orphans.length === 0) return;
@@ -445,14 +446,18 @@ async function runOrphanScan(
 			// bounded reconciliation (see reconcileAndRunOrphanScan) already ages it out over
 			// PROCESS_MATRIX_RESUMABLE_RETENTION_MS without help from this diagnostic, so
 			// repeating the warning on every startup until that TTL elapses is pure noise.
-			if (config.isProcessAlive(orphan.pid)) reportUnrecoveredOrphan(config, orphan, recoveryBoundary);
+			const observation = config.observeProcess(orphan.pid);
+			if (observation === "alive") reportUnrecoveredOrphan(config, orphan, recoveryBoundary);
 			continue;
 		}
-		if (!config.isProcessAlive(orphan.pid)) {
+		const observation = config.observeProcess(orphan.pid);
+		if (observation === "dead") {
 			await resumeDeadOrphan(config, orphan, signal);
 			continue;
 		}
-		await adoptLiveOrphan(config, orphan, signal);
+		if (observation === "alive") {
+			await adoptLiveOrphan(config, orphan, signal);
+		}
 	}
 }
 
@@ -893,7 +898,7 @@ async function startWorkerBranch(
 		// PID liveness alone is not process identity: a reused PID could otherwise keep a worker
 		// attached to an unrelated process forever. The parent session's own fresh master entry binds
 		// PID to a durable identity and proves that that exact session is still heartbeating.
-		if (!sessionId || !config.isProcessAlive(pid)) return false;
+		if (!sessionId || config.observeProcess(pid) !== "alive") return false;
 		const parent = await store.readEntry(config.agentDir, buildEntryId("master", sessionId));
 		if (parent?.role !== "master" || parent.agent.resumeContext.sessionId !== sessionId) return false;
 		if (parent.pid !== pid || parent.status !== "running") return false;
@@ -973,7 +978,7 @@ async function startWorkerBranch(
 		if (stopped) return;
 		const owned = acceptOwnedRecord(fresh);
 		if (stopped || !owned) return;
-		const directive = pollWorkerDirective(owned, currentParentPid, { isPidAlive: config.isProcessAlive });
+		const directive = pollWorkerDirective(owned, currentParentPid, { observeProcess: config.observeProcess });
 		if (directive.code !== "user_cleanup") return;
 		await completeCooperativeCleanup(owned);
 	};
@@ -1017,7 +1022,7 @@ async function startWorkerBranch(
 		// request -- that exit would end the newer generation's process.
 		if (stopped) return;
 		if (owned) {
-			const directive = pollWorkerDirective(owned, currentParentPid, { isPidAlive: config.isProcessAlive });
+			const directive = pollWorkerDirective(owned, currentParentPid, { observeProcess: config.observeProcess });
 			if (directive.code === "adopt" && owned.parentSessionId) {
 				// The adopting master persists its session id with the pid. Require both on the next
 				// healthy tick; accepting a pid-only adoption would reintroduce the PID-reuse bug.

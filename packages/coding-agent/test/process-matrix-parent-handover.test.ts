@@ -64,7 +64,7 @@ it.each(["different-pid", "same-pid", "invalid-master", "stale-generation", "sto
 			agent: identity("worker"),
 			store,
 			settings: { enabled: true, heartbeatMs: 5000, watcherPollMs: 1000, adoptionGraceMs: 60000 },
-			isProcessAlive: () => true,
+			observeProcess: () => "alive" as const,
 			now: () => Date.parse(at),
 			notify: (message: string) => {
 				notices.push(message);

@@ -12,6 +12,7 @@
 import { promises as fsPromises, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { isPositiveSafePid } from "@caupulican/pi-agent-core/process-tree";
 import { stateFile } from "../agent-paths.ts";
 import { isAgentIdentity } from "../orchestration/agent-resume.ts";
 import { withFileLock, withFileLockSync, writeFileAtomic, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -108,16 +109,16 @@ function isProcessMatrixEntry(value: unknown): value is ProcessMatrixEntry {
 	if (value.status === "resumable" && value.resumable === undefined) return false;
 	return (
 		value.entryId === buildEntryId(value.role, sessionId) &&
-		Number.isSafeInteger(value.pid) &&
+		isPositiveSafePid(value.pid) &&
 		typeof value.hostname === "string" &&
 		value.hostname.length <= 255 &&
 		isTimestamp(value.startedAt) &&
 		isTimestamp(value.heartbeatAt) &&
 		isProcessStatus(value.status) &&
-		(value.parentPid === undefined || (Number.isSafeInteger(value.parentPid) && Number(value.parentPid) > 0)) &&
+		(value.parentPid === undefined || isPositiveSafePid(value.parentPid)) &&
 		isOptionalString(value.parentSessionId, 512) &&
 		isOptionalString(value.tmuxSession, 512) &&
-		(value.tmuxPanePid === undefined || Number.isSafeInteger(value.tmuxPanePid)) &&
+		(value.tmuxPanePid === undefined || isPositiveSafePid(value.tmuxPanePid)) &&
 		isOptionalString(value.taskRef, 512) &&
 		isOptionalString(value.taskSummary, 2_000)
 	);

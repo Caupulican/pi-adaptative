@@ -11,10 +11,61 @@ import {
 	type StdioPipe,
 } from "node:child_process";
 import type { Readable } from "node:stream";
-import { killTree } from "@caupulican/pi-agent-core/process-tree";
+import { isPositiveSafePid, killTree } from "@caupulican/pi-agent-core/process-tree";
 import crossSpawn from "cross-spawn";
 
 const EXIT_STDIO_GRACE_MS = 100;
+
+/**
+ * Bind immediately after spawning, with Node's native `signal` option omitted. A failed spawn
+ * can retain a native handle before ENOENT is emitted; calling its kill() in that window can
+ * signal the caller's process group. Only the child's own successful spawn event grants a kill.
+ */
+export function bindChildProcessAbort(
+	child: ChildProcess,
+	signal: AbortSignal,
+	options: { onDiagnostic?: (message: string) => void } = {},
+): void {
+	let spawned = false;
+	let requested = false;
+	const onAbort = () => {
+		if (
+			!spawned ||
+			requested ||
+			!isPositiveSafePid(child.pid) ||
+			child.exitCode !== null ||
+			child.signalCode !== null
+		)
+			return;
+		requested = true;
+		try {
+			if (child.kill()) return;
+		} catch {
+			// An abort listener runs on EventTarget: propagating a signal error would crash the host.
+		}
+		(options.onDiagnostic ?? console.error)("Child process cancellation could not deliver its termination signal.");
+	};
+	const onSpawn = () => {
+		spawned = true;
+		if (signal.aborted) onAbort();
+	};
+	const cleanup = () => {
+		signal.removeEventListener("abort", onAbort);
+		child.off("spawn", onSpawn);
+		child.off("error", onError);
+		child.off("exit", cleanup);
+		child.off("close", cleanup);
+	};
+	const onError = () => {
+		// Spawn failure grants no process ownership. A later IPC/signal error is not an exit.
+		if (!spawned) cleanup();
+	};
+	child.once("spawn", onSpawn);
+	child.on("error", onError);
+	child.once("exit", cleanup);
+	child.once("close", cleanup);
+	signal.addEventListener("abort", onAbort, { once: true });
+}
 
 export function spawnProcess(
 	command: string,

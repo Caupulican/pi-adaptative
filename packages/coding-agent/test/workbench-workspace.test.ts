@@ -1,11 +1,46 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { WorkspaceObservation } from "../src/modes/interactive/workbench-workspace.ts";
 
 describe("event-triggered workspace observations", () => {
+	it.each(["missing-cwd", "missing-command"])("never abort-signals an unspawned Git handle (%s)", async (failure) => {
+		const directory = await mkdtemp(join(tmpdir(), "pi-observation-abort-"));
+		try {
+			for (const timing of ["replace", "dispose", "settled"]) {
+				const child = spawn(
+					process.execPath,
+					[
+						"--conditions=pi-source",
+						fileURLToPath(new URL("./fixtures/workspace-observation-abort.mjs", import.meta.url)),
+						failure,
+						timing,
+						directory,
+					],
+					{ detached: true, stdio: ["ignore", "pipe", "pipe"] },
+				);
+				let stdout = "";
+				let stderr = "";
+				child.stdout.on("data", (data: Buffer) => {
+					stdout += data.toString();
+				});
+				child.stderr.on("data", (data: Buffer) => {
+					stderr += data.toString();
+				});
+				const code = await new Promise<number | null>((resolve, reject) => {
+					child.once("error", reject);
+					child.once("close", resolve);
+				});
+				expect(code, stderr).toBe(0);
+				expect(JSON.parse(stdout), timing).toEqual({ invalidKills: 0, receivedSignals: 0, settled: true });
+			}
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
 	it("uses cwd-relative literal paths in nested worktrees", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "pi-workbench-nested-"));
 		const observer = new WorkspaceObservation();
