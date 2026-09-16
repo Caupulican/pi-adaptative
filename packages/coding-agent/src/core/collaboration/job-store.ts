@@ -34,6 +34,8 @@ import {
 
 const identity = collaborationIdentitySchema;
 const shortText = Type.String({ maxLength: 4096 });
+const taskCorrelationSchema = Type.Object({ goalId: Type.Optional(shortText) }, { additionalProperties: false });
+export type CollaborationTaskCorrelation = Static<typeof taskCorrelationSchema>;
 const terminalSchema = Type.Union([
 	Type.Literal("done"),
 	Type.Literal("blocked"),
@@ -81,6 +83,8 @@ const agentSchema = Type.Object(
 		turnId: Type.String({ maxLength: 128 }),
 		status: Type.Union([Type.Literal("idle"), Type.Literal("reserved"), Type.Literal("running"), terminalSchema]),
 		prompt: Type.String({ maxLength: 32768 }),
+		/** Current task ownership; an empty object deliberately means no goal. */
+		taskCorrelation: Type.Optional(taskCorrelationSchema),
 		evidence: Type.String({ maxLength: 16000 }),
 		usage: Type.Optional(collaborationUsageSchema),
 		resultClaim: Type.Optional(collaborationResultClaimSchema),
@@ -347,8 +351,18 @@ export class CollaborationJobStore {
 		});
 		return result;
 	}
-	private reserve(current: CollaborationJob, agentId: string, prompt: string, answering: boolean): CollaborationAgent {
+	private reserve(
+		current: CollaborationJob,
+		agentId: string,
+		prompt: string,
+		answering: boolean,
+		newTask?: CollaborationTaskCorrelation,
+	): CollaborationAgent {
 		const agent = assertOperableAgent(current, agentId);
+		if (newTask !== undefined && (!Value.Check(taskCorrelationSchema, newTask) || answering))
+			throw new Error("Invalid collaboration task correlation; answers must retain their task.");
+		if (agent.notifiedTurn < agent.turn && !["reserved", "running"].includes(agent.status))
+			throw new Error("Collaboration turn terminal handoff must be published before admitting successor turn.");
 		// An outstanding backend request means nobody has observed the resource this turn would run on.
 		// Guard before any mutation below, so a rejected reservation leaves the member untouched.
 		if (agent.acquiring)
@@ -356,9 +370,6 @@ export class CollaborationJobStore {
 		if (agent.steering) {
 			if (agent.status !== "stopped") {
 				throw new Error("Collaboration agent steering in progress; await steering settlement.");
-			}
-			if (agent.notifiedTurn < agent.turn) {
-				throw new Error("Collaboration turn terminal handoff must be published before admitting successor turn.");
 			}
 			delete agent.steering;
 		}
@@ -370,6 +381,9 @@ export class CollaborationJobStore {
 		if (!answering && agent.status === "blocked")
 			throw new Error("Answer the pending question before starting another task.");
 		const preparedPrompt = prepareCollaborationPrompt(current, agentId, prompt);
+		// Continuations (answers and peer messages) retain the task, while an explicit new task may
+		// clear the goal. Never rewrite the job's immutable launch provenance or CLI flags.
+		agent.taskCorrelation = { ...(newTask ?? agent.taskCorrelation ?? { goalId: current.goalId }) };
 		agent.turn++;
 		agent.turnId = randomUUID();
 		agent.status = "reserved";
@@ -382,9 +396,15 @@ export class CollaborationJobStore {
 		delete agent.helperPid;
 		return agent;
 	}
-	reserveTurn(id: string, agentId: string, prompt: string, answering = false): CollaborationAgent {
+	reserveTurn(
+		id: string,
+		agentId: string,
+		prompt: string,
+		answering = false,
+		newTask?: CollaborationTaskCorrelation,
+	): CollaborationAgent {
 		const job = this.update(id, (current) => {
-			this.reserve(current, agentId, prompt, answering);
+			this.reserve(current, agentId, prompt, answering, newTask);
 		});
 		return job.agents.find((agent) => agent.id === agentId)!;
 	}

@@ -587,7 +587,10 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 								params.agentId,
 								followupTask,
 								answering ? params.answer : undefined,
-								params.steer !== undefined ? { steer: params.steer } : undefined,
+								{
+									steer: params.steer,
+									...(!answering ? { newTask: { goalId: params.goalId } } : {}),
+								},
 							);
 				} else if (["stop_job", "stop_session", "dismiss"].includes(action)) {
 					if (params.dryRun === true)

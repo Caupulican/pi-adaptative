@@ -6,6 +6,7 @@ import {
 	type CollaborationAgent,
 	type CollaborationJob,
 	type CollaborationJobStore,
+	type CollaborationTaskCorrelation,
 	collaborationLaneId,
 	type NewCollaborationJob,
 } from "./job-store.ts";
@@ -190,7 +191,7 @@ export class CollaborationCoordinator {
 		this.deps.report({
 			laneId: collaborationLaneId(job.id, agent.id),
 			phase: "dispatch",
-			goalId: job.goalId,
+			goalId: agent.taskCorrelation?.goalId,
 			worktreeLaneKey: agent.profile.worktreeLane,
 			dispatch: {
 				sequence: agent.turn,
@@ -394,7 +395,7 @@ export class CollaborationCoordinator {
 		agentId: string | undefined,
 		text: string,
 		answer?: CollaborationAnswer,
-		options?: { steer?: boolean },
+		options?: { steer?: boolean; newTask?: CollaborationTaskCorrelation },
 	): Promise<CollaborationAgent> {
 		this.assertActive();
 		this.refresh();
@@ -466,7 +467,7 @@ export class CollaborationCoordinator {
 
 		this.assertActive();
 		this.refresh();
-		const agent = store.reserveTurn(jobId, target.id, text, !!answer);
+		const agent = store.reserveTurn(jobId, target.id, text, !!answer, options?.newTask);
 		await this.launchReservedTurn(job, agent, answer);
 		return agent;
 	}
