@@ -107,6 +107,8 @@ const agentSchema = Type.Object(
 		helperPid: Type.Optional(Type.Integer({ minimum: 1 })),
 		deadlineAt: Type.Optional(Type.Number()),
 		notifiedTurn: Type.Integer({ minimum: 0, maximum: 128 }),
+		/** Present only when this coordinator owns dispatch publication. Zero records unacknowledged
+		 * intent; absence does not authorize reconstructing another publisher's dispatch contract. */
 		notifiedDispatchTurn: Type.Optional(Type.Integer({ minimum: 0, maximum: 128 })),
 		/** The member's persistent CLI closure has been published to the durable lane projection. A
 		 * closure is a fact about the agent, not about a turn, so turn-based deduplication cannot
@@ -378,6 +380,7 @@ export class CollaborationJobStore {
 				prompt: "",
 				evidence: "",
 				notifiedTurn: 0,
+				...(digest ? { notifiedDispatchTurn: 0 } : {}),
 			})),
 		};
 		if (task)

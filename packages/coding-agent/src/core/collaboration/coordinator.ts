@@ -195,6 +195,11 @@ export class CollaborationCoordinator {
 		if (this.disposed) return;
 		const current = this.deps.store.load(job.id).agents.find((member) => member.id === agent.id);
 		if (!current || current.turnId !== agent.turnId || (current.notifiedDispatchTurn ?? 0) >= agent.turn) return;
+		if (current.notifiedDispatchTurn === undefined)
+			this.deps.store.update(job.id, (latest) => {
+				const member = latest.agents.find((item) => item.id === agent.id);
+				if (member?.turnId === agent.turnId) member.notifiedDispatchTurn = 0;
+			});
 		this.deps.report({
 			laneId: collaborationLaneId(job.id, agent.id),
 			phase: "dispatch",
@@ -589,7 +594,7 @@ export class CollaborationCoordinator {
 			return;
 		// A reload may recover a terminal whose dispatch publication failed. Preserve ordering using
 		// the same owner and durable receipt; never rerun the native prompt to recover a handoff.
-		this.dispatch(job, agent);
+		if (agent.notifiedDispatchTurn !== undefined) this.dispatch(job, agent);
 		this.deps.report({
 			laneId: collaborationLaneId(job.id, agent.id),
 			phase: "terminal",
