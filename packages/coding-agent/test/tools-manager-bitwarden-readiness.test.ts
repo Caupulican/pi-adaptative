@@ -21,6 +21,7 @@ describe("Bitwarden executable readiness", () => {
 		roots.push(root);
 		vi.stubEnv(ENV_AGENT_DIR, root);
 		vi.stubEnv("PATH", root);
+		vi.stubEnv("PATHEXT", ".exe");
 		const wrapper = join(root, process.platform === "win32" ? "bw.exe" : "bw");
 		writeFileSync(wrapper, "synthetic executable", { mode: 0o755 });
 		const probe = { pid: 1, output: [], stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), signal: null };
