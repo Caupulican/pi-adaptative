@@ -271,6 +271,9 @@ export class ContextPipeline {
 		legend?: string;
 		legendIds?: readonly string[];
 	} {
+		// A request projection already in flight may arrive after session cleanup closed the index.
+		// It must not reacquire storage or a retention lease for a disposed owner.
+		if (this.deps.isDisposed()) return { messages };
 		// A tier without aliasing sends paths as they are: no table, no legend, no rewrite.
 		if (this.deps.isPathAliasingEnabled?.() === false) return { messages };
 		this._pathAliasRuntime ??= new PathAliasRuntime(
