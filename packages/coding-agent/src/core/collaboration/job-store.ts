@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/types.ts";
+import type { ProcessParentOwnership } from "../process-matrix/runtime.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
 import {
@@ -44,6 +45,7 @@ const digestSchema = Type.String({ pattern: "^[a-f0-9]{64}$" });
 const startReceiptSchema = Type.Object(
 	{
 		key: identity,
+		parentSessionId: Type.Optional(shortText),
 		digest: digestSchema,
 		turns: Type.Array(Type.Object({ agentId: identity, turnId: shortText }), { minItems: 1, maxItems: 12 }),
 	},
@@ -124,6 +126,17 @@ const jobSchema = Type.Object(
 		id: identity,
 		parentSessionId: shortText,
 		parentSessionFile: Type.Optional(shortText),
+		/** Effective task controller; launch provenance and the CLI's peer identity remain immutable. */
+		controller: Type.Optional(
+			Type.Object(
+				{
+					parentSessionId: shortText,
+					parentPid: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+					generation: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+				},
+				{ additionalProperties: false },
+			),
+		),
 		sessionName: identity,
 		workspaceId: Type.Optional(shortText),
 		cwd: shortText,
@@ -153,10 +166,19 @@ export type CollaborationAgent = Omit<Static<typeof agentSchema>, "profile"> & {
 export type CollaborationJob = Omit<Static<typeof jobSchema>, "agents"> & { agents: CollaborationAgent[] };
 export type NewCollaborationJob = Omit<
 	CollaborationJob,
-	"version" | "variables" | "metadata" | "dismissed" | "agents" | "mailbox"
+	"version" | "variables" | "metadata" | "dismissed" | "agents" | "mailbox" | "controller"
 > & {
 	agents: Array<Omit<CollaborationAgent, "turn" | "turnId" | "status" | "prompt" | "evidence" | "notifiedTurn">>;
 };
+
+/** An untransferred record is still controlled by its immutable birth parent. */
+export function collaborationController(job: CollaborationJob): {
+	parentSessionId: string;
+	parentPid?: number;
+	generation: number;
+} {
+	return job.controller ?? { parentSessionId: job.parentSessionId, generation: 1 };
+}
 
 /** The persisted evidence and parent handoff share one UTF-8 byte ceiling. */
 export function boundCollaborationEvidence(text: string): string {
@@ -262,6 +284,7 @@ export function prepareCollaborationPrompt(
 export class CollaborationJobStore {
 	readonly directory: string;
 	readonly parentSessionId: string;
+	private readonly observedGenerations = new Map<string, number>();
 	constructor(directory: string, parentSessionId: string) {
 		this.directory = directory;
 		this.parentSessionId = parentSessionId;
@@ -273,8 +296,7 @@ export class CollaborationJobStore {
 		return join(this.directory, `${id}.json`);
 	}
 	private save(job: CollaborationJob, previous?: string): void {
-		if (!Value.Check(jobSchema, job) || job.parentSessionId !== this.parentSessionId)
-			throw new Error("Invalid collaboration job or parent.");
+		if (!Value.Check(jobSchema, job)) throw new Error("Invalid collaboration job.");
 		assertJobIntegrity(job);
 		const encoded = JSON.stringify(job);
 		if (Buffer.byteLength(encoded) > 1024 * 1024) throw new Error("Collaboration job exceeds 1 MiB.");
@@ -282,25 +304,50 @@ export class CollaborationJobStore {
 		writeFileAtomicSync(this.path(job.id), encoded, { mode: 0o600 });
 	}
 	load(id: string): CollaborationJob {
+		const job = this.read(id);
+		this.assertController(job);
+		return job;
+	}
+	private assertController(job: CollaborationJob): void {
+		const owner = collaborationController(job);
+		if (owner.parentSessionId !== this.parentSessionId)
+			throw new ForeignCollaborationJobError("Invalid collaboration controller parent.");
+		const observed = this.observedGenerations.get(job.id);
+		if (observed !== undefined && observed !== owner.generation)
+			throw new ForeignCollaborationJobError("Stale collaboration controller generation.");
+		this.observedGenerations.set(job.id, owner.generation);
+	}
+	private assertPeerParent(job: CollaborationJob): void {
+		if (
+			job.parentSessionId !== this.parentSessionId &&
+			collaborationController(job).parentSessionId !== this.parentSessionId
+		)
+			throw new ForeignCollaborationJobError("Invalid collaboration peer parent.");
+	}
+	private read(id: string): CollaborationJob {
 		const file = this.path(id);
 		const job: unknown = JSON.parse(readBoundedTextFileSync(file, 1024 * 1024, "Collaboration state file"));
 		if (!Value.Check(jobSchema, job) || job.id !== id) throw new Error("Invalid collaboration job.");
-		if (job.parentSessionId !== this.parentSessionId)
-			throw new ForeignCollaborationJobError("Invalid collaboration parent.");
 		assertJobIntegrity(job);
 		return job as CollaborationJob;
 	}
 	list(): CollaborationJob[] {
+		return this.listRecords().filter((job) => {
+			try {
+				this.assertController(job);
+				return true;
+			} catch (error) {
+				if (error instanceof ForeignCollaborationJobError) return false;
+				throw error;
+			}
+		});
+	}
+	private listRecords(): CollaborationJob[] {
 		const result: CollaborationJob[] = [];
 		const entries = readBoundedDirectoryNamesSync(this.directory, 256, "Collaboration state directory");
 		for (const entry of entries) {
 			if (!entry.endsWith(".json")) continue;
-			try {
-				result.push(this.load(entry.slice(0, -5)));
-			} catch (error) {
-				if (error instanceof ForeignCollaborationJobError) continue;
-				throw error;
-			}
+			result.push(this.read(entry.slice(0, -5)));
 		}
 		return result;
 	}
@@ -319,11 +366,16 @@ export class CollaborationJobStore {
 		return withFileLockSync(join(this.directory, "admission"), () => {
 			if (!Value.Check(digestSchema, input.specializationKey))
 				throw new Error("Collaboration admission requires a compiled specialization identity.");
-			const jobs = this.list();
+			if (input.parentSessionId !== this.parentSessionId) throw new Error("Invalid collaboration admission parent.");
+			const jobs = this.listRecords();
 			const digest = collaborationStartDigest(input, task, intent);
 			for (const job of jobs) {
-				const receipt = job.startReceipts?.find((entry) => entry.key === input.id);
+				const receipt = job.startReceipts?.find(
+					(entry) =>
+						entry.key === input.id && (entry.parentSessionId ?? job.parentSessionId) === this.parentSessionId,
+				);
 				if (!receipt) continue;
+				this.assertController(job);
 				if (receipt.digest !== digest) throw new Error("Collaboration start identity has different intent.");
 				if (
 					receipt.turns.some(
@@ -335,29 +387,46 @@ export class CollaborationJobStore {
 			}
 			const selected = selectCollaborationSpecialist(jobs, input, intent);
 			if (!selected) return { job: this.createAdmitted(input, task, digest), kind: "fresh" };
-			const job = this.update(selected.id, (current) => {
-				// Peer delivery and explicit follow-ups use this same job lock. Revalidate after acquiring
-				// it so admission cannot act on a snapshot from before a concurrent reservation.
-				selectCollaborationSpecialist([current], input, { jobId: current.id });
-				if ((current.startReceipts?.length ?? 0) >= 128)
-					throw new Error("Collaboration start receipt limit reached.");
-				if (task)
-					for (const agent of input.agents)
-						this.reserve(current, agent.id, collaborationAssignment(task, agent.task), false, {
-							goalId: input.goalId,
-						});
-				current.startReceipts ??= [];
-				current.startReceipts.push({
-					key: input.id,
-					digest,
-					turns: current.agents.map((agent) => ({ agentId: agent.id, turnId: agent.turnId })),
-				});
-			});
+			const job = this.updateRecord(
+				selected.id,
+				(current) => {
+					// Peer delivery and explicit follow-ups use this same job lock. Revalidate after acquiring
+					// it so admission cannot act on a snapshot from before a concurrent reservation.
+					selectCollaborationSpecialist([current], input, { jobId: current.id });
+					if ((current.startReceipts?.length ?? 0) >= 128)
+						throw new Error("Collaboration start receipt limit reached.");
+					const owner = collaborationController(current);
+					if (owner.parentSessionId !== this.parentSessionId) {
+						if (owner.generation === Number.MAX_SAFE_INTEGER)
+							throw new Error("Collaboration controller generation exhausted.");
+						current.controller = {
+							parentSessionId: this.parentSessionId,
+							parentPid: process.pid,
+							generation: owner.generation + 1,
+						};
+					} else this.assertController(current);
+					if (task)
+						for (const agent of input.agents)
+							this.reserve(current, agent.id, collaborationAssignment(task, agent.task), false, {
+								goalId: input.goalId,
+							});
+					current.startReceipts ??= [];
+					current.startReceipts.push({
+						key: input.id,
+						parentSessionId: this.parentSessionId,
+						digest,
+						turns: current.agents.map((agent) => ({ agentId: agent.id, turnId: agent.turnId })),
+					});
+				},
+				"transfer",
+			);
+			this.observedGenerations.set(job.id, collaborationController(job).generation);
 			return { job, kind: "reuse" };
 		});
 	}
 	/** Caller holds the admission lock. Publish the complete reservation in the first durable write. */
 	private createAdmitted(input: NewCollaborationJob, task?: string, digest?: string): CollaborationJob {
+		if (input.parentSessionId !== this.parentSessionId) throw new Error("Invalid collaboration creation parent.");
 		if (this.list().length >= 32)
 			throw new Error(
 				"Collaboration job retention limit reached (32). Archive completed jobs before admitting more.",
@@ -368,6 +437,7 @@ export class CollaborationJobStore {
 		const job: CollaborationJob = {
 			...input,
 			version: 1,
+			controller: { parentSessionId: this.parentSessionId, parentPid: process.pid, generation: 1 },
 			variables: {},
 			metadata: {},
 			mailbox: { messages: [], receipts: [] },
@@ -388,14 +458,30 @@ export class CollaborationJobStore {
 				this.reserve(job, agent.id, collaborationAssignment(task, agent.task), false);
 		if (digest)
 			job.startReceipts = [
-				{ key: input.id, digest, turns: job.agents.map((agent) => ({ agentId: agent.id, turnId: agent.turnId })) },
+				{
+					key: input.id,
+					parentSessionId: this.parentSessionId,
+					digest,
+					turns: job.agents.map((agent) => ({ agentId: agent.id, turnId: agent.turnId })),
+				},
 			];
 		this.save(job);
+		this.observedGenerations.set(job.id, 1);
 		return job;
 	}
 	update(id: string, apply: (job: CollaborationJob) => void): CollaborationJob {
+		return this.updateRecord(id, apply, "controller");
+	}
+	private updateRecord(
+		id: string,
+		apply: (job: CollaborationJob) => void,
+		access: "controller" | "peer" | "transfer",
+	): CollaborationJob {
 		return withFileLockSync(this.path(id), () => {
-			const job = this.load(id);
+			const job = this.read(id);
+			if (access === "controller") this.assertController(job);
+			if (access === "peer") this.assertPeerParent(job);
+			const ownerBefore = JSON.stringify(job.controller);
 			const previous = JSON.stringify(job);
 			const receiptCount = job.startReceipts?.length ?? 0;
 			const receiptsBefore = JSON.stringify(job.startReceipts ?? []);
@@ -416,6 +502,8 @@ export class CollaborationJobStore {
 			);
 			const callerTerminalIdBefore = job.callerTerminalId;
 			apply(job);
+			if (access !== "transfer" && ownerBefore !== JSON.stringify(job.controller))
+				throw new Error("Collaboration controller can change only during specialist admission.");
 			if (JSON.stringify((job.startReceipts ?? []).slice(0, receiptCount)) !== receiptsBefore)
 				throw new Error("Collaboration accepted start receipts are immutable.");
 			if (immutableIdentity(job) !== identityBefore) throw new Error("Collaboration launch identity is immutable.");
@@ -514,9 +602,19 @@ export class CollaborationJobStore {
 			throw new Error("Collaboration sender is inactive.");
 		return sender;
 	}
+	/** The retained CLI may follow supervision only through its original authenticated job binding. */
+	getPeerParentOwnership(id: string, senderId: string, token: string): ProcessParentOwnership | undefined {
+		const job = this.read(id);
+		this.assertPeerParent(job);
+		this.authenticatePeer(job, senderId, token);
+		const owner = collaborationController(job);
+		return owner.parentPid === undefined ? undefined : { ...owner, parentPid: owner.parentPid };
+	}
 	/** Answers mint a fresh dispatch identity; workers discover it without exposing credentials. */
 	currentPeerTurn(id: string, senderId: string, token: string): { turnId: string } {
-		const sender = this.authenticatePeer(this.load(id), senderId, token);
+		const job = this.read(id);
+		this.assertPeerParent(job);
+		const sender = this.authenticatePeer(job, senderId, token);
 		if (sender.status !== "running") throw new Error("Collaboration agent has no active reportable turn.");
 		return { turnId: sender.turnId };
 	}
@@ -524,21 +622,26 @@ export class CollaborationJobStore {
 	reportTurn(id: string, request: { senderId: string; token: string; claim: unknown }): CollaborationResultClaim {
 		const claim = validateCollaborationResultClaim(request.claim);
 		let result: CollaborationResultClaim | undefined;
-		this.update(id, (job) => {
-			const sender = this.authenticatePeer(job, request.senderId, request.token);
-			if (sender.steering)
-				throw new Error("Collaboration turn has pending steering admission; late report rejected.");
-			if (sender.turnId !== claim.turnId) throw new Error("Collaboration result claim has a stale turn identity.");
-			if (sender.resultClaim) {
-				if (JSON.stringify(sender.resultClaim) !== JSON.stringify(claim))
-					throw new Error("Collaboration result claim is immutable for this turn.");
-				result = sender.resultClaim;
-				return;
-			}
-			if (sender.status !== "running") throw new Error("Collaboration agent has no active reportable turn.");
-			sender.resultClaim = claim;
-			result = claim;
-		});
+		this.updateRecord(
+			id,
+			(job) => {
+				const sender = this.authenticatePeer(job, request.senderId, request.token);
+				if (sender.steering)
+					throw new Error("Collaboration turn has pending steering admission; late report rejected.");
+				if (sender.turnId !== claim.turnId)
+					throw new Error("Collaboration result claim has a stale turn identity.");
+				if (sender.resultClaim) {
+					if (JSON.stringify(sender.resultClaim) !== JSON.stringify(claim))
+						throw new Error("Collaboration result claim is immutable for this turn.");
+					result = sender.resultClaim;
+					return;
+				}
+				if (sender.status !== "running") throw new Error("Collaboration agent has no active reportable turn.");
+				sender.resultClaim = claim;
+				result = claim;
+			},
+			"peer",
+		);
 		return result!;
 	}
 	/** Native input observers persist full choices before emitting the blocked event, never a terminal. */
@@ -547,23 +650,27 @@ export class CollaborationJobStore {
 		request: { senderId: string; token: string; requestId: string; evidence: string },
 	): CollaborationQuestionReceipt | undefined {
 		let receipt: CollaborationQuestionReceipt | undefined;
-		this.update(id, (job) => {
-			const sender = this.authenticatePeer(job, request.senderId, request.token);
-			const pending = sender.pendingQuestion;
-			if (pending?.requestId === request.requestId) {
-				if (pending.evidence !== request.evidence)
-					throw new Error("Collaboration pending question is immutable for this request.");
-			} else {
-				if (sender.status !== "running") return;
-				if (pending) throw new Error("Collaboration agent already has a pending question.");
-				sender.pendingQuestion = validateCollaborationPendingQuestion({
-					turnId: sender.turnId,
-					requestId: request.requestId,
-					evidence: request.evidence,
-				});
-			}
-			receipt = { turnId: sender.turnId, requestId: request.requestId };
-		});
+		this.updateRecord(
+			id,
+			(job) => {
+				const sender = this.authenticatePeer(job, request.senderId, request.token);
+				const pending = sender.pendingQuestion;
+				if (pending?.requestId === request.requestId) {
+					if (pending.evidence !== request.evidence)
+						throw new Error("Collaboration pending question is immutable for this request.");
+				} else {
+					if (sender.status !== "running") return;
+					if (pending) throw new Error("Collaboration agent already has a pending question.");
+					sender.pendingQuestion = validateCollaborationPendingQuestion({
+						turnId: sender.turnId,
+						requestId: request.requestId,
+						evidence: request.evidence,
+					});
+				}
+				receipt = { turnId: sender.turnId, requestId: request.requestId };
+			},
+			"peer",
+		);
 		return receipt;
 	}
 	/** A late native settlement cannot clear a successor dispatch or another question. */
@@ -572,16 +679,20 @@ export class CollaborationJobStore {
 		request: { senderId: string; token: string; receipt: CollaborationQuestionReceipt },
 	): boolean {
 		let cleared = false;
-		this.update(id, (job) => {
-			const sender = this.authenticatePeer(job, request.senderId, request.token);
-			if (
-				sender.pendingQuestion?.turnId !== request.receipt.turnId ||
-				sender.pendingQuestion?.requestId !== request.receipt.requestId
-			)
-				return;
-			delete sender.pendingQuestion;
-			cleared = true;
-		});
+		this.updateRecord(
+			id,
+			(job) => {
+				const sender = this.authenticatePeer(job, request.senderId, request.token);
+				if (
+					sender.pendingQuestion?.turnId !== request.receipt.turnId ||
+					sender.pendingQuestion?.requestId !== request.receipt.requestId
+				)
+					return;
+				delete sender.pendingQuestion;
+				cleared = true;
+			},
+			"peer",
+		);
 		return cleared;
 	}
 	/** Authentication, idempotency, capacity, and enqueue share the job's single file transaction. */
@@ -590,33 +701,37 @@ export class CollaborationJobStore {
 		const message = { senderId, recipientId, messageId, text };
 		const digest = validateCollaborationPeerMessage(message);
 		let receipt: CollaborationPeerReceipt | undefined;
-		this.update(id, (job) => {
-			this.authenticatePeer(job, senderId, token);
-			const previous = job.mailbox.receipts.find(
-				(entry) => entry.senderId === senderId && entry.messageId === messageId,
-			);
-			if (previous) {
-				if (previous.digest !== digest)
-					throw new Error("Collaboration message identity reuse has different intent.");
-				receipt = previous;
-				return;
-			}
-			const recipient = job.agents.find((agent) => agent.id === recipientId);
-			if (
-				!recipient ||
-				recipient.id === senderId ||
-				recipient.closed ||
-				recipient.stopping ||
-				!["idle", "reserved", "running", "done", "blocked"].includes(recipient.status)
-			)
-				throw new Error("Collaboration recipient is not an available peer.");
-			if (job.mailbox.messages.length >= 32) throw new Error("Collaboration peer queue limit reached (32).");
-			if (job.mailbox.receipts.length >= 128)
-				throw new Error("Collaboration peer lifetime message limit reached (128).");
-			receipt = { senderId, recipientId, messageId, digest, state: "queued" };
-			job.mailbox.messages.push(message);
-			job.mailbox.receipts.push(receipt);
-		});
+		this.updateRecord(
+			id,
+			(job) => {
+				this.authenticatePeer(job, senderId, token);
+				const previous = job.mailbox.receipts.find(
+					(entry) => entry.senderId === senderId && entry.messageId === messageId,
+				);
+				if (previous) {
+					if (previous.digest !== digest)
+						throw new Error("Collaboration message identity reuse has different intent.");
+					receipt = previous;
+					return;
+				}
+				const recipient = job.agents.find((agent) => agent.id === recipientId);
+				if (
+					!recipient ||
+					recipient.id === senderId ||
+					recipient.closed ||
+					recipient.stopping ||
+					!["idle", "reserved", "running", "done", "blocked"].includes(recipient.status)
+				)
+					throw new Error("Collaboration recipient is not an available peer.");
+				if (job.mailbox.messages.length >= 32) throw new Error("Collaboration peer queue limit reached (32).");
+				if (job.mailbox.receipts.length >= 128)
+					throw new Error("Collaboration peer lifetime message limit reached (128).");
+				receipt = { senderId, recipientId, messageId, digest, state: "queued" };
+				job.mailbox.messages.push(message);
+				job.mailbox.receipts.push(receipt);
+			},
+			"peer",
+		);
 		return receipt!;
 	}
 	/** Consuming a peer request is the ordinary turn transition, never a second dispatch/retry path. */

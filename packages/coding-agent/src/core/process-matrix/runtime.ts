@@ -86,8 +86,21 @@ export const localProcessMatrixStore: ProcessMatrixStorePort = Object.freeze({
 	writeEntryIfUnchangedSync,
 });
 
+/** An authenticated controller record supplies effective supervision, separately from launch provenance. */
+export interface ProcessParentOwnership {
+	parentPid: number;
+	parentSessionId: string;
+	generation: number;
+}
+
+export interface ProcessParentOwnershipSource {
+	read(): ProcessParentOwnership | undefined;
+	subscribe(changed: () => void, onError: (error: Error) => void): () => void;
+}
+
 export interface ProcessMatrixRuntimeConfig {
 	agentDir: string;
+	parentOwnership?: ProcessParentOwnershipSource;
 	/** Canonical logical identity for this process and any exact-session resume. */
 	agent: AgentIdentityContract;
 	settings: ResolvedProcessMatrixSettings;
@@ -672,6 +685,25 @@ async function startWorkerBranch(
 	let watchTask: Promise<void> | undefined;
 	let preserveResumableOnExit = false;
 	let stopTask: Promise<void> | undefined;
+	let ownershipGeneration = 0;
+	let ownershipPending = false;
+	let unsubscribeOwnership: (() => void) | undefined;
+	const reportOwnershipError = (error: unknown): void => {
+		try {
+			config.onDiagnostic?.(`process-matrix: parent ownership observation failed: ${describeError(error)}`);
+		} catch {
+			/* A diagnostic cannot escape an ownership event or interrupt teardown. */
+		}
+	};
+	const stopOwnershipObserver = () => {
+		const unsubscribe = unsubscribeOwnership;
+		unsubscribeOwnership = undefined;
+		try {
+			unsubscribe?.();
+		} catch (error) {
+			reportOwnershipError(error);
+		}
+	};
 	const generationStartedAt = entry.startedAt;
 	const closeOnExit = (code: number | null = null): void => {
 		if (preserveResumableOnExit) return;
@@ -687,6 +719,7 @@ async function startWorkerBranch(
 	const closeWorker = async (): Promise<void> => {
 		if (stopped) return;
 		stopped = true;
+		stopOwnershipObserver();
 		if (timer) clearInterval(timer);
 		timer = undefined;
 		if (!preserveResumableOnExit) {
@@ -758,6 +791,7 @@ async function startWorkerBranch(
 	const relinquishOwnership = (): void => {
 		if (stopped) return;
 		stopped = true;
+		stopOwnershipObserver();
 		if (timer) clearInterval(timer);
 		timer = undefined;
 		process.off("exit", closeOnExit);
@@ -839,6 +873,7 @@ async function startWorkerBranch(
 		if (watchTask) return watchTask;
 		const task = tick().finally(() => {
 			if (watchTask === task) watchTask = undefined;
+			if (ownershipPending && !stopped) scheduleOwnershipRefresh();
 		});
 		watchTask = task;
 		return task;
@@ -854,26 +889,82 @@ async function startWorkerBranch(
 		timer.unref?.();
 	};
 
-	const declaredParentIsAlive = async (): Promise<boolean> => {
+	const parentIsAlive = async (pid: number, sessionId: string | undefined): Promise<boolean> => {
 		// PID liveness alone is not process identity: a reused PID could otherwise keep a worker
 		// attached to an unrelated process forever. The parent session's own fresh master entry binds
 		// PID to a durable identity and proves that that exact session is still heartbeating.
-		if (!currentParentSessionId || !config.isProcessAlive(currentParentPid)) return false;
-		const parent = await store.readEntry(config.agentDir, buildEntryId("master", currentParentSessionId));
-		if (parent?.role !== "master" || parent.agent.resumeContext.sessionId !== currentParentSessionId) return false;
-		if (parent.pid !== currentParentPid || parent.status !== "running") return false;
+		if (!sessionId || !config.isProcessAlive(pid)) return false;
+		const parent = await store.readEntry(config.agentDir, buildEntryId("master", sessionId));
+		if (parent?.role !== "master" || parent.agent.resumeContext.sessionId !== sessionId) return false;
+		if (parent.pid !== pid || parent.status !== "running") return false;
 		const heartbeatAt = Date.parse(parent.heartbeatAt);
 		const maxAge = config.settings.heartbeatMs * 2 + config.settings.watcherPollMs;
 		return Number.isFinite(heartbeatAt) && now() - heartbeatAt <= maxAge;
 	};
 
+	const refreshParentOwnership = async (): Promise<void> => {
+		if (stopped || !config.parentOwnership) return;
+		try {
+			const owner = config.parentOwnership.read();
+			if (!owner) return;
+			if (
+				!Number.isSafeInteger(owner.generation) ||
+				owner.generation < 1 ||
+				!Number.isSafeInteger(owner.parentPid) ||
+				owner.parentPid < 1 ||
+				typeof owner.parentSessionId !== "string" ||
+				!owner.parentSessionId.trim() ||
+				owner.parentSessionId.length > 512
+			)
+				throw new Error("Invalid effective parent ownership.");
+			const sameParent = owner.parentPid === currentParentPid && owner.parentSessionId === currentParentSessionId;
+			if (owner.generation < ownershipGeneration || (owner.generation === ownershipGeneration && !sameParent))
+				return;
+			if (sameParent) {
+				ownershipGeneration = owner.generation;
+				return;
+			}
+			if (!(await parentIsAlive(owner.parentPid, owner.parentSessionId)) || stopped) return;
+			const fresh = await store.readEntry(config.agentDir, entry.entryId);
+			if (stopped) return;
+			const owned = acceptOwnedRecord(fresh);
+			if (!owned || owned.status === "closed" || owned.windDownReason === "user_cleanup") return;
+			if (!(await persist(owned, applyAdoption(owned, owner), "failed to transfer worker supervision"))) return;
+			currentParentPid = owner.parentPid;
+			currentParentSessionId = owner.parentSessionId;
+			ownershipGeneration = owner.generation;
+			if (preserveResumableOnExit) {
+				preserveResumableOnExit = false;
+				if (timer) clearInterval(timer);
+				timer = undefined;
+				startHealthyWatch();
+			}
+		} catch (error) {
+			reportOwnershipError(error);
+		}
+	};
+
+	const scheduleOwnershipRefresh = (): void => {
+		if (stopped) return;
+		ownershipPending = true;
+		if (watchTask) return;
+		void runWatchTick(async () => {
+			while (ownershipPending && !stopped) {
+				ownershipPending = false;
+				await refreshParentOwnership();
+			}
+		}).catch(reportOwnershipError);
+	};
+
 	const healthyTick = async (): Promise<void> => {
 		if (stopped) return;
-		const parentIsAlive = await declaredParentIsAlive();
+		await refreshParentOwnership();
+		if (stopped) return;
+		const alive = await parentIsAlive(currentParentPid, currentParentSessionId);
 		// The liveness read is asynchronous; `stop()` may have completed while it was outstanding, and
 		// its verdict describes a lifecycle this tick no longer owns.
 		if (stopped) return;
-		if (!parentIsAlive) {
+		if (!alive) {
 			await enterWindDown();
 			return;
 		}
@@ -915,6 +1006,8 @@ async function startWorkerBranch(
 
 	const graceTick = async (graceDeadline: number): Promise<void> => {
 		if (stopped) return;
+		await refreshParentOwnership();
+		if (stopped || !preserveResumableOnExit) return;
 		const fresh = await store.readEntry(config.agentDir, entry.entryId);
 		// A stop that completed while this read was outstanding ends the grace window: neither an
 		// adoption nor a grace expiry may re-arm a timer, notify, or request exit after it.
@@ -961,6 +1054,12 @@ async function startWorkerBranch(
 		}
 	};
 
+	try {
+		unsubscribeOwnership = config.parentOwnership?.subscribe(scheduleOwnershipRefresh, reportOwnershipError);
+	} catch (error) {
+		reportOwnershipError(error);
+	}
+	await runWatchTick(refreshParentOwnership);
 	startHealthyWatch();
 
 	return { stop, waitForIdle };

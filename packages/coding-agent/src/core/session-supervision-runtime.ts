@@ -1,5 +1,6 @@
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeResource } from "./agent-session-runtime.ts";
+import { createCollaborationPeerContext } from "./collaboration/peer-context.ts";
 import { isGoalExecutionActive } from "./goals/goal-state.ts";
 import { createAgentIdentity } from "./orchestration/agent-resume.ts";
 import type { ResumablePayload } from "./process-matrix/codes.ts";
@@ -105,6 +106,7 @@ export class SessionSupervisionRuntime implements AgentSessionRuntimeResource {
 			Promise.resolve().then(() =>
 				startProcessMatrixRuntime({
 					agentDir: this.options.agentDir,
+					parentOwnership: createCollaborationPeerContext()?.parentOwnership,
 					agent,
 					...(taskRef ? { taskRef } : {}),
 					taskSummary: goal?.userGoal,

@@ -1,4 +1,7 @@
-import { isAbsolute } from "node:path";
+import { watch } from "node:fs";
+import { basename, isAbsolute } from "node:path";
+import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
+import type { ProcessParentOwnershipSource } from "../process-matrix/runtime.ts";
 import { CollaborationJobStore } from "./job-store.ts";
 import type { CollaborationQuestionReceipt } from "./result-claim.ts";
 
@@ -24,7 +27,22 @@ export function createCollaborationPeerContext(env: NodeJS.ProcessEnv = process.
 	)
 		throw new Error("Missing or invalid collaboration peer launch context.");
 	const store = new CollaborationJobStore(directory, parent);
+	const parentOwnership: ProcessParentOwnershipSource = {
+		read: () => store.getPeerParentOwnership(jobId, senderId, token),
+		subscribe: (changed, onError) => {
+			const file = basename(store.path(jobId));
+			const watcher = watch(canonicalizeWatchDir(directory), { persistent: false }, (_event, name) => {
+				if (name === null || name.toString() === file) changed();
+			});
+			watcher.on("error", (error) => {
+				watcher.close();
+				onError(error);
+			});
+			return () => watcher.close();
+		},
+	};
 	return {
+		parentOwnership,
 		current: () => store.currentPeerTurn(jobId, senderId, token),
 		send: (recipientId: string, messageId: string, text: string) =>
 			store.enqueuePeerMessage(jobId, { senderId, token, recipientId, messageId, text }),
