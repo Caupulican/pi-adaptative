@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { WorkerDirectoryAdmission } from "../delegation/worker-directory-admission.ts";
 import type { ManagedLaneEvent } from "../extensions/types.ts";
 import { type CollaborationBackend, CollaborationBackendError, type CollaborationPane } from "./backend.ts";
@@ -180,12 +181,15 @@ export class CollaborationCoordinator {
 	private readonly deps: CollaborationCoordinatorDeps;
 	private disposed = false;
 	private readonly directories = new WorkerDirectoryAdmission();
+	private readonly pendingAdmissions = new Map<string, { controller: AbortController; agents: ReadonlySet<string> }>();
 	constructor(deps: CollaborationCoordinatorDeps) {
 		this.deps = deps;
 	}
 	/** Native sessions and admitted finite helpers survive a parent reload; its callbacks do not. */
 	dispose(): void {
 		this.disposed = true;
+		for (const pending of this.pendingAdmissions.values())
+			pending.controller.abort(new Error("Collaboration coordinator is disposed."));
 	}
 	private assertActive(signal?: AbortSignal): void {
 		signal?.throwIfAborted();
@@ -229,6 +233,39 @@ export class CollaborationCoordinator {
 		intent: CollaborationStartIntent = {},
 	): Promise<CollaborationJob> {
 		this.assertActive(signal);
+		if (this.pendingAdmissions.has(input.id)) throw new Error("Collaboration launch admission is already pending.");
+		const pending = { controller: new AbortController(), agents: new Set(input.agents.map((agent) => agent.id)) };
+		this.pendingAdmissions.set(input.id, pending);
+		try {
+			return await this.launchAdmitted(
+				input,
+				task,
+				signal ? AbortSignal.any([signal, pending.controller.signal]) : pending.controller.signal,
+				intent,
+			);
+		} finally {
+			if (this.pendingAdmissions.get(input.id) === pending) this.pendingAdmissions.delete(input.id);
+		}
+	}
+	/** Cancellation before admission creates no durable task and proves no native resource closure. */
+	stopPendingAdmission(jobId: string, agentId?: string, dryRun = false): boolean {
+		const pending = this.pendingAdmissions.get(jobId);
+		if (
+			!pending ||
+			(agentId !== undefined && !pending.agents.has(agentId)) ||
+			existsSync(this.deps.store.path(jobId))
+		)
+			return false;
+		if (!dryRun) pending.controller.abort(new Error("Collaboration launch stopped during admission."));
+		return true;
+	}
+	private async launchAdmitted(
+		input: NewCollaborationJob,
+		task: string | undefined,
+		signal: AbortSignal,
+		intent: CollaborationStartIntent,
+	): Promise<CollaborationJob> {
+		this.assertActive(signal);
 		if (task && input.agents.length > 1) {
 			const tasks = input.agents.map((agent) => agent.task?.trim());
 			if (tasks.some((responsibility) => !responsibility) || new Set(tasks).size !== tasks.length)
@@ -247,6 +284,10 @@ export class CollaborationCoordinator {
 		);
 		const store = this.deps.store;
 		this.refresh();
+		this.assertActive(signal);
+		// No asynchronous gap between ending preflight ownership and durable admission. Stops after
+		// this point use the store's acquisition/turn fences, never the transient launch intent.
+		this.pendingAdmissions.delete(input.id);
 		const admission = store.admit(peers.job, task, intent);
 		if (admission.kind === "replay") return admission.job;
 		if (admission.kind === "reuse") return this.resumeTeam(admission.job, !!task, signal);
@@ -632,11 +673,13 @@ export class CollaborationCoordinator {
 		});
 	}
 	async stopAgent(jobId: string, agentId: string, turnId?: string, failure?: string): Promise<boolean> {
+		if (turnId === undefined && this.stopPendingAdmission(jobId, agentId)) return false;
 		const stopped = await stopCollaborationAgent(this.deps.store, this.deps.backend, jobId, agentId, turnId, failure);
 		this.refresh();
 		return stopped;
 	}
 	async stop(jobId: string, dismiss = false): Promise<void> {
+		if (this.stopPendingAdmission(jobId)) return;
 		const store = this.deps.store;
 		const job = store.load(jobId);
 		if (dismiss) store.dismiss(jobId);

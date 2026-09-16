@@ -558,6 +558,12 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 					readyJobs.add(launched.id);
 					details = { job: launched };
 				}
+			} else if (
+				params.jobId &&
+				["stop_job", "stop_session", "dismiss"].includes(action) &&
+				coordinator.stopPendingAdmission(params.jobId, undefined, params.dryRun === true)
+			) {
+				details = { jobId: params.jobId, dryRun: params.dryRun === true, pendingAdmission: true };
 			} else {
 				let job: CollaborationJob | undefined;
 				if (params.jobId) {
