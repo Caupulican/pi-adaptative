@@ -1,11 +1,15 @@
+import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { BackgroundLaneController, type BackgroundLaneControllerDeps } from "../src/core/background-lane-controller.ts";
+import { WorkerAgentControlCoordinator } from "../src/core/delegation/worker-agent-control-coordinator.ts";
 import { WorkerDispatchScheduler } from "../src/core/delegation/worker-dispatch-scheduler.ts";
+import { createLocalWorkerProcessOwnerId, isLocalProcessAlive } from "../src/core/delegation/worker-process-owner.ts";
 import { getInFlightWorkUnits, resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import {
@@ -161,7 +165,13 @@ describe("queued-worker quiesce visibility", () => {
 		const controller = new BackgroundLaneController(buildQueuingDeps(agentDir, { local: false, maxConcurrent: 1 }));
 
 		const first = await controller.startWorkerDelegation({ instructions: "first remote worker" });
-		const second = await controller.startWorkerDelegation({ instructions: "second remote worker" });
+		const second = await controller.startWorkerDelegation({
+			instructions: "second remote worker",
+			parallelWork: {
+				independentOf: [],
+				justification: "Exercise two independent workers at the scheduler ceiling.",
+			},
+		});
 
 		expect(first).toMatchObject({ started: true, record: { status: "running" } });
 		expect(second).toMatchObject({ started: true, record: { status: "queued" } });
@@ -178,7 +188,16 @@ describe("queued-worker quiesce visibility", () => {
 		const running = Promise.withResolvers<void>();
 		const deps = buildQueuingDeps(agentDir, { onRun: running.resolve });
 		const first = new BackgroundLaneController(deps);
-		const started = await first.startWorkerDelegation({ instructions: "survive restart" });
+		const exited = spawnSync(process.execPath, ["-p", "process.pid"], { encoding: "utf8" });
+		expect(exited.status).toBe(0);
+		const pid = Number(exited.stdout.trim());
+		expect(isLocalProcessAlive(pid)).toBe(false);
+		const identity = vi
+			.spyOn(WorkerAgentControlCoordinator.prototype, "getProcessOwnerId")
+			.mockReturnValue(createLocalWorkerProcessOwnerId(pid, randomUUID()));
+		const started = await first
+			.startWorkerDelegation({ instructions: "survive restart" })
+			.finally(() => identity.mockRestore());
 		expect(started).toMatchObject({ started: true, record: { status: "queued" } });
 
 		// A real process restart drops the in-memory quiesce registry and controller instance while

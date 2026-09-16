@@ -194,30 +194,46 @@ describe("delegate exact-action input corrections", () => {
 			undefined,
 		);
 	});
-	it.each([true, false])("rejects readOnly=%s changes when reusing a persistent worker", async (readOnly) => {
-		const startWorkerAgentTask = vi.fn(() => ({ started: true, steering: false as const, messageId: "turn-1" }));
-		const tool = createDelegateToolDefinition({
-			caller: { kind: "session_root" },
-			resolveMessageReplayScope: fixedReplayScope,
-			runWorkerDelegation: async () => ({ started: false }),
-			workerAgentControl: workerAgentControl({ startWorkerAgentTask }),
-		});
-		const result = await tool.execute(
-			"reuse",
-			{
-				action: "start",
-				agentId: "worker",
+	it.each([true, false])(
+		"forwards readOnly=%s reuse validation and reports the host's incompatibility",
+		async (readOnly) => {
+			const startWorkerAgentTask = vi.fn(() => ({ started: true, steering: false as const, messageId: "turn-1" }));
+			const runWorkerDelegation = vi.fn(async () => ({
+				started: false,
+				skipReason: "worker_reuse_overrides_incompatible",
+			}));
+			const tool = createDelegateToolDefinition({
+				caller: { kind: "session_root" },
+				resolveMessageReplayScope: fixedReplayScope,
+				runWorkerDelegation,
+				workerAgentControl: workerAgentControl({ startWorkerAgentTask }),
+			});
+			const result = await tool.execute(
+				"reuse",
+				{
+					action: "start",
+					agentId: "worker",
+					instructions: "Continue.",
+					readOnly,
+				},
+				undefined,
+				undefined,
+				context,
+			);
+			expect(runWorkerDelegation).toHaveBeenCalledExactlyOnceWith({
 				instructions: "Continue.",
-				readOnly,
-			},
-			undefined,
-			undefined,
-			context,
-		);
-		expect(result).toMatchObject({ isError: true, details: { skipReason: "worker_reuse_overrides_forbidden" } });
-		expect(delegateText(result)).toContain("readOnly");
-		expect(startWorkerAgentTask).not.toHaveBeenCalled();
-	});
+				reuseAgentId: "worker",
+				authority: { readOnly },
+				messageReplayKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/),
+			});
+			expect(result).toMatchObject({
+				isError: true,
+				details: { skipReason: "worker_reuse_overrides_incompatible" },
+			});
+			expect(delegateText(result)).toContain("different work");
+			expect(startWorkerAgentTask).not.toHaveBeenCalled();
+		},
+	);
 	it.each([
 		{ action: "wait_many", agentIds: ["worker"] },
 		{ action: "wait_many", mode: "all" },
@@ -636,7 +652,13 @@ describe("delegate exact-action input corrections", () => {
 			context,
 		);
 
-		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "Audit the failing lane" }, undefined);
+		expect(startWorkerDelegation).toHaveBeenCalledWith(
+			{
+				instructions: "Audit the failing lane",
+				messageReplayKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/),
+			},
+			undefined,
+		);
 		expect(result.details).toMatchObject({ started: true });
 	});
 

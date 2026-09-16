@@ -9,6 +9,7 @@ import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker
 import { WorkerActionJournal } from "../src/core/delegation/worker-action-journal.ts";
 import { resolveWorkerAuthority } from "../src/core/delegation/worker-authority-resolver.ts";
 import { WorkerConversation, WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
+import type { WorkerDelegationRequest } from "../src/core/delegation/worker-delegation-request.ts";
 import { WorkerDirectoryAdmission } from "../src/core/delegation/worker-directory-admission.ts";
 import {
 	buildWorkerExecutionPlan,
@@ -327,7 +328,11 @@ describe("AgentSession worker delegation", () => {
 			);
 
 			const firstRun = harness.session.runWorkerDelegationOnce({ instructions: "First", profileId: "worker-a" });
-			const secondRun = harness.session.runWorkerDelegationOnce({ instructions: "Second", profileId: "worker-b" });
+			const secondRun = harness.session.runWorkerDelegationOnce({
+				instructions: "Second",
+				profileId: "worker-b",
+				parallelWork: { independentOf: [], justification: "Exercise concurrent execution of equivalent profiles." },
+			});
 			await bothStarted.promise;
 			expect(
 				harness.session
@@ -1162,7 +1167,7 @@ describe("AgentSession worker delegation", () => {
 			const controls = (
 				harness.session as unknown as {
 					_backgroundLanes: {
-						startWorkerDelegation(request: { instructions: string; authority?: { path?: string } }): Promise<{
+						startWorkerDelegation(request: WorkerDelegationRequest): Promise<{
 							started: boolean;
 							skipReason?: string;
 						}>;
@@ -1182,6 +1187,10 @@ describe("AgentSession worker delegation", () => {
 				await controls.startWorkerDelegation({
 					instructions: "Second scoped write",
 					authority: { path: workspace },
+					parallelWork: {
+						independentOf: [],
+						justification: "Exercise serialization of independent write workers.",
+					},
 				}),
 			).toMatchObject({
 				started: true,
@@ -1393,7 +1402,10 @@ describe("AgentSession worker delegation", () => {
 					fauxAssistantMessage(
 						[
 							fauxToolCall("delegate", { instructions: "Scout first" }),
-							fauxToolCall("delegate", { instructions: "Scout second" }),
+							fauxToolCall("delegate", {
+								instructions: "Scout second",
+								parallelWork: { independentOf: [], justification: "Exercise two independent queued scouts." },
+							}),
 						],
 						{ stopReason: "toolUse" },
 					),
@@ -1479,7 +1491,13 @@ describe("AgentSession worker delegation", () => {
 					fauxAssistantMessage(
 						[
 							fauxToolCall("delegate", { instructions: "First queued-profile worker" }),
-							fauxToolCall("delegate", { instructions: "Second queued-profile worker" }),
+							fauxToolCall("delegate", {
+								instructions: "Second queued-profile worker",
+								parallelWork: {
+									independentOf: [],
+									justification: "Exercise a separate queued execution contract.",
+								},
+							}),
 						],
 						{ stopReason: "toolUse" },
 					),

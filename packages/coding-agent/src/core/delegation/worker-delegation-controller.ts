@@ -132,6 +132,7 @@ import {
 	WorkerProfileResolver,
 } from "./worker-profile-resolver.ts";
 import { type WorkerProjectAdmission, WorkerProjectDirectory } from "./worker-project-directory.ts";
+import { assertQueuedWorkerContextRecoverable } from "./worker-queued-context-recovery.ts";
 import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./worker-recovery-coordinator.ts";
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
@@ -504,6 +505,7 @@ export class WorkerDelegationController {
 	}
 
 	private cancelScheduledWorker(laneId: string, reasonCode: string): void {
+		if (!this.ownsProjectLane(laneId)) return;
 		try {
 			this.writeReservations.release(laneId);
 		} catch (error) {
@@ -597,6 +599,7 @@ export class WorkerDelegationController {
 		}
 		for (const record of records) {
 			if (record.status !== "queued" && record.status !== "running") continue;
+			if (!this.ownsProjectLane(record.laneId)) continue;
 			const ledger = this.inFlightLedgers.get(record.laneId);
 			if (ledger && suspendedAttemptIds.has(ledger.handle.attemptId)) {
 				this.inFlightLedgers.delete(record.laneId);
@@ -1351,6 +1354,7 @@ export class WorkerDelegationController {
 	 * the attempt-id publication fence above.
 	 */
 	private cancelAndPublish(lifecycle: WorkerLifecycle, laneId: string, reasonCode: string): LaneRecord | undefined {
+		if (!this.ownsProjectLane(laneId)) return undefined;
 		const record = lifecycle.cancel(laneId, reasonCode);
 		if (record) this.publishTerminalRecord(record);
 		if (record && !this.deps.isDisposed()) this.scheduler.drain();
@@ -2170,10 +2174,38 @@ export class WorkerDelegationController {
 			...options,
 			specializationKey: binding.specializationKey,
 			owner: { parentSessionId: this.deps.getSessionId(), incarnation: this.agentControl.getProcessOwnerId() },
+			assertQueuedRecovery: (ownership) =>
+				assertQueuedWorkerContextRecoverable(
+					ownership,
+					this.deps.getSessionId(),
+					agent,
+					this.lifecycle.getTaskRuntimeSnapshot(),
+				),
 		});
 		const claim = claimed.getProjectClaim()!;
 		this.projectClaims.set(agent.resumeContext.sessionId, claim);
 		return claim;
+	}
+
+	/** Observing another controller's durable queue never grants cancellation authority over it. */
+	private ownsProjectLane(laneId: string): boolean {
+		const attempt = this.lifecycle.getActiveAttempt(laneId);
+		const agent = this.lifecycle.getAgent(attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? laneId);
+		if (!agent) return true;
+		try {
+			const binding = this.conversations.getProjectContextBinding({
+				agentDir: this.deps.getAgentDir(),
+				resumeContext: agent.resumeContext,
+				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+			});
+			return (
+				!binding ||
+				(binding.ownership.state === "busy" &&
+					isDeepStrictEqual(binding.ownership.claim, this.projectClaims.get(agent.resumeContext.sessionId)))
+			);
+		} catch {
+			return false;
+		}
 	}
 
 	/** Did the caller explicitly, justifiably ask for an independent copy? */

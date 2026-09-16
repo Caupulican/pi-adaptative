@@ -828,6 +828,10 @@ describe("Herdr panel orchestration", () => {
 				action: "fire_task",
 				placement: "managed-workspace",
 				task: "Release secure production patch",
+				parallelWork: {
+					independent: true,
+					justification: "Exercise prompt composition for a separate active team.",
+				},
 				agents: [
 					{
 						provider: "agy",
@@ -1599,11 +1603,21 @@ describe("Herdr panel orchestration", () => {
 		}));
 
 		await expect(
-			coordinator.launch({
-				...job,
-				id: "job-caller-term-2",
-				callerTerminalId: "term-caller-initial",
-			}),
+			coordinator.launch(
+				{
+					...job,
+					id: "job-caller-term-2",
+					callerTerminalId: "term-caller-initial",
+				},
+				undefined,
+				undefined,
+				{
+					parallelWork: {
+						independent: true,
+						justification: "Exercise caller admission before creating another pane.",
+					},
+				},
+			),
 		).rejects.toThrow("Caller terminal handle changed; refusing to mutate shared session.");
 
 		await rm(root, { recursive: true, force: true });

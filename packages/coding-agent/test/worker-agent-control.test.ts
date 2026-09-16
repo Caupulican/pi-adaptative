@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -631,7 +631,7 @@ describe("WorkerAgentMailbox", () => {
 		expect(() => mailbox.pending()).toThrow("delivery timestamp predates creation");
 	});
 
-	it("does not read a durable mailbox file beyond its byte bound", () => {
+	it("rejects an oversized mailbox storage frame before JSON parsing", () => {
 		const agentDir = root();
 		const mailbox = new WorkerAgentMailbox({ agentDir, parentSessionId: "parent-1", agentId: "agent-1" });
 		mailbox.enqueue({ kind: "follow_up", content: "bounded" });
@@ -640,9 +640,14 @@ describe("WorkerAgentMailbox", () => {
 		if (!sessionEntry) throw new Error("test mailbox state missing");
 		const [entry] = readdirSync(join(mailboxDir, sessionEntry, "worker-mailboxes"));
 		if (!entry) throw new Error("test mailbox state missing");
-		writeFileSync(join(mailboxDir, sessionEntry, "worker-mailboxes", entry), "x".repeat(176 * 1024 + 1));
-
-		expect(() => mailbox.pending()).toThrow("durable size bound");
+		const file = join(mailboxDir, sessionEntry, "worker-mailboxes", entry);
+		writeFileSync(file, "x");
+		// Below the framing ceiling, malformed JSON reaches the parser.
+		expect(() => mailbox.pending()).toThrow(SyntaxError);
+		// A sparse file exceeds the 64 MiB framing ceiling without allocating its payload.
+		// The smaller decoded mailbox budget is tested separately above.
+		truncateSync(file, 64 * 1024 * 1024 + 1);
+		expect(() => mailbox.pending()).toThrow("Worker mailbox record exceeds its byte limit");
 	});
 
 	it("does not turn delivered history into a lifetime message limit", () => {

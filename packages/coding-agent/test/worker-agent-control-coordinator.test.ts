@@ -2061,9 +2061,17 @@ describe("WorkerAgentControlCoordinator", () => {
 				dependsOnTaskIds: ["dependency-b", "dependency-a"],
 			}),
 		).toThrow("durable task dependencies");
-		expect(() =>
+		expect(
 			coordinator.startWorkerAgentTask("agent-2", "first task", { idempotencyKey: "host-start-call-1" }),
-		).toThrow("already accepted by logical worker 'agent-1'");
+		).toEqual({
+			started: false,
+			steering: false,
+			messageId: "",
+			skipReason: "worker_task_replay_target_conflict",
+		});
+		expect(
+			new WorkerAgentMailbox({ agentDir, parentSessionId: "parent-atomic-start", agentId: "agent-2" }).pending(),
+		).toEqual([]);
 		expect(
 			coordinator.startWorkerAgentTask("agent-1", "competing task", { idempotencyKey: "host-start-call-2" }),
 		).toMatchObject({

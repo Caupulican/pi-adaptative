@@ -2054,7 +2054,12 @@ export class WorkerConversationStore {
 
 	/** Caller has positively admitted the specialization; transfer and writes share the transcript lock. */
 	claimProjectContext(
-		options: OpenWorkerConversationOptions & { owner: SpecialistContextOwner; specializationKey: string },
+		options: OpenWorkerConversationOptions & {
+			owner: SpecialistContextOwner;
+			specializationKey: string;
+			/** Host proof is re-read under the ownership lock, before either release or transfer. */
+			assertQueuedRecovery?: (ownership: SpecialistContextOwnership) => void;
+		},
 	): WorkerConversation {
 		const context = options.resumeContext;
 		if (!context.sessionFile || !/^[a-f0-9]{64}$/.test(options.specializationKey))
@@ -2088,8 +2093,13 @@ export class WorkerConversationStore {
 						throw new Error("Worker project specialization changed.");
 					if (!metadata.projectContext && metadata.parentSessionId !== options.owner.parentSessionId)
 						throw new Error("Cannot enroll a foreign worker history.");
-					const ownership = metadata.projectContext
-						? acquireSpecialistContext(metadata.projectContext.ownership, options.owner)
+					let previousOwnership = metadata.projectContext?.ownership;
+					if (previousOwnership?.state === "busy" && options.assertQueuedRecovery) {
+						options.assertQueuedRecovery(normalizeSpecialistContextOwnership(previousOwnership));
+						previousOwnership = releaseSpecialistContext(previousOwnership, previousOwnership.claim);
+					}
+					const ownership = previousOwnership
+						? acquireSpecialistContext(previousOwnership, options.owner)
 						: createSpecialistContextOwnership(options.owner);
 					bindWorkerMailboxRecord(
 						mailbox,

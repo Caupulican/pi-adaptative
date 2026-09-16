@@ -56,6 +56,7 @@ it("rejects stale reports after an answer and discovers the new exact identity w
 	const f = await runningReport();
 	runCollaborationPeer(["report", f.agent.turnId, "blocked", "Which branch?"], f.env);
 	f.store.finishTurn("claims", f.agent.id, f.agent.turnId, "blocked", "Which branch?");
+	await f.execute({ action: "list_jobs" });
 	const answered = f.store.reserveTurn("claims", f.agent.id, "Use feature", true);
 	expect(answered.resultClaim).toBeUndefined();
 	expect(() => runCollaborationPeer(["current"], f.env)).toThrow(/active/);

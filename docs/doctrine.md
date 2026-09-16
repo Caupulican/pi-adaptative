@@ -185,7 +185,11 @@ for `inspect`, versioned `repair` with `versionToken`, and session-wide `exclude
 from 280 to 305 for narrow toolkit selectors (`toolkitScript`, `toolkitArgs`) and then 333
 (323 measured tokens, retaining 10 tokens of headroom) for the six literal `edgeClass` values.
 The latter adds exactly 28 tokens; schema annotations are already removed and unions compacted,
-so retaining those validation values is deliberate. Live provider projection measures 5,059 total schema tokens against an aggregate ceiling
+so retaining those validation values is deliberate. Explicit independent specialist work adds the
+`delegate.parallelWork` object: its projected field costs at most 75 tokens, measured separately
+from the unchanged 875-token ceiling for the prior delegate surface. The 4,500-token combined
+base-tool ceiling stays fixed. This is a deliberate new control for mandatory specialist reuse;
+it does not permit unrelated description growth. Live provider projection measures 5,059 total schema tokens against an aggregate ceiling
 of 5,570 (4,500 base + 350 task_directory + 720 task_automation), while core tools excluding automation
 and directory measure 4,246 tokens, strictly under the unchanged 4,500 base limit. The additions address
 reproduced wrong-directory execution and safe task automation without widening worker grants or introducing
@@ -466,8 +470,13 @@ git (`repo_read`, capability `repo.read`) natively, so `readOnly: true` — whic
 process, network and service authority — still leaves a worker able to search files and read
 repository history. `repo_read` runs git with an argv allow-list: no shell, no hooks, pager or diff
 drivers, only output-shaping options, pathspecs and object paths inside its directory, credential
-files model-blind like `read`. Prose cannot narrow a grant. Persistent reuse retains its existing grant and rejects
-authority overrides. Status exposes only validated permission names bound to the selected
+files model-blind like `read`. Prose cannot narrow a grant. Persistent reuse retains its existing grant.
+Named starts route their complete options, including `readOnly`, through host admission: equivalent
+compiled options may select that specialist, while changed authority is refused before dispatch.
+The tool must not preempt that decision or silently discard options. Compatible idle specialists
+are reused automatically; independent parallel identities require an explicit justification.
+One tool-call replay key identifies the same admitted task across branch-leaf changes.
+Status exposes only validated permission names bound to the selected
 attempt, never permission guesses or raw resource grants. Inspection pages omit opaque provider
 replay signatures before output sizing; raw replay remains exact and both input and output are
 bounded. Unsupported status selectors refuse instead of expanding the selection.
@@ -704,6 +713,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-16 | Specialist reuse admission compares compiled options at the host, including named read-only requests; replay identity survives branch-leaf changes. The new explicit parallel-work field receives a separate 75-token allowance while the old 875-token delegate surface and aggregate base-tool ceiling remain fixed. |
 | 2026-09-15 | Read miss locates via `filesystem.file.exists`; write-create is a separate kind and is not loaded from that observation. Phone filesystem workflow asserts locate evidence, not create teaching. |
 | 2026-09-13 | CI follow-up: memory shares final prompt capacity; persona framing cannot consume the unbudgeted preference allowance; reload deduplicates unchanged drift notices. Transcript fixtures explicitly select empty grants while default-authority tests exercise YOLO. The closed goal edge vocabulary adds 28 schema tokens; the aggregate ceiling stays fixed. |
 | 2026-09-13 | Omitted edge policy grants YOLO execution across registered classes; explicit restricted policies retain their meaning. The edge contract fixtures select restricted mode explicitly, and dedicated regressions prove default grants, worker intersections, reload/compaction, and diagnostic recovery from unreadable policies. |

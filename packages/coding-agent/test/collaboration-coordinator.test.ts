@@ -137,9 +137,10 @@ it("a deadline stop is fenced to one exact turn and leaves other peers running",
 	);
 	expect(f.closeWorkspace).not.toHaveBeenCalled();
 	expect(f.store.load("team").agents[1].status).toBe("reserved");
-	expect(f.report).toHaveBeenCalledExactlyOnceWith(
-		expect.objectContaining({ laneId: "collaboration:team:one", status: "stopped" }),
-	);
+	expect(f.report.mock.calls.map(([event]) => event)).toEqual([
+		expect.objectContaining({ laneId: "collaboration:team:one", phase: "terminal", status: "stopped" }),
+		expect.objectContaining({ laneId: "collaboration:team:one", phase: "lifecycle", agentLifecycle: "retired" }),
+	]);
 });
 
 it("failed cleanup never publishes a stopped worker and blocks new prompts until recovery", async () => {
@@ -150,7 +151,7 @@ it("failed cleanup never publishes a stopped worker and blocks new prompts until
 	expect(f.report).not.toHaveBeenCalled();
 	expect(() => f.store.reserveTurn("team", "one", "must not race cleanup")).toThrow(/pending|stopping/);
 	await f.coordinator.stopAgent("team", "one", f.one.turnId);
-	expect(f.report).toHaveBeenCalledTimes(1);
+	expect(f.report.mock.calls.map(([event]) => event.phase)).toEqual(["terminal", "lifecycle"]);
 });
 
 it("does not stop a replacement pane occupant", async () => {
@@ -198,9 +199,15 @@ it("the helper stop owner persists proof without acknowledging or publishing the
 	expect(f.report).not.toHaveBeenCalled();
 	expect(f.store.load("team").agents[0]).toMatchObject({ status: "failed", notifiedTurn: 0, closed: true });
 	f.coordinator.refresh();
-	expect(f.report).toHaveBeenCalledExactlyOnceWith(
-		expect.objectContaining({ status: "failed", summary: "helper exited", dispatchSequence: f.one.turn }),
-	);
+	expect(f.report.mock.calls.map(([event]) => event)).toEqual([
+		expect.objectContaining({
+			phase: "terminal",
+			status: "failed",
+			summary: "helper exited",
+			dispatchSequence: f.one.turn,
+		}),
+		expect.objectContaining({ phase: "lifecycle", agentLifecycle: "retired", dispatchSequence: f.one.turn }),
+	]);
 });
 
 it("passes the immutable structured executable to native agent startup", async () => {

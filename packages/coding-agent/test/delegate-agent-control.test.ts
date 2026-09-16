@@ -133,6 +133,7 @@ describe("delegate logical-agent controls", () => {
 		expect(startWorkerDelegation).toHaveBeenCalledWith(
 			{
 				instructions: "consume both",
+				messageReplayKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/),
 				taskContext: {
 					requirementIds: [],
 					dependsOnTaskIds: ["prerequisite-a", "prerequisite-b"],
@@ -152,10 +153,10 @@ describe("delegate logical-agent controls", () => {
 		);
 	});
 
-	it("rejects every fresh-profile override on persistent worker reuse before dispatch", async () => {
-		const startWorkerDelegation = vi.fn(() => ({
-			started: true as const,
-			record: { laneId: "fresh", type: "worker" as const, status: "queued" as const },
+	it("validates every explicit reuse option through host admission and reports incompatibility", async () => {
+		const startWorkerDelegation = vi.fn((_request: WorkerDelegationRequest) => ({
+			started: false as const,
+			skipReason: "worker_reuse_overrides_incompatible",
 		}));
 		const startWorkerAgentTask = vi.fn(() => ({
 			started: true,
@@ -177,7 +178,14 @@ describe("delegate logical-agent controls", () => {
 			undefined,
 			context,
 		);
-		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "inherit one", forkTurns: "1" }, undefined);
+		expect(startWorkerDelegation).toHaveBeenCalledWith(
+			{
+				instructions: "inherit one",
+				forkTurns: "1",
+				messageReplayKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/),
+			},
+			undefined,
+		);
 		type DelegateStartOverride = Pick<
 			DelegateToolInput,
 			"model" | "path" | "toolNames" | "profileId" | "forkTurns"
@@ -204,9 +212,21 @@ describe("delegate logical-agent controls", () => {
 				started: false,
 				action: "start",
 				agentId: "worker-1",
-				skipReason: "worker_reuse_overrides_forbidden",
+				skipReason: "worker_reuse_overrides_incompatible",
 			});
-			expect(delegateText(reuse)).toContain("start a fresh worker without agentId");
+			const { profileId, forkTurns, ...authority } = override as DelegateStartOverride;
+			expect(startWorkerDelegation).toHaveBeenLastCalledWith(
+				{
+					instructions: "continue",
+					reuseAgentId: "worker-1",
+					messageReplayKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/),
+					...(profileId ? { profileId } : {}),
+					...(forkTurns ? { forkTurns } : {}),
+					...(Object.keys(authority).length ? { authority } : {}),
+				},
+				undefined,
+			);
+			expect(delegateText(reuse)).toContain("start without agentId");
 		}
 		expect(startWorkerAgentTask).not.toHaveBeenCalled();
 	});
@@ -1374,7 +1394,7 @@ describe("delegate wait and status", () => {
 });
 
 describe("delegate persistent worker reuse", () => {
-	it("uses one leaf-scoped host key for exact start replay and a distinct key on a new leaf", async () => {
+	it("keeps start replay stable across leaf changes and separates distinct tool calls", async () => {
 		let leafId = "leaf-a";
 		const replayContext = {
 			sessionManager: {
@@ -1427,16 +1447,19 @@ describe("delegate persistent worker reuse", () => {
 		const replay = await tool.execute("reused-tool-call", input, undefined, undefined, replayContext);
 		leafId = "leaf-b";
 		const nextLeaf = await tool.execute("reused-tool-call", input, undefined, undefined, replayContext);
+		const nextCall = await tool.execute("new-tool-call", input, undefined, undefined, replayContext);
 
 		expect(first.details).toMatchObject({ started: true, laneId: "task-1" });
 		expect(replay.details).toMatchObject({ started: true, laneId: "task-1" });
-		expect(nextLeaf.details).toMatchObject({ started: true, laneId: "task-2" });
+		expect(nextLeaf.details).toMatchObject({ started: true, laneId: "task-1" });
+		expect(nextCall.details).toMatchObject({ started: true, laneId: "task-2" });
 		const firstKey = startWorkerAgentTask.mock.calls[0]?.[2]?.idempotencyKey;
 		const replayKey = startWorkerAgentTask.mock.calls[1]?.[2]?.idempotencyKey;
 		const nextLeafKey = startWorkerAgentTask.mock.calls[2]?.[2]?.idempotencyKey;
 		expect(firstKey).toMatch(/^delegate-message-[a-f0-9]{64}$/);
 		expect(replayKey).toBe(firstKey);
-		expect(nextLeafKey).not.toBe(firstKey);
+		expect(nextLeafKey).toBe(firstKey);
+		expect(startWorkerAgentTask.mock.calls[3]?.[2]?.idempotencyKey).not.toBe(firstKey);
 	});
 
 	it("dispatches a new task onto an idle worker's persistent context instead of minting a fresh agent", async () => {

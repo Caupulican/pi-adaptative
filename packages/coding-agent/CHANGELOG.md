@@ -13,6 +13,7 @@
 - Compatible Herdr teams retain their panes and CLI conversations across project parent sessions; controller generations reject stale host writes, and authenticated Pi workers follow the new process supervisor.
 - A proven-dead parent no longer strands an unregistered, never-leased specialist setup after its transcript identity was saved. Recovery cancels the abandoned task, records its parent notification, and preserves enrolled context; concurrent leases and pending resource obligations prevent release.
 - Specialist allocation records preparation identity before task creation, allowing recovery before transcript binding and cancellation after a lost preparation receipt without leaving abandoned work queued.
+- Registered, never-started workers resume their accepted queued task after a proven-dead owner exits. Competing controllers cannot cancel another owner's enrolled task during dispatch or shutdown.
 - Reusing a Herdr specialist after resuming the same parent session in another process refreshes supervision ownership and rejects stale controller writes.
 - Python credential screening preserves matching quote boundaries, avoiding oversized source fragments being probed as filenames and retaining protection for paths containing quotes.
 - Credential redaction preserves structured execution-error classification across duplicate runtime module instances.

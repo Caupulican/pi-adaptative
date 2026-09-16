@@ -30,6 +30,7 @@ function controlsFor(session: unknown): DagControls {
 function dependencyRequest(instructions: string, dependencyTaskId: string): WorkerDelegationRequest {
 	return {
 		instructions,
+		parallelWork: { independentOf: [], justification: "Admit a separate DAG node with its own task identity." },
 		taskContext: {
 			requirementIds: [],
 			dependsOnTaskIds: [dependencyTaskId],
@@ -129,6 +130,7 @@ describe("worker controller dependency dispatch", () => {
 			expect(
 				await controls.startWorkerDelegation({
 					instructions: "Contend for the same scoped write.",
+					parallelWork: { independentOf: [], justification: "Exercise independent write-reservation contention." },
 					authority: { path: workspace },
 				}),
 			).toEqual({

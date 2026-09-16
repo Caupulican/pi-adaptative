@@ -46,12 +46,6 @@ function deferred<T>(): Deferred<T> {
 	return { promise, resolve, reject };
 }
 
-async function flushTasks(rounds = 25): Promise<void> {
-	for (let round = 0; round < rounds; round++) {
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-}
-
 const CALLER_PANE: CollaborationPane = {
 	paneId: "caller-pane",
 	terminalId: "caller-terminal",
@@ -109,6 +103,8 @@ interface Harness {
 	closeWorkspace: ReturnType<typeof vi.fn>;
 	launchTurn: ReturnType<typeof vi.fn>;
 	startedNames: string[];
+	splitEntered: Promise<void>;
+	workspaceEntered: Promise<void>;
 }
 
 async function harness(options: {
@@ -123,13 +119,17 @@ async function harness(options: {
 	const panes: CollaborationPane[] = options.placement === "current-pane" ? [CREATED_PANE] : [SECOND_PANE];
 	let splitIndex = 0;
 	const startedNames: string[] = [];
+	const splitEntered = deferred<void>();
+	const workspaceEntered = deferred<void>();
 
 	const splitPane = vi.fn(async () => {
+		splitEntered.resolve();
 		const next = panes[Math.min(splitIndex++, panes.length - 1)];
 		if (options.heldSplit) return options.heldSplit.promise;
 		return next;
 	});
 	const createWorkspace = vi.fn(async () => {
+		workspaceEntered.resolve();
 		if (options.heldWorkspace) return options.heldWorkspace.promise;
 		return { workspaceId: ROOT_PANE.workspaceId, tabId: ROOT_PANE.tabId, rootPane: ROOT_PANE };
 	});
@@ -218,6 +218,8 @@ async function harness(options: {
 		closeWorkspace,
 		launchTurn,
 		startedNames,
+		splitEntered: splitEntered.promise,
+		workspaceEntered: workspaceEntered.promise,
 	};
 }
 
@@ -232,12 +234,11 @@ describe("collaboration launch cancellation lifetime", () => {
 			() => "resolved",
 			(error: unknown) => error,
 		);
-		await flushTasks();
+		await h.splitEntered;
 		expect(h.splitPane).toHaveBeenCalledTimes(1);
 		expect(h.startAgent).not.toHaveBeenCalled();
 
 		controller.abort(new Error("Launch cancelled while the pane was being created."));
-		await flushTasks();
 		held.resolve(CREATED_PANE);
 		await observed;
 
@@ -257,11 +258,10 @@ describe("collaboration launch cancellation lifetime", () => {
 			() => "resolved",
 			(error: unknown) => error,
 		);
-		await flushTasks();
+		await h.splitEntered;
 		expect(h.splitPane).toHaveBeenCalledTimes(1);
 
 		h.coordinator.dispose();
-		await flushTasks();
 		held.resolve(CREATED_PANE);
 		await observed;
 
@@ -280,13 +280,12 @@ describe("collaboration launch cancellation lifetime", () => {
 			() => "resolved",
 			(error: unknown) => error,
 		);
-		await flushTasks();
+		await h.splitEntered;
 		// The root pane is reused for agent 0; agent 1 is the one whose split is held open.
 		expect(h.startAgent).toHaveBeenCalledTimes(1);
 		expect(h.splitPane).toHaveBeenCalledTimes(1);
 
 		controller.abort(new Error("Launch cancelled while the second pane was being created."));
-		await flushTasks();
 		held.resolve(SECOND_PANE);
 		await observed;
 
@@ -305,9 +304,8 @@ describe("collaboration launch cancellation lifetime", () => {
 			() => "resolved",
 			(error: unknown) => error,
 		);
-		await flushTasks();
+		await h.workspaceEntered;
 		controller.abort(new Error("Launch cancelled during workspace creation."));
-		await flushTasks();
 		held.resolve({ workspaceId: ROOT_PANE.workspaceId, tabId: ROOT_PANE.tabId, rootPane: ROOT_PANE });
 		const outcome = await observed;
 

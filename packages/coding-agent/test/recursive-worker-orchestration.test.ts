@@ -191,7 +191,10 @@ describe("leaf worker orchestration", () => {
 			const first = await harness.session.runWorkerDelegationOnce({ instructions: "Become the first peer." });
 			if (!first.record) throw new Error("Expected first worker record.");
 
-			const second = await harness.session.runWorkerDelegationOnce({ instructions: "Discover the first peer." });
+			const second = await harness.session.runWorkerDelegationOnce({
+				instructions: "Discover the first peer.",
+				parallelWork: { independentOf: [], justification: "Exercise visibility between two independent peers." },
+			});
 			if (!second.record) throw new Error("Expected second worker record.");
 
 			const serialized = JSON.stringify(treeControl(harness.session).listWorkerAgents());
@@ -330,16 +333,22 @@ describe("leaf worker orchestration", () => {
 			}
 			const before = durableEntityCounts(lifecycle);
 			const beforeConversations = conversationEntries(harness.tempDir, harness.session.sessionId);
-			harness.setResponses([fauxAssistantMessage('{"summary":"must not execute","status":"completed"}')]);
+			const remainingWorkers = setConcurrentResponses(harness, [
+				fauxAssistantMessage('{"summary":"must not execute","status":"completed"}'),
+			]);
 
 			const rejected = await harness.session.runWorkerDelegationOnce({
 				instructions: "Attempt one identity beyond the session bound.",
+				parallelWork: {
+					independentOf: [],
+					justification: "Exercise admission of an additional independent identity.",
+				},
 			});
 
 			expect(rejected).toEqual({ started: false, skipReason: "worker_agent_session_limit_reached" });
 			expect(durableEntityCounts(lifecycle)).toEqual(before);
 			expect(conversationEntries(harness.tempDir, harness.session.sessionId)).toEqual(beforeConversations);
-			expect(harness.getPendingResponseCount()).toBe(1);
+			expect(remainingWorkers()).toBe(1);
 		} finally {
 			await harness.cleanup();
 		}
@@ -1002,7 +1011,10 @@ describe("leaf worker orchestration", () => {
 			]);
 			const firstRoot = await harness.session.runWorkerDelegationOnce({ instructions: "Create first root." });
 			if (!firstRoot.record) throw new Error("Expected first root worker.");
-			const secondRoot = await harness.session.runWorkerDelegationOnce({ instructions: "Create second root." });
+			const secondRoot = await harness.session.runWorkerDelegationOnce({
+				instructions: "Create second root.",
+				parallelWork: { independentOf: [], justification: "Exercise the leaf restriction under a separate root." },
+			});
 			if (!secondRoot.record) throw new Error("Expected second root worker.");
 			const lifecycle = new WorkerLifecycle({
 				agentDir: harness.tempDir,
@@ -1171,7 +1183,13 @@ describe("leaf worker orchestration", () => {
 				},
 			]);
 			const first = await harness.session.runWorkerDelegationOnce({ instructions: "Run the first leaf." });
-			const second = await harness.session.runWorkerDelegationOnce({ instructions: "Run the second leaf." });
+			const second = await harness.session.runWorkerDelegationOnce({
+				instructions: "Run the second leaf.",
+				parallelWork: {
+					independentOf: [],
+					justification: "Exercise separate grants with independent token budgets.",
+				},
+			});
 
 			expect(first.record?.status).toBe("succeeded");
 			expect(second.record).toMatchObject({ status: "succeeded" });

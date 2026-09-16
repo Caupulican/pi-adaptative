@@ -148,23 +148,35 @@ describe("profile-derived persistent native dispatch", () => {
 			expect.objectContaining({ kind: "agy", args: ["--dangerously-skip-permissions"] }),
 		);
 	});
-	it("ignores stale jobId on fresh plans and prevents native launch after host reservation refusal", async () => {
+	it("keys fresh plans by call identity and prevents launch after host reservation refusal", async () => {
 		const f = await collaborationFixture();
 		cleanups.push(f.cleanup);
 		const results = await Promise.all(
-			[1, 2, 3, 4].map(() =>
-				f.execute({
-					action: "fire_task",
-					dryRun: true,
-					jobId: "stale",
-					task: "work",
-					agents: [{ provider: "pi" }],
-				}),
+			[1, 2, 3, 4].map((index) =>
+				f
+					.tool()
+					.execute(
+						`plan-${index}`,
+						{ action: "fire_task", dryRun: true, jobId: "stale", task: "work", agents: [{ provider: "pi" }] },
+						undefined,
+						undefined,
+						f.context,
+					),
 			),
 		);
 		const ids = results.map((result) => (result.details as { job: { id: string } }).job.id);
 		expect(new Set(ids).size).toBe(4);
 		expect(ids).not.toContain("stale");
+		const replay = await f
+			.tool()
+			.execute(
+				"plan-1",
+				{ action: "fire_task", dryRun: true, jobId: "stale", task: "work", agents: [{ provider: "pi" }] },
+				undefined,
+				undefined,
+				f.context,
+			);
+		expect(replay.details).toMatchObject({ job: { id: ids[0] } });
 		f.report.mockImplementation((event) => {
 			if (event.phase === "dispatch") throw new Error("reservation unavailable");
 		});

@@ -1,3 +1,4 @@
+import { projectToolSchemaForProvider } from "@caupulican/pi-agent-core";
 import { describe, expect, it } from "vitest";
 import {
 	buildContextCompositionReport,
@@ -181,7 +182,26 @@ describe("AgentSession.getContextCompositionReport", () => {
 				report.toolSchemaTokens - toolTokens.get("task_directory")! - toolTokens.get("task_automation")!,
 			).toBeLessThanOrEqual(4_500);
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(160);
-			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);
+			// Explicit independent work adds one bounded object to delegate's wire contract. Keep
+			// the old surface's 875-token ceiling and budget this addition independently.
+			const delegate = harness.agent.state.tools.find((tool) => tool.name === "delegate")!;
+			const parameters = delegate.parameters as { properties: Record<string, unknown> };
+			const { parallelWork, ...priorProperties } = parameters.properties;
+			expect(parallelWork).toBeDefined();
+			const priorReport = buildContextCompositionReport({
+				systemPrompt: "",
+				tools: [{ ...delegate, parameters: { ...parameters, properties: priorProperties } }],
+				extensions: [],
+				messages: [],
+				providerReportedTokens: null,
+				contextWindow: null,
+			});
+			expect(priorReport.tools[0].schemaTokens).toBeLessThanOrEqual(875);
+			const parallelTokens = Math.ceil(
+				(JSON.stringify({ parallelWork: projectToolSchemaForProvider(parallelWork) }).length - 1) / 4,
+			);
+			expect(parallelTokens).toBeLessThanOrEqual(75);
+			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875 + parallelTokens);
 			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(1_200);
 			expect(toolTokens.get("secret_store")).toBeLessThanOrEqual(330);
 			expect(toolTokens.get("goal")).toBeLessThanOrEqual(333);

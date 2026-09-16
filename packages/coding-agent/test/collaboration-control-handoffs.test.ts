@@ -61,6 +61,7 @@ it("retains exact-turn cleanup admission across store reopen and fences stale tu
 		results.push(reserveCollaborationCleanupAttempt(new CollaborationJobStore(f.root, "parent"), turn));
 	expect(results).toEqual([1, 2, 3, 0]);
 	f.store.finishTurn("control", agent.id, agent.turnId, "done", "verified");
+	await f.execute({ action: "list_jobs" });
 	const next = f.store.reserveTurn("control", agent.id, "next task");
 	expect(reserveCollaborationCleanupAttempt(f.store, turn)).toBeUndefined();
 	expect(reserveCollaborationCleanupAttempt(f.store, { ...turn, turnId: next.turnId })).toBe(1);

@@ -48,6 +48,10 @@ it("reserves once, fences stale/replayed terminals, and preserves peer state", a
 	expect(store.finishTurn("job-one", "worker", "wrong", "done", "stale")).toBe(false);
 	expect(store.finishTurn("job-one", "worker", first.turnId, "done", "evidence")).toBe(true);
 	expect(store.finishTurn("job-one", "worker", first.turnId, "failed", "replay")).toBe(false);
+	expect(() => store.reserveTurn("job-one", "worker", "unacknowledged")).toThrow(/handoff/);
+	store.update("job-one", (job) => {
+		job.agents[0].notifiedTurn = first.turn;
+	});
 	store.setVariable("job-one", "decision", "go");
 	const second = store.reserveTurn("job-one", "worker", "second");
 	expect(second.turn).toBe(2);
@@ -114,6 +118,9 @@ it("does not claim an expired reservation or replace a question with an ordinary
 	});
 	expect(store.claimTurn("job-one", "worker", turn.turnId, 10)).toBe(false);
 	store.finishTurn("job-one", "worker", turn.turnId, "blocked", "Which branch?");
+	store.update("job-one", (job) => {
+		job.agents[0].notifiedTurn = turn.turn;
+	});
 	expect(() => store.reserveTurn("job-one", "worker", "unrelated")).toThrow(/answer/i);
 	const answered = store.reserveTurn("job-one", "worker", "feature branch", true);
 	expect(answered.turnId).not.toBe(turn.turnId);
