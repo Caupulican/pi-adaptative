@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { WorkerDirectoryAdmission } from "../delegation/worker-directory-admission.ts";
 import type { ManagedLaneEvent } from "../extensions/types.ts";
 import { type CollaborationBackend, CollaborationBackendError, type CollaborationPane } from "./backend.ts";
 import {
@@ -12,6 +13,8 @@ import {
 } from "./job-store.ts";
 import { assertCollaborationReportCapability } from "./launch-profile.ts";
 import { bootstrapCollaborationPeers } from "./peer-bootstrap.ts";
+import { assertCollaborationNativeIdentity } from "./session-recovery.ts";
+import { type CollaborationStartIntent, collaborationSpecializationKey } from "./specialist-selection.ts";
 import { waitForSteeringSettlement } from "./turn-settlement.ts";
 
 export interface CollaborationAnswer {
@@ -176,6 +179,7 @@ class ManagedWorkspacePlacementStrategy implements CollaborationPlacementStrateg
 export class CollaborationCoordinator {
 	private readonly deps: CollaborationCoordinatorDeps;
 	private disposed = false;
+	private readonly directories = new WorkerDirectoryAdmission();
 	constructor(deps: CollaborationCoordinatorDeps) {
 		this.deps = deps;
 	}
@@ -206,7 +210,12 @@ export class CollaborationCoordinator {
 			},
 		});
 	}
-	async launch(input: NewCollaborationJob, task?: string, signal?: AbortSignal): Promise<CollaborationJob> {
+	async launch(
+		input: NewCollaborationJob,
+		task?: string,
+		signal?: AbortSignal,
+		intent: CollaborationStartIntent = {},
+	): Promise<CollaborationJob> {
 		this.assertActive(signal);
 		if (task && input.agents.length > 1) {
 			const tasks = input.agents.map((agent) => agent.task?.trim());
@@ -214,9 +223,22 @@ export class CollaborationCoordinator {
 				throw new Error("A multi-agent task requires distinct per-agent task responsibilities.");
 		}
 		if (task) for (const agent of input.agents) assertCollaborationReportCapability(agent.provider, agent.profile);
-		const peers = bootstrapCollaborationPeers(input, this.deps.store.directory);
+		const workspaceKeys = await Promise.all(
+			[input.cwd, ...input.agents.map((agent) => agent.cwd)].map((cwd) =>
+				this.directories.namespaceKey(cwd, signal),
+			),
+		);
+		this.assertActive(signal);
+		const peers = bootstrapCollaborationPeers(
+			{ ...input, specializationKey: collaborationSpecializationKey(input, workspaceKeys) },
+			this.deps.store.directory,
+		);
 		const store = this.deps.store;
-		let job = store.create(peers.job);
+		this.refresh();
+		const admission = store.admit(peers.job, task, intent);
+		if (admission.kind === "replay") return admission.job;
+		if (admission.kind === "reuse") return this.resumeTeam(admission.job, !!task, signal);
+		let job = admission.job;
 		let workspaceId: string | undefined;
 		let backend: CollaborationBackend | undefined;
 		try {
@@ -224,16 +246,7 @@ export class CollaborationCoordinator {
 			this.assertActive(signal);
 			if (task) {
 				for (const agent of job.agents) {
-					const turn = store.reserveTurn(
-						job.id,
-						agent.id,
-						agent.task
-							? task === agent.task
-								? agent.task
-								: `Team objective:\n${task}\n\nYour assigned responsibility:\n${agent.task}`
-							: task,
-					);
-					this.dispatch(job, turn);
+					this.dispatch(job, agent);
 				}
 			}
 			this.assertActive(signal);
@@ -386,6 +399,46 @@ export class CollaborationCoordinator {
 					});
 				}
 			}
+			this.refresh();
+			throw error;
+		}
+	}
+	private async resumeTeam(job: CollaborationJob, hasTask: boolean, signal?: AbortSignal): Promise<CollaborationJob> {
+		const submitted = new Set<string>();
+		try {
+			const backend = await this.deps.backend(job, false);
+			this.assertActive(signal);
+			// Verify every member before delivering any new prompt; team membership and peer credentials
+			// stay immutable. This is identity/readiness preflight, never output-based completion polling.
+			for (const agent of job.agents) {
+				const actual = await backend.getAgent(agent.backendName!);
+				this.assertActive(signal);
+				assertCollaborationNativeIdentity(agent, actual);
+				if (!actual.interactiveReady || actual.launchPending || !["idle", "done"].includes(actual.status))
+					throw new Error(`Collaboration specialist ${agent.id} is unavailable in its native session.`);
+			}
+			if (hasTask)
+				for (const agent of job.agents) {
+					this.assertActive(signal);
+					submitted.add(agent.id);
+					await this.launchReservedTurn(job, agent);
+				}
+			return this.deps.store.load(job.id);
+		} catch (error) {
+			// An unsubmitted member has no native work to cancel. Persist and publish its failed task
+			// without closing a possibly replaced pane or resubmitting an uncertain earlier delivery.
+			if (hasTask)
+				for (const agent of job.agents) {
+					if (submitted.has(agent.id)) continue;
+					this.deps.store.finishTurn(
+						job.id,
+						agent.id,
+						agent.turnId,
+						"failed",
+						`Specialist reuse refused: ${String(error).slice(0, 1000)}`,
+					);
+					this.dispatch(job, agent);
+				}
 			this.refresh();
 			throw error;
 		}

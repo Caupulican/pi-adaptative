@@ -107,6 +107,15 @@ const parameters = Type.Object({
 	dryRun: Type.Optional(Type.Boolean()),
 	force: Type.Optional(Type.Boolean()),
 	steer: Type.Optional(Type.Boolean()),
+	parallelWork: Type.Optional(
+		Type.Object(
+			{
+				independent: Type.Literal(true),
+				justification: Type.String({ minLength: 1, maxLength: 4096 }),
+			},
+			{ additionalProperties: false },
+		),
+	),
 	answer: Type.Optional(
 		Type.Object({
 			text: Type.Optional(text),
@@ -469,6 +478,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		promptSnippet: "Persistent multi-provider subagents with terminal/question-only handoffs.",
 		promptGuidelines: [
 			"Use delegate for in-process workers; use pi_collaboration for persistent native CLI environments.",
+			"Ordinary starts must reuse a compatible idle team in this parent session. Busy or ambiguous specialists are refused; choose an exact jobId or justify genuinely independent parallelWork. Never change a grant merely to evade reuse.",
 			"When running inside Herdr, placement defaults to current-pane (spawns sibling panels in the user's active workspace/tab). Set placement: managed-workspace for a private isolated daemon.",
 			"Only terminal handoffs and questions are returned automatically. Never poll/read panes for progress or re-submit an uncertain prompt.",
 			"Claude/agy use --dangerously-skip-permissions; Codex uses --dangerously-bypass-approvals-and-sandbox by explicit user policy. External CLI permissions and token budgets are not Pi-enforced.",
@@ -529,7 +539,10 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 							throw new Error("Stop the existing team's native sessions before reusing its launchKey.");
 						store.archive(plan.id);
 					}
-					const launched = await coordinator.launch(plan, action === "fire_task" ? task : undefined, signal);
+					const launched = await coordinator.launch(plan, action === "fire_task" ? task : undefined, signal, {
+						jobId: params.jobId,
+						parallelWork: params.parallelWork,
+					});
 					readyJobs.add(launched.id);
 					details = { job: launched };
 				}

@@ -10,6 +10,10 @@ Worker thoughts, progress, and tool text stay in the worker. Only a stopped-work
 
 Use `answer_question` with the same `jobId`/`agentId` and `answer.text` or `answer.keys` to respond to a question. Use `send_followup` for another task. Both reuse the persistent CLI and its context. Answers mint a fresh dispatch identity; workers query their authenticated `current` command again before `report`. A disconnected controller never blindly resubmits an uncertain prompt.
 
+Ordinary starts also reuse compatible idle teams owned by the current parent. Matching includes the physical workspace, provider invocation, environment, model, tools, resources, thinking, and peer-team membership. Every member must be available before any new prompt is submitted. Busy, blocked, closed, ambiguous, or replaced contexts cause a bounded refusal. Use `jobId` to choose a compatible team, or `parallelWork: { independent: true, justification: "..." }` for genuinely independent concurrent work. The new task's `goalId` belongs to that turn; answers retain their question's goal. Job provenance and the CLI's original launch flags stay immutable.
+
+`launchKey` identifies one accepted start. An exact retry never resubmits its prompt; changed intent under the same key is refused. A replay of a historical turn after a successor has started is refused with its accepted-state explanation. Retained contexts and admission receipts survive a parent-controller reload. Automatic matching does not adopt another parent's sessions.
+
 Pi dialog questions retain bounded authenticated question/choice context separately from final reports. Native dialogs receive direct input; textual questions from idle agents receive a continuation prompt. Keys-only answers require a blocked dialog. Oversized question context is explicitly marked incomplete, never silently treated as sufficient to answer.
 
 `job_status`, `list_jobs`, `set_variable`, and `list_variables` expose bounded state. `notify`, `set_status`, and `clear_status` affect display metadata, not task completion. `list_templates` and `show_template` load the single JSON template source.

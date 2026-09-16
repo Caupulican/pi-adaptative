@@ -31,9 +31,24 @@ import {
 	validateCollaborationPendingQuestion,
 	validateCollaborationResultClaim,
 } from "./result-claim.ts";
+import {
+	type CollaborationStartIntent,
+	collaborationAssignment,
+	collaborationStartDigest,
+	selectCollaborationSpecialist,
+} from "./specialist-selection.ts";
 
 const identity = collaborationIdentitySchema;
 const shortText = Type.String({ maxLength: 4096 });
+const digestSchema = Type.String({ pattern: "^[a-f0-9]{64}$" });
+const startReceiptSchema = Type.Object(
+	{
+		key: identity,
+		digest: digestSchema,
+		turns: Type.Array(Type.Object({ agentId: identity, turnId: shortText }), { minItems: 1, maxItems: 12 }),
+	},
+	{ additionalProperties: false },
+);
 const taskCorrelationSchema = Type.Object({ goalId: Type.Optional(shortText) }, { additionalProperties: false });
 export type CollaborationTaskCorrelation = Static<typeof taskCorrelationSchema>;
 const terminalSchema = Type.Union([
@@ -113,6 +128,8 @@ const jobSchema = Type.Object(
 		createdAt: Type.Number(),
 		deadlineSeconds: Type.Integer({ minimum: 5, maximum: 86400 }),
 		goalId: Type.Optional(shortText),
+		specializationKey: Type.Optional(digestSchema),
+		startReceipts: Type.Optional(Type.Array(startReceiptSchema, { maxItems: 128 })),
 		dismissed: Type.Boolean(),
 		variables: Type.Record(Type.String(), shortText, { maxProperties: 128 }),
 		metadata: Type.Record(Type.String(), shortText, { maxProperties: 128 }),
@@ -154,6 +171,7 @@ function immutableIdentity(job: CollaborationJob): string {
 		cwd: job.cwd,
 		createdAt: job.createdAt,
 		goalId: job.goalId,
+		specializationKey: job.specializationKey,
 		peerCommand: job.peerCommand,
 		placement: job.placement,
 		socketPath: job.socketPath,
@@ -284,34 +302,90 @@ export class CollaborationJobStore {
 		return result;
 	}
 	create(input: NewCollaborationJob): CollaborationJob {
+		return withFileLockSync(join(this.directory, "admission"), () => this.createAdmitted(input));
+	}
+	/** Matching, fresh allocation and team reservation share one cross-process admission fence. */
+	admit(
+		input: NewCollaborationJob,
+		task: string | undefined,
+		intent: CollaborationStartIntent,
+	): {
+		job: CollaborationJob;
+		kind: "fresh" | "reuse" | "replay";
+	} {
 		return withFileLockSync(join(this.directory, "admission"), () => {
-			if (this.list().length >= 32)
-				throw new Error(
-					"Collaboration job retention limit reached (32). Archive completed jobs before admitting more.",
-				);
-			if (existsSync(this.path(input.id))) throw new Error("Collaboration job already exists.");
-			if (new Set(input.agents.map((agent) => agent.id)).size !== input.agents.length)
-				throw new Error("Duplicate agent identity.");
-			const job: CollaborationJob = {
-				...input,
-				version: 1,
-				variables: {},
-				metadata: {},
-				mailbox: { messages: [], receipts: [] },
-				dismissed: false,
-				agents: input.agents.map((agent) => ({
-					...agent,
-					turn: 0,
-					turnId: "",
-					status: "idle",
-					prompt: "",
-					evidence: "",
-					notifiedTurn: 0,
-				})),
-			};
-			this.save(job);
-			return job;
+			const jobs = this.list();
+			const digest = collaborationStartDigest(input, task, intent);
+			for (const job of jobs) {
+				const receipt = job.startReceipts?.find((entry) => entry.key === input.id);
+				if (!receipt) continue;
+				if (receipt.digest !== digest) throw new Error("Collaboration start identity has different intent.");
+				if (
+					receipt.turns.some(
+						(turn) => job.agents.find((agent) => agent.id === turn.agentId)?.turnId !== turn.turnId,
+					)
+				)
+					throw new Error("Collaboration start was already accepted; its historical turn will not be replayed.");
+				return { job, kind: "replay" };
+			}
+			const selected = selectCollaborationSpecialist(jobs, input, intent);
+			if (!selected) return { job: this.createAdmitted(input, task, digest), kind: "fresh" };
+			const job = this.update(selected.id, (current) => {
+				// Peer delivery and explicit follow-ups use this same job lock. Revalidate after acquiring
+				// it so admission cannot act on a snapshot from before a concurrent reservation.
+				selectCollaborationSpecialist([current], input, { jobId: current.id });
+				if ((current.startReceipts?.length ?? 0) >= 128)
+					throw new Error("Collaboration start receipt limit reached.");
+				if (task)
+					for (const agent of input.agents)
+						this.reserve(current, agent.id, collaborationAssignment(task, agent.task), false, {
+							goalId: input.goalId,
+						});
+				current.startReceipts ??= [];
+				current.startReceipts.push({
+					key: input.id,
+					digest,
+					turns: current.agents.map((agent) => ({ agentId: agent.id, turnId: agent.turnId })),
+				});
+			});
+			return { job, kind: "reuse" };
 		});
+	}
+	/** Caller holds the admission lock. Publish the complete reservation in the first durable write. */
+	private createAdmitted(input: NewCollaborationJob, task?: string, digest?: string): CollaborationJob {
+		if (this.list().length >= 32)
+			throw new Error(
+				"Collaboration job retention limit reached (32). Archive completed jobs before admitting more.",
+			);
+		if (existsSync(this.path(input.id))) throw new Error("Collaboration job already exists.");
+		if (new Set(input.agents.map((agent) => agent.id)).size !== input.agents.length)
+			throw new Error("Duplicate agent identity.");
+		const job: CollaborationJob = {
+			...input,
+			version: 1,
+			variables: {},
+			metadata: {},
+			mailbox: { messages: [], receipts: [] },
+			dismissed: false,
+			agents: input.agents.map((agent) => ({
+				...agent,
+				turn: 0,
+				turnId: "",
+				status: "idle",
+				prompt: "",
+				evidence: "",
+				notifiedTurn: 0,
+			})),
+		};
+		if (task)
+			for (const agent of input.agents)
+				this.reserve(job, agent.id, collaborationAssignment(task, agent.task), false);
+		if (digest)
+			job.startReceipts = [
+				{ key: input.id, digest, turns: job.agents.map((agent) => ({ agentId: agent.id, turnId: agent.turnId })) },
+			];
+		this.save(job);
+		return job;
 	}
 	update(id: string, apply: (job: CollaborationJob) => void): CollaborationJob {
 		return withFileLockSync(this.path(id), () => {

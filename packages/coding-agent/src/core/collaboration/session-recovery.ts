@@ -1,6 +1,22 @@
 import { createHash } from "node:crypto";
+import type { CollaborationAgent as NativeAgent } from "./backend.ts";
 import type { CollaborationCoordinatorDeps } from "./coordinator.ts";
-import type { CollaborationJob, CollaborationJobStore } from "./job-store.ts";
+import type { CollaborationAgent, CollaborationJob, CollaborationJobStore } from "./job-store.ts";
+
+/** One identity predicate for startup restoration and new-task reuse. */
+export function assertCollaborationNativeIdentity(expected: CollaborationAgent, actual: NativeAgent | undefined): void {
+	if (
+		!expected.backendName ||
+		!expected.paneId ||
+		!expected.terminalId ||
+		!actual ||
+		actual.name !== expected.backendName ||
+		actual.paneId !== expected.paneId ||
+		actual.terminalId !== expected.terminalId ||
+		actual.kind !== expected.provider
+	)
+		throw new Error(`Saved agent ${expected.id} is missing or its native identity changed.`);
+}
 
 function recoveryIdentity(job: CollaborationJob): string {
 	return createHash("sha256")
@@ -45,16 +61,7 @@ export async function reconcileCollaborationSessions(
 					for (const expected of job.agents) {
 						if (expected.closed) continue;
 						const actual = native.find((agent) => agent.name === expected.backendName);
-						if (
-							!expected.backendName ||
-							!expected.paneId ||
-							!expected.terminalId ||
-							!actual ||
-							actual.paneId !== expected.paneId ||
-							actual.terminalId !== expected.terminalId ||
-							actual.kind !== expected.provider
-						)
-							throw new Error(`Saved agent ${expected.id} is missing or its native identity changed.`);
+						assertCollaborationNativeIdentity(expected, actual);
 						if (expected.steering) {
 							throw new Error(
 								`Saved agent ${expected.id} has pending steering (turn ${expected.turnId}); successor intent: "${expected.steering.prompt.slice(0, 100)}".`,
