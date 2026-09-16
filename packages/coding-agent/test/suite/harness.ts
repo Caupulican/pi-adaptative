@@ -5,6 +5,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { Agent } from "@caupulican/pi-agent-core/agent";
 import { convertToLlm } from "@caupulican/pi-agent-core/messages";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
@@ -67,6 +68,10 @@ export function getAssistantTexts(harness: Harness): string[] {
 }
 
 export interface HarnessOptions {
+	/** Caller-owned state shared by multiple parents; harness cleanup never removes it. */
+	agentDir?: string;
+	/** Caller owns registration and response queue lifetime when supplied. */
+	sharedFauxProvider?: FauxProviderRegistration;
 	/** Session working directory; defaults to the harness temp dir. Must exist. */
 	cwd?: string;
 	models?: FauxModelDefinition[];
@@ -119,11 +124,14 @@ function createTempDir(): string {
 
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	const tempDir = createTempDir();
-	const fauxProvider: FauxProviderRegistration = registerFauxProvider({
-		...options.fauxProvider,
-		models: options.models,
-	});
-	fauxProvider.setResponses([]);
+	const agentDir = options.agentDir ?? tempDir;
+	const fauxProvider: FauxProviderRegistration =
+		options.sharedFauxProvider ??
+		registerFauxProvider({
+			...options.fauxProvider,
+			models: options.models,
+		});
+	if (!options.sharedFauxProvider) fauxProvider.setResponses([]);
 	const model = fauxProvider.getModel();
 	const toolMap = options.tools ? Object.fromEntries(options.tools.map((tool) => [tool.name, tool])) : undefined;
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
@@ -170,18 +178,21 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		createdAt,
 		updatedAt: createdAt,
 	};
-	new OrchestrationProfileStore({ agentDir: tempDir, cwd: tempDir, projectTrusted: true }).save(
+	const profileStore = new OrchestrationProfileStore({ agentDir, cwd: options.cwd ?? tempDir, projectTrusted: true });
+	const profileSemantics = (profile: OrchestrationProfile) => {
+		const { createdAt: _created, updatedAt: _updated, sourcePath: _source, ...semantics } = profile;
+		return semantics;
+	};
+	for (const profile of [
 		options.workerOrchestrationProfile ?? defaultOrchestrationProfile,
-		"global",
-	);
-	for (const profile of options.additionalOrchestrationProfiles ?? []) {
-		new OrchestrationProfileStore({ agentDir: tempDir, cwd: tempDir, projectTrusted: true }).save(profile, "global");
-	}
-	if (options.orchestrationProfile) {
-		new OrchestrationProfileStore({ agentDir: tempDir, cwd: tempDir, projectTrusted: true }).save(
-			options.orchestrationProfile,
-			"global",
-		);
+		...(options.additionalOrchestrationProfiles ?? []),
+		...(options.orchestrationProfile ? [options.orchestrationProfile] : []),
+	]) {
+		if (options.agentDir && existsSync(profileStore.filePath(profile.profileId, "global"))) {
+			const existing = profileStore.load().profiles.find((item) => item.profileId === profile.profileId);
+			if (!existing || !isDeepStrictEqual(profileSemantics(existing), profileSemantics(profile)))
+				throw new Error(`Shared harness profile ${profile.profileId} has conflicting configuration.`);
+		} else profileStore.save(profile, "global");
 	}
 
 	const authStorage = AuthStorage.inMemory();
@@ -249,7 +260,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		sessionManager,
 		settingsManager,
 		cwd: options.cwd ?? tempDir,
-		agentDir: tempDir,
+		agentDir,
 		modelRegistry,
 		resourceLoader,
 		baseToolsOverride: toolMap,
@@ -273,7 +284,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			try {
 				await session.disposeAndWait();
 			} finally {
-				fauxProvider.unregister();
+				if (!options.sharedFauxProvider) fauxProvider.unregister();
 				if (existsSync(tempDir)) {
 					rmSync(tempDir, { recursive: true, maxRetries: 5, retryDelay: 100 });
 				}
