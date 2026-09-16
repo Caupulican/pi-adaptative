@@ -19,18 +19,37 @@ available for reuse; the active roster excludes idle specialists without deletin
 - Managed lane closure rejects stale generations while preserving genuine persistence failures.
 - Directory identity resolution has a deadline and honors cancellation.
 - A text-similarity advisory cannot veto a task with a different admitted grant.
+- Replayed starts preserve their declared fork mode and dependencies. Retrying an unchanged start
+  remains inert after the parent's transcript grows; changing the recorded intent is refused.
+- Context projection after session disposal cannot reopen the SQLite path-alias index.
 
 ## Evidence
 
-The latest regression set contains 29 tests. Thirteen assertions failed on Linux and native Windows
-before the production corrections; 16 controls passed on Linux. Windows additionally encountered an
-`EPERM` during scratch-directory teardown. That environmental failure is separate from the 13
-reproduced assertions. Test and fixture hashes were frozen before production edits.
+The direct implementation followed three frozen regression batches on Linux and native Windows:
 
-After correction, all 228 newly added coding-agent tests pass on Linux, including the unchanged 29
-tests. Type checking passes. Production clone coverage is 1,028 eligible files out of 1,037 owned
-files; the 50-token pass covers 997 files and reports zero clones. No scanner exclusions or limits
-were weakened. Native Windows results for the committed revision are recorded separately.
+| Batch | Tests | Reproduced assertion failures before correction |
+| --- | ---: | ---: |
+| Admission, cancellation, ownership, and specialist selection | 29 | 13 |
+| Replay dependencies and declared fork mode | 5 | 4 |
+| Storage disposal | 3 | 1 |
+
+The remaining cases serve as negative controls. An additional Windows scratch-directory teardown
+failure reproduced in the full slice and an isolated run. Its remaining files belonged to the SQLite
+path-alias index. A deterministic probe confirmed that late projection could reopen that index after
+disposal. After correcting this owner, the unchanged selection test and the complete new-test slice
+pass on Windows. This establishes the observed correction; it does not prove every possible Windows
+file-lock failure has the same cause.
+
+At production commit `e0e1d1ad016a64a9588b21c2bf671b077a8582ab`, all 236 newly added coding-agent tests
+in 35 files pass on Linux and native Windows. The 27 new agent tests in four files also pass on both
+platforms; Linux agent validation preceded the final coding-agent-only fixes. Only the new tests ran.
+Test and fixture hashes stayed frozen across each red/green cycle and match between checkouts. Normal
+commit hooks, including project type checking, pass. Production clone coverage is 1,028 eligible files
+out of 1,037 owned files; the 50-token pass covers 997 files and reports zero clones. No scanner
+exclusions or limits were weakened.
+
+The candidate that implicit resource selection alone breaks an unchanged named-task replay was not
+reproduced. Its negative control passes; no speculative correction was made for it.
 
 The Claude Code binary-analysis evidence supports stable conversation identity, single execution per
 specialist, event-driven idle state, and cleanup before releasing concurrency. It does not establish
@@ -44,10 +63,8 @@ owners; extracted binary code was not executed or copied into the runtime.
   transcript and mailbox writer, plus protection against deleting the original session bundle.
 - Managed Herdr workers retain explicit follow-up routing. Automatic matching and transferring their
   parent ownership are separate work; live CLI parent/task flags cannot simply be relabeled.
-- Replay comparison still needs stronger coverage for changed dependencies and declared fork mode.
 - Goal materialization and mailbox persistence span separate files. Deterministic admission refusal
   has no goal side effect, but an actual I/O failure between the two writes is not an atomic rollback.
-- Windows scratch-directory cleanup errors remain an unresolved platform probe, not a proven fix.
 
 This is source-level validation, not an official release or a rebuilt installed binary. The earlier
 local IPC repair remains installed separately.
