@@ -107,6 +107,7 @@ const agentSchema = Type.Object(
 		helperPid: Type.Optional(Type.Integer({ minimum: 1 })),
 		deadlineAt: Type.Optional(Type.Number()),
 		notifiedTurn: Type.Integer({ minimum: 0, maximum: 128 }),
+		notifiedDispatchTurn: Type.Optional(Type.Integer({ minimum: 0, maximum: 128 })),
 		/** The member's persistent CLI closure has been published to the durable lane projection. A
 		 * closure is a fact about the agent, not about a turn, so turn-based deduplication cannot
 		 * suppress it and cannot republish it either. */
@@ -314,6 +315,8 @@ export class CollaborationJobStore {
 		kind: "fresh" | "reuse" | "replay";
 	} {
 		return withFileLockSync(join(this.directory, "admission"), () => {
+			if (!Value.Check(digestSchema, input.specializationKey))
+				throw new Error("Collaboration admission requires a compiled specialization identity.");
 			const jobs = this.list();
 			const digest = collaborationStartDigest(input, task, intent);
 			for (const job of jobs) {
@@ -391,6 +394,17 @@ export class CollaborationJobStore {
 		return withFileLockSync(this.path(id), () => {
 			const job = this.load(id);
 			const previous = JSON.stringify(job);
+			const receiptCount = job.startReceipts?.length ?? 0;
+			const receiptsBefore = JSON.stringify(job.startReceipts ?? []);
+			const correlationsBefore = new Map(
+				job.agents.map((agent) => [
+					agent.id,
+					{
+						turnId: agent.turnId,
+						correlation: JSON.stringify(agent.taskCorrelation),
+					},
+				]),
+			);
 			const identityBefore = immutableIdentity(job);
 			const claimsBefore = new Map(
 				job.agents
@@ -399,10 +413,18 @@ export class CollaborationJobStore {
 			);
 			const callerTerminalIdBefore = job.callerTerminalId;
 			apply(job);
+			if (JSON.stringify((job.startReceipts ?? []).slice(0, receiptCount)) !== receiptsBefore)
+				throw new Error("Collaboration accepted start receipts are immutable.");
 			if (immutableIdentity(job) !== identityBefore) throw new Error("Collaboration launch identity is immutable.");
 			if (callerTerminalIdBefore && job.callerTerminalId !== callerTerminalIdBefore)
 				throw new Error("Collaboration caller terminal identity is immutable once admitted.");
 			for (const agent of job.agents) {
+				const correlation = correlationsBefore.get(agent.id);
+				if (
+					correlation?.turnId === agent.turnId &&
+					correlation.correlation !== JSON.stringify(agent.taskCorrelation)
+				)
+					throw new Error("Collaboration task correlation is immutable within its turn.");
 				const prior = claimsBefore.get(agent.turnId);
 				if (prior && prior !== JSON.stringify(agent.resultClaim))
 					throw new Error("Collaboration result claim is immutable for this turn.");

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { existsSync, type FSWatcher, statSync, watch } from "node:fs";
 import { join, resolve } from "node:path";
 import { type Static, Type } from "typebox";
@@ -324,7 +324,12 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		close();
 	});
 
-	const prepare = async (ctx: ExtensionContext, params: Params, probe: boolean): Promise<NewCollaborationJob> => {
+	const prepare = async (
+		ctx: ExtensionContext,
+		params: Params,
+		probe: boolean,
+		toolCallId: string,
+	): Promise<NewCollaborationJob> => {
 		const template = params.teamTemplate ? templates().find((item) => item.name === params.teamTemplate) : undefined;
 		if (params.teamTemplate && !template) throw new Error("Unknown collaboration template.");
 		const specs = params.agents ??
@@ -357,7 +362,14 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		if (isCurrentPane && !caller?.binPath) {
 			throw new Error("Placement 'current-pane' requires a valid caller executable (HERDR_BIN_PATH).");
 		}
-		const id = params.launchKey ?? `job-${randomUUID()}`;
+		// Tool-call identity is session-scoped; the mutable transcript leaf must not turn a replay
+		// into a new task after its result has already been appended.
+		const id =
+			params.launchKey ??
+			`job-${createHash("sha256")
+				.update(JSON.stringify([ctx.sessionManager.getSessionId(), toolCallId]))
+				.digest("hex")
+				.slice(0, 40)}`;
 		const cwd = resolve(ctx.cwd, params.cwd ?? ".");
 		const result: NewCollaborationJob = {
 			id,
@@ -508,7 +520,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				if (!details) throw new Error("Unknown collaboration template.");
 			} else if (action === "list_jobs") details = store.list();
 			else if (["workspace_plan", "launch_workspace", "fire_task"].includes(action)) {
-				const plan = await prepare(ctx, params, action !== "workspace_plan" && params.dryRun !== true);
+				const plan = await prepare(ctx, params, action !== "workspace_plan" && params.dryRun !== true, _id);
 				if (action === "workspace_plan" || params.dryRun) details = { dryRun: true, job: plan };
 				else {
 					let task = params.task ?? params.body;

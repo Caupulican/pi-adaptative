@@ -192,6 +192,9 @@ export class CollaborationCoordinator {
 		if (this.disposed) throw new Error("Collaboration coordinator is disposed.");
 	}
 	private dispatch(job: CollaborationJob, agent: CollaborationAgent): void {
+		if (this.disposed) return;
+		const current = this.deps.store.load(job.id).agents.find((member) => member.id === agent.id);
+		if (!current || current.turnId !== agent.turnId || (current.notifiedDispatchTurn ?? 0) >= agent.turn) return;
 		this.deps.report({
 			laneId: collaborationLaneId(job.id, agent.id),
 			phase: "dispatch",
@@ -208,6 +211,10 @@ export class CollaborationCoordinator {
 				writePaths: agent.profile.writePaths,
 				leaseTtlMs: job.deadlineSeconds * 1000,
 			},
+		});
+		this.deps.store.update(job.id, (latest) => {
+			const member = latest.agents.find((item) => item.id === agent.id);
+			if (member?.turnId === agent.turnId) member.notifiedDispatchTurn = agent.turn;
 		});
 	}
 	async launch(
@@ -406,6 +413,9 @@ export class CollaborationCoordinator {
 	private async resumeTeam(job: CollaborationJob, hasTask: boolean, signal?: AbortSignal): Promise<CollaborationJob> {
 		const submitted = new Set<string>();
 		try {
+			// Capture host ownership at acceptance, before any asynchronous readiness callback. The
+			// same durable publication receipt suppresses the ordinary launch path's second observation.
+			if (hasTask) for (const agent of job.agents) this.dispatch(job, agent);
 			const backend = await this.deps.backend(job, false);
 			this.assertActive(signal);
 			// Verify every member before delivering any new prompt; team membership and peer credentials
@@ -577,6 +587,9 @@ export class CollaborationCoordinator {
 			["idle", "reserved", "running"].includes(agent.status)
 		)
 			return;
+		// A reload may recover a terminal whose dispatch publication failed. Preserve ordering using
+		// the same owner and durable receipt; never rerun the native prompt to recover a handoff.
+		this.dispatch(job, agent);
 		this.deps.report({
 			laneId: collaborationLaneId(job.id, agent.id),
 			phase: "terminal",
