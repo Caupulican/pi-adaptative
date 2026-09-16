@@ -33,6 +33,10 @@ available for reuse; the active roster excludes idle specialists without deletin
   bounded parent notification before the allocation is released.
 - A lost preparation or enrollment receipt preserves durable task identity and reusable context;
   abandoned instructions are not replayed.
+- Registered initial work that remains queued and has never held a lease resumes its accepted task
+  after proven owner exit. Claim recovery rechecks the durable history under the transcript lock
+  and advances the ownership generation. A competing live or unknown controller cannot cancel
+  that work through failed dispatch or shutdown.
 - Herdr teams transfer their effective controller across project parent sessions without changing
   launch provenance. Same-session process restarts refresh the supervisor, and generations fence
   stale controllers while original authenticated peers can report the current turn.
@@ -69,6 +73,15 @@ remain unchanged from the failing baselines. The full repository check passes wi
 eligible/owned production files covered and zero clones. Subsequent refused-control regressions
 reproduce claim retention after empty and oversized messages on both operating systems.
 
+At production commit `b24f6d4db`, all 379 newly added coding-agent tests in 68 files and 27
+agent tests in four files pass on Linux and native Windows. The registered queued-owner regression
+first failed five assertions on each platform while its original-owner control passed; all six
+cases then passed without assertion changes. Additional checks reject previously leased history
+and foreign-parent claims and prevent a stale transcript view from writing after recovery.
+Production clone coverage is 1,035/1,044 eligible/owned files, with zero clones. The larger Windows
+slice also exposed timing-sensitive existing worker-session fixtures; their event synchronization
+is tracked separately from the frozen ownership regressions.
+
 The candidate that implicit resource selection alone breaks an unchanged named-task replay was not
 reproduced. Its negative control passes; no speculative correction was made for it.
 
@@ -81,8 +94,9 @@ owners; extracted binary code was not executed or copied into the runtime.
 
 - Native project transfer now has exclusive claims, transcript/mailbox fencing, and birth-bundle
   deletion protection. Refused controls release only newly acquired, quiescent claims. Recovery
-  deliberately keeps leased, registered, or uncertain work excluded; owner death alone does not
-  prove resource cleanup. Older receipts without preparation evidence remain excluded.
+  distinguishes abandoned unregistered setup from registered, never-started queued work. Previously
+  leased or uncertain work remains excluded from queued-context takeover; owner death alone does
+  not prove resource cleanup. Older receipts without preparation evidence remain excluded.
 - Managed Herdr ownership transfer is covered through the real job store, authenticated peer context,
   filesystem watcher, and process-matrix composition. Native provider inference remains untested;
   no paid provider calls were made. Historical lane records remain evidence of prior tasks, not

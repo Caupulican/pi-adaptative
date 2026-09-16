@@ -327,7 +327,11 @@ describe("AgentSession worker delegation", () => {
 				}),
 			);
 
-			const firstRun = harness.session.runWorkerDelegationOnce({ instructions: "First", profileId: "worker-a" });
+			const firstRun = harness.session.runWorkerDelegationOnce({
+				instructions: "First",
+				profileId: "worker-a",
+				parallelWork: { independentOf: [], justification: "Exercise concurrent execution of equivalent profiles." },
+			});
 			const secondRun = harness.session.runWorkerDelegationOnce({
 				instructions: "Second",
 				profileId: "worker-b",
@@ -926,6 +930,7 @@ describe("AgentSession worker delegation", () => {
 
 	it("persists a worker's conversation across tasks: a reused agent keeps its prior task context", async () => {
 		const harness = await createHarness();
+		let unsubscribe = () => {};
 		try {
 			harness.setResponses([fauxAssistantMessage('{"summary":"first task done","status":"completed"}')]);
 			const initial = await harness.session.runWorkerDelegationOnce({
@@ -953,17 +958,24 @@ describe("AgentSession worker delegation", () => {
 				}
 			)._backgroundLanes;
 			const agentId = initial.record.laneId;
+			const completed = Promise.withResolvers<void>();
+			unsubscribe = harness.session.subscribe((event) => {
+				if (
+					event.type === "delegate_workers" &&
+					event.terminalSinceFlush.some((record) => record.laneId !== agentId)
+				)
+					completed.resolve();
+			});
 			const followUp = controls.followUpWorkerAgent(agentId, "Recall the codeword from the previous task");
 			expect(followUp.started).toBe(true);
 			// The follow-up is a NEW task (fresh lane) dispatched onto the SAME durable conversation.
 			expect(followUp.record?.laneId).not.toBe(initial.record.laneId);
 
-			await vi.waitFor(() => {
-				const transcript = JSON.stringify(controls.readWorkerAgentTranscript(agentId, { maxMessages: 64 }));
-				expect(transcript).toContain("ZEPHYR-9");
-				expect(transcript).toContain("Recall the codeword from the previous task");
-			});
-			await vi.waitFor(() => {
+			await completed.promise;
+			const transcript = JSON.stringify(controls.readWorkerAgentTranscript(agentId, { maxMessages: 64 }));
+			expect(transcript).toContain("ZEPHYR-9");
+			expect(transcript).toContain("Recall the codeword from the previous task");
+			{
 				const snapshot = new WorkerLifecycle({
 					agentDir: harness.tempDir,
 					sessionId: harness.session.sessionId,
@@ -982,8 +994,9 @@ describe("AgentSession worker delegation", () => {
 					totalTokens: 0,
 					costUsd: 0,
 				});
-			});
+			}
 		} finally {
+			unsubscribe();
 			harness.cleanup();
 		}
 	});
@@ -1150,16 +1163,27 @@ describe("AgentSession worker delegation", () => {
 			resolveSecond = resolve;
 		});
 		let providerCalls = 0;
+		const firstStarted = Promise.withResolvers<void>();
+		const secondStarted = Promise.withResolvers<void>();
+		const completed = Promise.withResolvers<void>();
+		const terminalIds = new Set<string>();
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (event.type !== "delegate_workers") return;
+			for (const record of event.terminalSinceFlush) terminalIds.add(record.laneId);
+			if (terminalIds.size === 2) completed.resolve();
+		});
 		try {
 			mkdirSync(join(harness.tempDir, "src"), { recursive: true });
 			await harness.session.setModel({ ...harness.getModel(), baseUrl: "https://faux.invalid" });
-			harness.setResponses([
+			setConcurrentResponses(harness, [
 				() => {
 					providerCalls += 1;
+					firstStarted.resolve();
 					return first;
 				},
 				() => {
 					providerCalls += 1;
+					secondStarted.resolve();
 					return second;
 				},
 			]);
@@ -1195,16 +1219,20 @@ describe("AgentSession worker delegation", () => {
 			).toMatchObject({
 				started: true,
 			});
-			await vi.waitFor(() => expect(providerCalls).toBe(1));
+			await firstStarted.promise;
+			expect(providerCalls).toBe(1);
 			expect(
 				harness.session.getLaneRecords().some((record) => record.type === "worker" && record.status === "queued"),
 			).toBe(true);
 
 			resolveFirst(fauxAssistantMessage('{"summary":"first write complete"}'));
-			await vi.waitFor(() => expect(providerCalls).toBe(2));
+			await secondStarted.promise;
+			expect(providerCalls).toBe(2);
 			resolveSecond(fauxAssistantMessage('{"summary":"second write complete"}'));
-			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2));
+			await completed.promise;
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2);
 		} finally {
+			unsubscribe();
 			resolveFirst?.(fauxAssistantMessage('{"summary":"cleanup"}'));
 			resolveSecond?.(fauxAssistantMessage('{"summary":"cleanup"}'));
 			harness.cleanup();
@@ -1401,7 +1429,10 @@ describe("AgentSession worker delegation", () => {
 				[
 					fauxAssistantMessage(
 						[
-							fauxToolCall("delegate", { instructions: "Scout first" }),
+							fauxToolCall("delegate", {
+								instructions: "Scout first",
+								parallelWork: { independentOf: [], justification: "Exercise two independent queued scouts." },
+							}),
 							fauxToolCall("delegate", {
 								instructions: "Scout second",
 								parallelWork: { independentOf: [], justification: "Exercise two independent queued scouts." },
@@ -1447,22 +1478,14 @@ describe("AgentSession worker delegation", () => {
 			additionalOrchestrationProfiles: [replacement],
 		});
 		let releaseFirst = () => {};
-		let signalQueued!: () => void;
+		const firstStarted = Promise.withResolvers<void>();
 		let signalAllTerminal!: () => void;
-		const queued = new Promise<void>((resolve) => {
-			signalQueued = resolve;
-		});
 		const allTerminal = new Promise<void>((resolve) => {
 			signalAllTerminal = resolve;
 		});
 		const terminalLaneIds = new Set<string>();
 		const unsubscribe = harness.session.subscribe((event) => {
 			if (event.type !== "delegate_workers") return;
-			if (
-				harness.session.getLaneRecords().some((record) => record.type === "worker" && record.status === "queued")
-			) {
-				signalQueued();
-			}
 			for (const record of event.terminalSinceFlush) terminalLaneIds.add(record.laneId);
 			if (terminalLaneIds.size === 2) signalAllTerminal();
 		});
@@ -1480,6 +1503,7 @@ describe("AgentSession worker delegation", () => {
 				workerModelIds.push(model.id);
 				workerReasoning.push(options?.reasoning);
 				workerToolNames.push(context.tools?.map((tool) => tool.name) ?? []);
+				firstStarted.resolve();
 				return workerModelIds.length === 1
 					? firstWorkerResponse
 					: fauxAssistantMessage('{"summary":"second worker done","status":"completed"}');
@@ -1490,7 +1514,13 @@ describe("AgentSession worker delegation", () => {
 				[
 					fauxAssistantMessage(
 						[
-							fauxToolCall("delegate", { instructions: "First queued-profile worker" }),
+							fauxToolCall("delegate", {
+								instructions: "First queued-profile worker",
+								parallelWork: {
+									independentOf: [],
+									justification: "Exercise a separate queued execution contract.",
+								},
+							}),
 							fauxToolCall("delegate", {
 								instructions: "Second queued-profile worker",
 								parallelWork: {
@@ -1506,7 +1536,10 @@ describe("AgentSession worker delegation", () => {
 			);
 
 			await harness.session.prompt("Delegate both workers", { autoContinueGoal: false });
-			await queued;
+			await firstStarted.promise;
+			expect(
+				harness.session.getLaneRecords().filter((record) => record.type === "worker" && record.status === "queued"),
+			).toHaveLength(1);
 			new OrchestrationProfileStore({
 				agentDir: harness.tempDir,
 				cwd: harness.tempDir,

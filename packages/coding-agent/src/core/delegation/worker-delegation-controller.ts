@@ -49,7 +49,10 @@ import {
 } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
-import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
+import {
+	assertSpecialistContextClaim,
+	type SpecialistContextClaim,
+} from "../orchestration/specialist-context-ownership.ts";
 import {
 	type TaskProfileCreateInput,
 	type TaskProfileCreateResult,
@@ -2198,11 +2201,9 @@ export class WorkerDelegationController {
 				resumeContext: agent.resumeContext,
 				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
 			});
-			return (
-				!binding ||
-				(binding.ownership.state === "busy" &&
-					isDeepStrictEqual(binding.ownership.claim, this.projectClaims.get(agent.resumeContext.sessionId)))
-			);
+			if (binding)
+				assertSpecialistContextClaim(binding.ownership, this.projectClaims.get(agent.resumeContext.sessionId));
+			return true;
 		} catch {
 			return false;
 		}
