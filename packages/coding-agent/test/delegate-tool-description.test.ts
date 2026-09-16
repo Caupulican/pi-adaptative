@@ -241,13 +241,15 @@ describe("delegate tool capability description", () => {
 		expect(settings.getWorkerDelegationSettings()).toMatchObject({ writeEnabled: true });
 		expect(settings.getWorkerDelegationSettings()).not.toHaveProperty("writePaths");
 		expect(definition.description).toBe(descriptionBefore);
-		expect(definition.description).toContain("inherits the foreground model, reasoning, every compatible tool");
-		expect(definition.description).toContain("loaded profile is a reusable preset");
+		expect(definition.description).toContain("inherit foreground model, reasoning, compatible tools");
+		expect(definition.description).toContain("profileId selects a loaded preset");
 		expect(definition.description).toContain("persistent leaf workers");
 		expect(definition.description).not.toMatch(/descendant|subtree|recursive/i);
-		expect(definition.description).toContain("start with agentId dispatches a new task onto an existing idle worker");
-		expect(definition.description).toContain("New workers default to their self-contained instructions only");
-		expect(definition.description).toContain("Explicitly set forkTurns to all");
+		expect(definition.description).toContain(
+			"start automatically reuses compatible idle context across project sessions; agentId selects one specialist",
+		);
+		expect(definition.description).toContain("forkTurns defaults to none");
+		expect(definition.description).toContain("all or a positive recent-turn count requires the exact provider/model");
 
 		const parameters = definition.parameters as unknown as {
 			properties?: {
@@ -272,8 +274,8 @@ describe("delegate tool capability description", () => {
 		expect(parameters.properties).not.toHaveProperty("authority");
 		const promptGuidelines = (definition.promptGuidelines ?? []).join("\n");
 		expect(promptGuidelines).toContain("Optional model/thinkingLevel/path/toolNames only");
-		expect(promptGuidelines).toContain("CAVEMAN MODE - MANDATORY: fresh=no agentId");
-		expect(promptGuidelines).toContain("reuse=returned agentId");
+		expect(promptGuidelines).toContain("CAVEMAN MODE - MANDATORY: start=automatic reuse");
+		expect(promptGuidelines).toContain("agentId=select specialist");
 		expect(promptGuidelines).toContain("task=instructions");
 		expect(promptGuidelines.toLowerCase()).toContain("compiles and persists grant");
 		expect(promptGuidelines).toContain("queued=admitted");

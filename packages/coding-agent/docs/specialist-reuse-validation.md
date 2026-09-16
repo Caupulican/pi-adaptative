@@ -82,6 +82,12 @@ Production clone coverage is 1,035/1,044 eligible/owned files, with zero clones.
 slice also exposed timing-sensitive existing worker-session fixtures; their event synchronization
 is tracked separately from the frozen ownership regressions.
 
+The full CI matrix also exposed acquisition fixtures that assumed 25 event-loop ticks proved a
+backend request had started. Pane and workspace regressions now await explicit backend-entry
+events; their lifecycle assertions are unchanged. Existing description tests now check the approved
+automatic-reuse wording instead of the superseded `fresh=no agentId` instruction. This is fixture
+alignment, not a new production correction or a relaxation of the ownership regressions.
+
 The candidate that implicit resource selection alone breaks an unchanged named-task replay was not
 reproduced. Its negative control passes; no speculative correction was made for it.
 

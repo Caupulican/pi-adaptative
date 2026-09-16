@@ -9,25 +9,25 @@ describe("delegate tool description varies by wiring mode", () => {
 		});
 
 		expect(definition.description).toContain(
-			"inherits the foreground model, reasoning, every compatible tool, and machine-wide project access",
+			"inherit foreground model, reasoning, compatible tools and machine access",
 		);
 		expect(definition.description).toContain("persistent leaf workers");
-		expect(definition.description).toContain("start with agentId dispatches a new task onto an existing idle worker");
-		expect(definition.description).toContain("list reports every session worker through safe metadata");
-		expect(definition.description).toContain("transcript exposes bounded inspection pages");
-		expect(definition.description).toContain("omitting provider replay signatures");
+		expect(definition.description).toContain(
+			"start automatically reuses compatible idle context across project sessions; agentId selects one specialist",
+		);
+		expect(definition.description).toContain("list shows safe worker metadata/activity");
+		expect(definition.description).toContain("transcript pages");
+		expect(definition.description).toContain("omit replay signatures");
 		expect(definition.description).toContain("omittedMessages");
-		expect(definition.description).toContain("page may be empty while nextCursor continues");
-		expect(definition.description).toContain("wait and wait_many are event-driven");
-		expect(definition.description).toContain("inbox_wait observes explicit replies only");
+		expect(definition.description).toContain("Follow nextCursor even on empty pages");
+		expect(definition.description).toContain("wait/wait_many use event-driven completion");
+		expect(definition.description).toContain("inbox_wait observes explicit replies, never completion");
 		expect(definition.description).toContain(
-			"follow_up starts an idle targeted worker or steers an active targeted worker at a message boundary",
+			"follow_up starts an idle target or steers an active target at a message boundary",
 		);
-		expect(definition.description).toContain(
-			"send/broadcast are non-waking coordination evidence and do not control or complete workers",
-		);
+		expect(definition.description).toContain("send/broadcast are non-waking evidence");
 		expect(definition.description).not.toMatch(/subtree|descendant|recursive/i);
-		expect(definition.description).toContain("timeout alone is never stall evidence");
+		expect(definition.description).toContain("timeout proves no stall and permits no interrupt");
 		expect(definition.description).not.toContain("delegate_status");
 		expect(definition.description).not.toContain("returns immediately");
 		expect(definition.parameters).toMatchObject({
@@ -47,7 +47,7 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(guidelines.some((line) => line.includes("Completion: wait/wait_many"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("Timeout alone") && line.includes("never interrupt"))).toBe(true);
 		expect(guidelines).toContain(
-			"CAVEMAN MODE - MANDATORY: fresh=no agentId; reuse=returned agentId; task=instructions; idle=reuse.",
+			"CAVEMAN MODE - MANDATORY: start=automatic reuse; agentId=select specialist; parallelWork=justified independent copy; task=instructions.",
 		);
 		expect(guidelines.some((line) => line.includes("Host compiles and persists"))).toBe(true);
 	});
@@ -64,23 +64,23 @@ describe("delegate tool description varies by wiring mode", () => {
 
 		// Core capability wording is preserved alongside the async addendum.
 		expect(definition.description).toContain(
-			"inherits the foreground model, reasoning, every compatible tool, and machine-wide project access",
+			"inherit foreground model, reasoning, compatible tools and machine access",
 		);
 		expect(definition.description).toContain("persistent leaf workers");
-		expect(definition.description).toContain("start with agentId dispatches a new task onto an existing idle worker");
+		expect(definition.description).toContain(
+			"start automatically reuses compatible idle context across project sessions; agentId selects one specialist",
+		);
 		expect(definition.description).toContain("returns immediately");
 		expect(definition.description).not.toContain("delegate_status");
 		expect(definition.description).toContain("does not wait for the worker to finish");
 		expect(definition.description).toContain("terminal handoff");
 		expect(definition.description).toContain("Do not poll");
-		expect(definition.description).toContain("inbox_wait observes explicit replies only");
-		expect(definition.description).toContain("timeout alone is never stall evidence");
+		expect(definition.description).toContain("inbox_wait observes explicit replies, never completion");
+		expect(definition.description).toContain("timeout proves no stall and permits no interrupt");
 		expect(definition.description).toContain(
-			"follow_up starts an idle targeted worker or steers an active targeted worker at a message boundary",
+			"follow_up starts an idle target or steers an active target at a message boundary",
 		);
-		expect(definition.description).toContain(
-			"send/broadcast are non-waking coordination evidence and do not control or complete workers",
-		);
+		expect(definition.description).toContain("send/broadcast are non-waking evidence");
 
 		const guidelines = definition.promptGuidelines ?? [];
 		expect(guidelines.some((line) => line.includes("Transcript pages are bounded"))).toBe(true);
@@ -92,7 +92,7 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(guidelines.some((line) => line.includes("Completion: wait/wait_many"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("Timeout alone") && line.includes("never interrupt"))).toBe(true);
 		expect(guidelines).toContain(
-			"CAVEMAN MODE - MANDATORY: fresh=no agentId; reuse=returned agentId; task=instructions; idle=reuse.",
+			"CAVEMAN MODE - MANDATORY: start=automatic reuse; agentId=select specialist; parallelWork=justified independent copy; task=instructions.",
 		);
 		expect(guidelines.some((line) => line.includes("Host compiles and persists"))).toBe(true);
 	});

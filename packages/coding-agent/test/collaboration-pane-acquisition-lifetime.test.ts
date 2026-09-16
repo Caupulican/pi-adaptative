@@ -53,12 +53,6 @@ function deferred<T>(): Deferred<T> {
 	return { promise, resolve, reject };
 }
 
-async function flushTasks(rounds = 25): Promise<void> {
-	for (let round = 0; round < rounds; round++) {
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-}
-
 const CALLER_PANE: CollaborationPane = {
 	paneId: "caller-pane",
 	terminalId: "caller-terminal",
@@ -79,6 +73,7 @@ afterEach(async () => {
 });
 
 interface Harness {
+	acquisitionStarted: Promise<void>;
 	store: CollaborationJobStore;
 	coordinator: CollaborationCoordinator;
 	input: NewCollaborationJob;
@@ -94,7 +89,11 @@ async function harness(held?: Deferred<CollaborationPane>): Promise<Harness> {
 	const store = new CollaborationJobStore(root, "parent");
 	const registered = new Map<string, CollaborationPane>();
 
-	const splitPane = vi.fn(async () => (held ? held.promise : CREATED_PANE));
+	const acquisitionStarted = deferred<void>();
+	const splitPane = vi.fn(async () => {
+		acquisitionStarted.resolve();
+		return held ? held.promise : CREATED_PANE;
+	});
 	const startAgent = vi.fn(async (input: CollaborationStart): Promise<BackendAgent> => {
 		const pane = [CALLER_PANE, CREATED_PANE].find((candidate) => candidate.paneId === input.paneId);
 		if (!pane) throw new Error(`Unexpected startAgent pane ${input.paneId}`);
@@ -177,7 +176,16 @@ async function harness(held?: Deferred<CollaborationPane>): Promise<Harness> {
 		],
 	};
 
-	return { store, coordinator, input, splitPane, startAgent, closePane, getPane };
+	return {
+		acquisitionStarted: acquisitionStarted.promise,
+		store,
+		coordinator,
+		input,
+		splitPane,
+		startAgent,
+		closePane,
+		getPane,
+	};
 }
 
 describe("collaboration pane acquisition lifetime", () => {
@@ -188,7 +196,7 @@ describe("collaboration pane acquisition lifetime", () => {
 			() => "resolved",
 			(error: unknown) => error,
 		);
-		await flushTasks();
+		await h.acquisitionStarted;
 		expect(h.splitPane).toHaveBeenCalledTimes(1);
 
 		await h.coordinator.stopAgent("job", "agent0");
@@ -209,7 +217,7 @@ describe("collaboration pane acquisition lifetime", () => {
 			() => "resolved",
 			(error: unknown) => error,
 		);
-		await flushTasks();
+		await h.acquisitionStarted;
 
 		await h.coordinator.stopAgent("job", "agent0");
 		held.resolve(CREATED_PANE);
@@ -229,7 +237,7 @@ describe("collaboration pane acquisition lifetime", () => {
 			() => "resolved",
 			(error: unknown) => error,
 		);
-		await flushTasks();
+		await h.acquisitionStarted;
 
 		await h.coordinator.stopAgent("job", "agent0");
 		held.resolve(CREATED_PANE);
@@ -248,7 +256,7 @@ describe("collaboration pane acquisition lifetime", () => {
 			() => "resolved",
 			(error: unknown) => error,
 		);
-		await flushTasks();
+		await h.acquisitionStarted;
 
 		// The daemon may have created the pane and lost the reply; an absent pane id proves nothing.
 		held.reject(new CollaborationBackendError("pane_create_failed", "Reply lost after submission.", "unknown"));
@@ -266,7 +274,7 @@ describe("collaboration pane acquisition lifetime", () => {
 			() => "resolved",
 			(error: unknown) => error,
 		);
-		await flushTasks();
+		await h.acquisitionStarted;
 
 		held.reject(new CollaborationBackendError("invalid_cwd", "Rejected before submission.", "not-submitted"));
 		await launching;

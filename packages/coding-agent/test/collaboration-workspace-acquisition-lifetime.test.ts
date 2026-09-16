@@ -52,12 +52,6 @@ function deferred<T>(): Deferred<T> {
 	return { promise, resolve, reject };
 }
 
-async function flushTasks(rounds = 25): Promise<void> {
-	for (let round = 0; round < rounds; round++) {
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-}
-
 const ROOT_PANE: CollaborationPane = {
 	paneId: "root-pane",
 	terminalId: "root-terminal",
@@ -84,6 +78,7 @@ afterEach(async () => {
 });
 
 interface Harness {
+	acquisitionStarted: Promise<void>;
 	store: CollaborationJobStore;
 	coordinator: CollaborationCoordinator;
 	input: NewCollaborationJob;
@@ -98,7 +93,11 @@ async function harness(heldWorkspace?: Deferred<CollaborationWorkspace>): Promis
 	roots.push(root);
 	const store = new CollaborationJobStore(root, "parent");
 
-	const createWorkspace = vi.fn(async () => (heldWorkspace ? heldWorkspace.promise : WORKSPACE));
+	const acquisitionStarted = deferred<void>();
+	const createWorkspace = vi.fn(async () => {
+		acquisitionStarted.resolve();
+		return heldWorkspace ? heldWorkspace.promise : WORKSPACE;
+	});
 	const splitPane = vi.fn(async () => SECOND_PANE);
 	const startAgent = vi.fn(async (input: CollaborationStart): Promise<BackendAgent> => {
 		const pane = [ROOT_PANE, SECOND_PANE].find((candidate) => candidate.paneId === input.paneId);
@@ -159,7 +158,16 @@ async function harness(heldWorkspace?: Deferred<CollaborationWorkspace>): Promis
 		})),
 	};
 
-	return { store, coordinator, input, createWorkspace, splitPane, startAgent, closeWorkspace };
+	return {
+		acquisitionStarted: acquisitionStarted.promise,
+		store,
+		coordinator,
+		input,
+		createWorkspace,
+		splitPane,
+		startAgent,
+		closeWorkspace,
+	};
 }
 
 /** A job with one member, used for the store-owner transitions below. */
@@ -198,7 +206,7 @@ describe("managed workspace acquisition lifetime", () => {
 			() => "resolved",
 			(error: unknown) => error,
 		);
-		await flushTasks();
+		await h.acquisitionStarted;
 		expect(h.createWorkspace).toHaveBeenCalledTimes(1);
 
 		// The daemon may have created the workspace and lost the reply. No member has a pane, but that
@@ -219,7 +227,7 @@ describe("managed workspace acquisition lifetime", () => {
 			() => "resolved",
 			(error: unknown) => error,
 		);
-		await flushTasks();
+		await h.acquisitionStarted;
 
 		held.reject(new CollaborationBackendError("invalid_cwd", "Rejected before submission.", "not-submitted"));
 		await launching;
@@ -237,7 +245,7 @@ describe("managed workspace acquisition lifetime", () => {
 			() => "resolved",
 			(error: unknown) => error,
 		);
-		await flushTasks();
+		await h.acquisitionStarted;
 		expect(h.createWorkspace).toHaveBeenCalledTimes(1);
 
 		await h.coordinator.stopAgent("job", "agent0");
