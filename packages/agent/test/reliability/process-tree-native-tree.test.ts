@@ -205,11 +205,15 @@ describe("native process-tree termination on this host", () => {
 		expect(isProcessAlive(tree.child.pid as number)).toBe(true);
 		expect(isProcessAlive(tree.grandchildPid)).toBe(true);
 
-		const outcome = await killTree(tree.child, { graceMs: 5_000 });
+		const diagnostics: string[] = [];
+		const outcome = await killTree(tree.child, {
+			graceMs: 5_000,
+			onDiagnostic: (message) => diagnostics.push(message),
+		});
+		expect(["terminated", "killed"], diagnostics.join("\n")).toContain(outcome);
 
 		await withDeadline(tree.childExited, "the child exit event");
 		await withDeadline(tree.grandchildGone, "the grandchild connection to drop");
-		expect(["terminated", "killed"]).toContain(outcome);
 		expect(tree.child.exitCode !== null || tree.child.signalCode !== null).toBe(true);
 	});
 

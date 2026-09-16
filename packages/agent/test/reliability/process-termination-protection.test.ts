@@ -100,6 +100,66 @@ describe("bounded ancestry protection", () => {
 			expect(createProcessTerminationProtectionReader()()).toBeUndefined();
 		},
 	);
+	it("accepts an exited historical Windows parent while protecting every recorded ancestor PID", () => {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const stdout = JSON.stringify([
+			{ ProcessId: process.pid, ParentProcessId: process.ppid },
+			{ ProcessId: process.ppid, ParentProcessId: 7171 },
+		]);
+		vi.mocked(spawnSync).mockReturnValue({ status: 0, stdout } as ReturnType<typeof spawnSync>);
+		const ids = createProcessTerminationProtectionReader()();
+		expect(ids).toEqual(new Set([1, process.pid, process.ppid, 7171]));
+		expect(ids?.has(8181)).toBe(false);
+	});
+	it("never treats an absent self record as an exited historical parent", () => {
+		expect(collectProtectedProcessIds(100, 90, () => null)).toBeUndefined();
+	});
+	it("accepts an exited direct Windows parent and retains its protected PID", () => {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const stdout = JSON.stringify([{ ProcessId: process.pid, ParentProcessId: process.ppid }]);
+		vi.mocked(spawnSync).mockReturnValue({ status: 0, stdout } as ReturnType<typeof spawnSync>);
+		expect(createProcessTerminationProtectionReader()()).toEqual(new Set([1, process.pid, process.ppid]));
+	});
+	it.each(["ETIMEDOUT", "EACCES"])("refuses a Windows observer error %s despite parseable stdout", (code) => {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const stdout = JSON.stringify([{ ProcessId: process.pid, ParentProcessId: process.ppid }]);
+		vi.mocked(spawnSync).mockReturnValue({
+			pid: 8181,
+			output: [null, stdout, ""],
+			stderr: "",
+			signal: null,
+			status: 0,
+			stdout,
+			error: Object.assign(new Error(code), { code }),
+		});
+		expect(createProcessTerminationProtectionReader()()).toBeUndefined();
+	});
+	it.each([-1, 1.5])("refuses a malformed recorded Windows parent %s", (parentPid) => {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const stdout = JSON.stringify([
+			{ ProcessId: process.pid, ParentProcessId: process.ppid },
+			{ ProcessId: process.ppid, ParentProcessId: parentPid },
+		]);
+		vi.mocked(spawnSync).mockReturnValue({ status: 0, stdout } as ReturnType<typeof spawnSync>);
+		expect(createProcessTerminationProtectionReader()()).toBeUndefined();
+	});
+	it.each(["win32", "darwin"])("refuses a failed %s snapshot even when stdout contains ancestry", (targetPlatform) => {
+		Object.defineProperty(process, "platform", { value: targetPlatform, configurable: true });
+		const stdout =
+			targetPlatform === "win32"
+				? JSON.stringify([{ ProcessId: process.pid, ParentProcessId: process.ppid }])
+				: `${process.pid} ${process.ppid} ${process.pid}`;
+		vi.mocked(spawnSync).mockReturnValue({ status: 1, stdout } as ReturnType<typeof spawnSync>);
+		expect(createProcessTerminationProtectionReader()()).toBeUndefined();
+	});
+	it("still refuses a missing macOS ancestor in a successful process snapshot", () => {
+		Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+		vi.mocked(spawnSync).mockReturnValue({
+			status: 0,
+			stdout: `${process.pid} ${process.ppid} ${process.pid}`,
+		} as ReturnType<typeof spawnSync>);
+		expect(createProcessTerminationProtectionReader()()).toBeUndefined();
+	});
 	it("does not cache observer failure as authorization", () => {
 		Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
 		vi.mocked(spawnSync).mockReturnValue({ status: 1, stdout: "" } as ReturnType<typeof spawnSync>);

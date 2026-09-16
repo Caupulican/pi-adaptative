@@ -12,11 +12,15 @@ export interface ProcessParentRecord {
 	groupId?: number;
 }
 
-/** Unknown ancestry cannot authorize a destructive signal. No target liveness is inferred here. */
+/**
+ * Unknown ancestry cannot authorize a destructive signal. A null row explicitly proves an absent
+ * historical parent in a complete Windows snapshot; undefined remains an observation failure.
+ * No target liveness is inferred here.
+ */
 export function collectProtectedProcessIds(
 	selfPid: number,
 	parentPid: number,
-	read: (pid: number) => ProcessParentRecord | undefined,
+	read: (pid: number) => ProcessParentRecord | null | undefined,
 ): ReadonlySet<number> | undefined {
 	const protectedIds = new Set<number>([1]);
 	const seen = new Set<number>();
@@ -26,6 +30,10 @@ export function collectProtectedProcessIds(
 		if (seen.has(pid)) return undefined;
 		seen.add(pid);
 		const record = read(pid);
+		if (record === null && depth > 0) {
+			protectedIds.add(pid);
+			return protectedIds;
+		}
 		if (
 			!record ||
 			record.pid !== pid ||
@@ -111,6 +119,8 @@ function readProcessTable(platform: NodeJS.Platform): Map<number, ProcessParentR
  * Linux reads the live bounded ancestry directly. The other supported hosts need a process-table
  * command: retain a successful launch-ancestry snapshot while self/parent identity is unchanged.
  * This protects the hosting chain and groups, not unrelated processes or recycled target PIDs.
+ * On Windows a proven absent historical creator ends the observable chain; surviving older
+ * ancestors beyond that break cannot be reconstructed from the current process table.
  */
 export function createProcessTerminationProtectionReader(): () => ReadonlySet<number> | undefined {
 	let cached: { platform: NodeJS.Platform; pid: number; parentPid: number; ids: ReadonlySet<number> } | undefined;
@@ -123,7 +133,13 @@ export function createProcessTerminationProtectionReader(): () => ReadonlySet<nu
 			if (cached?.platform === platform && cached.pid === pid && cached.parentPid === parentPid) return cached.ids;
 			const table = readProcessTable(platform);
 			if (!table) return undefined;
-			const ids = collectProtectedProcessIds(pid, parentPid, (target) => table.get(target));
+			// Windows retains the creator PID after it exits instead of reparenting the child.
+			// Only a successfully parsed complete snapshot establishes that historical absence.
+			const ids = collectProtectedProcessIds(
+				pid,
+				parentPid,
+				(target) => table.get(target) ?? (platform === "win32" ? null : undefined),
+			);
 			if (ids) cached = { platform, pid, parentPid, ids };
 			return ids;
 		} catch {
