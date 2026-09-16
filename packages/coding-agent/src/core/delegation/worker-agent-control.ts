@@ -10,6 +10,7 @@ import {
 	type AgentBindingStatus,
 	type AttemptStatus,
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
+	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
@@ -26,12 +27,21 @@ import type { WorkerTaskSessionView } from "./worker-task-view.ts";
 
 const MAX_MAILBOX_MESSAGES = 64;
 const MAX_MAILBOX_MESSAGE_CHARS = 4_096;
+/**
+ * A task-bearing control message carries a worker's task brief, so its bound is the durable dispatch
+ * instruction bound -- the authoritative owner of how long a brief may be. Ordinary peer messages
+ * keep the smaller coordination bound; nothing is truncated to fit either one.
+ */
+const MAX_TASK_BEARING_MESSAGE_CHARS = MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH;
 const MAX_ORDINARY_MAILBOX_BYTES = 128 * 1024;
 const MAX_MAILBOX_MESSAGE_ID_CHARS = 512;
 const MAX_MAILBOX_TIMESTAMP_CHARS = 128;
 const MAX_MAILBOX_IDENTITY_CHARS = 512;
-/** Requirement/criterion ids one new-task correlation may carry; the mailbox stays a bounded file. */
-const MAX_MAILBOX_CORRELATION_IDS = 32;
+/**
+ * Requirement/criterion ids one new-task correlation may carry. The durable dispatch collection bound
+ * owns this number: a correlation the dispatch contract accepts must survive the mailbox unchanged.
+ */
+const MAX_MAILBOX_CORRELATION_IDS = MAX_ORCHESTRATION_COLLECTION_LENGTH;
 const MAX_MAILBOX_IDEMPOTENCY_KEY_CHARS = 2_048;
 const MAX_ORDINARY_RETAINED_MESSAGES = MAX_MAILBOX_MESSAGES * 2;
 const MAX_MANDATORY_RETAINED_MESSAGES = MAX_MAILBOX_MESSAGES;
@@ -44,7 +54,7 @@ const MAX_ENCODED_MANDATORY_MESSAGE_BYTES =
 		JSON.stringify({
 			messageId: `worker-message-${"f".repeat(64)}`,
 			kind: "follow_up",
-			content: `c${"\0".repeat(MAX_MAILBOX_MESSAGE_CHARS - 1)}`,
+			content: `c${"\0".repeat(MAX_TASK_BEARING_MESSAGE_CHARS - 1)}`,
 			senderAgentId: `s${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
 			threadId: `t${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
 			replyToMessageId: `r${"\0".repeat(MAX_MAILBOX_MESSAGE_ID_CHARS - 1)}`,
@@ -59,6 +69,10 @@ const MAX_ENCODED_MANDATORY_MESSAGE_BYTES =
 						(_, index) => `${index}${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
 					),
 					acceptanceCriterionIds: Array.from(
+						{ length: MAX_MAILBOX_CORRELATION_IDS },
+						(_, index) => `${index}${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
+					),
+					resourcePointerIds: Array.from(
 						{ length: MAX_MAILBOX_CORRELATION_IDS },
 						(_, index) => `${index}${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
 					),
@@ -93,6 +107,8 @@ export interface WorkerAgentNewTaskCorrelation {
 	goalId?: string;
 	requirementIds?: readonly string[];
 	acceptanceCriterionIds?: readonly string[];
+	/** Runtime narrowing of the specialist's admitted resources for this turn. */
+	resourcePointerIds?: readonly string[];
 }
 
 export type WorkerAgentTaskMetadata =
@@ -224,6 +240,7 @@ export interface WorkerAgentTaskStartOptions extends WorkerAgentControlScope {
 		goal?: GoalState;
 		requirementIds?: readonly string[];
 		acceptanceCriterionIds?: readonly string[];
+		resourcePointerIds?: readonly string[];
 	};
 }
 
@@ -599,7 +616,7 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 			(message.kind !== "steer" && message.kind !== "follow_up") ||
 			typeof message.content !== "string" ||
 			message.content.length === 0 ||
-			message.content.length > MAX_MAILBOX_MESSAGE_CHARS ||
+			message.content.length > maxContentChars(task) ||
 			(message.senderAgentId !== undefined &&
 				(typeof message.senderAgentId !== "string" ||
 					message.senderAgentId.length === 0 ||
@@ -852,7 +869,11 @@ function parsedNewTaskCorrelation(value: unknown): WorkerAgentNewTaskCorrelation
 	const correlation = value as Record<string, unknown>;
 	if (
 		!Object.keys(correlation).every(
-			(field) => field === "goalId" || field === "requirementIds" || field === "acceptanceCriterionIds",
+			(field) =>
+				field === "goalId" ||
+				field === "requirementIds" ||
+				field === "acceptanceCriterionIds" ||
+				field === "resourcePointerIds",
 		)
 	) {
 		throw new Error("Worker agent mailbox contains invalid new-task correlation metadata.");
@@ -868,7 +889,15 @@ function parsedNewTaskCorrelation(value: unknown): WorkerAgentNewTaskCorrelation
 		...(correlation.acceptanceCriterionIds === undefined
 			? {}
 			: { acceptanceCriterionIds: correlation.acceptanceCriterionIds as readonly string[] }),
+		...(correlation.resourcePointerIds === undefined
+			? {}
+			: { resourcePointerIds: correlation.resourcePointerIds as readonly string[] }),
 	});
+}
+
+/** How long this message's content may be: a task brief is bounded by the dispatch contract. */
+function maxContentChars(task: WorkerAgentTaskMetadata | undefined): number {
+	return task === undefined ? MAX_MAILBOX_MESSAGE_CHARS : MAX_TASK_BEARING_MESSAGE_CHARS;
 }
 
 function normalizeOptionalIdentity(value: string | undefined, label: string): string | undefined {
@@ -902,10 +931,15 @@ export function normalizeWorkerAgentNewTaskCorrelation(
 		value.acceptanceCriterionIds,
 		"new task acceptance criterion ids",
 	);
+	const resourcePointerIds = normalizeWorkerAgentCorrelationIds(
+		value.resourcePointerIds,
+		"new task resource pointer ids",
+	);
 	return {
 		...(goalId ? { goalId } : {}),
 		...(requirementIds.length > 0 ? { requirementIds } : {}),
 		...(acceptanceCriterionIds.length > 0 ? { acceptanceCriterionIds } : {}),
+		...(resourcePointerIds.length > 0 ? { resourcePointerIds } : {}),
 	};
 }
 
@@ -1124,6 +1158,14 @@ export class WorkerAgentMailbox {
 	}
 
 	/** Enqueue with exact creation evidence for an idempotent surrounding acceptance flow. */
+	/**
+	 * `onAdmitted` runs inside this transaction once EVERY deterministic refusal has been ruled out --
+	 * content and identity bounds, replay identity, pending capacity and encoded-byte admission -- and
+	 * immediately before the accepted message is written. It exists so a caller can materialize the
+	 * durable context an accepted message needs (its goal criteria) without persisting that context
+	 * for a start the mailbox is about to refuse. It must be synchronous and must not re-enter this
+	 * mailbox's lock; a throw from it refuses the admission with nothing written here.
+	 */
 	enqueueWithReceipt(input: {
 		kind: WorkerAgentMessageKind;
 		content: string;
@@ -1133,18 +1175,22 @@ export class WorkerAgentMailbox {
 		expectReply?: boolean;
 		task?: WorkerAgentTaskMetadata;
 		idempotencyKey?: string;
+		onAdmitted?: () => void;
 	}): WorkerAgentEnqueueReceipt {
-		const content = input.content.trim();
-		if (!content) throw new TypeError("A worker control message is required.");
-		if (content.length > MAX_MAILBOX_MESSAGE_CHARS) {
+		const task = normalizeTaskMetadata(input.task);
+		// A task-bearing message carries the worker's brief and is retained verbatim; ordinary peer
+		// coordination keeps its normalizing trim.
+		const content = task === undefined ? input.content.trim() : input.content;
+		if (!content.trim()) throw new TypeError("A worker control message is required.");
+		const contentLimit = maxContentChars(task);
+		if (content.length > contentLimit) {
 			throw new TypeError(
-				`Worker control messages may not exceed ${MAX_MAILBOX_MESSAGE_CHARS.toLocaleString("en-US")} characters.`,
+				`Worker control messages may not exceed ${contentLimit.toLocaleString("en-US")} characters.`,
 			);
 		}
 		const senderAgentId = normalizeOptionalIdentity(input.senderAgentId, "sender agent id");
 		const threadId = normalizeOptionalIdentity(input.threadId, "thread id");
 		const replyToMessageId = normalizeOptionalIdentity(input.replyToMessageId, "reply message id");
-		const task = normalizeTaskMetadata(input.task);
 		const idempotencyKey = input.idempotencyKey?.trim();
 		if (
 			input.idempotencyKey !== undefined &&
@@ -1247,6 +1293,9 @@ export class WorkerAgentMailbox {
 			},
 			!externallyReplayOwned,
 			true,
+			() => {
+				if (created) input.onAdmitted?.();
+			},
 		);
 		if (created) this.notify();
 		if (completedReplay) return { status: "completed_replay", messageId: message.messageId, created: false };
@@ -1287,6 +1336,41 @@ export class WorkerAgentMailbox {
 		if (!normalized) throw new TypeError("A worker control message id is required.");
 		const message = this.read().messages.find((candidate) => candidate.messageId === normalized);
 		return message ? structuredClone(message) : undefined;
+	}
+
+	/**
+	 * Does this exact control intent match the durable evidence retained for that message id?
+	 * `undefined` means this mailbox holds no evidence either way -- neither the message nor its
+	 * replay receipt survived bounded retention -- which is not proof of a match.
+	 *
+	 * One canonical normalization: the same `controlIntentDigest` the enqueue path itself records.
+	 */
+	matchesControlIntent(
+		messageId: string,
+		intent: {
+			content: string;
+			senderAgentId?: string;
+			threadId?: string;
+			replyToMessageId?: string;
+			expectReply?: boolean;
+			task?: WorkerAgentTaskMetadata;
+		},
+	): boolean | undefined {
+		const normalized = messageId.trim();
+		if (!normalized) throw new TypeError("A worker control message id is required.");
+		const state = this.read();
+		const candidate = {
+			content: intent.task === undefined ? intent.content.trim() : intent.content,
+			...(intent.senderAgentId ? { senderAgentId: intent.senderAgentId } : {}),
+			...(intent.threadId ? { threadId: intent.threadId } : {}),
+			...(intent.replyToMessageId ? { replyToMessageId: intent.replyToMessageId } : {}),
+			...(intent.expectReply === true ? { expectReply: true } : {}),
+			...(normalizeTaskMetadata(intent.task) ? { task: normalizeTaskMetadata(intent.task) } : {}),
+		};
+		const message = state.messages.find((entry) => entry.messageId === normalized);
+		if (message) return controlIntentDigest(message) === controlIntentDigest(candidate);
+		const receipt = controlReplayReceiptFor(state.replayReceipts, normalized);
+		return receipt ? receipt.intentDigest === controlIntentDigest(candidate) : undefined;
 	}
 
 	hasControlReplayReceipt(messageId: string): boolean {
@@ -1578,6 +1662,7 @@ export class WorkerAgentMailbox {
 		mutator: (state: WorkerAgentMailboxState) => WorkerAgentMailboxState,
 		ordinaryAdmission = false,
 		replayEvidenceAdmission = false,
+		beforeWrite?: () => void,
 	): void {
 		withFileLockSync(this.file, () => {
 			const state = this.read();
@@ -1635,7 +1720,10 @@ export class WorkerAgentMailbox {
 				encodedStateBytes(next),
 				bytesWithoutAddedReceipt,
 			);
-			if (changed) writeFileAtomicSync(this.file, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+			if (changed) {
+				beforeWrite?.();
+				writeFileAtomicSync(this.file, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+			}
 		});
 	}
 }

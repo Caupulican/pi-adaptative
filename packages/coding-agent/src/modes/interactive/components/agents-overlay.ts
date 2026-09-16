@@ -104,6 +104,15 @@ function backgroundToolRow(item: ActivityLaneItem): OrchestrationPanelRow {
 }
 
 const ACTIVE_WORKER_STATUSES = new Set<LaneRecord["status"]>(["queued", "running"]);
+
+/**
+ * Is this specialist lane currently working? Owned here beside the specialist projection, so the
+ * inspector and the workbench answer "active" from one definition instead of two status sets that
+ * can drift apart.
+ */
+export function isActiveWorkerLane(record: LaneRecord): boolean {
+	return ACTIVE_WORKER_STATUSES.has(record.status);
+}
 const ACTIVE_BACKGROUND_TOOL_STATUSES = new Set<ActivityLaneItem["status"]>(["active", "waiting"]);
 
 /** A worker lane whose logical agent still holds a session; `delegate retire` ends the session but keeps the record. */
@@ -139,7 +148,7 @@ export function projectSpecialistLanes(records: readonly LaneRecord[]): Speciali
 		else grouped.set(owner, [record]);
 	}
 	return [...grouped.values()].map((owned) => {
-		const active = owned.find((record) => ACTIVE_WORKER_STATUSES.has(record.status));
+		const active = owned.find(isActiveWorkerLane);
 		const current = active ?? (owned[0]?.agentId === undefined ? owned[0] : undefined);
 		return {
 			...(owned[0]?.agentId !== undefined ? { agentId: owned[0].agentId } : {}),
@@ -162,9 +171,9 @@ function projectWorkActivity(snapshot: AgentsOverlaySnapshot, nowMs: number): Wo
 	const specialists = projectSpecialistLanes(snapshot.laneRecords);
 	const currentLanes = specialists.flatMap((specialist) => (specialist.current ? [specialist.current] : []));
 	const idleSpecialists = specialists.length - currentLanes.length;
-	const activeWorkers = currentLanes.filter((record) => ACTIVE_WORKER_STATUSES.has(record.status));
+	const activeWorkers = currentLanes.filter(isActiveWorkerLane);
 	const finishedWorkers = currentLanes
-		.filter((record) => !ACTIVE_WORKER_STATUSES.has(record.status))
+		.filter((record) => !isActiveWorkerLane(record))
 		.sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
 		.slice(0, MAX_FINISHED_WORKERS);
 	const backgroundTools = snapshot.items.filter(

@@ -8,6 +8,9 @@ import { createTaskDirectoryValidator } from "../tasks/task-directory-validation
 
 export const WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS = 10_000;
 
+/** Fixed nonce used only to ask the directory backend for a comparable workspace identity. */
+const WORKER_SPECIALIST_NAMESPACE_NONCE = "pi-worker-specialist-namespace-v1";
+
 /** Captures native worker directory identity before durable dispatch and checks the saved identity on execution. */
 export class WorkerDirectoryAdmission {
 	private readonly backend = createNativeTaskDirectoryBackend();
@@ -70,6 +73,28 @@ export class WorkerDirectoryAdmission {
 		const worker = await captureProfile(contract.worker);
 		const verifier = contract.verifier ? await captureProfile(contract.verifier) : undefined;
 		return parseWorkerExecutionContract({ ...contract, worker, ...(verifier ? { verifier } : {}) });
+	}
+
+	/**
+	 * Stable namespace key for one physical workspace, as the existing directory backend spells it.
+	 * An attachment id is opaque and its default nonce is per-attachment, so specialization comparison
+	 * asks the backend for a COMPLETE id under one fixed nonce instead of interpreting a captured one.
+	 */
+	async namespaceKey(root: string, signal?: AbortSignal): Promise<string> {
+		const deadline = new AbortController();
+		const timer = setTimeout(
+			() => deadline.abort(new Error("Worker workspace identity timed out")),
+			WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS,
+		);
+		const bounded = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
+		try {
+			return await awaitPreflight(
+				() => this.backend.createAttachmentId(root, WORKER_SPECIALIST_NAMESPACE_NONCE, bounded),
+				bounded,
+			);
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 
 	async validateContext(context: ExecutionContext, signal: AbortSignal): Promise<void> {

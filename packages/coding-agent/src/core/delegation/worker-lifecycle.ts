@@ -14,6 +14,7 @@ import type {
 } from "../orchestration/contracts.ts";
 import {
 	DelegationOrchestrationLedger,
+	type PrepareAgentTurnInput,
 	type PrepareDelegationInput,
 	type PrepareManagedDelegationInput,
 	type StartedDelegationAttempt,
@@ -59,6 +60,18 @@ export type PendingVerificationRecovery =
  * Sole owner of in-process worker lifecycle state. LaneRecord is a compatibility/UI projection;
  * all transitions are committed through DurableTaskRuntime before the projection is returned.
  */
+/**
+ * A managed lifetime report that cannot be attributed to a generation. It is a statement about the
+ * REPORT, distinct from any durable runtime or store failure, so a caller can drop invalid input
+ * without ever swallowing a persistence error and permanently acknowledging an unwritten closure.
+ */
+export class ManagedLaneLifetimeInputError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "ManagedLaneLifetimeInputError";
+	}
+}
+
 export class WorkerLifecycle {
 	readonly ledger: DelegationOrchestrationLedger;
 	private nextLaneNumber: number;
@@ -115,12 +128,7 @@ export class WorkerLifecycle {
 	}
 
 	/** Queue the next distinct task/attempt for an idle logical agent. */
-	prepareAgentTurn(input: {
-		agentId: string;
-		instructions: string;
-		controlMessageId?: string;
-		dependsOnTaskIds?: readonly string[];
-	}): {
+	prepareAgentTurn(input: PrepareAgentTurnInput): {
 		record: LaneRecord;
 		attempt: AttemptRuntimeState;
 		/** True only when this call minted a genuinely new durable attempt -- false when a replayed
@@ -229,9 +237,17 @@ export class WorkerLifecycle {
 		// The lane genuinely holds nothing, so this is settled, not pending: reporting it again would
 		// retry forever against work that does not exist.
 		if (!attempt) return undefined;
+		// An unversioned closure names no generation. Substituting the current one would make a
+		// statement about a turn the producer never observed -- exactly the ownership inference the
+		// generation fence exists to prevent -- so it is refused, not applied.
+		if (dispatchSequence === undefined) {
+			throw new ManagedLaneLifetimeInputError(
+				`Managed worker '${laneId}' closure named no dispatch generation while turn ${attempt.dispatch.dispatchSequence ?? 1} is admitted.`,
+			);
+		}
 		this.ledger.runtime.recordManagedLifetime(attempt.attemptId, {
 			logicalLaneId: laneId,
-			dispatchSequence: dispatchSequence ?? attempt.dispatch.dispatchSequence ?? 1,
+			dispatchSequence,
 			lifetime: "retired",
 		});
 		return this.getManagedRecord(laneId);

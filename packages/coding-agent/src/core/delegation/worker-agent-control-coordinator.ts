@@ -3,6 +3,7 @@ import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { UserMessage } from "@caupulican/pi-ai";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { GoalState } from "../goals/goal-state.ts";
 import { latestAgentAttemptsByDurableOrder } from "../orchestration/attempt-ordering.ts";
 import {
 	type AgentBindingContract,
@@ -78,6 +79,12 @@ export interface WorkerAgentControlCoordinatorOptions {
 	abortLane(laneId: string, reasonCode: string): void;
 	cancelLane(laneId: string, reasonCode: string): LaneRecord | undefined;
 	taskStartHeadroomSkipReason?(agent: AgentBindingContract): string | undefined;
+	/**
+	 * False while the specialist's last execution still holds resources -- its tool surface has not
+	 * finished disposing. Durable idleness is not evidence of release, so every acceptance path
+	 * consults this owner before admitting new work onto the same context.
+	 */
+	isSpecialistSettled?(agentId: string): boolean;
 	waitBlockedByCaller?(callerAgentId: string, targetAgentIds: readonly string[]): readonly string[];
 	/** Yield caller-owned scheduler and mutation resources until the returned restorer succeeds. */
 	yieldCallerForWait?(callerAgentId: string): () => boolean | undefined;
@@ -510,16 +517,28 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 						...(options.newTask.acceptanceCriterionIds
 							? { acceptanceCriterionIds: options.newTask.acceptanceCriterionIds }
 							: {}),
+						...(options.newTask.resourcePointerIds
+							? { resourcePointerIds: options.newTask.resourcePointerIds }
+							: {}),
 					},
 		);
 		if (options.idempotencyKey !== undefined) {
+			const messageId = workerAgentMessageId(this.options.parentSessionId, options.idempotencyKey);
+			const admittedOwner = this.admittedSpecialistForControlMessage(messageId);
+			if (admittedOwner && admittedOwner !== agent.agentId) {
+				// This caller turn already admitted work on another specialist; re-aiming it here would
+				// silently start different work under a receipt that means something else. No message id
+				// is returned: nothing was accepted into THIS specialist's mailbox.
+				return {
+					started: false,
+					steering: false,
+					messageId: "",
+					skipReason: "worker_task_replay_target_conflict",
+				};
+			}
 			const replay = this.replayWorkerAgentTask(agent, message, options.idempotencyKey, dependsOnTaskIds, newTask);
 			if (replay) return replay;
 		}
-		// The goal's acceptance criteria are durable orchestration state, and a new task may only cite
-		// criteria its objective already carries. Admit them before the message exists, so a recovery
-		// that has only the persisted ids still finds them.
-		if (options.newTask?.goal) this.options.getLifecycle().synchronizeGoalState(options.newTask.goal);
 		const activity = this.activityForAgent(agent);
 		if (activity !== "idle") {
 			return { started: false, steering: false, messageId: "", skipReason: `worker_${activity}` };
@@ -527,12 +546,17 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (agent.status !== "registered") {
 			return { started: false, steering: false, messageId: "", skipReason: `agent_${agent.status}` };
 		}
+		// Durable idleness is not release: the previous execution may still be disposing its tools.
+		if (this.options.isSpecialistSettled?.(agent.agentId) === false) {
+			return { started: false, steering: false, messageId: "", skipReason: "worker_cleanup_pending" };
+		}
 		return this.startIdleAgentTask(
 			agent,
 			message,
 			options.idempotencyKey === undefined ? {} : { idempotencyKey: options.idempotencyKey },
 			dependsOnTaskIds,
 			newTask,
+			options.newTask?.goal,
 		);
 	}
 
@@ -552,10 +576,14 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				throw new Error("Worker control idempotency identity conflicts with its durable dispatch.");
 			}
 			this.assertAttemptDependencyIdentity(correlatedAttempt, dependsOnTaskIds);
-			// A replay that re-files the same instructions under a different goal is different work,
-			// and the ledger would reject it. Report that rather than handing back the original start
-			// as if the caller's correlation had been honoured.
-			if (!this.hasMatchingNewTaskCorrelation(correlatedAttempt, newTask)) {
+			// A replay that re-files the same instructions under a different goal -- or that changes its
+			// mind between new work and continuation -- is different work, and the ledger would reject
+			// it. Report that rather than handing back the original start as if the caller's
+			// correlation had been honoured.
+			if (
+				!this.hasMatchingReceiptIntent(agent.agentId, messageId, message, dependsOnTaskIds, newTask) ||
+				!this.hasMatchingNewTaskCorrelation(correlatedAttempt, newTask)
+			) {
 				return {
 					started: false,
 					steering: false,
@@ -643,6 +671,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		options: WorkerAgentMessageOptions,
 		dependsOnTaskIds: readonly string[] = [],
 		newTask?: WorkerAgentNewTaskCorrelation,
+		newTaskGoal?: GoalState,
 	): { started: boolean; steering: false; messageId: string; record?: LaneRecord; skipReason?: string } {
 		if (!this.isAcceptedControlReplay(agent.agentId, options.idempotencyKey)) {
 			const headroomSkipReason = this.options.taskStartHeadroomSkipReason?.(agent);
@@ -651,11 +680,22 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			const skipReason = this.reusableTaskAdmissionSkipReason(agent.agentId);
 			if (skipReason) return { started: false, steering: false, messageId: "", skipReason };
 		}
-		const queued = this.enqueuePeerMessage(agent, "follow_up", message, options, {
-			kind: "agent_turn",
-			...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
-			...(newTask ? { newTask } : {}),
-		});
+		const queued = this.enqueuePeerMessage(
+			agent,
+			"follow_up",
+			message,
+			options,
+			{
+				kind: "agent_turn",
+				...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
+				...(newTask ? { newTask } : {}),
+			},
+			// The goal's acceptance criteria are durable orchestration state that an accepted message
+			// needs on recovery, so they are still written BEFORE the message. The mailbox calls this
+			// only once it has ruled out every deterministic refusal (bounds, replay identity, pending
+			// capacity, encoded-byte admission), so a refused start no longer leaves a new objective.
+			newTaskGoal ? () => this.options.getLifecycle().synchronizeGoalState(newTaskGoal) : undefined,
+		);
 		if (queued.status === "completed_replay") {
 			return {
 				started: false,
@@ -675,6 +715,33 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		};
 	}
 
+	/**
+	 * Did this receipt originally declare the same intent? New work and continuation are different
+	 * requests for the same text, so the discriminator belongs to the receipt's identity: the durable
+	 * mailbox message records what was admitted, and a replay that changed its mind is not a replay.
+	 */
+	private hasMatchingReceiptIntent(
+		agentId: string,
+		messageId: string,
+		message: string,
+		dependsOnTaskIds: readonly string[],
+		newTask: WorkerAgentNewTaskCorrelation | undefined,
+	): boolean {
+		// The mailbox owns replay-intent normalization: it answers from the retained message when it
+		// has one, and from that message's durable replay receipt once bounded retention pruned the
+		// body. `undefined` means it holds no evidence either way, and unproven is not equal.
+		return (
+			this.getMailbox(agentId).matchesControlIntent(messageId, {
+				content: message,
+				task: {
+					kind: "agent_turn",
+					...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
+					...(newTask ? { newTask } : {}),
+				},
+			}) === true
+		);
+	}
+
 	/** Does a durable attempt already carry exactly the correlation this start is asking for? */
 	private hasMatchingNewTaskCorrelation(
 		attempt: AttemptRuntimeState,
@@ -687,7 +754,10 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return (
 			task.objectiveId === objectiveId &&
 			isDeepStrictEqual([...(attempt.dispatch.requirementIds ?? [])], [...(newTask.requirementIds ?? [])]) &&
-			isDeepStrictEqual([...task.acceptanceCriterionIds], [...(newTask.acceptanceCriterionIds ?? [])])
+			isDeepStrictEqual([...task.acceptanceCriterionIds], [...(newTask.acceptanceCriterionIds ?? [])]) &&
+			// The selected resources are part of the same declaration; a different selection is
+			// different work even when goal and requirements match.
+			isDeepStrictEqual([...attempt.dispatch.resourcePointerIds], [...(newTask.resourcePointerIds ?? [])])
 		);
 	}
 
@@ -1703,6 +1773,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				}
 				const activity = this.activityForAgent(agent);
 				if (activity !== "idle") return { started: false, skipReason: `worker_${activity}` };
+				if (this.options.isSpecialistSettled?.(agent.agentId) === false) {
+					// The pending turn stays pending: reconciliation runs again when the execution that
+					// still owns this context signals its state change after disposal.
+					return { started: false, skipReason: "worker_cleanup_pending" };
+				}
 				if (agent.status !== "registered") {
 					const settled = this.settleTerminalTaskBearingMessage(
 						agent,
@@ -1745,6 +1820,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 										...(newTask.acceptanceCriterionIds
 											? { acceptanceCriterionIds: newTask.acceptanceCriterionIds }
 											: {}),
+										...(newTask.resourcePointerIds ? { resourcePointerIds: newTask.resourcePointerIds } : {}),
 									},
 								}
 							: {}),
@@ -1847,6 +1923,20 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			throw new Error(`Worker control message '${message.messageId}' conflicts with its durable dispatch.`);
 		}
 		return attempt;
+	}
+
+	/**
+	 * The specialist a caller turn already admitted work on, whichever entrance admitted it. One
+	 * durable control-message identity owns exactly one task, so a later start that names a DIFFERENT
+	 * specialist under the same identity is a different request, not a replay of this one.
+	 */
+	private admittedSpecialistForControlMessage(messageId: string): string | undefined {
+		for (const attempt of Object.values(this.options.getLifecycle().getTaskRuntimeSnapshot().attempts)) {
+			if (attempt.dispatch.controlMessageId !== messageId) continue;
+			const owner = attempt.agentId ?? attempt.dispatch.logicalLaneId;
+			if (owner) return owner;
+		}
+		return undefined;
 	}
 
 	private controlMessageAttemptById(agentId: string, messageId: string): AttemptRuntimeState | undefined {
@@ -2095,6 +2185,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		content: string,
 		options: WorkerAgentMessageOptions,
 		task?: WorkerAgentTaskMetadata,
+		onAdmitted?: () => void,
 	): QueuedPeerMessage {
 		if (options.idempotencyKey !== undefined) {
 			this.assertIdempotencyTarget(target.agentId, options.idempotencyKey);
@@ -2104,6 +2195,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			content,
 			...options,
 			...(task ? { task } : {}),
+			...(onAdmitted ? { onAdmitted } : {}),
 		});
 	}
 

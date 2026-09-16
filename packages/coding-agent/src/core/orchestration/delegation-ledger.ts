@@ -13,7 +13,7 @@ import type {
 	WorkerExecutionContract,
 	WorkerRole,
 } from "./contracts.ts";
-import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "./contracts.ts";
+import { MAX_ORCHESTRATION_DESCRIPTION_LENGTH, MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "./contracts.ts";
 import { OrchestrationEventStore } from "./event-store.ts";
 import {
 	type AttemptRuntimeState,
@@ -37,6 +37,8 @@ export interface DelegationLedgerOptions {
 export interface PrepareDelegationInput {
 	laneId: string;
 	instructions: string;
+	/** Durable identity of the caller turn that admitted this dispatch; replays resolve back to it. */
+	controlMessageId?: string;
 	parentAgentId?: string;
 	executionContract: WorkerExecutionContract;
 	requiredCapabilities: readonly HarnessCapability[];
@@ -98,6 +100,20 @@ function activeAttempt(attempt: AttemptRuntimeState): boolean {
 	return attempt.status === "queued" || attempt.status === "leased" || attempt.status === "running";
 }
 
+/**
+ * The durable task description is a BOUNDED PROJECTION of the authoritative brief. A task contract
+ * bounds `description` at `MAX_ORCHESTRATION_DESCRIPTION_LENGTH`; a dispatched brief may be as long
+ * as `MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH`. The brief itself is never shortened -- it is
+ * persisted verbatim on `dispatch.instructions`, which is what the worker actually receives -- and
+ * the projection says so explicitly instead of ending mid-sentence.
+ */
+const TASK_DESCRIPTION_ELISION = "\n[bounded task description; the complete brief is on this task's dispatch]";
+
+export function projectTaskDescription(instructions: string): string {
+	if (instructions.length <= MAX_ORCHESTRATION_DESCRIPTION_LENGTH) return instructions;
+	return `${instructions.slice(0, MAX_ORCHESTRATION_DESCRIPTION_LENGTH - TASK_DESCRIPTION_ELISION.length)}${TASK_DESCRIPTION_ELISION}`;
+}
+
 function mailboxTurnTaskId(agentId: string, controlMessageId: string): string {
 	return `mailbox-turn-${createHash("sha256")
 		.update("pi-worker-agent-mailbox-turn-v1")
@@ -142,6 +158,7 @@ export class DelegationOrchestrationLedger {
 			...(input.taskContext ? { taskContext: input.taskContext } : {}),
 			dispatchMetadata: {
 				logicalLaneId: input.laneId,
+				...(input.controlMessageId ? { controlMessageId: input.controlMessageId } : {}),
 				...(input.birthContextForkReference ? { birthContextForkReference: input.birthContextForkReference } : {}),
 			},
 		});
@@ -179,10 +196,12 @@ export class DelegationOrchestrationLedger {
 	 */
 	prepareAgentTurn(input: PrepareAgentTurnInput): { attempt: AttemptRuntimeState; created: boolean } {
 		const agentId = input.agentId.trim();
-		const instructions = input.instructions.trim();
+		// Validated on the trimmed view, persisted verbatim: a brief is the worker's actual task text,
+		// and the durable dispatch must carry exactly what the caller sent.
+		const instructions = input.instructions;
 		const controlMessageId = input.controlMessageId?.trim();
 		if (!agentId) throw new DurableTaskRuntimeError("Logical worker agent id is required.");
-		if (!instructions) throw new DurableTaskRuntimeError("Worker follow-up instructions are required.");
+		if (!instructions.trim()) throw new DurableTaskRuntimeError("Worker follow-up instructions are required.");
 		if (
 			input.controlMessageId !== undefined &&
 			(!controlMessageId || controlMessageId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH)
@@ -230,14 +249,17 @@ export class DelegationOrchestrationLedger {
 			declaresNewWork ? (input.taskContext?.dependsOnTaskIds ?? input.dependsOnTaskIds) : input.dependsOnTaskIds,
 		);
 		if (existingTask && controlMessageId) {
-			// The receipt's identity covers the work's correlation as well as its text: a replay that
-			// re-files the same instructions under another goal is a different task, and it is rejected
-			// here -- before the fast replay path below hands the original attempt back.
+			// A receipt is compared against the task IT admitted. Explicitly declared correlation is
+			// part of that identity, so re-filing the same instructions under another goal is rejected.
+			// A continuation declares none: its inherited correlation was resolved when the task was
+			// created, and re-deriving it from whatever this specialist has done since would turn a
+			// later unrelated task into a false conflict with this receipt's own work.
 			if (
-				existingTask.description !== instructions ||
+				existingTask.description !== projectTaskDescription(instructions) ||
 				existingTask.role !== agent.role ||
-				existingTask.objectiveId !== objectiveId ||
-				!isDeepStrictEqual([...existingTask.acceptanceCriterionIds], [...acceptanceCriterionIds]) ||
+				(declaresNewWork && existingTask.objectiveId !== objectiveId) ||
+				(declaresNewWork &&
+					!isDeepStrictEqual([...existingTask.acceptanceCriterionIds], [...acceptanceCriterionIds])) ||
 				existingTask.dependsOn.length !== dependencyTaskIds.length ||
 				existingTask.dependsOn.some((dependencyId, index) => dependencyId !== dependencyTaskIds[index])
 			) {
@@ -254,8 +276,10 @@ export class DelegationOrchestrationLedger {
 					attempt.dispatch.logicalLaneId !== agentId ||
 					attempt.dispatch.controlMessageId !== controlMessageId ||
 					attempt.dispatch.instructions !== instructions ||
-					!isDeepStrictEqual([...(attempt.dispatch.requirementIds ?? [])], [...requirementIds]) ||
-					!isDeepStrictEqual([...attempt.dispatch.resourcePointerIds], [...resourcePointerIds])
+					(declaresNewWork &&
+						!isDeepStrictEqual([...(attempt.dispatch.requirementIds ?? [])], [...requirementIds])) ||
+					(declaresNewWork &&
+						!isDeepStrictEqual([...attempt.dispatch.resourcePointerIds], [...resourcePointerIds]))
 				) {
 					throw new DurableTaskRuntimeError(
 						`Worker control message '${controlMessageId}' has conflicting dispatch evidence.`,
@@ -362,7 +386,7 @@ export class DelegationOrchestrationLedger {
 		if (
 			existingTask &&
 			(existingTask.objectiveId !== objectiveId ||
-				existingTask.description !== input.instructions ||
+				existingTask.description !== projectTaskDescription(input.instructions) ||
 				existingTask.role !== input.role ||
 				existingTask.dependsOn.length !== dependencyTaskIds.length ||
 				existingTask.dependsOn.some((dependencyId, index) => dependencyId !== dependencyTaskIds[index]))
@@ -404,7 +428,7 @@ export class DelegationOrchestrationLedger {
 			taskId: input.laneId,
 			objectiveId,
 			title: deriveWorkerTaskLabel(input.instructions, `Delegated ${input.role} work`),
-			description: input.instructions,
+			description: projectTaskDescription(input.instructions),
 			role: input.role,
 			dependsOn: dependencyTaskIds,
 			requiredCapabilities: input.requiredCapabilities,

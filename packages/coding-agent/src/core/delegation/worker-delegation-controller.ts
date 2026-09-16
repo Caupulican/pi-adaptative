@@ -37,6 +37,7 @@ import type { ModelRegistry } from "../model-registry.ts";
 import { isLoopbackModelEndpoint } from "../models/model-endpoint.ts";
 import { providerUsageFromAttemptUsage } from "../orchestration/attempt-usage.ts";
 import {
+	type AgentResumeContext,
 	type AttemptUsageSnapshot,
 	type ExecutionGrant,
 	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
@@ -76,7 +77,7 @@ import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
 import { selectSanitizedContextFork } from "./sanitized-context-fork.ts";
 import { getLatestWorkerClaimSnapshot } from "./session-worker-claim.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
-import type { WorkerAgentControlPort, WorkerGrantSummary } from "./worker-agent-control.ts";
+import { type WorkerAgentControlPort, type WorkerGrantSummary, workerAgentMessageId } from "./worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
 import { createWorkerAttemptExecutor } from "./worker-attempt-executor.ts";
 import {
@@ -93,7 +94,11 @@ import {
 	type WorkerConversationRetentionPolicy,
 	WorkerConversationStore,
 } from "./worker-conversation-store.ts";
-import { parseWorkerDelegationAuthorityRequest, type WorkerDelegationRequest } from "./worker-delegation-request.ts";
+import {
+	parseWorkerDelegationAuthorityRequest,
+	parseWorkerParallelWorkIntent,
+	type WorkerDelegationRequest,
+} from "./worker-delegation-request.ts";
 import { WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS, WorkerDirectoryAdmission } from "./worker-directory-admission.ts";
 import {
 	formatWorkerDispatchWait,
@@ -110,6 +115,7 @@ import {
 import {
 	DEFAULT_WORKER_FLEET_LIMITS,
 	evaluateNewWorkerAdmission,
+	evaluateReusableWorkerTaskAdmission,
 	intersectWorkerDelegationLimits,
 	pendingVerifierSubjectTaskIds,
 	resolveWorkerFleetLimits,
@@ -127,7 +133,16 @@ import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
 import type { WorkerRunOutcome } from "./worker-runner.ts";
-import { DUPLICATE_WORKER_TASK_THRESHOLD, findSimilarActiveWorkerLanes } from "./worker-task-similarity.ts";
+import {
+	describeWorkerSpecialization,
+	sameWorkerSpecialization,
+	selectReusableWorkerSpecialist,
+	type WorkerSpecialistReuseDecision,
+	type WorkerSpecializationFingerprint,
+	workerContractWorkspaceRoot,
+	workerSpecializationWorkspaceRoots,
+} from "./worker-specialization-match.ts";
+import { findSimilarActiveWorkerLanes } from "./worker-task-similarity.ts";
 import { finalizeWorkerClaim } from "./worker-terminal-finalizer.ts";
 import {
 	type WorkerTerminalHandoff,
@@ -304,6 +319,20 @@ export class WorkerDelegationController {
 	/** Sole logical-agent control/mailbox owner; execution only calls its narrow delivery hooks. */
 	private readonly agentControl: WorkerAgentControlCoordinator;
 	private readonly publishedTerminalAttemptIds = new Set<string>();
+	/**
+	 * Specialists whose execution has not fully released its resources yet. An entry is added before
+	 * the attempt runs and removed only after the execution `finally` has awaited
+	 * `toolSurface.dispose()`, so it outlives the durable terminal, the in-flight ledger entry and the
+	 * lane abort controller -- all of which are cleared earlier. Every entrance (start, runOnce,
+	 * explicit control, mailbox reconciliation) consults this one set; it schedules nothing.
+	 */
+	private readonly executingSpecialistIds = new Map<string, number>();
+	/**
+	 * Specializations this process is already allocating a fresh identity for. Directory capture and
+	 * authority resolution are asynchronous, so two unnamed starts can both observe "no compatible
+	 * specialist"; this claim closes that window without inventing a second scheduler.
+	 */
+	private readonly allocatingSpecializations = new Map<string, number>();
 	private readonly yieldedCapacityAttemptIds = new Map<string, number>();
 	private readonly yieldedWriteReservations = new Map<string, WorkerWriteReservationWaitYield>();
 	private readonly conversations = new WorkerConversationStore();
@@ -400,6 +429,7 @@ export class WorkerDelegationController {
 				if (terminal && !this.deps.isDisposed()) this.scheduler.drain();
 				return terminal;
 			},
+			isSpecialistSettled: (agentId) => this.isSpecialistSettled(agentId),
 			taskStartHeadroomSkipReason: (agent) => {
 				const contract = this.lifecycle.getLatestAgentAttempt(agent.agentId)?.dispatch.executionContract;
 				return contract
@@ -435,6 +465,24 @@ export class WorkerDelegationController {
 			},
 			warn: (message) => this.safeWarn(message),
 		});
+	}
+
+	/** Has every resource of this specialist's last execution been released? */
+	private isSpecialistSettled(agentId: string): boolean {
+		return !this.executingSpecialistIds.has(agentId);
+	}
+
+	private beginSpecialistExecution(agentId: string | undefined): () => void {
+		if (!agentId) return () => {};
+		this.executingSpecialistIds.set(agentId, (this.executingSpecialistIds.get(agentId) ?? 0) + 1);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			const held = (this.executingSpecialistIds.get(agentId) ?? 1) - 1;
+			if (held > 0) this.executingSpecialistIds.set(agentId, held);
+			else this.executingSpecialistIds.delete(agentId);
+		};
 	}
 
 	private safeWarn(message: string): void {
@@ -890,8 +938,10 @@ export class WorkerDelegationController {
 		pinnedContract?: WorkerExecutionContract,
 	): WorkerAdmission {
 		if (this.deps.isDisposed()) return { ok: false, skipReason: "session_disposed" };
-		const instructions = request.instructions.trim();
-		if (!instructions) return { ok: false, skipReason: "missing_instructions" };
+		// Same rule as the durable ledger: emptiness is judged on the trimmed view, but the brief the
+		// worker receives is exactly the caller's text.
+		const instructions = request.instructions;
+		if (!instructions.trim()) return { ok: false, skipReason: "missing_instructions" };
 		if (!this.deps.isDelegateToolActive()) return { ok: false, skipReason: "delegate_tool_inactive" };
 		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
 		if (!settings.enabled) return { ok: false, skipReason: "worker_delegation_disabled" };
@@ -1618,17 +1668,25 @@ export class WorkerDelegationController {
 		return undefined;
 	}
 
-	/** One admission owner for every newly generated logical worker identity. */
+	/**
+	 * One admission owner for every ordinary worker request. `freshIdentity` separates the checks that
+	 * every request must pass -- permission, model policy, goal dependencies, authority, directory,
+	 * projection and queue headroom -- from the slots a NEW logical identity consumes. A reused turn
+	 * consumes no implementation identity, so a full fleet must not hide an idle compatible
+	 * specialist behind a capacity refusal.
+	 */
 	private admitNewWorkerRequest(
 		request: WorkerDelegationRequest,
 		pinnedContract?: WorkerExecutionContract,
+		options: { freshIdentity?: boolean } = {},
 	): WorkerAdmission {
+		const freshIdentity = options.freshIdentity !== false;
 		if (request.parentAgentId && !pinnedContract) {
 			return { ok: false, skipReason: "worker_leaf_delegation_forbidden" };
 		}
 		const goalDependencySkipReason = this.workerGoalDependencySkipReason(request);
 		if (goalDependencySkipReason) return { ok: false, skipReason: goalDependencySkipReason };
-		const fleetSkipReason = this.newWorkerFleetSkipReason(request);
+		const fleetSkipReason = freshIdentity ? this.newWorkerFleetSkipReason(request) : undefined;
 		if (fleetSkipReason) return { ok: false, skipReason: fleetSkipReason };
 		const treeAttemptSkipReason = this.workerTreeAttemptAdmissionSkipReason(request);
 		if (treeAttemptSkipReason) return { ok: false, skipReason: treeAttemptSkipReason };
@@ -1637,10 +1695,9 @@ export class WorkerDelegationController {
 		const contextForkSkipReason = this.workerContextForkAdmissionSkipReason(request, admission.executionContract);
 		if (contextForkSkipReason) return { ok: false, skipReason: contextForkSkipReason };
 		if (!request.verificationOfTaskId) this.recovery.recover();
-		const headroomSkipReason = this.newWorkerFleetSkipReason(
-			request,
-			this.requiredAgentSlotsForAdmission(request, admission),
-		);
+		const headroomSkipReason = freshIdentity
+			? this.newWorkerFleetSkipReason(request, this.requiredAgentSlotsForAdmission(request, admission))
+			: undefined;
 		if (headroomSkipReason) return { ok: false, skipReason: headroomSkipReason };
 		const projectionHeadroomSkipReason = this.workerProjectionHeadroomSkipReason(
 			admission.executionContract,
@@ -1695,6 +1752,78 @@ export class WorkerDelegationController {
 	}
 
 	/** One durable preparation path for queued, immediate, and recovered execution. */
+	/**
+	 * The durable identity of one caller turn. Fresh dispatches and reused mailbox turns record the
+	 * SAME id -- the one `WorkerAgentControlCoordinator` derives for its mailbox message -- so a replay
+	 * resolves through one rail whichever way the original call was admitted.
+	 */
+	private controlMessageIdFor(messageReplayKey: string | undefined): string | undefined {
+		if (!messageReplayKey) return undefined;
+		return workerAgentMessageId(this.deps.getSessionId(), messageReplayKey);
+	}
+
+	/**
+	 * The task one durable caller turn already admitted, if this start is a replay of it. Replaying a
+	 * tool call must return that same task -- never a second one, and never a second execution.
+	 */
+	private replayedWorkerAttempt(messageReplayKey: string | undefined): AttemptRuntimeState | undefined {
+		const controlMessageId = this.controlMessageIdFor(messageReplayKey);
+		if (!controlMessageId) return undefined;
+		return Object.values(this.lifecycle.getTaskRuntimeSnapshot().attempts).find(
+			(attempt) => attempt.dispatch.controlMessageId === controlMessageId,
+		);
+	}
+
+	/**
+	 * Is this request the SAME admitted command the replayed task already carries? A replay key names
+	 * one caller turn; it is not evidence that the request behind it is unchanged. The full brief (not
+	 * its bounded task-description projection), the compiled specialization, the requested target and
+	 * the task correlation all have to agree, and they are compared before anything is written.
+	 */
+	private replayMatchesAdmittedCommand(
+		request: WorkerDelegationRequest,
+		admitted: AttemptRuntimeState,
+		candidate: WorkerSpecializationFingerprint,
+		namespaceKeyOf: (root: string | undefined) => string,
+	): boolean {
+		if (admitted.dispatch.instructions !== request.instructions) return false;
+		const admittedContract = admitted.dispatch.executionContract;
+		if (!admittedContract) return false;
+		if (
+			!sameWorkerSpecialization(
+				describeWorkerSpecialization(
+					admittedContract,
+					admitted.dispatch.resourcePointerIds,
+					namespaceKeyOf,
+					admitted.dispatch.worktreeLaneKey,
+				),
+				candidate,
+			)
+		) {
+			return false;
+		}
+		// A named target must be the specialist that actually owns the admitted task.
+		const admittedAgentId = admitted.agentId ?? admitted.dispatch.logicalLaneId;
+		if (request.reuseAgentId && request.reuseAgentId !== admittedAgentId) return false;
+		// An explicit request for a NEW parent snapshot is a different initialization than a task that
+		// never captured one.
+		if (
+			this.workerContextForkMode(request, admittedContract).kind !== "none" &&
+			admitted.dispatch.birthContextForkReference === undefined
+		) {
+			return false;
+		}
+		const requested = request.taskContext;
+		const admittedTask = this.lifecycle.getTask(admitted.taskId)?.task;
+		return (
+			isDeepStrictEqual([...(admitted.dispatch.requirementIds ?? [])], [...(requested?.requirementIds ?? [])]) &&
+			isDeepStrictEqual(
+				[...(admittedTask?.acceptanceCriterionIds ?? [])],
+				[...(requested?.acceptanceCriterionIds ?? [])],
+			)
+		);
+	}
+
 	private prepareWorkerAttempt(
 		request: WorkerDelegationRequest,
 		admission: Extract<WorkerAdmission, { ok: true }>,
@@ -1734,6 +1863,10 @@ export class WorkerDelegationController {
 						return lifecycle.prepare(
 							{
 								instructions: admission.instructions,
+								...(() => {
+									const controlMessageId = this.controlMessageIdFor(request.messageReplayKey);
+									return controlMessageId ? { controlMessageId } : {};
+								})(),
 								...(request.parentAgentId ? { parentAgentId: request.parentAgentId } : {}),
 								birthContextForkReference,
 								executionContract: admission.executionContract,
@@ -1907,20 +2040,272 @@ export class WorkerDelegationController {
 		};
 	}
 
+	private claimFreshSpecialization(key: string): () => void {
+		this.allocatingSpecializations.set(key, (this.allocatingSpecializations.get(key) ?? 0) + 1);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			const held = (this.allocatingSpecializations.get(key) ?? 1) - 1;
+			if (held > 0) this.allocatingSpecializations.set(key, held);
+			else this.allocatingSpecializations.delete(key);
+		};
+	}
+
+	/** Did the caller explicitly, justifiably ask for an independent copy? */
+	private independentParallelIntent(request: WorkerDelegationRequest): boolean {
+		if (!request.parallelWork) return false;
+		parseWorkerParallelWorkIntent(request.parallelWork);
+		return true;
+	}
+
+	/**
+	 * Is this specialist's durable context readable right now? A compatible specialist whose transcript
+	 * cannot be opened is a bounded failure about that specialist -- never a reason to quietly create a
+	 * second one and abandon its history.
+	 */
+	private isSpecialistContextReadable(agent: { agentId: string; resumeContext: AgentResumeContext }): boolean {
+		try {
+			this.conversations.open({
+				agentDir: this.deps.getAgentDir(),
+				resumeContext: agent.resumeContext,
+				expectedLogicalAgentId: agent.agentId,
+			});
+			return true;
+		} catch (error) {
+			this.safeWarn(
+				`Worker specialist ${agent.agentId} context is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return false;
+		}
+	}
+
+	/**
+	 * Resolve a replayed caller turn against the command it actually admitted. Compilation has already
+	 * happened, so the comparison sees this request's effective grant, not the words it was written
+	 * with. An exact replay returns the original task -- inert, even after it settled; anything else is
+	 * a different request and is refused before any durable write.
+	 */
+	private resolveReplayedCommand(
+		request: WorkerDelegationRequest,
+		admission: Extract<WorkerAdmission, { ok: true }>,
+	): { kind: "none" } | { kind: "replay"; record: LaneRecord } | { kind: "conflict"; skipReason: string } {
+		const admitted = this.replayedWorkerAttempt(request.messageReplayKey);
+		if (!admitted) return { kind: "none" };
+		// Replay returns an existing receipt without executing work. Compare the recorded path intent;
+		// fresh execution separately requires physical directory identity through resolveSpecialistReuse.
+		const namespaceKeys = new Map<string, string>();
+		const namespaceKeyOf = (root: string | undefined): string => {
+			if (root === undefined) return "";
+			const existing = namespaceKeys.get(root);
+			if (existing) return existing;
+			const key = `root:${root}`;
+			namespaceKeys.set(root, key);
+			return key;
+		};
+		const candidate = describeWorkerSpecialization(
+			admission.executionContract,
+			admission.resourcePointerIds,
+			namespaceKeyOf,
+		);
+		if (!this.replayMatchesAdmittedCommand(request, admitted, candidate, namespaceKeyOf)) {
+			return { kind: "conflict", skipReason: "worker_start_replay_conflict" };
+		}
+		const record = this.lifecycle.getRecord(admitted.taskId);
+		return record ? { kind: "replay", record } : { kind: "conflict", skipReason: "orchestration_projection_missing" };
+	}
+
+	/**
+	 * The one specialization decision every ordinary native entrance shares. It runs on the CURRENT
+	 * compiled contract -- after authority resolution and directory capture -- so what is compared is
+	 * the effective admission this request would receive, not the words it was written with.
+	 */
+	private async resolveSpecialistReuse(
+		request: WorkerDelegationRequest,
+		admission: Extract<WorkerAdmission, { ok: true }>,
+		signal?: AbortSignal,
+	): Promise<WorkerSpecialistReuseDecision> {
+		// Runtime-owned verifier dispatches keep their pinned contract and their independence: a
+		// verifier is never matched against implementation work or a previous verification context.
+		if (request.verificationOfTaskId || request.parentAgentId) return { outcome: "fresh" };
+		let independentParallelIntent: boolean;
+		try {
+			independentParallelIntent = this.independentParallelIntent(request);
+		} catch {
+			return { outcome: "unavailable", skipReason: "worker_parallel_intent_invalid" };
+		}
+		const forkMode = this.workerContextForkMode(request, admission.executionContract);
+		const requestedBirth =
+			forkMode.kind === "none"
+				? undefined
+				: selectSanitizedContextFork(this.workerContextForkSource(request).messages, forkMode);
+		const roots = new Set<string>(workerSpecializationWorkspaceRoots(this.lifecycle.getTaskRuntimeSnapshot()));
+		for (const profile of [admission.executionContract.worker, admission.executionContract.verifier]) {
+			const root = profile ? workerContractWorkspaceRoot(profile) : undefined;
+			if (root) roots.add(root);
+		}
+		const sessionId = this.deps.getSessionId();
+		const namespaceKeys = new Map<string, string>();
+		for (const root of roots) {
+			try {
+				namespaceKeys.set(
+					root,
+					await this.directories.namespaceKey(
+						root,
+						signal ? AbortSignal.any([this.workerAbort.signal, signal]) : this.workerAbort.signal,
+					),
+				);
+			} catch (error) {
+				// An identity that cannot be resolved is not evidence of difference. Refuse in bounded
+				// terms rather than treat an unproven workspace as a new one and duplicate its context.
+				this.safeWarn(
+					`Worker workspace identity is unavailable for ${root}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				return { outcome: "unavailable", skipReason: "worker_specialist_namespace_unavailable" };
+			}
+		}
+		// Every await above could have outlived this request: recheck the owner's live state before the
+		// decision is allowed to bind anything.
+		if (this.deps.isDisposed() || sessionId !== this.deps.getSessionId()) {
+			return { outcome: "unavailable", skipReason: "worker_directory_session_changed" };
+		}
+		if (signal?.aborted || this.workerAbort.signal.aborted) {
+			return { outcome: "unavailable", skipReason: "worker_start_aborted" };
+		}
+		const namespaceKeyOf = (root: string | undefined): string => {
+			if (root === undefined) return "";
+			const resolved = namespaceKeys.get(root);
+			// A root nobody resolved cannot prove identity with anything, including itself.
+			return resolved ?? `unresolved:${root}:${randomUUID()}`;
+		};
+		// Read durable state AFTER the asynchronous identity resolution: another start in this process
+		// may have admitted its own specialist while those reads were outstanding.
+		const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
+		// The worktree lane is read from the durable dispatch on BOTH sides of the comparison: an
+		// in-process native dispatch records none today, and ambient process state is not a dispatch.
+		const candidate = describeWorkerSpecialization(
+			admission.executionContract,
+			admission.resourcePointerIds,
+			namespaceKeyOf,
+		);
+		const selected = selectWorkerResourcePointers(
+			admission.executionContract.worker.resourcePointers,
+			admission.resourcePointerIds,
+		);
+		if (!selected.ok) return { outcome: "unavailable", skipReason: selected.reason };
+		const materialized = materializeWorkerResourceBundle(selected.pointers);
+		if (!materialized.ok)
+			return { outcome: "unavailable", skipReason: `worker_resource_materialization_${materialized.code}` };
+		const decision = selectReusableWorkerSpecialist({
+			snapshot,
+			candidate,
+			...(request.reuseAgentId ? { agentId: request.reuseAgentId } : {}),
+			isInitializationCompatible: (agent, attempt) => {
+				if (agent && !isDeepStrictEqual(agent.resumeContext.contextPointers, materialized.pointers)) return false;
+				if (!requestedBirth) return true;
+				const reference = attempt.dispatch.birthContextForkReference;
+				if (!reference) return false;
+				try {
+					const birth = this.contextForks.open({
+						logicalAgentId: agent?.agentId ?? attempt.dispatch.logicalLaneId!,
+						reference,
+					});
+					return isDeepStrictEqual(birth.messages, requestedBirth);
+				} catch {
+					// Preserve the unreadable-context refusal instead of allocating a duplicate.
+					return true;
+				}
+			},
+			namespaceKeyOf,
+			isSettled: (agentId) => this.isSpecialistSettled(agentId),
+			isContextReadable: (agent) => this.isSpecialistContextReadable(agent),
+			...(independentParallelIntent ? { independentParallelIntent: true } : {}),
+			...(!independentParallelIntent && this.allocatingSpecializations.has(JSON.stringify(candidate))
+				? { freshAllocationInFlight: true }
+				: {}),
+		});
+		if (request.reuseAgentId) {
+			// The caller named a specialist and described its work explicitly. Equal effective options
+			// are honoured only after compilation proves they match that specialist; they are never
+			// ignored, and they never start different work somewhere else.
+			return decision.outcome === "reuse" && decision.agentId === request.reuseAgentId
+				? decision
+				: {
+						outcome: "unavailable",
+						skipReason:
+							decision.outcome === "unavailable" ? decision.skipReason : "worker_reuse_overrides_incompatible",
+					};
+		}
+		if (decision.outcome === "fresh" && !independentParallelIntent) {
+			return { outcome: "fresh", releaseAllocation: this.claimFreshSpecialization(JSON.stringify(candidate)) };
+		}
+		if (decision.outcome !== "reuse") return decision;
+		// A reused turn consumes no implementation identity, but its retained contract can still
+		// require a fresh verifier; that reservation is still owned by the fleet limits.
+		const reusable = evaluateReusableWorkerTaskAdmission(this.lifecycle.getTaskRuntimeSnapshot(), decision.agentId);
+		return reusable.ok ? decision : { outcome: "unavailable", skipReason: reusable.reasonCode };
+	}
+
+	/**
+	 * Dispatch a task onto an existing specialist through the control coordinator, which already owns
+	 * durable mailbox acceptance, transcript identity and resume. No second dispatch path is added.
+	 */
+	private startReusedSpecialistTask(
+		agentId: string,
+		request: WorkerDelegationRequest,
+	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
+		const goal = this.deps.getGoalStateSnapshot();
+		const taskContext = request.taskContext;
+		const accepted = this.agentControl.startWorkerAgentTask(agentId, request.instructions, {
+			...(taskContext?.dependsOnTaskIds?.length ? { dependsOnTaskIds: taskContext.dependsOnTaskIds } : {}),
+			...(request.messageReplayKey ? { idempotencyKey: request.messageReplayKey } : {}),
+			newTask: {
+				...(goal ? { goal } : {}),
+				...(taskContext?.requirementIds?.length ? { requirementIds: taskContext.requirementIds } : {}),
+				...(taskContext?.acceptanceCriterionIds?.length
+					? { acceptanceCriterionIds: taskContext.acceptanceCriterionIds }
+					: {}),
+				...(taskContext?.resourcePointerIds?.length ? { resourcePointerIds: taskContext.resourcePointerIds } : {}),
+			},
+		});
+		if (accepted.record) return { started: true, record: accepted.record };
+		return { started: false, skipReason: accepted.skipReason ?? "worker_specialist_task_not_accepted" };
+	}
+
 	async start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
 		const capturedRequest = structuredClone(request);
-		// A fresh dispatch whose instructions are the same text as an active lane's is that lane:
-		// absorbing it costs nothing, a second copy costs a worker. A merely similar lane is named so
-		// the parent can cancel one on purpose.
-		const similar = capturedRequest.verificationOfTaskId
-			? []
-			: findSimilarActiveWorkerLanes(this.lifecycle.getTaskRuntimeSnapshot(), capturedRequest.instructions);
-		const duplicate = similar.find((lane) => lane.similarity >= DUPLICATE_WORKER_TASK_THRESHOLD);
-		if (duplicate) return { started: false, skipReason: `worker_duplicate_of:${duplicate.laneId}` };
-		const admission = await this.admitWorkerDirectory(capturedRequest, signal);
-		const outcome = admission.ok
-			? this.startInternal(capturedRequest, undefined, admission)
-			: { started: false as const, skipReason: admission.skipReason };
+		// The specialization decision precedes fresh identity allocation, so the directory is captured
+		// and the authority resolved without yet reserving a new logical worker slot.
+		const shared = await this.admitWorkerDirectory(capturedRequest, signal, { freshIdentity: false });
+		if (!shared.ok) return { started: false, skipReason: shared.skipReason };
+		// A replayed caller turn is the task it already admitted: no new durable work, no execution.
+		const replayed = this.resolveReplayedCommand(capturedRequest, shared);
+		if (replayed.kind === "conflict") return { started: false, skipReason: replayed.skipReason };
+		if (replayed.kind === "replay") return { started: true, record: replayed.record };
+		const reuse = await this.resolveSpecialistReuse(capturedRequest, shared, signal);
+		if (reuse.outcome === "unavailable") return { started: false, skipReason: reuse.skipReason };
+		if (reuse.outcome === "reuse") return this.startReusedSpecialistTask(reuse.agentId, capturedRequest);
+		// Similar text remains an advisory signal. The specialization owner already distinguished the
+		// grants; text alone must not veto work under a different admitted grant.
+		const similar =
+			capturedRequest.verificationOfTaskId || this.independentParallelIntent(capturedRequest)
+				? []
+				: findSimilarActiveWorkerLanes(this.lifecycle.getTaskRuntimeSnapshot(), capturedRequest.instructions);
+		let outcome: { started: false; skipReason: string } | { started: true; record: LaneRecord };
+		try {
+			const admission = this.admitNewWorkerRequest(
+				{ ...capturedRequest, profileId: shared.executionContract.worker.profile.profileId },
+				shared.executionContract,
+			);
+			outcome = admission.ok
+				? this.startInternal(capturedRequest, undefined, {
+						...admission,
+						...(shared.modelPinBypass ? { modelPinBypass: shared.modelPinBypass } : {}),
+					})
+				: { started: false as const, skipReason: admission.skipReason };
+		} finally {
+			reuse.releaseAllocation?.();
+		}
 		if (!outcome.started) return outcome;
 		// A start that was queued already ran one scheduler admission; hand the parent its wait reason.
 		return {
@@ -1933,9 +2318,10 @@ export class WorkerDelegationController {
 	private async admitWorkerDirectory(
 		request: WorkerDelegationRequest,
 		signal?: AbortSignal,
+		options: { freshIdentity?: boolean } = {},
 	): Promise<WorkerAdmission> {
 		const sessionId = this.deps.getSessionId();
-		const admission = this.admitNewWorkerRequest(request);
+		const admission = this.admitNewWorkerRequest(request, undefined, options);
 		if (!admission.ok) return admission;
 		const boundedSignal = AbortSignal.any([
 			this.workerAbort.signal,
@@ -1957,6 +2343,7 @@ export class WorkerDelegationController {
 			const current = this.admitNewWorkerRequest(
 				{ ...request, profileId: executionContract.worker.profile.profileId },
 				executionContract,
+				options,
 			);
 			return current.ok
 				? { ...current, ...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}) }
@@ -2011,6 +2398,37 @@ export class WorkerDelegationController {
 		return outcome;
 	}
 
+	/**
+	 * `runOnce` promises an outcome, not an acceptance. A reused turn is admitted by the control
+	 * coordinator and dispatched by the scheduler, which keeps sole ownership of queue admission,
+	 * dependency and capacity gating, directory preflight and cancellation. This waits on that owner's
+	 * own observation of the lane instead of running it here.
+	 */
+	private async completeReusedSpecialistTask(
+		record: LaneRecord,
+		onStarted?: (record: LaneRecord) => void,
+	): Promise<WorkerDelegationRunOutcome> {
+		const observed = this.scheduler.observeLane(record.laneId, {
+			...(onStarted ? { onStarted } : {}),
+		});
+		if (!this.deps.isDisposed()) this.scheduler.drain();
+		const settled = await observed;
+		switch (settled.state) {
+			case "ran":
+				return settled.outcome;
+			case "cancelled":
+				return { started: false, skipReason: settled.reasonCode };
+			case "failed":
+				throw settled.error;
+			default: {
+				// The scheduler never owned this lane (already settled, or dispatched elsewhere). Report
+				// its current durable projection; that is an acceptance, never a completion claim.
+				const current = this.getWorkerLifecycle().getRecord(record.laneId) ?? record;
+				return { started: true, record: current };
+			}
+		}
+	}
+
 	async runOnce(
 		request: WorkerDelegationRequest,
 		onStarted?: (record: LaneRecord) => void,
@@ -2019,6 +2437,7 @@ export class WorkerDelegationController {
 	): Promise<WorkerDelegationRunOutcome> {
 		request = structuredClone(request);
 		let admission: Extract<WorkerAdmission, { ok: true }> | undefined;
+		let releaseAllocation: (() => void) | undefined;
 		if (existingRecord) {
 			if (!directoryValidated) {
 				const deregister = registerInFlightWork(
@@ -2038,18 +2457,37 @@ export class WorkerDelegationController {
 				}
 			}
 		} else {
-			const prepared = await this.admitWorkerDirectory(request);
-			if (!prepared.ok) return { started: false, skipReason: prepared.skipReason };
-			admission = prepared;
+			const shared = await this.admitWorkerDirectory(request, undefined, { freshIdentity: false });
+			if (!shared.ok) return { started: false, skipReason: shared.skipReason };
+			const replayed = this.resolveReplayedCommand(request, shared);
+			if (replayed.kind === "conflict") return { started: false, skipReason: replayed.skipReason };
+			if (replayed.kind === "replay") return { started: true, record: replayed.record };
+			const reuse = await this.resolveSpecialistReuse(request, shared);
+			if (reuse.outcome === "unavailable") return { started: false, skipReason: reuse.skipReason };
+			if (reuse.outcome === "reuse") {
+				const accepted = this.startReusedSpecialistTask(reuse.agentId, request);
+				if (!accepted.started) return accepted;
+				return this.completeReusedSpecialistTask(accepted.record, onStarted);
+			}
+			releaseAllocation = reuse.releaseAllocation;
+			const prepared = this.admitNewWorkerRequest(
+				{ ...request, profileId: shared.executionContract.worker.profile.profileId },
+				shared.executionContract,
+			);
+			if (!prepared.ok) {
+				releaseAllocation?.();
+				return { started: false, skipReason: prepared.skipReason };
+			}
+			admission = { ...prepared, ...(shared.modelPinBypass ? { modelPinBypass: shared.modelPinBypass } : {}) };
 		}
-		const { completion, ...outcome } = this.runOnceWithAdmission(
-			request,
-			onStarted,
-			existingRecord,
-			admission,
-			!existingRecord,
-		);
-		return completion ?? outcome;
+		let outcome: PreparedWorkerRun;
+		try {
+			outcome = this.runOnceWithAdmission(request, onStarted, existingRecord, admission, !existingRecord);
+		} finally {
+			releaseAllocation?.();
+		}
+		const { completion, ...settled } = outcome;
+		return completion ?? settled;
 	}
 
 	private async validateWorkerDirectory(record: LaneRecord): Promise<string | undefined> {
@@ -2510,6 +2948,10 @@ export class WorkerDelegationController {
 				: undefined,
 			warn: (message) => this.safeWarn(message),
 		});
+		// Held for this specialist across the whole execution and released only after the finally has
+		// awaited tool-surface disposal: a terminal record is not evidence that its resources are gone.
+		// Claimed as the last statement before the closure, so its matching finally always runs.
+		const releaseSpecialist = this.beginSpecialistExecution(agentId);
 		const completion = (async (): Promise<WorkerDelegationRunOutcome> => {
 			try {
 				// Register before the first execution await: disposal sees the live mutable ledger.
@@ -2732,6 +3174,9 @@ export class WorkerDelegationController {
 						`Worker mutation payload cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
+				// Only now is this specialist available again; everything above still owned its tools,
+				// its write reservation and its transcript handles.
+				releaseSpecialist();
 				this.agentControl.signalStateChanged();
 				deregisterInFlight();
 				if (!this.deps.isDisposed()) this.scheduler.drain(true);

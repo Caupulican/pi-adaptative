@@ -1368,6 +1368,7 @@ export class RuntimeBuilder {
 							signal,
 						),
 					runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),
+					getGoalStateSnapshot: () => this.deps.getGoalStateSnapshot(),
 					...(this.deps.describeWorkerGrant
 						? { describeWorkerGrant: (laneId: string) => this.deps.describeWorkerGrant?.(laneId) }
 						: {}),

@@ -143,6 +143,35 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 	};
 }
 
+/**
+ * Explicit, justified intent to run an independent copy beside the specialists this session already
+ * has. It is a caller INTENT, never authority: grant, capacity, verifier and directory admission all
+ * still apply to whatever it admits.
+ */
+export interface WorkerParallelWorkIntent {
+	/** Specialists this work must not share a context with. */
+	independentOf: readonly string[];
+	/** Why a separate context is required; retained for review, never interpreted as permission. */
+	justification: string;
+}
+
+export const MAX_PARALLEL_WORK_JUSTIFICATION_LENGTH = 1_024;
+
+/** Parse a caller's independent-parallel intent before it reaches admission. */
+export function parseWorkerParallelWorkIntent(value: unknown): WorkerParallelWorkIntent {
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["independentOf", "justification"])) {
+		throw new WorkerDelegationRequestError("Delegation parallel work intent contains an unsupported field.");
+	}
+	const justification = typeof value.justification === "string" ? value.justification.trim() : "";
+	if (!justification || justification.length > MAX_PARALLEL_WORK_JUSTIFICATION_LENGTH) {
+		throw new WorkerDelegationRequestError("Delegation parallel work intent requires a bounded justification.");
+	}
+	return {
+		independentOf: uniqueStringArray(value.independentOf ?? [], "Delegation parallel work independentOf"),
+		justification,
+	};
+}
+
 /** A profile is an optional preset; authority is compiled and persisted by the host. */
 export interface WorkerDelegationRequest {
 	instructions: string;
@@ -158,4 +187,21 @@ export interface WorkerDelegationRequest {
 	verificationOfTaskId?: string;
 	/** Runtime-owned durable task correlation; the delegate tool schema intentionally omits this. */
 	taskContext?: WorkerDelegationTaskContext;
+	/**
+	 * Explicit independent-parallel intent. Present means the caller deliberately wants a separate
+	 * context beside an existing compatible specialist; it never widens a grant or a capacity bound.
+	 */
+	parallelWork?: WorkerParallelWorkIntent;
+	/**
+	 * Host-owned durable replay identity for this start (the model-facing tool derives it from its own
+	 * tool call). A reused start carries it into the specialist's mailbox so a replayed call returns
+	 * the same task instead of appending another one.
+	 */
+	messageReplayKey?: string;
+	/**
+	 * The caller named this exact specialist AND supplied explicit options. Admission compiles those
+	 * options and the specialization decision must land on this agent; anything else means the options
+	 * describe different work, which is refused rather than silently started somewhere else.
+	 */
+	reuseAgentId?: string;
 }

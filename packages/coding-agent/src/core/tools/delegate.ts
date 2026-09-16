@@ -12,10 +12,15 @@ import {
 	type WorkerGrantSummary,
 } from "../delegation/worker-agent-control.ts";
 import { MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES } from "../delegation/worker-conversation-store.ts";
-import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
+import {
+	MAX_PARALLEL_WORK_JUSTIFICATION_LENGTH,
+	parseWorkerParallelWorkIntent,
+	type WorkerDelegationRequest,
+} from "../delegation/worker-delegation-request.ts";
 import type { WorkerRunOutcome } from "../delegation/worker-runner.ts";
 import type { WorkerTaskSessionView } from "../delegation/worker-task-view.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import type { GoalState } from "../goals/goal-state.ts";
 import {
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
 	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
@@ -169,6 +174,22 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 					maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 					description: "Stable worker id returned by start. With start, reuse that worker and persistent context.",
 				}),
+			),
+			parallelWork: Type.Optional(
+				Type.Object(
+					{
+						independentOf: Type.Array(
+							Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH }),
+							{ maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH },
+						),
+						justification: Type.String({ minLength: 1, maxLength: MAX_PARALLEL_WORK_JUSTIFICATION_LENGTH }),
+					},
+					{
+						additionalProperties: false,
+						description:
+							"Explicit justification for a separate independent specialist instead of reusing compatible context.",
+					},
+				),
 			),
 			agentIds: Type.Optional(
 				Type.Array(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH }), {
@@ -356,6 +377,7 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
 		"readOnly",
 		"instructions",
 		"agentId",
+		"parallelWork",
 		"dependsOn",
 		"forkTurns",
 		"requirementId",
@@ -666,6 +688,12 @@ export interface DelegateToolDependencies {
 	/** Host-owned durable turn identity used only by actions that can mutate worker mailboxes. */
 	resolveMessageReplayScope?: () => { sessionId: string; branchId: string };
 	/**
+	 * The parent's CURRENT goal, read at dispatch. A task started now belongs to the goal the parent
+	 * is pursuing now; without this port a reused specialist would inherit whatever goal it happened
+	 * to run first. Host-owned: the model never supplies goal state.
+	 */
+	getGoalStateSnapshot?: () => GoalState | undefined;
+	/**
 	 * The session's existing warning channel (e.g. WorkerDelegationController.safeWarn), if the
 	 * caller has one wired. Used only to surface prompt-guideline bounding diagnostics (a guideline
 	 * dropped or truncated to fit the provider prompt budget) — never required for correct operation.
@@ -683,7 +711,7 @@ function describeStartedWorker(
 	similarLaneIds?: readonly string[],
 ): string {
 	const parts = [
-		`delegate started (${record.status}) — stable agentId ${record.laneId}, task laneId ${record.laneId}`,
+		`delegate started (${record.status}) — stable agentId ${record.agentId ?? record.laneId}, task laneId ${record.laneId}`,
 	];
 	if (record.modelRef) parts.push(`effective model ${record.modelRef}, thinking ${record.thinkingLevel ?? "unknown"}`);
 	if (grant) {
@@ -895,15 +923,22 @@ function normalizeDelegateCaller(value: unknown): DelegateCaller {
 	throw new TypeError("A valid delegate caller is required.");
 }
 
+/**
+ * `scopeKind` selects which part of the host scope bounds the identity. Mailbox coordination is
+ * branch-scoped, but a START's durable identity must survive the session leaf moving on: the leaf
+ * advances with every appended entry, so a replay that arrives after the task settled would
+ * otherwise key differently and admit the same call twice.
+ */
 function messageIdempotencyKey(
 	caller: DelegateCaller,
 	scope: { sessionId: string; branchId: string },
 	toolCallId: string,
 	action: "start" | "send" | "broadcast" | "follow_up",
+	scopeKind: "branch" | "session" = "branch",
 ): string {
 	const callerIdentity = caller.kind === "worker" ? `worker:${caller.agentId}` : "session_root";
 	const sessionId = scope.sessionId.trim();
-	const branchId = scope.branchId.trim();
+	const branchId = scopeKind === "session" ? sessionId : scope.branchId.trim();
 	if (
 		!sessionId ||
 		sessionId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH ||
@@ -1085,6 +1120,58 @@ function workerTaskSessionJson(
 	);
 }
 
+/**
+ * The single normalization from one `delegate start` call to the host request. Both start entrances
+ * -- anonymous and explicitly named with options -- describe the same admitted command, so they build
+ * it here instead of each repeating the authority, fork and task-context shaping.
+ */
+function buildDelegateStartRequest(input: {
+	instructions: string;
+	toolInput: DelegateToolInput;
+	requirementIds: readonly string[];
+	dependsOnTaskIds?: readonly string[];
+	messageReplayKey?: string;
+	reuseAgentId?: string;
+}): WorkerDelegationRequest {
+	const tool = input.toolInput;
+	const profileId = tool.profileId?.trim();
+	const hasAuthority =
+		tool.model !== undefined ||
+		tool.thinkingLevel !== undefined ||
+		tool.path !== undefined ||
+		tool.toolNames !== undefined ||
+		tool.readOnly !== undefined;
+	return {
+		instructions: input.instructions,
+		...(input.messageReplayKey ? { messageReplayKey: input.messageReplayKey } : {}),
+		...(input.reuseAgentId ? { reuseAgentId: input.reuseAgentId } : {}),
+		...(profileId ? { profileId } : {}),
+		...(hasAuthority
+			? {
+					authority: {
+						...(tool.model ? { model: structuredClone(tool.model) } : {}),
+						...(tool.thinkingLevel ? { thinkingLevel: tool.thinkingLevel } : {}),
+						...(tool.path ? { path: tool.path } : {}),
+						...(tool.toolNames ? { toolNames: [...tool.toolNames] } : {}),
+						...(tool.readOnly !== undefined ? { readOnly: tool.readOnly } : {}),
+					},
+				}
+			: {}),
+		...(tool.forkTurns ? { forkTurns: tool.forkTurns } : {}),
+		...(tool.parallelWork ? { parallelWork: parseWorkerParallelWorkIntent(tool.parallelWork) } : {}),
+		...(input.dependsOnTaskIds || input.requirementIds.length > 0
+			? {
+					taskContext: {
+						requirementIds: [...input.requirementIds],
+						dependsOnTaskIds: [...(input.dependsOnTaskIds ?? [])],
+						acceptanceCriterionIds: [],
+						resourcePointerIds: [],
+					},
+				}
+			: {}),
+	};
+}
+
 function delegateStartSkipText(reason: string): string {
 	if (reason.startsWith("worker_duplicate_of:")) {
 		const laneId = reason.slice("worker_duplicate_of:".length);
@@ -1237,6 +1324,18 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				});
 			}
 			let agentIds: string[] | undefined;
+			if (input.parallelWork !== undefined) {
+				try {
+					parseWorkerParallelWorkIntent(input.parallelWork);
+					if (input.agentId) throw new Error("A named specialist cannot request an independent copy");
+				} catch (error) {
+					return invalid(error instanceof Error ? error.message : String(error), {
+						started: false,
+						action,
+						skipReason: "worker_parallel_intent_invalid",
+					});
+				}
+			}
 			if (input.agentIds !== undefined) {
 				if (
 					!Array.isArray(input.agentIds) ||
@@ -2077,7 +2176,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							agentId: reuseAgentId,
 							skipReason: "worker_agent_control_unavailable",
 						});
-					const reuseInstructions = input.instructions?.trim();
+					const reuseInstructions = input.instructions?.trim() ? input.instructions : undefined;
 					if (!reuseInstructions)
 						return invalid("delegate start requires instructions", {
 							started: false,
@@ -2098,17 +2197,10 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					)
 						.filter((entry) => entry[1] !== undefined)
 						.map(([field]) => field);
-					if (reuseOverrideFields.length > 0) {
-						return invalid(
-							`delegate start cannot apply ${reuseOverrideFields.join(", ")} while reusing worker ${reuseAgentId}. Existing workers keep their admitted birth model, thinking level, path, tools, profile, and context. No worker started; start a fresh worker without agentId to apply those overrides.`,
-							{
-								started: false,
-								action,
-								agentId: reuseAgentId,
-								skipReason: "worker_reuse_overrides_forbidden",
-							},
-						);
-					}
+					// Explicit options on a named worker are not refused unheard: the host compiles them and
+					// admits the start only if they describe that worker's own effective specialization.
+					// Anything else is different work and is reported as incompatible, not duplicated.
+					const validatedReuse = reuseOverrideFields.length > 0;
 					const replayScope = deps.resolveMessageReplayScope?.();
 					if (!replayScope) {
 						return invalid("delegate start with agentId requires a durable message replay scope", {
@@ -2118,10 +2210,64 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							skipReason: "message_replay_scope_unavailable",
 						});
 					}
+					const reuseRequirementIds = [
+						...(input.requirementId?.trim() ? [input.requirementId.trim()] : []),
+						...(input.requirementIds ? input.requirementIds.map((id) => id.trim()).filter(Boolean) : []),
+					];
+					const currentGoal = deps.getGoalStateSnapshot?.();
+					if (validatedReuse) {
+						const validatedRequest = buildDelegateStartRequest({
+							instructions: reuseInstructions,
+							toolInput: input,
+							requirementIds: reuseRequirementIds,
+							reuseAgentId,
+							messageReplayKey: messageIdempotencyKey(caller, replayScope, toolCallId, "start", "session"),
+							...(dependsOnTaskIds ? { dependsOnTaskIds } : {}),
+						});
+						const validated = deps.startWorkerDelegation
+							? await deps.startWorkerDelegation(validatedRequest, signal)
+							: await deps.runWorkerDelegation(validatedRequest);
+						if (!validated.started) {
+							return invalid(
+								`delegate start could not apply those options to worker ${reuseAgentId}: ${validated.skipReason ?? "not_started"}. They describe different work; start without agentId to run it as its own worker.`,
+								{
+									started: false,
+									action,
+									agentId: reuseAgentId,
+									skipReason: validated.skipReason ?? "worker_reuse_overrides_incompatible",
+								},
+							);
+						}
+						const validatedRecord = "record" in validated ? validated.record : undefined;
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: `worker ${reuseAgentId} accepted this task with its own admitted binding (lane ${validatedRecord?.laneId ?? "queued"})`,
+								},
+							],
+							details: {
+								started: true,
+								action,
+								agentId: validatedRecord?.agentId ?? reuseAgentId,
+								laneId: validatedRecord?.laneId,
+								status: validatedRecord?.status,
+								modelRef: validatedRecord?.modelRef,
+								thinkingLevel: validatedRecord?.thinkingLevel,
+								accepted: true,
+							},
+						};
+					}
 					const followed = deps.workerAgentControl.startWorkerAgentTask(reuseAgentId, reuseInstructions, {
 						...(workerScope ?? {}),
 						...(dependsOnTaskIds ? { dependsOnTaskIds } : {}),
-						idempotencyKey: messageIdempotencyKey(caller, replayScope, toolCallId, "start"),
+						idempotencyKey: messageIdempotencyKey(caller, replayScope, toolCallId, "start", "session"),
+						// An explicit start is new work on this specialist, correlated to the goal that is
+						// current right now; `follow_up` remains the intentional continuation.
+						newTask: {
+							...(currentGoal ? { goal: currentGoal } : {}),
+							...(reuseRequirementIds.length > 0 ? { requirementIds: reuseRequirementIds } : {}),
+						},
 					});
 					if (!followed.started && !followed.messageId) {
 						const skipReason = followed.skipReason ?? "not_started";
@@ -2167,7 +2313,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						},
 					};
 				}
-				const instructions = input.instructions?.trim();
+				// Validated on the trimmed view, forwarded verbatim: the brief is the worker's task text.
+				const instructions = input.instructions?.trim() ? input.instructions : undefined;
 				if (!instructions)
 					return invalid("delegate start requires instructions", {
 						started: false,
@@ -2191,32 +2338,26 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					...(input.requirementId?.trim() ? [input.requirementId.trim()] : []),
 					...(input.requirementIds ? input.requirementIds.map((id) => id.trim()).filter(Boolean) : []),
 				];
-				const request = {
+				const anonymousReplayScope = deps.resolveMessageReplayScope?.();
+				const request = buildDelegateStartRequest({
 					instructions,
-					...(profileId ? { profileId } : {}),
-					...(input.model || input.thinkingLevel || input.path || input.toolNames || input.readOnly !== undefined
+					toolInput: input,
+					requirementIds,
+					// Host-owned replay identity for this exact tool call: a replay of the same call must
+					// return the same task, whether it is still running or already settled.
+					...(anonymousReplayScope
 						? {
-								authority: {
-									...(input.model ? { model: structuredClone(input.model) } : {}),
-									...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
-									...(input.path ? { path: input.path } : {}),
-									...(input.toolNames ? { toolNames: [...input.toolNames] } : {}),
-									...(input.readOnly !== undefined ? { readOnly: input.readOnly } : {}),
-								},
+								messageReplayKey: messageIdempotencyKey(
+									caller,
+									anonymousReplayScope,
+									toolCallId,
+									"start",
+									"session",
+								),
 							}
 						: {}),
-					...(input.forkTurns ? { forkTurns: input.forkTurns } : {}),
-					...(dependsOnTaskIds || requirementIds.length > 0
-						? {
-								taskContext: {
-									requirementIds,
-									dependsOnTaskIds: dependsOnTaskIds ?? [],
-									acceptanceCriterionIds: [],
-									resourcePointerIds: [],
-								},
-							}
-						: {}),
-				};
+					...(dependsOnTaskIds ? { dependsOnTaskIds } : {}),
+				});
 				if (deps.startWorkerDelegation) {
 					signal?.throwIfAborted();
 					const started = await deps.startWorkerDelegation(request, signal);
@@ -2243,7 +2384,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							...((started.record.profileId ?? profileId)
 								? { profileId: started.record.profileId ?? profileId }
 								: {}),
-							agentId: started.record.laneId,
+							// The durable specialist identity, which is the lane only for its first task.
+							agentId: started.record.agentId ?? started.record.laneId,
 							laneId: started.record.laneId,
 							...(started.record.label ? { label: started.record.label } : {}),
 							status: started.record.status,
@@ -2299,7 +2441,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					details: {
 						started: true,
 						profileId: run.record?.profileId ?? profileId,
-						agentId: run.record?.laneId,
+						agentId: run.record?.agentId ?? run.record?.laneId,
 						laneId: run.record?.laneId,
 						label: run.record?.label,
 						status: run.record?.status,

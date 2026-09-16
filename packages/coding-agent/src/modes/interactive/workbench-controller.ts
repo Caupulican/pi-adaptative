@@ -1,7 +1,6 @@
 import { type AgentMessage, type ToolInvocationObservation, ToolInvocationReport } from "@caupulican/pi-agent-core";
 import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
 import { type Component, isMouseSequence, parseMouseSequence, Text, wrapTextWithAnsi } from "@caupulican/pi-tui";
-import type { LaneRecord } from "../../core/autonomy/lane-tracker.ts";
 import { backgroundToolInvocationObservations } from "../../core/background-tool-task-controller.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import { type OrchestrationPanelModel, renderOrchestrationPanelRows } from "../../core/tools/orchestration-panel.ts";
@@ -11,6 +10,7 @@ import {
 	type AgentsOverlaySnapshot,
 	buildWorkPanelModel,
 	compactWorkPanel,
+	isActiveWorkerLane,
 	projectSpecialistLanes,
 } from "./components/agents-overlay.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
@@ -438,7 +438,6 @@ export class WorkbenchController {
 
 const DEFAULT_PREVIEW_LIMIT = 24;
 const TEAM_SECTIONS = new Set(["Workers", "Background tools"]);
-const ACTIVE_WORKER = new Set<LaneRecord["status"]>(["queued", "running"]);
 
 function rowsComponent(model: OrchestrationPanelModel): Component {
 	return { render: (width) => renderOrchestrationPanelRows(theme, model, width), invalidate() {} };
@@ -517,7 +516,7 @@ export function buildWorkbenchSections(snapshot: AgentsOverlaySnapshot, nowMs: n
 		const team = compactWorkPanel({ ...model, rows: teamRows }, 4);
 		const shown = team.rows ?? [];
 		const workers = specialists.flatMap((specialist) => (specialist.current ? [specialist.current] : []));
-		const active = workers.filter((record) => ACTIVE_WORKER.has(record.status)).length;
+		const active = workers.filter(isActiveWorkerLane).length;
 		const meta = active
 			? `${active} active`
 			: `${specialists.length} ${specialists.length === 1 ? "agent" : "agents"}`;

@@ -568,7 +568,14 @@ async function persistResumedWorkerTerminal(
 			return;
 		}
 		const selfRegistered = await store.readEntry(config.agentDir, claimed.entryId);
-		if (selfRegistered?.pid === claimed.pid) {
+		if (
+			selfRegistered?.pid === claimed.pid &&
+			selfRegistered.role === claimed.role &&
+			selfRegistered.parentPid === claimed.parentPid &&
+			selfRegistered.parentSessionId === claimed.parentSessionId &&
+			selfRegistered.taskRef === claimed.taskRef &&
+			isDeepStrictEqual(selfRegistered.agent, claimed.agent)
+		) {
 			const registeredTerminal = markTerminal(selfRegistered, result, observedAt);
 			if (await store.writeEntryIfUnchanged(config.agentDir, claimed.entryId, selfRegistered, registeredTerminal)) {
 				if (lifetime.aborted) return;
@@ -758,6 +765,19 @@ async function startWorkerBranch(
 	};
 
 	/**
+	 * Accept a freshly read record as this generation's own. Ownership is decided when a record is
+	 * ACCEPTED, not only when one is written: a tick whose directive answer needs no write still acts
+	 * on what it read -- it keeps polling, and its grace deadline can still request an exit that would
+	 * terminate the process the NEW generation is running in.
+	 */
+	const acceptOwnedRecord = (fresh: ProcessMatrixEntry | undefined): ProcessMatrixEntry | undefined => {
+		if (fresh === undefined) return undefined;
+		if (ownsGeneration(fresh)) return fresh;
+		relinquishOwnership();
+		return undefined;
+	};
+
+	/**
 	 * The single fenced mutation gate for this branch. A watcher tick that was already awaiting a read
 	 * when `stop()` ran must not write, mutate in-memory state, or authorize a follow-on transition:
 	 * `closeWorker` has by then persisted the terminal record, and `closed` is terminal.
@@ -859,10 +879,12 @@ async function startWorkerBranch(
 		}
 		// Still healthy: also poll for a master-initiated cooperative-cleanup directive.
 		const fresh = await store.readEntry(config.agentDir, entry.entryId);
-		if (stopped || !fresh) return;
-		const directive = pollWorkerDirective(fresh, currentParentPid, { isPidAlive: config.isProcessAlive });
+		if (stopped) return;
+		const owned = acceptOwnedRecord(fresh);
+		if (stopped || !owned) return;
+		const directive = pollWorkerDirective(owned, currentParentPid, { isPidAlive: config.isProcessAlive });
 		if (directive.code !== "user_cleanup") return;
-		await completeCooperativeCleanup(fresh);
+		await completeCooperativeCleanup(owned);
 	};
 
 	const enterWindDown = async (): Promise<void> => {
@@ -897,21 +919,25 @@ async function startWorkerBranch(
 		// A stop that completed while this read was outstanding ends the grace window: neither an
 		// adoption nor a grace expiry may re-arm a timer, notify, or request exit after it.
 		if (stopped) return;
-		if (fresh) {
-			const directive = pollWorkerDirective(fresh, currentParentPid, { isPidAlive: config.isProcessAlive });
-			if (directive.code === "adopt" && fresh.parentSessionId) {
+		const owned = acceptOwnedRecord(fresh);
+		// Ownership moved while this window was open: no directive, no expiry, and above all no exit
+		// request -- that exit would end the newer generation's process.
+		if (stopped) return;
+		if (owned) {
+			const directive = pollWorkerDirective(owned, currentParentPid, { isPidAlive: config.isProcessAlive });
+			if (directive.code === "adopt" && owned.parentSessionId) {
 				// The adopting master persists its session id with the pid. Require both on the next
 				// healthy tick; accepting a pid-only adoption would reintroduce the PID-reuse bug.
 				if (
 					!(await persist(
-						fresh,
-						applyAdoption(fresh, { parentPid: directive.parentPid, parentSessionId: fresh.parentSessionId }),
+						owned,
+						applyAdoption(owned, { parentPid: directive.parentPid, parentSessionId: owned.parentSessionId }),
 						"failed to write worker adoption",
 					))
 				)
 					return;
 				currentParentPid = directive.parentPid;
-				currentParentSessionId = fresh.parentSessionId;
+				currentParentSessionId = owned.parentSessionId;
 				preserveResumableOnExit = false;
 				if (timer) {
 					clearInterval(timer);
@@ -925,7 +951,7 @@ async function startWorkerBranch(
 				return;
 			}
 			if (directive.code === "user_cleanup") {
-				await completeCooperativeCleanup(fresh);
+				await completeCooperativeCleanup(owned);
 				return;
 			}
 		}

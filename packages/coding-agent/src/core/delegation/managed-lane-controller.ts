@@ -22,7 +22,7 @@ import {
 	reviewManagedLaneChangedFiles,
 } from "./worker-claim.ts";
 import { compileManagedProcessExecutionGrant } from "./worker-execution-policy.ts";
-import type { WorkerLifecycle } from "./worker-lifecycle.ts";
+import { ManagedLaneLifetimeInputError, type WorkerLifecycle } from "./worker-lifecycle.ts";
 import { finalizeWorkerClaim } from "./worker-terminal-finalizer.ts";
 
 const LEGACY_MANAGED_LEASE_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -191,7 +191,17 @@ export class ManagedLaneController {
 			// "retained" is the state every dispatched lane already starts in, so only a closure carries
 			// new information. Nothing here touches the turn: no claim, no usage, no parent handoff.
 			if (event.agentLifecycle !== "retired") return undefined;
-			const record = this.lifecycle.retireManaged(event.laneId, event.dispatchSequence);
+			let record: LaneRecord | undefined;
+			try {
+				record = this.lifecycle.retireManaged(event.laneId, event.dispatchSequence);
+			} catch (error) {
+				// Only an unattributable REPORT is dropped -- it names no generation this lane can own.
+				// A durable runtime or store failure keeps propagating: swallowing it here would let the
+				// producer mark this closure published when nothing was persisted.
+				if (!(error instanceof ManagedLaneLifetimeInputError)) throw error;
+				this.warn(`Rejected lifetime report for managed worker ${event.laneId}: ${error.message}`);
+				return undefined;
+			}
 			if (record) appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
 			this.releaseRegistration(event.laneId);
 			return record;
