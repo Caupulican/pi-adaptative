@@ -2111,9 +2111,23 @@ export class WorkerDelegationController {
 
 	private releaseSettledProjectContext(agentId: string, conversation?: WorkerConversation): void {
 		const agent = this.lifecycle.getAgent(agentId);
-		if (agent?.status !== "registered" || !this.isSpecialistSettled(agentId)) return;
-		const latest = this.lifecycle.getLatestAgentAttempt(agentId);
+		if (!this.isSpecialistSettled(agentId)) return;
+		const latest = agent ? this.lifecycle.getLatestAgentAttempt(agentId) : this.lifecycle.getActiveAttempt(agentId);
 		if (latest && NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(latest.status)) return;
+		if (!agent && latest?.status === "cancelled") {
+			const selection = this.projectAgents.get(agentId)?.admission;
+			if (selection?.kind === "allocated") {
+				try {
+					this.projectDirectory.cancelPreparedAllocation(selection.allocation);
+					this.projectAgents.delete(agentId);
+				} catch (error) {
+					this.safeWarn(
+						`Worker allocation release failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}
+		}
+		if (agent?.status !== "registered") return;
 		const claim = this.projectClaims.get(agent.resumeContext.sessionId);
 		if (!claim) return;
 		try {

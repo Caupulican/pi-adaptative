@@ -148,9 +148,22 @@ export class WorkerProjectDirectory {
 		});
 	}
 
+	/** Caller proves the prepared task is cancelled and has no agent binding or executor. */
+	cancelPreparedAllocation(allocation: WorkerProjectAllocation): void {
+		this.updateAllocation(
+			allocation,
+			(entry) => {
+				if (entry.phase !== "allocating") throw new Error("Published worker allocation cannot be withdrawn.");
+				return undefined;
+			},
+			true,
+		);
+	}
+
 	private updateAllocation(
 		allocation: WorkerProjectAllocation,
 		update: (entry: DirectoryEntry) => DirectoryEntry | undefined,
+		requireUnenrolled = false,
 	): void {
 		const file = workerProjectSpecializationFile(this.agentDir, allocation.specializationKey);
 		withFileLockSync(file, () => {
@@ -159,10 +172,15 @@ export class WorkerProjectDirectory {
 			const entry = entries[index];
 			if (!entry || !isDeepStrictEqual(entry.allocatedBy, allocation.owner))
 				throw new Error("Worker allocation receipt is stale.");
-			const next = update(entry);
-			if (next) entries[index] = next;
-			else entries.splice(index, 1);
-			this.write(file, entries);
+			const commit = () => {
+				const next = update(entry);
+				if (next) entries[index] = next;
+				else entries.splice(index, 1);
+				this.write(file, entries);
+			};
+			if (requireUnenrolled && entry.reference)
+				this.conversations.withUnenrolledProjectContext(this.agentDir, entry.reference, commit);
+			else commit();
 		});
 	}
 

@@ -1931,6 +1931,38 @@ export class WorkerConversationStore {
 		return binding.ownership;
 	}
 
+	/** A cancelled setup may discard its allocation receipt, never its retained transcript. */
+	withUnenrolledProjectContext<T>(agentDir: string, reference: WorkerProjectContextReference, operation: () => T): T {
+		const context = reference.resumeContext;
+		if (!context.sessionFile) throw new Error("Worker allocation transcript identity is missing.");
+		const file = assertWorkerConversationFile(agentDir, context.sessionFile, context.sessionId);
+		return withSessionBundleAdmission(agentDir, reference.parentSessionId, () =>
+			withFileLockSync(file, () => {
+				const metadataFile = workerConversationMetadataFile(file);
+				if (existsSync(metadataFile)) {
+					const metadata = assertExactConversationMetadata(
+						metadataFile,
+						context,
+						reference.logicalAgentId,
+						reference.parentSessionId,
+					);
+					if (metadata.projectContext) throw new Error("Worker allocation is already enrolled.");
+				}
+				if (existsSync(file)) {
+					const conversation = this.openExisting(
+						{ agentDir, resumeContext: context, expectedLogicalAgentId: reference.logicalAgentId },
+						{ parentSessionId: reference.parentSessionId, recoverBirthContextPrefix: false },
+					);
+					if (conversation.hasActiveTranscriptCommit())
+						throw new Error("Worker transcript commit is still active.");
+					if (projectEnrollmentKey(SessionManager.open(file, agentDir, dirname(file))))
+						throw new Error("Worker allocation has retained enrollment evidence.");
+				}
+				return operation();
+			}),
+		);
+	}
+
 	/** Bounded, fail-closed claim inspection before removing a birth parent's artifact bundle. */
 	static reserveBundleDeletion(agentDir: string, parentSessionId: string): boolean {
 		return reserveSessionBundleDeletion(agentDir, parentSessionId, () => {
