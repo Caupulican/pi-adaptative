@@ -70,6 +70,7 @@ export interface WorkerAgentControlCoordinatorOptions {
 	conversationStore?: WorkerConversationStore;
 	getConversationClaim?(agent: AgentBindingContract): SpecialistContextClaim | undefined;
 	peekConversationClaim?(agent: AgentBindingContract): SpecialistContextClaim | undefined;
+	withConversationAdmission?<T>(agent: AgentBindingContract, operation: () => T): T;
 	isControlAvailable(): boolean;
 	getLifecycle(): WorkerLifecycle;
 	recoveredRequest(attempt: AttemptRuntimeState): WorkerDelegationRequest;
@@ -2205,14 +2206,17 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (options.idempotencyKey !== undefined) {
 			this.assertIdempotencyTarget(target.agentId, options.idempotencyKey);
 		}
-		this.options.getConversationClaim?.(target);
-		return this.getMailbox(target.agentId).enqueueWithReceipt({
-			kind,
-			content,
-			...options,
-			...(task ? { task } : {}),
-			...(onAdmitted ? { onAdmitted } : {}),
-		});
+		const enqueue = () =>
+			this.getMailbox(target.agentId).enqueueWithReceipt({
+				kind,
+				content,
+				...options,
+				...(task ? { task } : {}),
+				...(onAdmitted ? { onAdmitted } : {}),
+			});
+		return this.options.withConversationAdmission
+			? this.options.withConversationAdmission(target, enqueue)
+			: enqueue();
 	}
 
 	private workerAgentView(

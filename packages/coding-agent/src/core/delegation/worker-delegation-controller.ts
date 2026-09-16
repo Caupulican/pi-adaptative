@@ -416,6 +416,7 @@ export class WorkerDelegationController {
 			conversationStore: this.conversations,
 			getConversationClaim: (agent) => this.claimAgentProjectContext(agent),
 			peekConversationClaim: (agent) => this.projectClaims.get(agent.resumeContext.sessionId),
+			withConversationAdmission: (agent, operation) => this.withProjectContextAdmission(agent, operation),
 			isControlAvailable: () => this.deps.isDelegateToolActive(),
 			getLifecycle: () => this.getWorkerLifecycle(),
 			recoveredRequest: (attempt) => this.recovery.recoveredRequest(attempt),
@@ -2095,6 +2096,40 @@ export class WorkerDelegationController {
 		};
 	}
 
+	/** A command only retains a newly acquired claim if it leaves executable work or resources. */
+	private withProjectContextAdmission<T>(agent: AgentBindingContract, operation: () => T): T {
+		const alreadyOwned = this.projectClaims.has(agent.resumeContext.sessionId);
+		this.claimAgentProjectContext(agent);
+		try {
+			return operation();
+		} finally {
+			if (!alreadyOwned) this.releaseSettledProjectContext(agent.agentId);
+		}
+	}
+
+	private releaseSettledProjectContext(agentId: string, conversation?: WorkerConversation): void {
+		const agent = this.lifecycle.getAgent(agentId);
+		if (agent?.status !== "registered" || !this.isSpecialistSettled(agentId)) return;
+		const claim = this.projectClaims.get(agent.resumeContext.sessionId);
+		if (!claim) return;
+		try {
+			const current =
+				conversation ??
+				this.conversations.open({
+					agentDir: this.deps.getAgentDir(),
+					resumeContext: agent.resumeContext,
+					expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+					projectClaim: claim,
+				});
+			this.agentControl.releaseQuiescentContext(agentId, () => {
+				this.conversations.releaseProjectContext(current);
+				this.projectClaims.delete(agent.resumeContext.sessionId);
+			});
+		} catch (error) {
+			this.safeWarn(`Worker project release failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
 	private claimAgentProjectContext(agent: AgentBindingContract): SpecialistContextClaim | undefined {
 		const retained = this.projectClaims.get(agent.resumeContext.sessionId);
 		if (retained) return retained;
@@ -2391,28 +2426,37 @@ export class WorkerDelegationController {
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
 		const agent = this.lifecycle.getAgent(agentId);
 		if (!agent) return { started: false, skipReason: "unknown_agent" };
+		let admittedClaim = false;
 		try {
-			this.claimAgentProjectContext(agent);
-		} catch {
+			return this.withProjectContextAdmission(agent, () => {
+				admittedClaim = true;
+				const goal = this.deps.getGoalStateSnapshot();
+				const taskContext = request.taskContext;
+				const accepted = this.agentControl.startWorkerAgentTask(agentId, request.instructions, {
+					...(taskContext?.dependsOnTaskIds?.length ? { dependsOnTaskIds: taskContext.dependsOnTaskIds } : {}),
+					...(request.messageReplayKey ? { idempotencyKey: request.messageReplayKey } : {}),
+					newTask: {
+						controlForkMode: JSON.stringify(this.workerContextForkMode(request, contract)),
+						...(goal ? { goal } : {}),
+						...(taskContext?.requirementIds?.length ? { requirementIds: taskContext.requirementIds } : {}),
+						...(taskContext?.acceptanceCriterionIds?.length
+							? { acceptanceCriterionIds: taskContext.acceptanceCriterionIds }
+							: {}),
+						...(taskContext?.resourcePointerIds?.length
+							? { resourcePointerIds: taskContext.resourcePointerIds }
+							: {}),
+					},
+				});
+				if (accepted.record) return { started: true as const, record: accepted.record };
+				return {
+					started: false as const,
+					skipReason: accepted.skipReason ?? "worker_specialist_task_not_accepted",
+				};
+			});
+		} catch (error) {
+			if (admittedClaim) throw error;
 			return { started: false, skipReason: "worker_specialist_context_unavailable" };
 		}
-		const goal = this.deps.getGoalStateSnapshot();
-		const taskContext = request.taskContext;
-		const accepted = this.agentControl.startWorkerAgentTask(agentId, request.instructions, {
-			...(taskContext?.dependsOnTaskIds?.length ? { dependsOnTaskIds: taskContext.dependsOnTaskIds } : {}),
-			...(request.messageReplayKey ? { idempotencyKey: request.messageReplayKey } : {}),
-			newTask: {
-				controlForkMode: JSON.stringify(this.workerContextForkMode(request, contract)),
-				...(goal ? { goal } : {}),
-				...(taskContext?.requirementIds?.length ? { requirementIds: taskContext.requirementIds } : {}),
-				...(taskContext?.acceptanceCriterionIds?.length
-					? { acceptanceCriterionIds: taskContext.acceptanceCriterionIds }
-					: {}),
-				...(taskContext?.resourcePointerIds?.length ? { resourcePointerIds: taskContext.resourcePointerIds } : {}),
-			},
-		});
-		if (accepted.record) return { started: true, record: accepted.record };
-		return { started: false, skipReason: accepted.skipReason ?? "worker_specialist_task_not_accepted" };
 	}
 
 	async start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
@@ -3323,19 +3367,7 @@ export class WorkerDelegationController {
 				// Failed cleanup leaves resource ownership unresolved. Keep both the local execution
 				// hold and the durable project claim until that ownership can be resolved.
 				if (resourcesReleased) releaseSpecialist();
-				const settledAgent = lifecycle.getAgent(agentId);
-				if (resourcesReleased && conversation.getProjectClaim() && settledAgent?.status === "registered") {
-					try {
-						this.agentControl.releaseQuiescentContext(agentId, () => {
-							this.conversations.releaseProjectContext(conversation);
-							this.projectClaims.delete(conversation.getResumeContext().sessionId);
-						});
-					} catch (error) {
-						this.safeWarn(
-							`Worker project release failed: ${error instanceof Error ? error.message : String(error)}`,
-						);
-					}
-				}
+				if (resourcesReleased) this.releaseSettledProjectContext(agentId, conversation);
 				this.agentControl.signalStateChanged();
 				deregisterInFlight();
 				if (!this.deps.isDisposed()) this.scheduler.drain(true);

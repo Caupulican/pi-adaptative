@@ -54,6 +54,13 @@ commit hooks, including project type checking, pass. Production clone coverage i
 out of 1,037 owned files; the 50-token pass covers 997 files and reports zero clones. No scanner
 exclusions or limits were weakened.
 
+At `8fed042ff`, all 310 new coding-agent tests in 51 files pass on Linux and native Windows.
+The added project-transfer cases cover retained provider context, colliding local handles, busy
+admission, stale mailbox writers, cleanup failure, and serialized idle publication. Their assertions
+remain unchanged from the failing baselines. The full repository check passes with 1,033/1,042
+eligible/owned production files covered and zero clones. Subsequent refused-control regressions
+reproduce claim retention after empty and oversized messages on both operating systems.
+
 The candidate that implicit resource selection alone breaks an unchanged named-task replay was not
 reproduced. Its negative control passes; no speculative correction was made for it.
 
@@ -65,8 +72,8 @@ owners; extracted binary code was not executed or copied into the runtime.
 ## Remaining boundaries
 
 - Native project transfer now has exclusive claims, transcript/mailbox fencing, and birth-bundle
-  deletion protection. Interrupted allocation recovery and refused-control claim disposition still
-  need dedicated failure-path validation before release.
+  deletion protection. Refused controls release only newly acquired, quiescent claims. Interrupted
+  allocation recovery still needs dedicated failure-path validation before release.
 - Managed Herdr teams reuse compatible idle teams within a parent. Transferring their parent
   ownership remains separate work; live CLI parent/task flags cannot simply be relabeled.
 - Goal materialization and mailbox persistence span separate files. Deterministic admission refusal
