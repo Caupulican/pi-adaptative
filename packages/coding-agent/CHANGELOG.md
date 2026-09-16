@@ -7,6 +7,7 @@
 - Compatible native specialists retain their original conversation across parent sessions in the same project, with exclusive claims and distinct parent-local handles.
 - Specialist mailbox writes reject stale ownership; idle publication holds the mailbox admission lock, and failed tool cleanup keeps the specialist unavailable for reuse.
 - Rejected specialist control messages release newly acquired claims when no work remains, preserving project reuse after validation failures.
+- Cancelling a queued native worker or disposing its parent releases the settled project context without duplicating its transcript.
 - Python credential screening preserves matching quote boundaries, avoiding oversized source fragments being probed as filenames and retaining protection for paths containing quotes.
 - Credential redaction preserves structured execution-error classification across duplicate runtime module instances.
 - Python completed non-zero exits are operation outcomes, matching bash, so they keep output without a MUST ledger. Timeout and abort stay incomplete tool failures.

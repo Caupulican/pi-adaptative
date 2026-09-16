@@ -121,6 +121,7 @@ import {
 	pendingVerifierSubjectTaskIds,
 	resolveWorkerFleetLimits,
 } from "./worker-fleet-limits.ts";
+import { NONTERMINAL_WORKER_ATTEMPT_STATUSES } from "./worker-lane-projection.ts";
 import { WorkerLeaseHeartbeat } from "./worker-lease-heartbeat.ts";
 import { type PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
 import type { WorkerNotificationCoordinator, WorkerTerminalHandoffRecord } from "./worker-notification-coordinator.ts";
@@ -1317,6 +1318,7 @@ export class WorkerDelegationController {
 		const attemptId = attempt?.attemptId;
 		if (attemptId && this.publishedTerminalAttemptIds.has(attemptId)) return;
 		const childAgentId = attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? record.laneId;
+		if (attempt?.status === "cancelled") this.releaseSettledProjectContext(childAgentId);
 		const parentAgentId = this.lifecycle.getAgent(childAgentId)?.parentAgentId ?? attempt?.dispatch.parentAgentId;
 		if (attemptId && parentAgentId) {
 			try {
@@ -2110,6 +2112,8 @@ export class WorkerDelegationController {
 	private releaseSettledProjectContext(agentId: string, conversation?: WorkerConversation): void {
 		const agent = this.lifecycle.getAgent(agentId);
 		if (agent?.status !== "registered" || !this.isSpecialistSettled(agentId)) return;
+		const latest = this.lifecycle.getLatestAgentAttempt(agentId);
+		if (latest && NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(latest.status)) return;
 		const claim = this.projectClaims.get(agent.resumeContext.sessionId);
 		if (!claim) return;
 		try {
