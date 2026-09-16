@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import {
@@ -148,6 +149,8 @@ describe("secret_store tool", () => {
 			},
 		]);
 		expect(JSON.stringify(listed)).not.toContain(secret);
+		expect(JSON.stringify(listed.content)).toContain("DEPLOY_TOKEN");
+		expect(JSON.stringify(listed.content)).toContain("deploy");
 	});
 
 	it("discovers local credential sources without a vault session or owner handoff", async () => {
@@ -181,9 +184,32 @@ describe("secret_store tool", () => {
 			truncated: false,
 		});
 		expect(JSON.stringify(discovered)).not.toContain(secret);
+		expect(JSON.stringify(discovered.content)).toContain(".env.local");
+		expect(JSON.stringify(discovered.content)).toContain("DEPLOY_TOKEN");
 		expect(ui.input).not.toHaveBeenCalled();
 		expect(ui.custom).not.toHaveBeenCalled();
 		expect(ui.confirm).not.toHaveBeenCalled();
+	});
+
+	it("targets another credential directory and returns reusable absolute source descriptors", async () => {
+		const discoverMigrationSources = vi.fn(async () => ({
+			candidates: [{ source: { kind: "dotenv_file" as const, path: ".env" }, variableNames: ["TRELLO_TOKEN"] }],
+			skipped: 0,
+			truncated: false,
+		}));
+		const { tool } = createHarness({ discoverMigrationSources });
+		const { context } = createContext("rpc", "/work/project");
+		const discovered = await tool.execute(
+			"discover",
+			{ action: "discover", path: "../shared/trello" },
+			undefined,
+			undefined,
+			context,
+		);
+		const root = resolve(context.cwd, "../shared/trello");
+		expect(discoverMigrationSources).toHaveBeenCalledWith(root, undefined);
+		expect(discovered.details.sources?.[0].source).toEqual({ kind: "dotenv_file", path: resolve(root, ".env") });
+		expect(JSON.stringify(discovered.content)).toContain("TRELLO_TOKEN");
 	});
 
 	it("connects from a machine-owned BWS bootstrap without forcing owner input", async () => {
@@ -310,7 +336,7 @@ describe("secret_store tool", () => {
 		const [message] = result.content;
 		expect(message?.type).toBe("text");
 		if (message?.type !== "text") throw new Error("Expected a text-only owner setup result.");
-		expect(message.text).toContain("Configure BWS_ACCESS_TOKEN or BW_SESSION");
+		expect(message.text).toContain("Existing credential consumers can still use their configured sources directly");
 		expect(message.text).toContain("Pi never asks for credentials");
 		expect(message.text).not.toContain("owner input");
 		expect(message.text).not.toContain("/secrets");
@@ -479,7 +505,10 @@ describe("secret_store tool", () => {
 		for (const forbidden of ['"set"', '"remove"', '"lock"', '"materialize"', '"dotenv"', '"value"', '"secret"']) {
 			expect(schema).not.toContain(forbidden);
 		}
-		expect(teachings).toContain("Pi reads machine BWS_ACCESS_TOKEN or BW_SESSION only");
+		expect(teachings).toContain("Use existing credential consumers directly");
+		expect(teachings).toContain("Bitwarden activation or migration is not a prerequisite");
+		expect(teachings).not.toContain("activate before credential work");
+		expect(teachings).toContain("A truncated or empty discovery is not proof that credentials are absent");
 		expect(teachings).toContain("Pi never prompts for a session key");
 		expect(teachings).not.toContain("one masked BW_SESSION");
 		expect(teachings).toContain("current task genuinely requires credentials");

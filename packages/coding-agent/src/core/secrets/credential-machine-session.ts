@@ -92,14 +92,28 @@ function sessionFromDocument(document: string): MachineCredentialSession | undef
 	}
 }
 
+function machineConfigRoot(environment: NodeJS.ProcessEnv): string {
+	return environment.XDG_CONFIG_HOME ? resolve(environment.XDG_CONFIG_HOME) : join(homedir(), ".config");
+}
+
+/** Raw session files have an explicit format; unrelated bootstrap documents remain dotenv-only. */
+function passwordManagerSessionFiles(environment: NodeJS.ProcessEnv): string[] {
+	return [
+		...(environment.BW_SESSION_FILE ? [resolve(environment.BW_SESSION_FILE)] : []),
+		join(machineConfigRoot(environment), "bitwarden", "session"),
+	];
+}
+
 /** Find a machine-owned Bitwarden bootstrap without projecting its value into model-visible metadata. */
 export async function discoverMachineCredentialSession(
 	options: MachineCredentialSessionDiscoveryOptions = {},
 ): Promise<MachineCredentialSession | undefined> {
+	if (options.signal?.aborted) return undefined;
 	const environment = options.environment ?? process.env;
 	const processSession = sessionFromEnvironment(environment);
 	if (processSession) return processSession;
 
+	const rawSessionFiles = new Set(passwordManagerSessionFiles(environment));
 	const files = [...new Set((options.candidateFiles ?? []).map((path) => resolve(path)))].slice(
 		0,
 		MAX_BOOTSTRAP_FILES,
@@ -110,7 +124,16 @@ export async function discoverMachineCredentialSession(
 		let document = await readBoundedBootstrapFile(file, options.signal);
 		if (document === undefined) continue;
 		try {
-			const session = sessionFromDocument(document);
+			if (options.signal?.aborted) return undefined;
+			let session: MachineCredentialSession | undefined;
+			if (rawSessionFiles.has(file)) {
+				const sessionKey = validSessionKey(document.replace(/\r?\n$/u, ""));
+				if (sessionKey && /^[A-Za-z0-9+/_-]+={0,2}$/u.test(sessionKey)) {
+					session = { provider: "bitwarden_password_manager", sessionKey };
+				}
+			} else {
+				session = sessionFromDocument(document);
+			}
 			if (session?.provider === "bitwarden_secrets_manager") return session;
 			passwordManagerSession ??= session;
 		} finally {
@@ -126,7 +149,7 @@ export function getMachineCredentialBootstrapFiles(
 	environment: NodeJS.ProcessEnv = process.env,
 ): string[] {
 	const userHome = homedir();
-	const configRoot = environment.XDG_CONFIG_HOME ? resolve(environment.XDG_CONFIG_HOME) : join(userHome, ".config");
+	const configRoot = machineConfigRoot(environment);
 	return [
 		stateFile(agentDir, "secrets", "bws.env"),
 		stateFile(agentDir, "secrets", "bw.env"),
@@ -136,6 +159,7 @@ export function getMachineCredentialBootstrapFiles(
 		join(configRoot, "bitwarden", "bws.env"),
 		join(configRoot, "bitwarden-sm", "bws.env"),
 		join(userHome, ".bws", "bws.env"),
+		...passwordManagerSessionFiles(environment),
 	];
 }
 

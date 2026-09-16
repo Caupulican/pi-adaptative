@@ -61,6 +61,7 @@ interface ToolConfig {
 	repo: string; // GitHub repo (e.g., "sharkdp/fd")
 	binaryName: string; // Name of the binary inside the archive
 	systemBinaryNames?: string[]; // Alternative system command names to try before downloading
+	verifyCachedCommand?: boolean; // Credential wrappers can outlive their external runtime target.
 	tagPrefix: string; // Prefix for tags (e.g., "v" for v1.0.0, "" for 1.0.0)
 	getAssetName: (version: string, plat: string, architecture: string) => string | null;
 	downloadKind?: "archive" | "binary" | ((plat: string) => "archive" | "binary");
@@ -94,6 +95,7 @@ const TOOLS: Record<"bw" | "bws" | "fd" | "herdr" | "jq" | "jscpd" | "rg" | "uv"
 	},
 	bw: {
 		name: "Bitwarden CLI",
+		verifyCachedCommand: true,
 		repo: "bitwarden/clients",
 		binaryName: "bw",
 		systemBinaryNames: ["bw"],
@@ -117,6 +119,7 @@ const TOOLS: Record<"bw" | "bws" | "fd" | "herdr" | "jq" | "jscpd" | "rg" | "uv"
 	},
 	bws: {
 		name: "Bitwarden Secrets Manager CLI",
+		verifyCachedCommand: true,
 		repo: "bitwarden/sdk-sm",
 		binaryName: "bws",
 		systemBinaryNames: ["bws"],
@@ -332,8 +335,7 @@ export function getPinnedToolAsset(
 function commandExists(cmd: string): boolean {
 	try {
 		const result = spawnSync(cmd, ["--version"], { stdio: "pipe", timeout: COMMAND_PROBE_TIMEOUT_MS });
-		// Check for ENOENT error (command not found)
-		return result.error === undefined || result.error === null;
+		return !result.error && result.status === 0;
 	} catch {
 		return false;
 	}
@@ -455,7 +457,7 @@ export function getToolPath(tool: ManagedToolName): string | null {
 	// that file is deleted/modified -- an intentional narrow staleness window (the returned tool
 	// still exists and runs; it just isn't the newly-shadowing one), not a correctness bug.
 	const cached = readToolPathCache()[tool];
-	if (cached && isCachedToolPathFresh(cached)) {
+	if (cached && isCachedToolPathFresh(cached) && (!config.verifyCachedCommand || commandExists(cached.path))) {
 		return cached.path;
 	}
 

@@ -8,12 +8,17 @@ import {
 } from "@caupulican/pi-agent-core";
 import type { TSchema } from "typebox";
 import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
-import { redactKnownSecrets } from "../security/secret-text.ts";
 import { parseShellSearchInvocationScope, type ShellContentSearchTool } from "../tools/search-command-guard.ts";
 import { type ShellToken, tokenizeShellCommand } from "../tools/shell-command-parser.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
-import { mockCredentialContent, mockProtectedSearchLines } from "./credential-content-mock.ts";
+import {
+	isCredentialSecretKey,
+	mockCredentialContent,
+	mockCredentialFields,
+	mockedValue,
+	mockProtectedSearchLines,
+} from "./credential-content-mock.ts";
 import type { CredentialPathPolicy, CredentialPathProbe, CredentialPathProtection } from "./credential-path-policy.ts";
 import { createCredentialPathPolicy } from "./native-credential-path-probe.ts";
 import { pythonCredentialPathCandidates } from "./python-credential-literals.ts";
@@ -726,7 +731,7 @@ function createOutputRedactor(
 function redactResult<T>(
 	result: AgentToolResult<T>,
 	boundary?: CredentialExposureBoundary,
-	mock: (text: string) => string = redactKnownSecrets,
+	mock: (text: string) => string = mockCredentialFields,
 ): AgentToolResult<T> {
 	const redact = createOutputRedactor(boundary, mock);
 	const budget = { nodes: 0 };
@@ -760,7 +765,12 @@ function redactStructuredDetails(
 	}
 	if (prototype !== Object.prototype && prototype !== null) return value;
 	return Object.fromEntries(
-		Object.entries(value).map(([key, entry]) => [key, redactStructuredDetails(entry, redact, budget, depth + 1)]),
+		Object.entries(value).map(([key, entry]) => [
+			key,
+			typeof entry === "string" && isCredentialSecretKey(key)
+				? mockedValue(key)
+				: redactStructuredDetails(entry, redact, budget, depth + 1),
+		]),
 	);
 }
 
@@ -782,7 +792,7 @@ function createExposureMock(
 		);
 		return (text) => mockProtectedSearchLines(text, (path) => paths.isProtected(path));
 	}
-	return redactKnownSecrets;
+	return mockCredentialFields;
 }
 
 /**
@@ -815,7 +825,7 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 			},
 		},
 		async execute(toolCallId, params, signal, onUpdate) {
-			let mock: (text: string) => string = redactKnownSecrets;
+			let mock: (text: string) => string = mockCredentialFields;
 			const safeUpdate = onUpdate
 				? (partial: AgentToolResult<TDetails>) => {
 						onUpdate(redactResult(partial, boundary, mock));
@@ -848,8 +858,7 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 				// named abort, thrown verbatim by throwIfAborted) passes through untouched so the loop finalizes
 				// the call as `Operation aborted (<reason>)` without a second line about the guard.
 				if (signal?.aborted || (signal?.reason !== undefined && error === signal.reason)) throw error;
-				const redact = (text: string): string =>
-					boundary ? boundary.redactSensitiveText(text) : redactKnownSecrets(text);
+				const redact = createOutputRedactor(boundary, mockCredentialFields);
 				const classified = readAgentToolExecutionError(error);
 				if (classified) {
 					throw new AgentToolExecutionError(

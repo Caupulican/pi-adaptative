@@ -10,7 +10,7 @@ const SECRET_LIKE_PATTERNS: readonly RegExp[] = [
 	/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/-]{8,}=*/i,
 	/-----BEGIN [A-Z ]*PRIVATE KEY-----/,
 	/https?:\/\/[^\s/:@]+:[^\s/@]+@/i,
-	/[?&](?:x-amz-signature|x-goog-signature|signature|sig|access_token|api[_-]?key|token|secret|password)=[^&\s]+/i,
+	/[?&](?:x-amz-signature|x-goog-signature|signature|sig|access_token|api[_-]?key|key|token|secret|password)=[^&\s]+/i,
 	/\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|account[_-]?key|private[_-]?key|sharedaccesssignature|authorization|credential|secret|password)\b\s*[:=]\s*\S+/i,
 ];
 

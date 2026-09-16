@@ -282,6 +282,46 @@ describe("credential exposure guard", () => {
 		await expect(failing.execute("call", {})).rejects.not.toThrow(secret);
 	});
 
+	it("runs credential consumers while masking their unknown named keys in streamed and final output", async () => {
+		const secret = "opaque-trello-secret-value";
+		const consume = vi.fn((value: string) => value === secret);
+		const onUpdate = vi.fn();
+		const tool: AgentTool<typeof testSchema> = {
+			name: "bash",
+			label: "bash",
+			description: "credential consumer",
+			parameters: testSchema,
+			async execute(_id, _params, _signal, update) {
+				for (let end = 1; end <= secret.length; end++) {
+					update?.({ content: [{ type: "text", text: `{"TRELLO_TOKEN":"${secret.slice(0, end)}` }], details: {} });
+				}
+				const authenticated = consume(secret);
+				return {
+					content: [{ type: "text", text: `TRELLO_API_KEY=${secret}\nauthenticated=${authenticated}` }],
+					details: {
+						response: JSON.stringify({ TRELLO_TOKEN: secret, authenticated }),
+						TRELLO_TOKEN: secret,
+						credentialSource: "/host/trello/.env",
+					},
+				};
+			},
+		};
+		const result = await wrapToolWithCredentialExposureGuard(tool, "/workspace", undefined, "mock").execute(
+			"consume",
+			{ command: "credential-consumer" },
+			undefined,
+			onUpdate,
+		);
+		expect(consume).toHaveBeenCalledWith(secret);
+		expect(JSON.stringify(result)).not.toContain(secret);
+		expect(JSON.stringify(result)).toContain("authenticated=true");
+		expect(result.details.credentialSource).toBe("/host/trello/.env");
+		for (const [update] of onUpdate.mock.calls) {
+			expect(JSON.stringify(update)).not.toContain("opaque");
+			expect(update.content[0].text).toContain("<mocked:TRELLO_TOKEN>");
+		}
+	});
+
 	it("enforces the path decision at the wrapped execution boundary", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-secret-execution-boundary-"));
 		tempDirs.push(root);

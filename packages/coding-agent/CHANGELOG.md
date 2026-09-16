@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Fixed
+
+- Credential guidance permits direct use of existing credential consumers without requiring Bitwarden activation or migration, and no longer treats empty or truncated discovery as proof that credentials are absent.
+- Machine credential discovery reads the existing Bitwarden raw session file under the config directory or `BW_SESSION_FILE`, keeps it protected from model-facing tools, and respects cancellation before returning a session.
+- Credential discovery supports targeted directories and exposes reusable source descriptors to the model. Bitwarden provisioning rechecks cached wrappers and replaces unusable commands with the managed CLI.
+- Credential output masking covers opaque session files, compact and incomplete JSON, named secrets in streamed consumer output, structured results, and error messages while preserving host-side credential use.
+
 ## [0.99.26] - 2026-09-16
 
 ### Fixed

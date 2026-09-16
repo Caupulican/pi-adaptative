@@ -1,4 +1,6 @@
+import { resolve } from "node:path";
 import { type Static, Type } from "typebox";
+import { expandTildePath } from "../../config.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { defineTool } from "../extensions/types.ts";
 import {
@@ -70,6 +72,13 @@ const secretStoreSchema = Type.Object(
 				description: "Profile to activate or create during migration.",
 			}),
 		),
+		path: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: 4096,
+				description: "Directory to inspect with discover, including sources outside the current project.",
+			}),
+		),
 		description: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
 		overwrite: Type.Optional(
 			Type.Boolean({ description: "Explicitly replace an existing profile while preserving project bindings." }),
@@ -125,12 +134,14 @@ type SecretStoreResult = {
 };
 
 function result(details: SecretStoreToolDetails, text: string): SecretStoreResult {
-	return { content: [{ type: "text", text }], details };
+	// Details feed the UI; the provider receives content, so actionable metadata must be here too.
+	const metadata = details.sources ?? details.profiles;
+	return { content: [{ type: "text", text: metadata ? `${text}\n${JSON.stringify(metadata)}` : text }], details };
 }
 
 function ownerSetupRequired(action: SecretStoreToolInput["action"]): SecretStoreResult {
 	const message =
-		"No usable machine-owned Bitwarden session was found. Configure BWS_ACCESS_TOKEN or BW_SESSION in your environment yourself; Pi never asks for credentials.";
+		"No usable machine-owned Bitwarden session was found for profile operations. Existing credential consumers can still use their configured sources directly. Pi never asks for credentials.";
 	return result(
 		{
 			action,
@@ -148,6 +159,12 @@ function cancelled(action: SecretStoreToolInput["action"]): SecretStoreResult {
 }
 
 function invalid(input: SecretStoreToolInput): SecretStoreResult | undefined {
+	if (input.path !== undefined && input.action !== "discover") {
+		return result(
+			{ action: input.action, status: "error", code: "unexpected_discovery_path" },
+			"Only discover accepts a credential search directory.",
+		);
+	}
 	if (input.action === "migrate") {
 		if (!input.profile || !input.sources) {
 			return result(
@@ -257,17 +274,17 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 		promptSnippet: "Manage credentials; never expose values.",
 		promptGuidelines: [
 			"Active user-plane host gate authorizes model-blind migration; never ask duplicate confirmation.",
-			"Only when the current task genuinely requires credentials: call secret_store. Never probe or activate for an optional integration; its absence does not block unrelated work.",
-			"When required credentials are already on this machine or exact descriptors are unknown, call discover; never ask the owner for source paths or environment-variable names.",
-			"Discover names/paths only from bounded project, machine, and environment sources; migrate relevant candidates without exposing values.",
-			"Pi reads machine BWS_ACCESS_TOKEN or BW_SESSION only. If neither works, report owner_setup_required; Pi never prompts for a session key.",
-			"activate before credential work; TUI/print/RPC return metadata only.",
+			"Use existing credential consumers directly when the current task genuinely requires credentials. Bitwarden activation or migration is not a prerequisite. Never probe or activate for an optional integration.",
+			"Use discover for unknown sources (path targets another directory); never ask the owner for source paths or environment-variable names. A truncated or empty discovery is not proof that credentials are absent; follow owner-provided locations with targeted inspection and host-side consumption.",
+			"Discovery returns names/paths only. Migrate when a stored profile is needed; never expose values.",
+			"Bitwarden uses machine BWS_ACCESS_TOKEN, BW_SESSION, or supported bootstrap/session files. Pi never prompts for a session key.",
+			"activate loads a stored profile; TUI/print/RPC return metadata only.",
 			"One project binding: omit profile. Multiple: use list, select authorized profile.",
 			"Never request credentials in chat/tool arguments.",
 			"After activation, run consumer normally; never print/inspect/grep/echo credential environment values.",
 			"migrate accepts environment names, dotenv paths, key-file paths; never credential values.",
 			"Migration keeps sources. overwrite only for intentional Bitwarden profile replacement.",
-			"owner_setup_required without UI: report no usable machine Bitwarden session; never request setup or retry unchanged.",
+			"owner_setup_required applies only to Bitwarden profile operations; continue through existing credential consumers. Never request setup or retry unchanged.",
 		],
 		parameters: secretStoreSchema,
 		executionMode: "sequential",
@@ -305,7 +322,20 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 					}
 				}
 				if (input.action === "discover") {
-					const discovered = await discoverSources(ctx.cwd, signal);
+					const root = input.path === undefined ? ctx.cwd : resolve(ctx.cwd, expandTildePath(input.path));
+					const discovered = await discoverSources(root, signal);
+					if (input.path !== undefined) {
+						discovered.candidates = discovered.candidates.map((candidate) => ({
+							...candidate,
+							source:
+								candidate.source.kind === "environment"
+									? candidate.source
+									: {
+											...candidate.source,
+											path: resolve(root, candidate.source.path),
+										},
+						}));
+					}
 					const count = discovered.candidates.length;
 					const notes = [
 						discovered.skipped > 0

@@ -54,18 +54,22 @@ export function mockedValue(name: string): string {
 }
 
 /** `refreshToken`, `api_key`, `DB-PASSWORD` all name a secret; `author` does not. */
-function isSecretKey(key: string): boolean {
+export function isCredentialSecretKey(key: string): boolean {
 	const words = key
 		.replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
 		.toLowerCase()
 		.split(/[^a-z0-9]+/u)
 		.filter((word) => word.length > 0);
+	if (["source", "path", "name", "names", "count", "type"].includes(words.at(-1) ?? "")) return false;
 	return words.some((word) => SECRET_KEY_WORDS.has(word)) || SECRET_KEY_WORDS.has(words.join(""));
 }
 
 function mockAssignment(line: string): string | undefined {
 	const prefix = LINE_PREFIX_RE.exec(line)?.[1] ?? "";
 	const body = line.slice(prefix.length);
+	// Base64 padding is not a dotenv separator; retaining its left side exposes a raw session key.
+	if (/^[A-Za-z0-9+/_-]{32,}={0,2}\s*$/u.test(body)) return `${prefix}${mockedValue("credential content")}`;
+	if (/^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*[=:]\s*$/u.test(body)) return line;
 	const assignment = DOTENV_ASSIGNMENT_RE.exec(body);
 	if (!assignment) return undefined;
 	const [, lead, key, separator, value] = assignment;
@@ -79,14 +83,55 @@ function mockStructuredSecret(line: string): string | undefined {
 	const pair = STRUCTURED_PAIR_RE.exec(body);
 	if (!pair) return undefined;
 	const [, lead, key, separator, openQuote, value, closeQuote, tail] = pair;
-	if (!value || !isSecretKey(key)) return undefined;
+	if (!value || !isCredentialSecretKey(key)) return undefined;
 	return `${prefix}${lead}${key}${separator}${openQuote}${mockedValue(key)}${closeQuote}${tail}`;
 }
 
 /** A line that kept its key and lost its value needs no further redaction; other lines still do. */
 function mockLine(line: string, whole: boolean): string {
 	const mocked = whole ? (mockAssignment(line) ?? mockStructuredSecret(line)) : mockStructuredSecret(line);
-	return mocked ?? redactKnownSecrets(line);
+	if (mocked !== undefined) return mocked;
+	if (whole) {
+		const prefix = LINE_PREFIX_RE.exec(line)?.[1] ?? "";
+		const body = line.slice(prefix.length).trim();
+		// Raw key/session files and partial compact JSON must not pass through merely because
+		// their values have no recognized provider prefix or the closing quote has not arrived.
+		if (body && !body.startsWith("#") && !/^[{}[\],]+$/u.test(body) && (/^\S+$/u.test(body) || /^[{[]/u.test(body))) {
+			return `${prefix}${mockedValue("credential content")}`;
+		}
+	}
+	return redactKnownSecrets(line);
+}
+
+function mockJsonCredentials(value: unknown, sensitive = false, depth = 0): unknown {
+	if (depth >= 32) return mockedValue("nested credential content");
+	if (Array.isArray(value)) return value.map((entry) => mockJsonCredentials(entry, sensitive, depth + 1));
+	if (value !== null && typeof value === "object") {
+		const record = value as Record<string, unknown>;
+		return Object.fromEntries(
+			Object.entries(record).map(([key, entry]) => [
+				key,
+				mockJsonCredentials(
+					entry,
+					sensitive || isCredentialSecretKey(key) || (key === "value" && typeof record.name === "string"),
+					depth + 1,
+				),
+			]),
+		);
+	}
+	return sensitive ? mockedValue("credential value") : typeof value === "string" ? redactKnownSecrets(value) : value;
+}
+
+/** Named secrets in ordinary consumer output, including partial compact JSON snapshots. */
+export function mockCredentialFields(text: string): string {
+	const fields = text.replace(
+		/"([A-Za-z_][A-Za-z0-9_.-]*)"(\s*:\s*)"(?:\\.|[^"\\\r\n])*(?:"|$)/gu,
+		(match, key: string, separator: string) =>
+			isCredentialSecretKey(key) ? `"${key}"${separator}"${mockedValue(key)}"` : match,
+	);
+	const lines = fields.split("\n");
+	if (lines.length > MAX_MOCKED_LINES) return mockedValue("credential output exceeds line limit");
+	return lines.map((line) => mockLine(line, false)).join("\n");
 }
 
 /**
@@ -95,8 +140,15 @@ function mockLine(line: string, whole: boolean): string {
  */
 export function mockCredentialContent(text: string): string {
 	if (!text) return text;
+	if (/^\s*[{[]/u.test(text)) {
+		try {
+			return JSON.stringify(mockJsonCredentials(JSON.parse(text)));
+		} catch {
+			// Read tools also return numbered or mixed text; each incomplete JSON line is masked below.
+		}
+	}
 	const lines = text.split("\n");
-	if (lines.length > MAX_MOCKED_LINES) return redactKnownSecrets(text);
+	if (lines.length > MAX_MOCKED_LINES) return mockedValue("credential content exceeds line limit");
 	let inPem = false;
 	const out: string[] = [];
 	for (const line of lines) {
