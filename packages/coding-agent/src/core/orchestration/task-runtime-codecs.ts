@@ -1095,6 +1095,7 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 function normalizeAgentBinding(value: unknown, label: string): AgentBindingContract {
 	const agent = exactRecord(value, label, [
 		"schemaVersion",
+		"contextOrigin",
 		"agentId",
 		"resumeContext",
 		"parentAgentId",
@@ -1110,6 +1111,16 @@ function normalizeAgentBinding(value: unknown, label: string): AgentBindingContr
 		throw new DurableTaskRuntimeError(`${label}.schemaVersion is invalid.`);
 	}
 	const agentId = dispatchIdentifier(agent.agentId, `${label}.agentId`);
+	const origin =
+		agent.contextOrigin === undefined
+			? undefined
+			: exactRecord(agent.contextOrigin, `${label}.contextOrigin`, ["parentSessionId", "logicalAgentId"]);
+	const contextOrigin = origin
+		? {
+				parentSessionId: dispatchIdentifier(origin.parentSessionId, `${label}.contextOrigin.parentSessionId`),
+				logicalAgentId: dispatchIdentifier(origin.logicalAgentId, `${label}.contextOrigin.logicalAgentId`),
+			}
+		: undefined;
 	const parentAgentId = optionalDispatchIdentifier(agent.parentAgentId, `${label}.parentAgentId`);
 	const rootAgentId = dispatchIdentifier(agent.rootAgentId, `${label}.rootAgentId`);
 	const depth = number(agent.depth, `${label}.depth`);
@@ -1207,6 +1218,7 @@ function normalizeAgentBinding(value: unknown, label: string): AgentBindingContr
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		agentId,
 		resumeContext,
+		...(contextOrigin ? { contextOrigin } : {}),
 		...(parentAgentId ? { parentAgentId } : {}),
 		rootAgentId,
 		depth,

@@ -174,6 +174,7 @@ export interface PreparedTaskAttempt {
 
 export interface RegisterAgentInput {
 	agentId?: string;
+	contextOrigin?: AgentBindingContract["contextOrigin"];
 	parentAgentId?: string;
 	role: AgentBindingContract["role"];
 	resumeContext: AgentResumeContext;

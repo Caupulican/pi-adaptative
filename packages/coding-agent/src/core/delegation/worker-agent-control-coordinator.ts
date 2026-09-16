@@ -12,6 +12,7 @@ import {
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	type WorkerResultContract,
 } from "../orchestration/contracts.ts";
+import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import {
 	SessionRootMailbox,
@@ -67,6 +68,8 @@ export interface WorkerAgentControlCoordinatorOptions {
 	processOwnerId: string;
 	/** Controller-owned composition dependency; standalone coordinators receive a private default. */
 	conversationStore?: WorkerConversationStore;
+	getConversationClaim?(agent: AgentBindingContract): SpecialistContextClaim | undefined;
+	peekConversationClaim?(agent: AgentBindingContract): SpecialistContextClaim | undefined;
 	isControlAvailable(): boolean;
 	getLifecycle(): WorkerLifecycle;
 	recoveredRequest(attempt: AttemptRuntimeState): WorkerDelegationRequest;
@@ -272,7 +275,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			.open({
 				agentDir: this.options.agentDir,
 				resumeContext: agent.resumeContext,
-				expectedLogicalAgentId: agent.agentId,
+				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
 			})
 			.getRawTranscriptPage({
 				projection: "inspection",
@@ -1079,7 +1082,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const conversation = this.conversations.open({
 			agentDir: this.options.agentDir,
 			resumeContext: target.resumeContext,
-			expectedLogicalAgentId: target.agentId,
+			expectedLogicalAgentId: target.contextOrigin?.logicalAgentId ?? target.agentId,
+			...(appendIfMissing ? { projectClaim: this.options.getConversationClaim?.(target) } : {}),
 		});
 		if (typeof projected.content !== "string") {
 			throw new Error("Worker control transcript projection is not textual.");
@@ -1990,7 +1994,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			.open({
 				agentDir: this.options.agentDir,
 				resumeContext: agent.resumeContext,
-				expectedLogicalAgentId: agent.agentId,
+				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+				projectClaim: this.options.getConversationClaim?.(agent),
 			})
 			.enableAttemptUsageBoundaries();
 	}
@@ -2097,16 +2102,23 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	}
 
 	private getMailbox(agentId: string): WorkerAgentMailbox {
+		const agent = this.options.getLifecycle().getAgent(agentId);
+		const projectClaim = agent ? this.options.peekConversationClaim?.(agent) : undefined;
 		let mailbox = this.mailboxes.get(agentId);
-		if (!mailbox) {
+		if (!mailbox || !isDeepStrictEqual(mailbox.getProjectClaim(), projectClaim)) {
 			mailbox = new WorkerAgentMailbox({
 				agentDir: this.options.agentDir,
 				parentSessionId: this.options.parentSessionId,
 				agentId,
+				projectClaim,
 			});
 			this.mailboxes.set(agentId, mailbox);
 		}
 		return mailbox;
+	}
+
+	releaseQuiescentContext(agentId: string, release: () => void): boolean {
+		return this.getMailbox(agentId).withQuiescentMailbox(release);
 	}
 
 	private isAcceptedControlReplay(agentId: string, idempotencyKey: string | undefined): boolean {
@@ -2193,6 +2205,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (options.idempotencyKey !== undefined) {
 			this.assertIdempotencyTarget(target.agentId, options.idempotencyKey);
 		}
+		this.options.getConversationClaim?.(target);
 		return this.getMailbox(target.agentId).enqueueWithReceipt({
 			kind,
 			content,

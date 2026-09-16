@@ -156,6 +156,8 @@ export interface AgentIdentityContract {
 /** Durable logical identity. A replacement OS process resumes this same binding after interruption. */
 export interface AgentBindingContract extends AgentIdentityContract {
 	schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
+	/** Immutable transcript birth provenance when this parent's local handle imports project context. */
+	contextOrigin?: { parentSessionId: string; logicalAgentId: string };
 	/** Legacy direct creator retained for recovery. Fresh leaf workers omit this field. */
 	parentAgentId?: string;
 	/** Stable root identity retained across legacy recovered lineage. */

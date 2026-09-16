@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
@@ -145,6 +146,7 @@ export class WorkerLifecycle {
 
 	ensureAgent(input: {
 		agentId: string;
+		contextOrigin?: AgentBindingContract["contextOrigin"];
 		parentAgentId?: string;
 		role: WorkerRole;
 		resumeContext: AgentResumeContext;
@@ -154,6 +156,7 @@ export class WorkerLifecycle {
 		if (!existing) return this.ledger.runtime.registerAgent(input);
 		if (
 			existing.role !== input.role ||
+			!isDeepStrictEqual(existing.contextOrigin, input.contextOrigin) ||
 			existing.parentAgentId !== input.parentAgentId ||
 			!sameAgentResumeIdentity(existing.resumeContext, input.resumeContext)
 		) {

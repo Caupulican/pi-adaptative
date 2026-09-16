@@ -373,6 +373,7 @@ export class DurableTaskRuntime {
 		const agent: AgentBindingContract = {
 			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 			...identity,
+			...(input.contextOrigin ? { contextOrigin: structuredClone(input.contextOrigin) } : {}),
 			...(parent ? { parentAgentId: parent.agentId } : {}),
 			rootAgentId: parent?.rootAgentId ?? identity.agentId,
 			depth,

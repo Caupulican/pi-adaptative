@@ -65,6 +65,11 @@ import {
 	WorkerConversationOwnershipError,
 	type WorkerSessionFileHead,
 } from "./worker-conversation-revision.ts";
+import {
+	bindWorkerMailboxRecord,
+	type WorkerMailboxContextReference,
+	workerMailboxPath,
+} from "./worker-mailbox-record.ts";
 import { projectWorkerTranscriptForInspection } from "./worker-transcript-projection.ts";
 
 const MAX_WORKER_CONVERSATION_METADATA_BYTES = 256 * 1024;
@@ -476,6 +481,13 @@ function expectedResumeContext(options: CreateWorkerConversationOptions): AgentR
 interface WorkerConversationMetadataRead {
 	metadata: WorkerConversationMetadata;
 	content: string;
+}
+
+/** Immutable birth identity, separate from a claiming parent's local worker handle. */
+export interface WorkerProjectContextReference {
+	parentSessionId: string;
+	logicalAgentId: string;
+	resumeContext: AgentResumeContext;
 }
 
 function readWorkerConversationMetadata(metadataFile: string): WorkerConversationMetadataRead {
@@ -1805,6 +1817,120 @@ function assertApplicableCompactionResult(result: CompactionResult, preparation:
 export class WorkerConversationStore {
 	private readonly cachedCores = new Map<string, CachedWorkerConversationCore>();
 
+	/** Pure planned identity for allocation journaling before the transcript is created. */
+	static describe(options: CreateWorkerConversationOptions): AgentResumeContext {
+		return expectedResumeContext(options);
+	}
+
+	/** Mailbox mutations and ownership transfer serialize on this same transcript lock. */
+	static withProjectMailboxMutation<T>(
+		agentDir: string,
+		reference: WorkerMailboxContextReference,
+		parentSessionId: string,
+		claim: SpecialistContextClaim | undefined,
+		operation: () => T,
+	): T {
+		const file = assertWorkerConversationFile(agentDir, reference.sessionFile, reference.sessionId);
+		return withFileLockSync(file, () => {
+			const metadata = readWorkerConversationMetadata(workerConversationMetadataFile(file)).metadata;
+			assertExactConversationMetadataValue(
+				metadata,
+				metadata.resumeContext,
+				reference.logicalAgentId,
+				reference.parentSessionId,
+			);
+			if (
+				metadata.resumeContext.sessionId !== reference.sessionId ||
+				metadata.resumeContext.sessionFile !== file ||
+				!metadata.projectContext ||
+				claim?.parentSessionId !== parentSessionId
+			)
+				throw new Error("Worker mailbox project claim is missing or foreign.");
+			assertProjectConversationAccess(metadata, SessionManager.open(file, agentDir, dirname(file)), claim);
+			return operation();
+		});
+	}
+
+	bindProjectMailbox(
+		agentDir: string,
+		parentSessionId: string,
+		agentId: string,
+		conversation: WorkerConversation,
+	): void {
+		const context = conversation.getResumeContext();
+		const binding = this.getProjectContextBinding({ agentDir, resumeContext: context });
+		if (!binding || !context.sessionFile) throw new Error("Worker project binding is missing.");
+		const reference = {
+			parentSessionId: binding.reference.parentSessionId,
+			logicalAgentId: binding.reference.logicalAgentId,
+			sessionId: context.sessionId,
+			sessionFile: context.sessionFile,
+		};
+		const mailbox = workerMailboxPath(agentDir, parentSessionId, agentId);
+		withFileLockSync(mailbox, () =>
+			WorkerConversationStore.withProjectMailboxMutation(
+				agentDir,
+				reference,
+				parentSessionId,
+				conversation.getProjectClaim(),
+				() => bindWorkerMailboxRecord(mailbox, reference, parentSessionId, agentId),
+			),
+		);
+	}
+
+	getProjectContextBinding(
+		options: OpenWorkerConversationOptions,
+	):
+		| { specializationKey: string; reference: WorkerProjectContextReference; ownership: SpecialistContextOwnership }
+		| undefined {
+		const context = options.resumeContext;
+		if (!context.sessionFile) return undefined;
+		const sessionFile = assertWorkerConversationFile(options.agentDir, context.sessionFile, context.sessionId);
+		return withFileLockSync(sessionFile, () => {
+			const metadata = assertExactConversationMetadata(
+				workerConversationMetadataFile(sessionFile),
+				context,
+				options.expectedLogicalAgentId,
+			);
+			this.openExisting(options, { recoverBirthContextPrefix: false });
+			const enrollment = projectEnrollmentKey(
+				SessionManager.open(sessionFile, options.agentDir, dirname(sessionFile)),
+			);
+			if (enrollment !== metadata.projectContext?.specializationKey)
+				throw new Error("Worker project enrollment changed.");
+			if (!metadata.projectContext) return undefined;
+			if (!metadata.parentSessionId) throw new Error("Worker project birth parent is missing.");
+			return {
+				specializationKey: metadata.projectContext.specializationKey,
+				reference: {
+					parentSessionId: metadata.parentSessionId,
+					logicalAgentId: metadata.logicalAgentId,
+					resumeContext: cloneResumeContext(context),
+				},
+				ownership: normalizeSpecialistContextOwnership(metadata.projectContext.ownership),
+			};
+		});
+	}
+
+	inspectProjectContext(
+		agentDir: string,
+		reference: WorkerProjectContextReference,
+		specializationKey: string,
+	): SpecialistContextOwnership {
+		const binding = this.getProjectContextBinding({
+			agentDir,
+			resumeContext: reference.resumeContext,
+			expectedLogicalAgentId: reference.logicalAgentId,
+		});
+		if (
+			!binding ||
+			binding.specializationKey !== specializationKey ||
+			binding.reference.parentSessionId !== reference.parentSessionId
+		)
+			throw new Error("Worker project specialization changed.");
+		return binding.ownership;
+	}
+
 	/** Bounded, fail-closed claim inspection before removing a birth parent's artifact bundle. */
 	static reserveBundleDeletion(agentDir: string, parentSessionId: string): boolean {
 		return reserveSessionBundleDeletion(agentDir, parentSessionId, () => {
@@ -1871,48 +1997,63 @@ export class WorkerConversationStore {
 		if (!context.sessionFile || !/^[a-f0-9]{64}$/.test(options.specializationKey))
 			throw new Error("Invalid project context claim.");
 		const sessionFile = assertWorkerConversationFile(options.agentDir, context.sessionFile, context.sessionId);
-		const birthParent = assertExactConversationMetadata(
+		const birthMetadata = assertExactConversationMetadata(
 			workerConversationMetadataFile(sessionFile),
 			context,
 			options.expectedLogicalAgentId,
-		).parentSessionId;
+		);
+		const birthParent = birthMetadata.parentSessionId;
 		if (!birthParent) throw new Error("Worker project birth parent is missing.");
+		const mailbox = workerMailboxPath(options.agentDir, birthParent, birthMetadata.logicalAgentId);
 		return withSessionBundleAdmission(options.agentDir, birthParent, () =>
-			withFileLockSync(sessionFile, () => {
-				const previous = this.openExisting(options, { recoverBirthContextPrefix: false });
-				if (previous.hasActiveTranscriptCommit()) throw new Error("Worker transcript commit is still active.");
-				const file = workerConversationMetadataFile(sessionFile);
-				const metadata = assertExactConversationMetadata(
-					file,
-					context,
-					options.expectedLogicalAgentId,
-					birthParent,
-				);
-				const session = SessionManager.open(sessionFile, options.agentDir, dirname(sessionFile));
-				const enrollment = projectEnrollmentKey(session);
-				if (enrollment !== metadata.projectContext?.specializationKey)
-					throw new Error("Worker project enrollment changed.");
-				if (metadata.projectContext && metadata.projectContext.specializationKey !== options.specializationKey)
-					throw new Error("Worker project specialization changed.");
-				if (!metadata.projectContext && metadata.parentSessionId !== options.owner.parentSessionId)
-					throw new Error("Cannot enroll a foreign worker history.");
-				const ownership = metadata.projectContext
-					? acquireSpecialistContext(metadata.projectContext.ownership, options.owner)
-					: createSpecialistContextOwnership(options.owner);
-				writeWorkerConversationMetadata(file, {
-					...metadata,
-					projectContext: { specializationKey: options.specializationKey, ownership },
-				});
-				if (!enrollment)
-					session.appendCustomEntry(WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE, {
-						specializationKey: options.specializationKey,
+			withFileLockSync(mailbox, () =>
+				withFileLockSync(sessionFile, () => {
+					const previous = this.openExisting(options, { recoverBirthContextPrefix: false });
+					if (previous.hasActiveTranscriptCommit()) throw new Error("Worker transcript commit is still active.");
+					const file = workerConversationMetadataFile(sessionFile);
+					const metadata = assertExactConversationMetadata(
+						file,
+						context,
+						options.expectedLogicalAgentId,
+						birthParent,
+					);
+					const session = SessionManager.open(sessionFile, options.agentDir, dirname(sessionFile));
+					const enrollment = projectEnrollmentKey(session);
+					if (enrollment !== metadata.projectContext?.specializationKey)
+						throw new Error("Worker project enrollment changed.");
+					if (metadata.projectContext && metadata.projectContext.specializationKey !== options.specializationKey)
+						throw new Error("Worker project specialization changed.");
+					if (!metadata.projectContext && metadata.parentSessionId !== options.owner.parentSessionId)
+						throw new Error("Cannot enroll a foreign worker history.");
+					const ownership = metadata.projectContext
+						? acquireSpecialistContext(metadata.projectContext.ownership, options.owner)
+						: createSpecialistContextOwnership(options.owner);
+					bindWorkerMailboxRecord(
+						mailbox,
+						{
+							parentSessionId: birthParent,
+							logicalAgentId: metadata.logicalAgentId,
+							sessionId: context.sessionId,
+							sessionFile,
+						},
+						birthParent,
+						metadata.logicalAgentId,
+					);
+					writeWorkerConversationMetadata(file, {
+						...metadata,
+						projectContext: { specializationKey: options.specializationKey, ownership },
 					});
-				this.cachedCores.delete(sessionFile);
-				return this.openExisting(
-					{ ...options, projectClaim: ownership.claim },
-					{ recoverBirthContextPrefix: false },
-				);
-			}),
+					if (!enrollment)
+						session.appendCustomEntry(WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE, {
+							specializationKey: options.specializationKey,
+						});
+					this.cachedCores.delete(sessionFile);
+					return this.openExisting(
+						{ ...options, projectClaim: ownership.claim },
+						{ recoverBirthContextPrefix: false },
+					);
+				}),
+			),
 		);
 	}
 

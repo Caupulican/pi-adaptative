@@ -5,6 +5,12 @@ compatible specialist receives the next task through its existing mailbox and co
 unreadable, or ambiguous compatible contexts produce a bounded refusal. Naming a compatible worker
 resolves ambiguity. An independent copy requires explicit `parallelWork` intent and a justification.
 
+Native discovery also spans parent sessions sharing the agent directory and physical project. The
+project directory reserves allocation; the original transcript owns its exclusive execution claim.
+An importing parent gets its own local handle while retaining the transcript's birth identity.
+Mailbox mutations validate the captured claim under the transcript lock. Successful execution
+publishes availability while holding the mailbox admission lock; failed cleanup retains ownership.
+
 The comparison includes model, thinking, tools, paths, budgets, workspace identity, resource selection,
 and immutable initialization. Identical explicit parent snapshots reuse context; changed snapshots or
 materialized resource contents require a distinct specialist. Completed tasks leave their specialist
@@ -58,11 +64,11 @@ owners; extracted binary code was not executed or copied into the runtime.
 
 ## Remaining boundaries
 
-- Automatic matching currently applies to native specialists owned by the current parent session.
-  Project-wide transfer between parents needs an exclusive durable claim and fencing on every
-  transcript and mailbox writer, plus protection against deleting the original session bundle.
-- Managed Herdr workers retain explicit follow-up routing. Automatic matching and transferring their
-  parent ownership are separate work; live CLI parent/task flags cannot simply be relabeled.
+- Native project transfer now has exclusive claims, transcript/mailbox fencing, and birth-bundle
+  deletion protection. Interrupted allocation recovery and refused-control claim disposition still
+  need dedicated failure-path validation before release.
+- Managed Herdr teams reuse compatible idle teams within a parent. Transferring their parent
+  ownership remains separate work; live CLI parent/task flags cannot simply be relabeled.
 - Goal materialization and mailbox persistence span separate files. Deterministic admission refusal
   has no goal side effect, but an actual I/O failure between the two writes is not an atomic rollback.
 

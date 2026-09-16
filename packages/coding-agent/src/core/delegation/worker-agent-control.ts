@@ -1,8 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import type { Message } from "@caupulican/pi-ai";
-import { workerAgentMailboxFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { parseBoundedStringArray } from "../orchestration/bounded-string-array.ts";
@@ -14,8 +12,8 @@ import {
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
-import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
-import { readBoundedTextFileSync } from "../util/bounded-file.ts";
+import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
+import { withFileLockSync } from "../util/atomic-file.ts";
 import { createReplaySafeMailboxBounder } from "./replay-safe-mailbox-bounds.ts";
 import type {
 	SessionRootReply,
@@ -23,6 +21,8 @@ import type {
 	SessionRootReplyWaitOptions,
 	SessionRootReplyWaitResult,
 } from "./session-root-mailbox.ts";
+import { WorkerConversationStore } from "./worker-conversation-store.ts";
+import { readWorkerMailboxRecord, workerMailboxPath, writeWorkerMailboxRecord } from "./worker-mailbox-record.ts";
 import type { WorkerTaskSessionView } from "./worker-task-view.ts";
 
 const MAX_MAILBOX_MESSAGES = 64;
@@ -180,6 +180,7 @@ export interface WorkerAgentMailboxOptions {
 	agentDir: string;
 	parentSessionId: string;
 	agentId: string;
+	projectClaim?: SpecialistContextClaim;
 }
 
 export interface WorkerAgentTranscriptPage {
@@ -401,16 +402,6 @@ export interface WorkerAgentControlPort {
 		timeoutMs?: number,
 		scope?: WorkerAgentControlScope,
 	): Promise<WorkerAgentWaitResult>;
-}
-
-function mailboxDigest(parentSessionId: string, agentId: string): string {
-	return createHash("sha256")
-		.update("pi-worker-agent-mailbox-v1")
-		.update("\0")
-		.update(parentSessionId)
-		.update("\0")
-		.update(agentId)
-		.digest("hex");
 }
 
 function assertIdentity(value: string, label: string): string {
@@ -1135,19 +1126,45 @@ function ordinaryAdmissionEncodedBytes(state: WorkerAgentMailboxState): number {
  * WorkerConversation. The in-process subscription is a notification edge, not a polling loop.
  */
 export class WorkerAgentMailbox {
+	private readonly agentDir: string;
+	private readonly projectClaim?: SpecialistContextClaim;
 	private readonly parentSessionId: string;
 	private readonly agentId: string;
 	private readonly file: string;
 	private readonly listeners = new Set<() => void>();
 
 	constructor(options: WorkerAgentMailboxOptions) {
+		this.agentDir = options.agentDir;
+		this.projectClaim = options.projectClaim ? structuredClone(options.projectClaim) : undefined;
 		this.parentSessionId = assertIdentity(options.parentSessionId, "parent session id");
 		this.agentId = assertIdentity(options.agentId, "agent id");
-		this.file = workerAgentMailboxFile(
-			options.agentDir,
-			this.parentSessionId,
-			mailboxDigest(this.parentSessionId, this.agentId),
-		);
+		this.file = workerMailboxPath(options.agentDir, this.parentSessionId, this.agentId);
+	}
+
+	getProjectClaim(): SpecialistContextClaim | undefined {
+		return this.projectClaim ? structuredClone(this.projectClaim) : undefined;
+	}
+
+	/** Exclude admission until the owner finishes publishing availability under its transcript lock. */
+	withQuiescentMailbox(release: () => void): boolean {
+		return withFileLockSync(this.file, () => {
+			const state = this.read();
+			if (
+				state.replyAcknowledgements.length > 0 ||
+				state.messages.some(
+					(message) =>
+						(message.deliveredAt === undefined && message.failedAt === undefined) ||
+						(message.deliveredAt !== undefined &&
+							message.expectReply === true &&
+							message.repliedAt === undefined),
+				)
+			)
+				return false;
+			// The callback validates the exact claim while holding the transcript lock. Taking it
+			// here too would recursively lock the same file. Admission uses this same lock order.
+			release();
+			return true;
+		});
 	}
 
 	enqueue(input: {
@@ -1648,7 +1665,8 @@ export class WorkerAgentMailbox {
 	}
 
 	private read(): WorkerAgentMailboxState {
-		if (!existsSync(this.file)) {
+		const record = readWorkerMailboxRecord(this.file);
+		if (record.mailbox === undefined) {
 			return {
 				version: 1,
 				parentSessionId: this.parentSessionId,
@@ -1658,11 +1676,10 @@ export class WorkerAgentMailbox {
 				replayReceipts: [],
 			};
 		}
-		return parseState(
-			readBoundedTextFileSync(this.file, MAX_MAILBOX_BYTES, "Worker agent mailbox durable size bound"),
-			this.parentSessionId,
-			this.agentId,
-		);
+		const body = JSON.stringify(record.mailbox);
+		if (Buffer.byteLength(body) > MAX_MAILBOX_BYTES)
+			throw new Error("Worker agent mailbox durable size bound exceeded.");
+		return parseState(body, this.parentSessionId, this.agentId);
 	}
 
 	private update(
@@ -1672,65 +1689,77 @@ export class WorkerAgentMailbox {
 		beforeWrite?: () => void,
 	): void {
 		withFileLockSync(this.file, () => {
-			const state = this.read();
-			const previousOrdinaryBytes = ordinaryAdmissionEncodedBytes(state);
-			const previousReplayEvidenceSlots = projectedReplayEvidenceSlots(state);
-			const mutated = mutator(state);
-			const retained = pruneDeliveredHistory(
-				this.parentSessionId,
-				this.agentId,
-				mutated.messages,
-				mutated.replyAcknowledgements,
-				mutated.replayReceipts,
-				ordinaryAdmission,
-			);
-			const next = {
-				...mutated,
-				messages: retained.messages,
-				replayReceipts: retained.replayReceipts,
+			const record = readWorkerMailboxRecord(this.file);
+			const update = () => {
+				const state = this.read();
+				const previousOrdinaryBytes = ordinaryAdmissionEncodedBytes(state);
+				const previousReplayEvidenceSlots = projectedReplayEvidenceSlots(state);
+				const mutated = mutator(state);
+				const retained = pruneDeliveredHistory(
+					this.parentSessionId,
+					this.agentId,
+					mutated.messages,
+					mutated.replyAcknowledgements,
+					mutated.replayReceipts,
+					ordinaryAdmission,
+				);
+				const next = {
+					...mutated,
+					messages: retained.messages,
+					replayReceipts: retained.replayReceipts,
+				};
+				const addedReplayReceipt = mutated.replayReceipts.length > state.replayReceipts.length;
+				const bytesWithoutAddedReceipt = addedReplayReceipt
+					? encodedStateBytes({ ...next, replayReceipts: next.replayReceipts.slice(0, -1) })
+					: undefined;
+				const changed = JSON.stringify(next) !== JSON.stringify(state);
+				const nextOrdinaryBytes = ordinaryAdmissionEncodedBytes(next);
+				if (
+					ordinaryAdmission &&
+					changed &&
+					nextOrdinaryBytes > MAX_ORDINARY_MAILBOX_BYTES &&
+					nextOrdinaryBytes > previousOrdinaryBytes
+				) {
+					throw new Error(
+						addedReplayReceipt
+							? "Worker agent mailbox replay receipt storage exhausted its mandatory control byte reserve."
+							: "Worker agent mailbox passive control storage exhausted its mandatory control byte reserve.",
+					);
+				}
+				const nextReplayEvidenceSlots = projectedReplayEvidenceSlots(next);
+				if (nextReplayEvidenceSlots > MAX_MAILBOX_REPLAY_RECEIPTS) {
+					throw new Error("Worker agent mailbox exceeds its projected replay evidence bound.");
+				}
+				if (
+					replayEvidenceAdmission &&
+					nextReplayEvidenceSlots > MAX_REPLAY_EVIDENCE_SLOTS &&
+					nextReplayEvidenceSlots > previousReplayEvidenceSlots
+				) {
+					throw new Error(
+						`Worker agent mailbox replay evidence capacity reached its ${MAX_REPLAY_EVIDENCE_SLOTS} slot limit.`,
+					);
+				}
+				assertWorkerAgentMailboxBounds(
+					next.messages.length,
+					next.replayReceipts.length,
+					state.replayReceipts.length,
+					encodedStateBytes(next),
+					bytesWithoutAddedReceipt,
+				);
+				if (changed) {
+					beforeWrite?.();
+					writeWorkerMailboxRecord(this.file, next, record.reference);
+				}
 			};
-			const addedReplayReceipt = mutated.replayReceipts.length > state.replayReceipts.length;
-			const bytesWithoutAddedReceipt = addedReplayReceipt
-				? encodedStateBytes({ ...next, replayReceipts: next.replayReceipts.slice(0, -1) })
-				: undefined;
-			const changed = JSON.stringify(next) !== JSON.stringify(state);
-			const nextOrdinaryBytes = ordinaryAdmissionEncodedBytes(next);
-			if (
-				ordinaryAdmission &&
-				changed &&
-				nextOrdinaryBytes > MAX_ORDINARY_MAILBOX_BYTES &&
-				nextOrdinaryBytes > previousOrdinaryBytes
-			) {
-				throw new Error(
-					addedReplayReceipt
-						? "Worker agent mailbox replay receipt storage exhausted its mandatory control byte reserve."
-						: "Worker agent mailbox passive control storage exhausted its mandatory control byte reserve.",
+			if (record.reference)
+				WorkerConversationStore.withProjectMailboxMutation(
+					this.agentDir,
+					record.reference,
+					this.parentSessionId,
+					this.projectClaim,
+					update,
 				);
-			}
-			const nextReplayEvidenceSlots = projectedReplayEvidenceSlots(next);
-			if (nextReplayEvidenceSlots > MAX_MAILBOX_REPLAY_RECEIPTS) {
-				throw new Error("Worker agent mailbox exceeds its projected replay evidence bound.");
-			}
-			if (
-				replayEvidenceAdmission &&
-				nextReplayEvidenceSlots > MAX_REPLAY_EVIDENCE_SLOTS &&
-				nextReplayEvidenceSlots > previousReplayEvidenceSlots
-			) {
-				throw new Error(
-					`Worker agent mailbox replay evidence capacity reached its ${MAX_REPLAY_EVIDENCE_SLOTS} slot limit.`,
-				);
-			}
-			assertWorkerAgentMailboxBounds(
-				next.messages.length,
-				next.replayReceipts.length,
-				state.replayReceipts.length,
-				encodedStateBytes(next),
-				bytesWithoutAddedReceipt,
-			);
-			if (changed) {
-				beforeWrite?.();
-				writeFileAtomicSync(this.file, `${JSON.stringify(next)}\n`, { mode: 0o600 });
-			}
+			else update();
 		});
 	}
 }

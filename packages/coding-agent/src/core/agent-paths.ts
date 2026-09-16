@@ -266,6 +266,12 @@ export function orchestrationSessionDeletionFile(agentDir: string, parentSession
 	return stateFile(agentDir, "orchestration", "deletions", `${orchestrationSessionKey(parentSessionId)}.json`);
 }
 
+/** Bounded discovery for one effective native specialization; transcript metadata owns execution. */
+export function workerProjectSpecializationFile(agentDir: string, specializationKey: string): string {
+	if (!/^[a-f0-9]{64}$/.test(specializationKey)) throw new TypeError("Invalid worker specialization digest.");
+	return stateFile(agentDir, "orchestration", "project-specialists", `${specializationKey}.json`);
+}
+
 /** `<orchestrationSessionDir>/events` -- append-only event tail, snapshot, cursor, and idempotency state. */
 export function orchestrationEventStoreDir(agentDir: string, parentSessionId: string): string {
 	return join(orchestrationSessionDir(agentDir, parentSessionId), "events");

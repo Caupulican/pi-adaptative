@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { type AgentMessage, decodeExecutionContext } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -37,7 +37,7 @@ import type { ModelRegistry } from "../model-registry.ts";
 import { isLoopbackModelEndpoint } from "../models/model-endpoint.ts";
 import { providerUsageFromAttemptUsage } from "../orchestration/attempt-usage.ts";
 import {
-	type AgentResumeContext,
+	type AgentBindingContract,
 	type AttemptUsageSnapshot,
 	type ExecutionGrant,
 	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
@@ -49,6 +49,7 @@ import {
 } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
+import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import {
 	type TaskProfileCreateInput,
 	type TaskProfileCreateResult,
@@ -121,7 +122,7 @@ import {
 	resolveWorkerFleetLimits,
 } from "./worker-fleet-limits.ts";
 import { WorkerLeaseHeartbeat } from "./worker-lease-heartbeat.ts";
-import type { PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
+import { type PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
 import type { WorkerNotificationCoordinator, WorkerTerminalHandoffRecord } from "./worker-notification-coordinator.ts";
 import { createLocalWorkerProcessOwnerId } from "./worker-process-owner.ts";
 import {
@@ -129,6 +130,7 @@ import {
 	type ResolvedWorkerProfilePreset,
 	WorkerProfileResolver,
 } from "./worker-profile-resolver.ts";
+import { type WorkerProjectAdmission, WorkerProjectDirectory } from "./worker-project-directory.ts";
 import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./worker-recovery-coordinator.ts";
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
@@ -273,6 +275,11 @@ interface PreparedWorkerAgent {
 	resourceSystemPrompt: string;
 }
 
+interface ProjectSelection {
+	admission: Exclude<WorkerProjectAdmission, { kind: "unavailable" }>;
+	consumed: boolean;
+}
+
 type QueuedWorkerAttemptOutcome =
 	| { started: false; skipReason: string }
 	| {
@@ -327,15 +334,13 @@ export class WorkerDelegationController {
 	 * explicit control, mailbox reconciliation) consults this one set; it schedules nothing.
 	 */
 	private readonly executingSpecialistIds = new Map<string, number>();
-	/**
-	 * Specializations this process is already allocating a fresh identity for. Directory capture and
-	 * authority resolution are asynchronous, so two unnamed starts can both observe "no compatible
-	 * specialist"; this claim closes that window without inventing a second scheduler.
-	 */
-	private readonly allocatingSpecializations = new Map<string, number>();
 	private readonly yieldedCapacityAttemptIds = new Map<string, number>();
 	private readonly yieldedWriteReservations = new Map<string, WorkerWriteReservationWaitYield>();
 	private readonly conversations = new WorkerConversationStore();
+	private readonly projectDirectory: WorkerProjectDirectory;
+	private readonly projectSelections = new WeakMap<WorkerDelegationRequest, ProjectSelection>();
+	private readonly projectAgents = new Map<string, ProjectSelection>();
+	private readonly projectClaims = new Map<string, SpecialistContextClaim>();
 	private readonly contextForks: WorkerContextForkStore;
 	private readonly terminalHandoffs: WorkerTerminalHandoffCoordinator;
 	private readonly treeBudgets = new WorkerTreeBudgetCoordinator();
@@ -359,6 +364,7 @@ export class WorkerDelegationController {
 		this.deps = deps;
 		this.notifications = notifications;
 		this.lifecycle = lifecycle;
+		this.projectDirectory = new WorkerProjectDirectory(this.deps.getAgentDir(), this.conversations);
 		this.contextForks = new WorkerContextForkStore({
 			agentDir: this.deps.getAgentDir(),
 			parentSessionId: this.deps.getSessionId(),
@@ -408,6 +414,8 @@ export class WorkerDelegationController {
 			parentSessionId: this.deps.getSessionId(),
 			processOwnerId: createLocalWorkerProcessOwnerId(process.pid, randomUUID()),
 			conversationStore: this.conversations,
+			getConversationClaim: (agent) => this.claimAgentProjectContext(agent),
+			peekConversationClaim: (agent) => this.projectClaims.get(agent.resumeContext.sessionId),
 			isControlAvailable: () => this.deps.isDelegateToolActive(),
 			getLifecycle: () => this.getWorkerLifecycle(),
 			recoveredRequest: (attempt) => this.recovery.recoveredRequest(attempt),
@@ -1574,7 +1582,7 @@ export class WorkerDelegationController {
 		const conversation = this.conversations.open({
 			agentDir: this.deps.getAgentDir(),
 			resumeContext: parent.resumeContext,
-			expectedLogicalAgentId: parent.agentId,
+			expectedLogicalAgentId: parent.contextOrigin?.logicalAgentId ?? parent.agentId,
 		});
 		return { model, messages: conversation.getProviderContext().messages };
 	}
@@ -1840,6 +1848,60 @@ export class WorkerDelegationController {
 		const mode = this.workerContextForkMode(request, admission.executionContract);
 		const messages =
 			mode.kind === "none" ? [] : selectSanitizedContextFork(this.workerContextForkSource(request).messages, mode);
+		const project = this.projectSelections.get(request);
+		const prepare = (birthContextForkReference: WorkerContextForkReference, laneId: string) => {
+			const controlMessageId = this.controlMessageIdFor(request.messageReplayKey);
+			const value = lifecycle.prepare(
+				{
+					instructions: admission.instructions,
+					...(controlMessageId ? { controlMessageId } : {}),
+					...(request.parentAgentId ? { parentAgentId: request.parentAgentId } : {}),
+					birthContextForkReference,
+					controlForkMode: JSON.stringify(mode),
+					executionContract: admission.executionContract,
+					requiredCapabilities: admission.executionPlan.requiredCapabilities,
+					...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
+					taskContext: {
+						requirementIds: request.taskContext?.requirementIds ?? [],
+						dependsOnTaskIds: request.taskContext?.dependsOnTaskIds ?? [],
+						acceptanceCriterionIds: request.taskContext?.acceptanceCriterionIds ?? [],
+						resourcePointerIds: admission.resourcePointerIds,
+					},
+					...(goal ? { goal } : {}),
+				},
+				laneId,
+			);
+			if (project) {
+				project.consumed = true;
+				this.projectAgents.set(laneId, project);
+			}
+			const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
+			if (ownerEpoch !== undefined) this.notifications.noteLaneOwnerEpoch(value.record.laneId, ownerEpoch);
+			return value;
+		};
+		if (project?.admission.kind === "claimed") {
+			const imported = project.admission;
+			const laneId = lifecycle.getNextAvailableLaneIdCandidate();
+			const birth = imported.conversation.getBirthContextForkReference();
+			if (!birth) throw new Error("Project worker birth context is missing.");
+			const value = prepare(birth, laneId);
+			this.conversations.bindProjectMailbox(
+				this.deps.getAgentDir(),
+				this.deps.getSessionId(),
+				laneId,
+				imported.conversation,
+			);
+			lifecycle.ensureAgent({
+				agentId: laneId,
+				role: admission.executionContract.worker.profile.role,
+				resumeContext: imported.reference.resumeContext,
+				contextOrigin: {
+					parentSessionId: imported.reference.parentSessionId,
+					logicalAgentId: imported.reference.logicalAgentId,
+				},
+			});
+			return { executionPlan: admission.executionPlan, lifecycle, ...value };
+		}
 		for (let allocation = 0; allocation < DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession; allocation++) {
 			const laneId = lifecycle.getNextAvailableLaneIdCandidate();
 			let proposedReference: WorkerContextForkReference | undefined;
@@ -1858,39 +1920,13 @@ export class WorkerDelegationController {
 					},
 					prepare: (birthContextForkReference) => {
 						proposedReference = birthContextForkReference;
-						return lifecycle.prepare(
-							{
-								instructions: admission.instructions,
-								...(() => {
-									const controlMessageId = this.controlMessageIdFor(request.messageReplayKey);
-									return controlMessageId ? { controlMessageId } : {};
-								})(),
-								...(request.parentAgentId ? { parentAgentId: request.parentAgentId } : {}),
-								birthContextForkReference,
-								controlForkMode: JSON.stringify(mode),
-								executionContract: admission.executionContract,
-								requiredCapabilities: admission.executionPlan.requiredCapabilities,
-								...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
-								taskContext: {
-									requirementIds: request.taskContext?.requirementIds ?? [],
-									dependsOnTaskIds: request.taskContext?.dependsOnTaskIds ?? [],
-									acceptanceCriterionIds: request.taskContext?.acceptanceCriterionIds ?? [],
-									resourcePointerIds: admission.resourcePointerIds,
-								},
-								...(goal ? { goal } : {}),
-							},
-							laneId,
-						);
+						return prepare(birthContextForkReference, laneId);
 					},
 				});
 				// Genuine lane creation (not a retry/resume/drain -- those all supply `existingRecord`
 				// and return earlier, above). Capture the owner epoch exactly once, here, at the same
 				// moment `goal`/`goalId` above is fixed into the durable dispatch -- never re-read on a
 				// later touch of this same laneId.
-				const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
-				if (ownerEpoch !== undefined) {
-					this.notifications.noteLaneOwnerEpoch(captured.value.record.laneId, ownerEpoch);
-				}
 				return { executionPlan: admission.executionPlan, lifecycle, ...captured.value };
 			} catch (error) {
 				if (error instanceof WorkerContextForkStoreError && error.code === "identity_claimed") continue;
@@ -1998,7 +2034,8 @@ export class WorkerDelegationController {
 			const conversation = this.conversations.open({
 				agentDir: this.deps.getAgentDir(),
 				resumeContext: existing.resumeContext,
-				expectedLogicalAgentId: existing.agentId,
+				expectedLogicalAgentId: existing.contextOrigin?.logicalAgentId ?? existing.agentId,
+				projectClaim: this.claimAgentProjectContext(existing),
 			});
 			if (!isDeepStrictEqual(conversation.getBirthContextForkReference(), birthContextForkReference)) {
 				throw new Error("Worker conversation birth context conflicts with its durable attempt.");
@@ -2015,7 +2052,7 @@ export class WorkerDelegationController {
 		if (!selected.ok) throw new Error(selected.reason);
 		const materialized = materializeWorkerResourceBundle(selected.pointers);
 		if (!materialized.ok) throw new Error(`worker_resource_materialization_${materialized.code}`);
-		const conversation = this.conversations.ensure({
+		const conversationOptions = {
 			agentDir: this.deps.getAgentDir(),
 			parentSessionId: this.deps.getSessionId(),
 			logicalAgentId: agentId,
@@ -2025,7 +2062,26 @@ export class WorkerDelegationController {
 			resourceProfileNames: immutableWorker.profile.resourceProfileNames,
 			contextPointers: materialized.pointers,
 			...(birthContextForkReference ? { birthContextForkReference } : {}),
-		});
+		};
+		const selection = this.projectAgents.get(agentId)?.admission;
+		if (selection?.kind === "allocated")
+			this.projectDirectory.bindAllocation(selection.allocation, {
+				parentSessionId: this.deps.getSessionId(),
+				logicalAgentId: agentId,
+				resumeContext: WorkerConversationStore.describe(conversationOptions),
+			});
+		let conversation = this.conversations.ensure(conversationOptions);
+		if (selection?.kind === "allocated") {
+			conversation = this.conversations.claimProjectContext({
+				agentDir: this.deps.getAgentDir(),
+				resumeContext: conversation.getResumeContext(),
+				expectedLogicalAgentId: agentId,
+				owner: selection.allocation.owner,
+				specializationKey: selection.allocation.specializationKey,
+			});
+			this.projectClaims.set(conversation.getResumeContext().sessionId, conversation.getProjectClaim()!);
+			this.projectDirectory.publish(selection.allocation);
+		}
 		prepared.lifecycle.ensureAgent({
 			agentId,
 			...(prepared.attempt.dispatch.parentAgentId ? { parentAgentId: prepared.attempt.dispatch.parentAgentId } : {}),
@@ -2039,16 +2095,24 @@ export class WorkerDelegationController {
 		};
 	}
 
-	private claimFreshSpecialization(key: string): () => void {
-		this.allocatingSpecializations.set(key, (this.allocatingSpecializations.get(key) ?? 0) + 1);
-		let released = false;
-		return () => {
-			if (released) return;
-			released = true;
-			const held = (this.allocatingSpecializations.get(key) ?? 1) - 1;
-			if (held > 0) this.allocatingSpecializations.set(key, held);
-			else this.allocatingSpecializations.delete(key);
+	private claimAgentProjectContext(agent: AgentBindingContract): SpecialistContextClaim | undefined {
+		const retained = this.projectClaims.get(agent.resumeContext.sessionId);
+		if (retained) return retained;
+		const options = {
+			agentDir: this.deps.getAgentDir(),
+			resumeContext: agent.resumeContext,
+			expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
 		};
+		const binding = this.conversations.getProjectContextBinding(options);
+		if (!binding) return undefined;
+		const claimed = this.conversations.claimProjectContext({
+			...options,
+			specializationKey: binding.specializationKey,
+			owner: { parentSessionId: this.deps.getSessionId(), incarnation: this.agentControl.getProcessOwnerId() },
+		});
+		const claim = claimed.getProjectClaim()!;
+		this.projectClaims.set(agent.resumeContext.sessionId, claim);
+		return claim;
 	}
 
 	/** Did the caller explicitly, justifiably ask for an independent copy? */
@@ -2063,12 +2127,14 @@ export class WorkerDelegationController {
 	 * cannot be opened is a bounded failure about that specialist -- never a reason to quietly create a
 	 * second one and abandon its history.
 	 */
-	private isSpecialistContextReadable(agent: { agentId: string; resumeContext: AgentResumeContext }): boolean {
+	private isSpecialistContextReadable(
+		agent: Pick<AgentBindingContract, "agentId" | "resumeContext" | "contextOrigin">,
+	): boolean {
 		try {
 			this.conversations.open({
 				agentDir: this.deps.getAgentDir(),
 				resumeContext: agent.resumeContext,
-				expectedLogicalAgentId: agent.agentId,
+				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
 			});
 			return true;
 		} catch (error) {
@@ -2205,8 +2271,15 @@ export class WorkerDelegationController {
 				const reference = attempt.dispatch.birthContextForkReference;
 				if (!reference) return false;
 				try {
-					const birth = this.contextForks.open({
-						logicalAgentId: agent?.agentId ?? attempt.dispatch.logicalLaneId!,
+					const forks = agent?.contextOrigin
+						? new WorkerContextForkStore({
+								agentDir: this.deps.getAgentDir(),
+								parentSessionId: agent.contextOrigin.parentSessionId,
+							})
+						: this.contextForks;
+					const birth = forks.open({
+						logicalAgentId:
+							agent?.contextOrigin?.logicalAgentId ?? agent?.agentId ?? attempt.dispatch.logicalLaneId!,
 						reference,
 					});
 					return isDeepStrictEqual(birth.messages, requestedBirth);
@@ -2219,9 +2292,6 @@ export class WorkerDelegationController {
 			isSettled: (agentId) => this.isSpecialistSettled(agentId),
 			isContextReadable: (agent) => this.isSpecialistContextReadable(agent),
 			...(independentParallelIntent ? { independentParallelIntent: true } : {}),
-			...(!independentParallelIntent && this.allocatingSpecializations.has(JSON.stringify(candidate))
-				? { freshAllocationInFlight: true }
-				: {}),
 		});
 		if (request.reuseAgentId) {
 			// The caller named a specialist and described its work explicitly. Equal effective options
@@ -2235,8 +2305,73 @@ export class WorkerDelegationController {
 							decision.outcome === "unavailable" ? decision.skipReason : "worker_reuse_overrides_incompatible",
 					};
 		}
-		if (decision.outcome === "fresh" && !independentParallelIntent) {
-			return { outcome: "fresh", releaseAllocation: this.claimFreshSpecialization(JSON.stringify(candidate)) };
+		if (decision.outcome === "fresh") {
+			const specializationKey = createHash("sha256")
+				.update(JSON.stringify([candidate, materialized.pointers]))
+				.digest("hex");
+			let project: WorkerProjectAdmission;
+			try {
+				project = this.projectDirectory.admit({
+					specializationKey,
+					owner: { parentSessionId: sessionId, incarnation: this.agentControl.getProcessOwnerId() },
+					independent: independentParallelIntent,
+					isCompatible: (reference, ownership) => {
+						const ownerLifecycle =
+							ownership.claim.parentSessionId === sessionId
+								? this.lifecycle
+								: new WorkerLifecycle({
+										agentDir: this.deps.getAgentDir(),
+										sessionId: ownership.claim.parentSessionId,
+									});
+						const bindings = Object.values(ownerLifecycle.getTaskRuntimeSnapshot().agents).filter(
+							(agent) =>
+								agent.resumeContext.sessionId === reference.resumeContext.sessionId &&
+								agent.resumeContext.sessionFile === reference.resumeContext.sessionFile,
+						);
+						if (
+							bindings.some(
+								(agent) =>
+									agent.status === "retired" || agent.status === "suspended" || agent.status === "resuming",
+							)
+						)
+							return false;
+						if (bindings.length !== 1 && ownership.state === "idle")
+							throw new Error("Worker project owner binding is unavailable.");
+						if (!requestedBirth) return true;
+						const conversation = this.conversations.open({
+							agentDir: this.deps.getAgentDir(),
+							resumeContext: reference.resumeContext,
+							expectedLogicalAgentId: reference.logicalAgentId,
+						});
+						const birthReference = conversation.getBirthContextForkReference();
+						if (!birthReference) return false;
+						const birth = new WorkerContextForkStore({
+							agentDir: this.deps.getAgentDir(),
+							parentSessionId: reference.parentSessionId,
+						}).open({ logicalAgentId: reference.logicalAgentId, reference: birthReference });
+						return isDeepStrictEqual(birth.messages, requestedBirth);
+					},
+				});
+			} catch (error) {
+				this.safeWarn(`Worker project admission failed: ${error instanceof Error ? error.message : String(error)}`);
+				return { outcome: "unavailable", skipReason: "worker_project_directory_unavailable" };
+			}
+			if (project.kind === "unavailable") return { outcome: "unavailable", skipReason: project.reason };
+			const selection: ProjectSelection = { admission: project, consumed: false };
+			this.projectSelections.set(request, selection);
+			if (project.kind === "claimed")
+				this.projectClaims.set(project.reference.resumeContext.sessionId, project.conversation.getProjectClaim()!);
+			return {
+				outcome: "fresh",
+				releaseAllocation: () => {
+					if (selection.consumed) return;
+					if (project.kind === "allocated") this.projectDirectory.cancelUnboundAllocation(project.allocation);
+					else {
+						this.conversations.releaseProjectContext(project.conversation);
+						this.projectClaims.delete(project.reference.resumeContext.sessionId);
+					}
+				},
+			};
 		}
 		if (decision.outcome !== "reuse") return decision;
 		// A reused turn consumes no implementation identity, but its retained contract can still
@@ -2254,6 +2389,13 @@ export class WorkerDelegationController {
 		request: WorkerDelegationRequest,
 		contract: WorkerExecutionContract,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
+		const agent = this.lifecycle.getAgent(agentId);
+		if (!agent) return { started: false, skipReason: "unknown_agent" };
+		try {
+			this.claimAgentProjectContext(agent);
+		} catch {
+			return { started: false, skipReason: "worker_specialist_context_unavailable" };
+		}
 		const goal = this.deps.getGoalStateSnapshot();
 		const taskContext = request.taskContext;
 		const accepted = this.agentControl.startWorkerAgentTask(agentId, request.instructions, {
@@ -3169,16 +3311,31 @@ export class WorkerDelegationController {
 				this.yieldedWriteReservations.delete(durableHandle.attemptId);
 				this.inFlightLedgers.delete(startedRecord.laneId);
 				this.laneAbortControllers.delete(startedRecord.laneId);
+				let resourcesReleased = false;
 				try {
 					await toolSurface.dispose();
+					resourcesReleased = true;
 				} catch (error) {
 					this.safeWarn(
 						`Worker mutation payload cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
-				// Only now is this specialist available again; everything above still owned its tools,
-				// its write reservation and its transcript handles.
-				releaseSpecialist();
+				// Failed cleanup leaves resource ownership unresolved. Keep both the local execution
+				// hold and the durable project claim until that ownership can be resolved.
+				if (resourcesReleased) releaseSpecialist();
+				const settledAgent = lifecycle.getAgent(agentId);
+				if (resourcesReleased && conversation.getProjectClaim() && settledAgent?.status === "registered") {
+					try {
+						this.agentControl.releaseQuiescentContext(agentId, () => {
+							this.conversations.releaseProjectContext(conversation);
+							this.projectClaims.delete(conversation.getResumeContext().sessionId);
+						});
+					} catch (error) {
+						this.safeWarn(
+							`Worker project release failed: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+				}
 				this.agentControl.signalStateChanged();
 				deregisterInFlight();
 				if (!this.deps.isDisposed()) this.scheduler.drain(true);
