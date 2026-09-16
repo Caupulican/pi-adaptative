@@ -149,21 +149,39 @@ export class WorkerProjectDirectory {
 	}
 
 	/** Caller proves the prepared task is cancelled and has no agent binding or executor. */
-	cancelPreparedAllocation(allocation: WorkerProjectAllocation): void {
-		this.updateAllocation(
-			allocation,
-			(entry) => {
-				if (entry.phase !== "allocating") throw new Error("Published worker allocation cannot be withdrawn.");
-				return undefined;
-			},
-			true,
-		);
+	settleCancelledAllocation(
+		allocation: WorkerProjectAllocation,
+		withQuiescence: (operation: () => void) => boolean,
+	): string | undefined {
+		let sessionId: string | undefined;
+		this.withAllocation(allocation, (entry, save) => {
+			if (!entry.reference) {
+				if (entry.phase !== "allocating") throw new Error("Published worker allocation has no context.");
+				save(undefined);
+				return;
+			}
+			sessionId = entry.reference.resumeContext.sessionId;
+			this.conversations.settleCancelledProjectSetup(
+				{ agentDir: this.agentDir, reference: entry.reference, ...allocation, withQuiescence },
+				(enrolled) => {
+					if (!enrolled && entry.phase === "published") throw new Error("Published worker enrollment is missing.");
+					save(enrolled ? { ...entry, phase: "published" } : undefined);
+				},
+			);
+		});
+		return sessionId;
 	}
 
 	private updateAllocation(
 		allocation: WorkerProjectAllocation,
 		update: (entry: DirectoryEntry) => DirectoryEntry | undefined,
-		requireUnenrolled = false,
+	): void {
+		this.withAllocation(allocation, (entry, save) => save(update(entry)));
+	}
+
+	private withAllocation(
+		allocation: WorkerProjectAllocation,
+		operation: (entry: DirectoryEntry, save: (next: DirectoryEntry | undefined) => void) => void,
 	): void {
 		const file = workerProjectSpecializationFile(this.agentDir, allocation.specializationKey);
 		withFileLockSync(file, () => {
@@ -172,15 +190,11 @@ export class WorkerProjectDirectory {
 			const entry = entries[index];
 			if (!entry || !isDeepStrictEqual(entry.allocatedBy, allocation.owner))
 				throw new Error("Worker allocation receipt is stale.");
-			const commit = () => {
-				const next = update(entry);
+			operation(entry, (next) => {
 				if (next) entries[index] = next;
 				else entries.splice(index, 1);
 				this.write(file, entries);
-			};
-			if (requireUnenrolled && entry.reference)
-				this.conversations.withUnenrolledProjectContext(this.agentDir, entry.reference, commit);
-			else commit();
+			});
 		});
 	}
 

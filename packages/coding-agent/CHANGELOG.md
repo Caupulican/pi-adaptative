@@ -9,6 +9,7 @@
 - Rejected specialist control messages release newly acquired claims when no work remains, preserving project reuse after validation failures.
 - Cancelling a queued native worker or disposing its parent releases the settled project context without duplicating its transcript.
 - Failed native worker setup releases its project allocation after durable cancellation when the transcript is absent or unenrolled; uncertain ownership and active transcript writes retain exclusion.
+- A lost initial claim receipt or failed agent registration preserves the enrolled transcript for the next parent without replaying cancelled work; settlement requires the original claim and an empty mailbox.
 - Python credential screening preserves matching quote boundaries, avoiding oversized source fragments being probed as filenames and retaining protection for paths containing quotes.
 - Credential redaction preserves structured execution-error classification across duplicate runtime module instances.
 - Python completed non-zero exits are operation outcomes, matching bash, so they keep output without a MUST ledger. Timeout and abort stay incomplete tool failures.

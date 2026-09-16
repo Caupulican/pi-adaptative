@@ -1931,36 +1931,65 @@ export class WorkerConversationStore {
 		return binding.ownership;
 	}
 
-	/** A cancelled setup may discard its allocation receipt, never its retained transcript. */
-	withUnenrolledProjectContext<T>(agentDir: string, reference: WorkerProjectContextReference, operation: () => T): T {
+	/** Settle only a never-dispatched setup: preserve enrolled context, discard only an unenrolled receipt. */
+	settleCancelledProjectSetup(
+		input: {
+			agentDir: string;
+			reference: WorkerProjectContextReference;
+			specializationKey: string;
+			owner: SpecialistContextOwner;
+			withQuiescence(operation: () => void): boolean;
+		},
+		operation: (enrolled: boolean) => void,
+	): void {
+		const { agentDir, reference } = input;
 		const context = reference.resumeContext;
 		if (!context.sessionFile) throw new Error("Worker allocation transcript identity is missing.");
 		const file = assertWorkerConversationFile(agentDir, context.sessionFile, context.sessionId);
-		return withSessionBundleAdmission(agentDir, reference.parentSessionId, () =>
-			withFileLockSync(file, () => {
-				const metadataFile = workerConversationMetadataFile(file);
-				if (existsSync(metadataFile)) {
-					const metadata = assertExactConversationMetadata(
-						metadataFile,
-						context,
-						reference.logicalAgentId,
-						reference.parentSessionId,
-					);
-					if (metadata.projectContext) throw new Error("Worker allocation is already enrolled.");
-				}
-				if (existsSync(file)) {
-					const conversation = this.openExisting(
-						{ agentDir, resumeContext: context, expectedLogicalAgentId: reference.logicalAgentId },
-						{ parentSessionId: reference.parentSessionId, recoverBirthContextPrefix: false },
-					);
-					if (conversation.hasActiveTranscriptCommit())
-						throw new Error("Worker transcript commit is still active.");
-					if (projectEnrollmentKey(SessionManager.open(file, agentDir, dirname(file))))
-						throw new Error("Worker allocation has retained enrollment evidence.");
-				}
-				return operation();
-			}),
-		);
+		withSessionBundleAdmission(agentDir, reference.parentSessionId, () => {
+			const settled = input.withQuiescence(() =>
+				withFileLockSync(file, () => {
+					const metadataFile = workerConversationMetadataFile(file);
+					const metadata = existsSync(metadataFile)
+						? assertExactConversationMetadata(
+								metadataFile,
+								context,
+								reference.logicalAgentId,
+								reference.parentSessionId,
+							)
+						: undefined;
+					const project = metadata?.projectContext;
+					if (project && (!existsSync(file) || project.specializationKey !== input.specializationKey))
+						throw new Error("Worker allocation enrollment cannot be reconciled.");
+					if (existsSync(file)) {
+						const conversation = this.openExisting(
+							{ agentDir, resumeContext: context, expectedLogicalAgentId: reference.logicalAgentId },
+							{ parentSessionId: reference.parentSessionId, recoverBirthContextPrefix: false },
+						);
+						if (conversation.hasActiveTranscriptCommit())
+							throw new Error("Worker transcript commit is still active.");
+						if (
+							projectEnrollmentKey(SessionManager.open(file, agentDir, dirname(file))) !==
+							project?.specializationKey
+						)
+							throw new Error("Worker allocation enrollment evidence changed.");
+					}
+					if (project && metadata) {
+						const claim = { ...input.owner, generation: 1 };
+						// A retained receipt may complete after idle publication but before the directory write.
+						if (project.ownership.state !== "idle" || !isDeepStrictEqual(project.ownership.claim, claim)) {
+							assertSpecialistContextClaim(project.ownership, claim);
+							writeWorkerConversationMetadata(metadataFile, {
+								...metadata,
+								projectContext: { ...project, ownership: releaseSpecialistContext(project.ownership, claim) },
+							});
+						}
+					}
+					operation(project !== undefined);
+				}),
+			);
+			if (!settled) throw new Error("Worker setup has pending mailbox obligations.");
+		});
 	}
 
 	/** Bounded, fail-closed claim inspection before removing a birth parent's artifact bundle. */

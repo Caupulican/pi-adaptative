@@ -2114,11 +2114,14 @@ export class WorkerDelegationController {
 		if (!this.isSpecialistSettled(agentId)) return;
 		const latest = agent ? this.lifecycle.getLatestAgentAttempt(agentId) : this.lifecycle.getActiveAttempt(agentId);
 		if (latest && NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(latest.status)) return;
-		if (!agent && latest?.status === "cancelled") {
+		if (!agent && latest?.status === "cancelled" && !latest.lease) {
 			const selection = this.projectAgents.get(agentId)?.admission;
 			if (selection?.kind === "allocated") {
 				try {
-					this.projectDirectory.cancelPreparedAllocation(selection.allocation);
+					const sessionId = this.projectDirectory.settleCancelledAllocation(selection.allocation, (release) =>
+						this.agentControl.releaseQuiescentContext(agentId, release),
+					);
+					if (sessionId) this.projectClaims.delete(sessionId);
 					this.projectAgents.delete(agentId);
 				} catch (error) {
 					this.safeWarn(
@@ -2388,8 +2391,29 @@ export class WorkerDelegationController {
 							)
 						)
 							return false;
-						if (bindings.length !== 1 && ownership.state === "idle")
-							throw new Error("Worker project owner binding is unavailable.");
+						if (bindings.length !== 1 && ownership.state === "idle") {
+							// Setup can enroll a transcript before its first agent binding is registered.
+							// A cancelled, never-leased birth task proves this is that window, not lost live state.
+							const birthAttempt = ownerLifecycle.getActiveAttempt(reference.logicalAgentId);
+							if (
+								bindings.length !== 0 ||
+								ownership.claim.generation !== 1 ||
+								ownership.claim.parentSessionId !== reference.parentSessionId ||
+								birthAttempt?.status !== "cancelled" ||
+								birthAttempt.lease ||
+								!isDeepStrictEqual(
+									birthAttempt.dispatch.birthContextForkReference,
+									this.conversations
+										.open({
+											agentDir: this.deps.getAgentDir(),
+											resumeContext: reference.resumeContext,
+											expectedLogicalAgentId: reference.logicalAgentId,
+										})
+										.getBirthContextForkReference(),
+								)
+							)
+								throw new Error("Worker project owner binding is unavailable.");
+						}
 						if (!requestedBirth) return true;
 						const conversation = this.conversations.open({
 							agentDir: this.deps.getAgentDir(),
