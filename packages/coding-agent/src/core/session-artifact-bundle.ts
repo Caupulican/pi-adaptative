@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { lstat, rm, unlink } from "node:fs/promises";
 import { orchestrationSessionDir } from "./agent-paths.ts";
+import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
 
 export type SessionArtifactDeletionMethod = "trash" | "unlink";
 
@@ -75,6 +76,9 @@ export async function deleteForegroundSessionBundle(
 	}
 
 	const workerArtifactsPath = orchestrationSessionDir(options.agentDir, options.parentSessionId);
+	if (!WorkerConversationStore.reserveBundleDeletion(options.agentDir, options.parentSessionId)) {
+		return { foreground, workerArtifacts: { ok: false, method: "preserved" }, complete: false };
+	}
 	if (!existsSync(workerArtifactsPath)) {
 		return { foreground, workerArtifacts: { ok: true, method: "absent" }, complete: true };
 	}

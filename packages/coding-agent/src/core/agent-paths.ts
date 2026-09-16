@@ -261,6 +261,11 @@ export function orchestrationSessionDir(agentDir: string, parentSessionId: strin
 	return join(orchestrationSessionsDir(agentDir), orchestrationSessionKey(parentSessionId));
 }
 
+/** Outside the deleted bundle: a durable tombstone prevents recreating deleted worker contexts. */
+export function orchestrationSessionDeletionFile(agentDir: string, parentSessionId: string): string {
+	return stateFile(agentDir, "orchestration", "deletions", `${orchestrationSessionKey(parentSessionId)}.json`);
+}
+
 /** `<orchestrationSessionDir>/events` -- append-only event tail, snapshot, cursor, and idempotency state. */
 export function orchestrationEventStoreDir(agentDir: string, parentSessionId: string): string {
 	return join(orchestrationSessionDir(agentDir, parentSessionId), "events");
