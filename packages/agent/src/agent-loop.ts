@@ -2058,7 +2058,9 @@ function finalizeRejectedToolCall(
 	outcome: ImmediateToolCallOutcome,
 	tracker: ToolFailureMemoryTracker,
 ): FinalizedToolCallOutcome {
-	if (outcome.repeatedToolFailure) {
+	// A pre-execution cancellation is neither a failed attempt nor corrective progress. Keep its
+	// terminal result, but do not create failure memory or an unproductive recovery-gate effect.
+	if (outcome.repeatedToolFailure || outcome.phase === "cancelled") {
 		return {
 			toolCall,
 			result: outcome.result,
