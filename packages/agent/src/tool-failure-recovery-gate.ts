@@ -52,14 +52,19 @@ const ENVELOPE_BOUND_KEYS = new Set([
 	"waitseconds",
 ]);
 
-/** Largest positive finite bound named by any envelope field, or undefined when none is present. */
-function readEnvelopeBound(args: unknown): number | undefined {
+interface EnvelopeBound {
+	field: string;
+	value: number;
+}
+
+/** Keep one unambiguous bound's exact field identity; different fields may use different units. */
+function readEnvelopeBound(args: unknown): EnvelopeBound | undefined {
 	if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
-	let bound: number | undefined;
+	let bound: EnvelopeBound | undefined;
 	for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
-		if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) continue;
 		if (!ENVELOPE_BOUND_KEYS.has(key.toLowerCase().replaceAll(/[_-]/g, ""))) continue;
-		bound = bound === undefined ? value : Math.max(bound, value);
+		if (bound || typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+		bound = { field: key, value };
 	}
 	return bound;
 }
@@ -109,11 +114,10 @@ interface OperationState {
 	 */
 	unchangedRetriesRemaining: number;
 	/**
-	 * Largest resource-envelope bound this operation carried when it last ran, in whatever unit the
-	 * tool uses. Units never need normalizing: this is only ever compared against a later value of
-	 * the same field on the same operation, so the unit cancels.
+	 * Unambiguous resource-envelope bound this operation carried when it last ran. The exact field
+	 * must match before comparing values, so a value in seconds is never compared to milliseconds.
 	 */
-	envelopeBound?: number;
+	envelopeBound?: EnvelopeBound;
 	/**
 	 * Bound escalations this episode still allows. A timeout is the one failure whose canonical repair
 	 * is a bigger bound, so a strict, material increase buys an execution — but only a fixed few, or
@@ -325,7 +329,8 @@ export class ToolFailureRecoveryGate {
 			if (
 				incomingBound !== undefined &&
 				state.envelopeBound !== undefined &&
-				incomingBound >= state.envelopeBound * MIN_BOUND_ESCALATION_FACTOR
+				incomingBound.field === state.envelopeBound.field &&
+				incomingBound.value >= state.envelopeBound.value * MIN_BOUND_ESCALATION_FACTOR
 			) {
 				state.boundEscalationsRemaining--;
 				state.envelopeBound = incomingBound;
@@ -438,7 +443,7 @@ type TranscriptEvent =
 			executionKey: string;
 			worldCursor: number;
 			record: ToolFailureMemoryRecord;
-			envelopeBound?: number;
+			envelopeBound?: EnvelopeBound;
 	  };
 
 /**
