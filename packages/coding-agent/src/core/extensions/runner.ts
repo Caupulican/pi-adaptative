@@ -997,8 +997,11 @@ export class ExtensionRunner {
 				try {
 					const handlerResult = await handler(event, ctx);
 
-					if (handlerResult) {
-						result = handlerResult as ToolCallEventResult;
+					if (handlerResult && !result?.block) {
+						// Each hook can veto execution. Retain the first veto while continuing
+						// later handlers, and capture its controls before its owner can mutate it.
+						const decision = handlerResult as ToolCallEventResult;
+						result = { block: decision.block, reason: decision.reason, terminate: decision.terminate };
 					}
 				} catch (err) {
 					if (firstError === undefined) firstError = err;
