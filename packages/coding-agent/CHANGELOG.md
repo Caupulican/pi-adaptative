@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- Advisory-state writes preserve existing data after read failures and retain queued observations and foreign writes through failed flushes or close. Full batches reject further mutations until persistence recovers.
 - Tool-result image replacement and collapse invalidate cached conversions, preventing older previews from overwriting current output. Repeated expansion shares pending conversion work, and failed conversion remains retryable.
 
 ## [0.99.27] - 2026-09-16

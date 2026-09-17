@@ -69,6 +69,37 @@ describe("HostStateStore", () => {
 	});
 
 	describe("write-behind", () => {
+		it("does not admit more mutations beyond a failed flush's pending cap", () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-host-state-cap-"));
+			dirs.push(dir);
+			const blocker = join(dir, "blocked");
+			const filePath = join(blocker, "state.json");
+			const store = new HostStateStore<Counter>({
+				filePath,
+				version: 1,
+				fingerprint: () => HOST,
+				parseHost: (value) =>
+					value && typeof value === "object" && "count" in value ? (value as Counter) : undefined,
+				writeBehind: { debounceMs: 60_000, maxPending: 2 },
+			});
+			try {
+				increment(store, "a");
+				writeFileSync(blocker, "");
+				expect(() => increment(store, "b")).toThrow();
+				for (let i = 0; i < 10; i++) expect(() => increment(store, "rejected")).toThrow();
+				expect(store.getHost()?.notes).toEqual(["a", "b"]);
+				rmSync(blocker);
+				store.flush();
+				expect(persistedCount(filePath)).toBe(2);
+				expect(increment(store, "c")).toBe(3);
+				store.flush();
+				expect(persistedCount(filePath)).toBe(3);
+			} finally {
+				if (persistedCount(filePath) === undefined) rmSync(blocker, { force: true });
+				store.close();
+			}
+		});
+
 		it("applies mutations in memory at once and persists them in one flush", () => {
 			const { filePath, store } = createStore({ writeBehind: { debounceMs: 60_000 } });
 			expect(increment(store, "a")).toBe(1);

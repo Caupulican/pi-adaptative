@@ -1,7 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { deepFreeze } from "../util/deep-freeze.ts";
+import { isMissingPathError } from "../util/filesystem-errors.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 export interface HostFingerprint {
@@ -130,6 +131,8 @@ export class HostStateStore<THostData> {
 	 * mutation as its own transaction after that other process's writes.
 	 */
 	private working: HostStateFile<THostData> | undefined;
+	/** Disk snapshot from which working was cloned; a failed flush must not advance it. */
+	private workingBaseText: string | undefined;
 	private pending: Array<{
 		create: (host: HostFingerprint) => THostData;
 		mutate: (data: THostData, host: HostFingerprint) => HostStateMutation<unknown>;
@@ -173,9 +176,15 @@ export class HostStateStore<THostData> {
 	): TResult {
 		const host = this.currentHost();
 		if (this.writeBehind && !this.closed) {
+			// A failed cap-triggered flush retains its batch. Do not grow that replay log or
+			// mutate its working tree again until the already-admitted batch can be persisted.
+			if (this.pending.length >= this.writeBehind.maxPending) this.flush();
 			// The working tree is a clone of the last state read from or written to the file, taken
 			// once per batch; every mutation applies to it directly and is logged for replay.
-			this.working ??= structuredClone(this.load());
+			if (!this.working) {
+				this.working = structuredClone(this.load("mutation"));
+				this.workingBaseText = this.parsed?.text;
+			}
 			const data = this.working.hosts[host.id] ?? create(host);
 			this.working.hosts[host.id] = data;
 			const mutation = mutate(data, host);
@@ -188,7 +197,7 @@ export class HostStateStore<THostData> {
 		}
 		const execute = (): TResult => {
 			// A clone, so a mutator that throws halfway leaves the cached tree exactly as persisted.
-			const file = structuredClone(this.load());
+			const file = structuredClone(this.load(this.readOnly ? "read" : "mutation"));
 			const data = file.hosts[host.id] ?? create(host);
 			file.hosts[host.id] = data;
 			const mutation = mutate(data, host);
@@ -217,6 +226,7 @@ export class HostStateStore<THostData> {
 		}
 		if (this.pending.length === 0) {
 			this.working = undefined;
+			this.workingBaseText = undefined;
 			return;
 		}
 		const pending = this.pending;
@@ -225,10 +235,9 @@ export class HostStateStore<THostData> {
 		// Pending state is cleared only after the write succeeded; a failed flush keeps every
 		// mutation queued for the next attempt. Synchronous throughout, so nothing interleaves.
 		withFileLockSync(this.filePath, () => {
-			const lastSeenText = this.parsed?.text;
-			const current = this.load();
+			const current = this.load("mutation");
 			let next: HostStateFile<THostData>;
-			if (working && this.parsed?.text === lastSeenText) {
+			if (working && this.parsed?.text === this.workingBaseText) {
 				next = working;
 			} else {
 				next = structuredClone(current);
@@ -244,14 +253,16 @@ export class HostStateStore<THostData> {
 		});
 		this.pending = [];
 		this.working = undefined;
+		this.workingBaseText = undefined;
 	}
 
 	/** Flush pending mutations and stop batching; later mutations persist one transaction each. */
 	close(): void {
+		// A failed close retains batching and its exit hook until the batch is durable.
+		this.flush();
 		this.closed = true;
 		this.unregisterExitFlush?.();
 		this.unregisterExitFlush = undefined;
-		this.flush();
 	}
 
 	private scheduleFlush(): void {
@@ -267,15 +278,13 @@ export class HostStateStore<THostData> {
 		this.flushTimer.unref?.();
 	}
 
-	private load(): HostStateFile<THostData> {
-		if (!existsSync(this.filePath)) {
-			this.parsed = undefined;
-			return { version: this.version, hosts: {} };
-		}
+	private load(access: "read" | "mutation" = "read"): HostStateFile<THostData> {
 		let text: string;
 		try {
 			text = readFileSync(this.filePath, "utf-8");
-		} catch {
+		} catch (error) {
+			// Advisory reads may fall back, but a write must not treat unreadable state as absent.
+			if (access === "mutation" && !isMissingPathError(error)) throw error;
 			this.parsed = undefined;
 			return { version: this.version, hosts: {} };
 		}
