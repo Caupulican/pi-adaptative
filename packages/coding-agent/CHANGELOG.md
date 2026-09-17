@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- Tool-performance writes capture their evidence before queueing, preserving original identities and outcomes through replay and excluding undeclared selection payloads.
 - Tool hint measurements use the originating provider request instead of newly eligible live statistics, preventing credit for hints absent from that request.
 - Learned tool hints are limited to each prompt's registered tool surface, including restricted routed prompts and turns with no tools.
 - Advisory-state batches discard partial changes from failed or unaccepted mutation callbacks while preserving accepted observations and normal batching costs.

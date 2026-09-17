@@ -123,6 +123,10 @@ function statKey(key: ToolPerformanceKey): string {
 	return `${key.modelRef}\0${key.intentClass}\0${key.tool}`;
 }
 
+function capturePerformanceKey(key: ToolPerformanceKey): ToolPerformanceKey {
+	return { modelRef: key.modelRef, intentClass: key.intentClass, tool: key.tool };
+}
+
 function intentAgreementKey(modelRef: string, intentClass: ToolSelectionIntentClass): string {
 	return `${modelRef}\0${intentClass}`;
 }
@@ -218,7 +222,7 @@ function isIntentAgreement(value: unknown): value is ToolSelectionIntentAgreemen
 
 function emptyStats(key: ToolPerformanceKey, at: string): ToolPerformanceStats {
 	return {
-		...key,
+		...capturePerformanceKey(key),
 		alpha: 1,
 		beta: 1,
 		sampleCount: 0,
@@ -450,10 +454,11 @@ export class ToolPerformanceStore {
 	}
 
 	recordValidation(
-		key: ToolPerformanceKey,
+		inputKey: ToolPerformanceKey,
 		outcome: "repaired" | "bounced",
 		at = new Date().toISOString(),
 	): ToolPerformanceStats {
+		const key = capturePerformanceKey(inputKey);
 		return this.storage.mutateCurrentHost(
 			(host) => this.createHostData(host),
 			(host) => {
@@ -472,7 +477,29 @@ export class ToolPerformanceStore {
 		);
 	}
 
-	recordExecution(observation: ToolExecutionObservation): ToolPerformanceStats {
+	recordExecution(input: ToolExecutionObservation): ToolPerformanceStats {
+		// The replay callback owns this bounded snapshot. Caller mutation, reuse or later
+		// freezing of persisted state must never change the evidence already admitted.
+		const observation: ToolExecutionObservation = {
+			key: capturePerformanceKey(input.key),
+			success: input.success,
+			latencyMs: input.latencyMs,
+			inputTokenEstimate: input.inputTokenEstimate,
+			outputTokenEstimate: input.outputTokenEstimate,
+			hintActiveAtCallTime: input.hintActiveAtCallTime,
+			at: input.at,
+			selection: {
+				firstTool: input.selection.firstTool,
+				disposition: input.selection.disposition,
+				recommendation: input.selection.recommendation,
+				shortlist: input.selection.shortlist.slice(0, MAX_SHORTLIST_TOOLS),
+				entropy: input.selection.entropy,
+				margin: input.selection.margin,
+				ranked: input.selection.ranked
+					.slice(0, MAX_RANKED_TOOLS)
+					.map(({ tool, utility, probability }) => ({ tool, utility, probability })),
+			},
+		};
 		const at = observation.at ?? new Date().toISOString();
 		return this.storage.mutateCurrentHost(
 			(host) => this.createHostData(host),
@@ -507,8 +534,6 @@ export class ToolPerformanceStore {
 					intentClass: observation.key.intentClass,
 					actualTool: observation.key.tool,
 					succeeded: observation.success,
-					ranked: observation.selection.ranked.slice(0, MAX_RANKED_TOOLS),
-					shortlist: observation.selection.shortlist.slice(0, MAX_SHORTLIST_TOOLS),
 					latencyMs,
 					inputTokenEstimate,
 					outputTokenEstimate,
