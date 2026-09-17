@@ -4,9 +4,13 @@ export const ANTIGRAVITY_PROVIDER = "google-antigravity";
 export const ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 export const ANTIGRAVITY_VERSION = "1.2.3";
 
+function isAntigravityObject(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 export function antigravityObject(value: unknown): Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid Antigravity response");
-	return value as Record<string, unknown>;
+	if (!isAntigravityObject(value)) throw new Error("Invalid Antigravity response");
+	return value;
 }
 
 export function antigravityHeaders(
@@ -45,7 +49,8 @@ export function parseAntigravityModels(raw: unknown): Model<"google-antigravity"
 	if (entries.length > 200) throw new Error("Antigravity model catalog exceeds its size limit");
 	const models: Model<"google-antigravity">[] = [];
 	for (const [id, value] of entries) {
-		const info = antigravityObject(value);
+		if (!isAntigravityObject(value)) continue;
+		const info = value;
 		// This adapter exposes Gemini chat models, not internal completion or image-generation routes.
 		if (!/^gemini-[a-z0-9.-]+$/.test(id) || id.includes("image") || info.isInternal) continue;
 		if (!Number.isSafeInteger(info.maxTokens) || !Number.isSafeInteger(info.maxOutputTokens)) continue;

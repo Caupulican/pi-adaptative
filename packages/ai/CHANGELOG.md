@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Antigravity model discovery skips malformed individual entries while retaining valid advertised models, preventing unrelated catalog metadata from aborting subscription login or refresh.
+
 ## [0.99.27] - 2026-09-16
 
 ## [0.99.26] - 2026-09-16
