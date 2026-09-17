@@ -572,10 +572,18 @@ function getBedrockBaseUrl(modelId: string): string {
 		: "https://bedrock-runtime.us-east-1.amazonaws.com";
 }
 
+async function fetchModelCatalogResponse(url: string): Promise<Response> {
+	const response = await fetch(url);
+	if (!response.ok) {
+		throw new Error(`Model catalog request failed (${response.status}): ${url}`);
+	}
+	return response;
+}
+
 async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from OpenRouter API...");
-		const response = await fetch("https://openrouter.ai/api/v1/models");
+		const response = await fetchModelCatalogResponse("https://openrouter.ai/api/v1/models");
 		const data = await response.json();
 
 		const models: Model<any>[] = [];
@@ -625,15 +633,14 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 		console.log(`Fetched ${models.length} tool-capable models from OpenRouter`);
 		return models;
 	} catch (error) {
-		console.error("Failed to fetch OpenRouter models:", error);
-		return [];
+		throw new Error("Failed to fetch OpenRouter models", { cause: error });
 	}
 }
 
 async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from Vercel AI Gateway API...");
-		const response = await fetch(`${AI_GATEWAY_MODELS_URL}/models`);
+		const response = await fetchModelCatalogResponse(`${AI_GATEWAY_MODELS_URL}/models`);
 		const data = await response.json();
 		const models: Model<any>[] = [];
 
@@ -683,15 +690,14 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 		console.log(`Fetched ${models.length} tool-capable models from Vercel AI Gateway`);
 		return models;
 	} catch (error) {
-		console.error("Failed to fetch Vercel AI Gateway models:", error);
-		return [];
+		throw new Error("Failed to fetch Vercel AI Gateway models", { cause: error });
 	}
 }
 
 async function loadModelsDevData(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from models.dev API...");
-		const response = await fetch("https://models.dev/api.json");
+		const response = await fetchModelCatalogResponse("https://models.dev/api.json");
 		const data = await response.json();
 
 		const models: Model<any>[] = [];
@@ -1367,8 +1373,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		console.log(`Loaded ${models.length} tool-capable models from models.dev`);
 		return models;
 	} catch (error) {
-		console.error("Failed to load models.dev data:", error);
-		return [];
+		throw new Error("Failed to load models.dev data", { cause: error });
 	}
 }
 
@@ -1380,6 +1385,15 @@ async function generateModels() {
 	const modelsDevModels = await loadModelsDevData();
 	const openRouterModels = await fetchOpenRouterModels();
 	const aiGatewayModels = await fetchAiGatewayModels();
+	// Empty feeds cannot be distinguished from an upstream outage or schema change.
+	// Refuse publication before adding synthetic entries that could hide a failed source.
+	for (const [source, models] of [
+		["models.dev", modelsDevModels],
+		["OpenRouter", openRouterModels],
+		["Vercel AI Gateway", aiGatewayModels],
+	] as const) {
+		if (models.length === 0) throw new Error(`Refusing to publish model catalog: ${source} returned no usable models`);
+	}
 
 	// Combine models (models.dev has priority)
 	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels, ...FUGU_MODELS].filter(

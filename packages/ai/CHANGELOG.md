@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Model catalog refreshes stop before publication when a source request fails, returns an unsuccessful HTTP status, or produces no usable models, preserving the existing catalog.
 - Claude OAuth callback denials with matching state terminate login and release the listener, including when manual input remains pending; stale or missing state cannot cancel another login.
 - Subscription token refresh margins preserve a usable interval for short-lived tokens instead of triggering a new refresh on every request.
 - Concurrent OAuth refreshes share work only for the same provider adapter and refresh token, including rejected-key recovery. Storage retains its captured adapter through lock acquisition, preventing credentials or failures from crossing accounts or replacement adapters.
