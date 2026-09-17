@@ -178,11 +178,16 @@ export class ProviderLimitStore {
 	}
 
 	/** Forget a live limit whose reason is one of `reasons` (all reasons when omitted). */
-	clear(provider: string, reasons?: readonly ProviderLimitReason[]): boolean {
+	clear(
+		provider: string,
+		reasons?: readonly ProviderLimitReason[],
+		recordedBefore = Number.POSITIVE_INFINITY,
+	): boolean {
 		const path = this.limitPath(provider);
 		return withFileLockSync(path, () => {
 			const existing = this.readPath(path);
 			if (!existing) return false;
+			if (existing.recordedAt >= recordedBefore) return false;
 			if (reasons && !reasons.includes(existing.reason)) return false;
 			rmSync(path, { force: true });
 			return true;
@@ -304,13 +309,16 @@ export function observeProviderResult(
 	message: AssistantMessage,
 	nowMs: number,
 	key: string = message.provider,
+	requestStartedAt = Number.NEGATIVE_INFINITY,
 ): void {
 	const provider = key;
 	if (message.stopReason === "error") {
 		const limit = providerLimitFromFailure(message.provider, message.errorMessage ?? "", nowMs);
 		if (limit) store.record(provider, limit);
 	} else if (message.stopReason !== "aborted") {
-		store.clear(provider, ["rate_limit", "overloaded"]);
+		// A response to an older request cannot prove that a sibling's newer limit has recovered.
+		// Unknown request ownership likewise cannot clear another request's evidence.
+		store.clear(provider, ["rate_limit", "overloaded"], requestStartedAt);
 	}
 	for (const diagnostic of message.diagnostics ?? []) {
 		if (diagnostic.type !== "openai_codex_subscription_rate_limits") continue;

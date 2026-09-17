@@ -389,7 +389,7 @@ describe("ProviderLimitStore", () => {
 		expect(store.read("xai")).toBeUndefined();
 		observeProviderResult(store, failed("429 rate limit; retry after 45 seconds"), now);
 		expect(store.read("xai")).toMatchObject({ reason: "rate_limit", limitedUntil: now + 45_000 });
-		observeProviderResult(store, { ...fauxAssistantMessage("served"), provider: "xai" }, now);
+		observeProviderResult(store, { ...fauxAssistantMessage("served"), provider: "xai" }, now + 1, "xai", now + 1);
 		expect(store.read("xai")).toBeUndefined();
 	});
 });

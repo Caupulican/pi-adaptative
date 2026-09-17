@@ -277,15 +277,24 @@ export async function admitProviderRequest(
  */
 export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissionGateDeps): StreamFn {
 	return async (model, context, options) => {
-		const release = await admitProviderRequest(model.provider, deps, options?.signal);
+		const key = deps.getAccountKey?.(model.provider) ?? model.provider;
+		const release = await admitProviderRequest(
+			model.provider,
+			{ ...deps, getAccountKey: () => key },
+			options?.signal,
+		);
+		const requestStartedAt = (deps.now ?? Date.now)();
 		let released = false;
 		const releaseOnce = (): void => {
 			if (released) return;
 			released = true;
+			options?.signal?.removeEventListener("abort", releaseOnce);
 			release();
 		};
+		options?.signal?.addEventListener("abort", releaseOnce, { once: true });
 		let inner: Awaited<ReturnType<StreamFn>>;
 		try {
+			options?.signal?.throwIfAborted();
 			inner = await streamFn(model, context, options);
 		} catch (error) {
 			releaseOnce();
@@ -296,12 +305,7 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 				releaseOnce();
 				if (deps.limits) {
 					try {
-						observeProviderResult(
-							deps.limits,
-							message,
-							(deps.now ?? Date.now)(),
-							deps.getAccountKey?.(model.provider) ?? model.provider,
-						);
+						observeProviderResult(deps.limits, message, (deps.now ?? Date.now)(), key, requestStartedAt);
 					} catch {
 						// Shared-state bookkeeping must never fail the request it observes.
 					}
@@ -309,7 +313,6 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 			},
 			() => releaseOnce(),
 		);
-		options?.signal?.addEventListener("abort", releaseOnce, { once: true });
 		return inner;
 	};
 }

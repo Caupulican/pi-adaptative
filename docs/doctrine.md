@@ -528,7 +528,12 @@ its budget and otherwise refuses the request unsent with a message the reliabili
 reads as a rate limit carrying the remaining delay, so no retry ladder rediscovers a limit at the
 account's expense; a worker's own retry ladder publishes its wait the same way. Counts and limits
 are keyed by provider plus credential identity (`<provider>#<identity>`, never a secret), so two
-accounts on one provider are two budgets. A success clears a rate-limit or overload record. The emergency stop
+accounts on one provider are two budgets. Admission captures that identity once and retains it
+through result observation, even if the session's credentials change. A success clears a rate-limit
+or overload record only when its request started strictly after that record was published; an older,
+same-timestamp, or unknown-start success cannot establish recovery from a sibling's newer failure.
+Cancellation cleanup is installed before transport creation is awaited, and completion, rejection,
+or cancellation releases the hold and removes its listener. The emergency stop
 (`<agentDir>/ESTOP`) holds new worker and background requests in every process and never the
 foreground. A foreground request is otherwise registered and admitted at once. A worker or background request to a
 provider at its configured limit (`providerAdmission.limits`; no provider is capped by default,
@@ -540,7 +545,8 @@ perf profiler, so waiting is neither a connect stall nor time to first token. Wh
 request in flight from any process cut generation from 97.7 to 62.2 tokens per second, and no
 process knew what its siblings were sending; the census did not measure the count at which a cap
 pays for itself, so the ledger records by default and a limit is the owner's choice. Pinned by
-`packages/coding-agent/test/provider-admission.test.ts`.
+`packages/coding-agent/test/provider-admission.test.ts` and
+`packages/coding-agent/test/provider-admission-completion.test.ts`.
 
 **Queue validation cannot substitute a directory or start an attempt twice.** Fresh worker and
 verifier contracts capture native directory identity before durable dispatch. Queued and resumed
@@ -713,6 +719,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-17 | Provider completion retains its admitted account identity. Successful recovery requires a request start strictly newer than the stored cooldown, so late or unowned successes cannot erase sibling limits. Cancellation during transport creation releases admission immediately. |
 | 2026-09-16 | Specialist reuse admission compares compiled options at the host, including named read-only requests; replay identity survives branch-leaf changes. The new explicit parallel-work field receives a separate 75-token allowance while the old 875-token delegate surface and aggregate base-tool ceiling remain fixed. |
 | 2026-09-15 | Read miss locates via `filesystem.file.exists`; write-create is a separate kind and is not loaded from that observation. Phone filesystem workflow asserts locate evidence, not create teaching. |
 | 2026-09-13 | CI follow-up: memory shares final prompt capacity; persona framing cannot consume the unbudgeted preference allowance; reload deduplicates unchanged drift notices. Transcript fixtures explicitly select empty grants while default-authority tests exercise YOLO. The closed goal edge vocabulary adds 28 schema tokens; the aggregate ceiling stays fixed. |
