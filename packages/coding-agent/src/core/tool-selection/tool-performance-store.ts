@@ -14,6 +14,8 @@ const MAX_OBSERVATIONS_PER_HOST = 1_000;
 const MAX_OBSERVATION_BYTES_PER_HOST = 256 * 1024;
 const TARGET_OBSERVATION_BYTES_PER_HOST = 192 * 1024;
 const MAX_INTENT_AGREEMENT_PER_HOST = 500;
+const MAX_RANKED_TOOLS = 6;
+const MAX_SHORTLIST_TOOLS = 3;
 const EWMA_ALPHA = 0.25;
 
 export type ToolSelectionIntentClass = "read" | "search" | "execute" | "write" | "retrieve" | "explain" | "other";
@@ -143,20 +145,29 @@ function isStats(value: unknown): value is ToolPerformanceStats {
 		typeof value.modelRef === "string" &&
 		isIntentClass(value.intentClass) &&
 		typeof value.tool === "string" &&
-		typeof value.alpha === "number" &&
-		typeof value.beta === "number" &&
-		typeof value.sampleCount === "number" &&
-		typeof value.repairCount === "number" &&
-		typeof value.bounceCount === "number" &&
-		typeof value.failureCount === "number" &&
-		typeof value.lastUsedAt === "string"
+		isCount(value.alpha) &&
+		value.alpha > 0 &&
+		isCount(value.beta) &&
+		value.beta > 0 &&
+		isCount(value.sampleCount) &&
+		isCount(value.repairCount) &&
+		isCount(value.bounceCount) &&
+		isCount(value.failureCount) &&
+		value.failureCount <= value.sampleCount &&
+		value.beta === value.failureCount + 1 &&
+		value.alpha === value.sampleCount - value.failureCount + 1 &&
+		isOptionalMeasurement(value.latencyEwmaMs) &&
+		isOptionalMeasurement(value.latencyDeviationEwmaMs) &&
+		isOptionalMeasurement(value.inputTokenEstimateEwma) &&
+		isOptionalMeasurement(value.outputTokenEstimateEwma) &&
+		isTimestamp(value.lastUsedAt)
 	);
 }
 
 function isObservation(value: unknown): value is ToolSelectionObservation {
 	return (
 		isRecordObject(value) &&
-		typeof value.at === "string" &&
+		isTimestamp(value.at) &&
 		typeof value.modelRef === "string" &&
 		isIntentClass(value.intentClass) &&
 		typeof value.actualTool === "string" &&
@@ -164,20 +175,27 @@ function isObservation(value: unknown): value is ToolSelectionObservation {
 		typeof value.succeeded === "boolean" &&
 		(value.disposition === "recommend" || value.disposition === "shortlist" || value.disposition === "abstain") &&
 		Array.isArray(value.shortlist) &&
+		value.shortlist.length <= MAX_SHORTLIST_TOOLS &&
 		value.shortlist.every((tool) => typeof tool === "string") &&
-		typeof value.entropy === "number" &&
+		finiteNonNegative(value.entropy) !== undefined &&
 		typeof value.margin === "number" &&
+		Number.isFinite(value.margin) &&
 		Array.isArray(value.ranked) &&
+		value.ranked.length <= MAX_RANKED_TOOLS &&
 		value.ranked.every(
 			(entry) =>
 				isRecordObject(entry) &&
 				typeof entry.tool === "string" &&
 				typeof entry.utility === "number" &&
-				typeof entry.probability === "number",
+				Number.isFinite(entry.utility) &&
+				typeof entry.probability === "number" &&
+				Number.isFinite(entry.probability) &&
+				entry.probability >= 0 &&
+				entry.probability <= 1,
 		) &&
-		(value.latencyMs === undefined || typeof value.latencyMs === "number") &&
-		(value.inputTokenEstimate === undefined || typeof value.inputTokenEstimate === "number") &&
-		(value.outputTokenEstimate === undefined || typeof value.outputTokenEstimate === "number")
+		isOptionalMeasurement(value.latencyMs) &&
+		isOptionalMeasurement(value.inputTokenEstimate) &&
+		isOptionalMeasurement(value.outputTokenEstimate)
 	);
 }
 
@@ -186,11 +204,15 @@ function isIntentAgreement(value: unknown): value is ToolSelectionIntentAgreemen
 		isRecordObject(value) &&
 		typeof value.modelRef === "string" &&
 		isIntentClass(value.intentClass) &&
-		typeof value.sampleCount === "number" &&
-		typeof value.agreementCount === "number" &&
-		typeof value.hintActiveSampleCount === "number" &&
-		typeof value.hintActiveAgreementCount === "number" &&
-		typeof value.lastUpdatedAt === "string"
+		isCount(value.sampleCount) &&
+		isCount(value.agreementCount) &&
+		isCount(value.hintActiveSampleCount) &&
+		isCount(value.hintActiveAgreementCount) &&
+		value.agreementCount <= value.sampleCount &&
+		value.hintActiveSampleCount <= value.sampleCount &&
+		value.hintActiveAgreementCount <= value.hintActiveSampleCount &&
+		value.hintActiveAgreementCount <= value.agreementCount &&
+		isTimestamp(value.lastUpdatedAt)
 	);
 }
 
@@ -223,7 +245,19 @@ function emptyIntentAgreement(
 	};
 }
 
-function finiteNonNegative(value: number | undefined): number | undefined {
+function isCount(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isTimestamp(value: unknown): value is string {
+	return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function isOptionalMeasurement(value: unknown): boolean {
+	return value === undefined || finiteNonNegative(value) !== undefined;
+}
+
+function finiteNonNegative(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
@@ -287,14 +321,22 @@ function parseHost(value: unknown, hostId: string): HostToolPerformanceData | un
 	const intentAgreementRaw = isRecordObject(value.intentAgreement) ? value.intentAgreement : {};
 	return {
 		host,
-		stats: Object.fromEntries(
-			Object.entries(value.stats).filter((entry): entry is [string, ToolPerformanceStats] => isStats(entry[1])),
+		stats: trimStats(
+			Object.fromEntries(
+				Object.entries(value.stats).filter(
+					(entry): entry is [string, ToolPerformanceStats] => isStats(entry[1]) && entry[0] === statKey(entry[1]),
+				),
+			),
 		),
 		observations: observations.observations,
 		observationBytes: observations.bytes,
-		intentAgreement: Object.fromEntries(
-			Object.entries(intentAgreementRaw).filter((entry): entry is [string, ToolSelectionIntentAgreement] =>
-				isIntentAgreement(entry[1]),
+		intentAgreement: trimIntentAgreement(
+			Object.fromEntries(
+				Object.entries(intentAgreementRaw).filter(
+					(entry): entry is [string, ToolSelectionIntentAgreement] =>
+						isIntentAgreement(entry[1]) &&
+						entry[0] === intentAgreementKey(entry[1].modelRef, entry[1].intentClass),
+				),
 			),
 		),
 	};
@@ -465,8 +507,8 @@ export class ToolPerformanceStore {
 					intentClass: observation.key.intentClass,
 					actualTool: observation.key.tool,
 					succeeded: observation.success,
-					ranked: observation.selection.ranked.slice(0, 6),
-					shortlist: observation.selection.shortlist.slice(0, 3),
+					ranked: observation.selection.ranked.slice(0, MAX_RANKED_TOOLS),
+					shortlist: observation.selection.shortlist.slice(0, MAX_SHORTLIST_TOOLS),
 					latencyMs,
 					inputTokenEstimate,
 					outputTokenEstimate,
