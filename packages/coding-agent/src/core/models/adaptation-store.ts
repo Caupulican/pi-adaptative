@@ -437,9 +437,20 @@ export class ModelAdaptationStore {
 		).entry!;
 	}
 
-	setToolProbe(model: string, toolProbe: ModelToolProbe, at?: string): StoredModelAdaptation {
+	/** A graded text route and its successful calibration share one durable transaction. */
+	setToolProbe(
+		model: string,
+		toolProbe: ModelToolProbe,
+		at?: string,
+		protocol?: ModelProtocolCalibration,
+	): StoredModelAdaptation {
 		const now = at ?? toolProbe.probedAt;
-		return this.mutateProfile(model, new Date(now), (profile) => ({ ...profile, toolProbe }), now).entry!;
+		return this.mutateProfile(
+			model,
+			new Date(now),
+			(profile) => ({ ...profile, toolProbe, ...(protocol ? { protocol } : {}) }),
+			now,
+		).entry!;
 	}
 
 	recordPerfSample(model: string, sample: ModelPerfSample, at?: string): StoredModelAdaptation | undefined {
