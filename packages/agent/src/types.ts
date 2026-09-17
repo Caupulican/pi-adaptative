@@ -1119,6 +1119,12 @@ export type AgentToolFailureRecoveryAction = {
 
 /** Tool-owned failure targets and recovery actions. Undeclared behavior has no recovery authority. */
 export interface AgentToolFailureRecoveryContract<TParameters extends TSchema> {
+	/**
+	 * Pure projection of the timeout actually applied by this executor, in milliseconds, including
+	 * defaults and clamping. Undefined means no comparable bound; the host must not guess from args
+	 * when this method is declared. The same resolver must supply the executor's own timeout.
+	 */
+	getTimeoutMs?: (params: Static<TParameters>) => number | undefined;
 	/** Tool-owned corrective instruction, separate from raw diagnostics and execution admission. */
 	getFailureCorrection?: (params: Static<TParameters>, failure: AgentToolFailureEvidenceContext) => string | undefined;
 	/** Derive exact recovery requirements from validated arguments and a classified failure. */

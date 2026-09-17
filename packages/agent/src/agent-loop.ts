@@ -512,7 +512,7 @@ async function runLoop(
 	);
 	const verificationObligations = new VerificationObligationTracker(currentContext.messages);
 	const toolFailureRecoveryGate = continuationState.toolFailureRecoveryGate;
-	toolFailureRecoveryGate.restoreFromMessages(currentContext.messages);
+	toolFailureRecoveryGate.restoreFromMessages(currentContext.messages, currentContext.tools);
 	let lastSuccessfulTextProtocolBatch: SuccessfulTextProtocolBatch | undefined;
 	let previousAssistantForDegenerateCollapse: AssistantMessage | undefined;
 	// Check for steering messages at start (user may have typed while waiting)

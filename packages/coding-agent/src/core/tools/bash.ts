@@ -108,7 +108,7 @@ export function setCommandTimeoutMsForTests(ms: number | undefined): void {
 
 export function resolveCommandTimeoutSeconds(timeout: number | undefined): number {
 	if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) {
-		return DEFAULT_COMMAND_TIMEOUT_SECONDS;
+		return (commandTimeoutMsOverride ?? DEFAULT_COMMAND_TIMEOUT_SECONDS * 1000) / 1000;
 	}
 	return Math.max(MIN_COMMAND_TIMEOUT_SECONDS, Math.min(timeout, MAX_COMMAND_TIMEOUT_SECONDS));
 }
@@ -841,6 +841,7 @@ function createShellToolDefinition(
 		parameters: bashSchema,
 		backgroundRequested: (input) => input.background === true,
 		failureRecovery: {
+			getTimeoutMs: (params) => resolveCommandTimeoutSeconds(params.timeout) * 1000,
 			getFailureTargets: (params, failure) =>
 				failureRecoveryAuthority &&
 				/^exit_-?[1-9]\d*$/.test(failure.failureCode) &&
@@ -1113,10 +1114,7 @@ function createShellToolDefinition(
 					"operation_outcome",
 				);
 			};
-			const effectiveTimeoutSeconds =
-				typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0
-					? resolveCommandTimeoutSeconds(timeout)
-					: (commandTimeoutMsOverride ?? DEFAULT_COMMAND_TIMEOUT_SECONDS * 1000) / 1000;
+			const effectiveTimeoutSeconds = resolveCommandTimeoutSeconds(timeout);
 
 			// One execution path for the shell: routing on the Windows contract, the operator's command
 			// prefix, the spawn hook, the session env, the mutation barrier. The main command and the

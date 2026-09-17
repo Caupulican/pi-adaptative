@@ -53,12 +53,27 @@ const ENVELOPE_BOUND_KEYS = new Set([
 ]);
 
 interface EnvelopeBound {
-	field: string;
-	value: number;
+	/** Null identifies the executor-owned timeout in milliseconds, never an argument alias. */
+	field: string | null;
+	value: number | undefined;
 }
 
 /** Keep one unambiguous bound's exact field identity; different fields may use different units. */
-function readEnvelopeBound(args: unknown): EnvelopeBound | undefined {
+function readEnvelopeBound(args: unknown, tool?: AgentTool<any>): EnvelopeBound | undefined {
+	try {
+		const contract = tool?.failureRecovery;
+		const getTimeoutMs = contract?.getTimeoutMs;
+		if (getTimeoutMs) {
+			const value: unknown = Reflect.apply(getTimeoutMs, contract, [args]);
+			return {
+				field: null,
+				value: typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined,
+			};
+		}
+	} catch {
+		// A broken projection grants no escalation and cannot revive argument guessing.
+		return { field: null, value: undefined };
+	}
 	if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
 	let bound: EnvelopeBound | undefined;
 	for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
@@ -105,6 +120,8 @@ export type ToolFailureRecoveryAdmission =
  * operation again before anything else has changed cannot yield different information.
  */
 interface OperationState {
+	/** An earlier part of this episode fell out of the bounded restore index; replay before admission. */
+	needsReplay?: boolean;
 	record: ToolFailureMemoryRecord;
 	worldCursorAtLastExecution: number;
 	/**
@@ -114,8 +131,8 @@ interface OperationState {
 	 */
 	unchangedRetriesRemaining: number;
 	/**
-	 * Unambiguous resource-envelope bound this operation carried when it last ran. The exact field
-	 * must match before comparing values, so a value in seconds is never compared to milliseconds.
+	 * The executor's effective milliseconds when declared, otherwise one unambiguous argument field.
+	 * Different sources/fields never compare, so seconds cannot be compared to milliseconds.
 	 */
 	envelopeBound?: EnvelopeBound;
 	/**
@@ -174,9 +191,9 @@ class SeenExecutionFilter {
  * since that operation last ran. Until then the replay is refused, because its result is already in
  * the transcript.
  *
- * The world cursor is the whole budget. There are no per-operation attempt counts, no probe quotas,
- * and no circuits that stay open for the rest of the session: correct repair work always re-admits
- * the operation it repaired, however many times the agent needs it.
+ * World advances refresh an episode. Within an episode the failure catalogue may allow one unchanged
+ * retry, and a timeout may allow two material bound increases. No circuit stays open for the rest of
+ * the session: corrective work re-admits the operation it repaired however many times it is needed.
  *
  * Refusal is always local to one operation. This gate cannot deny an unrelated tool, cannot
  * terminate a tool batch, and cannot end a run — a stuck agent is the runaway-loop backstop's
@@ -197,27 +214,29 @@ export class ToolFailureRecoveryGate {
 		return this.statesByExecutionKey.size === 0;
 	}
 
-	restoreFromMessages(messages: readonly AgentMessage[]): void {
+	restoreFromMessages(messages: readonly AgentMessage[], tools: readonly AgentTool<any>[] = []): void {
 		this.trackTranscript(messages);
 		if (this.restoredFromTranscript || !this.isEmpty()) return;
 		this.restoredFromTranscript = true;
-		this.worldCursor = walkTranscript(messages, (event) => {
-			if (event.kind === "resolved") {
-				this.statesByExecutionKey.delete(event.executionKey);
-				return;
-			}
-			this.seenUnproductiveExecutions.add(event.executionKey);
-			// A restored state starts with no transient-retry allowance: the transcript already shows the
-			// attempts that were made, and the new user turn that triggers a restore has itself moved the
-			// world, which is the broader permission anyway.
-			this.retainState(event.executionKey, {
-				record: event.record,
-				worldCursorAtLastExecution: event.worldCursor,
-				unchangedRetriesRemaining: 0,
-				envelopeBound: event.envelopeBound,
-				boundEscalationsRemaining: MAX_BOUND_ESCALATIONS_PER_EPISODE,
-			});
-		});
+		this.worldCursor = walkTranscript(
+			messages,
+			(event) => {
+				if (event.kind === "resolved") {
+					this.statesByExecutionKey.delete(event.executionKey);
+					return;
+				}
+				const previous = this.statesByExecutionKey.get(event.executionKey);
+				const needsReplay =
+					previous?.needsReplay ||
+					(!previous && this.seenUnproductiveExecutions.mightContain(event.executionKey));
+				this.seenUnproductiveExecutions.add(event.executionKey);
+				this.retainState(event.executionKey, { ...restoreObservedState(previous, event), needsReplay });
+			},
+			tools,
+		);
+		// Preserve the existing conservative restart policy for transient unchanged retries. Replay
+		// computes their spending first so it can distinguish them from bound escalations correctly.
+		for (const state of this.statesByExecutionKey.values()) state.unchangedRetriesRemaining = 0;
 	}
 
 	/**
@@ -282,9 +301,21 @@ export class ToolFailureRecoveryGate {
 		this.trackTranscript(messages);
 		const executionKey = getToolExecutionKey(tool.name, args, executionScope);
 		if (this.resolvedBeforeTranscriptCommit.has(executionKey)) return { kind: "allowed" };
+		const incomingBound = readEnvelopeBound(args, tool);
 		let state = this.getHotState(executionKey);
-		if (!state && this.seenUnproductiveExecutions.mightContain(executionKey)) {
-			state = this.restoreOperationFromTranscript(executionKey);
+		if (
+			state?.needsReplay ||
+			(!state && this.seenUnproductiveExecutions.mightContain(executionKey)) ||
+			(state && incomingBound?.field === null && state.envelopeBound?.field !== null)
+		) {
+			const restored = this.restoreOperationFromTranscript(executionKey, tool);
+			if (restored) state = restored;
+			else if (state) {
+				// Missing history cannot erase a known failure or fabricate its execution bound.
+				state.envelopeBound = undefined;
+				state.boundEscalationsRemaining = 0;
+				state.needsReplay = false;
+			}
 		}
 		if (
 			!state &&
@@ -298,8 +329,8 @@ export class ToolFailureRecoveryGate {
 				record,
 				worldCursorAtLastExecution: this.worldCursor,
 				unchangedRetriesRemaining: 0,
-				envelopeBound: readEnvelopeBound(args),
-				boundEscalationsRemaining: MAX_BOUND_ESCALATIONS_PER_EPISODE,
+				// The incoming request is not evidence of the bound used by this retained failure.
+				boundEscalationsRemaining: 0,
 			};
 			this.retainState(executionKey, state);
 		}
@@ -318,25 +349,7 @@ export class ToolFailureRecoveryGate {
 		}
 
 		if (this.worldCursor > state.worldCursorAtLastExecution) return { kind: "allowed" };
-		if (state.unchangedRetriesRemaining > 0) {
-			state.unchangedRetriesRemaining--;
-			return { kind: "allowed" };
-		}
-		// Raising the bound is the canonical repair for a timeout. Admit a strict, material increase,
-		// a bounded number of times, so the one fix that addresses the cause is not classified as no fix.
-		if (state.record.phase === "timeout" && state.boundEscalationsRemaining > 0) {
-			const incomingBound = readEnvelopeBound(args);
-			if (
-				incomingBound !== undefined &&
-				state.envelopeBound !== undefined &&
-				incomingBound.field === state.envelopeBound.field &&
-				incomingBound.value >= state.envelopeBound.value * MIN_BOUND_ESCALATION_FACTOR
-			) {
-				state.boundEscalationsRemaining--;
-				state.envelopeBound = incomingBound;
-				return { kind: "allowed" };
-			}
-		}
+		if (consumeRetryAllowance(state, incomingBound)) return { kind: "allowed" };
 		return { kind: "blocked", record: state.record, envelopeOnlyChange: rawArgumentsDiffer };
 	}
 
@@ -346,30 +359,18 @@ export class ToolFailureRecoveryGate {
 			this.observeSuccess(effect.tool, effect.args, effect.executionScope);
 			return;
 		}
-		this.observeUnproductive(effect.record, effect.args);
+		this.observeUnproductive(effect.record, effect.args, effect.tool);
 	}
 
-	private observeUnproductive(record: ToolFailureMemoryRecord, args: unknown): void {
+	private observeUnproductive(record: ToolFailureMemoryRecord, args: unknown, tool?: AgentTool<any>): void {
 		const executionKey = getToolExecutionKey(record.tool, args, getToolFailureRecordExecutionScope(record));
 		this.resolvedBeforeTranscriptCommit.delete(executionKey);
 		this.seenUnproductiveExecutions.add(executionKey);
 		const previous = this.statesByExecutionKey.get(executionKey);
-		// The transient-retry allowance belongs to one episode: it refills when the world has moved
-		// since this operation last ran, and is otherwise spent down so a transient class cannot
-		// bankroll an unbounded run of identical calls.
-		const startsFreshEpisode = !previous || previous.worldCursorAtLastExecution !== this.worldCursor;
-		this.retainState(executionKey, {
-			record,
-			worldCursorAtLastExecution: this.worldCursor,
-			unchangedRetriesRemaining: startsFreshEpisode
-				? getToolExecutionUnchangedRetryLimit(record.failureCode)
-				: previous.unchangedRetriesRemaining,
-			// The bound just executed becomes the baseline the next one must materially beat.
-			envelopeBound: readEnvelopeBound(args),
-			boundEscalationsRemaining: startsFreshEpisode
-				? MAX_BOUND_ESCALATIONS_PER_EPISODE
-				: previous.boundEscalationsRemaining,
-		});
+		this.retainState(
+			executionKey,
+			observeFailureState(record, readEnvelopeBound(args, tool), this.worldCursor, previous),
+		);
 	}
 
 	private observeSuccess(tool: AgentTool<any>, args: unknown, executionScope?: string): void {
@@ -416,22 +417,20 @@ export class ToolFailureRecoveryGate {
 		}
 	}
 
-	private restoreOperationFromTranscript(executionKey: string): OperationState | undefined {
+	private restoreOperationFromTranscript(executionKey: string, tool: AgentTool<any>): OperationState | undefined {
 		let restored: OperationState | undefined;
-		walkTranscript(this.transcriptMessages, (event) => {
-			if (event.executionKey !== executionKey) return;
-			restored =
-				event.kind === "resolved"
-					? undefined
-					: {
-							record: event.record,
-							worldCursorAtLastExecution: event.worldCursor,
-							unchangedRetriesRemaining: 0,
-							envelopeBound: event.envelopeBound,
-							boundEscalationsRemaining: MAX_BOUND_ESCALATIONS_PER_EPISODE,
-						};
-		});
-		if (restored) this.retainState(executionKey, restored);
+		walkTranscript(
+			this.transcriptMessages,
+			(event) => {
+				if (event.executionKey !== executionKey) return;
+				restored = event.kind === "resolved" ? undefined : restoreObservedState(restored, event);
+			},
+			[tool],
+		);
+		if (restored) {
+			restored.unchangedRetriesRemaining = 0;
+			this.retainState(executionKey, restored);
+		}
 		return restored;
 	}
 }
@@ -444,7 +443,78 @@ type TranscriptEvent =
 			worldCursor: number;
 			record: ToolFailureMemoryRecord;
 			envelopeBound?: EnvelopeBound;
+			replayRefused: boolean;
 	  };
+
+/** One allowance transition for live admission and transcript reconstruction. */
+function consumeRetryAllowance(state: OperationState, incomingBound: EnvelopeBound | undefined): boolean {
+	if (state.unchangedRetriesRemaining > 0) {
+		state.unchangedRetriesRemaining--;
+		return true;
+	}
+	const timeout =
+		state.record.phase === "timeout" ||
+		(state.record.phase === "execution" &&
+			state.record.failureCode === "timeout" &&
+			state.envelopeBound?.field === null);
+	if (
+		timeout &&
+		state.boundEscalationsRemaining > 0 &&
+		incomingBound?.value !== undefined &&
+		state.envelopeBound?.value !== undefined &&
+		incomingBound.field === state.envelopeBound.field &&
+		incomingBound.value >= state.envelopeBound.value * MIN_BOUND_ESCALATION_FACTOR
+	) {
+		state.boundEscalationsRemaining--;
+		state.envelopeBound = incomingBound;
+		return true;
+	}
+	return false;
+}
+
+function observeFailureState(
+	record: ToolFailureMemoryRecord,
+	envelopeBound: EnvelopeBound | undefined,
+	worldCursor: number,
+	previous: OperationState | undefined,
+): OperationState {
+	const fresh = !previous || previous.worldCursorAtLastExecution !== worldCursor;
+	return {
+		record,
+		worldCursorAtLastExecution: worldCursor,
+		unchangedRetriesRemaining: fresh
+			? getToolExecutionUnchangedRetryLimit(record.failureCode)
+			: previous.unchangedRetriesRemaining,
+		envelopeBound,
+		boundEscalationsRemaining: fresh ? MAX_BOUND_ESCALATIONS_PER_EPISODE : previous.boundEscalationsRemaining,
+	};
+}
+
+function restoreObservedState(
+	previous: OperationState | undefined,
+	event: Extract<TranscriptEvent, { kind: "unproductive" }>,
+): OperationState {
+	if (event.replayRefused) {
+		// A refusal did not execute its requested bound. With only a retained refusal and no original
+		// execution, there is no baseline or budget evidence; a real world advance still admits work.
+		return (
+			previous ?? {
+				record: event.record,
+				worldCursorAtLastExecution: event.worldCursor,
+				unchangedRetriesRemaining: 0,
+				boundEscalationsRemaining: 0,
+			}
+		);
+	}
+	if (
+		previous?.record.phase === "validation" &&
+		getToolFailureRecordRawKey(previous.record) !== getToolFailureRecordRawKey(event.record)
+	) {
+		previous = undefined;
+	}
+	if (previous?.worldCursorAtLastExecution === event.worldCursor) consumeRetryAllowance(previous, event.envelopeBound);
+	return observeFailureState(event.record, event.envelopeBound, event.worldCursor, previous);
+}
 
 /**
  * Replay a transcript's world advances in order, reporting each completed operation with the cursor
@@ -452,7 +522,11 @@ type TranscriptEvent =
  * every successful tool result, plus every user turn — so a resumed session admits precisely what an
  * uninterrupted one would. Returns the final cursor.
  */
-function walkTranscript(messages: readonly AgentMessage[], visit: (event: TranscriptEvent) => void): number {
+function walkTranscript(
+	messages: readonly AgentMessage[],
+	visit: (event: TranscriptEvent) => void,
+	tools: readonly AgentTool<any>[] = [],
+): number {
 	const callsById = new Map<string, { name: string; args: unknown }>();
 	let worldCursor = 0;
 	for (const message of messages) {
@@ -470,11 +544,8 @@ function walkTranscript(messages: readonly AgentMessage[], visit: (event: Transc
 		const call = callsById.get(message.toolCallId);
 		if (!call) continue;
 		callsById.delete(message.toolCallId);
-		const executionKey = getToolExecutionKey(
-			call.name,
-			call.args,
-			retainedToolInvocation(message.details)?.executionScope,
-		);
+		const invocation = retainedToolInvocation(message.details);
+		const executionKey = getToolExecutionKey(call.name, call.args, invocation?.executionScope);
 		if (!message.isError || isSuccessfulOperationWithHookFailure(message.details)) {
 			worldCursor++;
 			visit({ kind: "resolved", executionKey, worldCursor });
@@ -489,7 +560,17 @@ function walkTranscript(messages: readonly AgentMessage[], visit: (event: Transc
 		) {
 			continue;
 		}
-		visit({ kind: "unproductive", executionKey, worldCursor, record, envelopeBound: readEnvelopeBound(call.args) });
+		visit({
+			kind: "unproductive",
+			executionKey,
+			worldCursor,
+			record,
+			envelopeBound: readEnvelopeBound(call.args, tools.find((tool) => tool.name === call.name)),
+			replayRefused:
+				invocation?.execution !== "completed" &&
+				message.errorKind !== "operation_outcome" &&
+				readVisibleToolFailureCode(message) === "repeated_failed_operation",
+		});
 	}
 	return worldCursor;
 }
