@@ -103,6 +103,11 @@ type LockResult<T> = {
 	next?: string;
 };
 
+type OAuthStorageRevision = {
+	data: number;
+	provider: number;
+};
+
 const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
 
 export interface AuthStorageBackend {
@@ -247,6 +252,9 @@ export class InMemoryAuthStorageBackend implements AuthStorageBackend {
  */
 export class AuthStorage {
 	private data: AuthStorageData = {};
+	private dataRevision = 0;
+	private reloadRevision = 0;
+	private providerRevisions = new Map<string, number>();
 	private runtimeOverrides: Map<string, string> = new Map();
 	private fallbackResolver?: (provider: string) => string | undefined;
 	private loadError: Error | null = null;
@@ -318,6 +326,8 @@ export class AuthStorage {
 				return { result: undefined };
 			});
 			this.data = this.parseStorageData(content);
+			this.reloadRevision = ++this.dataRevision;
+			this.providerRevisions.clear();
 			this.loadError = null;
 		} catch (error) {
 			this.loadError = error as Error;
@@ -358,6 +368,7 @@ export class AuthStorage {
 	 */
 	set(provider: string, credential: AuthCredential): void {
 		this.data[provider] = credential;
+		this.providerRevisions.set(provider, ++this.dataRevision);
 		this.persistProviderChange(provider, credential);
 	}
 
@@ -366,6 +377,7 @@ export class AuthStorage {
 	 */
 	remove(provider: string): void {
 		delete this.data[provider];
+		this.providerRevisions.set(provider, ++this.dataRevision);
 		this.persistProviderChange(provider, undefined);
 	}
 
@@ -453,6 +465,45 @@ export class AuthStorage {
 		this.remove(provider);
 	}
 
+	private captureOAuthStorageRevision(providerId: string): OAuthStorageRevision {
+		return { data: this.dataRevision, provider: this.providerRevisions.get(providerId) ?? this.reloadRevision };
+	}
+
+	/** Publish a refresh or recovery snapshot only after the backend commits and releases its lock. */
+	private async withOAuthStorageLock<T>(
+		providerId: string,
+		fn: (current: AuthStorageData) => Promise<{ result: T; nextData?: AuthStorageData }>,
+		revision = this.captureOAuthStorageRevision(providerId),
+	): Promise<T | undefined> {
+		if (this.captureOAuthStorageRevision(providerId).provider !== revision.provider) return undefined;
+		const committed = await this.storage.withLockAsync<{ result: T; data: AuthStorageData } | undefined>(
+			async (current) => {
+				if (this.captureOAuthStorageRevision(providerId).provider !== revision.provider)
+					return { result: undefined };
+				const currentData = this.parseStorageData(current);
+				const update = await fn(currentData);
+				return {
+					result: { result: update.result, data: update.nextData ?? currentData },
+					next: update.nextData === undefined ? undefined : JSON.stringify(update.nextData, null, 2),
+				};
+			},
+		);
+		// Fence the returned key as well as the cache: a superseded rotation must not
+		// authorize a pending request after a local logout, replacement or reload.
+		if (!committed || this.captureOAuthStorageRevision(providerId).provider !== revision.provider) return undefined;
+		if (this.dataRevision === revision.data) {
+			this.data = committed.data;
+		} else {
+			// Other providers may change independently while this backend releases its lock.
+			const credential = committed.data[providerId];
+			if (credential) this.data[providerId] = credential;
+			else delete this.data[providerId];
+		}
+		this.providerRevisions.set(providerId, ++this.dataRevision);
+		this.loadError = null;
+		return committed.result;
+	}
+
 	/**
 	 * Refresh OAuth token with backend locking to prevent race conditions.
 	 * Multiple pi instances may try to refresh simultaneously when tokens expire.
@@ -465,11 +516,7 @@ export class AuthStorage {
 			return null;
 		}
 
-		const result = await this.storage.withLockAsync(async (current) => {
-			const currentData = this.parseStorageData(current);
-			this.data = currentData;
-			this.loadError = null;
-
+		const result = await this.withOAuthStorageLock(providerId, async (currentData) => {
 			const cred = currentData[providerId];
 			if (cred?.type !== "oauth") {
 				return { result: null };
@@ -495,12 +542,10 @@ export class AuthStorage {
 				...currentData,
 				[providerId]: { type: "oauth", ...refreshed.newCredentials },
 			};
-			this.data = merged;
-			this.loadError = null;
-			return { result: refreshed, next: JSON.stringify(merged, null, 2) };
+			return { result: refreshed, nextData: merged };
 		});
 
-		return result;
+		return result ?? null;
 	}
 
 	/**
@@ -513,9 +558,7 @@ export class AuthStorage {
 		const provider = getOAuthProvider(providerId);
 		if (!provider) return undefined;
 
-		return this.storage.withLockAsync(async (current) => {
-			const currentData = this.parseStorageData(current);
-			this.data = currentData;
+		return this.withOAuthStorageLock(providerId, async (currentData) => {
 			const credential = currentData[providerId];
 			if (credential?.type !== "oauth") return { result: undefined };
 
@@ -528,9 +571,7 @@ export class AuthStorage {
 				const refreshed = await provider.refreshToken(credential);
 				const nextCredential: OAuthCredential = { type: "oauth", ...refreshed };
 				const nextData = { ...currentData, [providerId]: nextCredential };
-				this.data = nextData;
-				this.loadError = null;
-				return { result: provider.getApiKey(nextCredential), next: JSON.stringify(nextData, null, 2) };
+				return { result: provider.getApiKey(nextCredential), nextData };
 			} catch (error) {
 				this.recordError(error);
 				return { result: undefined };
@@ -551,6 +592,7 @@ export class AuthStorage {
 		const provider = getOAuthProvider(providerId);
 		if (cred?.type !== "oauth" || !provider || this.loadError) return undefined;
 		if (Date.now() < cred.expires) return provider.getApiKey(cred);
+		const revision = this.captureOAuthStorageRevision(providerId);
 		try {
 			const refreshed = (await this.refreshOAuthTokenWithLock(providerId))?.apiKey;
 			if (refreshed !== undefined) return refreshed;
@@ -567,13 +609,24 @@ export class AuthStorage {
 		} catch (error) {
 			if (error instanceof OAuthCredentialUnusableError) throw error;
 			this.recordError(error);
-			this.reload();
-			const updated = this.data[providerId];
-			if (!this.loadError && updated?.type === "oauth" && Date.now() < updated.expires) {
+			let updated: AuthCredential | null | undefined;
+			try {
+				updated = await this.withOAuthStorageLock(
+					providerId,
+					async (current) => ({ result: current[providerId] ?? null }),
+					revision,
+				);
+			} catch (recoveryError) {
+				this.recordError(recoveryError);
+				throw new OAuthCredentialUnusableError(providerId, cred.expires, redactRefreshFailureReason(error));
+			}
+			// An explicit local intent or a removed stored OAuth credential wins over
+			// failure recovery too. Recovery must never replace the whole cache blindly.
+			if (updated?.type !== "oauth") return undefined;
+			if (Date.now() < updated.expires) {
 				return provider.getApiKey(updated);
 			}
-			const expiresAt = updated?.type === "oauth" ? updated.expires : cred.expires;
-			throw new OAuthCredentialUnusableError(providerId, expiresAt, redactRefreshFailureReason(error));
+			throw new OAuthCredentialUnusableError(providerId, updated.expires, redactRefreshFailureReason(error));
 		}
 	}
 
