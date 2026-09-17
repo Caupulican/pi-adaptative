@@ -3,6 +3,7 @@
 ### Fixed
 
 - Tool-recovery instructions acknowledge the host's unspent retry allowance, so the shared protocol no longer contradicts immediate timeout-retry guidance.
+- Tool preparation reserves retry credit until executor entry and refunds abandoned preparation; cleanup also releases bound invocations if background selection throws before execution starts.
 
 ## [0.99.27] - 2026-09-16
 

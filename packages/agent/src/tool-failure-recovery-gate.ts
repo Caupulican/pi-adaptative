@@ -103,6 +103,36 @@ export type ToolFailureRecoveryAdmission =
 			envelopeOnlyChange: boolean;
 	  };
 
+export interface ToolFailureRecoveryReservation {
+	/** Transfer reserved credit to an actual executor attempt. */
+	commit(): void;
+	/** Refund only credit whose executor has not started. Safe after commit or cancellation. */
+	cancel(): void;
+}
+
+type ReservedAdmission =
+	| { kind: "allowed"; reservation: ToolFailureRecoveryReservation }
+	| Extract<ToolFailureRecoveryAdmission, { kind: "blocked" }>;
+
+const UNCHARGED_RESERVATION: ToolFailureRecoveryReservation = Object.freeze({
+	commit() {},
+	cancel() {},
+});
+
+interface RetryBudget {
+	unchangedRetriesRemaining: number;
+	/** A timeout may buy only two material bound increases in one failure episode. */
+	boundEscalationsRemaining: number;
+}
+
+type RetryDebit = keyof RetryBudget;
+
+interface PendingRetry {
+	budget: RetryBudget;
+	debit: RetryDebit;
+	bound: EnvelopeBound | undefined;
+}
+
 /**
  * What is known about one exact operation the last time it ran to completion.
  *
@@ -116,22 +146,15 @@ interface OperationState {
 	record: ToolFailureMemoryRecord;
 	worldCursorAtLastExecution: number;
 	/**
-	 * Immediate identical retries this failure class still allows, from the execution-error catalogue.
-	 * Some classes are transient by nature — a timeout, a throttled backend — and repeating the exact
-	 * call really can return something new. Spending these does not depend on the world moving.
+	 * Credit belongs to an episode, not an observation object. Pending reservations and subsequent
+	 * failures in the same episode share this identity; a world advance creates a new budget.
 	 */
-	unchangedRetriesRemaining: number;
+	budget: RetryBudget;
 	/**
 	 * The executor's effective milliseconds when declared, otherwise one unambiguous argument field.
 	 * Different sources/fields never compare, so seconds cannot be compared to milliseconds.
 	 */
 	envelopeBound?: EnvelopeBound;
-	/**
-	 * Bound escalations this episode still allows. A timeout is the one failure whose canonical repair
-	 * is a bigger bound, so a strict, material increase buys an execution — but only a fixed few, or
-	 * the operation could be replayed forever by growing its own timeout.
-	 */
-	boundEscalationsRemaining: number;
 }
 
 interface AvailableRecoveryAction {
@@ -192,6 +215,8 @@ class SeenExecutionFilter {
  */
 export class ToolFailureRecoveryGate {
 	private readonly statesByExecutionKey = new Map<string, OperationState>();
+	/** Live reservations pin their state: transcript replay cannot reconstruct unstarted debits. */
+	private readonly pendingRetries = new Map<string, Set<PendingRetry>>();
 	private readonly seenUnproductiveExecutions = new SeenExecutionFilter();
 	/** Exact successes not yet present in the transcript snapshot consulted by admission. */
 	private readonly resolvedBeforeTranscriptCommit = new Set<string>();
@@ -227,7 +252,7 @@ export class ToolFailureRecoveryGate {
 		);
 		// Preserve the existing conservative restart policy for transient unchanged retries. Replay
 		// computes their spending first so it can distinguish them from bound escalations correctly.
-		for (const state of this.statesByExecutionKey.values()) state.unchangedRetriesRemaining = 0;
+		for (const state of this.statesByExecutionKey.values()) state.budget.unchangedRetriesRemaining = 0;
 	}
 
 	/**
@@ -278,7 +303,9 @@ export class ToolFailureRecoveryGate {
 		if (retryLimit === 0) return "none";
 		const state = this.statesByExecutionKey.get(executionKey);
 		const remaining =
-			!state || state.worldCursorAtLastExecution !== this.worldCursor ? retryLimit : state.unchangedRetriesRemaining;
+			!state || state.worldCursorAtLastExecution !== this.worldCursor
+				? retryLimit
+				: state.budget.unchangedRetriesRemaining;
 		return remaining > 0 ? "available" : "spent";
 	}
 
@@ -289,22 +316,38 @@ export class ToolFailureRecoveryGate {
 		messages: readonly AgentMessage[] = this.transcriptMessages,
 		executionScope?: string,
 	): ToolFailureRecoveryAdmission {
+		const admission = this.reserve(tool, args, record, messages, executionScope);
+		if (admission.kind === "blocked") return admission;
+		admission.reservation.commit();
+		return { kind: "allowed" };
+	}
+
+	reserve(
+		tool: AgentTool<any>,
+		args: unknown,
+		record: ToolFailureMemoryRecord | undefined,
+		messages: readonly AgentMessage[] = this.transcriptMessages,
+		executionScope?: string,
+	): ReservedAdmission {
 		this.trackTranscript(messages);
 		const executionKey = getToolExecutionKey(tool.name, args, executionScope);
-		if (this.resolvedBeforeTranscriptCommit.has(executionKey)) return { kind: "allowed" };
+		if (this.resolvedBeforeTranscriptCommit.has(executionKey)) {
+			return { kind: "allowed", reservation: UNCHARGED_RESERVATION };
+		}
 		const incomingBound = readEnvelopeBound(args, tool);
 		let state = this.getHotState(executionKey);
 		if (
-			state?.needsReplay ||
-			(!state && this.seenUnproductiveExecutions.mightContain(executionKey)) ||
-			(state && incomingBound?.field === null && state.envelopeBound?.field !== null)
+			!this.pendingRetries.has(executionKey) &&
+			(state?.needsReplay ||
+				(!state && this.seenUnproductiveExecutions.mightContain(executionKey)) ||
+				(state && incomingBound?.field === null && state.envelopeBound?.field !== null))
 		) {
 			const restored = this.restoreOperationFromTranscript(executionKey, tool);
 			if (restored) state = restored;
 			else if (state) {
 				// Missing history cannot erase a known failure or fabricate its execution bound.
 				state.envelopeBound = undefined;
-				state.boundEscalationsRemaining = 0;
+				state.budget.boundEscalationsRemaining = 0;
 				state.needsReplay = false;
 			}
 		}
@@ -319,13 +362,12 @@ export class ToolFailureRecoveryGate {
 			state = {
 				record,
 				worldCursorAtLastExecution: this.worldCursor,
-				unchangedRetriesRemaining: 0,
 				// The incoming request is not evidence of the bound used by this retained failure.
-				boundEscalationsRemaining: 0,
+				budget: { unchangedRetriesRemaining: 0, boundEscalationsRemaining: 0 },
 			};
 			this.retainState(executionKey, state);
 		}
-		if (!state) return { kind: "allowed" };
+		if (!state) return { kind: "allowed", reservation: UNCHARGED_RESERVATION };
 		if (record && getToolFailureRecordExecutionKey(record) === executionKey) state.record = record;
 
 		// A schema rejection judges the literal argument object, so the field it named is part of the
@@ -336,11 +378,40 @@ export class ToolFailureRecoveryGate {
 		const rawArgumentsDiffer = storedRawKey !== undefined && storedRawKey !== incomingRawKey;
 		if (state.record.phase === "validation" && rawArgumentsDiffer) {
 			this.statesByExecutionKey.delete(executionKey);
-			return { kind: "allowed" };
+			return { kind: "allowed", reservation: UNCHARGED_RESERVATION };
 		}
 
-		if (this.worldCursor > state.worldCursorAtLastExecution) return { kind: "allowed" };
-		if (consumeRetryAllowance(state, incomingBound)) return { kind: "allowed" };
+		if (this.worldCursor > state.worldCursorAtLastExecution) {
+			return { kind: "allowed", reservation: UNCHARGED_RESERVATION };
+		}
+		// Pending growth constrains siblings, but is not an executed baseline. Removing a reservation
+		// must not restore a scalar snapshot that may itself have belonged to another canceled call.
+		const comparison = { ...state };
+		for (const pending of this.pendingRetries.get(executionKey) ?? []) {
+			if (pending.budget === state.budget && pending.debit === "boundEscalationsRemaining") {
+				comparison.envelopeBound = greaterMatchingBound(comparison.envelopeBound, pending.bound);
+			}
+		}
+		const debit = consumeRetryAllowance(comparison, incomingBound);
+		if (debit) {
+			const pending: PendingRetry = { budget: state.budget, debit, bound: incomingBound };
+			const reservations = this.pendingRetries.get(executionKey) ?? new Set<PendingRetry>();
+			reservations.add(pending);
+			this.pendingRetries.set(executionKey, reservations);
+			const settle = (commit: boolean) => {
+				if (!reservations.delete(pending)) return;
+				if (!commit) pending.budget[pending.debit]++;
+				else if (pending.debit === "boundEscalationsRemaining") {
+					const current = this.statesByExecutionKey.get(executionKey);
+					if (current?.budget === pending.budget) {
+						current.envelopeBound = greaterMatchingBound(current.envelopeBound, pending.bound);
+					}
+				}
+				if (reservations.size === 0) this.pendingRetries.delete(executionKey);
+				this.trimStates();
+			};
+			return { kind: "allowed", reservation: { commit: () => settle(true), cancel: () => settle(false) } };
+		}
 		return { kind: "blocked", record: state.record, envelopeOnlyChange: rawArgumentsDiffer };
 	}
 
@@ -406,10 +477,13 @@ export class ToolFailureRecoveryGate {
 	private retainState(executionKey: string, state: OperationState): void {
 		this.statesByExecutionKey.delete(executionKey);
 		this.statesByExecutionKey.set(executionKey, state);
-		while (this.statesByExecutionKey.size > MAX_TRACKED_OPERATIONS) {
-			const oldest = this.statesByExecutionKey.keys().next().value;
-			if (oldest === undefined) break;
-			this.statesByExecutionKey.delete(oldest);
+		this.trimStates();
+	}
+
+	private trimStates(): void {
+		for (const key of this.statesByExecutionKey.keys()) {
+			if (this.statesByExecutionKey.size <= MAX_TRACKED_OPERATIONS) break;
+			if (!this.pendingRetries.has(key)) this.statesByExecutionKey.delete(key);
 		}
 	}
 
@@ -424,7 +498,7 @@ export class ToolFailureRecoveryGate {
 			[tool],
 		);
 		if (restored) {
-			restored.unchangedRetriesRemaining = 0;
+			restored.budget.unchangedRetriesRemaining = 0;
 			this.retainState(executionKey, restored);
 		}
 		return restored;
@@ -443,10 +517,10 @@ type TranscriptEvent =
 	  };
 
 /** One allowance transition for live admission and transcript reconstruction. */
-function consumeRetryAllowance(state: OperationState, incomingBound: EnvelopeBound | undefined): boolean {
-	if (state.unchangedRetriesRemaining > 0) {
-		state.unchangedRetriesRemaining--;
-		return true;
+function consumeRetryAllowance(state: OperationState, incomingBound: EnvelopeBound | undefined): RetryDebit | undefined {
+	if (state.budget.unchangedRetriesRemaining > 0) {
+		state.budget.unchangedRetriesRemaining--;
+		return "unchangedRetriesRemaining";
 	}
 	const timeout =
 		state.record.phase === "timeout" ||
@@ -455,17 +529,30 @@ function consumeRetryAllowance(state: OperationState, incomingBound: EnvelopeBou
 			state.envelopeBound?.field === null);
 	if (
 		timeout &&
-		state.boundEscalationsRemaining > 0 &&
+		state.budget.boundEscalationsRemaining > 0 &&
 		incomingBound?.value !== undefined &&
 		state.envelopeBound?.value !== undefined &&
 		incomingBound.field === state.envelopeBound.field &&
 		incomingBound.value >= state.envelopeBound.value * MIN_BOUND_ESCALATION_FACTOR
 	) {
-		state.boundEscalationsRemaining--;
+		state.budget.boundEscalationsRemaining--;
 		state.envelopeBound = incomingBound;
-		return true;
+		return "boundEscalationsRemaining";
 	}
-	return false;
+	return undefined;
+}
+
+/** A later-started smaller reservation must never roll a committed/pending bound backwards. */
+function greaterMatchingBound(
+	current: EnvelopeBound | undefined,
+	candidate: EnvelopeBound | undefined,
+): EnvelopeBound | undefined {
+	return current?.value !== undefined &&
+		candidate?.value !== undefined &&
+		current.field === candidate.field &&
+		candidate.value > current.value
+		? candidate
+		: current;
 }
 
 function observeFailureState(
@@ -478,11 +565,13 @@ function observeFailureState(
 	return {
 		record,
 		worldCursorAtLastExecution: worldCursor,
-		unchangedRetriesRemaining: fresh
-			? getToolExecutionUnchangedRetryLimit(record.failureCode)
-			: previous.unchangedRetriesRemaining,
 		envelopeBound,
-		boundEscalationsRemaining: fresh ? MAX_BOUND_ESCALATIONS_PER_EPISODE : previous.boundEscalationsRemaining,
+		budget: fresh
+			? {
+					unchangedRetriesRemaining: getToolExecutionUnchangedRetryLimit(record.failureCode),
+					boundEscalationsRemaining: MAX_BOUND_ESCALATIONS_PER_EPISODE,
+				}
+			: previous.budget,
 	};
 }
 
@@ -497,8 +586,7 @@ function restoreObservedState(
 			previous ?? {
 				record: event.record,
 				worldCursorAtLastExecution: event.worldCursor,
-				unchangedRetriesRemaining: 0,
-				boundEscalationsRemaining: 0,
+				budget: { unchangedRetriesRemaining: 0, boundEscalationsRemaining: 0 },
 			}
 		);
 	}

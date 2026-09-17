@@ -44,7 +44,11 @@ import {
 	type ToolFailureMemoryTracker,
 	toolFailureCorrection,
 } from "./tool-failure-memory.ts";
-import { ToolFailureRecoveryGate, type ToolFailureRecoveryGateEffect } from "./tool-failure-recovery-gate.ts";
+import {
+	ToolFailureRecoveryGate,
+	type ToolFailureRecoveryGateEffect,
+	type ToolFailureRecoveryReservation,
+} from "./tool-failure-recovery-gate.ts";
 import { readToolFailureTimeoutMs } from "./tool-failure-timeout.ts";
 import { type BoundToolInvocation, bindToolInvocation } from "./tool-invocation-binding.ts";
 import { retainedToolInvocation, stampToolInvocation } from "./tool-invocation-receipt.ts";
@@ -1015,7 +1019,7 @@ async function streamAssistantResponse(
 
 interface ToolExecutionContext {
 	/** Prepared leases not yet transferred to their real execution's completion. */
-	pendingBindings: Set<() => void>;
+	pendingPreparations: Set<() => void>;
 	/** Results published by this batch survive a later admission or scheduling failure. */
 	messages: ToolResultMessage[];
 	context: AgentContext;
@@ -1052,7 +1056,7 @@ async function executeToolCalls(
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
 	beginToolFailureBatch(toolFailureMemory);
 	const execCtx: ToolExecutionContext = {
-		pendingBindings: new Set(),
+		pendingPreparations: new Set(),
 		messages: [],
 		context: currentContext,
 		assistantMessage,
@@ -1077,7 +1081,15 @@ async function executeToolCalls(
 	} catch (cause) {
 		return { messages: execCtx.messages, terminate: true, failure: { cause } };
 	} finally {
-		for (const release of execCtx.pendingBindings) release();
+		const releaseErrors: unknown[] = [];
+		for (const release of execCtx.pendingPreparations) {
+			try {
+				release();
+			} catch (error) {
+				releaseErrors.push(error);
+			}
+		}
+		if (releaseErrors.length > 0) throw new AggregateError(releaseErrors, "Prepared tool cleanup failed");
 	}
 }
 
@@ -1143,7 +1155,7 @@ async function prepareAndStartToolCall(
 			finalized,
 		};
 	}
-	if (preparation.binding) execCtx.pendingBindings.add(preparation.binding.release);
+	execCtx.pendingPreparations.add(preparation.release);
 	return { kind: "prepared", preparation };
 }
 
@@ -1152,7 +1164,6 @@ async function finalizeStartedToolCall(
 	started: StartedToolCall,
 ): Promise<FinalizedToolCallOutcome> {
 	if (started.kind === "finalized") return started.finalized;
-	if (started.preparation.binding) execCtx.pendingBindings.delete(started.preparation.binding.release);
 	return executeAndFinalizePreparedToolCall(
 		execCtx.context,
 		execCtx.assistantMessage,
@@ -1164,6 +1175,9 @@ async function finalizeStartedToolCall(
 		execCtx.toolFailureRecoveryGate,
 		execCtx.signal,
 		execCtx.emit,
+		() => {
+			execCtx.pendingPreparations.delete(started.preparation.release);
+		},
 	);
 }
 
@@ -1447,6 +1461,9 @@ async function executeToolCallsPartitioned(
 
 type PreparedToolCall = {
 	binding?: BoundToolInvocation;
+	recoveryReservation: ToolFailureRecoveryReservation;
+	/** Refund unstarted admission and release the binding through one idempotent owner. */
+	release(): void;
 	kind: "prepared";
 	toolCall: AgentToolCall;
 	tool: AgentTool<any>;
@@ -1914,6 +1931,14 @@ async function prepareToolCall(
 
 	let validationEvent: ToolArgumentValidationTelemetryEvent | undefined;
 	let binding: BoundToolInvocation | undefined;
+	let recoveryReservation: ToolFailureRecoveryReservation | undefined;
+	let released = false;
+	const release = () => {
+		if (released) return;
+		released = true;
+		recoveryReservation?.cancel();
+		binding?.release();
+	};
 	let admitted = false;
 	try {
 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
@@ -1950,7 +1975,7 @@ async function prepareToolCall(
 			validatedArgs,
 			binding?.executionScope,
 		);
-		const admission = toolFailureRecoveryGate.admit(
+		const admission = toolFailureRecoveryGate.reserve(
 			tool,
 			validatedArgs,
 			unresolvedRecord,
@@ -1978,6 +2003,7 @@ async function prepareToolCall(
 				validationEvent: createValidationBounceTelemetry(config, toolCall, "repeated_failed_operation"),
 			};
 		}
+		recoveryReservation = admission.reservation;
 		if (config.beforeToolCall) {
 			const beforeResult = await config.beforeToolCall(
 				{
@@ -2019,6 +2045,8 @@ async function prepareToolCall(
 		return {
 			kind: "prepared",
 			binding,
+			recoveryReservation,
+			release,
 			toolCall,
 			tool,
 			args: validatedArgs,
@@ -2048,7 +2076,7 @@ async function prepareToolCall(
 			validationEvent,
 		};
 	} finally {
-		if (!admitted) binding?.release();
+		if (!admitted) release();
 	}
 }
 
@@ -2157,6 +2185,7 @@ async function executeAndFinalizePreparedToolCall(
 	toolFailureRecoveryGate: ToolFailureRecoveryGate,
 	foregroundSignal: AbortSignal | undefined,
 	emit: AgentEventSink,
+	onExecutionOwnership: () => void,
 ): Promise<FinalizedToolCallOutcome> {
 	// The model can ask for a background task up front; otherwise only the operator's clock (off by
 	// default) or a manual host request moves a foreground call to the background.
@@ -2171,6 +2200,9 @@ async function executeAndFinalizePreparedToolCall(
 	let emitForegroundUpdates = true;
 	const completion = (async (): Promise<FinalizedToolCallOutcome> => {
 		try {
+			// Until this finally exists, batch cleanup still owns preparation. A throwing background
+			// selector must not strand a binding or spend a retry for a body that never started.
+			onExecutionOwnership();
 			const executed = await executePreparedToolCall(prepared, executionSignal, (event) => {
 				if (emitForegroundUpdates) return emit(event);
 			});
@@ -2187,8 +2219,11 @@ async function executeAndFinalizePreparedToolCall(
 				executionSignal,
 			);
 		} finally {
-			prepared.binding?.release();
-			executionAbort?.detachForeground();
+			try {
+				prepared.release();
+			} finally {
+				executionAbort?.detachForeground();
+			}
 		}
 	})();
 	if (!executionAbort || !config.handoffToolCall) return completion;
@@ -2290,6 +2325,7 @@ async function executePreparedToolCall(
 	);
 	let executed: ExecutedToolCallOutcome;
 	try {
+		prepared.recoveryReservation.commit();
 		const result = await prepared.tool.execute(
 			prepared.toolCall.id,
 			prepared.args as never,
