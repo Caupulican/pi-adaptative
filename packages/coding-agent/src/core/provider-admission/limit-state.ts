@@ -256,7 +256,7 @@ interface UsageWindowLike {
 }
 
 /**
- * The reset time of the first fully used subscription window in a provider's snapshots
+ * The latest reset time among fully used subscription windows in a provider's snapshots
  * (the Codex `x-codex-*-used-percent` / `-reset-at` family: `resetsAt` is epoch seconds), or
  * undefined when no window is exhausted or no window states when it resets.
  */
@@ -264,6 +264,7 @@ export function usageWindowLimit(
 	rateLimits: readonly unknown[],
 	nowMs: number,
 ): { limitedUntil: number; detail: string } | undefined {
+	let latest: { limitedUntil: number; detail: string } | undefined;
 	for (const snapshot of rateLimits) {
 		if (!isPlainRecord(snapshot)) continue;
 		for (const key of ["primary", "secondary"] as const) {
@@ -276,12 +277,13 @@ export function usageWindowLimit(
 				typeof window.resetAfterSeconds === "number" ? nowMs + window.resetAfterSeconds * 1000 : undefined;
 			const limitedUntil = resetsAt ?? resetAfter;
 			if (limitedUntil === undefined || limitedUntil <= nowMs) continue;
+			if (latest && limitedUntil <= latest.limitedUntil) continue;
 			const name =
 				typeof snapshot.limitName === "string" ? snapshot.limitName : String(snapshot.limitId ?? "window");
-			return { limitedUntil, detail: `${name} ${key} window ${used}% used` };
+			latest = { limitedUntil, detail: `${name} ${key} window ${used}% used` };
 		}
 	}
-	return undefined;
+	return latest;
 }
 
 /**
