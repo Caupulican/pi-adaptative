@@ -206,21 +206,39 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 	private value: string | undefined;
+	private locked = false;
+	private pending = Promise.resolve();
 
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
-		const { result, next } = fn(this.value);
-		if (next !== undefined) {
-			this.value = next;
+		if (this.locked) throw new Error("Auth storage is locked by another transaction");
+		this.locked = true;
+		try {
+			const { result, next } = fn(this.value);
+			if (next !== undefined) {
+				this.value = next;
+			}
+			return result;
+		} finally {
+			this.locked = false;
 		}
-		return result;
 	}
 
 	async withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T> {
-		const { result, next } = await fn(this.value);
-		if (next !== undefined) {
-			this.value = next;
+		const previous = this.pending;
+		const released = Promise.withResolvers<void>();
+		this.pending = released.promise;
+		await previous;
+		this.locked = true;
+		try {
+			const { result, next } = await fn(this.value);
+			if (next !== undefined) {
+				this.value = next;
+			}
+			return result;
+		} finally {
+			this.locked = false;
+			released.resolve();
 		}
-		return result;
 	}
 }
 
