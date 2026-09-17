@@ -3,9 +3,16 @@
 ### Added
 
 - `TYPESAFE_API_KEY` lookup for the separate Jev review service without adding a selectable chat model.
+- `PI_MODEL_CATALOG_PROVIDER` for refreshing one provider through the model generator while preserving the other committed provider sections.
+
+### Changed
+
+- Refreshed the OpenRouter model catalog, including new models, aliases, pricing, and limits. Entries use advertised reasoning efforts and defaults.
 
 ### Fixed
 
+- OpenRouter moving aliases inherit target-model compatibility while retaining their own wire IDs and pricing. Mandatory reasoning and Mercury tool-use restrictions remain enforced.
+- GitHub Copilot GPT-6 models use Responses and the supported GPT reasoning controls instead of falling through to the older Chat Completions route.
 - Model catalog refreshes stop before publication when a source request fails, returns an unsuccessful HTTP status, or produces no usable models, preserving the existing catalog.
 - Claude OAuth callback denials with matching state terminate login and release the listener, including when manual input remains pending; stale or missing state cannot cancel another login.
 - Subscription token refresh margins preserve a usable interval for short-lived tokens instead of triggering a new refresh on every request.

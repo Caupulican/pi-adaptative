@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { writeFileSync } from "fs";
+import { readFileSync, writeFileSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import {
@@ -19,15 +19,20 @@ import type {
 	OpenAIResponsesCompat,
 } from "../src/types.ts";
 import { runModelCatalogGeneration } from "./model-catalog-generation-policy.ts";
+import { replaceModelCatalogProvider } from "./model-catalog-provider-update.ts";
+import { parseOpenRouterCatalogMetadata, type OpenRouterCatalogMetadata } from "./openrouter-catalog-metadata.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageRoot = join(__dirname, "..");
+const committedModelCatalogPath = join(packageRoot, "src", "models.generated.ts");
+// Limit publication to one existing provider while retaining the committed catalog's other sections.
+const modelCatalogProvider = process.env.PI_MODEL_CATALOG_PROVIDER;
 // Overridable so the drift checker (check:model-catalog) can generate into a scratch path
 // without touching the committed file it diffs against.
 const modelCatalogOutputPath = process.env.PI_MODEL_CATALOG_OUTPUT_PATH
 	? resolve(process.env.PI_MODEL_CATALOG_OUTPUT_PATH)
-	: join(packageRoot, "src", "models.generated.ts");
+	: committedModelCatalogPath;
 
 interface ModelsDevModel {
 	id: string;
@@ -419,20 +424,20 @@ function isGemma4Model(modelId: string): boolean {
 	return /gemma-?4/.test(modelId.toLowerCase());
 }
 
-function applyThinkingLevelMetadata(model: Model<any>): void {
+function applyThinkingLevelMetadata(model: Model<any>, modelId = model.id): void {
 	if (
 		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
-		model.id.startsWith("gpt-5")
+		(modelId.startsWith("gpt-5") || isOpenAiGpt6(modelId))
 	) {
 		mergeThinkingLevelMap(model, { off: null });
 	}
-	if (model.provider === "github-copilot" && model.id.startsWith("gpt-5")) {
+	if (model.provider === "github-copilot" && (modelId.startsWith("gpt-5") || isOpenAiGpt6(modelId))) {
 		mergeThinkingLevelMap(model, { minimal: "low" });
 	}
 	if (
 		model.api === "openai-responses" &&
 		model.provider === "openai" &&
-		OPENAI_RESPONSES_NONE_REASONING_MODELS.has(model.id)
+		OPENAI_RESPONSES_NONE_REASONING_MODELS.has(modelId)
 	) {
 		mergeThinkingLevelMap(model, { off: "none" });
 	}
@@ -440,69 +445,69 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		// Reasoning cannot be disabled. Unspecified effort is high (xAI + Grok CLI).
 		// xhigh is grok-4.6+ only; grok-4.5 treats an unsupported xhigh request as high.
 		mergeThinkingLevelMap(model, { off: null, minimal: null });
-		if (model.id !== "grok-4.5") {
+		if (modelId !== "grok-4.5") {
 			mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 		}
 		model.defaultThinkingLevel = "high";
 	}
-	if (supportsOpenAiXhigh(model.id)) {
+	if (supportsOpenAiXhigh(modelId)) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 	}
-	if (isOpenAiResponsesLiteFamily(model.id)) {
+	if (isOpenAiResponsesLiteFamily(modelId)) {
 		mergeThinkingLevelMap(model, { max: "max" });
 	}
 	if (supportsUltraThinkingAlias(model)) {
 		// Ultra is a UI reasoning label; supported GPT-5.6 variants receive max on the wire.
 		mergeThinkingLevelMap(model, { ultra: "max" });
 	}
-	if (model.provider === "openai-codex" && model.id === "gpt-6-astra") {
+	if (model.provider === "openai-codex" && modelId === "gpt-6-astra") {
 		// Codex f1aac1e88: Ultra is local orchestration intent, not a wire effort.
 		// core/src/client.rs resolves it through the catalog's multi_agent_reasoning_effort:
 		// Astra selects xhigh; GPT-5.6 Sol/Terra have no override and fall back to max above.
 		mergeThinkingLevelMap(model, { ultra: "xhigh" });
 	}
-	if (model.provider === "openai" && model.id === "gpt-5.5") {
+	if (model.provider === "openai" && modelId === "gpt-5.5") {
 		mergeThinkingLevelMap(model, { minimal: null });
 	}
-	if (model.provider === "openai" && isOpenAiResponsesLiteFamily(model.id)) {
+	if (model.provider === "openai" && isOpenAiResponsesLiteFamily(modelId)) {
 		mergeThinkingLevelMap(model, { minimal: null });
 	}
-	if (model.id.endsWith("gpt-5.5-pro")) {
+	if (modelId.endsWith("gpt-5.5-pro")) {
 		mergeThinkingLevelMap(model, { off: null, minimal: null, low: null });
 	}
 	// Anthropic adaptive-thinking effort support:
 	// - max is available on all adaptive-thinking Claude models.
 	// - xhigh is available on Opus 4.7/4.8/5, Sonnet 5, and Fable 5.
 	if (
-		model.id.includes("opus-4-6") ||
-		model.id.includes("opus-4.6") ||
-		model.id.includes("sonnet-4-6") ||
-		model.id.includes("sonnet-4.6")
+		modelId.includes("opus-4-6") ||
+		modelId.includes("opus-4.6") ||
+		modelId.includes("sonnet-4-6") ||
+		modelId.includes("sonnet-4.6")
 	) {
 		mergeThinkingLevelMap(model, { max: "max" });
 	}
 	if (
-		model.id.includes("opus-4-7") ||
-		model.id.includes("opus-4.7") ||
-		model.id.includes("opus-4-8") ||
-		model.id.includes("opus-4.8") ||
-		model.id.includes("opus-5") ||
-		model.id.includes("opus.5") ||
-		model.id.includes("sonnet-5") ||
-		model.id.includes("sonnet.5")
+		modelId.includes("opus-4-7") ||
+		modelId.includes("opus-4.7") ||
+		modelId.includes("opus-4-8") ||
+		modelId.includes("opus-4.8") ||
+		modelId.includes("opus-5") ||
+		modelId.includes("opus.5") ||
+		modelId.includes("sonnet-5") ||
+		modelId.includes("sonnet.5")
 	) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh", max: "max" });
 	}
-	if (model.id.includes("fable-5")) {
+	if (modelId.includes("fable-5")) {
 		mergeThinkingLevelMap(model, { off: null, xhigh: "xhigh", max: "max" });
 	}
-	if (model.api === "anthropic-messages" && isAnthropicAdaptiveThinkingModel(model.id)) {
+	if (model.api === "anthropic-messages" && isAnthropicAdaptiveThinkingModel(modelId)) {
 		mergeAnthropicMessagesCompat(model, { forceAdaptiveThinking: true });
 	}
-	if (model.api === "anthropic-messages" && isAnthropicTemperatureUnsupportedModel(model.id)) {
+	if (model.api === "anthropic-messages" && isAnthropicTemperatureUnsupportedModel(modelId)) {
 		mergeAnthropicMessagesCompat(model, { supportsTemperature: false });
 	}
-	if (model.api === "openai-completions" && model.id.includes("deepseek-v4")) {
+	if (model.api === "openai-completions" && modelId.includes("deepseek-v4")) {
 		mergeThinkingLevelMap(
 			model,
 			model.provider === "openrouter"
@@ -510,25 +515,25 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 				: DEEPSEEK_V4_THINKING_LEVEL_MAP,
 		);
 	}
-	if (isGoogleThinkingApi(model) && isGemini3ProModel(model.id)) {
+	if (isGoogleThinkingApi(model) && isGemini3ProModel(modelId)) {
 		mergeThinkingLevelMap(model, { off: null, minimal: null, low: "LOW", medium: null, high: "HIGH" });
 	}
-	if (isGoogleThinkingApi(model) && isGemini3FlashModel(model.id)) {
+	if (isGoogleThinkingApi(model) && isGemini3FlashModel(modelId)) {
 		mergeThinkingLevelMap(model, { off: null });
 	}
-	if (isGoogleThinkingApi(model) && isGemma4Model(model.id)) {
+	if (isGoogleThinkingApi(model) && isGemma4Model(modelId)) {
 		mergeThinkingLevelMap(model, { off: null, minimal: "MINIMAL", low: null, medium: null, high: "HIGH" });
 	}
-	if (model.provider === "groq" && model.id === "qwen/qwen3.6-27b") {
+	if (model.provider === "groq" && modelId === "qwen/qwen3.6-27b") {
 		mergeThinkingLevelMap(model, { minimal: null, low: null, medium: null, high: "default" });
 	}
-	if (model.provider === "openai-codex" && supportsOpenAiXhigh(model.id)) {
+	if (model.provider === "openai-codex" && supportsOpenAiXhigh(modelId)) {
 		mergeThinkingLevelMap(model, { minimal: "low" });
 	}
-	if (model.provider === "openai-codex" && isOpenAiResponsesLiteFamily(model.id)) {
+	if (model.provider === "openai-codex" && isOpenAiResponsesLiteFamily(modelId)) {
 		mergeThinkingLevelMap(model, { off: null, minimal: null });
 	}
-	if (model.provider === "openrouter" && model.id === "stealth/ox-alpha") {
+	if (model.provider === "openrouter" && modelId === "stealth/ox-alpha") {
 		// Ox Alpha accepts OpenRouter's maximum reasoning effort. Keep this explicit so the
 		// catalog capability gate exposes --thinking max instead of silently clamping to high.
 		// Reasoning is mandatory: {effort:"none"} 400s. Mark off unsupported so the provider
@@ -538,18 +543,18 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		mergeThinkingLevelMap(model, { off: null, max: "max" });
 		model.textToolCallProtocol = true;
 	}
-	if (model.provider === "openrouter" && model.id.startsWith("inception/mercury-2")) {
+	if (model.provider === "openrouter" && modelId.startsWith("inception/mercury-2")) {
 		// Mercury 2 in instant mode (reasoning_effort: "none") disables tool calling.
 		// Mark "off" unsupported so the openai-completions provider omits the reasoning param
 		// instead of defaulting to {reasoning:{effort:"none"}} (see openai-completions.ts:575).
 		// Pi's low/medium/high pass through verbatim; OpenRouter normalizes to Mercury's vocabulary.
 		mergeThinkingLevelMap(model, { off: null });
 	}
-	if (model.provider === "opencode-go" && model.id === "kimi-k2.6") {
+	if (model.provider === "opencode-go" && modelId === "kimi-k2.6") {
 		// OpenCode Go exposes Kimi K2.6 thinking as on/off, not distinct effort tiers.
 		mergeThinkingLevelMap(model, { minimal: null, low: null, medium: null });
 	}
-	if (model.provider === "opencode" && model.id === "grok-build-0.1") {
+	if (model.provider === "opencode" && modelId === "grok-build-0.1") {
 		// OpenCode Zen Grok Build reasons by default but rejects explicit reasoningEffort.
 		mergeThinkingLevelMap(model, { off: null, minimal: null, low: null, medium: null });
 	}
@@ -580,13 +585,17 @@ async function fetchModelCatalogResponse(url: string): Promise<Response> {
 	return response;
 }
 
-async function fetchOpenRouterModels(): Promise<Model<any>[]> {
+async function fetchOpenRouterModels(): Promise<{
+	models: Model<"openai-completions">[];
+	metadata: Map<string, OpenRouterCatalogMetadata>;
+}> {
 	try {
 		console.log("Fetching models from OpenRouter API...");
 		const response = await fetchModelCatalogResponse("https://openrouter.ai/api/v1/models");
 		const data = await response.json();
 
-		const models: Model<any>[] = [];
+		const models: Model<"openai-completions">[] = [];
+		const metadata = new Map<string, OpenRouterCatalogMetadata>();
 
 		for (const model of data.data) {
 			// Only include models that support tools
@@ -610,7 +619,7 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 			const cacheReadCost = parseFloat(model.pricing?.input_cache_read || "0") * 1_000_000;
 			const cacheWriteCost = parseFloat(model.pricing?.input_cache_write || "0") * 1_000_000;
 
-			const normalizedModel: Model<any> = {
+			const normalizedModel: Model<"openai-completions"> = {
 				id: modelKey,
 				name: model.name,
 				api: "openai-completions",
@@ -628,10 +637,11 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 				maxTokens: model.top_provider?.max_completion_tokens || 4096,
 			};
 			models.push(normalizedModel);
+			metadata.set(normalizedModel.id, parseOpenRouterCatalogMetadata(model));
 		}
 
 		console.log(`Fetched ${models.length} tool-capable models from OpenRouter`);
-		return models;
+		return { models, metadata };
 	} catch (error) {
 		throw new Error("Failed to fetch OpenRouter models", { cause: error });
 	}
@@ -1168,9 +1178,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 				// Claude 4.x and 5.x models route to Anthropic Messages API.
 				const isCopilotClaude = /^claude-(fable|haiku|sonnet|opus)-[45]([.\-]|$)/.test(modelId);
-				// GPT-5, OSWE, and MAI-Code models are only served through the Responses endpoint.
+				// GPT-5/6, OSWE, and MAI-Code models use the Responses endpoint.
 				const needsResponsesApi =
-					modelId.startsWith("gpt-5") || modelId.startsWith("oswe") || modelId.startsWith("mai-");
+					modelId.startsWith("gpt-5") || isOpenAiGpt6(modelId) || modelId.startsWith("oswe") || modelId.startsWith("mai-");
 
 				const api: Api = isCopilotClaude
 					? "anthropic-messages"
@@ -1383,8 +1393,10 @@ async function generateModels() {
 	// OpenRouter: xAI and other providers (excluding Anthropic, Google, OpenAI)
 	// AI Gateway: OpenAI-compatible catalog with tool-capable models
 	const modelsDevModels = await loadModelsDevData();
-	const openRouterModels = await fetchOpenRouterModels();
+	const { models: openRouterModels, metadata: openRouterMetadata } = await fetchOpenRouterModels();
 	const aiGatewayModels = await fetchAiGatewayModels();
+	const compatibilityModelId = (model: Model<Api>): string =>
+		model.provider === "openrouter" ? openRouterMetadata.get(model.id)?.targetId ?? model.id : model.id;
 	// Empty feeds cannot be distinguished from an upstream outage or schema change.
 	// Refuse publication before adding synthetic entries that could hide a failed source.
 	for (const [source, models] of [
@@ -1458,7 +1470,10 @@ async function generateModels() {
 			candidate.cost.cacheRead = 0.07;
 			candidate.maxTokens = 4096;
 		}
-		if (candidate.provider === "openrouter" && candidate.id.startsWith("moonshotai/kimi-k2.6")) {
+		if (
+			candidate.provider === "openrouter" &&
+			compatibilityModelId(candidate).startsWith("moonshotai/kimi-k2.6")
+		) {
 			candidate.compat = { ...candidate.compat, supportsDeveloperRole: false };
 		}
 		if (candidate.provider === "openrouter" && candidate.id === "z-ai/glm-5") {
@@ -1879,7 +1894,7 @@ async function generateModels() {
 	for (const candidate of allModels) {
 		if (
 			candidate.api === "openai-completions" &&
-			candidate.id.includes("deepseek-v4") &&
+			compatibilityModelId(candidate).includes("deepseek-v4") &&
 			(candidate.provider === "deepseek" || candidate.provider === "openrouter")
 		) {
 			candidate.compat = {
@@ -2347,7 +2362,14 @@ async function generateModels() {
 			const cacheControlFormat = detectOpenRouterCacheControlFormat(model.provider, model.id);
 			if (cacheControlFormat) model.compat = { ...model.compat, cacheControlFormat };
 		}
-		applyThinkingLevelMetadata(model);
+		const metadata = model.provider === "openrouter" ? openRouterMetadata.get(model.id) : undefined;
+		applyThinkingLevelMetadata(model, compatibilityModelId(model));
+		if (metadata?.thinkingLevelMap) {
+			// Advertised efforts override name-based defaults. An omitted off mapping
+			// preserves tool-use restrictions such as Mercury's always-on reasoning.
+			mergeThinkingLevelMap(model, metadata.thinkingLevelMap);
+		}
+		if (metadata?.defaultThinkingLevel) model.defaultThinkingLevel = metadata.defaultThinkingLevel;
 	}
 
 	// Group by provider and deduplicate by model ID
@@ -2440,8 +2462,19 @@ export const MODELS = {
 `;
 
 	// Write file
+	if (modelCatalogProvider) {
+		output = replaceModelCatalogProvider(
+			readFileSync(committedModelCatalogPath, "utf8"),
+			output,
+			modelCatalogProvider,
+		);
+	}
 	writeFileSync(modelCatalogOutputPath, output);
 	console.log(`Generated ${modelCatalogOutputPath}`);
+	if (modelCatalogProvider) {
+		console.log(`Refreshed ${modelCatalogProvider}: ${Object.keys(providers[modelCatalogProvider]).length} models; retained other providers`);
+		return;
+	}
 
 	// Print statistics
 	const totalModels = allModels.length;

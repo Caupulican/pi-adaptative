@@ -7,6 +7,12 @@ const catalogs = new Map([
 					"fixture-direct": { name: "Fixture Direct", tool_call: true, limit: { context: 8192, output: 1024 } },
 				},
 			},
+			"github-copilot": {
+				models: {
+					"gpt-6-astra": { name: "GPT-6 Astra", tool_call: true, reasoning: true },
+					"gpt-4.1": { name: "GPT-4.1", tool_call: true, reasoning: false },
+				},
+			},
 		},
 	],
 	[
@@ -19,6 +25,31 @@ const catalogs = new Map([
 					supported_parameters: ["tools"],
 					context_length: 8192,
 					top_provider: { max_completion_tokens: 1024 },
+				},
+				{
+					id: "~deepseek/deepseek-flash-latest",
+					name: "DeepSeek Flash Latest",
+					alias_target: { slug: "deepseek/deepseek-v4.1-flash" },
+					supported_parameters: ["tools", "reasoning"],
+					reasoning: { mandatory: false, supported_efforts: ["low", "high", "max"], default_effort: "high" },
+					pricing: { prompt: "0.000001", completion: "0.000002" },
+				},
+				{
+					id: "~openai/gpt-astra-latest",
+					name: "GPT Astra Latest",
+					alias_target: { slug: "openai/gpt-6-astra" },
+					supported_parameters: ["tools", "reasoning"],
+					reasoning: {
+						mandatory: true,
+						supported_efforts: ["low", "medium", "high", "xhigh", "max"],
+						default_effort: "medium",
+					},
+				},
+				{
+					id: "inception/mercury-2.5",
+					name: "Mercury 2.5",
+					supported_parameters: ["tools", "reasoning"],
+					reasoning: { mandatory: false, supported_efforts: ["low", "medium", "high"] },
 				},
 			],
 		},
