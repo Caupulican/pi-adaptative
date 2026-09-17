@@ -778,7 +778,7 @@ export class AgentSession {
 			transformExtensions: this._memory.createContextProjection(() => this._extensionRunner),
 			runContextAudit: (messages) => this._runContextAudit(messages),
 			runPromptPolicyPlanning: (report) => this._runPromptPolicyPlanning(report),
-			runMemoryRetrieval: (messages) => this._runMemoryRetrieval(messages),
+			runMemoryRetrieval: (messages) => this._memory.runMemoryRetrieval(messages),
 			applyContextGc: (messages, writePayloads, frozenBelow) =>
 				this._applyContextGc(messages, writePayloads, frozenBelow),
 			correlatePromptPolicyWithContextGc: (report) => this._correlatePromptPolicyWithContextGc(report),
@@ -1780,14 +1780,6 @@ export class AgentSession {
 	/** Read-only inspection of the latest prompt-enforcement report, for tests/debugging. */
 	getPromptEnforcementReport(): PromptEnforcementReport {
 		return this._pipeline.getPromptEnforcementReport();
-	}
-
-	/**
-	 * Provider-plan hot-path delegation to {@link MemoryController.runMemoryRetrieval}. Kept as a
-	 * one-line method so the request context controller owns pass ordering.
-	 */
-	private _runMemoryRetrieval(messages: AgentMessage[]): Promise<MemoryRetrievalReport> {
-		return this._memory.runMemoryRetrieval(messages);
 	}
 
 	/** Read-only inspection of the latest memory-retrieval report, for tests/debugging. */
