@@ -25,6 +25,7 @@ import {
 	startPlannedAgentProviderRequest,
 	startPlannedAgentProviderRequestWithId,
 } from "./provider-request-planner.ts";
+import { boundedFailureCode } from "./tool-failure-code.ts";
 import {
 	assessToolFailure,
 	beginToolFailureBatch,
@@ -2514,13 +2515,18 @@ async function finalizeExecutedToolCall(
 
 	const repaired = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
 	const projectedDetails = detailsWithoutVerification(repaired.result.details);
+	const executorFailureIdentity = executed.failureCode === undefined
+		? {}
+		: { failureCode: boundedFailureCode(executed.failureCode) };
 	const invocationDetails = stampToolInvocation(projectedDetails, {
 		version: 1,
 		requestId,
 		...(prepared.binding ? { executionScope: prepared.binding.executionScope } : {}),
 		...(executed.operationCompleted
-			? { execution: "completed", operationStatus: executed.isError ? "error" : "success" }
-			: { execution: "unknown" }),
+			? executed.isError
+				? { execution: "completed", operationStatus: "error", ...executorFailureIdentity }
+				: { execution: "completed", operationStatus: "success" }
+			: { execution: "unknown", ...executorFailureIdentity }),
 		postprocessingFailures: [
 			...(executed.progressDeliveryFailed ? ["progress" as const] : []),
 			...(afterHookFailed ? ["after_hook" as const] : []),

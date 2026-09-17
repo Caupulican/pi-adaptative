@@ -11,6 +11,7 @@ import {
 	type ToolFailureMemoryRecord,
 } from "../src/tool-failure-memory.ts";
 import { ToolFailureRecoveryGate } from "../src/tool-failure-recovery-gate.ts";
+import { retainedToolInvocation } from "../src/tool-invocation-receipt.ts";
 import { type AgentMessage, type AgentTool, AgentToolExecutionError } from "../src/types.ts";
 import { createEmptyUsage } from "../src/usage.ts";
 
@@ -127,6 +128,20 @@ describe("executor-owned timeout recovery", () => {
 		expect(executed).toEqual([60, 60, 120, 240]);
 		const results = messages.filter((message) => message.role === "toolResult");
 		expect(results).toHaveLength(5);
+		for (const result of results.slice(0, 4)) {
+			expect(retainedToolInvocation(result.details)).toMatchObject({
+				execution: "completed", operationStatus: "error", failureCode: "timeout",
+			});
+		}
+		// Replay actual raw operation outcomes, not createToolFailureResult's synthetic memory.
+		for (const completed of [1, 4]) {
+			const last = messages.indexOf(results[completed - 1]);
+			const persisted = JSON.parse(JSON.stringify(messages.slice(0, last + 1))) as AgentMessage[];
+			const resumed = new ToolFailureRecoveryGate();
+			resumed.restoreFromMessages(persisted, [runtimeTool]);
+			expect(resumed.admit(runtimeTool, { command: "fixture", timeout: completed === 1 ? 120 : 480 }, undefined))
+				.toMatchObject({ kind: completed === 1 ? "allowed" : "blocked" });
+		}
 		expect(results.at(-1)?.content).toEqual(expect.arrayContaining([
 			expect.objectContaining({ type: "text", text: expect.stringContaining('"failure_code":"repeated_failed_operation"') }),
 		]));

@@ -543,8 +543,9 @@ function walkTranscript(
 		if (message.role !== "toolResult") continue;
 		const call = callsById.get(message.toolCallId);
 		if (!call) continue;
-		callsById.delete(message.toolCallId);
 		const invocation = retainedToolInvocation(message.details);
+		if (invocation?.execution === "running") continue;
+		callsById.delete(message.toolCallId);
 		const executionKey = getToolExecutionKey(call.name, call.args, invocation?.executionScope);
 		if (!message.isError || isSuccessfulOperationWithHookFailure(message.details)) {
 			worldCursor++;
@@ -552,6 +553,7 @@ function walkTranscript(
 			continue;
 		}
 		const record = restoreToolFailureRecord(message, call.name, call.args);
+		if (!record) continue;
 		// A prompt-scoped block is cleared by a new owner prompt, not by anything the agent can do, so
 		// it never becomes a repetition state.
 		if (

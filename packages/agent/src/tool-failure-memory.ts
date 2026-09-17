@@ -4,6 +4,7 @@ import {
 	type ToolFailurePhase,
 } from "@caupulican/pi-ai/tool-repair-registry";
 import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/types";
+import { boundedFailureCode } from "./tool-failure-code.ts";
 import {
 	MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT,
 	mandatoryToolFailureRecoveryMetadata,
@@ -49,7 +50,6 @@ const TOOL_FAILURE_EXECUTION_KEY = Symbol("ToolFailureExecutionKey");
 const TOOL_FAILURE_RAW_KEY = Symbol("ToolFailureRawKey");
 const TOOL_FAILURE_EXECUTION_SCOPE = Symbol("ToolFailureExecutionScope");
 const MAX_OPERATION_CHARS = 240;
-const MAX_FAILURE_CODE_CHARS = 48;
 const MAX_DIAGNOSTIC_CHARS = 240;
 const MAX_CORRECTION_CHARS = 480;
 export const MAX_TOOL_FAILURE_EVIDENCE_CHARS = 1_600;
@@ -629,11 +629,13 @@ export function restoreToolFailureRecord(
 	result: ToolResultMessage,
 	tool: string,
 	args: unknown,
-): ToolFailureMemoryRecord {
-	const executionScope = retainedToolInvocation(result.details)?.executionScope;
+): ToolFailureMemoryRecord | undefined {
+	const invocation = retainedToolInvocation(result.details);
+	const executionScope = invocation?.executionScope;
 	const executionKey = getToolExecutionKey(tool, args, executionScope);
 	const rawKey = getToolRawOperationKey(tool, args, executionScope);
 	const persisted = readFailureRecord(result.details);
+	if (isCancelledToolFailure(persisted, firstText(result), invocation?.failureCode)) return undefined;
 	if (persisted) {
 		return {
 			...persisted,
@@ -642,9 +644,9 @@ export function restoreToolFailureRecord(
 		};
 	}
 	const identity = operationIdentity(tool, args, executionScope);
-	// A completed operation that reported a negative status keeps its own raw output, so there is no
-	// harness record to read back. Recover its terminal status from that output rather than flattening
-	// every such result to a generic `tool_error`.
+	// Native operation outcomes retain raw output rather than a harness failure record. Prefer the
+	// executor's receipt: output can contain misleading status prose or JSON from the command itself.
+	// Old transcripts without this evidence retain the existing best-effort text fallback.
 	const visibleCode = readVisibleToolFailureCode(result);
 	return {
 		version: TOOL_FAILURE_MEMORY_VERSION,
@@ -657,7 +659,7 @@ export function restoreToolFailureRecord(
 		occurrence: 1,
 		state: "failed",
 		phase: "execution",
-		failureCode: boundedFailureCode(visibleCode ?? classifyToolFailure(firstText(result))),
+		failureCode: invocation?.failureCode ?? boundedFailureCode(visibleCode ?? classifyToolFailure(firstText(result))),
 		correction: fallbackFailureGuidance("failed", false, "execution"),
 	};
 }
@@ -701,15 +703,6 @@ export function forEachPairedToolResult(
 			return;
 		}
 	}
-}
-
-function boundedFailureCode(value: string): string {
-	const normalized = value
-		.trim()
-		.toLowerCase()
-		.replace(/[^a-z0-9_.:-]+/g, "_")
-		.replace(/^_+|_+$/g, "");
-	return truncate(normalized || "tool_error", MAX_FAILURE_CODE_CHARS);
 }
 
 /**
@@ -790,7 +783,12 @@ function isToolFailurePhase(value: unknown): value is ToolFailurePhase {
  * finished, and every later request carried the record until an unrelated success cleared it. The
  * tool result itself stays in the transcript, which is the honest record of what was stopped.
  */
-function isCancelledToolFailure(record: ToolFailureMemoryRecord | undefined, text: string): boolean {
+function isCancelledToolFailure(
+	record: ToolFailureMemoryRecord | undefined,
+	text: string,
+	executorFailureCode?: string,
+): boolean {
+	if (executorFailureCode !== undefined) return inferToolFailurePhase("failed", executorFailureCode) === "cancelled";
 	if (record) {
 		return record.phase === "cancelled" || inferToolFailurePhase(record.state, record.failureCode) === "cancelled";
 	}
@@ -1284,9 +1282,11 @@ function foldToolFailureContext(
 		if (message.role !== "toolResult") continue;
 
 		const call = callById.get(message.toolCallId);
-		callById.delete(message.toolCallId);
 		const textPayload = firstText(message);
-		const executionScope = retainedToolInvocation(message.details)?.executionScope;
+		const invocation = retainedToolInvocation(message.details);
+		if (invocation?.execution === "running") continue;
+		callById.delete(message.toolCallId);
+		const executionScope = invocation?.executionScope;
 		if (message.errorKind === "operation_outcome" || isSuccessfulOperationWithHookFailure(message.details)) {
 			// The tool executed and reported an outcome: a successful call of the tool as far as the
 			// ledger is concerned, whatever the outcome says about the operation itself.
@@ -1297,7 +1297,7 @@ function foldToolFailureContext(
 		if (isHarnessFailure) {
 			const retained = readFailureRecord(message.details);
 			// A cancelled call never reaches the ledger: see isCancelledToolFailure.
-			if (isCancelledToolFailure(retained, textPayload)) continue;
+			if (isCancelledToolFailure(retained, textPayload, invocation?.failureCode)) continue;
 			const toolName =
 				retained?.failureCode === UNKNOWN_TOOL_KIND
 					? UNKNOWN_TOOL_KIND

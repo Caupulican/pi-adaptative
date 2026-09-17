@@ -1,3 +1,4 @@
+import { isBoundedFailureCode } from "./tool-failure-code.ts";
 import { readWireRecord } from "./wire-record.ts";
 
 /** Engine evidence, independent of hook policy, display status, and verification claims. */
@@ -9,8 +10,10 @@ export type ToolInvocationReceipt = Readonly<{
 	postprocessingFailures: readonly ("progress" | "after_hook")[];
 }> &
 	(
-		| Readonly<{ execution: "not_started" | "running" | "unknown"; operationStatus?: never }>
-		| Readonly<{ execution: "completed"; operationStatus: "success" | "error" }>
+		| Readonly<{ execution: "not_started" | "running"; operationStatus?: never; failureCode?: never }>
+		| Readonly<{ execution: "unknown"; operationStatus?: never; failureCode?: string }>
+		| Readonly<{ execution: "completed"; operationStatus: "success"; failureCode?: never }>
+		| Readonly<{ execution: "completed"; operationStatus: "error"; failureCode?: string }>
 	);
 
 const RECEIPT_KEYS = new Set([
@@ -20,13 +23,19 @@ const RECEIPT_KEYS = new Set([
 	"operationStatus",
 	"postprocessingFailures",
 	"executionScope",
+	"failureCode",
 ]);
 
 /** Strict bounded data-only wire decoder. It never upgrades missing historical evidence. */
 export function decodeToolInvocationReceipt(value: unknown): ToolInvocationReceipt | undefined {
 	const record = readWireRecord(value, RECEIPT_KEYS);
 	if (!record) return undefined;
-	const { version, requestId, execution, operationStatus, executionScope } = record;
+	const { version, requestId, execution, operationStatus, executionScope, failureCode } = record;
+	if (
+		Object.hasOwn(record, "failureCode") &&
+		(!isBoundedFailureCode(failureCode) ||
+			!(execution === "unknown" || (execution === "completed" && operationStatus === "error")))
+	) return undefined;
 	if (
 		Object.hasOwn(record, "executionScope") &&
 		(typeof executionScope !== "string" || !/^context:[0-9a-f]{32}$/.test(executionScope))
@@ -58,11 +67,15 @@ export function decodeToolInvocationReceipt(value: unknown): ToolInvocationRecei
 	};
 	if (execution === "completed") {
 		if (operationStatus !== "success" && operationStatus !== "error") return undefined;
-		return Object.freeze({ ...base, execution, operationStatus });
+		if (operationStatus === "success") return Object.freeze({ ...base, execution, operationStatus });
+		return Object.freeze({ ...base, execution, operationStatus, ...(typeof failureCode === "string" ? { failureCode } : {}) });
 	}
 	if (execution !== "not_started" && execution !== "running" && execution !== "unknown") return undefined;
 	if (Object.hasOwn(record, "operationStatus") || (execution !== "unknown" && postprocessingFailures.length > 0))
 		return undefined;
+	if (execution === "unknown") {
+		return Object.freeze({ ...base, execution, ...(typeof failureCode === "string" ? { failureCode } : {}) });
+	}
 	return Object.freeze({ ...base, execution });
 }
 
