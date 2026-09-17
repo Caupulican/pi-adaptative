@@ -65,7 +65,7 @@ function appendFailure(
 }
 
 describe("executor-owned timeout recovery", () => {
-	it("executes bounded native-style timeout repairs through the real loop", async () => {
+	it.each([false, true])("executes and restores native-style timeout repairs with projected memory=%s", async (projectedMemory) => {
 		const executed: number[] = [];
 		const runtimeTool: AgentTool<typeof parameters> = {
 			...tool,
@@ -101,6 +101,9 @@ describe("executor-owned timeout recovery", () => {
 					(message): message is Message => ["user", "assistant", "toolResult"].includes(message.role),
 				),
 				toolExecution: "sequential",
+				afterToolCall: projectedMemory ? async ({ args }) => ({
+					details: { piToolFailureMemory: describeOperationOutcome(tool.name, args, "exit_1", "Projected status") },
+				}) : undefined,
 				maxStallTurns: 0,
 				maxRepeatedFailures: 0,
 			},

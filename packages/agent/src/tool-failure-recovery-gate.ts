@@ -556,10 +556,7 @@ function walkTranscript(
 		if (!record) continue;
 		// A prompt-scoped block is cleared by a new owner prompt, not by anything the agent can do, so
 		// it never becomes a repetition state.
-		if (
-			isPromptScopedFailureCode(readVisibleToolFailureCode(message)) ||
-			isPromptScopedFailureCode(record.failureCode)
-		) {
+		if (isPromptScopedFailureCode(record.failureCode)) {
 			continue;
 		}
 		visit({

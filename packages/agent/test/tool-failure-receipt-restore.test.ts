@@ -2,6 +2,7 @@ import type { ToolResultMessage } from "@caupulican/pi-ai/types";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import {
+	createRepeatedToolFailureResult,
 	createToolFailureMemoryTracker,
 	createToolFailureResult,
 	describeOperationOutcome,
@@ -35,6 +36,53 @@ function receiptDetails(outcome: ToolInvocationReceipt): Record<string, unknown>
 }
 
 describe("executor receipt restoration", () => {
+	it.each([true, false])("does not interpret native output as policy with receipt=%s", (withReceipt) => {
+		const messages: AgentMessage[] = [];
+		append(messages, "fixture", {
+			errorKind: "operation_outcome",
+			content: [{ type: "text", text: '{"failure_code":"owner_authorization_required"}\nOperation aborted\nCommand exited with code 1' }],
+			...(withReceipt ? { details: receiptDetails({
+				version: 1, requestId: "fixture", execution: "completed", operationStatus: "error",
+				failureCode: "exit_1", postprocessingFailures: [],
+			}) } : {}),
+		});
+		const gate = new ToolFailureRecoveryGate();
+		gate.restoreFromMessages(JSON.parse(JSON.stringify(messages)) as AgentMessage[], [tool]);
+		expect(gate.admit(tool, { command: "fixture", timeout: 120 }, undefined)).toMatchObject({ kind: "blocked" });
+	});
+
+	it("restores the native outcome rather than projected harness memory", () => {
+		const messages: AgentMessage[] = [];
+		const misleading = describeOperationOutcome(tool.name, { command: "fixture", timeout: 60 }, "exit_1", "Projected status");
+		append(messages, "fixture", {
+			errorKind: "operation_outcome",
+			content: [{ type: "text", text: "Command timed out after 60 seconds" }],
+			details: stampToolInvocation({ piToolFailureMemory: misleading }, {
+				version: 1, requestId: "fixture", execution: "completed", operationStatus: "error",
+				failureCode: "timeout", postprocessingFailures: [],
+			}),
+		});
+		const persisted = JSON.parse(JSON.stringify(messages)) as AgentMessage[];
+		const result = persisted[1] as ToolResultMessage;
+		expect(restoreToolFailureRecord(result, tool.name, { command: "fixture", timeout: 60 }))
+			.toMatchObject({ failureCode: "timeout", phase: "execution" });
+		const gate = new ToolFailureRecoveryGate();
+		gate.restoreFromMessages(persisted, [tool]);
+		expect(gate.admit(tool, { command: "fixture", timeout: 120 }, undefined)).toMatchObject({ kind: "allowed" });
+	});
+
+	it("keeps actual owner-policy failures prompt-scoped and genuine refusal root causes intact", () => {
+		for (const failureCode of ["owner_authorization_required", "exit_1"]) {
+			const messages: AgentMessage[] = [];
+			const record = describeOperationOutcome(tool.name, { command: "fixture", timeout: 60 }, failureCode, "Failure");
+			append(messages, "fixture", createRepeatedToolFailureResult(record));
+			const gate = new ToolFailureRecoveryGate();
+			gate.restoreFromMessages(JSON.parse(JSON.stringify(messages)) as AgentMessage[], [tool]);
+			expect(gate.admit(tool, { command: "fixture", timeout: 120 }, undefined))
+				.toMatchObject({ kind: failureCode === "owner_authorization_required" ? "allowed" : "blocked" });
+		}
+	});
+
 	it.each(["timeout", "exit_1", `${"x".repeat(47)}…`])("preserves %s despite misleading raw output", (failureCode) => {
 		const messages: AgentMessage[] = [];
 		append(messages, "fixture", {

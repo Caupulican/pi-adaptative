@@ -634,8 +634,12 @@ export function restoreToolFailureRecord(
 	const executionScope = invocation?.executionScope;
 	const executionKey = getToolExecutionKey(tool, args, executionScope);
 	const rawKey = getToolRawOperationKey(tool, args, executionScope);
-	const persisted = readFailureRecord(result.details);
-	if (isCancelledToolFailure(persisted, firstText(result), invocation?.failureCode)) return undefined;
+	const operationOutcome = result.errorKind === "operation_outcome";
+	// Native outcomes retain command output and projected details, not harness failure memory.
+	// Neither channel can supersede the executor receipt or masquerade as a policy/cancellation.
+	const persisted = operationOutcome ? undefined : readFailureRecord(result.details);
+	const outcomeCode = invocation?.failureCode ?? (operationOutcome ? classifyToolFailure(firstText(result)) : undefined);
+	if (isCancelledToolFailure(persisted, firstText(result), outcomeCode)) return undefined;
 	if (persisted) {
 		return {
 			...persisted,
@@ -647,7 +651,7 @@ export function restoreToolFailureRecord(
 	// Native operation outcomes retain raw output rather than a harness failure record. Prefer the
 	// executor's receipt: output can contain misleading status prose or JSON from the command itself.
 	// Old transcripts without this evidence retain the existing best-effort text fallback.
-	const visibleCode = readVisibleToolFailureCode(result);
+	const visibleCode = operationOutcome ? undefined : readVisibleToolFailureCode(result);
 	return {
 		version: TOOL_FAILURE_MEMORY_VERSION,
 		failureKey: identity.failureKey,
@@ -659,7 +663,7 @@ export function restoreToolFailureRecord(
 		occurrence: 1,
 		state: "failed",
 		phase: "execution",
-		failureCode: invocation?.failureCode ?? boundedFailureCode(visibleCode ?? classifyToolFailure(firstText(result))),
+		failureCode: outcomeCode ?? boundedFailureCode(visibleCode ?? classifyToolFailure(firstText(result))),
 		correction: fallbackFailureGuidance("failed", false, "execution"),
 	};
 }
