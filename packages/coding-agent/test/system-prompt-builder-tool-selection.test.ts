@@ -6,7 +6,7 @@
  * risk for this dep — accumulating MORE evidence for the SAME winner must NOT change the text (only
  * an actual flip in the promoted tool may).
  */
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MemoryPromptBudget } from "../src/core/context/memory-prompt-budget.ts";
 import type { Extension } from "../src/core/extensions/types.ts";
 import type { MemoryManager } from "../src/core/memory/memory-manager.ts";
@@ -67,7 +67,56 @@ const readHint: ToolSelectionHint = {
 	entropy: 0,
 };
 
+afterEach(() => vi.useRealTimers());
+
 describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
+	it.each(["selected", "filtered", "empty", "unregistered"] as const)(
+		"limits hint rendering to the actual prompt tool surface: %s",
+		(surface) => {
+			const hints = Object.freeze([Object.freeze({ ...readHint })]);
+			const builder = new SystemPromptBuilder(
+				makeDeps({
+					getToolSelectionHints: () => hints,
+					hasTool: (name) => surface !== "unregistered" || name !== "read_file",
+				}),
+			);
+			const tools = surface === "empty" ? [] : surface === "filtered" ? ["bash"] : ["read_file"];
+			const prompt = builder.rebuildSystemPrompt(tools);
+			expect(prompt.includes("- read: `read_file` established for this model")).toBe(surface === "selected");
+			expect(prompt.includes("EVIDENCE-GATED TOOL SHORTLIST")).toBe(surface === "selected");
+			expect(hints).toEqual([readHint]);
+		},
+	);
+
+	it("filters a routed hint without altering the base prompt or losing it on restoration", () => {
+		const builder = new SystemPromptBuilder(makeDeps({ getToolSelectionHints: () => [readHint] }));
+		const base = builder.rebuildSystemPrompt(["read_file", "bash"]);
+		const options = builder.getBaseSystemPromptOptions();
+		expect(base).toContain("- read: `read_file` established for this model");
+		expect(builder.buildSystemPromptForToolNames(["bash"])).not.toContain("EVIDENCE-GATED TOOL SHORTLIST");
+		expect(builder.getBaseSystemPromptOptions()).toBe(options);
+		expect(builder.rebuildSystemPrompt(["read_file", "bash"])).toBe(base);
+	});
+
+	it("keeps same-day hints stable across evidence and order changes, with a next-day control", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 17, 8));
+		const searchHint: ToolSelectionHint = { ...readHint, intentClass: "search", tool: "grep" };
+		let hints = [readHint, searchHint];
+		const builder = new SystemPromptBuilder(makeDeps({ getToolSelectionHints: () => hints }));
+		const surface = ["read_file", "grep"];
+		const morning = builder.rebuildSystemPrompt(surface);
+		expect(morning).toContain("- read: `read_file` established for this model");
+		expect(morning).toContain("- search: `grep` established for this model");
+		vi.setSystemTime(new Date(2026, 8, 17, 23));
+		hints = [searchHint, readHint].map((hint) => ({ ...hint, sampleCount: 5_000, margin: 0.95, entropy: 0.01 }));
+		expect(builder.rebuildSystemPrompt(surface)).toBe(morning);
+		vi.setSystemTime(new Date(2026, 8, 18, 8));
+		const nextDay = builder.rebuildSystemPrompt(surface);
+		expect(nextDay).not.toBe(morning);
+		expect(nextDay.replace("Current date: 2026-09-18", "Current date: 2026-09-17")).toBe(morning);
+	});
+
 	it.each([8192, undefined])(
 		"allocates static memory from remaining prompt capacity (context window %s)",
 		(contextWindow) => {
@@ -458,35 +507,35 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 
 	it("renders a compact block naming the promoted tool once a hint is active", () => {
 		const builder = new SystemPromptBuilder(makeDeps({ getToolSelectionHints: () => [readHint] }));
-		const prompt = builder.rebuildSystemPrompt(["read"]);
+		const prompt = builder.rebuildSystemPrompt(["read_file"]);
 		expect(prompt).toContain("EVIDENCE-GATED TOOL SHORTLIST");
 		expect(prompt).toContain("read_file");
 	});
 
 	it("is byte-identical across two consecutive builds with an unchanged hint set (cache stability)", () => {
 		const builder = new SystemPromptBuilder(makeDeps({ getToolSelectionHints: () => [readHint] }));
-		const first = builder.rebuildSystemPrompt(["read"]);
-		const second = builder.rebuildSystemPrompt(["read"]);
+		const first = builder.rebuildSystemPrompt(["read_file"]);
+		const second = builder.rebuildSystemPrompt(["read_file"]);
 		expect(second).toBe(first);
 	});
 
 	it("does NOT change when the same tool accumulates more evidence — only a flip in the winner changes the text", () => {
 		const early = new SystemPromptBuilder(
 			makeDeps({ getToolSelectionHints: () => [{ ...readHint, sampleCount: 3, margin: 0.12, entropy: 0.4 }] }),
-		).rebuildSystemPrompt(["read"]);
+		).rebuildSystemPrompt(["read_file"]);
 		const later = new SystemPromptBuilder(
 			makeDeps({ getToolSelectionHints: () => [{ ...readHint, sampleCount: 5_000, margin: 0.95, entropy: 0.01 }] }),
-		).rebuildSystemPrompt(["read"]);
+		).rebuildSystemPrompt(["read_file"]);
 		expect(later).toBe(early);
 	});
 
 	it("changes when the promoted tool for the intent actually flips", () => {
 		const before = new SystemPromptBuilder(makeDeps({ getToolSelectionHints: () => [readHint] })).rebuildSystemPrompt(
-			["read"],
+			["read_file", "cat_file"],
 		);
 		const after = new SystemPromptBuilder(
 			makeDeps({ getToolSelectionHints: () => [{ ...readHint, tool: "cat_file" }] }),
-		).rebuildSystemPrompt(["read"]);
+		).rebuildSystemPrompt(["read_file", "cat_file"]);
 		expect(after).not.toBe(before);
 	});
 });

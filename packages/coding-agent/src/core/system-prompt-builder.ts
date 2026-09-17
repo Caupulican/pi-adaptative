@@ -226,8 +226,11 @@ export class SystemPromptBuilder {
 	}
 
 	/** The evidence-gated tool-selection hint block (see `getToolSelectionHints` on the deps). */
-	private _buildToolSelectionHintPrompt(): string | undefined {
-		return formatToolSelectionHints(this.deps.getToolSelectionHints?.() ?? []);
+	private _buildToolSelectionHintPrompt(validToolNames: readonly string[]): string | undefined {
+		const available = new Set(validToolNames);
+		return formatToolSelectionHints(
+			(this.deps.getToolSelectionHints?.() ?? []).filter((hint) => available.has(hint.tool)),
+		);
 	}
 
 	private _buildToolApplicabilityPrompt(
@@ -382,7 +385,7 @@ export class SystemPromptBuilder {
 			this._buildWorkLifecyclePrompt(validToolNames),
 			this._buildDelegationPrompt(validToolNames.includes("delegate")),
 			this._buildModelAdaptationPrompt(),
-			this._buildToolSelectionHintPrompt(),
+			this._buildToolSelectionHintPrompt(validToolNames),
 			this._buildToolApplicabilityPrompt(validToolNames, activeExtensions, modelCapability),
 		].filter((part): part is string => Boolean(part));
 		const loadedContextFiles = this.deps.getResourceLoader().getAgentsFiles().agentsFiles;
