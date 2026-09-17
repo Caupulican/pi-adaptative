@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Tool-result image replacement and collapse invalidate cached conversions, preventing older previews from overwriting current output. Repeated expansion shares pending conversion work, and failed conversion remains retryable.
+
 ## [0.99.27] - 2026-09-16
 
 ### Fixed

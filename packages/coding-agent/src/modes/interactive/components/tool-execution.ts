@@ -173,7 +173,8 @@ export class ToolExecutionComponent extends Container {
 	private argsComplete = false;
 	private result?: ToolExecutionResult;
 	private materializedResult?: ToolExecutionResult;
-	private convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
+	/** Null reserves an index while conversion is pending; a value is ready for display. */
+	private convertedImages: Map<number, { data: string; mimeType: string } | null> = new Map();
 	private hideComponent = false;
 	private readonly timing = new ToolTimingComponent(monotonicNow);
 	private questionView?: Component;
@@ -392,6 +393,7 @@ export class ToolExecutionComponent extends Container {
 		}
 		this.result = result;
 		this.materializedResult = undefined;
+		this.resetImageConversions();
 		this.isPartial = isPartial;
 		this.updateDisplay();
 		if (this.shouldMaterializeResult()) this.maybeConvertImagesForKitty();
@@ -417,6 +419,7 @@ export class ToolExecutionComponent extends Container {
 		if (!result) return;
 		const caps = getCapabilities();
 		if (caps.images !== "kitty") return;
+		const conversions = this.convertedImages;
 
 		const imageBlocks = result.content.filter((c) => c.type === "image");
 		for (let i = 0; i < imageBlocks.length; i++) {
@@ -426,14 +429,24 @@ export class ToolExecutionComponent extends Container {
 			if (this.convertedImages.has(i)) continue;
 
 			const index = i;
+			conversions.set(index, null);
 			convertToPng(img.data, img.mimeType).then((converted) => {
-				if (converted && this.getMaterializedResult() === result) {
-					this.convertedImages.set(index, converted);
-					this.updateDisplay();
-					this.ui.requestRender();
+				if (this.convertedImages !== conversions || this.getMaterializedResult() !== result) return;
+				if (!converted) {
+					conversions.delete(index);
+					return;
 				}
+				conversions.set(index, converted);
+				this.updateDisplay();
+				this.ui.requestRender();
 			});
 		}
+	}
+
+	private resetImageConversions(): void {
+		// Release cached pixels and fence pending callbacks, even when a tool reuses its result object.
+		this.convertedImages.clear();
+		this.convertedImages = new Map();
 	}
 
 	setExpanded(expanded: boolean): void {
@@ -441,7 +454,7 @@ export class ToolExecutionComponent extends Container {
 		if (!expanded) {
 			this.resultRendererComponent = undefined;
 			this.materializedResult = undefined;
-			this.convertedImages.clear();
+			this.resetImageConversions();
 		}
 		this.updateDisplay();
 		if (expanded) this.maybeConvertImagesForKitty();
