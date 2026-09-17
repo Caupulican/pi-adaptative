@@ -1,5 +1,6 @@
 import type { Agent } from "@caupulican/pi-agent-core";
 import type { SessionManager, SessionMessageBatchEntry } from "@caupulican/pi-agent-core/session";
+import type { ProviderRequestSnapshotContext } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage, Message } from "@caupulican/pi-ai";
 import { ForegroundLifecycleController, type ProviderRetryLifecycleEvent } from "./foreground-lifecycle-controller.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
@@ -37,6 +38,7 @@ export class ForegroundLifecycleAdapter {
 		providerLimitStore?: ProviderLimitStore,
 		observeMessagePersisted?: (message: Message, entryId: string) => void,
 		liveWarningSink?: () => ((message: string) => void) | undefined,
+		observeProviderRequest?: (context: ProviderRequestSnapshotContext) => void,
 	) {
 		this.sessionManager = sessionManager;
 		this.providerLimitStore = providerLimitStore;
@@ -47,6 +49,7 @@ export class ForegroundLifecycleAdapter {
 			sessionManager,
 			modelRouter,
 			emitWarning: (message) => this.pendingWarnings.push(message),
+			observeProviderRequest,
 			...(getMutationScope ? { getMutationScope } : {}),
 			...(getAnnouncer ? { getAnnouncer } : {}),
 		});

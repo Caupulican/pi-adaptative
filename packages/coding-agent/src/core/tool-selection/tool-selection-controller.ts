@@ -4,7 +4,7 @@ import {
 	type ExpectedUtilityCandidate,
 	type ToolSelectionDecision,
 } from "./expected-utility.ts";
-import { evaluateToolPromotion, type ToolSelectionHint } from "./promotion.ts";
+import { evaluateToolPromotion, renderedToolSelectionHintIntents, type ToolSelectionHint } from "./promotion.ts";
 import type {
 	ToolExecutionObservation,
 	ToolPerformanceKey,
@@ -201,6 +201,11 @@ export class ToolSelectionController {
 	private readonly pending = new Map<string, ToolSelectionPendingObservation>();
 	private readonly timings = new ToolPhaseTimings();
 	private firstToolInTurn = true;
+	private requestHints?: {
+		requestId: string;
+		modelRef: string;
+		intents: ReadonlySet<ToolSelectionIntentClass>;
+	};
 	private readonly recoveryBoost = new Set<string>();
 	/** Kill switch: observe/stats recording, default ON. `PI_TOOL_SELECTION_OBSERVE=0` disables it. */
 	private readonly observeEnabled: boolean;
@@ -211,6 +216,7 @@ export class ToolSelectionController {
 	}
 
 	startTurn(): void {
+		this.requestHints = undefined;
 		this.firstToolInTurn = true;
 	}
 
@@ -222,7 +228,16 @@ export class ToolSelectionController {
 		}
 	}
 
-	begin(toolCallId: string, toolName: string, args: unknown): ToolSelectionPendingObservation {
+	/** Capture the materialized request, before transport, without retaining its prompt or messages. */
+	observeProviderRequest(requestId: string, modelRef: string, systemPrompt: string): void {
+		this.requestHints = {
+			requestId,
+			modelRef,
+			intents: renderedToolSelectionHintIntents(systemPrompt, INTENT_CLASSES),
+		};
+	}
+
+	begin(toolCallId: string, toolName: string, args: unknown, requestId?: string): ToolSelectionPendingObservation {
 		const selectionStartedAt = performance.now();
 		const modelRef = this.deps.getModelRef();
 		const activeTools = this.deps
@@ -269,10 +284,14 @@ export class ToolSelectionController {
 		const decision = decideExpectedUtility(candidates);
 		const firstTool = this.firstToolInTurn;
 		const selection = this.selectionSnapshot(decision, firstTool);
-		// Evaluated BEFORE this call is recorded, so it reflects evidence up to (not including) this
-		// observation — captured now because complete() (later, async) can no longer distinguish
-		// "before" from "after" once the store has been written.
-		const hintActiveAtCallTime = this.observeEnabled ? evaluateToolPromotion(intentStats).tool !== undefined : false;
+		// Eligibility may have changed since the prompt was built. Credit only the captured request,
+		// never a newly eligible hint that the model has not received. Foreground requests are serial;
+		// completed calls retain their own captured bit even after a later snapshot replaces this one.
+		const hintActiveAtCallTime =
+			requestId !== undefined &&
+			this.requestHints?.requestId === requestId &&
+			this.requestHints.modelRef === modelRef &&
+			this.requestHints.intents.has(intentClass);
 		const selectionCompletedAt = performance.now();
 		this.timings.record("selection", selectionCompletedAt - selectionStartedAt);
 		const pending: ToolSelectionPendingObservation = {

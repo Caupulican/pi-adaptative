@@ -915,6 +915,12 @@ export class AgentSession {
 			(message, entryId) => this._reflection.noteOwnerInputPersisted(message, entryId),
 			() =>
 				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,
+			({ requestId, model, context }) =>
+				this._toolSelection.observeProviderRequest(
+					requestId,
+					formatModelRouterModel(model),
+					context.systemPrompt ?? "",
+				),
 		);
 		this._foregroundLifecycle.start();
 		this._reflection = new ReflectionController({

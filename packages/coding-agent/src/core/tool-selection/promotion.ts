@@ -47,6 +47,29 @@ export interface ToolPromotionDecision {
 	entropy: number;
 }
 
+const HINT_HEADING = "EVIDENCE-GATED TOOL SHORTLIST; observation, never directive";
+const HINT_FOOTER = "Use task judgment.";
+
+/** Recognize one complete canonical block; ambiguous or malformed blocks carry no attribution. */
+export function renderedToolSelectionHintIntents(
+	systemPrompt: string,
+	intents: readonly ToolSelectionIntentClass[],
+): ReadonlySet<ToolSelectionIntentClass> {
+	const lines = systemPrompt.split("\n");
+	const start = lines.indexOf(HINT_HEADING);
+	const result = new Set<ToolSelectionIntentClass>();
+	if (start < 0 || lines.indexOf(HINT_HEADING, start + 1) >= 0) return result;
+	for (let index = start + 1; index < lines.length; index++) {
+		const line = lines[index]!;
+		if (line === HINT_FOOTER) return result;
+		const match = /^- ([a-z]+): `([^`\r\n]+)` established for this model$/u.exec(line);
+		const intent = intents.find((candidate) => candidate === match?.[1]);
+		if (!intent || result.has(intent)) return new Set();
+		result.add(intent);
+	}
+	return new Set();
+}
+
 function candidateFromStats(stats: ToolPerformanceStats): ExpectedUtilityCandidate {
 	return {
 		tool: stats.tool,
@@ -102,5 +125,5 @@ export function formatToolSelectionHints(hints: readonly ToolSelectionHint[]): s
 	const lines = [...hints]
 		.sort((left, right) => left.intentClass.localeCompare(right.intentClass))
 		.map((hint) => `- ${hint.intentClass}: \`${hint.tool}\` established for this model`);
-	return ["EVIDENCE-GATED TOOL SHORTLIST; observation, never directive", ...lines, "Use task judgment."].join("\n");
+	return [HINT_HEADING, ...lines, HINT_FOOTER].join("\n");
 }

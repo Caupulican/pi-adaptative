@@ -1,4 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
+import { describe, expect, it, vi } from "vitest";
+import { formatToolSelectionHints } from "../src/core/tool-selection/promotion.ts";
+import { ToolPerformanceStore } from "../src/core/tool-selection/tool-performance-store.ts";
 import type { ToolSelectionController } from "../src/core/tool-selection/tool-selection-controller.ts";
 import { createHarness } from "./suite/harness.ts";
 
@@ -27,6 +32,77 @@ function promoteReadHint(toolSelection: ToolSelectionController): void {
 }
 
 describe("AgentSession — tool-selection wiring", () => {
+	it.each([
+		{ rendered: false, override: undefined },
+		{ rendered: true, override: undefined },
+		{ rendered: true, override: false },
+		{ rendered: false, override: true },
+	])("credits request hints (rendered=$rendered, extension override=$override)", async ({ rendered, override }) => {
+		let hintBlock = "";
+		const harness = await createHarness({
+			initialActiveToolNames: ["read"],
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", (event) => {
+						if (override === undefined) return;
+						const withoutHint = event.systemPrompt.replace(
+							/EVIDENCE-GATED TOOL SHORTLIST; observation, never directive\n[\s\S]*?Use task judgment\./u,
+							"",
+						);
+						return { systemPrompt: override ? `${withoutHint}\n${hintBlock}` : withoutHint };
+					});
+				},
+			],
+		});
+		try {
+			const selection = toolSelectionOf(harness);
+			promoteReadHint(selection);
+			hintBlock = formatToolSelectionHints(selection.getActiveHints())!;
+			const snapshots = vi.spyOn(selection, "observeProviderRequest");
+			const admissions = vi.spyOn(selection, "begin");
+			if (rendered) {
+				(harness.session as unknown as { _refreshBaseSystemPrompt(): void })._refreshBaseSystemPrompt();
+			}
+			const path = join(harness.tempDir, "hint-fixture.txt");
+			writeFileSync(path, "fixture content");
+			let observedHint: boolean | undefined;
+			harness.setResponses([
+				(context) => {
+					observedHint = context.systemPrompt?.includes("- read: `read` established for this model") === true;
+					return fauxAssistantMessage(fauxToolCall("read", { path }), { stopReason: "toolUse" });
+				},
+				fauxAssistantMessage("Read complete."),
+			]);
+			await harness.session.prompt("Read the fixture once.");
+			const expectedHint = override ?? rendered;
+			expect(observedHint).toBe(expectedHint);
+			expect(snapshots).toHaveBeenCalledTimes(2);
+			expect(admissions).toHaveBeenCalledTimes(1);
+			expect(admissions.mock.calls[0][3]).toBe(snapshots.mock.calls[0][0]);
+			expect(snapshots.mock.calls[0][0]).not.toBe(snapshots.mock.calls[1][0]);
+			expect(snapshots.mock.calls[0][2].includes("- read: `read` established for this model")).toBe(expectedHint);
+			expect(selection.getReport().find((entry) => entry.intentClass === "read")).toMatchObject({
+				sampleCount: 4,
+				hintSampleCount: expectedHint ? 1 : 0,
+			});
+			// Replayed completion cannot add a fifth sample; verify persisted bytes through a fresh reader.
+			selection.complete(admissions.mock.calls[0][0], true);
+			const writer = (selection as unknown as { deps: { store: ToolPerformanceStore } }).deps.store;
+			writer.flush();
+			const reader = ToolPerformanceStore.forAgentDir(harness.tempDir, { readOnly: true });
+			try {
+				expect(reader.getIntentAgreement(snapshots.mock.calls[0][1], "read")).toMatchObject({
+					sampleCount: 4,
+					hintActiveSampleCount: expectedHint ? 1 : 0,
+				});
+			} finally {
+				reader.close();
+			}
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
 	it("the built system prompt contains an active hint once the live controller promotes one", async () => {
 		const harness = await createHarness({ initialActiveToolNames: ["read"] });
 		try {

@@ -56,6 +56,7 @@ interface ForegroundLifecycleControllerDeps {
 	sessionManager: SessionManager;
 	modelRouter: ModelRouterController;
 	emitWarning(message: string): void;
+	observeProviderRequest?(context: ProviderRequestSnapshotContext): void;
 	/**
 	 * Session identity of the group lock these announcements order (see file-mutation-queue.ts).
 	 * Omitted announces into the process-wide default scope, which is what a single-session host had.
@@ -149,6 +150,7 @@ export class ForegroundLifecycleController {
 		this.deps.sessionManager.appendRequestSnapshot(buildRequestSnapshotInput(context, this.deps.sessionManager));
 		dumpProviderRequest(requestId, context.context);
 		signal?.throwIfAborted();
+		this.deps.observeProviderRequest?.(context);
 	}
 
 	private appendMessage: AppendMessage = (message) => {

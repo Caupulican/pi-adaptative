@@ -57,7 +57,10 @@ export class ToolGateController {
 		this.deps = deps;
 	}
 
-	readonly beforeToolCall: BeforeToolCall = async ({ toolCall, args, executionContext, pathAuthority }, signal) => {
+	readonly beforeToolCall: BeforeToolCall = async (
+		{ toolCall, args, executionContext, pathAuthority, requestId },
+		signal,
+	) => {
 		signal?.throwIfAborted();
 		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);
 		if (escalation) {
@@ -141,7 +144,7 @@ export class ToolGateController {
 
 			if (extensionResult) return extensionResult;
 
-			this.deps.getToolSelectionController?.()?.begin(toolCall.id, toolCall.name, finalArgs);
+			this.deps.getToolSelectionController?.()?.begin(toolCall.id, toolCall.name, finalArgs, requestId);
 			return undefined;
 		} finally {
 			// A later abort does not invalidate a decision the envelope already made; the pre-hook

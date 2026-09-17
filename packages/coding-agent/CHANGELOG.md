@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- Tool hint measurements use the originating provider request instead of newly eligible live statistics, preventing credit for hints absent from that request.
 - Learned tool hints are limited to each prompt's registered tool surface, including restricted routed prompts and turns with no tools.
 - Advisory-state batches discard partial changes from failed or unaccepted mutation callbacks while preserving accepted observations and normal batching costs.
 - Advisory-state writes preserve existing data after read failures and retain queued observations and foreign writes through failed flushes or close. Full batches reject further mutations until persistence recovers.

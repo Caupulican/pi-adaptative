@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionRunner } from "../src/core/extensions/index.ts";
 import { ToolGateController } from "../src/core/tool-gate-controller.ts";
+import { formatToolSelectionHints } from "../src/core/tool-selection/promotion.ts";
 import { ToolPerformanceStore } from "../src/core/tool-selection/tool-performance-store.ts";
 import {
 	recoveryToolsForFailedTool,
@@ -119,9 +120,9 @@ describe("ToolSelectionController — observe/agreement/promotion loop", () => {
 		expect(hints).toHaveLength(1);
 		expect(hints[0]).toMatchObject({ intentClass: "read", tool: "read_file" });
 
-		// This 4th call happens WHILE the hint is active — the only call that should land in the
-		// hint-efficacy bucket (hintActiveAtCallTime is stamped BEFORE this call is recorded).
-		controller.begin("call-3", "read_file", {});
+		// Eligibility alone is not delivery: this request actually includes the promoted hint.
+		controller.observeProviderRequest("hint-request", "faux/model", formatToolSelectionHints(hints)!);
+		controller.begin("call-3", "read_file", {}, "hint-request");
 		controller.complete("call-3", true, [{ type: "text", text: "ok" }]);
 
 		const report = controller.getReport();
