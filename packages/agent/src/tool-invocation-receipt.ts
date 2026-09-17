@@ -7,6 +7,8 @@ export type ToolInvocationReceipt = Readonly<{
 	requestId: string;
 	/** Opaque exact binding identity, never provider-supplied arguments or a raw local path. */
 	executionScope?: string;
+	/** Effective executor timeout captured before execution. Null means declared but unavailable. */
+	timeoutMs?: number | null;
 	postprocessingFailures: readonly ("progress" | "after_hook")[];
 }> &
 	(
@@ -24,13 +26,19 @@ const RECEIPT_KEYS = new Set([
 	"postprocessingFailures",
 	"executionScope",
 	"failureCode",
+	"timeoutMs",
 ]);
 
 /** Strict bounded data-only wire decoder. It never upgrades missing historical evidence. */
 export function decodeToolInvocationReceipt(value: unknown): ToolInvocationReceipt | undefined {
 	const record = readWireRecord(value, RECEIPT_KEYS);
 	if (!record) return undefined;
-	const { version, requestId, execution, operationStatus, executionScope, failureCode } = record;
+	const { version, requestId, execution, operationStatus, executionScope, failureCode, timeoutMs } = record;
+	if (
+		Object.hasOwn(record, "timeoutMs") &&
+		((timeoutMs !== null && (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0)) ||
+			(execution !== "completed" && execution !== "unknown"))
+	) return undefined;
 	if (
 		Object.hasOwn(record, "failureCode") &&
 		(!isBoundedFailureCode(failureCode) ||
@@ -64,6 +72,7 @@ export function decodeToolInvocationReceipt(value: unknown): ToolInvocationRecei
 		requestId,
 		postprocessingFailures: Object.freeze(postprocessingFailures),
 		...(typeof executionScope === "string" ? { executionScope } : {}),
+		...(typeof timeoutMs === "number" || timeoutMs === null ? { timeoutMs } : {}),
 	};
 	if (execution === "completed") {
 		if (operationStatus !== "success" && operationStatus !== "error") return undefined;

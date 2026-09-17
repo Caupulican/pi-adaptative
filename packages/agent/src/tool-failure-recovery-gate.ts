@@ -13,6 +13,7 @@ import {
 	type ToolFailureMemoryRecord,
 } from "./tool-failure-memory.ts";
 import { TOOL_FAILURE_READMISSION_RULE } from "./tool-failure-recovery-protocol.ts";
+import { readToolFailureTimeoutMs } from "./tool-failure-timeout.ts";
 import { isSuccessfulOperationWithHookFailure, retainedToolInvocation } from "./tool-invocation-receipt.ts";
 import type {
 	AgentMessage,
@@ -59,21 +60,9 @@ interface EnvelopeBound {
 }
 
 /** Keep one unambiguous bound's exact field identity; different fields may use different units. */
-function readEnvelopeBound(args: unknown, tool?: AgentTool<any>): EnvelopeBound | undefined {
-	try {
-		const contract = tool?.failureRecovery;
-		const getTimeoutMs = contract?.getTimeoutMs;
-		if (getTimeoutMs) {
-			const value: unknown = Reflect.apply(getTimeoutMs, contract, [args]);
-			return {
-				field: null,
-				value: typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined,
-			};
-		}
-	} catch {
-		// A broken projection grants no escalation and cannot revive argument guessing.
-		return { field: null, value: undefined };
-	}
+function readEnvelopeBound(args: unknown, tool?: AgentTool<any>, snapshot?: number | null): EnvelopeBound | undefined {
+	const timeoutMs = snapshot === undefined ? readToolFailureTimeoutMs(args, tool) : snapshot;
+	if (timeoutMs !== undefined) return { field: null, value: timeoutMs ?? undefined };
 	if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
 	let bound: EnvelopeBound | undefined;
 	for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
@@ -97,6 +86,8 @@ export type ToolFailureRecoveryGateEffect =
 			tool?: AgentTool<any>;
 			record: ToolFailureMemoryRecord;
 			args: unknown;
+			/** Captured from the actual bound executor before execution; null forbids reconstruction. */
+			timeoutMs?: number | null;
 	  }
 	| { kind: "success"; tool: AgentTool<any>; args: unknown; executionScope?: string };
 
@@ -359,17 +350,22 @@ export class ToolFailureRecoveryGate {
 			this.observeSuccess(effect.tool, effect.args, effect.executionScope);
 			return;
 		}
-		this.observeUnproductive(effect.record, effect.args, effect.tool);
+		this.observeUnproductive(effect.record, effect.args, effect.tool, effect.timeoutMs);
 	}
 
-	private observeUnproductive(record: ToolFailureMemoryRecord, args: unknown, tool?: AgentTool<any>): void {
+	private observeUnproductive(
+		record: ToolFailureMemoryRecord,
+		args: unknown,
+		tool?: AgentTool<any>,
+		timeoutMs?: number | null,
+	): void {
 		const executionKey = getToolExecutionKey(record.tool, args, getToolFailureRecordExecutionScope(record));
 		this.resolvedBeforeTranscriptCommit.delete(executionKey);
 		this.seenUnproductiveExecutions.add(executionKey);
 		const previous = this.statesByExecutionKey.get(executionKey);
 		this.retainState(
 			executionKey,
-			observeFailureState(record, readEnvelopeBound(args, tool), this.worldCursor, previous),
+			observeFailureState(record, readEnvelopeBound(args, tool, timeoutMs), this.worldCursor, previous),
 		);
 	}
 
@@ -564,7 +560,7 @@ function walkTranscript(
 			executionKey,
 			worldCursor,
 			record,
-			envelopeBound: readEnvelopeBound(call.args, tools.find((tool) => tool.name === call.name)),
+			envelopeBound: readEnvelopeBound(call.args, tools.find((tool) => tool.name === call.name), invocation?.timeoutMs),
 			replayRefused:
 				invocation?.execution !== "completed" &&
 				message.errorKind !== "operation_outcome" &&

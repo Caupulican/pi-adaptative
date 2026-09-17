@@ -45,6 +45,7 @@ import {
 	toolFailureCorrection,
 } from "./tool-failure-memory.ts";
 import { ToolFailureRecoveryGate, type ToolFailureRecoveryGateEffect } from "./tool-failure-recovery-gate.ts";
+import { readToolFailureTimeoutMs } from "./tool-failure-timeout.ts";
 import { type BoundToolInvocation, bindToolInvocation } from "./tool-invocation-binding.ts";
 import { retainedToolInvocation, stampToolInvocation } from "./tool-invocation-receipt.ts";
 import { ToolProgressDelivery } from "./tool-progress-delivery.ts";
@@ -1479,6 +1480,7 @@ type ExecutedToolCallOutcome = {
 	failureCode?: string;
 	outputSignature?: string;
 	errorKind?: AgentToolErrorKind;
+	timeoutMs?: number | null;
 };
 
 type FinalizedToolCallOutcome = {
@@ -2274,6 +2276,7 @@ async function executePreparedToolCall(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallOutcome> {
+	const timeoutMs = readToolFailureTimeoutMs(prepared.args, prepared.tool);
 	const progress = new ToolProgressDelivery<AgentToolResult<unknown>>((partialResult) =>
 		emit({
 			type: "tool_execution_update",
@@ -2335,7 +2338,11 @@ async function executePreparedToolCall(
 			};
 		}
 	}
-	return { ...executed, progressDeliveryFailed: await progress.finish() };
+	return {
+		...executed,
+		...(timeoutMs === undefined ? {} : { timeoutMs }),
+		progressDeliveryFailed: await progress.finish(),
+	};
 }
 
 function repairTeachKey(toolName: string, note: string): string {
@@ -2458,6 +2465,7 @@ async function finalizeExecutedToolCall(
 			executionGateEffect = {
 				kind: "unproductive",
 				tool: prepared.tool,
+				...(executed.timeoutMs === undefined ? {} : { timeoutMs: executed.timeoutMs }),
 				record: describeOperationOutcome(
 					prepared.toolCall.name,
 					prepared.args,
@@ -2496,6 +2504,7 @@ async function finalizeExecutedToolCall(
 			executionGateEffect = {
 				kind: "unproductive",
 				tool: prepared.tool,
+				...(executed.timeoutMs === undefined ? {} : { timeoutMs: executed.timeoutMs }),
 				record,
 				args: prepared.args,
 			};
@@ -2521,6 +2530,7 @@ async function finalizeExecutedToolCall(
 	const invocationDetails = stampToolInvocation(projectedDetails, {
 		version: 1,
 		requestId,
+		...(executed.timeoutMs === undefined ? {} : { timeoutMs: executed.timeoutMs }),
 		...(prepared.binding ? { executionScope: prepared.binding.executionScope } : {}),
 		...(executed.operationCompleted
 			? executed.isError

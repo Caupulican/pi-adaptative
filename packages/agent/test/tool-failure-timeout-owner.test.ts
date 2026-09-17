@@ -131,9 +131,10 @@ describe("executor-owned timeout recovery", () => {
 		expect(executed).toEqual([60, 60, 120, 240]);
 		const results = messages.filter((message) => message.role === "toolResult");
 		expect(results).toHaveLength(5);
-		for (const result of results.slice(0, 4)) {
+		for (const [index, result] of results.slice(0, 4).entries()) {
 			expect(retainedToolInvocation(result.details)).toMatchObject({
 				execution: "completed", operationStatus: "error", failureCode: "timeout",
+				timeoutMs: requested[index] * 1000,
 			});
 		}
 		// Replay actual raw operation outcomes, not createToolFailureResult's synthetic memory.
@@ -143,6 +144,11 @@ describe("executor-owned timeout recovery", () => {
 			const resumed = new ToolFailureRecoveryGate();
 			resumed.restoreFromMessages(persisted, [runtimeTool]);
 			expect(resumed.admit(runtimeTool, { command: "fixture", timeout: completed === 1 ? 120 : 480 }, undefined))
+				.toMatchObject({ kind: completed === 1 ? "allowed" : "blocked" });
+			const changedDefaults = { ...runtimeTool, failureRecovery: { getTimeoutMs: () => 360_000 } };
+			const upgraded = new ToolFailureRecoveryGate();
+			upgraded.restoreFromMessages(persisted, [changedDefaults]);
+			expect(upgraded.admit(changedDefaults, { command: "fixture" }, undefined))
 				.toMatchObject({ kind: completed === 1 ? "allowed" : "blocked" });
 		}
 		expect(results.at(-1)?.content).toEqual(expect.arrayContaining([
@@ -158,6 +164,16 @@ describe("executor-owned timeout recovery", () => {
 		gate.apply({ kind: "unproductive", tool, args, record });
 		expect(gate.admit(tool, args, undefined)).toEqual({ kind: "allowed" });
 		expect(gate.admit(tool, { ...args, timeout: 240 }, undefined)).toEqual({ kind: "allowed" });
+	});
+
+	it.each([60_000, null])("uses the captured live timeout %s after resolver changes", (timeoutMs) => {
+		const args = { command: "fixture" };
+		const changed = { ...tool, failureRecovery: { getTimeoutMs: () => 120_000 } };
+		const gate = new ToolFailureRecoveryGate();
+		gate.apply({ kind: "unproductive", tool: changed, args, record: timeoutFailure(args), timeoutMs });
+		expect(gate.admit(changed, args, undefined)).toEqual({ kind: "allowed" });
+		expect(gate.admit(changed, args, undefined))
+			.toMatchObject({ kind: timeoutMs === null ? "blocked" : "allowed" });
 	});
 
 	it.each([

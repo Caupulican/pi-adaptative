@@ -36,6 +36,25 @@ function receiptDetails(outcome: ToolInvocationReceipt): Record<string, unknown>
 }
 
 describe("executor receipt restoration", () => {
+	it.each([60_000, null])("uses persisted timeout %s without querying a changed historical resolver", (timeoutMs) => {
+		const messages: AgentMessage[] = [];
+		append(messages, "fixture", {
+			errorKind: "operation_outcome", content: [{ type: "text", text: "Command timed out" }],
+			details: receiptDetails({
+				version: 1, requestId: "fixture", execution: "completed", operationStatus: "error",
+				failureCode: "timeout", timeoutMs, postprocessingFailures: [],
+			}),
+		});
+		let projections = 0;
+		const changed = { ...tool, failureRecovery: { getTimeoutMs: () => { projections++; return 120_000; } } };
+		const gate = new ToolFailureRecoveryGate();
+		gate.restoreFromMessages(JSON.parse(JSON.stringify(messages)) as AgentMessage[], [changed]);
+		expect(projections).toBe(0);
+		expect(gate.admit(changed, { command: "fixture" }, undefined))
+			.toMatchObject({ kind: timeoutMs === null ? "blocked" : "allowed" });
+		expect(projections).toBe(1);
+	});
+
 	it.each([true, false])("does not interpret native output as policy with receipt=%s", (withReceipt) => {
 		const messages: AgentMessage[] = [];
 		append(messages, "fixture", {

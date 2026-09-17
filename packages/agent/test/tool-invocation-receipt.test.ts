@@ -16,6 +16,21 @@ const receipt = {
 } as const;
 
 describe("invocation receipt wire boundary", () => {
+	it.each([60_000, null])("round-trips an execution timeout snapshot %s", (timeoutMs) => {
+		const candidate = { ...receipt, timeoutMs };
+		expect(decodeToolInvocationReceipt(JSON.parse(JSON.stringify(candidate)))).toEqual(candidate);
+	});
+
+	it.each([undefined, 0, -1, Number.NaN, Infinity, "60000"])("rejects invalid timeout snapshots %#", (timeoutMs) => {
+		expect(decodeToolInvocationReceipt({ ...receipt, timeoutMs })).toBeUndefined();
+	});
+
+	it.each(["running", "not_started"])("rejects an execution snapshot on %s", (execution) => {
+		expect(decodeToolInvocationReceipt({
+			version: 1, requestId: "fixture", execution, timeoutMs: 60_000, postprocessingFailures: [],
+		})).toBeUndefined();
+	});
+
 	it("accepts the existing failure-code truncation marker", () => {
 		const failureCode = boundedFailureCode(`${"x".repeat(47)} diagnostic`);
 		expect(failureCode).toBe(`${"x".repeat(47)}…`);
