@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:f
 import { join } from "node:path";
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import type { AssistantMessage } from "@caupulican/pi-ai";
-import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";
 import { providerAdmissionDir } from "./ledger.ts";
@@ -136,28 +136,32 @@ export class ProviderLimitStore {
 		provider: string,
 		input: { limitedUntil: number; reason: ProviderLimitReason; detail?: string },
 	): ProviderLimitRecord {
-		const nowMs = this.now();
-		const existing = this.read(provider);
-		if (existing && existing.limitedUntil >= input.limitedUntil) return existing;
-		const record: ProviderLimitRecord = {
-			provider,
-			limitedUntil: input.limitedUntil,
-			reason: input.reason,
-			recordedAt: nowMs,
-			pid: this.pid,
-			...(this.sessionId ? { sessionId: this.sessionId } : {}),
-			...(input.detail ? { detail: input.detail.slice(0, MAX_DETAIL_LENGTH) } : {}),
-		};
-		mkdirSync(this.limitsDir, { recursive: true });
-		writeFileAtomicSync(this.limitPath(provider), `${JSON.stringify(record)}\n`, { mode: 0o600 });
-		return record;
+		const path = this.limitPath(provider);
+		return withFileLockSync(path, () => {
+			const nowMs = this.now();
+			const existing = this.readPath(path);
+			if (existing && existing.limitedUntil >= input.limitedUntil) return existing;
+			const record: ProviderLimitRecord = {
+				provider,
+				limitedUntil: input.limitedUntil,
+				reason: input.reason,
+				recordedAt: nowMs,
+				pid: this.pid,
+				...(this.sessionId ? { sessionId: this.sessionId } : {}),
+				...(input.detail ? { detail: input.detail.slice(0, MAX_DETAIL_LENGTH) } : {}),
+			};
+			writeFileAtomicSync(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+			return record;
+		});
 	}
 
 	/** The live limit for `provider`, or undefined (an expired record is removed on read). */
 	read(provider: string): ProviderLimitRecord | undefined {
-		return this.readPath(this.limitPath(provider));
+		const path = this.limitPath(provider);
+		return withFileLockSync(path, () => this.readPath(path));
 	}
 
+	/** Caller holds the path lock through any subsequent decision/write; cleanup mutates the file. */
 	private readPath(path: string): ProviderLimitRecord | undefined {
 		let parsed: unknown;
 		try {
@@ -175,11 +179,14 @@ export class ProviderLimitStore {
 
 	/** Forget a live limit whose reason is one of `reasons` (all reasons when omitted). */
 	clear(provider: string, reasons?: readonly ProviderLimitReason[]): boolean {
-		const existing = this.read(provider);
-		if (!existing) return false;
-		if (reasons && !reasons.includes(existing.reason)) return false;
-		rmSync(this.limitPath(provider), { force: true });
-		return true;
+		const path = this.limitPath(provider);
+		return withFileLockSync(path, () => {
+			const existing = this.readPath(path);
+			if (!existing) return false;
+			if (reasons && !reasons.includes(existing.reason)) return false;
+			rmSync(path, { force: true });
+			return true;
+		});
 	}
 
 	list(): ProviderLimitRecord[] {
@@ -187,7 +194,8 @@ export class ProviderLimitStore {
 		const records: ProviderLimitRecord[] = [];
 		for (const name of readdirSync(this.limitsDir)) {
 			if (!name.endsWith(".json")) continue;
-			const record = this.readPath(join(this.limitsDir, name));
+			const path = join(this.limitsDir, name);
+			const record = withFileLockSync(path, () => this.readPath(path));
 			if (record) records.push(record);
 		}
 		return records.sort((a, b) => a.provider.localeCompare(b.provider));
