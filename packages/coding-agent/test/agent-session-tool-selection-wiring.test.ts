@@ -24,9 +24,9 @@ function toolSelectionOf(harness: Awaited<ReturnType<typeof createHarness>>): To
 
 /** Promotes a hint for the "read" intent by driving the exact recipe
  * test/tool-selection-controller.test.ts uses: 3 successful calls clears the evidence gate. */
-function promoteReadHint(toolSelection: ToolSelectionController): void {
+function promoteReadHint(toolSelection: ToolSelectionController, modelRef: string): void {
 	for (let i = 0; i < 3; i += 1) {
-		toolSelection.begin(`call-${i}`, "read", {});
+		toolSelection.begin(`call-${i}`, "read", {}, { modelRef });
 		toolSelection.complete(`call-${i}`, true, [{ type: "text", text: "ok" }]);
 	}
 }
@@ -56,7 +56,7 @@ describe("AgentSession — tool-selection wiring", () => {
 		});
 		try {
 			const selection = toolSelectionOf(harness);
-			promoteReadHint(selection);
+			promoteReadHint(selection, `${harness.getModel().provider}/${harness.getModel().id}`);
 			hintBlock = formatToolSelectionHints(selection.getActiveHints())!;
 			const snapshots = vi.spyOn(selection, "observeProviderRequest");
 			const admissions = vi.spyOn(selection, "begin");
@@ -78,7 +78,7 @@ describe("AgentSession — tool-selection wiring", () => {
 			expect(observedHint).toBe(expectedHint);
 			expect(snapshots).toHaveBeenCalledTimes(2);
 			expect(admissions).toHaveBeenCalledTimes(1);
-			expect(admissions.mock.calls[0][3]).toBe(snapshots.mock.calls[0][0]);
+			expect(admissions.mock.calls[0][3].requestId).toBe(snapshots.mock.calls[0][0]);
 			expect(snapshots.mock.calls[0][0]).not.toBe(snapshots.mock.calls[1][0]);
 			expect(snapshots.mock.calls[0][2].includes("- read: `read` established for this model")).toBe(expectedHint);
 			expect(selection.getReport().find((entry) => entry.intentClass === "read")).toMatchObject({
@@ -109,7 +109,7 @@ describe("AgentSession — tool-selection wiring", () => {
 			const toolSelection = toolSelectionOf(harness);
 			expect(toolSelection.getActiveHints()).toEqual([]);
 
-			promoteReadHint(toolSelection);
+			promoteReadHint(toolSelection, `${harness.getModel().provider}/${harness.getModel().id}`);
 			expect(toolSelection.getActiveHints()).toHaveLength(1);
 
 			// Force a rebuild against the now-promoted hint (system-prompt-stability's own invariant —
@@ -144,7 +144,7 @@ describe("AgentSession — tool-selection wiring", () => {
 			expect(before).toContain("Tool-selection loop: no observations recorded yet");
 			expect(before).toContain("hint snapshot: n=");
 
-			promoteReadHint(toolSelection);
+			promoteReadHint(toolSelection, `${harness.getModel().provider}/${harness.getModel().id}`);
 
 			const after = harness.session.formatToolRepairHealthReport();
 			expect(after).toContain("Tool-selection loop (observe -> agreement -> evidence-gated hint)");

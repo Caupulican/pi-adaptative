@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BeforeToolCallResult } from "@caupulican/pi-agent-core";
+import { fauxAssistantMessage } from "@caupulican/pi-ai/faux";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CapabilityEnvelope, GateOutcome } from "../src/core/autonomy/contracts.ts";
 import type { ExtensionRunner } from "../src/core/extensions/index.ts";
@@ -44,9 +45,11 @@ function createController(options: {
 	});
 	const call = (args: Record<string, unknown>, signal?: AbortSignal) =>
 		controller.beforeToolCall(
-			{ toolCall: { id: `call-${outcomes.length + 1}`, name: "read", arguments: args }, args } as Parameters<
-				typeof controller.beforeToolCall
-			>[0],
+			{
+				assistantMessage: fauxAssistantMessage(""),
+				toolCall: { id: `call-${outcomes.length + 1}`, name: "read", arguments: args },
+				args,
+			} as Parameters<typeof controller.beforeToolCall>[0],
 			signal,
 		);
 	return { call, outcomes };

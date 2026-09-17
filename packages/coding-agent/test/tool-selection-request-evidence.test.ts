@@ -16,6 +16,47 @@ afterEach(() => {
 });
 
 describe("request-bound tool hint evidence", () => {
+	it("keeps explicit model identities through source reuse, request replacement and reversed completion", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-hint-model-"));
+		const store = ToolPerformanceStore.forAgentDir(dir);
+		cleanups.push(() => {
+			store.close();
+			rmSync(dir, { recursive: true, force: true });
+		});
+		const getModelRef = vi.fn(() => {
+			throw new Error("live model is not evidence");
+		});
+		const controller = new ToolSelectionController({ store, getModelRef, getActiveTools: () => [{ name: "read" }] });
+		const source = { modelRef: "faux/first", requestId: "first" };
+		controller.observeProviderRequest(source.requestId, source.modelRef, prompt);
+		controller.begin("first-call", "read", {}, source);
+		source.modelRef = "faux/second";
+		source.requestId = "second";
+		controller.observeProviderRequest(source.requestId, source.modelRef, "No hint");
+		controller.begin("second-call", "read", {}, source);
+		controller.recordValidation("read", "repaired", "faux/first");
+		controller.recordValidation("read", "bounced", "faux/second");
+		controller.complete("second-call", false);
+		controller.startTurn();
+		controller.complete("first-call", true);
+		controller.complete("first-call", false);
+		expect(getModelRef).not.toHaveBeenCalled();
+		expect(store.get({ modelRef: "faux/first", intentClass: "read", tool: "read" })).toMatchObject({
+			sampleCount: 1,
+			failureCount: 0,
+			repairCount: 1,
+			bounceCount: 0,
+		});
+		expect(store.get({ modelRef: "faux/second", intentClass: "read", tool: "read" })).toMatchObject({
+			sampleCount: 1,
+			failureCount: 1,
+			repairCount: 0,
+			bounceCount: 1,
+		});
+		expect(store.getIntentAgreement("faux/first", "read").hintActiveSampleCount).toBe(1);
+		expect(store.getIntentAgreement("faux/second", "read").hintActiveSampleCount).toBe(0);
+	});
+
 	it.each([
 		["canonical", prompt, true],
 		["embedded", `Other instructions\n\n${prompt}\n\nMore instructions`, true],
@@ -46,7 +87,12 @@ describe("request-bound tool hint evidence", () => {
 			getActiveTools: () => [{ name: "read" }],
 		});
 		const credit = (requestId?: string) => {
-			const result = controller.begin("call", "read", {}, requestId).hintActiveAtCallTime;
+			const result = controller.begin(
+				"call",
+				"read",
+				{},
+				{ modelRef: "faux/model", requestId },
+			).hintActiveAtCallTime;
 			controller.complete("call", true);
 			return result;
 		};
@@ -127,9 +173,14 @@ describe("request-bound tool hint evidence", () => {
 		});
 		controller.observeProviderRequest("request-1", "faux/model", prompt);
 		env.PI_TOOL_SELECTION_HINTS = "0";
-		expect(controller.begin("seen", "read", {}, "request-1").hintActiveAtCallTime).toBe(true);
+		expect(
+			controller.begin("seen", "read", {}, { modelRef: "faux/model", requestId: "request-1" }).hintActiveAtCallTime,
+		).toBe(true);
 		controller.observeProviderRequest("request-2", "faux/model", "No hint");
-		expect(controller.begin("unseen", "read", {}, "request-2").hintActiveAtCallTime).toBe(false);
+		expect(
+			controller.begin("unseen", "read", {}, { modelRef: "faux/model", requestId: "request-2" })
+				.hintActiveAtCallTime,
+		).toBe(false);
 		controller.complete("unseen", true);
 		controller.complete("seen", true);
 		expect(controller.getReport()[0]).toMatchObject({ sampleCount: 2, hintSampleCount: 1 });

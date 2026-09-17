@@ -1168,7 +1168,11 @@ export class AgentSession {
 		this.agent.onToolArgumentValidation = (event) => {
 			const taggedEvent = this._toolProtocol.tagAdaptationRuleTeaching(event);
 			if (taggedEvent.outcome === "repaired" || taggedEvent.outcome === "bounced") {
-				this._toolSelection.recordValidation(taggedEvent.tool, taggedEvent.outcome);
+				this._toolSelection.recordValidation(
+					taggedEvent.tool,
+					taggedEvent.outcome,
+					taggedEvent.provider && taggedEvent.model ? `${taggedEvent.provider}/${taggedEvent.model}` : "unknown",
+				);
 			}
 			previousToolArgumentValidation?.(taggedEvent);
 			// Protocol health and adaptation are deterministic runtime behavior, not optional recovery

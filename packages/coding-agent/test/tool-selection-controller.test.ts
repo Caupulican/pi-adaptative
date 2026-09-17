@@ -55,7 +55,7 @@ describe("ToolSelectionController", () => {
 			{ store },
 		);
 
-		controller.begin("call-1", "read", {});
+		controller.begin("call-1", "read", {}, { modelRef: "faux/model" });
 
 		expect(get).not.toHaveBeenCalled();
 		expect(getStatsForIntent).toHaveBeenCalledTimes(1);
@@ -63,13 +63,13 @@ describe("ToolSelectionController", () => {
 
 	it("builds an intent-scoped observation and records successful/failing outcomes", () => {
 		const controller = makeController();
-		const pending = controller.begin("call-1", "read", { path: "/tmp/example.txt" });
+		const pending = controller.begin("call-1", "read", { path: "/tmp/example.txt" }, { modelRef: "faux/model" });
 		expect(pending.selection.ranked.some((candidate) => candidate.tool === "no_tool")).toBe(true);
 		expect(pending.selection.ranked.some((candidate) => candidate.tool === "read")).toBe(true);
 		controller.complete("call-1", true, [{ type: "text", text: "ok" }]);
-		controller.recordValidation("read", "repaired");
-		controller.recordValidation("read", "bounced");
-		const next = controller.begin("call-2", "read", { path: "/tmp/other.txt" });
+		controller.recordValidation("read", "repaired", "faux/model");
+		controller.recordValidation("read", "bounced", "faux/model");
+		const next = controller.begin("call-2", "read", { path: "/tmp/other.txt" }, { modelRef: "faux/model" });
 		controller.complete("call-2", false, [{ type: "text", text: "failed" }]);
 
 		const store = (controller as unknown as { deps: { store: ToolPerformanceStore } }).deps.store;
@@ -86,7 +86,7 @@ describe("ToolSelectionController", () => {
 			{ name: "read", description: "read a file", pathValidated: false },
 			{ name: "grep", description: "search files", pathValidated: true },
 		]);
-		const pending = controller.begin("call-1", "read", { path: "../outside" });
+		const pending = controller.begin("call-1", "read", { path: "../outside" }, { modelRef: "faux/model" });
 		expect(pending.selection.recommendation).not.toBe("read");
 	});
 });
@@ -111,7 +111,7 @@ describe("ToolSelectionController — observe/agreement/promotion loop", () => {
 		expect(controller.getActiveHints()).toEqual([]);
 
 		for (let i = 0; i < 3; i += 1) {
-			controller.begin(`call-${i}`, "read_file", {});
+			controller.begin(`call-${i}`, "read_file", {}, { modelRef: "faux/model" });
 			controller.complete(`call-${i}`, true, [{ type: "text", text: "ok" }]);
 		}
 
@@ -122,7 +122,7 @@ describe("ToolSelectionController — observe/agreement/promotion loop", () => {
 
 		// Eligibility alone is not delivery: this request actually includes the promoted hint.
 		controller.observeProviderRequest("hint-request", "faux/model", formatToolSelectionHints(hints)!);
-		controller.begin("call-3", "read_file", {}, "hint-request");
+		controller.begin("call-3", "read_file", {}, { modelRef: "faux/model", requestId: "hint-request" });
 		controller.complete("call-3", true, [{ type: "text", text: "ok" }]);
 
 		const report = controller.getReport();
@@ -142,13 +142,13 @@ describe("ToolSelectionController — observe/agreement/promotion loop", () => {
 		];
 		const controller = makeController(tools);
 		for (let i = 0; i < 3; i += 1) {
-			controller.begin(`ok-${i}`, "flaky_tool", {});
+			controller.begin(`ok-${i}`, "flaky_tool", {}, { modelRef: "faux/model" });
 			controller.complete(`ok-${i}`, true, []);
 		}
 		expect(controller.getActiveHints()).toHaveLength(1);
 
 		for (let i = 0; i < 40; i += 1) {
-			controller.begin(`fail-${i}`, "flaky_tool", {});
+			controller.begin(`fail-${i}`, "flaky_tool", {}, { modelRef: "faux/model" });
 			controller.complete(`fail-${i}`, false, []);
 		}
 		expect(controller.getActiveHints()).toEqual([]);
@@ -161,10 +161,10 @@ describe("ToolSelectionController — observe/agreement/promotion loop", () => {
 			env: { PI_TOOL_SELECTION_OBSERVE: "0" },
 		});
 		for (let i = 0; i < 5; i += 1) {
-			controller.begin(`call-${i}`, "read_file", {});
+			controller.begin(`call-${i}`, "read_file", {}, { modelRef: "faux/model" });
 			controller.complete(`call-${i}`, true, []);
 		}
-		controller.recordValidation("read_file", "repaired");
+		controller.recordValidation("read_file", "repaired", "faux/model");
 		expect(store.get({ modelRef: "faux/model", intentClass: "read", tool: "read_file" }).sampleCount).toBe(0);
 		expect(controller.getReport()).toEqual([]);
 	});
@@ -174,7 +174,7 @@ describe("ToolSelectionController — observe/agreement/promotion loop", () => {
 		const tools: ToolSelectionTool[] = [{ name: "read_file", description: "read a file", pathValidated: true }];
 		const observing = makeController(tools, { store });
 		for (let i = 0; i < 3; i += 1) {
-			observing.begin(`call-${i}`, "read_file", {});
+			observing.begin(`call-${i}`, "read_file", {}, { modelRef: "faux/model" });
 			observing.complete(`call-${i}`, true, []);
 		}
 		expect(observing.getActiveHints()).toHaveLength(1);
@@ -206,7 +206,7 @@ describe("ToolGateController selector integration", () => {
 				}) as unknown as ToolSelectionController,
 		});
 		const runBefore = (input: { toolCall: { id: string; name: string }; args: unknown }) =>
-			gate.beforeToolCall(input as never);
+			gate.beforeToolCall({ ...input, assistantMessage: { provider: "faux", model: "model" } } as never);
 		const runAfter = (input: {
 			toolCall: { id: string; name: string };
 			args: unknown;

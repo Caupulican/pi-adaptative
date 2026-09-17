@@ -237,9 +237,14 @@ export class ToolSelectionController {
 		};
 	}
 
-	begin(toolCallId: string, toolName: string, args: unknown, requestId?: string): ToolSelectionPendingObservation {
+	begin(
+		toolCallId: string,
+		toolName: string,
+		args: unknown,
+		source: { modelRef: string; requestId?: string },
+	): ToolSelectionPendingObservation {
 		const selectionStartedAt = performance.now();
-		const modelRef = this.deps.getModelRef();
+		const { modelRef, requestId } = source;
 		const activeTools = this.deps
 			.getActiveTools()
 			.filter(
@@ -334,9 +339,8 @@ export class ToolSelectionController {
 		}
 	}
 
-	recordValidation(toolName: string, outcome: "repaired" | "bounced"): void {
+	recordValidation(toolName: string, outcome: "repaired" | "bounced", modelRef: string): void {
 		if (!this.observeEnabled) return;
-		const modelRef = this.deps.getModelRef();
 		const tool = this.deps.getActiveTools().find((candidate) => candidate.name === toolName) ?? { name: toolName };
 		const writeStartedAt = performance.now();
 		try {

@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- Tool execution and validation evidence stays attributed to its originating model when the session model changes during a response or tool hook.
 - Tool-performance writes capture their evidence before queueing, preserving original identities and outcomes through replay and excluding undeclared selection payloads.
 - Tool hint measurements use the originating provider request instead of newly eligible live statistics, preventing credit for hints absent from that request.
 - Learned tool hints are limited to each prompt's registered tool surface, including restricted routed prompts and turns with no tools.

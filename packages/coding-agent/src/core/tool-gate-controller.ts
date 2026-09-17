@@ -58,10 +58,12 @@ export class ToolGateController {
 	}
 
 	readonly beforeToolCall: BeforeToolCall = async (
-		{ toolCall, args, executionContext, pathAuthority, requestId },
+		{ toolCall, args, executionContext, pathAuthority, requestId, assistantMessage },
 		signal,
 	) => {
 		signal?.throwIfAborted();
+		// Session model selection may change during a provider response or any awaited hook.
+		const modelRef = `${assistantMessage.provider}/${assistantMessage.model}`;
 		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);
 		if (escalation) {
 			return escalation;
@@ -144,7 +146,9 @@ export class ToolGateController {
 
 			if (extensionResult) return extensionResult;
 
-			this.deps.getToolSelectionController?.()?.begin(toolCall.id, toolCall.name, finalArgs, requestId);
+			this.deps
+				.getToolSelectionController?.()
+				?.begin(toolCall.id, toolCall.name, finalArgs, { modelRef, requestId });
 			return undefined;
 		} finally {
 			// A later abort does not invalidate a decision the envelope already made; the pre-hook
