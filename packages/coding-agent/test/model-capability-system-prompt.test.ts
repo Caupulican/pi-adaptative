@@ -42,7 +42,9 @@ describe("capability-shaped system prompts", () => {
 		expect(prompt).toMatch(/^Pi-Adaptative focused coding executor\./);
 		expect(prompt).toContain(CONTEXT_PATH);
 		expect(prompt).toContain("read each relevant listed file completely before any mutation");
-		expect(prompt).toContain("Retry unchanged only after any other tool succeeds or a new user turn.");
+		expect(prompt).toContain(
+			"Retry unchanged only with an unspent harness allowance, any later tool success, or a new user turn.",
+		);
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
 		expect(prompt).not.toContain("n-plus-2-architecture");
 		expect(prompt).toContain("Current working directory: /repo");

@@ -358,7 +358,9 @@ describe("tool failure memory", () => {
 
 		expect(sanitized.ledger).toContain("ACTIVE TOOL FAILURES mistakes=bash:1");
 		expect(sanitized.ledger).toContain('"kind_mistakes":1');
-		expect(sanitized.ledger).toContain("Retry unchanged only after any other tool succeeds or a new user turn.");
+		expect(sanitized.ledger).toContain(
+			"Retry unchanged only with an unspent harness allowance, any later tool success, or a new user turn.",
+		);
 		expect(sanitized.ledger).not.toContain("<harness_tool_failures");
 	});
 

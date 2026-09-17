@@ -448,7 +448,7 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 	});
 
 	it.each(["lean", "minimal"] as const)(
-		"teaches the world-cursor retry rule to the %s execution profile",
+		"teaches the bounded allowance and world-cursor retry rule to the %s execution profile",
 		(capabilityClass) => {
 			const prompt = new SystemPromptBuilder(
 				makeDeps({
@@ -463,7 +463,9 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 				}),
 			).rebuildSystemPrompt(["read"]);
 
-			expect(prompt).toContain("Retry unchanged only after any other tool succeeds or a new user turn.");
+			expect(prompt).toContain(
+				"Retry unchanged only with an unspent harness allowance, any later tool success, or a new user turn.",
+			);
 			expect(prompt).not.toContain("never repeat unchanged failure");
 			expect(prompt).not.toContain("never repeat the same call");
 		},

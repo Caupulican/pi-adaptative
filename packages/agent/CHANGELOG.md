@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Tool-recovery instructions acknowledge the host's unspent retry allowance, so the shared protocol no longer contradicts immediate timeout-retry guidance.
+
 ## [0.99.27] - 2026-09-16
 
 ## [0.99.26] - 2026-09-16

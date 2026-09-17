@@ -211,13 +211,15 @@ describe("mandatory tool failure recovery protocol", () => {
 		expect(sanitized.ledger).toContain("MANDATORY TOOL FAILURE RECOVERY v1");
 		expect(sanitized.ledger).toContain("MANDATORY AND NON-NEGOTIABLE");
 		expect(sanitized.ledger).toContain("MANDATORY: blocked/rejected means not executed");
-		expect(sanitized.ledger).toContain("Irrelevant argument changes do not recover it");
-		expect(sanitized.ledger).toContain("refusal keeps tool-result pairing and runs no hooks/tools");
+		expect(sanitized.ledger).toContain("Cosmetic edits do not repair");
+		expect(sanitized.ledger).toContain("refused calls keep result pairing and run no hooks/tools");
 		expect(sanitized.ledger).toContain('"MUST":true');
 		expect(sanitized.ledger).not.toContain("<mandatory_tool_failure");
 
-		// The standing protocol must teach the world-cursor rule and nothing that outlived it.
-		expect(sanitized.ledger).toContain("Retry unchanged only after any other tool succeeds or a new user turn.");
+		// Teach the gate's bounded allowance and its world-cursor fallback together.
+		expect(sanitized.ledger).toContain(
+			"Retry unchanged only with an unspent harness allowance, any later tool success, or a new user turn.",
+		);
 		expect(sanitized.ledger).toContain("Only that operation is refused; tools and run continue");
 		for (const removed of [
 			"never repeat the same call",

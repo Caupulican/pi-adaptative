@@ -632,7 +632,9 @@ describe("non-native phone filesystem workflow", () => {
 
 			expect(blockedContext).toContain('"failure_code":"file_not_found"');
 			expect(blockedContext).toContain('"occ":2');
-			expect(blockedContext).toContain("Retry unchanged only after any other tool succeeds or a new user turn.");
+			expect(blockedContext).toContain(
+				"Retry unchanged only with an unspent harness allowance, any later tool success, or a new user turn.",
+			);
 			expect(blockedContext).toContain(
 				"The operation is readmitted after another tool succeeds or a new user turn.",
 			);
