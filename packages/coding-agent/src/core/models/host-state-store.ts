@@ -163,11 +163,48 @@ export class HostStateStore<THostData> {
 	}
 
 	getHost(hostId = this.currentHost().id): THostData | undefined {
-		return (this.working ?? this.load()).hosts[hostId];
+		return this.readableState().hosts[hostId];
 	}
 
 	getAllHosts(): THostData[] {
-		return Object.values((this.working ?? this.load()).hosts);
+		return Object.values(this.readableState().hosts);
+	}
+
+	private readableState(): HostStateFile<THostData> {
+		return this.working ?? (this.pending.length > 0 ? this.ensureWorkingState() : this.load());
+	}
+
+	private ensureWorkingState(): HostStateFile<THostData> {
+		if (!this.working) {
+			// Rejection must not make an admitted batch depend on another disk read. Its
+			// original snapshot remains authoritative for local reads until flush rebases it.
+			const replaying = this.pending.length > 0;
+			const current = replaying
+				? this.workingBaseText === undefined
+					? { version: this.version, hosts: {} }
+					: this.parseFile(this.workingBaseText)
+				: this.load("mutation");
+			const baseText = replaying ? this.workingBaseText : this.parsed?.text;
+			const next = this.replayPending(current, this.currentHost());
+			this.working = next;
+			this.workingBaseText = baseText;
+		}
+		return this.working;
+	}
+
+	private discardWorkingState(): void {
+		this.working = undefined;
+		if (this.pending.length === 0) this.workingBaseText = undefined;
+	}
+
+	private replayPending(file: HostStateFile<THostData>, host: HostFingerprint): HostStateFile<THostData> {
+		const next = structuredClone(file);
+		for (const mutation of this.pending) {
+			const data = next.hosts[host.id] ?? mutation.create(host);
+			next.hosts[host.id] = data;
+			mutation.mutate(data, host);
+		}
+		return next;
 	}
 
 	mutateCurrentHost<TResult>(
@@ -179,20 +216,25 @@ export class HostStateStore<THostData> {
 			// A failed cap-triggered flush retains its batch. Do not grow that replay log or
 			// mutate its working tree again until the already-admitted batch can be persisted.
 			if (this.pending.length >= this.writeBehind.maxPending) this.flush();
-			// The working tree is a clone of the last state read from or written to the file, taken
-			// once per batch; every mutation applies to it directly and is logged for replay.
-			if (!this.working) {
-				this.working = structuredClone(this.load("mutation"));
-				this.workingBaseText = this.parsed?.text;
+			// Successful admissions share one batch clone. A failed callback invalidates it;
+			// the next read or admission rebuilds from durable state plus accepted mutations.
+			const working = this.ensureWorkingState();
+			let mutation: HostStateMutation<TResult>;
+			try {
+				const data = working.hosts[host.id] ?? create(host);
+				working.hosts[host.id] = data;
+				mutation = mutate(data, host);
+			} catch (error) {
+				this.discardWorkingState();
+				throw error;
 			}
-			const data = this.working.hosts[host.id] ?? create(host);
-			this.working.hosts[host.id] = data;
-			const mutation = mutate(data, host);
-			if (mutation.changed) {
-				this.pending.push({ create, mutate });
-				if (this.pending.length >= this.writeBehind.maxPending) this.flush();
-				else this.scheduleFlush();
+			if (!mutation.changed) {
+				this.discardWorkingState();
+				return mutation.result;
 			}
+			this.pending.push({ create, mutate });
+			if (this.pending.length >= this.writeBehind.maxPending) this.flush();
+			else this.scheduleFlush();
 			return mutation.result;
 		}
 		const execute = (): TResult => {
@@ -225,11 +267,9 @@ export class HostStateStore<THostData> {
 			this.flushTimer = undefined;
 		}
 		if (this.pending.length === 0) {
-			this.working = undefined;
-			this.workingBaseText = undefined;
+			this.discardWorkingState();
 			return;
 		}
-		const pending = this.pending;
 		const working = this.working;
 		const host = this.currentHost();
 		// Pending state is cleared only after the write succeeded; a failed flush keeps every
@@ -240,20 +280,14 @@ export class HostStateStore<THostData> {
 			if (working && this.parsed?.text === this.workingBaseText) {
 				next = working;
 			} else {
-				next = structuredClone(current);
-				for (const mutation of pending) {
-					const data = next.hosts[host.id] ?? mutation.create(host);
-					next.hosts[host.id] = data;
-					mutation.mutate(data, host);
-				}
+				next = this.replayPending(current, host);
 			}
 			const text = `${JSON.stringify(next)}\n`;
 			writeFileAtomicSync(this.filePath, text);
 			this.parsed = { text, file: deepFreeze(next) };
 		});
 		this.pending = [];
-		this.working = undefined;
-		this.workingBaseText = undefined;
+		this.discardWorkingState();
 	}
 
 	/** Flush pending mutations and stop batching; later mutations persist one transaction each. */
