@@ -194,6 +194,10 @@ function clampInteger(value: number | undefined, fallback: number, minimum: numb
 	return Math.max(minimum, Math.min(maximum, Math.trunc(value)));
 }
 
+function resolvePythonTimeoutMs(timeoutSeconds: number | undefined): number {
+	return clampInteger(timeoutSeconds, DEFAULT_PYTHON_TIMEOUT_SECONDS, 1, MAX_PYTHON_TIMEOUT_SECONDS) * 1000;
+}
+
 function createLocalPythonOperations(): PythonOperations {
 	return {
 		stat: (path) => stat(path),
@@ -281,6 +285,7 @@ export function createPythonToolDefinition(
 		parameters: pythonSchema,
 		backgroundRequested: (input) => input.background === true,
 		failureRecovery: {
+			getTimeoutMs: ({ timeoutSeconds }) => resolvePythonTimeoutMs(timeoutSeconds),
 			actions: recoveryAuthority
 				? [
 						{
@@ -339,12 +344,7 @@ export function createPythonToolDefinition(
 				variables: composeExecutionEnvironment(backendEnvironment, []),
 			};
 			const args = input.args ? [...input.args] : [];
-			const timeoutSeconds = clampInteger(
-				input.timeoutSeconds,
-				DEFAULT_PYTHON_TIMEOUT_SECONDS,
-				1,
-				MAX_PYTHON_TIMEOUT_SECONDS,
-			);
+			const timeoutMs = resolvePythonTimeoutMs(input.timeoutSeconds);
 			const maxOutputBytes = clampInteger(
 				input.maxOutputBytes,
 				50 * 1024,
@@ -443,7 +443,7 @@ export function createPythonToolDefinition(
 						args: scriptPath ? ["-B", scriptPath, ...args] : ["-B", "-", ...args],
 						cwd,
 						stdin: hasCode ? input.code : undefined,
-						timeoutMs: timeoutSeconds * 1000,
+						timeoutMs,
 						signal,
 						env: environment,
 						onStdout: (chunk) => stdout.append(chunk),
@@ -489,17 +489,26 @@ export function createPythonToolDefinition(
 				const status = `[python exitCode=${execution.exitCode ?? "null"}${execution.signal ? `; signal=${execution.signal}` : ""}]`;
 				sections.push(status);
 				const text = sections.join("\n\n");
-				if (execution.reason === "timeout")
-					throw new Error(`${text}\n\nPython timed out after ${timeoutSeconds} seconds`);
-				if (execution.reason === "aborted") throw new Error(`${text}\n\nPython execution aborted`);
-				if (execution.exitCode !== 0) {
+				if (execution.reason !== "exited" || execution.exitCode !== 0) {
+					const outputSignature = `${stdout.getOutputSignature()}:${stderr.getOutputSignature()}`;
+					if (execution.reason === "timeout") {
+						throw new AgentToolExecutionError(
+							`${text}\n\nPython timed out after ${timeoutMs / 1000} seconds`,
+							"timeout",
+							outputSignature,
+							"operation_outcome",
+						);
+					}
+					if (execution.reason === "aborted") {
+						throw new AgentToolExecutionError(`${text}\n\nPython execution aborted`, "aborted", outputSignature);
+					}
 					const termination = execution.signal
 						? `signal ${execution.signal}`
 						: `code ${execution.exitCode ?? "unknown"}`;
 					throw new AgentToolExecutionError(
 						`${text}\n\nPython exited with ${termination}`,
 						execution.exitCode === null ? "exit_unknown" : `exit_${execution.exitCode}`,
-						`${stdout.getOutputSignature()}:${stderr.getOutputSignature()}`,
+						outputSignature,
 						"operation_outcome",
 					);
 				}
