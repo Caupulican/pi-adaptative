@@ -68,6 +68,11 @@ function finiteOr(value: number | undefined, fallback: number): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function scaledCost(value: number | undefined, scale: number): number {
+	// Adding two finite measurements can overflow. An oversized cost is saturated, never free.
+	return value === Number.POSITIVE_INFINITY ? 1 : clampUnit(finiteOr(value, 0) / Math.max(1, scale));
+}
+
 export function betaSuccessProbability(alpha: number, beta: number): number {
 	const positiveAlpha = Math.max(0, finiteOr(alpha, 0));
 	const positiveBeta = Math.max(0, finiteOr(beta, 0));
@@ -99,8 +104,8 @@ export function rankExpectedUtilityCandidates(
 		const successProbability = clampUnit(
 			candidate.successProbability ?? betaSuccessProbability(candidate.alpha, candidate.beta),
 		);
-		const latencyCost = clampUnit(finiteOr(candidate.latencyMs, 0) / Math.max(1, weights.latencyScaleMs));
-		const tokenCost = clampUnit(finiteOr(candidate.tokenEstimate, 0) / Math.max(1, weights.tokenScale));
+		const latencyCost = scaledCost(candidate.latencyMs, weights.latencyScaleMs);
+		const tokenCost = scaledCost(candidate.tokenEstimate, weights.tokenScale);
 		const riskCost = clampUnit(finiteOr(candidate.riskCost, 0));
 		const contextCost = clampUnit(finiteOr(candidate.contextCost, 0));
 		const utility =

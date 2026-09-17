@@ -125,7 +125,7 @@ describe("subscription OAuth providers", () => {
 				referrer: "pi",
 			});
 			for (const request of requests.slice(0, 4)) {
-				expect(request.headers.get("x-grok-client-version")).toBe("1.0.30");
+				expect(request.headers.get("x-grok-client-version")).toBe("1.0.34");
 				expect(request.headers.get("x-grok-client-surface")).toBe("cli");
 				expect(request.headers.get("content-type")).toBe("application/x-www-form-urlencoded");
 				expect(request.headers.get("x-xai-token-auth")).toBeNull();
@@ -238,9 +238,7 @@ describe("subscription OAuth providers", () => {
 			return Response.json({ access_token: "access-1", expires_in: 3600 });
 		});
 
-		await expect(xaiOAuthProvider.login(callbacks())).rejects.toThrow(
-			"Invalid xAI OAuth response field: refresh_token",
-		);
+		await expect(xaiOAuthProvider.login(callbacks())).rejects.toThrow("xAI returned invalid OAuth credentials");
 	});
 
 	it("surfaces 'error: description' when a token refresh fails", async () => {

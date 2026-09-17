@@ -227,7 +227,10 @@ describe("text tool protocol calibration", () => {
 			if (!isCalibration(context)) return "done";
 			// Negative control: this replies with a syntactically valid echo envelope even when the
 			// task probe demands the nested edit payload, so echo success alone cannot certify it.
-			return `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
+			// The task prompt has no echo token; throwing while extracting one would test a failed
+			// transport instead of a completed response containing the wrong tool call.
+			const token = isTaskScaleCalibration(context) ? "echo-instead-of-edit" : calibrationToken(context);
+			return `<pi:call name="echo">{"data":"${token}"}</pi:call>`;
 		});
 		try {
 			const report = await created.session.probeToolCalling(`${model.provider}/${model.id}`);

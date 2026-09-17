@@ -24,6 +24,7 @@ import {
 import { type BedrockSsoLoginOptions, loginBedrockSsoProfile } from "../../core/bedrock-sso-login.ts";
 import { cliProviderAliases, defaultModelPerProvider } from "../../core/model-resolver.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
+import { TYPESAFE_PROVIDER } from "../../core/review/typesafe-contract.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
@@ -186,6 +187,9 @@ export class AuthDialogsController {
 				name: this.session.modelRegistry.getProviderDisplayName(providerId),
 				authType: "api_key",
 			});
+		}
+		if (!options.some((option) => option.id === TYPESAFE_PROVIDER)) {
+			options.push({ id: TYPESAFE_PROVIDER, name: "TypeSafe (Jev reviewer)", authType: "api_key" });
 		}
 
 		const filteredOptions = authType ? options.filter((option) => option.authType === authType) : options;
@@ -379,6 +383,12 @@ export class AuthDialogsController {
 		previousModel: Model<any> | undefined,
 	): Promise<void> {
 		this.session.modelRegistry.refresh();
+		if (providerId === TYPESAFE_PROVIDER) {
+			this.ui.showStatus(
+				"TypeSafe review enabled. Jev is available through typesafe_review; authentication is checked on the first review.",
+			);
+			return;
+		}
 
 		const actionLabel = authType === "oauth" ? `Logged in to ${providerName}` : `Saved API key for ${providerName}`;
 
@@ -599,7 +609,11 @@ export class AuthDialogsController {
 			async () => {
 				const apiKey = (await dialog.showPrompt("Enter API key:")).trim();
 				if (!apiKey) throw new Error("API key cannot be empty.");
-				this.session.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
+				const saved = this.session.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
+				if (saved === false)
+					throw new Error(
+						"API key was not saved; it is available only in this session. Check credential storage permissions and retry.",
+					);
 			},
 			() => this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel),
 			`Failed to save API key for ${providerName}: `,

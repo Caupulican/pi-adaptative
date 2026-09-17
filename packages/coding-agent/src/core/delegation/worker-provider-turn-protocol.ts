@@ -1,5 +1,6 @@
 import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core/usage";
 import type { Usage } from "@caupulican/pi-ai";
+import { usageDeltaFromProviderUsage } from "../orchestration/attempt-usage.ts";
 import type { GatewayUsageDelta, ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
 
 export class WorkerCompletionProtocolError extends Error {
@@ -7,17 +8,6 @@ export class WorkerCompletionProtocolError extends Error {
 		super(message);
 		this.name = "WorkerCompletionProtocolError";
 	}
-}
-
-function usageDelta(usage: Usage): Required<GatewayUsageDelta> {
-	return {
-		inputTokens: usage.input,
-		outputTokens: usage.output,
-		cacheReadTokens: usage.cacheRead,
-		cacheWriteTokens: usage.cacheWrite,
-		totalTokens: usage.totalTokens,
-		costUsd: usage.cost.total,
-	};
 }
 
 function positiveUsageDelta(reported: Usage, accounted: Usage): Required<GatewayUsageDelta> {
@@ -123,7 +113,7 @@ export class WorkerProviderTurnProtocol {
 			);
 		}
 		try {
-			this.recordUsage?.(usageDelta(usage));
+			this.recordUsage?.(usageDeltaFromProviderUsage(usage));
 			addUsage(this.callbackAccountedUsage, usage);
 			this.assistantUsageAccounted = true;
 		} catch (error) {

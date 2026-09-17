@@ -1081,7 +1081,7 @@ function toolRoleFailure(role: FitnessRole, probe: ToolProbeResult | undefined):
 	if (probe.verdict === "text-protocol") return undefined;
 	if (probe.verdict === "native" && probe.nativeGrade === "task") return undefined;
 	if (probe.verdict === "native") return `reported native ${probe.nativeGrade ?? "ungraded"}, not task-scale calls`;
-	return `probe reported none${probe.diagnostic ? ` (${probe.diagnostic})` : ""}`;
+	return `probe reported ${probe.verdict}${probe.diagnostic ? ` (${probe.diagnostic})` : ""}`;
 }
 
 /** Persist a role assignment from the post-probe selector into the matching settings. */

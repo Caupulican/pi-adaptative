@@ -32,6 +32,7 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		"pipeline",
 		"ask_question",
 		"secret_store",
+		"typesafe_review",
 		"memory",
 		"delegate",
 		"tool_task",

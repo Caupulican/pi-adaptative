@@ -1,8 +1,21 @@
 ## [Unreleased]
 
+### Added
+
+- `TYPESAFE_API_KEY` lookup for the separate Jev review service without adding a selectable chat model.
+
 ### Fixed
 
+- Claude OAuth callback denials with matching state terminate login and release the listener, including when manual input remains pending; stale or missing state cannot cancel another login.
+- Subscription token refresh margins preserve a usable interval for short-lived tokens instead of triggering a new refresh on every request.
+- Concurrent OAuth refreshes share work only for the same provider adapter and refresh token, including rejected-key recovery. Storage retains its captured adapter through lock acquisition, preventing credentials or failures from crossing accounts or replacement adapters.
+- Antigravity refresh owns its submitted credential snapshot and exposes completed credentials through a typed error when later account discovery fails, retaining the discovery cause without putting tokens in error serialization.
 - Antigravity model discovery skips malformed individual entries while retaining valid advertised models, preventing unrelated catalog metadata from aborting subscription login or refresh.
+- Claude subscription OAuth retains granted scopes, migrates plugin and project access, preserves custom-client identity, and retries a rejected scope migration once with the original grants. Hosted callback fallback, cancellation, token validation, and safe token diagnostics cover both login and refresh.
+- Anthropic subscription login honors cancellation through manual input, callback waiting, and token exchange, and closes its callback listener before accepting another login.
+- Anthropic, Antigravity, and xAI token acceptance shares validated credential construction; malformed tokens and invalid lifetimes cannot enter storage, and short lifetimes do not backdate expiry. Anthropic token errors omit raw response bodies.
+- Subscription request metadata follows the inspected Claude Code 2.1.273, Grok CLI 1.0.34, and AGY 1.2.4 client versions.
+- xAI device authorization and token exchange reject redirects and honor cancellation before requests and after responses.
 
 ## [0.99.27] - 2026-09-16
 

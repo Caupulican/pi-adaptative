@@ -114,6 +114,9 @@ import type { ProfileFilterReloadSnapshot } from "./profile-filter-controller.ts
 import { assertReloadQuiescent } from "./reload-blockers.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
+import { TYPESAFE_PROVIDER } from "./review/typesafe-contract.ts";
+import { TypeSafeEvidenceStore } from "./review/typesafe-evidence-store.ts";
+import { TypeSafeReviewer } from "./review/typesafe-reviewer.ts";
 import { ScoutController } from "./scout-controller.ts";
 import { BitwardenCredentialStorageRouter } from "./secrets/bitwarden-credential-storage-router.ts";
 import {
@@ -176,6 +179,7 @@ import {
 import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/tool-definition-wrapper.ts";
 import { wrapToolExecution } from "./tools/tool-execution-wrapper.ts";
 import { createToolTaskToolDefinition, type ToolTaskDependencies } from "./tools/tool-task.ts";
+import { createTypeSafeReviewToolDefinition } from "./tools/typesafe-review.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
 import { countFileLinesSync } from "./util/bounded-file.ts";
 import { createLane } from "./worktree-sync/git-engine.ts";
@@ -1093,6 +1097,23 @@ export class RuntimeBuilder {
 			this._baseToolDefinitions.set("tool_task", createToolTaskToolDefinition(toolTaskDependencies));
 		}
 		if (!baseToolsOverride) {
+			if (toolAccess.allows("typesafe_review")) {
+				const reviewer = new TypeSafeReviewer({
+					getApiKey: () =>
+						this.deps.getModelRegistry().authStorage.getApiKey(TYPESAFE_PROVIDER, { includeFallback: false }),
+				});
+				this._baseToolDefinitions.set(
+					"typesafe_review",
+					createTypeSafeReviewToolDefinition(
+						reviewer,
+						TypeSafeEvidenceStore.file(
+							this.deps.getAgentDir(),
+							this.deps.getSessionManager().getSessionId(),
+							this.deps.getSessionManager().getSessionLineageIds(),
+						),
+					),
+				);
+			}
 			if (toolAccess.allows("task_directory")) {
 				const definition = createTaskDirectoryToolDefinition(this._taskDirectories, () =>
 					this.deps.getTaskStepsStateSnapshot(),

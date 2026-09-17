@@ -121,6 +121,7 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 	}
 
 	const envMap: Record<string, string> = {
+		typesafe: "TYPESAFE_API_KEY",
 		openai: "OPENAI_API_KEY",
 		"azure-openai-responses": "AZURE_OPENAI_API_KEY",
 		deepseek: "DEEPSEEK_API_KEY",

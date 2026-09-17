@@ -293,6 +293,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		options.lifecycle.checkpoint(options.laneId, { summary, usage });
 		return usage;
 	};
+	options.toolSurface.toolUsage.bindCheckpoint(() => {
+		checkpointUsage("Persisted billed tool service usage before result publication.");
+	});
 	const remainingAttemptTokens = (): number | undefined => options.toolSurface.gateway?.remainingAttemptTokenBudget();
 	// A worker turn is capped by the model's own output limit, never by the lane summary cap: a
 	// claim envelope with findings, or a write tool call carrying a file, does not fit 2048 tokens.
@@ -646,6 +649,11 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 											}
 											if (message.role === "assistant" && origin !== "local") {
 												providerTurn.accountAssistantUsage(message.usage);
+											}
+											if (message.role === "toolResult") {
+												// Validate before persistence and retain billed usage if the append fails.
+												// Tool service usage is separate from assistant reservation epochs.
+												options.toolSurface.toolUsage.settle(message.toolCallId, message.usage);
 											}
 											options.conversation.appendMessage(message);
 											options.agentControl.acknowledgeMailboxMessage(options.agentId, message);

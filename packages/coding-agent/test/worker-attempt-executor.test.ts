@@ -4,6 +4,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../src/core/agent-session-contracts.ts";
 import type { LaneToolSurface } from "../src/core/autonomy/lane-tool-surface.ts";
+import { LaneToolUsage } from "../src/core/autonomy/lane-tool-usage.ts";
 import { createWorkerAttemptExecutor } from "../src/core/delegation/worker-attempt-executor.ts";
 import { WorkerConversation, type WorkerTranscriptMessage } from "../src/core/delegation/worker-conversation-store.ts";
 import type { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
@@ -106,6 +107,7 @@ function createExecutorHarness(
 			return undefined;
 		},
 		gateway,
+		toolUsage: new LaneToolUsage((usage) => gateway.recordUsage(usage)),
 	};
 	const checkpoints: string[] = [];
 	const checkpointUsages: AttemptUsageSnapshot[] = [];
@@ -229,6 +231,66 @@ turn context
 (none)`;
 
 describe("worker attempt executor", () => {
+	it.each(["valid", "malformed", "append_failure"] as const)(
+		"accounts billed tool usage before persistence while refusing malformed records: %s",
+		async (scenario) => {
+			const billed: Usage = { ...ZERO_USAGE, input: scenario === "malformed" ? -1 : 11, output: 2, totalTokens: 13 };
+			const harness = createExecutorHarness(
+				async (options) => {
+					const assistant = assistantToolRequest(17);
+					const toolCall = assistant.content.find((content) => content.type === "toolCall");
+					if (toolCall?.type !== "toolCall" || !options.beforeToolCall) throw new Error("Missing tool preflight");
+					await options.onMessage?.(assistant);
+					await options.beforeToolCall(
+						{
+							assistantMessage: assistant,
+							toolCall,
+							args: { path: "focused.ts" },
+							context: { systemPrompt: "", messages: [], tools: [] },
+						},
+						undefined,
+					);
+					const toolResult: Message = {
+						role: "toolResult",
+						toolCallId: toolCall.id,
+						toolName: "read",
+						content: [{ type: "text", text: "Billed service result" }],
+						isError: false,
+						timestamp: 2,
+						usage: billed,
+					};
+					await options.onMessage?.(toolResult);
+					await invokeRequestPreflight(options);
+					const terminal = fauxAssistantMessage('{"summary":"Recorded service usage.","status":"completed"}');
+					await options.onMessage?.(terminal);
+					return {
+						text: '{"summary":"Recorded service usage.","status":"completed"}',
+						usage: assistant.usage,
+						stopReason: "stop",
+						messages: [...(options.history ?? []), assistant, toolResult, terminal],
+					};
+				},
+				100,
+				(message) => {
+					if (scenario === "append_failure" && message.role === "toolResult")
+						throw new Error("fixture durable append failure");
+				},
+			);
+			const result = await harness.executor.run();
+			expect(result.rawOutcome.accepted).toBe(scenario === "valid");
+			const expected = {
+				inputTokens: scenario === "malformed" ? 17 : 28,
+				outputTokens: scenario === "malformed" ? 0 : 2,
+				totalTokens: scenario === "malformed" ? 17 : 30,
+			};
+			expect(result.usage).toMatchObject(expected);
+			expect(harness.checkpointUsages.at(-1)).toMatchObject(expected);
+			expect(
+				harness.conversation.getRawTranscript().filter((message) => message.role === "toolResult"),
+			).toHaveLength(scenario === "valid" ? 1 : 0);
+			expect(() => harness.conversation.getRawTranscriptUsage()).not.toThrow();
+		},
+	);
 	it("persists a failed partial tool call as terminal evidence without waiting for tool execution", async () => {
 		const assistant: AssistantMessage = {
 			...assistantToolRequest(17),

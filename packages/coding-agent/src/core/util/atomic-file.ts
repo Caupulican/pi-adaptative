@@ -55,8 +55,9 @@ function isTransientRenameErrorOnWin32(err: unknown): boolean {
 }
 
 /** Sync counterpart of the rename-retry policy; see {@link isTransientRenameErrorOnWin32}. */
-function renameSyncWithRetry(tmpPath: string, filePath: string, fs: FaultableFs): void {
+function renameSyncWithRetry(tmpPath: string, filePath: string, fs: FaultableFs, beforeCommit?: () => void): void {
 	for (let attempt = 0; attempt <= RENAME_RETRY_ATTEMPTS; attempt++) {
+		beforeCommit?.();
 		try {
 			fs.renameSync(tmpPath, filePath);
 			return;
@@ -69,8 +70,9 @@ function renameSyncWithRetry(tmpPath: string, filePath: string, fs: FaultableFs)
 }
 
 /** Async counterpart of the rename-retry policy; see {@link isTransientRenameErrorOnWin32}. */
-async function renameWithRetry(tmpPath: string, filePath: string): Promise<void> {
+async function renameWithRetry(tmpPath: string, filePath: string, beforeCommit?: () => void): Promise<void> {
 	for (let attempt = 0; attempt <= RENAME_RETRY_ATTEMPTS; attempt++) {
+		beforeCommit?.();
 		try {
 			await fsPromises.rename(tmpPath, filePath);
 			return;
@@ -119,6 +121,13 @@ export interface AtomicFileLockOptions {
 export interface AtomicFileWriteOptions {
 	/** POSIX permission bits applied to the temporary file and inherited by the renamed destination. */
 	mode?: number;
+	/**
+	 * Revalidate ownership immediately before every replacement attempt, including after
+	 * asynchronous staging or Windows retry waits. Throw to discard this invocation's
+	 * temporary file. This fences observed ownership loss; it cannot cancel a rename
+	 * already submitted to the operating system.
+	 */
+	beforeCommit?: () => void;
 	/**
 	 * Injection seam for the mutating fs primitives this write issues (`mkdirSync`, `writeFileSync`,
 	 * `renameSync`). Defaults to real `node:fs` — omitting this option is a zero-behavior-change no-op.
@@ -378,7 +387,7 @@ export function writeFileAtomicSync(filePath: string, content: string, options?:
 	try {
 		// `wx` makes a nonce collision harmless: never truncate another writer's temporary file.
 		fs.writeFileSync(tmpPath, content, { encoding: "utf-8", flag: "wx", mode: options?.mode });
-		renameSyncWithRetry(tmpPath, filePath, fs);
+		renameSyncWithRetry(tmpPath, filePath, fs, options?.beforeCommit);
 		renamed = true;
 	} finally {
 		if (!renamed) removeTemporaryPathSync(tmpPath);
@@ -398,7 +407,7 @@ export async function writeFileAtomic(
 		try {
 			// `wx` makes a nonce collision harmless: never truncate another writer's temporary file.
 			await fsPromises.writeFile(tmpPath, content, { encoding: "utf-8", flag: "wx", mode: options?.mode });
-			await renameWithRetry(tmpPath, filePath);
+			await renameWithRetry(tmpPath, filePath, options?.beforeCommit);
 			renamed = true;
 		} finally {
 			if (!renamed) await removeTemporaryPath(tmpPath);

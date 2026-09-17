@@ -1,12 +1,9 @@
-import {
-	ANTIGRAVITY_PROVIDER,
-	antigravityObject,
-	discoverAntigravityAccount,
-	parseAntigravityModels,
-} from "../antigravity.ts";
-import { parseAuthorizationInput } from "./authorization-input.ts";
+import { ANTIGRAVITY_PROVIDER, discoverAntigravityAccount, parseAntigravityModels } from "../antigravity.ts";
+import { awaitAuthorizationInput, parseAuthorizationInput } from "./authorization-input.ts";
 import { generatePKCE } from "./pkce.ts";
-import type { OAuthCredentials, OAuthLoginCallbacks, OAuthProviderInterface } from "./types.ts";
+import { OAuthRefreshCompletedError } from "./refresh-completed-error.ts";
+import { parseOAuthTokenCredentials } from "./token-credentials.ts";
+import type { OAuthCredentials, OAuthProviderInterface } from "./types.ts";
 
 const CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
 const CLIENT_SECRET = "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";
@@ -28,44 +25,12 @@ async function exchangeToken(
 		signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
 	});
 	if (!response.ok) throw new Error(`Antigravity token exchange failed (HTTP ${response.status})`);
-	const token = antigravityObject(await response.json());
-	const refresh = token.refresh_token ?? previous?.refresh;
-	if (
-		typeof token.access_token !== "string" ||
-		!token.access_token ||
-		typeof refresh !== "string" ||
-		!refresh ||
-		typeof token.expires_in !== "number" ||
-		!Number.isSafeInteger(token.expires_in) ||
-		token.expires_in <= 0 ||
-		token.expires_in > 31_536_000
-	) {
-		throw new Error("Antigravity returned invalid OAuth credentials");
-	}
+	const token: unknown = await response.json();
+	signal?.throwIfAborted();
 	return {
 		...previous,
-		access: token.access_token,
-		refresh,
-		expires: Date.now() + Math.max(0, token.expires_in - 60) * 1000,
+		...parseOAuthTokenCredentials(token, "Antigravity", 60, previous?.refresh),
 	};
-}
-
-async function promptAuthorizationCode(callbacks: OAuthLoginCallbacks): Promise<string> {
-	const signal = callbacks.signal;
-	let onAbort: (() => void) | undefined;
-	try {
-		const cancelled = new Promise<never>((_, reject) => {
-			onAbort = () => reject(signal?.reason ?? new Error("Antigravity login cancelled"));
-			signal?.addEventListener("abort", onAbort, { once: true });
-			if (signal?.aborted) onAbort();
-		});
-		return await Promise.race([
-			cancelled,
-			callbacks.onPrompt({ message: "Paste the Antigravity authorization code or callback URL:" }),
-		]);
-	} finally {
-		if (onAbort) signal?.removeEventListener("abort", onAbort);
-	}
 }
 
 export const antigravityOAuthProvider: OAuthProviderInterface = {
@@ -91,7 +56,10 @@ export const antigravityOAuthProvider: OAuthProviderInterface = {
 			url: `https://accounts.google.com/o/oauth2/auth?${params}`,
 			instructions: "Sign in, then copy the authorization code from the Antigravity page.",
 		});
-		const input = await promptAuthorizationCode(callbacks);
+		const input = await awaitAuthorizationInput(
+			() => callbacks.onPrompt({ message: "Paste the Antigravity authorization code or callback URL:" }),
+			callbacks.signal,
+		);
 		callbacks.signal?.throwIfAborted();
 		const parsed = parseAuthorizationInput(input);
 		if (!parsed.code || (parsed.state !== undefined && parsed.state !== state))
@@ -105,11 +73,18 @@ export const antigravityOAuthProvider: OAuthProviderInterface = {
 		return { ...credentials, ...(await discoverAntigravityAccount(credentials.access, callbacks.signal)) };
 	},
 	async refreshToken(credentials) {
+		// The omitted-token fallback and retained account metadata must describe
+		// the credential submitted, even if the caller mutates its object during I/O.
+		const submitted = structuredClone(credentials);
 		const refreshed = await exchangeToken(
-			{ grant_type: "refresh_token", refresh_token: credentials.refresh },
-			credentials,
+			{ grant_type: "refresh_token", refresh_token: submitted.refresh },
+			submitted,
 		);
-		return { ...refreshed, ...(await discoverAntigravityAccount(refreshed.access)) };
+		try {
+			return { ...refreshed, ...(await discoverAntigravityAccount(refreshed.access)) };
+		} catch (error) {
+			throw new OAuthRefreshCompletedError(ANTIGRAVITY_PROVIDER, refreshed, error);
+		}
 	},
 	getApiKey(credentials) {
 		return credentials.access;

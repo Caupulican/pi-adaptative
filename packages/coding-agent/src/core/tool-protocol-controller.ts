@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent, StreamFn } from "@caupulican/pi-agent-core";
@@ -34,6 +35,7 @@ import {
 import type {
 	ModelAdaptationRule,
 	ModelAdaptationStore,
+	ModelProtocolCalibration,
 	ModelToolProbe,
 	ModelToolProbeVerdict,
 	NativeToolProbeGrade,
@@ -96,7 +98,8 @@ function toolProtocolProbeText(message: AssistantMessage): string {
 		.trim();
 }
 
-export type ToolProbeVerdict = "native" | "text-protocol" | "none";
+/** Incomplete trials are reported, never persisted as capability evidence. */
+export type ToolProbeVerdict = ModelToolProbeVerdict | "inconclusive";
 
 export interface ToolProbeResult {
 	model: string;
@@ -128,6 +131,12 @@ export interface ToolProtocolControllerDeps {
 	probeForAuto(model: Model<Api>): Promise<ToolProbeResult>;
 }
 
+interface ToolProbeRun {
+	readonly model: Model<Api>;
+	readonly modelKey: string;
+	readonly id: string;
+}
+
 /** Owns model tool-protocol selection, probing, circuit breaking, and repair teaching. */
 export class ToolProtocolController {
 	private readonly repairModeSessionCounts = new Map<string, number>();
@@ -139,8 +148,16 @@ export class ToolProtocolController {
 	private correctiveSteerCount = 0;
 	private probeUsageReportSeq = 0;
 	private readonly autoProbedModels = new Set<string>();
-	/** The exact active tool surface and prompt withheld for one no-route run; restored at completion. */
-	private withheldRouteState: { tools: Agent["state"]["tools"]; systemPrompt: string } | undefined;
+	private readonly activeProbes = new Map<string, ToolProbeRun>();
+	/** Restore only the temporary values this no-route run still owns at completion. */
+	private withheldRouteState:
+		| {
+				tools: Agent["state"]["tools"];
+				systemPrompt: string;
+				withheldTools: Agent["state"]["tools"];
+				withheldPrompt?: string;
+		  }
+		| undefined;
 	private readonly deps: ToolProtocolControllerDeps;
 
 	constructor(deps: ToolProtocolControllerDeps) {
@@ -201,8 +218,12 @@ export class ToolProtocolController {
 	/** Restore the normal active-tool surface after a bounded no-route run settles. */
 	restoreWithheldTools(): void {
 		if (!this.withheldRouteState) return;
-		this.deps.agent.state.tools = this.withheldRouteState.tools;
-		this.deps.agent.state.systemPrompt = this.withheldRouteState.systemPrompt;
+		if (this.deps.agent.state.tools === this.withheldRouteState.withheldTools) {
+			this.deps.agent.state.tools = this.withheldRouteState.tools;
+		}
+		if (this.deps.agent.state.systemPrompt === this.withheldRouteState.withheldPrompt) {
+			this.deps.agent.state.systemPrompt = this.withheldRouteState.systemPrompt;
+		}
 		this.withheldRouteState = undefined;
 	}
 
@@ -219,14 +240,30 @@ export class ToolProtocolController {
 	}
 
 	async probeToolCallingForModel(model: Model<Api>): Promise<ToolProbeResult> {
-		const modelKey = this.modelRef(model);
+		const run: ToolProbeRun = { model, modelKey: this.modelRef(model), id: randomUUID() };
+		this.activeProbes.set(run.modelKey, run);
+		try {
+			return await this.runToolProbe(run);
+		} finally {
+			if (this.activeProbes.get(run.modelKey) === run) this.activeProbes.delete(run.modelKey);
+		}
+	}
+
+	private assertCurrentProbe(run: ToolProbeRun): void {
+		if (this.deps.isDisposed()) throw new Error("Tool probe session disposed.");
+		if (this.activeProbes.get(run.modelKey) !== run) throw new Error("Tool probe superseded by a newer probe.");
+	}
+
+	private async runToolProbe(run: ToolProbeRun): Promise<ToolProbeResult> {
+		const modelKey = run.modelKey;
 		const probedAt = new Date().toISOString();
 		let nativeGrade: NativeToolProbeGrade = "absent";
 		let diagnostic: string | undefined;
 		try {
-			nativeGrade = await this.gradeNativeToolCallingForModel(model, "pi-native-probe");
+			this.assertCurrentProbe(run);
+			nativeGrade = await this.gradeNativeToolCallingForModel(run, "pi-native-probe");
 			if (nativeGrade === "task") {
-				this.storeToolProbe(modelKey, {
+				this.storeToolProbe(run, {
 					version: MODEL_TOOL_PROTOCOL_VERSION,
 					status: "native",
 					probedAt,
@@ -238,36 +275,35 @@ export class ToolProtocolController {
 				nativeGrade === "echo-only"
 					? "Native echo probe passed but task-scale read probe failed."
 					: "Native task-scale read and echo probes did not produce provider-native tool calls.";
-		} catch (error) {
-			diagnostic = error instanceof Error ? error.message : String(error);
-		}
-
-		try {
-			const calibrated = await this.calibrateTextToolProtocolForModel(model, modelKey, { persistFailure: false });
+			const calibrated = await this.calibrateTextToolProtocolForModel(run);
 			if (calibrated.status === "calibrated") {
-				this.storeToolProbe(modelKey, {
-					version: MODEL_TOOL_PROTOCOL_VERSION,
-					status: "text-protocol",
-					probedAt: calibrated.calibratedAt,
-					variant: calibrated.variant,
-					nativeGrade,
-					diagnostic,
-				});
+				this.storeToolProbe(
+					run,
+					{
+						version: MODEL_TOOL_PROTOCOL_VERSION,
+						status: "text-protocol",
+						probedAt: calibrated.calibratedAt,
+						variant: calibrated.variant,
+						nativeGrade,
+						diagnostic,
+					},
+					{ version: MODEL_TOOL_PROTOCOL_VERSION, ...calibrated },
+				);
 				return { model: modelKey, verdict: "text-protocol", variant: calibrated.variant, nativeGrade, diagnostic };
 			}
 			diagnostic = `${diagnostic ? `${diagnostic} ` : ""}Text protocol variants failed: ${calibrated.variantsTried.join(", ")}`;
+			this.storeToolProbe(run, {
+				version: MODEL_TOOL_PROTOCOL_VERSION,
+				status: "none",
+				probedAt,
+				nativeGrade,
+				diagnostic,
+			});
+			return { model: modelKey, verdict: "none", nativeGrade, diagnostic };
 		} catch (error) {
 			diagnostic = error instanceof Error ? error.message : String(error);
+			return { model: modelKey, verdict: "inconclusive", nativeGrade, diagnostic };
 		}
-
-		this.storeToolProbe(modelKey, {
-			version: MODEL_TOOL_PROTOCOL_VERSION,
-			status: "none",
-			probedAt,
-			nativeGrade,
-			diagnostic,
-		});
-		return { model: modelKey, verdict: "none", nativeGrade, diagnostic };
 	}
 
 	handleTextProtocolParse(event: TextToolProtocolParseEvent & { failureClass?: string }): void {
@@ -433,7 +469,9 @@ export class ToolProtocolController {
 						? ` (variant ${result.variant}); it will use the text tool protocol starting next turn`
 						: result.verdict === "none"
 							? " — no working tool-call path was found; run /toolprobe for details"
-							: "; native tool calls stay in use";
+							: result.verdict === "inconclusive"
+								? ` — probe incomplete; prior routing evidence retained (${result.diagnostic ?? "no complete result"})`
+								: "; native tool calls stay in use";
 				this.deps.emitWarning(
 					`Auto-probed ${modelKey} after repeated native tool-call validation failures: verdict "${result.verdict}"${detail}.`,
 				);
@@ -472,7 +510,9 @@ export class ToolProtocolController {
 		return `${model.provider}/${model.id}`;
 	}
 
-	private async streamForProbe(model: Model<Api>, context: Context, options: SimpleStreamOptions) {
+	private async streamForProbe(run: ToolProbeRun, context: Context, options: SimpleStreamOptions) {
+		this.assertCurrentProbe(run);
+		const model = run.model;
 		let requestOptions = options;
 		if (this.deps.isRawStreamSimple(this.deps.agent.streamFn)) {
 			const auth = await this.deps.getRequiredRequestAuth(model);
@@ -482,6 +522,7 @@ export class ToolProtocolController {
 				headers: auth.headers || options.headers ? { ...auth.headers, ...options.headers } : undefined,
 			};
 		}
+		this.assertCurrentProbe(run);
 		return this.deps.agent.streamFn(model, context, requestOptions);
 	}
 
@@ -490,6 +531,7 @@ export class ToolProtocolController {
 	}
 
 	private async resolveProbeStreamCountingUsage(
+		run: ToolProbeRun,
 		stream: AssistantMessageEventStream,
 		label: string,
 		reportId: string,
@@ -498,6 +540,14 @@ export class ToolProtocolController {
 		const usage = message.usage;
 		if (usage && (usage.cost.total > 0 || usage.totalTokens > 0)) {
 			this.deps.addSpawnedUsage(usage, { label, reportId });
+		}
+		this.assertCurrentProbe(run);
+		// A transport failure, cancellation, or truncated response proves neither tool support nor
+		// its absence. Charge reported usage, then stop this probe before inspecting partial content.
+		if (message.stopReason !== "stop" && message.stopReason !== "toolUse") {
+			throw new Error(
+				`Tool probe incomplete (${message.stopReason})${message.errorMessage ? `: ${message.errorMessage}` : ""}`,
+			);
 		}
 		return message;
 	}
@@ -547,7 +597,7 @@ export class ToolProtocolController {
 	}
 
 	private async runNativeToolProbeTrial(
-		model: Model<Api>,
+		run: ToolProbeRun,
 		instruction: string,
 		tool: Tool,
 		maxTokens: number,
@@ -556,7 +606,7 @@ export class ToolProtocolController {
 		argValue: string,
 	): Promise<boolean> {
 		const stream = await this.streamForProbe(
-			model,
+			run,
 			{
 				systemPrompt: this.nativeToolProbeSystemPrompt(instruction),
 				messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
@@ -565,17 +615,18 @@ export class ToolProtocolController {
 			{ textToolCallProtocol: false, maxRetries: 0, temperature: 0, maxTokens },
 		);
 		const message = await this.resolveProbeStreamCountingUsage(
+			run,
 			stream,
 			"tool-probe",
-			this.nextProbeUsageReportId(model, reportKind),
+			this.nextProbeUsageReportId(run.model, reportKind),
 		);
 		return this.messageHasToolCallWithStringArgument(message, tool.name, argName, argValue);
 	}
 
-	private async runNativeReadTaskProbeTrial(model: Model<Api>, path: string): Promise<boolean> {
+	private async runNativeReadTaskProbeTrial(run: ToolProbeRun, path: string): Promise<boolean> {
 		const instruction = `Native tool-call capability probe: task-scale read. Provider-native call only: read once, path exactly "${path}".`;
 		return this.runNativeToolProbeTrial(
-			model,
+			run,
 			instruction,
 			NATIVE_TOOL_PROBE_READ_TOOL,
 			768,
@@ -585,20 +636,20 @@ export class ToolProtocolController {
 		);
 	}
 
-	private async runNativeEchoToolProbeTrial(model: Model<Api>, token: string): Promise<boolean> {
+	private async runNativeEchoToolProbeTrial(run: ToolProbeRun, token: string): Promise<boolean> {
 		const instruction = `Native tool-call capability probe: echo-only. Provider-native call only: echo, data exactly "${token}".`;
-		return this.runNativeToolProbeTrial(model, instruction, TEXT_TOOL_PROTOCOL_ECHO_TOOL, 256, "echo", "data", token);
+		return this.runNativeToolProbeTrial(run, instruction, TEXT_TOOL_PROTOCOL_ECHO_TOOL, 256, "echo", "data", token);
 	}
 
-	private async gradeNativeToolCallingForModel(model: Model<Api>, token: string): Promise<NativeToolProbeGrade> {
+	private async gradeNativeToolCallingForModel(run: ToolProbeRun, token: string): Promise<NativeToolProbeGrade> {
 		const path = join(
 			getProcessWorkRun(this.deps.agentDir, "probes", "native-tools").path,
-			`pi-native-probe-${process.pid}-${Date.now()}.txt`,
+			`pi-native-probe-${run.id}.txt`,
 		);
 		writeFileSync(path, token, "utf-8");
 		try {
-			if (await this.runNativeReadTaskProbeTrial(model, path)) return "task";
-			if (await this.runNativeEchoToolProbeTrial(model, token)) return "echo-only";
+			if (await this.runNativeReadTaskProbeTrial(run, path)) return "task";
+			if (await this.runNativeEchoToolProbeTrial(run, token)) return "echo-only";
 			return "absent";
 		} finally {
 			rmSync(path, { force: true });
@@ -606,36 +657,38 @@ export class ToolProtocolController {
 	}
 
 	private async runTextProtocolTrial(
-		model: Model<Api>,
+		run: ToolProbeRun,
 		variant: TextToolProtocolVariant,
 		token: string,
 	): Promise<boolean> {
-		const stream = await this.streamForProbe(model, this.textProtocolCalibrationContext(variant, token), {
+		const stream = await this.streamForProbe(run, this.textProtocolCalibrationContext(variant, token), {
 			textToolCallProtocol: false,
 			maxRetries: 0,
 			temperature: 0,
 			maxTokens: 256,
 		});
 		const message = await this.resolveProbeStreamCountingUsage(
+			run,
 			stream,
 			"text-protocol-calibration",
-			this.nextProbeUsageReportId(model, `text-protocol:${variant}`),
+			this.nextProbeUsageReportId(run.model, `text-protocol:${variant}`),
 		);
 		const text = toolProtocolProbeText(message);
 		if (!text) return false;
 		const parsed = parseTextToolCalls(text, [TEXT_TOOL_PROTOCOL_ECHO_TOOL]);
 		if (!parsed.calls.some((call) => call.name === "echo" && call.arguments.data === token)) return false;
 
-		const taskStream = await this.streamForProbe(model, this.textProtocolTaskCalibrationContext(variant), {
+		const taskStream = await this.streamForProbe(run, this.textProtocolTaskCalibrationContext(variant), {
 			textToolCallProtocol: false,
 			maxRetries: 0,
 			temperature: 0,
 			maxTokens: 768,
 		});
 		const taskMessage = await this.resolveProbeStreamCountingUsage(
+			run,
 			taskStream,
 			"text-protocol-calibration",
-			this.nextProbeUsageReportId(model, `text-protocol-task:${variant}`),
+			this.nextProbeUsageReportId(run.model, `text-protocol-task:${variant}`),
 		);
 		const taskText = toolProtocolProbeText(taskMessage);
 		if (!taskText) return false;
@@ -648,9 +701,7 @@ export class ToolProtocolController {
 	}
 
 	private async calibrateTextToolProtocolForModel(
-		model: Model<Api>,
-		modelKey: string | undefined,
-		options: { persistFailure: boolean },
+		run: ToolProbeRun,
 	): Promise<
 		| { status: "calibrated"; variant: TextToolProtocolVariant; calibratedAt: string }
 		| { status: "failed"; attemptedAt: string; variantsTried: string[] }
@@ -660,32 +711,19 @@ export class ToolProtocolController {
 			variantsTried.push(variant);
 			let passed = true;
 			for (let trial = 0; trial < TEXT_TOOL_PROTOCOL_TRIALS_PER_VARIANT; trial++) {
-				if (!(await this.runTextProtocolTrial(model, variant, `pi-calibration-${trial + 1}`))) {
+				if (!(await this.runTextProtocolTrial(run, variant, `pi-calibration-${trial + 1}`))) {
 					passed = false;
 					break;
 				}
 			}
 			if (passed) {
+				this.assertCurrentProbe(run);
 				const calibratedAt = new Date().toISOString();
-				if (modelKey) {
-					this.deps.adaptationStore.setProtocol(
-						modelKey,
-						{ version: MODEL_TOOL_PROTOCOL_VERSION, status: "calibrated", variant, calibratedAt },
-						calibratedAt,
-					);
-				}
 				return { status: "calibrated", variant, calibratedAt };
 			}
 		}
 
 		const attemptedAt = new Date().toISOString();
-		if (modelKey && options.persistFailure) {
-			this.deps.adaptationStore.setProtocol(
-				modelKey,
-				{ version: MODEL_TOOL_PROTOCOL_VERSION, status: "failed", attemptedAt, variantsTried },
-				attemptedAt,
-			);
-		}
 		return { status: "failed", attemptedAt, variantsTried };
 	}
 
@@ -709,8 +747,9 @@ export class ToolProtocolController {
 		return lines.join("\n");
 	}
 
-	private storeToolProbe(modelKey: string, probe: ModelToolProbe): void {
-		this.deps.adaptationStore.setToolProbe(modelKey, probe, probe.probedAt);
+	private storeToolProbe(run: ToolProbeRun, probe: ModelToolProbe, protocol?: ModelProtocolCalibration): void {
+		this.assertCurrentProbe(run);
+		this.deps.adaptationStore.setToolProbe(run.modelKey, probe, probe.probedAt, protocol);
 	}
 
 	private async resolveToolProbeModels(target?: string): Promise<Model<Api>[]> {
@@ -742,11 +781,17 @@ export class ToolProtocolController {
 		this.withheldRouteState = {
 			tools: this.deps.agent.state.tools,
 			systemPrompt: this.deps.agent.state.systemPrompt,
+			withheldTools: [],
 		};
-		this.deps.agent.state.tools = [];
+		this.deps.agent.state.tools = this.withheldRouteState.withheldTools;
+		// AgentState clones tool assignments; retain the installed surface, not its input array.
+		this.withheldRouteState.withheldTools = this.deps.agent.state.tools;
 		// prepareRun built the normal prompt before protocol resolution. Rebuild against the empty
 		// surface so no tool primer, snippet, or guideline can advertise a call the provider cannot make.
-		this.deps.agent.state.systemPrompt = this.deps.buildToolFreeSystemPrompt(NO_CERTIFIED_TOOL_ROUTE_SYSTEM_GUIDANCE);
+		this.withheldRouteState.withheldPrompt = this.deps.buildToolFreeSystemPrompt(
+			NO_CERTIFIED_TOOL_ROUTE_SYSTEM_GUIDANCE,
+		);
+		this.deps.agent.state.systemPrompt = this.withheldRouteState.withheldPrompt;
 	}
 
 	private completeParseFailureEpisode(): void {

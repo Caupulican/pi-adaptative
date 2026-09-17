@@ -2,7 +2,7 @@ import type { Model } from "../types.ts";
 
 export const ANTIGRAVITY_PROVIDER = "google-antigravity";
 export const ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
-export const ANTIGRAVITY_VERSION = "1.2.3";
+export const ANTIGRAVITY_VERSION = "1.2.4";
 
 function isAntigravityObject(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);

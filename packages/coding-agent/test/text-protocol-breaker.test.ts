@@ -565,6 +565,38 @@ describe("text-protocol circuit breaker", () => {
 		}
 	});
 
+	it("retains an extension tool-surface update when a no-route turn settles", async () => {
+		const model = createModel("no-route-surface-update");
+		const modelKey = `${model.provider}/${model.id}`;
+		ModelAdaptationStore.forAgentDir(agentDir).setToolProbe(modelKey, {
+			version: 1,
+			status: "none",
+			probedAt: new Date().toISOString(),
+		});
+		let updateTools: () => void = () => {};
+		let updatedPrompt = "";
+		const requests: CapturedRequest[] = [];
+		const created = await createSession(model, requests, () => {
+			updateTools();
+			return "bounded text-only response";
+		});
+		try {
+			created.session.setActiveToolsByName(["read", "bash"]);
+			updateTools = () => {
+				created.session.setActiveToolsByName(["read"]);
+				updatedPrompt = created.session.agent.state.systemPrompt;
+			};
+			await created.session.prompt("retain the tool update made while this turn completes");
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.context.tools).toEqual([]);
+			expect(created.session.getActiveToolNames()).toEqual(["read"]);
+			expect(created.session.agent.state.systemPrompt).toBe(updatedPrompt);
+		} finally {
+			await created.session.disposeAndWait();
+			created.modelRegistry.unregisterProvider(model.provider);
+		}
+	});
+
 	it("injects a one-line corrective steer after the first parse failure, throttled every Nth failure after", async () => {
 		const model = createModel("steer-model", { textProtocol: false });
 		const modelKey = `${model.provider}/${model.id}`;

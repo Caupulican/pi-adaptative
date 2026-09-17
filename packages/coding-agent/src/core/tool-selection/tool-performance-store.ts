@@ -14,6 +14,8 @@ const MAX_OBSERVATIONS_PER_HOST = 1_000;
 const MAX_OBSERVATION_BYTES_PER_HOST = 256 * 1024;
 const TARGET_OBSERVATION_BYTES_PER_HOST = 192 * 1024;
 const MAX_INTENT_AGREEMENT_PER_HOST = 500;
+const MAX_EVIDENCE_MAP_BYTES = 256 * 1024;
+const TARGET_EVIDENCE_MAP_BYTES = 192 * 1024;
 const MAX_RANKED_TOOLS = 6;
 const MAX_SHORTLIST_TOOLS = 3;
 const EWMA_ALPHA = 0.25;
@@ -96,9 +98,11 @@ export interface ToolSelectionIntentAgreement {
 interface HostToolPerformanceData {
 	host: HostFingerprint;
 	stats: Record<string, ToolPerformanceStats>;
+	statsBytes: number;
 	observations: ToolSelectionObservation[];
 	observationBytes: number;
 	intentAgreement: Record<string, ToolSelectionIntentAgreement>;
+	intentAgreementBytes: number;
 }
 
 export interface ToolExecutionObservation {
@@ -323,48 +327,85 @@ function parseHost(value: unknown, hostId: string): HostToolPerformanceData | un
 	// intentAgreement is a purely additive field (older store files predate it) — tolerate absence
 	// rather than bumping STORE_VERSION, same as any other backward-compatible default-empty field.
 	const intentAgreementRaw = isRecordObject(value.intentAgreement) ? value.intentAgreement : {};
+	const stats = trimEvidenceRecords(
+		Object.fromEntries(
+			Object.entries(value.stats).filter(
+				(entry): entry is [string, ToolPerformanceStats] => isStats(entry[1]) && entry[0] === statKey(entry[1]),
+			),
+		),
+		MAX_STATS_PER_HOST,
+		(entry) => entry.lastUsedAt,
+	);
+	const intentAgreement = trimEvidenceRecords(
+		Object.fromEntries(
+			Object.entries(intentAgreementRaw).filter(
+				(entry): entry is [string, ToolSelectionIntentAgreement] =>
+					isIntentAgreement(entry[1]) && entry[0] === intentAgreementKey(entry[1].modelRef, entry[1].intentClass),
+			),
+		),
+		MAX_INTENT_AGREEMENT_PER_HOST,
+		(entry) => entry.lastUpdatedAt,
+	);
 	return {
 		host,
-		stats: trimStats(
-			Object.fromEntries(
-				Object.entries(value.stats).filter(
-					(entry): entry is [string, ToolPerformanceStats] => isStats(entry[1]) && entry[0] === statKey(entry[1]),
-				),
-			),
-		),
+		stats: stats.records,
+		statsBytes: stats.bytes,
 		observations: observations.observations,
 		observationBytes: observations.bytes,
-		intentAgreement: trimIntentAgreement(
-			Object.fromEntries(
-				Object.entries(intentAgreementRaw).filter(
-					(entry): entry is [string, ToolSelectionIntentAgreement] =>
-						isIntentAgreement(entry[1]) &&
-						entry[0] === intentAgreementKey(entry[1].modelRef, entry[1].intentClass),
-				),
-			),
-		),
+		intentAgreement: intentAgreement.records,
+		intentAgreementBytes: intentAgreement.bytes,
 	};
 }
 
-function trimStats(stats: Record<string, ToolPerformanceStats>): Record<string, ToolPerformanceStats> {
-	const entries = Object.entries(stats);
-	if (entries.length <= MAX_STATS_PER_HOST) return stats;
-	return Object.fromEntries(
-		entries
-			.sort(([, left], [, right]) => Date.parse(right.lastUsedAt) - Date.parse(left.lastUsedAt))
-			.slice(0, MAX_STATS_PER_HOST),
-	);
+function encodedEvidenceEntryBytes<T>(key: string, value: T): number {
+	return Buffer.byteLength(JSON.stringify(key), "utf8") + 1 + Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
-function trimIntentAgreement(
-	records: Record<string, ToolSelectionIntentAgreement>,
-): Record<string, ToolSelectionIntentAgreement> {
+/** Same retention policy for both aggregate maps; load always measures bytes instead of trusting disk counters. */
+function trimEvidenceRecords<T>(
+	records: Record<string, T>,
+	maxCount: number,
+	timestamp: (record: T) => string,
+	knownBytes?: number,
+): { records: Record<string, T>; bytes: number } {
 	const entries = Object.entries(records);
-	if (entries.length <= MAX_INTENT_AGREEMENT_PER_HOST) return records;
-	return Object.fromEntries(
-		entries
-			.sort(([, left], [, right]) => Date.parse(right.lastUpdatedAt) - Date.parse(left.lastUpdatedAt))
-			.slice(0, MAX_INTENT_AGREEMENT_PER_HOST),
+	const bytes =
+		knownBytes ??
+		2 +
+			Math.max(0, entries.length - 1) +
+			entries.reduce((sum, [key, record]) => sum + encodedEvidenceEntryBytes(key, record), 0);
+	if (entries.length <= maxCount && bytes <= MAX_EVIDENCE_MAP_BYTES) return { records, bytes };
+	entries.sort(([, left], [, right]) => Date.parse(timestamp(right)) - Date.parse(timestamp(left)));
+	const retained: Array<[string, T]> = [];
+	let retainedBytes = 2;
+	for (const entry of entries) {
+		if (retained.length === maxCount) break;
+		const addition = encodedEvidenceEntryBytes(...entry) + (retained.length > 0 ? 1 : 0);
+		if (retainedBytes + addition > TARGET_EVIDENCE_MAP_BYTES) continue;
+		retained.push(entry);
+		retainedBytes += addition;
+	}
+	return { records: Object.fromEntries(retained), bytes: retainedBytes };
+}
+
+/** Ordinary updates measure only the changed record; rescan/sort only at a retention boundary. */
+function putEvidenceRecord<T>(
+	records: Record<string, T>,
+	bytes: number,
+	key: string,
+	value: T,
+	maxCount: number,
+	timestamp: (record: T) => string,
+): { records: Record<string, T>; bytes: number } {
+	const previous = records[key];
+	const removed = previous === undefined ? 0 : encodedEvidenceEntryBytes(key, previous);
+	const comma = previous === undefined && bytes > 2 ? 1 : 0;
+	records[key] = value;
+	return trimEvidenceRecords(
+		records,
+		maxCount,
+		timestamp,
+		bytes - removed + encodedEvidenceEntryBytes(key, value) + comma,
 	);
 }
 
@@ -411,46 +452,67 @@ export class ToolPerformanceStore {
 	}
 
 	private createHostData(host: HostFingerprint): HostToolPerformanceData {
-		return { host, stats: {}, observations: [], observationBytes: 2, intentAgreement: {} };
+		return {
+			host,
+			stats: {},
+			statsBytes: 2,
+			observations: [],
+			observationBytes: 2,
+			intentAgreement: {},
+			intentAgreementBytes: 2,
+		};
+	}
+
+	private putStats(host: HostToolPerformanceData, key: string, value: ToolPerformanceStats): void {
+		const bounded = putEvidenceRecord(
+			host.stats,
+			host.statsBytes,
+			key,
+			value,
+			MAX_STATS_PER_HOST,
+			(entry) => entry.lastUsedAt,
+		);
+		host.stats = bounded.records;
+		host.statsBytes = bounded.bytes;
 	}
 
 	get(key: ToolPerformanceKey): ToolPerformanceStats {
 		const host = this.storage.getHost();
 		const stats = host?.stats[statKey(key)];
-		return stats ? { ...stats } : emptyStats(key, new Date(0).toISOString());
+		return stats ? structuredClone(stats) : emptyStats(key, new Date(0).toISOString());
 	}
 
 	/** One fresh durable snapshot of every per-tool track record for a model. */
 	getStatsForModel(modelRef: string): ToolPerformanceStats[] {
 		const host = this.storage.getHost();
 		if (!host) return [];
-		return Object.values(host.stats)
-			.filter((stats) => stats.modelRef === modelRef)
-			.map((stats) => ({ ...stats }));
+		return structuredClone(Object.values(host.stats).filter((stats) => stats.modelRef === modelRef));
 	}
 
 	/** Every per-tool track record recorded for a (model,intent) bucket — the promotion.ts input. */
 	getStatsForIntent(modelRef: string, intentClass: ToolSelectionIntentClass): ToolPerformanceStats[] {
 		const host = this.storage.getHost();
 		if (!host) return [];
-		return Object.values(host.stats)
-			.filter((stats) => stats.modelRef === modelRef && stats.intentClass === intentClass)
-			.map((stats) => ({ ...stats }));
+		return structuredClone(
+			Object.values(host.stats).filter((stats) => stats.modelRef === modelRef && stats.intentClass === intentClass),
+		);
 	}
 
 	/** Durable observe-mode agreement for one (model,intent) bucket (see {@link ToolSelectionIntentAgreement}). */
 	getIntentAgreement(modelRef: string, intentClass: ToolSelectionIntentClass): ToolSelectionIntentAgreement {
 		const host = this.storage.getHost();
 		const record = host?.intentAgreement[intentAgreementKey(modelRef, intentClass)];
-		return record ? { ...record } : emptyIntentAgreement(modelRef, intentClass, new Date(0).toISOString());
+		return record ? structuredClone(record) : emptyIntentAgreement(modelRef, intentClass, new Date(0).toISOString());
 	}
 
 	/** All recorded (model,intent) agreement buckets, optionally scoped to one model — report input. */
 	getAllIntentAgreements(modelRef?: string): ToolSelectionIntentAgreement[] {
 		const host = this.storage.getHost();
-		return Object.values(host?.intentAgreement ?? {})
-			.filter((record) => modelRef === undefined || record.modelRef === modelRef)
-			.map((record) => ({ ...record }));
+		return structuredClone(
+			Object.values(host?.intentAgreement ?? {}).filter(
+				(record) => modelRef === undefined || record.modelRef === modelRef,
+			),
+		);
 	}
 
 	recordValidation(
@@ -470,9 +532,8 @@ export class ToolPerformanceStore {
 					bounceCount: current.bounceCount + (outcome === "bounced" ? 1 : 0),
 					lastUsedAt: at,
 				};
-				host.stats[storageKey] = next;
-				host.stats = trimStats(host.stats);
-				return { result: { ...next }, changed: true };
+				this.putStats(host, storageKey, next);
+				return { result: structuredClone(next), changed: true };
 			},
 		);
 	}
@@ -525,8 +586,7 @@ export class ToolPerformanceStore {
 					failureCount: current.failureCount + (observation.success ? 0 : 1),
 					lastUsedAt: at,
 				};
-				host.stats[storageKey] = next;
-				host.stats = trimStats(host.stats);
+				this.putStats(host, storageKey, next);
 				const selectionObservation: ToolSelectionObservation = {
 					...observation.selection,
 					at,
@@ -559,7 +619,7 @@ export class ToolPerformanceStore {
 				const currentAgreement =
 					host.intentAgreement[agreementKey] ??
 					emptyIntentAgreement(observation.key.modelRef, observation.key.intentClass, at);
-				host.intentAgreement[agreementKey] = {
+				const nextAgreement: ToolSelectionIntentAgreement = {
 					...currentAgreement,
 					sampleCount: currentAgreement.sampleCount + 1,
 					agreementCount: currentAgreement.agreementCount + (agreed ? 1 : 0),
@@ -569,9 +629,18 @@ export class ToolPerformanceStore {
 						currentAgreement.hintActiveAgreementCount + (observation.hintActiveAtCallTime && agreed ? 1 : 0),
 					lastUpdatedAt: at,
 				};
-				host.intentAgreement = trimIntentAgreement(host.intentAgreement);
+				const boundedAgreement = putEvidenceRecord(
+					host.intentAgreement,
+					host.intentAgreementBytes,
+					agreementKey,
+					nextAgreement,
+					MAX_INTENT_AGREEMENT_PER_HOST,
+					(entry) => entry.lastUpdatedAt,
+				);
+				host.intentAgreement = boundedAgreement.records;
+				host.intentAgreementBytes = boundedAgreement.bytes;
 
-				return { result: { ...next }, changed: true };
+				return { result: structuredClone(next), changed: true };
 			},
 		);
 	}
@@ -609,12 +678,10 @@ export class ToolPerformanceStore {
 
 	getObservations(modelRef?: string): ToolSelectionObservation[] {
 		const host = this.storage.getHost();
-		return (host?.observations ?? [])
-			.filter((observation) => modelRef === undefined || observation.modelRef === modelRef)
-			.map((observation) => ({
-				...observation,
-				shortlist: [...observation.shortlist],
-				ranked: observation.ranked.map((candidate) => ({ ...candidate })),
-			}));
+		return structuredClone(
+			(host?.observations ?? []).filter(
+				(observation) => modelRef === undefined || observation.modelRef === modelRef,
+			),
+		);
 	}
 }

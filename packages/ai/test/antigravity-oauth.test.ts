@@ -50,7 +50,7 @@ describe("Antigravity subscription login", () => {
 		["darwin", "x64", "darwin", "amd64"],
 	])("uses runtime-specific CLI headers on %s/%s", (platform, arch, osType, architecture) => {
 		const headers = antigravityHeaders("fixture", { platform, arch });
-		expect(headers["User-Agent"]).toContain("antigravity/cli/1.2.3");
+		expect(headers["User-Agent"]).toContain("antigravity/cli/1.2.4");
 		expect(headers["User-Agent"]).toContain(`os_type=${osType}; arch=${architecture}`);
 		expect(headers["User-Agent"]).toContain("auth_method=consumer");
 	});

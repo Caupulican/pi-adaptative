@@ -46,6 +46,22 @@ describe("evaluateToolPromotion", () => {
 		expect(decision.tool).toBeUndefined();
 	});
 
+	it.each([100_000, 1e308])("does not reward token cost overflow with a free hint: %s", (tokens) => {
+		const decision = evaluateToolPromotion([
+			stats({
+				tool: "expensive",
+				alpha: 1,
+				beta: 4,
+				sampleCount: 3,
+				failureCount: 3,
+				latencyEwmaMs: 2_500,
+				inputTokenEstimateEwma: tokens,
+				outputTokenEstimateEwma: tokens,
+			}),
+		]);
+		expect(decision.tool).toBeUndefined();
+	});
+
 	it("promotes the clearly-better of two competing tools once the gap is wide enough to also clear the entropy gate", () => {
 		// A modest utility gap (e.g. 10/1 vs 2/8 posteriors) still trips the high-entropy shortlist
 		// gate — softmax over bounded [0,1] utilities stays close to 50/50 unless the posteriors are

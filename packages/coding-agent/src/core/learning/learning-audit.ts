@@ -6,7 +6,7 @@ import {
 	type SessionSnapshotCodec,
 	type SessionSnapshotPayload,
 } from "../session-snapshot.ts";
-import type { DurableChangeLayer, DurableChangeProposal } from "./learning-gate.ts";
+import { type DurableChangeLayer, type DurableChangeProposal, isLearningDecision } from "./learning-gate.ts";
 import type { ReflectionWrite } from "./reflection-engine.ts";
 
 /**
@@ -181,18 +181,6 @@ function isLearningRollbackPlan(value: unknown): value is LearningRollbackPlan {
 	return typeof plan.instructions === "string";
 }
 
-function isLearningDecisionShape(value: unknown): value is LearningDecision {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const decision = value as Record<string, unknown>;
-	return (
-		(decision.kind === "no-op" || decision.kind === "proposal" || decision.kind === "apply") &&
-		typeof decision.reasonCode === "string" &&
-		typeof decision.confidence === "number" &&
-		typeof decision.summary === "string" &&
-		typeof decision.requiresApproval === "boolean"
-	);
-}
-
 export function isLearningAuditRecord(value: unknown): value is LearningAuditRecord {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	const record = value as Record<string, unknown>;
@@ -201,7 +189,7 @@ export function isLearningAuditRecord(value: unknown): value is LearningAuditRec
 	if (typeof record.layer !== "string" || !LAYERS.includes(record.layer)) return false;
 	if (typeof record.action !== "string" || !AUDIT_ACTIONS.includes(record.action)) return false;
 	if (typeof record.summary !== "string" || typeof record.reasonCode !== "string") return false;
-	if (!isLearningDecisionShape(record.decision)) return false;
+	if (!isLearningDecision(record.decision)) return false;
 	if (record.rollback !== undefined && !isLearningRollbackPlan(record.rollback)) return false;
 	if (!isOptionalString(record.rollbackOf)) return false;
 	return typeof record.createdAt === "string";

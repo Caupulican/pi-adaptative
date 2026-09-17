@@ -136,9 +136,16 @@ function getHeaderRetryDelayMs(error: ProviderError, nowMs = Date.now()): number
 }
 
 function getServerRetryDelayMs(error: ProviderError): number | undefined {
-	const delays = [getHeaderRetryDelayMs(error), getStructuredRetryDelayMs(error)].filter(
-		(delay): delay is number => delay !== undefined,
-	);
+	// Claude subscription 429s can carry only an absolute reset, with no Retry-After.
+	// A reset on an unrelated failure is usage metadata, not a retry instruction.
+	const resetSeconds =
+		error.status === 429 ? Number(getProviderHeader(error.headers, "anthropic-ratelimit-unified-reset")) : NaN;
+	const resetDelayMs = resetSeconds * 1000 - Date.now();
+	const delays = [
+		getHeaderRetryDelayMs(error),
+		getStructuredRetryDelayMs(error),
+		Number.isFinite(resetDelayMs) && resetDelayMs > 0 ? Math.ceil(resetDelayMs) : undefined,
+	].filter((delay): delay is number => delay !== undefined);
 	return delays.length > 0 ? Math.max(...delays) : undefined;
 }
 

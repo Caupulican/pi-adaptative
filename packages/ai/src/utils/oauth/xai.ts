@@ -2,16 +2,16 @@
 
 import type { Api, Model } from "../../types.ts";
 import { pollOAuthDeviceCodeFlow } from "./device-code.ts";
+import { parseOAuthTokenCredentials } from "./token-credentials.ts";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthProviderInterface } from "./types.ts";
 
 const XAI_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
 const XAI_SCOPE = "openid profile email offline_access grok-cli:access api:access";
 const XAI_DEVICE_CODE_URL = "https://auth.x.ai/oauth2/device/code";
 const XAI_TOKEN_URL = "https://auth.x.ai/oauth2/token";
-const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const DEFAULT_TOKEN_LIFETIME_SECONDS = 3600;
 const XAI_CLI_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
-const XAI_CLI_VERSION_HEADERS = { "x-grok-client-version": "1.0.30" } as const;
+const XAI_CLI_VERSION_HEADERS = { "x-grok-client-version": "1.0.34" } as const;
 const XAI_DEVICE_FLOW_HEADERS = {
 	...XAI_CLI_VERSION_HEADERS,
 	"x-grok-client-surface": "cli",
@@ -76,6 +76,7 @@ async function postForm(
 	options: { signal?: AbortSignal; headers?: Record<string, string> } = {},
 ): Promise<OAuthHttpResponse> {
 	const { signal } = options;
+	signal?.throwIfAborted();
 	let response: Response;
 	try {
 		response = await fetch(url, {
@@ -86,13 +87,15 @@ async function postForm(
 				"Content-Type": "application/x-www-form-urlencoded",
 			},
 			body: new URLSearchParams(fields),
-			signal,
+			redirect: "error",
+			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
 		});
 	} catch (error) {
 		if (signal?.aborted) throw new Error("Login cancelled");
 		throw error;
 	}
 
+	signal?.throwIfAborted();
 	let body: JsonObject;
 	try {
 		const parsed = (await response.json()) as unknown;
@@ -101,6 +104,7 @@ async function postForm(
 		if (signal?.aborted) throw new Error("Login cancelled");
 		throw new Error(`xAI OAuth returned invalid JSON (HTTP ${response.status})`);
 	}
+	signal?.throwIfAborted();
 	return { ok: response.ok, status: response.status, body };
 }
 
@@ -129,18 +133,12 @@ function parseDeviceCode(body: JsonObject): XaiDeviceCode {
 }
 
 function credentialsFromTokenResponse(body: JsonObject, previousRefreshToken?: string): OAuthCredentials {
-	const access = requiredString(body, "access_token");
-	const refresh =
-		body.refresh_token === undefined && previousRefreshToken
-			? previousRefreshToken
-			: requiredString(body, "refresh_token");
-	const expiresInSeconds =
-		body.expires_in === undefined ? DEFAULT_TOKEN_LIFETIME_SECONDS : positiveNumber(body, "expires_in");
-	return {
-		access,
-		refresh,
-		expires: Date.now() + expiresInSeconds * 1000 - REFRESH_SKEW_MS,
-	};
+	return parseOAuthTokenCredentials(
+		{ ...body, expires_in: body.expires_in === undefined ? DEFAULT_TOKEN_LIFETIME_SECONDS : body.expires_in },
+		"xAI",
+		5 * 60,
+		previousRefreshToken,
+	);
 }
 
 async function requestDeviceCode(signal?: AbortSignal): Promise<XaiDeviceCode> {

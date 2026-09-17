@@ -20,6 +20,7 @@ const MINIMAL_ACTIVE_TOOL_NAMES = [
 	"get_goal",
 	"update_goal",
 	"ask_question",
+	"typesafe_review",
 	"run_toolkit_script",
 	"artifact_retrieve",
 ];
@@ -55,6 +56,7 @@ describe("model capability auto-detection", () => {
 				"pipeline",
 				"ask_question",
 				"secret_store",
+				"typesafe_review",
 				"delegate",
 				"tool_task",
 				"run_toolkit_script",
@@ -103,11 +105,16 @@ describe("model capability auto-detection", () => {
 		}
 	});
 
-	it("keeps only compact goal lifecycle tools on a chat-class (<8k) model", async () => {
+	it("keeps goal lifecycle and independent review tools on a chat-class (<8k) model", async () => {
 		const harness = await createHarness({ models: [{ id: "tiny-model", contextWindow: 4_096 }] });
 		try {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("chat");
-			expect(harness.session.getActiveToolNames()).toEqual(["create_goal", "get_goal", "update_goal"]);
+			expect(harness.session.getActiveToolNames()).toEqual([
+				"create_goal",
+				"get_goal",
+				"update_goal",
+				"typesafe_review",
+			]);
 			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative concise chat assistant\./);
 			expect(harness.session.systemPrompt).toContain(CHAT_WORK_LIFECYCLE_SYSTEM_RULE);
 			expect(harness.session.systemPrompt).not.toContain("Current working directory:");

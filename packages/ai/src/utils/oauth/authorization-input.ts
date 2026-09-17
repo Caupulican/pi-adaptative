@@ -15,6 +15,23 @@ export interface AuthorizationRaceOptions {
 	stateMismatchMessage: string;
 }
 
+/** Stop waiting for host input on cancellation without allowing a late result to resume login. */
+export async function awaitAuthorizationInput<T>(input: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+	signal?.throwIfAborted();
+	let onAbort: (() => void) | undefined;
+	try {
+		const cancelled = new Promise<never>((_, reject) => {
+			onAbort = () => reject(signal?.reason ?? new Error("OAuth login cancelled"));
+			signal?.addEventListener("abort", onAbort, { once: true });
+		});
+		const result = await Promise.race([cancelled, input()]);
+		signal?.throwIfAborted();
+		return result;
+	} finally {
+		if (onAbort) signal?.removeEventListener("abort", onAbort);
+	}
+}
+
 export function parseAuthorizationInput(input: string): AuthorizationInput {
 	const value = input
 		.trim()

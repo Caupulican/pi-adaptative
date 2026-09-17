@@ -44,6 +44,7 @@ describe("Antigravity OAuth and transport", () => {
 		const [url, options] = fetchMock.mock.calls[1] as [string, RequestInit];
 		expect(url).toBe("https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse");
 		expect(new Headers(options.headers).get("Authorization")).toBe("Bearer fixture-token");
+		expect(new Headers(options.headers).get("User-Agent")).toMatch(/^antigravity\/cli\/1\.2\.4 \(aidev_client;/);
 		const payload = JSON.parse(String(options.body));
 		expect(payload.project).toBe("fixture-project");
 		expect(payload.request.systemInstruction).toEqual({ role: "user", parts: [{ text: "User-owned instructions" }] });

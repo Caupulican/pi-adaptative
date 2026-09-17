@@ -339,21 +339,24 @@ describe("runFitnessAndAssign gates adoption on the probe verdict", () => {
 		});
 	});
 
-	it("refuses a router role when the real tool probe found no usable protocol", async () => {
-		const report = await runModelFitnessProbe({ trials: 1, now: () => 0, complete: allPassingComplete });
-		const { ctx, selectorOpened, getModelRouterSettings, statuses } = routerContext(
-			async (args) => ({ started: true, model: args.model, report }),
-			{ enabled: true },
-			async (target = "") => ({
-				results: [{ model: target, verdict: "none", nativeGrade: "absent" }],
-				table: "none",
-			}),
-		);
+	it.each(["none", "inconclusive"] as const)(
+		"refuses a router role when the real tool probe is %s",
+		async (verdict) => {
+			const report = await runModelFitnessProbe({ trials: 1, now: () => 0, complete: allPassingComplete });
+			const { ctx, selectorOpened, getModelRouterSettings, statuses } = routerContext(
+				async (args) => ({ started: true, model: args.model, report }),
+				{ enabled: true },
+				async (target = "") => ({
+					results: [{ model: target, verdict, nativeGrade: "absent" }],
+					table: verdict,
+				}),
+			);
 
-		await runFitnessAndAssign.call(ctx, "ollama/good-model");
+			await runFitnessAndAssign.call(ctx, "ollama/good-model");
 
-		expect(selectorOpened()).toBe(1);
-		expect(getModelRouterSettings().cheapModel).toBeUndefined();
-		expect(statuses.some((line) => line.includes("real tool execution") && line.includes("none"))).toBe(true);
-	});
+			expect(selectorOpened()).toBe(1);
+			expect(getModelRouterSettings().cheapModel).toBeUndefined();
+			expect(statuses.some((line) => line.includes("real tool execution") && line.includes(verdict))).toBe(true);
+		},
+	);
 });

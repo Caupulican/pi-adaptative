@@ -35,6 +35,7 @@ const DEFAULT_ACTIVE = [
 	"model_fitness",
 	"context_scout",
 	"pi_collaboration",
+	"typesafe_review",
 ];
 
 describe("deriveModelCapabilityProfile", () => {
@@ -144,7 +145,7 @@ describe("filterToolNamesForCapability", () => {
 		}
 	});
 
-	it("reduces minimal to the core coding set and chat to compact goal lifecycle controls", () => {
+	it("retains the independent reviewer alongside each constrained model's tool surface", () => {
 		const minimal = deriveModelCapabilityProfile({ contextWindow: 8_192 });
 		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, minimal)).toEqual([
 			"read",
@@ -158,12 +159,26 @@ describe("filterToolNamesForCapability", () => {
 			"update_goal",
 			"ask_question",
 			"run_toolkit_script",
+			"typesafe_review",
 		]);
 
 		const chat = deriveModelCapabilityProfile({ contextWindow: 4_096 });
 		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, chat)).toEqual([...MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS]);
-		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, chat)).toEqual(["create_goal", "get_goal", "update_goal"]);
+		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, chat)).toEqual([
+			"create_goal",
+			"get_goal",
+			"update_goal",
+			"typesafe_review",
+		]);
 	});
+	it.each([200_000, 16_384, 8_192, 4_096])(
+		"makes Jev available at window %s without inventing an unrequested tool",
+		(contextWindow) => {
+			const profile = deriveModelCapabilityProfile({ contextWindow });
+			expect(filterToolNamesForCapability(["typesafe_review"], profile)).toEqual(["typesafe_review"]);
+			expect(filterToolNamesForCapability([], profile)).toEqual([]);
+		},
+	);
 
 	it("keeps owner clarification available to lean and minimal models", () => {
 		for (const contextWindow of [16_384, 8_192]) {

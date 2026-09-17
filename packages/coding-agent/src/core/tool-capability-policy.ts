@@ -51,6 +51,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	),
 	...["fetch", "web_search"].map((toolName) => [toolName, NETWORK_POLICY] as const),
 	["webfetch", policy([["network.http"]], "service-proxy")],
+	["typesafe_review", policy([["network.http"], ["credentials.use"]], "service-proxy")],
 	[
 		"image_generate",
 		policy([["network.http"], ["credentials.use"], ["filesystem.read"]], ["service-proxy", "path-scope"]),

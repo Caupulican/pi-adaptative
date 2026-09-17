@@ -5,7 +5,7 @@
 import type { ExecutionContext } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { measureJsonLength } from "@caupulican/pi-agent-core/provider-request-estimator";
-import type { AgentMessage } from "@caupulican/pi-agent-core/types";
+import { type AgentMessage, safeErrorMessage } from "@caupulican/pi-agent-core/types";
 import type { ImageContent, Model } from "@caupulican/pi-ai";
 import type { KeyId } from "@caupulican/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
@@ -14,6 +14,7 @@ import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import { DEFAULT_STALE_EXTENSION_CONTEXT_MESSAGE } from "./stale-context.ts";
+import { snapshotToolResultData } from "./tool-result-snapshot.ts";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -160,12 +161,17 @@ export interface ExtensionContextPlan {
 }
 
 export function createExtensionHandlerError(extensionPath: string, event: string, error: unknown): ExtensionError {
-	return {
-		extensionPath,
-		event,
-		error: error instanceof Error ? error.message : String(error),
-		stack: error instanceof Error ? error.stack : undefined,
-	};
+	try {
+		return {
+			extensionPath,
+			event,
+			error: error instanceof Error ? error.message : String(error),
+			stack: error instanceof Error ? error.stack : undefined,
+		};
+	} catch {
+		// Formatting an arbitrary thrown value is diagnostic work, not another handler failure.
+		return { extensionPath, event, error: safeErrorMessage(error, "Extension handler failed.") };
+	}
 }
 
 export type NewSessionHandler = (options?: {
@@ -558,7 +564,13 @@ export class ExtensionRunner {
 
 	emitError(error: ExtensionError): void {
 		for (const listener of this.errorListeners) {
-			listener(error);
+			try {
+				// Diagnostics cannot replace an execution failure or interrupt result delivery.
+				// Do not await listeners: a pending reporter must not hold up the tool loop.
+				void Promise.resolve(listener(error)).catch(() => {});
+			} catch {
+				// Continue reporting the original failure to the remaining listeners.
+			}
 		}
 	}
 
@@ -930,7 +942,7 @@ export class ExtensionRunner {
 		executionContext?: ExecutionContext,
 	): Promise<ToolResultEventResult | undefined> {
 		const ctx = this.createContext(executionContext);
-		const currentEvent: ToolResultEvent = { ...event };
+		const currentEvent: ToolResultEvent & Pick<ToolResultEventResult, "terminate"> = { ...event };
 		let modified = false;
 
 		for (const ext of this.extensions) {
@@ -939,27 +951,38 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const handlerResult = (await handler(currentEvent, ctx)) as ToolResultEventResult | undefined;
+					const handlerResult = (await handler(snapshotToolResultData(currentEvent), ctx)) as
+						| ToolResultEventResult
+						| undefined;
 					if (!handlerResult) continue;
 
-					if (handlerResult.content !== undefined) {
-						currentEvent.content = handlerResult.content;
+					// Read the complete patch before publishing any field: a failing getter must
+					// leave the last accepted result intact for subsequent handlers and delivery.
+					const { content, details, isError, usage, terminate } = snapshotToolResultData({
+						content: handlerResult.content,
+						details: handlerResult.details,
+						isError: handlerResult.isError,
+						usage: handlerResult.usage,
+						terminate: handlerResult.terminate,
+					});
+					if (content !== undefined) {
+						currentEvent.content = content;
 						modified = true;
 					}
-					if (handlerResult.details !== undefined) {
-						currentEvent.details = handlerResult.details;
+					if (details !== undefined) {
+						currentEvent.details = details;
 						modified = true;
 					}
-					if (handlerResult.isError !== undefined) {
-						currentEvent.isError = handlerResult.isError;
+					if (isError !== undefined) {
+						currentEvent.isError = isError;
 						modified = true;
 					}
-					if (handlerResult.usage !== undefined) {
-						currentEvent.usage = handlerResult.usage;
+					if (usage !== undefined) {
+						currentEvent.usage = usage;
 						modified = true;
 					}
-					if (handlerResult.terminate !== undefined) {
-						(currentEvent as any).terminate = handlerResult.terminate;
+					if (terminate !== undefined) {
+						currentEvent.terminate = terminate;
 						modified = true;
 					}
 				} catch (err) {
@@ -977,7 +1000,7 @@ export class ExtensionRunner {
 			details: currentEvent.details,
 			isError: currentEvent.isError,
 			usage: currentEvent.usage,
-			terminate: (currentEvent as any).terminate,
+			terminate: currentEvent.terminate,
 		};
 	}
 
@@ -987,7 +1010,7 @@ export class ExtensionRunner {
 	): Promise<ToolCallEventResult | undefined> {
 		const ctx = this.createContext(executionContext);
 		let result: ToolCallEventResult | undefined;
-		let firstError: unknown;
+		let firstError: { value: unknown } | undefined;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_call");
@@ -1004,13 +1027,13 @@ export class ExtensionRunner {
 						result = { block: decision.block, reason: decision.reason, terminate: decision.terminate };
 					}
 				} catch (err) {
-					if (firstError === undefined) firstError = err;
+					firstError ??= { value: err };
 					this.reportHandlerError(ext.path, "tool_call", err);
 				}
 			}
 		}
 
-		if (firstError !== undefined) throw firstError;
+		if (firstError) throw firstError.value;
 		return result;
 	}
 

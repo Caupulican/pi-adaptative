@@ -60,6 +60,7 @@ const DEFAULT_TOOL_NAMES = [
 	"artifact_retrieve",
 	"skill",
 	"skill_audit",
+	"typesafe_review",
 ] as const;
 const AVAILABLE_TOOL_NAMES: ReadonlySet<string> = new Set(CLASSIFIED_LANE_TOOL_NAMES);
 const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [
@@ -70,6 +71,7 @@ const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [
 	"repo.read",
 	"process.exec",
 	"network.http",
+	"credentials.use",
 	"service.mcp",
 	"skill.read",
 ];

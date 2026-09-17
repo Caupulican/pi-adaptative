@@ -34,6 +34,14 @@ export interface LearningGateSettings {
 
 const MAX_DECISION_SUMMARY_LENGTH = 240;
 
+function isConfidence(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100;
+}
+
+function isObservationCount(value: number): boolean {
+	return Number.isSafeInteger(value) && value >= 0;
+}
+
 function boundedDecisionSummary(summary: string): string {
 	if (summary.length <= MAX_DECISION_SUMMARY_LENGTH) return summary;
 	return `${summary.slice(0, MAX_DECISION_SUMMARY_LENGTH - 1)}…`;
@@ -50,7 +58,7 @@ function learningDecision(args: {
 	return {
 		kind: args.kind,
 		reasonCode: args.reasonCode,
-		confidence: args.confidence,
+		confidence: isConfidence(args.confidence) ? args.confidence : 0,
 		summary: boundedDecisionSummary(args.summary),
 		requiresApproval: args.requiresApproval,
 		createdAt: args.createdAt,
@@ -74,6 +82,22 @@ export function evaluateLearningDecision(args: {
 			confidence,
 			summary: proposal.summary,
 			requiresApproval: false,
+			createdAt: now,
+		});
+	}
+
+	// Comparisons with NaN are false: validate both evidence and policy before any eligibility
+	// comparison. Invalid input remains visible for review but can never authorize a durable write.
+	const invalidEvidence =
+		!isConfidence(confidence) || !isObservationCount(observations) || !isObservationCount(contradictions);
+	const invalidPolicy = !isConfidence(settings.confidenceThreshold) || !isObservationCount(settings.minObservations);
+	if (invalidEvidence || invalidPolicy) {
+		return learningDecision({
+			kind: "proposal",
+			reasonCode: invalidEvidence ? "invalid_learning_evidence" : "invalid_learning_policy",
+			confidence,
+			summary: proposal.summary,
+			requiresApproval: true,
 			createdAt: now,
 		});
 	}
@@ -122,7 +146,10 @@ export function evaluateLearningDecision(args: {
 	}
 
 	if (settings.requireEvidence) {
-		const hasEvidence = !!(proposal.evidenceIds && proposal.evidenceIds.length > 0);
+		const hasEvidence =
+			proposal.evidenceIds !== undefined &&
+			proposal.evidenceIds.length > 0 &&
+			proposal.evidenceIds.every((id) => typeof id === "string" && id.trim().length > 0);
 		if (!hasEvidence) {
 			return learningDecision({
 				kind: "proposal",
@@ -190,7 +217,7 @@ export function isLearningDecision(value: unknown): value is LearningDecision {
 	}
 
 	if (typeof value.reasonCode !== "string") return false;
-	if (typeof value.confidence !== "number" || !Number.isFinite(value.confidence)) return false;
+	if (!isConfidence(value.confidence)) return false;
 	if (typeof value.summary !== "string") return false;
 	if (typeof value.requiresApproval !== "boolean") return false;
 	if (value.createdAt !== undefined && typeof value.createdAt !== "string") return false;

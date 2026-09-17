@@ -6,9 +6,10 @@
  */
 
 import type { Server } from "node:http";
-import { parseAuthorizationInput, raceAuthorizationInput } from "./authorization-input.ts";
+import { awaitAuthorizationInput, parseAuthorizationInput, raceAuthorizationInput } from "./authorization-input.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
 import { generatePKCE } from "./pkce.ts";
+import { parseOAuthTokenCredentials } from "./token-credentials.ts";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt, OAuthProviderInterface } from "./types.ts";
 
 type CallbackServerInfo = {
@@ -33,8 +34,30 @@ const CALLBACK_HOST = process.env.PI_OAUTH_CALLBACK_HOST || "127.0.0.1";
 const CALLBACK_PORT = 53692;
 const CALLBACK_PATH = "/callback";
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}`;
-const SCOPES =
-	"org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+const MANUAL_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
+const INFERENCE_SCOPES = [
+	"user:profile",
+	"user:inference",
+	"user:sessions:claude_code",
+	"user:mcp_servers",
+	"user:file_upload",
+	"user:plugins",
+];
+const SCOPES = ["org:create_api_key", ...INFERENCE_SCOPES].join(" ");
+
+class AnthropicOAuthRequestError extends Error {
+	readonly invalidScope: boolean;
+	constructor(status: number, invalidScope: boolean) {
+		super(`Anthropic OAuth request failed (HTTP ${status})`);
+		this.invalidScope = invalidScope;
+	}
+}
+
+function parseAnthropicCredentials(data: unknown, previousRefresh?: string): OAuthCredentials {
+	const credentials = parseOAuthTokenCredentials(data, "Anthropic", 5 * 60, previousRefresh);
+	const scope = (data as Record<string, unknown>).scope;
+	return { ...credentials, scopes: typeof scope === "string" ? scope.split(" ").filter(Boolean) : [] };
+}
 async function getNodeApis(): Promise<NodeApis> {
 	if (nodeApis) return nodeApis;
 	if (!nodeApisPromise) {
@@ -70,8 +93,8 @@ async function startCallbackServer(expectedState: string): Promise<CallbackServe
 	const { createServer } = await getNodeApis();
 
 	return new Promise((resolve, reject) => {
-		let settleWait: ((value: { code: string; state: string } | null) => void) | undefined;
-		const waitForCodePromise = new Promise<{ code: string; state: string } | null>((resolveWait) => {
+		let settleWait: ((value: { code: string; state: string } | Error | null) => void) | undefined;
+		const waitForCodePromise = new Promise<{ code: string; state: string } | Error | null>((resolveWait) => {
 			let settled = false;
 			settleWait = (value) => {
 				if (settled) return;
@@ -93,21 +116,22 @@ async function startCallbackServer(expectedState: string): Promise<CallbackServe
 				const state = url.searchParams.get("state");
 				const error = url.searchParams.get("error");
 
-				if (error) {
-					res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-					res.end(oauthErrorHtml("Anthropic authentication did not complete.", `Error: ${error}`));
-					return;
-				}
-
-				if (!code || !state) {
-					res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-					res.end(oauthErrorHtml("Missing code or state parameter."));
-					return;
-				}
-
 				if (state !== expectedState) {
 					res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
 					res.end(oauthErrorHtml("State mismatch."));
+					return;
+				}
+
+				if (error) {
+					res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+					res.end(oauthErrorHtml("Anthropic authentication did not complete."));
+					settleWait?.(new Error("Anthropic authentication did not complete."));
+					return;
+				}
+
+				if (!code) {
+					res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+					res.end(oauthErrorHtml("Missing code or state parameter."));
 					return;
 				}
 
@@ -131,30 +155,74 @@ async function startCallbackServer(expectedState: string): Promise<CallbackServe
 				cancelWait: () => {
 					settleWait?.(null);
 				},
-				waitForCode: () => waitForCodePromise,
+				waitForCode: async () => {
+					// Store a terminal error as a value until the login consumer attaches.
+					const result = await waitForCodePromise;
+					if (result instanceof Error) throw result;
+					return result;
+				},
 			});
 		});
 	});
 }
 
-async function postJson(url: string, body: Record<string, string | number>): Promise<string> {
-	const response = await fetch(url, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			Accept: "application/json",
-		},
-		body: JSON.stringify(body),
-		signal: AbortSignal.timeout(30_000),
-	});
-
-	const responseBody = await response.text();
-
-	if (!response.ok) {
-		throw new Error(`HTTP request failed. status=${response.status}; url=${url}; body=${responseBody}`);
+async function postJson(
+	url: string,
+	body: Record<string, string | number>,
+	signal?: AbortSignal,
+	inspectScopeError = false,
+): Promise<unknown> {
+	signal?.throwIfAborted();
+	const requestSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
+	let response: Response;
+	try {
+		response = await fetch(url, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Accept: "application/json",
+			},
+			body: JSON.stringify(body),
+			redirect: "error",
+			signal: requestSignal,
+		});
+	} catch {
+		signal?.throwIfAborted();
+		throw new Error(requestSignal.aborted ? "Anthropic OAuth request timed out" : "Anthropic OAuth transport failed");
 	}
-
-	return responseBody;
+	signal?.throwIfAborted();
+	if (!response.ok) {
+		let invalidScope = false;
+		if (inspectScopeError && response.status === 400) {
+			try {
+				const data: unknown = await response.json();
+				if (data && typeof data === "object" && "error" in data) {
+					const error = data.error;
+					invalidScope =
+						error === "invalid_scope" ||
+						(typeof error === "object" && error !== null && "type" in error && error.type === "invalid_scope");
+				}
+			} catch {
+				// Unparseable response bodies never authorize the scope fallback.
+			}
+		}
+		try {
+			await response.body?.cancel();
+		} catch {
+			// Cleanup must not replace the HTTP status with untrusted transport diagnostics.
+		}
+		signal?.throwIfAborted();
+		throw new AnthropicOAuthRequestError(response.status, invalidScope);
+	}
+	let data: unknown;
+	try {
+		data = await response.json();
+	} catch {
+		signal?.throwIfAborted();
+		throw new Error("Anthropic OAuth returned invalid JSON");
+	}
+	signal?.throwIfAborted();
+	return data;
 }
 
 async function exchangeAuthorizationCode(
@@ -162,37 +230,30 @@ async function exchangeAuthorizationCode(
 	state: string,
 	verifier: string,
 	redirectUri: string,
+	signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
-	let responseBody: string;
+	let tokenData: unknown;
 	try {
-		responseBody = await postJson(TOKEN_URL, {
-			grant_type: "authorization_code",
-			client_id: CLIENT_ID,
-			code,
-			state,
-			redirect_uri: redirectUri,
-			code_verifier: verifier,
-		});
+		tokenData = await postJson(
+			TOKEN_URL,
+			{
+				grant_type: "authorization_code",
+				client_id: CLIENT_ID,
+				code,
+				state,
+				redirect_uri: redirectUri,
+				code_verifier: verifier,
+			},
+			signal,
+		);
 	} catch (error) {
+		signal?.throwIfAborted();
 		throw new Error(
 			`Token exchange request failed. url=${TOKEN_URL}; redirect_uri=${redirectUri}; response_type=authorization_code; details=${formatErrorDetails(error)}`,
 		);
 	}
 
-	let tokenData: { access_token: string; refresh_token: string; expires_in: number };
-	try {
-		tokenData = JSON.parse(responseBody) as { access_token: string; refresh_token: string; expires_in: number };
-	} catch (error) {
-		throw new Error(
-			`Token exchange returned invalid JSON. url=${TOKEN_URL}; body=${responseBody}; details=${formatErrorDetails(error)}`,
-		);
-	}
-
-	return {
-		refresh: tokenData.refresh_token,
-		access: tokenData.access_token,
-		expires: Date.now() + tokenData.expires_in * 1000 - 5 * 60 * 1000,
-	};
+	return parseAnthropicCredentials(tokenData);
 }
 
 /**
@@ -203,21 +264,37 @@ export async function loginAnthropic(options: {
 	onPrompt: (prompt: OAuthPrompt) => Promise<string>;
 	onProgress?: (message: string) => void;
 	onManualCodeInput?: () => Promise<string>;
+	signal?: AbortSignal;
 }): Promise<OAuthCredentials> {
+	options.signal?.throwIfAborted();
 	const { verifier, challenge } = await generatePKCE();
+	options.signal?.throwIfAborted();
 	const expectedState = crypto.randomUUID();
-	const server = await startCallbackServer(expectedState);
+	const server = await startCallbackServer(expectedState).catch((error: unknown) => {
+		options.signal?.throwIfAborted();
+		if (
+			typeof error !== "object" ||
+			error === null ||
+			!("code" in error) ||
+			(error.code !== "EADDRINUSE" && error.code !== "EACCES")
+		) {
+			throw error;
+		}
+		options.onProgress?.("Local callback unavailable. Continuing with manual authorization.");
+		return undefined;
+	});
 
 	let code: string | undefined;
 	let state: string | undefined;
-	let redirectUriForExchange = REDIRECT_URI;
+	const redirectUriForExchange = server?.redirectUri ?? MANUAL_REDIRECT_URI;
 
 	try {
+		options.signal?.throwIfAborted();
 		const authParams = new URLSearchParams({
 			code: "true",
 			client_id: CLIENT_ID,
 			response_type: "code",
-			redirect_uri: REDIRECT_URI,
+			redirect_uri: redirectUriForExchange,
 			scope: SCOPES,
 			code_challenge: challenge,
 			code_challenge_method: "S256",
@@ -230,33 +307,42 @@ export async function loginAnthropic(options: {
 				"Complete login in your browser. If the browser is on another machine, paste the final redirect URL here.",
 		});
 
-		if (options.onManualCodeInput) {
-			const authorization = await raceAuthorizationInput({
-				manualInput: options.onManualCodeInput,
-				waitForCallback: server.waitForCode,
-				cancelWait: server.cancelWait,
-				expectedState,
-				stateMismatchMessage: "OAuth state mismatch",
-			});
+		const manualInput = options.onManualCodeInput;
+		if (server && manualInput) {
+			const authorization = await awaitAuthorizationInput(
+				() =>
+					raceAuthorizationInput({
+						manualInput,
+						waitForCallback: server.waitForCode,
+						cancelWait: server.cancelWait,
+						expectedState,
+						stateMismatchMessage: "OAuth state mismatch",
+					}),
+				options.signal,
+			);
 			if (authorization) {
 				code = authorization.code;
 				state = authorization.state ?? expectedState;
-				if (authorization.source === "callback") redirectUriForExchange = REDIRECT_URI;
 			}
-		} else {
-			const result = await server.waitForCode();
+		} else if (server) {
+			const result = await awaitAuthorizationInput(server.waitForCode, options.signal);
 			if (result?.code) {
 				code = result.code;
 				state = result.state;
-				redirectUriForExchange = REDIRECT_URI;
 			}
 		}
 
 		if (!code) {
-			const input = await options.onPrompt({
-				message: "Paste the authorization code or full redirect URL:",
-				placeholder: REDIRECT_URI,
-			});
+			const input = await awaitAuthorizationInput(
+				!server && manualInput
+					? manualInput
+					: () =>
+							options.onPrompt({
+								message: "Paste the authorization code or full redirect URL:",
+								placeholder: redirectUriForExchange,
+							}),
+				options.signal,
+			);
 			const parsed = parseAuthorizationInput(input);
 			if (parsed.state && parsed.state !== expectedState) {
 				throw new Error("OAuth state mismatch");
@@ -274,45 +360,70 @@ export async function loginAnthropic(options: {
 		}
 
 		options.onProgress?.("Exchanging authorization code for tokens...");
-		return exchangeAuthorizationCode(code, state, verifier, redirectUriForExchange);
+		return await exchangeAuthorizationCode(code, state, verifier, redirectUriForExchange, options.signal);
 	} finally {
-		server.server.close();
+		server?.cancelWait();
+		server?.server.close();
 	}
 }
 
 /**
  * Refresh Anthropic OAuth token
  */
-export async function refreshAnthropicToken(refreshToken: string): Promise<OAuthCredentials> {
-	let responseBody: string;
+export async function refreshAnthropicToken(
+	refreshToken: string,
+	options: { scopes?: unknown; clientId?: unknown; subscriptionType?: unknown; signal?: AbortSignal } = {},
+): Promise<OAuthCredentials> {
+	options.signal?.throwIfAborted();
+	if (
+		options.scopes !== undefined &&
+		(!Array.isArray(options.scopes) ||
+			!options.scopes.every(
+				(scope): scope is string => typeof scope === "string" && scope.length > 0 && !/\s/.test(scope),
+			))
+	) {
+		throw new Error("Anthropic stored OAuth scopes are invalid");
+	}
+	if (options.clientId !== undefined && (typeof options.clientId !== "string" || !options.clientId.trim())) {
+		throw new Error("Anthropic stored OAuth client identity is invalid");
+	}
+	const originalScopes: string[] = options.scopes === undefined ? [] : [...options.scopes];
+	const clientId = options.clientId;
+	const hasInference = originalScopes.includes("user:inference");
+	const migrate =
+		!clientId && (hasInference || (typeof options.subscriptionType === "string" && !!options.subscriptionType));
+	const scopes = migrate
+		? [
+				...INFERENCE_SCOPES,
+				...originalScopes.filter((scope) => scope === "user:projects:read" || scope === "user:projects:write"),
+			]
+		: originalScopes.length
+			? originalScopes
+			: INFERENCE_SCOPES;
+	const body = {
+		grant_type: "refresh_token",
+		client_id: clientId ?? CLIENT_ID,
+		refresh_token: refreshToken,
+		scope: [...new Set(scopes)].join(" "),
+	};
+	let data: unknown;
 	try {
-		responseBody = await postJson(TOKEN_URL, {
-			grant_type: "refresh_token",
-			client_id: CLIENT_ID,
-			refresh_token: refreshToken,
-		});
+		try {
+			data = await postJson(TOKEN_URL, body, options.signal, migrate && hasInference);
+		} catch (error) {
+			if (!migrate || !hasInference || !(error instanceof AnthropicOAuthRequestError) || !error.invalidScope)
+				throw error;
+			data = await postJson(TOKEN_URL, { ...body, scope: originalScopes.join(" ") }, options.signal);
+		}
 	} catch (error) {
+		options.signal?.throwIfAborted();
 		throw new Error(`Anthropic token refresh request failed. url=${TOKEN_URL}; details=${formatErrorDetails(error)}`);
 	}
 
-	let data: { access_token: string; refresh_token?: string; expires_in: number; scope?: string };
-	try {
-		data = JSON.parse(responseBody) as {
-			access_token: string;
-			refresh_token?: string;
-			expires_in: number;
-			scope?: string;
-		};
-	} catch (error) {
-		throw new Error(
-			`Anthropic token refresh returned invalid JSON. url=${TOKEN_URL}; body=${responseBody}; details=${formatErrorDetails(error)}`,
-		);
-	}
-
 	return {
-		refresh: data.refresh_token === undefined ? refreshToken : data.refresh_token,
-		access: data.access_token,
-		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
+		...parseAnthropicCredentials(data, refreshToken),
+		...(clientId ? { clientId } : {}),
+		...(typeof options.subscriptionType === "string" ? { subscriptionType: options.subscriptionType } : {}),
 	};
 }
 
@@ -328,11 +439,16 @@ export const anthropicOAuthProvider: OAuthProviderInterface = {
 			onPrompt: callbacks.onPrompt,
 			onProgress: callbacks.onProgress,
 			onManualCodeInput: callbacks.onManualCodeInput,
+			signal: callbacks.signal,
 		});
 	},
 
 	async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-		return refreshAnthropicToken(credentials.refresh);
+		return refreshAnthropicToken(credentials.refresh, {
+			scopes: credentials.scopes,
+			clientId: credentials.clientId,
+			subscriptionType: credentials.subscriptionType,
+		});
 	},
 
 	getApiKey(credentials: OAuthCredentials): string {

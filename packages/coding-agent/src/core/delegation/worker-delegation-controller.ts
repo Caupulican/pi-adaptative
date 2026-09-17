@@ -71,6 +71,8 @@ import { emergencyStopPath, isEmergencyStopEngaged } from "../provider-admission
 import { ProviderLimitStore } from "../provider-admission/limit-state.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
+import { TYPESAFE_PROVIDER } from "../review/typesafe-contract.ts";
+import { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
 import { executeToolkitScript } from "../toolkit/script-runner.ts";
@@ -1766,6 +1768,7 @@ export class WorkerDelegationController {
 		if (active.has("skill") && this.deps.getSkillReadBroker) names.push("skill");
 		if (active.has("skill_audit") && this.deps.getSkillAuditSource) names.push("skill_audit");
 		if (active.has("run_toolkit_script")) names.push("run_toolkit_script");
+		if (active.has("typesafe_review")) names.push("typesafe_review");
 		return names;
 	}
 
@@ -3004,6 +3007,17 @@ export class WorkerDelegationController {
 			? getProcessWorkRun(this.deps.getAgentDir(), "outputs", "tool-streams").path
 			: undefined;
 		const adapterSources: WorkerToolAdapterSources = {};
+		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "typesafe_review")) {
+			adapterSources.typeSafe = {
+				evidenceStore: TypeSafeEvidenceStore.file(
+					this.deps.getAgentDir(),
+					this.deps.getSessionId(),
+					this.deps.getSessionManager().getSessionLineageIds(),
+				),
+				getApiKey: () =>
+					this.deps.getModelRegistry().authStorage.getApiKey(TYPESAFE_PROVIDER, { includeFallback: false }),
+			};
+		}
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "artifact_retrieve")) {
 			const artifactStore = this.deps.getArtifactStore?.();
 			if (artifactStore) adapterSources.artifactStore = artifactStore;

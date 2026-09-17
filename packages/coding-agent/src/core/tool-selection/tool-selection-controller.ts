@@ -89,7 +89,10 @@ function tokenize(value: string): string[] {
 		.filter(Boolean);
 }
 
-/** Intent is a pure function of a tool's name and description; classified once per distinct pair. */
+const MAX_CACHED_TOOL_INTENTS = 512;
+const MAX_CACHED_TOOL_KEY_CHARS = 4_096;
+
+/** Memoize ordinary pairs with bounded retention as extensions and descriptions change. */
 const toolIntents = new Map<string, ToolSelectionIntentClass>();
 
 function classifyToolIntent(tool: ToolSelectionTool): ToolSelectionIntentClass {
@@ -97,7 +100,13 @@ function classifyToolIntent(tool: ToolSelectionTool): ToolSelectionIntentClass {
 	const cached = toolIntents.get(key);
 	if (cached !== undefined) return cached;
 	const intent = classifyToolIntentUncached(tool);
-	toolIntents.set(key, intent);
+	if (key.length <= MAX_CACHED_TOOL_KEY_CHARS) {
+		if (toolIntents.size >= MAX_CACHED_TOOL_INTENTS) {
+			const oldest = toolIntents.keys().next().value;
+			if (oldest !== undefined) toolIntents.delete(oldest);
+		}
+		toolIntents.set(key, intent);
+	}
 	return intent;
 }
 
@@ -164,6 +173,14 @@ function modelToolKey(modelRef: string, intentClass: ToolSelectionIntentClass, t
 	return { modelRef, intentClass, tool };
 }
 
+function activePromotionStats(
+	stats: readonly ToolPerformanceStats[],
+	tools: readonly ToolSelectionTool[],
+): ToolPerformanceStats[] {
+	const names = new Set(tools.map((tool) => tool.name));
+	return stats.filter((entry) => names.has(entry.tool));
+}
+
 function candidateFor(
 	intentClass: ToolSelectionIntentClass,
 	tool: ToolSelectionTool,
@@ -209,15 +226,43 @@ export class ToolSelectionController {
 	private readonly recoveryBoost = new Set<string>();
 	/** Kill switch: observe/stats recording, default ON. `PI_TOOL_SELECTION_OBSERVE=0` disables it. */
 	private readonly observeEnabled: boolean;
+	private observationsPaused = false;
 
 	constructor(deps: ToolSelectionControllerDeps) {
 		this.deps = deps;
 		this.observeEnabled = (deps.env ?? process.env).PI_TOOL_SELECTION_OBSERVE !== "0";
 	}
 
+	private getAllowedTools(): ToolSelectionTool[] {
+		return this.deps
+			.getActiveTools()
+			.filter(
+				(tool) =>
+					tool.profileAllowed !== false &&
+					tool.capabilityAllowed !== false &&
+					(this.deps.isCandidateAllowed?.(tool.name) ?? true),
+			);
+	}
+
+	private hintsEnabled(): boolean {
+		return (
+			this.observeEnabled &&
+			!this.observationsPaused &&
+			(this.deps.env ?? process.env).PI_TOOL_SELECTION_HINTS !== "0"
+		);
+	}
+
 	startTurn(): void {
 		this.requestHints = undefined;
 		this.firstToolInTurn = true;
+		if (this.observationsPaused) {
+			try {
+				this.deps.store.flush();
+				this.observationsPaused = false;
+			} catch {
+				// Retry only on the next turn boundary, never on every tool call in this turn.
+			}
+		}
 	}
 
 	noteRecoveryTools(tools: readonly string[]): void {
@@ -245,14 +290,7 @@ export class ToolSelectionController {
 	): ToolSelectionPendingObservation {
 		const selectionStartedAt = performance.now();
 		const { modelRef, requestId } = source;
-		const activeTools = this.deps
-			.getActiveTools()
-			.filter(
-				(tool) =>
-					tool.profileAllowed !== false &&
-					tool.capabilityAllowed !== false &&
-					(this.deps.isCandidateAllowed?.(tool.name) ?? true),
-			);
+		const activeTools = this.getAllowedTools();
 		const actualTool = activeTools.find((tool) => tool.name === toolName) ?? {
 			name: toolName,
 			pathValidated: true,
@@ -321,7 +359,7 @@ export class ToolSelectionController {
 		const latencyMs = Math.max(0, completedAt - pending.startedAt);
 		this.timings.record("execution", latencyMs);
 		if (!succeeded) this.noteRecoveryTools(recoveryToolsForFailedTool(pending.key.tool));
-		if (!this.observeEnabled) return;
+		if (!this.observeEnabled || this.observationsPaused) return;
 		const execution: ToolExecutionObservation = {
 			key: pending.key,
 			success: succeeded,
@@ -334,17 +372,27 @@ export class ToolSelectionController {
 		const writeStartedAt = performance.now();
 		try {
 			this.deps.store.recordExecution(execution);
+		} catch {
+			// Advisory evidence must not convert a completed operation into a tool failure.
+			this.observationsPaused = true;
 		} finally {
 			this.timings.record("observation_write", performance.now() - writeStartedAt);
 		}
 	}
 
+	/** Retire a terminal call whose result projection failed, without inventing an execution outcome. */
+	discard(toolCallId: string): void {
+		this.pending.delete(toolCallId);
+	}
+
 	recordValidation(toolName: string, outcome: "repaired" | "bounced", modelRef: string): void {
-		if (!this.observeEnabled) return;
+		if (!this.observeEnabled || this.observationsPaused) return;
 		const tool = this.deps.getActiveTools().find((candidate) => candidate.name === toolName) ?? { name: toolName };
 		const writeStartedAt = performance.now();
 		try {
 			this.deps.store.recordValidation(modelToolKey(modelRef, classifyToolIntent(tool), toolName), outcome);
+		} catch {
+			this.observationsPaused = true;
 		} finally {
 			this.timings.record("validation_write", performance.now() - writeStartedAt);
 		}
@@ -358,11 +406,11 @@ export class ToolSelectionController {
 	 * cleared the gate yet.
 	 */
 	getActiveHints(modelRef: string = this.deps.getModelRef()): ToolSelectionHint[] {
-		if ((this.deps.env ?? process.env).PI_TOOL_SELECTION_HINTS === "0") return [];
-		if (!this.observeEnabled) return [];
+		if (!this.hintsEnabled()) return [];
 		const snapshotStartedAt = performance.now();
 		const statsByIntent = new Map<ToolSelectionIntentClass, ToolPerformanceStats[]>();
-		for (const stats of this.deps.store.getStatsForModel(modelRef)) {
+		const activeStats = activePromotionStats(this.deps.store.getStatsForModel(modelRef), this.getAllowedTools());
+		for (const stats of activeStats) {
 			const entries = statsByIntent.get(stats.intentClass) ?? [];
 			entries.push(stats);
 			statsByIntent.set(stats.intentClass, entries);
@@ -385,7 +433,10 @@ export class ToolSelectionController {
 	}
 
 	formatTimingReport(): string {
-		return this.timings.formatReport();
+		const report = this.timings.formatReport();
+		return this.observationsPaused
+			? `${report}\nTool-selection observations paused after a storage error; retrying at the next turn.`
+			: report;
 	}
 
 	/**

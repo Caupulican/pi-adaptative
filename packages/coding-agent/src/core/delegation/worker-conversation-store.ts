@@ -25,10 +25,15 @@ import {
 	SessionManager,
 } from "@caupulican/pi-agent-core/session";
 import type { ProviderRequestSnapshotContext } from "@caupulican/pi-agent-core/types";
+import { addUsage, createEmptyUsage, getSessionEntryUsage } from "@caupulican/pi-agent-core/usage";
 import type { AssistantMessageDiagnostic, Message, Usage } from "@caupulican/pi-ai";
 import { orchestrationSessionsDir, workerConversationSessionsDir } from "../agent-paths.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
-import { validateAttemptUsageSnapshot } from "../orchestration/attempt-usage.ts";
+import {
+	usageDeltaFromProviderUsage,
+	validateAttemptUsageSnapshot,
+	validateProviderUsage,
+} from "../orchestration/attempt-usage.ts";
 import type { AgentResumeContext, AttemptUsageSnapshot, ResourcePointer } from "../orchestration/contracts.ts";
 import { reserveSessionBundleDeletion, withSessionBundleAdmission } from "../orchestration/session-bundle-lifecycle.ts";
 import {
@@ -1353,30 +1358,16 @@ export class WorkerConversation {
 				if (nextBoundaryIndex >= 0) lastUsageEntry = nextBoundaryIndex;
 			} else if (this.usageAccountingVersion === 1) firstUsageEntry = lastUsageEntry;
 		}
+		const billed = createEmptyUsage();
 		visitWorkerSessionEntries(this.sessionManager, firstUsageEntry, lastUsageEntry, (entry) => {
-			if (entry.type === "compaction" && entry.usage) {
-				usage.inputTokens += entry.usage.input;
-				usage.outputTokens += entry.usage.output;
-				usage.cacheReadTokens += entry.usage.cacheRead;
-				usage.cacheWriteTokens += entry.usage.cacheWrite;
-				usage.totalTokens += entry.usage.totalTokens;
-				usage.costUsd += entry.usage.cost.total;
-				return;
-			}
-			if (entry.type !== "message") return;
-			if (entry.message.role === "toolResult") {
-				usage.toolCalls += 1;
-				return;
-			}
-			if (entry.message.role !== "assistant") return;
-			usage.inputTokens += entry.message.usage.input;
-			usage.outputTokens += entry.message.usage.output;
-			usage.cacheReadTokens += entry.message.usage.cacheRead;
-			usage.cacheWriteTokens += entry.message.usage.cacheWrite;
-			usage.totalTokens += entry.message.usage.totalTokens;
-			usage.costUsd += entry.message.usage.cost.total;
+			if (entry.type === "message" && entry.message.role === "toolResult") usage.toolCalls += 1;
+			const reported = getSessionEntryUsage(entry);
+			if (reported) addUsage(billed, validateProviderUsage(reported, "worker transcript usage"));
 		});
-		return validateAttemptUsageSnapshot(usage, "legacy worker transcript usage");
+		return validateAttemptUsageSnapshot(
+			{ ...usage, ...usageDeltaFromProviderUsage(billed) },
+			"worker transcript usage",
+		);
 	}
 
 	/**

@@ -281,52 +281,18 @@ export class ModelAdaptationStore {
 			this.perfFlushTimer = undefined;
 		}
 		if (this.pendingPerfCount === 0) return;
-		const pending = [...this.pendingPerf.entries()];
-		this.pendingPerf.clear();
-		this.pendingPerfCount = 0;
-		for (const [model, samples] of pending) {
+		for (const [model, samples] of this.pendingPerf) {
 			const last = samples[samples.length - 1]!;
-			this.mutateProfile(
-				model,
-				new Date(last.at),
-				(profile) => {
-					let perf = profile.perf;
-					let changed = false;
-					for (const { sample, at } of samples) {
-						const next = updateModelPerfProfile(perf, sample, at);
-						if (next) {
-							perf = next;
-							changed = true;
-						}
-					}
-					return changed ? { ...profile, perf } : undefined;
-				},
-				last.at,
-			);
+			this.mutateProfile(model, new Date(last.at), () => undefined, last.at);
 		}
 	}
 
 	/** Flush deferred perf samples and stop deferring; the owning session calls it on dispose. */
 	close(): void {
+		this.flush();
 		this.closed = true;
 		this.unregisterExitFlush?.();
 		this.unregisterExitFlush = undefined;
-		this.flush();
-	}
-
-	/**
-	 * Load-mutate-write under a single exclusive lock so two concurrent stores (e.g. two sessions
-	 * sharing an agentDir) can't both read the old file and clobber each other's write.
-	 */
-	private store(model: string, profile: ModelAdaptationProfile, at: string): StoredModelAdaptation {
-		return this.storage.mutateCurrentHost(
-			() => ({}),
-			(profiles, host) => {
-				const entry: StoredModelAdaptation = { model, profile: normalizeProfile(profile), at, host };
-				profiles[model] = entry;
-				return { result: entry, changed: true };
-			},
-		);
 	}
 
 	/** Keep the complete profile read-modify-write transaction under the host-state lock. */
@@ -336,23 +302,22 @@ export class ModelAdaptationStore {
 		mutate: (profile: ModelAdaptationProfile) => ModelAdaptationProfile | undefined,
 		storedAt = now.toISOString(),
 	): ProfileMutation {
-		// Deferred perf samples for this model fold in first, so this mutation sees and keeps them.
-		if (this.pendingPerf.has(model)) {
-			const samples = this.pendingPerf.get(model) ?? [];
-			this.pendingPerf.delete(model);
-			this.pendingPerfCount -= samples.length;
-			for (const { sample, at } of samples) this.applyPerfSample(model, sample, at);
-		}
-		return this.storage.mutateCurrentHost<ProfileMutation>(
+		// Fold the batch and the requested mutation under the same lock; retire samples only
+		// after commit succeeds so failures remain retryable without replaying committed models.
+		const samples = this.pendingPerf.get(model) ?? [];
+		const result = this.storage.mutateCurrentHost<ProfileMutation>(
 			() => ({}),
 			(profiles, host) => {
 				const current = normalizeProfile(profiles[model]?.profile);
-				const activeRules = pruneRetiredRules(current.rules, current.teachStats, now);
-				const pruned = activeRules.length !== current.rules.length;
-				const active = pruned ? { ...current, rules: activeRules } : current;
+				let perf = current.perf;
+				for (const { sample, at } of samples) perf = updateModelPerfProfile(perf, sample, at);
+				const sampled = perf === current.perf ? current : { ...current, perf };
+				const activeRules = pruneRetiredRules(sampled.rules, sampled.teachStats, now);
+				const pruned = activeRules.length !== sampled.rules.length;
+				const active = pruned ? { ...sampled, rules: activeRules } : sampled;
 				const requested = mutate(active);
 				const applied = requested !== undefined;
-				if (!applied && !pruned) {
+				if (!applied && !pruned && sampled === current) {
 					return { result: { profile: active, applied: false }, changed: false };
 				}
 				const profile = normalizeProfile(requested ?? active);
@@ -361,11 +326,21 @@ export class ModelAdaptationStore {
 				return { result: { profile, entry, applied }, changed: true };
 			},
 		);
+		if (samples.length > 0) {
+			this.pendingPerf.delete(model);
+			this.pendingPerfCount -= samples.length;
+			if (this.pendingPerfCount === 0 && this.perfFlushTimer) {
+				clearTimeout(this.perfFlushTimer);
+				this.perfFlushTimer = undefined;
+			}
+		}
+		return result;
 	}
 
 	/** Persist the profile for a model on the CURRENT host. Best-effort, returns the entry. */
 	save(model: string, profile: ModelAdaptationProfile, at?: string): StoredModelAdaptation {
-		return this.store(model, profile, at ?? new Date().toISOString());
+		const now = at ?? new Date().toISOString();
+		return this.mutateProfile(model, new Date(now), () => profile, now).entry!;
 	}
 
 	/** Profile for a model on the current host; prunes retired rules before returning. */
@@ -457,8 +432,9 @@ export class ModelAdaptationStore {
 		if (!hasUsableModelPerfSample(sample)) return undefined;
 		const now = at ?? sample.at ?? new Date().toISOString();
 		if (this.deferPerfSamples && !this.closed) {
+			if (this.pendingPerfCount >= DEFERRED_PERF_SAMPLE_CAP) this.flush();
 			const queue = this.pendingPerf.get(model) ?? [];
-			queue.push({ sample, at: now });
+			queue.push({ sample: { ...sample }, at: now });
 			this.pendingPerf.set(model, queue);
 			this.pendingPerfCount += 1;
 			if (this.pendingPerfCount >= DEFERRED_PERF_SAMPLE_CAP) this.flush();

@@ -19,6 +19,7 @@ export const CLASSIFIED_LANE_TOOL_NAMES = [
 	"run_toolkit_script",
 	"skill",
 	"skill_audit",
+	"typesafe_review",
 ] as const;
 export const ORCHESTRATION_PROFILE_TOOL_NAMES = [...CLASSIFIED_LANE_TOOL_NAMES, "delegate", "task_directory"] as const;
 

@@ -36,6 +36,7 @@ import { disposeShellExecutionSession } from "../tools/shell-execution-session.t
 import { createWriteTool } from "../tools/write.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { evaluateToolGate } from "./gates.ts";
+import { LaneToolUsage } from "./lane-tool-usage.ts";
 import type { WorkerToolAdapterRegistry } from "./worker-tool-adapter-registry.ts";
 
 const READ_ONLY_LANE_TOOL_NAMES = ["read", "grep", "find", "ls", "repo_read"] as const;
@@ -67,6 +68,7 @@ export interface LaneToolSurface {
 	beforeToolCall: NonNullable<AgentLoopConfig["beforeToolCall"]>;
 	/** Canonical cumulative authority/budget meter for a compiled worker grant. */
 	gateway?: CapabilityGateway;
+	toolUsage: LaneToolUsage;
 }
 
 export interface LaneToolSurfaceOptions {
@@ -127,6 +129,7 @@ function createLaneTools(
 	names: readonly string[],
 	fileMutationIntents: FileMutationIntentController,
 	mutationScope: string,
+	toolUsage: LaneToolUsage,
 	privatePathBoundary?: CredentialExposureBoundary,
 	readMemory?: (query: string) => Promise<string>,
 	executionPolicy?: OrchestrationExecutionPolicy,
@@ -189,7 +192,11 @@ function createLaneTools(
 		if (factory) tool = factory();
 		else {
 			if (!workerToolAdapters) return [];
-			const materialized = workerToolAdapters.materialize(name, { cwd, credentialBoundary: privatePathBoundary });
+			const materialized = workerToolAdapters.materialize(name, {
+				cwd,
+				credentialBoundary: privatePathBoundary,
+				reportUsage: (toolCallId, usage) => toolUsage.report(toolCallId, usage),
+			});
 			if (!materialized.ok) throw new Error(materialized.reason);
 			tool = materialized.tool;
 		}
@@ -263,6 +270,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				...(options.sharedBudget ? { sharedBudget: options.sharedBudget } : {}),
 			})
 		: undefined;
+	const toolUsage = new LaneToolUsage(gateway ? (usage) => gateway.recordUsage(usage) : undefined);
 	const deniedPaths = options.deniedPaths?.map((entry) => path.resolve(entry));
 	const privatePathBoundary =
 		deniedPaths && deniedPaths.length > 0
@@ -303,6 +311,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			allowedTools,
 			fileMutationIntents,
 			mutationScope,
+			toolUsage,
 			privatePathBoundary,
 			options.readMemory,
 			options.executionPolicy,
@@ -313,6 +322,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			options.bindTool,
 		),
 		dispose: async () => {
+			toolUsage.close();
 			if (options.shellSessionKey) disposeShellExecutionSession(options.shellSessionKey);
 			// The intent controller releases the lane's hold on the worktree scope.
 			await fileMutationIntents.dispose();
@@ -320,6 +330,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		allowedTools,
 		deniedTools,
 		unboundAllowPatterns,
+		toolUsage,
 		beforeToolCall: async ({ toolCall, args }) => {
 			if (!allowedToolSet.has(toolCall.name)) {
 				return { block: true, reason: `Lane tool '${toolCall.name}' is outside the materialized UAC surface.` };

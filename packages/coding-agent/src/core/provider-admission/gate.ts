@@ -167,49 +167,55 @@ export async function admitProviderRequest(
 		signal?.throwIfAborted();
 	}
 
-	const recorded = deps.limits?.read(key);
-	if (recorded) {
-		const startedAt = now();
-		const remainingMs = recorded.limitedUntil - startedAt;
-		const budgetMs = lane === "foreground" ? policy.foregroundLimitWaitMs : policy.maxWaitMs;
-		if (remainingMs > budgetMs) {
-			deps.record?.({
-				...base,
-				reason: "provider_limit",
-				inflightAtStart: inflightNow(),
-				inflightAtAdmission: inflightNow(),
-				waitedMs: 0,
-				timedOut: true,
-				limitedUntil: recorded.limitedUntil,
-			});
-			throw new ProviderLimitedError(recorded, startedAt);
-		}
-		if (remainingMs > 0) {
-			const inflightAtStart = inflightNow();
-			deps.onWait?.({
-				...base,
-				phase: "start",
-				reason: "provider_limit",
-				expectedMs: remainingMs,
-				limitedUntil: recorded.limitedUntil,
-			});
-			try {
-				await sleep(remainingMs, signal);
-			} finally {
-				deps.onWait?.({ ...base, phase: "end", reason: "provider_limit", waitedMs: now() - startedAt });
-			}
-			deps.record?.({
-				...base,
-				reason: "provider_limit",
-				inflightAtStart,
-				inflightAtAdmission: inflightNow(),
-				waitedMs: now() - startedAt,
-				timedOut: false,
-				limitedUntil: recorded.limitedUntil,
-			});
+	const limitWaitStartedAt = now();
+	const waitForProviderLimit = async (): Promise<void> => {
+		for (;;) {
 			signal?.throwIfAborted();
+			const recorded = deps.limits?.read(key);
+			if (!recorded) return;
+			const startedAt = now();
+			const remainingMs = recorded.limitedUntil - startedAt;
+			const budgetMs = lane === "foreground" ? policy.foregroundLimitWaitMs : policy.maxWaitMs;
+			if (remainingMs > budgetMs - (startedAt - limitWaitStartedAt)) {
+				deps.record?.({
+					...base,
+					reason: "provider_limit",
+					inflightAtStart: inflightNow(),
+					inflightAtAdmission: inflightNow(),
+					waitedMs: startedAt - limitWaitStartedAt,
+					timedOut: true,
+					limitedUntil: recorded.limitedUntil,
+				});
+				throw new ProviderLimitedError(recorded, startedAt);
+			}
+			if (remainingMs > 0) {
+				const inflightAtStart = inflightNow();
+				deps.onWait?.({
+					...base,
+					phase: "start",
+					reason: "provider_limit",
+					expectedMs: remainingMs,
+					limitedUntil: recorded.limitedUntil,
+				});
+				try {
+					await sleep(remainingMs, signal);
+				} finally {
+					deps.onWait?.({ ...base, phase: "end", reason: "provider_limit", waitedMs: now() - startedAt });
+				}
+				deps.record?.({
+					...base,
+					reason: "provider_limit",
+					inflightAtStart,
+					inflightAtAdmission: inflightNow(),
+					waitedMs: now() - startedAt,
+					timedOut: false,
+					limitedUntil: recorded.limitedUntil,
+				});
+				signal?.throwIfAborted();
+			}
 		}
-	}
+	};
+	await waitForProviderLimit();
 
 	if (lane === "foreground" || !(limit > 0)) {
 		return deps.ledger.acquire(key, lane).release;
@@ -225,6 +231,7 @@ export async function admitProviderRequest(
 	};
 	for (;;) {
 		try {
+			await waitForProviderLimit();
 			signal?.throwIfAborted();
 		} catch (error) {
 			endWait();

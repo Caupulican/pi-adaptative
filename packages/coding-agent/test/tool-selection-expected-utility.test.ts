@@ -45,6 +45,17 @@ describe("expected utility tool selection", () => {
 		expect(decision.recommendation).toBe("read");
 	});
 
+	it.each([Number.MAX_VALUE, Number.POSITIVE_INFINITY])(
+		"saturates oversized costs instead of making them free: %s",
+		(cost) => {
+			const [ranked] = rankExpectedUtilityCandidates([
+				candidate("expensive", { latencyMs: cost, tokenEstimate: cost }),
+			]);
+			expect(ranked?.latencyCost).toBe(1);
+			expect(ranked?.tokenCost).toBe(1);
+		},
+	);
+
 	it("shortlists ties and high-entropy candidates", () => {
 		const decision = decideExpectedUtility([candidate("read"), candidate("search"), candidate("find")]);
 		expect(decision.disposition).toBe("shortlist");

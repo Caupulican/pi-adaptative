@@ -128,28 +128,25 @@ export class ToolGateController {
 			}
 
 			// 3. Post-hook arguments: direct-script gate, then the envelope on what will really run
-			const finalArgs = (extensionResult as { args?: unknown })?.args ?? args;
+			// Hooks rewrite event.input in place. The executor retains this same args object;
+			// extension return values carry control decisions, never replacement arguments.
 			const effectiveCwd = executionContext?.cwd ?? scopeCwd;
 			if (this.deps.checkDirectScriptExecution) {
-				const directCheck = this.deps.checkDirectScriptExecution(toolCall.name, finalArgs, effectiveCwd);
+				const directCheck = this.deps.checkDirectScriptExecution(toolCall.name, args, effectiveCwd);
 				if (directCheck) {
 					return directCheck;
 				}
 			}
-			terminalOutcome = await evaluateEnvelope(finalArgs);
+			terminalOutcome = await evaluateEnvelope(args);
 			const deniedAfterHook = blockedBy(terminalOutcome);
 			if (deniedAfterHook) return deniedAfterHook;
 
 			// 4. Single edge authorization on the actual final operation
-			const edge = await this.deps.checkEdge?.(toolCall.name, finalArgs, executionContext?.cwd, signal);
+			const edge = await this.deps.checkEdge?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (edge) return edge;
 
-			if (extensionResult) return extensionResult;
-
-			this.deps
-				.getToolSelectionController?.()
-				?.begin(toolCall.id, toolCall.name, finalArgs, { modelRef, requestId });
-			return undefined;
+			this.deps.getToolSelectionController?.()?.begin(toolCall.id, toolCall.name, args, { modelRef, requestId });
+			return extensionResult;
 		} finally {
 			// A later abort does not invalidate a decision the envelope already made; the pre-hook
 			// evaluation above either completed (and is published) or threw before this block exists.
@@ -163,57 +160,64 @@ export class ToolGateController {
 		// Retired first and synchronously, before any hook here can throw -- a write rejected by its own
 		// preflight would otherwise park a later bash in the same batch for the rest of the turn.
 		retireToolCall(toolCall.id, this.deps.getMutationScope?.());
-		const runner = this.deps.getExtensionRunner();
-		let content = result.content;
-		let details = result.details;
-		let usage = result.usage;
-		let terminate = result.terminate;
-		let resolvedIsError = isError;
+		const selection = this.deps.getToolSelectionController?.();
+		try {
+			const runner = this.deps.getExtensionRunner();
+			let content = result.content;
+			let details = result.details;
+			let usage = result.usage;
+			let terminate = result.terminate;
+			let resolvedIsError = isError;
 
-		if (runner.hasHandlers("tool_result")) {
-			const hookResult = await runner.emitToolResult(
-				{
-					type: "tool_result",
-					toolName: toolCall.name,
-					toolCallId: toolCall.id,
-					input: args as Record<string, unknown>,
-					content,
-					details,
-					isError,
-					usage,
-				},
-				executionContext,
-			);
-			if (hookResult) {
-				content = hookResult.content ?? content;
-				details = hookResult.details;
-				resolvedIsError = hookResult.isError ?? isError;
-				usage = hookResult.usage ?? usage;
-				if (hookResult.terminate !== undefined) terminate = hookResult.terminate;
+			if (runner.hasHandlers("tool_result")) {
+				const hookResult = await runner.emitToolResult(
+					{
+						type: "tool_result",
+						toolName: toolCall.name,
+						toolCallId: toolCall.id,
+						input: args as Record<string, unknown>,
+						content,
+						details,
+						isError,
+						usage,
+					},
+					executionContext,
+				);
+				if (hookResult) {
+					content = hookResult.content ?? content;
+					details = hookResult.details;
+					resolvedIsError = hookResult.isError ?? isError;
+					usage = hookResult.usage ?? usage;
+					if (hookResult.terminate !== undefined) terminate = hookResult.terminate;
+				}
 			}
-		}
 
-		// Untrusted-content boundary: structurally fence output from attacker-controllable sources
-		// (web/search, subagents, recall, third-party tools) so injection payloads are framed as data.
-		// First-party tools (read/grep/find/ls/edit/write/bash) are trusted and pass through unchanged.
-		if (classifyToolTrust(toolCall.name) === "untrusted") {
-			const source = `tool:${toolCall.name}`;
-			const wrapped = content.map((block) =>
-				block.type === "text" ? { ...block, text: wrapUntrustedText(block.text, source) } : block,
-			);
-			content = wrapped;
-		}
+			// Untrusted-content boundary: structurally fence output from attacker-controllable sources
+			// (web/search, subagents, recall, third-party tools) so injection payloads are framed as data.
+			// First-party tools (read/grep/find/ls/edit/write/bash) are trusted and pass through unchanged.
+			if (classifyToolTrust(toolCall.name) === "untrusted") {
+				const source = `tool:${toolCall.name}`;
+				const wrapped = content.map((block) =>
+					block.type === "text" ? { ...block, text: wrapUntrustedText(block.text, source) } : block,
+				);
+				content = wrapped;
+			}
 
-		this.deps.getToolSelectionController?.()?.complete(toolCall.id, !resolvedIsError, content);
-		if (
-			content === result.content &&
-			details === result.details &&
-			resolvedIsError === isError &&
-			usage === result.usage &&
-			terminate === result.terminate
-		) {
-			return undefined;
+			selection?.complete(toolCall.id, !resolvedIsError, content);
+			if (
+				content === result.content &&
+				details === result.details &&
+				resolvedIsError === isError &&
+				usage === result.usage &&
+				terminate === result.terminate
+			) {
+				return undefined;
+			}
+			return { content, details, isError: resolvedIsError, usage, terminate };
+		} finally {
+			// Result hooks can fail before complete(). A terminal call must retain no pending
+			// observation; a projection failure is not evidence that the tool itself failed.
+			selection?.discard(toolCall.id);
 		}
-		return { content, details, isError: resolvedIsError, usage, terminate };
 	};
 }

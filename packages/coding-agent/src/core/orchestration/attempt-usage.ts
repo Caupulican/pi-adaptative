@@ -79,6 +79,21 @@ export function validateProviderUsage(value: unknown, label = "provider usage"):
 	};
 }
 
+/** Shared projection for billed assistant and tool usage into live worker accounting. */
+export function usageDeltaFromProviderUsage(
+	value: Usage,
+): Omit<AttemptUsageSnapshot, "toolCalls" | "activeWallClockMs"> {
+	const usage = validateProviderUsage(value);
+	return {
+		inputTokens: usage.input,
+		outputTokens: usage.output,
+		cacheReadTokens: usage.cacheRead,
+		cacheWriteTokens: usage.cacheWrite,
+		totalTokens: usage.totalTokens,
+		costUsd: usage.cost.total,
+	};
+}
+
 /** Validate the one durable cumulative usage shape shared by checkpoints, recovery, and results. */
 export function validateAttemptUsageSnapshot(
 	usage: AttemptUsageSnapshot,

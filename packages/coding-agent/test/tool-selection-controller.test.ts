@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionRunner } from "../src/core/extensions/index.ts";
+import type { ToolCallEvent } from "../src/core/extensions/types.ts";
 import { ToolGateController } from "../src/core/tool-gate-controller.ts";
 import { formatToolSelectionHints } from "../src/core/tool-selection/promotion.ts";
 import { ToolPerformanceStore } from "../src/core/tool-selection/tool-performance-store.ts";
@@ -42,6 +43,46 @@ function makeController(
 }
 
 describe("ToolSelectionController", () => {
+	it("pauses failed advisory writes without failing tools and recovers at a turn boundary", () => {
+		const store = makeStore();
+		const controller = makeController(undefined, { store });
+		const record = vi.spyOn(store, "recordExecution").mockImplementationOnce(() => {
+			throw new Error("fixture storage failure");
+		});
+		const validation = vi.spyOn(store, "recordValidation");
+		const flush = vi.spyOn(store, "flush").mockImplementationOnce(() => {
+			throw new Error("fixture storage still unavailable");
+		});
+		controller.begin("first", "read", {}, { modelRef: "faux/model" });
+		expect(() => controller.complete("first", true)).not.toThrow();
+		expect(controller.formatTimingReport()).toContain("observations paused");
+		controller.begin("paused", "read", {}, { modelRef: "faux/model" });
+		controller.complete("paused", true);
+		controller.recordValidation("read", "repaired", "faux/model");
+		expect(record).toHaveBeenCalledTimes(1);
+		expect(validation).not.toHaveBeenCalled();
+		controller.startTurn();
+		expect(flush).toHaveBeenCalledTimes(1);
+		expect(controller.formatTimingReport()).toContain("observations paused");
+		controller.startTurn();
+		expect(flush).toHaveBeenCalledTimes(2);
+		controller.begin("recovered", "read", {}, { modelRef: "faux/model" });
+		controller.complete("recovered", true);
+		expect(record).toHaveBeenCalledTimes(2);
+		expect(controller.formatTimingReport()).not.toContain("observations paused");
+		expect(store.get({ modelRef: "faux/model", intentClass: "read", tool: "read" }).sampleCount).toBe(1);
+	});
+
+	it("isolates validation-statistic failures from argument repair", () => {
+		const store = makeStore();
+		const controller = makeController(undefined, { store });
+		vi.spyOn(store, "recordValidation").mockImplementationOnce(() => {
+			throw new Error("fixture validation-statistic failure");
+		});
+		expect(() => controller.recordValidation("read", "repaired", "faux/model")).not.toThrow();
+		expect(controller.formatTimingReport()).toContain("observations paused");
+	});
+
 	it("loads one intent snapshot instead of rereading durable state per candidate", () => {
 		const store = makeStore();
 		const get = vi.spyOn(store, "get");
@@ -92,6 +133,54 @@ describe("ToolSelectionController", () => {
 });
 
 describe("ToolSelectionController — observe/agreement/promotion loop", () => {
+	it.each(["removed", "profile", "capability", "policy"] as const)(
+		"withdraws learned hints when the tool is %s and restores them when available",
+		(reason) => {
+			let tools: ToolSelectionTool[] = [{ name: "read_file", description: "read a file" }];
+			let policyAllowed = true;
+			const controller = makeController(undefined, {
+				getActiveTools: () => tools,
+				isCandidateAllowed: () => policyAllowed,
+			});
+			for (let i = 0; i < 3; i++) {
+				controller.begin(`learn-${i}`, "read_file", {}, { modelRef: "faux/model" });
+				controller.complete(`learn-${i}`, true, []);
+			}
+			expect(controller.getActiveHints().map((hint) => hint.tool)).toEqual(["read_file"]);
+			if (reason === "removed") tools = [];
+			if (reason === "profile") tools[0].profileAllowed = false;
+			if (reason === "capability") tools[0].capabilityAllowed = false;
+			if (reason === "policy") policyAllowed = false;
+			expect(controller.getActiveHints()).toEqual([]);
+			tools = [{ name: "read_file", description: "read a file" }];
+			policyAllowed = true;
+			expect(controller.getActiveHints().map((hint) => hint.tool)).toEqual(["read_file"]);
+		},
+	);
+
+	it("does not attribute calls to a hint while the hint surface is disabled", () => {
+		const env = { PI_TOOL_SELECTION_HINTS: "1" };
+		const controller = makeController([{ name: "read_file", description: "read a file" }], { env });
+		for (let i = 0; i < 3; i++) {
+			controller.begin(`learn-${i}`, "read_file", {}, { modelRef: "faux/model" });
+			controller.complete(`learn-${i}`, true, []);
+		}
+		expect(controller.getActiveHints()).toHaveLength(1);
+		env.PI_TOOL_SELECTION_HINTS = "0";
+		controller.begin("without-hint", "read_file", {}, { modelRef: "faux/model" });
+		controller.complete("without-hint", true, []);
+		expect(controller.getReport()[0].hintSampleCount).toBe(0);
+		env.PI_TOOL_SELECTION_HINTS = "1";
+		controller.observeProviderRequest(
+			"hint-request",
+			"faux/model",
+			formatToolSelectionHints(controller.getActiveHints())!,
+		);
+		controller.begin("with-hint", "read_file", {}, { modelRef: "faux/model", requestId: "hint-request" });
+		controller.complete("with-hint", true, []);
+		expect(controller.getReport()[0].hintSampleCount).toBe(1);
+	});
+
 	it("loads one model snapshot when evaluating every intent hint", () => {
 		const getStatsForModel = vi.fn(() => []);
 		const getStatsForIntent = vi.fn(() => []);
@@ -187,9 +276,117 @@ describe("ToolSelectionController — observe/agreement/promotion loop", () => {
 });
 
 describe("ToolGateController selector integration", () => {
+	it("preserves a successful result during a real advisory storage failure and recovers without a prompt", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-selection-storage-failure-"));
+		dirs.push(dir);
+		const store = ToolPerformanceStore.forAgentDir(dir, { writeBehind: { maxPending: 1 } });
+		const controller = makeController(undefined, { store });
+		const blocker = join(dir, "state");
+		writeFileSync(blocker, "not a directory");
+		const gate = new ToolGateController({
+			maybeEscalateToolCall: () => undefined,
+			getCwd: () => process.cwd(),
+			getCapabilityEnvelope: () => undefined,
+			recordGateOutcome: () => undefined,
+			getExtensionRunner: () => ({ hasHandlers: () => false }) as unknown as ExtensionRunner,
+			getToolSelectionController: () => controller,
+		});
+		try {
+			const call = {
+				assistantMessage: { provider: "faux", model: "model" },
+				toolCall: { id: "success", name: "read" },
+				args: {},
+			};
+			await gate.beforeToolCall(call as never);
+			await expect(
+				gate.afterToolCall({
+					...call,
+					result: { content: [{ type: "text", text: "actual result" }] },
+					isError: false,
+				} as never),
+			).resolves.toBeUndefined();
+			expect(controller.formatTimingReport()).toContain("observations paused");
+			expect(controller.getActiveHints()).toEqual([]);
+			rmSync(blocker);
+			controller.startTurn();
+			expect(controller.formatTimingReport()).not.toContain("observations paused");
+			expect(store.get({ modelRef: "faux/model", intentClass: "read", tool: "read" }).sampleCount).toBe(1);
+		} finally {
+			rmSync(blocker, { recursive: true, force: true });
+			store.close();
+		}
+	});
+
+	it.each([false, true])("retires observations when a result hook fails (throws=%s)", async (throws) => {
+		const store = makeStore();
+		const controller = makeController(undefined, { store });
+		const hookError = new Error("result projection failed");
+		const gate = new ToolGateController({
+			maybeEscalateToolCall: () => undefined,
+			getCwd: () => process.cwd(),
+			getCapabilityEnvelope: () => undefined,
+			recordGateOutcome: () => undefined,
+			getExtensionRunner: () =>
+				({
+					hasHandlers: (event: string) => event === "tool_result",
+					emitToolResult: async () => {
+						if (throws) throw hookError;
+					},
+				}) as unknown as ExtensionRunner,
+			getToolSelectionController: () => controller,
+		});
+		const call = {
+			assistantMessage: { provider: "faux", model: "model" },
+			toolCall: { id: "terminal", name: "read" },
+			args: {},
+		};
+		await gate.beforeToolCall(call as never);
+		const completion = gate.afterToolCall({ ...call, result: { content: [] }, isError: false } as never);
+		if (throws) await expect(completion).rejects.toBe(hookError);
+		else await expect(completion).resolves.toBeUndefined();
+		// A stale completion cannot resurrect a terminal call or fabricate usable routing evidence.
+		controller.complete("terminal", true, [{ type: "text", text: "late" }]);
+		expect(store.get({ modelRef: "faux/model", intentClass: "read", tool: "read" }).sampleCount).toBe(throws ? 0 : 1);
+	});
+
+	it.each([false, true])("observes an extension-rewritten call only when allowed (blocked=%s)", async (blocked) => {
+		const begin = vi.fn();
+		const rewritten = { block: blocked };
+		const args = { path: "initial.txt" };
+		const gate = new ToolGateController({
+			maybeEscalateToolCall: () => undefined,
+			getCwd: () => process.cwd(),
+			getCapabilityEnvelope: () => undefined,
+			recordGateOutcome: () => undefined,
+			getExtensionRunner: () =>
+				({
+					hasHandlers: () => true,
+					emitToolCall: async (event: ToolCallEvent) => {
+						Object.assign(event.input, { path: "rewritten.txt" });
+						return rewritten;
+					},
+				}) as unknown as ExtensionRunner,
+			getToolSelectionController: () => ({ begin }) as unknown as ToolSelectionController,
+		});
+		const result = await gate.beforeToolCall({
+			assistantMessage: { provider: "faux", model: "model" },
+			toolCall: { id: "rewritten", name: "read" },
+			args,
+		} as never);
+		expect(result).toBe(rewritten);
+		expect(args.path).toBe("rewritten.txt");
+		if (blocked) expect(begin).not.toHaveBeenCalled();
+		else
+			expect(begin).toHaveBeenCalledWith("rewritten", "read", args, {
+				modelRef: "faux/model",
+				requestId: undefined,
+			});
+	});
+
 	it("observes only calls that survive router, autonomy, and extension gates", async () => {
 		const started: string[] = [];
 		const completed: Array<{ id: string; success: boolean }> = [];
+		const retired: string[] = [];
 		const extensionRunner = {
 			hasHandlers: () => false,
 		} as unknown as ExtensionRunner;
@@ -203,6 +400,7 @@ describe("ToolGateController selector integration", () => {
 				({
 					begin: (id: string) => started.push(id),
 					complete: (id: string, success: boolean) => completed.push({ id, success }),
+					discard: (id: string) => retired.push(id),
 				}) as unknown as ToolSelectionController,
 		});
 		const runBefore = (input: { toolCall: { id: string; name: string }; args: unknown }) =>
@@ -226,6 +424,7 @@ describe("ToolGateController selector integration", () => {
 		});
 		expect(started).toEqual(["allowed"]);
 		expect(completed).toEqual([{ id: "allowed", success: true }]);
+		expect(retired).toEqual(["allowed"]);
 	});
 
 	it("maps failed tools to recovery tools and never write after a read miss", () => {

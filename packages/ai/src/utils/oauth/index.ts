@@ -30,6 +30,7 @@ export {
 	refreshOpenAICodexToken,
 } from "./openai-codex.ts";
 export { loginOpenRouter, openRouterOAuthProvider } from "./openrouter.ts";
+export { OAuthRefreshCompletedError } from "./refresh-completed-error.ts";
 export * from "./types.ts";
 export { loginXai, refreshXaiToken, xaiOAuthProvider } from "./xai.ts";
 
@@ -44,6 +45,7 @@ import { antigravityOAuthProvider } from "./google-antigravity.ts";
 import { kimiCodingOAuthProvider } from "./kimi-coding.ts";
 import { openaiCodexOAuthProvider } from "./openai-codex.ts";
 import { openRouterOAuthProvider } from "./openrouter.ts";
+import { OAuthRefreshCompletedError } from "./refresh-completed-error.ts";
 import type { OAuthCredentials, OAuthProviderId, OAuthProviderInfo, OAuthProviderInterface } from "./types.ts";
 import { xaiOAuthProvider } from "./xai.ts";
 
@@ -125,38 +127,57 @@ export function getOAuthProviderInfoList(): OAuthProviderInfo[] {
 // High-level API (uses provider registry)
 // ============================================================================
 
-const inFlightRefreshes = new Map<OAuthProviderId, Promise<OAuthCredentials>>();
+// A provider ID can name a replacement adapter or credentials for several accounts.
+// Only callers using the same adapter and refresh token may share a rotation.
+const inFlightRefreshes = new WeakMap<OAuthProviderInterface, Map<string, Promise<OAuthCredentials>>>();
+
+function resolveOAuthProvider(providerOrId: OAuthProviderId | OAuthProviderInterface): OAuthProviderInterface {
+	const provider = typeof providerOrId === "string" ? getOAuthProvider(providerOrId) : providerOrId;
+	if (!provider) {
+		throw new Error(`Unknown OAuth provider: ${providerOrId}`);
+	}
+	return provider;
+}
 
 /**
- * Refresh token for any OAuth provider.
- * @deprecated Use getOAuthProvider(id).refreshToken() instead
+ * Refresh credentials for a captured adapter or a registered provider.
+ * Expiry and rejected-key recovery share the same pending token exchange.
  */
 export async function refreshOAuthToken(
-	providerId: OAuthProviderId,
+	providerOrId: OAuthProviderId | OAuthProviderInterface,
 	credentials: OAuthCredentials,
 ): Promise<OAuthCredentials> {
-	const provider = getOAuthProvider(providerId);
-	if (!provider) {
-		throw new Error(`Unknown OAuth provider: ${providerId}`);
+	const provider = resolveOAuthProvider(providerOrId);
+	let providerRefreshes = inFlightRefreshes.get(provider);
+	if (!providerRefreshes) {
+		providerRefreshes = new Map();
+		inFlightRefreshes.set(provider, providerRefreshes);
 	}
-	return provider.refreshToken(credentials);
+	const refreshToken = credentials.refresh;
+	let refresh = providerRefreshes.get(refreshToken);
+	if (!refresh) {
+		refresh = provider.refreshToken(credentials).finally(() => {
+			providerRefreshes.delete(refreshToken);
+		});
+		providerRefreshes.set(refreshToken, refresh);
+	}
+	return refresh;
 }
 
 /**
  * Get API key for a provider from OAuth credentials.
  * Automatically refreshes expired tokens.
+ * Pass a captured adapter when a caller must retain its identity across awaited work.
  *
  * @returns API key string and updated credentials, or null if no credentials
  * @throws Error if refresh fails
  */
 export async function getOAuthApiKey(
-	providerId: OAuthProviderId,
+	providerOrId: OAuthProviderId | OAuthProviderInterface,
 	credentials: Record<string, OAuthCredentials>,
 ): Promise<{ newCredentials: OAuthCredentials; apiKey: string } | null> {
-	const provider = getOAuthProvider(providerId);
-	if (!provider) {
-		throw new Error(`Unknown OAuth provider: ${providerId}`);
-	}
+	const provider = resolveOAuthProvider(providerOrId);
+	const providerId = provider.id;
 
 	let creds = credentials[providerId];
 	if (!creds) {
@@ -165,16 +186,10 @@ export async function getOAuthApiKey(
 
 	// Refresh if expired
 	if (Date.now() >= creds.expires) {
-		let refresh = inFlightRefreshes.get(providerId);
-		if (!refresh) {
-			refresh = provider.refreshToken(creds).finally(() => {
-				inFlightRefreshes.delete(providerId);
-			});
-			inFlightRefreshes.set(providerId, refresh);
-		}
 		try {
-			creds = await refresh;
+			creds = await refreshOAuthToken(provider, creds);
 		} catch (error) {
+			if (error instanceof OAuthRefreshCompletedError) throw error;
 			// The provider's own failure (HTTP status, invalid_grant, network) is the reason a caller
 			// can act on; it rides as the cause so the user-facing message can name it.
 			throw new Error(`Failed to refresh OAuth token for ${providerId}`, { cause: error });

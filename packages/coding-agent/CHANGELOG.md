@@ -1,16 +1,42 @@
 ## [Unreleased]
 
+### Added
+
+- Built-in TypeSafe Jev evaluation and review for foreground and worker agents through `typesafe_review`, supporting Choice, Noul and Score, high/max claim gates, durable retrievable evidence, `/login typesafe`, environment credentials, and a bundled skill for semantic decisions and verification across domains.
+
 ### Fixed
 
+- Extension result handlers isolate plain result data from failed or late mutations while preserving callable and class metadata.
+- OAuth storage retains completed Antigravity rotations when later discovery fails, then reports that failure to the caller. Recovery preserves logout, replacement, and write-failure boundaries without repeating the token exchange.
+- Worker usage accounting includes billed tool-service tokens in live totals, durable checkpoints, and transcript recovery.
+- Jev review evidence survives large-result retention, service-error projection, transport retries, and session forks; retry accounting includes every reported token charge.
+- Extension tool-call vetoes retain their original decision through later handlers and mutations of the returned control object.
+- Extension tool-call handlers fail closed for every thrown value, including `undefined`, while later handlers still run and the first failure is preserved.
+- Tool gates check the in-place arguments executed after extension hooks, preventing returned metadata from bypassing path scope or incorrectly blocking allowed calls.
 - Tool execution and validation evidence stays attributed to its originating model when the session model changes during a response or tool hook.
 - Tool-performance writes capture their evidence before queueing, preserving original identities and outcomes through replay and excluding undeclared selection payloads.
+- Tool-performance aggregate maps enforce encoded-byte retention budgets, and aggregate snapshots isolate nested metadata from the store's working state.
 - Tool hint measurements use the originating provider request instead of newly eligible live statistics, preventing credit for hints absent from that request.
 - Learned tool hints are limited to each prompt's registered tool surface, including restricted routed prompts and turns with no tools.
-- Advisory-state batches discard partial changes from failed or unaccepted mutation callbacks while preserving accepted observations and normal batching costs.
+- Provider admission rechecks extended account reset times against the original wait budget, keeps settled results attributed to the admitted account, and prevents an older successful request from clearing a newer limit.
+- Provider admission releases reservations during cancelled stream creation, prevents transport startup when cancellation races admission, and detaches abort listeners on completion.
+- Learning auto-apply rejects invalid numeric evidence and policy values and blank evidence references. Audit replay uses the same decision validator as the learning gate.
+- Learned tool hints follow current tool availability and policy, and disabled hints no longer accrue effectiveness measurements. Allowed extension-rewritten calls contribute observations using their final arguments.
+- Failed result hooks retire pending tool-selection observations without fabricating execution evidence.
+- Interrupted, truncated, and failed tool probes report an inconclusive result, stop further probe requests, and preserve prior routing evidence. Completed probes retain usage accounting and capability gates.
+- Optional tool-statistic storage failures preserve tool outcomes, pause observations until turn-boundary recovery, and cannot grow a failed write-behind batch past its pending cap.
+- Persisted tool-performance evidence rejects malformed counters, measurements, and mismatched identities and enforces history limits when loading.
 - Advisory-state writes preserve existing data after read failures and retain queued observations and foreign writes through failed flushes or close. Full batches reject further mutations until persistence recovers.
+- Advisory-state batches discard partial changes from failed or unaccepted mutation callbacks while preserving accepted observations and normal batching costs.
+- Tool-intent caching bounds retained entries and skips oversized keys without changing classification results. Overflowing token and latency costs saturate instead of becoming free.
+- No-route turn cleanup preserves tool and prompt changes made by extensions while the turn was running.
+- Tool probes fence superseded and disposed runs, keep late usage accounting, and commit text-route calibration and verdict together.
+- Deferred model-performance samples survive failed writes, stop admission at the pending cap, and commit together with a following profile mutation. Explicit profile replacement consumes older queued observations.
 - Tool-result image replacement and collapse invalidate cached conversions, preventing older previews from overwriting current output. Repeated expansion shares pending conversion work, and failed conversion remains retryable.
 - In-memory OAuth credential transactions serialize refreshes, reject conflicting synchronous writes, and release queued callers after failures.
 - OAuth refreshes publish credentials only after storage commits and preserve newer logout, replacement, reload, and unrelated-provider changes through success and failure recovery.
+- Credential-file writes recheck lock ownership immediately before replacement, including after Windows rename retries, so observed lock loss cannot overwrite a newer credential from a staged file.
+- OAuth expiry and rejected-token recovery preserve successful rotations through a lost storage lock, save only against unchanged credentials, and adopt valid sibling rotations without repeating the token request. Tokens that expire before recovery finishes or retain the rejected key are not returned by rejected-token recovery.
 
 ## [0.99.27] - 2026-09-16
 

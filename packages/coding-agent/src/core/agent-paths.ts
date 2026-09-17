@@ -261,6 +261,11 @@ export function orchestrationSessionDir(agentDir: string, parentSessionId: strin
 	return join(orchestrationSessionsDir(agentDir), orchestrationSessionKey(parentSessionId));
 }
 
+/** Durable review evidence shared by a foreground session and its worker agents. */
+export function typeSafeEvidenceDir(agentDir: string, parentSessionId: string): string {
+	return join(orchestrationSessionDir(agentDir, parentSessionId), "typesafe-reviews");
+}
+
 /** Outside the deleted bundle: a durable tombstone prevents recreating deleted worker contexts. */
 export function orchestrationSessionDeletionFile(agentDir: string, parentSessionId: string): string {
 	return stateFile(agentDir, "orchestration", "deletions", `${orchestrationSessionKey(parentSessionId)}.json`);

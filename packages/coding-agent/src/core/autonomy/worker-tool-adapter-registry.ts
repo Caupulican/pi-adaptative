@@ -1,7 +1,10 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
+import type { Usage } from "@caupulican/pi-ai";
 import type { TSchema } from "typebox";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
+import type { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
+import { TypeSafeReviewer } from "../review/typesafe-reviewer.ts";
 import { type CredentialExposureBoundary, isProtectedCredentialPath } from "../secrets/credential-exposure-guard.ts";
 import { createArtifactRetrieveTool } from "../tools/artifact-retrieve.ts";
 import {
@@ -17,6 +20,7 @@ import {
 	type SkillAuditToolOptions,
 } from "../tools/skill-audit.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
+import { createTypeSafeReviewToolDefinition } from "../tools/typesafe-review.ts";
 
 /**
  * Host-owned inputs available while constructing one fresh worker tool.
@@ -29,6 +33,7 @@ export interface WorkerToolAdapterContext {
 	cwd: string;
 	signal?: AbortSignal;
 	credentialBoundary?: CredentialExposureBoundary;
+	reportUsage?: (toolCallId: string, usage: Usage) => void;
 }
 
 export type WorkerToolAdapterFactory = (context: WorkerToolAdapterContext) => AgentTool<TSchema, unknown>;
@@ -70,6 +75,7 @@ export const WORKER_TOOL_ADAPTER_NAMES: ReadonlySet<string> = new Set([
 	"run_toolkit_script",
 	"skill",
 	"skill_audit",
+	"typesafe_review",
 ]);
 
 export type WorkerToolAdapterMaterialization =
@@ -77,6 +83,8 @@ export type WorkerToolAdapterMaterialization =
 	| { ok: false; reason: string };
 
 export interface WorkerToolAdapterSources {
+	/** Host-owned credential lookup; workers receive judgments, never credential access. */
+	typeSafe?: ConstructorParameters<typeof TypeSafeReviewer>[0] & { evidenceStore: TypeSafeEvidenceStore };
 	/** Session-owned packed output store; retrieval is bounded and identifier-only. */
 	artifactStore?: ArtifactStore;
 	/** Host-owned script registry and bounded executor. */
@@ -145,6 +153,25 @@ export class WorkerToolAdapterRegistry {
 /** Build the default safe adapters from host-owned brokers. Omitted sources stay unsupported. */
 export function createWorkerToolAdapterRegistry(sources: WorkerToolAdapterSources = {}): WorkerToolAdapterRegistry {
 	const registry = new WorkerToolAdapterRegistry();
+	if (sources.typeSafe) {
+		const dependencies = sources.typeSafe;
+		registry.register({
+			name: "typesafe_review",
+			description: "Use Jev through the host-owned review service.",
+			create: (context) => {
+				const definition = createTypeSafeReviewToolDefinition(
+					new TypeSafeReviewer(dependencies),
+					dependencies.evidenceStore,
+					context.reportUsage,
+				);
+				// Isolated workers do not use the foreground prompt-guideline composer.
+				return wrapToolDefinition<typeof definition.parameters, unknown>({
+					...definition,
+					promptSnippet: `${definition.description}\n${definition.promptGuidelines.join("\n")}`,
+				});
+			},
+		});
+	}
 	if (sources.artifactStore) {
 		registry.register({
 			name: "artifact_retrieve",

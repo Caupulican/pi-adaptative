@@ -92,8 +92,10 @@ export const MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS: readonly string[] = [
 	"ask_question",
 	// The executor tool: minimal-class models ARE the daily-ops executors, and its schema is tiny.
 	"run_toolkit_script",
+	"typesafe_review",
 ];
-export const MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS: readonly string[] = [...GOAL_LIFECYCLE_TOOL_NAMES];
+// Independent semantic assistance is available across model classes; authority filters still apply.
+export const MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS: readonly string[] = [...GOAL_LIFECYCLE_TOOL_NAMES, "typesafe_review"];
 
 export const DEFAULT_LANE_MAX_OUTPUT_TOKENS = 2048;
 const MIN_LANE_MAX_OUTPUT_TOKENS = 256;

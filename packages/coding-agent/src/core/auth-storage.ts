@@ -14,10 +14,13 @@ import {
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
 	type OAuthProviderId,
+	OAuthRefreshCompletedError,
+	refreshOAuthToken,
 } from "@caupulican/pi-ai/oauth";
 import { chmodSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
+import { isDeepStrictEqual } from "util";
 import { getAgentDir } from "../config.ts";
 import { normalizePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
@@ -110,6 +113,13 @@ type OAuthStorageRevision = {
 
 const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
 
+class AuthStorageLockCompromisedError extends Error {
+	constructor(cause?: Error) {
+		super("Auth storage lock was compromised", { cause });
+		this.name = "AuthStorageLockCompromisedError";
+	}
+}
+
 export interface AuthStorageBackend {
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
 	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T>;
@@ -165,7 +175,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		let lockCompromisedError: Error | undefined;
 		const throwIfCompromised = () => {
 			if (lockCompromised) {
-				throw lockCompromisedError ?? new Error("Auth storage lock was compromised");
+				throw new AuthStorageLockCompromisedError(lockCompromisedError);
 			}
 		};
 
@@ -192,7 +202,10 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			const { result, next } = await fn(current);
 			throwIfCompromised();
 			if (next !== undefined) {
-				await writeFileAtomic(this.authPath, next, AUTH_FILE_WRITE_OPTIONS);
+				await writeFileAtomic(this.authPath, next, {
+					...AUTH_FILE_WRITE_OPTIONS,
+					beforeCommit: throwIfCompromised,
+				});
 				chmodSync(this.authPath, 0o600);
 			}
 			throwIfCompromised();
@@ -335,9 +348,9 @@ export class AuthStorage {
 		}
 	}
 
-	private persistProviderChange(provider: string, credential: AuthCredential | undefined): void {
+	private persistProviderChange(provider: string, credential: AuthCredential | undefined): boolean {
 		if (this.loadError) {
-			return;
+			return false;
 		}
 
 		try {
@@ -351,8 +364,10 @@ export class AuthStorage {
 				}
 				return { result: undefined, next: JSON.stringify(merged, null, 2) };
 			});
+			return true;
 		} catch (error) {
 			this.recordError(error);
+			return false;
 		}
 	}
 
@@ -364,12 +379,13 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Set credential for a provider.
+	 * Set credential for a provider. Returns whether persistence succeeded; a failed write
+	 * retains the existing session-only behavior and records its error for the host.
 	 */
-	set(provider: string, credential: AuthCredential): void {
+	set(provider: string, credential: AuthCredential): boolean {
 		this.data[provider] = credential;
 		this.providerRevisions.set(provider, ++this.dataRevision);
-		this.persistProviderChange(provider, credential);
+		return this.persistProviderChange(provider, credential);
 	}
 
 	/**
@@ -505,6 +521,67 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Retain a completed rotation until its commit is known. If its lock was lost,
+	 * reacquire once and compare the complete posted credential before saving. A
+	 * different writer wins; the token endpoint is never replayed for persistence.
+	 */
+	private async withOAuthRefreshLock(
+		providerId: string,
+		refresh: (credential: OAuthCredential) => Promise<OAuthCredentials | undefined>,
+	): Promise<OAuthCredentials | undefined> {
+		const revision = this.captureOAuthStorageRevision(providerId);
+		let rotation: { posted: OAuthCredential; received: OAuthCredential } | undefined;
+		let discoveryFailure: OAuthRefreshCompletedError | undefined;
+		let result: OAuthCredentials | undefined;
+		try {
+			result = await this.withOAuthStorageLock(
+				providerId,
+				async (current) => {
+					const credential = current[providerId];
+					if (credential?.type !== "oauth") return { result: undefined };
+					const posted = structuredClone(credential);
+					let refreshed: OAuthCredentials | undefined;
+					try {
+						refreshed = await refresh(credential);
+					} catch (error) {
+						if (!(error instanceof OAuthRefreshCompletedError) || error.providerId !== providerId) throw error;
+						this.recordError(error);
+						discoveryFailure = error;
+						refreshed = error.credentials;
+					}
+					if (!refreshed) return { result: undefined };
+					const received: OAuthCredential = { type: "oauth", ...refreshed };
+					if (isDeepStrictEqual(posted, received)) return { result: received };
+					rotation = { posted, received };
+					return { result: received, nextData: { ...current, [providerId]: received } };
+				},
+				revision,
+			);
+		} catch (error) {
+			if (!(error instanceof AuthStorageLockCompromisedError) || !rotation) throw error;
+			const { posted, received } = rotation;
+			result = await this.withOAuthStorageLock(
+				providerId,
+				async (current) => {
+					const credential = current[providerId];
+					if (credential?.type !== "oauth") return { result: undefined };
+					if (!isDeepStrictEqual(credential, posted)) {
+						return { result: Date.now() < credential.expires ? credential : undefined };
+					}
+					return { result: received, nextData: { ...current, [providerId]: received } };
+				},
+				revision,
+			);
+		}
+		// Persist a completed rotation before reporting the later discovery failure.
+		// The caller sees the real failure; the next request need not rotate again.
+		if (result && discoveryFailure) throw discoveryFailure;
+		// Even a usable sibling can expire while the backend finishes its commit or
+		// releases ownership. Never return a key that is already stale at publication.
+		return result && Date.now() < result.expires ? result : undefined;
+	}
+
+	/**
 	 * Refresh OAuth token with backend locking to prevent race conditions.
 	 * Multiple pi instances may try to refresh simultaneously when tokens expire.
 	 */
@@ -516,36 +593,13 @@ export class AuthStorage {
 			return null;
 		}
 
-		const result = await this.withOAuthStorageLock(providerId, async (currentData) => {
-			const cred = currentData[providerId];
-			if (cred?.type !== "oauth") {
-				return { result: null };
-			}
-
+		const newCredentials = await this.withOAuthRefreshLock(providerId, async (cred) => {
 			if (Date.now() < cred.expires) {
-				return { result: { apiKey: provider.getApiKey(cred), newCredentials: cred } };
+				return cred;
 			}
-
-			const oauthCreds: Record<string, OAuthCredentials> = {};
-			for (const [key, value] of Object.entries(currentData)) {
-				if (value.type === "oauth") {
-					oauthCreds[key] = value;
-				}
-			}
-
-			const refreshed = await getOAuthApiKey(providerId, oauthCreds);
-			if (!refreshed) {
-				return { result: null };
-			}
-
-			const merged: AuthStorageData = {
-				...currentData,
-				[providerId]: { type: "oauth", ...refreshed.newCredentials },
-			};
-			return { result: refreshed, nextData: merged };
+			return (await getOAuthApiKey(provider, { [providerId]: cred }))?.newCredentials;
 		});
-
-		return result ?? null;
+		return newCredentials ? { apiKey: provider.getApiKey(newCredentials), newCredentials } : null;
 	}
 
 	/**
@@ -558,25 +612,24 @@ export class AuthStorage {
 		const provider = getOAuthProvider(providerId);
 		if (!provider) return undefined;
 
-		return this.withOAuthStorageLock(providerId, async (currentData) => {
-			const credential = currentData[providerId];
-			if (credential?.type !== "oauth") return { result: undefined };
-
+		const recovered = await this.withOAuthRefreshLock(providerId, async (credential) => {
 			const currentKey = provider.getApiKey(credential);
 			if (currentKey !== rejectedApiKey && Date.now() < credential.expires) {
-				return { result: currentKey };
+				return credential;
 			}
 
 			try {
-				const refreshed = await provider.refreshToken(credential);
-				const nextCredential: OAuthCredential = { type: "oauth", ...refreshed };
-				const nextData = { ...currentData, [providerId]: nextCredential };
-				return { result: provider.getApiKey(nextCredential), nextData };
+				return await refreshOAuthToken(provider, credential);
 			} catch (error) {
+				if (error instanceof OAuthRefreshCompletedError) throw error;
 				this.recordError(error);
-				return { result: undefined };
+				return undefined;
 			}
 		});
+		const recoveredKey = recovered ? provider.getApiKey(recovered) : undefined;
+		// A foreign metadata edit can retain the very key that triggered recovery.
+		// Preserve that write, but do not present the rejected key as a repaired one.
+		return recoveredKey !== rejectedApiKey ? recoveredKey : undefined;
 	}
 
 	/**
@@ -607,7 +660,7 @@ export class AuthStorage {
 				"the stored refresh token was refused or is no longer present",
 			);
 		} catch (error) {
-			if (error instanceof OAuthCredentialUnusableError) throw error;
+			if (error instanceof OAuthCredentialUnusableError || error instanceof OAuthRefreshCompletedError) throw error;
 			this.recordError(error);
 			let updated: AuthCredential | null | undefined;
 			try {
