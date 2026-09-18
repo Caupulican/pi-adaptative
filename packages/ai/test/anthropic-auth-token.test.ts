@@ -13,6 +13,9 @@ import type { Context, Model } from "../src/types.ts";
 const mockState = vi.hoisted(() => ({
 	constructorOptions: undefined as Record<string, unknown> | undefined,
 	createParams: undefined as Record<string, unknown> | undefined,
+	createImplementation: undefined as
+		| ((params: Record<string, unknown>) => { asResponse: () => Promise<Response> })
+		| undefined,
 }));
 
 vi.mock("@anthropic-ai/sdk", () => {
@@ -40,6 +43,9 @@ vi.mock("@anthropic-ai/sdk", () => {
 		messages = {
 			create: (params: Record<string, unknown>) => {
 				mockState.createParams = params;
+				if (mockState.createImplementation) {
+					return mockState.createImplementation(params);
+				}
 				return { asResponse: async () => response() };
 			},
 		};
@@ -79,6 +85,7 @@ beforeEach(() => {
 	delete process.env[ANTHROPIC_API_KEY_ENV];
 	mockState.constructorOptions = undefined;
 	mockState.createParams = undefined;
+	mockState.createImplementation = undefined;
 });
 
 afterEach(() => {
@@ -158,5 +165,49 @@ describe("Anthropic bearer-token authentication", () => {
 
 		expect(mockState.constructorOptions?.apiKey).toBeNull();
 		expect(mockState.constructorOptions?.authToken).toBe("kimi-token");
+	});
+
+	it("recovers from 401 using onAuthRejection and retries once with the replacement key", async () => {
+		let callCount = 0;
+		mockState.createImplementation = () => {
+			callCount++;
+			if (callCount === 1) {
+				const error = new Error("Unauthorized");
+				(error as Error & { status?: number }).status = 401;
+				throw error;
+			}
+			const body = [
+				`event: message_start\ndata: ${JSON.stringify({
+					type: "message_start",
+					message: { id: "msg_test", usage: { input_tokens: 1, output_tokens: 0 } },
+				})}\n`,
+				`event: message_delta\ndata: ${JSON.stringify({
+					type: "message_delta",
+					delta: { stop_reason: "end_turn" },
+					usage: { output_tokens: 1 },
+				})}\n`,
+				`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n`,
+			].join("\n");
+			return {
+				asResponse: async () =>
+					new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+			};
+		};
+
+		let rejectionNotified = false;
+		const result = await streamSimple(model, context, {
+			apiKey: "expired-key",
+			onAuthRejection: async (event) => {
+				rejectionNotified = true;
+				expect(event.providerId).toBe("anthropic");
+				expect(event.status).toBe(401);
+				expect(event.attempt).toBe(1);
+				return "refreshed-key";
+			},
+		}).result();
+
+		expect(rejectionNotified).toBe(true);
+		expect(result.stopReason).toBe("stop");
+		expect(mockState.constructorOptions?.apiKey).toBe("refreshed-key");
 	});
 });

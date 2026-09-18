@@ -24,52 +24,10 @@ export const streamSimpleAntigravity: StreamFunction<"google-antigravity", Simpl
 	options,
 ) => streamAntigravity(model, context, buildGoogleSimpleOptions(model, options, options?.apiKey));
 
-async function* generateAntigravityContent(
-	model: Model<"google-antigravity">,
-	options: GoogleGenAiOptions,
-	params: GenerateContentParameters,
+async function* readAntigravityEvents(
+	reader: ReadableStreamDefaultReader<Uint8Array>,
+	abortSignal?: AbortSignal,
 ): AsyncGenerator<GoogleGenAiResponse> {
-	const token = options.apiKey;
-	if (!token?.trim()) throw new Error("Missing Antigravity credentials. Sign in with /login.");
-	if (model.baseUrl !== ANTIGRAVITY_ENDPOINT) throw new Error("Antigravity requires its trusted service endpoint");
-	const config = params.config;
-	const projectId = await resolveAntigravityProject(token, config?.abortSignal);
-	config?.abortSignal?.throwIfAborted();
-	const headers = new Headers({ ...model.headers, ...options.headers });
-	for (const [key, value] of Object.entries(antigravityHeaders(token))) headers.set(key, value);
-	headers.set("Accept", "text/event-stream");
-	const systemInstruction =
-		typeof config?.systemInstruction === "string"
-			? { role: "user", parts: [{ text: config.systemInstruction }] }
-			: config?.systemInstruction;
-	const response = await fetch(`${ANTIGRAVITY_ENDPOINT}/v1internal:streamGenerateContent?alt=sse`, {
-		method: "POST",
-		redirect: "error",
-		signal: config?.abortSignal,
-		headers,
-		body: JSON.stringify({
-			project: projectId,
-			model: params.model,
-			requestId: crypto.randomUUID(),
-			requestType: "agent",
-			userAgent: "antigravity",
-			request: {
-				contents: params.contents,
-				systemInstruction,
-				tools: config?.tools,
-				toolConfig: config?.toolConfig,
-				sessionId: options.sessionId,
-				generationConfig: {
-					temperature: config?.temperature,
-					maxOutputTokens: config?.maxOutputTokens,
-					thinkingConfig: config?.thinkingConfig,
-				},
-			},
-		}),
-	});
-	if (!response.ok) throw new Error(`Antigravity inference failed (HTTP ${response.status})`);
-	if (!response.body) throw new Error("Antigravity returned no stream");
-	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
 	const lines = new StreamingLineDecoder(2 * 1024 * 1024);
 	let data: string[] = [];
@@ -153,7 +111,7 @@ async function* generateAntigravityContent(
 	}
 	try {
 		while (true) {
-			config?.abortSignal?.throwIfAborted();
+			abortSignal?.throwIfAborted();
 			const chunk = await reader.read();
 			if (chunk.done) break;
 			for (const line of lines.push(decoder.decode(chunk.value, { stream: true }))) {
@@ -176,9 +134,62 @@ async function* generateAntigravityContent(
 	}
 }
 
+async function generateAntigravityContent(
+	model: Model<"google-antigravity">,
+	options: GoogleGenAiOptions,
+	params: GenerateContentParameters,
+): Promise<AsyncIterable<GoogleGenAiResponse>> {
+	const token = options.apiKey;
+	if (!token?.trim()) throw new Error("Missing Antigravity credentials. Sign in with /login.");
+	if (model.baseUrl !== ANTIGRAVITY_ENDPOINT) throw new Error("Antigravity requires its trusted service endpoint");
+	const config = params.config;
+	const projectId = await resolveAntigravityProject(token, config?.abortSignal);
+	config?.abortSignal?.throwIfAborted();
+	const headers = new Headers({ ...model.headers, ...options.headers });
+	for (const [key, value] of Object.entries(antigravityHeaders(token))) headers.set(key, value);
+	headers.set("Accept", "text/event-stream");
+	const systemInstruction =
+		typeof config?.systemInstruction === "string"
+			? { role: "user", parts: [{ text: config.systemInstruction }] }
+			: config?.systemInstruction;
+	const response = await fetch(`${ANTIGRAVITY_ENDPOINT}/v1internal:streamGenerateContent?alt=sse`, {
+		method: "POST",
+		redirect: "error",
+		signal: config?.abortSignal,
+		headers,
+		body: JSON.stringify({
+			project: projectId,
+			model: params.model,
+			requestId: crypto.randomUUID(),
+			requestType: "agent",
+			userAgent: "antigravity",
+			request: {
+				contents: params.contents,
+				systemInstruction,
+				tools: config?.tools,
+				toolConfig: config?.toolConfig,
+				sessionId: options.sessionId,
+				generationConfig: {
+					temperature: config?.temperature,
+					maxOutputTokens: config?.maxOutputTokens,
+					thinkingConfig: config?.thinkingConfig,
+				},
+			},
+		}),
+	});
+	if (!response.ok) {
+		const error = new Error(`Antigravity inference failed (HTTP ${response.status})`);
+		(error as Error & { status?: number }).status = response.status;
+		throw error;
+	}
+	if (!response.body) throw new Error("Antigravity returned no stream");
+	const reader = response.body.getReader();
+	return readAntigravityEvents(reader, config?.abortSignal);
+}
+
 export function createAntigravityClient(
 	model: Model<"google-antigravity">,
 	options: GoogleGenAiOptions,
 ): GoogleGenAiClient {
-	return { models: { generateContentStream: async (params) => generateAntigravityContent(model, options, params) } };
+	return { models: { generateContentStream: (params) => generateAntigravityContent(model, options, params) } };
 }

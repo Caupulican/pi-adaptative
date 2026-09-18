@@ -23,6 +23,7 @@ export function buildBaseOptions(_model: Model<Api>, options?: SimpleStreamOptio
 		metadata: options?.metadata,
 		interactionMode: options?.interactionMode,
 		onInteractiveAuthRecovery: options?.onInteractiveAuthRecovery,
+		onAuthRejection: options?.onAuthRejection,
 	};
 }
 

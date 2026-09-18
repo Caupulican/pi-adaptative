@@ -12,6 +12,7 @@ import type {
 	ThinkingContent,
 } from "../types.ts";
 import { createEmptyUsage } from "../usage.ts";
+import { normalizeProviderError } from "../utils/error-body.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import {
@@ -193,4 +194,27 @@ export function mapStandardThinkingEffort(
 	if (level === "minimal" || level === "low") return "low";
 	if (level === "medium") return "medium";
 	return "high";
+}
+
+export async function executeWithAuthRecovery<T>(
+	providerId: string,
+	options: StreamOptions | undefined,
+	operation: (replacementKey?: string) => Promise<T>,
+): Promise<T> {
+	try {
+		return await operation();
+	} catch (error) {
+		const status = normalizeProviderError(error).status;
+		if (status === 401 && options?.onAuthRejection) {
+			const replacementKey = await options.onAuthRejection({
+				providerId,
+				status: 401,
+				attempt: 1,
+			});
+			if (replacementKey) {
+				return await operation(replacementKey);
+			}
+		}
+		throw error;
+	}
 }

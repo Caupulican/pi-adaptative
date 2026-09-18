@@ -4,6 +4,7 @@
 
 - Bound tool intent cache entry retention with an invariant loop, ensuring map size strictly cannot exceed 512 entries.
 - Guard skill curator against disuse misclassification in narrow observation windows, and persist user curation rejections to prevent re-archiving restored skills across sessions.
+- Wire `onAuthRejection` recovery across all registered OAuth subscription providers, including xAI, Claude, and Antigravity.
 
 ## [0.99.28] - 2026-09-18
 

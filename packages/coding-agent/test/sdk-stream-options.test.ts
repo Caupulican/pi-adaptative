@@ -295,4 +295,16 @@ describe("createAgentSession stream options", () => {
 
 		expect(options?.onAuthRejection).toBeTypeOf("function");
 	});
+
+	it("wires OAuth rejection recovery for xai provider", async () => {
+		const options = await captureStreamOptions("openai-responses", {}, {}, "xai");
+
+		expect(options?.onAuthRejection).toBeTypeOf("function");
+	});
+
+	it("does not wire default OAuth rejection recovery for non-OAuth provider without caller handler", async () => {
+		const options = await captureStreamOptions("openai-responses", {}, {}, "unknown-custom-provider");
+
+		expect(options?.onAuthRejection).toBeUndefined();
+	});
 });

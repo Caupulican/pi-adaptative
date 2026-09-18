@@ -235,4 +235,43 @@ describe("Antigravity OAuth and transport", () => {
 		expect(result.stopReason).toBe("aborted");
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
+
+	it("recovers from 401 using onAuthRejection and retries once with the replacement key", async () => {
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(Response.json({ cloudaicompanionProject: "fixture-project" }))
+			.mockResolvedValueOnce(Response.json({}, { status: 401 }))
+			.mockResolvedValueOnce(Response.json({ cloudaicompanionProject: "fixture-project" }))
+			.mockResolvedValueOnce(
+				new Response(
+					'data: {"response":{"candidates":[{"content":{"parts":[{"text":"recovered"}]},"finishReason":"STOP"}]}}\n\n',
+					{ headers: { "Content-Type": "text/event-stream" } },
+				),
+			);
+		vi.stubGlobal("fetch", fetchMock);
+
+		let rejectionNotified = false;
+		const result = await streamAntigravity(
+			model,
+			{ messages: [{ role: "user", content: "Hello", timestamp: 0 }] },
+			{
+				apiKey: "expired-token",
+				onAuthRejection: async (event) => {
+					rejectionNotified = true;
+					expect(event.providerId).toBe("google-antigravity");
+					expect(event.status).toBe(401);
+					expect(event.attempt).toBe(1);
+					return "refreshed-token";
+				},
+			},
+		).result();
+
+		expect(rejectionNotified).toBe(true);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
+		const [, secondCallOptions] = fetchMock.mock.calls[1] as [string, RequestInit];
+		expect(new Headers(secondCallOptions.headers).get("Authorization")).toBe("Bearer expired-token");
+		const [, fourthCallOptions] = fetchMock.mock.calls[3] as [string, RequestInit];
+		expect(new Headers(fourthCallOptions.headers).get("Authorization")).toBe("Bearer refreshed-token");
+	});
 });

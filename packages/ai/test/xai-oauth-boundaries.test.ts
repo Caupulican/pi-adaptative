@@ -27,6 +27,10 @@ describe("xAI OAuth input and cancellation boundaries", () => {
 		// The shared margin retains half of a short token's lifetime; immediate expiry caused refresh churn.
 		expect(await refreshXaiToken("refresh")).toEqual({ access: "access", refresh: "refresh", expires: 1_030_000 });
 		expect(fetch.mock.calls[0]?.[1]?.redirect).toBe("error");
+		expect(fetch.mock.calls[0]?.[1]?.headers).toMatchObject({
+			"x-grok-client-surface": "cli",
+			"x-grok-client-version": "1.0.34",
+		});
 	});
 	it("does not request or display a device code after pre-abort", async () => {
 		const controller = new AbortController();

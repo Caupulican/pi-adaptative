@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Added
+
+- Pass HTTP status codes from Antigravity inference failures and propagate `onAuthRejection` recovery across xAI, Claude, and Antigravity streams.
+- Union branch selection scores non-discriminator property signatures to target discriminator-less schemas during tool-call repair.
+
+### Fixed
+
+- Recover from 401 authorization rejection during stream creation across xAI, Claude, and Antigravity by requesting a replacement token and retrying once.
+- Tool-repair schema traversal resolves into `anyOf`/`oneOf`/`allOf` union branches, enabling stringified JSON repair for union parameter schemas.
+- xAI OAuth token requests and refreshes include the full 10-scope set matching Grok CLI 1.0.34 and pass device flow headers.
+
 ## [0.99.28] - 2026-09-18
 
 ### Added

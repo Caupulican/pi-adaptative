@@ -694,4 +694,42 @@ describe("discriminated unions", () => {
 			},
 		]);
 	});
+
+	it("repairs stringified JSON array in discriminator-less union branch", () => {
+		const editTool: Tool = {
+			name: "edit",
+			description: "edit file",
+			parameters: Type.Union([
+				Type.Object({
+					path: Type.String(),
+					edits: Type.Array(
+						Type.Object({
+							oldText: Type.String(),
+							newText: Type.String(),
+						}),
+					),
+				}),
+				Type.Object({
+					path: Type.String(),
+					payloadRef: Type.String(),
+				}),
+			]),
+		};
+
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "call-edit-1",
+			name: "edit",
+			arguments: {
+				path: "test.txt",
+				edits: '[{"oldText":"foo","newText":"bar"}]' as unknown as Array<{ oldText: string; newText: string }>,
+			},
+		};
+
+		const validated = validateToolArguments(editTool, toolCall);
+		expect(validated).toEqual({
+			path: "test.txt",
+			edits: [{ oldText: "foo", newText: "bar" }],
+		});
+	});
 });

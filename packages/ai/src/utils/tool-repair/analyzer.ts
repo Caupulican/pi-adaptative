@@ -135,6 +135,20 @@ export function resolveSchemaAtPath(
 			cursor = cursor.properties[segment];
 			continue;
 		}
+		const unionBranches: JsonSchemaObject[] = [
+			...(cursor.anyOf ?? []),
+			...(cursor.oneOf ?? []),
+			...(cursor.allOf ?? []),
+		];
+		if (unionBranches.length > 0) {
+			const matchingBranch = unionBranches.find((branch: JsonSchemaObject) =>
+				isJsonSchemaObject(branch.properties?.[segment]),
+			);
+			if (matchingBranch && isJsonSchemaObject(matchingBranch.properties?.[segment])) {
+				cursor = matchingBranch.properties[segment];
+				continue;
+			}
+		}
 		if (Array.isArray(cursor.items)) {
 			const index = Number(segment);
 			cursor = Number.isInteger(index) ? cursor.items[index] : undefined;

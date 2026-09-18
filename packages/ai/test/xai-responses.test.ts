@@ -97,6 +97,46 @@ describe.each(["grok-4.5", "grok-4.6"] as const)("xAI Responses lane (%s)", (mod
 		expect(headers.get("authorization")).toBe("Bearer test-key-123");
 	});
 
+	it("recovers from 401 using onAuthRejection and retries once with the replacement key", async () => {
+		const originalFetch = globalThis.fetch;
+		const capturedAuthHeaders: string[] = [];
+		let callCount = 0;
+		globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+			callCount++;
+			const headers = new Headers(init?.headers);
+			const auth = headers.get("authorization");
+			if (auth) capturedAuthHeaders.push(auth);
+			if (callCount === 1) {
+				return new Response(JSON.stringify({ error: { message: "Invalid token" } }), {
+					status: 401,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return completedResponsesSse();
+		}) as typeof fetch;
+
+		try {
+			let rejectionEvent: { providerId: string; status: 401; attempt: number } | undefined;
+			const result = await streamOpenAIResponses(getModel("xai", modelId), context, {
+				apiKey: "initial-rejected-key",
+				onAuthRejection: async (event) => {
+					rejectionEvent = event;
+					return "replacement-clean-key";
+				},
+			}).result();
+
+			expect(rejectionEvent).toEqual({
+				providerId: "xai",
+				status: 401,
+				attempt: 1,
+			});
+			expect(capturedAuthHeaders).toEqual(["Bearer initial-rejected-key", "Bearer replacement-clean-key"]);
+			expect(result.stopReason).toBe("stop");
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
 	it("does not send Grok CLI proxy headers to the public API", async () => {
 		const { headers } = await captureResponsesRequest(modelId, { apiKey: "test-key-123" });
 		expect(headers.get("x-xai-token-auth")).toBeNull();

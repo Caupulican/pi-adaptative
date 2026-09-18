@@ -6,7 +6,8 @@ import { parseOAuthTokenCredentials } from "./token-credentials.ts";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthProviderInterface } from "./types.ts";
 
 const XAI_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
-const XAI_SCOPE = "openid profile email offline_access grok-cli:access api:access";
+const XAI_SCOPE =
+	"openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write";
 const XAI_DEVICE_CODE_URL = "https://auth.x.ai/oauth2/device/code";
 const XAI_TOKEN_URL = "https://auth.x.ai/oauth2/token";
 const DEFAULT_TOKEN_LIFETIME_SECONDS = 3600;
@@ -199,12 +200,19 @@ export async function loginXai(callbacks: OAuthLoginCallbacks): Promise<OAuthCre
 	return pollForTokens(device, callbacks.signal);
 }
 
-export async function refreshXaiToken(refreshToken: string): Promise<OAuthCredentials> {
-	const response = await postForm(XAI_TOKEN_URL, {
-		grant_type: "refresh_token",
-		client_id: XAI_CLIENT_ID,
-		refresh_token: refreshToken,
-	});
+export async function refreshXaiToken(
+	refreshToken: string,
+	options?: { signal?: AbortSignal },
+): Promise<OAuthCredentials> {
+	const response = await postForm(
+		XAI_TOKEN_URL,
+		{
+			grant_type: "refresh_token",
+			client_id: XAI_CLIENT_ID,
+			refresh_token: refreshToken,
+		},
+		{ signal: options?.signal, headers: XAI_DEVICE_FLOW_HEADERS },
+	);
 	if (!response.ok) throw requestFailure("token refresh", response);
 	return credentialsFromTokenResponse(response.body, refreshToken);
 }

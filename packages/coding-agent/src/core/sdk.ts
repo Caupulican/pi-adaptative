@@ -10,6 +10,7 @@ import {
 	type ServiceTier,
 	streamSimple,
 } from "@caupulican/pi-ai";
+import { getOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { configFile } from "./agent-paths.ts";
@@ -501,7 +502,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				onInteractiveAuthRecovery: options?.onInteractiveAuthRecovery ?? recoverBedrockSsoAuthentication,
 				apiKey: auth.apiKey,
 				onAuthRejection:
-					auth.apiKey && model.provider === "openai-codex"
+					auth.apiKey && (model.provider === "openai-codex" || getOAuthProvider(model.provider) !== undefined)
 						? async () => modelRegistry.recoverRejectedOAuthApiKey(model.provider, auth.apiKey as string)
 						: options?.onAuthRejection,
 				timeoutMs,

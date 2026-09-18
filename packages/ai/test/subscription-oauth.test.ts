@@ -121,10 +121,10 @@ describe("subscription OAuth providers", () => {
 			expect(requests[0].url).toBe("https://auth.x.ai/oauth2/device/code");
 			expect(requests[0].fields).toEqual({
 				client_id: "b1a00492-073a-47ea-816f-4c329264a828",
-				scope: "openid profile email offline_access grok-cli:access api:access",
+				scope: "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write",
 				referrer: "pi",
 			});
-			for (const request of requests.slice(0, 4)) {
+			for (const request of requests) {
 				expect(request.headers.get("x-grok-client-version")).toBe("1.0.34");
 				expect(request.headers.get("x-grok-client-surface")).toBe("cli");
 				expect(request.headers.get("content-type")).toBe("application/x-www-form-urlencoded");
@@ -145,7 +145,6 @@ describe("subscription OAuth providers", () => {
 				client_id: "b1a00492-073a-47ea-816f-4c329264a828",
 				refresh_token: "refresh",
 			});
-			expect(requests[4].headers.get("x-grok-client-surface")).toBeNull();
 		} finally {
 			vi.useRealTimers();
 		}
@@ -173,30 +172,37 @@ describe("subscription OAuth providers", () => {
 	});
 
 	it("falls back to the poller default interval when the server sends interval: 0", async () => {
-		let deviceCode: OAuthDeviceCodeInfo | undefined;
-		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-			const url = String(input);
-			if (url.endsWith("/device/code")) {
-				return Response.json({
-					device_code: "device",
-					user_code: "ABCD-EFGH",
-					verification_uri: "https://auth.x.ai/activate",
-					interval: 0,
-					expires_in: 600,
-				});
-			}
-			return Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 3600 });
-		});
+		vi.useFakeTimers();
+		try {
+			let deviceCode: OAuthDeviceCodeInfo | undefined;
+			vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+				const url = String(input);
+				if (url.endsWith("/device/code")) {
+					return Response.json({
+						device_code: "device",
+						user_code: "ABCD-EFGH",
+						verification_uri: "https://auth.x.ai/activate",
+						interval: 0,
+						expires_in: 600,
+					});
+				}
+				return Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 3600 });
+			});
 
-		await xaiOAuthProvider.login(
-			callbacks({
-				onDeviceCode: (info) => {
-					deviceCode = info;
-				},
-			}),
-		);
-		// interval: 0 is not a usable poll interval; the device-code poller falls back to its own default.
-		expect(deviceCode?.intervalSeconds).toBeUndefined();
+			const loginPromise = xaiOAuthProvider.login(
+				callbacks({
+					onDeviceCode: (info) => {
+						deviceCode = info;
+					},
+				}),
+			);
+			await vi.advanceTimersByTimeAsync(5000);
+			await loginPromise;
+			// interval: 0 is not a usable poll interval; the device-code poller falls back to its own default.
+			expect(deviceCode?.intervalSeconds).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("defaults token expiry to 3600s when the token response omits expires_in", async () => {

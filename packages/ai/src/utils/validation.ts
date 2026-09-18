@@ -504,11 +504,45 @@ export function selectUnionBranch(schema: unknown, args: unknown): Record<string
 	const record = asRecord(args);
 	if (!root || !record) return undefined;
 	const discriminators = unionDiscriminators(root);
-	if (!discriminators) return undefined;
-	for (const { key, alternatives } of discriminators) {
-		const matches = alternatives.filter((alternative) => alternative.value === record[key]);
-		if (matches.length === 1) return matches[0]?.schema;
+	if (discriminators) {
+		for (const { key, alternatives } of discriminators) {
+			const matches = alternatives.filter((alternative) => alternative.value === record[key]);
+			if (matches.length === 1) return matches[0]?.schema;
+		}
 	}
+
+	const alternatives = schemaAlternatives(root)
+		.map(asRecord)
+		.filter((alt): alt is Record<string, unknown> => alt !== undefined);
+	if (alternatives.length >= 2) {
+		const argKeys = Object.keys(record);
+		const candidates = alternatives.map((alt) => {
+			const properties = asRecord(alt.properties) ?? {};
+			const altPropKeys = Object.keys(properties);
+			const uniqueToThisBranch = altPropKeys.filter((k) =>
+				alternatives.some((other) => other !== alt && !asRecord(other.properties)?.[k]),
+			);
+			const matchedUnique = uniqueToThisBranch.filter((k) => argKeys.includes(k));
+			const forbiddenMatched = argKeys.filter(
+				(k) => alt.additionalProperties === false && properties[k] === undefined,
+			);
+			return {
+				alt,
+				score: matchedUnique.length,
+				hasForbidden: forbiddenMatched.length > 0,
+			};
+		});
+
+		const viable = candidates.filter((c) => c.score > 0 && !c.hasForbidden);
+		if (viable.length === 1 && viable[0]) {
+			return viable[0].alt;
+		}
+		const sorted = candidates.filter((c) => c.score > 0).sort((a, b) => b.score - a.score);
+		if (sorted.length > 0 && sorted[0] && (sorted.length === 1 || sorted[0].score > (sorted[1]?.score ?? 0))) {
+			return sorted[0].alt;
+		}
+	}
+
 	return undefined;
 }
 

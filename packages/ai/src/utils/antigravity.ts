@@ -40,7 +40,11 @@ export async function antigravityRequest(
 		redirect: "error",
 		signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
 	});
-	if (!response.ok) throw new Error(`Antigravity ${method} failed (HTTP ${response.status})`);
+	if (!response.ok) {
+		const error = new Error(`Antigravity ${method} failed (HTTP ${response.status})`);
+		(error as Error & { status?: number }).status = response.status;
+		throw error;
+	}
 	return antigravityObject(await response.json());
 }
 

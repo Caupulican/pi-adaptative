@@ -42,6 +42,7 @@ import {
 	createAssistantMessage,
 	createProviderRetryOptions,
 	createRetryFreeRequestOptions,
+	executeWithAuthRecovery,
 	mapStandardThinkingEffort,
 	resolveCacheRetention,
 	terminateAssistantStreamWithError,
@@ -512,17 +513,16 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 		try {
 			let client: Anthropic;
 			let isOAuth: boolean;
+			let apiKey = options?.apiKey;
+			let copilotDynamicHeaders: Record<string, string> | undefined;
+			const cacheRetention = options?.cacheRetention ?? resolveCacheRetention();
+			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 
-			if (options?.client) {
-				client = options.client;
-				isOAuth = false;
-			} else {
-				const apiKey = options?.apiKey;
-				if (!apiKey && !hasAuthorizationHeader(model.headers, options?.headers)) {
+			const initClient = (key: string | undefined) => {
+				if (!key && !hasAuthorizationHeader(model.headers, options?.headers)) {
 					throw new Error(`No API key for provider: ${model.provider}`);
 				}
 
-				let copilotDynamicHeaders: Record<string, string> | undefined;
 				if (model.provider === "github-copilot") {
 					const hasImages = hasCopilotVisionInput(context.messages);
 					copilotDynamicHeaders = buildCopilotDynamicHeaders({
@@ -531,35 +531,61 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					});
 				}
 
-				const cacheRetention = options?.cacheRetention ?? resolveCacheRetention();
-				const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-
-				const created = createClient(
+				return createClient(
 					model,
-					apiKey,
+					key,
 					options?.interleavedThinking ?? true,
 					shouldUseFineGrainedToolStreamingBeta(model, context),
 					options?.headers,
 					copilotDynamicHeaders,
 					cacheSessionId,
 				);
+			};
+
+			if (options?.client) {
+				client = options.client;
+				isOAuth = false;
+			} else {
+				const created = initClient(apiKey);
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
-			const toolNameMap = createToolNameMap(
+			let toolNameMap = createToolNameMap(
 				context.tools ?? [],
 				isOAuth ? { normalizeName: toClaudeCodeName } : undefined,
 			);
-			const params = await applyProviderPayloadHook(
+			let params = await applyProviderPayloadHook(
 				buildParams(model, context, isOAuth, toolNameMap, options),
 				model,
 				options?.onPayload,
 			);
 			const requestOptions = createRetryFreeRequestOptions(options);
-			const response = await retryProviderRequest(
-				() => client.messages.create({ ...params, stream: true }, requestOptions).asResponse(),
-				createProviderRetryOptions(options),
-			);
+			const retryOptions = createProviderRetryOptions(options);
+
+			const executeCreate = (c: Anthropic, p: typeof params) =>
+				retryProviderRequest(
+					() => c.messages.create({ ...p, stream: true }, requestOptions).asResponse(),
+					retryOptions,
+				);
+
+			const response = await executeWithAuthRecovery(model.provider, options, async (replacementKey) => {
+				if (replacementKey) {
+					apiKey = replacementKey;
+					const created = initClient(apiKey);
+					client = created.client;
+					isOAuth = created.isOAuthToken;
+					toolNameMap = createToolNameMap(
+						context.tools ?? [],
+						isOAuth ? { normalizeName: toClaudeCodeName } : undefined,
+					);
+					params = await applyProviderPayloadHook(
+						buildParams(model, context, isOAuth, toolNameMap, options),
+						model,
+						options?.onPayload,
+					);
+				}
+				return executeCreate(client, params);
+			});
 			appendAnthropicSubscriptionRateLimitDiagnostics(output, response.headers);
 			await beginAssistantResponseStream(stream, output, response, model, options?.onResponse);
 

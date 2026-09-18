@@ -30,6 +30,7 @@ import {
 	applyProviderPayloadHook,
 	completeAssistantStream,
 	createAssistantMessage,
+	executeWithAuthRecovery,
 	finishTextOrThinkingBlock,
 	terminateAssistantStreamWithError,
 } from "./provider-runtime.ts";
@@ -65,13 +66,21 @@ export function streamGoogleGenAi<TApi extends GoogleApiType>(
 		const output = createAssistantMessage(model);
 
 		try {
-			const client = createClient();
+			let client = createClient();
 			const params = await applyProviderPayloadHook(
 				buildGoogleGenerateContentParameters(model, context, options),
 				model,
 				options?.onPayload,
 			);
-			const googleStream = await client.models.generateContentStream(params);
+			const googleStream = await executeWithAuthRecovery(model.provider, options, async (replacementKey) => {
+				if (replacementKey) {
+					if (options) {
+						options.apiKey = replacementKey;
+					}
+					client = createClient();
+				}
+				return client.models.generateContentStream(params);
+			});
 			const toolNameMap = createToolNameMap(context.tools ?? []);
 
 			stream.push({ type: "start", partial: output });

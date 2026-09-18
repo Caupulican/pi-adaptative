@@ -30,6 +30,7 @@ import {
 	createAssistantMessage,
 	createProviderRetryOptions,
 	createRetryFreeRequestOptions,
+	executeWithAuthRecovery,
 	resolveCacheRetention,
 	terminateAssistantStreamWithError,
 } from "./provider-runtime.ts";
@@ -86,14 +87,14 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 
 		try {
 			// Create OpenAI client
-			const apiKey = options?.apiKey;
+			let apiKey = options?.apiKey;
 			if (!apiKey) {
 				throw new Error(`No API key for provider: ${model.provider}`);
 			}
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const compat = getCompat(model);
-			const client = createOpenAIClient(model, apiKey, {
+			let client = createOpenAIClient(model, apiKey, {
 				baseUrl: resolveBaseUrl(model),
 				context,
 				callerHeaders: options?.headers,
@@ -107,10 +108,28 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				options,
 				model.provider === "fugu" ? FUGU_DEFAULT_TIMEOUT_MS : undefined,
 			);
-			const { data: openaiStream, response } = await retryProviderRequest(
-				() => client.responses.create(params, requestOptions).withResponse(),
-				createProviderRetryOptions(options, model.provider === "fugu" ? FUGU_DEFAULT_MAX_RETRIES : 0),
+			const retryOptions = createProviderRetryOptions(
+				options,
+				model.provider === "fugu" ? FUGU_DEFAULT_MAX_RETRIES : 0,
 			);
+			const executeCreate = () =>
+				retryProviderRequest(() => client.responses.create(params, requestOptions).withResponse(), retryOptions);
+
+			const responseData = await executeWithAuthRecovery(model.provider, options, (replacementKey) => {
+				if (replacementKey) {
+					apiKey = replacementKey;
+					client = createOpenAIClient(model, apiKey, {
+						baseUrl: resolveBaseUrl(model),
+						context,
+						callerHeaders: options?.headers,
+						session: cacheSessionId
+							? { id: cacheSessionId, format: compat.sessionAffinityFormat, includeLegacyAffinity: false }
+							: undefined,
+					});
+				}
+				return executeCreate();
+			});
+			const { data: openaiStream, response } = responseData;
 			await beginAssistantResponseStream(stream, output, response, model, options?.onResponse);
 
 			await processResponsesStream(openaiStream, output, stream, model, {
