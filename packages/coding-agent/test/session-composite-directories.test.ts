@@ -116,26 +116,39 @@ describe("composite tools consume admitted task context", () => {
 			expect(probes.toolkit).not.toHaveBeenCalled();
 			expect(probes.scout).not.toHaveBeenCalled();
 			const invocation = await tool.bindInvocation!("active", params, abort.signal);
-			const execution = invocation.execute("active", params, abort.signal);
+			const execution = invocation.execute("active", params, abort.signal).then(
+				(result) => ({ status: "fulfilled" as const, result }),
+				(error: unknown) => ({ status: "rejected" as const, error }),
+			);
 			await started.promise;
-			let selected = false;
-			const selection = directory.execute("switch", { action: "select", workspaceId: "session" }).then(() => {
-				selected = true;
-			});
+			let reattached = false;
+			const reattachment = directory
+				.execute("reattach", { action: "reattach", workspaceId: "project", path: project })
+				.then(() => {
+					reattached = true;
+				});
 			try {
 				abort.abort();
 				await cancelled.promise;
-				expect(selected).toBe(false);
+				expect(reattached).toBe(false);
 				expect(invocation.executionContext.cwd).toBe(project);
 				finished.resolve();
-				await execution;
-				expect(selected).toBe(false);
+				const outcome = await execution;
+				if (name === "run_toolkit_script") {
+					expect(outcome).toMatchObject({
+						status: "rejected",
+						error: { name: "AgentToolExecutionError", failureCode: "aborted", errorKind: "tool_failure" },
+					});
+				} else expect(outcome.status).toBe("fulfilled");
+				expect(reattached).toBe(false);
 			} finally {
 				finished.resolve();
 				await execution;
 				invocation.release();
 			}
-			await selection;
+			await reattachment;
+			expect(reattached).toBe(true);
+			await directory.execute("switch", { action: "select", workspaceId: "session" });
 			const next = await tool.bindInvocation!("next", params);
 			try {
 				expect(next.executionContext.cwd).toBe(harness.tempDir);
