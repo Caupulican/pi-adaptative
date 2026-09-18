@@ -118,13 +118,31 @@ describe("tool batch terminal settlement", () => {
 		expect(outcome).not.toHaveProperty("error");
 		if (!("messages" in outcome)) return;
 		const results = outcome.messages.filter((message) => message.role === "toolResult");
-		const expected = fault === "control" ? calls : ["fast", "held"];
-		expect(results.map((message) => message.toolCallId)).toEqual(expected);
-		expect(effects.sort()).toEqual([...expected].sort());
-		expect(results.every((message) => !message.isError)).toBe(true);
-		for (const result of results) {
-			expect(result.details).toMatchObject({
-				piToolInvocation: { execution: "completed", operationStatus: "success", postprocessingFailures: [] },
+		const expectedCalls = fault === "control" ? calls : ["fast", "held", "refill"];
+		const expectedEffects = fault === "control" ? calls : ["fast", "held"];
+		expect(results.map((message) => message.toolCallId)).toEqual(expectedCalls);
+		expect(effects.sort()).toEqual([...expectedEffects].sort());
+		if (fault === "control") {
+			expect(results.every((message) => !message.isError)).toBe(true);
+			for (const result of results) {
+				expect(result.details).toMatchObject({
+					piToolInvocation: { execution: "completed", operationStatus: "success", postprocessingFailures: [] },
+				});
+			}
+		} else {
+			const completed = results.filter((message) => message.toolCallId !== "refill");
+			expect(completed.every((message) => !message.isError)).toBe(true);
+			for (const result of completed) {
+				expect(result.details).toMatchObject({
+					piToolInvocation: { execution: "completed", operationStatus: "success", postprocessingFailures: [] },
+				});
+			}
+			const abandoned = results.find((message) => message.toolCallId === "refill");
+			expect(abandoned).toMatchObject({
+				isError: true,
+				details: {
+					piToolInvocation: { execution: "not_started", failureCode: "aborted" },
+				},
 			});
 		}
 		expect(outcome.messages).toEqual(
