@@ -223,7 +223,7 @@ export class ForegroundLifecycleController {
 	private async onToolCallStart(
 		calls: readonly ToolCallStartContext[],
 		signal?: AbortSignal,
-	): Promise<ToolCallStartReservation | void> {
+	): Promise<ToolCallStartReservation | undefined> {
 		if (calls.length === 0) return;
 		signal?.throwIfAborted();
 		const requestId = calls[0]!.requestId;

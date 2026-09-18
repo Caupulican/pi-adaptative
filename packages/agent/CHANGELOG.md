@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- Last-resort batch cleanup preserves already published tool results and carries cleanup failures alongside the original batch failure instead of overriding its return.
 - Tool-recovery instructions acknowledge the host's unspent retry allowance, so the shared protocol no longer contradicts immediate timeout-retry guidance.
 - Tool preparation reserves retry credit until executor entry and refunds abandoned preparation; cleanup also releases bound invocations if background selection throws before execution starts.
 - Tool-start hooks can return per-call resource leases. Abandoned preparation releases these before waiting for running siblings; detached execution keeps its lease through real finalization.

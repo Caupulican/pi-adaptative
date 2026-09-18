@@ -1072,19 +1072,28 @@ async function executeToolCalls(
 		signal,
 		emit,
 	};
+	let batch: ExecutedToolCallBatch;
 	try {
-		const batch =
+		batch =
 			config.toolExecution === "sequential" || isToolParallelismDisabled()
 				? await executeToolCallsSequential(execCtx, toolCalls)
 				: await executeToolCallsPartitioned(execCtx, toolCalls);
 		if (!execCtx.validationBounced) resetValidationFailureTracker(validationFailureTracker);
-		return batch;
 	} catch (cause) {
-		return { messages: execCtx.messages, terminate: true, failure: { cause } };
-	} finally {
-		const releaseErrors = releasePendingPreparations(execCtx);
-		if (releaseErrors.length > 0) throw new AggregateError(releaseErrors, "Prepared tool cleanup failed");
+		batch = { messages: execCtx.messages, terminate: true, failure: { cause } };
 	}
+	const releaseErrors = releasePendingPreparations(execCtx);
+	if (releaseErrors.length > 0) {
+		// Cleanup cannot replace a returned batch: the parent still needs its completed messages.
+		// Test the failure envelope, not its cause, because throwing undefined is still a failure.
+		const causes = batch.failure ? [batch.failure.cause, ...releaseErrors] : releaseErrors;
+		batch = {
+			...batch,
+			terminate: true,
+			failure: { cause: new AggregateError(causes, "Prepared tool cleanup failed") },
+		};
+	}
+	return batch;
 }
 
 function releasePendingPreparations(execCtx: ToolExecutionContext): unknown[] {
@@ -1284,7 +1293,10 @@ async function executeBarrierToolCall(
 		try {
 			await reservePreparedToolCalls(execCtx, [{ preparation: started.preparation, index }]);
 		} catch (cause) {
-			started = { kind: "finalized", finalized: finalizeAbandonedPreparedToolCall(execCtx, started.preparation, cause) };
+			started = {
+				kind: "finalized",
+				finalized: finalizeAbandonedPreparedToolCall(execCtx, started.preparation, cause),
+			};
 		}
 	}
 	const finalized = await finalizeStartedToolCall(execCtx, started);
@@ -1430,9 +1442,15 @@ async function pooledExecuteToolCalls(
 	const settle = async (slot: number, finalized: FinalizedToolCallOutcome): Promise<void> => {
 		results[slot] = finalized;
 		if (finalized.batchFailure) {
-			failure = failure && failure.cause !== finalized.batchFailure.cause
-				? { cause: new AggregateError([failure.cause, finalized.batchFailure.cause], "Tool batch startup failed") }
-				: finalized.batchFailure;
+			failure =
+				failure && failure.cause !== finalized.batchFailure.cause
+					? {
+							cause: new AggregateError(
+								[failure.cause, finalized.batchFailure.cause],
+								"Tool batch startup failed",
+							),
+						}
+					: finalized.batchFailure;
 		}
 		drainGateApply();
 		await emitToolExecutionEnd(finalized, execCtx.emit);
@@ -1487,7 +1505,11 @@ async function pooledExecuteToolCalls(
 		// their own completion cleanup, including detached background work.
 		const abandoned = [...undispatched].map(([slot, prepared]) => ({
 			slot,
-			finalized: finalizeAbandonedPreparedToolCall(execCtx, prepared, failure ? failure.cause : execCtx.signal?.reason),
+			finalized: finalizeAbandonedPreparedToolCall(
+				execCtx,
+				prepared,
+				failure ? failure.cause : execCtx.signal?.reason,
+			),
 		}));
 		undispatched.clear();
 		for (const { slot, finalized } of abandoned) {
@@ -2723,9 +2745,8 @@ async function finalizeExecutedToolCall(
 
 	const repaired = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
 	const projectedDetails = detailsWithoutVerification(repaired.result.details);
-	const executorFailureIdentity = executed.failureCode === undefined
-		? {}
-		: { failureCode: boundedFailureCode(executed.failureCode) };
+	const executorFailureIdentity =
+		executed.failureCode === undefined ? {} : { failureCode: boundedFailureCode(executed.failureCode) };
 	const invocationDetails = stampToolInvocation(projectedDetails, {
 		version: 1,
 		requestId,

@@ -321,7 +321,7 @@ export interface ToolCallStartReservation {
 export type ToolCallStartHook = (
 	calls: readonly ToolCallStartContext[],
 	signal?: AbortSignal,
-) => void | ToolCallStartReservation | Promise<void | ToolCallStartReservation>;
+) => void | ToolCallStartReservation | Promise<void> | Promise<ToolCallStartReservation | undefined>;
 
 /** Context passed to `shouldStopAfterTurn`. */
 export interface ShouldStopAfterTurnContext {
