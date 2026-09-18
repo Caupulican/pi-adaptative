@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Worker checkpoints retain the originating execution lease, preventing late callbacks from recording progress under a resumed worker's generation.
 - Incomplete toolkit executions retain bounded stdout/stderr evidence and artifact references through mandatory failure projection, while remaining unknown execution outcomes.
 - Background handoff resolves its mutation scope before registration, keeping completion ownership in the foreground if the scope dependency fails.
 - Toolkit nonzero exits and deadlines use native operation-outcome recovery; missing exit evidence remains an execution failure. Cancellation cannot turn a cooperative zero exit into script success.

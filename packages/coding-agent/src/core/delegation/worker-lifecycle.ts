@@ -291,7 +291,7 @@ export class WorkerLifecycle {
 	}
 
 	checkpoint(
-		laneId: string,
+		handle: Pick<StartedDelegationAttempt, "attemptId" | "leaseId" | "fencingToken">,
 		input: {
 			summary: string;
 			artifactIds?: readonly string[];
@@ -299,12 +299,12 @@ export class WorkerLifecycle {
 			usage?: AttemptUsageSnapshot;
 		},
 	) {
-		const attempt = this.requireActiveAttempt(laneId);
-		if (!attempt.lease) throw new Error(`Durable worker '${laneId}' has no live lease.`);
+		// Preserve the caller's execution generation. Resolving the lane's current lease here
+		// would let a callback from before suspension checkpoint under a resumed worker's fence.
 		return this.ledger.runtime.checkpointAttempt({
-			attemptId: attempt.attemptId,
-			leaseId: attempt.lease.leaseId,
-			fencingToken: attempt.lease.fencingToken,
+			attemptId: handle.attemptId,
+			leaseId: handle.leaseId,
+			fencingToken: handle.fencingToken,
 			summary: input.summary,
 			...(input.artifactIds ? { artifactIds: input.artifactIds } : {}),
 			...(input.evidenceIds ? { evidenceIds: input.evidenceIds } : {}),

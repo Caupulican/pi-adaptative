@@ -290,7 +290,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		);
 	const checkpointUsage = (summary: string): AttemptUsageSnapshot => {
 		const usage = currentUsage();
-		options.lifecycle.checkpoint(options.laneId, { summary, usage });
+		options.lifecycle.checkpoint(options.durableHandle, { summary, usage });
 		return usage;
 	};
 	options.toolSurface.toolUsage.bindCheckpoint(() => {

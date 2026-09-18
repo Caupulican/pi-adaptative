@@ -170,7 +170,7 @@ describe("WorkerLifecycle", () => {
 			}),
 		);
 		const first = lifecycle.startAgent(prepared.record.laneId, agent.agentId, profile.leaseTtlMs);
-		const checkpoint = lifecycle.checkpoint(prepared.record.laneId, { summary: "Repository inspected" });
+		const checkpoint = lifecycle.checkpoint(first, { summary: "Repository inspected" });
 		expect(lifecycle.getTaskRuntimeSnapshot()).toMatchObject({
 			attempts: { [first.attemptId]: { agentId: agent.agentId, checkpointIds: [checkpoint.checkpointId] } },
 			agents: { [agent.agentId]: { resumeContext: { latestCheckpointId: checkpoint.checkpointId } } },
@@ -182,6 +182,9 @@ describe("WorkerLifecycle", () => {
 
 		expect(lifecycle.suspendBoundInProcessAttemptsForRestart(agent.agentId)).toEqual([first.attemptId]);
 		expect(lifecycle.suspendBoundInProcessAttemptsForRestart(agent.agentId)).toEqual([]);
+		const suspendedState = structuredClone(lifecycle.getTaskRuntimeSnapshot());
+		expect(() => lifecycle.checkpoint(first, { summary: "Late suspended callback" })).toThrow("not running");
+		expect(lifecycle.getTaskRuntimeSnapshot()).toEqual(suspendedState);
 		// Suspension is a resumable ownership state, not a terminal failure and not a runnable lease.
 		expect(lifecycle.getRecord(prepared.record.laneId)).toMatchObject({ status: "running" });
 		expect(lifecycle.getPendingTerminalNotifications()).toEqual([]);
@@ -194,6 +197,17 @@ describe("WorkerLifecycle", () => {
 			status: "running",
 			lease: { fencingToken: resumed.fencingToken },
 		});
+		const resumedState = structuredClone(lifecycle.getTaskRuntimeSnapshot());
+		expect(() => lifecycle.checkpoint(first, { summary: "Late previous-generation callback" })).toThrow(
+			"lease or fencing token is stale",
+		);
+		expect(lifecycle.getTaskRuntimeSnapshot()).toEqual(resumedState);
+		const currentCheckpoint = lifecycle.checkpoint(resumed, { summary: "Current generation progress" });
+		expect(currentCheckpoint.fencingToken).toBe(resumed.fencingToken);
+		expect(lifecycle.getActiveAttempt(prepared.record.laneId)?.checkpointIds).toEqual([
+			checkpoint.checkpointId,
+			currentCheckpoint.checkpointId,
+		]);
 	});
 
 	it("renews a live attempt lease without changing its ownership fence", () => {
@@ -229,7 +243,7 @@ describe("WorkerLifecycle", () => {
 			expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(Date.parse(originalExpiresAt));
 
 			vi.advanceTimersByTime(500);
-			expect(() => lifecycle.checkpoint(prepared.record.laneId, { summary: "long call completed" })).not.toThrow();
+			expect(() => lifecycle.checkpoint(handle, { summary: "long call completed" })).not.toThrow();
 			expect(() => lifecycle.finish(resultFor(handle))).not.toThrow();
 		} finally {
 			vi.useRealTimers();
