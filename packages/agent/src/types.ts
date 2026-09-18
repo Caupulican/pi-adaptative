@@ -321,6 +321,7 @@ export interface ToolCallStartReservation {
 export type ToolCallStartHook = (
 	calls: readonly ToolCallStartContext[],
 	signal?: AbortSignal,
+	// biome-ignore lint/suspicious/noConfusingVoidType: Hooks returning Promise<void> must compose with reservation-returning branches; undefined would reject that valid union.
 ) => void | ToolCallStartReservation | Promise<void | ToolCallStartReservation>;
 
 /** Context passed to `shouldStopAfterTurn`. */

@@ -8,6 +8,7 @@ describe("tool start hook return contract", () => {
 
 	it.each([false, true])("accepts a mixed async void/reservation return: reserve=%s", async (reserve) => {
 		const reservation: ToolCallStartReservation = { release: vi.fn() };
+		// biome-ignore lint/suspicious/noConfusingVoidType: Explicit void reproduces the rejected mixed async result; undefined would miss the regression.
 		const noReservation: void = undefined;
 		// This assignment must type-check as well as run: Promise<void | Reservation>
 		// is a valid hook, not just Promise<void> or Promise<Reservation> separately.
