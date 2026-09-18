@@ -69,6 +69,7 @@ import type {
 	StreamFn,
 	ToolCallRepairInfo,
 	ToolCallStartContext,
+	ToolCallStartReservation,
 } from "./types.ts";
 import {
 	DEFAULT_MAX_PROVIDER_TURNS,
@@ -1081,16 +1082,22 @@ async function executeToolCalls(
 	} catch (cause) {
 		return { messages: execCtx.messages, terminate: true, failure: { cause } };
 	} finally {
-		const releaseErrors: unknown[] = [];
-		for (const release of execCtx.pendingPreparations) {
-			try {
-				release();
-			} catch (error) {
-				releaseErrors.push(error);
-			}
-		}
+		const releaseErrors = releasePendingPreparations(execCtx);
 		if (releaseErrors.length > 0) throw new AggregateError(releaseErrors, "Prepared tool cleanup failed");
 	}
+}
+
+function releasePendingPreparations(execCtx: ToolExecutionContext): unknown[] {
+	const errors: unknown[] = [];
+	for (const release of execCtx.pendingPreparations) {
+		execCtx.pendingPreparations.delete(release);
+		try {
+			release();
+		} catch (error) {
+			errors.push(error);
+		}
+	}
+	return errors;
 }
 
 type ExecutedToolCallBatch = {
@@ -1164,21 +1171,34 @@ async function finalizeStartedToolCall(
 	started: StartedToolCall,
 ): Promise<FinalizedToolCallOutcome> {
 	if (started.kind === "finalized") return started.finalized;
-	return executeAndFinalizePreparedToolCall(
-		execCtx.context,
-		execCtx.assistantMessage,
-		started.preparation,
-		execCtx.requestId,
-		execCtx.config,
-		execCtx.repairTeachTracker,
-		execCtx.toolFailureMemory,
-		execCtx.toolFailureRecoveryGate,
-		execCtx.signal,
-		execCtx.emit,
-		() => {
-			execCtx.pendingPreparations.delete(started.preparation.release);
-		},
-	);
+	try {
+		return await executeAndFinalizePreparedToolCall(
+			execCtx.context,
+			execCtx.assistantMessage,
+			started.preparation,
+			execCtx.requestId,
+			execCtx.config,
+			execCtx.repairTeachTracker,
+			execCtx.toolFailureMemory,
+			execCtx.toolFailureRecoveryGate,
+			execCtx.signal,
+			execCtx.emit,
+			() => {
+				execCtx.pendingPreparations.delete(started.preparation.release);
+			},
+		);
+	} catch (cause) {
+		// Release startup failures before the pool drains siblings: one may be waiting on this
+		// call's host reservation. A running or handed-off call owns its own completion cleanup.
+		if (execCtx.pendingPreparations.delete(started.preparation.release)) {
+			try {
+				started.preparation.release();
+			} catch (cleanup) {
+				throw new AggregateError([cause, cleanup], "Tool startup and cleanup failed");
+			}
+		}
+		throw cause;
+	}
 }
 
 async function reservePreparedToolCalls(
@@ -1202,7 +1222,13 @@ async function reservePreparedToolCalls(
 			context: execCtx.context,
 			executionContext: prepared.binding?.executionContext,
 		}));
-		await execCtx.config.onToolCallStart(calls, execCtx.signal);
+		const reservedCallIds = calls.map((call) => call.callId);
+		const reservation = await execCtx.config.onToolCallStart(calls, execCtx.signal);
+		if (reservation) {
+			for (const [index, { preparation }] of preparedCalls.entries()) {
+				preparation.attachStartReservation(reservation, reservedCallIds[index]);
+			}
+		}
 	}
 	execCtx.signal?.throwIfAborted();
 	for (const { preparation: prepared } of preparedCalls) {
@@ -1414,6 +1440,16 @@ async function pooledExecuteToolCalls(
 	} catch (cause) {
 		failure ??= { cause };
 	} finally {
+		// Unstarted reservations cannot remain dependencies of siblings we are about to await.
+		const releaseErrors = releasePendingPreparations(execCtx);
+		if (releaseErrors.length > 0) {
+			failure = {
+				cause: new AggregateError(
+					[...(failure ? [failure.cause] : []), ...releaseErrors],
+					"Tool batch preparation cleanup failed",
+				),
+			};
+		}
 		// Admission failure is not cancellation of siblings that already own effects. Drain every
 		// dispatched call before publishing results or allowing the parent loop to terminal.
 		await Promise.all(inFlight.values());
@@ -1462,6 +1498,7 @@ async function executeToolCallsPartitioned(
 type PreparedToolCall = {
 	binding?: BoundToolInvocation;
 	recoveryReservation: ToolFailureRecoveryReservation;
+	attachStartReservation(reservation: ToolCallStartReservation, callId: string): void;
 	/** Refund unstarted admission and release the binding through one idempotent owner. */
 	release(): void;
 	kind: "prepared";
@@ -1932,12 +1969,17 @@ async function prepareToolCall(
 	let validationEvent: ToolArgumentValidationTelemetryEvent | undefined;
 	let binding: BoundToolInvocation | undefined;
 	let recoveryReservation: ToolFailureRecoveryReservation | undefined;
+	let startReservation: { lease: ToolCallStartReservation; callId: string } | undefined;
 	let released = false;
 	const release = () => {
 		if (released) return;
 		released = true;
 		recoveryReservation?.cancel();
-		binding?.release();
+		try {
+			startReservation?.lease.release(startReservation.callId);
+		} finally {
+			binding?.release();
+		}
 	};
 	let admitted = false;
 	try {
@@ -2046,6 +2088,10 @@ async function prepareToolCall(
 			kind: "prepared",
 			binding,
 			recoveryReservation,
+			attachStartReservation(reservation, callId) {
+				if (startReservation) throw new Error("Tool start reservation already attached");
+				startReservation = { lease: reservation, callId };
+			},
 			release,
 			toolCall,
 			tool,

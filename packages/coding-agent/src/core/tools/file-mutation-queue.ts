@@ -276,7 +276,7 @@ export class MutationLockScope {
 		kind: boolean | ToolCallKind,
 		batchId: string | undefined,
 		announcer: string | undefined,
-	): void {
+	): () => void {
 		const resolvedKind: ToolCallKind = typeof kind === "boolean" ? (kind ? "mutation" : "other") : kind;
 		if (batchId !== undefined && batchId !== this.announcedBatchIds.get(announcer)) {
 			for (const [announcedCallId, announcement] of this.announcements) {
@@ -286,8 +286,13 @@ export class MutationLockScope {
 			}
 			this.announcedBatchIds.set(announcer, batchId);
 		}
-		this.announcements.set(callId, { index, kind: resolvedKind, joined: false, batchId, announcer });
+		const announcement = { index, kind: resolvedKind, joined: false, batchId, announcer };
+		this.announcements.set(callId, announcement);
 		this.releaseClearedWaiters();
+		return () => {
+			// Detached completion may outlive a new wave that reused the provider's call id.
+			if (this.announcements.get(callId) === announcement) this.retire(callId);
+		};
 	}
 
 	retire(callId: string): void {
@@ -512,6 +517,7 @@ export function disposeMutationLockScope(key: string): void {
  * `batchId` names the reservation wave; a wave with a new identity retires whatever the previous one
  * left behind, which can never join any more - its results already produced the assistant message
  * this wave belongs to. `scope` names the session this wave belongs to.
+ * Returns an idempotent release fenced to this exact announcement, safe after call-id reuse.
  */
 export function announceToolCall(
 	callId: string,
@@ -520,8 +526,8 @@ export function announceToolCall(
 	batchId?: string,
 	scope?: string,
 	announcer?: string,
-): void {
-	getMutationLockScope(scope).announce(callId, index, kind, batchId, announcer);
+): () => void {
+	return getMutationLockScope(scope).announce(callId, index, kind, batchId, announcer);
 }
 
 /**

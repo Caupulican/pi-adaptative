@@ -1,7 +1,11 @@
 import type { Agent, AgentMessage } from "@caupulican/pi-agent-core";
 import type { SessionLifecycleInspection, SessionManager } from "@caupulican/pi-agent-core/session";
 import { sessionLifecycleToolIdentityKey } from "@caupulican/pi-agent-core/session";
-import type { ProviderRequestSnapshotContext, ToolCallStartContext } from "@caupulican/pi-agent-core/types";
+import type {
+	ProviderRequestSnapshotContext,
+	ToolCallStartContext,
+	ToolCallStartReservation,
+} from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage, Message, ToolResultMessage } from "@caupulican/pi-ai";
 import type { ModelRouterController } from "./model-router-controller.ts";
 import { dumpProviderRequest } from "./request-dump.ts";
@@ -216,7 +220,10 @@ export class ForegroundLifecycleController {
 		}
 	}
 
-	private async onToolCallStart(calls: readonly ToolCallStartContext[], signal?: AbortSignal): Promise<void> {
+	private async onToolCallStart(
+		calls: readonly ToolCallStartContext[],
+		signal?: AbortSignal,
+	): Promise<ToolCallStartReservation | void> {
 		if (calls.length === 0) return;
 		signal?.throwIfAborted();
 		const requestId = calls[0]!.requestId;
@@ -261,17 +268,36 @@ export class ForegroundLifecycleController {
 		const batchId = `${requestId}\u0000${assistantMessageEntryId}`;
 		const mutationScope = this.deps.getMutationScope?.();
 		const announcer = this.deps.getAnnouncer?.();
-		for (const call of calls) {
-			announceToolCall(call.callId, call.index, call.mutation, batchId, mutationScope, announcer);
+		const releases = new Map<string, () => void>();
+		const reservation: ToolCallStartReservation = {
+			release(callId) {
+				const release = releases.get(callId);
+				releases.delete(callId);
+				release?.();
+			},
+		};
+		try {
+			for (const call of calls) {
+				releases.set(
+					call.callId,
+					announceToolCall(call.callId, call.index, call.mutation, batchId, mutationScope, announcer),
+				);
+			}
+			for (const identity of identities) this.startedTools.set(this.toolKey(identity), identity);
+			for (const identity of identities) {
+				const callKey = this.callKey(identity.callId, identity.toolName);
+				const pending = this.pendingToolsByCall.get(callKey) ?? new Set<string>();
+				pending.add(this.toolKey(identity));
+				this.pendingToolsByCall.set(callKey, pending);
+			}
+			signal?.throwIfAborted();
+			return reservation;
+		} catch (error) {
+			// The core cannot own a lease that this hook never returned. Durable starts remain for
+			// canonical result/repair handling; live queue dependencies must end immediately.
+			for (const callId of releases.keys()) reservation.release(callId);
+			throw error;
 		}
-		for (const identity of identities) this.startedTools.set(this.toolKey(identity), identity);
-		for (const identity of identities) {
-			const callKey = this.callKey(identity.callId, identity.toolName);
-			const pending = this.pendingToolsByCall.get(callKey) ?? new Set<string>();
-			pending.add(this.toolKey(identity));
-			this.pendingToolsByCall.set(callKey, pending);
-		}
-		signal?.throwIfAborted();
 	}
 
 	private toolKey(

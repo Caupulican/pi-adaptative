@@ -293,13 +293,28 @@ export interface ToolCallStartContext extends BeforeToolCallContext {
 }
 
 /**
+ * Live resources held by a successful tool-start reservation, independent of durable result evidence.
+ * The host owns cleanup until its start hook returns; if it throws, it must release acquired resources.
+ */
+export interface ToolCallStartReservation {
+	/** Synchronous, infallible and idempotent. Release only this wave's resource for the named call. */
+	release(callId: string): void;
+}
+
+/**
  * Reserve one or more prepared tool calls before their side effects begin.
  *
  * Sequential execution invokes this once with one prepared call. Parallel execution invokes it
  * once with the complete prepared wave, so a host can atomically persist the wave reservation before
  * any body starts. Immediate validation, policy, and replay outcomes are never offered here.
+ * A returned reservation transfers live resource cleanup to the core. Each call releases after
+ * real finalization (including background completion), or immediately when preparation is abandoned.
+ * This cleanup is not a durable tool result or evidence that execution succeeded.
  */
-export type ToolCallStartHook = (calls: readonly ToolCallStartContext[], signal?: AbortSignal) => void | Promise<void>;
+export type ToolCallStartHook = (
+	calls: readonly ToolCallStartContext[],
+	signal?: AbortSignal,
+) => void | ToolCallStartReservation | Promise<void | ToolCallStartReservation>;
 
 /** Context passed to `shouldStopAfterTurn`. */
 export interface ShouldStopAfterTurnContext {
