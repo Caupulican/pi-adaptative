@@ -659,6 +659,7 @@ export class AgentSession {
 			isForegroundBusy: () => this._foregroundRecovery.isBusy,
 			waitForForegroundIdle: () => this._foregroundRecovery.waitForIdle(),
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
+			getPathAliasTable: () => this._pipeline.peekPathAliasTable(),
 		});
 		this._memory = new MemoryController({
 			acquireSystemSwitchLease: () => {

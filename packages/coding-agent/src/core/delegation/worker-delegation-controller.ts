@@ -30,6 +30,7 @@ import {
 	type WorkerToolAdapterSources,
 } from "../autonomy/worker-tool-adapter-registry.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
+import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
@@ -246,6 +247,8 @@ export interface WorkerDelegationControllerDeps {
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Parent admitted edge grants for worker edge authorization without interactive prompts. */
 	getEdgeGrants?(): readonly EdgeGrantView[];
+	/** Host-owned path alias table getter for expanding alias tokens in worker tool arguments. */
+	getPathAliasTable?: () => PathAliasTable;
 }
 
 type WorkerAdmission =
@@ -3072,6 +3075,7 @@ export class WorkerDelegationController {
 			: undefined;
 		const toolSurface = createLaneToolSurface({
 			cwd: executionPlan.cwd,
+			...(this.deps.getPathAliasTable ? { getPathAliasTable: this.deps.getPathAliasTable } : {}),
 			...(executionContext ? { bindTool: (tool) => this.directories.bindTool(tool, executionContext) } : {}),
 			deniedPaths: executionPlan.deniedPaths,
 			readMemory: executionPlan.readMemory ? (query) => this.deps.readMemoryForLane(query) : undefined,

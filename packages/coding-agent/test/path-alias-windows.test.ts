@@ -196,4 +196,22 @@ describe("path alias windows-shape rewriting", () => {
 		const deeper = String.raw`C:\Users\me\proj\src\a.ts.bak`;
 		expect(rewriteText(table, `open ${deeper}`)).toBe(`open ${deeper}`);
 	});
+
+	it("expands Windows drive-letter paths as absolute on any host without prepending cwd", () => {
+		const text = `open C:\\Users\\me\\proj\\src\\alpha.ts now`;
+		const table = buildPathAliasTable("/repo", [text]);
+		expect(table.entries).toHaveLength(1);
+		const id = table.entries[0].id;
+		expect(expandText(table, `open ${id} now`, true)).toBe("open C:/Users/me/proj/src/alpha.ts now");
+	});
+
+	it("expands Windows UNC paths as absolute on any host without prepending cwd", () => {
+		const table = {
+			cwd: "/repo",
+			entries: [{ id: "p/alpha.ts", path: String.raw`\\server\share\proj\src\alpha.ts` }],
+		};
+		expect(expandText(table, "open p/alpha.ts now", true)).toBe(
+			String.raw`open \\server\share\proj\src\alpha.ts now`,
+		);
+	});
 });

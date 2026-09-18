@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { isAbsolute, resolve } from "node:path";
+import { posix, win32 } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { formatPathRelativeToCwdOrAbsolute, resolvePath } from "../../utils/paths.ts";
 
@@ -112,11 +112,13 @@ const MIME_TYPE_RE = /^(?:application|audio|example|font|haptics|image|message|m
 const NON_FILE_CANDIDATE_RE = /(?:^|\/)(?:refs|heads|origin|remotes)\/|\.\.\.|\.\.(?:\/|$)/;
 const NUMERIC_BASENAME_RE = /^\d+(?:[-_.]\d+)*$/;
 const EXTENSION_ONLY_BASENAME_RE = /^\.\w+$/;
+const EPHEMERAL_STREAM_PATH_RE =
+	/(?:^|[\\/])(?:tool-streams[\\/]|pi-(?:bash|python|output)(?:-(?:stdout|stderr))?-[0-9a-f]+\.log$)/i;
 
 function shouldAlias(path: string): boolean {
 	if (path.startsWith("http://") || path.startsWith("https://") || path.startsWith("git@")) return false;
 	if (/^P#?\d+$/i.test(path) || path.startsWith("p/")) return false;
-	if (NON_FILE_CANDIDATE_RE.test(path)) return false;
+	if (NON_FILE_CANDIDATE_RE.test(path) || EPHEMERAL_STREAM_PATH_RE.test(path)) return false;
 	const basename = path.slice(path.lastIndexOf("/") + 1);
 	if (NUMERIC_BASENAME_RE.test(basename) || EXTENSION_ONLY_BASENAME_RE.test(basename)) return false;
 	if (MIME_TYPE_RE.test(path)) return false;
@@ -670,7 +672,9 @@ function compileExpander(table: PathAliasTable): Map<string, string> {
  * names a file that does not exist (measured live twice, after `task_directory select`).
  */
 function expandedPath(table: PathAliasTable, path: string, absolute: boolean): string {
-	return absolute && !isAbsolute(path) ? resolve(table.cwd, path) : path;
+	if (!absolute) return path;
+	if (win32.isAbsolute(path) || posix.isAbsolute(path)) return path;
+	return resolvePath(toPosix(path), table.cwd);
 }
 
 export function expandText(table: PathAliasTable, text: string, absolute = false): string {
@@ -695,14 +699,30 @@ export const PATH_PARAMETER_KEYS: ReadonlySet<string> = new Set([
 	"paths",
 	"file",
 	"files",
+	"filePath",
+	"file_path",
+	"scriptPath",
+	"script_path",
+	"targetPath",
+	"target_path",
+	"sourcePath",
+	"source_path",
+	"destPath",
+	"dest_path",
+	"basePath",
+	"base_path",
+	"relativePath",
+	"relative_path",
+	"oldPath",
+	"old_path",
+	"newPath",
+	"new_path",
 	"cwd",
 	"dir",
 	"directory",
 	"target",
 	"source",
 	"destination",
-	"oldPath",
-	"newPath",
 ]);
 
 /**

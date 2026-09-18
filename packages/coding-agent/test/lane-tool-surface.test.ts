@@ -6,6 +6,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLaneToolSurface, type LaneToolSurface } from "../src/core/autonomy/lane-tool-surface.ts";
+import { emptyPathAliasTable, extendPathAliasTable } from "../src/core/context/path-alias-table.ts";
 import { CapabilityGatewayDeniedError } from "../src/core/orchestration/capability-gateway.ts";
 import {
 	type ExecutionGrant,
@@ -491,5 +492,17 @@ describe("classified lane tool surface", () => {
 		await expect(gate(surface, "read", { path: path.join(cwd, "AGENTS.md") })).rejects.toBeInstanceOf(
 			CapabilityGatewayDeniedError,
 		);
+	});
+
+	it("expands path aliases in tool parameters when getPathAliasTable is provided", async () => {
+		const filePath = path.join(cwd, "src", "sub", "deep", "index.ts");
+		const table = extendPathAliasTable(emptyPathAliasTable(cwd), ["src/sub/deep/index.ts"]).table;
+		const surface = createLaneToolSurface({
+			cwd,
+			getPathAliasTable: () => table,
+		});
+		const readTool = surface.tools.find((tool) => tool.name === "read");
+		expect(readTool).toBeDefined();
+		expect(readTool?.prepareArguments?.({ path: "p/index.ts" })).toEqual({ path: filePath });
 	});
 });

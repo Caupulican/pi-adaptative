@@ -509,5 +509,24 @@ describe("alias mint exclusions", () => {
 		expect(
 			collectUnknownAliasTokensInPathParams(table, { paths: ["p/a.ts", "p/grep.ts"], nested: { file: "p/b.ts" } }),
 		).toEqual(["p/a.ts", "p/b.ts"]);
+		expect(
+			collectUnknownAliasTokensInPathParams(table, {
+				scriptPath: "p/ghost.py",
+				filePath: "p/ghost.ts",
+				targetPath: "p/ghost2.ts",
+				sourcePath: "p/ghost3.ts",
+				destPath: "p/ghost4.ts",
+				basePath: "p/ghost5.ts",
+			}),
+		).toEqual(["p/ghost.py", "p/ghost.ts", "p/ghost2.ts", "p/ghost3.ts", "p/ghost4.ts", "p/ghost5.ts"]);
+	});
+
+	it("excludes ephemeral tool stream logs from path aliasing", () => {
+		const table = buildPathAliasTable("/repo", [
+			"Output in /tmp/tool-streams/pi-bash-1234abcd.log and /var/log/tool-streams/pi-python-deadbeef.log",
+			String.raw`Windows logs: C:\Temp\tool-streams\pi-python-stdout-12345678.log and D:\data\tool-streams\pi-python-stderr-abcdef01.log and C:\Temp\pi-output-98765432.log`,
+			"Bare stream logs: pi-bash-1234abcd.log and pi-python-stdout-12345678.log and pi-output-98765432.log",
+		]);
+		expect(table.entries).toHaveLength(0);
 	});
 });

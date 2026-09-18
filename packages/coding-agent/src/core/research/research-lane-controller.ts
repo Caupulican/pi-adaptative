@@ -14,6 +14,7 @@ import type { LaneTracker } from "../autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "../autonomy/session-lane-record.ts";
 import { composeSubagentSystemPrompt } from "../autonomy/subagent-prompt.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
+import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import type { NormalizedProfile } from "../profile-registry.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
@@ -43,6 +44,8 @@ export interface ResearchLaneControllerDeps {
 	): string | undefined;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	collectWorkspaceSources: typeof collectWorkspaceSources;
+	/** Host-owned path alias table getter for expanding alias tokens in research tool arguments. */
+	getPathAliasTable?: () => PathAliasTable;
 }
 
 /** Owns autonomous research demand, scheduling, execution, persistence, and cancellation. */
@@ -184,6 +187,7 @@ export class ResearchLaneController {
 				cwd: this.deps.getCwd(),
 				profile: laneProfile,
 				deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
+				...(this.deps.getPathAliasTable ? { getPathAliasTable: this.deps.getPathAliasTable } : {}),
 			});
 			toolSurface = activeToolSurface;
 			this.warnUnboundToolGrants(laneProfile, activeToolSurface);

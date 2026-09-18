@@ -148,4 +148,50 @@ describe("path alias tool wrapper", () => {
 		await wrapped.execute("t3", { path: "p/grep.ts" }, undefined as never, undefined);
 		expect(calls).toEqual([{ path: grepPath }]);
 	});
+
+	it("rejects unminted alias in scriptPath parameter and expands minted one", async () => {
+		const calls: unknown[] = [];
+		const pythonTool = {
+			name: "python",
+			label: "Python",
+			description: "runs code",
+			parameters: Type.Object({ scriptPath: Type.Optional(Type.String()) }),
+			async execute(_id: string, params: unknown) {
+				calls.push(params);
+				return { content: [{ type: "text" as const, text: "ok" }], details: undefined };
+			},
+		};
+		const wrapped = wrapToolWithPathAliasExpansion(
+			pythonTool as never,
+			() => table,
+			new WeakSet(),
+			() => repo,
+		);
+		expect(() => wrapped.execute("t4", { scriptPath: "p/ghost.py" }, undefined as never, undefined)).toThrow(
+			/Unminted path alias "p\/ghost.py"/,
+		);
+		await wrapped.execute("t5", { scriptPath: "p/grep.ts" }, undefined as never, undefined);
+		expect(calls).toEqual([{ scriptPath: grepPath }]);
+	});
+
+	it("rejects unminted alias in snake_case and relative path parameters", async () => {
+		const genericTool = {
+			name: "custom_reader",
+			label: "Custom",
+			description: "custom read",
+			parameters: Type.Object({ file_path: Type.Optional(Type.String()) }),
+			async execute(_id: string, _params: unknown) {
+				return { content: [{ type: "text" as const, text: "ok" }], details: undefined };
+			},
+		};
+		const wrapped = wrapToolWithPathAliasExpansion(
+			genericTool as never,
+			() => table,
+			new WeakSet(),
+			() => repo,
+		);
+		expect(() => wrapped.execute("t6", { file_path: "p/ghost.ts" }, undefined as never, undefined)).toThrow(
+			/Unminted path alias "p\/ghost.ts"/,
+		);
+	});
 });

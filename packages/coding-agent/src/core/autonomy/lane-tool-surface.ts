@@ -1,6 +1,8 @@
 import path from "node:path";
 import type { AgentLoopConfig, AgentTool, BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
+import type { PathAliasTable } from "../context/path-alias-table.ts";
+import { wrapToolWithPathAliasExpansion } from "../context/path-alias-tool-wrap.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
 import {
@@ -106,6 +108,8 @@ export interface LaneToolSurfaceOptions {
 		args: unknown,
 		cwd: string,
 	) => Promise<BeforeToolCallResult | undefined> | BeforeToolCallResult | undefined;
+	/** Host-owned path alias table getter for expanding alias tokens in tool arguments. */
+	getPathAliasTable?: () => PathAliasTable;
 }
 
 function strictLaneProfilePatterns(profile: NormalizedProfile | undefined): {
@@ -317,22 +321,29 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		...(deniedPaths && deniedPaths.length > 0 ? { deniedPaths } : {}),
 	};
 
+	const rawTools = createLaneTools(
+		options.cwd,
+		allowedTools,
+		fileMutationIntents,
+		mutationScope,
+		toolUsage,
+		privatePathBoundary,
+		options.readMemory,
+		options.executionPolicy,
+		options.processMaxWallClockMs,
+		options.shellSessionKey,
+		options.shellOutputDirectory,
+		options.workerToolAdapters,
+		options.bindTool,
+	);
+	const getPathAliasTable = options.getPathAliasTable;
+	const wrappedTools = new WeakSet<AgentTool>();
+	const tools = getPathAliasTable
+		? rawTools.map((tool) => wrapToolWithPathAliasExpansion(tool, getPathAliasTable, wrappedTools, () => options.cwd))
+		: rawTools;
+
 	return {
-		tools: createLaneTools(
-			options.cwd,
-			allowedTools,
-			fileMutationIntents,
-			mutationScope,
-			toolUsage,
-			privatePathBoundary,
-			options.readMemory,
-			options.executionPolicy,
-			options.processMaxWallClockMs,
-			options.shellSessionKey,
-			options.shellOutputDirectory,
-			options.workerToolAdapters,
-			options.bindTool,
-		),
+		tools,
 		dispose: async () => {
 			try {
 				toolUsage.close();
