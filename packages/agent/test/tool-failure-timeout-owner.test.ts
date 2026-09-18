@@ -163,7 +163,10 @@ describe("executor-owned timeout recovery", () => {
 				expect(
 					resumed.admit(runtimeTool, { command: "fixture", timeout: completed === 1 ? 120 : 480 }, undefined),
 				).toMatchObject({ kind: completed === 1 ? "allowed" : "blocked" });
-				const changedDefaults = { ...runtimeTool, failureRecovery: { getTimeoutMs: () => 360_000 } };
+				const changedDefaults: AgentTool<typeof parameters> = {
+					...runtimeTool,
+					failureRecovery: { getTimeoutMs: () => 360_000 },
+				};
 				const upgraded = new ToolFailureRecoveryGate();
 				upgraded.restoreFromMessages(persisted, [changedDefaults]);
 				expect(upgraded.admit(changedDefaults, { command: "fixture" }, undefined)).toMatchObject({
@@ -193,7 +196,7 @@ describe("executor-owned timeout recovery", () => {
 
 	it.each([60_000, null])("uses the captured live timeout %s after resolver changes", (timeoutMs) => {
 		const args = { command: "fixture" };
-		const changed = { ...tool, failureRecovery: { getTimeoutMs: () => 120_000 } };
+		const changed: AgentTool<typeof parameters> = { ...tool, failureRecovery: { getTimeoutMs: () => 120_000 } };
 		const gate = new ToolFailureRecoveryGate();
 		gate.apply({ kind: "unproductive", tool: changed, args, record: timeoutFailure(args), timeoutMs });
 		expect(gate.admit(changed, args, undefined)).toEqual({ kind: "allowed" });
@@ -225,7 +228,7 @@ describe("executor-owned timeout recovery", () => {
 			throw new Error("projection unavailable");
 		},
 	])("does not infer an argument bound when its declared owner cannot supply one", (getTimeoutMs) => {
-		const unavailable = { ...tool, failureRecovery: { getTimeoutMs } };
+		const unavailable: AgentTool<typeof parameters> = { ...tool, failureRecovery: { getTimeoutMs } };
 		const gate = new ToolFailureRecoveryGate();
 		const args = { command: "fixture", timeout: 60 };
 		gate.apply({ kind: "unproductive", tool: unavailable, args, record: timeoutFailure(args) });

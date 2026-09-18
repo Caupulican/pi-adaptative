@@ -71,7 +71,7 @@ describe("executor receipt restoration", () => {
 			}),
 		});
 		let projections = 0;
-		const changed = {
+		const changed: AgentTool<typeof parameters> = {
 			...tool,
 			failureRecovery: {
 				getTimeoutMs: () => {
