@@ -172,7 +172,7 @@ describe("Antigravity subscription login", () => {
 		expect(
 			parseAntigravityModels({
 				...catalog,
-				"claude-sonnet": catalog["gemini-3-flash"],
+				"unsupported-model": catalog["gemini-3-flash"],
 				"gemini-image": catalog["gemini-3-flash"],
 				"gemini-invalid": { maxTokens: 10, maxOutputTokens: 11 },
 			}),
