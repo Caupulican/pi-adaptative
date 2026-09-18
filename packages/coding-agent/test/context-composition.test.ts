@@ -172,6 +172,9 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// headroom). Its closed edgeClass enum adds 28 tokens to the prior 295-token surface;
 			// provider projection already strips descriptions and compacts literal unions. Those
 			// six exact values prevent invented grants; the aggregate allowance remains unchanged.
+			// The requested Jev tool gets its own 512-token policy ceiling inside the unchanged
+			// aggregate allowance. Its actual cost is removed only from the pre-Jev subtotal,
+			// so unused Jev allowance cannot hide growth in the original tool surface.
 			expect(
 				report.toolSchemaTokens,
 				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),
@@ -179,8 +182,13 @@ describe("AgentSession.getContextCompositionReport", () => {
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("task_directory")).toBeLessThanOrEqual(350);
 			expect(toolTokens.get("task_automation")).toBeLessThanOrEqual(720);
+			expect(toolTokens.get("typesafe_review")).toBeGreaterThan(0);
+			expect(toolTokens.get("typesafe_review")).toBeLessThanOrEqual(512);
 			expect(
-				report.toolSchemaTokens - toolTokens.get("task_directory")! - toolTokens.get("task_automation")!,
+				report.toolSchemaTokens -
+					toolTokens.get("task_directory")! -
+					toolTokens.get("task_automation")! -
+					toolTokens.get("typesafe_review")!,
 			).toBeLessThanOrEqual(4_500);
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(160);
 			// Explicit independent work adds one bounded object to delegate's wire contract. Keep
