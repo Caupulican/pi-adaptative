@@ -203,6 +203,13 @@ export interface AfterToolCallResult {
 
 /** Context passed to `beforeToolCall`. */
 export interface BeforeToolCallContext {
+	/**
+	 * Transfer synchronous cleanup to this invocation's preparation owner. It runs on rejection or
+	 * abandonment, or after real finalization (including detached work), even if the hook later throws.
+	 * Registration after release runs cleanup immediately. Cleanup must be synchronous, infallible
+	 * and idempotent; it never represents an execution outcome.
+	 */
+	registerCleanup?(cleanup: () => void): void;
 	/** Immutable host binding captured before policy admission; absent for context-free tools. */
 	executionContext?: ExecutionContext;
 	/** Live backend filesystem capabilities for an executing backend; not serialized to journal data. */

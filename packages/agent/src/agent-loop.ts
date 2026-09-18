@@ -2020,16 +2020,27 @@ async function prepareToolCall(
 	let binding: BoundToolInvocation | undefined;
 	let recoveryReservation: ToolFailureRecoveryReservation | undefined;
 	let startReservation: { lease: ToolCallStartReservation; callId: string } | undefined;
+	const preparationCleanups = new Set<() => void>();
 	let released = false;
 	const release = () => {
 		if (released) return;
 		released = true;
-		recoveryReservation?.cancel();
-		try {
-			startReservation?.lease.release(startReservation.callId);
-		} finally {
-			binding?.release();
+		const errors: unknown[] = [];
+		const attemptRelease = (cleanup: () => void) => {
+			try {
+				cleanup();
+			} catch (error) {
+				errors.push(error);
+			}
+		};
+		attemptRelease(() => recoveryReservation?.cancel());
+		for (const cleanup of preparationCleanups) {
+			attemptRelease(cleanup);
 		}
+		preparationCleanups.clear();
+		attemptRelease(() => startReservation?.lease.release(startReservation.callId));
+		attemptRelease(() => binding?.release());
+		if (errors.length > 0) throw new AggregateError(errors, "Tool preparation cleanup failed");
 	};
 	let admitted = false;
 	try {
@@ -2099,6 +2110,10 @@ async function prepareToolCall(
 		if (config.beforeToolCall) {
 			const beforeResult = await config.beforeToolCall(
 				{
+					registerCleanup(cleanup) {
+						if (released) cleanup();
+						else preparationCleanups.add(cleanup);
+					},
 					requestId,
 					assistantMessage,
 					toolCall,

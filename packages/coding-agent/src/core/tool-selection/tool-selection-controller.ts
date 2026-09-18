@@ -380,8 +380,9 @@ export class ToolSelectionController {
 		}
 	}
 
-	/** Retire a terminal call whose result projection failed, without inventing an execution outcome. */
-	discard(toolCallId: string): void {
+	/** Retire without an execution outcome; an old cleanup cannot erase a replacement observation. */
+	discard(toolCallId: string, expected?: ToolSelectionPendingObservation): void {
+		if (expected && this.pending.get(toolCallId) !== expected) return;
 		this.pending.delete(toolCallId);
 	}
 

@@ -43,6 +43,17 @@ function makeController(
 }
 
 describe("ToolSelectionController", () => {
+	it("does not discard a replacement observation through an old cleanup handle", () => {
+		const store = makeStore();
+		const controller = makeController(undefined, { store });
+		const old = controller.begin("reused", "read", {}, { modelRef: "faux/old" });
+		controller.begin("reused", "read", {}, { modelRef: "faux/new" });
+		controller.discard("reused", old);
+		controller.complete("reused", true);
+		expect(store.get({ modelRef: "faux/old", intentClass: "read", tool: "read" }).sampleCount).toBe(0);
+		expect(store.get({ modelRef: "faux/new", intentClass: "read", tool: "read" }).sampleCount).toBe(1);
+	});
+
 	it("pauses failed advisory writes without failing tools and recovers at a turn boundary", () => {
 		const store = makeStore();
 		const controller = makeController(undefined, { store });
@@ -276,6 +287,24 @@ describe("ToolSelectionController — observe/agreement/promotion loop", () => {
 });
 
 describe("ToolGateController selector integration", () => {
+	it("keeps advisory selection reads from denying an allowed tool", async () => {
+		const store = makeStore();
+		const controller = makeController(undefined, { store });
+		vi.spyOn(store, "getStatsForIntent").mockImplementation(() => { throw new Error("advisory read unavailable"); });
+		const gate = new ToolGateController({
+			maybeEscalateToolCall: () => undefined,
+			getCwd: () => process.cwd(),
+			getCapabilityEnvelope: () => undefined,
+			recordGateOutcome() {},
+			getExtensionRunner: () => ({ hasHandlers: () => false }) as unknown as ExtensionRunner,
+			getToolSelectionController: () => controller,
+		});
+		await expect(gate.beforeToolCall({
+			assistantMessage: { provider: "faux", model: "model" },
+			toolCall: { id: "advisory-error", name: "read" }, args: {},
+		} as never)).resolves.toBeUndefined();
+	});
+
 	it("preserves a successful result during a real advisory storage failure and recovers without a prompt", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-selection-storage-failure-"));
 		dirs.push(dir);

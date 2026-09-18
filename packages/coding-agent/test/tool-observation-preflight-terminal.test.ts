@@ -9,7 +9,7 @@ import { createReadTool } from "../src/core/tools/read.ts";
 import { createHarness } from "./suite/harness.ts";
 
 describe("terminal observations for calls that never execute", () => {
-	it.each(["success", "reservation failure", "cancel before reservation", "cancel after gates"] as const)(
+	it.each(["success", "reservation failure", "selector failure", "gate wrapper failure", "cancel before reservation", "cancel after gates"] as const)(
 		"retires the pending observation after %s",
 		async (mode) => {
 			const begins = vi.spyOn(ToolSelectionController.prototype, "begin");
@@ -19,6 +19,9 @@ describe("terminal observations for calls that never execute", () => {
 				tools: [createReadTool(process.cwd(), { operations: { readFile: reads, access } })],
 			});
 			try {
+				if (mode === "selector failure") {
+					harness.session.agent.isBackgroundRequested = () => { throw new Error("fixture selector failure"); };
+				}
 				const originalStart = harness.session.agent.onToolCallStart;
 				harness.session.agent.onToolCallStart = async (...args) => {
 					if (mode === "reservation failure") throw new Error("fixture reservation failure");
@@ -29,6 +32,7 @@ describe("terminal observations for calls that never execute", () => {
 				const originalGate = harness.session.agent.beforeToolCall!;
 				harness.session.agent.beforeToolCall = async (...args) => {
 					const result = await originalGate(...args);
+					if (mode === "gate wrapper failure") throw new Error("fixture failure after observation began");
 					if (mode === "cancel after gates") harness.session.agent.abort("fixture post-gate cancellation");
 					return result;
 				};

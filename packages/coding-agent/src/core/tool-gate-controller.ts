@@ -58,7 +58,7 @@ export class ToolGateController {
 	}
 
 	readonly beforeToolCall: BeforeToolCall = async (
-		{ toolCall, args, executionContext, pathAuthority, requestId, assistantMessage },
+		{ toolCall, args, executionContext, pathAuthority, requestId, assistantMessage, registerCleanup },
 		signal,
 	) => {
 		signal?.throwIfAborted();
@@ -145,7 +145,18 @@ export class ToolGateController {
 			const edge = await this.deps.checkEdge?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (edge) return edge;
 
-			this.deps.getToolSelectionController?.()?.begin(toolCall.id, toolCall.name, args, { modelRef, requestId });
+			let releaseObservation: (() => void) | undefined;
+			try {
+				const selection = this.deps.getToolSelectionController?.();
+				if (selection) {
+					const callId = toolCall.id;
+					const observation = selection.begin(callId, toolCall.name, args, { modelRef, requestId });
+					releaseObservation = () => selection.discard(callId, observation);
+				}
+			} catch {
+				// Advisory ranking/storage reads cannot deny an otherwise authorized operation.
+			}
+			if (releaseObservation) registerCleanup?.(releaseObservation);
 			return extensionResult;
 		} finally {
 			// A later abort does not invalidate a decision the envelope already made; the pre-hook
