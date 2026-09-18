@@ -22,7 +22,7 @@ describe("tool start reservation cleanup", () => {
 	});
 	afterEach(() => vi.unstubAllEnvs());
 
-	it.each(["selector_throw", "host_cancel", "execute", "rewritten_id"] as const)(
+	it.each(["selector_throw", "selector_undefined", "prepare_cancel", "host_cancel", "execute", "rewritten_id"] as const)(
 		"settles the real announcement queue after %s",
 		async (boundary) => {
 			const scopeKey = `reservation-cleanup-${boundary}`;
@@ -49,6 +49,7 @@ describe("tool start reservation cleanup", () => {
 			});
 			lifecycle.install();
 			const executed: string[] = [];
+			const persisted: Message[] = [];
 			const parameters = Type.Object({ value: Type.String() });
 			const mutation: AgentTool<typeof parameters> = {
 				name: "mutation_fixture", label: "Mutation", description: "Fixture mutation", parameters,
@@ -88,8 +89,12 @@ describe("tool start reservation cleanup", () => {
 						onProviderRequestSnapshot: agent.onProviderRequestSnapshot,
 						onToolCallStart: agent.onToolCallStart,
 						toolExecution: "parallel", toolConcurrency: 2, maxProviderTurns: 1,
+						beforeToolCall: async ({ toolCall }) => {
+							if (boundary === "prepare_cancel" && toolCall.name === shell.name) abort.abort("Preparation canceled");
+						},
 						isBackgroundRequested: (name) => {
 							if (boundary === "selector_throw" && name === mutation.name) throw new Error("Selector failed");
+							if (boundary === "selector_undefined" && name === mutation.name) throw undefined;
 							return false;
 						},
 						afterToolCall: async ({ toolCall }) => {
@@ -102,6 +107,7 @@ describe("tool start reservation cleanup", () => {
 						const message = event.message;
 						if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") return;
 						const entryId = sessionManager.appendMessage(message);
+						persisted.push(message);
 						lifecycle.onMessagePersisted(message, entryId);
 					},
 					abort.signal,
@@ -122,10 +128,27 @@ describe("tool start reservation cleanup", () => {
 				expect(executed).toEqual(
 					boundary === "execute" || boundary === "rewritten_id"
 						? ["mutation", "shell"]
-						: boundary === "selector_throw" ? ["shell"] : [],
+						: boundary === "selector_throw" || boundary === "selector_undefined" ? ["shell"] : [],
 				);
 				expect(scope.idle).toBe(true);
-				if (boundary === "selector_throw") {
+				expect(messages).toEqual(persisted);
+				const results = messages.filter((message) => message.role === "toolResult");
+				if (boundary !== "rewritten_id") {
+					expect(results.map((result) => result.toolCallId)).toEqual(["mutation", "shell"]);
+					expect(sessionManager.planSessionLifecycleRepair().toolClosers).toEqual([]);
+					expect(sessionManager.planSessionLifecycleRepair().terminalPromotions).toEqual([]);
+				}
+				if (boundary !== "execute" && boundary !== "rewritten_id") {
+					const abandoned = boundary === "host_cancel" || boundary === "prepare_cancel" ? results : results.slice(0, 1);
+					for (const result of abandoned) {
+						expect(result).toMatchObject({
+							isError: true,
+							details: { piToolInvocation: { execution: "not_started", failureCode: "aborted" } },
+						});
+						expect(result.details).not.toHaveProperty("piToolFailureMemory");
+					}
+				}
+				if (boundary === "selector_throw" || boundary === "selector_undefined") {
 					expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: "toolResult", toolCallId: "shell", isError: false })]));
 				}
 			} finally {

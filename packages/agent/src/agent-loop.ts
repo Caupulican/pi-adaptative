@@ -1154,6 +1154,7 @@ async function prepareAndStartToolCall(
 				requestId: execCtx.requestId,
 				...(preparation.executionScope ? { executionScope: preparation.executionScope } : {}),
 				execution: "not_started",
+				...(preparation.phase === "cancelled" ? { failureCode: "aborted" as const } : {}),
 				postprocessingFailures: [],
 			}),
 		};
@@ -1190,15 +1191,43 @@ async function finalizeStartedToolCall(
 	} catch (cause) {
 		// Release startup failures before the pool drains siblings: one may be waiting on this
 		// call's host reservation. A running or handed-off call owns its own completion cleanup.
-		if (execCtx.pendingPreparations.delete(started.preparation.release)) {
-			try {
-				started.preparation.release();
-			} catch (cleanup) {
-				throw new AggregateError([cause, cleanup], "Tool startup and cleanup failed");
-			}
+		if (execCtx.pendingPreparations.has(started.preparation.release)) {
+			return finalizeAbandonedPreparedToolCall(execCtx, started.preparation, cause);
 		}
 		throw cause;
 	}
+}
+
+/** Release before any event delivery or sibling drain, then publish through normal settlement. */
+function finalizeAbandonedPreparedToolCall(
+	execCtx: ToolExecutionContext,
+	prepared: PreparedToolCall,
+	cause: unknown,
+): FinalizedToolCallOutcome {
+	execCtx.pendingPreparations.delete(prepared.release);
+	try {
+		prepared.release();
+	} catch (cleanup) {
+		cause = new AggregateError([cause, cleanup], "Tool startup and cleanup failed");
+	}
+	const result = createErrorToolResult(abortedToolCallText(execCtx.signal?.reason, "Tool execution never started."));
+	return {
+		toolCall: prepared.toolCall,
+		result: {
+			...result,
+			details: stampToolInvocation(result.details, {
+				version: 1,
+				requestId: execCtx.requestId,
+				...(prepared.binding ? { executionScope: prepared.binding.executionScope } : {}),
+				execution: "not_started",
+				failureCode: "aborted",
+				postprocessingFailures: [],
+			}),
+		},
+		isError: true,
+		// No executor outcome, after-hook, failure-memory observation or recovery-gate effect.
+		batchFailure: { cause },
+	};
 }
 
 async function reservePreparedToolCalls(
@@ -1250,9 +1279,13 @@ async function executeBarrierToolCall(
 	toolCall: AgentToolCall,
 	index: number,
 ): Promise<{ finalized: FinalizedToolCallOutcome; toolResultMessage: ToolResultMessage }> {
-	const started = await prepareAndStartToolCall(execCtx, toolCall, index);
+	let started = await prepareAndStartToolCall(execCtx, toolCall, index);
 	if (started.kind === "prepared") {
-		await reservePreparedToolCalls(execCtx, [{ preparation: started.preparation, index }]);
+		try {
+			await reservePreparedToolCalls(execCtx, [{ preparation: started.preparation, index }]);
+		} catch (cause) {
+			started = { kind: "finalized", finalized: finalizeAbandonedPreparedToolCall(execCtx, started.preparation, cause) };
+		}
 	}
 	const finalized = await finalizeStartedToolCall(execCtx, started);
 	execCtx.toolFailureRecoveryGate.apply(finalized.executionGateEffect);
@@ -1278,6 +1311,7 @@ async function executeToolCallsSequential(
 		const { finalized, toolResultMessage } = await executeBarrierToolCall(execCtx, toolCall, index);
 		finalizedCalls.push(finalized);
 		messages.push(toolResultMessage);
+		if (finalized.batchFailure) throw finalized.batchFailure.cause;
 		if (finalized.deliveryFailure) throw finalized.deliveryFailure;
 
 		if (execCtx.signal?.aborted) {
@@ -1382,6 +1416,7 @@ async function pooledExecuteToolCalls(
 ): Promise<{ finalized: FinalizedToolCallOutcome[]; failure?: { cause: unknown } }> {
 	const results: (FinalizedToolCallOutcome | undefined)[] = new Array(entries.length);
 	const inFlight = new Map<number, Promise<void>>();
+	const undispatched = new Map<number, PreparedToolCall>();
 	let failure: { cause: unknown } | undefined;
 	let nextToApply = 0;
 	const drainGateApply = (): void => {
@@ -1394,6 +1429,11 @@ async function pooledExecuteToolCalls(
 	};
 	const settle = async (slot: number, finalized: FinalizedToolCallOutcome): Promise<void> => {
 		results[slot] = finalized;
+		if (finalized.batchFailure) {
+			failure = failure && failure.cause !== finalized.batchFailure.cause
+				? { cause: new AggregateError([failure.cause, finalized.batchFailure.cause], "Tool batch startup failed") }
+				: finalized.batchFailure;
+		}
 		drainGateApply();
 		await emitToolExecutionEnd(finalized, execCtx.emit);
 		if (finalized.deliveryFailure) throw finalized.deliveryFailure;
@@ -1409,7 +1449,7 @@ async function pooledExecuteToolCalls(
 			}
 			const refillWave: { preparation: PreparedToolCall; index: number }[] = [];
 			const refillSlots: { slot: number; started: StartedToolCall }[] = [];
-			while (refillWave.length < free && next < entries.length && !execCtx.signal?.aborted) {
+			while (refillWave.length < free && next < entries.length && !execCtx.signal?.aborted && !failure) {
 				const entry = entries[next];
 				const slot = next;
 				next++;
@@ -1420,12 +1460,14 @@ async function pooledExecuteToolCalls(
 					continue;
 				}
 				refillWave.push({ preparation: started.preparation, index: entry.index });
+				undispatched.set(slot, started.preparation);
 				refillSlots.push({ slot, started });
 			}
 			if (refillSlots.length === 0) continue;
 			await reservePreparedToolCalls(execCtx, refillWave);
 			if (failure) break;
 			for (const { slot, started } of refillSlots) {
+				undispatched.delete(slot);
 				const running = finalizeStartedToolCall(execCtx, started)
 					.then((finalized) => settle(slot, finalized))
 					.catch((cause: unknown) => {
@@ -1440,15 +1482,20 @@ async function pooledExecuteToolCalls(
 	} catch (cause) {
 		failure ??= { cause };
 	} finally {
-		// Unstarted reservations cannot remain dependencies of siblings we are about to await.
-		const releaseErrors = releasePendingPreparations(execCtx);
-		if (releaseErrors.length > 0) {
-			failure = {
-				cause: new AggregateError(
-					[...(failure ? [failure.cause] : []), ...releaseErrors],
-					"Tool batch preparation cleanup failed",
-				),
-			};
+		// Release EVERY undispatched dependency before awaiting event delivery or running siblings.
+		// Dispatched startup failures settle in finalizeStartedToolCall; real executions retain
+		// their own completion cleanup, including detached background work.
+		const abandoned = [...undispatched].map(([slot, prepared]) => ({
+			slot,
+			finalized: finalizeAbandonedPreparedToolCall(execCtx, prepared, failure ? failure.cause : execCtx.signal?.reason),
+		}));
+		undispatched.clear();
+		for (const { slot, finalized } of abandoned) {
+			try {
+				await settle(slot, finalized);
+			} catch (cause) {
+				failure ??= { cause };
+			}
 		}
 		// Admission failure is not cancellation of siblings that already own effects. Drain every
 		// dispatched call before publishing results or allowing the parent loop to terminal.
@@ -1474,6 +1521,7 @@ async function executeToolCallsPartitioned(
 			const { finalized, toolResultMessage } = await executeBarrierToolCall(execCtx, group.call, group.index);
 			orderedFinalizedCalls.push(finalized);
 			messages.push(toolResultMessage);
+			if (finalized.batchFailure) throw finalized.batchFailure.cause;
 			if (finalized.deliveryFailure) throw finalized.deliveryFailure;
 			continue;
 		}
@@ -1541,6 +1589,8 @@ type FinalizedToolCallOutcome = {
 	toolCall: AgentToolCall;
 	result: AgentToolResult<any>;
 	isError: boolean;
+	/** Startup failed before execution; terminal the call before ending its batch. */
+	batchFailure?: { cause: unknown };
 	deliveryFailure?: Error;
 	executionGateEffect?: ToolFailureRecoveryGateEffect;
 	/** Present only for an accepted handoff; sequential batches await it before their next body. */

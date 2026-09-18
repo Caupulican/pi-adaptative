@@ -3692,7 +3692,12 @@ describe("agentLoop with AgentMessage", () => {
 		expect(executed).toEqual([]);
 		expect(transportCalls).toBe(1);
 		expect(events.filter((event) => event.type === "tool_execution_start")).toHaveLength(0);
-		expect(events.filter((event) => event.type === "tool_execution_end")).toHaveLength(0);
+		// Prepared calls now terminal explicitly even when their reservation never succeeds.
+		expect(events.filter((event) => event.type === "tool_execution_end")).toHaveLength(2);
+		expect((await stream.result()).filter((message) => message.role === "toolResult")).toMatchObject([
+			{ toolCallId: "tool-1", isError: true, details: { piToolInvocation: { execution: "not_started", failureCode: "aborted" } } },
+			{ toolCallId: "tool-2", isError: true, details: { piToolInvocation: { execution: "not_started", failureCode: "aborted" } } },
+		]);
 		await expect(stream.result()).resolves.toEqual(
 			expect.arrayContaining([expect.objectContaining({ role: "assistant", stopReason: "error" })]),
 		);
@@ -5424,6 +5429,7 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 			expect(finalMessages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
 			expect(finalMessages.filter((m) => m.role === "toolResult")).toMatchObject([
 				{ toolCallId: "call-a", isError: false },
+				{ toolCallId: "call-b", isError: true, details: { piToolInvocation: { execution: "not_started", failureCode: "aborted" } } },
 			]);
 			expect(finalMessages).toEqual(
 				events.flatMap((event) => (event.type === "message_end" ? [event.message] : [])),
@@ -5491,7 +5497,7 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 
 			// Wave 1 (calls 1-4) fully ran and succeeded.
 			expect(executed.sort()).toEqual(["1", "2", "3", "4"]);
-			// The aborted reservation cannot erase the prior wave's successful results.
+			// Retain the prior wave and explicitly terminal the prepared call that never ran.
 			const finalMessages = await stream.result();
 			expect(finalMessages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
 			expect(finalMessages.filter((m) => m.role === "toolResult").map((m) => m.toolCallId)).toEqual([
@@ -5499,7 +5505,11 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 				"call-2",
 				"call-3",
 				"call-4",
+				"call-5",
 			]);
+			expect(finalMessages.filter((m) => m.role === "toolResult").at(-1)).toMatchObject({
+				isError: true, details: { piToolInvocation: { execution: "not_started", failureCode: "aborted" } },
+			});
 		});
 	});
 

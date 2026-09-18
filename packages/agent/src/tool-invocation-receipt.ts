@@ -12,7 +12,8 @@ export type ToolInvocationReceipt = Readonly<{
 	postprocessingFailures: readonly ("progress" | "after_hook")[];
 }> &
 	(
-		| Readonly<{ execution: "not_started" | "running"; operationStatus?: never; failureCode?: never }>
+		| Readonly<{ execution: "not_started"; operationStatus?: never; failureCode?: "aborted" }>
+		| Readonly<{ execution: "running"; operationStatus?: never; failureCode?: never }>
 		| Readonly<{ execution: "unknown"; operationStatus?: never; failureCode?: string }>
 		| Readonly<{ execution: "completed"; operationStatus: "success"; failureCode?: never }>
 		| Readonly<{ execution: "completed"; operationStatus: "error"; failureCode?: string }>
@@ -42,7 +43,8 @@ export function decodeToolInvocationReceipt(value: unknown): ToolInvocationRecei
 	if (
 		Object.hasOwn(record, "failureCode") &&
 		(!isBoundedFailureCode(failureCode) ||
-			!(execution === "unknown" || (execution === "completed" && operationStatus === "error")))
+			!(execution === "unknown" || (execution === "completed" && operationStatus === "error") ||
+				(execution === "not_started" && failureCode === "aborted")))
 	) return undefined;
 	if (
 		Object.hasOwn(record, "executionScope") &&
@@ -84,6 +86,9 @@ export function decodeToolInvocationReceipt(value: unknown): ToolInvocationRecei
 		return undefined;
 	if (execution === "unknown") {
 		return Object.freeze({ ...base, execution, ...(typeof failureCode === "string" ? { failureCode } : {}) });
+	}
+	if (execution === "not_started" && failureCode === "aborted") {
+		return Object.freeze({ ...base, execution, failureCode });
 	}
 	return Object.freeze({ ...base, execution });
 }

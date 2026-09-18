@@ -5,6 +5,7 @@
 - Tool-recovery instructions acknowledge the host's unspent retry allowance, so the shared protocol no longer contradicts immediate timeout-retry guidance.
 - Tool preparation reserves retry credit until executor entry and refunds abandoned preparation; cleanup also releases bound invocations if background selection throws before execution starts.
 - Tool-start hooks can return per-call resource leases. Abandoned preparation releases these before waiting for running siblings; detached execution keeps its lease through real finalization.
+- Prepared calls abandoned during reservation or startup publish explicit `not_started` results before the batch ends, preserving real sibling results and excluding abandonment from execution-failure recovery on replay.
 
 ## [0.99.27] - 2026-09-16
 

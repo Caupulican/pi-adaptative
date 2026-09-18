@@ -3,6 +3,7 @@ import type { AssistantMessage, Message } from "@caupulican/pi-ai/types";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { createAgentLoopContinuationState, runAgentLoop } from "../src/agent-loop.ts";
+import { restoreToolFailureRecord } from "../src/tool-failure-memory.ts";
 import { retainedToolInvocation } from "../src/tool-invocation-receipt.ts";
 import { type AgentTool, AgentToolExecutionError } from "../src/types.ts";
 import { createEmptyUsage } from "../src/usage.ts";
@@ -84,6 +85,21 @@ describe("retry reservation workflow", () => {
 		const firstResult = messages.find((message) => message.role === "toolResult");
 		const scope = retainedToolInvocation(firstResult?.details)?.executionScope;
 		expect(scope).toBeDefined();
+		const retryResult = messages.filter((message) => message.role === "toolResult")
+			.find((message) => message.toolCallId === "retry");
+		if (boundary !== "execute" && boundary !== "before_throw") {
+			expect(retryResult).toBeDefined();
+			expect(retainedToolInvocation(retryResult?.details)).toMatchObject({
+				execution: "not_started", failureCode: "aborted", executionScope: scope,
+			});
+			if (!retryResult) throw new Error("Missing abandoned retry result");
+			// A hostile-looking abort diagnostic cannot create a timeout episode on replay.
+			expect(restoreToolFailureRecord({ ...retryResult, content: [{ type: "text", text: "Timed out" }] }, tool.name, args))
+				.toBeUndefined();
+		} else if (boundary === "execute") {
+			if (!retryResult) throw new Error("Missing executed retry result");
+			expect(restoreToolFailureRecord(retryResult, tool.name, args)?.failureCode).toBe("timeout");
+		}
 		const next = continuation.toolFailureRecoveryGate.reserve(tool, args, undefined, messages, scope);
 		expect(next.kind).toBe(boundary === "execute" ? "blocked" : "allowed");
 		if (next.kind === "allowed") next.reservation.cancel();

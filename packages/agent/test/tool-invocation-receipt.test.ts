@@ -16,6 +16,16 @@ const receipt = {
 } as const;
 
 describe("invocation receipt wire boundary", () => {
+	it("retains explicit abandonment without inventing an executor outcome", () => {
+		const abandoned = {
+			version: 1, requestId: "fixture", execution: "not_started",
+			failureCode: "aborted", postprocessingFailures: [],
+		};
+		expect(decodeToolInvocationReceipt(JSON.parse(JSON.stringify(abandoned)))).toEqual(abandoned);
+		expect(decodeToolInvocationReceipt({ ...abandoned, execution: "running" })).toBeUndefined();
+		expect(decodeToolInvocationReceipt({ ...abandoned, operationStatus: "error" })).toBeUndefined();
+	});
+
 	it.each([60_000, null])("round-trips an execution timeout snapshot %s", (timeoutMs) => {
 		const candidate = { ...receipt, timeoutMs };
 		expect(decodeToolInvocationReceipt(JSON.parse(JSON.stringify(candidate)))).toEqual(candidate);
