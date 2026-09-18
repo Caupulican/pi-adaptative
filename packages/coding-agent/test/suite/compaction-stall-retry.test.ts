@@ -156,9 +156,9 @@ describe("compaction stall retry", () => {
 		await harness.session.prompt("two");
 
 		let summarizationRequests = 0;
-		const stalledSummary: FauxResponseFactory = (context, options) => {
+		const stalledSummary: FauxResponseFactory = (...args) => {
 			summarizationRequests++;
-			return hangUntilAborted(context, options);
+			return hangUntilAborted(...args);
 		};
 		harness.setResponses([stalledSummary, stalledSummary]);
 
