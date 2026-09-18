@@ -427,9 +427,18 @@ describe("TypeSafe review boundary", () => {
 	it("reports missing setup without sending a request or exposing a key", async () => {
 		const fetcher = vi.fn();
 		const reviewer = new TypeSafeReviewer({ getApiKey: async () => undefined, fetch: fetcher });
-		expect(await reviewer.status()).toMatchObject({ enabled: false });
+		expect(await reviewer.status()).toMatchObject({ enabled: false, authenticationVerified: false });
 		await expect(reviewer.review(input)).rejects.toThrow("/login typesafe");
 		expect(fetcher).not.toHaveBeenCalled();
+	});
+	it("verifies authentication upon successful HTTP 200 review while keeping status zero-I/O", async () => {
+		const fetcher = vi.fn(async () => Response.json(response()));
+		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		expect(await reviewer.status()).toMatchObject({ enabled: true, authenticationVerified: false });
+		expect(fetcher).not.toHaveBeenCalled();
+
+		await reviewer.review(input);
+		expect(await reviewer.status()).toMatchObject({ enabled: true, authenticationVerified: true });
 	});
 	it("sends complete state once to the fixed endpoint and retains the raw judgment", async () => {
 		const fetcher = vi.fn(async () => Response.json(response()));

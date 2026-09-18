@@ -107,6 +107,7 @@ export class TypeSafeReviewError extends Error {
 /** Separate judge port: does not generate code, choose tools, or authorize side effects. */
 export class TypeSafeReviewer {
 	private readonly deps: { getApiKey(): Promise<string | undefined>; fetch?: typeof fetch };
+	private verifiedKey?: string;
 	constructor(deps: { getApiKey(): Promise<string | undefined>; fetch?: typeof fetch }) {
 		this.deps = deps;
 	}
@@ -123,12 +124,13 @@ export class TypeSafeReviewer {
 
 	async status() {
 		const key = await this.resolveKey();
+		const enabled = Boolean(key?.trim());
 		return {
-			enabled: Boolean(key?.trim()),
+			enabled,
 			model: TYPESAFE_MODEL,
 			confidence: REVIEW_CONFIDENCE,
 			setup: "/login typesafe or TYPESAFE_API_KEY",
-			authenticationVerified: false,
+			authenticationVerified: Boolean(enabled && this.verifiedKey && this.verifiedKey === key),
 		};
 	}
 
@@ -240,6 +242,9 @@ export class TypeSafeReviewer {
 					}
 					if (decoded.duplicateKeys) throw new Error("Invalid TypeSafe response: duplicate JSON member");
 					if (!response.ok) {
+						if (response.status === 401 || response.status === 403) {
+							this.verifiedKey = undefined;
+						}
 						const error = Object.assign(new Error(`TypeSafe HTTP ${response.status}`), {
 							status: response.status,
 							headers: response.headers,
@@ -252,6 +257,7 @@ export class TypeSafeReviewer {
 			);
 			combined.signal?.throwIfAborted();
 			validateEvaluationResponse(raw, snapshot);
+			this.verifiedKey = key;
 			return {
 				request,
 				requestSha256,
