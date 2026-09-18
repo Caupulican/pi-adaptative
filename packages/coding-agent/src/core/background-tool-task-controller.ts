@@ -1020,7 +1020,7 @@ export class BackgroundToolTaskController {
 				reproducible: false,
 				truncation: { maxBytes: MAX_INLINE_OUTPUT_BYTES, maxLines: MAX_INLINE_OUTPUT_LINES },
 			},
-			this.deps.getArtifactStore(),
+			() => this.deps.getArtifactStore(),
 			state.artifactHolderId,
 		);
 		const output = packed.artifactId

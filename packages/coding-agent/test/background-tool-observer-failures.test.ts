@@ -153,11 +153,12 @@ describe("background terminal observer failures", () => {
 			if (fault === "cleanup") throw new Error("cleanup failed");
 			return [];
 		});
-		let lookups = 0;
+		let pruning = false;
 		const { controller, notifications } = createHarness({
 			loadPersistedRecordsNewestFirst: () => records,
+			recordUsage: () => { pruning = true; },
 			getArtifactStore: () => {
-				if (++lookups === 2 && fault === "lookup") throw new Error("lookup failed");
+				if (pruning && fault === "lookup") throw new Error("lookup failed");
 				return store;
 			},
 			onError: () => { throw undefined; },

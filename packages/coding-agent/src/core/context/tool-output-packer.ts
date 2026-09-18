@@ -39,15 +39,16 @@ export interface PackToolOutputRequest {
 
 export interface PackedToolOutput {
 	/**
-	 * Bounded preview content -- head and tail with a middle-omission marker.
-	 * No footer/notice text is appended here; callers already have their own per-tool
-	 * footer conventions (grep's vs. find's bracket ordering differ) and own formatting
-	 * the artifact notice into their own notice list via `formatArtifactNotice`.
+	 * Bounded preview content -- head and tail with a middle-omission marker. Callers own
+	 * per-tool footers and artifact links via `formatArtifactNotice`. An artifact exception
+	 * adds one fixed-size loss warning beyond the raw-preview cap so every caller discloses it.
 	 */
 	content: string;
 	truncation: TruncationResult;
 	/** Present only if packing succeeded and the artifact is protected from cleanup. */
 	artifactId?: string;
+	/** Failed optional storage boundary; no raw diagnostics or retrievable artifact are claimed. */
+	artifactFailure?: "lookup" | "write" | "reference";
 	packed: boolean;
 }
 
@@ -66,34 +67,50 @@ export function formatArtifactNotice(artifactId: string): string {
  * fails (`addReference` returns false), the artifact is not claimed in the result at all --
  * the caller falls back to the bounded/truncated content exactly as if no store had been
  * provided, since an unprotected artifact could be cleaned up at any time.
+ * A throwing storage boundary likewise retains the preview, with an explicit loss warning.
+ * A lazy store source is consulted only when output needs capture; inline output is independent
+ * of optional storage availability. This function never retries storage or operation execution.
  */
 export function packToolOutput(
 	request: PackToolOutputRequest,
-	artifactStore: ArtifactStore | undefined,
+	artifactSource: ArtifactStore | (() => ArtifactStore | undefined) | undefined,
 	holderId: string,
 ): PackedToolOutput {
 	const truncation = truncateMiddle(request.rawContent, request.truncation);
 
-	if (!truncation.truncated || !artifactStore) {
+	if (!truncation.truncated || !artifactSource) {
 		return { content: truncation.content, truncation, packed: false };
 	}
 
-	const { ref } = artifactStore.write({
-		kind: "tool_output",
-		content: request.rawContent,
-		toolName: request.toolName,
-		command: request.command,
-		path: request.path,
-		sessionEntryId: request.sessionEntryId,
-		createdAtTurn: request.createdAtTurn ?? 0,
-		reproducible: request.reproducible ?? true,
-	});
+	let artifactFailure: NonNullable<PackedToolOutput["artifactFailure"]> = "lookup";
+	try {
+		const artifactStore = typeof artifactSource === "function" ? artifactSource() : artifactSource;
+		if (!artifactStore) return { content: truncation.content, truncation, packed: false };
+		artifactFailure = "write";
+		const { ref } = artifactStore.write({
+			kind: "tool_output",
+			content: request.rawContent,
+			toolName: request.toolName,
+			command: request.command,
+			path: request.path,
+			sessionEntryId: request.sessionEntryId,
+			createdAtTurn: request.createdAtTurn ?? 0,
+			reproducible: request.reproducible ?? true,
+		});
 
-	if (!artifactStore.addReference(ref.id, holderId)) {
-		return { content: truncation.content, truncation, packed: false };
+		artifactFailure = "reference";
+		if (!artifactStore.addReference(ref.id, holderId)) {
+			return { content: truncation.content, truncation, packed: false };
+		}
+		return { content: truncation.content, truncation, artifactId: ref.id, packed: true };
+	} catch {
+		return {
+			content: `${truncation.content}\n\n[Full output unavailable: artifact storage failed. This preview is partial. Do not repeat the operation merely to recover omitted output.]`,
+			truncation,
+			packed: false,
+			artifactFailure,
+		};
 	}
-
-	return { content: truncation.content, truncation, artifactId: ref.id, packed: true };
 }
 
 export interface BroadQueryTracker {

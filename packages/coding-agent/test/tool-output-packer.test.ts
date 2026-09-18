@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createInMemoryArtifactStore, isMissingArtifactMarker } from "../src/core/context/context-artifacts.ts";
 import {
 	broadQueryInvalidationNote,
@@ -79,6 +79,58 @@ describe("packToolOutput: never silently drops or fabricates content", () => {
 describe("formatArtifactNotice", () => {
 	it("includes the artifact id in a stable, greppable format", () => {
 		expect(formatArtifactNotice("abc123")).toBe("Full output: artifact tool-output:abc123");
+	});
+});
+
+describe("packToolOutput: storage failure preserves the operation output preview", () => {
+	it.each(["eager", "lazy"].flatMap((mode) =>
+		(mode === "lazy" ? ["lookup", "write", "reference"] : ["write", "reference"]).flatMap((stage) =>
+			["error", "undefined"].map((thrown) => ({ mode, stage, thrown })),
+		),
+	))("discloses capture failure without retrying: $mode / $stage / $thrown", ({ mode, stage, thrown }) => {
+		const store = createInMemoryArtifactStore();
+		const fail = () => { throw thrown === "undefined" ? undefined : new Error("private storage diagnostic"); };
+		const write = vi.spyOn(store, "write");
+		const reference = vi.spyOn(store, "addReference");
+		if (stage === "write") write.mockImplementation(fail);
+		if (stage === "reference") reference.mockImplementation(fail);
+		const lookup = vi.fn(() => { if (stage === "lookup") fail(); return store; });
+		const rawContent = repeatLines(5000, "日本語");
+		const request = { toolName: "fixture", rawContent };
+		const preview = packToolOutput(request, undefined, "holder");
+		const result = packToolOutput(request, mode === "lazy" ? lookup : store, "holder");
+		expect(result.packed).toBe(false);
+		expect(result.artifactId).toBeUndefined();
+		expect(result.artifactFailure).toBe(stage);
+		expect(result.truncation).toEqual(preview.truncation);
+		expect(result.content.startsWith(preview.content)).toBe(true);
+		expect(result.content).toContain("Full output unavailable");
+		expect(result.content).toContain("Do not repeat the operation");
+		expect(result.content).not.toContain("private storage diagnostic");
+		expect(Buffer.byteLength(result.content)).toBeLessThanOrEqual(result.truncation.maxBytes + 256);
+		expect(lookup).toHaveBeenCalledTimes(mode === "lazy" ? 1 : 0);
+		expect(write).toHaveBeenCalledTimes(stage === "lookup" ? 0 : 1);
+		expect(reference).toHaveBeenCalledTimes(stage === "reference" ? 1 : 0);
+	});
+
+	it("does not consult optional storage for output that fits inline", () => {
+		const lookup = vi.fn(() => { throw new Error("offline storage"); });
+		const result = packToolOutput({ toolName: "fixture", rawContent: "committed" }, lookup, "holder");
+		expect(result).toMatchObject({ content: "committed", packed: false, truncation: { truncated: false } });
+		expect(result.artifactFailure).toBeUndefined();
+		expect(lookup).not.toHaveBeenCalled();
+	});
+
+	it("protects the same exact payload when storage is resolved lazily", () => {
+		const store = createInMemoryArtifactStore();
+		const lookup = vi.fn(() => store);
+		const rawContent = repeatLines(5000);
+		const result = packToolOutput({ toolName: "fixture", rawContent }, lookup, "holder");
+		expect(result.packed).toBe(true);
+		expect(result.artifactFailure).toBeUndefined();
+		expect(lookup).toHaveBeenCalledOnce();
+		expect(store.read(result.artifactId!)).toMatchObject({ content: rawContent });
+		expect(store.referenceCount(result.artifactId!)).toBe(1);
 	});
 });
 
