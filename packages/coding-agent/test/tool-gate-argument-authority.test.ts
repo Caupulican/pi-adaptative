@@ -176,7 +176,15 @@ describe("post-hook argument authority", () => {
 				if (actualOutside) {
 					expect.soft(text).not.toContain("ACTUAL_FIXTURE");
 					expect(text).toContain("path_outside_allowed_roots");
-					expect(text).toContain(actualPath);
+					expect(text.startsWith("[harness] ")).toBe(true);
+					const denial: unknown = JSON.parse(text.slice("[harness] ".length));
+					expect(denial).toMatchObject({
+						state: "rejected",
+						phase: "policy",
+						tool: "read",
+						failure_code: "blocked",
+						diagnostic: expect.stringContaining(actualPath),
+					});
 				} else expect.soft(text).toContain("ACTUAL_FIXTURE");
 				expect(text).not.toContain("DECOY_FIXTURE");
 			} finally {

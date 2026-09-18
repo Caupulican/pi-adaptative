@@ -200,11 +200,11 @@ describe("native python tool", () => {
 		}
 	});
 
-	it("keeps python timeout and abort as incomplete tool failures", async () => {
+	it("retains timeout recovery identity and distinguishes abort from an operation outcome", async () => {
 		const cwd = await createTempDirectory();
-		for (const [reason, expected] of [
-			["timeout", /timed out after 30 seconds/],
-			["aborted", /aborted/],
+		for (const [reason, errorKind, expected] of [
+			["timeout", "operation_outcome", /timed out after 30 seconds/],
+			["aborted", "tool_failure", /aborted/],
 		] as const) {
 			const tool = createPythonToolDefinition(cwd, {
 				resolveRuntime: readyRuntime,
@@ -219,7 +219,12 @@ describe("native python tool", () => {
 				await tool.execute(reason, { code: "pass" }, undefined, undefined, undefined as never);
 				throw new Error(`expected python ${reason} to throw`);
 			} catch (error) {
-				expect(error).not.toBeInstanceOf(AgentToolExecutionError);
+				expect(error).toBeInstanceOf(AgentToolExecutionError);
+				expect(error).toMatchObject({
+					failureCode: reason,
+					errorKind,
+					outputSignature: expect.stringMatching(/\S/),
+				});
 				expect((error as Error).message).toMatch(expected);
 			}
 		}
