@@ -61,13 +61,14 @@ describe("tool batch cleanup result retention", () => {
 							(message) =>
 								message.role === "user" || message.role === "assistant" || message.role === "toolResult",
 						),
-					beforeToolCall: ({ toolCall, registerCleanup }) => {
+					beforeToolCall: async ({ toolCall, registerCleanup }) => {
 						registerCleanup?.(() => {
 							released.push(toolCall.id);
 							if (toolCall.id !== "third" || cleanup === "clean") return;
 							if (cleanup === "undefined") throw undefined;
 							throw new Error("last pending cleanup failed");
 						});
+						return undefined;
 					},
 					onToolCallStart: (calls) => {
 						if (calls[0].callId === "first") return;
