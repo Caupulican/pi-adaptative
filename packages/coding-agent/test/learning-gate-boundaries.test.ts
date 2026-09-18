@@ -115,4 +115,14 @@ describe("learning evidence boundaries", () => {
 		const decision = { ...evaluateLearningDecision(eligible), kind: "apply" as const, requiresApproval: true };
 		expect(isLearningDecision(decision)).toBe(false);
 	});
+
+	it("rejects contradictory decision with kind proposal and requiresApproval false", () => {
+		const decision = { ...evaluateLearningDecision(eligible), kind: "proposal" as const, requiresApproval: false };
+		expect(isLearningDecision(decision)).toBe(false);
+	});
+
+	it("rejects contradictory decision with kind no-op and requiresApproval true", () => {
+		const decision = { ...evaluateLearningDecision(eligible), kind: "no-op" as const, requiresApproval: true };
+		expect(isLearningDecision(decision)).toBe(false);
+	});
 });

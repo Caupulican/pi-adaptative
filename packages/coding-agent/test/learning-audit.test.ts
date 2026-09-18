@@ -115,6 +115,23 @@ describe("isLearningAuditRecord", () => {
 				}),
 			),
 		).toBe(false);
+		expect(
+			isLearningAuditRecord(
+				auditRecord({
+					action: "propose",
+					decision: {
+						kind: "apply",
+						reasonCode: "eligible_auto_apply",
+						confidence: 95,
+						summary: "Apply",
+						requiresApproval: false,
+					},
+				}),
+			),
+		).toBe(false);
+		expect(isLearningAuditRecord(auditRecord({ action: "apply", rollbackOf: "audit-0" }))).toBe(false);
+		expect(isLearningAuditRecord(auditRecord({ action: "rollback", rollbackOf: undefined }))).toBe(false);
+		expect(isLearningAuditRecord(auditRecord({ action: "rollback", rollbackOf: "   " }))).toBe(false);
 	});
 });
 

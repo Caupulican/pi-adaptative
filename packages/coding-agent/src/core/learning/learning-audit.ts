@@ -196,8 +196,15 @@ export function isLearningAuditRecord(value: unknown): value is LearningAuditRec
 	if (record.action === "apply" && (record.decision.kind === "proposal" || record.decision.requiresApproval)) {
 		return false;
 	}
+	if (record.action === "propose" && record.decision.kind !== "proposal") {
+		return false;
+	}
+	if (record.action === "rollback") {
+		if (typeof record.rollbackOf !== "string" || record.rollbackOf.trim().length === 0) return false;
+	} else if (record.rollbackOf !== undefined) {
+		return false;
+	}
 	if (record.rollback !== undefined && !isLearningRollbackPlan(record.rollback)) return false;
-	if (!isOptionalString(record.rollbackOf)) return false;
 	return typeof record.createdAt === "string";
 }
 
