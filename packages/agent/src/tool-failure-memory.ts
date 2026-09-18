@@ -638,7 +638,8 @@ export function restoreToolFailureRecord(
 	// Native outcomes retain command output and projected details, not harness failure memory.
 	// Neither channel can supersede the executor receipt or masquerade as a policy/cancellation.
 	const persisted = operationOutcome ? undefined : readFailureRecord(result.details);
-	const outcomeCode = invocation?.failureCode ?? (operationOutcome ? classifyToolFailure(firstText(result)) : undefined);
+	const outcomeCode =
+		invocation?.failureCode ?? (operationOutcome ? classifyToolFailure(firstText(result)) : undefined);
 	if (isCancelledToolFailure(persisted, firstText(result), outcomeCode)) return undefined;
 	if (persisted) {
 		return {

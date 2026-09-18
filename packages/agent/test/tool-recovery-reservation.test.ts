@@ -49,18 +49,21 @@ describe("retry credit reservation", () => {
 		expect(gate.reserve(tool, args, undefined).kind).toBe("blocked");
 	});
 
-	it.each([false, true])("removes canceled bound reservations without a fictitious baseline, reverse=%s", (reverse) => {
-		const gate = new ToolFailureRecoveryGate();
-		fail(gate);
-		gate.admit(tool, args, undefined);
-		const first = reserve(gate, 120);
-		const second = reserve(gate, 240);
-		expect(gate.reserve(tool, { ...args, timeout: 480 }, undefined).kind).toBe("blocked");
-		for (const lease of reverse ? [second, first] : [first, second]) lease.cancel();
-		reserve(gate, 120).commit();
-		reserve(gate, 240).commit();
-		expect(gate.reserve(tool, { ...args, timeout: 480 }, undefined).kind).toBe("blocked");
-	});
+	it.each([false, true])(
+		"removes canceled bound reservations without a fictitious baseline, reverse=%s",
+		(reverse) => {
+			const gate = new ToolFailureRecoveryGate();
+			fail(gate);
+			gate.admit(tool, args, undefined);
+			const first = reserve(gate, 120);
+			const second = reserve(gate, 240);
+			expect(gate.reserve(tool, { ...args, timeout: 480 }, undefined).kind).toBe("blocked");
+			for (const lease of reverse ? [second, first] : [first, second]) lease.cancel();
+			reserve(gate, 120).commit();
+			reserve(gate, 240).commit();
+			expect(gate.reserve(tool, { ...args, timeout: 480 }, undefined).kind).toBe("blocked");
+		},
+	);
 
 	it("retains a committed sibling's bound when an earlier reservation is canceled", () => {
 		const gate = new ToolFailureRecoveryGate();

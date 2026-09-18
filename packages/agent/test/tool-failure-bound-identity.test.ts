@@ -35,16 +35,15 @@ function failedGate(bounds: Record<string, number>): ToolFailureRecoveryGate {
 }
 
 describe("timeout escalation field identity", () => {
-	it.each([
-		{ timeout: 60, maxWaitMs: 120 },
-		{ timeoutMs: 120 },
-		{ waitSeconds: 120 },
-	])("does not buy escalation by changing the bound field: %j", (bounds) => {
-		const gate = failedGate({ timeout: 60 });
-		expect(gate.admit(tool, { command: "fixture", ...bounds }, undefined)).toMatchObject({ kind: "blocked" });
-		// A refused substitution does not consume a valid same-field repair.
-		expect(gate.admit(tool, { command: "fixture", timeout: 120 }, undefined)).toEqual({ kind: "allowed" });
-	});
+	it.each([{ timeout: 60, maxWaitMs: 120 }, { timeoutMs: 120 }, { waitSeconds: 120 }])(
+		"does not buy escalation by changing the bound field: %j",
+		(bounds) => {
+			const gate = failedGate({ timeout: 60 });
+			expect(gate.admit(tool, { command: "fixture", ...bounds }, undefined)).toMatchObject({ kind: "blocked" });
+			// A refused substitution does not consume a valid same-field repair.
+			expect(gate.admit(tool, { command: "fixture", timeout: 120 }, undefined)).toEqual({ kind: "allowed" });
+		},
+	);
 
 	it("does not select a numeric maximum from an ambiguous baseline", () => {
 		const gate = failedGate({ timeout: 60, maxWaitMs: 120 });

@@ -20,8 +20,16 @@ import {
 } from "../src/core/tools/file-mutation-queue.ts";
 
 const model: Model<"openai-responses"> = {
-	id: "fixture", name: "fixture", api: "openai-responses", provider: "fixture", baseUrl: "https://example.invalid",
-	reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 8192, maxTokens: 1024,
+	id: "fixture",
+	name: "fixture",
+	api: "openai-responses",
+	provider: "fixture",
+	baseUrl: "https://example.invalid",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 8192,
+	maxTokens: 1024,
 };
 
 describe("background handoff admission ownership", () => {
@@ -40,30 +48,51 @@ describe("background handoff admission ownership", () => {
 				return scope;
 			});
 			const controller = new BackgroundToolTaskController({
-				getSessionId: () => "fixture-session", getArtifactStore: () => undefined, getMutationScope,
+				getSessionId: () => "fixture-session",
+				getArtifactStore: () => undefined,
+				getMutationScope,
 				persist: (record) => {
 					if (mode === "persistence_refusal") throw new Error("Persistence unavailable");
 					persisted.push(record);
 				},
-				notifyTerminal: (records) => { notified.push(...records); },
+				notifyTerminal: (records) => {
+					notified.push(...records);
+				},
 			});
 			const parameters = Type.Object({});
-			const execute = vi.fn(async (callId: string) => withExclusiveMutationBarrier(async () => {
-				started.resolve();
-				await releaseBody.promise;
-				return { content: [{ type: "text" as const, text: "actual operation output" }], details: {} };
-			}, { holdId: callId, scope }));
+			const execute = vi.fn(async (callId: string) =>
+				withExclusiveMutationBarrier(
+					async () => {
+						started.resolve();
+						await releaseBody.promise;
+						return { content: [{ type: "text" as const, text: "actual operation output" }], details: {} };
+					},
+					{ holdId: callId, scope },
+				),
+			);
 			const tool: AgentTool<typeof parameters> = {
-				name: "fixture", label: "Fixture", description: "Controlled operation", parameters, execute,
+				name: "fixture",
+				label: "Fixture",
+				description: "Controlled operation",
+				parameters,
+				execute,
 			};
 			let completion: Promise<BackgroundToolCallCompletion> | undefined;
 			const running = runAgentLoop(
 				[{ role: "user", content: "Run fixture", timestamp: 0 }],
 				{ systemPrompt: "Fixture", messages: [], tools: [tool] },
 				{
-					model, maxProviderTurns: 1,
-					convertToLlm: (history) => history.filter((message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult"),
-					subscribeToolCallHandoffRequest: (_id, request) => { request(); return () => {}; },
+					model,
+					maxProviderTurns: 1,
+					convertToLlm: (history) =>
+						history.filter(
+							(message) =>
+								message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+						),
+					subscribeToolCallHandoffRequest: (_id, request) => {
+						request();
+						return () => {};
+					},
 					handoffToolCall: (context) => {
 						completion = context.completion;
 						try {
@@ -72,13 +101,25 @@ describe("background handoff admission ownership", () => {
 							attempted.resolve();
 						}
 					},
-				}, () => {}, undefined,
+				},
+				() => {},
+				undefined,
 				() => {
 					const stream = new AssistantMessageEventStream();
-					stream.push({ type: "done", reason: "toolUse", message: {
-						role: "assistant", api: model.api, provider: model.provider, model: model.id, usage: createEmptyUsage(), timestamp: 0,
-						stopReason: "toolUse", content: [{ type: "toolCall", id: "fixture-call", name: tool.name, arguments: {} }],
-					} });
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: {
+							role: "assistant",
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage: createEmptyUsage(),
+							timestamp: 0,
+							stopReason: "toolUse",
+							content: [{ type: "toolCall", id: "fixture-call", name: tool.name, arguments: {} }],
+						},
+					});
 					return stream;
 				},
 			);
@@ -111,7 +152,9 @@ describe("background handoff admission ownership", () => {
 				expect(results).toHaveLength(1);
 				expect(retainedToolInvocation(results[0].details)?.execution).toBe(accepted ? "running" : "completed");
 				if (accepted) {
-					expect(notified).toEqual([expect.objectContaining({ status: "completed", output: "actual operation output" })]);
+					expect(notified).toEqual([
+						expect.objectContaining({ status: "completed", output: "actual operation output" }),
+					]);
 				} else {
 					expect(results[0].content).toEqual([{ type: "text", text: "actual operation output" }]);
 					expect(controller.list()).toEqual([]);

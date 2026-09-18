@@ -19,24 +19,38 @@ describe("invocation receipt wire boundary", () => {
 	it("retains cleanup alongside independent postprocessing failures", () => {
 		const candidate = { ...receipt, postprocessingFailures: ["progress", "after_hook", "cleanup"] };
 		expect(decodeToolInvocationReceipt(JSON.parse(JSON.stringify(candidate)))).toEqual(candidate);
-		expect(decodeToolInvocationReceipt({ ...candidate, postprocessingFailures: ["cleanup", "cleanup"] })).toBeUndefined();
+		expect(
+			decodeToolInvocationReceipt({ ...candidate, postprocessingFailures: ["cleanup", "cleanup"] }),
+		).toBeUndefined();
 		for (const execution of ["running", "not_started"]) {
-			expect(decodeToolInvocationReceipt({
-				version: 1, requestId: "fixture", execution, postprocessingFailures: ["cleanup"],
-			})).toBeUndefined();
+			expect(
+				decodeToolInvocationReceipt({
+					version: 1,
+					requestId: "fixture",
+					execution,
+					postprocessingFailures: ["cleanup"],
+				}),
+			).toBeUndefined();
 		}
 		const details = Object.defineProperty({}, "piVerification", {
-			value: { status: "passed" }, enumerable: true, configurable: false, writable: false,
+			value: { status: "passed" },
+			enumerable: true,
+			configurable: false,
+			writable: false,
 		});
 		const stamped = stampToolInvocation(details, { ...receipt, postprocessingFailures: ["cleanup"] });
-		expect(Object.getOwnPropertyDescriptor(stamped, "piVerification"))
-			.toEqual(Object.getOwnPropertyDescriptor(details, "piVerification"));
+		expect(Object.getOwnPropertyDescriptor(stamped, "piVerification")).toEqual(
+			Object.getOwnPropertyDescriptor(details, "piVerification"),
+		);
 	});
 
 	it("retains explicit abandonment without inventing an executor outcome", () => {
 		const abandoned = {
-			version: 1, requestId: "fixture", execution: "not_started",
-			failureCode: "aborted", postprocessingFailures: [],
+			version: 1,
+			requestId: "fixture",
+			execution: "not_started",
+			failureCode: "aborted",
+			postprocessingFailures: [],
 		};
 		expect(decodeToolInvocationReceipt(JSON.parse(JSON.stringify(abandoned)))).toEqual(abandoned);
 		expect(decodeToolInvocationReceipt({ ...abandoned, execution: "running" })).toBeUndefined();
@@ -53,16 +67,23 @@ describe("invocation receipt wire boundary", () => {
 	});
 
 	it.each(["running", "not_started"])("rejects an execution snapshot on %s", (execution) => {
-		expect(decodeToolInvocationReceipt({
-			version: 1, requestId: "fixture", execution, timeoutMs: 60_000, postprocessingFailures: [],
-		})).toBeUndefined();
+		expect(
+			decodeToolInvocationReceipt({
+				version: 1,
+				requestId: "fixture",
+				execution,
+				timeoutMs: 60_000,
+				postprocessingFailures: [],
+			}),
+		).toBeUndefined();
 	});
 
 	it("accepts the existing failure-code truncation marker", () => {
 		const failureCode = boundedFailureCode(`${"x".repeat(47)} diagnostic`);
 		expect(failureCode).toBe(`${"x".repeat(47)}…`);
-		expect(decodeToolInvocationReceipt({ ...receipt, operationStatus: "error", failureCode }))
-			.toMatchObject({ failureCode });
+		expect(decodeToolInvocationReceipt({ ...receipt, operationStatus: "error", failureCode })).toMatchObject({
+			failureCode,
+		});
 	});
 	it("round-trips executor failure identity for completed errors and interrupted execution", () => {
 		for (const outcome of [
@@ -75,7 +96,8 @@ describe("invocation receipt wire boundary", () => {
 	});
 
 	it.each([undefined, "", " TIMEOUT ", "x".repeat(49), 1, "timeout\n"])(
-		"rejects a malformed explicit failure identity %#", (failureCode) => {
+		"rejects a malformed explicit failure identity %#",
+		(failureCode) => {
 			expect(decodeToolInvocationReceipt({ ...receipt, operationStatus: "error", failureCode })).toBeUndefined();
 		},
 	);
@@ -83,9 +105,15 @@ describe("invocation receipt wire boundary", () => {
 	it("rejects failure identities on successful or nonterminal receipts", () => {
 		expect(decodeToolInvocationReceipt({ ...receipt, failureCode: "timeout" })).toBeUndefined();
 		for (const execution of ["running", "not_started"]) {
-			expect(decodeToolInvocationReceipt({
-				version: 1, requestId: "fixture", execution, postprocessingFailures: [], failureCode: "timeout",
-			})).toBeUndefined();
+			expect(
+				decodeToolInvocationReceipt({
+					version: 1,
+					requestId: "fixture",
+					execution,
+					postprocessingFailures: [],
+					failureCode: "timeout",
+				}),
+			).toBeUndefined();
 		}
 	});
 

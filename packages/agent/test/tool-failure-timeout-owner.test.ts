@@ -65,96 +65,121 @@ function appendFailure(
 }
 
 describe("executor-owned timeout recovery", () => {
-	it.each([false, true])("executes and restores native-style timeout repairs with projected memory=%s", async (projectedMemory) => {
-		const executed: number[] = [];
-		const runtimeTool: AgentTool<typeof parameters> = {
-			...tool,
-			async execute(_id, args) {
-				executed.push(args.timeout ?? 120);
-				throw new AgentToolExecutionError(
-					`Command timed out after ${args.timeout} seconds`,
-					"timeout",
-					"fixture-output",
-					"operation_outcome",
-				);
-			},
-		};
-		const requested = [60, 60, 120, 240, 480];
-		let turn = 0;
-		const messages = await runAgentLoop(
-			[{ role: "user", content: "Perform the fixture operation", timestamp: 1 }],
-			{ systemPrompt: "", messages: [], tools: [runtimeTool] },
-			{
-				model: {
-					id: "fixture",
-					name: "fixture",
-					api: "openai-responses",
-					provider: "openai",
-					baseUrl: "https://example.invalid",
-					reasoning: false,
-					input: ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: 8192,
-					maxTokens: 1024,
+	it.each([false, true])(
+		"executes and restores native-style timeout repairs with projected memory=%s",
+		async (projectedMemory) => {
+			const executed: number[] = [];
+			const runtimeTool: AgentTool<typeof parameters> = {
+				...tool,
+				async execute(_id, args) {
+					executed.push(args.timeout ?? 120);
+					throw new AgentToolExecutionError(
+						`Command timed out after ${args.timeout} seconds`,
+						"timeout",
+						"fixture-output",
+						"operation_outcome",
+					);
 				},
-				convertToLlm: (history) => history.filter(
-					(message): message is Message => ["user", "assistant", "toolResult"].includes(message.role),
-				),
-				toolExecution: "sequential",
-				afterToolCall: projectedMemory ? async ({ args }) => ({
-					details: { piToolFailureMemory: describeOperationOutcome(tool.name, args, "exit_1", "Projected status") },
-				}) : undefined,
-				maxStallTurns: 0,
-				maxRepeatedFailures: 0,
-			},
-			() => {},
-			undefined,
-			() => {
-				const timeout = requested[turn++];
-				const message: AssistantMessage = {
-					role: "assistant",
-					content: timeout === undefined
-						? [{ type: "text", text: "Timeout recovery remains unresolved." }]
-						: [{ type: "toolCall", id: `fixture-${turn}`, name: tool.name, arguments: { command: "fixture", timeout } }],
-					api: "openai-responses",
-					provider: "openai",
-					model: "fixture",
-					usage: createEmptyUsage(),
-					stopReason: timeout === undefined ? "stop" : "toolUse",
-					timestamp: turn,
-				};
-				const stream = createAssistantMessageEventStream();
-				stream.push({ type: "done", reason: message.stopReason === "toolUse" ? "toolUse" : "stop", message });
-				return stream;
-			},
-		);
-		expect(executed).toEqual([60, 60, 120, 240]);
-		const results = messages.filter((message) => message.role === "toolResult");
-		expect(results).toHaveLength(5);
-		for (const [index, result] of results.slice(0, 4).entries()) {
-			expect(retainedToolInvocation(result.details)).toMatchObject({
-				execution: "completed", operationStatus: "error", failureCode: "timeout",
-				timeoutMs: requested[index] * 1000,
-			});
-		}
-		// Replay actual raw operation outcomes, not createToolFailureResult's synthetic memory.
-		for (const completed of [1, 4]) {
-			const last = messages.indexOf(results[completed - 1]);
-			const persisted = JSON.parse(JSON.stringify(messages.slice(0, last + 1))) as AgentMessage[];
-			const resumed = new ToolFailureRecoveryGate();
-			resumed.restoreFromMessages(persisted, [runtimeTool]);
-			expect(resumed.admit(runtimeTool, { command: "fixture", timeout: completed === 1 ? 120 : 480 }, undefined))
-				.toMatchObject({ kind: completed === 1 ? "allowed" : "blocked" });
-			const changedDefaults = { ...runtimeTool, failureRecovery: { getTimeoutMs: () => 360_000 } };
-			const upgraded = new ToolFailureRecoveryGate();
-			upgraded.restoreFromMessages(persisted, [changedDefaults]);
-			expect(upgraded.admit(changedDefaults, { command: "fixture" }, undefined))
-				.toMatchObject({ kind: completed === 1 ? "allowed" : "blocked" });
-		}
-		expect(results.at(-1)?.content).toEqual(expect.arrayContaining([
-			expect.objectContaining({ type: "text", text: expect.stringContaining('"failure_code":"repeated_failed_operation"') }),
-		]));
-	});
+			};
+			const requested = [60, 60, 120, 240, 480];
+			let turn = 0;
+			const messages = await runAgentLoop(
+				[{ role: "user", content: "Perform the fixture operation", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [runtimeTool] },
+				{
+					model: {
+						id: "fixture",
+						name: "fixture",
+						api: "openai-responses",
+						provider: "openai",
+						baseUrl: "https://example.invalid",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 8192,
+						maxTokens: 1024,
+					},
+					convertToLlm: (history) =>
+						history.filter((message): message is Message =>
+							["user", "assistant", "toolResult"].includes(message.role),
+						),
+					toolExecution: "sequential",
+					afterToolCall: projectedMemory
+						? async ({ args }) => ({
+								details: {
+									piToolFailureMemory: describeOperationOutcome(tool.name, args, "exit_1", "Projected status"),
+								},
+							})
+						: undefined,
+					maxStallTurns: 0,
+					maxRepeatedFailures: 0,
+				},
+				() => {},
+				undefined,
+				() => {
+					const timeout = requested[turn++];
+					const message: AssistantMessage = {
+						role: "assistant",
+						content:
+							timeout === undefined
+								? [{ type: "text", text: "Timeout recovery remains unresolved." }]
+								: [
+										{
+											type: "toolCall",
+											id: `fixture-${turn}`,
+											name: tool.name,
+											arguments: { command: "fixture", timeout },
+										},
+									],
+						api: "openai-responses",
+						provider: "openai",
+						model: "fixture",
+						usage: createEmptyUsage(),
+						stopReason: timeout === undefined ? "stop" : "toolUse",
+						timestamp: turn,
+					};
+					const stream = createAssistantMessageEventStream();
+					stream.push({ type: "done", reason: message.stopReason === "toolUse" ? "toolUse" : "stop", message });
+					return stream;
+				},
+			);
+			expect(executed).toEqual([60, 60, 120, 240]);
+			const results = messages.filter((message) => message.role === "toolResult");
+			expect(results).toHaveLength(5);
+			for (const [index, result] of results.slice(0, 4).entries()) {
+				expect(retainedToolInvocation(result.details)).toMatchObject({
+					execution: "completed",
+					operationStatus: "error",
+					failureCode: "timeout",
+					timeoutMs: requested[index] * 1000,
+				});
+			}
+			// Replay actual raw operation outcomes, not createToolFailureResult's synthetic memory.
+			for (const completed of [1, 4]) {
+				const last = messages.indexOf(results[completed - 1]);
+				const persisted = JSON.parse(JSON.stringify(messages.slice(0, last + 1))) as AgentMessage[];
+				const resumed = new ToolFailureRecoveryGate();
+				resumed.restoreFromMessages(persisted, [runtimeTool]);
+				expect(
+					resumed.admit(runtimeTool, { command: "fixture", timeout: completed === 1 ? 120 : 480 }, undefined),
+				).toMatchObject({ kind: completed === 1 ? "allowed" : "blocked" });
+				const changedDefaults = { ...runtimeTool, failureRecovery: { getTimeoutMs: () => 360_000 } };
+				const upgraded = new ToolFailureRecoveryGate();
+				upgraded.restoreFromMessages(persisted, [changedDefaults]);
+				expect(upgraded.admit(changedDefaults, { command: "fixture" }, undefined)).toMatchObject({
+					kind: completed === 1 ? "allowed" : "blocked",
+				});
+			}
+			expect(results.at(-1)?.content).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						type: "text",
+						text: expect.stringContaining('"failure_code":"repeated_failed_operation"'),
+					}),
+				]),
+			);
+		},
+	);
 
 	it("admits a real increase from the default for a native operation outcome", () => {
 		const gate = new ToolFailureRecoveryGate();
@@ -172,13 +197,18 @@ describe("executor-owned timeout recovery", () => {
 		const gate = new ToolFailureRecoveryGate();
 		gate.apply({ kind: "unproductive", tool: changed, args, record: timeoutFailure(args), timeoutMs });
 		expect(gate.admit(changed, args, undefined)).toEqual({ kind: "allowed" });
-		expect(gate.admit(changed, args, undefined))
-			.toMatchObject({ kind: timeoutMs === null ? "blocked" : "allowed" });
+		expect(gate.admit(changed, args, undefined)).toMatchObject({ kind: timeoutMs === null ? "blocked" : "allowed" });
 	});
 
 	it.each([
-		[{ command: "fixture", timeout: 0.001 }, { command: "fixture", timeout: 0.002 }],
-		[{ command: "fixture", maxWaitMs: 1000 }, { command: "fixture", maxWaitMs: 2000 }],
+		[
+			{ command: "fixture", timeout: 0.001 },
+			{ command: "fixture", timeout: 0.002 },
+		],
+		[
+			{ command: "fixture", maxWaitMs: 1000 },
+			{ command: "fixture", maxWaitMs: 2000 },
+		],
 	])("refuses growth that does not change the executor's timeout", (before, after) => {
 		const gate = new ToolFailureRecoveryGate();
 		gate.apply({ kind: "unproductive", tool, args: before, record: timeoutFailure(before) });
@@ -234,7 +264,9 @@ describe("executor-owned timeout recovery", () => {
 				kind: "blocked",
 			});
 			candidate.noteWorldAdvance();
-			expect(candidate.admit(tool, { command: "fixture", timeout: 480 }, undefined, messages)).toEqual({ kind: "allowed" });
+			expect(candidate.admit(tool, { command: "fixture", timeout: 480 }, undefined, messages)).toEqual({
+				kind: "allowed",
+			});
 		}
 	});
 

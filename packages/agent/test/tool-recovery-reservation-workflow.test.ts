@@ -10,7 +10,12 @@ import { createEmptyUsage } from "../src/usage.ts";
 
 describe("retry reservation workflow", () => {
 	it.each([
-		"before_cancel", "before_throw", "reservation_cancel", "reservation_throw", "background_throw", "execute",
+		"before_cancel",
+		"before_throw",
+		"reservation_cancel",
+		"reservation_throw",
+		"background_throw",
+		"execute",
 	] as const)("settles admission at %s", async (boundary) => {
 		const controller = new AbortController();
 		const continuation = createAgentLoopContinuationState();
@@ -23,19 +28,31 @@ describe("retry reservation workflow", () => {
 			label: "Retry fixture",
 			description: "Exercise admission ownership across host callbacks",
 			parameters,
-			async execute() { throw new Error("Expected bound execution"); },
+			async execute() {
+				throw new Error("Expected bound execution");
+			},
 			async bindInvocation(id) {
 				return {
 					executionContext: {
-						attachment: { workspaceId: "fixture", attachmentId: "fixture", root: "/fixture", flavor: "posix", caseSensitive: true },
-						sessionId: "fixture", generation: 0, cwd: "/fixture",
+						attachment: {
+							workspaceId: "fixture",
+							attachmentId: "fixture",
+							root: "/fixture",
+							flavor: "posix",
+							caseSensitive: true,
+						},
+						sessionId: "fixture",
+						generation: 0,
+						cwd: "/fixture",
 					},
 					failureRecovery: { getTimeoutMs: ({ timeout }) => timeout * 1000 },
 					async execute() {
 						executed.push(id);
 						throw new AgentToolExecutionError("Timed out", "timeout", "fixture-output", "operation_outcome");
 					},
-					release() { released.push(id); },
+					release() {
+						released.push(id);
+					},
 				};
 			},
 		};
@@ -45,14 +62,23 @@ describe("retry reservation workflow", () => {
 			{ systemPrompt: "", messages: [], tools: [tool] },
 			{
 				model: {
-					id: "fixture", name: "fixture", api: "openai-responses", provider: "openai", baseUrl: "https://example.invalid",
-					reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: 8192, maxTokens: 1024,
+					id: "fixture",
+					name: "fixture",
+					api: "openai-responses",
+					provider: "openai",
+					baseUrl: "https://example.invalid",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 1024,
 				},
-				convertToLlm: (history) => history.filter(
-					(message): message is Message => ["user", "assistant", "toolResult"].includes(message.role),
-				),
-				toolExecution: "sequential", maxProviderTurns: 2,
+				convertToLlm: (history) =>
+					history.filter((message): message is Message =>
+						["user", "assistant", "toolResult"].includes(message.role),
+					),
+				toolExecution: "sequential",
+				maxProviderTurns: 2,
 				beforeToolCall: async ({ toolCall }) => {
 					if (toolCall.id !== "retry") return;
 					if (boundary === "before_cancel") controller.abort();
@@ -68,34 +94,50 @@ describe("retry reservation workflow", () => {
 					return false;
 				},
 			},
-			() => {}, controller.signal,
+			() => {},
+			controller.signal,
 			() => {
 				const id = ++turn === 1 ? "initial" : "retry";
 				const message: AssistantMessage = {
-					role: "assistant", content: [{ type: "toolCall", id, name: tool.name, arguments: { ...args } }],
-					api: "openai-responses", provider: "openai", model: "fixture", usage: createEmptyUsage(), stopReason: "toolUse", timestamp: turn,
+					role: "assistant",
+					content: [{ type: "toolCall", id, name: tool.name, arguments: { ...args } }],
+					api: "openai-responses",
+					provider: "openai",
+					model: "fixture",
+					usage: createEmptyUsage(),
+					stopReason: "toolUse",
+					timestamp: turn,
 				};
 				const stream = createAssistantMessageEventStream();
 				stream.push({ type: "done", reason: "toolUse", message });
 				return stream;
-			}, continuation,
+			},
+			continuation,
 		);
 		expect(executed).toEqual(boundary === "execute" ? ["initial", "retry"] : ["initial"]);
 		expect(released).toEqual(["initial", "retry"]);
 		const firstResult = messages.find((message) => message.role === "toolResult");
 		const scope = retainedToolInvocation(firstResult?.details)?.executionScope;
 		expect(scope).toBeDefined();
-		const retryResult = messages.filter((message) => message.role === "toolResult")
+		const retryResult = messages
+			.filter((message) => message.role === "toolResult")
 			.find((message) => message.toolCallId === "retry");
 		if (boundary !== "execute" && boundary !== "before_throw") {
 			expect(retryResult).toBeDefined();
 			expect(retainedToolInvocation(retryResult?.details)).toMatchObject({
-				execution: "not_started", failureCode: "aborted", executionScope: scope,
+				execution: "not_started",
+				failureCode: "aborted",
+				executionScope: scope,
 			});
 			if (!retryResult) throw new Error("Missing abandoned retry result");
 			// A hostile-looking abort diagnostic cannot create a timeout episode on replay.
-			expect(restoreToolFailureRecord({ ...retryResult, content: [{ type: "text", text: "Timed out" }] }, tool.name, args))
-				.toBeUndefined();
+			expect(
+				restoreToolFailureRecord(
+					{ ...retryResult, content: [{ type: "text", text: "Timed out" }] },
+					tool.name,
+					args,
+				),
+			).toBeUndefined();
 		} else if (boundary === "execute") {
 			if (!retryResult) throw new Error("Missing executed retry result");
 			expect(restoreToolFailureRecord(retryResult, tool.name, args)?.failureCode).toBe("timeout");

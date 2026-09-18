@@ -83,18 +83,25 @@ describe("formatArtifactNotice", () => {
 });
 
 describe("packToolOutput: storage failure preserves the operation output preview", () => {
-	it.each(["eager", "lazy"].flatMap((mode) =>
-		(mode === "lazy" ? ["lookup", "write", "reference"] : ["write", "reference"]).flatMap((stage) =>
-			["error", "undefined"].map((thrown) => ({ mode, stage, thrown })),
+	it.each(
+		["eager", "lazy"].flatMap((mode) =>
+			(mode === "lazy" ? ["lookup", "write", "reference"] : ["write", "reference"]).flatMap((stage) =>
+				["error", "undefined"].map((thrown) => ({ mode, stage, thrown })),
+			),
 		),
-	))("discloses capture failure without retrying: $mode / $stage / $thrown", ({ mode, stage, thrown }) => {
+	)("discloses capture failure without retrying: $mode / $stage / $thrown", ({ mode, stage, thrown }) => {
 		const store = createInMemoryArtifactStore();
-		const fail = () => { throw thrown === "undefined" ? undefined : new Error("private storage diagnostic"); };
+		const fail = () => {
+			throw thrown === "undefined" ? undefined : new Error("private storage diagnostic");
+		};
 		const write = vi.spyOn(store, "write");
 		const reference = vi.spyOn(store, "addReference");
 		if (stage === "write") write.mockImplementation(fail);
 		if (stage === "reference") reference.mockImplementation(fail);
-		const lookup = vi.fn(() => { if (stage === "lookup") fail(); return store; });
+		const lookup = vi.fn(() => {
+			if (stage === "lookup") fail();
+			return store;
+		});
 		const rawContent = repeatLines(5000, "日本語");
 		const request = { toolName: "fixture", rawContent };
 		const preview = packToolOutput(request, undefined, "holder");
@@ -114,7 +121,9 @@ describe("packToolOutput: storage failure preserves the operation output preview
 	});
 
 	it("does not consult optional storage for output that fits inline", () => {
-		const lookup = vi.fn(() => { throw new Error("offline storage"); });
+		const lookup = vi.fn(() => {
+			throw new Error("offline storage");
+		});
 		const result = packToolOutput({ toolName: "fixture", rawContent: "committed" }, lookup, "holder");
 		expect(result).toMatchObject({ content: "committed", packed: false, truncation: { truncated: false } });
 		expect(result.artifactFailure).toBeUndefined();

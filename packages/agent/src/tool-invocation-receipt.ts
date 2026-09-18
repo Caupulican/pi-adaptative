@@ -43,13 +43,18 @@ export function decodeToolInvocationReceipt(value: unknown): ToolInvocationRecei
 		Object.hasOwn(record, "timeoutMs") &&
 		((timeoutMs !== null && (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0)) ||
 			(execution !== "completed" && execution !== "unknown"))
-	) return undefined;
+	)
+		return undefined;
 	if (
 		Object.hasOwn(record, "failureCode") &&
 		(!isBoundedFailureCode(failureCode) ||
-			!(execution === "unknown" || (execution === "completed" && operationStatus === "error") ||
-				(execution === "not_started" && failureCode === "aborted")))
-	) return undefined;
+			!(
+				execution === "unknown" ||
+				(execution === "completed" && operationStatus === "error") ||
+				(execution === "not_started" && failureCode === "aborted")
+			))
+	)
+		return undefined;
 	if (
 		Object.hasOwn(record, "executionScope") &&
 		(typeof executionScope !== "string" || !/^context:[0-9a-f]{32}$/.test(executionScope))
@@ -83,7 +88,12 @@ export function decodeToolInvocationReceipt(value: unknown): ToolInvocationRecei
 	if (execution === "completed") {
 		if (operationStatus !== "success" && operationStatus !== "error") return undefined;
 		if (operationStatus === "success") return Object.freeze({ ...base, execution, operationStatus });
-		return Object.freeze({ ...base, execution, operationStatus, ...(typeof failureCode === "string" ? { failureCode } : {}) });
+		return Object.freeze({
+			...base,
+			execution,
+			operationStatus,
+			...(typeof failureCode === "string" ? { failureCode } : {}),
+		});
 	}
 	if (execution !== "not_started" && execution !== "running" && execution !== "unknown") return undefined;
 	if (Object.hasOwn(record, "operationStatus") || (execution !== "unknown" && postprocessingFailures.length > 0))

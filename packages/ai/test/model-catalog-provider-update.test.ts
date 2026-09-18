@@ -28,24 +28,32 @@ describe("provider-scoped catalog publication", () => {
 
 	it("can replace the first provider while leaving the following provider untouched", () => {
 		const result = replaceModelCatalogProvider(current, generated, "anthropic");
-		expect(result).toBe(current.replace('"retained": { id: "retained" }', '"unrelated-new": { id: "unrelated-new" }'));
+		expect(result).toBe(
+			current.replace('"retained": { id: "retained" }', '"unrelated-new": { id: "unrelated-new" }'),
+		);
 	});
 
 	it("rejects unknown or missing provider sections instead of publishing an empty catalog", () => {
 		expect(() => replaceModelCatalogProvider(current, generated, "missing")).toThrow("Missing catalog provider");
-		expect(() => replaceModelCatalogProvider(current, generated.replace('"openrouter"', '"other"'), "openrouter"))
-			.toThrow("Missing catalog provider");
+		expect(() =>
+			replaceModelCatalogProvider(current, generated.replace('"openrouter"', '"other"'), "openrouter"),
+		).toThrow("Missing catalog provider");
 	});
 
 	it("rejects an unterminated provider section", () => {
 		const malformed = 'export const MODELS = {\n\t"openrouter": {\n';
-		expect(() => replaceModelCatalogProvider(malformed, generated, "openrouter")).toThrow("Unterminated catalog provider");
+		expect(() => replaceModelCatalogProvider(malformed, generated, "openrouter")).toThrow(
+			"Unterminated catalog provider",
+		);
 		const missingFirstTerminator = current.replace("\n\t},\n", "\n");
-		expect(() => replaceModelCatalogProvider(missingFirstTerminator, generated, "anthropic"))
-			.toThrow("Unterminated catalog provider");
+		expect(() => replaceModelCatalogProvider(missingFirstTerminator, generated, "anthropic")).toThrow(
+			"Unterminated catalog provider",
+		);
 	});
 
 	it("rejects duplicate provider headers", () => {
-		expect(() => replaceModelCatalogProvider(current + current, generated, "openrouter")).toThrow("Duplicate catalog provider");
+		expect(() => replaceModelCatalogProvider(current + current, generated, "openrouter")).toThrow(
+			"Duplicate catalog provider",
+		);
 	});
 });

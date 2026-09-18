@@ -3695,8 +3695,16 @@ describe("agentLoop with AgentMessage", () => {
 		// Prepared calls now terminal explicitly even when their reservation never succeeds.
 		expect(events.filter((event) => event.type === "tool_execution_end")).toHaveLength(2);
 		expect((await stream.result()).filter((message) => message.role === "toolResult")).toMatchObject([
-			{ toolCallId: "tool-1", isError: true, details: { piToolInvocation: { execution: "not_started", failureCode: "aborted" } } },
-			{ toolCallId: "tool-2", isError: true, details: { piToolInvocation: { execution: "not_started", failureCode: "aborted" } } },
+			{
+				toolCallId: "tool-1",
+				isError: true,
+				details: { piToolInvocation: { execution: "not_started", failureCode: "aborted" } },
+			},
+			{
+				toolCallId: "tool-2",
+				isError: true,
+				details: { piToolInvocation: { execution: "not_started", failureCode: "aborted" } },
+			},
 		]);
 		await expect(stream.result()).resolves.toEqual(
 			expect.arrayContaining([expect.objectContaining({ role: "assistant", stopReason: "error" })]),
@@ -5429,7 +5437,11 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 			expect(finalMessages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
 			expect(finalMessages.filter((m) => m.role === "toolResult")).toMatchObject([
 				{ toolCallId: "call-a", isError: false },
-				{ toolCallId: "call-b", isError: true, details: { piToolInvocation: { execution: "not_started", failureCode: "aborted" } } },
+				{
+					toolCallId: "call-b",
+					isError: true,
+					details: { piToolInvocation: { execution: "not_started", failureCode: "aborted" } },
+				},
 			]);
 			expect(finalMessages).toEqual(
 				events.flatMap((event) => (event.type === "message_end" ? [event.message] : [])),
@@ -5508,7 +5520,8 @@ describe("Phase 3 S0 - tool-execution scheduler characterization", () => {
 				"call-5",
 			]);
 			expect(finalMessages.filter((m) => m.role === "toolResult").at(-1)).toMatchObject({
-				isError: true, details: { piToolInvocation: { execution: "not_started", failureCode: "aborted" } },
+				isError: true,
+				details: { piToolInvocation: { execution: "not_started", failureCode: "aborted" } },
 			});
 		});
 	});

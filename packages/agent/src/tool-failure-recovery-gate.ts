@@ -243,8 +243,7 @@ export class ToolFailureRecoveryGate {
 				}
 				const previous = this.statesByExecutionKey.get(event.executionKey);
 				const needsReplay =
-					previous?.needsReplay ||
-					(!previous && this.seenUnproductiveExecutions.mightContain(event.executionKey));
+					previous?.needsReplay || (!previous && this.seenUnproductiveExecutions.mightContain(event.executionKey));
 				this.seenUnproductiveExecutions.add(event.executionKey);
 				this.retainState(event.executionKey, { ...restoreObservedState(previous, event), needsReplay });
 			},
@@ -517,7 +516,10 @@ type TranscriptEvent =
 	  };
 
 /** One allowance transition for live admission and transcript reconstruction. */
-function consumeRetryAllowance(state: OperationState, incomingBound: EnvelopeBound | undefined): RetryDebit | undefined {
+function consumeRetryAllowance(
+	state: OperationState,
+	incomingBound: EnvelopeBound | undefined,
+): RetryDebit | undefined {
 	if (state.budget.unchangedRetriesRemaining > 0) {
 		state.budget.unchangedRetriesRemaining--;
 		return "unchangedRetriesRemaining";
@@ -648,7 +650,11 @@ function walkTranscript(
 			executionKey,
 			worldCursor,
 			record,
-			envelopeBound: readEnvelopeBound(call.args, tools.find((tool) => tool.name === call.name), invocation?.timeoutMs),
+			envelopeBound: readEnvelopeBound(
+				call.args,
+				tools.find((tool) => tool.name === call.name),
+				invocation?.timeoutMs,
+			),
 			replayRefused:
 				invocation?.execution !== "completed" &&
 				message.errorKind !== "operation_outcome" &&

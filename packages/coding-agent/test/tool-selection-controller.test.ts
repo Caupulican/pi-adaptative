@@ -290,7 +290,9 @@ describe("ToolGateController selector integration", () => {
 	it("keeps advisory selection reads from denying an allowed tool", async () => {
 		const store = makeStore();
 		const controller = makeController(undefined, { store });
-		vi.spyOn(store, "getStatsForIntent").mockImplementation(() => { throw new Error("advisory read unavailable"); });
+		vi.spyOn(store, "getStatsForIntent").mockImplementation(() => {
+			throw new Error("advisory read unavailable");
+		});
 		const gate = new ToolGateController({
 			maybeEscalateToolCall: () => undefined,
 			getCwd: () => process.cwd(),
@@ -299,10 +301,13 @@ describe("ToolGateController selector integration", () => {
 			getExtensionRunner: () => ({ hasHandlers: () => false }) as unknown as ExtensionRunner,
 			getToolSelectionController: () => controller,
 		});
-		await expect(gate.beforeToolCall({
-			assistantMessage: { provider: "faux", model: "model" },
-			toolCall: { id: "advisory-error", name: "read" }, args: {},
-		} as never)).resolves.toBeUndefined();
+		await expect(
+			gate.beforeToolCall({
+				assistantMessage: { provider: "faux", model: "model" },
+				toolCall: { id: "advisory-error", name: "read" },
+				args: {},
+			} as never),
+		).resolves.toBeUndefined();
 	});
 
 	it("preserves a successful result during a real advisory storage failure and recovers without a prompt", async () => {

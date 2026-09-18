@@ -3,7 +3,9 @@ const MAX_FAILURE_CODE_CHARS = 48;
 /** Accept the canonical ASCII code and its existing terminal truncation marker. */
 export function isBoundedFailureCode(value: unknown): value is string {
 	return (
-		typeof value === "string" && value.length > 0 && value.length <= MAX_FAILURE_CODE_CHARS &&
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= MAX_FAILURE_CODE_CHARS &&
 		/^[a-z0-9_.:-]+(?:…)?$/.test(value)
 	);
 }
