@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
-import type { AssistantMessage } from "@caupulican/pi-ai";
+import { type AssistantMessage, getProviderRetryDirective } from "@caupulican/pi-ai";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";
@@ -241,20 +241,97 @@ export class ProviderLimitStore {
  * cooldown here once made the owner's turn sleep a minute after one overload the retry controller
  * would have retried in two seconds.
  */
+function extractHeaderDelayMs(headers: unknown, nowMs: number): number | undefined {
+	if (!headers || typeof headers !== "object") return undefined;
+	const readHeader = (target: string): string | undefined => {
+		if ("get" in headers && typeof (headers as { get: (name: string) => string | null }).get === "function") {
+			return (headers as { get: (name: string) => string | null }).get(target) ?? undefined;
+		}
+		const needle = target.toLowerCase();
+		const match = Object.entries(headers as Record<string, unknown>).find(([k]) => k.toLowerCase() === needle);
+		return typeof match?.[1] === "string" ? match[1] : undefined;
+	};
+
+	const ram = readHeader("retry-after-ms");
+	if (ram !== undefined) {
+		const millis = Number.parseFloat(ram);
+		if (Number.isFinite(millis) && millis >= 0) return millis;
+	}
+	const ra = readHeader("retry-after");
+	if (ra !== undefined) {
+		const seconds = Number.parseFloat(ra);
+		if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+		const parsed = Date.parse(ra);
+		if (Number.isFinite(parsed) && parsed > nowMs) return parsed - nowMs;
+	}
+	const reset = readHeader("anthropic-ratelimit-unified-reset");
+	if (reset !== undefined) {
+		const resetSec = Number.parseFloat(reset);
+		if (Number.isFinite(resetSec)) {
+			const resetMs = resetSec * 1000 - nowMs;
+			if (resetMs > 0) return Math.ceil(resetMs);
+		}
+	}
+	return undefined;
+}
+
 export function providerLimitFromFailure(
 	provider: string,
-	errorMessage: string,
+	errorOrMessage: unknown,
 	nowMs: number,
 	delayMs?: number,
 ): { limitedUntil: number; reason: ProviderLimitReason; detail: string } | undefined {
+	let errorMessage = "";
+	if (typeof errorOrMessage === "string") {
+		errorMessage = errorOrMessage;
+	} else if (errorOrMessage instanceof Error) {
+		errorMessage = errorOrMessage.message;
+	} else if (isPlainRecord(errorOrMessage) && typeof errorOrMessage.message === "string") {
+		errorMessage = errorOrMessage.message;
+	} else if (errorOrMessage != null) {
+		errorMessage = String(errorOrMessage);
+	}
+
+	if (delayMs === undefined && typeof errorOrMessage === "object" && errorOrMessage !== null) {
+		const directive = getProviderRetryDirective(errorOrMessage);
+		if (
+			directive?.retryAfterMs !== undefined &&
+			Number.isFinite(directive.retryAfterMs) &&
+			directive.retryAfterMs > 0
+		) {
+			delayMs = directive.retryAfterMs;
+		} else {
+			const headers =
+				(errorOrMessage as { headers?: unknown; response?: { headers?: unknown } }).headers ??
+				(errorOrMessage as { response?: { headers?: unknown } }).response?.headers;
+			if (headers) {
+				const headerDelay = extractHeaderDelayMs(headers, nowMs);
+				if (headerDelay !== undefined) {
+					delayMs = headerDelay;
+				}
+			}
+		}
+	}
+
 	const classified = classifyFailure({ message: errorMessage, provider });
-	if (classified.reason !== "rate_limit" && classified.reason !== "overloaded") return undefined;
+	let reason: ProviderLimitReason | undefined;
+	if (classified.reason === "rate_limit" || classified.reason === "overloaded") {
+		reason = classified.reason;
+	} else if (typeof errorOrMessage === "object" && errorOrMessage !== null) {
+		const status = (errorOrMessage as { status?: unknown }).status;
+		if (status === 429) reason = "rate_limit";
+		else if (status === 529) reason = "overloaded";
+	}
+	if (!reason) return undefined;
+
 	const waitMs = delayMs ?? classified.retryAfterMs;
-	if (waitMs === undefined) return undefined;
+	if (waitMs === undefined || !Number.isFinite(waitMs) || waitMs <= 0) return undefined;
 	return {
 		limitedUntil: nowMs + waitMs,
-		reason: classified.reason,
-		detail: errorMessage.replace(/\s+/g, " ").trim().slice(0, MAX_DETAIL_LENGTH),
+		reason,
+		detail:
+			errorMessage.replace(/\s+/g, " ").trim().slice(0, MAX_DETAIL_LENGTH) ||
+			`${provider} ${reason.replace("_", " ")}`,
 	};
 }
 
@@ -280,10 +357,15 @@ export function usageWindowLimit(
 			const window = snapshot[key] as UsageWindowLike | undefined;
 			if (!isPlainRecord(window)) continue;
 			const used = window.usedPercent;
-			if (typeof used !== "number" || used < USAGE_WINDOW_EXHAUSTED_PERCENT) continue;
-			const resetsAt = typeof window.resetsAt === "number" ? window.resetsAt * 1000 : undefined;
+			if (typeof used !== "number" || !Number.isFinite(used) || used < USAGE_WINDOW_EXHAUSTED_PERCENT) continue;
+			const resetsAt =
+				typeof window.resetsAt === "number" && Number.isFinite(window.resetsAt)
+					? window.resetsAt * 1000
+					: undefined;
 			const resetAfter =
-				typeof window.resetAfterSeconds === "number" ? nowMs + window.resetAfterSeconds * 1000 : undefined;
+				typeof window.resetAfterSeconds === "number" && Number.isFinite(window.resetAfterSeconds)
+					? nowMs + window.resetAfterSeconds * 1000
+					: undefined;
 			const limitedUntil = resetsAt ?? resetAfter;
 			if (limitedUntil === undefined || limitedUntil <= nowMs) continue;
 			if (latest && limitedUntil <= latest.limitedUntil) continue;
@@ -317,11 +399,43 @@ export function observeProviderResult(
 		store.clear(provider, ["rate_limit", "overloaded"], requestStartedAt);
 	}
 	for (const diagnostic of message.diagnostics ?? []) {
-		if (diagnostic.type !== "openai_codex_subscription_rate_limits") continue;
-		const rateLimits = diagnostic.details?.rateLimits;
-		if (!Array.isArray(rateLimits)) continue;
-		store.recordUsage(provider, rateLimits);
-		const exhausted = usageWindowLimit(rateLimits, nowMs);
-		if (exhausted) store.record(provider, { ...exhausted, reason: "usage_window" });
+		if (diagnostic.type === "openai_codex_subscription_rate_limits") {
+			const rateLimits = diagnostic.details?.rateLimits;
+			if (!Array.isArray(rateLimits)) continue;
+			store.recordUsage(provider, rateLimits);
+			const exhausted = usageWindowLimit(rateLimits, nowMs);
+			if (exhausted) store.record(provider, { ...exhausted, reason: "usage_window" });
+		} else if (diagnostic.type === "anthropic_subscription_rate_limits") {
+			const details = diagnostic.details;
+			if (!isPlainRecord(details)) continue;
+			const status = typeof details.status === "string" ? details.status : undefined;
+			const rawResetsAt = details.resetsAt ?? details.reset;
+			const resetsAt = typeof rawResetsAt === "number" && Number.isFinite(rawResetsAt) ? rawResetsAt : undefined;
+			const isRejected = status === "rejected";
+			const isFuture = resetsAt !== undefined && resetsAt * 1000 > nowMs;
+			if (isRejected || (status !== "allowed" && isFuture)) {
+				if (resetsAt !== undefined && Number.isFinite(resetsAt)) {
+					const detailParts: string[] = [];
+					const claim = details.representativeClaim ?? details["representative-claim"];
+					if (typeof claim === "string" && claim.length > 0) {
+						detailParts.push(claim);
+					}
+					if (status) {
+						detailParts.push(`status ${status}`);
+					}
+					const detail =
+						typeof details.detail === "string"
+							? details.detail
+							: detailParts.length > 0
+								? `anthropic subscription rate limit (${detailParts.join(", ")})`
+								: "anthropic subscription rate limit";
+					store.record(provider, {
+						limitedUntil: resetsAt * 1000,
+						reason: "rate_limit",
+						detail,
+					});
+				}
+			}
+		}
 	}
 }

@@ -9,6 +9,7 @@ import type {
 import { calculateCost } from "../models.ts";
 import type {
 	AnthropicMessagesCompat,
+	AssistantMessage,
 	CacheRetention,
 	Context,
 	ImageContent,
@@ -24,6 +25,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { type AssistantMessageDiagnostic, appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
@@ -409,6 +411,94 @@ async function* iterateAnthropicEvents(
 	}
 }
 
+function extractAnthropicHeaderValue(
+	headers: Headers | Record<string, unknown> | undefined,
+	name: string,
+): string | undefined {
+	if (!headers) return undefined;
+	if ("get" in headers && typeof (headers as Headers).get === "function") {
+		const val = (headers as Headers).get(name);
+		return val === null ? undefined : val;
+	}
+	const target = name.toLowerCase();
+	for (const [key, val] of Object.entries(headers as Record<string, unknown>)) {
+		if (key.toLowerCase() === target) {
+			if (typeof val === "string") return val;
+			if (typeof val === "number") return String(val);
+			if (Array.isArray(val) && typeof val[0] === "string") return val[0];
+		}
+	}
+	return undefined;
+}
+
+function parseAnthropicHeaderFloat(
+	headers: Headers | Record<string, unknown> | undefined,
+	name: string,
+): number | undefined {
+	const val = extractAnthropicHeaderValue(headers, name);
+	if (val === undefined) return undefined;
+	const num = Number.parseFloat(val);
+	return Number.isFinite(num) ? num : undefined;
+}
+
+function appendAnthropicSubscriptionRateLimitDiagnostics(
+	output: AssistantMessage,
+	headers: Headers | Record<string, unknown> | undefined,
+): void {
+	if (!headers) return;
+	if (output.diagnostics?.some((d: AssistantMessageDiagnostic) => d.type === "anthropic_subscription_rate_limits")) {
+		return;
+	}
+	const status = extractAnthropicHeaderValue(headers, "anthropic-ratelimit-unified-status");
+	const reset = parseAnthropicHeaderFloat(headers, "anthropic-ratelimit-unified-reset");
+	const reset5h = parseAnthropicHeaderFloat(headers, "anthropic-ratelimit-unified-5h-reset");
+	const reset7d = parseAnthropicHeaderFloat(headers, "anthropic-ratelimit-unified-7d-reset");
+	const fallback = extractAnthropicHeaderValue(headers, "anthropic-ratelimit-unified-fallback");
+	const representativeClaim = extractAnthropicHeaderValue(headers, "anthropic-ratelimit-unified-representative-claim");
+	const overageStatus = extractAnthropicHeaderValue(headers, "anthropic-ratelimit-unified-overage-status");
+	const overageReset = parseAnthropicHeaderFloat(headers, "anthropic-ratelimit-unified-overage-reset");
+	const overageDisabledReason = extractAnthropicHeaderValue(
+		headers,
+		"anthropic-ratelimit-unified-overage-disabled-reason",
+	);
+
+	if (
+		status === undefined &&
+		reset === undefined &&
+		reset5h === undefined &&
+		reset7d === undefined &&
+		fallback === undefined &&
+		representativeClaim === undefined &&
+		overageStatus === undefined &&
+		overageReset === undefined &&
+		overageDisabledReason === undefined
+	) {
+		return;
+	}
+
+	const details: Record<string, unknown> = {
+		...(status !== undefined ? { status } : {}),
+		...(reset !== undefined ? { reset, resetsAt: reset } : {}),
+		...(reset5h !== undefined ? { "5h-reset": reset5h, reset5h } : {}),
+		...(reset7d !== undefined ? { "7d-reset": reset7d, reset7d } : {}),
+		...(fallback !== undefined ? { fallback } : {}),
+		...(representativeClaim !== undefined
+			? { "representative-claim": representativeClaim, representativeClaim }
+			: {}),
+		...(overageStatus !== undefined ? { "overage-status": overageStatus, overageStatus } : {}),
+		...(overageReset !== undefined ? { "overage-reset": overageReset, overageReset } : {}),
+		...(overageDisabledReason !== undefined
+			? { "overage-disabled-reason": overageDisabledReason, overageDisabledReason }
+			: {}),
+	};
+
+	appendAssistantMessageDiagnostic(output, {
+		type: "anthropic_subscription_rate_limits",
+		timestamp: Date.now(),
+		details,
+	});
+}
+
 export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	model: Model<"anthropic-messages">,
 	context: Context,
@@ -470,6 +560,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				() => client.messages.create({ ...params, stream: true }, requestOptions).asResponse(),
 				createProviderRetryOptions(options),
 			);
+			appendAnthropicSubscriptionRateLimitDiagnostics(output, response.headers);
 			await beginAssistantResponseStream(stream, output, response, model, options?.onResponse);
 
 			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
@@ -644,6 +735,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 
 			completeAssistantStream(stream, output, options?.signal);
 		} catch (error) {
+			if (typeof error === "object" && error !== null && "headers" in error) {
+				appendAnthropicSubscriptionRateLimitDiagnostics(output, (error as { headers?: Headers }).headers);
+			}
 			terminateAssistantStreamWithError(stream, output, options?.signal, error, {
 				formatError: (caught) => (caught instanceof Error ? caught.message : JSON.stringify(caught)),
 				scratchFields: ["index", "partialJson"],

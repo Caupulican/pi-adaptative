@@ -2,7 +2,12 @@ import type { StreamFn } from "@caupulican/pi-agent-core";
 import { splitProviderAccountKey } from "./account-key.ts";
 import { currentProviderLane, type ProviderRequestLane } from "./lane-context.ts";
 import type { ProviderAdmissionHold, ProviderAdmissionLedger } from "./ledger.ts";
-import { observeProviderResult, ProviderLimitedError, type ProviderLimitStore } from "./limit-state.ts";
+import {
+	observeProviderResult,
+	ProviderLimitedError,
+	type ProviderLimitStore,
+	providerLimitFromFailure,
+} from "./limit-state.ts";
 
 /**
  * Durable record of one admission wait: a request that found the provider limited machine-wide,
@@ -299,12 +304,22 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 			release();
 		};
 		options?.signal?.addEventListener("abort", releaseOnce, { once: true });
+		const recordFailureLimit = (error: unknown): void => {
+			if (!deps.limits) return;
+			try {
+				const limit = providerLimitFromFailure(model.provider, error, (deps.now ?? Date.now)());
+				if (limit) deps.limits.record(key, limit);
+			} catch {
+				// Shared-state bookkeeping must never mask the failure.
+			}
+		};
 		let inner: Awaited<ReturnType<StreamFn>>;
 		try {
 			options?.signal?.throwIfAborted();
 			inner = await streamFn(model, context, options);
 		} catch (error) {
 			releaseOnce();
+			recordFailureLimit(error);
 			throw error;
 		}
 		inner.result().then(
@@ -318,7 +333,10 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 					}
 				}
 			},
-			() => releaseOnce(),
+			(error) => {
+				releaseOnce();
+				recordFailureLimit(error);
+			},
 		);
 		return inner;
 	};
