@@ -2,8 +2,10 @@
 
 ### Fixed
 
+- Allow candidate proposals with non-approval requirements in learning decision validation, and project decisions to proposal shape when reflection blocks skill promotion.
 - Bound tool intent cache entry retention with an invariant loop, ensuring map size strictly cannot exceed 512 entries.
 - Guard skill curator against disuse misclassification in narrow observation windows, and persist user curation rejections to prevent re-archiving restored skills across sessions.
+- Preserve parameter object identity in path alias expansion when no tokens change, preventing false-positive argument modification and downstream worker transcript divergence.
 - Wire `onAuthRejection` recovery across all registered OAuth subscription providers, including xAI, Claude, and Antigravity.
 
 ## [0.99.28] - 2026-09-18

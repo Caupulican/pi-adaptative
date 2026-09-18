@@ -116,9 +116,9 @@ describe("learning evidence boundaries", () => {
 		expect(isLearningDecision(decision)).toBe(false);
 	});
 
-	it("rejects contradictory decision with kind proposal and requiresApproval false", () => {
+	it("accepts candidate proposal decision with requiresApproval false", () => {
 		const decision = { ...evaluateLearningDecision(eligible), kind: "proposal" as const, requiresApproval: false };
-		expect(isLearningDecision(decision)).toBe(false);
+		expect(isLearningDecision(decision)).toBe(true);
 	});
 
 	it("rejects contradictory decision with kind no-op and requiresApproval true", () => {

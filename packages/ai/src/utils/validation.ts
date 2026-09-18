@@ -504,11 +504,12 @@ export function selectUnionBranch(schema: unknown, args: unknown): Record<string
 	const record = asRecord(args);
 	if (!root || !record) return undefined;
 	const discriminators = unionDiscriminators(root);
-	if (discriminators) {
+	if (discriminators && discriminators.length > 0) {
 		for (const { key, alternatives } of discriminators) {
 			const matches = alternatives.filter((alternative) => alternative.value === record[key]);
 			if (matches.length === 1) return matches[0]?.schema;
 		}
+		return undefined;
 	}
 
 	const alternatives = schemaAlternatives(root)

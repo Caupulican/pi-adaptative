@@ -8,6 +8,7 @@
 ### Fixed
 
 - Recover from 401 authorization rejection during stream creation across xAI, Claude, and Antigravity by requesting a replacement token and retrying once.
+- Return undefined in union branch selection when discriminators exist on root schema but do not match uniquely, preserving discriminator isolation.
 - Tool-repair schema traversal resolves into `anyOf`/`oneOf`/`allOf` union branches, enabling stringified JSON repair for union parameter schemas.
 - xAI OAuth token requests and refreshes include the full 10-scope set matching Grok CLI 1.0.34 and pass device flow headers.
 

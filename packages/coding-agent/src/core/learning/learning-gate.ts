@@ -221,7 +221,6 @@ export function isLearningDecision(value: unknown): value is LearningDecision {
 	if (typeof value.summary !== "string") return false;
 	if (typeof value.requiresApproval !== "boolean") return false;
 	if (value.kind === "apply" && value.requiresApproval) return false;
-	if (value.kind === "proposal" && !value.requiresApproval) return false;
 	if (value.kind === "no-op" && value.requiresApproval) return false;
 	if (value.createdAt !== undefined && typeof value.createdAt !== "string") return false;
 

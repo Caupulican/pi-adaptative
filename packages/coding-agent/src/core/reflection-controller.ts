@@ -1865,7 +1865,15 @@ export class ReflectionController {
 						: writeFailed
 							? APPLY_WRITE_REFUSED_REASON_CODE
 							: decision.reasonCode,
-					decision,
+					decision: skillPromotionBlock
+						? {
+								...decision,
+								kind: "proposal",
+								reasonCode: skillPromotionBlock.reasonCode,
+								summary: `${decision.summary} — ${skillPromotionBlock.note}`,
+								requiresApproval: true,
+							}
+						: decision,
 					// No rollback plan on a failed apply or a held/proposed promotion — nothing durable
 					// landed in either case, so there is nothing to undo.
 					rollback:

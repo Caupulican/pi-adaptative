@@ -90,5 +90,7 @@ it.each([
 			.mockResolvedValueOnce(Response.json({ cloudaicompanionProject: "fixture-project" }))
 			.mockResolvedValueOnce(Response.json(catalog)),
 	);
-	await expect(discoverAntigravityAccount("fixture-token")).rejects.toThrow("no supported Gemini chat models");
+	await expect(discoverAntigravityAccount("fixture-token")).rejects.toThrow(
+		"Antigravity returned no supported chat models",
+	);
 });

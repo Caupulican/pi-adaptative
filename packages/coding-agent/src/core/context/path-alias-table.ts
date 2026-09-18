@@ -786,13 +786,24 @@ export function collectUnknownAliasTokens(table: PathAliasTable, params: unknown
 /** `absolute` selects the executor-facing spelling (legend-root absolute); see {@link expandText}. */
 export function expandParams(table: PathAliasTable, params: unknown, absolute = false): unknown {
 	if (typeof params === "string") return expandText(table, params, absolute);
-	if (Array.isArray(params)) return params.map((entry) => expandParams(table, entry, absolute));
+	if (Array.isArray(params)) {
+		let changed = false;
+		const next = params.map((entry) => {
+			const expanded = expandParams(table, entry, absolute);
+			if (expanded !== entry) changed = true;
+			return expanded;
+		});
+		return changed ? next : params;
+	}
 	if (params && typeof params === "object") {
+		let changed = false;
 		const next: Record<string, unknown> = {};
 		for (const [key, value] of Object.entries(params)) {
-			next[key] = expandParams(table, value, absolute);
+			const expanded = expandParams(table, value, absolute);
+			if (expanded !== value) changed = true;
+			next[key] = expanded;
 		}
-		return next;
+		return changed ? next : params;
 	}
 	return params;
 }
