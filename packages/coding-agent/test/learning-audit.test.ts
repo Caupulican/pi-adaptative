@@ -59,12 +59,14 @@ describe("proposalFromReflectionWrite / rollbackPlanForReflectionWrite", () => {
 		const rollbackDefault = rollbackPlanForReflectionWrite(writeDefault);
 		expect(rollbackDefault.kind).toBe("memory_add");
 		expect(rollbackDefault.previous).toBe("stale fact");
+		expect(rollbackDefault.previousTarget).toBe("memory");
 		expect(rollbackDefault.instructions).toContain("MEMORY file");
 
 		const writeUser: ReflectionWrite = { kind: "memory_remove", target: "stale user fact", section: "USER" };
 		const rollbackUser = rollbackPlanForReflectionWrite(writeUser);
 		expect(rollbackUser.kind).toBe("memory_add");
 		expect(rollbackUser.previous).toBe("stale user fact");
+		expect(rollbackUser.previousTarget).toBe("user");
 		expect(rollbackUser.instructions).toContain("USER memory section");
 	});
 

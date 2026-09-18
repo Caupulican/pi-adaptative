@@ -63,7 +63,11 @@ describe("learning apply policy — audit and rollback", () => {
 			}) as never;
 	};
 
-	const runPass = (session: Awaited<ReturnType<typeof newSession>>, reportId = "turn-1") =>
+	const runPass = (
+		session: Awaited<ReturnType<typeof newSession>>,
+		reportId = "turn-1",
+		explicitUserMemoryInstruction = false,
+	) =>
 		session.runReflectionPass({
 			signals: {
 				trigger: "corrective",
@@ -73,6 +77,7 @@ describe("learning apply policy — audit and rollback", () => {
 				usefulLately: 0,
 			},
 			recentTurnText: "user: remember to run checks",
+			explicitUserMemoryInstruction,
 			reportId,
 		});
 
@@ -532,6 +537,65 @@ describe("learning apply policy — audit and rollback", () => {
 	it("returns audit_not_found for unknown ids and refuses to roll back proposals", async () => {
 		const session = await newSession({ enabled: true, allowedAutoApplyLayers: [] });
 		expect(await session.rollbackLearningWrite("nope")).toEqual({ ok: false, reason: "audit_not_found" });
+		await session.disposeAndWait();
+	});
+
+	it("rolls back a memory_remove from USER to USER.md rather than MEMORY.md", async () => {
+		const session = await newSession({ enabled: false });
+		// First apply an explicit preference write
+		scriptReflection(session, [{ kind: "memory_add", section: "USER", text: "User prefers dark mode" }]);
+		await runPass(session, "turn-1", true);
+		expect(readFileSync(join(agentDir, "USER.md"), "utf-8")).toContain("User prefers dark mode");
+
+		// Now remove it
+		scriptReflection(session, [{ kind: "memory_remove", section: "USER", target: "User prefers dark mode" }]);
+		await runPass(session, "turn-2", true);
+		const audits = session.getLearningAuditRecords();
+		const removeAudit = audits.find(
+			(a) => a.action === "apply" && (a.summary.includes("Remove memory") || a.summary.includes("remove USER")),
+		);
+		expect(removeAudit).toBeDefined();
+		expect(removeAudit?.rollback?.kind).toBe("memory_add");
+		expect(removeAudit?.rollback?.previousTarget).toBe("user");
+		expect(readFileSync(join(agentDir, "USER.md"), "utf-8")).not.toContain("User prefers dark mode");
+
+		const rolledBack = await session.rollbackLearningWrite(removeAudit!.id);
+		expect(rolledBack).toEqual({ ok: true, reason: "rollback_applied" });
+		expect(readFileSync(join(agentDir, "USER.md"), "utf-8")).toContain("User prefers dark mode");
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).not.toContain("User prefers dark mode");
+		await session.disposeAndWait();
+	});
+
+	it("rolls back a memory_remove from MEMORY to MEMORY.md", async () => {
+		const session = await newSession({ enabled: false });
+		scriptReflection(session, [{ kind: "memory_remove", section: "MEMORY", target: "Existing fact" }]);
+		await runPass(session, "turn-1", true);
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).not.toContain("Existing fact");
+
+		const audits = session.getLearningAuditRecords();
+		const removeAudit = audits.find((a) => a.action === "apply" && a.rollback?.kind === "memory_add");
+		expect(removeAudit).toBeDefined();
+		expect(removeAudit?.rollback?.kind).toBe("memory_add");
+		expect(removeAudit?.rollback?.previousTarget).toBe("memory");
+
+		const rolledBack = await session.rollbackLearningWrite(removeAudit!.id);
+		expect(rolledBack).toEqual({ ok: true, reason: "rollback_applied" });
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).toContain("Existing fact");
+		expect(readFileSync(join(agentDir, "USER.md"), "utf-8")).not.toContain("Existing fact");
+		await session.disposeAndWait();
+	});
+
+	it("memory_remove with section USER does not steal the same line from MEMORY.md", async () => {
+		const session = await newSession({ enabled: false });
+		const shared = "Shared durable line";
+		scriptReflection(session, [{ kind: "memory_add", section: "USER", text: shared }]);
+		await runPass(session, "turn-user", true);
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).toContain("Existing fact");
+		scriptReflection(session, [{ kind: "memory_remove", section: "USER", target: shared }]);
+		await runPass(session, "turn-remove", true);
+		expect(readFileSync(join(agentDir, "USER.md"), "utf-8")).not.toContain(shared);
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).toContain("Existing fact");
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).not.toContain(shared);
 		await session.disposeAndWait();
 	});
 });

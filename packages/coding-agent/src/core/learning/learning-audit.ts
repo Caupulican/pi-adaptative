@@ -30,8 +30,8 @@ export interface LearningRollbackPlan {
 	target?: string;
 	/** Original text to restore (memory_restore/memory_add). */
 	previous?: string;
-	/** Organization rollback only: the hot file `previous` was removed from; absent means the general file. */
-	previousTarget?: "memory" | "project";
+	/** Organization/memory rollback: the hot file `previous` was removed from; absent means the general file. */
+	previousTarget?: "memory" | "project" | "user";
 	/** Compare-and-delete guard for a structured record created by this exact audited write. */
 	expectedDigest?: string;
 	/** Organization rollback only: false when the OKF record predated this hot-memory move. */
@@ -142,6 +142,7 @@ export function rollbackPlanForReflectionWrite(write: ReflectionWrite): Learning
 			return {
 				kind: "memory_add",
 				previous: write.target,
+				previousTarget: write.section === "USER" ? "user" : "memory",
 				instructions:
 					write.section === "USER"
 						? "Re-add the removed text to the USER memory section."
@@ -176,7 +177,12 @@ function isLearningRollbackPlan(value: unknown): value is LearningRollbackPlan {
 	const plan = value as Record<string, unknown>;
 	if (typeof plan.kind !== "string" || !ROLLBACK_KINDS.includes(plan.kind)) return false;
 	if (!isOptionalString(plan.target) || !isOptionalString(plan.previous)) return false;
-	if (plan.previousTarget !== undefined && plan.previousTarget !== "memory" && plan.previousTarget !== "project") {
+	if (
+		plan.previousTarget !== undefined &&
+		plan.previousTarget !== "memory" &&
+		plan.previousTarget !== "project" &&
+		plan.previousTarget !== "user"
+	) {
 		return false;
 	}
 	if (!isOptionalString(plan.expectedDigest)) return false;

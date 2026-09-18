@@ -508,6 +508,7 @@ export class ReflectionController {
 	 */
 	private readonly ownerInputOriginals = new WeakMap<AgentMessage, string>();
 	private userPreferenceAuditSequence = 0;
+	private _internalExplicitAdmission = false;
 
 	constructor(deps: ReflectionControllerDeps) {
 		this.deps = deps;
@@ -1217,6 +1218,9 @@ export class ReflectionController {
 			} else
 				notes.push(`${citation.source}: the owner's sentence carries no explicit preference or correction wording`);
 		}
+		if (request.basis === "explicit" && this._internalExplicitAdmission) {
+			explicitVerified = true;
+		}
 		const basis: "explicit" | "inferred" = request.basis === "explicit" && explicitVerified ? "explicit" : "inferred";
 		if (request.basis === "explicit" && !explicitVerified)
 			notes.push("explicit basis unverified; treated as inferred");
@@ -1323,6 +1327,7 @@ export class ReflectionController {
 							? {
 									kind: "memory_add",
 									previous: request.existing?.text,
+									previousTarget: "user",
 									instructions: "Re-add the removed USER.md preference line.",
 								}
 							: request.existing
@@ -1759,7 +1764,7 @@ export class ReflectionController {
 			}
 			const explicitUserMemoryWrite =
 				input.explicitUserMemoryInstruction === true &&
-				(write.kind === "memory_add" || write.kind === "memory_replace");
+				(write.kind === "memory_add" || write.kind === "memory_replace" || write.kind === "memory_remove");
 			// Additive skill promotion is the skill counterpart of a memory fact: a repeatable
 			// procedure should land as a loadable SKILL.md (overlap audit still holds the write).
 			// An owner who enabled auto-apply and omitted "skill" from the allow-list keeps that ceiling.
@@ -1843,7 +1848,11 @@ export class ReflectionController {
 			// not-found (or, worse, misfires against whatever now occupies that text).
 			const applyResult =
 				decision.kind === "apply" && !skillPromotionBlock
-					? await this._applyReflectionWrite(write, signal)
+					? await this._applyReflectionWrite(
+							write,
+							signal,
+							input.explicitUserMemoryInstruction === true || !policy.enabled,
+						)
 					: { applied: false };
 			const writeFailed = decision.kind === "apply" && !skillPromotionBlock && !applyResult.applied;
 			if (decision.kind !== "no-op") {
@@ -1942,11 +1951,15 @@ export class ReflectionController {
 			}
 			case "memory_add": {
 				if (rollback.previous === undefined) return { ok: false, reason: "missing_rollback_target" };
-				const applied = await this._applyReflectionWrite({
-					kind: "memory_add",
-					section: "MEMORY",
-					text: rollback.previous,
-				});
+				const applied = await this._applyReflectionWrite(
+					{
+						kind: "memory_add",
+						section: rollback.previousTarget === "user" ? "USER" : "MEMORY",
+						text: rollback.previous,
+					},
+					undefined,
+					true,
+				);
 				if (!applied.applied) return { ok: false, reason: "rollback_apply_failed" };
 				break;
 			}
@@ -1974,7 +1987,9 @@ export class ReflectionController {
 					...target,
 					expectedDigest: rollback.expectedDigest,
 					sourceText: rollback.previous,
-					...(rollback.previousTarget ? { sourceTarget: rollback.previousTarget } : {}),
+					...(rollback.previousTarget === "memory" || rollback.previousTarget === "project"
+						? { sourceTarget: rollback.previousTarget }
+						: {}),
 					removeRecord: rollback.removeOkf === true,
 				});
 				if (!applied) return { ok: false, reason: "rollback_apply_failed" };
@@ -2011,117 +2026,166 @@ export class ReflectionController {
 	 * actually applied so callers that MUST know — rollback's once-only accounting — can react instead
 	 * of recording a success that never happened.
 	 */
-	private async _applyReflectionWrite(write: ReflectionWrite, signal?: AbortSignal): Promise<ReflectionApplyResult> {
-		// ICM mode: zero legacy MEMORY.md/USER.md/OKF reads/writes. Promote_skill still lands
-		// under the skills dir (ICM reference), never OKF bookkeeping.
-		if (
-			this.isIcmMode() &&
-			(write.kind === "okf_add" ||
-				write.kind === "okf_organize" ||
-				write.kind === "memory_add" ||
-				write.kind === "memory_replace" ||
-				write.kind === "memory_remove")
-		) {
-			return { applied: false };
-		}
-		// R7 memory-to-behavior: a recurring procedure is compiled into an executable skill file rather
-		// than stored as a flat fact. Written under the agent skills dir so it loads like any user skill.
-		if (write.kind === "promote_skill") {
-			const promoted = this._promoteReflectionSkill(write.name, write.description, write.body);
-			if (promoted) this.deps.refreshLiveSkills?.();
-			return { applied: promoted };
-		}
-		if (write.kind === "okf_add" || write.kind === "okf_organize") {
-			try {
-				const result = await this.deps.applyStructuredReflectionWrite(write, signal);
-				if (!result.applied || result.digest === undefined) return { applied: false };
-				return {
-					applied: true,
-					rollback:
-						write.kind === "okf_add"
+	private async _applyReflectionWrite(
+		write: ReflectionWrite,
+		signal?: AbortSignal,
+		explicit?: boolean,
+	): Promise<ReflectionApplyResult> {
+		const prevInternal = this._internalExplicitAdmission;
+		if (explicit) this._internalExplicitAdmission = true;
+		try {
+			// ICM mode: zero legacy MEMORY.md/USER.md/OKF reads/writes. Promote_skill still lands
+			// under the skills dir (ICM reference), never OKF bookkeeping.
+			if (
+				this.isIcmMode() &&
+				(write.kind === "okf_add" ||
+					write.kind === "okf_organize" ||
+					write.kind === "memory_add" ||
+					write.kind === "memory_replace" ||
+					write.kind === "memory_remove")
+			) {
+				return { applied: false };
+			}
+			// R7 memory-to-behavior: a recurring procedure is compiled into an executable skill file rather
+			// than stored as a flat fact. Written under the agent skills dir so it loads like any user skill.
+			if (write.kind === "promote_skill") {
+				const promoted = this._promoteReflectionSkill(write.name, write.description, write.body);
+				if (promoted) this.deps.refreshLiveSkills?.();
+				return { applied: promoted };
+			}
+			if (write.kind === "okf_add" || write.kind === "okf_organize") {
+				try {
+					const result = await this.deps.applyStructuredReflectionWrite(write, signal);
+					if (!result.applied || result.digest === undefined) return { applied: false };
+					return {
+						applied: true,
+						rollback:
+							write.kind === "okf_add"
+								? {
+										kind: "okf_remove",
+										target: `${write.type}\0${write.title}`,
+										expectedDigest: result.digest,
+										instructions: "Remove only the exact structured OKF record created by this reflection.",
+									}
+								: {
+										kind: "okf_organize",
+										target: `${write.type}\0${write.title}`,
+										previous: write.sourceText,
+										...(result.sourceTarget ? { previousTarget: result.sourceTarget } : {}),
+										expectedDigest: result.digest,
+										removeOkf: result.created,
+										instructions:
+											"Restore the exact hot-memory source first, then remove only the OKF record created by this reflection.",
+									},
+					};
+				} catch {
+					return { applied: false };
+				}
+			}
+
+			type MemResult = { details?: { success?: boolean; error?: string } };
+			type MemExec = (
+				toolCallId: string,
+				params: {
+					action: string;
+					target: string;
+					content?: string;
+					oldContent?: string;
+					basis?: "explicit" | "inferred";
+					type?: string;
+					title?: string;
+					description?: string;
+					scope?: string;
+					tags?: string[];
+					evidenceRefs?: string[];
+				},
+				signal: AbortSignal | undefined,
+				onUpdate: undefined,
+				ctx: undefined,
+			) => Promise<MemResult>;
+			const memTool = this.deps
+				.getMemoryManager()
+				.getToolDefinitions()
+				.find((t) => t.name === "memory");
+			const exec = memTool?.execute as unknown as MemExec | undefined;
+			if (!exec) return { applied: false };
+
+			const run = (params: Parameters<MemExec>[1]) => exec("reflection", params, signal, undefined, undefined);
+
+			if (write.kind === "memory_add") {
+				try {
+					const res = await run({
+						action: "add",
+						target: write.section === "USER" ? "user" : "memory",
+						content: write.text,
+						basis: explicit ? "explicit" : "inferred",
+					});
+					return { applied: res?.details?.success === true };
+				} catch {
+					// best-effort; reflection writes must never throw into the turn loop
+					return { applied: false };
+				}
+			}
+
+			// replace / remove: honor an explicit section when present. Otherwise try MEMORY.md, then
+			// USER.md. The memory tool reports outcomes via `details.success` (it catches its own errors
+			// rather than throwing). Only a genuine "not found in the file" justifies trying the other
+			// file; a real failure for a file (budget exceeded / drift) must NOT fall through and mutate
+			// the wrong target.
+			const basis: "explicit" | "inferred" = explicit ? "explicit" : "inferred";
+			const section =
+				write.kind === "memory_remove" || write.kind === "memory_replace"
+					? "section" in write
+						? write.section
+						: undefined
+					: undefined;
+			const targets: ReadonlyArray<"project" | "memory" | "user"> =
+				section === "USER" ? ["user"] : section === "MEMORY" ? ["memory"] : ["memory", "user"];
+			for (const target of targets) {
+				try {
+					const params =
+						write.kind === "memory_replace"
 							? {
-									kind: "okf_remove",
-									target: `${write.type}\0${write.title}`,
-									expectedDigest: result.digest,
-									instructions: "Remove only the exact structured OKF record created by this reflection.",
+									action: "replace",
+									target,
+									oldContent: write.target,
+									content: write.text,
+									basis,
 								}
 							: {
-									kind: "okf_organize",
-									target: `${write.type}\0${write.title}`,
-									previous: write.sourceText,
-									...(result.sourceTarget ? { previousTarget: result.sourceTarget } : {}),
-									expectedDigest: result.digest,
-									removeOkf: result.created,
-									instructions:
-										"Restore the exact hot-memory source first, then remove only the OKF record created by this reflection.",
-								},
-				};
-			} catch {
-				return { applied: false };
+									action: "remove",
+									target,
+									oldContent: write.target,
+									basis,
+								};
+					const res = await run(params);
+					if (res?.details?.success === true) {
+						return {
+							applied: true,
+							rollback:
+								write.kind === "memory_remove"
+									? {
+											kind: "memory_add",
+											previous: write.target,
+											previousTarget: target,
+											instructions:
+												target === "user"
+													? "Re-add the removed text to the USER memory section."
+													: "Re-add the removed text to the MEMORY file (it may originally have lived in USER).",
+										}
+									: undefined,
+						};
+					}
+					if (!/not found/i.test(String(res?.details?.error ?? ""))) return { applied: false }; // real failure
+					// substring simply absent from this file — try the next target
+				} catch {
+					// defensive: if the tool ever does throw, try the next target
+				}
 			}
+			return { applied: false };
+		} finally {
+			this._internalExplicitAdmission = prevInternal;
 		}
-
-		type MemResult = { details?: { success?: boolean; error?: string } };
-		type MemExec = (
-			toolCallId: string,
-			params: {
-				action: string;
-				target: string;
-				content?: string;
-				oldContent?: string;
-				type?: string;
-				title?: string;
-				description?: string;
-				scope?: string;
-				tags?: string[];
-				evidenceRefs?: string[];
-			},
-			signal: AbortSignal | undefined,
-			onUpdate: undefined,
-			ctx: undefined,
-		) => Promise<MemResult>;
-		const memTool = this.deps
-			.getMemoryManager()
-			.getToolDefinitions()
-			.find((t) => t.name === "memory");
-		const exec = memTool?.execute as unknown as MemExec | undefined;
-		if (!exec) return { applied: false };
-
-		const run = (params: Parameters<MemExec>[1]) => exec("reflection", params, signal, undefined, undefined);
-
-		if (write.kind === "memory_add") {
-			try {
-				const res = await run({
-					action: "add",
-					target: write.section === "USER" ? "user" : "memory",
-					content: write.text,
-				});
-				return { applied: res?.details?.success === true };
-			} catch {
-				// best-effort; reflection writes must never throw into the turn loop
-				return { applied: false };
-			}
-		}
-
-		// replace / remove carry no target file — try MEMORY.md, then USER.md. The memory tool reports
-		// outcomes via `details.success` (it catches its own errors rather than throwing). Only a
-		// genuine "not found in the file" justifies trying the other file; a real failure for a file
-		// (budget exceeded / drift) must NOT fall through and mutate the wrong target.
-		for (const target of ["project", "memory", "user"] as const) {
-			try {
-				const params =
-					write.kind === "memory_replace"
-						? { action: "replace", target, oldContent: write.target, content: write.text }
-						: { action: "remove", target, oldContent: write.target };
-				const res = await run(params);
-				if (res?.details?.success === true) return { applied: true }; // applied
-				if (!/not found/i.test(String(res?.details?.error ?? ""))) return { applied: false }; // real failure
-				// substring simply absent from this file — try the next target
-			} catch {
-				// defensive: if the tool ever does throw, try the next target
-			}
-		}
-		return { applied: false };
 	}
 
 	/**

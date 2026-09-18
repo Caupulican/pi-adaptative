@@ -3913,6 +3913,8 @@ export class AgentSession {
 		signal?: AbortSignal;
 		/** Stable id so a duplicate scheduling/retry of the same pass can't double-count its cost. */
 		reportId?: string;
+		/** True only when every turn in this pass explicitly asked Pi to remember durable information. */
+		explicitUserMemoryInstruction?: boolean;
 	}): Promise<ReflectionResult | null> {
 		return this._reflection.runReflectionPass(input);
 	}
