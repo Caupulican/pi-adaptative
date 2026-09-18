@@ -51,8 +51,8 @@ export function parseAntigravityModels(raw: unknown): Model<"google-antigravity"
 	for (const [id, value] of entries) {
 		if (!isAntigravityObject(value)) continue;
 		const info = value;
-		// This adapter exposes Gemini chat models, not internal completion or image-generation routes.
-		if (!/^gemini-[a-z0-9.-]+$/.test(id) || id.includes("image") || info.isInternal) continue;
+		// This adapter exposes chat models, not internal completion or image-generation routes.
+		if (!/^(?:gemini|claude|gpt|o[1-9])-[a-z0-9.-]+$/.test(id) || id.includes("image") || info.isInternal) continue;
 		if (!Number.isSafeInteger(info.maxTokens) || !Number.isSafeInteger(info.maxOutputTokens)) continue;
 		const contextWindow = info.maxTokens as number;
 		const maxTokens = info.maxOutputTokens as number;
@@ -114,7 +114,7 @@ export async function discoverAntigravityAccount(
 		}
 	}
 	const models = parseAntigravityModels(response.models).filter((model) => agentIds.has(model.id));
-	if (models.length === 0) throw new Error("Antigravity returned no supported Gemini chat models");
+	if (models.length === 0) throw new Error("Antigravity returned no supported chat models");
 	// Persist only public model capabilities, never quota/account metadata from discovery.
 	const modelCatalog = Object.fromEntries(
 		models.map((model) => [

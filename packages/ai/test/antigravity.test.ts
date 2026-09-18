@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { streamAntigravity } from "../src/providers/google-antigravity.ts";
 import type { Model } from "../src/types.ts";
+import { discoverAntigravityAccount, parseAntigravityModels } from "../src/utils/antigravity.ts";
 import { getOAuthProvider } from "../src/utils/oauth/index.ts";
 
 const model: Model<"google-antigravity"> = {
@@ -19,7 +20,92 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("Antigravity OAuth and transport", () => {
 	it("registers its own OAuth owner", () => {
-		expect(getOAuthProvider("google-antigravity")?.name).toContain("Antigravity");
+		expect(getOAuthProvider("google-antigravity")?.name).toBe("Google Antigravity");
+	});
+
+	it("accepts advertised Claude, GPT, and Gemini models under google-antigravity", () => {
+		const models = parseAntigravityModels({
+			"gemini-2.5-pro": {
+				displayName: "Gemini 2.5 Pro",
+				maxTokens: 1000000,
+				maxOutputTokens: 8192,
+				supportsThinking: true,
+				supportsImages: true,
+			},
+			"claude-sonnet-4-6": {
+				displayName: "Claude Sonnet 4.6",
+				maxTokens: 200000,
+				maxOutputTokens: 8192,
+				supportsThinking: true,
+				supportsImages: true,
+			},
+			"gpt-4o": {
+				displayName: "GPT-4o",
+				maxTokens: 128000,
+				maxOutputTokens: 4096,
+				supportsThinking: false,
+				supportsImages: true,
+			},
+			"o3-mini": {
+				displayName: "o3-mini",
+				maxTokens: 200000,
+				maxOutputTokens: 100000,
+				supportsThinking: true,
+				supportsImages: false,
+			},
+			"gemini-image-gen": {
+				displayName: "Gemini Image Gen",
+				maxTokens: 10000,
+				maxOutputTokens: 1000,
+			},
+			"unsupported-model": {
+				displayName: "Unsupported",
+				maxTokens: 10000,
+				maxOutputTokens: 1000,
+			},
+		});
+
+		expect(models.map((m) => m.id)).toEqual(["gemini-2.5-pro", "claude-sonnet-4-6", "gpt-4o", "o3-mini"]);
+		for (const m of models) {
+			expect(m.provider).toBe("google-antigravity");
+			expect(m.api).toBe("google-antigravity");
+			expect(m.baseUrl).toBe("https://daily-cloudcode-pa.googleapis.com");
+		}
+	});
+
+	it("discovers advertised Claude and GPT models in discoverAntigravityAccount", async () => {
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(Response.json({ cloudaicompanionProject: { id: "fixture-project" } }))
+			.mockResolvedValueOnce(
+				Response.json({
+					models: {
+						"claude-sonnet-4-6": {
+							displayName: "Claude Sonnet 4.6",
+							maxTokens: 200000,
+							maxOutputTokens: 8192,
+							supportsThinking: true,
+							supportsImages: true,
+						},
+						"gpt-4o": {
+							displayName: "GPT-4o",
+							maxTokens: 128000,
+							maxOutputTokens: 4096,
+							supportsThinking: false,
+							supportsImages: true,
+						},
+					},
+					agentModelSorts: [
+						{
+							groups: [{ modelIds: ["claude-sonnet-4-6", "gpt-4o"] }],
+						},
+					],
+				}),
+			);
+		vi.stubGlobal("fetch", fetchMock);
+		const account = await discoverAntigravityAccount("fixture-token");
+		expect(account.projectId).toBe("fixture-project");
+		expect(Object.keys(account.modelCatalog as Record<string, unknown>)).toEqual(["claude-sonnet-4-6", "gpt-4o"]);
 	});
 
 	it("streams the Cloud Code Assist envelope without replacing the system prompt", async () => {

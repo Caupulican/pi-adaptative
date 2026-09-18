@@ -35,7 +35,7 @@ async function exchangeToken(
 
 export const antigravityOAuthProvider: OAuthProviderInterface = {
 	id: ANTIGRAVITY_PROVIDER,
-	name: "Google Antigravity (Gemini)",
+	name: "Google Antigravity",
 	isSubscription: true,
 	async login(callbacks) {
 		callbacks.signal?.throwIfAborted();
