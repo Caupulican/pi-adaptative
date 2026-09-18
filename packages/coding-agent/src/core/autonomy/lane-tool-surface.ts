@@ -33,6 +33,7 @@ import { createReadTool } from "../tools/read.ts";
 import { createRepoReadTool } from "../tools/repo-read.ts";
 import { createRunProcessTool } from "../tools/run-process.ts";
 import { disposeShellExecutionSession } from "../tools/shell-execution-session.ts";
+import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { createWriteTool } from "../tools/write.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { evaluateToolGate } from "./gates.ts";
@@ -201,7 +202,18 @@ function createLaneTools(
 			tool = materialized.tool;
 		}
 		// A lane's private-path boundary is authority, not visibility: it denies before running.
-		return [wrapToolWithCredentialExposureGuard(bindTool ? bindTool(tool) : tool, cwd, privatePathBoundary, "deny")];
+		const guarded = wrapToolWithCredentialExposureGuard(
+			bindTool ? bindTool(tool) : tool,
+			cwd,
+			privatePathBoundary,
+			"deny",
+		);
+		return [
+			wrapToolExecution(guarded, (executor) => ({
+				...executor,
+				execute: (toolCallId, ...args) => toolUsage.run(toolCallId, () => executor.execute(toolCallId, ...args)),
+			})),
+		];
 	});
 }
 
@@ -322,16 +334,23 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			options.bindTool,
 		),
 		dispose: async () => {
-			toolUsage.close();
-			if (options.shellSessionKey) disposeShellExecutionSession(options.shellSessionKey);
-			// The intent controller releases the lane's hold on the worktree scope.
-			await fileMutationIntents.dispose();
+			try {
+				toolUsage.close();
+			} finally {
+				try {
+					if (options.shellSessionKey) disposeShellExecutionSession(options.shellSessionKey);
+				} finally {
+					// Billing or shell failure cannot retain the lane's hold on the worktree scope.
+					await fileMutationIntents.dispose();
+				}
+			}
 		},
 		allowedTools,
 		deniedTools,
 		unboundAllowPatterns,
 		toolUsage,
 		beforeToolCall: async ({ toolCall, args }) => {
+			toolUsage.assertOpen();
 			if (!allowedToolSet.has(toolCall.name)) {
 				return { block: true, reason: `Lane tool '${toolCall.name}' is outside the materialized UAC surface.` };
 			}

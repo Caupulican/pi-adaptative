@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import { basename, join } from "node:path";
 import { loadEntriesFromFile, type SessionEntry } from "@caupulican/pi-agent-core/session";
-import type { AssistantMessage, Usage } from "@caupulican/pi-ai";
-import { SPAWNED_USAGE_CUSTOM_TYPE, type SpawnedUsageReport } from "../agent-session.ts";
+import { addUsage, createEmptyUsage, getSessionEntryUsage } from "@caupulican/pi-agent-core/usage";
+import type { Usage } from "@caupulican/pi-ai";
+import { SPAWNED_USAGE_CUSTOM_TYPE, type SpawnedUsageReport } from "../agent-session-contracts.ts";
 
 function isUsage(value: unknown): value is Usage {
 	if (!value || typeof value !== "object") return false;
@@ -87,38 +88,14 @@ export function findChildSessionFile(sessionDir: string, sessionId: string): str
 	return undefined;
 }
 
-export function aggregateCumulativeUsageFromSessionEntries(entries: SessionEntry[]): Usage {
-	let input = 0;
-	let output = 0;
-	let cacheRead = 0;
-	let cacheWrite = 0;
-	let totalTokens = 0;
-	let costInput = 0;
-	let costOutput = 0;
-	let costCacheRead = 0;
-	let costCacheWrite = 0;
-	let costTotal = 0;
-
-	const add = (usage: Usage) => {
-		input += usage.input;
-		output += usage.output;
-		cacheRead += usage.cacheRead;
-		cacheWrite += usage.cacheWrite;
-		totalTokens += usage.totalTokens;
-		costInput += usage.cost.input;
-		costOutput += usage.cost.output;
-		costCacheRead += usage.cost.cacheRead;
-		costCacheWrite += usage.cost.cacheWrite;
-		costTotal += usage.cost.total;
-	};
-
+/** Whole-session spend, including direct entry charges and already-rolled-up descendants. */
+export function aggregateCumulativeUsageFromSessionEntries(entries: readonly SessionEntry[]): Usage {
+	const total = createEmptyUsage();
 	const seenSpawnedReportIds = new Set<string>();
 	for (const entry of entries) {
-		if (entry.type === "message" && entry.message.role === "assistant") {
-			const usage = (entry.message as AssistantMessage).usage;
-			if (usage && isUsage(usage)) {
-				add(usage);
-			}
+		const usage = getSessionEntryUsage(entry);
+		if (usage && isUsage(usage)) {
+			addUsage(total, usage);
 		} else if (entry.type === "custom" && entry.customType === SPAWNED_USAGE_CUSTOM_TYPE) {
 			const data = entry.data as SpawnedUsageReport | undefined;
 			if (!data?.usage || !isUsage(data.usage)) continue;
@@ -126,24 +103,10 @@ export function aggregateCumulativeUsageFromSessionEntries(entries: SessionEntry
 				if (seenSpawnedReportIds.has(data.reportId)) continue;
 				seenSpawnedReportIds.add(data.reportId);
 			}
-			add(data.usage);
+			addUsage(total, data.usage);
 		}
 	}
-
-	return {
-		input,
-		output,
-		cacheRead,
-		cacheWrite,
-		totalTokens,
-		cost: {
-			input: costInput,
-			output: costOutput,
-			cacheRead: costCacheRead,
-			cacheWrite: costCacheWrite,
-			total: costTotal,
-		},
-	};
+	return total;
 }
 
 export function reportCompletedAutoLearnUsageHelper(args: {

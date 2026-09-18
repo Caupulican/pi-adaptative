@@ -6,7 +6,8 @@ import type { ExecutionContext } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { measureJsonLength } from "@caupulican/pi-agent-core/provider-request-estimator";
 import { type AgentMessage, safeErrorMessage } from "@caupulican/pi-agent-core/types";
-import type { ImageContent, Model } from "@caupulican/pi-ai";
+import { combineUsage } from "@caupulican/pi-agent-core/usage";
+import type { ImageContent, Model, Usage } from "@caupulican/pi-ai";
 import type { KeyId } from "@caupulican/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
@@ -115,6 +116,13 @@ interface BeforeAgentStartCombinedResult {
 	systemPrompt?: string;
 }
 
+interface SessionBeforeTreeCombinedResult {
+	/** Last handler decision (or the first cancellation), without reading unrelated extension fields. */
+	result?: SessionBeforeTreeResult;
+	/** Sum of charges returned by every handler, including summaries replaced by later handlers. */
+	reportedUsage?: Usage;
+}
+
 /**
  * Events handled by the generic emit() method.
  * Events with dedicated emitXxx() methods are excluded for stronger type safety.
@@ -150,7 +158,7 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 		: TEvent extends { type: "session_before_compact" }
 			? SessionBeforeCompactResult | undefined
 			: TEvent extends { type: "session_before_tree" }
-				? SessionBeforeTreeResult | undefined
+				? SessionBeforeTreeCombinedResult
 				: undefined;
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
@@ -859,8 +867,9 @@ export class ExtensionRunner {
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
 		const ctx = this.createContext();
 		let result: SessionBeforeEventResult | undefined;
+		let treeSummaryUsage: Usage | undefined;
 
-		for (const ext of this.extensions) {
+		extensions: for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(event.type);
 			if (!handlers || handlers.length === 0) continue;
 
@@ -870,8 +879,19 @@ export class ExtensionRunner {
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = handlerResult as SessionBeforeEventResult;
+						if (event.type === "session_before_tree") {
+							try {
+								const usage = (handlerResult as SessionBeforeTreeResult).summary?.usage;
+								// Snapshot each returned charge before another handler can replace the
+								// decision or mutate the original result. Decision precedence is unchanged.
+								if (usage) treeSummaryUsage = combineUsage(treeSummaryUsage, usage);
+							} catch (err) {
+								// A malformed receipt must not erase a handler's cancellation veto.
+								this.reportHandlerError(ext.path, event.type, err);
+							}
+						}
 						if (result.cancel) {
-							return result as RunnerEmitResult<TEvent>;
+							break extensions;
 						}
 					}
 				} catch (err) {
@@ -880,6 +900,9 @@ export class ExtensionRunner {
 			}
 		}
 
+		if (event.type === "session_before_tree") {
+			return { result, reportedUsage: treeSummaryUsage } as RunnerEmitResult<TEvent>;
+		}
 		return result as RunnerEmitResult<TEvent>;
 	}
 

@@ -92,7 +92,7 @@ EXECUTION RULES
 
 - One scoped task: inspect before small coherent edits; run narrowest useful check.
 - Listed tools/schemas only; follow failure guidance. ${TOOL_FAILURE_RETRY_MODEL_RULE}
-- Batch independent calls; order dependent/mutating/stateful calls. Report actual results; never claim incomplete actions as done.
+- Batch independent calls in one message; order dependent/mutating/stateful calls. Report actual results; never claim incomplete actions as done.
 - ${OWNER_AUTHORIZATION_RULE}
 - ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
 

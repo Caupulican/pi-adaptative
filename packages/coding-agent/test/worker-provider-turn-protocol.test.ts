@@ -57,6 +57,90 @@ function createProtocol(options: {
 }
 
 describe("WorkerProviderTurnProtocol", () => {
+	it("rejects a negative receipt even when earlier usage could hide it in a positive cumulative sum", async () => {
+		const recorded = vi.fn();
+		const protocol = createProtocol({
+			acquireReservation: async () => trackedReservation().reservation,
+			recordUsage: recorded,
+		});
+		await protocol.requestPreflight();
+		protocol.accountAssistantUsage(usage({ input: 10, totalTokens: 10 }));
+		protocol.consumeToolAssistantAndRelease();
+		await protocol.requestPreflight();
+		expect(() => protocol.accountAssistantUsage(usage({ input: -1, totalTokens: -1 }))).toThrow();
+		expect(recorded).toHaveBeenCalledOnce();
+		protocol.accountAssistantUsage(usage({ input: 2, totalTokens: 2 }));
+		expect(recorded).toHaveBeenCalledTimes(2);
+		expect(recorded.mock.calls[1][0]).toMatchObject({ inputTokens: 2, totalTokens: 2 });
+	});
+
+	it.each(["callback_first", "aggregate_first"] as const)(
+		"charges aborted callback and aggregate evidence once: %s",
+		async (order) => {
+			const abort = new AbortController();
+			const recorded: GatewayUsageDelta[] = [];
+			const protocol = createProtocol({
+				acquireReservation: async () => trackedReservation().reservation,
+				signal: abort.signal,
+				recordUsage: (delta) => recorded.push(delta),
+			});
+			await protocol.requestPreflight();
+			abort.abort();
+			protocol.close();
+			const receipt = usage({ input: 11, totalTokens: 11, costTotal: 0.2 });
+			if (order === "aggregate_first") protocol.accountUnverifiedResultUsageDelta(receipt);
+			protocol.accountLateAssistantUsage(receipt);
+			protocol.accountUnverifiedResultUsageDelta(receipt);
+			protocol.accountUnverifiedResultUsageDelta(receipt);
+			expect(recorded).toHaveLength(1);
+			expect(recorded[0]).toMatchObject({ inputTokens: 11, totalTokens: 11, costUsd: 0.2 });
+		},
+	);
+
+	it("retains one late assistant receipt after abort without reopening its released reservation", async () => {
+		const abort = new AbortController();
+		const acquired = trackedReservation();
+		const recorded = vi.fn();
+		const protocol = createProtocol({
+			acquireReservation: async () => acquired.reservation,
+			signal: abort.signal,
+			recordUsage: recorded,
+		});
+		await protocol.requestPreflight();
+		abort.abort();
+		protocol.close();
+		protocol.close();
+		protocol.accountLateAssistantUsage(usage({ input: 11, totalTokens: 11 }));
+		expect(recorded).toHaveBeenCalledOnce();
+		expect(() => protocol.accountLateAssistantUsage(usage({ input: 11, totalTokens: 11 }))).toThrow();
+		expect(() => protocol.consumeTerminalAssistantAndHold()).toThrow();
+		expect(acquired.release).toHaveBeenCalledOnce();
+		expect(protocol.accountUnverifiedResultUsageDelta(usage({ input: 11, totalTokens: 11 }))).toBe(false);
+	});
+
+	it.each(["missing", "consumed", "not_aborted"] as const)(
+		"refuses late receipt authority when the epoch is %s",
+		async (state) => {
+			const abort = new AbortController();
+			const recorded = vi.fn();
+			const protocol = createProtocol({
+				acquireReservation: async () => trackedReservation().reservation,
+				signal: abort.signal,
+				recordUsage: recorded,
+			});
+			if (state !== "missing") await protocol.requestPreflight();
+			if (state === "consumed") {
+				protocol.accountAssistantUsage(usage());
+				protocol.consumeTerminalAssistantAndHold();
+			}
+			if (state !== "not_aborted") abort.abort();
+			protocol.close();
+			const calls = recorded.mock.calls.length;
+			expect(() => protocol.accountLateAssistantUsage(usage({ input: 11, totalTokens: 11 }))).toThrow();
+			expect(recorded).toHaveBeenCalledTimes(calls);
+		},
+	);
+
 	it("fails overlapping preflights and invalidates the stale acquisition", async () => {
 		const deferred = deferredReservation();
 		const acquired = trackedReservation();

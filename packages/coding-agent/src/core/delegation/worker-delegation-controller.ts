@@ -650,11 +650,8 @@ export class WorkerDelegationController {
 					reasonCode: "session_disposed",
 				}).record;
 				this.publishTerminalRecord(canceled);
-				// The terminal result and owner usage report share the same fenced cumulative snapshot.
+				// The claim describes execution; durable usage receipts own parent charge delivery.
 				this.deps.saveWorkerClaimSnapshot(claim, ledger.request);
-				if (reportedUsage.cost.total > 0 || reportedUsage.totalTokens > 0) {
-					this.deps.addSpawnedUsage(reportedUsage, { label: "worker-delegation", reportId });
-				}
 			} catch (error) {
 				this.safeWarn(
 					`Failed to persist canceled worker claim ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -3339,9 +3336,6 @@ export class WorkerDelegationController {
 						`Failed to persist worker claim ${startedRecord.laneId}: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
-				if (reportedUsage.cost.total > 0 || reportedUsage.totalTokens > 0) {
-					this.deps.addSpawnedUsage(reportedUsage, { label: "worker-delegation", reportId: usageReportId });
-				}
 
 				const terminalRecords: LaneRecord[] = [record];
 				if (request.verificationOfTaskId) {
@@ -3391,7 +3385,9 @@ export class WorkerDelegationController {
 				return { started: true, record, outcome };
 			} catch (error) {
 				const durableState = lifecycle.ledger.runtime.getSnapshot().attempts[durableHandle.attemptId];
-				if (durableState?.status === "suspended") {
+				const fenceSuperseded =
+					durableState?.lease !== undefined && durableState.lease.fencingToken !== durableHandle.fencingToken;
+				if (durableState?.status === "suspended" || fenceSuperseded) {
 					// Disposal/reload fences agent-bound work before its aborted completion unwinds. Do not
 					// convert that resumable interruption into a terminal claim or cancellation.
 					return { started: true, record: lifecycle.getRecord(startedRecord.laneId) };
@@ -3435,7 +3431,7 @@ export class WorkerDelegationController {
 					}
 				}
 				let record = lifecycle.getRecord(startedRecord.laneId);
-				if (record?.status === "queued" || record?.status === "running") {
+				if (!fenceSuperseded && (record?.status === "queued" || record?.status === "running")) {
 					record = this.cancelAndPublish(lifecycle, startedRecord.laneId, "worker_delegation_error");
 				}
 				if (record && !this.deps.isDisposed()) this.publishTerminalRecord(record);

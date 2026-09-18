@@ -87,6 +87,9 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 	// on the dispatch for a queued turn that no process has taken yet. Without it every consumer
 	// counts tasks where it means specialists.
 	const agentId = attempt.agentId ?? attempt.dispatch.logicalLaneId;
+	// A terminal result seals execution, not subsequent received billing. Legacy managed results
+	// have no generation accounting and retain their reported cost.
+	const costUsd = attempt.usageAccounting?.total.costUsd ?? attempt.result?.usage.costUsd;
 	return {
 		laneId: managed ? (attempt.dispatch.logicalLaneId ?? taskId) : taskId,
 		type: managed ? "tmux-worker" : "worker",
@@ -105,7 +108,7 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 		...(status === "queued" || status === "running"
 			? {}
 			: { completedAt: task.verification?.completedAt ?? attempt.updatedAt }),
-		...(attempt.result?.usage.costUsd !== undefined ? { costUsd: attempt.result.usage.costUsd } : {}),
+		...(costUsd !== undefined ? { costUsd } : {}),
 		...(goalId ? { goalId } : {}),
 		...(agentStatus ? { agentStatus } : {}),
 		...(attempt.dispatch.worktreeLaneKey ? { worktreeLaneKey: attempt.dispatch.worktreeLaneKey } : {}),

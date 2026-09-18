@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 const generator = fileURLToPath(new URL("../scripts/generate-models.ts", import.meta.url));
-const fixture = fileURLToPath(new URL("./fixtures/model-catalog-refresh-fetch.mjs", import.meta.url));
+const fixture = new URL("./fixtures/model-catalog-refresh-fetch.mjs", import.meta.url).href;
 const directories: string[] = [];
 const sources = [
 	"https://models.dev/api.json",

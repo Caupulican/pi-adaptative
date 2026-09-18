@@ -1,3 +1,4 @@
+import type { AttemptUsageAccounting } from "./attempt-usage-generations.ts";
 import type {
 	AcceptanceCriterion,
 	AgentBindingContract,
@@ -9,6 +10,7 @@ import type {
 	AttemptLease,
 	AttemptRetryState,
 	AttemptStatus,
+	AttemptUsageSnapshot,
 	EvidenceContract,
 	ExecutionGrant,
 	ManagedLaneLifetime,
@@ -52,6 +54,10 @@ export interface AttemptRuntimeState {
 	/** Omitted for legacy attempts and attempts that have never entered the host retry ladder. */
 	retry?: AttemptRetryState;
 	checkpointIds: readonly string[];
+	/** Received charges retain their execution-generation identity after suspension or completion. */
+	usageAccounting?: AttemptUsageAccounting;
+	/** Parent-report outbox; removal requires acknowledgement after the parent receipt persists. */
+	usageReceipts?: Readonly<Record<string, AttemptUsageReceipt>>;
 	result?: WorkerResultContract;
 	/**
 	 * Managed-process attempts only: lifetime of the external process this turn was dispatched to,
@@ -60,6 +66,15 @@ export interface AttemptRuntimeState {
 	managedLifetime?: ManagedLaneLifetime;
 	createdAt: string;
 	updatedAt: string;
+}
+
+export interface AttemptUsageReceipt {
+	readonly receiptId: string;
+	readonly leaseId: string;
+	readonly fencingToken: number;
+	readonly kind: "baseline" | "increase";
+	readonly usage: AttemptUsageSnapshot;
+	readonly recordedAt: string;
 }
 
 export interface NotificationRuntimeState {

@@ -42,12 +42,14 @@ export class WorkerProviderTurnProtocol {
 	private readonly signal: AbortSignal;
 	private readonly onFailure: (error: unknown) => void;
 	private readonly callbackAccountedUsage = createEmptyUsage();
+	private readonly chargedUsage = createEmptyUsage();
 	private held: ProviderBudgetReservation | undefined;
 	private heldConsumed = false;
 	private assistantUsageAccounted = false;
 	private inFlight = false;
 	private generation = 0;
 	private closed = false;
+	private lateAssistantPending = false;
 	private successfulPreflights = 0;
 	private consumedPreflights = 0;
 
@@ -112,14 +114,17 @@ export class WorkerProviderTurnProtocol {
 				),
 			);
 		}
-		try {
-			this.recordUsage?.(usageDeltaFromProviderUsage(usage));
-			addUsage(this.callbackAccountedUsage, usage);
-			this.assistantUsageAccounted = true;
-		} catch (error) {
-			this.onFailure(error);
-			throw error;
+		this.recordAssistantReceipt(usage);
+		this.assistantUsageAccounted = true;
+	}
+
+	/** Billing survives abort for the one admitted response that had not yet been accounted. */
+	accountLateAssistantUsage(usage: Usage): void {
+		if (!this.closed || !this.signal.aborted || !this.lateAssistantPending) {
+			this.fail(new WorkerCompletionProtocolError("Worker completion has no pending late assistant receipt."));
 		}
+		this.recordAssistantReceipt(usage);
+		this.lateAssistantPending = false;
 	}
 
 	/** Account usage before releasing a tool-request turn for nested or subsequent provider work. */
@@ -169,26 +174,51 @@ export class WorkerProviderTurnProtocol {
 
 	/** Conservatively charge only provider-result usage not already evidenced by assistant callbacks. */
 	accountUnverifiedResultUsageDelta(reported: Usage): boolean {
-		const delta = positiveUsageDelta(reported, this.callbackAccountedUsage);
-		let recorded = false;
-		if (this.recordUsage && hasUsage(delta)) {
-			try {
-				this.recordUsage(delta);
-				recorded = true;
-			} catch (error) {
-				this.onFailure(error);
-				throw error;
-			}
-		}
-		return recorded;
+		return this.chargeCumulativeUsage(reported);
 	}
 
 	close(): void {
 		if (!this.closed) {
+			this.lateAssistantPending = this.hasOutstandingAssistantReservation() && !this.assistantUsageAccounted;
 			this.closed = true;
 			this.generation += 1;
 		}
 		this.releaseHeldReservation();
+	}
+
+	private recordAssistantReceipt(usage: Usage): void {
+		try {
+			usageDeltaFromProviderUsage(usage);
+		} catch (error) {
+			this.onFailure(error);
+			throw error;
+		}
+		const cumulative = structuredClone(this.callbackAccountedUsage);
+		addUsage(cumulative, usage);
+		this.chargeCumulativeUsage(cumulative);
+		addUsage(this.callbackAccountedUsage, usage);
+	}
+
+	/** Callback sums and a returned aggregate describe the same spend, in either arrival order. */
+	private chargeCumulativeUsage(reported: Usage): boolean {
+		try {
+			usageDeltaFromProviderUsage(reported);
+			const delta = positiveUsageDelta(reported, this.chargedUsage);
+			if (!hasUsage(delta)) return false;
+			this.recordUsage?.(delta);
+			addUsage(this.chargedUsage, {
+				input: delta.inputTokens,
+				output: delta.outputTokens,
+				cacheRead: delta.cacheReadTokens,
+				cacheWrite: delta.cacheWriteTokens,
+				totalTokens: delta.totalTokens,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: delta.costUsd },
+			});
+			return this.recordUsage !== undefined;
+		} catch (error) {
+			this.onFailure(error);
+			throw error;
+		}
 	}
 
 	private consumeAccountedAssistant(): void {

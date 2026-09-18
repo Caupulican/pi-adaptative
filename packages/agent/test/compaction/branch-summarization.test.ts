@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateBranchSummary, prepareBranchEntries } from "../../src/compaction/branch-summarization.ts";
 import type { CompactionEntry, SessionEntry, SessionMessageEntry } from "../../src/session/session-manager.ts";
 import type { StreamFn } from "../../src/types.ts";
+import { createEmptyUsage } from "../../src/usage.ts";
 
 function createModel(): Model<any> {
 	return {
@@ -45,6 +46,143 @@ afterEach(() => {
 });
 
 describe("generateBranchSummary reliability", () => {
+	it.each([new Error("Retry transport failed"), undefined])(
+		"publishes received usage before a later raw rejection: %s",
+		async (failure) => {
+			vi.useFakeTimers();
+			const onUsage = vi.fn();
+			let calls = 0;
+			const message = fauxAssistantMessage("", {
+				stopReason: "error",
+				errorMessage: "429 rate limited. Please try again in 1.5s.",
+			});
+			message.usage = { ...createEmptyUsage(), input: 10, output: 1, totalTokens: 11 };
+			const streamFn: StreamFn = () => {
+				if (++calls === 2) throw failure;
+				return streamWith({ type: "error", reason: "error", error: message });
+			};
+			const pending = generateBranchSummary([entry("summarize me")], {
+				model: createModel(),
+				apiKey: "key",
+				signal: new AbortController().signal,
+				streamFn,
+				onUsage,
+			});
+			const rejection = expect(pending).rejects.toBe(failure);
+			await vi.runAllTimersAsync();
+			await rejection;
+			expect(calls).toBe(2);
+			expect(onUsage).toHaveBeenCalledExactlyOnceWith(message.usage);
+		},
+	);
+
+	it("isolates usage snapshots from callbacks and later successful retries", async () => {
+		vi.useFakeTimers();
+		const received: ReturnType<typeof createEmptyUsage>[] = [];
+		let calls = 0;
+		const streamFn: StreamFn = () => {
+			const reason = ++calls === 1 ? "error" : "stop";
+			const message = fauxAssistantMessage("Summary", {
+				stopReason: reason,
+				errorMessage: "429 rate limited. Please try again in 1.5s.",
+			});
+			message.usage = { ...createEmptyUsage(), input: 10, totalTokens: 10 };
+			return streamWith(
+				reason === "error" ? { type: "error", reason, error: message } : { type: "done", reason, message },
+			);
+		};
+		const pending = generateBranchSummary([entry("summarize me")], {
+			model: createModel(),
+			apiKey: "key",
+			signal: new AbortController().signal,
+			streamFn,
+			onUsage: (usage) => {
+				received.push(structuredClone(usage));
+				usage.totalTokens = 999;
+				usage.cost.total = 999;
+			},
+		});
+		await vi.runAllTimersAsync();
+		const result = await pending;
+		expect(received.map((usage) => usage.totalTokens)).toEqual([10, 20]);
+		expect(received.map((usage) => usage.cost.total)).toEqual([0, 0]);
+		expect(result.usage?.totalTokens).toBe(20);
+		expect(result.usage?.cost.total).toBe(0);
+		expect(result.summary).toContain("Summary");
+	});
+
+	it.each(["stop", "aborted", "error", "length"] as const)(
+		"returns every received charge after a retry ending in %s",
+		async (stopReason) => {
+			vi.useFakeTimers();
+			let calls = 0;
+			const streamFn: StreamFn = () => {
+				calls++;
+				const reason = calls === 1 ? "error" : stopReason;
+				const message = fauxAssistantMessage("Summary", {
+					stopReason: reason,
+					errorMessage: calls === 1 ? "429 rate limited. Please try again in 1.5s." : "401 unauthorized",
+				});
+				message.usage = { ...createEmptyUsage(), input: 10, output: 1, totalTokens: 11 };
+				message.usage.cost.total = 0.25;
+				return streamWith(
+					reason === "aborted" || reason === "error"
+						? { type: "error", reason, error: message }
+						: { type: "done", reason, message },
+				);
+			};
+			const pending = generateBranchSummary([entry("summarize me")], {
+				model: createModel(),
+				apiKey: "key",
+				signal: new AbortController().signal,
+				streamFn,
+			});
+			await vi.runAllTimersAsync();
+			const result = await pending;
+			expect(calls).toBe(2);
+			expect(result.usage).toEqual({
+				...createEmptyUsage(),
+				input: 20,
+				output: 2,
+				totalTokens: 22,
+				cost: { ...createEmptyUsage().cost, total: 0.5 },
+			});
+			if (stopReason === "stop") expect(result.summary).toContain("Summary");
+			else expect(result.summary).toBeUndefined();
+			if (stopReason === "aborted") expect(result.aborted).toBe(true);
+			if (stopReason === "error") expect(result.error).toBe("401 unauthorized");
+			if (stopReason === "length") expect(result.error).toContain("output cap");
+		},
+	);
+
+	it("retains the received charge when cancellation interrupts retry backoff", async () => {
+		vi.useFakeTimers();
+		const controller = new AbortController();
+		let calls = 0;
+		const message = fauxAssistantMessage("", {
+			stopReason: "error",
+			errorMessage: "429 rate limited. Please try again in 1.5s.",
+		});
+		message.usage = { ...createEmptyUsage(), input: 10, totalTokens: 10 };
+		const streamFn: StreamFn = () => {
+			calls++;
+			return streamWith({ type: "error", reason: "error", error: message });
+		};
+		const pending = generateBranchSummary([entry("summarize me")], {
+			model: createModel(),
+			apiKey: "key",
+			signal: controller.signal,
+			streamFn,
+		});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(calls).toBe(1);
+		expect(vi.getTimerCount()).toBeGreaterThan(0);
+		controller.abort();
+		expect(await pending).toEqual({ aborted: true, usage: message.usage });
+		expect(calls).toBe(1);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
 	it("ignores malformed persisted file-operation values", () => {
 		const malformed = {
 			type: "branch_summary",

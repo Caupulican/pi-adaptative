@@ -74,6 +74,8 @@ export interface HarnessOptions {
 	sharedFauxProvider?: FauxProviderRegistration;
 	/** Session working directory; defaults to the harness temp dir. Must exist. */
 	cwd?: string;
+	/** Persist the session inside the harness-owned temporary directory. */
+	persistSession?: boolean;
 	models?: FauxModelDefinition[];
 	fauxProvider?: Pick<RegisterFauxProviderOptions, "api" | "provider" | "onRequest">;
 	settings?: Partial<Settings>;
@@ -137,7 +139,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager = options.persistSession
+		? SessionManager.create(options.cwd ?? tempDir, agentDir, join(tempDir, "sessions"))
+		: SessionManager.inMemory();
 	const workerModel = model;
 	const defaultOrchestrationProfileId = options.workerOrchestrationProfile?.profileId ?? "test-worker";
 	const effectiveSettings: Partial<Settings> = {

@@ -2,6 +2,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
+import { DurableTaskRuntime } from "../src/core/orchestration/task-runtime.ts";
 import { type TypeSafeEvidenceRef, TypeSafeEvidenceStore } from "../src/core/review/typesafe-evidence-store.ts";
 import { createHarness } from "./suite/harness.ts";
 
@@ -9,28 +10,34 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("worker billed review cancellation", () => {
 	it.each([
-		{ shutdown: false, failCheckpoint: false },
-		{ shutdown: true, failCheckpoint: false },
-		{ shutdown: false, failCheckpoint: true },
-	])("retains a received service charge: %j", async ({ shutdown, failCheckpoint }) => {
+		{ shutdown: false, failUsageWrite: false },
+		{ shutdown: true, failUsageWrite: false },
+		{ shutdown: false, failUsageWrite: true },
+	])("retains a received service charge: %j", async ({ shutdown, failUsageWrite }) => {
 		const harness = await createHarness({
 			initialActiveToolNames: ["delegate", "typesafe_review", "skill"],
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
 		const sessionId = harness.sessionManager.getSessionId();
 		const save = TypeSafeEvidenceStore.prototype.save;
-		const checkpoint = WorkerLifecycle.prototype.checkpoint;
-		let receiptCheckpoints = 0;
-		vi.spyOn(WorkerLifecycle.prototype, "checkpoint").mockImplementation(function (
-			this: WorkerLifecycle,
-			laneId,
-			input,
+		const recordUsage = DurableTaskRuntime.prototype.recordAttemptUsage;
+		let billedUsageWrites = 0;
+		vi.spyOn(DurableTaskRuntime.prototype, "recordAttemptUsage").mockImplementation(function (
+			this: DurableTaskRuntime,
+			handle,
+			usage,
 		) {
-			if (input.summary === "Persisted billed tool service usage before result publication.") {
-				receiptCheckpoints++;
-				if (failCheckpoint && receiptCheckpoints === 1) throw new Error("fixture checkpoint failure");
+			const previous =
+				this.getSnapshot().attempts[handle.attemptId]?.usageAccounting?.generations[handle.leaseId]?.reported;
+			if (
+				previous &&
+				usage.inputTokens - previous.inputTokens === 100 &&
+				usage.outputTokens - previous.outputTokens === 10
+			) {
+				billedUsageWrites++;
+				if (failUsageWrite && billedUsageWrites === 1) throw new Error("fixture usage write failure");
 			}
-			return checkpoint.call(this, laneId, input);
+			return recordUsage.call(this, handle, usage);
 		});
 		let receipt: TypeSafeEvidenceRef | undefined;
 		vi.spyOn(TypeSafeEvidenceStore.prototype, "save").mockImplementation(function (
@@ -74,7 +81,7 @@ describe("worker billed review cancellation", () => {
 			]);
 			await harness.session.runWorkerDelegationOnce({ instructions: "Review the fixture with Jev." });
 			expect(fetcher).toHaveBeenCalledOnce();
-			expect(receiptCheckpoints).toBe(failCheckpoint ? 2 : 1);
+			expect(billedUsageWrites).toBe(failUsageWrite ? 2 : 1);
 			expect(receipt).toBeDefined();
 			const archived = TypeSafeEvidenceStore.file(harness.tempDir, sessionId).read(receipt!.id);
 			expect(JSON.parse(archived.text)).toMatchObject({

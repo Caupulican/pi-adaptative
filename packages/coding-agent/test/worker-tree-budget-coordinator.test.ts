@@ -5,6 +5,11 @@ import {
 	type WorkerTreeBudgetExceededError,
 	workerTreeCanAdmitAttempt,
 } from "../src/core/delegation/worker-tree-budget-coordinator.ts";
+import {
+	type AttemptUsageAccounting,
+	beginAttemptUsageGeneration,
+	projectPendingAttemptGenerationUsage,
+} from "../src/core/orchestration/attempt-usage-generations.ts";
 import type { AttemptUsageSnapshot } from "../src/core/orchestration/contracts.ts";
 
 function usage(overrides: Partial<AttemptUsageSnapshot> = {}): AttemptUsageSnapshot {
@@ -22,6 +27,63 @@ function usage(overrides: Partial<AttemptUsageSnapshot> = {}): AttemptUsageSnaps
 }
 
 describe("WorkerTreeBudgetCoordinator", () => {
+	it("keeps overlapping generation charges through replay, reservations and rejected publications", async () => {
+		const coordinator = new WorkerTreeBudgetCoordinator();
+		const port = coordinator.createPort({
+			rootAgentId: "root",
+			attemptId: "attempt",
+			budget: { maxTokens: 100 },
+			seeds: [],
+			initialUsage: usage(),
+		});
+		const sibling = coordinator.createPort({
+			rootAgentId: "root",
+			attemptId: "sibling",
+			budget: { maxTokens: 100 },
+			seeds: [],
+			initialUsage: usage(),
+		});
+		const older = { leaseId: "old", fencingToken: 1 };
+		const newer = { leaseId: "new", fencingToken: 2 };
+		const original = beginAttemptUsageGeneration(undefined, older, usage());
+		const resumed = beginAttemptUsageGeneration(original, newer);
+		const first = projectPendingAttemptGenerationUsage(original, older, usage({ inputTokens: 10, totalTokens: 10 }));
+		const second = projectPendingAttemptGenerationUsage(resumed, newer, usage({ inputTokens: 20, totalTokens: 20 }));
+		const publish = (accounting: AttemptUsageAccounting) => {
+			const { activeWallClockMs, ...total } = accounting.total;
+			port.recordAttemptUsage({ ...total, wallClockMs: activeWallClockMs }, accounting);
+		};
+		const reserved = await port.reserveProviderBudget(80, "request");
+		publish(first);
+		publish(second);
+		expect(port.getAttemptUsage()).toEqual(usage({ inputTokens: 30, totalTokens: 30 }));
+		expect(sibling.getAttemptUsage()).toEqual(usage());
+		port.getAttemptUsage().inputTokens = 999;
+		expect(port.getAttemptUsage().inputTokens).toBe(30);
+		expect(sibling.remainingTokens()).toBe(20); // 30 spent + 50 still reserved.
+		publish(first);
+		publish(resumed);
+		expect(sibling.remainingTokens()).toBe(20);
+		const malformed = { ...second, total: usage({ inputTokens: 60, totalTokens: 60 }) };
+		expect(() => publish(malformed)).toThrow();
+		expect(sibling.remainingTokens()).toBe(20);
+		reserved.release();
+		expect(sibling.remainingTokens()).toBe(70);
+		// Registering another consumer with stale durable totals cannot erase pending spend.
+		coordinator.createPort({
+			rootAgentId: "root",
+			attemptId: "attempt",
+			budget: { maxTokens: 100 },
+			seeds: [{ attemptId: "attempt", usage: second.total }],
+			initialUsage: second.total,
+		});
+		publish(second);
+		expect(sibling.remainingTokens()).toBe(70);
+		const admitted = await sibling.reserveProviderBudget(100, "sibling request");
+		expect(admitted.maxTokens).toBe(70);
+		admitted.release();
+	});
+
 	it("refuses a new attempt when the tree already holds the maxAttempts ceiling", () => {
 		expect(workerTreeCanAdmitAttempt(0, undefined)).toBe(true);
 		expect(workerTreeCanAdmitAttempt(1, 1)).toBe(false);

@@ -1,3 +1,4 @@
+import type { AgentToolResult } from "@caupulican/pi-agent-core";
 import type { Usage } from "@caupulican/pi-ai";
 import { EMPTY_ATTEMPT_USAGE, usageDeltaFromProviderUsage } from "../orchestration/attempt-usage.ts";
 
@@ -7,6 +8,8 @@ type BilledUsage = ReturnType<typeof usageDeltaFromProviderUsage>;
 export class LaneToolUsage {
 	private readonly recordUsage: ((usage: BilledUsage) => void) | undefined;
 	private readonly reported = new Map<string, BilledUsage>();
+	private readonly activeInvocations = new Set<string>();
+	private readonly pendingFinalReceipts = new Set<string>();
 	private checkpoint: (() => void) | undefined;
 	private checkpointPending = false;
 	private closed = false;
@@ -20,9 +23,43 @@ export class LaneToolUsage {
 		this.checkpoint = checkpoint;
 	}
 
+	assertOpen(): void {
+		if (this.closed) throw new Error("Lane tool usage owner is closed.");
+	}
+
+	/** Execution may stop awaiting a tool before its service response finishes decoding. */
+	async run<T extends AgentToolResult<unknown>>(toolCallId: string, invoke: () => Promise<T> | T): Promise<T> {
+		this.assertOpen();
+		if (
+			this.activeInvocations.has(toolCallId) ||
+			this.pendingFinalReceipts.has(toolCallId) ||
+			this.reported.has(toolCallId)
+		) {
+			throw new Error("Lane tool invocation identity is already active.");
+		}
+		this.activeInvocations.add(toolCallId);
+		try {
+			const result = await invoke();
+			// A tool may declare its first receipt only in its final result. Keep that admitted
+			// identity until message settlement; accounting here could replace a valid result on error.
+			if (result.usage !== undefined) this.pendingFinalReceipts.add(toolCallId);
+			return result;
+		} finally {
+			this.activeInvocations.delete(toolCallId);
+			this.releaseSettledCheckpoint();
+		}
+	}
+
 	/** Reports are cumulative within one invocation, including billed transport retries. */
 	report(toolCallId: string, usage: Usage): void {
-		if (this.closed) throw new Error("Lane tool usage owner is closed.");
+		if (
+			this.closed &&
+			!this.activeInvocations.has(toolCallId) &&
+			!this.pendingFinalReceipts.has(toolCallId) &&
+			!this.reported.has(toolCallId)
+		) {
+			throw new Error("Lane tool usage owner is closed.");
+		}
 		const current = usageDeltaFromProviderUsage(usage);
 		const previous = this.reported.get(toolCallId) ?? EMPTY_ATTEMPT_USAGE;
 		const delta = { ...current };
@@ -43,6 +80,8 @@ export class LaneToolUsage {
 		if (usage) this.report(toolCallId, usage);
 		else this.flushCheckpoint();
 		this.reported.delete(toolCallId);
+		this.pendingFinalReceipts.delete(toolCallId);
+		this.releaseSettledCheckpoint();
 	}
 
 	private flushCheckpoint(): void {
@@ -54,7 +93,21 @@ export class LaneToolUsage {
 
 	close(): void {
 		this.closed = true;
-		this.reported.clear();
-		this.checkpoint = undefined;
+		// Stop new execution immediately, but preserve billing for admitted asynchronous work.
+		// A failed flush must retain both the invocation baseline and its retry-capable owner.
+		this.flushCheckpoint();
+		this.releaseSettledCheckpoint();
+	}
+
+	private releaseSettledCheckpoint(): void {
+		if (
+			this.closed &&
+			this.activeInvocations.size === 0 &&
+			this.pendingFinalReceipts.size === 0 &&
+			this.reported.size === 0 &&
+			!this.checkpointPending
+		) {
+			this.checkpoint = undefined;
+		}
 	}
 }

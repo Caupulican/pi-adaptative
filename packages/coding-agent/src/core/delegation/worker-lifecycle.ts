@@ -3,6 +3,7 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
 import { latestAgentAttemptByDurableOrder } from "../orchestration/attempt-ordering.ts";
+import type { GatewayUsageAccountingPort } from "../orchestration/capability-gateway.ts";
 import type {
 	AgentBindingContract,
 	AgentResumeContext,
@@ -310,6 +311,32 @@ export class WorkerLifecycle {
 			...(input.evidenceIds ? { evidenceIds: input.evidenceIds } : {}),
 			...(input.usage ? { usage: input.usage } : {}),
 		});
+	}
+
+	/** Admit one accounting generation while live; its receipt port survives execution fencing. */
+	beginUsageAccounting(
+		handle: Pick<StartedDelegationAttempt, "attemptId" | "leaseId" | "fencingToken">,
+		recoveryBaseline: AttemptUsageSnapshot,
+	): GatewayUsageAccountingPort {
+		const identity = { attemptId: handle.attemptId, leaseId: handle.leaseId, fencingToken: handle.fencingToken };
+		const runtime = this.ledger.runtime;
+		const existing = runtime.getSnapshot().attempts[identity.attemptId]?.usageAccounting;
+		const baseline = runtime.beginAttemptUsage(identity, existing ? undefined : recoveryBaseline);
+		return {
+			identity: Object.freeze({ leaseId: identity.leaseId, fencingToken: identity.fencingToken }),
+			baseline,
+			record: (usage) => {
+				runtime.recordAttemptUsage(identity, usage);
+			},
+			read: () => {
+				const accounting = runtime.getSnapshot().attempts[identity.attemptId]?.usageAccounting;
+				const generation = accounting?.generations[identity.leaseId];
+				if (!accounting || !generation || generation.fencingToken !== identity.fencingToken) {
+					throw new Error("Worker usage accounting lost its registered generation.");
+				}
+				return accounting;
+			},
+		};
 	}
 
 	/**

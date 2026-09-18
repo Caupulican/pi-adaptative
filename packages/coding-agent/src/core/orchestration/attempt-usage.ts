@@ -13,6 +13,22 @@ export const EMPTY_ATTEMPT_USAGE: AttemptUsageSnapshot = {
 	activeWallClockMs: 0,
 };
 
+/** Canonical accounting supersedes execution checkpoints, which cannot accept late receipts. */
+export function projectAttemptUsage(
+	attempt: {
+		checkpointIds: readonly string[];
+		usageAccounting?: { readonly total: AttemptUsageSnapshot };
+	},
+	checkpoints: Readonly<Record<string, { usage?: AttemptUsageSnapshot }>>,
+): AttemptUsageSnapshot | undefined {
+	if (attempt.usageAccounting) return structuredClone(attempt.usageAccounting.total);
+	for (let index = attempt.checkpointIds.length - 1; index >= 0; index--) {
+		const usage = checkpoints[attempt.checkpointIds[index]]?.usage;
+		if (usage) return structuredClone(usage);
+	}
+	return undefined;
+}
+
 /**
  * Validate an untrusted provider-neutral usage report before it reaches durable accounting.
  * Provider totals are authoritative and therefore need not equal the detail field sum.
@@ -171,6 +187,21 @@ export function addAttemptUsage(
 		},
 		label,
 	);
+}
+
+/** Difference between cumulative reports; rejecting decreases preserves receipt conservation. */
+export function attemptUsageIncrease(
+	reported: AttemptUsageSnapshot,
+	previous: AttemptUsageSnapshot,
+): AttemptUsageSnapshot {
+	validateAttemptUsageSnapshot(reported);
+	validateAttemptUsageSnapshot(previous);
+	const delta = { ...EMPTY_ATTEMPT_USAGE };
+	for (const key of Object.keys(delta) as Array<keyof AttemptUsageSnapshot>) {
+		delta[key] = reported[key] - previous[key];
+		if (delta[key] < 0) throw new Error("Attempt usage cannot decrease.");
+	}
+	return validateAttemptUsageSnapshot(delta);
 }
 
 /**

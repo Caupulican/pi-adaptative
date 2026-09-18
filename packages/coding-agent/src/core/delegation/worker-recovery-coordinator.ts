@@ -449,12 +449,14 @@ export class WorkerRecoveryCoordinator {
 		return { text, usage: last.usage, stopReason: last.stopReason };
 	}
 
-	/** Legacy raw transcripts predate durable usage checkpoints; reconstruct their bounded cumulative baseline. */
+	/** Reconstruct legacy usage only before generation-attributed accounting becomes authoritative. */
 	initialUsage(
 		conversation: WorkerConversation,
 		checkpointUsage: AttemptUsageSnapshot | undefined,
 		attemptId: string,
 	): AttemptUsageSnapshot {
+		const accounting = this.options.lifecycle.getTaskRuntimeSnapshot().attempts[attemptId]?.usageAccounting;
+		if (accounting) return structuredClone(accounting.total);
 		const transcriptUsage = conversation.getRawTranscriptUsage(attemptId);
 		return checkpointUsage ? reconcileAttemptUsage(checkpointUsage, transcriptUsage) : transcriptUsage;
 	}

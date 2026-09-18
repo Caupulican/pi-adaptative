@@ -283,8 +283,6 @@ export class AgentSession {
 	/** Delegate provider-prompt-guideline bounding diagnostics (root-session delegate tool only). */
 	private _delegatePromptGuidelineWarnings: string[] = [];
 
-	private _branchSummaryAbortController: AbortController | undefined = undefined;
-
 	private readonly _modelSelection: ModelSelectionController;
 	private readonly _bash: BashExecutionController;
 	private readonly _profileFilter: ProfileFilterController;
@@ -1185,14 +1183,13 @@ export class AgentSession {
 		};
 		this._treeNavigator = new SessionTreeNavigator({
 			getSessionManager: () => this.sessionManager,
+			addSpawnedUsage: (usage, options) => this.addSpawnedUsage(usage, options),
 			getModel: () => this.model,
 			getExtensionRunner: () => this._extensionRunner,
 			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
 			getSettingsManager: () => this.settingsManager,
 			getAgent: () => this.agent,
-			setBranchSummaryAbort: (controller) => {
-				this._branchSummaryAbortController = controller;
-			},
+			onBranchChanged: () => this._reflection.invalidateCurrentTurnCueStateCache({ releaseActiveClaim: true }),
 		});
 		this._modelSelection = new ModelSelectionController({
 			getAgent: () => this.agent,
@@ -2408,7 +2405,7 @@ export class AgentSession {
 
 	/** Whether compaction or branch summarization is currently running */
 	get isCompacting(): boolean {
-		return this._compaction.isRunning() || this._branchSummaryAbortController !== undefined;
+		return this._compaction.isRunning() || this._treeNavigator.isRunning();
 	}
 
 	/** All messages including custom types like BashExecutionMessage */
@@ -3357,7 +3354,7 @@ export class AgentSession {
 	 * Cancel in-progress branch summarization.
 	 */
 	abortBranchSummary(): void {
-		this._branchSummaryAbortController?.abort();
+		this._treeNavigator.abort();
 	}
 
 	/**
@@ -3612,9 +3609,7 @@ export class AgentSession {
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
-		const result = await this._treeNavigator.navigateTree(targetId, options);
-		this._reflection.invalidateCurrentTurnCueStateCache({ releaseActiveClaim: !result.cancelled });
-		return result;
+		return this._treeNavigator.navigateTree(targetId, options);
 	}
 
 	getUserMessagesForForking(): Array<{ entryId: string; text: string }> {

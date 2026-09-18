@@ -76,4 +76,56 @@ describe("native toolkit terminal reason projection", () => {
 		});
 		expect(spawnProcess).not.toHaveBeenCalled();
 	});
+
+	it.each([new Error("waiter failed"), undefined])(
+		"retains captured output when the waiter rejects with %s",
+		async (error) => {
+			const child = Object.assign(new ChildProcess(), {
+				stdout: new PassThrough(),
+				stderr: new PassThrough(),
+			});
+			vi.mocked(spawnProcess).mockReturnValue(child);
+			vi.mocked(waitForChildProcessWithTermination).mockImplementation(async () => {
+				child.stdout.emit("data", Buffer.from("partial result"));
+				child.stderr.emit("data", Buffer.from("script diagnostic"));
+				throw error;
+			});
+			await expect(spawnScriptExecutor("synthetic", [], "/fixture", 1000)).resolves.toMatchObject({
+				exitCode: null,
+				stdout: "partial result",
+				stderr: `script diagnostic\n${error instanceof Error ? error.message : String(error)}`,
+				timedOut: false,
+			});
+		},
+	);
+
+	it("retains the overflow reason and captured stderr when the waiter rejects", async () => {
+		const child = Object.assign(new ChildProcess(), {
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		vi.mocked(spawnProcess).mockReturnValue(child);
+		vi.mocked(waitForChildProcessWithTermination).mockImplementation(async () => {
+			child.stderr.emit("data", Buffer.from("script diagnostic"));
+			child.stdout.emit("data", Buffer.alloc(512 * 1024 + 1, "x"));
+			throw new Error("waiter failed");
+		});
+		const result = await spawnScriptExecutor("synthetic", [], "/fixture", 1000);
+		expect(result.exitCode).toBeNull();
+		expect(result.stdout).toBe("x".repeat(512 * 1024));
+		expect(result.stderr).toBe("script diagnostic\nCommand output exceeded maxBuffer (524288 bytes)\nwaiter failed");
+	});
+
+	it("reports a spawn failure without adding empty output diagnostics", async () => {
+		vi.mocked(spawnProcess).mockImplementation(() => {
+			throw new Error("spawn failed");
+		});
+		await expect(spawnScriptExecutor("synthetic", [], "/fixture", 1000)).resolves.toMatchObject({
+			exitCode: null,
+			stdout: "",
+			stderr: "spawn failed",
+			timedOut: false,
+		});
+		expect(waitForChildProcessWithTermination).not.toHaveBeenCalled();
+	});
 });

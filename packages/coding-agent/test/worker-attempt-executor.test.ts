@@ -10,8 +10,12 @@ import { WorkerConversation, type WorkerTranscriptMessage } from "../src/core/de
 import type { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { WorkerTreeBudgetCoordinator } from "../src/core/delegation/worker-tree-budget-coordinator.ts";
 import { DEFAULT_WORKER_MAX_OUTPUT_TOKENS } from "../src/core/model-capability.ts";
+import {
+	beginAttemptUsageGeneration,
+	recordAttemptGenerationUsage,
+} from "../src/core/orchestration/attempt-usage-generations.ts";
 import { CapabilityGateway, type SharedCapabilityBudget } from "../src/core/orchestration/capability-gateway.ts";
-import type { AttemptUsageSnapshot, ExecutionGrant } from "../src/core/orchestration/contracts.ts";
+import type { AttemptCheckpoint, AttemptUsageSnapshot, ExecutionGrant } from "../src/core/orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../src/core/orchestration/delegation-ledger.ts";
 import { createTestExecutionGrant } from "./orchestration-profile-fixture.ts";
 
@@ -171,14 +175,31 @@ function createExecutorHarness(
 		toolSurface,
 		conversation,
 		lifecycle: {
+			beginUsageAccounting: (identity, baseline) => {
+				let persisted = beginAttemptUsageGeneration(undefined, identity, baseline);
+				return {
+					identity,
+					baseline,
+					record: (usage) => {
+						persisted = recordAttemptGenerationUsage(persisted, identity, usage);
+					},
+					read: () => persisted,
+				};
+			},
 			checkpoint: (_laneId, checkpoint) => {
 				checkpoints.push(checkpoint.summary);
 				if (checkpoint.usage) checkpointUsages.push(checkpoint.usage);
+				return {} as AttemptCheckpoint;
 			},
-		} as Pick<WorkerLifecycle, "checkpoint">,
+		} as Pick<WorkerLifecycle, "checkpoint" | "beginUsageAccounting">,
 		laneId: "worker-task",
 		agentId: "worker-agent",
-		durableHandle: { taskId: "worker-task", attemptId: "attempt", fencingToken: 1 } as StartedDelegationAttempt,
+		durableHandle: {
+			taskId: "worker-task",
+			attemptId: "attempt",
+			leaseId: "lease",
+			fencingToken: 1,
+		} as StartedDelegationAttempt,
 		parentSessionId: "parent",
 		agentDir: process.cwd(),
 		cwd: process.cwd(),
@@ -231,6 +252,52 @@ turn context
 (none)`;
 
 describe("worker attempt executor", () => {
+	it("charges a late assistant callback even when its provider never returns an aggregate result", async () => {
+		const abort = new AbortController();
+		let isolated: IsolatedCompletionOptions | undefined;
+		const harness = createExecutorHarness(
+			async (options) => {
+				await invokeRequestPreflight(options);
+				isolated = options;
+				return new Promise<IsolatedCompletionResult>(() => undefined);
+			},
+			100,
+			undefined,
+			undefined,
+			abort.signal,
+		);
+		const execution = harness.executor.run();
+		for (let tick = 0; tick < 20 && !isolated; tick++) await Promise.resolve();
+		expect(isolated).toBeDefined();
+		abort.abort(new Error("owner stopped"));
+		await execution;
+		const late = {
+			...fauxAssistantMessage("paid late response"),
+			usage: { ...ZERO_USAGE, input: 11, totalTokens: 11 },
+		};
+		await expect(isolated!.onMessage!(late)).rejects.toThrow("owner stopped");
+		expect(harness.gateway.getUsage()).toMatchObject({ inputTokens: 11, totalTokens: 11 });
+		expect(harness.conversation.getRawTranscript().map((message) => message.role)).toEqual(["user"]);
+	});
+
+	it("charges an observed assistant tool request before cancellation can skip its tool preflight", async () => {
+		const abort = new AbortController();
+		const harness = createExecutorHarness(
+			async (options) => {
+				await options.onMessage?.(assistantToolRequest(17));
+				abort.abort(new Error("cancel before tool preflight"));
+				return new Promise<IsolatedCompletionResult>(() => undefined);
+			},
+			100,
+			undefined,
+			undefined,
+			abort.signal,
+		);
+		await harness.executor.run();
+		expect(harness.gateway.getUsage()).toMatchObject({ inputTokens: 17, totalTokens: 17 });
+		expect(harness.conversation.getRawTranscript().map((message) => message.role)).toEqual(["user"]);
+	});
+
 	it.each(["valid", "malformed", "append_failure"] as const)(
 		"accounts billed tool usage before persistence while refusing malformed records: %s",
 		async (scenario) => {
@@ -1645,13 +1712,14 @@ describe("worker attempt executor", () => {
 		expect(harness.conversation.getRawTranscript().map((message) => message.role)).toEqual(["user"]);
 	});
 
-	it("does not apply or account a verified compaction that resolves after the composed signal aborts", async () => {
+	it("retains billed usage but does not apply a compaction that resolves after the composed signal aborts", async () => {
 		vi.useFakeTimers();
 		let resolveCompaction: ((result: IsolatedCompletionResult) => void) | undefined;
 		try {
 			const harness = createExecutorHarness(
 				async (options) => {
 					if (options.laneKind === "worker-compaction") {
+						await invokeRequestPreflight(options);
 						return new Promise<IsolatedCompletionResult>((resolve) => {
 							resolveCompaction = resolve;
 						});
@@ -1687,7 +1755,7 @@ describe("worker attempt executor", () => {
 
 			expect(result.rawOutcome.accepted).toBe(false);
 			expect(harness.conversation.hasProviderCompaction()).toBe(false);
-			expect(harness.gateway.getUsage()).toMatchObject({ inputTokens: 0, totalTokens: 0 });
+			expect(harness.gateway.getUsage()).toMatchObject({ inputTokens: 11, totalTokens: 11 });
 			expect(harness.checkpoints).not.toContain("Persisted worker compaction provider usage before verification.");
 		} finally {
 			vi.useRealTimers();

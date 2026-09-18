@@ -1,8 +1,9 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { AgentContext } from "@caupulican/pi-agent-core";
+import type { AgentContext, AgentTool, ExecutionContext } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
+import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLaneToolSurface, type LaneToolSurface } from "../src/core/autonomy/lane-tool-surface.ts";
 import { CapabilityGatewayDeniedError } from "../src/core/orchestration/capability-gateway.ts";
@@ -13,6 +14,7 @@ import {
 } from "../src/core/orchestration/contracts.ts";
 import type { NormalizedProfile } from "../src/core/profile-registry.ts";
 import type { ResourceProfileSettings } from "../src/core/settings-manager.ts";
+import { FileMutationIntentController } from "../src/core/tools/file-mutation-intent.ts";
 import { acquirePersistentShellSession, disposePersistentShellSession } from "../src/core/tools/shell-session.ts";
 
 function profile(resources: ResourceProfileSettings): NormalizedProfile {
@@ -50,6 +52,98 @@ describe("classified lane tool surface", () => {
 		expect(first.allowedTools).not.toContain("delegate");
 		expect(first.allowedTools).not.toContain("ask_question");
 		expect(first.allowedTools).not.toContain("bash");
+	});
+
+	it.each([
+		[false, false],
+		[false, true],
+		[true, false],
+		[true, true],
+	])("retains started billing but rejects execution after disposal: bound=%s interim=%s", async (bound, interim) => {
+		let release: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let notifyStarted: () => void = () => {};
+		const started = new Promise<void>((resolve) => {
+			notifyStarted = resolve;
+		});
+		const usage = { ...createEmptyUsage(), input: 10, totalTokens: 10 };
+		const executionContext: ExecutionContext = {
+			attachment: {
+				workspaceId: "workspace",
+				attachmentId: "attachment",
+				root: cwd,
+				flavor: process.platform === "win32" ? "win32" : "posix",
+				caseSensitive: process.platform !== "win32",
+			},
+			sessionId: "session",
+			generation: 0,
+			cwd,
+		};
+		const releaseBinding = vi.fn();
+		const backend = vi.fn<AgentTool["execute"]>(async (toolCallId) => {
+			notifyStarted();
+			await ready;
+			if (interim) surface.toolUsage.report(toolCallId, usage);
+			return { content: [{ type: "text", text: "received" }], details: {}, usage };
+		});
+		const surface = createLaneToolSurface({
+			cwd,
+			profile: profile({ tools: { allow: ["memory_read"] } }),
+			readMemory: async () => "unused",
+			bindTool: (tool) => ({
+				...tool,
+				execute: backend,
+				...(bound
+					? { bindInvocation: async () => ({ executionContext, execute: backend, release: releaseBinding }) }
+					: {}),
+			}),
+		});
+		const checkpoint = vi.fn();
+		surface.toolUsage.bindCheckpoint(checkpoint);
+		const tool = surface.tools[0];
+		const invocation = bound ? await tool.bindInvocation!("in-flight", { query: "fixture" }) : undefined;
+		const executor = invocation ?? tool;
+		const pending = executor.execute("in-flight", { query: "fixture" });
+		try {
+			await started;
+			await surface.dispose();
+			await expect(executor.execute("new", { query: "fixture" })).rejects.toThrow("closed");
+			await expect(gate(surface, "memory_read", { query: "fixture" })).rejects.toThrow("closed");
+			release();
+			await expect(pending).resolves.toMatchObject({ usage });
+			surface.toolUsage.settle("in-flight", usage);
+			expect(backend).toHaveBeenCalledOnce();
+			expect(checkpoint).toHaveBeenCalledOnce();
+		} finally {
+			release();
+			await pending.catch(() => undefined);
+			invocation?.release();
+			await surface.dispose();
+		}
+		expect(releaseBinding).toHaveBeenCalledTimes(bound ? 1 : 0);
+	});
+
+	it("releases mutation ownership even when closing billing cannot persist its pending receipt", async () => {
+		const release = vi.spyOn(FileMutationIntentController.prototype, "dispose");
+		const surface = createLaneToolSurface({ cwd });
+		let storageAvailable = false;
+		surface.toolUsage.bindCheckpoint(() => {
+			if (!storageAvailable) throw new Error("usage persistence unavailable");
+		});
+		try {
+			expect(() =>
+				surface.toolUsage.report("receipt", { ...createEmptyUsage(), input: 10, totalTokens: 10 }),
+			).toThrow("usage persistence unavailable");
+			await expect(surface.dispose()).rejects.toThrow("usage persistence unavailable");
+			expect(release).toHaveBeenCalledOnce();
+			await expect(gate(surface, "read", { path: "source.txt" })).rejects.toThrow("closed");
+		} finally {
+			storageAvailable = true;
+			await surface.dispose();
+			release.mockRestore();
+		}
 	});
 
 	it("rejects a compiled grant for a tool the isolated lane cannot materialize", () => {

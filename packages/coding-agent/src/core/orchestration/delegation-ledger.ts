@@ -5,6 +5,7 @@ import { deriveWorkerTaskLabel } from "../delegation/worker-task-label.ts";
 import { hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { latestAgentAttemptByDurableOrder } from "./attempt-ordering.ts";
+import { projectAttemptUsage } from "./attempt-usage.ts";
 import type {
 	AttemptUsageSnapshot,
 	HarnessCapability,
@@ -544,16 +545,12 @@ export class DelegationOrchestrationLedger {
 		this.runtime.cancelAttempt(attemptId, reasonCode);
 	}
 
-	/** Latest fenced cumulative usage, if this attempt has crossed a durable checkpoint boundary. */
+	/** Durable accounting total, or the latest checkpoint for an attempt predating accounting. */
 	getAttemptUsage(attemptId: string): AttemptUsageSnapshot | undefined {
 		const snapshot = this.runtime.getSnapshot();
 		const attempt = snapshot.attempts[attemptId];
 		if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
-		for (const checkpointId of [...attempt.checkpointIds].reverse()) {
-			const usage = snapshot.checkpoints[checkpointId]?.usage;
-			if (usage) return structuredClone(usage);
-		}
-		return undefined;
+		return projectAttemptUsage(attempt, snapshot.checkpoints);
 	}
 
 	/** Fence interrupted isolated completions and queue one replacement attempt per task. */

@@ -6,8 +6,14 @@
 
 ### Fixed
 
+- Provider admission preserves unreadable cooldown and in-flight records and blocks affected admission decisions instead of deleting state and treating the account as available.
 - Jev evidence lookup preserves disk read and corruption failures instead of silently substituting ancestor records; artifact retrieval distinguishes unavailable storage from genuine absence.
+- Repeated lane cleanup releases its mutation-scope reference once, and scopes retained during an older disposal remain registered when in-flight work drains.
+- Failed payload deletion retains cleanup ownership and storage accounting for retry without reviving consumed references; disposal preserves the first failure even when its thrown value is falsy.
+- Disposing a mutation controller closes retry-payload retention before cleanup, preventing late write/edit path errors from creating abandoned payloads while preserving cleanup retries.
+- Child-session usage reports include paid tool calls, compaction, and branch summaries through the same cumulative accounting path as live sessions.
 - Worker checkpoints retain the originating execution lease, preventing late callbacks from recording progress under a resumed worker's generation.
+- Minimal-model prompt prose leaves more room for Windows working directories and learned repair rules while retaining the existing capability budget and tool surface.
 - Incomplete toolkit executions retain bounded stdout/stderr evidence and artifact references through mandatory failure projection, while remaining unknown execution outcomes.
 - Background handoff resolves its mutation scope before registration, keeping completion ownership in the foreground if the scope dependency fails.
 - Toolkit nonzero exits and deadlines use native operation-outcome recovery; missing exit evidence remains an execution failure. Cancellation cannot turn a cooperative zero exit into script success.

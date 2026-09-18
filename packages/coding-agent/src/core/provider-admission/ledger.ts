@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { stateFile } from "../agent-paths.ts";
 import { isProcessAlive } from "../process-liveness.ts";
@@ -6,6 +6,7 @@ import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../ut
 import { isPlainRecord } from "../util/value-guards.ts";
 import { splitProviderAccountKey } from "./account-key.ts";
 import type { ProviderRequestLane } from "./lane-context.ts";
+import { readProviderAdmissionRecord } from "./record-storage.ts";
 
 /**
  * Machine-wide record of the provider requests currently in flight from every pi process on this
@@ -233,14 +234,8 @@ export class ProviderAdmissionLedger {
 		for (const name of names) {
 			if (!name.endsWith(ENTRY_SUFFIX)) continue;
 			const path = join(this.dir, name);
-			let entry: unknown;
-			try {
-				entry = JSON.parse(readFileSync(path, "utf-8")) as unknown;
-			} catch {
-				// A half-written or corrupt entry is not evidence of a live request.
-				rmSync(path, { force: true });
-				continue;
-			}
+			const entry = readProviderAdmissionRecord(path);
+			if (entry === undefined) continue;
 			if (!isEntry(entry)) {
 				rmSync(path, { force: true });
 				continue;

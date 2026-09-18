@@ -2,8 +2,13 @@ import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts
 import {
 	attemptUsageFromGatewayUsage,
 	EMPTY_ATTEMPT_USAGE,
+	projectAttemptUsage,
 	reconcileAttemptUsage,
 } from "../orchestration/attempt-usage.ts";
+import {
+	type AttemptUsageAccounting,
+	reconcileAttemptUsageAccounting,
+} from "../orchestration/attempt-usage-generations.ts";
 import {
 	budgetedTokens,
 	type GatewayUsageSnapshot,
@@ -40,6 +45,7 @@ export class WorkerTreeBudgetExceededError extends BoundedCompletionFailureError
 interface TreeBudgetState {
 	budget: RiskBudget;
 	attempts: Map<string, AttemptUsageSnapshot>;
+	generationUsage: Map<string, AttemptUsageAccounting>;
 	reservations: Map<string, { maxTokens: number }>;
 	waiters: ProviderBudgetWaiter[];
 }
@@ -69,6 +75,7 @@ export interface WorkerTreeBudgetProjection {
 				agentId?: string;
 				dispatch: { logicalLaneId?: string };
 				checkpointIds: readonly string[];
+				usageAccounting?: { readonly total: AttemptUsageSnapshot };
 			}
 		>
 	>;
@@ -90,10 +97,7 @@ export function collectWorkerTreeBudgetSeeds(
 	for (const attempt of Object.values(snapshot.attempts)) {
 		const attemptAgentId = attempt.agentId ?? attempt.dispatch.logicalLaneId;
 		if (!attemptAgentId || snapshot.agents[attemptAgentId]?.rootAgentId !== rootAgentId) continue;
-		const usage = [...attempt.checkpointIds]
-			.reverse()
-			.map((checkpointId) => snapshot.checkpoints[checkpointId]?.usage)
-			.find((candidate): candidate is AttemptUsageSnapshot => candidate !== undefined);
+		const usage = projectAttemptUsage(attempt, snapshot.checkpoints);
 		seeds.push({ attemptId: attempt.attemptId, usage: usage ?? EMPTY_ATTEMPT_USAGE });
 	}
 	return seeds;
@@ -116,7 +120,13 @@ export class WorkerTreeBudgetCoordinator {
 	}): SharedCapabilityBudget {
 		let state = this.trees.get(args.rootAgentId);
 		if (!state) {
-			state = { budget: structuredClone(args.budget), attempts: new Map(), reservations: new Map(), waiters: [] };
+			state = {
+				budget: structuredClone(args.budget),
+				attempts: new Map(),
+				generationUsage: new Map(),
+				reservations: new Map(),
+				waiters: [],
+			};
 			this.trees.set(args.rootAgentId, state);
 		} else {
 			state.budget = intersectRiskBudgets(state.budget, args.budget);
@@ -134,7 +144,8 @@ export class WorkerTreeBudgetCoordinator {
 		const tree = state;
 		return {
 			assertBudgetAvailable: (subject) => this.assertAvailable(tree, subject),
-			recordAttemptUsage: (usage) => this.recordAttemptUsage(tree, args.attemptId, usage),
+			getAttemptUsage: () => structuredClone(tree.attempts.get(args.attemptId) ?? EMPTY_ATTEMPT_USAGE),
+			recordAttemptUsage: (usage, accounting) => this.recordAttemptUsage(tree, args.attemptId, usage, accounting),
 			remainingTokens: () => {
 				const maximum = tree.budget.maxTokens;
 				return maximum === undefined
@@ -146,9 +157,23 @@ export class WorkerTreeBudgetCoordinator {
 		};
 	}
 
-	private recordAttemptUsage(state: TreeBudgetState, attemptId: string, usage: GatewayUsageSnapshot): void {
+	private recordAttemptUsage(
+		state: TreeBudgetState,
+		attemptId: string,
+		usage: GatewayUsageSnapshot,
+		accounting?: AttemptUsageAccounting,
+	): void {
 		const previous = state.attempts.get(attemptId);
-		const merged = reconcileAttemptUsage(previous ?? EMPTY_ATTEMPT_USAGE, attemptUsageFromGatewayUsage(usage));
+		const publication = attemptUsageFromGatewayUsage(usage);
+		const attributed = accounting
+			? reconcileAttemptUsageAccounting(state.generationUsage.get(attemptId), accounting)
+			: undefined;
+		// Anonymous recovery evidence is a floor, never another additive generation.
+		const merged = reconcileAttemptUsage(
+			previous ?? EMPTY_ATTEMPT_USAGE,
+			attributed ? reconcileAttemptUsage(publication, attributed.total) : publication,
+		);
+		if (attributed) state.generationUsage.set(attemptId, attributed);
 		state.attempts.set(attemptId, merged);
 		const reservation = state.reservations.get(attemptId);
 		if (reservation && previous) {

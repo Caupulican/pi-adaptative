@@ -37,6 +37,7 @@ import { runWorker, type WorkerRunOutcome } from "./worker-runner.ts";
 import { buildWorkerSystemPrompt } from "./worker-system-prompt.ts";
 import { captureWorkerTerminalOutputArtifact } from "./worker-terminal-output-artifact.ts";
 import { WorkerTreeBudgetExceededError } from "./worker-tree-budget-coordinator.ts";
+import { WorkerUsageAccounting } from "./worker-usage-accounting.ts";
 
 export interface RecoveredWorkerTerminalCompletion {
 	text: string;
@@ -133,7 +134,7 @@ export interface WorkerAttemptExecutorOptions {
 	executionPlan: WorkerExecutionPlan;
 	toolSurface: LaneToolSurface;
 	conversation: WorkerConversation;
-	lifecycle: Pick<WorkerLifecycle, "checkpoint">;
+	lifecycle: Pick<WorkerLifecycle, "checkpoint" | "beginUsageAccounting">;
 	laneId: string;
 	agentId: string;
 	durableHandle: StartedDelegationAttempt;
@@ -289,13 +290,23 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			},
 		);
 	const checkpointUsage = (summary: string): AttemptUsageSnapshot => {
+		options.toolSurface.gateway?.flushUsage();
 		const usage = currentUsage();
 		options.lifecycle.checkpoint(options.durableHandle, { summary, usage });
 		return usage;
 	};
 	options.toolSurface.toolUsage.bindCheckpoint(() => {
-		checkpointUsage("Persisted billed tool service usage before result publication.");
+		options.toolSurface.gateway?.flushUsage();
 	});
+	const usageSignals = new Set<AbortSignal>();
+	const stopUsageClock = (): void => options.toolSurface.gateway?.stopUsageClock();
+	const observeUsageSignal = (signal: AbortSignal): void => {
+		if (signal.aborted) stopUsageClock();
+		else if (!usageSignals.has(signal)) {
+			usageSignals.add(signal);
+			signal.addEventListener("abort", stopUsageClock, { once: true });
+		}
+	};
 	const remainingAttemptTokens = (): number | undefined => options.toolSurface.gateway?.remainingAttemptTokenBudget();
 	// A worker turn is capped by the model's own output limit, never by the lane summary cap: a
 	// claim envelope with findings, or a write tool call carrying a file, does not fit 2048 tokens.
@@ -387,7 +398,6 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 									if (preflightFailed) throw workerCompletionCallbackFailure(preflightFailure);
 									throw error;
 								}
-								requestSignal.throwIfAborted();
 								const response: AssistantMessage = {
 									role: "assistant",
 									content: completion.text ? [{ type: "text", text: completion.text }] : [],
@@ -407,6 +417,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								} else {
 									providerTurn.accountUnverifiedResultUsageDelta(completion.usage);
 								}
+								options.toolSurface.gateway?.flushUsage();
+								requestSignal.throwIfAborted();
 								checkpointUsage("Persisted worker compaction provider usage before verification.");
 								if (providerTurn.hasSuccessfulPreflight()) {
 									try {
@@ -444,390 +456,440 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		async run(): Promise<WorkerAttemptExecutionResult> {
 			if (ran) throw new Error("A worker attempt executor may run only once.");
 			ran = true;
-			options.conversation.beginAttemptUsage(options.durableHandle.attemptId);
-			if (!options.hasPersistedUsageCheckpoint) {
-				checkpointUsage("Persisted deterministic cumulative usage baseline for the durable worker transcript.");
-			}
-			const rawOutcome = await runWorker({
-				request: options.request,
-				maxUsd: options.grant.budget.maxCostUsd,
-				maxWallClockMs: options.grant.budget.maxWallClockMs ?? 0,
-				usageReportId: options.usageReportId,
-				getChangedFiles: () => [...changedFiles],
-				signal: options.signal,
-				cwd: options.cwd,
-				processCapable: options.processCapable,
-				...(options.verificationSubjectTaskId
-					? { verificationSubjectTaskId: options.verificationSubjectTaskId }
-					: {}),
-				...(options.applyActions
-					? {
-							applyActions: (actions: readonly WorkerAction[]) => {
-								const report = options.applyActions!(actions, actionJournal);
-								for (const filePath of report.changedFiles) recordChangedFile(filePath);
-								return report;
-							},
-						}
-					: {}),
-				complete: async ({ systemPrompt, userPrompt, signal }) => {
-					if (options.recoveredTerminal) {
-						terminalOutput = options.recoveredTerminal.text;
-						checkpointUsage("Reused the persisted terminal worker assistant response after recovery.");
-						return {
-							text: options.recoveredTerminal.text,
-							costUsd: options.initialUsage.costUsd,
-							stopReason: options.recoveredTerminal.stopReason,
-						};
-					}
-					const retentionPolicy = createRetentionPolicy(signal);
-					const persistedToolAssistantIds = new Set<string>();
-					const pendingToolAssistants = new Map<string, AssistantMessage>();
-					let activeProviderTurn: WorkerProviderTurnProtocol | undefined;
-					const closeActiveProviderTurn = (): void => {
-						const active = activeProviderTurn;
-						activeProviderTurn = undefined;
-						active?.close();
-					};
-					options.toolSurface.gateway?.assertBudgetAvailable("worker_provider_completion");
-					const availableTokens = remainingAttemptTokens();
-					if (availableTokens !== undefined && availableTokens <= 0) {
-						throw new Error("Worker token budget exhausted before provider completion.");
-					}
-					options.conversation.ensureAttemptUserPrompt(options.durableHandle.attemptId, userPrompt);
-					let history: Message[] = [];
-					let completion: IsolatedCompletionResult;
-					const attemptProviderCompletion = async (): Promise<IsolatedCompletionResult> => {
-						// Later attempts resume from the durably persisted transcript, not a stale snapshot.
-						const transcriptCommit = options.conversation.beginTranscriptCommit();
-						history = transcriptCommit.history;
-						const historyLength = history.length;
-						const transcriptCursor = transcriptCommit.cursor;
-						const durableCallbackMessages: WorkerTranscriptMessage[] = [];
-						let callbackFailed = false;
-						let callbackFailure: unknown;
-						const retainCallbackFailure = (error: unknown): void => {
-							if (callbackFailed) return;
-							callbackFailed = true;
-							callbackFailure = error;
-						};
-						const providerTurn = new WorkerProviderTurnProtocol({
-							acquireReservation: () =>
-								reserveProviderBudget(workerOutputTokenCeiling, "worker_provider_completion", signal),
-							signal,
-							onFailure: retainCallbackFailure,
-							...(options.toolSurface.gateway
-								? { recordUsage: (delta) => options.toolSurface.gateway?.recordUsage(delta) }
-								: {}),
-						});
-						activeProviderTurn = providerTurn;
-						const persistToolRequest = (message: AssistantMessage): void => {
-							signal.throwIfAborted();
-							const toolCallIds = message.content.flatMap((content) =>
-								content.type === "toolCall" ? [content.id] : [],
-							);
-							if (toolCallIds.length === 0 || toolCallIds.every((id) => persistedToolAssistantIds.has(id)))
-								return;
-							providerTurn.accountAssistantUsage(message.usage);
-							options.conversation.appendMessage(message);
-							for (const id of toolCallIds) {
-								persistedToolAssistantIds.add(id);
-								pendingToolAssistants.delete(id);
+			try {
+				const gateway = options.toolSurface.gateway;
+				if (!gateway) throw new Error("Worker execution requires a capability gateway with durable accounting.");
+				gateway.bindUsageAccounting(
+					new WorkerUsageAccounting({
+						port: options.lifecycle.beginUsageAccounting(options.durableHandle, options.initialUsage),
+						warn: options.warn,
+						label: `Worker ${options.laneId}`,
+						afterRecord: () => gateway.publishUsage(),
+					}),
+				);
+				if (options.signal) observeUsageSignal(options.signal);
+				options.signal?.throwIfAborted();
+				options.conversation.beginAttemptUsage(options.durableHandle.attemptId);
+				if (!options.hasPersistedUsageCheckpoint) {
+					checkpointUsage("Persisted deterministic cumulative usage baseline for the durable worker transcript.");
+				}
+				const rawOutcome = await runWorker({
+					request: options.request,
+					maxUsd: options.grant.budget.maxCostUsd,
+					maxWallClockMs: options.grant.budget.maxWallClockMs ?? 0,
+					usageReportId: options.usageReportId,
+					getChangedFiles: () => [...changedFiles],
+					signal: options.signal,
+					cwd: options.cwd,
+					processCapable: options.processCapable,
+					...(options.verificationSubjectTaskId
+						? { verificationSubjectTaskId: options.verificationSubjectTaskId }
+						: {}),
+					...(options.applyActions
+						? {
+								applyActions: (actions: readonly WorkerAction[]) => {
+									const report = options.applyActions!(actions, actionJournal);
+									for (const filePath of report.changedFiles) recordChangedFile(filePath);
+									return report;
+								},
 							}
-							checkpointUsage("Persisted worker assistant tool request and its cumulative provider usage.");
-							providerTurn.consumeToolAssistantAndRelease();
-							durableCallbackMessages.push(message);
+						: {}),
+					complete: async ({ systemPrompt, userPrompt, signal }) => {
+						observeUsageSignal(signal);
+						if (options.recoveredTerminal) {
+							terminalOutput = options.recoveredTerminal.text;
+							checkpointUsage("Reused the persisted terminal worker assistant response after recovery.");
+							return {
+								text: options.recoveredTerminal.text,
+								costUsd: currentUsage().costUsd,
+								stopReason: options.recoveredTerminal.stopReason,
+							};
+						}
+						const retentionPolicy = createRetentionPolicy(signal);
+						const persistedToolAssistantIds = new Set<string>();
+						const pendingToolAssistants = new Map<string, AssistantMessage>();
+						let activeProviderTurn: WorkerProviderTurnProtocol | undefined;
+						const closeActiveProviderTurn = (): void => {
+							const active = activeProviderTurn;
+							activeProviderTurn = undefined;
+							active?.close();
 						};
-						let committed = false;
-						const abortTranscriptCursor = (): void => {
-							providerTurn.close();
-							options.conversation.abortTranscriptCommit(transcriptCursor);
-						};
-						signal.addEventListener("abort", abortTranscriptCursor, { once: true });
-						try {
-							signal.throwIfAborted();
-							let result: IsolatedCompletionResult;
+						options.toolSurface.gateway?.assertBudgetAvailable("worker_provider_completion");
+						const availableTokens = remainingAttemptTokens();
+						if (availableTokens !== undefined && availableTokens <= 0) {
+							throw new Error("Worker token budget exhausted before provider completion.");
+						}
+						options.conversation.ensureAttemptUserPrompt(options.durableHandle.attemptId, userPrompt);
+						let history: Message[] = [];
+						let completion: IsolatedCompletionResult;
+						const attemptProviderCompletion = async (): Promise<IsolatedCompletionResult> => {
+							// Later attempts resume from the durably persisted transcript, not a stale snapshot.
+							const transcriptCommit = options.conversation.beginTranscriptCommit();
+							history = transcriptCommit.history;
+							const historyLength = history.length;
+							const transcriptCursor = transcriptCommit.cursor;
+							const durableCallbackMessages: WorkerTranscriptMessage[] = [];
+							let callbackFailed = false;
+							let callbackFailure: unknown;
+							const retainCallbackFailure = (error: unknown): void => {
+								if (callbackFailed) return;
+								callbackFailed = true;
+								callbackFailure = error;
+							};
+							const providerTurn = new WorkerProviderTurnProtocol({
+								acquireReservation: () =>
+									reserveProviderBudget(workerOutputTokenCeiling, "worker_provider_completion", signal),
+								signal,
+								onFailure: retainCallbackFailure,
+								...(options.toolSurface.gateway
+									? { recordUsage: (delta) => options.toolSurface.gateway?.recordUsage(delta) }
+									: {}),
+							});
+							activeProviderTurn = providerTurn;
+							const persistToolRequest = (message: AssistantMessage): void => {
+								signal.throwIfAborted();
+								const toolCallIds = message.content.flatMap((content) =>
+									content.type === "toolCall" ? [content.id] : [],
+								);
+								if (toolCallIds.length === 0 || toolCallIds.every((id) => persistedToolAssistantIds.has(id)))
+									return;
+								const observed = toolCallIds
+									.map((id) => pendingToolAssistants.get(id))
+									.find((item) => item !== undefined);
+								if (observed) {
+									if (!isDeepStrictEqual(observed.usage, message.usage)) {
+										throw new WorkerCompletionProtocolError(
+											"Worker tool request changed its already accounted provider usage.",
+										);
+									}
+								} else providerTurn.accountAssistantUsage(message.usage);
+								options.toolSurface.gateway?.flushUsage();
+								options.conversation.appendMessage(message);
+								for (const id of toolCallIds) {
+									persistedToolAssistantIds.add(id);
+									pendingToolAssistants.delete(id);
+								}
+								checkpointUsage("Persisted worker assistant tool request and its cumulative provider usage.");
+								providerTurn.consumeToolAssistantAndRelease();
+								durableCallbackMessages.push(message);
+							};
+							let committed = false;
+							const abortTranscriptCursor = (): void => {
+								providerTurn.close();
+								options.conversation.abortTranscriptCommit(transcriptCursor);
+							};
+							signal.addEventListener("abort", abortTranscriptCursor, { once: true });
 							try {
-								result = await options.runIsolatedCompletion({
-									systemPrompt: buildWorkerSystemPrompt({
-										soul: options.soul,
-										rolePrompt: systemPrompt,
-										workerResourceSystemPrompt: options.workerResourceSystemPrompt,
-										contextFiles: options.workerContextFiles,
-										canReadContextFiles: options.toolSurface.allowedTools.includes("read"),
-										modelCapability: options.laneCapability,
-										agentDir: options.agentDir,
+								signal.throwIfAborted();
+								let result: IsolatedCompletionResult;
+								try {
+									result = await options.runIsolatedCompletion({
+										systemPrompt: buildWorkerSystemPrompt({
+											soul: options.soul,
+											rolePrompt: systemPrompt,
+											workerResourceSystemPrompt: options.workerResourceSystemPrompt,
+											contextFiles: options.workerContextFiles,
+											canReadContextFiles: options.toolSurface.allowedTools.includes("read"),
+											modelCapability: options.laneCapability,
+											agentDir: options.agentDir,
+											model: options.model,
+											projectContextFiles: options.projectContextFiles,
+											...(options.personaGuidance ? { personaGuidance: options.personaGuidance } : {}),
+										}),
+										history,
+										messages: [],
 										model: options.model,
-										projectContextFiles: options.projectContextFiles,
-										...(options.personaGuidance ? { personaGuidance: options.personaGuidance } : {}),
-									}),
-									history,
-									messages: [],
-									model: options.model,
-									thinkingLevel: options.thinkingLevel,
-									maxTokens: Math.min(workerOutputTokenCeiling, availableTokens ?? Number.POSITIVE_INFINITY),
-									tools: options.toolSurface.tools,
-									requestPreflight: () => providerTurn.requestPreflight(),
-									// One durable request_snapshot per accepted provider request, so the worker's
-									// request start and reasoning level survive in its own conversation.
-									onProviderRequestSnapshot: (context) => {
-										signal.throwIfAborted();
-										options.conversation.appendRequestSnapshot(context);
-									},
-									beforeToolCall: async (context, toolSignal) => {
-										try {
+										thinkingLevel: options.thinkingLevel,
+										maxTokens: Math.min(
+											workerOutputTokenCeiling,
+											availableTokens ?? Number.POSITIVE_INFINITY,
+										),
+										tools: options.toolSurface.tools,
+										requestPreflight: () => providerTurn.requestPreflight(),
+										// One durable request_snapshot per accepted provider request, so the worker's
+										// request start and reasoning level survive in its own conversation.
+										onProviderRequestSnapshot: (context) => {
 											signal.throwIfAborted();
-											persistToolRequest(context.assistantMessage);
-											const decision = await options.toolSurface.beforeToolCall(context, toolSignal);
-											signal.throwIfAborted();
-											if (!decision?.block) {
-												checkpointUsage(
-													`Authorized worker tool '${context.toolCall.name}' under its durable grant.`,
-												);
-											}
-											return decision;
-										} catch (error) {
-											retainCallbackFailure(error);
-											throw error;
-										}
-									},
-									afterToolCall: async ({ toolCall, args }) => {
-										try {
-											if (
-												(toolCall.name === "write" || toolCall.name === "edit") &&
-												args &&
-												typeof args === "object" &&
-												!Array.isArray(args)
-											) {
-												const rawPath = (args as Record<string, unknown>).path;
-												if (typeof rawPath === "string" && rawPath.length > 0) {
-													const absolutePath = path.isAbsolute(rawPath)
-														? path.resolve(rawPath)
-														: path.resolve(options.cwd, rawPath);
-													let canonicalPath = absolutePath;
-													try {
-														canonicalPath = safeRealpathSync(absolutePath);
-													} catch {
-														// The operation entered execution; retain its lexical target if canonicalization failed.
-													}
-													recordChangedFile(
-														path.relative(options.cwd, canonicalPath).split(path.sep).join("/"),
+											options.conversation.appendRequestSnapshot(context);
+										},
+										beforeToolCall: async (context, toolSignal) => {
+											try {
+												signal.throwIfAborted();
+												persistToolRequest(context.assistantMessage);
+												const decision = await options.toolSurface.beforeToolCall(context, toolSignal);
+												signal.throwIfAborted();
+												if (!decision?.block) {
+													checkpointUsage(
+														`Authorized worker tool '${context.toolCall.name}' under its durable grant.`,
 													);
 												}
+												return decision;
+											} catch (error) {
+												retainCallbackFailure(error);
+												throw error;
 											}
-											signal.throwIfAborted();
-											return undefined;
-										} catch (error) {
-											retainCallbackFailure(error);
-											throw error;
-										}
-									},
-									onMessage: (message, origin) => {
-										try {
-											signal.throwIfAborted();
-											// Failed/aborted streams can retain partial tool calls, but the loop never
-											// executes them. Their terminal callback must account and persist the response now.
-											if (
-												message.role === "assistant" &&
-												message.stopReason !== "error" &&
-												message.stopReason !== "aborted" &&
-												message.content.some((content) => content.type === "toolCall")
-											) {
-												// Known calls are normalized before beforeToolCall and persist from that hook.
-												// Retain the request only so immediate unknown/malformed results can close the
-												// transcript without freezing pre-repair arguments into durable history.
-												for (const content of message.content) {
-													if (content.type === "toolCall") pendingToolAssistants.set(content.id, message);
-												}
-												return;
-											}
-											if (
-												message.role === "toolResult" &&
-												!persistedToolAssistantIds.has(message.toolCallId)
-											) {
-												const pending = pendingToolAssistants.get(message.toolCallId);
-												if (pending) persistToolRequest(pending);
-											}
-											if (message.role === "assistant" && origin !== "local") {
-												providerTurn.accountAssistantUsage(message.usage);
-											}
-											if (message.role === "toolResult") {
-												// Validate before persistence and retain billed usage if the append fails.
-												// Tool service usage is separate from assistant reservation epochs.
-												options.toolSurface.toolUsage.settle(message.toolCallId, message.usage);
-											}
-											options.conversation.appendMessage(message);
-											options.agentControl.acknowledgeMailboxMessage(options.agentId, message);
-											if (message.role === "assistant" && origin !== "local") {
-												checkpointUsage(
-													"Persisted worker assistant response and its cumulative provider usage.",
-												);
-												providerTurn.consumeTerminalAssistantAndHold();
-											}
-											if (message.role === "toolResult")
-												checkpointUsage(`Persisted worker tool result '${message.toolCallId}'.`);
-											durableCallbackMessages.push(message);
-										} catch (error) {
-											retainCallbackFailure(error);
-											throw error;
-										}
-									},
-									getSteeringMessages: async (): Promise<AgentMessage[]> => {
-										try {
-											signal.throwIfAborted();
-											const includeFollowUp = firstMailboxPoll;
-											firstMailboxPoll = false;
-											const messages = options.agentControl.mailboxMessagesForConversation(
-												options.agentId,
-												options.conversation,
-												includeFollowUp,
-											);
-											signal.throwIfAborted();
-											return messages;
-										} catch (error) {
-											retainCallbackFailure(error);
-											throw error;
-										}
-									},
-									getFollowUpMessages: async (): Promise<AgentMessage[]> => {
-										try {
-											signal.throwIfAborted();
-											const messages = options.agentControl.mailboxMessagesForConversation(
-												options.agentId,
-												options.conversation,
-												true,
-											);
-											signal.throwIfAborted();
-											return messages;
-										} catch (error) {
-											retainCallbackFailure(error);
-											throw error;
-										}
-									},
-									...(retentionPolicy
-										? {
-												transformContext: async (messages: AgentMessage[]) => {
-													try {
-														signal.throwIfAborted();
-														const retained = await options.conversation.compactProviderContext(
-															retentionPolicy,
-															signal,
-														);
-														signal.throwIfAborted();
-														if (
-															retained.contextUsage.tokens > retentionPolicy.maxContextTokens &&
-															!retentionWarningEmitted
-														) {
-															retentionWarningEmitted = true;
-															options.warn(
-																`Worker ${options.laneId} has one retained turn larger than its context policy; provider overflow recovery may be required.`,
-															);
+										},
+										afterToolCall: async ({ toolCall, args }) => {
+											try {
+												if (
+													(toolCall.name === "write" || toolCall.name === "edit") &&
+													args &&
+													typeof args === "object" &&
+													!Array.isArray(args)
+												) {
+													const rawPath = (args as Record<string, unknown>).path;
+													if (typeof rawPath === "string" && rawPath.length > 0) {
+														const absolutePath = path.isAbsolute(rawPath)
+															? path.resolve(rawPath)
+															: path.resolve(options.cwd, rawPath);
+														let canonicalPath = absolutePath;
+														try {
+															canonicalPath = safeRealpathSync(absolutePath);
+														} catch {
+															// The operation entered execution; retain its lexical target if canonicalization failed.
 														}
-														if (
-															retained.status !== "compacted_verified" &&
-															retained.status !== "compacted_deterministic"
-														) {
+														recordChangedFile(
+															path.relative(options.cwd, canonicalPath).split(path.sep).join("/"),
+														);
+													}
+												}
+												signal.throwIfAborted();
+												return undefined;
+											} catch (error) {
+												retainCallbackFailure(error);
+												throw error;
+											}
+										},
+										onMessage: (message, origin) => {
+											try {
+												if (signal.aborted && message.role === "assistant" && origin !== "local") {
+													providerTurn.close();
+													providerTurn.accountLateAssistantUsage(message.usage);
+													options.toolSurface.gateway?.flushUsage();
+												}
+												if (signal.aborted && message.role === "toolResult") {
+													options.toolSurface.toolUsage.settle(message.toolCallId, message.usage);
+												}
+												signal.throwIfAborted();
+												if (message.role === "assistant" && origin !== "local") {
+													providerTurn.accountAssistantUsage(message.usage);
+													options.toolSurface.gateway?.flushUsage();
+												}
+												// Failed/aborted streams can retain partial tool calls, but the loop never
+												// executes them. Their terminal callback must account and persist the response now.
+												if (
+													message.role === "assistant" &&
+													message.stopReason !== "error" &&
+													message.stopReason !== "aborted" &&
+													message.content.some((content) => content.type === "toolCall")
+												) {
+													// Known calls are normalized before beforeToolCall and persist from that hook.
+													// Retain the request only so immediate unknown/malformed results can close the
+													// transcript without freezing pre-repair arguments into durable history.
+													for (const content of message.content) {
+														if (content.type === "toolCall")
+															pendingToolAssistants.set(content.id, message);
+													}
+													return;
+												}
+												if (
+													message.role === "toolResult" &&
+													!persistedToolAssistantIds.has(message.toolCallId)
+												) {
+													const pending = pendingToolAssistants.get(message.toolCallId);
+													if (pending) persistToolRequest(pending);
+												}
+												if (message.role === "toolResult") {
+													// Validate before persistence and retain billed usage if the append fails.
+													// Tool service usage is separate from assistant reservation epochs.
+													options.toolSurface.toolUsage.settle(message.toolCallId, message.usage);
+												}
+												options.conversation.appendMessage(message);
+												options.agentControl.acknowledgeMailboxMessage(options.agentId, message);
+												if (message.role === "assistant" && origin !== "local") {
+													checkpointUsage(
+														"Persisted worker assistant response and its cumulative provider usage.",
+													);
+													providerTurn.consumeTerminalAssistantAndHold();
+												}
+												if (message.role === "toolResult")
+													checkpointUsage(`Persisted worker tool result '${message.toolCallId}'.`);
+												durableCallbackMessages.push(message);
+											} catch (error) {
+												retainCallbackFailure(error);
+												throw error;
+											}
+										},
+										getSteeringMessages: async (): Promise<AgentMessage[]> => {
+											try {
+												signal.throwIfAborted();
+												const includeFollowUp = firstMailboxPoll;
+												firstMailboxPoll = false;
+												const messages = options.agentControl.mailboxMessagesForConversation(
+													options.agentId,
+													options.conversation,
+													includeFollowUp,
+												);
+												signal.throwIfAborted();
+												return messages;
+											} catch (error) {
+												retainCallbackFailure(error);
+												throw error;
+											}
+										},
+										getFollowUpMessages: async (): Promise<AgentMessage[]> => {
+											try {
+												signal.throwIfAborted();
+												const messages = options.agentControl.mailboxMessagesForConversation(
+													options.agentId,
+													options.conversation,
+													true,
+												);
+												signal.throwIfAborted();
+												return messages;
+											} catch (error) {
+												retainCallbackFailure(error);
+												throw error;
+											}
+										},
+										...(retentionPolicy
+											? {
+													transformContext: async (messages: AgentMessage[]) => {
+														try {
+															signal.throwIfAborted();
+															const retained = await options.conversation.compactProviderContext(
+																retentionPolicy,
+																signal,
+															);
+															signal.throwIfAborted();
+															if (
+																retained.contextUsage.tokens > retentionPolicy.maxContextTokens &&
+																!retentionWarningEmitted
+															) {
+																retentionWarningEmitted = true;
+																options.warn(
+																	`Worker ${options.laneId} has one retained turn larger than its context policy; provider overflow recovery may be required.`,
+																);
+															}
+															if (
+																retained.status !== "compacted_verified" &&
+																retained.status !== "compacted_deterministic"
+															) {
+																return messages;
+															}
+															return sanitizeToolFailureContext(retained.context.messages, "").messages;
+														} catch (error) {
+															if (signal.aborted) {
+																retainCallbackFailure(error);
+																signal.throwIfAborted();
+															}
+															if (error instanceof WorkerConversationOwnershipError) {
+																retainCallbackFailure(error);
+																throw error;
+															}
+															if (!retentionWarningEmitted) {
+																retentionWarningEmitted = true;
+																options.warn(
+																	`Worker context retention failed: ${error instanceof Error ? error.message : String(error)}`,
+																);
+															}
 															return messages;
 														}
-														return sanitizeToolFailureContext(retained.context.messages, "").messages;
-													} catch (error) {
-														if (signal.aborted) {
-															retainCallbackFailure(error);
-															signal.throwIfAborted();
-														}
-														if (error instanceof WorkerConversationOwnershipError) {
-															retainCallbackFailure(error);
-															throw error;
-														}
-														if (!retentionWarningEmitted) {
-															retentionWarningEmitted = true;
-															options.warn(
-																`Worker context retention failed: ${error instanceof Error ? error.message : String(error)}`,
-															);
-														}
-														return messages;
-													}
-												},
-											}
-										: {}),
-									signal,
-									cacheRetention: "short",
-									laneKind: "worker",
-								});
-							} catch (error) {
+													},
+												}
+											: {}),
+										signal,
+										cacheRetention: "short",
+										laneKind: "worker",
+									});
+								} catch (error) {
+									providerTurn.close();
+									if (signal.aborted) throw error;
+									if (callbackFailed) throw workerCompletionCallbackFailure(callbackFailure);
+									throw error;
+								}
+								try {
+									providerTurn.assertEverySuccessfulPreflightConsumed();
+								} catch (error) {
+									retainCallbackFailure(error);
+								}
+								const supplementalUsage = providerTurn.accountUnverifiedResultUsageDelta(result.usage);
+								options.toolSurface.gateway?.flushUsage();
+								signal.throwIfAborted();
+								if (supplementalUsage) {
+									checkpointUsage(
+										"Persisted supplemental provider result usage before rejecting unverified completion evidence.",
+									);
+								}
 								providerTurn.close();
-								if (signal.aborted) throw error;
 								if (callbackFailed) throw workerCompletionCallbackFailure(callbackFailure);
-								throw error;
+								providerTurn.assertProviderOutputPreflight();
+								const evidenced = callbackEvidencedCompletion(result, historyLength, durableCallbackMessages);
+								signal.throwIfAborted();
+								const appended = options.conversation.commitTranscript(transcriptCursor, evidenced.suffix, {
+									appendMissing: false,
+								});
+								if (appended !== 0) {
+									throw new WorkerConversationOwnershipError(
+										"Worker callback transcript verification unexpectedly appended missing messages.",
+									);
+								}
+								committed = true;
+								return evidenced.completion;
+							} finally {
+								signal.removeEventListener("abort", abortTranscriptCursor);
+								providerTurn.close();
+								if (activeProviderTurn === providerTurn) activeProviderTurn = undefined;
+								if (!committed) options.conversation.abortTranscriptCommit(transcriptCursor);
 							}
-							try {
-								providerTurn.assertEverySuccessfulPreflightConsumed();
-							} catch (error) {
-								retainCallbackFailure(error);
-							}
-							signal.throwIfAborted();
-							if (providerTurn.accountUnverifiedResultUsageDelta(result.usage)) {
-								checkpointUsage(
-									"Persisted supplemental provider result usage before rejecting unverified completion evidence.",
-								);
-							}
-							providerTurn.close();
-							if (callbackFailed) throw workerCompletionCallbackFailure(callbackFailure);
-							providerTurn.assertProviderOutputPreflight();
-							const evidenced = callbackEvidencedCompletion(result, historyLength, durableCallbackMessages);
-							signal.throwIfAborted();
-							const appended = options.conversation.commitTranscript(transcriptCursor, evidenced.suffix, {
-								appendMissing: false,
+						};
+						try {
+							completion = await runProviderCompletionWithBackoff({
+								attempt: attemptProviderCompletion,
+								onAttemptFailure: closeActiveProviderTurn,
+								provider: options.model.provider,
+								laneId: options.laneId,
+								warn: options.warn,
+								...(signal ? { signal } : {}),
 							});
-							if (appended !== 0) {
-								throw new WorkerConversationOwnershipError(
-									"Worker callback transcript verification unexpectedly appended missing messages.",
-								);
-							}
-							committed = true;
-							return evidenced.completion;
 						} finally {
-							signal.removeEventListener("abort", abortTranscriptCursor);
-							providerTurn.close();
-							if (activeProviderTurn === providerTurn) activeProviderTurn = undefined;
-							if (!committed) options.conversation.abortTranscriptCommit(transcriptCursor);
+							closeActiveProviderTurn();
 						}
-					};
-					try {
-						completion = await runProviderCompletionWithBackoff({
-							attempt: attemptProviderCompletion,
-							onAttemptFailure: closeActiveProviderTurn,
-							provider: options.model.provider,
-							laneId: options.laneId,
-							warn: options.warn,
-							...(signal ? { signal } : {}),
-						});
-					} finally {
-						closeActiveProviderTurn();
-					}
-					const cumulativeUsage = checkpointUsage(
-						"Verified the callback-persisted worker conversation terminal suffix.",
-					);
-					terminalOutput = completion.text;
-					return {
-						text: completion.text,
-						costUsd: cumulativeUsage.costUsd,
-						stopReason: String(completion.stopReason),
-						changedFiles: [...changedFiles],
-						blockers: [...toolIssues],
-					};
-				},
-			});
-			const usage = checkpointUsage("Persisted final cumulative worker usage before terminal result.");
-			const outputArtifact = terminalOutput
-				? captureWorkerTerminalOutputArtifact({
-						agentDir: options.agentDir,
-						parentSessionId: options.parentSessionId,
-						attemptId: options.durableHandle.attemptId,
-						text: terminalOutput,
-						createdAt: new Date().toISOString(),
-					})
-				: undefined;
-			return { rawOutcome, usage, changedFiles: [...changedFiles], ...(outputArtifact ? { outputArtifact } : {}) };
+						const cumulativeUsage = checkpointUsage(
+							"Verified the callback-persisted worker conversation terminal suffix.",
+						);
+						terminalOutput = completion.text;
+						return {
+							text: completion.text,
+							costUsd: cumulativeUsage.costUsd,
+							stopReason: String(completion.stopReason),
+							changedFiles: [...changedFiles],
+							blockers: [...toolIssues],
+						};
+					},
+				});
+				stopUsageClock();
+				const usage = checkpointUsage("Persisted final cumulative worker usage before terminal result.");
+				const outputArtifact = terminalOutput
+					? captureWorkerTerminalOutputArtifact({
+							agentDir: options.agentDir,
+							parentSessionId: options.parentSessionId,
+							attemptId: options.durableHandle.attemptId,
+							text: terminalOutput,
+							createdAt: new Date().toISOString(),
+						})
+					: undefined;
+				return {
+					rawOutcome,
+					usage,
+					changedFiles: [...changedFiles],
+					...(outputArtifact ? { outputArtifact } : {}),
+				};
+			} finally {
+				stopUsageClock();
+				for (const signal of usageSignals) signal.removeEventListener("abort", stopUsageClock);
+				usageSignals.clear();
+			}
 		},
 	};
 }

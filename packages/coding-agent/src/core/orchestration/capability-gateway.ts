@@ -8,7 +8,12 @@ import {
 	resolveToolCallCapabilities,
 	resolveToolCallPathAccess,
 } from "../tool-capability-policy.ts";
-import { validateAttemptUsageSnapshot } from "./attempt-usage.ts";
+import { attemptUsageFromGatewayUsage, reconcileAttemptUsage, validateAttemptUsageSnapshot } from "./attempt-usage.ts";
+import {
+	type AttemptUsageAccounting,
+	type AttemptUsageGenerationIdentity,
+	projectPendingAttemptGenerationUsage,
+} from "./attempt-usage-generations.ts";
 import type { AttemptUsageSnapshot, ExecutionGrant, HarnessCapability, ToolCapabilityManifest } from "./contracts.ts";
 
 export type GatewayDecisionCode =
@@ -66,6 +71,14 @@ export interface GatewayUsageSnapshot {
 	wallClockMs: number;
 }
 
+/** Bound to one registered execution generation; reports never include foreign corrections. */
+export interface GatewayUsageAccountingPort {
+	readonly identity: AttemptUsageGenerationIdentity;
+	readonly baseline: AttemptUsageSnapshot;
+	read(): AttemptUsageAccounting;
+	record(usage: AttemptUsageSnapshot): void;
+}
+
 export interface ProviderBudgetReservation {
 	maxTokens: number;
 	release(): void;
@@ -73,7 +86,9 @@ export interface ProviderBudgetReservation {
 
 export interface SharedCapabilityBudget {
 	assertBudgetAvailable(subject: string): void;
-	recordAttemptUsage(usage: GatewayUsageSnapshot): void;
+	/** All received usage for this attempt, including other generations' pending writes. */
+	getAttemptUsage(): AttemptUsageSnapshot;
+	recordAttemptUsage(usage: GatewayUsageSnapshot, accounting?: AttemptUsageAccounting): void;
 	remainingTokens(): number | undefined;
 	reserveProviderBudget(
 		requestedMaxTokens: number,
@@ -196,8 +211,12 @@ export class CapabilityGateway {
 	private readonly now: () => number;
 	private readonly onAudit?: (record: GatewayAuditRecord) => void;
 	private readonly sharedBudget?: SharedCapabilityBudget;
-	private readonly startedAt: number;
-	private readonly initialWallClockMs: number;
+	private startedAt: number;
+	private initialWallClockMs: number;
+	private stoppedAt?: number;
+	private lastWallClockMs = 0;
+	private usageAccounting?: GatewayUsageAccountingPort;
+	private usageStarted = false;
 	private toolCalls: number;
 	private inputTokens: number;
 	private outputTokens: number;
@@ -232,7 +251,72 @@ export class CapabilityGateway {
 		this.cacheWriteTokens = initialUsage.cacheWriteTokens;
 		this.totalTokens = initialUsage.totalTokens;
 		this.costUsd = initialUsage.costUsd;
-		this.sharedBudget?.recordAttemptUsage(this.getUsage());
+		this.publishUsage();
+	}
+
+	/** Install the registered baseline before this gateway authorizes or charges any work. */
+	bindUsageAccounting(port: GatewayUsageAccountingPort): void {
+		if (this.usageAccounting) throw new Error("CapabilityGateway: accounting is already bound.");
+		if (this.usageStarted) throw new Error("CapabilityGateway: accounting must bind before usage starts.");
+		const baseline = validateAttemptUsageSnapshot(port.baseline);
+		const startedAt = this.currentTime();
+		this.toolCalls = baseline.toolCalls;
+		this.inputTokens = baseline.inputTokens;
+		this.outputTokens = baseline.outputTokens;
+		this.cacheReadTokens = baseline.cacheReadTokens;
+		this.cacheWriteTokens = baseline.cacheWriteTokens;
+		this.totalTokens = baseline.totalTokens;
+		this.costUsd = baseline.costUsd;
+		this.initialWallClockMs = baseline.activeWallClockMs;
+		this.lastWallClockMs = baseline.activeWallClockMs;
+		this.startedAt = startedAt;
+		this.usageAccounting = port;
+		this.publishUsage();
+	}
+
+	/** Persist cumulative local counters. A failed/ambiguous write can retry this exact state. */
+	flushUsage(): void {
+		let recorded = false;
+		let recordFailure: unknown;
+		try {
+			this.usageAccounting?.record(attemptUsageFromGatewayUsage(this.getLocalUsage()));
+			recorded = true;
+		} catch (error) {
+			recordFailure = error;
+		}
+		try {
+			// A pending durable receipt is still received usage: sibling admission must count it.
+			this.publishUsage();
+		} catch (error) {
+			if (!recorded) {
+				throw new AggregateError(
+					[recordFailure, error],
+					"Usage persistence and shared budget publication both failed.",
+					{
+						cause: recordFailure,
+					},
+				);
+			}
+			throw error;
+		}
+		if (!recorded) throw recordFailure;
+	}
+
+	/** Publish canonical plus pending usage after either direct persistence or an owned retry. */
+	publishUsage(): void {
+		if (!this.sharedBudget) return;
+		const accounting = this.getProjectedAccounting();
+		if (!accounting) {
+			this.sharedBudget.recordAttemptUsage(this.getLocalUsage());
+			return;
+		}
+		const { activeWallClockMs, ...usage } = accounting.total;
+		this.sharedBudget.recordAttemptUsage({ ...usage, wallClockMs: activeWallClockMs }, accounting);
+	}
+
+	/** Shutdown stops active time, but received billing facts may still be recorded afterward. */
+	stopUsageClock(): void {
+		this.stoppedAt ??= this.currentTime();
 	}
 
 	async execute<T>(
@@ -248,14 +332,14 @@ export class CapabilityGateway {
 	/** Immediate pre-execution authorization for runtimes that expose a before-tool-call hook. */
 	authorizeToolCall(manifest: ToolCapabilityManifest, toolName: string, params: unknown): void {
 		const now = this.currentTime();
-		const wallClockMs = this.wallClockMsAt(now);
-		this.authorize(manifest, toolName, params, now, wallClockMs);
+		this.authorize(manifest, toolName, params, now);
 		const toolCalls = this.toolCalls + 1;
 		if (!Number.isSafeInteger(toolCalls)) {
 			throw new Error("CapabilityGateway: tool-call count would exceed safe cumulative usage bounds.");
 		}
 		this.toolCalls = toolCalls;
-		this.sharedBudget?.recordAttemptUsage(this.getUsage());
+		this.usageStarted = true;
+		this.flushUsage();
 		this.audit(toolName, "allow", "allowed");
 	}
 
@@ -283,12 +367,16 @@ export class CapabilityGateway {
 		this.cacheWriteTokens = cacheWriteTokens;
 		this.totalTokens = totalTokens;
 		this.costUsd = costUsd;
-		this.sharedBudget?.recordAttemptUsage(this.getUsage());
+		this.usageStarted = true;
+		// The receipt owner first records its cumulative invocation baseline, then flushes. Throwing
+		// from persistence inside this delta callback would let a receipt retry add the delta twice.
+		if (!this.usageAccounting) this.publishUsage();
 	}
 
 	/** Enforce resumed cumulative budgets before a provider request that has no tool-call boundary. */
 	assertBudgetAvailable(subject = "provider"): void {
-		this.enforceBudget(subject, this.wallClockMsAt(this.currentTime()));
+		this.flushUsage();
+		this.enforceBudget(subject);
 		this.sharedBudget?.assertBudgetAvailable(subject);
 	}
 
@@ -328,6 +416,26 @@ export class CapabilityGateway {
 	}
 
 	getUsage(): GatewayUsageSnapshot {
+		const accounting = this.getProjectedAccounting();
+		const local = accounting?.total ?? attemptUsageFromGatewayUsage(this.getLocalUsage());
+		// A lower per-attempt grant must see the same pending receipts as the tree's wider budget.
+		// This read never copies foreign generation corrections into the counters we persist.
+		const { activeWallClockMs, ...usage } = this.sharedBudget
+			? reconcileAttemptUsage(local, this.sharedBudget.getAttemptUsage())
+			: local;
+		return { ...usage, wallClockMs: activeWallClockMs };
+	}
+
+	private getProjectedAccounting(): AttemptUsageAccounting | undefined {
+		if (!this.usageAccounting) return undefined;
+		return projectPendingAttemptGenerationUsage(
+			this.usageAccounting.read(),
+			this.usageAccounting.identity,
+			attemptUsageFromGatewayUsage(this.getLocalUsage()),
+		);
+	}
+
+	private getLocalUsage(): GatewayUsageSnapshot {
 		return {
 			toolCalls: this.toolCalls,
 			inputTokens: this.inputTokens,
@@ -340,13 +448,7 @@ export class CapabilityGateway {
 		};
 	}
 
-	private authorize(
-		manifest: ToolCapabilityManifest,
-		toolName: string,
-		params: unknown,
-		now: number,
-		wallClockMs: number,
-	): void {
+	private authorize(manifest: ToolCapabilityManifest, toolName: string, params: unknown, now: number): void {
 		if (this.grant.expiresAt && Date.parse(this.grant.expiresAt) <= now) {
 			this.deny(toolName, "grant_expired", `Execution grant '${this.grant.grantId}' expired.`);
 		}
@@ -369,7 +471,8 @@ export class CapabilityGateway {
 				`Tool '${toolName}' action requires a capability outside its compiled manifest.`,
 			);
 		}
-		this.enforceBudget(toolName, wallClockMs);
+		this.flushUsage();
+		this.enforceBudget(toolName);
 		this.sharedBudget?.assertBudgetAvailable(toolName);
 
 		const canonicalPolicy = getToolCapabilityPolicy(toolName);
@@ -399,18 +502,19 @@ export class CapabilityGateway {
 		}
 	}
 
-	private enforceBudget(toolName: string, wallClockMs: number): void {
+	private enforceBudget(toolName: string): void {
 		const budget = this.grant.budget;
-		if (budget.maxToolCalls !== undefined && this.toolCalls >= budget.maxToolCalls) {
+		const usage = this.getUsage();
+		if (budget.maxToolCalls !== undefined && usage.toolCalls >= budget.maxToolCalls) {
 			this.deny(toolName, "tool_call_budget_exhausted", "Tool-call budget exhausted.");
 		}
-		if (budget.maxTokens !== undefined && budgetedTokens(this.getUsage()) >= budget.maxTokens) {
+		if (budget.maxTokens !== undefined && budgetedTokens(usage) >= budget.maxTokens) {
 			this.deny(toolName, "token_budget_exhausted", "Token budget exhausted.");
 		}
-		if (budget.maxCostUsd !== undefined && this.costUsd >= budget.maxCostUsd) {
+		if (budget.maxCostUsd !== undefined && usage.costUsd >= budget.maxCostUsd) {
 			this.deny(toolName, "cost_budget_exhausted", "Cost budget exhausted.");
 		}
-		if (budget.maxWallClockMs !== undefined && wallClockMs >= budget.maxWallClockMs) {
+		if (budget.maxWallClockMs !== undefined && usage.wallClockMs >= budget.maxWallClockMs) {
 			this.deny(toolName, "wall_clock_budget_exhausted", "Wall-clock budget exhausted.");
 		}
 	}
@@ -424,7 +528,7 @@ export class CapabilityGateway {
 	}
 
 	private wallClockMsAt(now: number): number {
-		const elapsed = now - this.startedAt;
+		const elapsed = (this.stoppedAt ?? now) - this.startedAt;
 		if (!Number.isFinite(elapsed)) {
 			throw new Error("CapabilityGateway: active wall-clock elapsed time must be finite.");
 		}
@@ -432,7 +536,8 @@ export class CapabilityGateway {
 		if (!Number.isFinite(wallClockMs) || wallClockMs < 0) {
 			throw new Error("CapabilityGateway: accumulated wall-clock usage must be finite and non-negative.");
 		}
-		return wallClockMs;
+		this.lastWallClockMs = Math.max(this.lastWallClockMs, wallClockMs);
+		return this.lastWallClockMs;
 	}
 
 	private pathAllowed(rawPath: string, allowedPaths: readonly string[]): boolean {

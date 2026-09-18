@@ -57,4 +57,69 @@ describe("lane tool usage owner", () => {
 		expect(record).toHaveBeenCalledOnce();
 		expect(checkpoint).toHaveBeenCalledTimes(3);
 	});
+
+	it("retains an admitted invocation's late charge after closing admission", async () => {
+		const record = vi.fn();
+		const checkpoint = vi.fn();
+		const owner = new LaneToolUsage(record);
+		owner.bindCheckpoint(checkpoint);
+		let release: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const usage = { ...createEmptyUsage(), input: 10, totalTokens: 10 };
+		const pending = owner.run("in-flight", async () => {
+			await ready;
+			owner.report("in-flight", usage);
+			return { content: [], details: {}, usage };
+		});
+		owner.close();
+		const newWork = vi.fn();
+		await expect(owner.run("new", newWork)).rejects.toThrow("closed");
+		expect(newWork).not.toHaveBeenCalled();
+		expect(() => owner.report("unknown", usage)).toThrow("closed");
+		release();
+		expect(await pending).toEqual({ content: [], details: {}, usage });
+		owner.settle("in-flight", usage);
+		expect(record).toHaveBeenCalledOnce();
+		expect(checkpoint).toHaveBeenCalledOnce();
+	});
+
+	it("does not erase a failed checkpoint when close is retried", () => {
+		const record = vi.fn();
+		const checkpoint = vi.fn((): void => {
+			throw new Error("storage unavailable");
+		});
+		const owner = new LaneToolUsage(record);
+		owner.bindCheckpoint(checkpoint);
+		const usage = { ...createEmptyUsage(), input: 10, totalTokens: 10 };
+		expect(() => owner.report("receipt", usage)).toThrow("storage unavailable");
+		expect(() => owner.close()).toThrow("storage unavailable");
+		checkpoint.mockImplementation(() => undefined);
+		owner.close();
+		owner.settle("receipt", usage);
+		expect(record).toHaveBeenCalledOnce();
+		expect(checkpoint).toHaveBeenCalledTimes(3);
+	});
+
+	it("rejects concurrent reuse of an invocation identity while allowing sequential reuse", async () => {
+		const owner = new LaneToolUsage();
+		let release: () => void = () => {};
+		const pending = owner.run(
+			"call",
+			() =>
+				new Promise<{ content: []; details: undefined }>((resolve) => {
+					release = () => resolve({ content: [], details: undefined });
+				}),
+		);
+		const overlapping = vi.fn();
+		await expect(owner.run("call", overlapping)).rejects.toThrow("already active");
+		expect(overlapping).not.toHaveBeenCalled();
+		release();
+		await pending;
+		await expect(owner.run("call", async () => ({ content: [], details: "next" }))).resolves.toEqual({
+			content: [],
+			details: "next",
+		});
+	});
 });

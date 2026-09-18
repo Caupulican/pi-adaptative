@@ -24,6 +24,7 @@ import type {
 } from "./agent-session-contracts.ts";
 import { isLaneTerminalStatus, type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
+import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
 import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
 import type {
 	SessionRootReply,
@@ -56,6 +57,7 @@ import {
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
+import { WorkerUsageReceiptDelivery } from "./delegation/worker-usage-receipt-delivery.ts";
 import type { ManagedLaneEvent } from "./extensions/types.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
@@ -63,6 +65,7 @@ import type { GoalState } from "./goals/goal-state.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { WorkerResultContract } from "./orchestration/contracts.ts";
+import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import type {
 	TaskProfileCreateInput,
 	TaskProfileCreateResult,
@@ -113,6 +116,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _workers: WorkerDelegationController | undefined;
 	/** One durable lifecycle shared by every worker execution adapter. */
 	private _workerLifecycle: WorkerLifecycle | undefined;
+	/** Durable usage delivery shares the lifecycle's event store, independently of terminal handoffs. */
+	private _workerUsage: WorkerUsageReceiptDelivery | undefined;
 	/** Shared terminal outbox for managed and in-process workers; lazy under UAC omission. */
 	private _workerNotifications: WorkerNotificationCoordinator | undefined;
 	/** Active event waits consume matching terminal edges before a redundant parent wake is admitted. */
@@ -169,11 +174,23 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	private _getWorkerLifecycle(): WorkerLifecycle {
 		if (this._workerLifecycle) return this._workerLifecycle;
+		const parentSessionId = this.deps.getSessionId();
+		const store = new OrchestrationEventStore({ agentDir: this.deps.getAgentDir(), sessionId: parentSessionId });
 		const lifecycle = new WorkerLifecycle({
 			agentDir: this.deps.getAgentDir(),
-			sessionId: this.deps.getSessionId(),
+			sessionId: parentSessionId,
+			store,
 		});
 		this._workerLifecycle = lifecycle;
+		this._workerUsage = new WorkerUsageReceiptDelivery({
+			parentSessionId,
+			runtime: lifecycle.ledger.runtime,
+			subscribe: (listener) => store.subscribe(listener),
+			deliver: (usage, options) =>
+				deliverSpawnedUsageReceipt(this.deps.getSessionManager(), this.deps, usage, options),
+			isDisposed: () => this.deps.isDisposed(),
+			warn: (message) => this._safeWarn(message),
+		});
 		for (const notification of lifecycle.getPendingTerminalNotifications()) {
 			this._getWorkerNotificationCoordinator().recordTerminal(notification.record, notification.notificationId);
 		}
@@ -389,6 +406,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._managedLanes?.release();
 
 		this._workers?.abort();
+		this._workerUsage?.dispose();
 		this._workerNotifications?.dispose();
 	}
 
@@ -722,6 +740,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/** Start every capacity-eligible queued worker at the owner session's foreground-idle boundary. */
 	drainQueuedWorkerDelegations(): void {
+		this._workerUsage?.signal();
 		if (this.deps.isDelegateToolActive?.()) this._getWorkerController().drain();
 	}
 

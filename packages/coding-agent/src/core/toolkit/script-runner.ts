@@ -53,6 +53,12 @@ export const spawnScriptExecutor: ScriptExecutor = async (command, argv, cwd, ti
 	let stdoutBytes = 0;
 	let stderrBytes = 0;
 	let outputExceeded = false;
+	const renderStderr = (failure?: string): string => {
+		const diagnostics = [Buffer.concat(stderrChunks).toString("utf8")];
+		if (outputExceeded) diagnostics.push(`Command output exceeded maxBuffer (${MAX_OUTPUT_BYTES} bytes)`);
+		if (failure !== undefined) diagnostics.push(failure);
+		return diagnostics.filter((diagnostic) => diagnostic.length > 0).join("\n");
+	};
 	const appendChunk = (chunks: Buffer[], chunk: Buffer, streamBytes: number): number => {
 		const remaining = Math.max(0, MAX_OUTPUT_BYTES - streamBytes);
 		if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
@@ -83,16 +89,12 @@ export const spawnScriptExecutor: ScriptExecutor = async (command, argv, cwd, ti
 			killGraceMs: SCRIPT_KILL_GRACE_MS,
 		});
 		const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-		let stderr = Buffer.concat(stderrChunks).toString("utf8");
-		if (outputExceeded) {
-			stderr = `${stderr}${stderr ? "\n" : ""}Command output exceeded maxBuffer (${MAX_OUTPUT_BYTES} bytes)`;
-		}
 		return {
 			// A cooperative child can exit zero after termination was requested. Preserve the
 			// waiter's reason: only an ordinary exit establishes the script's own exit status.
 			exitCode: outputExceeded || terminal.reason !== "exited" ? null : terminal.code,
 			stdout,
-			stderr,
+			stderr: renderStderr(),
 			durationMs: Date.now() - started,
 			timedOut: terminal.reason === "timeout",
 		};
@@ -100,7 +102,7 @@ export const spawnScriptExecutor: ScriptExecutor = async (command, argv, cwd, ti
 		return {
 			exitCode: null,
 			stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-			stderr: error instanceof Error ? error.message : String(error),
+			stderr: renderStderr(error instanceof Error ? error.message : String(error)),
 			durationMs: Date.now() - started,
 			timedOut: false,
 		};

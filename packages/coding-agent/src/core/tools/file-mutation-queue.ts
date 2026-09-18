@@ -180,7 +180,7 @@ export class MutationLockScope {
 
 	/** Drop a disposed scope from the registry at the first moment it holds nothing. */
 	private settle(): void {
-		if (!this.disposeRequested || !this.idle) return;
+		if (!this.disposeRequested || this.users > 0 || !this.idle) return;
 		if (mutationLockScopes.get(this.key) === this) mutationLockScopes.delete(this.key);
 	}
 

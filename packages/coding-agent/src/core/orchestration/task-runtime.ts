@@ -1,8 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { deepFreeze } from "../util/deep-freeze.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
+import { beginAttemptUsageGeneration, recordAttemptGenerationUsage } from "./attempt-usage-generations.ts";
 import {
 	type AgentBindingContract,
 	type AgentIdentityContract,
@@ -13,6 +14,7 @@ import {
 	type AttemptCheckpoint,
 	type AttemptLease,
 	type AttemptRetryState,
+	type AttemptUsageSnapshot,
 	type EvidenceContract,
 	type ExecutionGrant,
 	MAX_ORCHESTRATION_AGENT_BINDINGS,
@@ -49,6 +51,7 @@ import {
 	retryStateFromValue,
 	taskFromValue,
 	usageFromPayload,
+	usageGenerationIdentityFromValue,
 	validateTaskContractForState,
 	validateTaskDependencyIds,
 } from "./task-runtime-codecs.ts";
@@ -77,6 +80,7 @@ import {
 	assertNotificationTarget,
 	assertObjectiveStatusTransition,
 	assertRetryBackoffElapsedAt,
+	assertRunningAttemptLease,
 	assertTaskAttemptBudgetForState,
 	assertTaskFailureTransition,
 	assertVerificationTransition,
@@ -716,6 +720,82 @@ export class DurableTaskRuntime {
 			payload: toJsonObject({ checkpoint, leaseId: args.leaseId }),
 		});
 		return structuredClone(checkpoint);
+	}
+
+	/** Admit a usage generation before starting I/O; returns its immutable local-counter baseline. */
+	beginAttemptUsage(
+		handle: Pick<AttemptLease, "attemptId" | "leaseId" | "fencingToken">,
+		recoveryBaseline?: AttemptUsageSnapshot,
+	): AttemptUsageSnapshot {
+		this.refresh();
+		const identity = usageGenerationIdentityFromValue(
+			{ leaseId: handle.leaseId, fencingToken: handle.fencingToken },
+			"usage generation",
+		);
+		const attempt = assertRunningAttemptLease(
+			this.state,
+			handle.attemptId,
+			identity.leaseId,
+			identity.fencingToken,
+			this.nowIso(),
+		);
+		const baseline =
+			recoveryBaseline === undefined ? undefined : usageFromPayload(recoveryBaseline, "usage baseline");
+		const accounting = beginAttemptUsageGeneration(attempt.usageAccounting, identity, baseline);
+		if (accounting !== attempt.usageAccounting) {
+			this.commit({
+				type: "attempt.usage_registered",
+				aggregateId: handle.attemptId,
+				actor: "runtime",
+				idempotencyKey: `attempt-usage-registered:${handle.attemptId}:${identity.fencingToken}`,
+				payload: toJsonObject({ attemptId: handle.attemptId, ...identity, ...(baseline ? { baseline } : {}) }),
+			});
+		}
+		return structuredClone(
+			this.state.attempts[handle.attemptId]!.usageAccounting!.generations[identity.leaseId].baseline,
+		);
+	}
+
+	/** A registered generation may report received charges after its execution authority ends. */
+	recordAttemptUsage(
+		handle: Pick<AttemptLease, "attemptId" | "leaseId" | "fencingToken">,
+		usage: AttemptUsageSnapshot,
+	): AttemptUsageSnapshot {
+		this.refresh();
+		const attempt = this.requireAttempt(handle.attemptId);
+		if (!attempt.usageAccounting) throw new DurableTaskRuntimeError("Usage generation is not registered.");
+		const identity = usageGenerationIdentityFromValue(
+			{ leaseId: handle.leaseId, fencingToken: handle.fencingToken },
+			"usage generation",
+		);
+		const reported = usageFromPayload(usage, "usage report");
+		const accounting = recordAttemptGenerationUsage(attempt.usageAccounting, identity, reported);
+		if (accounting !== attempt.usageAccounting) {
+			const digest = createHash("sha256").update(JSON.stringify(reported)).digest("hex");
+			this.commit({
+				type: "attempt.usage_recorded",
+				aggregateId: handle.attemptId,
+				actor: "runtime",
+				idempotencyKey: `attempt-usage-recorded:${handle.attemptId}:${identity.fencingToken}:${digest}`,
+				payload: toJsonObject({ attemptId: handle.attemptId, ...identity, usage: reported }),
+			});
+		}
+		return structuredClone(this.state.attempts[handle.attemptId]!.usageAccounting!.total);
+	}
+
+	/** Parent delivery only; this never changes execution authority or completion notifications. */
+	acknowledgeUsageReceipt(attemptId: string, receiptId: string): void {
+		this.refresh();
+		const attempt = this.requireAttempt(attemptId);
+		const receipt = dispatchIdentifier(receiptId, "usage receipt identity");
+		if (!attempt.usageReceipts || !Object.hasOwn(attempt.usageReceipts, receipt)) return;
+		this.commit({
+			type: "attempt.usage_delivered",
+			aggregateId: attemptId,
+			actor: "runtime",
+			idempotencyKey: `attempt-usage-delivered:${attemptId}:${receipt}`,
+			payload: toJsonObject({ attemptId, receiptId: receipt }),
+		});
 	}
 
 	finishAttempt(result: WorkerResultContract): AttemptRuntimeState {

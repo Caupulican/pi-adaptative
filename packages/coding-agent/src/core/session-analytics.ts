@@ -1,9 +1,8 @@
 /**
  * Session usage / cost / stats accounting, context-window usage, and session export.
  *
- * Extracted verbatim from agent-session.ts (god-file decomposition). Read-only over the session
- * except for its two owned memo caches (`_spawnedUsageCache`, `_dailyUsageCache`) — it never mutates
- * agent or session state. Single source of truth for "how much did this session and its spawned
+ * Owns spawned-usage ingestion and accounting memo lifetimes. Single source of truth for
+ * "how much did this session and its spawned
  * subtree spend" (footer roll-up, print-mode child reporting), the daily cross-session totals, the
  * /context window estimate, and HTML/JSONL export of the current branch.
  */
@@ -46,6 +45,12 @@ import {
 	formatDailyUsageBreakdown,
 	getLocalDayWindow,
 } from "./cost/daily-usage.ts";
+import { aggregateCumulativeUsageFromSessionEntries } from "./cost/session-usage.ts";
+import {
+	deliverSpawnedUsageReceipt,
+	type SpawnedUsageReceiptDisposition,
+	type SpawnedUsageReceiptOptions,
+} from "./cost/spawned-usage-receipt.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import type { ContextUsage, ToolDefinition } from "./extensions/index.ts";
@@ -88,6 +93,14 @@ export interface SessionAnalyticsDeps {
 }
 
 export class SessionAnalytics {
+	/** All accounting memos belong to one append-only session lineage, not to its entry count. */
+	private _accountingSession?: {
+		session: SessionManager;
+		sessionId: string;
+		sessionFile: string | undefined;
+		lastEntry: SessionEntry | undefined;
+		entryCount: number;
+	};
 	/** Incremental aggregate over append-ordered session entries. */
 	private _currentSessionCostCache?: {
 		entryCount: number;
@@ -280,7 +293,7 @@ export class SessionAnalytics {
 
 	/**
 	 * Cumulative usage (full breakdown) for this session's entire spawn subtree: its own
-	 * assistant messages PLUS every `spawned_usage` report it has rolled up. Single source of
+	 * direct assistant, tool and summary charges PLUS every `spawned_usage` report it has rolled up. Single source of
 	 * truth for "how much did this session and everything it spawned spend" — used by print-mode
 	 * to emit a child's total so a spawner can roll it up via {@link addSpawnedUsage}.
 	 *
@@ -289,25 +302,7 @@ export class SessionAnalytics {
 	 * silently under-counts the grandchildren.
 	 */
 	getCumulativeUsage(): Usage {
-		const total = createEmptyUsage();
-		const entries = this.deps.getSessionManager().getEntries();
-		for (const entry of entries) {
-			const usage = getSessionEntryUsage(entry);
-			if (usage) addUsage(total, usage);
-		}
-		// Roll up usage this session attributed to its own spawned children (single-hop).
-		const seenSpawnedReportIds = new Set<string>();
-		for (const entry of entries) {
-			if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) continue;
-			const data = entry.data as SpawnedUsageReport | undefined;
-			if (!data?.usage) continue;
-			if (data.reportId) {
-				if (seenSpawnedReportIds.has(data.reportId)) continue;
-				seenSpawnedReportIds.add(data.reportId);
-			}
-			addUsage(total, data.usage);
-		}
-		return total;
+		return aggregateCumulativeUsageFromSessionEntries(this.deps.getSessionManager().getEntries());
 	}
 
 	/**
@@ -341,22 +336,62 @@ export class SessionAnalytics {
 		return entryId;
 	}
 
-	private getCurrentSessionCostTotals(): CurrentSessionCostAccumulator {
+	/**
+	 * Deliver an immutable outbox receipt through the existing spawned-usage ledger. Only a matching
+	 * record read back from the owning parent's file permits the sender to discard its receipt.
+	 * New sessions buffer entries before their first assistant; successful append alone is insufficient.
+	 */
+	deliverSpawnedUsageReceipt(usage: Usage, options: SpawnedUsageReceiptOptions): SpawnedUsageReceiptDisposition {
+		return deliverSpawnedUsageReceipt(this.deps.getSessionManager(), this, usage, options);
+	}
+
+	private getAccountingSession(): SessionManager {
 		const sessionManager = this.deps.getSessionManager();
+		const entryCount = sessionManager.getEntryCount?.() ?? sessionManager.getEntries().length;
+		const previous = this._accountingSession;
+		const sameLineage =
+			previous &&
+			previous.session === sessionManager &&
+			previous.sessionId === sessionManager.getSessionId() &&
+			previous.sessionFile === sessionManager.getSessionFile() &&
+			entryCount >= previous.entryCount &&
+			(!previous.lastEntry || sessionManager.getEntry?.(previous.lastEntry.id) === previous.lastEntry);
+		if (!sameLineage) {
+			this._currentSessionCostCache = undefined;
+			this._dailyUsageCache = undefined;
+			this._costSummaryCache = undefined;
+		}
+		if (!sameLineage || entryCount !== previous?.entryCount) {
+			const tail =
+				entryCount > 0
+					? (sessionManager.getEntriesSince?.(entryCount - 1) ?? sessionManager.getEntries()).at(-1)
+					: undefined;
+			this._accountingSession = {
+				session: sessionManager,
+				sessionId: sessionManager.getSessionId(),
+				sessionFile: sessionManager.getSessionFile(),
+				entryCount,
+				lastEntry: tail,
+			};
+		}
+		return sessionManager;
+	}
+
+	private getCurrentSessionCostTotals(): CurrentSessionCostAccumulator {
+		const sessionManager = this.getAccountingSession();
 		const entryCount = sessionManager.getEntryCount?.() ?? sessionManager.getEntries().length;
 		let cache = this._currentSessionCostCache;
 		const getEntriesSince = sessionManager.getEntriesSince?.bind(sessionManager);
 		if (!cache || entryCount < cache.entryCount || !getEntriesSince) {
+			const entries = sessionManager.getEntries();
 			cache = {
 				entryCount,
-				accumulator: accumulateCurrentSessionCostsFromEntries(
-					createCurrentSessionCostAccumulator(),
-					sessionManager.getEntries(),
-				),
+				accumulator: accumulateCurrentSessionCostsFromEntries(createCurrentSessionCostAccumulator(), entries),
 			};
 			this._currentSessionCostCache = cache;
 		} else if (entryCount > cache.entryCount) {
-			accumulateCurrentSessionCostsFromEntries(cache.accumulator, getEntriesSince(cache.entryCount));
+			const appended = getEntriesSince(cache.entryCount);
+			accumulateCurrentSessionCostsFromEntries(cache.accumulator, appended);
 			cache.entryCount = entryCount;
 		}
 		return cache.accumulator;
@@ -372,7 +407,7 @@ export class SessionAnalytics {
 	}
 
 	getCostSummary(now = new Date()): SessionCostSummary {
-		const sessionManager = this.deps.getSessionManager();
+		const sessionManager = this.getAccountingSession();
 		const entryCount = sessionManager.getEntryCount?.() ?? sessionManager.getEntries().length;
 		const window = getLocalDayWindow(now);
 		const dailyTotals = this.getDailyUsageTotals(now);
@@ -401,7 +436,7 @@ export class SessionAnalytics {
 	}
 
 	getDailyUsageTotals(now = new Date()): DailyUsageTotals {
-		const sessionManager = this.deps.getSessionManager();
+		const sessionManager = this.getAccountingSession();
 		const sessionDir = sessionManager.getSessionDir();
 		const scope = sessionManager.usesDefaultSessionDir() ? getSessionsDir() : sessionDir;
 		const nowMs = now.getTime();

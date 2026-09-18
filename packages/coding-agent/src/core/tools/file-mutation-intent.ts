@@ -138,6 +138,8 @@ interface MutationPayloadRecord {
 	digest: string;
 	byteLength: number;
 	expiresAt: number;
+	/** A consumed reference stays revoked even when its file still needs cleanup. */
+	cleanupPending: boolean;
 }
 
 export interface FileMutationIntentControllerOptions {
@@ -277,10 +279,8 @@ async function stageLocalMutationPayload(content: string, ttlMs: number): Promis
 	const operation = localMutationPayloadOperationTail.then(async () => {
 		for (const [path, record] of localMutationPayloadFiles) {
 			if (record.expiresAt > Date.now()) continue;
-			localMutationPayloadFiles.delete(path);
-			localMutationPayloadBytes -= record.byteLength;
 			try {
-				await unlink(path);
+				await unlinkLocalMutationPayloadOrFile(path);
 			} catch (error) {
 				if (!isMissingPathError(error)) throw error;
 			}
@@ -301,15 +301,28 @@ async function stageLocalMutationPayload(content: string, ttlMs: number): Promis
 	return stagedPath;
 }
 
-async function removeLocalMutationPayloadOrFile(path: string): Promise<void> {
-	const operation = localMutationPayloadOperationTail.then(async () => {
-		const record = localMutationPayloadFiles.get(path);
-		if (record !== undefined) {
-			localMutationPayloadFiles.delete(path);
-			localMutationPayloadBytes -= record.byteLength;
-		}
+/** Called only inside the process payload queue; never enqueues behind its own caller. */
+async function unlinkLocalMutationPayloadOrFile(path: string): Promise<void> {
+	let absent = false;
+	try {
 		await unlink(path);
-	});
+		absent = true;
+	} catch (error) {
+		absent = isMissingPathError(error);
+		throw error;
+	} finally {
+		if (absent) {
+			const record = localMutationPayloadFiles.get(path);
+			if (record !== undefined) {
+				localMutationPayloadFiles.delete(path);
+				localMutationPayloadBytes -= record.byteLength;
+			}
+		}
+	}
+}
+
+async function removeLocalMutationPayloadOrFile(path: string): Promise<void> {
+	const operation = localMutationPayloadOperationTail.then(() => unlinkLocalMutationPayloadOrFile(path));
 	localMutationPayloadOperationTail = operation.catch(() => {});
 	await operation;
 }
@@ -341,10 +354,12 @@ export class FileMutationIntentController {
 	private readonly now: () => number;
 	/** Session identity forwarded to the group lock; undefined keeps the process-wide default scope. */
 	private readonly mutationScope: string | undefined;
+	private mutationScopeReleased = false;
 	private readonly contentReferences = new Map<string, ContentReferenceRecord>();
 	private readonly mutationPayloads = new Map<string, MutationPayloadRecord>();
 	private mutationPayloadBytes = 0;
 	private lastMutationPayloadExpiresAt = 0;
+	private mutationPayloadRetentionClosed = false;
 	private mutationPayloadOperationTail: Promise<void> = Promise.resolve();
 
 	constructor(options: FileMutationIntentControllerOptions = {}) {
@@ -541,6 +556,8 @@ export class FileMutationIntentController {
 		payload: string,
 	): Promise<FileMutationPayloadReference | undefined> {
 		return this.runMutationPayloadOperation(async () => {
+			// Recheck inside the queue: disposal may begin before this retain reaches its turn.
+			if (this.mutationPayloadRetentionClosed) return undefined;
 			await this.pruneExpiredMutationPayloads();
 			const byteLength = Buffer.byteLength(payload, "utf8");
 			if (byteLength > this.mutationPayloadByteLimit) return undefined;
@@ -572,6 +589,7 @@ export class FileMutationIntentController {
 				digest: createHash("sha256").update(payload, "utf8").digest("hex"),
 				byteLength,
 				expiresAt,
+				cleanupPending: false,
 			});
 			this.mutationPayloadBytes += byteLength;
 			return { payloadRef, byteLength };
@@ -617,20 +635,27 @@ export class FileMutationIntentController {
 		await this.runMutationPayloadOperation(() => this.deleteMutationPayload(payloadRef));
 	}
 
-	/** Release every payload owned by this controller without touching another controller's files. */
+	/** Close retention and release owned payloads; a failed cleanup remains retryable. */
 	async dispose(): Promise<void> {
+		// Late write/edit path errors must not create payloads after the cleanup sweep.
+		// Staging already in progress precedes this sweep on the same queue and is included in it.
+		this.mutationPayloadRetentionClosed = true;
 		await this.runMutationPayloadOperation(async () => {
-			let firstError: unknown;
+			let failure: { error: unknown } | undefined;
 			for (const payloadRef of [...this.mutationPayloads.keys()]) {
 				try {
 					await this.deleteMutationPayload(payloadRef, true);
 				} catch (error) {
-					firstError ??= error;
+					failure ??= { error };
 				}
 			}
-			if (firstError) throw firstError;
+			if (failure) throw failure.error;
 		});
-		if (this.mutationScope !== undefined) disposeMutationLockScope(this.mutationScope);
+		if (this.mutationScope !== undefined && !this.mutationScopeReleased) {
+			// A cleanup retry owns no part of another controller's shared reference.
+			this.mutationScopeReleased = true;
+			disposeMutationLockScope(this.mutationScope);
+		}
 	}
 
 	async copyReferencedContent(
@@ -669,7 +694,7 @@ export class FileMutationIntentController {
 		await this.pruneExpiredMutationPayloads();
 		if (signal?.aborted) throw new Error("Operation aborted");
 		const record = this.mutationPayloads.get(payloadRef);
-		if (!record) {
+		if (!record || record.cleanupPending) {
 			throw new Error("File mutation payload reference is invalid, expired, or belongs to another session.");
 		}
 		if (record.kind !== kind) {
@@ -791,13 +816,17 @@ export class FileMutationIntentController {
 	private async deleteMutationPayload(payloadRef: string, strict = false): Promise<void> {
 		const record = this.mutationPayloads.get(payloadRef);
 		if (!record) return;
-		this.mutationPayloads.delete(payloadRef);
-		this.mutationPayloadBytes -= record.byteLength;
+		record.cleanupPending = true;
 		try {
 			await this.operations.removeFile(record.sourcePath);
 		} catch (error) {
-			if (strict && !isMissingPathError(error)) throw error;
+			if (!isMissingPathError(error)) {
+				if (strict) throw error;
+				return;
+			}
 		}
+		this.mutationPayloads.delete(payloadRef);
+		this.mutationPayloadBytes -= record.byteLength;
 	}
 
 	private runMutationPayloadOperation<T>(operation: () => Promise<T>): Promise<T> {

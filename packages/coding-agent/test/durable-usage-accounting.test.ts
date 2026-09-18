@@ -1,11 +1,18 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage, AgentState } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
+import { CURRENT_SESSION_VERSION, type SessionHeader } from "@caupulican/pi-agent-core/session";
 import type { AssistantMessage, ToolResultMessage, Usage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { SPAWNED_USAGE_CUSTOM_TYPE } from "../src/core/agent-session-contracts.ts";
 import { aggregateCurrentSessionCostsFromEntries } from "../src/core/cost/cost-summary.ts";
 import { aggregateDailyUsageFromEntries } from "../src/core/cost/daily-usage.ts";
+import {
+	aggregateCumulativeUsageFromSessionEntries,
+	reportCompletedAutoLearnUsageHelper,
+} from "../src/core/cost/session-usage.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import type { Extension, ExtensionRuntime, ToolDefinition } from "../src/core/extensions/types.ts";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
@@ -148,6 +155,42 @@ describe("session usage ownership", () => {
 		const cumulative = analytics.getCumulativeUsage();
 		expect(cumulative.cost.total).toBe(15);
 		expect(cumulative.totalTokens).toBe(60);
+		// File-based child reporting must retain the same paid tool and summary entries as live reporting.
+		expect(aggregateCumulativeUsageFromSessionEntries(entries)).toEqual(cumulative);
+		const sessionDir = mkdtempSync(join(tmpdir(), "pi-child-usage-"));
+		try {
+			const header: SessionHeader = {
+				type: "session",
+				version: CURRENT_SESSION_VERSION,
+				id: session.getSessionId(),
+				cwd: session.getCwd(),
+				timestamp: new Date().toISOString(),
+			};
+			writeFileSync(
+				join(sessionDir, `${header.id}.jsonl`),
+				`${[header, ...entries].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+			);
+			const reports: Usage[] = [];
+			reportCompletedAutoLearnUsageHelper({
+				runId: "paid-child",
+				sessionDir,
+				sessionId: header.id,
+				parentSession: {
+					addSpawnedUsage: (reported, options) => {
+						reports.push(reported);
+						expect(options).toEqual({
+							label: "auto-learn",
+							sourceSessionId: header.id,
+							reportId: `auto-learn:paid-child:${header.id}`,
+						});
+						return "reported-entry";
+					},
+				},
+			});
+			expect(reports).toEqual([cumulative]);
+		} finally {
+			rmSync(sessionDir, { recursive: true, force: true });
+		}
 
 		const current = aggregateCurrentSessionCostsFromEntries(entries);
 		expect(current).toMatchObject({ ownCost: 10, subagentCost: 5, currentCost: 15, subagentReports: 1 });
@@ -157,5 +200,37 @@ describe("session usage ownership", () => {
 			endMs: Date.now() + 60_000,
 		});
 		expect(daily).toMatchObject({ ownCost: 10, spawnedCost: 5, totalCost: 15, totalTokens: 60, reports: 1 });
+	});
+
+	it("keeps valid report identities, anonymous charges and zero-price tool tokens without mutating entries", () => {
+		const session = SessionManager.inMemory("/tmp/pi-child-usage-identities");
+		session.appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, {
+			reportId: "child",
+			usage: { input: "malformed", cost: { total: 100 } },
+		});
+		session.appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, { reportId: "child", usage: usage(2) });
+		session.appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, { reportId: "child", usage: usage(2) });
+		session.appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, { usage: usage(1) });
+		session.appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, { usage: usage(1) });
+		session.appendCustomEntry("unrelated", { usage: usage(100) });
+		const freeUsage = { ...usage(3), cost: usage(0).cost };
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "review-1",
+			toolName: "typesafe_review",
+			content: [{ type: "text", text: "reviewed" }],
+			usage: freeUsage,
+			isError: false,
+			timestamp: Date.now(),
+		});
+		const entries = session.getEntries();
+		const before = structuredClone(entries);
+		const result = aggregateCumulativeUsageFromSessionEntries(entries);
+		expect(result).toEqual({ ...usage(7), cost: usage(4).cost });
+		result.input = 999;
+		result.cost.total = 999;
+		expect(aggregateCumulativeUsageFromSessionEntries(entries)).toEqual({ ...usage(7), cost: usage(4).cost });
+		expect(entries).toEqual(before);
+		expect(aggregateCumulativeUsageFromSessionEntries([])).toEqual(usage(0));
 	});
 });

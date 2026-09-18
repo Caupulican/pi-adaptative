@@ -1672,7 +1672,12 @@ export class SessionManager {
 		}
 	}
 
-	private _persistEntries(entries: readonly SessionEntry[], encodedEntries: readonly string[]): void {
+	private _persistEntries(
+		entries: readonly SessionEntry[],
+		encodedEntries: readonly string[],
+		signal?: AbortSignal,
+	): void {
+		signal?.throwIfAborted();
 		if (!this.persist || !this.sessionFile) return;
 		if (entries.length !== encodedEntries.length) {
 			throw new Error("Session persistence encoding count does not match the entry batch.");
@@ -1683,29 +1688,32 @@ export class SessionManager {
 			);
 		}
 
-		try {
-			const hasAssistant =
-				this.fileEntries.some(
-					(candidate) => candidate.type === "message" && candidate.message.role === "assistant",
-				) || entries.some((entry) => entry.type === "message" && entry.message.role === "assistant");
-			const forceFlush = entries.some((entry) => isSessionLifecycleEntry(entry));
-			if (!hasAssistant && !forceFlush) {
-				if (this.flushed && encodedEntries.length > 0) {
-					this._ensureSessionFileParent(this.sessionFile);
-					appendFileSync(this.sessionFile, `${encodedEntries.join("\n")}\n`);
-				}
-				return;
-			}
+		const hasAssistant =
+			this.fileEntries.some((candidate) => candidate.type === "message" && candidate.message.role === "assistant") ||
+			entries.some((entry) => entry.type === "message" && entry.message.role === "assistant");
+		const forceFlush = entries.some((entry) => isSessionLifecycleEntry(entry));
+		const shouldFlush = hasAssistant || forceFlush;
+		// Encoding can invoke extension-owned getters. Prepare the entire initial prefix
+		// before opening the file, then check cancellation at the last pre-write boundary.
+		// Preparation failure is not an uncertain physical write and must remain recoverable.
+		const encodedPayload =
+			!this.flushed && shouldFlush
+				? `${this.fileEntries
+						.map((candidate) =>
+							candidate.type === "session" ? JSON.stringify(candidate) : encodeSessionEntry(candidate),
+						)
+						.concat(encodedEntries)
+						.join("\n")}\n`
+				: `${encodedEntries.join("\n")}\n`;
+		signal?.throwIfAborted();
+		if (!this.flushed && !shouldFlush) return;
 
-			const encodedPayload = `${encodedEntries.join("\n")}\n`;
+		try {
 			if (!this.flushed) {
 				this._ensureSessionFileParent(this.sessionFile);
 				const fd = openSync(this.sessionFile, "wx");
 				try {
-					const prefix = this.fileEntries.map((candidate) =>
-						candidate.type === "session" ? JSON.stringify(candidate) : encodeSessionEntry(candidate),
-					);
-					writeFileSync(fd, `${prefix.concat(encodedEntries).join("\n")}\n`);
+					writeFileSync(fd, encodedPayload);
 				} finally {
 					closeSync(fd);
 				}
@@ -1728,7 +1736,12 @@ export class SessionManager {
 		this._persistEntries([entry], [encodedEntry]);
 	}
 
-	private _appendEntries(entries: readonly SessionEntry[], preencodedEntries?: readonly string[]): void {
+	private _appendEntries(
+		entries: readonly SessionEntry[],
+		preencodedEntries?: readonly string[],
+		signal?: AbortSignal,
+	): void {
+		signal?.throwIfAborted();
 		const encodedEntries =
 			preencodedEntries ??
 			(this.persist && this.sessionFile
@@ -1741,11 +1754,12 @@ export class SessionManager {
 			throw new Error("Session append encoding count does not match the entry batch.");
 		}
 		if (encodedEntries.length > 0) {
-			this._persistEntries(entries, encodedEntries);
+			this._persistEntries(entries, encodedEntries, signal);
 		} else {
 			for (const entry of entries) {
 				if (isSessionLifecycleEntry(entry)) encodeSessionEntry(entry);
 			}
+			signal?.throwIfAborted();
 		}
 		for (const entry of entries) {
 			this.fileEntries.push(entry);
@@ -2812,13 +2826,13 @@ export class SessionManager {
 		details?: unknown,
 		fromHook?: boolean,
 		usage?: Usage,
+		signal?: AbortSignal,
 	): string {
 		if (branchFromId !== null && !this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
-		this._invalidateSessionContextCache();
-		this.leafId = branchFromId;
-		this.lifecycleActiveCache = undefined;
+		// The canonical append publishes the new leaf and advances/invalidates its caches
+		// after persistence. Moving the leaf first strands navigation on a failed write.
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.byId),
@@ -2830,7 +2844,7 @@ export class SessionManager {
 			usage,
 			fromHook,
 		};
-		this._appendEntry(entry);
+		this._appendEntries([entry], undefined, signal);
 		return entry.id;
 	}
 

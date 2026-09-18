@@ -2,10 +2,11 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:f
 import { join } from "node:path";
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import type { AssistantMessage } from "@caupulican/pi-ai";
-import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";
 import { providerAdmissionDir } from "./ledger.ts";
+import { readProviderAdmissionRecord } from "./record-storage.ts";
 
 /**
  * Machine-wide "this provider is limited until T" state, shared by every pi process on the agent
@@ -163,13 +164,8 @@ export class ProviderLimitStore {
 
 	/** Caller holds the path lock through any subsequent decision/write; cleanup mutates the file. */
 	private readPath(path: string): ProviderLimitRecord | undefined {
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
-		} catch (error) {
-			if (!isMissingFileError(error)) rmSync(path, { force: true });
-			return undefined;
-		}
+		const parsed = readProviderAdmissionRecord(path);
+		if (parsed === undefined) return undefined;
 		if (!isLimitRecord(parsed) || parsed.limitedUntil <= this.now()) {
 			rmSync(path, { force: true });
 			return undefined;

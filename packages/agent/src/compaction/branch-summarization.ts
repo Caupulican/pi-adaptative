@@ -22,7 +22,7 @@ import {
 } from "../reliability/index.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session/session-manager.ts";
 import type { AgentMessage, StreamFn } from "../types.ts";
-import { addUsage, createEmptyUsage } from "../usage.ts";
+import { addUsage, combineUsage, createEmptyUsage } from "../usage.ts";
 import { estimateTokens } from "./compaction.ts";
 import {
 	addPersistedFileOperations,
@@ -43,7 +43,7 @@ export interface BranchSummaryResult {
 	summary?: string;
 	readFiles?: string[];
 	modifiedFiles?: string[];
-	/** Provider usage spent generating the summary, including retry attempts. */
+	/** Received provider usage, including retries and unsuccessful terminal results. */
 	usage?: Usage;
 	aborted?: boolean;
 	error?: string;
@@ -90,6 +90,8 @@ export interface GenerateBranchSummaryOptions {
 	reserveTokens?: number;
 	/** Optional wrapped stream function (watchdog/retry-capable host path). */
 	streamFn?: StreamFn;
+	/** Cumulative received usage snapshot, published before retry work can throw. */
+	onUsage?: (usage: Usage) => void;
 }
 
 // ============================================================================
@@ -306,6 +308,7 @@ export async function generateBranchSummary(
 		replaceInstructions,
 		reserveTokens = 16384,
 		streamFn,
+		onUsage,
 	} = options;
 
 	// Token budget = context window minus reserved space for prompt + response
@@ -354,6 +357,7 @@ export async function generateBranchSummary(
 			streamFn,
 		);
 		addUsage(usage, response.usage);
+		onUsage?.(combineUsage(usage));
 		if (response.stopReason !== "error") break;
 		const classified = classifyFailure({ message: response.errorMessage ?? "", provider: response.provider });
 		if (!classified.retryable || signal.aborted || attempt >= DEFAULT_RETRY_POLICY.maxAttempts) break;
@@ -363,7 +367,7 @@ export async function generateBranchSummary(
 			});
 			await sleepAbortable(delayMs, signal);
 		} catch (error) {
-			if (signal.aborted) return { aborted: true };
+			if (signal.aborted) return { aborted: true, usage };
 			if (error instanceof RetryDelayExceededError) {
 				response.errorMessage = `${response.errorMessage || "Summarization failed"}\n${error.message}`;
 				break;
@@ -371,17 +375,17 @@ export async function generateBranchSummary(
 			throw error;
 		}
 	}
-	if (!response) return { error: "Summarization failed" };
+	if (!response) return { error: "Summarization failed", usage };
 
 	// Check if aborted, errored, or truncated
 	if (response.stopReason === "aborted") {
-		return { aborted: true };
+		return { aborted: true, usage };
 	}
 	if (response.stopReason === "error") {
-		return { error: response.errorMessage || "Summarization failed" };
+		return { error: response.errorMessage || "Summarization failed", usage };
 	}
 	if (response.stopReason === "length") {
-		return { error: "branch summary hit its output cap before completing" };
+		return { error: "branch summary hit its output cap before completing", usage };
 	}
 
 	let summary = response.content

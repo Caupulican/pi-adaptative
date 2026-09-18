@@ -1,5 +1,11 @@
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
+import { attemptUsageIncrease, EMPTY_ATTEMPT_USAGE } from "./attempt-usage.ts";
+import {
+	type AttemptUsageAccounting,
+	beginAttemptUsageGeneration,
+	recordAttemptGenerationUsage,
+} from "./attempt-usage-generations.ts";
 import {
 	type AgentBindingContract,
 	type ApprovalRequestContract,
@@ -44,6 +50,8 @@ import {
 	retryStateFromValue,
 	string,
 	taskFromPayload,
+	usageFromPayload,
+	usageGenerationIdentityFromValue,
 	validateTaskContractForState,
 } from "./task-runtime-codecs.ts";
 import {
@@ -769,9 +777,21 @@ export function assertAttemptStartTransition(
 	if (!attempt.lease || attempt.lease.leaseId !== leaseId || attempt.lease.fencingToken !== fencingToken) {
 		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' lease or fencing token is stale.`);
 	}
-	assertLeaseLiveAt(attempt.lease, occurredAt, `Attempt '${attemptId}'`);
+	assertAttemptLeaseMatches(attempt, leaseId, fencingToken, occurredAt);
 	requireActiveObjectiveForAttemptInProjection(state, attempt);
 	return attempt;
+}
+
+export function assertAttemptLeaseMatches(
+	attempt: AttemptRuntimeState,
+	leaseId: string,
+	fencingToken: number,
+	occurredAt: string,
+): void {
+	if (!attempt.lease || attempt.lease.leaseId !== leaseId || attempt.lease.fencingToken !== fencingToken) {
+		throw new DurableTaskRuntimeError(`Attempt '${attempt.attemptId}' lease or fencing token is stale.`);
+	}
+	assertLeaseLiveAt(attempt.lease, occurredAt, `Attempt '${attempt.attemptId}'`);
 }
 
 export function assertAttemptLeaseRenewalTransition(
@@ -791,12 +811,9 @@ export function assertAttemptLeaseRenewalTransition(
 	if (attempt.status !== "leased" && attempt.status !== "running") {
 		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' cannot renew from '${attempt.status}'.`);
 	}
-	if (!attempt.lease || attempt.lease.leaseId !== leaseId || attempt.lease.fencingToken !== fencingToken) {
-		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' lease or fencing token is stale.`);
-	}
-	assertLeaseLiveAt(attempt.lease, occurredAt, `Attempt '${attemptId}'`);
+	assertAttemptLeaseMatches(attempt, leaseId, fencingToken, occurredAt);
 	const expiresAtMs = Date.parse(expiresAt);
-	if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.parse(attempt.lease.expiresAt)) {
+	if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.parse(attempt.lease!.expiresAt)) {
 		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' renewed lease must extend its expiration.`);
 	}
 	requireActiveObjectiveForAttemptInProjection(state, attempt);
@@ -813,15 +830,23 @@ export function assertAttemptCheckpointTransition(
 	if (aggregateId !== checkpoint.attemptId) {
 		throw new DurableTaskRuntimeError(`Checkpointed attempt '${checkpoint.attemptId}' does not match its aggregate.`);
 	}
-	const attempt = state.attempts[checkpoint.attemptId];
-	if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${checkpoint.attemptId}'.`);
+	return assertRunningAttemptLease(state, checkpoint.attemptId, leaseId, checkpoint.fencingToken, occurredAt);
+}
+
+/** Progress and accounting registration require the same exact live execution authority. */
+export function assertRunningAttemptLease(
+	state: TaskRuntimeProjection,
+	attemptId: string,
+	leaseId: string,
+	fencingToken: number,
+	occurredAt: string,
+): AttemptRuntimeState {
+	const attempt = state.attempts[attemptId];
+	if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
 	if (attempt.status !== "running") {
-		throw new DurableTaskRuntimeError(`Attempt '${checkpoint.attemptId}' is not running.`);
+		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' is not running.`);
 	}
-	if (!attempt.lease || attempt.lease.leaseId !== leaseId || attempt.lease.fencingToken !== checkpoint.fencingToken) {
-		throw new DurableTaskRuntimeError(`Attempt '${checkpoint.attemptId}' lease or fencing token is stale.`);
-	}
-	assertLeaseLiveAt(attempt.lease, occurredAt, `Attempt '${checkpoint.attemptId}'`);
+	assertAttemptLeaseMatches(attempt, leaseId, fencingToken, occurredAt);
 	return attempt;
 }
 
@@ -1410,6 +1435,84 @@ export function reduceOrchestrationEvent(
 					};
 				}
 			}
+			break;
+		}
+		case "attempt.usage_registered":
+		case "attempt.usage_recorded": {
+			const attemptId = dispatchIdentifier(event.payload.attemptId, `${event.type}.attemptId`);
+			assertEventAggregateId(event, attemptId, "Usage attempt");
+			const identity = usageGenerationIdentityFromValue(
+				{ leaseId: event.payload.leaseId, fencingToken: event.payload.fencingToken },
+				event.type,
+			);
+			const attempt = attempts[attemptId];
+			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+			let usageAccounting: AttemptUsageAccounting;
+			if (event.type === "attempt.usage_registered") {
+				assertRunningAttemptLease(state, attemptId, identity.leaseId, identity.fencingToken, event.occurredAt);
+				usageAccounting = beginAttemptUsageGeneration(
+					attempt.usageAccounting,
+					identity,
+					event.payload.baseline === undefined
+						? undefined
+						: usageFromPayload(event.payload.baseline, "usage baseline"),
+				);
+			} else {
+				if (!attempt.usageAccounting) throw new DurableTaskRuntimeError("Usage generation is not registered.");
+				usageAccounting = recordAttemptGenerationUsage(
+					attempt.usageAccounting,
+					identity,
+					usageFromPayload(event.payload.usage, "usage report"),
+				);
+			}
+			// Accounting is a received fact: it cannot alter execution, agent, task or notification state.
+			const increase = attemptUsageIncrease(
+				usageAccounting.total,
+				attempt.usageAccounting?.total ?? EMPTY_ATTEMPT_USAGE,
+			);
+			const billable =
+				increase.inputTokens > 0 ||
+				increase.outputTokens > 0 ||
+				increase.cacheReadTokens > 0 ||
+				increase.cacheWriteTokens > 0 ||
+				increase.totalTokens > 0 ||
+				increase.costUsd > 0;
+			const receiptId = dispatchIdentifier(event.eventId, "usage receipt identity");
+			if (billable && attempt.usageReceipts && Object.hasOwn(attempt.usageReceipts, receiptId)) {
+				throw new DurableTaskRuntimeError("Usage receipt identity was reused for another increase.");
+			}
+			const receiptKind: "baseline" | "increase" = attempt.usageAccounting ? "increase" : "baseline";
+			attempts[attemptId] = {
+				...attempt,
+				usageAccounting,
+				...(billable
+					? {
+							usageReceipts: {
+								...attempt.usageReceipts,
+								[receiptId]: {
+									receiptId,
+									...identity,
+									kind: receiptKind,
+									usage: increase,
+									recordedAt: event.occurredAt,
+								},
+							},
+						}
+					: {}),
+			};
+			break;
+		}
+		case "attempt.usage_delivered": {
+			const attemptId = dispatchIdentifier(event.payload.attemptId, "attempt.usage_delivered.attemptId");
+			assertEventAggregateId(event, attemptId, "Usage receipt attempt");
+			const receiptId = dispatchIdentifier(event.payload.receiptId, "attempt.usage_delivered.receiptId");
+			const attempt = attempts[attemptId];
+			if (!attempt?.usageReceipts || !Object.hasOwn(attempt.usageReceipts, receiptId)) {
+				throw new DurableTaskRuntimeError("Unknown pending usage receipt.");
+			}
+			const usageReceipts = { ...attempt.usageReceipts };
+			delete usageReceipts[receiptId];
+			attempts[attemptId] = { ...attempt, usageReceipts };
 			break;
 		}
 		case "attempt.suspended": {

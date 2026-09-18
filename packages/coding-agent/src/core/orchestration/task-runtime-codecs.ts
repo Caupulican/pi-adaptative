@@ -1,6 +1,12 @@
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
-import { validateAttemptUsageSnapshot } from "./attempt-usage.ts";
+import { addAttemptUsage, EMPTY_ATTEMPT_USAGE, validateAttemptUsageSnapshot } from "./attempt-usage.ts";
+import {
+	type AttemptUsageAccounting,
+	type AttemptUsageGeneration,
+	type AttemptUsageGenerationIdentity,
+	totalAttemptGenerationUsage,
+} from "./attempt-usage-generations.ts";
 import {
 	type AcceptanceCriterion,
 	AGENT_BINDING_STATUSES,
@@ -13,6 +19,7 @@ import {
 	type AttemptLease,
 	type AttemptRetryState,
 	type AttemptStatus,
+	type AttemptUsageSnapshot,
 	type EvidenceContract,
 	type ExecutionGrant,
 	isHarnessCapability,
@@ -66,6 +73,7 @@ import {
 import {
 	type ApprovalRuntimeState,
 	type AttemptRuntimeState,
+	type AttemptUsageReceipt,
 	DurableTaskRuntimeError,
 	missingTrustedCriteria,
 	type NotificationRuntimeState,
@@ -785,6 +793,8 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		"lease",
 		"retry",
 		"checkpointIds",
+		"usageAccounting",
+		"usageReceipts",
 		"result",
 		"managedLifetime",
 		"createdAt",
@@ -820,6 +830,12 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		...(attempt.agentId === undefined ? {} : { agentId: dispatchIdentifier(attempt.agentId, `${label}.agentId`) }),
 		...(attempt.lease === undefined ? {} : { lease: leaseFromPayload(toJsonObject({ lease: attempt.lease })) }),
 		...(attempt.retry === undefined ? {} : { retry: retryStateFromValue(attempt.retry, `${label}.retry`) }),
+		...(attempt.usageAccounting === undefined
+			? {}
+			: { usageAccounting: usageAccountingFromValue(attempt.usageAccounting, `${label}.usageAccounting`) }),
+		...(attempt.usageReceipts === undefined
+			? {}
+			: { usageReceipts: usageReceiptsFromValue(attempt.usageReceipts, `${label}.usageReceipts`) }),
 		checkpointIds: retainedIdentifierArray(
 			attempt.checkpointIds,
 			MAX_ORCHESTRATION_CHECKPOINTS,
@@ -916,7 +932,7 @@ function checkpointFromValue(value: unknown, label: string): AttemptCheckpoint {
 	};
 }
 
-export function usageFromPayload(value: unknown, label: string): AttemptCheckpoint["usage"] {
+export function usageFromPayload(value: unknown, label: string): AttemptUsageSnapshot {
 	const usage = record(value, label);
 	const expectedFields = [
 		"toolCalls",
@@ -947,6 +963,77 @@ export function usageFromPayload(value: unknown, label: string): AttemptCheckpoi
 	} catch (error) {
 		throw new DurableTaskRuntimeError(error instanceof Error ? error.message : String(error));
 	}
+}
+
+export function usageGenerationIdentityFromValue(value: unknown, label: string): AttemptUsageGenerationIdentity {
+	const identity = exactRecord(value, label, ["leaseId", "fencingToken"]);
+	const fencingToken = number(identity.fencingToken, `${label}.fencingToken`);
+	if (!Number.isSafeInteger(fencingToken) || fencingToken < 1) {
+		throw new DurableTaskRuntimeError(`${label}.fencingToken must be a positive safe integer.`);
+	}
+	return { leaseId: dispatchIdentifier(identity.leaseId, `${label}.leaseId`), fencingToken };
+}
+
+function usageReceiptsFromValue(value: unknown, label: string): Readonly<Record<string, AttemptUsageReceipt>> {
+	const entries = record(value, label);
+	const receipts: Record<string, AttemptUsageReceipt> = Object.create(null);
+	for (const [key, value] of Object.entries(entries)) {
+		const receipt = exactRecord(value, `${label}.${key}`, [
+			"receiptId",
+			"leaseId",
+			"fencingToken",
+			"kind",
+			"usage",
+			"recordedAt",
+		]);
+		const receiptId = dispatchIdentifier(receipt.receiptId, `${label}.receiptId`);
+		if (receiptId !== key) throw new DurableTaskRuntimeError(`${label} has a mismatched receipt identity.`);
+		const identity = usageGenerationIdentityFromValue(
+			{ leaseId: receipt.leaseId, fencingToken: receipt.fencingToken },
+			label,
+		);
+		if (receipt.kind !== "baseline" && receipt.kind !== "increase") {
+			throw new DurableTaskRuntimeError(`${label} has an invalid receipt kind.`);
+		}
+		receipts[key] = {
+			receiptId,
+			...identity,
+			kind: receipt.kind,
+			usage: usageFromPayload(receipt.usage, `${label}.usage`),
+			recordedAt: isoDate(receipt.recordedAt, `${label}.recordedAt`),
+		};
+	}
+	return receipts;
+}
+
+function usageAccountingFromValue(value: unknown, label: string): AttemptUsageAccounting {
+	const accounting = exactRecord(value, label, ["total", "generations"]);
+	const entries = record(accounting.generations, `${label}.generations`);
+	const generations: Record<string, AttemptUsageGeneration> = Object.create(null);
+	const fences = new Set<number>();
+	for (const [leaseId, entry] of Object.entries(entries)) {
+		const generation = exactRecord(entry, `${label}.generations.${leaseId}`, [
+			"fencingToken",
+			"baseline",
+			"reported",
+		]);
+		const identity = usageGenerationIdentityFromValue({ leaseId, fencingToken: generation.fencingToken }, label);
+		if (fences.has(identity.fencingToken))
+			throw new DurableTaskRuntimeError(`${label} has duplicate generation fences.`);
+		fences.add(identity.fencingToken);
+		generations[leaseId] = {
+			fencingToken: identity.fencingToken,
+			baseline: usageFromPayload(generation.baseline, `${label}.baseline`),
+			reported: usageFromPayload(generation.reported, `${label}.reported`),
+		};
+	}
+	const total = usageFromPayload(accounting.total, `${label}.total`);
+	const derived = totalAttemptGenerationUsage(generations);
+	for (const key of Object.keys(total) as Array<keyof AttemptUsageSnapshot>) {
+		if (total[key] !== derived[key])
+			throw new DurableTaskRuntimeError(`${label} accounting total does not match its generations.`);
+	}
+	return { total, generations };
 }
 
 export function resultFromPayload(payload: JsonObject): WorkerResultContract {
@@ -1537,6 +1624,44 @@ function validateSnapshotTaskGraph(state: TaskRuntimeProjection): void {
 		}
 		if (attempt.lease?.attemptId !== undefined && attempt.lease.attemptId !== attemptId) {
 			throw new DurableTaskRuntimeError(`${label} attempt '${attemptId}' has a cross-attempt lease.`);
+		}
+		if (attempt.usageAccounting) {
+			if (!attempt.lease || attempt.status === "queued") {
+				throw new DurableTaskRuntimeError(`${label} attempt '${attemptId}' accounting lacks execution ownership.`);
+			}
+			for (const [leaseId, generation] of Object.entries(attempt.usageAccounting.generations)) {
+				if (
+					generation.fencingToken > attempt.lease.fencingToken ||
+					(generation.fencingToken === attempt.lease.fencingToken && leaseId !== attempt.lease.leaseId)
+				) {
+					throw new DurableTaskRuntimeError(
+						`${label} attempt '${attemptId}' accounting has a future or mismatched generation.`,
+					);
+				}
+			}
+		}
+		if (attempt.usageReceipts) {
+			const accounting = attempt.usageAccounting;
+			if (!accounting) throw new DurableTaskRuntimeError(`${label} usage receipts lack accounting.`);
+			const receipts = Object.values(attempt.usageReceipts);
+			let pendingUsage = { ...EMPTY_ATTEMPT_USAGE };
+			for (const receipt of receipts) {
+				const generation = accounting.generations[receipt.leaseId];
+				if (!generation || generation.fencingToken !== receipt.fencingToken) {
+					throw new DurableTaskRuntimeError(`${label} usage receipt has no registered generation.`);
+				}
+				pendingUsage = addAttemptUsage(pendingUsage, receipt.usage, "pending usage receipts");
+			}
+			for (const key of Object.keys(pendingUsage) as Array<keyof AttemptUsageSnapshot>) {
+				// Cumulative floating totals can differ by rounding when their deltas are recombined.
+				const rounding =
+					key === "costUsd" || key === "activeWallClockMs"
+						? Number.EPSILON * Math.max(1, accounting.total[key]) * receipts.length
+						: 0;
+				if (pendingUsage[key] - accounting.total[key] > rounding) {
+					throw new DurableTaskRuntimeError(`${label} pending usage receipts exceed accounted usage.`);
+				}
+			}
 		}
 		if (attempt.grant) {
 			if (
