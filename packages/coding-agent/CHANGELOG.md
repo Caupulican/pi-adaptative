@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Background tool terminals still settle waiters and notify their parent when usage accounting, diagnostic reporting, or cleanup of an older task's artifact throws.
 - Abandoned tool preparations discard pending selection observations without recording a fabricated execution; advisory selection reads cannot deny an otherwise authorized tool.
 - Foreground tool reservations release mutation-queue announcements when startup is abandoned; cleanup handles are fenced to the exact announcement so reused call IDs cannot redirect a late release.
 - Extension result handlers isolate plain result data from failed or late mutations while preserving callable and class metadata.

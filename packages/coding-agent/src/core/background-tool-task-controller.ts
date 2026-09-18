@@ -234,7 +234,9 @@ export interface BackgroundToolTaskControllerDeps {
 		options: { wakeParent: boolean },
 	): BackgroundToolTerminalDeliveryResult | Promise<BackgroundToolTerminalDeliveryResult>;
 	onLiveTasksChanged?(tasks: readonly BackgroundToolTaskLiveView[]): void;
+	/** Synchronous accounting observer; failures are reported without withholding the tool terminal. */
 	recordUsage?(taskId: string, usage: Usage): void;
+	/** Best-effort diagnostic observer. Its own failures cannot interrupt task ownership. */
 	onError?(message: string, error: unknown): void;
 	now?(): Date;
 	/** Event-wait watchdog; completion still arrives through the terminal handoff after this bound. */
@@ -821,7 +823,7 @@ export class BackgroundToolTaskController {
 		try {
 			state.cancel();
 		} catch (error) {
-			this.deps.onError?.(`Failed to cancel background tool task ${taskId}`, error);
+			this.reportError(`Failed to cancel background tool task ${taskId}`, error);
 		}
 		return true;
 	}
@@ -877,7 +879,7 @@ export class BackgroundToolTaskController {
 				try {
 					state.cancel();
 				} catch (error) {
-					this.deps.onError?.(`Failed to cancel background tool task ${state.record.taskId}`, error);
+					this.reportError(`Failed to cancel background tool task ${state.record.taskId}`, error);
 				}
 				this.finishState(
 					state,
@@ -922,7 +924,7 @@ export class BackgroundToolTaskController {
 		try {
 			values = load();
 		} catch (error) {
-			this.deps.onError?.("Failed to load persisted background tool tasks", error);
+			this.reportError("Failed to load persisted background tool tasks", error);
 			return;
 		}
 		const sessionId = this.deps.getSessionId();
@@ -1053,7 +1055,13 @@ export class BackgroundToolTaskController {
 					};
 				})();
 		state.record = terminalRecord;
-		if (usage) this.deps.recordUsage?.(record.taskId, usage);
+		if (usage) {
+			try {
+				this.deps.recordUsage?.(record.taskId, usage);
+			} catch (error) {
+				this.reportError(`Failed to account usage for background tool task ${record.taskId}`, error);
+			}
+		}
 		state.resolveTerminal(terminalRecord);
 		this.emitLiveTasks();
 		this.pruneTerminalTasks();
@@ -1068,7 +1076,7 @@ export class BackgroundToolTaskController {
 			this.deps.persist(durableRecord);
 			return true;
 		} catch (error) {
-			this.deps.onError?.(`Failed to persist background tool task ${record.taskId}`, error);
+			this.reportError(`Failed to persist background tool task ${record.taskId}`, error);
 			return false;
 		}
 	}
@@ -1149,14 +1157,10 @@ export class BackgroundToolTaskController {
 				const includedIds = records.slice(0, MAX_TERMINAL_HANDOFF_RECORDS).map((record) => record.taskId);
 				const omitted = records.length - includedIds.length;
 				const suffix = omitted > 0 ? ` (+${omitted} more)` : "";
-				try {
-					this.deps.onError?.(
-						`Failed to notify terminal background tool task batch ${includedIds.join(", ")}${suffix}`,
-						error,
-					);
-				} catch {
-					// Diagnostics cannot consume the pending terminal handoff.
-				}
+				this.reportError(
+					`Failed to notify terminal background tool task batch ${includedIds.join(", ")}${suffix}`,
+					error,
+				);
 				this.scheduleNotificationRetry();
 				return;
 			}
@@ -1189,7 +1193,7 @@ export class BackgroundToolTaskController {
 		try {
 			this.deps.onLiveTasksChanged?.(tasks);
 		} catch (error) {
-			this.deps.onError?.("Failed to emit background tool task level signal", error);
+			this.reportError("Failed to emit background tool task level signal", error);
 		}
 	}
 
@@ -1198,9 +1202,21 @@ export class BackgroundToolTaskController {
 		for (const state of terminal.slice(0, Math.max(0, terminal.length - MAX_RETAINED_TERMINAL_TASKS))) {
 			this.tasks.delete(state.record.taskId);
 			if (!state.record.artifactId) continue;
-			const store = this.deps.getArtifactStore();
-			store?.removeReference(state.record.artifactId, state.artifactHolderId);
-			store?.cleanup();
+			try {
+				const store = this.deps.getArtifactStore();
+				store?.removeReference(state.record.artifactId, state.artifactHolderId);
+				store?.cleanup();
+			} catch (error) {
+				this.reportError(`Failed to prune artifact for background tool task ${state.record.taskId}`, error);
+			}
+		}
+	}
+
+	private reportError(message: string, error: unknown): void {
+		try {
+			this.deps.onError?.(message, error);
+		} catch {
+			// Diagnostics must not strand an admitted task, its waiter or its parent notification.
 		}
 	}
 
