@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { MAX_TOOL_FAILURE_EVIDENCE_CHARS } from "@caupulican/pi-agent-core/tool-failure-memory";
+import { truncateMiddle, truncateTail } from "@caupulican/pi-agent-core/truncate";
 import { AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
 import { type Static, Type } from "typebox";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
@@ -7,6 +9,8 @@ import type { ToolDefinition } from "../extensions/types.ts";
 import { acceptReflexPlan, type ReflexPlan } from "../toolkit/reflex-interpreter.ts";
 import { matchToolkitScript, type ToolkitScript } from "../toolkit/script-registry.ts";
 import type { ScriptExecution } from "../toolkit/script-runner.ts";
+
+const INCOMPLETE_EXECUTION_FAILURE_CODE = "toolkit_execution_incomplete";
 
 const runToolkitScriptSchema = Type.Object(
 	{
@@ -81,6 +85,16 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 			"Report real output/exitCode; never claim success for nonzero exitCode.",
 		],
 		parameters: runToolkitScriptSchema,
+		failureRecovery: {
+			getFailureEvidence: (_params, failure) => {
+				if (failure.failureCode !== INCOMPLETE_EXECUTION_FAILURE_CODE) return undefined;
+				// The MUST record has a separate evidence channel: retain partial output there without
+				// turning an unknown execution into a completed operation or repeating the script.
+				const options = { maxBytes: MAX_TOOL_FAILURE_EVIDENCE_CHARS };
+				const preview = truncateMiddle(failure.message, options);
+				return preview.firstLineExceedsLimit ? truncateTail(failure.message, options).content : preview.content;
+			},
+		},
 		async execute(
 			toolCallId,
 			input: RunToolkitScriptInput,
@@ -229,7 +243,7 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 					.digest("hex");
 				throw new AgentToolExecutionError(
 					body,
-					execution.timedOut ? "timeout" : signal?.aborted ? "aborted" : "toolkit_execution_incomplete",
+					execution.timedOut ? "timeout" : signal?.aborted ? "aborted" : INCOMPLETE_EXECUTION_FAILURE_CODE,
 					outputSignature,
 					execution.timedOut ? "operation_outcome" : "tool_failure",
 				);
