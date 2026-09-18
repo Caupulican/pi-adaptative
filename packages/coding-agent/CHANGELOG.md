@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Bound tool intent cache entry retention with an invariant loop, ensuring map size strictly cannot exceed 512 entries.
+
 ## [0.99.28] - 2026-09-18
 
 ### Added

@@ -101,9 +101,13 @@ function classifyToolIntent(tool: ToolSelectionTool): ToolSelectionIntentClass {
 	if (cached !== undefined) return cached;
 	const intent = classifyToolIntentUncached(tool);
 	if (key.length <= MAX_CACHED_TOOL_KEY_CHARS) {
-		if (toolIntents.size >= MAX_CACHED_TOOL_INTENTS) {
+		while (toolIntents.size >= MAX_CACHED_TOOL_INTENTS) {
 			const oldest = toolIntents.keys().next().value;
-			if (oldest !== undefined) toolIntents.delete(oldest);
+			if (oldest === undefined) {
+				toolIntents.clear();
+				break;
+			}
+			toolIntents.delete(oldest);
 		}
 		toolIntents.set(key, intent);
 	}
