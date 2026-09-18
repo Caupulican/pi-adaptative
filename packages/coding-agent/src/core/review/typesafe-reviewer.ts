@@ -234,7 +234,7 @@ export class TypeSafeReviewer {
 		// Snapshot before any await. No omitted fields or context truncation are permitted.
 		const snapshot: EvaluationInput = JSON.parse(serializeEvaluation(input));
 		if (!Value.Check(evaluationInputSchema, snapshot)) throw new Error("Invalid TypeSafe evaluation input");
-		const request = { model: TYPESAFE_MODEL, ...snapshot };
+		const request = { model: snapshot.model ?? TYPESAFE_MODEL, ...snapshot };
 		const body = JSON.stringify(request);
 		if (Buffer.byteLength(body) > MAX_REQUEST_BYTES)
 			throw new Error("TypeSafe request exceeds 2 MiB; partition with explicit coverage, never truncate evidence");

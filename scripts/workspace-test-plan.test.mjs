@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { WORKSPACES, resolveWorkspaceTestPlan } from "./workspace-test-plan.mjs";
+import { WORKSPACES, planWorkspaceTests, resolveWorkspaceTestPlan } from "./workspace-test-plan.mjs";
 
 test("the default plan retains every workspace in dependency order", () => {
 	assert.deepEqual(resolveWorkspaceTestPlan([]), WORKSPACES);
@@ -19,4 +19,31 @@ test("a selected plan rejects unknown or duplicate workspaces", () => {
 		() => resolveWorkspaceTestPlan(["packages/tui", "packages/tui"]),
 		/Duplicate test workspace/u,
 	);
+});
+
+test("a test/ filter with no workspace runs only workspaces that own that path", () => {
+	const exists = (path) => path.replaceAll("\\", "/").endsWith("packages/coding-agent/test/system-one");
+	assert.deepEqual(planWorkspaceTests(["test/system-one"], exists), {
+		workspaces: ["packages/coding-agent"],
+		filters: ["test/system-one"],
+	});
+});
+
+test("an owned test/ filter plus a workspace keeps that workspace and forwards the filter", () => {
+	const exists = () => true;
+	assert.deepEqual(planWorkspaceTests(["packages/tui", "test/system-one"], exists), {
+		workspaces: ["packages/tui"],
+		filters: ["test/system-one"],
+	});
+});
+
+test("a test/ filter owned by no workspace is rejected", () => {
+	assert.throws(() => planWorkspaceTests(["test/system-one"], () => false), /Unknown test filter/u);
+});
+
+test("bare npm test still selects every workspace and forwards no filters", () => {
+	assert.deepEqual(planWorkspaceTests([]), {
+		workspaces: [...WORKSPACES],
+		filters: [],
+	});
 });

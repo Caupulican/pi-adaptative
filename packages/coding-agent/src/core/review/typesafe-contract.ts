@@ -50,6 +50,7 @@ const questionSchema = Type.Union([
 
 export const evaluationInputSchema = Type.Object(
 	{
+		model: Type.Optional(Type.String({ minLength: 1 })),
 		state: contextSchema,
 		questions: Type.Record(Type.String(), questionSchema, { minProperties: 1 }),
 	},

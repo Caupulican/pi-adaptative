@@ -14,6 +14,7 @@ import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
 import { evaluateToolGateAsync } from "./autonomy/gates.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
+import type { SystemOneController } from "./system-one/index.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import { retireToolCall } from "./tools/file-mutation-queue.ts";
 
@@ -48,6 +49,8 @@ export interface ToolGateControllerDeps {
 	getMutationScope?(): string;
 	/** Direct script execution gate: intercepts shell/process execution of registered automation scripts. */
 	checkDirectScriptExecution?(toolName: string, args: unknown, cwd?: string): BeforeToolCallResult | undefined;
+	/** System One semantic control plane controller, if active for this session/run. */
+	getSystemOneController?(): SystemOneController | undefined;
 }
 
 export class ToolGateController {
@@ -144,6 +147,29 @@ export class ToolGateController {
 			// 4. Single edge authorization on the actual final operation
 			const edge = await this.deps.checkEdge?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (edge) return edge;
+
+			// 5. System One semantic tool gate
+			const systemOne = this.deps.getSystemOneController?.();
+			if (systemOne) {
+				const impact =
+					toolCall.name === "bash"
+						? "local_reversible"
+						: toolCall.name.includes("edit") || toolCall.name.includes("write")
+							? "repo_mutation"
+							: "read_only";
+				const systemOneResult = await systemOne.validateToolGate({
+					tool: toolCall.name,
+					intent: `Invoke tool ${toolCall.name}`,
+					impact,
+					args,
+				});
+				if (systemOneResult.outcome === "block") {
+					return {
+						block: true,
+						reason: systemOneResult.reason ?? "Tool execution blocked by System One semantic gate",
+					};
+				}
+			}
 
 			let releaseObservation: (() => void) | undefined;
 			try {
