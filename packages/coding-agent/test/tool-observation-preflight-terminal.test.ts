@@ -30,10 +30,11 @@ describe("terminal observations for calls that never execute", () => {
 				};
 			}
 			const originalStart = harness.session.agent.onToolCallStart;
+			if (!originalStart) throw new Error("Expected the installed foreground reservation hook");
 			harness.session.agent.onToolCallStart = async (...args) => {
 				if (mode === "reservation failure") throw new Error("fixture reservation failure");
 				if (mode === "cancel before reservation") harness.session.agent.abort("fixture reservation cancellation");
-				return originalStart?.(...args);
+				return originalStart(...args);
 			};
 			const originalGate = harness.session.agent.beforeToolCall!;
 			harness.session.agent.beforeToolCall = async (...args) => {
