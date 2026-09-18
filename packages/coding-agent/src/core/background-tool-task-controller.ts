@@ -688,6 +688,9 @@ export class BackgroundToolTaskController {
 		) {
 			return undefined;
 		}
+		// Resolve dependencies before registering ownership: the core retains foreground ownership
+		// when handoff throws. A failed lookup must not leave a second completion subscriber here.
+		const mutationScope = this.deps.getMutationScope?.();
 		const sessionId = this.deps.getSessionId();
 		const taskId = `tool-task-${this.nextTaskId++}`;
 		const startedAt = this.now().toISOString();
@@ -733,7 +736,7 @@ export class BackgroundToolTaskController {
 		// process-wide exclusive mutation barrier its tool took when it started. A command requested as
 		// background never takes the barrier at all; a clock or manual handoff releases it here, which
 		// is the only reason a 30-minute job used to park every sibling bash/python behind it.
-		releaseExclusiveHold(context.toolCall.id, this.deps.getMutationScope?.());
+		releaseExclusiveHold(context.toolCall.id, mutationScope);
 
 		return {
 			result: {
