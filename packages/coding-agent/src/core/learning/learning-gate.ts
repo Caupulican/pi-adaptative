@@ -220,6 +220,7 @@ export function isLearningDecision(value: unknown): value is LearningDecision {
 	if (!isConfidence(value.confidence)) return false;
 	if (typeof value.summary !== "string") return false;
 	if (typeof value.requiresApproval !== "boolean") return false;
+	if (value.kind === "apply" && value.requiresApproval) return false;
 	if (value.createdAt !== undefined && typeof value.createdAt !== "string") return false;
 
 	return true;

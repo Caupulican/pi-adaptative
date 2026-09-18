@@ -142,7 +142,10 @@ export function rollbackPlanForReflectionWrite(write: ReflectionWrite): Learning
 			return {
 				kind: "memory_add",
 				previous: write.target,
-				instructions: "Re-add the removed text to the MEMORY file (it may originally have lived in USER).",
+				instructions:
+					write.section === "USER"
+						? "Re-add the removed text to the USER memory section."
+						: "Re-add the removed text to the MEMORY file (it may originally have lived in USER).",
 			};
 		case "promote_skill":
 			return {
@@ -190,6 +193,9 @@ export function isLearningAuditRecord(value: unknown): value is LearningAuditRec
 	if (typeof record.action !== "string" || !AUDIT_ACTIONS.includes(record.action)) return false;
 	if (typeof record.summary !== "string" || typeof record.reasonCode !== "string") return false;
 	if (!isLearningDecision(record.decision)) return false;
+	if (record.action === "apply" && (record.decision.kind === "proposal" || record.decision.requiresApproval)) {
+		return false;
+	}
 	if (record.rollback !== undefined && !isLearningRollbackPlan(record.rollback)) return false;
 	if (!isOptionalString(record.rollbackOf)) return false;
 	return typeof record.createdAt === "string";

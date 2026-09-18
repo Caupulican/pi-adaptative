@@ -101,7 +101,7 @@ export type ReflectionWrite =
 			evidenceRefs: string[];
 	  }
 	| { kind: "memory_replace"; target: string; text: string }
-	| { kind: "memory_remove"; target: string }
+	| { kind: "memory_remove"; target: string; section?: "MEMORY" | "USER" }
 	// R7 memory-to-behavior: promote a recurring procedural workflow into an executable skill.
 	| { kind: "promote_skill"; name: string; description: string; body: string };
 

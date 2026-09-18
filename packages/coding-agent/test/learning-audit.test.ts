@@ -55,10 +55,17 @@ describe("proposalFromReflectionWrite / rollbackPlanForReflectionWrite", () => {
 	});
 
 	it("derives an add-back rollback for memory_remove", () => {
-		const write: ReflectionWrite = { kind: "memory_remove", target: "stale fact" };
-		const rollback = rollbackPlanForReflectionWrite(write);
-		expect(rollback.kind).toBe("memory_add");
-		expect(rollback.previous).toBe("stale fact");
+		const writeDefault: ReflectionWrite = { kind: "memory_remove", target: "stale fact" };
+		const rollbackDefault = rollbackPlanForReflectionWrite(writeDefault);
+		expect(rollbackDefault.kind).toBe("memory_add");
+		expect(rollbackDefault.previous).toBe("stale fact");
+		expect(rollbackDefault.instructions).toContain("MEMORY file");
+
+		const writeUser: ReflectionWrite = { kind: "memory_remove", target: "stale user fact", section: "USER" };
+		const rollbackUser = rollbackPlanForReflectionWrite(writeUser);
+		expect(rollbackUser.kind).toBe("memory_add");
+		expect(rollbackUser.previous).toBe("stale user fact");
+		expect(rollbackUser.instructions).toContain("USER memory section");
 	});
 
 	it("derives a skill proposal with an archive rollback for promote_skill", () => {
@@ -94,6 +101,20 @@ describe("isLearningAuditRecord", () => {
 		expect(isLearningAuditRecord(auditRecord({ action: "undo" as never }))).toBe(false);
 		expect(isLearningAuditRecord(auditRecord({ layer: "firmware" as never }))).toBe(false);
 		expect(isLearningAuditRecord({ ...auditRecord(), decision: { kind: "apply" } })).toBe(false);
+		expect(
+			isLearningAuditRecord(
+				auditRecord({
+					action: "apply",
+					decision: {
+						kind: "proposal",
+						reasonCode: "needs_confirmation",
+						confidence: 80,
+						summary: "Proposal",
+						requiresApproval: true,
+					},
+				}),
+			),
+		).toBe(false);
 	});
 });
 
