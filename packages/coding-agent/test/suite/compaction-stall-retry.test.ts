@@ -11,10 +11,13 @@ import { createHarness, type Harness } from "./harness.ts";
 describe("compaction stall retry", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		setStreamIdleOptionsForTests(undefined);
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			setStreamIdleOptionsForTests(undefined);
 		}
 	});
 
@@ -152,8 +155,18 @@ describe("compaction stall retry", () => {
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
 
-		harness.setResponses([hangUntilAborted, hangUntilAborted]);
+		let summarizationRequests = 0;
+		const stalledSummary: FauxResponseFactory = (context, options) => {
+			summarizationRequests++;
+			return hangUntilAborted(context, options);
+		};
+		harness.setResponses([stalledSummary, stalledSummary]);
 
 		await expect(harness.session.compact()).rejects.toThrow(/stream stalled/);
-	}, 5000);
+		expect(summarizationRequests).toBe(2);
+		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+		// Use the package's bounded timeout for setup plus prompts plus compaction, as the recovery
+		// cases above do. The 200ms watchdog and exact retry count remain the behavior under test.
+	});
 });
