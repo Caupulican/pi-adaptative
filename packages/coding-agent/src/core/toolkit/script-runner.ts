@@ -88,7 +88,9 @@ export const spawnScriptExecutor: ScriptExecutor = async (command, argv, cwd, ti
 			stderr = `${stderr}${stderr ? "\n" : ""}Command output exceeded maxBuffer (${MAX_OUTPUT_BYTES} bytes)`;
 		}
 		return {
-			exitCode: outputExceeded ? null : terminal.code,
+			// A cooperative child can exit zero after termination was requested. Preserve the
+			// waiter's reason: only an ordinary exit establishes the script's own exit status.
+			exitCode: outputExceeded || terminal.reason !== "exited" ? null : terminal.code,
 			stdout,
 			stderr,
 			durationMs: Date.now() - started,

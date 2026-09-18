@@ -8,6 +8,7 @@
 - Prepared calls abandoned during reservation or startup publish explicit `not_started` results before the batch ends, preserving real sibling results and excluding abandonment from execution-failure recovery on replay.
 - Pre-execution hooks can register invocation cleanup that survives later hook failure and runs on abandonment or real completion, including detached work.
 - Throwing invocation cleanup or handoff unsubscribe retains the actual tool result and records a separate cleanup warning; foreground batches publish completed results before stopping.
+- Error-kind documentation reflects configured-deadline outcomes and no longer implies that execution failures roll back side effects.
 
 ## [0.99.27] - 2026-09-16
 

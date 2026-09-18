@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
 import { type Static, Type } from "typebox";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "../context/tool-output-packer.ts";
@@ -87,6 +89,7 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 			content: Array<{ type: "text"; text: string }>;
 			details: RunToolkitScriptDetails;
 			isError?: boolean;
+			errorKind?: "operation_outcome";
 		}> {
 			const scripts = deps.getScripts();
 			if (scripts.length === 0) {
@@ -186,7 +189,8 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 
 			// Explicit args from the caller win; a brain-extracted arg list fills in for fuzzy requests.
 			const execution = await deps.execute(immutableScript, immutableArgs, signal);
-			const failed = execution.exitCode !== 0 || execution.timedOut;
+			const hasExit = Number.isSafeInteger(execution.exitCode);
+			const failed = !hasExit || execution.exitCode !== 0 || execution.timedOut;
 			const header = failed
 				? `FAILED: ${immutableScript.name} exited ${execution.timedOut ? "by timeout" : execution.exitCode} after ${execution.durationMs}ms`
 				: `${immutableScript.name} succeeded in ${execution.durationMs}ms`;
@@ -213,6 +217,24 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 				? `${packed.content}\n\n[${formatArtifactNotice(packed.artifactId)}]`
 				: packed.content;
 
+			if (execution.timedOut || !hasExit) {
+				// Match shell/Python deadline outcomes; missing exit evidence remains an execution
+				// failure. Throw through the core's existing structured path so the receipt and
+				// recovery identity do not depend on the display text or its truncated preview.
+				const outputSignature = createHash("sha256")
+					.update(`stdout:${Buffer.byteLength(execution.stdout, "utf8")}:`)
+					.update(execution.stdout)
+					.update(`stderr:${Buffer.byteLength(execution.stderr, "utf8")}:`)
+					.update(execution.stderr)
+					.digest("hex");
+				throw new AgentToolExecutionError(
+					body,
+					execution.timedOut ? "timeout" : signal?.aborted ? "aborted" : "toolkit_execution_incomplete",
+					outputSignature,
+					execution.timedOut ? "operation_outcome" : "tool_failure",
+				);
+			}
+
 			return {
 				content: [{ type: "text" as const, text: body }],
 				details: {
@@ -225,7 +247,7 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 					durationMs: execution.durationMs,
 					...(packed.artifactId ? { artifactId: packed.artifactId } : {}),
 				},
-				...(failed ? { isError: true } : {}),
+				...(failed ? { isError: true, errorKind: "operation_outcome" as const } : {}),
 			};
 		},
 	};

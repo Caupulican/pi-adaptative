@@ -936,14 +936,14 @@ export type AgentMessageOrigin = "local";
 /**
  * Why an errored tool result is an error. These are different events and the harness treats them differently.
  *
- * `tool_failure` — the tool could not perform the operation at all: rejected arguments, denied
- * authority, a timeout, a crash. The operation never happened, the harness owns the diagnostic it
- * shows the model, and it replaces the result with a bounded failure record.
+ * `tool_failure` — the tool could not establish an operation outcome: rejected arguments, denied
+ * authority, interrupted execution, or a crash. Effects may already have occurred; this is not
+ * rollback evidence. The harness replaces the result with a bounded failure record.
  *
- * `operation_outcome` — the tool performed the operation completely and is reporting the
- * operation's own negative status: a process exit code, a search that matched nothing, a predicate
- * that answered false. Nothing failed; this is the observation the agent asked for. The harness
- * leaves the tool's own output exactly as returned and never rewrites it into a failure record.
+ * `operation_outcome` — the tool established the bounded attempt's negative status: a process exit
+ * code, a configured command deadline, a search that matched nothing, or a false predicate. This
+ * does not imply the requested objective was achieved. The harness leaves the tool's output
+ * intact and does not treat the outcome as a protocol mistake in failure memory.
  *
  * Both are unproductive to repeat while nothing else has changed, so both are observed by the
  * repetition governor in {@link "./tool-failure-recovery-gate.ts"}. Neither may ever end a run.

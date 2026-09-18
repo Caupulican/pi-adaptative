@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Toolkit nonzero exits and deadlines use native operation-outcome recovery; missing exit evidence remains an execution failure. Cancellation cannot turn a cooperative zero exit into script success.
 - Artifact storage exceptions preserve bounded tool-output previews with an explicit loss warning instead of erasing completed script results or stranding background terminals; small background output no longer requires artifact storage.
 - Background tool terminals still settle waiters and notify their parent when usage accounting, diagnostic reporting, or cleanup of an older task's artifact throws.
 - Abandoned tool preparations discard pending selection observations without recording a fabricated execution; advisory selection reads cannot deny an otherwise authorized tool.
