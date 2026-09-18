@@ -80,7 +80,10 @@ export class TypeSafeEvidenceStore {
 		try {
 			return this.admit(() => {
 				const stored = this.artifacts.read(id);
-				if (isMissingArtifactMarker(stored)) throw new TypeSafeEvidenceUnavailableError();
+				if (isMissingArtifactMarker(stored)) {
+					if (stored.reason === "unavailable") throw new Error("TypeSafe evidence could not be read");
+					throw new TypeSafeEvidenceUnavailableError();
+				}
 				const sha256 = createHash("sha256").update(stored.content).digest("hex");
 				if (stored.ref.command !== sha256 || offset > stored.content.length)
 					throw new Error("TypeSafe evidence integrity or offset check failed");

@@ -111,7 +111,10 @@ export function createArtifactRetrieveToolDefinition(
 					content: [
 						{
 							type: "text",
-							text: `Artifact not found: ${artifactId} (${result.missingReason}). It may have been cleaned up, or the id may be incorrect.`,
+							text:
+								result.missingReason === "unavailable"
+									? `Artifact could not be read: ${artifactId}. Storage is inaccessible or the record is incomplete or corrupt.`
+									: `Artifact not found: ${artifactId} (${result.missingReason}). It may have been cleaned up, or the id may be incorrect.`,
 						},
 					],
 					details: { found: false, mode: effectiveMode },

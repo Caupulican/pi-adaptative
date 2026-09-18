@@ -15,7 +15,16 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmdirSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { type ContextArtifactRef, estimateByteLength, estimateLineCount } from "./context-item.ts";
@@ -36,7 +45,8 @@ export interface ArtifactRecord {
 	content: string;
 }
 
-export type MissingArtifactReason = "not_found" | "cleaned_up";
+/** Unavailable preserves read/corruption failures; it is not evidence of absence. */
+export type MissingArtifactReason = "not_found" | "cleaned_up" | "unavailable";
 
 export interface MissingArtifactMarker {
 	id: string;
@@ -391,22 +401,39 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 
 		read(id: string): ArtifactRecord | MissingArtifactMarker {
 			if (!isSafeArtifactId(id)) return { id, missing: true, reason: "not_found" };
-			if (!ensureExistingBaseDir()) return { id, missing: true, reason: "not_found" };
 			try {
+				if (!ensureExistingBaseDir()) {
+					// existsSync also returns false for inaccessible paths. Only confirmed absence
+					// permits a caller to look elsewhere for this record.
+					return {
+						id,
+						missing: true,
+						reason: lstatSync(baseDir, { throwIfNoEntry: false }) ? "unavailable" : "not_found",
+					};
+				}
 				return withFileLockSync(metaPath(baseDir, id), () => {
 					const meta = readMeta(baseDir, id);
 					const pPath = payloadPath(baseDir, id);
-					if (!meta || !existsSync(pPath)) {
+					if (!meta) {
+						const metadataExists = lstatSync(metaPath(baseDir, id), { throwIfNoEntry: false }) !== undefined;
+						const payloadExists = lstatSync(pPath, { throwIfNoEntry: false }) !== undefined;
 						return {
 							id,
 							missing: true,
-							reason: cleanedUpThisInstance.has(id) ? "cleaned_up" : "not_found",
+							reason:
+								metadataExists || payloadExists
+									? "unavailable"
+									: cleanedUpThisInstance.has(id)
+										? "cleaned_up"
+										: "not_found",
 						};
 					}
+					if (meta.ref.id !== id) return { id, missing: true, reason: "unavailable" };
+					// A metadata record without a readable payload is an incomplete capture.
 					return { ref: meta.ref, content: readFileSync(pPath, "utf8") };
 				});
 			} catch {
-				return { id, missing: true, reason: cleanedUpThisInstance.has(id) ? "cleaned_up" : "not_found" };
+				return { id, missing: true, reason: "unavailable" };
 			}
 		},
 
