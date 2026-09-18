@@ -431,14 +431,32 @@ describe("TypeSafe review boundary", () => {
 		await expect(reviewer.review(input)).rejects.toThrow("/login typesafe");
 		expect(fetcher).not.toHaveBeenCalled();
 	});
-	it("verifies authentication upon successful HTTP 200 review while keeping status zero-I/O", async () => {
-		const fetcher = vi.fn(async () => Response.json(response()));
+	it("verifies authentication upon status connection and caches verification for subsequent calls", async () => {
+		const fetcher = vi.fn(async (url: string | URL | Request) => {
+			if (String(url).includes("/models")) return Response.json({ models: [] });
+			return Response.json(response());
+		});
 		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
-		expect(await reviewer.status()).toMatchObject({ enabled: true, authenticationVerified: false });
+		expect(await reviewer.status()).toMatchObject({ enabled: true, authenticationVerified: true });
+		expect(fetcher).toHaveBeenCalledWith("https://api.typesafe.ai/v1/models", expect.any(Object));
+
+		// Second call uses cached verification without re-requesting models
+		fetcher.mockClear();
+		expect(await reviewer.status()).toMatchObject({ enabled: true, authenticationVerified: true });
 		expect(fetcher).not.toHaveBeenCalled();
 
 		await reviewer.review(input);
 		expect(await reviewer.status()).toMatchObject({ enabled: true, authenticationVerified: true });
+	});
+	it("reports authentication failure when status connection receives 401", async () => {
+		const fetcher = vi.fn(async () => new Response("Unauthorized", { status: 401 }));
+		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "invalid-key", fetch: fetcher });
+		expect(await reviewer.status()).toMatchObject({
+			enabled: true,
+			authenticationVerified: false,
+			message: expect.stringContaining("authentication failed"),
+		});
+		expect(fetcher).toHaveBeenCalledWith("https://api.typesafe.ai/v1/models", expect.any(Object));
 	});
 	it("sends complete state once to the fixed endpoint and retains the raw judgment", async () => {
 		const fetcher = vi.fn(async () => Response.json(response()));

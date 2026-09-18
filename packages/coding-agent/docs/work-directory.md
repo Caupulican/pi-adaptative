@@ -56,6 +56,8 @@ straggler:
   okf-memory/                                                                          authored/indexed memory (root)
     user-preferences/index.okf.md                                                       USER.md overflow index
     user-preferences/user-preferences-<digest>.okf.md                                  bounded preference shards
+  memory/                                                                              project hot MEMORY.md + ICM bundles (root)
+    projects/<project-key>/MEMORY.md                                                    per-project hot memory
   skills/ extensions/ prompts/ themes/ profiles/                                       user resources (root)
     profiles/directories/<workspace-hash>/settings.json                                directory overlays
   state/     durable machine state: model adaptation/fitness, tool-performance,        -- stateDir/stateFile

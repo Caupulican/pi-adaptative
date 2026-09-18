@@ -179,4 +179,39 @@ describe("tools-manager: ffi-rs native binding staging", () => {
 			expect(existsSync(join(managedDir, "node_modules", "@yuuang"))).toBe(false);
 		});
 	});
+
+	it("resolves @ff-labs/fff-node via dist/index.cjs when bare require throws", async () => {
+		await withFreshManagedDir(async (managedDir) => {
+			const fffDir = join(managedDir, "node_modules", "@ff-labs", "fff-node");
+			mkdirSync(join(fffDir, "dist"), { recursive: true });
+			writeFileSync(
+				join(fffDir, "package.json"),
+				JSON.stringify({ name: "@ff-labs/fff-node", main: "dist/index.cjs" }),
+			);
+			writeFileSync(join(fffDir, "dist", "index.cjs"), "module.exports = { FileFinder: class {}, ok: true };");
+
+			const { loadAvailableFffNodePackage } = await import("../src/utils/tools-manager.ts");
+			const fakeRequire = ((id: string) => {
+				if (id === "@ff-labs/fff-node") {
+					throw new Error("Cannot find module '@ff-labs/fff-node'");
+				}
+				if (id.endsWith("index.cjs")) {
+					return { FileFinder: class {}, ok: true };
+				}
+				throw new Error(`Unexpected require: ${id}`);
+			}) as unknown as Parameters<typeof loadAvailableFffNodePackage>[0] extends readonly (infer R)[] | undefined
+				? R
+				: never;
+			(fakeRequire as { resolve?: (id: string) => string }).resolve = (id: string) => {
+				if (id === "@ff-labs/fff-node/package.json") {
+					return join(fffDir, "package.json");
+				}
+				throw new Error(`Cannot resolve ${id}`);
+			};
+
+			const loaded = loadAvailableFffNodePackage([fakeRequire]);
+			expect(loaded).toBeDefined();
+			expect((loaded as { ok?: boolean } | undefined)?.ok).toBe(true);
+		});
+	});
 });

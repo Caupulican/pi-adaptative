@@ -12,6 +12,7 @@ import {
 	serializeEvaluation,
 	TYPESAFE_ENDPOINT,
 	TYPESAFE_MODEL,
+	TYPESAFE_MODELS_ENDPOINT,
 	validateEvaluationResponse,
 } from "./typesafe-contract.ts";
 
@@ -122,15 +123,67 @@ export class TypeSafeReviewer {
 		return key || undefined;
 	}
 
-	async status() {
+	async status(signal?: AbortSignal) {
 		const key = await this.resolveKey();
 		const enabled = Boolean(key?.trim());
+		if (!enabled || !key) {
+			return {
+				enabled: false,
+				model: TYPESAFE_MODEL,
+				confidence: REVIEW_CONFIDENCE,
+				setup: "/login typesafe or TYPESAFE_API_KEY",
+				authenticationVerified: false,
+				message: "TypeSafe is not configured. Use /login typesafe or TYPESAFE_API_KEY.",
+			};
+		}
+		if (this.verifiedKey !== key) {
+			const timeout = new AbortController();
+			const timer = setTimeout(() => timeout.abort(), 10_000);
+			const combined = combineAbortSignals([signal, timeout.signal]);
+			try {
+				const response = await (this.deps.fetch ?? fetch)(TYPESAFE_MODELS_ENDPOINT, {
+					method: "GET",
+					headers: { Authorization: `Bearer ${key}` },
+					redirect: "error",
+					signal: combined.signal,
+				});
+				if (response.ok) {
+					this.verifiedKey = key;
+				} else if (response.status === 401 || response.status === 403) {
+					this.verifiedKey = undefined;
+					return {
+						enabled: true,
+						model: TYPESAFE_MODEL,
+						confidence: REVIEW_CONFIDENCE,
+						setup: "/login typesafe or TYPESAFE_API_KEY",
+						authenticationVerified: false,
+						message: "TypeSafe authentication failed. Check /login typesafe or TYPESAFE_API_KEY.",
+					};
+				}
+			} catch {
+				return {
+					enabled: true,
+					model: TYPESAFE_MODEL,
+					confidence: REVIEW_CONFIDENCE,
+					setup: "/login typesafe or TYPESAFE_API_KEY",
+					authenticationVerified: false,
+					message: "TypeSafe endpoint unreachable.",
+				};
+			} finally {
+				clearTimeout(timer);
+				combined.cleanup();
+			}
+		}
+		const authenticationVerified = this.verifiedKey === key;
 		return {
-			enabled,
+			enabled: true,
 			model: TYPESAFE_MODEL,
 			confidence: REVIEW_CONFIDENCE,
 			setup: "/login typesafe or TYPESAFE_API_KEY",
-			authenticationVerified: Boolean(enabled && this.verifiedKey && this.verifiedKey === key),
+			authenticationVerified,
+			message: authenticationVerified
+				? "TypeSafe authenticated and verified."
+				: "TypeSafe key configured but verification failed.",
 		};
 	}
 

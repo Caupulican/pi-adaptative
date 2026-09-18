@@ -107,7 +107,7 @@ export function createTypeSafeReviewToolDefinition(
 			"Use Jev for semantic decisions and independent verification in any domain. Status checks setup. Evaluate batches Choice, Noul and Score questions for classification, detection, routing, ranking, retrieval, extraction, ambiguity, planning, guardrails and evidence checks. Review gates claims at high (0.95) or max (0.99) confidence. Evidence reads retained records by id and offset. Sends explicit state only; does not execute or authorize actions.",
 		promptSnippet: "Jev: semantic judgments and high/max claim review.",
 		promptGuidelines: [
-			"Check typesafe_review status at work start. If enabled, load typesafe-review; use Jev for every applicable semantic uncertainty throughout work, in any domain.",
+			"Check typesafe_review status at work start. When enabled and authenticationVerified are true, use Jev for semantic decisions and reviews throughout work, in any domain.",
 			"Batch independent narrow questions with complete relevant source, tests, prior findings and limitations; never hide adverse evidence. Reproduce bug candidates before fixing.",
 			"Approval requires every expected verdict and high/max confidence; fix findings or add missing evidence. Never reroll unchanged evidence for a better score. Credentials belong in /login typesafe, never tool arguments.",
 		],
@@ -132,7 +132,7 @@ export function createTypeSafeReviewToolDefinition(
 					};
 				}
 				if (input.action === "status") {
-					const status = await reviewer.status();
+					const status = await reviewer.status(signal);
 					return { content: [{ type: "text" as const, text: JSON.stringify(status) }], details: status };
 				}
 				if (input.action === "evaluate" && !input.evaluation)

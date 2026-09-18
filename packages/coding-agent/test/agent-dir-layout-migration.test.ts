@@ -194,6 +194,61 @@ describe("migrateAgentDirLayout", () => {
 		expect(fs.existsSync(emptyDir)).toBe(false);
 		expect(fs.readFileSync(path.join(populatedDir, "session.jsonl"), "utf-8")).toBe("durable transcript\n");
 	});
+
+	it("keeps live project memory at the agent root instead of archiving it as a straggler", () => {
+		const agentDir = createAgentDir();
+		const live = path.join(agentDir, "memory", "projects", "cafebabedeadbeef", "MEMORY.md");
+		fs.mkdirSync(path.dirname(live), { recursive: true });
+		fs.writeFileSync(live, "project facts\n", "utf-8");
+
+		migrateAgentDirLayout(agentDir);
+
+		expect(fs.readFileSync(live, "utf-8")).toBe("project facts\n");
+		expect(fs.existsSync(stateFile(agentDir, "legacy-layout", "memory"))).toBe(false);
+	});
+
+	it("restores a previously archived memory tree when the live root is missing", () => {
+		const agentDir = createAgentDir();
+		const stolen = stateFile(agentDir, "legacy-layout", "memory", "projects", "cafebabedeadbeef", "MEMORY.md");
+		fs.mkdirSync(path.dirname(stolen), { recursive: true });
+		fs.writeFileSync(stolen, "archived facts\n", "utf-8");
+
+		migrateAgentDirLayout(agentDir);
+
+		expect(fs.readFileSync(path.join(agentDir, "memory", "projects", "cafebabedeadbeef", "MEMORY.md"), "utf-8")).toBe(
+			"archived facts\n",
+		);
+		expect(fs.existsSync(stateFile(agentDir, "legacy-layout", "memory"))).toBe(false);
+	});
+
+	it("does not clobber a live memory tree with the archived copy", () => {
+		const agentDir = createAgentDir();
+		const live = path.join(agentDir, "memory", "AGENTS.md");
+		const stolen = stateFile(agentDir, "legacy-layout", "memory", "AGENTS.md");
+		fs.mkdirSync(path.dirname(live), { recursive: true });
+		fs.mkdirSync(path.dirname(stolen), { recursive: true });
+		fs.writeFileSync(live, "live catalog\n", "utf-8");
+		fs.writeFileSync(stolen, "archived catalog\n", "utf-8");
+
+		migrateAgentDirLayout(agentDir);
+
+		expect(fs.readFileSync(live, "utf-8")).toBe("live catalog\n");
+		expect(fs.readFileSync(stolen, "utf-8")).toBe("archived catalog\n");
+	});
+
+	it("still archives an unknown root directory under state/legacy-layout", () => {
+		const agentDir = createAgentDir();
+		const stray = path.join(agentDir, "stray-root", "note.md");
+		fs.mkdirSync(path.dirname(stray), { recursive: true });
+		fs.writeFileSync(stray, "external\n", "utf-8");
+
+		migrateAgentDirLayout(agentDir);
+
+		expect(fs.existsSync(path.join(agentDir, "stray-root"))).toBe(false);
+		expect(fs.readFileSync(stateFile(agentDir, "legacy-layout", "stray-root", "note.md"), "utf-8")).toBe(
+			"external\n",
+		);
+	});
 });
 
 describe("runMigrations wires migrateAgentDirLayout in before any store read", () => {

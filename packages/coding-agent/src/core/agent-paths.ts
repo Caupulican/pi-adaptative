@@ -9,7 +9,8 @@
  * ```
  * <agentDir>/
  *   auth.json settings.json models.json keybindings.json MEMORY.md USER.md SYSTEM.md …   user CONFIG/MEMORY (root, kept)
- *   okf-memory/                                                                            authored memory (root, kept)
+ *   okf-memory/                                                                            authored OKF memory (root, kept)
+ *   memory/                                                                                project hot MEMORY.md + ICM bundles (root, kept)
  *   skills/ extensions/ prompts/ themes/ profiles/                                        user RESOURCES (root, kept)
  *     profiles/directories/<workspace-hash>/settings.json                                 directory overlays
  *   state/     durable machine state (model adaptation/fitness, tool performance,
@@ -69,6 +70,7 @@ export const AGENT_ROOT_FILE_NAMES = [
 /** Root entries reserved for user resources and machine-managed storage classes. */
 export const AGENT_ROOT_DIRECTORY_NAMES = [
 	"okf-memory",
+	"memory",
 	"skills",
 	"extensions",
 	"prompts",

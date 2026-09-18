@@ -11,6 +11,7 @@ import {
 	getProcessWorkRun,
 	getWorkRoot,
 	gitDir,
+	isCanonicalAgentRootEntry,
 	managedSecretEnvDir,
 	modelsDir,
 	npmDir,
@@ -18,6 +19,7 @@ import {
 	orchestrationEventStoreDir,
 	orchestrationSessionDir,
 	orchestrationSessionsDir,
+	projectMemoryDir,
 	reloadCoordinationDir,
 	resourceDir,
 	runtimesDir,
@@ -51,6 +53,12 @@ describe("agent-paths SSOT accessors", () => {
 
 	it("authored memory and durable profile/backup collections have canonical containers", () => {
 		expect(okfMemoryDir(AGENT_DIR)).toBe(join(AGENT_DIR, "okf-memory"));
+		expect(projectMemoryDir(AGENT_DIR, "0123456789abcdef")).toBe(
+			join(AGENT_DIR, "memory", "projects", "0123456789abcdef"),
+		);
+		expect(isCanonicalAgentRootEntry("memory")).toBe(true);
+		expect(isCanonicalAgentRootEntry("okf-memory")).toBe(true);
+		expect(isCanonicalAgentRootEntry("memory-backup")).toBe(false);
 		expect(directoryProfilesDir(AGENT_DIR)).toBe(join(AGENT_DIR, "profiles", "directories"));
 		expect(configBackupsDir(AGENT_DIR)).toBe(join(AGENT_DIR, "state", "backups", "config"));
 	});

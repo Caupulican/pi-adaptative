@@ -163,15 +163,31 @@ export class SystemPromptBuilder {
 		return `SITUATION SOUL\n${soul}`;
 	}
 
+	private _buildHarnessSelfHealingPrompt(profile: ModelCapabilityProfile): string | undefined {
+		if (this.deps.isChildSession()) return undefined;
+		if (profile.class === "chat") return undefined;
+		if (profile.class !== "full") {
+			return "PI HARNESS SELF-HEALING: managed tools (rg, jq, uv/Python, FFF native search) auto-provision, repair bindings, and recover from transient failures.";
+		}
+		return "PI HARNESS SELF-HEALING: Managed tools (ripgrep, jq, uv-managed Python, FFF native search) auto-provision, repair bindings, and self-heal from missing or damaged local states. If a managed tool is reported missing, doctor and search backends retry and heal on demand.";
+	}
+
 	private _buildSelfModificationPrompt(profile: ModelCapabilityProfile): string | undefined {
 		const settings = this.deps.getSettingsManager().getSelfModificationSettings();
-		if (!settings.enabled) {
+		const cwd = this.deps.getCwd();
+		const inSourceCheckout =
+			existsSync(resolvePath("package.json", cwd)) &&
+			existsSync(resolvePath("packages/coding-agent/package.json", cwd));
+		if (!settings.enabled && !inSourceCheckout) {
 			return undefined;
 		}
 
 		// Resolve from an ordered candidate list first (portable WSL/Termux switching
 		// from settings alone), then fall back to the legacy single sourcePath.
 		const rawCandidates = collectSelfModificationSourceCandidates(settings);
+		if (rawCandidates.length === 0 && inSourceCheckout) {
+			rawCandidates.push(cwd);
+		}
 
 		if (rawCandidates.length === 0) {
 			return "PI SELF-MODIFICATION: enabled but sourcePaths/sourcePath is missing. Do not modify core/runtime output; ask for the pi-adaptative source checkout path.";
@@ -189,9 +205,9 @@ export class SystemPromptBuilder {
 			? sourcePath
 			: `${sourcePath} (invalid source checkout; user must correct \`selfModification.sourcePaths\` before editing)`;
 		if (profile.class !== "full") {
-			return `PI SELF-MODIFICATION: edit core only under ${sourceStatus}. Inspect first; preserve concurrent work; smallest auditable change; focused validation.`;
+			return `PI SELF-MODIFICATION: edit core only under ${sourceStatus}. Inspect first; preserve concurrent work; smallest auditable change; focused validation. Use runtime_update to reload or restart.`;
 		}
-		return `PI SELF-MODIFICATION: source=${sourceStatus}. Edit core/harness only there; never patch installed/generated output as source of truth. Restate scope; inspect source/docs; preserve concurrent changes; make the smallest auditable edit; run focused then proportionate checks; reload only after saved evidence.`;
+		return `PI SELF-MODIFICATION: source=${sourceStatus}. Edit core/harness only there; never patch installed/generated output as source of truth. Restate scope; inspect source/docs; preserve concurrent changes; make the smallest auditable edit; run focused then proportionate checks; use runtime_update (reload extensions or restart core) only after saved evidence.`;
 	}
 
 	private _buildStaticMemoryPrompt(profile: ModelCapabilityProfile, availableChars?: number): string | undefined {
@@ -380,6 +396,7 @@ export class SystemPromptBuilder {
 			// bounded stable-prompt envelope is not spent on it.
 			modelCapability.class === "full" ? MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT : undefined,
 			this._buildProjectInstructionIsolationPrompt(modelCapability),
+			this._buildHarnessSelfHealingPrompt(modelCapability),
 			this._buildSelfModificationPrompt(modelCapability),
 			this._buildAutonomyPrompt(modelCapability),
 			this._buildWorkLifecyclePrompt(validToolNames),

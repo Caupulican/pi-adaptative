@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Fixed
+
+- Treat `memory/` as a canonical agent-root directory so doctor and startup migration no longer archive live project memory. Restore a previously stolen tree from `state/legacy-layout/memory` when the live root is missing.
+- Resolve `@ff-labs/fff-node` via direct `package.json` lookup and `dist/index.cjs` candidates when bare module require fails.
+- Auto-detect source checkouts from cwd for `runtime_update` and inform the model of managed tool self-healing capabilities.
+- Actively verify TypeSafe credentials against the models endpoint in `typesafe_review` status checks, setting `authenticationVerified: true` and caching verification on success to prevent models from mistaking unverified status for authentication failure.
+
 ## [0.99.29] - 2026-09-18
 
 ### Fixed

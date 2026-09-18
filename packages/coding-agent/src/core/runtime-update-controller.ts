@@ -196,7 +196,9 @@ export class RuntimeUpdateController {
 						throw new Error("A runtime update is already pending; finish this tool batch first.");
 					}
 					if (input.action === "restart" && !this.restart)
-						throw new Error("No safe core restart adapter is available in this host.");
+						throw new Error(
+							"No safe core restart adapter is available in this host (core restart requires supervised interactive CLI mode; use action: 'reload' for extensions and active tools).",
+						);
 					if (input.action === "restart" && input.extensionPath)
 						throw new Error("extensionPath applies only to extension reloads.");
 					if (!toolCallId || toolCallId.length > 256) throw new Error("Invalid runtime update identity.");

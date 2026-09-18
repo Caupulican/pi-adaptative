@@ -794,11 +794,19 @@ function createManagedFffRequire(): ModuleRequire | undefined {
 	return createRequire(pathToFileURL(FFF_MANAGED_PACKAGE_JSON).href);
 }
 
+const FFF_DIST_CANDIDATE_ENTRIES = [
+	join("dist", "index.cjs"),
+	join("dist", "index.js"),
+	join("dist", "src", "index.js"),
+] as const;
+
 function findFffNodeDistEntry(startPath: string): string | undefined {
 	let currentDir = dirname(startPath);
 	while (currentDir !== dirname(currentDir)) {
-		const candidate = join(currentDir, "node_modules", "@ff-labs", "fff-node", "dist", "src", "index.js");
-		if (existsSync(candidate)) return candidate;
+		for (const candidateEntry of FFF_DIST_CANDIDATE_ENTRIES) {
+			const candidate = join(currentDir, "node_modules", "@ff-labs", "fff-node", candidateEntry);
+			if (existsSync(candidate)) return candidate;
+		}
 		currentDir = dirname(currentDir);
 	}
 	return undefined;
@@ -820,6 +828,18 @@ function recordFffLoadError(error: unknown): undefined {
 function loadFffNodeDistEntry(requireFff: ModuleRequire): unknown | undefined {
 	if (!requireFff.resolve) return undefined;
 	try {
+		try {
+			const pkgPath = requireFff.resolve("@ff-labs/fff-node/package.json");
+			const pkgDir = dirname(pkgPath);
+			for (const candidateEntry of FFF_DIST_CANDIDATE_ENTRIES) {
+				const candidate = join(pkgDir, candidateEntry);
+				if (existsSync(candidate)) {
+					return requireFff(candidate);
+				}
+			}
+		} catch {
+			// Fall through to ffi-rs traversal if direct resolve is unavailable or fails.
+		}
 		const ffiPath = requireFff.resolve("ffi-rs");
 		const fffEntry = findFffNodeDistEntry(ffiPath);
 		return fffEntry ? requireFff(fffEntry) : undefined;

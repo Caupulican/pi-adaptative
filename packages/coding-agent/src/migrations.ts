@@ -504,6 +504,19 @@ function migrateLegacyAgentFile(agentDir: string, legacyName: string, canonicalP
 	}
 }
 
+/** Put a canonical root directory back when an earlier unexpected-root pass archived it. */
+function restoreMisplacedCanonicalRoot(agentDir: string, name: string): void {
+	if (!isCanonicalAgentRootEntry(name)) return;
+	const liveDir = join(agentDir, name);
+	if (existsSync(liveDir)) return;
+	const stolenDir = stateFile(agentDir, "legacy-layout", name);
+	if (!existsSync(stolenDir)) return;
+	const stolenStats = lstatSync(stolenDir);
+	if (!stolenStats.isDirectory() || stolenStats.isSymbolicLink()) return;
+	mkdirSync(agentDir, { recursive: true });
+	renameSync(stolenDir, liveDir);
+}
+
 /** Remove only empty real per-project session directories; transcript files are never retention-pruned. */
 export function pruneEmptySessionNamespaces(agentDir: string): string[] {
 	const root = sessionsDir(agentDir);
@@ -592,6 +605,9 @@ export function migrateAgentDirLayout(agentDir: string): void {
 				}
 			}
 		}
+	} catch {}
+	try {
+		restoreMisplacedCanonicalRoot(agentDir, "memory");
 	} catch {}
 	pruneEmptySessionNamespaces(agentDir);
 }

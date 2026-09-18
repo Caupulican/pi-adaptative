@@ -7,7 +7,8 @@ description: "Use built-in Jev judgments for every applicable semantic task wher
 
 ## How to use the skill
 
-Call `typesafe_review` with `action: "status"`. When enabled, explicitly use it
+Call `typesafe_review` with `action: "status"`. When enabled, it verifies authentication
+against the TypeSafe models endpoint and reports `authenticationVerified: true`. Explicitly use it
 for every applicable task where a semantic judgment can reduce meaningful
 uncertainty, throughout the work rather than only at final review. This applies
 to engineering, research, writing, analysis, planning and other domains. When disabled, explain

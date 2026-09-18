@@ -33,16 +33,27 @@ describe("agent directory layout inspection", () => {
 		const agentDir = createTempDir();
 		writeFileSync(join(agentDir, "auth.json"), "{}");
 		writeFileSync(join(agentDir, "MEMORY.md"), "memory");
-		for (const name of ["extensions", "profiles", "state", "cache", "work", "sessions"]) {
+		for (const name of ["extensions", "memory", "profiles", "state", "cache", "work", "sessions"]) {
 			mkdirSync(join(agentDir, name));
 		}
 
 		expect(inspectAgentDirectoryLayout(agentDir)).toMatchObject({
-			scannedEntries: 8,
+			scannedEntries: 9,
 			unexpectedEntryCount: 0,
 			unexpectedEntries: [],
 			truncated: false,
 		});
+	});
+
+	it("does not treat a live memory/ tree as an unexpected straggler", () => {
+		const agentDir = createTempDir();
+		mkdirSync(join(agentDir, "memory"));
+		mkdirSync(join(agentDir, "memory-backup"));
+
+		const report = inspectAgentDirectoryLayout(agentDir);
+		expect(report.unexpectedEntries).toEqual(["memory-backup"]);
+		expect(report.unexpectedEntryCount).toBe(1);
+		expect(report.truncated).toBe(false);
 	});
 
 	it("bounds both scanning and retained unexpected entry names", () => {
