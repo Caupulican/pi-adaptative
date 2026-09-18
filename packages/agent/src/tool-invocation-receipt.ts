@@ -1,6 +1,10 @@
 import { isBoundedFailureCode } from "./tool-failure-code.ts";
 import { readWireRecord } from "./wire-record.ts";
 
+const POSTPROCESSING_FAILURE_NAMES = ["progress", "after_hook", "cleanup"] as const;
+type ToolPostprocessingFailure = (typeof POSTPROCESSING_FAILURE_NAMES)[number];
+const POSTPROCESSING_FAILURES = new Set<ToolPostprocessingFailure>(POSTPROCESSING_FAILURE_NAMES);
+
 /** Engine evidence, independent of hook policy, display status, and verification claims. */
 export type ToolInvocationReceipt = Readonly<{
 	version: 1;
@@ -9,7 +13,7 @@ export type ToolInvocationReceipt = Readonly<{
 	executionScope?: string;
 	/** Effective executor timeout captured before execution. Null means declared but unavailable. */
 	timeoutMs?: number | null;
-	postprocessingFailures: readonly ("progress" | "after_hook")[];
+	postprocessingFailures: readonly ToolPostprocessingFailure[];
 }> &
 	(
 		| Readonly<{ execution: "not_started"; operationStatus?: never; failureCode?: "aborted" }>
@@ -59,14 +63,14 @@ export function decodeToolInvocationReceipt(value: unknown): ToolInvocationRecei
 		requestId.length > 256 ||
 		!/^[A-Za-z0-9._:-]+$/.test(requestId) ||
 		!Array.isArray(failures) ||
-		failures.length > 2 ||
+		failures.length > POSTPROCESSING_FAILURES.size ||
 		Reflect.ownKeys(failures).length !== failures.length + 1
 	)
 		return undefined;
-	const postprocessingFailures: ("progress" | "after_hook")[] = [];
+	const postprocessingFailures: ToolPostprocessingFailure[] = [];
 	for (let index = 0; index < failures.length; index++) {
 		const item = Object.getOwnPropertyDescriptor(failures, index)?.value;
-		if ((item !== "progress" && item !== "after_hook") || postprocessingFailures.includes(item)) return undefined;
+		if (!POSTPROCESSING_FAILURES.has(item) || postprocessingFailures.includes(item)) return undefined;
 		postprocessingFailures.push(item);
 	}
 	const base = {

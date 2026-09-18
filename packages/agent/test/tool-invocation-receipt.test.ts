@@ -16,6 +16,23 @@ const receipt = {
 } as const;
 
 describe("invocation receipt wire boundary", () => {
+	it("retains cleanup alongside independent postprocessing failures", () => {
+		const candidate = { ...receipt, postprocessingFailures: ["progress", "after_hook", "cleanup"] };
+		expect(decodeToolInvocationReceipt(JSON.parse(JSON.stringify(candidate)))).toEqual(candidate);
+		expect(decodeToolInvocationReceipt({ ...candidate, postprocessingFailures: ["cleanup", "cleanup"] })).toBeUndefined();
+		for (const execution of ["running", "not_started"]) {
+			expect(decodeToolInvocationReceipt({
+				version: 1, requestId: "fixture", execution, postprocessingFailures: ["cleanup"],
+			})).toBeUndefined();
+		}
+		const details = Object.defineProperty({}, "piVerification", {
+			value: { status: "passed" }, enumerable: true, configurable: false, writable: false,
+		});
+		const stamped = stampToolInvocation(details, { ...receipt, postprocessingFailures: ["cleanup"] });
+		expect(Object.getOwnPropertyDescriptor(stamped, "piVerification"))
+			.toEqual(Object.getOwnPropertyDescriptor(details, "piVerification"));
+	});
+
 	it("retains explicit abandonment without inventing an executor outcome", () => {
 		const abandoned = {
 			version: 1, requestId: "fixture", execution: "not_started",

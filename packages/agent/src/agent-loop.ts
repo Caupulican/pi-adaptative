@@ -2285,6 +2285,33 @@ function getBackgroundToolCallDelay(config: AgentLoopConfig): number | undefined
 	return delay;
 }
 
+/** Cleanup faults describe harness delivery, never a reason to repeat the completed operation. */
+function retainToolCleanupFailure(finalized: FinalizedToolCallOutcome): FinalizedToolCallOutcome {
+	const receipt = retainedToolInvocation(finalized.result.details);
+	if (!receipt || (receipt.execution !== "completed" && receipt.execution !== "unknown")) {
+		throw new Error("Missing finalized tool invocation receipt");
+	}
+	if (receipt.postprocessingFailures.includes("cleanup")) return finalized;
+	return {
+		...finalized,
+		result: {
+			...finalized.result,
+			content: [
+				...finalized.result.content,
+				{
+					type: "text",
+					text: "[harness] Tool cleanup failed. The operation result is retained; inspect it rather than rerunning the operation to recover cleanup.",
+				},
+			],
+			details: stampToolInvocation(finalized.result.details, {
+				...receipt,
+				postprocessingFailures: [...receipt.postprocessingFailures, "cleanup"],
+			}),
+		},
+		deliveryFailure: finalized.deliveryFailure ?? new Error("tool_cleanup_failed"),
+	};
+}
+
 async function executeAndFinalizePreparedToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -2310,14 +2337,15 @@ async function executeAndFinalizePreparedToolCall(
 	const startedAt = Date.now();
 	let emitForegroundUpdates = true;
 	const completion = (async (): Promise<FinalizedToolCallOutcome> => {
+		let settled: { value: FinalizedToolCallOutcome } | { failure: unknown };
 		try {
-			// Until this finally exists, batch cleanup still owns preparation. A throwing background
+			// Until this completion owns cleanup, the batch still owns preparation. A throwing background
 			// selector must not strand a binding or spend a retry for a body that never started.
 			onExecutionOwnership();
 			const executed = await executePreparedToolCall(prepared, executionSignal, (event) => {
 				if (emitForegroundUpdates) return emit(event);
 			});
-			return await finalizeExecutedToolCall(
+			const value = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
 				prepared,
@@ -2329,13 +2357,27 @@ async function executeAndFinalizePreparedToolCall(
 				toolFailureRecoveryGate,
 				executionSignal,
 			);
-		} finally {
-			try {
-				prepared.release();
-			} finally {
-				executionAbort?.detachForeground();
-			}
+			settled = { value };
+		} catch (failure) {
+			settled = { failure };
 		}
+		const cleanupErrors: unknown[] = [];
+		try {
+			prepared.release();
+		} catch (error) {
+			cleanupErrors.push(error);
+		}
+		try {
+			executionAbort?.detachForeground();
+		} catch (error) {
+			cleanupErrors.push(error);
+		}
+		if ("failure" in settled) {
+			if (cleanupErrors.length > 0)
+				throw new AggregateError([settled.failure, ...cleanupErrors], "Tool finalization and cleanup failed");
+			throw settled.failure;
+		}
+		return cleanupErrors.length > 0 ? retainToolCleanupFailure(settled.value) : settled.value;
 	})();
 	if (!executionAbort || !config.handoffToolCall) return completion;
 
@@ -2363,12 +2405,20 @@ async function executeAndFinalizePreparedToolCall(
 		triggers.push(manual);
 	}
 	let outcome: { kind: "completed"; value: FinalizedToolCallOutcome } | { kind: "deadline" | "manual" };
+	let unsubscribeFailed = false;
 	try {
 		outcome = await Promise.race([completion.then((value) => ({ kind: "completed" as const, value })), ...triggers]);
 	} finally {
 		if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-		unsubscribeHandoffRequest?.();
+		try {
+			unsubscribeHandoffRequest?.();
+		} catch {
+			unsubscribeFailed = true;
+		}
 	}
+	// Failed subscription teardown cannot discard the running body or admit a new handoff. Keep
+	// foreground ownership until its actual completion and publish that outcome before ending.
+	if (unsubscribeFailed) return retainToolCleanupFailure(await completion);
 	if (outcome.kind === "completed") return outcome.value;
 	if (executionAbort.signal.aborted) return completion;
 
