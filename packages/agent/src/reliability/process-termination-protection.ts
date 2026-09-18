@@ -173,10 +173,21 @@ export function createProcessTerminationProtectionReader(): (
 			if (!table) return undefined;
 			// Windows retains the creator PID after it exits instead of reparenting the child.
 			// Only a successfully parsed complete snapshot establishes that historical absence.
+			// On Windows, a recycled PID pointing back to an already visited ancestor or to itself
+			// proves the historical creator is absent; end the observable chain cleanly.
+			const visited = new Set<number>();
 			const ids = collectProtectedProcessIds(
 				pid,
 				parentPid,
-				(target) => table.get(target) ?? (platform === "win32" ? null : undefined),
+				(target) => {
+					visited.add(target);
+					const record = table.get(target);
+					if (!record) return platform === "win32" ? null : undefined;
+					if (platform === "win32" && (record.parentPid === target || visited.has(record.parentPid))) {
+						return null;
+					}
+					return record;
+				},
 				onDiagnostic,
 			);
 			if (ids) cached = { platform, pid, parentPid, ids };

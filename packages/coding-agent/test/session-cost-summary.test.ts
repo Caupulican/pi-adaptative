@@ -63,6 +63,7 @@ function createAnalytics(
 		},
 		getEntryCount: () => entries.length,
 		getEntriesSince: (startIndex: number) => entries.slice(startIndex),
+		getEntry: (id: string) => entries.find((entry) => entry.id === id),
 		getSessionDir: () => sessionDir,
 		usesDefaultSessionDir: () => false,
 		getSessionFile: () => join(sessionDir, "session.jsonl"),

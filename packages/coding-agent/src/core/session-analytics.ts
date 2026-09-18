@@ -355,7 +355,8 @@ export class SessionAnalytics {
 			previous.sessionId === sessionManager.getSessionId() &&
 			previous.sessionFile === sessionManager.getSessionFile() &&
 			entryCount >= previous.entryCount &&
-			(!previous.lastEntry || sessionManager.getEntry?.(previous.lastEntry.id) === previous.lastEntry);
+			(!previous.lastEntry ||
+				(sessionManager.getEntry ? sessionManager.getEntry(previous.lastEntry.id) === previous.lastEntry : true));
 		if (!sameLineage) {
 			this._currentSessionCostCache = undefined;
 			this._dailyUsageCache = undefined;

@@ -370,6 +370,21 @@ describe("background lane disposal", () => {
 			}),
 		]);
 	});
+
+	it("safely tolerates omitted deps.isDisposed when materializing worker lifecycle and receipts", () => {
+		const controller = new BackgroundLaneController({
+			getAgentDir: () => "/tmp/pi-background-lane-omitted-disposed",
+			getSessionId: () => "session-omitted-disposed",
+			getSessionManager: () => ({ getEntries: () => [] }) as unknown as SessionManager,
+		} as never);
+		const internals = controller as unknown as {
+			_getWorkerLifecycle(): WorkerLifecycle;
+			_workerUsage?: unknown;
+		};
+		const lifecycle = internals._getWorkerLifecycle();
+		expect(lifecycle).toBeDefined();
+		expect(internals._workerUsage).toBeDefined();
+	});
 });
 
 describe("worker runtime construction", () => {

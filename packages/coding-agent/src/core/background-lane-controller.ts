@@ -188,7 +188,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			subscribe: (listener) => store.subscribe(listener),
 			deliver: (usage, options) =>
 				deliverSpawnedUsageReceipt(this.deps.getSessionManager(), this.deps, usage, options),
-			isDisposed: () => this.deps.isDisposed(),
+			isDisposed: () => Boolean(this.deps.isDisposed?.()),
 			warn: (message) => this._safeWarn(message),
 		});
 		for (const notification of lifecycle.getPendingTerminalNotifications()) {

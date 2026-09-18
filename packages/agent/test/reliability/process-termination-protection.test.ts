@@ -153,6 +153,16 @@ describe("bounded ancestry protection", () => {
 		vi.mocked(spawnSync).mockReturnValue({ status: 0, stdout } as ReturnType<typeof spawnSync>);
 		expect(createProcessTerminationProtectionReader()()).toEqual(new Set([1, process.pid, process.ppid]));
 	});
+	it("treats a Windows recycled PID loop as an absent historical creator and retains protected ancestors", () => {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const stdout = JSON.stringify([
+			{ ProcessId: process.pid, ParentProcessId: process.ppid },
+			{ ProcessId: process.ppid, ParentProcessId: 2604 },
+			{ ProcessId: 2604, ParentProcessId: process.ppid },
+		]);
+		vi.mocked(spawnSync).mockReturnValue({ status: 0, stdout } as ReturnType<typeof spawnSync>);
+		expect(createProcessTerminationProtectionReader()()).toEqual(new Set([1, process.pid, process.ppid, 2604]));
+	});
 	it.each(["ETIMEDOUT", "EACCES"])("refuses a Windows observer error %s despite parseable stdout", (code) => {
 		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
 		const stdout = JSON.stringify([{ ProcessId: process.pid, ParentProcessId: process.ppid }]);
