@@ -7,6 +7,7 @@ import {
 	type PathAliasTable,
 } from "../src/core/context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../src/core/context/path-alias-tool-wrap.ts";
+import { resolvePath } from "../src/utils/paths.ts";
 
 describe("50-case path and parameter comprehensive corpus", () => {
 	const repo = "/repo";
@@ -136,7 +137,7 @@ describe("50-case path and parameter comprehensive corpus", () => {
 			cwd: repo,
 			entries: [{ id: "p/index.ts", path: "./src/index.ts" }],
 		};
-		expect(expandText(table, "open p/index.ts now", true)).toBe("open /repo/src/index.ts now");
+		expect(expandText(table, "open p/index.ts now", true)).toBe(`open ${resolvePath("src/index.ts", repo)} now`);
 	});
 
 	it("Case 13: Clean relative path without prefix resolves against cwd when absolute=true", () => {
@@ -144,7 +145,7 @@ describe("50-case path and parameter comprehensive corpus", () => {
 			cwd: repo,
 			entries: [{ id: "p/index.ts", path: "src/index.ts" }],
 		};
-		expect(expandText(table, "open p/index.ts now", true)).toBe("open /repo/src/index.ts now");
+		expect(expandText(table, "open p/index.ts now", true)).toBe(`open ${resolvePath("src/index.ts", repo)} now`);
 	});
 
 	it("Case 14: Windows dot-relative path resolves against cwd when absolute=true", () => {
@@ -152,7 +153,7 @@ describe("50-case path and parameter comprehensive corpus", () => {
 			cwd: repo,
 			entries: [{ id: "p/index.ts", path: String.raw`.\src\index.ts` }],
 		};
-		expect(expandText(table, "open p/index.ts now", true)).toBe("open /repo/src/index.ts now");
+		expect(expandText(table, "open p/index.ts now", true)).toBe(`open ${resolvePath("src/index.ts", repo)} now`);
 	});
 
 	// --------------------------------------------------------------------------
@@ -262,7 +263,7 @@ describe("50-case path and parameter comprehensive corpus", () => {
 	it("Case 30: Minted path alias in 'path' parameter expands to canonical path", async () => {
 		const { wrapped, calls } = createMockTool("path");
 		await wrapped.execute("call-30", { path: "p/grep.ts" }, undefined as never, undefined);
-		expect(calls).toEqual([{ path: `/repo/${grepPath}` }]);
+		expect(calls).toEqual([{ path: resolvePath(grepPath, repo) }]);
 	});
 
 	it("Case 31: Unminted path alias in 'path' parameter is rejected with descriptive error", () => {
@@ -275,7 +276,7 @@ describe("50-case path and parameter comprehensive corpus", () => {
 	it("Case 32: Minted path aliases in 'paths' array parameter expand to canonical paths", async () => {
 		const { wrapped, calls } = createMockTool("paths");
 		await wrapped.execute("call-32", { paths: ["p/grep.ts"] }, undefined as never, undefined);
-		expect(calls).toEqual([{ paths: [`/repo/${grepPath}`] }]);
+		expect(calls).toEqual([{ paths: [resolvePath(grepPath, repo)] }]);
 	});
 
 	it("Case 33: Unminted path aliases in 'paths' array parameter are rejected", () => {
