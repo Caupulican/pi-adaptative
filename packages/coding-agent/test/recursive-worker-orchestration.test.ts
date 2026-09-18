@@ -955,6 +955,7 @@ describe("leaf worker orchestration", () => {
 				"edit",
 				"python",
 				STABLE_SHELL_TOOL_NAME,
+				"typesafe_review",
 				"artifact_retrieve",
 				"run_toolkit_script",
 				"skill",

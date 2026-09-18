@@ -111,6 +111,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"task_directory",
 			"task_steps",
 			"tool_task",
+			"typesafe_review",
 			"update_goal",
 			"webfetch",
 			"worktree_sync",

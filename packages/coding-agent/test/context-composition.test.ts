@@ -146,6 +146,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"task_directory",
 					"task_steps",
 					"tool_task",
+					"typesafe_review",
 					"update_goal",
 					"write",
 					"webfetch",

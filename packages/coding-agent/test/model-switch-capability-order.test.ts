@@ -54,6 +54,7 @@ describe("model switch capability ordering", () => {
 				"get_goal",
 				"update_goal",
 				"ask_question",
+				"typesafe_review",
 				"run_toolkit_script",
 				"artifact_retrieve",
 			]);

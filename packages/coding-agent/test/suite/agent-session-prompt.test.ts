@@ -316,6 +316,7 @@ describe("AgentSession prompt characterization", () => {
 			"pipeline",
 			"ask_question",
 			"secret_store",
+			"typesafe_review",
 			"delegate",
 			"tool_task",
 			"run_toolkit_script",

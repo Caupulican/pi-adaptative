@@ -72,6 +72,7 @@ describe("regression #5109: exclude tools", () => {
 				"task_automation",
 				"task_directory",
 				"task_steps",
+				"typesafe_review",
 				"update_goal",
 				"webfetch",
 				"write",
