@@ -25,6 +25,21 @@ export interface PromotedSkillInfo {
 	keywords: string[];
 }
 
+export interface DisuseBreadthGuard {
+	/** Whether observation breadth is sufficient to infer true disuse. When false, archival proposals are suppressed. */
+	sufficient?: boolean;
+	/** Number of observed sessions/traces evaluated. */
+	sessionCount?: number;
+	/** Minimum sessions required before proposing archival. Default 1. */
+	minSessions?: number;
+	/** Day span across observations. */
+	spanDays?: number;
+	/** Minimum day span required. Default 0. */
+	minSpanDays?: number;
+	/** Human reason if insufficient. */
+	reason?: string;
+}
+
 export interface CuratorOptions {
 	/** A promoted skill unused and older than this many days is proposed for archival. Default 30. */
 	staleDays: number;
@@ -32,6 +47,10 @@ export interface CuratorOptions {
 	overlapThreshold: number;
 	/** Current time (ms epoch); injected so the proposal logic stays pure/testable. */
 	now: number;
+	/** Disuse evidence qualification (Grok learn parity). Archival is suppressed if disuse breadth is insufficient. */
+	disuseGuard?: DisuseBreadthGuard;
+	/** Set of skill names whose archival proposal was rejected by the user; suppressed across runs. */
+	rejectedSkills?: ReadonlySet<string>;
 }
 
 export const DEFAULT_CURATOR_OPTIONS: Omit<CuratorOptions, "now"> = {
@@ -53,17 +72,26 @@ export interface CurationProposals {
 export function computeCurationProposals(skills: PromotedSkillInfo[], opts: CuratorOptions): CurationProposals {
 	const staleMs = opts.staleDays * 86_400_000;
 	const archive: CurationProposals["archive"] = [];
-	for (const s of skills) {
-		// "Stale" = never recently used AND not freshly promoted: measure age from the most recent of
-		// last-use / creation so a brand-new skill isn't archived before it has had a chance to be used.
-		const lastSeen = Math.max(s.lastUsedMs, s.createdMs);
-		const ageMs = opts.now - lastSeen;
-		if (ageMs > staleMs) {
-			const days = Math.floor(ageMs / 86_400_000);
-			archive.push({
-				name: s.name,
-				reason: s.useCount === 0 ? `never used, ${days}d old` : `unused for ${days}d (${s.useCount} total uses)`,
-			});
+	const disuseSufficient =
+		opts.disuseGuard?.sufficient !== false &&
+		(opts.disuseGuard?.minSessions === undefined ||
+			(opts.disuseGuard.sessionCount ?? 0) >= opts.disuseGuard.minSessions) &&
+		(opts.disuseGuard?.minSpanDays === undefined || (opts.disuseGuard.spanDays ?? 0) >= opts.disuseGuard.minSpanDays);
+
+	if (disuseSufficient) {
+		for (const s of skills) {
+			if (opts.rejectedSkills?.has(s.name)) continue;
+			// "Stale" = never recently used AND not freshly promoted: measure age from the most recent of
+			// last-use / creation so a brand-new skill isn't archived before it has had a chance to be used.
+			const lastSeen = Math.max(s.lastUsedMs, s.createdMs);
+			const ageMs = opts.now - lastSeen;
+			if (ageMs > staleMs) {
+				const days = Math.floor(ageMs / 86_400_000);
+				archive.push({
+					name: s.name,
+					reason: s.useCount === 0 ? `never used, ${days}d old` : `unused for ${days}d (${s.useCount} total uses)`,
+				});
+			}
 		}
 	}
 
@@ -93,6 +121,14 @@ type UsageMap = Record<string, UsageRecord>;
 /** Cap on how much of a skill body feeds keyword extraction (keeps overlap detection cheap). */
 const KEYWORD_SOURCE_CAP = 4000;
 
+export interface CurationDecisionRecord {
+	date: string;
+	name: string;
+	action: "archive" | "consolidate";
+	decision: "applied" | "rejected" | "deferred";
+	reason?: string;
+}
+
 /**
  * Filesystem layer over {@link computeCurationProposals}: reads promoted SKILL.md files + the usage
  * sidecar, and archives/restores skills non-destructively. The current time is injected so callers (and
@@ -102,11 +138,13 @@ export class SkillCurator {
 	private readonly skillsDir: string;
 	private readonly archiveDir: string;
 	private readonly usageFile: string;
+	private readonly decisionsFile: string;
 
 	constructor(skillsDir: string) {
 		this.skillsDir = skillsDir;
 		this.archiveDir = join(skillsDir, ".archive");
 		this.usageFile = join(skillsDir, ".usage.json");
+		this.decisionsFile = join(skillsDir, ".decisions.jsonl");
 	}
 
 	/**
@@ -127,13 +165,69 @@ export class SkillCurator {
 		}
 	}
 
+	/**
+	 * Record a curation decision (Grok learn parity via decisions.jsonl). Appends one JSON line.
+	 */
+	recordDecision(decision: {
+		name: string;
+		action: "archive" | "consolidate";
+		decision: "applied" | "rejected" | "deferred";
+		reason?: string;
+	}): void {
+		try {
+			withFileLockSync(this.decisionsFile, () => {
+				const line: CurationDecisionRecord = {
+					date: new Date().toISOString().slice(0, 10),
+					name: decision.name,
+					action: decision.action,
+					decision: decision.decision,
+					reason: decision.reason,
+				};
+				let existing = "";
+				try {
+					existing = readFileSync(this.decisionsFile, "utf-8");
+				} catch {
+					existing = "";
+				}
+				const content = existing ? `${existing.trimEnd()}\n${JSON.stringify(line)}\n` : `${JSON.stringify(line)}\n`;
+				writeFileAtomicSync(this.decisionsFile, content);
+			});
+		} catch {
+			// decision tracking must never disrupt a turn
+		}
+	}
+
+	/**
+	 * Load skill names whose archival was explicitly rejected by the user.
+	 */
+	loadRejections(): Set<string> {
+		const rejections = new Set<string>();
+		try {
+			const content = readFileSync(this.decisionsFile, "utf-8");
+			for (const line of content.split("\n")) {
+				const trimmed = line.trim();
+				if (!trimmed) continue;
+				const entry = JSON.parse(trimmed) as CurationDecisionRecord;
+				if (entry.action === "archive" && entry.decision === "rejected") {
+					rejections.add(entry.name);
+				}
+			}
+		} catch {
+			// file may not exist yet
+		}
+		return rejections;
+	}
+
 	/** Build the proposals from the current promoted-skill corpus. */
 	proposeCuration(now: number, options: Partial<Omit<CuratorOptions, "now">> = {}): CurationProposals {
 		const skills = this.loadPromotedSkills();
+		const rejectedSkills = options.rejectedSkills ?? this.loadRejections();
 		return computeCurationProposals(skills, {
 			now,
 			staleDays: options.staleDays ?? DEFAULT_CURATOR_OPTIONS.staleDays,
 			overlapThreshold: options.overlapThreshold ?? DEFAULT_CURATOR_OPTIONS.overlapThreshold,
+			disuseGuard: options.disuseGuard,
+			rejectedSkills,
 		});
 	}
 
@@ -169,6 +263,12 @@ export class SkillCurator {
 			if (!existsSync(join(from, "SKILL.md")) || !this.isPromoted(name)) return false;
 			mkdirSync(this.archiveDir, { recursive: true });
 			renameSync(from, join(this.archiveDir, name));
+			this.recordDecision({
+				name,
+				action: "archive",
+				decision: "applied",
+				reason: "archived",
+			});
 			return true;
 		} catch {
 			return false;
@@ -182,6 +282,13 @@ export class SkillCurator {
 			const to = join(this.skillsDir, name);
 			if (!existsSync(join(from, "SKILL.md")) || existsSync(to)) return false;
 			renameSync(from, to);
+			this.recordDecision({
+				name,
+				action: "archive",
+				decision: "rejected",
+				reason: "restored by user",
+			});
+			this.recordUse(name, Date.now());
 			return true;
 		} catch {
 			return false;

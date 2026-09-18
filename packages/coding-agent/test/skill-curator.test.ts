@@ -168,4 +168,78 @@ parentPort.postMessage({ done: true });
 		const promoted = curator.loadPromotedSkills().find((s) => s.name === "promoted-one");
 		expect(promoted?.useCount).toBe(iterationsPerWorker * 2);
 	}, 20_000);
+
+	it("respects disuse breadth guard to suppress archival in narrow observation windows", () => {
+		writeSkill("stale-candidate", true);
+		const curator = new SkillCurator(dir);
+		const created = curator.loadPromotedSkills()[0].createdMs;
+		const now = created + 40 * DAY;
+
+		// 1. Explicit insufficient guard suppresses archival
+		const narrowProposals = curator.proposeCuration(now, {
+			staleDays: 30,
+			disuseGuard: { sufficient: false, reason: "scoped to single session" },
+		});
+		expect(narrowProposals.archive).toEqual([]);
+
+		// 2. Insufficient session count suppresses archival
+		const fewSessionsProposals = curator.proposeCuration(now, {
+			staleDays: 30,
+			disuseGuard: { sessionCount: 5, minSessions: 20 },
+		});
+		expect(fewSessionsProposals.archive).toEqual([]);
+
+		// 3. Insufficient day span suppresses archival
+		const shortSpanProposals = curator.proposeCuration(now, {
+			staleDays: 30,
+			disuseGuard: { spanDays: 3, minSpanDays: 7 },
+		});
+		expect(shortSpanProposals.archive).toEqual([]);
+
+		// 4. Sufficient observation window allows archival
+		const sufficientProposals = curator.proposeCuration(now, {
+			staleDays: 30,
+			disuseGuard: { sufficient: true, sessionCount: 25, minSessions: 20, spanDays: 14, minSpanDays: 7 },
+		});
+		expect(sufficientProposals.archive.map((a) => a.name)).toEqual(["stale-candidate"]);
+	});
+
+	it("persists curation rejections and prevents re-archival of restored skills", async () => {
+		writeSkill("stale-rejected", true);
+		const curator = new SkillCurator(dir);
+		const created = curator.loadPromotedSkills()[0].createdMs;
+		const now = created + 40 * DAY;
+
+		// Initial proposal includes the stale skill
+		expect(curator.proposeCuration(now, { staleDays: 30 }).archive.map((a) => a.name)).toEqual(["stale-rejected"]);
+
+		// User rejects the proposal: records in decisions.jsonl
+		curator.recordDecision({
+			name: "stale-rejected",
+			action: "archive",
+			decision: "rejected",
+			reason: "user kept skill",
+		});
+
+		// Subsequent proposal suppresses the rejected skill
+		expect(curator.proposeCuration(now, { staleDays: 30 }).archive).toEqual([]);
+		expect(await curator.autoArchiveStale(now, { staleDays: 30 })).toEqual([]);
+
+		// Test restoreSkill parity: if a skill was archived, restoring it records a rejection
+		writeSkill("to-archive-and-restore", true);
+		expect(curator.archiveSkill("to-archive-and-restore")).toBe(true);
+		expect(existsSync(join(dir, ".archive", "to-archive-and-restore", "SKILL.md"))).toBe(true);
+
+		// User restores the skill
+		expect(curator.restoreSkill("to-archive-and-restore")).toBe(true);
+		expect(existsSync(join(dir, "to-archive-and-restore", "SKILL.md"))).toBe(true);
+
+		// Subsequent proposals and autoArchiveStale will NOT re-archive it
+		expect(curator.loadRejections().has("to-archive-and-restore")).toBe(true);
+		expect(curator.proposeCuration(now, { staleDays: 30 }).archive.map((a) => a.name)).not.toContain(
+			"to-archive-and-restore",
+		);
+		const secondArchive = await curator.autoArchiveStale(now, { staleDays: 30 });
+		expect(secondArchive).not.toContain("to-archive-and-restore");
+	});
 });
