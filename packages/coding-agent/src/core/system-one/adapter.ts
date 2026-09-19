@@ -43,6 +43,10 @@ export interface TypeSafeReviewerLike {
 	}>;
 }
 
+export interface SystemOneJevAdapterDeps {
+	sleep?: (ms: number) => Promise<void>;
+}
+
 /**
  * SystemOneJevAdapter: TypeSafe System One client with pinned model enforcement and failure policy.
  * R-006: Pin Jev to jev-1.13.0 in production.
@@ -54,11 +58,17 @@ export class SystemOneJevAdapter implements JevAdapter {
 	private readonly reviewer: TypeSafeReviewerLike;
 	private readonly config: SystemOneConfig;
 	private readonly pinnedModel: string;
+	private readonly sleep: (ms: number) => Promise<void>;
 
-	constructor(reviewer: TypeSafeReviewerLike, config: SystemOneConfig = DEFAULT_SYSTEM_ONE_CONFIG) {
+	constructor(
+		reviewer: TypeSafeReviewerLike,
+		config: SystemOneConfig = DEFAULT_SYSTEM_ONE_CONFIG,
+		deps: SystemOneJevAdapterDeps = {},
+	) {
 		this.reviewer = reviewer;
 		this.config = config;
 		this.pinnedModel = config.model.production || SYSTEM_ONE_PINNED_MODEL;
+		this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 	}
 
 	async evaluate(input: JevEvaluationRequest, options?: JevAdapterEvaluateOptions): Promise<JevEvaluationResponse> {
@@ -115,7 +125,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 				// R-067: Bounded backoff for transient or rate limit errors
 				if (attempts < maxAttempts) {
 					const backoffMs = Math.min(1000 * 2 ** (attempts - 1) + Math.random() * 200, 5000);
-					await new Promise((resolve) => setTimeout(resolve, backoffMs));
+					await this.sleep(backoffMs);
 				}
 			}
 		}

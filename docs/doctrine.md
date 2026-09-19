@@ -110,7 +110,8 @@ is the message, `agentId` on `status`/`review` is that agent's latest lane, `mes
 `interrupt` is queued for the paused worker, `retire` with undelivered control messages lists them
 and takes `force: true` — while a plural on a singular action or two selectors still refuse. An
 invented `sN-<slug>` or `sN-<uuid>` task-step selector names the one step carrying that number; a
-trailing numeric fragment (`s1-2`) still refuses. Pinned by
+trailing numeric fragment (`s1-2`) still refuses. When an exact `step-N` is absent and not archived, an
+ordinal position selector resolves to the open step at that 1-based index. Pinned by
 `packages/coding-agent/test/delegate-exact-input-corrections.test.ts`,
 `packages/coding-agent/test/worker-authority-resolver.test.ts`,
 `packages/coding-agent/test/task-state.test.ts`,

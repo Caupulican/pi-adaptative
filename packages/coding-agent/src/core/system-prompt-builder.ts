@@ -211,8 +211,10 @@ export class SystemPromptBuilder {
 	}
 
 	private _buildStaticMemoryPrompt(profile: ModelCapabilityProfile, availableChars?: number): string | undefined {
-		// ICM mode: avoid reading legacy MEMORY.md/USER.md/OKF bodies automatically.
-		if (this.isIcmMode()) return ICM_MEMORY_GUIDANCE;
+		// ICM mode: avoid reading legacy MEMORY.md/USER.md/OKF bodies automatically; install frozen ICM catalog.
+		if (this.isIcmMode()) {
+			return this.deps.getMemoryManager?.().freezeSystemPromptBlock?.() || ICM_MEMORY_GUIDANCE;
+		}
 		let budget =
 			profile.class !== "full" && profile.contextWindow !== undefined
 				? resolveMemoryPromptBudget({ contextWindow: profile.contextWindow, configuredMaxResults: 3 })

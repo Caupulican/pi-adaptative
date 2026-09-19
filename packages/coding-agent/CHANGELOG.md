@@ -1,11 +1,18 @@
 ## [Unreleased]
 
+### Added
+
+- Wire SystemOneController semantic control plane into AgentSession turn lifecycle, ToolGateController execution interception, and goal completion validation.
+
 ### Fixed
 
 - Treat `memory/` as a canonical agent-root directory so doctor and startup migration no longer archive live project memory. Restore a previously stolen tree from `state/legacy-layout/memory` when the live root is missing.
 - Resolve `@ff-labs/fff-node` via direct `package.json` lookup and `dist/index.cjs` candidates when bare module require fails.
 - Auto-detect source checkouts from cwd for `runtime_update` and inform the model of managed tool self-healing capabilities.
 - Actively verify TypeSafe credentials against the models endpoint in `typesafe_review` status checks, setting `authenticationVerified: true` and caching verification on success to prevent models from mistaking unverified status for authentication failure.
+- Resolve `task_steps` selector mismatch deadlocks by supporting 1-based index ordinal positions when exact step numbers are absent.
+- Freeze and install the generated ICM memory catalog block into the system prompt builder when running in ICM mode.
+- Allow injecting sleep function into SystemOneJevAdapter to eliminate timeout impedance and test latency during backoff retries.
 
 ## [0.99.29] - 2026-09-18
 

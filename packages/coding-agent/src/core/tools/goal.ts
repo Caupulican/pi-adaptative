@@ -28,6 +28,7 @@ import {
 } from "../goals/goal-tool-core.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import { awaitPreflight } from "../preflight.ts";
+import type { SystemOneController } from "../system-one/controller.ts";
 import {
 	emptyOrchestrationCall,
 	goalEvidencePanelRow,
@@ -303,6 +304,8 @@ export interface GoalToolDependencies {
 	 * quote resolved verbatim to a user message; absent when the host has no edge (tests, SDK).
 	 */
 	grantEdge?: (grant: { class: EdgeClass; quote: string; messageEntryId: string; scopeKey?: string }) => void;
+	/** System One semantic control plane controller for two-stage completion validation. */
+	getSystemOneController?: () => SystemOneController | undefined;
 	/**
 	 * Narrow operation scope resolver for toolkit.script grants. Resolves registered script name
 	 * and exact argv to an internal scope key using host registry and execution context.
@@ -897,6 +900,18 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 							`Cannot transition goal to ${result.state.status}: active verification obligation(s) remain (${activeVerificationIds.join(", ")}). The same verification id must report status passed first.`,
 							current,
 						);
+					}
+					const systemOne = deps.getSystemOneController?.();
+					if (systemOne) {
+						const completionDecision = await systemOne.executeCompletionTransaction(false);
+						if (completionDecision.verdict !== "complete") {
+							const reasons = completionDecision.failed_gates.map((g) => g.reason).join("; ");
+							return goalExecutionError(
+								input.action,
+								`System One semantic completion gate rejected: ${reasons || completionDecision.verdict}`,
+								current,
+							);
+						}
 					}
 				}
 				let committed = result.state;

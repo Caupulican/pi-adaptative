@@ -441,8 +441,21 @@ export function resolveTaskStepSelector(
 	// `step-<n>`. Measured live, a model that wrote "s2" lost the turn and armed the failure ledger.
 	const ordinal = /^(?:#|s|step)?[\s-]*(\d+)$/.exec(normalized);
 	if (ordinal) {
-		const byOrdinal = steps.find((step) => step.id.toLocaleLowerCase() === `step-${Number(ordinal[1])}`);
+		const num = Number(ordinal[1]);
+		const byOrdinal = steps.find((step) => step.id.toLocaleLowerCase() === `step-${num}`);
 		if (byOrdinal) return byOrdinal;
+		const open = steps.filter((step) => step.status !== "completed" && step.status !== "cancelled");
+		const archivedCount = (context?.archive?.completed ?? 0) + (context?.archive?.cancelled ?? 0);
+		const isArchivedHistorical =
+			context?.nextStepNumber !== undefined && num > 0 && num < context.nextStepNumber && archivedCount > 0;
+		if (!isArchivedHistorical) {
+			const candidateList = open.length > 0 ? open : steps;
+			if (num >= 1 && num <= candidateList.length) {
+				const resolved = candidateList[num - 1]!;
+				onNormalized?.(`selector ${JSON.stringify(selector.trim())} resolved by 1-based index to ${resolved.id}`);
+				return resolved;
+			}
+		}
 	}
 	// An ordinal prefix with trailing noise ("s1-<uuid>", "step 2 (done)") names one step when
 	// exactly one id carries that number: measured live, a model invented "s1-<uuid>" and lost 28

@@ -16,6 +16,7 @@ import {
 } from "./agent-session-contracts.ts";
 import type { CapabilityTierDemotion } from "./capability-tier.ts";
 import type { GoalGuardRecovery } from "./goals/goal-session-controller.ts";
+import type { SystemOneController } from "./system-one/controller.ts";
 
 export interface SessionGuardDeps {
 	getModel(): Model<Api> | undefined;
@@ -109,4 +110,24 @@ export function handleToolValidationEscalation(deps: SessionGuardDeps, event: To
 		return;
 	}
 	deps.requestValidationFailureEscalation();
+}
+
+export async function executeSystemOnePreflight(
+	controller: SystemOneController | undefined,
+	messageCount: number,
+): Promise<void> {
+	if (!controller) return;
+	const preflight = await controller.validatePreflight(String(messageCount + 1));
+	if (preflight.route === "block") {
+		throw new Error(`System One preflight rejected: ${preflight.decision.policy_result}`);
+	}
+}
+
+export async function executeSystemOnePostflight(
+	controller: SystemOneController | undefined,
+	messageCount: number,
+	aborted?: boolean,
+): Promise<void> {
+	if (!controller || aborted) return;
+	await controller.validatePostflight(String(messageCount));
 }

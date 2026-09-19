@@ -4,19 +4,16 @@ import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import type { CompactionResult, CompactionSettings } from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
 import { type CustomMessage, createCustomMessage } from "@caupulican/pi-agent-core/messages";
-import type { StreamIdleOptions } from "@caupulican/pi-agent-core/reliability";
 import type { BranchSummaryEntry, SessionManager } from "@caupulican/pi-agent-core/session";
 import { NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR } from "@caupulican/pi-agent-core/tool-protocol-residue";
 import type {
 	AgentContext,
 	AgentEvent,
 	AgentMessage,
-	AgentRunawayStopInfo,
 	AgentState,
 	AgentTool,
 	StreamFn,
 	ThinkingLevel,
-	ToolValidationEscalationEvent,
 } from "@caupulican/pi-agent-core/types";
 import {
 	createVerificationDismissalDetails,
@@ -39,7 +36,13 @@ import {
 	type SessionEdgeDeps,
 	sessionEdgeGrants,
 } from "./agent-session-edge.ts";
-import { handleRunawayStop, handleToolValidationEscalation, type SessionGuardDeps } from "./agent-session-guards.ts";
+import {
+	executeSystemOnePostflight,
+	executeSystemOnePreflight,
+	handleRunawayStop,
+	handleToolValidationEscalation,
+	type SessionGuardDeps,
+} from "./agent-session-guards.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import type {
 	CapabilityEnvelope,
@@ -194,6 +197,7 @@ import type {
 	SettingsScope,
 } from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
+import type { SystemOneController } from "./system-one/controller.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
 import { captureSessionTaskDirectoryContext } from "./tasks/task-directory-context.ts";
@@ -212,41 +216,30 @@ import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-ses
 // Stream-idle watchdog wiring
 // ============================================================================
 
-/** Test-only override of the stream-idle bounds. Read per-request by the wiring's resolver. */
-let streamIdleOptionsOverride: Partial<StreamIdleOptions> | undefined;
-
-/** Test hook: override stream-idle bounds. Pass undefined to restore user-locked defaults. */
-export function setStreamIdleOptionsForTests(opts: Partial<StreamIdleOptions> | undefined): void {
-	streamIdleOptionsOverride = opts;
-}
-
 export * from "./agent-session-contracts.ts";
 
-import type {
-	AgentSessionConfig,
-	AgentSessionEvent,
-	AgentSessionEventListener,
-	ExtensionBindings,
-	GoalContinuationLoopOptions,
-	GoalContinuationLoopResult,
-	GoalContinuationOnceOptions,
-	GoalContinuationOnceResult,
-	IsolatedCompletionOptions,
-	IsolatedCompletionResult,
-	ModelCycleResult,
-	PromptOptions,
-	ResearchLaneRunOutcome,
-	SessionStats,
-	SpawnedUsageTotals,
-	WorkerDelegationRunOutcome,
+import {
+	type AgentSessionConfig,
+	type AgentSessionEvent,
+	type AgentSessionEventListener,
+	type ExtensionBindings,
+	type GoalContinuationLoopOptions,
+	type GoalContinuationLoopResult,
+	type GoalContinuationOnceOptions,
+	type GoalContinuationOnceResult,
+	getStreamIdleOptionsOverride,
+	type IsolatedCompletionOptions,
+	type IsolatedCompletionResult,
+	isInterruptedAssistantStopReason,
+	type ModelCycleResult,
+	type PromptOptions,
+	type ResearchLaneRunOutcome,
+	type SessionStats,
+	type SpawnedUsageTotals,
+	type WorkerDelegationRunOutcome,
 } from "./agent-session-contracts.ts";
-import { isInterruptedAssistantStopReason } from "./agent-session-contracts.ts";
 
 export type { ToolProbeReport, ToolProbeResult, ToolProbeVerdict } from "./tool-protocol-controller.ts";
-
-interface ForegroundPromptSubmission {
-	lease?: ForegroundSubmissionLease;
-}
 
 // ============================================================================
 // AgentSession Class
@@ -407,9 +400,11 @@ export class AgentSession {
 	// The paired _baseSystemPromptOptions and their construction live in SystemPromptBuilder.
 	private _baseSystemPrompt = "";
 	private readonly _pathAliasWrappedTools = new WeakSet<AgentTool>();
+	private _systemOneController?: SystemOneController;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this._systemOneController = config.systemOneController;
 		// The provider stream chain (perf profile, idle watchdog, machine-wide admission) is built and
 		// installed exactly once, here; see session-stream-chain.ts.
 		const agentDir = config.agentDir ?? getAgentDir();
@@ -448,7 +443,7 @@ export class AgentSession {
 			authStorage: config.modelRegistry.authStorage,
 			onWait: (event) => this._emit({ type: "provider_admission_wait", ...event }),
 			getRepetitionGuardRepeats: () => this.getCapabilityTierPolicy().repetitionGuardRepeats,
-			getStreamIdleOptionsOverride: () => streamIdleOptionsOverride,
+			getStreamIdleOptionsOverride,
 		});
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
@@ -1056,6 +1051,7 @@ export class AgentSession {
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			saveGoalStateSnapshot: (state, expected) => this.saveGoalStateSnapshot(state, expected),
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
+			getSystemOneController: () => this._systemOneController,
 			grantEdgeFromInstructions: (grant) => this.grantEdge(grant.class, "instructions", grant),
 			enforceEdgeOperation: (op, signal) => enforceSessionEdgeOperation(this._edgeDeps(), op, undefined, signal),
 			authorizeGoalStartFromTool: (input) => this._goals.authorizeStartFromTool(input),
@@ -1271,6 +1267,7 @@ export class AgentSession {
 			checkEdge: (tool, args, cwd, signal) => enforceSessionEdge(this._edgeDeps(), tool, args, cwd, signal),
 			checkDirectScriptExecution: (toolName, args, cwd) =>
 				this._runtimeBuilder.checkDirectScriptExecution(toolName, args, cwd),
+			getSystemOneController: () => this._systemOneController,
 		});
 
 		// Always subscribe to agent events for internal handling
@@ -1296,6 +1293,11 @@ export class AgentSession {
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
+	}
+
+	/** System One semantic control plane controller, if active for this session. */
+	get systemOneController(): SystemOneController | undefined {
+		return this._systemOneController;
 	}
 
 	/**
@@ -1820,8 +1822,8 @@ export class AgentSession {
 			this._backgroundToolTasks.subscribeHandoffRequest(toolCallId, request);
 		this.agent.isBackgroundRequested = (tool, args) =>
 			this.getToolDefinition(tool)?.backgroundRequested?.(args as never) === true;
-		this.agent.onRunawayStop = (info) => this._handleRunawayStop(info);
-		this.agent.onToolValidationEscalation = (event) => this._handleToolValidationEscalation(event);
+		this.agent.onRunawayStop = (info) => handleRunawayStop(this._guardDeps(), info);
+		this.agent.onToolValidationEscalation = (event) => handleToolValidationEscalation(this._guardDeps(), event);
 		this.agent.toolFailureProtocolProse = this.getCapabilityTierPolicy().protocolProse;
 		this.agent.maxRepeatedFailures = this.getCapabilityTierPolicy().repetitionGuardRepeats;
 	}
@@ -1849,14 +1851,6 @@ export class AgentSession {
 			maybeAutoProbe: (model) => this._toolProtocol.maybeAutoProbe(model),
 			requestValidationFailureEscalation: () => this._modelRouter.requestValidationFailureEscalation(),
 		};
-	}
-
-	private _handleRunawayStop(info: AgentRunawayStopInfo): void {
-		handleRunawayStop(this._guardDeps(), info);
-	}
-
-	private _handleToolValidationEscalation(event: ToolValidationEscalationEvent): void {
-		handleToolValidationEscalation(this._guardDeps(), event);
 	}
 
 	// =========================================================================
@@ -2601,7 +2595,7 @@ export class AgentSession {
 		options?: PromptOptions,
 		initialSubmissionLease?: ForegroundSubmissionLease,
 	): Promise<void> {
-		const submission: ForegroundPromptSubmission = { lease: initialSubmissionLease };
+		const submission = { lease: initialSubmissionLease };
 		if (submission.lease) this._foregroundPromptLease = submission.lease;
 		try {
 			await this._promptUnserialized(text, options, submission);
@@ -2625,7 +2619,7 @@ export class AgentSession {
 	private async _promptUnserialized(
 		text: string,
 		options: PromptOptions | undefined,
-		submission: ForegroundPromptSubmission,
+		submission: { lease?: ForegroundSubmissionLease },
 	): Promise<void> {
 		const submissionSignal = options?.signal;
 		// Fast path for a submission cancelled before it ever started: nothing has been built, painted or
@@ -2983,6 +2977,7 @@ export class AgentSession {
 		this._goals.setStartAuthority(goalToolStartAuthority);
 		try {
 			this._toolProtocol.resetTurnState();
+			await executeSystemOnePreflight(this._systemOneController, this.agent.state.messages.length);
 			await this._modelRouter.runRoutedTurn(
 				messages,
 				routedTurnModel,
@@ -2990,6 +2985,11 @@ export class AgentSession {
 				true,
 				false,
 				submissionSignal,
+			);
+			await executeSystemOnePostflight(
+				this._systemOneController,
+				this.agent.state.messages.length,
+				submissionSignal?.aborted,
 			);
 			// A cancelled submission records no outcome. Cancelled before the run, the last assistant
 			// message is the PREVIOUS turn's and scoring it here would count that turn twice; cancelled

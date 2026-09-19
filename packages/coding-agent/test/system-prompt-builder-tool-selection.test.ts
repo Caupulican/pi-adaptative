@@ -541,3 +541,48 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		expect(after).not.toBe(before);
 	});
 });
+
+describe("SystemPromptBuilder — ICM catalog freeze", () => {
+	it("installs the frozen IcmProvider catalog block instead of static guidance only", () => {
+		const freeze = vi.fn(() => 'ICM memory:\nUser ICM catalog: "/tmp/agent/memory"');
+		const builder = new SystemPromptBuilder(
+			makeDeps({
+				getSettingsManager: () =>
+					({
+						getActiveProfileSoul: () => undefined,
+						getSelfModificationSettings: () => ({ enabled: false }),
+						getAutoLearnSettings: () => ({ enabled: false }),
+						getAutonomySettings: () => ({ mode: "off" }),
+						getWorkerDelegationSettings: () => ({ enabled: false }),
+						getProjectContextFiles: () => "off",
+						getMemorySystem: () => "icm",
+					}) as unknown as SettingsManager,
+				getMemoryManager: () => ({ freezeSystemPromptBlock: freeze }) as unknown as MemoryManager,
+			}),
+		);
+		const prompt = builder.rebuildSystemPrompt(["read"]);
+		expect(freeze).toHaveBeenCalled();
+		expect(prompt).toContain('User ICM catalog: "/tmp/agent/memory"');
+		expect(prompt).not.toContain("=== Persistent Memory (file-store) ===");
+	});
+
+	it("falls back to routing guidance when the frozen ICM block is empty", () => {
+		const builder = new SystemPromptBuilder(
+			makeDeps({
+				getSettingsManager: () =>
+					({
+						getActiveProfileSoul: () => undefined,
+						getSelfModificationSettings: () => ({ enabled: false }),
+						getAutoLearnSettings: () => ({ enabled: false }),
+						getAutonomySettings: () => ({ mode: "off" }),
+						getWorkerDelegationSettings: () => ({ enabled: false }),
+						getProjectContextFiles: () => "off",
+						getMemorySystem: () => "icm",
+					}) as unknown as SettingsManager,
+			}),
+		);
+		const prompt = builder.rebuildSystemPrompt(["read"]);
+		expect(prompt).toContain("ICM memory:");
+		expect(prompt).toContain("on demand with native tools");
+	});
+});

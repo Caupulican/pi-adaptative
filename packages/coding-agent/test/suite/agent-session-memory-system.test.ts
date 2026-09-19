@@ -20,8 +20,13 @@ describe("AgentSession memory-system switching", () => {
 		expect(harness.session.getMemorySystem()).toBe("icm");
 		expect(harness.session.getActiveToolNames()).not.toContain("memory");
 		expect(harness.session.systemPrompt).toContain("ICM memory:");
+		expect(harness.session.systemPrompt).toContain(
+			`User ICM catalog: ${JSON.stringify(join(harness.tempDir, "memory"))}`,
+		);
+		expect(harness.session.systemPrompt).toContain(`Workspace: ${JSON.stringify(harness.tempDir)}`);
 		expect(harness.session.systemPrompt).toContain("Root reflection is disabled.");
 		expect(harness.session.systemPrompt).not.toContain("Query memory");
+		expect(harness.session.systemPrompt).not.toContain("=== Persistent Memory (file-store) ===");
 	});
 
 	it("switches both ways without modifying legacy file contents", async () => {

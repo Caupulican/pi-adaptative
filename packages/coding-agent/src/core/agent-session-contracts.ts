@@ -38,6 +38,7 @@ import type { ResearchRunResult } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-manager.ts";
+import type { SystemOneController } from "./system-one/controller.ts";
 import type { ToolArgumentValidationStats } from "./tool-recovery-stats.ts";
 
 export { type ParsedSkillBlock, parseSkillBlock } from "./skill-block.mjs";
@@ -133,6 +134,8 @@ export interface AgentSessionConfig {
 	orchestrationProfile?: OrchestrationProfile;
 	/** Injectable local-runtime I/O dependencies. */
 	localRuntimeDeps?: LocalRuntimeDeps;
+	/** System One semantic control plane controller for Jev semantic validation. */
+	systemOneController?: SystemOneController;
 }
 
 export interface ExtensionBindings {
@@ -387,3 +390,14 @@ export interface GoalContinuationLoopResult {
 
 /** Test-only stream watchdog override contract retained in the public session module. */
 export type StreamIdleOptionsOverride = Partial<StreamIdleOptions> | undefined;
+
+let streamIdleOptionsOverride: Partial<StreamIdleOptions> | undefined;
+
+/** Test hook: override stream-idle bounds. Pass undefined to restore user-locked defaults. */
+export function setStreamIdleOptionsForTests(opts: Partial<StreamIdleOptions> | undefined): void {
+	streamIdleOptionsOverride = opts;
+}
+
+export function getStreamIdleOptionsOverride(): Partial<StreamIdleOptions> | undefined {
+	return streamIdleOptionsOverride;
+}

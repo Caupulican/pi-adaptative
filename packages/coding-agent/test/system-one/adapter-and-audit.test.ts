@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { SystemOneJevAdapter } from "../../src/core/system-one/adapter.ts";
 import { AuditStore } from "../../src/core/system-one/audit.ts";
 
@@ -26,41 +26,34 @@ describe("System One Adapter and Audit", () => {
 	});
 
 	it("applies failure policy: degrades open on read-only with audit, fails closed on repo mutation (R-066)", async () => {
-		vi.useFakeTimers();
-		try {
-			const failingReviewer = {
-				evaluate: async () => {
-					throw new Error("TypeSafe API 503 Service Unavailable");
-				},
-			};
+		const failingReviewer = {
+			evaluate: async () => {
+				throw new Error("TypeSafe API 503 Service Unavailable");
+			},
+		};
 
-			const adapter = new SystemOneJevAdapter(failingReviewer);
+		const adapter = new SystemOneJevAdapter(failingReviewer, undefined, {
+			sleep: async () => {},
+		});
 
-			const readOnlyRes = adapter.evaluate(
-				{
-					state: { test: true },
-					questions: { test: { type: "noul", instructions: "test" } },
-				},
-				{ impact: "read_only" },
-			);
-			await vi.runAllTimersAsync();
-			expect((await readOnlyRes).answers).toEqual({});
+		const readOnlyRes = await adapter.evaluate(
+			{
+				state: { test: true },
+				questions: { test: { type: "noul", instructions: "test" } },
+			},
+			{ impact: "read_only" },
+		);
+		expect(readOnlyRes.answers).toEqual({});
 
-			const mutationRes = adapter.evaluate(
+		await expect(
+			adapter.evaluate(
 				{
 					state: { test: true },
 					questions: { test: { type: "noul", instructions: "test" } },
 				},
 				{ impact: "repo_mutation" },
-			);
-			const mutationAssert = expect(mutationRes).rejects.toThrow(
-				"Jev System One unavailable for impact 'repo_mutation'",
-			);
-			await vi.runAllTimersAsync();
-			await mutationAssert;
-		} finally {
-			vi.useRealTimers();
-		}
+			),
+		).rejects.toThrow("Jev System One unavailable for impact 'repo_mutation'");
 	});
 
 	it("persists full decision and tool action audit trail and provides explanation (R-040, R-041)", () => {

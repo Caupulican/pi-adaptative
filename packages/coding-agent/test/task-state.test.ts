@@ -434,4 +434,24 @@ describe("resolveTaskStepSelector ordinal prefixes", () => {
 		expect(resolveTaskStepSelector(state.steps, "s1-normalizing-worker-grep").id).toBe("step-1");
 		expect(() => resolveTaskStepSelector(state.steps, "s1-2")).toThrow(/not found for selector: s1-2/);
 	});
+
+	it("resolves a 1-based index ordinal selector to visible open steps when exact step-N does not exist", () => {
+		let state = createTaskStepsState("T0");
+		state.nextStepNumber = 12;
+		state = setTaskSteps(
+			state,
+			[
+				{ content: "Survey ICM vs file-store paths", status: "in_progress" },
+				{ content: "Failing tests then fix remaining holes", status: "pending" },
+				{ content: "Prove with tests", status: "pending" },
+			],
+			"T1",
+		);
+		expect(state.steps.map((s) => s.id)).toEqual(["step-12", "step-13", "step-14"]);
+		const notes: string[] = [];
+		expect(resolveTaskStepSelector(state.steps, "1", (note) => notes.push(note)).id).toBe("step-12");
+		expect(resolveTaskStepSelector(state.steps, "2").id).toBe("step-13");
+		expect(resolveTaskStepSelector(state.steps, "3").id).toBe("step-14");
+		expect(notes[0]).toContain("resolved by 1-based index to step-12");
+	});
 });

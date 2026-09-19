@@ -141,6 +141,7 @@ import {
 } from "./settings-manager.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import type { SystemOneController } from "./system-one/controller.ts";
 import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
 import type { TaskStepsState } from "./tasks/task-state.ts";
@@ -357,6 +358,8 @@ export interface RuntimeBuilderDeps {
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string;
 	/** Trusted active verification identities reconstructed by the session owner. */
 	getActiveVerificationIds?(): readonly string[];
+	/** System One semantic control plane controller. */
+	getSystemOneController?(): SystemOneController | undefined;
 	/** Record an edge grant the model cited from the operator's own words (goal grant_edge). */
 	grantEdgeFromInstructions?(grant: {
 		class: EdgeClass;
@@ -1188,6 +1191,7 @@ export class RuntimeBuilder {
 				const goalToolDefinition = createGoalToolDefinition({
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
 					getActiveVerificationIds: () => this.deps.getActiveVerificationIds?.() ?? [],
+					getSystemOneController: () => this.deps.getSystemOneController?.(),
 					grantEdge: this.deps.grantEdgeFromInstructions
 						? (grant) => this.deps.grantEdgeFromInstructions?.(grant)
 						: undefined,
