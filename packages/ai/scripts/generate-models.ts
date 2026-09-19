@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
@@ -636,10 +636,8 @@ function getOpenRouterApiKey(): string | undefined {
 	if (process.env.OPENROUTER_API_KEY) return process.env.OPENROUTER_API_KEY;
 	try {
 		const authFile = join(homedir(), ".pi", "agent", "auth.json");
-		if (existsSync(authFile)) {
-			const data = JSON.parse(readFileSync(authFile, "utf-8")) as Record<string, { key?: string }>;
-			if (data.openrouter?.key) return data.openrouter.key;
-		}
+		const data = JSON.parse(readFileSync(authFile, "utf-8")) as Record<string, { key?: string }>;
+		if (data.openrouter?.key) return data.openrouter.key;
 	} catch {
 		// Ignore storage read failures
 	}
