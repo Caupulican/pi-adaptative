@@ -541,7 +541,10 @@ describe("TypeSafe review boundary", () => {
 
 		const status = await reviewer.status();
 		expect(status).toMatchObject({ enabled: true, authenticationVerified: true });
-		expect(fetcher).toHaveBeenCalledWith("https://openrouter.ai/api/v1/models", expect.any(Object));
+		expect(fetcher).toHaveBeenCalledWith(
+			"https://openrouter.ai/api/v1/models?output_modalities=decisions",
+			expect.any(Object),
+		);
 
 		fetcher.mockClear();
 		const result = await reviewer.review(input);

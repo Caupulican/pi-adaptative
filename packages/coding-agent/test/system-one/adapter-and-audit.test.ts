@@ -3,8 +3,11 @@ import { SystemOneJevAdapter } from "../../src/core/system-one/adapter.ts";
 import { AuditStore } from "../../src/core/system-one/audit.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG } from "../../src/core/system-one/config.ts";
 import {
+	getSystemOneProviderDriver,
+	OpenRouterSystemOneDriver,
 	registerSystemOneProviderDriver,
 	type SystemOneProviderDriver,
+	TypeSafeSystemOneDriver,
 } from "../../src/core/system-one/provider-driver.ts";
 
 describe("System One Adapter and Audit", () => {
@@ -222,5 +225,61 @@ describe("System One Adapter and Audit", () => {
 		const res = await adapter.evaluate({ state: {}, questions: {} });
 		expect(res.model).toBe("custom/jev-1.13.0");
 		expect(res.answers).toEqual({ result: "ok" });
+	});
+
+	it("OpenRouterSystemOneDriver discovers models from decisions category endpoint", async () => {
+		const driver = new OpenRouterSystemOneDriver();
+		const originalFetch = globalThis.fetch;
+		let calledUrl = "";
+		let authHeader = "";
+
+		try {
+			globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+				calledUrl = String(url);
+				authHeader = (init?.headers as Record<string, string>)?.Authorization ?? "";
+				return {
+					ok: true,
+					json: async () => ({
+						data: [
+							{ id: "~typesafe/jev-latest" },
+							{ id: "typesafe/jev-1.13" },
+							{ id: "typesafe/jev-1.13-20260917" },
+						],
+					}),
+				} as unknown as Response;
+			}) as typeof fetch;
+
+			process.env.OPENROUTER_API_KEY = "test-openrouter-key";
+			const discovered = await driver.discoverModels();
+			expect(calledUrl).toBe("https://openrouter.ai/api/v1/models?output_modalities=decisions");
+			expect(authHeader).toBe("Bearer test-openrouter-key");
+			expect(discovered).toEqual(["~typesafe/jev-latest", "typesafe/jev-1.13", "typesafe/jev-1.13-20260917"]);
+		} finally {
+			globalThis.fetch = originalFetch;
+			delete process.env.OPENROUTER_API_KEY;
+		}
+	});
+
+	it("OpenRouterSystemOneDriver tolerates tilde aliases, typesafe prefixes, and version timestamps", () => {
+		const driver = new OpenRouterSystemOneDriver();
+		expect(driver.matchesModel("typesafe/jev-1.13", "typesafe/jev-1.13-20260917")).toBe(true);
+		expect(driver.matchesModel("typesafe/jev-latest", "~typesafe/jev-latest")).toBe(true);
+		expect(driver.matchesModel("~typesafe/jev-latest", "typesafe/jev-latest")).toBe(true);
+		expect(driver.matchesModel("typesafe/jev-1.13", "typesafe/jev-1.13.0")).toBe(true);
+		expect(driver.matchesModel("typesafe/jev-1.13.0", "typesafe/jev-1.13")).toBe(true);
+		expect(driver.matchesModel("typesafe/jev-1.13", "typesafe/jev-preview")).toBe(false);
+	});
+
+	it("resolves built-in drivers via getSystemOneProviderDriver", () => {
+		expect(getSystemOneProviderDriver("typesafe")).toBeInstanceOf(TypeSafeSystemOneDriver);
+		expect(getSystemOneProviderDriver("openrouter")).toBeInstanceOf(OpenRouterSystemOneDriver);
+		expect(getSystemOneProviderDriver()).toBeInstanceOf(TypeSafeSystemOneDriver);
+		expect(() => getSystemOneProviderDriver("unknown-provider")).toThrow("Unsupported System One provider");
+	});
+
+	it("TypeSafeSystemOneDriver discovers models with graceful fallback", async () => {
+		const driver = new TypeSafeSystemOneDriver();
+		const models = await driver.discoverModels();
+		expect(models).toEqual(["jev-latest", "jev-1.13.0"]);
 	});
 });

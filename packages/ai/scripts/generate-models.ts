@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
+import { homedir } from "os";
 import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import {
@@ -631,8 +632,22 @@ function getBedrockBaseUrl(modelId: string): string {
 		: "https://bedrock-runtime.us-east-1.amazonaws.com";
 }
 
-async function fetchModelCatalogResponse(url: string): Promise<Response> {
-	const response = await fetch(url);
+function getOpenRouterApiKey(): string | undefined {
+	if (process.env.OPENROUTER_API_KEY) return process.env.OPENROUTER_API_KEY;
+	try {
+		const authFile = join(homedir(), ".pi", "agent", "auth.json");
+		if (existsSync(authFile)) {
+			const data = JSON.parse(readFileSync(authFile, "utf-8")) as Record<string, { key?: string }>;
+			if (data.openrouter?.key) return data.openrouter.key;
+		}
+	} catch {
+		// Ignore storage read failures
+	}
+	return undefined;
+}
+
+async function fetchModelCatalogResponse(url: string, headers?: Record<string, string>): Promise<Response> {
+	const response = await fetch(url, headers ? { headers } : undefined);
 	if (!response.ok) {
 		throw new Error(`Model catalog request failed (${response.status}): ${url}`);
 	}
@@ -645,15 +660,24 @@ async function fetchOpenRouterModels(): Promise<{
 }> {
 	try {
 		console.log("Fetching models from OpenRouter API...");
-		const response = await fetchModelCatalogResponse("https://openrouter.ai/api/v1/models");
+		const apiKey = getOpenRouterApiKey();
+		const headers: Record<string, string> = {};
+		if (apiKey) {
+			headers.Authorization = `Bearer ${apiKey}`;
+		}
+		const response = await fetchModelCatalogResponse(
+			"https://openrouter.ai/api/v1/models?output_modalities=all",
+			headers,
+		);
 		const data = await response.json();
 
 		const models: Model<"openai-completions">[] = [];
 		const metadata = new Map<string, OpenRouterCatalogMetadata>();
 
 		for (const model of data.data) {
-			// Only include models that support tools
-			if (!model.supported_parameters?.includes("tools")) continue;
+			const isDecisionModel = model.architecture?.output_modalities?.includes("decisions");
+			// Include models that support tools or specialized decisions models
+			if (!model.supported_parameters?.includes("tools") && !isDecisionModel) continue;
 
 			// Parse provider from model ID
 			let provider: KnownProvider = "openrouter";
@@ -692,6 +716,13 @@ async function fetchOpenRouterModels(): Promise<{
 			};
 			models.push(normalizedModel);
 			metadata.set(normalizedModel.id, parseOpenRouterCatalogMetadata(model));
+
+			// If OpenRouter assigns a tilde prefix alias (e.g. ~typesafe/jev-latest), also index without tilde
+			if (model.id.startsWith("~")) {
+				const aliasId = model.id.slice(1);
+				models.push({ ...normalizedModel, id: aliasId });
+				metadata.set(aliasId, parseOpenRouterCatalogMetadata(model));
+			}
 		}
 
 		console.log(`Fetched ${models.length} tool-capable models from OpenRouter`);
