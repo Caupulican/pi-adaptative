@@ -32,6 +32,7 @@ describe("icm memory provider", () => {
 		});
 		const block = provider.systemPromptBlock();
 		expect(block).toContain(JSON.stringify("/workspace/project"));
+		expect(block).toContain(JSON.stringify(join(tempDir, "memory")));
 		expect(block).toContain(JSON.stringify(resourceDir("pipelines", tempDir)));
 		expect(block).not.toContain(`${tempDir}/icm/`);
 	});

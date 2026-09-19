@@ -7,6 +7,7 @@
  * block that directs the model to use on-demand scoped reads.
  */
 
+import { join } from "node:path";
 import { resourceDir } from "../../agent-paths.ts";
 import { type MemoryPromptBudget, memoryTextFitsBudget } from "../../context/memory-prompt-budget.ts";
 import type { MemoryCapabilities, MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
@@ -43,6 +44,7 @@ export class IcmProvider implements MemoryProvider {
 		const block = [
 			ICM_MEMORY_GUIDANCE,
 			`Workspace: ${JSON.stringify(this.context.cwd)}`,
+			`User ICM catalog: ${JSON.stringify(join(this.context.agentDir, "memory"))}`,
 			`Pipelines: ${JSON.stringify(resourceDir("pipelines", this.context.agentDir))}`,
 		].join("\n");
 		return budget === undefined || memoryTextFitsBudget(block, budget) ? block : "";
