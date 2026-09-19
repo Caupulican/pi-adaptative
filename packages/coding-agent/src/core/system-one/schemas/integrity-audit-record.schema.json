@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi-adaptative:integrity:audit-record:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "stage",
+    "policy_id",
+    "policy_version",
+    "policy_digest",
+    "projection_digest",
+    "question_digest",
+    "provider",
+    "model",
+    "result",
+    "timestamp"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "stage": {
+      "type": "string"
+    },
+    "policy_id": {
+      "type": "string"
+    },
+    "policy_version": {
+      "type": "string"
+    },
+    "policy_digest": {
+      "type": "string"
+    },
+    "projection_digest": {
+      "type": "string"
+    },
+    "question_digest": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model": {
+      "type": "string"
+    },
+    "result": {
+      "type": "string"
+    },
+    "answer_summary": {
+      "type": "object"
+    },
+    "timestamp": {
+      "type": "string"
+    },
+    "latency_ms": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

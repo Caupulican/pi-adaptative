@@ -187,6 +187,30 @@ export {
 export { createExtensionRuntime, discoverAndLoadExtensions } from "./core/extensions/loader.ts";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
+// Public Execution-Integrity Substrate SDK
+export {
+	canonicalJsonStringify,
+	computePolicyPackDigest,
+	computeSha256,
+	type IntegrityAuditRecord,
+	type IntegrityDecision,
+	type IntegrityExtension,
+	type IntegrityGateResult,
+	type IntegrityHookContext,
+	type IntegrityHookName,
+	type IntegrityImpact,
+	type IntegrityStateAdapter,
+	type IntegrityValidationRequest,
+	type IntegrityValidationResult,
+	type IntegrityValidationStatus,
+	type PolicyPackRef,
+	type SemanticValidator,
+	type ValidationPolicyPack,
+	type ValidationPolicyPackQuestion,
+	type ValidationPolicyPackStage,
+	type ValidationPolicyProvider,
+	validatePolicyPackStructure,
+} from "./core/hooks/index.ts";
 export {
 	appendRunRecord,
 	type ConfidenceMode,
@@ -401,6 +425,20 @@ export {
 	type SkillFrontmatter,
 } from "./core/skills.ts";
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
+export {
+	type HookExecutionOptions,
+	IntegrityHookCoordinator,
+} from "./core/system-one/integrity-hooks.ts";
+export {
+	InMemoryValidationPolicyProvider,
+	PolicyPackDigestMismatchError,
+	PolicyPackValidationError,
+	resolveVerifiedPolicyPack,
+} from "./core/system-one/policy-pack.ts";
+export {
+	DefaultSemanticValidator,
+	type DefaultSemanticValidatorOptions,
+} from "./core/system-one/public-validator.ts";
 export { POLICY_OWNED_RUNTIME_TOOL_NAMES } from "./core/tool-capability-policy.ts";
 export {
 	type AskQuestion,

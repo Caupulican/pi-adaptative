@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import type { PolicyPackRef } from "../hooks/index.ts";
+import { PolicyPackDigestMismatchError } from "./policy-pack.ts";
 import type {
 	AcceptanceCriterion,
 	Change,
@@ -772,16 +774,67 @@ export class ExecutionStore {
 	}
 
 	/**
-	 * Revalidate repository revision and invalidate stale evidence upon session resume (R-062).
+	 * Bind an immutable policy pack to this session/run (R-014, R-015).
+	 * Once bound, the pack cannot be changed mid-transaction.
 	 */
-	revalidateOnResume(currentRevision: string): {
+	bindPolicyPack(pack: PolicyPackRef): void {
+		if (this.state.policy_pack) {
+			if (
+				this.state.policy_pack.id !== pack.id ||
+				this.state.policy_pack.version !== pack.version ||
+				this.state.policy_pack.digest !== pack.digest
+			) {
+				throw new Error(
+					`Cannot rebind policy pack: session already bound to '${this.state.policy_pack.id}@${this.state.policy_pack.version}' (${this.state.policy_pack.digest}), cannot mutate to '${pack.id}@${pack.version}' (${pack.digest})`,
+				);
+			}
+			return;
+		}
+		this.state.policy_pack = Object.freeze({ ...pack });
+		this.state.updated_at = new Date().toISOString();
+	}
+
+	/**
+	 * Revalidate repository revision and verify exact policy pack digest upon session resume (R-016, R-062).
+	 */
+	revalidateOnResume(
+		currentRevision: string,
+		activePack?: PolicyPackRef,
+	): {
 		invalidatedObservations: number;
 		invalidatedClaims: number;
 		revisionChanged: boolean;
+		policyPackVerified: boolean;
+		policyPackMismatch?: string;
 	} {
 		const revisionChanged = this.state.repo.current_revision !== currentRevision;
 		let invalidatedObservations = 0;
 		let invalidatedClaims = 0;
+		let policyPackVerified = true;
+		let policyPackMismatch: string | undefined;
+
+		if (this.state.policy_pack) {
+			if (!activePack) {
+				policyPackVerified = false;
+				policyPackMismatch = `Persisted session requires policy pack '${this.state.policy_pack.id}@${this.state.policy_pack.version}' (digest: ${this.state.policy_pack.digest}), but no active policy pack was supplied on resume.`;
+				this.state.phase = "blocked_external";
+			} else if (
+				activePack.id !== this.state.policy_pack.id ||
+				activePack.version !== this.state.policy_pack.version ||
+				activePack.digest !== this.state.policy_pack.digest
+			) {
+				policyPackVerified = false;
+				policyPackMismatch = `Policy pack mismatch on resume: expected '${this.state.policy_pack.id}@${this.state.policy_pack.version}' (${this.state.policy_pack.digest}), received '${activePack.id}@${activePack.version}' (${activePack.digest})`;
+				this.state.phase = "blocked_external";
+				throw new PolicyPackDigestMismatchError(
+					this.state.policy_pack.id,
+					activePack.digest,
+					this.state.policy_pack.digest,
+				);
+			}
+		} else if (activePack) {
+			this.state.policy_pack = Object.freeze({ ...activePack });
+		}
 
 		if (revisionChanged) {
 			const invalidatedObsIds = new Set<string>();
@@ -807,7 +860,13 @@ export class ExecutionStore {
 			this.state.updated_at = new Date().toISOString();
 		}
 
-		return { invalidatedObservations, invalidatedClaims, revisionChanged };
+		return {
+			invalidatedObservations,
+			invalidatedClaims,
+			revisionChanged,
+			policyPackVerified,
+			policyPackMismatch,
+		};
 	}
 
 	/**

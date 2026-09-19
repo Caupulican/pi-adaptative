@@ -28,6 +28,7 @@ import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { resolveFastModeServiceTier } from "./fast-mode.ts";
+import type { IntegrityExtension } from "./hooks/index.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
@@ -48,6 +49,7 @@ import { SystemOneJevAdapter } from "./system-one/adapter.ts";
 import { createSystemOneConfig } from "./system-one/config.ts";
 import { SystemOneController } from "./system-one/controller.ts";
 import { ExecutionStore } from "./system-one/execution-state.ts";
+import { IntegrityHookCoordinator } from "./system-one/integrity-hooks.ts";
 import { time } from "./timings.ts";
 import {
 	createBashTool,
@@ -144,6 +146,10 @@ export interface CreateAgentSessionOptions {
 	systemOneProvider?: "typesafe" | "openrouter";
 	/** Optional model for System One. Takes precedence over settings. */
 	systemOneModel?: string;
+	/** Optional integrity extensions to register with the integrity hook coordinator. */
+	integrityExtensions?: IntegrityExtension[];
+	/** Optional pre-configured integrity hook coordinator. */
+	hookCoordinator?: IntegrityHookCoordinator;
 }
 
 /** Result from createAgentSession */
@@ -566,6 +572,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			? false
 			: systemOneSettings.enabled && process.env.PI_SYSTEM_ONE_DISABLED !== "1");
 
+	const hookCoordinator =
+		options.hookCoordinator ??
+		(options.integrityExtensions ? new IntegrityHookCoordinator(options.integrityExtensions) : undefined);
+
 	if (!systemOneController && systemOneEnabled) {
 		const typesafeKey = (await authStorage.getApiKey("typesafe")) ?? process.env.TYPESAFE_API_KEY;
 		const openrouterKey = (await authStorage.getApiKey("openrouter")) ?? process.env.OPENROUTER_API_KEY;
@@ -640,6 +650,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				store,
 				adapter,
 				userKeys: [chosenKey],
+				hookCoordinator,
 			});
 		}
 	}
@@ -667,6 +678,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			} catch {
 				// Non-git directory
 			}
+			if (systemOneController.hookCoordinator?.hasExtensions()) {
+				await systemOneController.hookCoordinator.runHook("resume", {
+					schema_version: "1.0",
+					run_id: sessionManager.getSessionId(),
+					session_id: sessionManager.getSessionId(),
+					hook: "resume",
+					impact: "read_only",
+				});
+			}
 		}
 	} else {
 		// Save initial model and thinking level for new sessions so they can be restored on resume
@@ -674,6 +694,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			sessionManager.appendModelChange(model.provider, model.id);
 		}
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
+		if (systemOneController?.hookCoordinator?.hasExtensions()) {
+			await systemOneController.hookCoordinator.runHook("session_start", {
+				schema_version: "1.0",
+				run_id: sessionManager.getSessionId(),
+				session_id: sessionManager.getSessionId(),
+				hook: "session_start",
+				impact: "read_only",
+			});
+		}
 	}
 
 	const session = new AgentSession({

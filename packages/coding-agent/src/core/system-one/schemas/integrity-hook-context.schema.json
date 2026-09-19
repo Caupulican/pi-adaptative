@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi-adaptative:integrity:hook-context:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "hook",
+    "impact",
+    "session_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "hook": {
+      "enum": [
+        "session_start",
+        "resume",
+        "worker_assignment",
+        "worker_turn",
+        "before_tool",
+        "after_tool",
+        "before_mutation",
+        "after_mutation",
+        "completion_candidate",
+        "terminal"
+      ]
+    },
+    "impact": {
+      "enum": [
+        "read_only",
+        "local_reversible",
+        "repo_mutation",
+        "external_side_effect",
+        "destructive"
+      ]
+    },
+    "tool": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

@@ -78,6 +78,7 @@ export {
 	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";
 export { discoverAndLoadExtensions } from "./extensions/loader.ts";
+export * from "./hooks/index.ts";
 export * from "./orchestration/capability-gateway.ts";
 export * from "./orchestration/contracts.ts";
 export * from "./orchestration/event-store.ts";

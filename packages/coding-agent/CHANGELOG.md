@@ -1,8 +1,15 @@
 ## [Unreleased]
 
+### Added
+
+- Public Execution-Integrity Substrate SDK under `@mariobasilio/pi-coding-agent/hooks` exposing `SemanticValidator`, `ValidationPolicyProvider`, `IntegrityExtension`, `IntegrityHookCoordinator`, policy pack schema validation, and audit minimization.
+- Fail-closed lifecycle hook coordination with error isolation across 10 execution checkpoints (`session_start`, `before_tool`, `before_mutation`, `after_mutation`, `after_tool`, `completion_candidate`, `terminal`, `recovery_attempt`, `resume`, `session_end`).
+
 ### Fixed
 
 - Load managed `@ff-labs/fff-node` from absolute `dist/index.cjs` when specifier require fails in a bun-compiled binary, so doctor does not report install-completed-but-unloaded after npm wrote a complete tree.
+- Operator edge authorization outranks advisory semantic tool gates so user-approved actions (such as `git push` or release operations) execute immediately without false-positive injection rejection loops.
+- Control plane and harness orchestration tools (`task_steps`, `goal`, `create_goal`, `skill`) are excluded from semantic repo-mutation injection gates to prevent false-positive command blocking.
 
 ## [0.99.30] - 2026-09-19
 

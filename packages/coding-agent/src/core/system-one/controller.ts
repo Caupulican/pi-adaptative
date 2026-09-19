@@ -1,8 +1,10 @@
+import type { IntegrityGateResult } from "../hooks/index.ts";
 import type { JevAdapter } from "./adapter.ts";
 import { AuditStore } from "./audit.ts";
 import { getQuestionPack, hashQuestionPack, SYSTEM_ONE_CATALOG_VERSION, SYSTEM_ONE_PINNED_MODEL } from "./catalog.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import type { ExecutionStore } from "./execution-state.ts";
+import type { IntegrityHookCoordinator } from "./integrity-hooks.ts";
 import {
 	decideFinalCompletion,
 	decidePostflight,
@@ -14,7 +16,7 @@ import {
 	type FinalCompletionVerdict,
 } from "./policy.ts";
 import { StateProjector } from "./projector.ts";
-import type { ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
+import type { ExecutionState, ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
 
 export interface SystemOneControllerDeps {
 	store: ExecutionStore;
@@ -23,6 +25,7 @@ export interface SystemOneControllerDeps {
 	audit?: AuditStore;
 	config?: SystemOneConfig;
 	userKeys?: readonly string[];
+	hookCoordinator?: IntegrityHookCoordinator;
 }
 
 /**
@@ -35,6 +38,7 @@ export class SystemOneController {
 	readonly projector: StateProjector;
 	readonly audit: AuditStore;
 	readonly config: SystemOneConfig;
+	readonly hookCoordinator?: IntegrityHookCoordinator;
 
 	constructor(deps: SystemOneControllerDeps) {
 		this.store = deps.store;
@@ -42,6 +46,7 @@ export class SystemOneController {
 		this.projector = deps.projector ?? new StateProjector(deps.userKeys ?? []);
 		this.audit = deps.audit ?? new AuditStore();
 		this.config = deps.config ?? DEFAULT_SYSTEM_ONE_CONFIG;
+		this.hookCoordinator = deps.hookCoordinator;
 	}
 
 	private async runStageValidation(
@@ -382,8 +387,15 @@ export class SystemOneController {
 	 * R-058: A second completion_challenge pack MUST run after primary completion pack.
 	 * R-059: Any failed hard completion gate routes to verify_more, retrieve_more, rework, or blocked_external.
 	 * R-060: Blocked external dependencies route to blocked_external.
+	 * PI-021: External completion gate runs before terminal transition.
 	 */
-	async executeCompletionTransaction(isBugFix = false): Promise<FinalCompletionVerdict> {
+	async executeCompletionTransaction(
+		isBugFix = false,
+		options?: {
+			externalGate?: (snapshot: ExecutionState) => Promise<IntegrityGateResult | undefined>;
+			signal?: AbortSignal;
+		},
+	): Promise<FinalCompletionVerdict> {
 		// 1. Evaluate all deterministic gates first (R-020, R-035)
 		const detResult = evaluateDeterministicCompletionGates(this.store.snapshot());
 		for (const g of detResult.gates) {
@@ -422,10 +434,61 @@ export class SystemOneController {
 		this.audit.recordDecision(this.store.runId, primaryStage.decision);
 		this.audit.recordDecision(this.store.runId, challengeStage.decision);
 
-		// 5. Update state phase according to verdict
+		// 5. External completion gate and hooks check (PI-021)
+		if (finalVerdict.verdict === "complete") {
+			if (options?.externalGate) {
+				const extGateResult = await options.externalGate(this.store.snapshot());
+				if (extGateResult && extGateResult.decision !== "allow") {
+					finalVerdict.verdict = extGateResult.decision === "replan" ? "rework" : "blocked_external";
+					finalVerdict.failed_gates.push({
+						id: "external_completion_gate",
+						reason:
+							extGateResult.reasonCodes.join("; ") || `External gate rejected with ${extGateResult.decision}`,
+						required_next_proof: "Pass external integrity completion gate",
+					});
+				}
+			}
+
+			if (this.hookCoordinator?.hasExtensions() && finalVerdict.verdict === "complete") {
+				const hookResult = await this.hookCoordinator.runHook(
+					"completion_candidate",
+					{
+						schema_version: "1.0",
+						run_id: this.store.runId,
+						session_id: this.store.runId,
+						hook: "completion_candidate",
+						impact: "repo_mutation",
+					},
+					{ signal: options?.signal },
+				);
+				if (hookResult.decision !== "allow") {
+					finalVerdict.verdict = hookResult.decision === "replan" ? "rework" : "blocked_external";
+					finalVerdict.failed_gates.push({
+						id: "external_hook_gate",
+						reason: hookResult.reasonCodes.join("; ") || `Completion hook rejected with ${hookResult.decision}`,
+						required_next_proof: "Pass external integrity completion hook",
+					});
+				}
+			}
+		}
+
+		// 6. Update state phase according to verdict
 		if (finalVerdict.verdict === "complete") {
 			// Harness policy transitions to complete (R-002)
 			this.store.transitionPhase("complete", true);
+			if (this.hookCoordinator?.hasExtensions()) {
+				await this.hookCoordinator.runHook(
+					"terminal",
+					{
+						schema_version: "1.0",
+						run_id: this.store.runId,
+						session_id: this.store.runId,
+						hook: "terminal",
+						impact: "repo_mutation",
+					},
+					{ signal: options?.signal },
+				);
+			}
 		} else if (finalVerdict.verdict === "blocked_external") {
 			this.store.transitionPhase("blocked_external", true);
 		} else if (finalVerdict.verdict === "rework") {

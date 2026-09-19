@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi-adaptative:integrity:validation-response:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "provider",
+    "model",
+    "answers",
+    "projection_digest",
+    "policy_pack_digest"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "status": {
+      "enum": [
+        "ok",
+        "unavailable",
+        "rejected",
+        "error"
+      ]
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model": {
+      "type": "string"
+    },
+    "answers": {
+      "type": "object"
+    },
+    "projection_digest": {
+      "type": "string"
+    },
+    "policy_pack_digest": {
+      "type": "string"
+    },
+    "latency_ms": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "error_code": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

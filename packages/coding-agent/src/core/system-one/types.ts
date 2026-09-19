@@ -5,6 +5,8 @@
  * Normative reference: URN urn:pi-adaptive:system-one:execution-state:1.0
  */
 
+import type { PolicyPackRef } from "../hooks/index.ts";
+
 export type Phase =
 	| "init"
 	| "discovery"
@@ -287,6 +289,7 @@ export interface ExecutionState {
 	decisions: ValidationDecision[];
 	risks: Risk[];
 	completion: CompletionState;
+	policy_pack?: PolicyPackRef;
 }
 
 export interface WorkerClaimInput {

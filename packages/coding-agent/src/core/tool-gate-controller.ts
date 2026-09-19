@@ -11,12 +11,27 @@
 
 import type { Agent, BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
+import { classifyAllEdgeOperations } from "./autonomy/edge-policy.ts";
 import { evaluateToolGateAsync } from "./autonomy/gates.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import type { SystemOneController } from "./system-one/index.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import { retireToolCall } from "./tools/file-mutation-queue.ts";
+
+export const CONTROL_PLANE_TOOL_NAMES: ReadonlySet<string> = new Set([
+	"task_steps",
+	"goal",
+	"create_goal",
+	"get_goal",
+	"update_goal",
+	"task_directory",
+	"skill",
+	"skill_audit",
+	"delegate",
+	"tool_task",
+	"ask_question",
+]);
 
 type BeforeToolCall = NonNullable<Agent["beforeToolCall"]>;
 type AfterToolCall = NonNullable<Agent["afterToolCall"]>;
@@ -149,14 +164,65 @@ export class ToolGateController {
 			if (edge) return edge;
 
 			// 5. System One semantic tool gate
+			const isControlPlaneTool = CONTROL_PLANE_TOOL_NAMES.has(toolCall.name);
+			const edgeOperations = classifyAllEdgeOperations({
+				toolName: toolCall.name,
+				args,
+				cwd: executionContext?.cwd ?? scopeCwd,
+				scopeCwd,
+			});
+			const isOperatorAuthorizedEdge = edgeOperations.length > 0;
+
+			// Operator edge authorization outranks advisory semantic tool gates;
+			// control-plane tools are internal harness operations, not untrusted repo inputs.
 			const systemOne = this.deps.getSystemOneController?.();
-			if (systemOne) {
+			if (systemOne && !isControlPlaneTool && !isOperatorAuthorizedEdge) {
 				const impact =
 					toolCall.name === "bash"
 						? "local_reversible"
 						: toolCall.name.includes("edit") || toolCall.name.includes("write")
 							? "repo_mutation"
 							: "read_only";
+
+				if (systemOne.hookCoordinator?.hasExtensions()) {
+					const beforeToolResult = await systemOne.hookCoordinator.runHook("before_tool", {
+						schema_version: "1.0",
+						run_id: systemOne.store.runId,
+						session_id: systemOne.store.runId,
+						hook: "before_tool",
+						impact,
+						tool: toolCall.name,
+						metadata: { args },
+					});
+					if (beforeToolResult?.decision === "deny") {
+						return {
+							block: true,
+							reason:
+								beforeToolResult.reasonCodes.join(", ") ||
+								"Tool execution blocked by integrity before_tool hook",
+						};
+					}
+					if (impact === "repo_mutation") {
+						const beforeMutationResult = await systemOne.hookCoordinator.runHook("before_mutation", {
+							schema_version: "1.0",
+							run_id: systemOne.store.runId,
+							session_id: systemOne.store.runId,
+							hook: "before_mutation",
+							impact,
+							tool: toolCall.name,
+							metadata: { args },
+						});
+						if (beforeMutationResult?.decision === "deny") {
+							return {
+								block: true,
+								reason:
+									beforeMutationResult.reasonCodes.join(", ") ||
+									"Tool execution blocked by integrity before_mutation hook",
+							};
+						}
+					}
+				}
+
 				const systemOneResult = await systemOne.validateToolGate({
 					tool: toolCall.name,
 					intent: `Invoke tool ${toolCall.name}`,
@@ -241,6 +307,29 @@ export class ToolGateController {
 			}
 
 			selection?.complete(toolCall.id, !resolvedIsError, content);
+
+			const systemOne = this.deps.getSystemOneController?.();
+			if (systemOne?.hookCoordinator?.hasExtensions()) {
+				const isMutation = toolCall.name.includes("edit") || toolCall.name.includes("write");
+				if (isMutation) {
+					await systemOne.hookCoordinator.runHook("after_mutation", {
+						schema_version: "1.0",
+						run_id: systemOne.store.runId,
+						session_id: systemOne.store.runId,
+						hook: "after_mutation",
+						impact: "repo_mutation",
+						tool: toolCall.name,
+					});
+				}
+				await systemOne.hookCoordinator.runHook("after_tool", {
+					schema_version: "1.0",
+					run_id: systemOne.store.runId,
+					session_id: systemOne.store.runId,
+					hook: "after_tool",
+					impact: isMutation ? "repo_mutation" : toolCall.name === "bash" ? "local_reversible" : "read_only",
+					tool: toolCall.name,
+				});
+			}
 			if (
 				content === result.content &&
 				details === result.details &&

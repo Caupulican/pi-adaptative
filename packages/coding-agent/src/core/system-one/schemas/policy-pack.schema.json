@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi-adaptative:integrity:policy-pack:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "version",
+    "digest",
+    "stages",
+    "questions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "id": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{64}$"
+    },
+    "stages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "hook",
+          "required",
+          "fail_mode"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "hook": {
+            "enum": [
+              "session_start",
+              "resume",
+              "worker_turn",
+              "before_tool",
+              "after_tool",
+              "before_mutation",
+              "after_mutation",
+              "completion_candidate",
+              "terminal"
+            ]
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "fail_mode": {
+            "enum": [
+              "open_unavailable",
+              "closed"
+            ]
+          },
+          "question_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "questions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "type",
+          "instruction"
+        ],
+        "properties": {
+          "type": {
+            "enum": [
+              "noul",
+              "choice",
+              "score"
+            ]
+          },
+          "instruction": {
+            "type": "string"
+          },
+          "criteria": {}
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}
