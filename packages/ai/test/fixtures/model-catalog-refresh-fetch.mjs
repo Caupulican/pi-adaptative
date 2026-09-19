@@ -72,9 +72,10 @@ const catalogs = new Map([
 
 // Deliberately never delegate to the real fetch: this child cannot make provider requests.
 globalThis.fetch = async (input) => {
-	const url = String(input);
+	const rawUrl = String(input);
+	const url = rawUrl.split("?")[0];
 	const catalog = catalogs.get(url);
-	if (!catalog) throw new Error(`Unexpected catalog URL: ${url}`);
+	if (!catalog) throw new Error(`Unexpected catalog URL: ${rawUrl}`);
 	if (url !== process.env.PI_CATALOG_FIXTURE_SOURCE) return Response.json(catalog);
 	switch (process.env.PI_CATALOG_FIXTURE_FAILURE) {
 		case "network":

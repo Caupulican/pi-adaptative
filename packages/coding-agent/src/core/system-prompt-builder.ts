@@ -165,7 +165,7 @@ export class SystemPromptBuilder {
 
 	private _buildHarnessSelfHealingPrompt(profile: ModelCapabilityProfile): string | undefined {
 		if (this.deps.isChildSession()) return undefined;
-		if (profile.class === "chat") return undefined;
+		if (profile.class === "chat" || profile.class === "minimal") return undefined;
 		if (profile.class !== "full") {
 			return "PI HARNESS SELF-HEALING: managed tools (rg, jq, uv/Python, FFF native search) auto-provision, repair bindings, and recover from transient failures.";
 		}
@@ -204,6 +204,9 @@ export class SystemPromptBuilder {
 		const sourceStatus = sourceLooksValid
 			? sourcePath
 			: `${sourcePath} (invalid source checkout; user must correct \`selfModification.sourcePaths\` before editing)`;
+		if (profile.class === "minimal") {
+			return `PI SELF-MODIFICATION: edit core only under ${sourceStatus}. Smallest change; validate.`;
+		}
 		if (profile.class !== "full") {
 			return `PI SELF-MODIFICATION: edit core only under ${sourceStatus}. Inspect first; preserve concurrent work; smallest auditable change; focused validation. Use runtime_update to reload or restart.`;
 		}
