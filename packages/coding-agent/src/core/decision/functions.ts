@@ -2,6 +2,7 @@ export interface ChoiceParamDef {
 	readonly kind: "choice";
 	readonly options: readonly string[];
 	readonly descriptions?: Record<string, string>;
+	readonly notFor?: Record<string, string>;
 	readonly defaultValue?: string;
 	readonly optional?: boolean;
 }
@@ -22,11 +23,16 @@ export interface SemanticFunctionDef {
 
 export type SemanticFunctionRegistry = Record<string, SemanticFunctionDef>;
 
-export function choice(options: readonly string[], descriptions?: Record<string, string>): ChoiceParamDef {
+export function choice(
+	options: readonly string[],
+	descriptions?: Record<string, string>,
+	notFor?: Record<string, string>,
+): ChoiceParamDef {
 	return {
 		kind: "choice",
 		options,
 		descriptions,
+		notFor,
 		optional: false,
 	};
 }
@@ -35,11 +41,13 @@ export function optionalChoice(
 	options: readonly string[],
 	defaultValue: string,
 	descriptions?: Record<string, string>,
+	notFor?: Record<string, string>,
 ): ChoiceParamDef {
 	return {
 		kind: "choice",
 		options,
 		descriptions,
+		notFor,
 		defaultValue,
 		optional: true,
 	};

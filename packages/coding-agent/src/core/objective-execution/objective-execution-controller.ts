@@ -1,17 +1,23 @@
 /**
  * Objective Execution Controller.
  * Deterministic loop owner for objective continuation, semantic routing, and completion gating.
- * Conforms to reference/objective-execution-controller.ts, STRICT_RULES.md, and MASTER_SPEC v2.0.
+ * Conforms to ROUTING_PROGRAM.md, COMPLETION_COORDINATOR.md, HUMAN_EDGE.md, and FINAL_PATCH_SPEC v2.1.
  */
 
 import { randomUUID } from "node:crypto";
 import type { AuthorityEnvelope, ProposedAction } from "../autonomy/authority-envelope.ts";
-import { type HumanEdgeRequest, requiresHumanEdge } from "../autonomy/human-edge.ts";
+import { DurableHumanEdgeLedger, type HumanEdgeRequest, requiresHumanEdge } from "../autonomy/human-edge.ts";
+import { DecisionActionPolicy } from "../decision/action-policy.ts";
 import type { DecisionEngineRouter } from "../decision/engine-router.ts";
 import type { CompletionAssuranceProfile } from "../decision/policy.ts";
 import { createDecisionProgram } from "../decision/program.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
+import {
+	CompletionCoordinator,
+	type CompletionEvaluationContext,
+	type IndependentReviewerVerdict,
+} from "./completion-coordinator.ts";
 import {
 	buildDeliveryBundle,
 	type DeliveryArtifact,
@@ -27,7 +33,7 @@ import {
 	validateObjectiveRoute,
 } from "./objective-route.ts";
 import { composeObjectiveRoute } from "./objective-route-policy.ts";
-import type { SemanticRouteJudgments } from "./objective-route-projector.ts";
+import { projectBoundedCombinedState, type SemanticRouteJudgments } from "./objective-route-projector.ts";
 import { ObjectiveStallDetector, type StallEvaluation } from "./objective-stall-fingerprint.ts";
 
 export type ExecutionLoopMode = "legacy_goal" | "objective_shadow" | "objective_primary";
@@ -61,8 +67,17 @@ export interface ObjectiveExecutionControllerDeps {
 		recordHostEvidence?(evidence: unknown): Promise<void>;
 	};
 	decisions?: DecisionEngineRouter;
+	actionPolicy?: DecisionActionPolicy;
 	authorityEnvelope?: AuthorityEnvelope;
+	humanEdgeLedger?: DurableHumanEdgeLedger;
 	completionProfile?: CompletionAssuranceProfile;
+	reviewer?: {
+		review(input: {
+			objectiveId: string;
+			sourceRevision: string;
+			acceptanceMatrix: Record<string, unknown>;
+		}): Promise<IndependentReviewerVerdict> | IndependentReviewerVerdict;
+	};
 	evidence?: {
 		reconcile?(objectiveId: string): Promise<void>;
 		ingestLatest?(objectiveId: string): Promise<void>;
@@ -93,9 +108,9 @@ export interface ObjectiveExecutionControllerDeps {
 	getRouteProposedAction?(route: ObjectiveRoute): ProposedAction;
 }
 
-const ROUTE_DECISION_PROGRAM = createDecisionProgram({
+export const ROUTE_DECISION_PROGRAM = createDecisionProgram({
 	id: "objective-route-v2",
-	version: "2.0.0",
+	version: "2.1.0",
 	decisions: [
 		{
 			kind: "choice",
@@ -116,14 +131,50 @@ const ROUTE_DECISION_PROGRAM = createDecisionProgram({
 		{
 			kind: "choice",
 			id: "missing_work_class",
-			instruction: "What primary class of work remains to advance the objective?",
+			instruction: "What primary canonical class of work remains to advance the objective?",
 			options: {
-				investigation: { description: "Inspect code, search symbols, gather context" },
-				implementation: { description: "Author or edit source code" },
-				verification: { description: "Run tests, diagnostics, or benchmarks" },
-				review: { description: "Review diff or verify architecture invariants" },
-				none: { description: "All required criteria verified" },
+				retrieve: {
+					description: "Retrieve code, tests, docs, or runtime context",
+					notFor: "Required context and files are already loaded and verified",
+				},
+				investigate: {
+					description: "Inspect codebase, trace root cause, explore hypotheses",
+					notFor: "Root cause is understood and exact code changes are planned",
+				},
+				implement: {
+					description: "Author or edit source code to advance objective",
+					notFor: "Root cause or necessary evidence is still unresolved",
+				},
+				deterministic_test: {
+					description: "Run deterministic tests or static checks",
+					notFor: "No test or check commands are available or needed",
+				},
+				verify: {
+					description: "Verify behavior against required criteria",
+					notFor: "Implementation has not yet changed",
+				},
+				review: {
+					description: "Review diff or verify architectural invariants",
+					notFor: "Significant implementation work is still incomplete",
+				},
+				replan: {
+					description: "Strategy failed, scope changed, or replanning required",
+					notFor: "Current strategy is progressing smoothly",
+				},
+				none: {
+					description: "All required criteria verified and complete",
+					notFor: "Acceptance criteria or mechanical checks remain incomplete",
+				},
+				insufficient_evidence: {
+					description: "Insufficient evidence to determine next implementation action",
+					notFor: "Clear path forward is established with available evidence",
+				},
 			},
+		},
+		{
+			kind: "boolean",
+			id: "current_worker_can_continue",
+			instruction: "Can the current worker continue without resetting context or changing role?",
 		},
 		{
 			kind: "boolean",
@@ -132,8 +183,34 @@ const ROUTE_DECISION_PROGRAM = createDecisionProgram({
 		},
 		{
 			kind: "boolean",
-			id: "capability_escalation_needed",
+			id: "capability_escalation_required",
 			instruction: "Does the remaining work require escalated tools or reasoning models?",
+		},
+		{
+			kind: "boolean",
+			id: "external_blocker_present",
+			instruction: "Is progress blocked by external service, permissions, or missing user action?",
+		},
+		{
+			kind: "score",
+			id: "semantic_progress",
+			instruction: "Score the verified semantic progress made towards the objective",
+			levels: [
+				{ value: 0, description: "No verified progress" },
+				{ value: 1, description: "Useful evidence only" },
+				{ value: 2, description: "Acceptance advanced" },
+				{ value: 3, description: "Major uncertainty or required behavior resolved" },
+			],
+		},
+		{
+			kind: "boolean",
+			id: "context_stale",
+			instruction: "Has the worker context become stale relative to recent file or runtime changes?",
+		},
+		{
+			kind: "boolean",
+			id: "strategy_repetition",
+			instruction: "Is the execution repeating a failed strategy without acquiring new evidence?",
 		},
 		{
 			kind: "boolean",
@@ -142,8 +219,8 @@ const ROUTE_DECISION_PROGRAM = createDecisionProgram({
 		},
 		{
 			kind: "boolean",
-			id: "external_blocker",
-			instruction: "Is progress blocked by external service or missing user action?",
+			id: "evidence_sufficient",
+			instruction: "Is the available evidence sufficient to substantiate the current state?",
 		},
 	],
 });
@@ -151,15 +228,21 @@ const ROUTE_DECISION_PROGRAM = createDecisionProgram({
 export class ObjectiveExecutionController {
 	private readonly deps: ObjectiveExecutionControllerDeps;
 	private readonly defaultStallDetector: ObjectiveStallDetector;
+	private readonly humanEdgeLedger: DurableHumanEdgeLedger;
 	private cycleCounter = 0;
 
 	constructor(deps: ObjectiveExecutionControllerDeps) {
 		this.deps = deps;
 		this.defaultStallDetector = new ObjectiveStallDetector();
+		this.humanEdgeLedger = deps.humanEdgeLedger ?? new DurableHumanEdgeLedger();
 	}
 
 	getMode(): ExecutionLoopMode {
 		return this.deps.mode ?? "objective_shadow";
+	}
+
+	getHumanEdgeLedger(): DurableHumanEdgeLedger {
+		return this.humanEdgeLedger;
 	}
 
 	async evaluateRouteOnce(
@@ -184,47 +267,6 @@ export class ObjectiveExecutionController {
 		// Reconcile evidence
 		await this.deps.evidence?.reconcile?.(objectiveId);
 
-		// Evaluate semantic route from Decision Kernel or System One
-		let semantic: SemanticRouteJudgments = {};
-
-		if (this.deps.decisions) {
-			try {
-				const stateProjection = {
-					objective: runtime.objectives[objectiveId],
-					tasks: Object.values(runtime.tasks),
-					activeAttempts,
-				};
-				const evaluation = await this.deps.decisions.evaluateOrFallback(ROUTE_DECISION_PROGRAM, stateProjection, {
-					signal: options?.signal,
-					consequence: "medium",
-				});
-
-				const wr = evaluation.results.work_remaining;
-				const mwc = evaluation.results.missing_work_class;
-				const iwr = evaluation.results.independent_worker_required;
-				const cen = evaluation.results.capability_escalation_needed;
-				const _cp = evaluation.results.completion_plausible;
-				const eb = evaluation.results.external_blocker;
-
-				semantic = {
-					workRemaining: wr?.kind === "boolean" ? wr.value : undefined,
-					missingWorkClass:
-						mwc?.kind === "choice" ? (mwc.selected as SemanticRouteJudgments["missingWorkClass"]) : undefined,
-					independentWorkerRequired: iwr?.kind === "boolean" ? iwr.value : undefined,
-					capabilityEscalationRequired: cen?.kind === "boolean" ? cen.value : undefined,
-					externalBlockerPresent: eb?.kind === "boolean" ? eb.value : undefined,
-				};
-			} catch {
-				// Fallback to deterministic route policy
-			}
-		} else if (this.deps.systemOne?.evaluateObjectiveRoute) {
-			try {
-				semantic = await this.deps.systemOne.evaluateObjectiveRoute(objectiveId, { signal: options?.signal });
-			} catch {
-				// Validator failure falls back to deterministic rule set
-			}
-		}
-
 		// Evaluate stall
 		let stall: StallEvaluation = {
 			stalled: false,
@@ -234,6 +276,68 @@ export class ObjectiveExecutionController {
 		};
 		if (this.deps.stalls) {
 			stall = await this.deps.stalls.evaluate(objectiveId);
+		}
+
+		// Evaluate semantic route via Decision Kernel (FIN-050: no direct provider-specific route branch)
+		let semantic: SemanticRouteJudgments = {};
+
+		if (this.deps.decisions) {
+			try {
+				// FIN-034: Use bounded combined state projection
+				const stateProjection = projectBoundedCombinedState(objectiveId, runtime, {
+					stallTurns: stall.stallTurns,
+					strategyFingerprint: stall.fingerprint,
+				});
+
+				const evaluation = await this.deps.decisions.evaluateOrFallback(ROUTE_DECISION_PROGRAM, stateProjection, {
+					signal: options?.signal,
+					consequence: "medium",
+				});
+
+				// FIN-035: Pass evaluation through DecisionActionPolicy
+				const policy = this.deps.actionPolicy ?? new DecisionActionPolicy();
+				const mwc = evaluation.results.missing_work_class;
+				let missingWorkClass: SemanticRouteJudgments["missingWorkClass"] =
+					mwc?.kind === "choice" ? (mwc.selected as SemanticRouteJudgments["missingWorkClass"]) : undefined;
+
+				if (mwc && mwc.kind === "choice") {
+					const disposition = policy.evaluateChoice(mwc, "medium");
+					if (disposition.action !== "accept") {
+						// Low confidence or unaccepted provenance routes to retrieve or insufficient_evidence
+						missingWorkClass = "insufficient_evidence";
+					}
+				}
+
+				const wr = evaluation.results.work_remaining;
+				const cwcc = evaluation.results.current_worker_can_continue;
+				const iwr = evaluation.results.independent_worker_required;
+				const cer =
+					evaluation.results.capability_escalation_required ?? evaluation.results.capability_escalation_needed;
+				const ebp = evaluation.results.external_blocker_present ?? evaluation.results.external_blocker;
+				const sp = evaluation.results.semantic_progress;
+				const cs = evaluation.results.context_stale;
+				const sr = evaluation.results.strategy_repetition;
+
+				semantic = {
+					workRemaining: wr?.kind === "boolean" ? wr.value : undefined,
+					missingWorkClass,
+					currentWorkerCanContinue: cwcc?.kind === "boolean" ? cwcc.value : undefined,
+					independentWorkerRequired: iwr?.kind === "boolean" ? iwr.value : undefined,
+					capabilityEscalationRequired: cer?.kind === "boolean" ? cer.value : undefined,
+					externalBlockerPresent: ebp?.kind === "boolean" ? ebp.value : undefined,
+					semanticProgress: sp?.kind === "score" ? sp.value : undefined,
+					contextStale: cs?.kind === "boolean" ? cs.value : undefined,
+					strategyRepetition: sr?.kind === "boolean" ? sr.value : undefined,
+				};
+			} catch {
+				// Fallback to deterministic route policy
+			}
+		} else if (this.deps.systemOne?.evaluateObjectiveRoute) {
+			try {
+				semantic = await this.deps.systemOne.evaluateObjectiveRoute(objectiveId, { signal: options?.signal });
+			} catch {
+				// Fallback to deterministic rule set
+			}
 		}
 
 		const route = composeObjectiveRoute({
@@ -269,7 +373,7 @@ export class ObjectiveExecutionController {
 		objectiveId: string,
 		terminalStatus: DeliveryTerminalStatus,
 		runtime: TaskRuntimeProjection,
-		extra?: { decisionRefs?: readonly string[] },
+		extra?: { decisionRefs?: readonly string[]; reasonCodes?: readonly string[] },
 	): Promise<DeliveryBundle> {
 		const sourceRevision = (await this.deps.runtime.getSourceRevision?.(objectiveId)) ?? "HEAD";
 		const artifacts = (await this.deps.runtime.getArtifacts?.(objectiveId)) ?? [];
@@ -285,46 +389,8 @@ export class ObjectiveExecutionController {
 			artifacts,
 			limitations,
 			decisionRefs: extra?.decisionRefs,
+			failedGates: extra?.reasonCodes,
 		});
-	}
-
-	private async handleCompletionTransaction(
-		objectiveId: string,
-		runtime: TaskRuntimeProjection,
-		signal?: AbortSignal,
-	): Promise<
-		| { outcome: "completed"; result: ObjectiveTerminalResult }
-		| { outcome: "repaired" }
-		| { outcome: "failed"; error: unknown }
-	> {
-		if (!this.deps.systemOne?.executeCompletionTransaction) {
-			return { outcome: "failed", error: new Error("no_completion_transaction") };
-		}
-		try {
-			const verdict = await this.deps.systemOne.executeCompletionTransaction(false, { signal });
-			if (verdict.verdict === "complete") {
-				const bundle = await this.buildBundle(objectiveId, "complete", runtime, {
-					decisionRefs: (verdict as { decision_id?: string }).decision_id
-						? [(verdict as { decision_id?: string }).decision_id!]
-						: undefined,
-				});
-				return {
-					outcome: "completed",
-					result: {
-						status: "complete",
-						reasonCodes: ["completion_passed"],
-						completionDecisionId: (verdict as { decision_id?: string }).decision_id,
-						cycleCount: this.cycleCounter,
-						deliveryBundle: bundle,
-					},
-				};
-			}
-			const repairs = completionFailuresToRepairWork(verdict.failed_gates, objectiveId);
-			await this.deps.runtime.ensureRepairTasks?.(objectiveId, repairs);
-			return { outcome: "repaired" };
-		} catch (err) {
-			return { outcome: "failed", error: err };
-		}
 	}
 
 	async run(objectiveId: string, signal?: AbortSignal): Promise<ObjectiveTerminalResult> {
@@ -368,16 +434,31 @@ export class ObjectiveExecutionController {
 			// 3. Evaluate route
 			const route = await this.evaluateRouteOnce(objectiveId, { signal });
 
-			// 4. Authority Envelope gate
+			// 4. Authority Envelope gate (FIN-070..FIN-074: Durable Human Edge)
 			if (this.deps.authorityEnvelope) {
 				const proposedAction = this.deps.getRouteProposedAction
 					? this.deps.getRouteProposedAction(route)
 					: { kind: route.route };
-				const edge = requiresHumanEdge(objectiveId, proposedAction, this.deps.authorityEnvelope);
+				const edge = requiresHumanEdge(
+					objectiveId,
+					proposedAction,
+					this.deps.authorityEnvelope,
+					false,
+					this.humanEdgeLedger,
+				);
 				if (edge) {
 					if (this.deps.onHumanEdgeRequest) {
 						const approved = await this.deps.onHumanEdgeRequest(edge);
 						if (!approved) {
+							// FIN-071: Record denial
+							this.humanEdgeLedger.recordDecision({
+								id: `dec-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+								request_id: edge.id,
+								decision: "deny",
+								exact_scope: edge.exact_authority ?? proposedAction.kind,
+								scope_type: "one_shot",
+								timestamp: Date.now(),
+							});
 							const bundle = await this.buildBundle(objectiveId, "owner_required", runtime);
 							return {
 								status: "blocked",
@@ -386,6 +467,15 @@ export class ObjectiveExecutionController {
 								deliveryBundle: bundle,
 							};
 						}
+						// FIN-071: Record grant
+						this.humanEdgeLedger.recordDecision({
+							id: `dec-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+							request_id: edge.id,
+							decision: "grant",
+							exact_scope: edge.exact_authority ?? proposedAction.kind,
+							scope_type: "durable",
+							timestamp: Date.now(),
+						});
 					} else {
 						const bundle = await this.buildBundle(objectiveId, "owner_required", runtime);
 						return {
@@ -398,14 +488,32 @@ export class ObjectiveExecutionController {
 				}
 			}
 
-			// 5. Dispatch based on route
+			// 5. Dispatch based on route (FIN-051, FIN-052: Explicit failure if executor is missing)
 			switch (route.route) {
 				case "retrieve":
-					await this.deps.retrieval?.execute?.(route, signal);
+					if (!this.deps.retrieval?.execute) {
+						const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime);
+						return {
+							status: "unrecoverable",
+							reasonCodes: ["missing_required_executor:retrieval"],
+							cycleCount: this.cycleCounter,
+							deliveryBundle: bundle,
+						};
+					}
+					await this.deps.retrieval.execute(route, signal);
 					break;
 
 				case "deterministic_test":
-					await this.deps.verifier?.execute?.(route, signal);
+					if (!this.deps.verifier?.execute) {
+						const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime);
+						return {
+							status: "unrecoverable",
+							reasonCodes: ["missing_required_executor:verifier"],
+							cycleCount: this.cycleCounter,
+							deliveryBundle: bundle,
+						};
+					}
+					await this.deps.verifier.execute(route, signal);
 					break;
 
 				case "investigate":
@@ -413,89 +521,113 @@ export class ObjectiveExecutionController {
 				case "verify":
 				case "review":
 				case "replan":
-					await this.deps.workerDispatcher?.dispatch?.(route, signal);
+					if (!this.deps.workerDispatcher?.dispatch) {
+						const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime);
+						return {
+							status: "unrecoverable",
+							reasonCodes: ["missing_required_executor:workerDispatcher.dispatch"],
+							cycleCount: this.cycleCounter,
+							deliveryBundle: bundle,
+						};
+					}
+					await this.deps.workerDispatcher.dispatch(route, signal);
 					break;
 
 				case "continue_current_worker":
-					await this.deps.workerDispatcher?.continueWorker?.(route, signal);
+					if (!this.deps.workerDispatcher?.continueWorker) {
+						const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime);
+						return {
+							status: "unrecoverable",
+							reasonCodes: ["missing_required_executor:workerDispatcher.continueWorker"],
+							cycleCount: this.cycleCounter,
+							deliveryBundle: bundle,
+						};
+					}
+					await this.deps.workerDispatcher.continueWorker(route, signal);
 					break;
 
 				case "escalate_capability":
-					await this.deps.workerDispatcher?.dispatchEscalated?.(route, signal);
+					if (!this.deps.workerDispatcher?.dispatchEscalated) {
+						const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime);
+						return {
+							status: "unrecoverable",
+							reasonCodes: ["missing_required_executor:workerDispatcher.dispatchEscalated"],
+							cycleCount: this.cycleCounter,
+							deliveryBundle: bundle,
+						};
+					}
+					await this.deps.workerDispatcher.dispatchEscalated(route, signal);
 					break;
 
 				case "completion_candidate": {
+					// FIN-060: Single completion owner via CompletionCoordinator
 					const profile = this.deps.completionProfile ?? "semantic_enhanced";
 
-					if (profile === "system_one_required") {
-						// ADR-064: system_one_required profile stops as semantic_gate_unavailable if calibrated engine missing
-						const hasCalibrated =
-							this.deps.decisions?.select(ROUTE_DECISION_PROGRAM, "critical")?.capabilities()
-								.confidenceProvenance === "native_calibrated" ||
-							Boolean(this.deps.systemOne?.executeCompletionTransaction);
+					const completionContext: CompletionEvaluationContext = {
+						runtime,
+						getSourceRevision: this.deps.runtime.getSourceRevision?.bind(this.deps.runtime),
+						getArtifacts: this.deps.runtime.getArtifacts?.bind(this.deps.runtime),
+						getLimitations: this.deps.runtime.getLimitations?.bind(this.deps.runtime),
+						reviewer: this.deps.reviewer,
+						semanticEvaluator: this.deps.systemOne?.executeCompletionTransaction
+							? {
+									evaluateCompletion: async (_objId, opts) => {
+										const verdict = await this.deps.systemOne!.executeCompletionTransaction!(false, opts);
+										return {
+											passed: verdict.verdict === "complete",
+											decisionRef: (verdict as { decision_id?: string }).decision_id,
+											failedGates: verdict.failed_gates.map((g) => g.id),
+										};
+									},
+								}
+							: undefined,
+						hasCalibratedEngine: () => {
+							const candidate = this.deps.decisions?.select(ROUTE_DECISION_PROGRAM, "critical");
+							return (
+								candidate?.capabilities().confidenceProvenance === "native_calibrated" ||
+								Boolean(this.deps.systemOne?.executeCompletionTransaction)
+							);
+						},
+					};
 
-						if (!hasCalibrated) {
-							const bundle = await this.buildBundle(objectiveId, "semantic_gate_unavailable", runtime);
-							return {
-								status: "semantic_gate_unavailable",
-								reasonCodes: ["system_one_required_but_unavailable"],
-								cycleCount: this.cycleCounter,
-								deliveryBundle: bundle,
-							};
-						}
+					const evalResult = await CompletionCoordinator.evaluate(objectiveId, profile, completionContext, {
+						signal,
+					});
 
-						const tx = await this.handleCompletionTransaction(objectiveId, runtime, signal);
-						if (tx.outcome === "completed") {
-							return tx.result;
-						}
-						if (tx.outcome === "failed") {
-							const bundle = await this.buildBundle(objectiveId, "semantic_gate_unavailable", runtime);
-							return {
-								status: "semantic_gate_unavailable",
-								reasonCodes: ["system_one_required_transaction_failed"],
-								cycleCount: this.cycleCounter,
-								deliveryBundle: bundle,
-							};
-						}
-						break;
-					}
-
-					if (profile === "mechanical") {
-						// ADR-061: Mechanical completion profile produces DeliveryBundle without Jev
-						const bundle = await this.buildBundle(objectiveId, "complete", runtime);
+					if (evalResult.verdict === "complete") {
 						return {
 							status: "complete",
-							reasonCodes: ["mechanical_completion_passed"],
+							reasonCodes: ["completion_passed"],
+							completionDecisionId: evalResult.semanticRefs?.[0],
+							cycleCount: this.cycleCounter,
+							deliveryBundle: evalResult.deliveryBundle,
+						};
+					}
+
+					if (evalResult.verdict === "semantic_gate_unavailable") {
+						const bundle = await this.buildBundle(objectiveId, "semantic_gate_unavailable", runtime, {
+							reasonCodes: evalResult.failedGates,
+						});
+						return {
+							status: "semantic_gate_unavailable",
+							reasonCodes:
+								evalResult.failedGates.length > 0
+									? evalResult.failedGates
+									: ["system_one_required_but_unavailable"],
 							cycleCount: this.cycleCounter,
 							deliveryBundle: bundle,
 						};
 					}
 
-					// Default / semantic_enhanced profile
-					if (this.deps.systemOne?.executeCompletionTransaction) {
-						const tx = await this.handleCompletionTransaction(objectiveId, runtime, signal);
-						if (tx.outcome === "completed") {
-							return tx.result;
-						}
-						if (tx.outcome === "failed") {
-							const bundle = await this.buildBundle(objectiveId, "complete", runtime);
-							return {
-								status: "complete",
-								reasonCodes: ["fallback_mechanical_completion_passed"],
-								cycleCount: this.cycleCounter,
-								deliveryBundle: bundle,
-							};
-						}
-						break;
+					// Not complete: schedule repair tasks if runtime supports it
+					if (evalResult.failedGates.length > 0 && this.deps.runtime.ensureRepairTasks) {
+						const repairs = completionFailuresToRepairWork(
+							evalResult.failedGates.map((gateId) => ({ gate_id: gateId })),
+							objectiveId,
+						);
+						await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
 					}
-
-					const bundle = await this.buildBundle(objectiveId, "complete", runtime);
-					return {
-						status: "complete",
-						reasonCodes: ["mechanical_completion_passed"],
-						cycleCount: this.cycleCounter,
-						deliveryBundle: bundle,
-					};
+					break;
 				}
 
 				case "blocked_external":
@@ -521,7 +653,16 @@ export class ObjectiveExecutionController {
 
 				case "wait_for_worker":
 				case "wait_for_tool":
-					await this.deps.waiter?.wait?.(route, signal);
+					if (!this.deps.waiter?.wait) {
+						const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime);
+						return {
+							status: "unrecoverable",
+							reasonCodes: ["missing_required_executor:waiter"],
+							cycleCount: this.cycleCounter,
+							deliveryBundle: bundle,
+						};
+					}
+					await this.deps.waiter.wait(route, signal);
 					break;
 			}
 
@@ -558,7 +699,6 @@ export class ObjectiveExecutionController {
 			blocked: "blocked_external",
 			unrecoverable: "unrecoverable",
 			budget_exhausted: "budget_exhausted",
-			complete: "complete",
 			semantic_gate_unavailable: "semantic_gate_unavailable",
 		};
 		return this.buildBundle(objectiveId, statusMap[result.status] ?? "unrecoverable", runtime);

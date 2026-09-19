@@ -1,3 +1,4 @@
+export * from "./action-policy.ts";
 export * from "./capabilities.ts";
 export * from "./compiler.ts";
 export * from "./confidence.ts";
@@ -11,3 +12,4 @@ export * from "./functions.ts";
 export * from "./policy.ts";
 export * from "./primitives.ts";
 export * from "./program.ts";
+export * from "./protocol-error.ts";

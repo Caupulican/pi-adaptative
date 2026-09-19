@@ -43,6 +43,7 @@ export interface SetDecision {
 	readonly instructionTemplate: string;
 	readonly members: Record<string, string>;
 	readonly consequence?: Consequence;
+	readonly threshold?: number;
 }
 
 export type DecisionDefinition = BooleanDecision | ChoiceDecision | ScoreDecision | SetDecision;

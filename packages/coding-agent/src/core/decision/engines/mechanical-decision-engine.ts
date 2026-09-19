@@ -45,31 +45,53 @@ export class MechanicalDecisionEngine implements SemanticDecisionEngine {
 		const results: Record<string, DecisionResult> = {};
 
 		const rawObjective = (mechState as any).objective;
-		const objectiveCriteria: readonly any[] = rawObjective?.objective?.acceptanceCriteria ?? [];
-		const objectiveEvidence: readonly any[] = rawObjective?.evidence ?? [];
+		const rawRuntime = (mechState as any).runtime;
+		const rawIntegrity = (mechState as any).integrity;
+
+		const readyTask =
+			rawRuntime?.ready_tasks?.length > 0 ? { status: "ready" } : mechState.tasks?.find((t) => t.status === "ready");
+		const retryableTask =
+			rawRuntime?.failed_retryable_tasks?.length > 0
+				? { status: "failed", retriesRemaining: 1 }
+				: mechState.tasks?.find((t) => t.status === "failed" && (t.retriesRemaining ?? 0) > 0);
+		const runningAttempts = rawRuntime?.running_attempts?.length ?? (mechState as any).activeAttempts?.length ?? 0;
+
+		const objectiveCriteria: readonly any[] =
+			rawObjective?.required_criteria ?? rawObjective?.objective?.acceptanceCriteria ?? [];
+		const objectiveEvidence: readonly any[] = rawIntegrity?.fresh_evidence ?? rawObjective?.evidence ?? [];
 
 		const criteria =
 			mechState.acceptance ??
 			(objectiveCriteria.length > 0
-				? objectiveCriteria.map((ac) => ({
-						id: ac.id,
-						required: ac.required !== false,
-						satisfied: objectiveEvidence.some((e) => e.acceptanceCriterionId === ac.id && e.verdict === "passed"),
-					}))
+				? objectiveCriteria.map((ac) => {
+						const critId = typeof ac === "string" ? ac : ac.id;
+						const req = typeof ac === "string" ? true : ac.required !== false;
+						const sat = objectiveEvidence.some((e) =>
+							typeof e === "string"
+								? e === critId
+								: (e.acceptanceCriterionId === critId || e.requirement_id === critId) && e.verdict !== "failed",
+						);
+						return {
+							id: critId,
+							required: req,
+							satisfied: sat,
+						};
+					})
 				: []);
 
 		const allSatisfied =
 			criteria.length > 0
 				? criteria.every((a) => !a.required || a.satisfied)
-				: (mechState.tasks?.length ?? 0) === 0 || mechState.tasks?.every((t) => t.status === "completed");
+				: rawRuntime
+					? (rawRuntime.ready_tasks?.length ?? 0) === 0 &&
+						(rawRuntime.failed_retryable_tasks?.length ?? 0) === 0 &&
+						runningAttempts === 0
+					: (mechState.tasks?.length ?? 0) === 0 || mechState.tasks?.every((t) => t.status === "completed");
 
 		for (const decision of program.decisions) {
 			if (decision.id === "__function__" && decision.kind === "choice") {
-				// Mechanical routing rules per MASTER_SPEC and mechanical-fallback-policy
 				let selectedFunc = "dispatch_worker";
 
-				const readyTask = mechState.tasks?.find((t) => t.status === "ready");
-				const retryableTask = mechState.tasks?.find((t) => t.status === "failed" && (t.retriesRemaining ?? 0) > 0);
 				const missingProof = criteria.find(
 					(a) => a.required && (a as any).mechanicalProofRequired && !(a as any).mechanicalProofPassed,
 				);
@@ -87,7 +109,11 @@ export class MechanicalDecisionEngine implements SemanticDecisionEngine {
 				}
 
 				if (!decision.options[selectedFunc]) {
-					selectedFunc = Object.keys(decision.options)[0] ?? "dispatch_worker";
+					results[decision.id] = {
+						kind: "unsupported",
+						reason: `mechanical_function_${selectedFunc}_not_in_options`,
+					};
+					continue;
 				}
 
 				results[decision.id] = {
@@ -97,79 +123,106 @@ export class MechanicalDecisionEngine implements SemanticDecisionEngine {
 					margin: 1.0,
 					confidence: {
 						value: 1.0,
-						provenance: "none",
+						provenance: "heuristic",
 						isCalibrated: false,
 					},
 				};
 			} else if (decision.kind === "choice") {
-				// ADR-033: If decision corresponds to an argument or semantic judgment,
-				// use deterministic state if possible, else unsupported/default
-				let selected = Object.keys(decision.options)[0];
+				let selected: string | undefined;
 
 				if (decision.id === "missing_work_class") {
-					selected = allSatisfied ? "none" : "implementation";
-					if (!decision.options[selected]) {
-						selected = Object.keys(decision.options)[0];
+					const missingProof = criteria.find(
+						(a) => a.required && (a as any).mechanicalProofRequired && !(a as any).mechanicalProofPassed,
+					);
+
+					if (allSatisfied) {
+						selected = "none";
+					} else if (missingProof) {
+						selected = "verify";
+					} else if (retryableTask) {
+						selected = "replan";
+					} else if (readyTask) {
+						selected = "implement";
 					}
 				} else if (decision.id.endsWith("__role")) {
 					const unsatisfied = criteria.find((a) => a.required && !(a as any).satisfied);
 					selected = (unsatisfied as any)?.implementationPresent ? "verifier" : "investigator";
-					if (!decision.options[selected]) {
-						selected = Object.keys(decision.options)[0];
-					}
 				} else if (decision.id.endsWith("__kind") && decision.options.test) {
 					selected = "test";
 				} else if (decision.id.endsWith("__reason") && decision.options.strategy_failed) {
 					selected = "strategy_failed";
 				}
 
-				results[decision.id] = {
-					kind: "choice",
-					selected,
-					distribution: { [selected]: 1.0 },
-					margin: 1.0,
-					confidence: {
-						value: 1.0,
-						provenance: "none",
-						isCalibrated: false,
-					},
-				};
-			} else if (decision.kind === "boolean") {
-				let value = false;
-				if (decision.id.includes("work_remaining")) {
-					value = !allSatisfied;
+				if (selected && decision.options[selected]) {
+					results[decision.id] = {
+						kind: "choice",
+						selected,
+						distribution: { [selected]: 1.0 },
+						margin: 1.0,
+						confidence: {
+							value: 1.0,
+							provenance: "heuristic",
+							isCalibrated: false,
+						},
+					};
+				} else {
+					results[decision.id] = {
+						kind: "unsupported",
+						reason: `semantic_choice_${decision.id}_not_derivable_mechanically`,
+					};
 				}
-				results[decision.id] = {
-					kind: "boolean",
-					value,
-					probabilityTrue: value ? 1.0 : 0.0,
-					confidence: {
-						value: 1.0,
-						provenance: "none",
-						isCalibrated: false,
-					},
-				};
+			} else if (decision.kind === "boolean") {
+				let val: boolean | undefined;
+				if (decision.id.includes("work_remaining")) {
+					val = !allSatisfied;
+				} else if (decision.id.includes("cancelled")) {
+					val = Boolean(mechState.cancelled);
+				} else if (decision.id.includes("budget_exhausted")) {
+					val = Boolean(mechState.budgetExhausted);
+				} else if (decision.id === "current_worker_can_continue") {
+					val = Boolean(mechState.requiredWorkerInFlight);
+				}
+
+				if (val !== undefined) {
+					results[decision.id] = {
+						kind: "boolean",
+						value: val,
+						probabilityTrue: val ? 1.0 : 0.0,
+						confidence: {
+							value: 1.0,
+							provenance: "heuristic",
+							isCalibrated: false,
+						},
+					};
+				} else {
+					results[decision.id] = {
+						kind: "unsupported",
+						reason: `semantic_boolean_${decision.id}_not_derivable_mechanically`,
+					};
+				}
 			} else if (decision.kind === "score") {
-				results[decision.id] = {
-					kind: "score",
-					value: decision.levels[0]?.value ?? 0,
-					distribution: { [decision.levels[0]?.value ?? 0]: 1.0 },
-					confidence: {
-						value: 1.0,
-						provenance: "none",
-						isCalibrated: false,
-					},
-				};
+				if (decision.id === "semantic_progress") {
+					const val = allSatisfied ? 3 : criteria.some((c) => c.satisfied) ? 2 : 0;
+					results[decision.id] = {
+						kind: "score",
+						value: val,
+						distribution: { [val]: 1.0 },
+						confidence: {
+							value: 1.0,
+							provenance: "heuristic",
+							isCalibrated: false,
+						},
+					};
+				} else {
+					results[decision.id] = {
+						kind: "unsupported",
+						reason: `semantic_score_${decision.id}_not_derivable_mechanically`,
+					};
+				}
 			} else if (decision.kind === "set") {
 				results[decision.id] = {
-					kind: "set",
-					selected: [],
-					memberships: {},
-					confidence: {
-						value: 1.0,
-						provenance: "none",
-						isCalibrated: false,
-					},
+					kind: "unsupported",
+					reason: `semantic_set_${decision.id}_not_derivable_mechanically`,
 				};
 			}
 		}

@@ -4,6 +4,7 @@ import type { DecisionEngineCapabilities } from "../capabilities.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../engine.ts";
 import { createDecisionEvaluation, type DecisionEvaluation, type DecisionResult } from "../evaluation.ts";
 import type { DecisionProgram } from "../program.ts";
+import { DecisionEngineProtocolError } from "../protocol-error.ts";
 
 export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 	readonly id = "typesafe-system-one";
@@ -46,7 +47,11 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 			} else if (d.kind === "choice") {
 				const criteria: Record<string, string> = {};
 				for (const [key, opt] of Object.entries(d.options)) {
-					criteria[key] = opt.description;
+					if (opt.notFor) {
+						criteria[key] = `${opt.description} (NOT for: ${opt.notFor})`;
+					} else {
+						criteria[key] = opt.description;
+					}
 				}
 				questions[d.id] = {
 					type: "choice",
@@ -73,6 +78,7 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 			}
 		}
 
+		const startTime = Date.now();
 		const response = await this.adapter.evaluate(
 			{
 				model: this.model,
@@ -84,19 +90,35 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 				timeoutMs: options?.timeoutMs,
 			},
 		);
+		const latencyMs = Date.now() - startTime;
 
 		const results: Record<string, DecisionResult> = {};
 
 		for (const d of program.decisions) {
+			const raw = response.answers[d.id];
 			if (d.kind === "boolean") {
-				const ans = (response.answers[d.id] ?? {}) as {
-					value?: boolean;
-					probability?: number;
-					confidence?: number;
-				};
-				const prob = typeof ans.probability === "number" ? ans.probability : 0.5;
-				const val = typeof ans.value === "boolean" ? ans.value : prob >= 0.5;
-				const conf = typeof ans.confidence === "number" ? ans.confidence : Math.max(prob, 1 - prob);
+				if (!raw || typeof raw !== "object") {
+					throw new DecisionEngineProtocolError(`Missing answer for boolean decision '${d.id}'`, {
+						decisionId: d.id,
+					});
+				}
+				const ans = raw as { type?: string; noul?: number };
+				if (
+					ans.type !== "noul" ||
+					typeof ans.noul !== "number" ||
+					!Number.isFinite(ans.noul) ||
+					ans.noul < 0 ||
+					ans.noul > 1
+				) {
+					throw new DecisionEngineProtocolError(
+						`Invalid noul answer for boolean decision '${d.id}': expected finite number in [0, 1]`,
+						{ decisionId: d.id, raw },
+					);
+				}
+				const noul = ans.noul;
+				const prob = noul;
+				const val = noul >= 0.5;
+				const conf = Math.max(noul, 1 - noul);
 
 				results[d.id] = {
 					kind: "boolean",
@@ -104,52 +126,138 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 					probabilityTrue: prob,
 					confidence: {
 						value: conf,
-						provenance: "native_calibrated",
+						provenance: "derived_calibrated_probability",
 						isCalibrated: true,
 						noulProbabilityTrue: prob,
 					},
 				};
 			} else if (d.kind === "choice") {
-				const ans = (response.answers[d.id] ?? {}) as {
+				if (!raw || typeof raw !== "object") {
+					throw new DecisionEngineProtocolError(`Missing answer for choice decision '${d.id}'`, {
+						decisionId: d.id,
+					});
+				}
+				const ans = raw as {
+					type?: string;
 					choice?: string;
-					selected?: string;
-					distribution?: Record<string, number>;
-					margin?: number;
 					confidence?: number;
+					probabilities?: Record<string, number>;
 				};
-				const selected = ans.choice ?? ans.selected ?? Object.keys(d.options)[0] ?? "unknown";
-				const distribution = ans.distribution ?? { [selected]: 1.0 };
-				const margin = typeof ans.margin === "number" ? ans.margin : 1.0;
-				const conf = typeof ans.confidence === "number" ? ans.confidence : (distribution[selected] ?? 0.9);
+				if (ans.type !== "choice" || typeof ans.choice !== "string" || !d.options[ans.choice]) {
+					throw new DecisionEngineProtocolError(`Invalid choice '${ans.choice}' for decision '${d.id}'`, {
+						decisionId: d.id,
+						raw,
+					});
+				}
+				if (
+					typeof ans.confidence !== "number" ||
+					!Number.isFinite(ans.confidence) ||
+					ans.confidence < 0 ||
+					ans.confidence > 1
+				) {
+					throw new DecisionEngineProtocolError(`Invalid confidence for choice decision '${d.id}'`, {
+						decisionId: d.id,
+						raw,
+					});
+				}
+				if (!ans.probabilities || typeof ans.probabilities !== "object") {
+					throw new DecisionEngineProtocolError(`Missing probabilities for choice decision '${d.id}'`, {
+						decisionId: d.id,
+						raw,
+					});
+				}
+				let sum = 0;
+				const sortedProbs: number[] = [];
+				for (const [k, p] of Object.entries(ans.probabilities)) {
+					if (typeof p !== "number" || !Number.isFinite(p) || p < 0 || p > 1) {
+						throw new DecisionEngineProtocolError(`Invalid probability for option '${k}' in decision '${d.id}'`, {
+							decisionId: d.id,
+							raw,
+						});
+					}
+					sum += p;
+					sortedProbs.push(p);
+				}
+				if (Math.abs(sum - 1.0) > 0.1) {
+					throw new DecisionEngineProtocolError(
+						`Probabilities for choice decision '${d.id}' do not sum to 1 (sum = ${sum})`,
+						{ decisionId: d.id, raw },
+					);
+				}
+				sortedProbs.sort((a, b) => b - a);
+				const top = sortedProbs[0] ?? 1.0;
+				const second = sortedProbs[1] ?? 0.0;
+				const margin = top - second;
 
 				results[d.id] = {
 					kind: "choice",
-					selected,
-					distribution,
+					selected: ans.choice,
+					distribution: ans.probabilities,
 					margin,
 					confidence: {
-						value: conf,
+						value: ans.confidence,
 						provenance: "native_calibrated",
 						isCalibrated: true,
 					},
 				};
 			} else if (d.kind === "score") {
-				const ans = (response.answers[d.id] ?? {}) as {
+				if (!raw || typeof raw !== "object") {
+					throw new DecisionEngineProtocolError(`Missing answer for score decision '${d.id}'`, {
+						decisionId: d.id,
+					});
+				}
+				const ans = raw as {
+					type?: string;
 					score?: number;
-					value?: number;
-					distribution?: Record<number, number>;
 					confidence?: number;
+					probabilities?: Record<string, number>;
 				};
-				const value = typeof ans.score === "number" ? ans.score : (ans.value ?? 0);
-				const distribution = ans.distribution ?? { [value]: 1.0 };
-				const conf = typeof ans.confidence === "number" ? ans.confidence : 0.9;
+				if (ans.type !== "score" || typeof ans.score !== "number" || !Number.isFinite(ans.score)) {
+					throw new DecisionEngineProtocolError(`Invalid score for decision '${d.id}'`, { decisionId: d.id, raw });
+				}
+				if (
+					typeof ans.confidence !== "number" ||
+					!Number.isFinite(ans.confidence) ||
+					ans.confidence < 0 ||
+					ans.confidence > 1
+				) {
+					throw new DecisionEngineProtocolError(`Invalid confidence for score decision '${d.id}'`, {
+						decisionId: d.id,
+						raw,
+					});
+				}
+				if (!ans.probabilities || typeof ans.probabilities !== "object") {
+					throw new DecisionEngineProtocolError(`Missing probabilities for score decision '${d.id}'`, {
+						decisionId: d.id,
+						raw,
+					});
+				}
+				const numericDistribution: Record<number, number> = {};
+				let sum = 0;
+				for (const [k, p] of Object.entries(ans.probabilities)) {
+					const numKey = Number(k);
+					if (Number.isNaN(numKey) || typeof p !== "number" || !Number.isFinite(p) || p < 0 || p > 1) {
+						throw new DecisionEngineProtocolError(
+							`Invalid score probability for key '${k}' in decision '${d.id}'`,
+							{ decisionId: d.id, raw },
+						);
+					}
+					numericDistribution[numKey] = p;
+					sum += p;
+				}
+				if (Math.abs(sum - 1.0) > 0.1) {
+					throw new DecisionEngineProtocolError(
+						`Score probabilities for decision '${d.id}' do not sum to 1 (sum = ${sum})`,
+						{ decisionId: d.id, raw },
+					);
+				}
 
 				results[d.id] = {
 					kind: "score",
-					value,
-					distribution,
+					value: ans.score,
+					distribution: numericDistribution,
 					confidence: {
-						value: conf,
+						value: ans.confidence,
 						provenance: "native_calibrated",
 						isCalibrated: true,
 					},
@@ -161,18 +269,32 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 
 				for (const memberKey of Object.keys(d.members)) {
 					const qId = `${d.id}__${memberKey}`;
-					const ans = (response.answers[qId] ?? {}) as {
-						value?: boolean;
-						probability?: number;
-						confidence?: number;
-					};
-					const prob = typeof ans.probability === "number" ? ans.probability : 0.0;
+					const memberRaw = response.answers[qId];
+					if (!memberRaw || typeof memberRaw !== "object") {
+						throw new DecisionEngineProtocolError(`Missing answer for set item '${qId}'`, { decisionId: qId });
+					}
+					const ans = memberRaw as { type?: string; noul?: number };
+					if (
+						ans.type !== "noul" ||
+						typeof ans.noul !== "number" ||
+						!Number.isFinite(ans.noul) ||
+						ans.noul < 0 ||
+						ans.noul > 1
+					) {
+						throw new DecisionEngineProtocolError(
+							`Invalid noul answer for set item '${qId}': expected finite number in [0, 1]`,
+							{ decisionId: qId, raw: memberRaw },
+						);
+					}
+					const prob = ans.noul;
 					memberships[memberKey] = prob;
-					if (prob >= 0.5 || ans.value === true) {
+					if (prob >= (d.threshold ?? 0.5)) {
 						selected.push(memberKey);
 					}
-					const conf = typeof ans.confidence === "number" ? ans.confidence : Math.max(prob, 1 - prob);
-					if (conf < minConf) minConf = conf;
+					const conf = Math.max(prob, 1 - prob);
+					if (conf < minConf) {
+						minConf = conf;
+					}
 				}
 
 				results[d.id] = {
@@ -181,7 +303,7 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 					memberships,
 					confidence: {
 						value: minConf,
-						provenance: "native_calibrated",
+						provenance: "derived_calibrated_probability",
 						isCalibrated: true,
 					},
 				};
@@ -195,6 +317,15 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 			model: response.model || this.model,
 			confidenceProvenance: "native_calibrated",
 			results,
+			audit: {
+				engineId: this.id,
+				provider: "typesafe",
+				model: response.model || this.model,
+				programId: program.id,
+				programVersion: program.version,
+				confidenceProvenance: "native_calibrated",
+				latencyMs,
+			},
 		});
 	}
 }

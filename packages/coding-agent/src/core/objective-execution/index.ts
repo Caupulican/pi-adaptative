@@ -3,6 +3,14 @@
  */
 
 export {
+	CompletionCoordinator,
+	type CompletionEvaluationContext,
+	type CompletionEvaluationResult,
+	type CompletionVerdict,
+	type IndependentReviewerVerdict,
+	type SemanticEnhancedFallbackPolicy,
+} from "./completion-coordinator.ts";
+export {
 	buildDeliveryBundle,
 	type DeliveryArtifact,
 	type DeliveryBundle,
@@ -54,7 +62,9 @@ export {
 	type RouteCompositionInput,
 } from "./objective-route-policy.ts";
 export {
+	type BoundedCombinedStateProjection,
 	type ObjectiveRouteProjection,
+	projectBoundedCombinedState,
 	projectObjectiveForRouting,
 	type SemanticRouteJudgments,
 } from "./objective-route-projector.ts";

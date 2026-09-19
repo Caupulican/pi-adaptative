@@ -1,4 +1,4 @@
-import { type DecisionConfidence, weakestCallConfidence } from "./confidence.ts";
+import { type ConfidenceProvenance, type DecisionConfidence, weakestCallConfidence } from "./confidence.ts";
 import type { DecisionEvaluation, FunctionCallDecisionResult } from "./evaluation.ts";
 import type { SemanticFunctionRegistry } from "./functions.ts";
 import type { ChoiceDecision, DecisionDefinition } from "./primitives.ts";
@@ -39,13 +39,23 @@ export function compileSemanticFunctionsToProgram(
 				requiredParams.push(paramName);
 			}
 
+			if (paramDef.optional) {
+				// FIN-040: Compile <function>__<arg>__stated decision
+				decisions.push({
+					kind: "boolean",
+					id: `${funcName}__${paramName}__stated`,
+					instruction: `Determine whether optional argument ${paramName} is explicitly stated or applicable for function ${funcName}`,
+				});
+			}
+
 			// Generate argument decision
 			const decisionId = `${funcName}__${paramName}`;
 			if (paramDef.kind === "choice") {
-				const argOptions: Record<string, { description: string }> = {};
+				const argOptions: Record<string, { description: string; notFor?: string }> = {};
 				for (const opt of paramDef.options) {
 					argOptions[opt] = {
 						description: paramDef.descriptions?.[opt] ?? `Option ${opt} for ${paramName}`,
+						...(paramDef.notFor?.[opt] ? { notFor: paramDef.notFor[opt] } : {}),
 					};
 				}
 				decisions.push({
@@ -118,7 +128,29 @@ export function resolveFunctionCall(
 		const decisionId = `${selectedFunc}__${paramName}`;
 		const argResult = evaluation.results[decisionId];
 
-		if (argResult) {
+		let shouldApplyArg = false;
+		if (paramDef.optional) {
+			const statedResult = evaluation.results[`${selectedFunc}__${paramName}__stated`];
+			const isStated =
+				statedResult?.kind === "boolean" ? statedResult.value : argResult !== undefined && !statedResult;
+
+			if (isStated) {
+				if (statedResult && statedResult.kind === "boolean") {
+					argConfidences[`${paramName}__stated`] = statedResult.confidence;
+					requiredConfidences.push(statedResult.confidence);
+				}
+				shouldApplyArg = true;
+			} else {
+				// FIN-041: Optional argument not stated, use default and do not force choice into confidences
+				if (paramDef.defaultValue !== undefined) {
+					resolvedArgs[paramName] = paramDef.defaultValue;
+				}
+			}
+		} else {
+			shouldApplyArg = true;
+		}
+
+		if (shouldApplyArg && argResult) {
 			if (argResult.kind === "choice") {
 				resolvedArgs[paramName] = argResult.selected;
 				argConfidences[paramName] = argResult.confidence;
@@ -128,14 +160,12 @@ export function resolveFunctionCall(
 				argConfidences[paramName] = argResult.confidence;
 				requiredConfidences.push(argResult.confidence);
 			}
-		} else if (paramDef.optional && paramDef.defaultValue !== undefined) {
-			// ADR-016: Optional semantic function parameters support defaults/applicability
-			resolvedArgs[paramName] = paramDef.defaultValue;
 		}
 	}
 
-	// ADR-015: Weakest-link call confidence
-	const callConfidence = weakestCallConfidence(requiredConfidences, evaluation.engine.confidence_provenance);
+	// ADR-015 / FIN-043: Weakest-link call confidence
+	const provenance: ConfidenceProvenance = evaluation.engine?.confidence_provenance ?? "heuristic";
+	const callConfidence = weakestCallConfidence(requiredConfidences, provenance);
 
 	return {
 		kind: "function_call",
@@ -144,4 +174,71 @@ export function resolveFunctionCall(
 		confidence: callConfidence,
 		argumentConfidences: argConfidences,
 	};
+}
+
+export interface FunctionAuthorizationContext {
+	readonly registry: SemanticFunctionRegistry;
+	readonly authorityEnvelope?: {
+		readonly allowedFunctions?: readonly string[];
+		readonly blockedFunctions?: readonly string[];
+	};
+	readonly workerCapabilities?: readonly string[];
+	readonly deterministicPreconditions?: (funcName: string, args: Record<string, unknown>) => boolean;
+}
+
+export interface FunctionAuthorizationResult {
+	readonly authorized: boolean;
+	readonly reason?: string;
+}
+
+/**
+ * FIN-044: Mechanically authorizes a proposed semantic function call before execution.
+ */
+export function authorizeFunctionCall(
+	call: FunctionCallDecisionResult,
+	context: FunctionAuthorizationContext,
+): FunctionAuthorizationResult {
+	const funcDef = context.registry[call.name];
+	if (!funcDef) {
+		return { authorized: false, reason: `Function '${call.name}' is not in registry.` };
+	}
+
+	// Validate required arguments
+	for (const [paramName, paramDef] of Object.entries(funcDef.parameters)) {
+		if (!paramDef.optional && !(paramName in call.arguments)) {
+			return {
+				authorized: false,
+				reason: `Missing required argument '${paramName}' for function '${call.name}'.`,
+			};
+		}
+		if (paramName in call.arguments && paramDef.kind === "choice") {
+			const val = call.arguments[paramName];
+			if (typeof val !== "string" || !paramDef.options.includes(val)) {
+				return {
+					authorized: false,
+					reason: `Invalid value '${String(val)}' for choice argument '${paramName}'.`,
+				};
+			}
+		}
+	}
+
+	// Validate authority envelope
+	if (context.authorityEnvelope?.blockedFunctions?.includes(call.name)) {
+		return { authorized: false, reason: `Function '${call.name}' is blocked by authority envelope.` };
+	}
+	if (context.authorityEnvelope?.allowedFunctions && !context.authorityEnvelope.allowedFunctions.includes(call.name)) {
+		return { authorized: false, reason: `Function '${call.name}' is not permitted by authority envelope.` };
+	}
+
+	// Validate worker capability
+	if (context.workerCapabilities && !context.workerCapabilities.includes(call.name)) {
+		return { authorized: false, reason: `Worker lacks capability for function '${call.name}'.` };
+	}
+
+	// Validate deterministic preconditions
+	if (context.deterministicPreconditions && !context.deterministicPreconditions(call.name, call.arguments)) {
+		return { authorized: false, reason: `Deterministic preconditions failed for function '${call.name}'.` };
+	}
+
+	return { authorized: true };
 }

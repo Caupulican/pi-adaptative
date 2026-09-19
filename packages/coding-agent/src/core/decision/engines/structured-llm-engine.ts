@@ -31,71 +31,163 @@ export class StructuredLlmDecisionEngine implements SemanticDecisionEngine {
 	}
 
 	async evaluate(program: DecisionProgram, state: unknown, options?: DecisionOptions): Promise<DecisionEvaluation> {
-		let parsedAnswers: Record<string, unknown> = {};
+		let parsedAnswers: Record<string, unknown> | null = null;
 
 		if (this.runner) {
 			const prompt = `Evaluate the following decision program: ${JSON.stringify(program)}\nState: ${JSON.stringify(state)}\nProvide a JSON mapping decision ids to answers.`;
-			const raw = await this.runner.complete(prompt, options?.signal);
 			try {
+				const raw = await this.runner.complete(prompt, options?.signal);
 				parsedAnswers = JSON.parse(raw);
 			} catch {
-				parsedAnswers = {};
+				parsedAnswers = null;
 			}
 		}
 
 		const results: Record<string, DecisionResult> = {};
+		let hasDeclaredConfidence = false;
 
 		for (const d of program.decisions) {
+			if (!parsedAnswers || typeof parsedAnswers !== "object" || parsedAnswers[d.id] === undefined) {
+				results[d.id] = {
+					kind: "unsupported",
+					reason: `missing_answer_for_${d.id}`,
+				};
+				continue;
+			}
+
+			const rawAns = parsedAnswers[d.id];
+			let declaredConf: number | undefined;
+			if (typeof rawAns === "object" && rawAns !== null && "confidence" in rawAns) {
+				const c = (rawAns as { confidence: unknown }).confidence;
+				if (typeof c === "number" && Number.isFinite(c) && c >= 0 && c <= 1) {
+					declaredConf = c;
+					hasDeclaredConfidence = true;
+				}
+			}
+
+			const confidenceVal = declaredConf ?? 0.5;
+			const provenance = declaredConf !== undefined ? "synthetic_self_report" : "none";
+
 			if (d.kind === "boolean") {
-				const ans = parsedAnswers[d.id];
-				const val = typeof ans === "boolean" ? ans : false;
+				let val: boolean | undefined;
+				if (typeof rawAns === "boolean") {
+					val = rawAns;
+				} else if (typeof rawAns === "object" && rawAns !== null && "value" in rawAns) {
+					const v = (rawAns as { value: unknown }).value;
+					if (typeof v === "boolean") val = v;
+				}
+
+				if (val === undefined) {
+					results[d.id] = {
+						kind: "unsupported",
+						reason: `invalid_boolean_for_${d.id}`,
+					};
+					continue;
+				}
+
 				results[d.id] = {
 					kind: "boolean",
 					value: val,
-					probabilityTrue: val ? 0.9 : 0.1,
+					probabilityTrue: val ? 1.0 : 0.0,
 					confidence: {
-						value: 0.85,
-						provenance: "synthetic_self_report",
+						value: confidenceVal,
+						provenance,
 						isCalibrated: false,
 					},
 				};
 			} else if (d.kind === "choice") {
-				const ans = parsedAnswers[d.id];
-				const selected = typeof ans === "string" && d.options[ans] ? ans : (Object.keys(d.options)[0] ?? "unknown");
+				let selected: string | undefined;
+				let distribution: Record<string, number> | undefined;
+
+				if (typeof rawAns === "string" && d.options[rawAns]) {
+					selected = rawAns;
+					distribution = { [selected]: 1.0 };
+				} else if (typeof rawAns === "object" && rawAns !== null) {
+					const c = rawAns as {
+						choice?: unknown;
+						selected?: unknown;
+						probabilities?: unknown;
+						distribution?: unknown;
+					};
+					const candidate =
+						typeof c.choice === "string" ? c.choice : typeof c.selected === "string" ? c.selected : undefined;
+					if (candidate && d.options[candidate]) {
+						selected = candidate;
+					}
+					if (typeof c.probabilities === "object" && c.probabilities !== null) {
+						distribution = c.probabilities as Record<string, number>;
+					} else if (typeof c.distribution === "object" && c.distribution !== null) {
+						distribution = c.distribution as Record<string, number>;
+					}
+				}
+
+				if (!selected) {
+					results[d.id] = {
+						kind: "unsupported",
+						reason: `unknown_choice_for_${d.id}`,
+					};
+					continue;
+				}
+
 				results[d.id] = {
 					kind: "choice",
 					selected,
-					distribution: { [selected]: 1.0 },
+					distribution: distribution ?? { [selected]: 1.0 },
 					margin: 1.0,
 					confidence: {
-						value: 0.85,
-						provenance: "synthetic_self_report",
+						value: confidenceVal,
+						provenance,
 						isCalibrated: false,
 					},
 				};
 			} else if (d.kind === "score") {
-				const ans = parsedAnswers[d.id];
-				const value = typeof ans === "number" ? ans : (d.levels[0]?.value ?? 0);
+				let val: number | undefined;
+				if (typeof rawAns === "number" && Number.isFinite(rawAns)) {
+					val = rawAns;
+				} else if (typeof rawAns === "object" && rawAns !== null && "value" in rawAns) {
+					const v = (rawAns as { value: unknown }).value;
+					if (typeof v === "number" && Number.isFinite(v)) val = v;
+				}
+
+				if (val === undefined) {
+					results[d.id] = {
+						kind: "unsupported",
+						reason: `invalid_score_for_${d.id}`,
+					};
+					continue;
+				}
+
 				results[d.id] = {
 					kind: "score",
-					value,
-					distribution: { [value]: 1.0 },
+					value: val,
+					distribution: { [val]: 1.0 },
 					confidence: {
-						value: 0.85,
-						provenance: "synthetic_self_report",
+						value: confidenceVal,
+						provenance,
 						isCalibrated: false,
 					},
 				};
 			} else if (d.kind === "set") {
-				const ans = parsedAnswers[d.id];
-				const selected = Array.isArray(ans) ? (ans as string[]) : [];
+				let selected: string[] | undefined;
+				if (Array.isArray(rawAns) && rawAns.every((item) => typeof item === "string" && item in d.members)) {
+					selected = rawAns as string[];
+				}
+
+				if (!selected) {
+					results[d.id] = {
+						kind: "unsupported",
+						reason: `invalid_set_for_${d.id}`,
+					};
+					continue;
+				}
+
 				results[d.id] = {
 					kind: "set",
 					selected,
 					memberships: {},
 					confidence: {
-						value: 0.85,
-						provenance: "synthetic_self_report",
+						value: confidenceVal,
+						provenance,
 						isCalibrated: false,
 					},
 				};
@@ -107,7 +199,7 @@ export class StructuredLlmDecisionEngine implements SemanticDecisionEngine {
 			programVersion: program.version,
 			engineId: this.id,
 			model: this.model,
-			confidenceProvenance: "synthetic_self_report",
+			confidenceProvenance: hasDeclaredConfidence ? "synthetic_self_report" : "none",
 			results,
 		});
 	}

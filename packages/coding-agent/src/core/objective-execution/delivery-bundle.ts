@@ -32,6 +32,13 @@ export interface DeliveryBundle {
 	readonly limitations: readonly string[];
 	readonly decision_refs?: readonly string[];
 	readonly usage?: Record<string, unknown>;
+	readonly assurance_profile_requested?: string;
+	readonly assurance_profile_used?: string;
+	readonly reviewer_refs?: readonly string[];
+	readonly failed_gates?: readonly string[];
+	readonly required_next_proof?: readonly string[];
+	readonly changed_files?: readonly string[];
+	readonly diff_digest?: string;
 }
 
 export function buildDeliveryBundle(input: {
@@ -44,6 +51,13 @@ export function buildDeliveryBundle(input: {
 	readonly limitations?: readonly string[];
 	readonly decisionRefs?: readonly string[];
 	readonly usage?: Record<string, unknown>;
+	readonly assuranceProfileRequested?: string;
+	readonly assuranceProfileUsed?: string;
+	readonly reviewerRefs?: readonly string[];
+	readonly failedGates?: readonly string[];
+	readonly requiredNextProof?: readonly string[];
+	readonly changedFiles?: readonly string[];
+	readonly diffDigest?: string;
 }): DeliveryBundle {
 	return {
 		schema_version: "2.0",
@@ -56,5 +70,12 @@ export function buildDeliveryBundle(input: {
 		limitations: input.limitations ?? [],
 		decision_refs: input.decisionRefs,
 		usage: input.usage,
+		assurance_profile_requested: input.assuranceProfileRequested,
+		assurance_profile_used: input.assuranceProfileUsed,
+		reviewer_refs: input.reviewerRefs,
+		failed_gates: input.failedGates,
+		required_next_proof: input.requiredNextProof,
+		changed_files: input.changedFiles,
+		diff_digest: input.diffDigest,
 	};
 }

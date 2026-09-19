@@ -37,12 +37,34 @@ export interface FunctionCallDecisionResult {
 	readonly argumentConfidences: Record<string, DecisionConfidence>;
 }
 
+export interface UnsupportedDecisionResult {
+	readonly kind: "unsupported";
+	readonly reason: string;
+}
+
 export type DecisionResult =
 	| BooleanDecisionResult
 	| ChoiceDecisionResult
 	| ScoreDecisionResult
 	| SetDecisionResult
-	| FunctionCallDecisionResult;
+	| FunctionCallDecisionResult
+	| UnsupportedDecisionResult;
+
+export interface DecisionEvaluationAudit {
+	readonly engineId: string;
+	readonly provider?: string;
+	readonly model: string;
+	readonly programId: string;
+	readonly programVersion: string;
+	readonly programDigest?: string;
+	readonly stateDigest?: string;
+	readonly rawAnswerDigest?: string;
+	readonly confidenceProvenance: ConfidenceProvenance;
+	readonly latencyMs?: number;
+	readonly consequence?: string;
+	readonly fallbackChain?: readonly string[];
+	readonly policyDisposition?: string;
+}
 
 export interface DecisionEvaluation {
 	readonly schema_version: "2.0";
@@ -58,6 +80,7 @@ export interface DecisionEvaluation {
 	readonly results: Record<string, DecisionResult>;
 	readonly timestamp: string;
 	readonly proposedFunctionCall?: FunctionCallDecisionResult;
+	readonly audit?: DecisionEvaluationAudit;
 }
 
 export function createDecisionEvaluation(input: {
@@ -69,6 +92,7 @@ export function createDecisionEvaluation(input: {
 	readonly results: Record<string, DecisionResult>;
 	readonly proposedFunctionCall?: FunctionCallDecisionResult;
 	readonly timestamp?: string;
+	readonly audit?: DecisionEvaluationAudit;
 }): DecisionEvaluation {
 	return {
 		schema_version: "2.0",
@@ -84,5 +108,6 @@ export function createDecisionEvaluation(input: {
 		results: input.results,
 		timestamp: input.timestamp ?? new Date().toISOString(),
 		proposedFunctionCall: input.proposedFunctionCall,
+		audit: input.audit,
 	};
 }

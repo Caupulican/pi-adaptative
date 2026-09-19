@@ -137,7 +137,9 @@ describe("Decision Engine Router & Portability", () => {
 	});
 
 	it("ADR-032: structured LLM fallback marks synthetic self-report confidence", async () => {
-		const structured = new StructuredLlmDecisionEngine("mock-llm");
+		const structured = new StructuredLlmDecisionEngine("mock-llm", {
+			complete: async () => JSON.stringify({ task_kind: { choice: "bug_fix", confidence: 0.85 } }),
+		});
 		const program = createDecisionProgram({
 			id: "test-llm-prog",
 			decisions: [
@@ -152,8 +154,11 @@ describe("Decision Engine Router & Portability", () => {
 
 		const result = await structured.evaluate(program, {});
 		expect(result.engine.confidence_provenance).toBe("synthetic_self_report");
-		expect(result.results.task_kind.confidence.provenance).toBe("synthetic_self_report");
-		expect(result.results.task_kind.confidence.isCalibrated).toBe(false);
+		expect(result.results.task_kind.kind).toBe("choice");
+		if (result.results.task_kind.kind === "choice") {
+			expect(result.results.task_kind.confidence.provenance).toBe("synthetic_self_report");
+			expect(result.results.task_kind.confidence.isCalibrated).toBe(false);
+		}
 	});
 
 	it("ADR-001 & ADR-002 & ADR-033: MechanicalDecisionEngine works with no credentials", async () => {
@@ -195,12 +200,12 @@ describe("Decision Engine Router & Portability", () => {
 			evaluate: async (_input: any) => ({
 				model: "jev-1.13.0",
 				answers: {
-					q1: { value: true, probability: 0.94, confidence: 0.94 },
+					q1: { type: "noul", noul: 0.94 },
 					q2: {
+						type: "choice",
 						choice: "feature",
-						distribution: { feature: 0.92, bug_fix: 0.08 },
-						margin: 0.84,
 						confidence: 0.92,
+						probabilities: { feature: 0.92, bug_fix: 0.08 },
 					},
 				},
 				latency_ms: 120,
@@ -225,10 +230,14 @@ describe("Decision Engine Router & Portability", () => {
 
 		const evaluation = await engine.evaluate(program, { test: "state" });
 		expect(evaluation.engine.confidence_provenance).toBe("native_calibrated");
-		expect(evaluation.results.q1.confidence.isCalibrated).toBe(true);
-		expect(evaluation.results.q1.confidence.value).toBe(0.94);
-		expect((evaluation.results.q1 as any).probabilityTrue).toBe(0.94);
-		expect((evaluation.results.q2 as any).distribution.feature).toBe(0.92);
+		const q1 = evaluation.results.q1;
+		if (q1.kind !== "boolean") throw new Error("Expected boolean result");
+		expect(q1.confidence.isCalibrated).toBe(true);
+		expect(q1.confidence.value).toBe(0.94);
+		expect(q1.probabilityTrue).toBe(0.94);
+		const q2 = evaluation.results.q2;
+		if (q2.kind !== "choice") throw new Error("Expected choice result");
+		expect(q2.distribution.feature).toBe(0.92);
 	});
 });
 
