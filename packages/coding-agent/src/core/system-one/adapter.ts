@@ -1,6 +1,7 @@
 import { SYSTEM_ONE_PINNED_MODEL } from "./catalog.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import { containsCredential } from "./projector.ts";
+import { getSystemOneProviderDriver, type SystemOneProviderDriver } from "./provider-driver.ts";
 import type { ToolImpact } from "./types.ts";
 
 export interface JevEvaluationRequest {
@@ -29,7 +30,7 @@ export interface JevAdapter {
 	evaluate(input: JevEvaluationRequest, options?: JevAdapterEvaluateOptions): Promise<JevEvaluationResponse>;
 }
 
-export interface TypeSafeReviewerLike {
+export interface SystemOneReviewerLike {
 	evaluate(
 		input: { model?: string; state: unknown; questions: Record<string, unknown> },
 		signal?: AbortSignal,
@@ -44,14 +45,17 @@ export interface TypeSafeReviewerLike {
 	}>;
 }
 
+export type TypeSafeReviewerLike = SystemOneReviewerLike;
+
 export interface SystemOneJevAdapterDeps {
 	sleep?: (ms: number) => Promise<void>;
 	getApiKey?: () => Promise<string | undefined> | string | undefined;
 	getUserKeys?: () => Promise<readonly string[]> | readonly string[];
+	driver?: SystemOneProviderDriver;
 }
 
 /**
- * SystemOneJevAdapter: TypeSafe System One client with pinned model enforcement and failure policy.
+ * SystemOneJevAdapter: System One client with pinned model enforcement and failure policy.
  * R-006: Pin Jev to jev-1.13.0 in production.
  * R-007: Log the concrete model version and reject unexpected model drift.
  * R-032: Secrets, tokens, credentials, private keys, and user keys MUST NOT be leaked.
@@ -59,14 +63,15 @@ export interface SystemOneJevAdapterDeps {
  * R-067: Rate-limit retries MUST use bounded backoff.
  */
 export class SystemOneJevAdapter implements JevAdapter {
-	private readonly reviewer: TypeSafeReviewerLike;
+	private readonly reviewer: SystemOneReviewerLike;
 	private readonly config: SystemOneConfig;
 	private readonly pinnedModel: string;
 	private readonly sleep: (ms: number) => Promise<void>;
 	private readonly deps: SystemOneJevAdapterDeps;
+	private readonly driver: SystemOneProviderDriver;
 
 	constructor(
-		reviewer: TypeSafeReviewerLike,
+		reviewer: SystemOneReviewerLike,
 		config: SystemOneConfig = DEFAULT_SYSTEM_ONE_CONFIG,
 		deps: SystemOneJevAdapterDeps = {},
 	) {
@@ -74,6 +79,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 		this.config = config;
 		this.pinnedModel = config.model.production || SYSTEM_ONE_PINNED_MODEL;
 		this.deps = deps;
+		this.driver = deps.driver ?? getSystemOneProviderDriver(config.provider);
 		this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 	}
 
@@ -83,11 +89,12 @@ export class SystemOneJevAdapter implements JevAdapter {
 		const impact = options?.impact ?? "read_only";
 
 		// 1. Mandatory user credential requirement: always require non-empty user API key (no bypass, no fallback)
-		const getApiKey = this.deps.getApiKey ?? (() => process.env.TYPESAFE_API_KEY);
+		const getApiKey = this.deps.getApiKey ?? (() => this.driver.getApiKey());
 		const userKey = (await getApiKey())?.trim();
 		if (!userKey) {
+			const credentialHint = this.driver.formatSetupHelp();
 			throw new Error(
-				"TypeSafe System One requires an API key configured by the user (use /login typesafe or TYPESAFE_API_KEY). No fallback or default credential is permitted.",
+				`${this.driver.displayName} System One requires an API key configured by the user (${credentialHint}). No fallback or default credential is permitted.`,
 			);
 		}
 
@@ -141,7 +148,8 @@ export class SystemOneJevAdapter implements JevAdapter {
 				const latency_ms = result.elapsedMs ?? Date.now() - started;
 
 				// R-007: Log the concrete model version returned and reject unexpected model drift
-				if (this.config.model.pin_required && returnedModel !== targetModel) {
+				const modelsMatch = this.driver.matchesModel(targetModel, returnedModel);
+				if (this.config.model.pin_required && !modelsMatch) {
 					throw new Error(
 						`Model drift detected: requested pinned model '${targetModel}', but Jev endpoint returned '${returnedModel}' (R-007)`,
 					);

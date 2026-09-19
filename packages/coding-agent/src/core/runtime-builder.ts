@@ -114,7 +114,6 @@ import type { ProfileFilterReloadSnapshot } from "./profile-filter-controller.ts
 import { assertReloadQuiescent } from "./reload-blockers.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
-import { TYPESAFE_PROVIDER } from "./review/typesafe-contract.ts";
 import { TypeSafeEvidenceStore } from "./review/typesafe-evidence-store.ts";
 import { TypeSafeReviewer } from "./review/typesafe-reviewer.ts";
 import { ScoutController } from "./scout-controller.ts";
@@ -1101,9 +1100,22 @@ export class RuntimeBuilder {
 		}
 		if (!baseToolsOverride) {
 			if (toolAccess.allows("typesafe_review")) {
+				const systemOneSettings = this.deps.getSettingsManager().getSystemOneSettings();
 				const reviewer = new TypeSafeReviewer({
-					getApiKey: () =>
-						this.deps.getModelRegistry().authStorage.getApiKey(TYPESAFE_PROVIDER, { includeFallback: false }),
+					provider: systemOneSettings.provider,
+					model: systemOneSettings.model,
+					getApiKey: async () => {
+						const currentSettings = this.deps.getSettingsManager().getSystemOneSettings();
+						const currentProvider = currentSettings.provider ?? "typesafe";
+						const key = await this.deps
+							.getModelRegistry()
+							.authStorage.getApiKey(currentProvider, { includeFallback: false });
+						if (key) return key;
+						const fallbackProvider = currentProvider === "openrouter" ? "typesafe" : "openrouter";
+						return this.deps
+							.getModelRegistry()
+							.authStorage.getApiKey(fallbackProvider, { includeFallback: false });
+					},
 				});
 				this._baseToolDefinitions.set(
 					"typesafe_review",

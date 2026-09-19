@@ -364,7 +364,7 @@ describe("packaged TypeSafe reviewer", () => {
 				session.modelRegistry
 					.getAll()
 					.some((model) => model.provider === "typesafe" || model.id.startsWith("jev-")),
-			).toBe(false);
+			).toBe(true);
 			expect(await tool.execute("status-2", { action: "status" }, undefined, undefined, {} as never)).toMatchObject({
 				details: { enabled: true },
 			});

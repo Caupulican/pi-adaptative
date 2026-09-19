@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { combineAbortSignals } from "@caupulican/pi-ai/abort-signals";
 import { retryProviderRequest } from "@caupulican/pi-ai/provider-retry";
 import { Value } from "typebox/value";
+import { getSystemOneProviderDriver, type SystemOneProviderDriver } from "../system-one/provider-driver.ts";
 import {
 	type EvaluationInput,
 	type EvaluationResponse,
@@ -10,9 +11,6 @@ import {
 	type ReviewInput,
 	reviewInputSchema,
 	serializeEvaluation,
-	TYPESAFE_ENDPOINT,
-	TYPESAFE_MODEL,
-	TYPESAFE_MODELS_ENDPOINT,
 	validateEvaluationResponse,
 } from "./typesafe-contract.ts";
 
@@ -105,35 +103,76 @@ export class TypeSafeReviewError extends Error {
 	}
 }
 
+export interface SystemOneReviewerDeps {
+	getApiKey(): Promise<string | undefined>;
+	fetch?: typeof fetch;
+	provider?: string;
+	driver?: SystemOneProviderDriver;
+	model?: string;
+	endpoint?: string;
+	modelsEndpoint?: string;
+}
+
+export type TypeSafeReviewerDeps = SystemOneReviewerDeps;
+
 /** Separate judge port: does not generate code, choose tools, or authorize side effects. */
-export class TypeSafeReviewer {
-	private readonly deps: { getApiKey(): Promise<string | undefined>; fetch?: typeof fetch };
+export class SystemOneReviewer {
+	private readonly deps: SystemOneReviewerDeps;
+	private readonly driver: SystemOneProviderDriver;
 	private verifiedKey?: string;
-	constructor(deps: { getApiKey(): Promise<string | undefined>; fetch?: typeof fetch }) {
+
+	constructor(deps: SystemOneReviewerDeps) {
 		this.deps = deps;
+		this.driver = deps.driver ?? getSystemOneProviderDriver(deps.provider);
 	}
+
+	private getProviderName(): string {
+		return this.driver.displayName;
+	}
+
+	private getDefaultModel(): string {
+		return this.deps.model ?? this.driver.defaultModel;
+	}
+
+	private getEndpoint(): string {
+		return this.deps.endpoint ?? this.driver.decisionsEndpoint;
+	}
+
+	private getModelsEndpoint(): string {
+		return this.deps.modelsEndpoint ?? this.driver.modelsEndpoint;
+	}
+
+	private getSetupHint(): string {
+		return this.driver.formatSetupHelp();
+	}
+
 	private async resolveKey(): Promise<string | undefined> {
+		const name = this.getProviderName();
+		const setup = this.getSetupHint();
 		let key: string | undefined;
 		try {
 			key = (await this.deps.getApiKey())?.trim();
 		} catch {
-			throw new Error("TypeSafe credential lookup failed; check /login typesafe");
+			throw new Error(`${name} credential lookup failed; check ${setup}`);
 		}
-		if (key && !/^[\x21-\x7e]+$/.test(key)) throw new Error("Invalid TypeSafe credential");
+		if (key && !/^[\x21-\x7e]+$/.test(key)) throw new Error(`Invalid ${name} credential`);
 		return key || undefined;
 	}
 
 	async status(signal?: AbortSignal) {
+		const providerName = this.getProviderName();
+		const model = this.getDefaultModel();
+		const setup = this.getSetupHint();
 		const key = await this.resolveKey();
 		const enabled = Boolean(key?.trim());
 		if (!enabled || !key) {
 			return {
 				enabled: false,
-				model: TYPESAFE_MODEL,
+				model,
 				confidence: REVIEW_CONFIDENCE,
-				setup: "/login typesafe or TYPESAFE_API_KEY",
+				setup,
 				authenticationVerified: false,
-				message: "TypeSafe is not configured. Use /login typesafe or TYPESAFE_API_KEY.",
+				message: `${providerName} is not configured. Use ${setup}.`,
 			};
 		}
 		if (this.verifiedKey !== key) {
@@ -141,7 +180,7 @@ export class TypeSafeReviewer {
 			const timer = setTimeout(() => timeout.abort(), 10_000);
 			const combined = combineAbortSignals([signal, timeout.signal]);
 			try {
-				const response = await (this.deps.fetch ?? fetch)(TYPESAFE_MODELS_ENDPOINT, {
+				const response = await (this.deps.fetch ?? fetch)(this.getModelsEndpoint(), {
 					method: "GET",
 					headers: { Authorization: `Bearer ${key}` },
 					redirect: "error",
@@ -153,21 +192,21 @@ export class TypeSafeReviewer {
 					this.verifiedKey = undefined;
 					return {
 						enabled: true,
-						model: TYPESAFE_MODEL,
+						model,
 						confidence: REVIEW_CONFIDENCE,
-						setup: "/login typesafe or TYPESAFE_API_KEY",
+						setup,
 						authenticationVerified: false,
-						message: "TypeSafe authentication failed. Check /login typesafe or TYPESAFE_API_KEY.",
+						message: `${providerName} authentication failed. Check ${setup}.`,
 					};
 				}
 			} catch {
 				return {
 					enabled: true,
-					model: TYPESAFE_MODEL,
+					model,
 					confidence: REVIEW_CONFIDENCE,
-					setup: "/login typesafe or TYPESAFE_API_KEY",
+					setup,
 					authenticationVerified: false,
-					message: "TypeSafe endpoint unreachable.",
+					message: `${providerName} endpoint unreachable.`,
 				};
 			} finally {
 				clearTimeout(timer);
@@ -177,13 +216,13 @@ export class TypeSafeReviewer {
 		const authenticationVerified = this.verifiedKey === key;
 		return {
 			enabled: true,
-			model: TYPESAFE_MODEL,
+			model,
 			confidence: REVIEW_CONFIDENCE,
-			setup: "/login typesafe or TYPESAFE_API_KEY",
+			setup,
 			authenticationVerified,
 			message: authenticationVerified
-				? "TypeSafe authenticated and verified."
-				: "TypeSafe key configured but verification failed.",
+				? `${providerName} authenticated and verified.`
+				: `${providerName} key configured but verification failed.`,
 		};
 	}
 
@@ -230,19 +269,26 @@ export class TypeSafeReviewer {
 		signal?: AbortSignal,
 		onResponse?: (attempts: readonly TypeSafeTransportAttempt[]) => void,
 	): Promise<EvaluationRecord> {
+		const providerName = this.getProviderName();
+		const defaultModel = this.getDefaultModel();
+		const endpoint = this.getEndpoint();
+		const setup = this.getSetupHint();
+
 		signal?.throwIfAborted();
 		// Snapshot before any await. No omitted fields or context truncation are permitted.
 		const snapshot: EvaluationInput = JSON.parse(serializeEvaluation(input));
-		if (!Value.Check(evaluationInputSchema, snapshot)) throw new Error("Invalid TypeSafe evaluation input");
-		const request = { model: snapshot.model ?? TYPESAFE_MODEL, ...snapshot };
+		if (!Value.Check(evaluationInputSchema, snapshot)) throw new Error(`Invalid ${providerName} evaluation input`);
+		const request = { model: snapshot.model ?? defaultModel, ...snapshot };
 		const body = JSON.stringify(request);
 		if (Buffer.byteLength(body) > MAX_REQUEST_BYTES)
-			throw new Error("TypeSafe request exceeds 2 MiB; partition with explicit coverage, never truncate evidence");
+			throw new Error(
+				`${providerName} request exceeds 2 MiB; partition with explicit coverage, never truncate evidence`,
+			);
 		const key = await this.resolveKey();
 		signal?.throwIfAborted();
-		if (!key) throw new Error("TypeSafe is not configured. Use /login typesafe or TYPESAFE_API_KEY");
+		if (!key) throw new Error(`${providerName} is not configured. Use ${setup}`);
 		if (body.includes(JSON.stringify(key).slice(1, -1)) || API_CREDENTIAL.test(body))
-			throw new Error("TypeSafe evidence contains an API credential");
+			throw new Error(`${providerName} evidence contains an API credential`);
 		const requestSha256 = createHash("sha256").update(body).digest("hex");
 		const timeout = new AbortController();
 		const timer = setTimeout(() => timeout.abort(), 50_000);
@@ -259,7 +305,7 @@ export class TypeSafeReviewer {
 					raw = undefined;
 					const attempt: TypeSafeTransportAttempt = { attempt: attempts };
 					transportAttempts.push(attempt);
-					const response = await (this.deps.fetch ?? fetch)(TYPESAFE_ENDPOINT, {
+					const response = await (this.deps.fetch ?? fetch)(endpoint, {
 						method: "POST",
 						headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
 						body,
@@ -267,7 +313,7 @@ export class TypeSafeReviewer {
 						signal: combined.signal,
 					});
 					attempt.status = response.status;
-					if (!response.body) throw new Error("Empty TypeSafe response");
+					if (!response.body) throw new Error(`Empty ${providerName} response`);
 					const reader = response.body.getReader();
 					const chunks: Uint8Array[] = [];
 					let bytes = 0;
@@ -276,7 +322,7 @@ export class TypeSafeReviewer {
 							const { done, value } = await reader.read();
 							if (done) break;
 							bytes += value.byteLength;
-							if (bytes > MAX_RESPONSE_BYTES) throw new Error("TypeSafe response exceeds 256 KiB");
+							if (bytes > MAX_RESPONSE_BYTES) throw new Error(`${providerName} response exceeds 256 KiB`);
 							chunks.push(value);
 						}
 					} finally {
@@ -291,14 +337,14 @@ export class TypeSafeReviewer {
 						onResponse?.(transportAttempts);
 					} catch {
 						// A local persistence failure must never inherit provider retry metadata.
-						throw new Error("TypeSafe usage recording failed");
+						throw new Error(`${providerName} usage recording failed`);
 					}
-					if (decoded.duplicateKeys) throw new Error("Invalid TypeSafe response: duplicate JSON member");
+					if (decoded.duplicateKeys) throw new Error(`Invalid ${providerName} response: duplicate JSON member`);
 					if (!response.ok) {
 						if (response.status === 401 || response.status === 403) {
 							this.verifiedKey = undefined;
 						}
-						const error = Object.assign(new Error(`TypeSafe HTTP ${response.status}`), {
+						const error = Object.assign(new Error(`${providerName} HTTP ${response.status}`), {
 							status: response.status,
 							headers: response.headers,
 						});
@@ -321,14 +367,13 @@ export class TypeSafeReviewer {
 			};
 		} catch (error) {
 			// Never project arbitrary transport messages: they can contain the Authorization header.
+			const errorRegex =
+				/^(Invalid (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) HTTP|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response exceeds|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) usage recording failed|Empty (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|Server requested)/;
 			const message = combined.signal?.aborted
-				? "TypeSafe review cancelled or timed out"
-				: error instanceof Error &&
-						/^(Invalid TypeSafe response|TypeSafe HTTP|TypeSafe response exceeds|TypeSafe usage recording failed|Empty TypeSafe response|Server requested)/.test(
-							error.message,
-						)
+				? `${providerName} review cancelled or timed out`
+				: error instanceof Error && errorRegex.test(error.message)
 					? error.message
-					: "TypeSafe request failed";
+					: `${providerName} request failed`;
 			throw new TypeSafeReviewError(redactReviewText(message, key), requestSha256, request, raw, transportAttempts);
 		} finally {
 			clearTimeout(timer);
@@ -336,3 +381,7 @@ export class TypeSafeReviewer {
 		}
 	}
 }
+
+export const TypeSafeReviewer = SystemOneReviewer;
+export type TypeSafeReviewer = SystemOneReviewer;
+export type SystemOneReviewError = TypeSafeReviewError;

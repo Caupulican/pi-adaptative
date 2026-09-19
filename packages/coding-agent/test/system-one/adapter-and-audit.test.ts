@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { SystemOneJevAdapter } from "../../src/core/system-one/adapter.ts";
 import { AuditStore } from "../../src/core/system-one/audit.ts";
+import { DEFAULT_SYSTEM_ONE_CONFIG } from "../../src/core/system-one/config.ts";
+import {
+	registerSystemOneProviderDriver,
+	type SystemOneProviderDriver,
+} from "../../src/core/system-one/provider-driver.ts";
 
 describe("System One Adapter and Audit", () => {
 	it("enforces pinned model jev-1.13.0 and rejects model drift (R-006, R-007)", async () => {
@@ -183,5 +188,39 @@ describe("System One Adapter and Audit", () => {
 		).rejects.toThrow(
 			"TypeSafe System One detected sensitive credential in review payload; outgoing request blocked to prevent credential leakage (R-032)",
 		);
+	});
+
+	it("supports extending with custom provider driver under open-closed principle", async () => {
+		const customDriver: SystemOneProviderDriver = {
+			id: "custom-cloud",
+			displayName: "Custom Cloud",
+			defaultModel: "custom/jev-1.13.0",
+			defaultPinnedModel: "custom/jev-1.13.0",
+			decisionsEndpoint: "https://custom.cloud/api/decisions",
+			modelsEndpoint: "https://custom.cloud/api/models",
+			apiKeyEnvVar: "CUSTOM_CLOUD_API_KEY",
+			loginCommand: "/login custom-cloud",
+			matchesModel: (target, returned) => target === returned,
+			formatSetupHelp: () => "use CUSTOM_CLOUD_API_KEY",
+			getApiKey: () => "custom-key",
+		};
+		registerSystemOneProviderDriver(customDriver);
+		const adapter = new SystemOneJevAdapter(
+			{
+				evaluate: async ({ model }) => ({
+					request: { model: model ?? "custom/jev-1.13.0" },
+					response: { model: "custom/jev-1.13.0", answers: { result: "ok" } },
+					elapsedMs: 5,
+				}),
+			},
+			{
+				...DEFAULT_SYSTEM_ONE_CONFIG,
+				provider: "custom-cloud" as unknown as typeof DEFAULT_SYSTEM_ONE_CONFIG.provider,
+				model: { production: "custom/jev-1.13.0", preview: "custom/jev-1.13.0", pin_required: true },
+			},
+		);
+		const res = await adapter.evaluate({ state: {}, questions: {} });
+		expect(res.model).toBe("custom/jev-1.13.0");
+		expect(res.answers).toEqual({ result: "ok" });
 	});
 });

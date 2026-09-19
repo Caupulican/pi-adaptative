@@ -45,6 +45,7 @@ import type {
 } from "./settings-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { SystemOneJevAdapter } from "./system-one/adapter.ts";
+import { createSystemOneConfig } from "./system-one/config.ts";
 import { SystemOneController } from "./system-one/controller.ts";
 import { ExecutionStore } from "./system-one/execution-state.ts";
 import { time } from "./timings.ts";
@@ -137,6 +138,12 @@ export interface CreateAgentSessionOptions {
 	systemOneController?: SystemOneController;
 	/** Optional flag to disable automatic System One semantic control plane controller construction. */
 	disableSystemOne?: boolean;
+	/** Optional flag to explicitly enable or disable System One semantic control plane. Takes precedence over settings. */
+	systemOneEnabled?: boolean;
+	/** Optional provider for System One ("typesafe" or "openrouter"). Takes precedence over settings. */
+	systemOneProvider?: "typesafe" | "openrouter";
+	/** Optional model for System One. Takes precedence over settings. */
+	systemOneModel?: string;
 }
 
 /** Result from createAgentSession */
@@ -552,19 +559,58 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	});
 
 	let systemOneController = options.systemOneController;
-	if (!systemOneController && options.disableSystemOne !== true && process.env.PI_SYSTEM_ONE_DISABLED !== "1") {
+	const systemOneSettings = settingsManager.getSystemOneSettings();
+	const systemOneEnabled =
+		options.systemOneEnabled ??
+		(options.disableSystemOne === true
+			? false
+			: systemOneSettings.enabled && process.env.PI_SYSTEM_ONE_DISABLED !== "1");
+
+	if (!systemOneController && systemOneEnabled) {
 		const typesafeKey = (await authStorage.getApiKey("typesafe")) ?? process.env.TYPESAFE_API_KEY;
-		if (typesafeKey) {
+		const openrouterKey = (await authStorage.getApiKey("openrouter")) ?? process.env.OPENROUTER_API_KEY;
+
+		// Resolve provider: explicit option > settings > autodetect based on available keys
+		const provider: "typesafe" | "openrouter" =
+			options.systemOneProvider ??
+			(systemOneSettings.provider === "openrouter" || (!typesafeKey && Boolean(openrouterKey))
+				? "openrouter"
+				: "typesafe");
+
+		const chosenKey = provider === "openrouter" ? openrouterKey : typesafeKey;
+
+		if (chosenKey) {
+			const model =
+				options.systemOneModel ??
+				systemOneSettings.model ??
+				(provider === "openrouter" ? "typesafe/jev-1.13" : "jev-1.13.0");
+
 			const reviewer = new TypeSafeReviewer({
-				getApiKey: async () => (await authStorage.getApiKey("typesafe")) ?? process.env.TYPESAFE_API_KEY,
+				provider,
+				model,
+				getApiKey: async () =>
+					(await authStorage.getApiKey(provider)) ??
+					(provider === "openrouter" ? process.env.OPENROUTER_API_KEY : process.env.TYPESAFE_API_KEY),
 			});
-			const adapter = new SystemOneJevAdapter(reviewer, undefined, {
-				getApiKey: async () => (await authStorage.getApiKey("typesafe")) ?? process.env.TYPESAFE_API_KEY,
+
+			const config = createSystemOneConfig({
+				enabled: true,
+				provider,
+				productionModel: model,
+			});
+
+			const adapter = new SystemOneJevAdapter(reviewer, config, {
+				getApiKey: async () =>
+					(await authStorage.getApiKey(provider)) ??
+					(provider === "openrouter" ? process.env.OPENROUTER_API_KEY : process.env.TYPESAFE_API_KEY),
 				getUserKeys: async () => {
-					const k = (await authStorage.getApiKey("typesafe")) ?? process.env.TYPESAFE_API_KEY;
+					const k =
+						(await authStorage.getApiKey(provider)) ??
+						(provider === "openrouter" ? process.env.OPENROUTER_API_KEY : process.env.TYPESAFE_API_KEY);
 					return k ? [k] : [];
 				},
 			});
+
 			let baselineRevision = "unknown";
 			try {
 				baselineRevision =
@@ -593,7 +639,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			systemOneController = new SystemOneController({
 				store,
 				adapter,
-				userKeys: [typesafeKey],
+				userKeys: [chosenKey],
 			});
 		}
 	}

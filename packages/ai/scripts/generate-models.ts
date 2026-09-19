@@ -216,6 +216,60 @@ const FUGU_MODELS: Model<"openai-responses">[] = [
 		maxTokens: 10_000,
 	},
 ];
+const TYPESAFE_BASE_URL = "https://api.typesafe.ai/v1/systemone";
+const TYPESAFE_MODELS: Model<"openai-completions">[] = [
+	{
+		id: "jev-1.13.0",
+		name: "Jev 1.13",
+		api: "openai-completions",
+		provider: "typesafe",
+		baseUrl: TYPESAFE_BASE_URL,
+		reasoning: false,
+		input: ["text"],
+		cost: {
+			input: 0.25,
+			output: 1.25,
+			cacheRead: 0,
+			cacheWrite: 0,
+		},
+		contextWindow: 32_000,
+		maxTokens: 4096,
+	},
+	{
+		id: "jev-latest",
+		name: "Jev Latest",
+		api: "openai-completions",
+		provider: "typesafe",
+		baseUrl: TYPESAFE_BASE_URL,
+		reasoning: false,
+		input: ["text"],
+		cost: {
+			input: 0.25,
+			output: 1.25,
+			cacheRead: 0,
+			cacheWrite: 0,
+		},
+		contextWindow: 32_000,
+		maxTokens: 4096,
+	},
+	{
+		id: "jev-preview",
+		name: "Jev Preview",
+		api: "openai-completions",
+		provider: "typesafe",
+		baseUrl: TYPESAFE_BASE_URL,
+		reasoning: false,
+		input: ["text"],
+		cost: {
+			input: 0.25,
+			output: 1.25,
+			cacheRead: 0,
+			cacheWrite: 0,
+		},
+		contextWindow: 32_000,
+		maxTokens: 4096,
+	},
+];
 const ZAI_TOOL_STREAM_UNSUPPORTED_MODELS = new Set(["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v"]);
 const EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS = new Set([
 	"github-copilot:claude-haiku-4.5",
@@ -1248,8 +1302,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		}
 
 		// Process Kimi For Coding models
-		if (data["kimi-for-coding"]?.models) {
-			const kimiModels = data["kimi-for-coding"].models as Record<string, ModelsDevModel>;
+		const kimiData = data["kimi-for-coding"] || data["kimi-code-plan-global"] || data["kimi-code-plan-cn"];
+		if (kimiData?.models) {
+			const kimiModels = kimiData.models as Record<string, ModelsDevModel>;
 			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
 
 			const kimiAliases = new Set(["k2p5", "k2p6"]);
@@ -1408,7 +1463,7 @@ async function generateModels() {
 	}
 
 	// Combine models (models.dev has priority)
-	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels, ...FUGU_MODELS].filter(
+	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels, ...FUGU_MODELS, ...TYPESAFE_MODELS].filter(
 		(model) =>
 			!(model.provider === "xai" && XAI_BUILTIN_EXCLUDED_MODEL_IDS.has(model.id)) &&
 			!((model.provider === "opencode" || model.provider === "opencode-go") && model.id === "gpt-5.3-codex-spark"),
@@ -1813,18 +1868,70 @@ async function generateModels() {
 		});
 	}
 
-	// Add missing GitHub Copilot GPT-5.3 models until models.dev includes them.
-	const copilotBaseModel = allModels.find(
-		(m) => m.provider === "github-copilot" && m.id === "gpt-5.2-codex",
-	);
-	if (copilotBaseModel) {
-		if (!allModels.some((m) => m.provider === "github-copilot" && m.id === "gpt-5.3-codex")) {
-			allModels.push({
-				...copilotBaseModel,
-				id: "gpt-5.3-codex",
-				name: "GPT-5.3 Codex",
-			});
-		}
+	if (!allModels.some((m) => m.provider === "github-copilot" && m.id === "gpt-4.1")) {
+		allModels.push({
+			id: "gpt-4.1",
+			name: "GPT-4.1",
+			api: "openai-completions",
+			provider: "github-copilot",
+			baseUrl: "https://api.individual.githubcopilot.com",
+			headers: { ...COPILOT_STATIC_HEADERS },
+			compat: { supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false },
+			reasoning: false,
+			input: ["text", "image"],
+			cost: {
+				input: 2,
+				output: 8,
+				cacheRead: 0.5,
+				cacheWrite: 0,
+			},
+			contextWindow: 128000,
+			maxTokens: 16384,
+		});
+	}
+
+	if (!allModels.some((m) => m.provider === "github-copilot" && m.id === "gpt-5.2-codex")) {
+		allModels.push({
+			id: "gpt-5.2-codex",
+			name: "GPT-5.2 Codex",
+			api: "openai-responses",
+			provider: "github-copilot",
+			baseUrl: "https://api.individual.githubcopilot.com",
+			headers: { ...COPILOT_STATIC_HEADERS },
+			reasoning: true,
+			thinkingLevelMap: { off: null, minimal: "low", xhigh: "xhigh" },
+			input: ["text", "image"],
+			cost: {
+				input: 1.75,
+				output: 14,
+				cacheRead: 0.175,
+				cacheWrite: 0,
+			},
+			contextWindow: 400000,
+			maxTokens: 128000,
+		});
+	}
+
+	if (!allModels.some((m) => m.provider === "github-copilot" && m.id === "gpt-5.3-codex")) {
+		allModels.push({
+			id: "gpt-5.3-codex",
+			name: "GPT-5.3 Codex",
+			api: "openai-responses",
+			provider: "github-copilot",
+			baseUrl: "https://api.individual.githubcopilot.com",
+			headers: { ...COPILOT_STATIC_HEADERS },
+			reasoning: true,
+			thinkingLevelMap: { off: null, minimal: "low", xhigh: "xhigh" },
+			input: ["text", "image"],
+			cost: {
+				input: 1.75,
+				output: 14,
+				cacheRead: 0.175,
+				cacheWrite: 0,
+			},
+			contextWindow: 400000,
+			maxTokens: 128000,
+		});
 	}
 
 	if (!allModels.some((m) => m.provider === "openai" && m.id === "gpt-5.4")) {
@@ -2174,6 +2281,57 @@ async function generateModels() {
 			contextWindow: 1000000,
 			maxTokens: 30000,
 		});
+	}
+
+	if (!allModels.some(m => m.provider === "openrouter" && m.id === "typesafe/jev-1.13")) {
+		allModels.push({
+			id: "typesafe/jev-1.13",
+			name: "TypeSafe: Jev 1.13",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: {
+				input: 0.25,
+				output: 1.25,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+			contextWindow: 32000,
+			maxTokens: 4096,
+		});
+	}
+
+	if (!allModels.some(m => m.provider === "openrouter" && m.id === "typesafe/jev-latest")) {
+		allModels.push({
+			id: "typesafe/jev-latest",
+			name: "TypeSafe: Jev Latest",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: {
+				input: 0.25,
+				output: 1.25,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+			contextWindow: 32000,
+			maxTokens: 4096,
+		});
+	}
+
+	if (!allModels.some(m => m.provider === "openrouter" && m.id === "mistralai/mistral-large-2512")) {
+		const baseModel = allModels.find(m => m.provider === "openrouter" && m.id === "mistralai/mistral-large");
+		if (baseModel) {
+			allModels.push({
+				...baseModel,
+				id: "mistralai/mistral-large-2512",
+				name: "Mistral Large 2512",
+			});
+		}
 	}
 
 	const VERTEX_BASE_URL = "https://{location}-aiplatform.googleapis.com";

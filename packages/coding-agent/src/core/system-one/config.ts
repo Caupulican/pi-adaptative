@@ -84,7 +84,7 @@ export interface SystemOneSecurityConfig {
 
 export interface SystemOneConfig {
 	readonly enabled: boolean;
-	readonly provider: "typesafe";
+	readonly provider: "typesafe" | "openrouter";
 	readonly model: {
 		readonly production: string;
 		readonly preview: string;
@@ -180,3 +180,34 @@ export const DEFAULT_SYSTEM_ONE_CONFIG: SystemOneConfig = Object.freeze({
 		store_model_version: true,
 	}),
 });
+
+export const OPENROUTER_SYSTEM_ONE_CONFIG: SystemOneConfig = Object.freeze({
+	...DEFAULT_SYSTEM_ONE_CONFIG,
+	provider: "openrouter",
+	model: Object.freeze({
+		production: "typesafe/jev-1.13",
+		preview: "typesafe/jev-latest",
+		pin_required: true,
+	}),
+});
+
+export function createSystemOneConfig(options?: {
+	enabled?: boolean;
+	provider?: "typesafe" | "openrouter";
+	productionModel?: string;
+	previewModel?: string;
+	pinRequired?: boolean;
+}): SystemOneConfig {
+	const provider = options?.provider ?? "typesafe";
+	const base = provider === "openrouter" ? OPENROUTER_SYSTEM_ONE_CONFIG : DEFAULT_SYSTEM_ONE_CONFIG;
+	return Object.freeze({
+		...base,
+		enabled: options?.enabled ?? base.enabled,
+		provider,
+		model: Object.freeze({
+			production: options?.productionModel ?? base.model.production,
+			preview: options?.previewModel ?? base.model.preview,
+			pin_required: options?.pinRequired ?? base.model.pin_required,
+		}),
+	});
+}

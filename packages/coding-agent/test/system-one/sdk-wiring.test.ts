@@ -107,4 +107,61 @@ describe("System One SDK Session Auto-Wiring and Resume Hook (R-062, R-071)", ()
 
 		await session.disposeAndWait();
 	});
+
+	it("auto-wires SystemOneController with OpenRouter when openrouter credentials exist and provider is openrouter", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5");
+		expect(model).toBeTruthy();
+
+		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+		authStorage.setRuntimeApiKey("openrouter", "sk-or-v1-test-key-12345");
+
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			model: model!,
+			authStorage,
+			systemOneProvider: "openrouter",
+			systemOneModel: "typesafe/jev-1.13",
+			sessionManager: SessionManager.inMemory(cwd),
+		});
+
+		expect(session.systemOneController).toBeDefined();
+		expect(session.systemOneController?.store).toBeDefined();
+		expect(session.systemOneController?.adapter).toBeDefined();
+
+		await session.disposeAndWait();
+	});
+
+	it("respects settingsManager systemOne configuration for provider, model, and enabled status", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5");
+		expect(model).toBeTruthy();
+
+		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+		authStorage.setRuntimeApiKey("openrouter", "sk-or-v1-test-key-12345");
+
+		// Test disabled via settings
+		const { session: disabledSession } = await createAgentSession({
+			cwd,
+			agentDir,
+			model: model!,
+			authStorage,
+			sessionManager: SessionManager.inMemory(cwd),
+			systemOneEnabled: false,
+		});
+		expect(disabledSession.systemOneController).toBeUndefined();
+		await disabledSession.disposeAndWait();
+
+		// Test enabled with openrouter provider and custom model via options
+		const { session: openrouterSession } = await createAgentSession({
+			cwd,
+			agentDir,
+			model: model!,
+			authStorage,
+			sessionManager: SessionManager.inMemory(cwd),
+			systemOneProvider: "openrouter",
+			systemOneModel: "typesafe/jev-latest",
+		});
+		expect(openrouterSession.systemOneController).toBeDefined();
+		await openrouterSession.disposeAndWait();
+	});
 });

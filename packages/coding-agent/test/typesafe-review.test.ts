@@ -528,4 +528,40 @@ describe("TypeSafe review boundary", () => {
 		await expect(reviewer.review(input, AbortSignal.abort())).rejects.toThrow();
 		expect(fetcher).not.toHaveBeenCalled();
 	});
+	it("supports openrouter provider for reviews and status verification", async () => {
+		const fetcher = vi.fn(async (url: string | URL | Request) => {
+			if (String(url).includes("/models")) return Response.json({ data: [] });
+			return Response.json(response(0.99, "supports"));
+		});
+		const reviewer = new TypeSafeReviewer({
+			provider: "openrouter",
+			getApiKey: async () => "openrouter-key",
+			fetch: fetcher,
+		});
+
+		const status = await reviewer.status();
+		expect(status).toMatchObject({ enabled: true, authenticationVerified: true });
+		expect(fetcher).toHaveBeenCalledWith("https://openrouter.ai/api/v1/models", expect.any(Object));
+
+		fetcher.mockClear();
+		const result = await reviewer.review(input);
+		expect(result).toMatchObject({ accepted: true, threshold: 0.95 });
+
+		const [url, options] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+		expect(url).toBe("https://openrouter.ai/api/alpha/decisions");
+		expect(JSON.parse(String(options.body))).toMatchObject({
+			model: "typesafe/jev-latest",
+			state: input.state,
+		});
+	});
+	it("reports openrouter key configuration error when unauthenticated", async () => {
+		const reviewer = new TypeSafeReviewer({
+			provider: "openrouter",
+			getApiKey: async () => undefined,
+		});
+		const status = await reviewer.status();
+		expect(status.enabled).toBe(false);
+		expect(status.message).toContain("/login openrouter");
+		await expect(reviewer.review(input)).rejects.toThrow("/login openrouter");
+	});
 });

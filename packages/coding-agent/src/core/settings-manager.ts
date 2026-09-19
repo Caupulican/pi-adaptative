@@ -58,6 +58,12 @@ export interface ScoutSettings {
 	model?: string; // default: "auto" — resolve an installed FastContext model, else return unavailable from the tool
 }
 
+export interface SystemOneSettings {
+	enabled?: boolean; // default: true
+	provider?: "typesafe" | "openrouter"; // default: "typesafe"
+	model?: string; // default: "jev-1.13.0" (typesafe) or "typesafe/jev-1.13" (openrouter)
+}
+
 export interface SemanticMemoryGcSettings {
 	enabled?: boolean; // default: true
 	preserveRecentPages?: number; // default: 1 -- see context-gc.ts DEFAULT_CONTEXT_GC_SETTINGS (canonical)
@@ -716,6 +722,8 @@ export interface Settings {
 	catalogDir?: string;
 	compaction?: CompactionSettings;
 	scout?: ScoutSettings;
+	/** TypeSafe System One configuration (direct API or OpenRouter) */
+	systemOne?: SystemOneSettings;
 	/** Proactive per-turn cost guard (#34). */
 	costGuard?: Partial<CostGuardSettings>;
 	/** Per-request reasoning policy for turns the operator did not start. */
@@ -3323,6 +3331,28 @@ export class SettingsManager {
 		}
 		this.globalSettings.scout = { ...settings };
 		this.markModified("scout");
+		this.save();
+	}
+
+	getSystemOneSettings(): { enabled: boolean; provider: "typesafe" | "openrouter"; model?: string } {
+		const raw = this.settings.systemOne;
+		return {
+			enabled: raw?.enabled ?? true,
+			provider: raw?.provider === "openrouter" ? "openrouter" : "typesafe",
+			model: raw?.model,
+		};
+	}
+
+	setSystemOneSettings(settings: SystemOneSettings, scope: SettingsScope = "global"): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.systemOne = { ...settings };
+			this.markProjectModified("systemOne");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+		this.globalSettings.systemOne = { ...settings };
+		this.markModified("systemOne");
 		this.save();
 	}
 

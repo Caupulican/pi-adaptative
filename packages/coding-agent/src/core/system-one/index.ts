@@ -7,4 +7,5 @@ export * from "./evals/replay.ts";
 export * from "./execution-state.ts";
 export * from "./policy.ts";
 export * from "./projector.ts";
+export * from "./provider-driver.ts";
 export * from "./types.ts";
