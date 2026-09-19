@@ -503,8 +503,8 @@ the grant anchor could silently add a new share. Pinned by
 and inherits the foreground thinking level one notch down; authored choices are never moved.**
 Routing (`workerDelegation.account`, default `other`) takes the first candidate of
 `routeProviders` (`provider` or `provider/modelId`), then every other authenticated provider in
-catalog order, skipping the foreground's provider, exhausted models and accounts with a live
-machine-wide limit, and falls back to the foreground model when nothing else is authenticated; a
+catalog order, skipping the foreground's provider, models lacking background-lane capability (`backgroundLanesEnabled`), exhausted models and accounts with a live
+machine-wide limit, and falls back to the foreground model when nothing else is authenticated (a simulated `faux` foreground provider never routes away to external accounts); a
 `routeProvidersByRole` list replaces the order for one role. An authority model, a model pin and a profile
 binding stay exactly as written. Why: measured 2026-09-11, a worker wave landed on the same
 account as the owner's turn and competed with it for one subscription's budget. When neither the delegation authority nor the profile binding pins a thinking level, the

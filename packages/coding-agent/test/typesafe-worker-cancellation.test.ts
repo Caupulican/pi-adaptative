@@ -16,7 +16,7 @@ describe("worker billed review cancellation", () => {
 	])("retains a received service charge: %j", async ({ shutdown, failUsageWrite }) => {
 		const harness = await createHarness({
 			initialActiveToolNames: ["delegate", "typesafe_review", "skill"],
-			settings: { workerDelegation: { enabled: true, account: "same", orchestrationProfile: undefined } },
+			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
 		const sessionId = harness.sessionManager.getSessionId();
 		const save = TypeSafeEvidenceStore.prototype.save;

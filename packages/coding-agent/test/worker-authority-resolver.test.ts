@@ -544,6 +544,28 @@ describe("resolveWorkerAuthority", () => {
 			provider: "llama-cpp",
 			modelId: "local",
 		});
+		// A faux foreground model never routes away to another account.
+		const fauxForeground = { id: "faux-model", provider: "faux", contextWindow: 200_000 } as Model<Api>;
+		models.push(fauxForeground);
+		authed.add("faux");
+		expect(
+			resolveWorkerAuthority({
+				authority: { path: "/repo" },
+				foregroundModel: fauxForeground,
+				foregroundToolNames: ["read"],
+				accountRouting: { account: "other", routeProviders: [] },
+				modelRegistry: registry,
+				isModelExhausted: () => false,
+			}),
+		).toMatchObject({ ok: true, shipment: { modelBinding: { provider: "faux", modelId: "faux-model" } } });
+		authed.delete("faux");
+		// A model that lacks backgroundLanesEnabled (e.g. minimal capability class with small context) is skipped.
+		authed.add("typesafe");
+		models.push({ id: "jev-1.13.0", provider: "typesafe", contextWindow: 12_000 } as Model<Api>);
+		expect(resolve({ account: "other", routeProviders: ["typesafe"] })).toMatchObject({
+			provider: "xai",
+			modelId: "grok-4.6",
+		});
 	});
 
 	it("never moves an authority model, a pin or a profile binding to another account", () => {

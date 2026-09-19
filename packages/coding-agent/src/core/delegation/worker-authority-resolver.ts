@@ -9,6 +9,7 @@ import {
 	WORKER_MEMORY_READ_TOOL_NAME,
 	WORKER_ROOT_MEMORY_TOOL_NAMES,
 } from "../memory/worker-memory-tools.ts";
+import { deriveModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { defaultModelPerProvider } from "../model-resolver.ts";
 import {
@@ -169,7 +170,7 @@ export function selectRoutedWorkerModel(input: {
 	isModelExhausted: (model: Model<Api>) => boolean;
 	isModelLimited?: (model: Model<Api>) => boolean;
 }): Model<Api> | undefined {
-	if (input.routing.account !== "other") return undefined;
+	if (input.routing.account !== "other" || input.foregroundModel.provider === "faux") return undefined;
 	const { foregroundModel, modelRegistry } = input;
 	const ordered =
 		(input.role !== undefined ? input.routing.routeProvidersByRole?.[input.role] : undefined) ??
@@ -187,6 +188,8 @@ export function selectRoutedWorkerModel(input: {
 			: (modelRegistry.find(provider, defaultModelPerProvider[provider as KnownProvider] ?? "") ??
 				available.find((entry) => entry.provider === provider));
 		if (!model || !modelRegistry.hasConfiguredAuth(model) || input.isModelExhausted(model)) return undefined;
+		if (!deriveModelCapabilityProfile({ contextWindow: model.contextWindow }).backgroundLanesEnabled)
+			return undefined;
 		// A candidate whose account is limited right now (a 429 a sibling saw, an exhausted window)
 		// is skipped for this dispatch: the ledger is a scheduler input, not only a wait.
 		if (input.isModelLimited?.(model)) return undefined;
