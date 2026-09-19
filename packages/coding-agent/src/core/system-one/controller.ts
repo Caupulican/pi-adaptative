@@ -22,6 +22,7 @@ export interface SystemOneControllerDeps {
 	projector?: StateProjector;
 	audit?: AuditStore;
 	config?: SystemOneConfig;
+	userKeys?: readonly string[];
 }
 
 /**
@@ -38,7 +39,7 @@ export class SystemOneController {
 	constructor(deps: SystemOneControllerDeps) {
 		this.store = deps.store;
 		this.adapter = deps.adapter;
-		this.projector = deps.projector ?? new StateProjector();
+		this.projector = deps.projector ?? new StateProjector(deps.userKeys ?? []);
 		this.audit = deps.audit ?? new AuditStore();
 		this.config = deps.config ?? DEFAULT_SYSTEM_ONE_CONFIG;
 	}

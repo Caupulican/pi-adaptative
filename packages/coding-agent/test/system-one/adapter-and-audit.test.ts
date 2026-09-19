@@ -16,7 +16,9 @@ describe("System One Adapter and Audit", () => {
 			}),
 		};
 
-		const adapter = new SystemOneJevAdapter(driftingReviewer);
+		const adapter = new SystemOneJevAdapter(driftingReviewer, undefined, {
+			getApiKey: () => "test-valid-user-key-12345",
+		});
 		await expect(
 			adapter.evaluate({
 				state: { test: true },
@@ -34,6 +36,7 @@ describe("System One Adapter and Audit", () => {
 
 		const adapter = new SystemOneJevAdapter(failingReviewer, undefined, {
 			sleep: async () => {},
+			getApiKey: () => "test-valid-user-key-12345",
 		});
 
 		const readOnlyRes = await adapter.evaluate(
@@ -98,5 +101,87 @@ describe("System One Adapter and Audit", () => {
 		expect(explanation?.explanation).toContain("Stage: preflight");
 		expect(explanation?.explanation).toContain("Model: jev-1.13.0");
 		expect(explanation?.explanation).toContain("Policy Result: allow");
+	});
+
+	it("requires user-configured API key and rejects empty or missing keys", async () => {
+		const dummyReviewer = {
+			evaluate: async () => ({
+				request: { model: "jev-1.13.0" },
+				response: { model: "jev-1.13.0", answers: {} },
+				elapsedMs: 10,
+			}),
+		};
+
+		// 1. getApiKey returning undefined
+		const adapterNoKey = new SystemOneJevAdapter(dummyReviewer, undefined, {
+			getApiKey: () => undefined,
+		});
+		await expect(
+			adapterNoKey.evaluate({
+				state: { prompt: "hello" },
+				questions: { q1: "test" },
+			}),
+		).rejects.toThrow("TypeSafe System One requires an API key configured by the user");
+
+		// 2. getApiKey returning whitespace
+		const adapterEmptyKey = new SystemOneJevAdapter(dummyReviewer, undefined, {
+			getApiKey: () => "   ",
+		});
+		await expect(
+			adapterEmptyKey.evaluate({
+				state: { prompt: "hello" },
+				questions: { q1: "test" },
+			}),
+		).rejects.toThrow("TypeSafe System One requires an API key configured by the user");
+
+		// 3. No getApiKey provided and no environment key set
+		const prevEnv = process.env.TYPESAFE_API_KEY;
+		delete process.env.TYPESAFE_API_KEY;
+		try {
+			const adapterDefault = new SystemOneJevAdapter(dummyReviewer);
+			await expect(
+				adapterDefault.evaluate({
+					state: { prompt: "hello" },
+					questions: { q1: "test" },
+				}),
+			).rejects.toThrow("TypeSafe System One requires an API key configured by the user");
+		} finally {
+			if (prevEnv !== undefined) process.env.TYPESAFE_API_KEY = prevEnv;
+		}
+	});
+
+	it("prevents leaking user API keys and credentials in outgoing review payloads (R-032)", async () => {
+		const dummyReviewer = {
+			evaluate: async () => ({
+				request: { model: "jev-1.13.0" },
+				response: { model: "jev-1.13.0", answers: {} },
+				elapsedMs: 10,
+			}),
+		};
+
+		const userSecret = "typesafe_live_secret_key_abcdef123456";
+		const adapter = new SystemOneJevAdapter(dummyReviewer, undefined, {
+			getApiKey: () => userSecret,
+		});
+
+		// Payload contains user key in state
+		await expect(
+			adapter.evaluate({
+				state: { prompt: `Run this with ${userSecret}` },
+				questions: { q1: "test" },
+			}),
+		).rejects.toThrow(
+			"TypeSafe System One detected user API key in review payload; outgoing request blocked to prevent credential leakage (R-032)",
+		);
+
+		// Payload contains Anthropic credential pattern in questions
+		await expect(
+			adapter.evaluate({
+				state: { prompt: "Run safe task" },
+				questions: { q1: "Check sk-ant-api03-abcdef1234567890abcdef1234567890" },
+			}),
+		).rejects.toThrow(
+			"TypeSafe System One detected sensitive credential in review payload; outgoing request blocked to prevent credential leakage (R-032)",
+		);
 	});
 });
