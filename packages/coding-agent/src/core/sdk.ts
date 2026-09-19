@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { Agent } from "@caupulican/pi-agent-core/agent";
 import { convertToLlm } from "@caupulican/pi-agent-core/messages";
 import { getDefaultSessionDir, SessionManager } from "@caupulican/pi-agent-core/session";
@@ -35,6 +36,7 @@ import { validateOrchestrationProfile } from "./orchestration/profile-registry.t
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
+import { TypeSafeReviewer } from "./review/typesafe-reviewer.ts";
 import { isWorkerSession } from "./session-role.ts";
 import type {
 	ProfileDefinitionInput,
@@ -42,6 +44,9 @@ import type {
 	ResourceProfileSettings,
 } from "./settings-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
+import { SystemOneJevAdapter } from "./system-one/adapter.ts";
+import { SystemOneController } from "./system-one/controller.ts";
+import { ExecutionStore } from "./system-one/execution-state.ts";
 import { time } from "./timings.ts";
 import {
 	createBashTool,
@@ -128,6 +133,10 @@ export interface CreateAgentSessionOptions {
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
+	/** System One semantic control plane controller for Jev semantic validation. */
+	systemOneController?: SystemOneController;
+	/** Optional flag to disable automatic System One semantic control plane controller construction. */
+	disableSystemOne?: boolean;
 }
 
 /** Result from createAgentSession */
@@ -542,6 +551,53 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 	});
 
+	let systemOneController = options.systemOneController;
+	if (!systemOneController && options.disableSystemOne !== true && process.env.PI_SYSTEM_ONE_DISABLED !== "1") {
+		const typesafeKey = (await authStorage.getApiKey("typesafe")) ?? process.env.TYPESAFE_API_KEY;
+		if (typesafeKey) {
+			const reviewer = new TypeSafeReviewer({
+				getApiKey: async () => (await authStorage.getApiKey("typesafe")) ?? process.env.TYPESAFE_API_KEY,
+			});
+			const adapter = new SystemOneJevAdapter(reviewer, undefined, {
+				getApiKey: async () => (await authStorage.getApiKey("typesafe")) ?? process.env.TYPESAFE_API_KEY,
+				getUserKeys: async () => {
+					const k = (await authStorage.getApiKey("typesafe")) ?? process.env.TYPESAFE_API_KEY;
+					return k ? [k] : [];
+				},
+			});
+			let baselineRevision = "unknown";
+			try {
+				baselineRevision =
+					execFileSync("git", ["rev-parse", "HEAD"], {
+						cwd,
+						encoding: "utf-8",
+						stdio: ["ignore", "pipe", "ignore"],
+					}).trim() || "unknown";
+			} catch {
+				// Non-git directory
+			}
+			const store = new ExecutionStore({
+				run_id: sessionManager.getSessionId(),
+				objective: {
+					request: "",
+					normalized_goal: "",
+					acceptance_criteria: [],
+					constraints: [],
+				},
+				repo: {
+					root: cwd,
+					baseline_revision: baselineRevision,
+					current_revision: baselineRevision,
+				},
+			});
+			systemOneController = new SystemOneController({
+				store,
+				adapter,
+				userKeys: [typesafeKey],
+			});
+		}
+	}
+
 	// Restore messages if session has existing data
 	if (hasExistingSession) {
 		agent.state.messages = existingSession.messages;
@@ -551,6 +607,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		agent.resetSanitizerPrefixHorizon();
 		if (!hasThinkingEntry) {
 			sessionManager.appendThinkingLevelChange(thinkingLevel);
+		}
+		if (systemOneController) {
+			try {
+				const currentRevision = execFileSync("git", ["rev-parse", "HEAD"], {
+					cwd,
+					encoding: "utf-8",
+					stdio: ["ignore", "pipe", "ignore"],
+				}).trim();
+				if (currentRevision) {
+					systemOneController.store.revalidateOnResume(currentRevision);
+				}
+			} catch {
+				// Non-git directory
+			}
 		}
 	} else {
 		// Save initial model and thinking level for new sessions so they can be restored on resume
@@ -584,6 +654,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		isChildSession,
 		orchestrationProfile,
 		sessionStartEvent: options.sessionStartEvent,
+		systemOneController,
 	});
 	try {
 		// The initial runtime has now bound providers from profile-granted extensions. Re-resolve the

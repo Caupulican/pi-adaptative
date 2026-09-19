@@ -6,6 +6,7 @@
  * line ceiling only ever moves down).
  */
 
+import { execFileSync } from "node:child_process";
 import type { AgentRunawayStopInfo, ToolValidationEscalationEvent } from "@caupulican/pi-agent-core";
 import type { Api, Model } from "@caupulican/pi-ai";
 import {
@@ -130,4 +131,29 @@ export async function executeSystemOnePostflight(
 ): Promise<void> {
 	if (!controller || aborted) return;
 	await controller.validatePostflight(String(messageCount));
+}
+
+/**
+ * Revalidate baseline/current repository revision and invalidate stale evidence upon session resume (R-062).
+ */
+export function executeSystemOneResumeRevalidation(
+	controller: SystemOneController | undefined,
+	cwd: string,
+	currentRevision?: string,
+): { invalidatedObservations: number; invalidatedClaims: number; revisionChanged: boolean } | undefined {
+	if (!controller) return undefined;
+	let revision = currentRevision;
+	if (!revision) {
+		try {
+			revision = execFileSync("git", ["rev-parse", "HEAD"], {
+				cwd,
+				encoding: "utf-8",
+				stdio: ["ignore", "pipe", "ignore"],
+			}).trim();
+		} catch {
+			// Non-git directory or git error
+		}
+	}
+	if (!revision) return undefined;
+	return controller.store.revalidateOnResume(revision);
 }

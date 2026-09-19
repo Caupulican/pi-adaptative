@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { JevAdapter } from "../adapter.ts";
 import { getQuestionPack, SYSTEM_ONE_PINNED_MODEL } from "../catalog.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "../config.ts";
@@ -119,4 +120,13 @@ export class SystemOneReplayRunner {
 			prematureCompletionRate: totalCases > 0 ? prematureCompletionCount / totalCases : 0,
 		};
 	}
+}
+
+/**
+ * Load the default labeled replay corpus fixture (R-068).
+ */
+export function loadDefaultReplayCorpus(): ReplayTestCase[] {
+	const corpusUrl = new URL("./corpus/labeled-traces.json", import.meta.url);
+	const content = readFileSync(corpusUrl, "utf-8");
+	return JSON.parse(content) as ReplayTestCase[];
 }

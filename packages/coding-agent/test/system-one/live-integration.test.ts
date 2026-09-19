@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { executeSystemOneResumeRevalidation } from "../../src/core/agent-session-guards.ts";
 import { createGoalState } from "../../src/core/goals/goal-state.ts";
 import { SystemOneController } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
@@ -225,5 +226,67 @@ describe("System One Live Integration", () => {
 		expect(result.isError).toBeFalsy();
 		expect((result.details as any)?.applied).toBe(true);
 		expect(currentState.status).toBe("completed");
+	});
+
+	it("revalidates repository revision and invalidates stale evidence upon session resume (R-062)", () => {
+		const store = new ExecutionStore({
+			run_id: "resume-test-run",
+			objective: {
+				request: "Fix bug",
+				normalized_goal: "Fix checkout bug",
+				acceptance_criteria: [],
+				constraints: [],
+			},
+			repo: {
+				root: "/workspace",
+				baseline_revision: "git-rev-100",
+				current_revision: "git-rev-100",
+			},
+		});
+
+		const obs = store.recordObservation({
+			text: "Observed checkout retry logic",
+			source: {
+				kind: "file",
+				locator: "src/checkout.ts",
+				content_hash: "hash123",
+				revision: "git-rev-100",
+				trust: "repository_untrusted_text",
+			},
+		});
+
+		const claim = store.recordClaim({
+			text: "Checkout has idempotent retry",
+			materiality: "completion_critical",
+			evidence_ids: [obs.id],
+		});
+		store.updateClaimStatus(claim.id, "supported");
+
+		const controller = new SystemOneController({
+			store,
+			adapter: { evaluate: vi.fn() as any },
+		});
+
+		// First, resume with unchanged revision
+		const unchanged = executeSystemOneResumeRevalidation(controller, "/workspace", "git-rev-100");
+		expect(unchanged?.revisionChanged).toBe(false);
+		expect(unchanged?.invalidatedObservations).toBe(0);
+		expect(unchanged?.invalidatedClaims).toBe(0);
+
+		// Now resume with changed revision (e.g. user or other branch updated HEAD)
+		const changed = executeSystemOneResumeRevalidation(controller, "/workspace", "git-rev-200");
+		expect(changed?.revisionChanged).toBe(true);
+		expect(changed?.invalidatedObservations).toBe(1);
+		expect(changed?.invalidatedClaims).toBe(1);
+
+		const snapshot = store.snapshot();
+		expect(snapshot.repo.current_revision).toBe("git-rev-200");
+		expect(snapshot.observations.find((o) => o.id === obs.id)?.freshness).toBe("invalidated");
+		expect(snapshot.claims.find((c) => c.id === claim.id)?.status).toBe("unverified");
+	});
+
+	it("handles undefined controller gracefully in executeSystemOneResumeRevalidation", () => {
+		const result = executeSystemOneResumeRevalidation(undefined, "/workspace", "rev-1");
+		expect(result).toBeUndefined();
 	});
 });

@@ -62,6 +62,161 @@ export interface ExecutionStoreOptions {
 	initial_plan?: PlanStep[];
 }
 
+const VALID_ACTIONS = new Set(["inspect", "retrieve", "edit", "build", "test", "verify", "replan", "report", "none"]);
+const VALID_MATERIALITIES = new Set(["informational", "material", "completion_critical"]);
+const VALID_HYPOTHESIS_STATUSES = new Set(["candidate", "investigating", "supported", "rejected", "superseded"]);
+const VALID_IMPACTS = new Set([
+	"read_only",
+	"local_reversible",
+	"repo_mutation",
+	"external_side_effect",
+	"destructive",
+]);
+
+const ALLOWED_WORKER_TURN_KEYS = new Set([
+	"run_id",
+	"step_id",
+	"requested_action",
+	"decision_summary",
+	"claims",
+	"hypothesis_updates",
+	"requested_tools",
+	"completion_candidate",
+	"known_limitations",
+]);
+
+/**
+ * Validate raw worker turn against normative worker_turn.schema.json (R-071, Section 30).
+ * Enforces additionalProperties: false, required fields, and enum values.
+ */
+export function validateWorkerTurnResult(raw: unknown): WorkerTurnResult {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+		throw new TypeError("Worker turn must be a non-null object conforming to worker_turn.schema.json");
+	}
+
+	const obj = raw as Record<string, unknown>;
+
+	for (const key of Object.keys(obj)) {
+		if (!ALLOWED_WORKER_TURN_KEYS.has(key)) {
+			throw new TypeError(`Worker turn contains forbidden property '${key}' (schema forbids additionalProperties)`);
+		}
+	}
+
+	if (typeof obj.run_id !== "string" || !obj.run_id) {
+		throw new TypeError("Worker turn must contain a valid non-empty 'run_id' string");
+	}
+	if (typeof obj.step_id !== "string" || !obj.step_id) {
+		throw new TypeError("Worker turn must contain a valid non-empty 'step_id' string");
+	}
+	if (typeof obj.requested_action !== "string" || !VALID_ACTIONS.has(obj.requested_action)) {
+		throw new TypeError(`Worker turn 'requested_action' must be one of: ${[...VALID_ACTIONS].join(", ")}`);
+	}
+	if (typeof obj.completion_candidate !== "boolean") {
+		throw new TypeError("Worker turn must contain boolean 'completion_candidate'");
+	}
+	if (!Array.isArray(obj.claims)) {
+		throw new TypeError("Worker turn 'claims' must be an array");
+	}
+	if (!Array.isArray(obj.hypothesis_updates)) {
+		throw new TypeError("Worker turn 'hypothesis_updates' must be an array");
+	}
+	if (!Array.isArray(obj.requested_tools)) {
+		throw new TypeError("Worker turn 'requested_tools' must be an array");
+	}
+	if (obj.decision_summary !== undefined && typeof obj.decision_summary !== "string") {
+		throw new TypeError("Worker turn 'decision_summary' must be a string if provided");
+	}
+	if (obj.known_limitations !== undefined) {
+		if (!Array.isArray(obj.known_limitations) || obj.known_limitations.some((x) => typeof x !== "string")) {
+			throw new TypeError("Worker turn 'known_limitations' must be an array of strings if provided");
+		}
+	}
+
+	for (let i = 0; i < obj.claims.length; i++) {
+		const c = obj.claims[i];
+		if (typeof c !== "object" || c === null || Array.isArray(c)) {
+			throw new TypeError(`Claim at index ${i} must be an object`);
+		}
+		const cObj = c as Record<string, unknown>;
+		for (const k of Object.keys(cObj)) {
+			if (k !== "text" && k !== "materiality" && k !== "evidence_refs") {
+				throw new TypeError(`Claim at index ${i} contains forbidden property '${k}'`);
+			}
+		}
+		if (typeof cObj.text !== "string" || !cObj.text) {
+			throw new TypeError(`Claim at index ${i} must have a non-empty 'text' string`);
+		}
+		if (typeof cObj.materiality !== "string" || !VALID_MATERIALITIES.has(cObj.materiality)) {
+			throw new TypeError(`Claim at index ${i} has invalid materiality: ${String(cObj.materiality)}`);
+		}
+		if (!Array.isArray(cObj.evidence_refs) || cObj.evidence_refs.some((r) => typeof r !== "string")) {
+			throw new TypeError(`Claim at index ${i} 'evidence_refs' must be an array of string IDs`);
+		}
+	}
+
+	for (let i = 0; i < obj.hypothesis_updates.length; i++) {
+		const h = obj.hypothesis_updates[i];
+		if (typeof h !== "object" || h === null || Array.isArray(h)) {
+			throw new TypeError(`Hypothesis update at index ${i} must be an object`);
+		}
+		const hObj = h as Record<string, unknown>;
+		for (const k of Object.keys(hObj)) {
+			if (k !== "hypothesis_id" && k !== "status" && k !== "evidence_refs" && k !== "next_discriminator") {
+				throw new TypeError(`Hypothesis update at index ${i} contains forbidden property '${k}'`);
+			}
+		}
+		if (typeof hObj.hypothesis_id !== "string" || !hObj.hypothesis_id) {
+			throw new TypeError(`Hypothesis update at index ${i} must have a non-empty 'hypothesis_id' string`);
+		}
+		if (typeof hObj.status !== "string" || !VALID_HYPOTHESIS_STATUSES.has(hObj.status)) {
+			throw new TypeError(`Hypothesis update at index ${i} has invalid status: ${String(hObj.status)}`);
+		}
+		if (
+			hObj.evidence_refs !== undefined &&
+			(!Array.isArray(hObj.evidence_refs) || hObj.evidence_refs.some((r) => typeof r !== "string"))
+		) {
+			throw new TypeError(`Hypothesis update at index ${i} 'evidence_refs' must be an array of strings`);
+		}
+		if (
+			hObj.next_discriminator !== undefined &&
+			hObj.next_discriminator !== null &&
+			typeof hObj.next_discriminator !== "string"
+		) {
+			throw new TypeError(`Hypothesis update at index ${i} 'next_discriminator' must be string or null`);
+		}
+	}
+
+	for (let i = 0; i < obj.requested_tools.length; i++) {
+		const t = obj.requested_tools[i];
+		if (typeof t !== "object" || t === null || Array.isArray(t)) {
+			throw new TypeError(`Requested tool at index ${i} must be an object`);
+		}
+		const tObj = t as Record<string, unknown>;
+		for (const k of Object.keys(tObj)) {
+			if (k !== "tool" && k !== "intent" && k !== "impact" && k !== "arguments") {
+				throw new TypeError(`Requested tool at index ${i} contains forbidden property '${k}'`);
+			}
+		}
+		if (typeof tObj.tool !== "string" || !tObj.tool) {
+			throw new TypeError(`Requested tool at index ${i} must have a non-empty 'tool' string`);
+		}
+		if (typeof tObj.intent !== "string" || !tObj.intent) {
+			throw new TypeError(`Requested tool at index ${i} must have a non-empty 'intent' string`);
+		}
+		if (typeof tObj.impact !== "string" || !VALID_IMPACTS.has(tObj.impact)) {
+			throw new TypeError(`Requested tool at index ${i} has invalid impact: ${String(tObj.impact)}`);
+		}
+		if (
+			tObj.arguments !== undefined &&
+			(typeof tObj.arguments !== "object" || tObj.arguments === null || Array.isArray(tObj.arguments))
+		) {
+			throw new TypeError(`Requested tool at index ${i} 'arguments' must be an object if provided`);
+		}
+	}
+
+	return raw as WorkerTurnResult;
+}
+
 export class ExecutionStore {
 	private state: ExecutionState;
 	private observationCounter = 0;
@@ -532,12 +687,14 @@ export class ExecutionStore {
 	 * Apply a worker turn result to the execution state.
 	 * R-001: Worker emits completion_candidate=true; cannot mark complete itself.
 	 * R-045: Track failed strategy fingerprints to prevent loops without new evidence.
+	 * R-071: Validates turn against worker_turn.schema.json before applying.
 	 */
-	applyWorkerTurn(turn: WorkerTurnResult): {
+	applyWorkerTurn(rawTurn: unknown): {
 		isCompletionCandidate: boolean;
 		loopDetected: boolean;
 		failedStrategyCount: number;
 	} {
+		const turn = validateWorkerTurnResult(rawTurn);
 		// Update claims
 		for (const claimInput of turn.claims) {
 			this.recordClaim({
@@ -612,6 +769,45 @@ export class ExecutionStore {
 
 		this.state.updated_at = new Date().toISOString();
 		return { isCompletionCandidate, loopDetected, failedStrategyCount };
+	}
+
+	/**
+	 * Revalidate repository revision and invalidate stale evidence upon session resume (R-062).
+	 */
+	revalidateOnResume(currentRevision: string): {
+		invalidatedObservations: number;
+		invalidatedClaims: number;
+		revisionChanged: boolean;
+	} {
+		const revisionChanged = this.state.repo.current_revision !== currentRevision;
+		let invalidatedObservations = 0;
+		let invalidatedClaims = 0;
+
+		if (revisionChanged) {
+			const invalidatedObsIds = new Set<string>();
+			for (const obs of this.state.observations) {
+				if (obs.source.kind === "file" && obs.freshness === "fresh") {
+					obs.freshness = "invalidated";
+					invalidatedObsIds.add(obs.id);
+					invalidatedObservations++;
+				}
+			}
+
+			for (const claim of this.state.claims) {
+				if (claim.status === "supported" || claim.status === "partially_supported") {
+					const hasInvalidatedEvidence = claim.evidence_ids.some((id) => invalidatedObsIds.has(id));
+					if (hasInvalidatedEvidence) {
+						claim.status = "unverified";
+						invalidatedClaims++;
+					}
+				}
+			}
+
+			this.state.repo.current_revision = currentRevision;
+			this.state.updated_at = new Date().toISOString();
+		}
+
+		return { invalidatedObservations, invalidatedClaims, revisionChanged };
 	}
 
 	/**

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { type ReplayTestCase, SystemOneReplayRunner } from "../../src/core/system-one/evals/replay.ts";
+import {
+	loadDefaultReplayCorpus,
+	type ReplayTestCase,
+	SystemOneReplayRunner,
+} from "../../src/core/system-one/evals/replay.ts";
 
 describe("System One Replay Evaluation Harness", () => {
 	it("measures calibration metrics and catches premature completion and hallucinated claims (R-068, R-069, R-070)", async () => {
@@ -102,5 +106,30 @@ describe("System One Replay Evaluation Harness", () => {
 		expect(metrics.prematureCompletionCount).toBe(0);
 		expect(metrics.falseAllowRate).toBe(0);
 		expect(metrics.falseRejectRate).toBe(0);
+	});
+
+	it("loads and validates static labeled replay corpus fixture (R-068)", () => {
+		const corpus = loadDefaultReplayCorpus();
+		expect(corpus.length).toBeGreaterThanOrEqual(8);
+
+		for (const testCase of corpus) {
+			expect(testCase.id).toBeDefined();
+			expect(["intake", "preflight", "tool_gate", "postflight", "drift", "completion"]).toContain(testCase.stage);
+			expect(["allow", "reject", "rework", "complete", "retrieve"]).toContain(testCase.expectedOutcome);
+			expect(testCase.state).toBeDefined();
+			expect(typeof testCase.state).toBe("object");
+			expect(testCase.groundTruth).toBeDefined();
+		}
+
+		// Verify coverage of each canonical defect type
+		const hasHallucination = corpus.some((c) => c.groundTruth.isHallucinatedClaim);
+		const hasScopeDrift = corpus.some((c) => c.groundTruth.isScopeDrift);
+		const hasPrematureCompletion = corpus.some((c) => c.groundTruth.isPrematureCompletion);
+		const hasSymptomOnly = corpus.some((c) => c.groundTruth.isSymptomOnly);
+
+		expect(hasHallucination).toBe(true);
+		expect(hasScopeDrift).toBe(true);
+		expect(hasPrematureCompletion).toBe(true);
+		expect(hasSymptomOnly).toBe(true);
 	});
 });

@@ -184,4 +184,91 @@ describe("System One ExecutionState", () => {
 		expect(result2.loopDetected).toBe(true);
 		expect(result2.failedStrategyCount).toBe(2);
 	});
+
+	it("enforces worker_turn schema and rejects unexpected properties (R-071, worker_turn.schema.json)", () => {
+		const store = createStore();
+
+		// Additional unexpected property (additionalProperties: false)
+		expect(() =>
+			store.applyWorkerTurn({
+				run_id: store.runId,
+				step_id: "step-1",
+				requested_action: "inspect",
+				claims: [],
+				hypothesis_updates: [],
+				requested_tools: [],
+				completion_candidate: false,
+				unexpected_hack: "malicious_payload",
+			}),
+		).toThrow("Worker turn contains forbidden property 'unexpected_hack'");
+
+		// Invalid requested_action enum
+		expect(() =>
+			store.applyWorkerTurn({
+				run_id: store.runId,
+				step_id: "step-1",
+				requested_action: "hack_database",
+				claims: [],
+				hypothesis_updates: [],
+				requested_tools: [],
+				completion_candidate: false,
+			}),
+		).toThrow("Worker turn 'requested_action' must be one of");
+
+		// Claim with unexpected property
+		expect(() =>
+			store.applyWorkerTurn({
+				run_id: store.runId,
+				step_id: "step-1",
+				requested_action: "inspect",
+				claims: [{ text: "test", materiality: "informational", evidence_refs: [], rogue_field: 123 }],
+				hypothesis_updates: [],
+				requested_tools: [],
+				completion_candidate: false,
+			}),
+		).toThrow("Claim at index 0 contains forbidden property 'rogue_field'");
+	});
+
+	it("revalidates repository revision and invalidates stale evidence on resume (R-062)", () => {
+		const store = createStore();
+		const obs = store.recordObservation({
+			text: "checkout.ts line 1",
+			source: {
+				kind: "file",
+				locator: "src/checkout.ts",
+				content: "code",
+				revision: "git-commit-baseline-001",
+				trust: "authoritative",
+			},
+		});
+
+		const claim = store.recordClaim({
+			text: "Logic verified at baseline-001",
+			materiality: "material",
+			evidence_ids: [obs.id],
+		});
+		store.updateClaimStatus(claim.id, "supported");
+
+		expect(obs.freshness).toBe("fresh");
+		expect(store.snapshot().claims.find((c) => c.id === claim.id)?.status).toBe("supported");
+
+		// Resume on same revision: nothing invalidated
+		const noChange = store.revalidateOnResume("git-commit-baseline-001");
+		expect(noChange.revisionChanged).toBe(false);
+		expect(noChange.invalidatedObservations).toBe(0);
+		expect(obs.freshness).toBe("fresh");
+
+		// Resume after external commit: evidence invalidated!
+		const changed = store.revalidateOnResume("git-commit-new-head-002");
+		expect(changed.revisionChanged).toBe(true);
+		expect(changed.invalidatedObservations).toBe(1);
+		expect(changed.invalidatedClaims).toBe(1);
+
+		const updatedSnapshot = store.snapshot();
+		const updatedObs = updatedSnapshot.observations.find((o) => o.id === obs.id);
+		const updatedClaim = updatedSnapshot.claims.find((c) => c.id === claim.id);
+		expect(updatedObs?.freshness).toBe("invalidated");
+		expect(updatedClaim?.status).toBe("unverified");
+		expect(updatedSnapshot.repo.current_revision).toBe("git-commit-new-head-002");
+	});
 });
