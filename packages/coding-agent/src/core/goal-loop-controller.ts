@@ -79,6 +79,8 @@ export interface GoalLoopControllerDeps {
 	recordGoalContinuationFailure(error: unknown): void;
 	/** Persist a reason-specific budget terminal state before returning control. */
 	markGoalBudgetLimited(reason: string): void;
+	/** Optional callback when a continuation decision is evaluated (used for shadow route evaluation). */
+	notifyContinuationEvaluated?(snapshot: GoalRuntimeSnapshot): Promise<void> | void;
 }
 
 export class GoalLoopController {
@@ -92,9 +94,11 @@ export class GoalLoopController {
 		const snapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
 
 		if (snapshot.continuation.action !== "continue") {
+			await this.deps.notifyContinuationEvaluated?.(snapshot);
 			return { submitted: false, snapshot };
 		}
 
+		await this.deps.notifyContinuationEvaluated?.(snapshot);
 		const prompt = buildGoalContinuationPrompt();
 		const turnOutcome = await this.deps.prompt(prompt.text, {
 			expandPromptTemplates: false,

@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:autonomy:authority-envelope:2.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "interaction_policy",
+    "notification_policy",
+    "filesystem",
+    "external",
+    "spend"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.0"
+    },
+    "interaction_policy": {
+      "enum": [
+        "edge_only",
+        "interactive",
+        "fully_silent_until_terminal"
+      ]
+    },
+    "notification_policy": {
+      "enum": [
+        "terminal_or_edge",
+        "milestones",
+        "verbose"
+      ]
+    },
+    "filesystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "read_roots",
+        "write_roots",
+        "denied_roots"
+      ],
+      "properties": {
+        "read_roots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "write_roots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "denied_roots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "external": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "network": {
+          "type": "boolean"
+        },
+        "push": {
+          "type": "boolean"
+        },
+        "deploy": {
+          "type": "boolean"
+        },
+        "publish": {
+          "type": "boolean"
+        },
+        "destructive": {
+          "type": "boolean"
+        },
+        "legal_identity": {
+          "type": "boolean"
+        },
+        "financial": {
+          "type": "boolean"
+        }
+      }
+    },
+    "spend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "currency",
+        "max_per_objective"
+      ],
+      "properties": {
+        "currency": {
+          "type": "string"
+        },
+        "max_per_objective": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

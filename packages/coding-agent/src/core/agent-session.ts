@@ -12,7 +12,6 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
-	StreamFn,
 	ThinkingLevel,
 } from "@caupulican/pi-agent-core/types";
 import {
@@ -151,6 +150,7 @@ import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
+import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import { PendingInputQueueController, type QueuedInput } from "./pending-input-queue-controller.ts";
@@ -401,10 +401,14 @@ export class AgentSession {
 	private _baseSystemPrompt = "";
 	private readonly _pathAliasWrappedTools = new WeakSet<AgentTool>();
 	private _systemOneController?: SystemOneController;
+	private _executionLoopMode?: ExecutionLoopMode;
+	private _objectiveExecutionController?: ObjectiveExecutionController;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this._systemOneController = config.systemOneController;
+		this._executionLoopMode = config.executionLoopMode;
+		this._objectiveExecutionController = config.objectiveExecutionController;
 		// The provider stream chain (perf profile, idle watchdog, machine-wide admission) is built and
 		// installed exactly once, here; see session-stream-chain.ts.
 		const agentDir = config.agentDir ?? getAgentDir();
@@ -500,7 +504,7 @@ export class AgentSession {
 			settingsManager: this.settingsManager,
 			getModelRegistry: () => this._modelRegistry,
 			adaptationStore: modelAdaptationStore,
-			isRawStreamSimple: (fn) => this._isRawStreamSimple(fn),
+			isRawStreamSimple: (fn) => isRawStreamSimpleFn(fn),
 			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
@@ -534,7 +538,7 @@ export class AgentSession {
 			getTools: () => this.agent.state.tools,
 			getSystemPrompt: () => this._baseSystemPrompt,
 			getRequestHooks: () => ({ onPayload: this.agent.onPayload, onResponse: this.agent.onResponse }),
-			isRawStreamSimple: (streamFn) => this._isRawStreamSimple(streamFn),
+			isRawStreamSimple: (streamFn) => isRawStreamSimpleFn(streamFn),
 			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
 			ensureManagedModelReady: (model) => this._localRuntimeController.ensureIsolatedModelReady(model),
 		});
@@ -595,6 +599,8 @@ export class AgentSession {
 			scheduleGoalAutoContinueFromIdle: () => this._backgroundLanes.scheduleGoalAutoContinueFromIdle(),
 			prompt: (text, options) => this.prompt(text, options),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
+			getExecutionLoopMode: () => this._executionLoopMode,
+			getObjectiveExecutionController: () => this._objectiveExecutionController,
 		});
 		this._pendingQueue = new PendingInputQueueController({
 			agent: this.agent,
@@ -690,7 +696,7 @@ export class AgentSession {
 			getModel: () => this.model,
 			getSettingsManager: () => this.settingsManager,
 			getModelRegistry: () => this._modelRegistry,
-			isRawStream: () => this._isRawStreamSimple(this.agent.streamFn),
+			isRawStream: () => isRawStreamSimpleFn(this.agent.streamFn),
 			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
 			isModelExhausted: (ref) => this._foregroundRecovery.isModelExhausted(ref),
 			getStoredFitnessReport: (ref) => this.getStoredFitnessReports().find((entry) => entry.model === ref)?.report,
@@ -739,16 +745,16 @@ export class AgentSession {
 			settingsManager: this.settingsManager,
 			getModel: () => this.model,
 			getAdaptedSettings: () => this._getAdaptedCompactionSettings(),
-			getRequestAuth: (model) => this._getCompactionRequestAuth(model),
+			getRequestAuth: (model) => this._compactionSupport.getRequestAuth(model),
 			resolveModelAndAuth: (compactionModel, sessionModel) =>
-				this._resolveCompactionModelAndAuth(compactionModel, sessionModel),
-			resolveModel: (sessionModel) => this._resolveCompactionModel(sessionModel),
-			getSelectionReason: () => this._getLastCompactionSelectionReason(),
+				this._compactionSupport.resolveModelAndAuth(compactionModel, sessionModel),
+			resolveModel: (sessionModel) => this._compactionSupport.resolveModel(sessionModel),
+			getSelectionReason: () => this._compactionSupport.getLastSelectionReason(),
 			resolveThinkingLevel: (compactionModel, sessionModel) =>
-				this._resolveCompactionThinkingLevel(compactionModel, sessionModel),
+				this._compactionSupport.resolveThinkingLevel(this.thinkingLevel, compactionModel, sessionModel),
 			describeSummarizer: () => this._describeCompactionSummarizer(),
 			getExtensionRunner: () => this._extensionRunner,
-			isRawStream: () => this._isRawStreamSimple(this.agent.streamFn),
+			isRawStream: () => isRawStreamSimpleFn(this.agent.streamFn),
 			disconnectAgent: () => this._disconnectFromAgent(),
 			reconnectAgent: () => this._reconnectToAgent(),
 			abortForeground: () => this.abort("compaction"),
@@ -920,7 +926,7 @@ export class AgentSession {
 		this._reflection = new ReflectionController({
 			getModel: () => this.model,
 			getAgent: () => this.agent,
-			isRawStreamSimple: () => this._isRawStreamSimple(this.agent.streamFn),
+			isRawStreamSimple: () => isRawStreamSimpleFn(this.agent.streamFn),
 			getModelRegistry: () => this._modelRegistry,
 			getMemoryManager: () => this._memory.getMemoryManager(),
 			getFreshOkfMemoryForReflection: () => this._memory.getFreshOkfMemoryForReflection(),
@@ -1300,13 +1306,14 @@ export class AgentSession {
 		return this._systemOneController;
 	}
 
-	/**
-	 * True when the session's stream fn is the raw `streamSimple` provider entry (directly, or as the
-	 * base wrapped by the idle watchdog at construction). Callers use this to decide whether request
-	 * auth must be injected explicitly — see `isRawStreamSimpleFn`.
-	 */
-	private _isRawStreamSimple(fn: StreamFn): boolean {
-		return isRawStreamSimpleFn(fn);
+	/** Execution loop mode for this session. */
+	get executionLoopMode(): ExecutionLoopMode | undefined {
+		return this._executionLoopMode;
+	}
+
+	/** Objective execution controller, if active for this session. */
+	get objectiveExecutionController(): ObjectiveExecutionController | undefined {
+		return this._objectiveExecutionController;
 	}
 
 	private async _getRequiredRequestAuth(model: Model<Api>): Promise<RequestAuth> {
@@ -1338,26 +1345,6 @@ export class AgentSession {
 		throw new Error(formatNoApiKeyFoundMessage(model.provider));
 	}
 
-	// Summarizer model/thinking selection, request auth (with session-model fallback), and
-	// window-adapted settings live in CompactionSupport (see compaction-support.ts).
-	private _getCompactionRequestAuth(model: Model<Api>): Promise<{
-		apiKey?: string;
-		headers?: Record<string, string>;
-	}> {
-		return this._compactionSupport.getRequestAuth(model);
-	}
-
-	private _resolveCompactionModelAndAuth(
-		compactionModel: Model<Api>,
-		sessionModel: Model<Api>,
-	): Promise<{ model: Model<Api>; apiKey?: string; headers?: Record<string, string>; failure?: string }> {
-		return this._compactionSupport.resolveModelAndAuth(compactionModel, sessionModel);
-	}
-
-	private _resolveCompactionModel(sessionModel: Model<Api>): Model<Api> {
-		return this._compactionSupport.resolveModel(sessionModel);
-	}
-
 	/**
 	 * One bounded diagnostic clause for compaction retry warnings: which summarizer selection won
 	 * (and why) plus the input-size estimate the capacity check consumed — the two facts every
@@ -1367,17 +1354,6 @@ export class AgentSession {
 		const reason = this._compactionSupport.getLastSelectionReason() ?? "unresolved";
 		const estimate = this._pipeline.estimateCurrentContextTokens(this.agent.state.messages);
 		return `summarizer: ${reason}, ~${Math.ceil(estimate / 1000)}k est input`;
-	}
-
-	private _getLastCompactionSelectionReason(): string | undefined {
-		return this._compactionSupport.getLastSelectionReason();
-	}
-
-	private _resolveCompactionThinkingLevel(
-		compactionModel: Model<Api>,
-		sessionModel: Model<Api>,
-	): ThinkingLevel | undefined {
-		return this._compactionSupport.resolveThinkingLevel(this.thinkingLevel, compactionModel, sessionModel);
 	}
 
 	/** Latest cost-guard decision (for the host footer/UI to surface a warning). Undefined if disabled. */

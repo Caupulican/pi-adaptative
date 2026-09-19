@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:decision:evaluation:2.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "program",
+    "engine",
+    "results",
+    "timestamp"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.0"
+    },
+    "program": {
+      "type": "object",
+      "required": [
+        "id",
+        "version"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "engine": {
+      "type": "object",
+      "required": [
+        "id",
+        "model",
+        "confidence_provenance"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "confidence_provenance": {
+          "enum": [
+            "native_calibrated",
+            "native_uncalibrated",
+            "derived_logprobs",
+            "synthetic_self_report",
+            "none"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "results": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "timestamp": {
+      "type": "string"
+    }
+  }
+}

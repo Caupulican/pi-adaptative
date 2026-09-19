@@ -70,6 +70,7 @@ export {
 	InMemoryAuthStorageBackend,
 	type OAuthCredential,
 } from "./core/auth-storage.ts";
+export * from "./core/autonomy/index.ts";
 // Copied bundled extensions resolve runtime dependencies through this public module. Bun embeds
 // this surface; relative imports back into dist/core do not exist beside a compiled executable.
 export {
@@ -78,6 +79,7 @@ export {
 } from "./core/autonomy/worker-session-private-scope.ts";
 export { type CollaborationExtensionOptions, piCollaborationExtension } from "./core/collaboration/extension.ts";
 export { NativeProviderRegistry, type NativeProviderStrategy } from "./core/collaboration/native-provider.ts";
+export * from "./core/decision/index.ts";
 export { mapToolNamesForPlatform } from "./core/default-tool-surface.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 // Extension system
@@ -265,6 +267,52 @@ export {
 	serializeRunRecord,
 } from "./core/improvement-loop.ts";
 export { ModelRegistry } from "./core/model-registry.ts";
+// Objective Execution Controller & Jev Substrate
+export {
+	buildDeliveryBundle,
+	CURRENT_GOAL_MIGRATION_VERSION,
+	completionFailuresToRepairWork,
+	composeObjectiveRoute,
+	computeGoalStateDigest,
+	type DeliveryArtifact,
+	type DeliveryBundle,
+	type DeliveryTerminalStatus,
+	type DeliveryVerificationRecord,
+	type DisagreementTelemetryEvent,
+	type ExecutionLoopMode,
+	GOAL_MIGRATION_SCHEMA_VERSION,
+	GoalCompatibilityAdapter,
+	type GoalCompatibilityAdapterDeps,
+	GoalMigrationError,
+	type GoalMigrationRecord,
+	type LegacyEvidence,
+	type LegacyGoalStart,
+	type LegacyRequirement,
+	type LegacySatisfyRequirement,
+	migrateGoalState,
+	OBJECTIVE_ROUTE_SCHEMA_VERSION,
+	ObjectiveExecutionController,
+	type ObjectiveExecutionControllerDeps,
+	type ObjectiveRoute,
+	type ObjectiveRouteName,
+	type ObjectiveRouteProjection,
+	ObjectiveRouteValidationError,
+	ObjectiveStallDetector,
+	type ObjectiveTerminalResult,
+	projectObjectiveForRouting,
+	REPAIR_WORK_SCHEMA_VERSION,
+	type RepairWork,
+	type RepairWorkClass,
+	RepairWorkValidationError,
+	type RouteCompositionInput,
+	routeToTerminal,
+	type SemanticRouteJudgments,
+	type StallEvaluation,
+	type StallTrackerState,
+	VALID_OBJECTIVE_ROUTES,
+	validateObjectiveRoute,
+	validateRepairWork,
+} from "./core/objective-execution/index.ts";
 export * from "./core/orchestration/capability-gateway.ts";
 export * from "./core/orchestration/contracts.ts";
 export * from "./core/orchestration/event-store.ts";

@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "cycle_id",
+    "objective_id",
+    "route",
+    "reason_codes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "cycle_id": {
+      "type": "string"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "route": {
+      "enum": [
+        "retrieve",
+        "investigate",
+        "implement",
+        "deterministic_test",
+        "verify",
+        "review",
+        "replan",
+        "continue_current_worker",
+        "wait_for_worker",
+        "wait_for_tool",
+        "escalate_capability",
+        "completion_candidate",
+        "blocked_external",
+        "owner_required",
+        "cancel",
+        "unrecoverable"
+      ]
+    },
+    "reason_codes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "attempt_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "target_requirement_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "target_hypothesis_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "validation_decision_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

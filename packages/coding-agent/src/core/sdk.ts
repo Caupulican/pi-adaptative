@@ -31,6 +31,7 @@ import { resolveFastModeServiceTier } from "./fast-mode.ts";
 import type { IntegrityExtension } from "./hooks/index.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
+import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
@@ -138,6 +139,10 @@ export interface CreateAgentSessionOptions {
 	sessionStartEvent?: SessionStartEvent;
 	/** System One semantic control plane controller for Jev semantic validation. */
 	systemOneController?: SystemOneController;
+	/** Execution loop mode for objective execution ('legacy_goal', 'objective_shadow', 'objective_primary'). */
+	executionLoopMode?: ExecutionLoopMode;
+	/** Objective execution controller for deterministic loop authority and route evaluation. */
+	objectiveExecutionController?: ObjectiveExecutionController;
 	/** Optional flag to disable automatic System One semantic control plane controller construction. */
 	disableSystemOne?: boolean;
 	/** Optional flag to explicitly enable or disable System One semantic control plane. Takes precedence over settings. */
@@ -730,6 +735,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		orchestrationProfile,
 		sessionStartEvent: options.sessionStartEvent,
 		systemOneController,
+		executionLoopMode: options.executionLoopMode,
+		objectiveExecutionController: options.objectiveExecutionController,
 	});
 	try {
 		// The initial runtime has now bound providers from profile-granted extensions. Re-resolve the

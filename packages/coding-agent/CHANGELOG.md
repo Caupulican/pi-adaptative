@@ -4,6 +4,10 @@
 
 - Public Execution-Integrity Substrate SDK under `@mariobasilio/pi-coding-agent/hooks` exposing `SemanticValidator`, `ValidationPolicyProvider`, `IntegrityExtension`, `IntegrityHookCoordinator`, policy pack schema validation, and audit minimization.
 - Fail-closed lifecycle hook coordination with error isolation across 10 execution checkpoints (`session_start`, `before_tool`, `before_mutation`, `after_mutation`, `after_tool`, `completion_candidate`, `terminal`, `recovery_attempt`, `resume`, `session_end`).
+- Autonomous Decision Runtime and Decision Kernel IR (`BooleanDecision`, `ChoiceDecision`, `ScoreDecision`, `SetDecision`) with weakest-link confidence aggregation and provider-neutral semantic function registration.
+- Pluggable decision engine architecture with `DecisionEngineRouter`, `MechanicalDecisionEngine` (zero-credential deterministic fallback), `TypeSafeSystemOneDecisionEngine` (calibrated System One adapter over `jev-1.13.0`), and `StructuredLlmDecisionEngine`.
+- Authority Envelope with human-on-the-edge policy (`edge_only` interaction, `terminal_or_edge` notification) emitting structured `HumanEdgeRequest` payloads when out-of-envelope operations occur.
+- Standardized `DeliveryBundle` (`urn:pi:delivery:bundle:2.0`) packaging verified objective outcomes with completion assurance profiles (`mechanical`, `mechanical_plus_reviewer`, `semantic_enhanced`, `system_one_required`).
 
 ### Fixed
 

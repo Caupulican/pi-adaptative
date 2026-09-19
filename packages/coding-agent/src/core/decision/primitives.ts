@@ -1,0 +1,48 @@
+export type Consequence = "low" | "medium" | "high" | "critical";
+
+export interface BooleanDecision {
+	readonly kind: "boolean";
+	readonly id: string;
+	readonly instruction: string;
+	readonly criteria?: {
+		readonly true?: string;
+		readonly false?: string;
+	};
+	readonly consequence?: Consequence;
+}
+
+export interface ChoiceOption {
+	readonly description: string;
+	readonly notFor?: string;
+}
+
+export interface ChoiceDecision {
+	readonly kind: "choice";
+	readonly id: string;
+	readonly instruction: string;
+	readonly options: Record<string, ChoiceOption>;
+	readonly consequence?: Consequence;
+}
+
+export interface ScoreLevel {
+	readonly value: number;
+	readonly description: string;
+}
+
+export interface ScoreDecision {
+	readonly kind: "score";
+	readonly id: string;
+	readonly instruction: string;
+	readonly levels: readonly ScoreLevel[];
+	readonly consequence?: Consequence;
+}
+
+export interface SetDecision {
+	readonly kind: "set";
+	readonly id: string;
+	readonly instructionTemplate: string;
+	readonly members: Record<string, string>;
+	readonly consequence?: Consequence;
+}
+
+export type DecisionDefinition = BooleanDecision | ChoiceDecision | ScoreDecision | SetDecision;

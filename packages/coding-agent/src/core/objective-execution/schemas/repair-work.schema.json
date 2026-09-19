@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repair_id",
+    "objective_id",
+    "failed_gate_id",
+    "reason",
+    "required_next_proof",
+    "recommended_work_class"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "repair_id": {
+      "type": "string"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "failed_gate_id": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "required_next_proof": {
+      "type": "string"
+    },
+    "recommended_work_class": {
+      "enum": [
+        "retrieve",
+        "investigate",
+        "implement",
+        "deterministic_test",
+        "verify",
+        "review",
+        "replan"
+      ]
+    },
+    "acceptance_criterion_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "prior_failed_strategy_fingerprints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "independent_worker_required": {
+      "type": "boolean"
+    }
+  }
+}

@@ -15,6 +15,7 @@ import {
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import { GoalLoopController } from "../goal-loop-controller.ts";
+import type { ExecutionLoopMode, ObjectiveExecutionController } from "../objective-execution/index.ts";
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { GoalBudgetExhaustedError } from "./goal-execution-errors.ts";
@@ -60,6 +61,8 @@ export interface GoalSessionControllerDeps {
 	scheduleGoalAutoContinueFromIdle(): void;
 	prompt(text: string, options?: PromptOptions): Promise<void>;
 	emitWarning(message: string): void;
+	getExecutionLoopMode?(): ExecutionLoopMode | undefined;
+	getObjectiveExecutionController?(): ObjectiveExecutionController | undefined;
 }
 
 export type ChatGoalAdmission =
@@ -147,6 +150,9 @@ export class GoalSessionController {
 			recordGoalContinuationPass: (pass) => this.recordContinuationPass(pass),
 			recordGoalContinuationFailure: (error) => this.recordContinuationFailure(error),
 			markGoalBudgetLimited: (reason) => this.markBudgetLimited(reason),
+			notifyContinuationEvaluated: async (snapshot) => {
+				await this.evaluateShadowRoute(snapshot.continuation.action);
+			},
 		});
 	}
 
@@ -679,11 +685,38 @@ export class GoalSessionController {
 		});
 	}
 
+	private async evaluateShadowRoute(legacyAction: string): Promise<void> {
+		const objectiveController = this.deps.getObjectiveExecutionController?.();
+		const mode = this.deps.getExecutionLoopMode?.() ?? objectiveController?.getMode() ?? "legacy_goal";
+		if (mode !== "objective_shadow" || !objectiveController) return;
+
+		const state = this.getState();
+		if (!state?.goalId) return;
+
+		try {
+			await objectiveController.evaluateRouteOnce(state.goalId, {
+				legacyActionHint: legacyAction,
+			});
+		} catch {
+			// Shadow evaluation must never fail or interfere with the active execution loop
+		}
+	}
+
 	continueOnce(options: GoalContinuationOnceOptions): Promise<GoalContinuationOnceResult> {
+		const mode = this.deps.getExecutionLoopMode?.() ?? this.deps.getObjectiveExecutionController?.()?.getMode();
+		if (mode === "objective_primary") {
+			const snapshot = this.getRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
+			return Promise.resolve({ submitted: false, snapshot });
+		}
 		return this.loop.continueGoalOnce(options);
 	}
 
 	continueLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
+		const mode = this.deps.getExecutionLoopMode?.() ?? this.deps.getObjectiveExecutionController?.()?.getMode();
+		if (mode === "objective_primary") {
+			const snapshot = this.getRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
+			return Promise.resolve({ turnsSubmitted: 0, stopReason: "continuation_not_allowed", finalSnapshot: snapshot });
+		}
 		return this.loop.continueGoalLoop(options);
 	}
 

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:autonomy:human-edge:2.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "objective_id",
+    "edge_type",
+    "request",
+    "reason",
+    "alternatives_exhausted",
+    "impact",
+    "work_can_continue"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.0"
+    },
+    "id": {
+      "type": "string"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "edge_type": {
+      "enum": [
+        "authority",
+        "information",
+        "product_direction",
+        "legal_identity",
+        "financial",
+        "secret_scope",
+        "irreversible_external",
+        "semantic_gate_unavailable"
+      ]
+    },
+    "request": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "alternatives_exhausted": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "impact": {
+      "type": "string"
+    },
+    "work_can_continue": {
+      "type": "boolean"
+    },
+    "default_if_no_response": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

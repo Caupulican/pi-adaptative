@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "legacy_goal_id",
+    "objective_id",
+    "migration_version",
+    "source_digest",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "legacy_goal_id": {
+      "type": "string"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "migration_version": {
+      "type": "string"
+    },
+    "source_digest": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "dry_run",
+        "migrated",
+        "verified",
+        "failed"
+      ]
+    },
+    "mapped_requirement_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "mapped_evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
