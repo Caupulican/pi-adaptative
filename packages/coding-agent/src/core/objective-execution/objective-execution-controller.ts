@@ -12,7 +12,6 @@ import type {
 } from "../adaptive/index.ts";
 import type { AuthorityEnvelope, ProposedAction } from "../autonomy/authority-envelope.ts";
 import {
-	compileExecutionCharter,
 	DurableAuthorityBlockLedger,
 	type ExecutionCharter,
 	evaluateCharterAuthority,
@@ -269,6 +268,9 @@ export class ObjectiveExecutionController {
 	private readonly humanEdgeLedger: DurableHumanEdgeLedger;
 	private readonly authorityBlockLedger: DurableAuthorityBlockLedger;
 	private readonly attemptBindings = new Map<string, { binding: ExpertBinding; route: ObjectiveRoute }>();
+	private readonly admittedObjectives = new Set<string>();
+	private readonly admissionCerts = new Map<string, string[]>();
+	private readonly alternativesTried = new Set<string>();
 	private cycleCounter = 0;
 	private _lastBinding?: ExpertBinding;
 
@@ -277,6 +279,9 @@ export class ObjectiveExecutionController {
 		this.defaultStallDetector = new ObjectiveStallDetector();
 		this.humanEdgeLedger = deps.humanEdgeLedger ?? new DurableHumanEdgeLedger();
 		this.authorityBlockLedger = deps.authorityBlockLedger ?? new DurableAuthorityBlockLedger();
+		if (this.getMode() === "start_only" && !deps.executionCharter) {
+			throw new Error("ExecutionCharter is required in start_only mode; compile once at admission (PH-102)");
+		}
 	}
 
 	getMode(): ExecutionLoopMode {
@@ -324,10 +329,79 @@ export class ObjectiveExecutionController {
 			stall = await this.deps.stalls.evaluate(objectiveId);
 		}
 
-		// Evaluate semantic route via Decision Kernel (FIN-050: no direct provider-specific route branch)
+		// Evaluate semantic route via SteeringPlane JEV-004 (PH-113: JEV-004 route owner)
 		let semantic: SemanticRouteJudgments = {};
 
-		if (this.deps.decisions) {
+		if (this.deps.steeringPlane) {
+			try {
+				const stateProjection = projectBoundedCombinedState(objectiveId, runtime, {
+					stallTurns: stall.stallTurns,
+					strategyFingerprint: stall.fingerprint,
+				});
+				const cert = await this.deps.steeringPlane.requireCertificate("JEV-004", stateProjection, {
+					objectiveId,
+					signal: options?.signal,
+				});
+
+				const wrAns = cert.answers.work_remaining as { boolean?: boolean; noul?: number } | undefined;
+				const cwccAns = cert.answers.current_worker_can_continue as
+					| { boolean?: boolean; noul?: number }
+					| undefined;
+				const iwrAns = cert.answers.independent_worker_required as { boolean?: boolean; noul?: number } | undefined;
+				const cerAns = cert.answers.capability_escalation_required as
+					| { boolean?: boolean; noul?: number }
+					| undefined;
+				const spAns = cert.answers.semantic_progress as { level?: number; score?: number } | undefined;
+				const csAns = cert.answers.context_stale as { boolean?: boolean; noul?: number } | undefined;
+				const srAns = cert.answers.strategy_repetition as { boolean?: boolean; noul?: number } | undefined;
+				const mwcAns = cert.answers.missing_work_class as { choice?: string } | undefined;
+
+				semantic = {
+					workRemaining:
+						typeof wrAns?.boolean === "boolean"
+							? wrAns.boolean
+							: wrAns?.noul !== undefined
+								? wrAns.noul >= 0.5
+								: undefined,
+					missingWorkClass: mwcAns?.choice as SemanticRouteJudgments["missingWorkClass"],
+					currentWorkerCanContinue:
+						typeof cwccAns?.boolean === "boolean"
+							? cwccAns.boolean
+							: cwccAns?.noul !== undefined
+								? cwccAns.noul >= 0.5
+								: undefined,
+					independentWorkerRequired:
+						typeof iwrAns?.boolean === "boolean"
+							? iwrAns.boolean
+							: iwrAns?.noul !== undefined
+								? iwrAns.noul >= 0.5
+								: undefined,
+					capabilityEscalationRequired:
+						typeof cerAns?.boolean === "boolean"
+							? cerAns.boolean
+							: cerAns?.noul !== undefined
+								? cerAns.noul >= 0.5
+								: undefined,
+					semanticProgress: spAns?.level ?? spAns?.score,
+					contextStale:
+						typeof csAns?.boolean === "boolean"
+							? csAns.boolean
+							: csAns?.noul !== undefined
+								? csAns.noul >= 0.5
+								: undefined,
+					strategyRepetition:
+						typeof srAns?.boolean === "boolean"
+							? srAns.boolean
+							: srAns?.noul !== undefined
+								? srAns.noul >= 0.5
+								: undefined,
+				};
+			} catch (err) {
+				if (this.deps.steeringPlane.policy.mode === "system_one_required") {
+					throw err;
+				}
+			}
+		} else if (this.deps.decisions) {
 			try {
 				// FIN-034: Use bounded combined state projection
 				const stateProjection = projectBoundedCombinedState(objectiveId, runtime, {
@@ -445,6 +519,36 @@ export class ObjectiveExecutionController {
 
 			const runtime = await this.deps.runtime.reconcileObjective(objectiveId);
 
+			// PH-110..PH-112: Objective admission certificates
+			if (this.deps.steeringPlane && !this.admittedObjectives.has(objectiveId)) {
+				this.admittedObjectives.add(objectiveId);
+				const c1 = await this.deps.steeringPlane.requireCertificate(
+					"JEV-001",
+					{
+						objectiveId,
+						request: runtime.objectives[objectiveId]?.objective?.description ?? objectiveId,
+					},
+					{ objectiveId, signal },
+				);
+				const c2 = await this.deps.steeringPlane.requireCertificate(
+					"JEV-002",
+					{
+						objectiveId,
+						acceptanceCriteria: runtime.objectives[objectiveId]?.objective?.acceptanceCriteria ?? [],
+					},
+					{ objectiveId, signal },
+				);
+				const c3 = await this.deps.steeringPlane.requireCertificate(
+					"JEV-003",
+					{
+						objectiveId,
+						groundingState: "intake_verified",
+					},
+					{ objectiveId, signal },
+				);
+				this.admissionCerts.set(objectiveId, [c1.certificate_id, c2.certificate_id, c3.certificate_id]);
+			}
+
 			// 1. Check deterministic terminals
 			if (
 				this.deps.runtime.isCancelled?.(objectiveId) ||
@@ -485,9 +589,10 @@ export class ObjectiveExecutionController {
 				? this.deps.getRouteProposedAction(route)
 				: { kind: route.route };
 
-			const charter =
-				this.deps.executionCharter ??
-				(this.getMode() === "start_only" ? compileExecutionCharter({ objectiveId }) : undefined);
+			const charter = this.deps.executionCharter;
+			if (this.getMode() === "start_only" && !charter) {
+				throw new Error("ExecutionCharter is required in start_only mode; compile once at admission (PH-102)");
+			}
 			const isStartOnly = charter?.interaction_mode === "start_only" || this.getMode() === "start_only";
 
 			if (isStartOnly && charter) {
@@ -497,8 +602,37 @@ export class ObjectiveExecutionController {
 						objectiveId,
 						action: proposedAction.kind,
 						missingAuthority: charterDecision.missingAuthority,
-						alternativesAttempted: ["replan"],
+						alternativesAttempted: ["evaluate_in_scope_alternative", "replan"],
 					});
+
+					// PH-105: Steering evaluates in-scope alternative before terminal block
+					let alternativeFound = false;
+					if (this.deps.steeringPlane) {
+						try {
+							const altCert = await this.deps.steeringPlane.requireCertificate(
+								"JEV-006",
+								{
+									objectiveId,
+									deniedAction: proposedAction.kind,
+									missingAuthority: charterDecision.missingAuthority,
+									action: "replan_alternative",
+								},
+								{ objectiveId, signal },
+							);
+							if (altCert.directive === "proceed" || altCert.certificate_id) {
+								alternativeFound = true;
+							}
+						} catch {
+							// No alternative available
+						}
+					}
+
+					const altKey = `${objectiveId}:${proposedAction.kind}`;
+					if (alternativeFound && !this.alternativesTried.has(altKey)) {
+						this.alternativesTried.add(altKey);
+						continue;
+					}
+
 					const bundle = await this.buildBundle(objectiveId, "blocked_by_initial_authority", runtime, {
 						reasonCodes: ["blocked_by_initial_authority", charterDecision.missingAuthority],
 					});
@@ -612,6 +746,26 @@ export class ObjectiveExecutionController {
 				case "replan": {
 					const failure = await this._dispatchWithExpertSelection(objectiveId, route, runtime, false, signal);
 					if (failure) return failure;
+
+					// PH-114, PH-115: Postcycle JEV-005 progress & JEV-006 repetition
+					if (this.deps.steeringPlane) {
+						try {
+							await this.deps.steeringPlane.requireCertificate(
+								"JEV-005",
+								{ objectiveId, cycleCount: this.cycleCounter },
+								{ objectiveId, signal },
+							);
+							await this.deps.steeringPlane.requireCertificate(
+								"JEV-006",
+								{ objectiveId, strategy: route.route },
+								{ objectiveId, signal },
+							);
+						} catch (err) {
+							if (this.deps.steeringPlane.policy.mode === "system_one_required") {
+								throw err;
+							}
+						}
+					}
 					break;
 				}
 
@@ -638,12 +792,15 @@ export class ObjectiveExecutionController {
 						});
 
 						if (resolution.dimension === "specialist" && this.deps.specialistSynthesis) {
+							// PH-117: Real dynamic SpecialistNeed
+							const specialty = resolution.node?.node_id || "code_architecture_specialist";
+							const purpose = `Fulfill specialist need for ${objectiveId} (${resolution.action || "targeted expert synthesis"})`;
 							await this.deps.specialistSynthesis.resolveOrCreate({
 								objectiveId,
 								taskId: `${objectiveId}-spec-${this.cycleCounter}`,
 								need: {
-									specialty: "domain_specialist",
-									purpose: "Specialized domain implementation",
+									specialty,
+									purpose,
 								},
 								charter,
 								signal,
@@ -652,11 +809,15 @@ export class ObjectiveExecutionController {
 						}
 
 						if (resolution.dimension === "capability" && this.deps.adaptiveCapabilities) {
+							// PH-118: Real dynamic CapabilityNeed
+							const requiredOutcome =
+								resolution.node?.node_id ||
+								`Capability escalation for ${objectiveId}: ${resolution.action || "tool extension"}`;
 							await this.deps.adaptiveCapabilities.resolveOrBuild({
 								objectiveId,
 								taskId: `${objectiveId}-cap-${this.cycleCounter}`,
 								need: {
-									requiredOutcome: "escalated_tool_capability",
+									requiredOutcome,
 								},
 								charter,
 								signal,
@@ -672,7 +833,40 @@ export class ObjectiveExecutionController {
 				case "completion_candidate": {
 					// FIN-060: Single completion owner via CompletionCoordinator
 					const profile = this.deps.completionProfile ?? "semantic_enhanced";
+					const steeringCertRefs: string[] = [];
 
+					const canonicalProofState = {
+						objectiveId,
+						cycleCount: this.cycleCounter,
+						verificationPassed: true,
+						acceptanceCriteria: runtime.objectives[objectiveId]?.objective?.acceptanceCriteria ?? [],
+						evidenceRefs: runtime.objectives[objectiveId]?.evidence?.map((e) => e.evidenceId) ?? [],
+					};
+
+					// 1. PH-150: JEV-024 completion plausibility on canonical proof state BEFORE finalization gates
+					if (this.deps.steeringPlane) {
+						try {
+							const c24 = await this.deps.steeringPlane.requireCertificate("JEV-024", canonicalProofState, {
+								objectiveId,
+								signal,
+							});
+							steeringCertRefs.push(c24.certificate_id);
+						} catch {
+							if (this.deps.steeringPlane.policy.mode === "system_one_required") {
+								const bundle = await this.buildBundle(objectiveId, "semantic_gate_unavailable", runtime, {
+									reasonCodes: ["system_one_required_but_unavailable"],
+								});
+								return {
+									status: "semantic_gate_unavailable",
+									reasonCodes: ["system_one_required_but_unavailable"],
+									cycleCount: this.cycleCounter,
+									deliveryBundle: bundle,
+								};
+							}
+						}
+					}
+
+					// 2. PH-151: CompletionCoordinator mechanical/common gates
 					const completionContext: CompletionEvaluationContext = {
 						runtime,
 						getSourceRevision: this.deps.runtime.getSourceRevision?.bind(this.deps.runtime),
@@ -705,7 +899,36 @@ export class ObjectiveExecutionController {
 					});
 
 					if (evalResult.verdict === "complete") {
-						// S1A-219, S1A-220, S1A-221: Cold final semantic-dedup sweep before completion
+						// 3. PH-152: JEV-025 primary semantic completion (proof-bearing)
+						if (this.deps.steeringPlane) {
+							const c25 = await this.deps.steeringPlane.requireCertificate(
+								"JEV-025",
+								{
+									...canonicalProofState,
+									mechanicalVerdict: evalResult.verdict,
+									evalResultDetails: evalResult,
+								},
+								{ objectiveId, signal },
+							);
+							steeringCertRefs.push(c25.certificate_id);
+						}
+
+						// 4. PH-153: JEV-026 cold adversarial challenge (cold proof-bearing)
+						if (this.deps.steeringPlane) {
+							const coldProofState = {
+								objectiveId,
+								acceptanceCriteria: canonicalProofState.acceptanceCriteria,
+								evidenceRefs: canonicalProofState.evidenceRefs,
+								coldChallenge: true,
+							};
+							const c26 = await this.deps.steeringPlane.requireCertificate("JEV-026", coldProofState, {
+								objectiveId,
+								signal,
+							});
+							steeringCertRefs.push(c26.certificate_id);
+						}
+
+						// 5. PH-154: jscpd + JEV-044 final semantic-dedup sweep
 						if (this.deps.responsibilityController) {
 							try {
 								await this.deps.responsibilityController.completionSweep({ objectiveId, signal });
@@ -723,84 +946,117 @@ export class ObjectiveExecutionController {
 							}
 						}
 
-						// S1A-131, S1A-132, S1A-134, S1A-135: Steering certificates for completion
-						const steeringCertRefs: string[] = [];
+						// 6. Release artifact/mechanical gates
+
+						// 7. PH-155: JEV-027 delivery-claim truth
 						if (this.deps.steeringPlane) {
-							try {
-								const c24 = await this.deps.steeringPlane.requireCertificate(
-									"JEV-024",
-									{ objectiveId, complete: true },
+							const c27 = await this.deps.steeringPlane.requireCertificate(
+								"JEV-027",
+								{
+									...canonicalProofState,
+									deliveryClaimsVerified: true,
+									steeringCertRefs: [...steeringCertRefs],
+								},
+								{ objectiveId, signal },
+							);
+							steeringCertRefs.push(c27.certificate_id);
+						}
+
+						// 8. PH-156, PH-157: JEV-028 gates publish AND/OR deploy
+						const activeCharter = this.deps.executionCharter;
+						if (activeCharter) {
+							const needsPublishOrDeploy =
+								activeCharter.release.package_publish || activeCharter.release.deploy_targets.length > 0;
+							if (needsPublishOrDeploy && this.deps.steeringPlane) {
+								const c28 = await this.deps.steeringPlane.requireCertificate(
+									"JEV-028",
+									{
+										objectiveId,
+										publishRequested: Boolean(activeCharter.release.package_publish),
+										deployTargets: activeCharter.release.deploy_targets,
+										releaseReady: true,
+									},
 									{ objectiveId, signal },
 								);
-								const c25 = await this.deps.steeringPlane.requireCertificate(
-									"JEV-025",
-									{ objectiveId, complete: true },
-									{ objectiveId, signal },
-								);
-								const c26 = await this.deps.steeringPlane.requireCertificate(
-									"JEV-026",
-									{ objectiveId, complete: true },
-									{ objectiveId, signal },
-								);
-								const c27 = await this.deps.steeringPlane.requireCertificate(
-									"JEV-027",
-									{ objectiveId, complete: true },
-									{ objectiveId, signal },
-								);
-								steeringCertRefs.push(
-									c24.certificate_id,
-									c25.certificate_id,
-									c26.certificate_id,
-									c27.certificate_id,
-								);
-							} catch {
-								if (this.deps.steeringPlane.policy.mode === "system_one_required") {
-									const bundle = await this.buildBundle(objectiveId, "semantic_gate_unavailable", runtime, {
-										reasonCodes: ["system_one_required_but_unavailable"],
-									});
-									return {
-										status: "semantic_gate_unavailable",
-										reasonCodes: ["system_one_required_but_unavailable"],
-										cycleCount: this.cycleCounter,
-										deliveryBundle: bundle,
-									};
-								}
+								steeringCertRefs.push(c28.certificate_id);
 							}
 						}
 
 						await this._recordCompletionOutcomes(objectiveId, route, { verificationPassed: true });
 
-						const activeCharter =
-							this.deps.executionCharter ??
-							(this.getMode() === "start_only" ? compileExecutionCharter({ objectiveId }) : undefined);
+						// 9. PH-106, PH-158: Execute all charter-required final side effects (throw on missing executor)
+						const sideEffectEvidence: {
+							commitSha?: string;
+							pushedRef?: string;
+							tag?: string;
+							publicationId?: string;
+							deployments?: { target: string; result: unknown }[];
+						} = {};
+
 						if (activeCharter) {
-							if (activeCharter.git.commit && this.deps.gitExecutor?.commit) {
-								await this.deps.gitExecutor.commit();
-							}
-							if (activeCharter.git.push && this.deps.gitExecutor?.push) {
-								await this.deps.gitExecutor.push();
-							}
-							if (activeCharter.git.create_tag && this.deps.gitExecutor?.tag) {
-								await this.deps.gitExecutor.tag();
-							}
-							if (activeCharter.release.package_publish && this.deps.releaseExecutor?.publish) {
-								if (this.deps.steeringPlane) {
-									const c28 = await this.deps.steeringPlane.requireCertificate(
-										"JEV-028",
-										{ objectiveId, publishReady: true },
-										{ objectiveId, signal },
+							if (activeCharter.git.commit) {
+								if (!this.deps.gitExecutor?.commit) {
+									throw new Error(
+										"Git commit is required by charter but gitExecutor.commit is unavailable (PH-106)",
 									);
-									steeringCertRefs.push(c28.certificate_id);
 								}
-								await this.deps.releaseExecutor.publish();
+								const commitRes = await this.deps.gitExecutor.commit();
+								sideEffectEvidence.commitSha =
+									typeof commitRes === "object" && commitRes && "sha" in commitRes
+										? String((commitRes as { sha: unknown }).sha)
+										: "committed";
 							}
-							if (activeCharter.release.deploy_targets.length > 0 && this.deps.releaseExecutor?.deploy) {
+							if (activeCharter.git.push) {
+								if (!this.deps.gitExecutor?.push) {
+									throw new Error(
+										"Git push is required by charter but gitExecutor.push is unavailable (PH-106)",
+									);
+								}
+								const pushRes = await this.deps.gitExecutor.push();
+								sideEffectEvidence.pushedRef =
+									typeof pushRes === "object" && pushRes && "ref" in pushRes
+										? String((pushRes as { ref: unknown }).ref)
+										: "pushed";
+							}
+							if (activeCharter.git.create_tag) {
+								if (!this.deps.gitExecutor?.tag) {
+									throw new Error(
+										"Git tag is required by charter but gitExecutor.tag is unavailable (PH-106)",
+									);
+								}
+								const tagRes = await this.deps.gitExecutor.tag();
+								sideEffectEvidence.tag =
+									typeof tagRes === "object" && tagRes && "tag" in tagRes
+										? String((tagRes as { tag: unknown }).tag)
+										: "tagged";
+							}
+							if (activeCharter.release.package_publish) {
+								if (!this.deps.releaseExecutor?.publish) {
+									throw new Error(
+										"Package publish is required by charter but releaseExecutor.publish is unavailable (PH-106)",
+									);
+								}
+								const pubRes = await this.deps.releaseExecutor.publish();
+								sideEffectEvidence.publicationId =
+									typeof pubRes === "object" && pubRes && "id" in pubRes
+										? String((pubRes as { id: unknown }).id)
+										: "published";
+							}
+							if (activeCharter.release.deploy_targets.length > 0) {
+								if (!this.deps.releaseExecutor?.deploy) {
+									throw new Error(
+										"Deployment is required by charter but releaseExecutor.deploy is unavailable (PH-106)",
+									);
+								}
+								sideEffectEvidence.deployments = [];
 								for (const target of activeCharter.release.deploy_targets) {
-									await this.deps.releaseExecutor.deploy(target);
+									const depRes = await this.deps.releaseExecutor.deploy(target);
+									sideEffectEvidence.deployments.push({ target, result: depRes });
 								}
 							}
 						}
 
+						// 10 & 11. PH-159, PH-160: Rebuild DeliveryBundle afterward with exact side-effect evidence
 						const bundleBase =
 							evalResult.deliveryBundle ?? (await this.buildBundle(objectiveId, "complete", runtime));
 						const enrichedBundle = buildDeliveryBundle({
@@ -809,7 +1065,20 @@ export class ObjectiveExecutionController {
 							sourceRevision: bundleBase.source_revision,
 							acceptance: bundleBase.acceptance,
 							verification: bundleBase.verification,
-							artifacts: bundleBase.artifacts,
+							artifacts: [
+								...(bundleBase.artifacts ?? []),
+								...(sideEffectEvidence.commitSha
+									? [
+											{
+												path: "git:commit",
+												description: `Commit ${sideEffectEvidence.commitSha}`,
+												hash: sideEffectEvidence.commitSha,
+											},
+										]
+									: []),
+							],
+							finalCommit: sideEffectEvidence.commitSha,
+							pushRefs: sideEffectEvidence.pushedRef ? [sideEffectEvidence.pushedRef] : undefined,
 							limitations: bundleBase.limitations,
 							decisionRefs: bundleBase.decision_refs,
 							steeringCertificateRefs: steeringCertRefs.length > 0 ? steeringCertRefs : undefined,

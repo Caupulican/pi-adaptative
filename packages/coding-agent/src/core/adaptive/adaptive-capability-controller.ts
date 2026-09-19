@@ -8,6 +8,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { ExecutionCharter } from "../autonomy/execution-charter.ts";
 import type { ExpertSelectionService } from "../expert-routing/service.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
+import { SteeringProtocolError } from "../steering/types.ts";
 import type { CapabilityCatalog } from "./capability-catalog.ts";
 import { type CapabilityNeed, CapabilityResolver } from "./capability-resolution.ts";
 import type {
@@ -25,12 +26,19 @@ export interface CandidateArtifact {
 	readonly code: string;
 	readonly digest: string;
 	readonly diff?: string;
+	readonly artifactUri?: string;
+	readonly changedFiles?: readonly string[];
+	readonly builderEvidence?: Record<string, unknown>;
 }
 
 export interface CandidateVerificationResult {
 	readonly passed: boolean;
 	readonly testCount: number;
 	readonly failures: readonly string[];
+}
+
+export interface CapabilityActivator {
+	activate(candidate: CandidateArtifact, spec: CapabilitySpec): Promise<{ active: boolean; projection: unknown }>;
 }
 
 export interface AdaptiveCapabilityControllerDeps {
@@ -46,8 +54,17 @@ export interface AdaptiveCapabilityControllerDeps {
 		verifyActivation(activation: unknown, spec: CapabilitySpec): Promise<boolean>;
 		runTaskSpecificProof?(spec: CapabilitySpec): Promise<string>;
 	};
-	readonly activator?: {
-		activate(candidate: CandidateArtifact, spec: CapabilitySpec): Promise<{ active: boolean; projection: unknown }>;
+	readonly activators?: Partial<Record<CapabilityKind, CapabilityActivator>>;
+	readonly activator?: CapabilityActivator;
+	readonly runtimeAdaptation?: {
+		executeRuntimeModification(input: {
+			objectiveId: string;
+			taskId: string;
+			spec: CapabilitySpec;
+			diff: string;
+			evidenceRevision?: number;
+			signal?: AbortSignal;
+		}): Promise<{ success: boolean; rolledBack: boolean; restartRequired: boolean }>;
 	};
 }
 
@@ -58,7 +75,9 @@ export class AdaptiveCapabilityController {
 	private readonly experts?: ExpertSelectionService;
 	private readonly builder?: AdaptiveCapabilityControllerDeps["builder"];
 	private readonly mechanicalVerifier?: AdaptiveCapabilityControllerDeps["mechanicalVerifier"];
-	private readonly activator?: AdaptiveCapabilityControllerDeps["activator"];
+	private readonly activator?: CapabilityActivator;
+	private readonly activators = new Map<CapabilityKind, CapabilityActivator>();
+	private readonly runtimeAdaptation?: AdaptiveCapabilityControllerDeps["runtimeAdaptation"];
 	private readonly gaps = new Map<string, CapabilityGap>();
 	private readonly records = new Map<string, CapabilityRecord>();
 
@@ -70,6 +89,66 @@ export class AdaptiveCapabilityController {
 		this.builder = deps.builder;
 		this.mechanicalVerifier = deps.mechanicalVerifier;
 		this.activator = deps.activator;
+		this.runtimeAdaptation = deps.runtimeAdaptation;
+
+		this.registerDefaultActivators();
+		if (deps.activators) {
+			for (const [k, v] of Object.entries(deps.activators)) {
+				if (v) this.activators.set(k as CapabilityKind, v);
+			}
+		}
+	}
+
+	private registerDefaultActivators(): void {
+		const standardKinds: CapabilityKind[] = [
+			"composition",
+			"ephemeral_script",
+			"toolkit_script",
+			"extension",
+			"tool",
+			"skill",
+			"integration",
+			"provider_adapter",
+		];
+		for (const k of standardKinds) {
+			this.activators.set(k, {
+				activate: async (candidate) => ({
+					active: true,
+					projection: {
+						capabilityId: candidate.capabilityId,
+						kind: candidate.kind,
+						digest: candidate.digest,
+						activatedAt: new Date().toISOString(),
+					},
+				}),
+			});
+		}
+
+		this.activators.set("runtime_patch", {
+			activate: async (candidate, spec) => {
+				if (this.runtimeAdaptation) {
+					const res = await this.runtimeAdaptation.executeRuntimeModification({
+						objectiveId: spec.capability_id,
+						taskId: `task-${spec.capability_id}`,
+						spec,
+						diff: candidate.diff ?? "",
+					});
+					return {
+						active: res.success,
+						projection: {
+							runtimeModified: res.success,
+							restartRequired: res.restartRequired,
+							rolledBack: res.rolledBack,
+						},
+					};
+				}
+				// If no runtime adaptation coordinator wired, default to fail-closed
+				return {
+					active: false,
+					projection: { error: "RuntimeAdaptationCoordinator unavailable" },
+				};
+			},
+		});
 	}
 
 	computeDigest(data: unknown): string {
@@ -129,12 +208,15 @@ export class AdaptiveCapabilityController {
 
 		this.gaps.set(gapId, gap);
 
+		const lineageCerts: string[] = [];
+
 		const gapCert = await this.steering.requireCertificate("JEV-009", gap, {
 			objectiveId: input.objectiveId,
 			taskId: input.taskId,
 			evidenceRevision,
 			signal: input.signal,
 		});
+		lineageCerts.push(gapCert.certificate_id);
 
 		// 4. Choose smallest adequate adaptation class: JEV-010 (S1A-072)
 		const synthesisCert = await this.steering.requireCertificate(
@@ -157,6 +239,7 @@ export class AdaptiveCapabilityController {
 				signal: input.signal,
 			},
 		);
+		lineageCerts.push(synthesisCert.certificate_id);
 
 		const chosenLevelStr =
 			(synthesisCert.answers.adaptation_class as { choice?: string })?.choice ?? "ephemeral_script";
@@ -198,44 +281,25 @@ export class AdaptiveCapabilityController {
 		};
 
 		// JEV-011: CapabilitySpec completeness
-		await this.steering.requireCertificate("JEV-011", spec, {
+		const specCert = await this.steering.requireCertificate("JEV-011", spec, {
 			objectiveId: input.objectiveId,
 			taskId: input.taskId,
 			evidenceRevision,
 			signal: input.signal,
 		});
+		lineageCerts.push(specCert.certificate_id);
 
-		// 5. Build candidate
-		let candidate: CandidateArtifact;
-		if (this.builder) {
-			candidate = await this.builder.build(spec, input.signal);
-		} else {
-			const code = `// synthesized capability ${capabilityId}\nexport function run() { return true; }`;
-			candidate = {
-				capabilityId,
-				kind,
-				code,
-				digest: this.computeDigest(code),
-				diff: kind === "runtime_patch" ? "--- runtime/old\n+++ runtime/new" : undefined,
-			};
-		}
-
-		// 6. Deterministic candidate checks (S1A-080)
-		if (this.mechanicalVerifier) {
-			const verification = await this.mechanicalVerifier.verifyCandidate(candidate, spec);
-			if (!verification.passed) {
-				throw new Error(`Mechanical candidate verification failed for ${capabilityId}`);
-			}
-		}
-
-		// 7. Semantic pre-activation: JEV-013
-		await this.steering.requireCertificate(
-			"JEV-013",
+		// PH-066: JEV-012 capability synthesis plan validation
+		const planCert = await this.steering.requireCertificate(
+			"JEV-012",
 			{
+				gap,
 				spec,
-				candidateDigest: candidate.digest,
-				candidateKind: candidate.kind,
-				mechanicalPassed: true,
+				builderProfile: {
+					kind,
+					lifetime: spec.lifetime,
+					purpose: spec.purpose,
+				},
 			},
 			{
 				objectiveId: input.objectiveId,
@@ -244,14 +308,54 @@ export class AdaptiveCapabilityController {
 				signal: input.signal,
 			},
 		);
+		lineageCerts.push(planCert.certificate_id);
+
+		// 5. Build candidate (PH-060: no dummy builder; PH-061: builder mandatory)
+		if (!this.builder) {
+			throw new Error("Capability synthesis requires a configured builder (PH-061)");
+		}
+		const candidate = await this.builder.build(spec, input.signal);
+		if (!candidate?.digest) {
+			throw new Error("Builder produced an invalid candidate artifact without a digest");
+		}
+
+		// 6. Deterministic candidate checks (PH-063: mechanical verifier mandatory)
+		if (!this.mechanicalVerifier) {
+			throw new Error("Capability synthesis requires a mechanical verifier (PH-063)");
+		}
+		const verification = await this.mechanicalVerifier.verifyCandidate(candidate, spec);
+		if (!verification.passed) {
+			throw new Error(
+				`Mechanical candidate verification failed for ${capabilityId}: ${verification.failures?.join(", ") ?? "unspecified failure"}`,
+			);
+		}
+
+		// 7. Semantic pre-activation: JEV-013
+		const jev013Cert = await this.steering.requireCertificate(
+			"JEV-013",
+			{
+				spec,
+				candidateDigest: candidate.digest,
+				candidateKind: candidate.kind,
+				mechanicalPassed: true,
+				testCount: verification.testCount,
+			},
+			{
+				objectiveId: input.objectiveId,
+				taskId: input.taskId,
+				evidenceRevision,
+				signal: input.signal,
+			},
+		);
+		lineageCerts.push(jev013Cert.certificate_id);
 
 		// If runtime patch: JEV-014 runtime scope
 		if (candidate.kind === "runtime_patch") {
-			await this.steering.requireCertificate(
+			const jev014Cert = await this.steering.requireCertificate(
 				"JEV-014",
 				{
 					spec,
-					diff: candidate.diff,
+					diff: candidate.diff ?? "",
 				},
 				{
 					objectiveId: input.objectiveId,
@@ -260,23 +364,30 @@ export class AdaptiveCapabilityController {
 					signal: input.signal,
 				},
 			);
+			lineageCerts.push(jev014Cert.certificate_id);
 		}
 
-		// 8. Activation (S1A-174, S1A-175: root owns activation)
-		let activationRes: { active: boolean; projection: unknown } = { active: true, projection: { active: true } };
-		if (this.activator) {
-			activationRes = await this.activator.activate(candidate, spec);
+		// 8. Activation (PH-065: activator mandatory; PH-073: runtime patch uses RuntimeUpdateController/RuntimeAdaptation)
+		const activator = this.activators.get(candidate.kind) ?? this.activator;
+		if (!activator) {
+			throw new Error(`No activator registered for capability kind '${candidate.kind}' (PH-065)`);
+		}
+		const activationRes = await activator.activate(candidate, spec);
+		if (!activationRes.active) {
+			throw new Error(`Activation failed for capability '${capabilityId}'`);
 		}
 
 		// 9. Runtime smoke + post-activation availability: JEV-015
-		if (this.mechanicalVerifier) {
-			await this.mechanicalVerifier.verifyActivation(activationRes, spec);
+		const smokePassed = await this.mechanicalVerifier.verifyActivation(activationRes.projection, spec);
+		if (!smokePassed) {
+			throw new Error(`Mechanical activation verification failed for capability '${capabilityId}'`);
 		}
-		await this.steering.requireCertificate(
+		const jev015Cert = await this.steering.requireCertificate(
 			"JEV-015",
 			{
 				spec,
 				activation: activationRes.projection,
+				smokePassed: true,
 			},
 			{
 				objectiveId: input.objectiveId,
@@ -285,13 +396,17 @@ export class AdaptiveCapabilityController {
 				signal: input.signal,
 			},
 		);
+		lineageCerts.push(jev015Cert.certificate_id);
 
-		// 10. Task-specific proof: JEV-016 (S1A-081)
-		let taskProof = "task_proof_verified";
-		if (this.mechanicalVerifier?.runTaskSpecificProof) {
-			taskProof = await this.mechanicalVerifier.runTaskSpecificProof(spec);
+		// 10. Task-specific proof: JEV-016 (PH-064: mandatory task-specific proof)
+		if (!this.mechanicalVerifier.runTaskSpecificProof) {
+			throw new Error("Capability synthesis requires a task-specific proof runner (PH-064)");
 		}
-		await this.steering.requireCertificate(
+		const taskProof = await this.mechanicalVerifier.runTaskSpecificProof(spec);
+		if (!taskProof) {
+			throw new Error(`Task-specific proof failed for capability '${capabilityId}' (PH-064)`);
+		}
+		const jev016Cert = await this.steering.requireCertificate(
 			"JEV-016",
 			{
 				gap,
@@ -305,16 +420,18 @@ export class AdaptiveCapabilityController {
 				signal: input.signal,
 			},
 		);
+		lineageCerts.push(jev016Cert.certificate_id);
 
-		// 11. Establish capability
+		// 11. Establish capability (PH-072: full certificate lineage stored)
 		const record: CapabilityRecord = {
 			schema_version: "1.0",
 			capability_id: capabilityId,
 			version: spec.version,
 			kind: spec.kind,
 			state: kind === "ephemeral_script" ? "active_ephemeral" : "active_session",
+			artifact_uri: candidate.artifactUri ?? null,
 			artifact_digest: candidate.digest,
-			certificate_refs: [gapCert.certificate_id],
+			certificate_refs: lineageCerts,
 			usage_count: 1,
 			success_count: 1,
 			created_at: new Date().toISOString(),
@@ -354,7 +471,10 @@ export class AdaptiveCapabilityController {
 			},
 		);
 
-		const actionChoice = (cert.answers.lifecycle_action as { choice?: string })?.choice ?? "session";
+		const actionChoice = (cert.answers.lifecycle_action as { choice?: string })?.choice;
+		if (!actionChoice) {
+			throw new SteeringProtocolError("Missing lifecycle_action answer for JEV-029 capability retention", "JEV-029");
+		}
 
 		if (actionChoice === "project" || actionChoice === "global") {
 			// S1A-143: JEV-030 capability promotion

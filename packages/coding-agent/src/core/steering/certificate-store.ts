@@ -1,15 +1,45 @@
 /**
  * Durable Steering Certificate Store.
- * Implements S1A-002, S1A-003, S1A-004, S1A-005, S1A-006, S1A-007, S1A-170.
+ * Implements S1A-002..S1A-007, S1A-170, PH-020..PH-028.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { SteeringCertificate } from "./types.ts";
+import { canonicalJson } from "./canonical.ts";
+import type { CertificateLookupQuery, SteeringCertificate } from "./types.ts";
+
+export class SteeringCertificateStoreError extends Error {
+	constructor(message: string, cause?: unknown) {
+		super(message, { cause });
+		this.name = "SteeringCertificateStoreError";
+	}
+}
+
+export function isValidCertificateRecord(item: unknown): item is SteeringCertificate {
+	if (!item || typeof item !== "object") return false;
+	const c = item as Record<string, unknown>;
+	return (
+		typeof c.certificate_id === "string" &&
+		typeof c.objective_id === "string" &&
+		typeof c.checkpoint_id === "string" &&
+		typeof c.state_digest === "string" &&
+		typeof c.evidence_revision === "number" &&
+		c.answers !== null &&
+		typeof c.answers === "object" &&
+		typeof c.directive === "string" &&
+		c.policy !== null &&
+		typeof c.policy === "object" &&
+		c.question_pack !== null &&
+		typeof c.question_pack === "object" &&
+		c.engine !== null &&
+		typeof c.engine === "object"
+	);
+}
 
 export class SteeringCertificateStore {
 	private readonly certificatesById = new Map<string, SteeringCertificate>();
-	private readonly persistentPath?: string;
+	readonly persistentPath?: string;
 
 	constructor(persistentPath?: string) {
 		this.persistentPath = persistentPath;
@@ -18,38 +48,57 @@ export class SteeringCertificateStore {
 		}
 	}
 
+	hasDurableBackend(): boolean {
+		return Boolean(this.persistentPath);
+	}
+
 	private loadFromDisk(): void {
+		if (!this.persistentPath) return;
 		try {
-			if (!this.persistentPath) return;
 			const content = readFileSync(this.persistentPath, "utf8");
 			const parsed = JSON.parse(content);
 			if (Array.isArray(parsed)) {
 				for (const item of parsed) {
-					if (item && typeof item.certificate_id === "string") {
+					if (isValidCertificateRecord(item)) {
 						this.certificatesById.set(item.certificate_id, item);
 					}
 				}
 			}
-		} catch {
-			// Fail-safe load
+		} catch (err) {
+			throw new SteeringCertificateStoreError(`Failed to load certificates from ${this.persistentPath}`, err);
 		}
 	}
 
 	private saveToDisk(): void {
 		if (!this.persistentPath) return;
+		const dir = dirname(this.persistentPath);
+		if (!existsSync(dir)) {
+			mkdirSync(dir, { recursive: true });
+		}
+		const all = Array.from(this.certificatesById.values());
+		const serialized = canonicalJson(all);
+		const tempPath = `${this.persistentPath}.tmp.${Date.now()}.${randomUUID().slice(0, 8)}`;
 		try {
-			const dir = dirname(this.persistentPath);
-			if (!existsSync(dir)) {
-				mkdirSync(dir, { recursive: true });
+			writeFileSync(tempPath, serialized, "utf8");
+			renameSync(tempPath, this.persistentPath);
+		} catch (err) {
+			try {
+				if (existsSync(tempPath)) unlinkSync(tempPath);
+			} catch {
+				// ignore cleanup error
 			}
-			const all = Array.from(this.certificatesById.values());
-			writeFileSync(this.persistentPath, JSON.stringify(all, null, 2), "utf8");
-		} catch {
-			// Fail-safe persistence
+			throw new SteeringCertificateStoreError(
+				`Failed atomic persistence of steering certificates to ${this.persistentPath}`,
+				err,
+			);
 		}
 	}
 
 	async persist(cert: SteeringCertificate): Promise<SteeringCertificate> {
+		if (!isValidCertificateRecord(cert)) {
+			const certId = (cert as unknown as Record<string, unknown>)?.certificate_id ?? "unknown";
+			throw new SteeringCertificateStoreError(`Cannot persist invalid certificate: ${certId}`);
+		}
 		this.certificatesById.set(cert.certificate_id, cert);
 		this.saveToDisk();
 		return cert;
@@ -71,23 +120,56 @@ export class SteeringCertificateStore {
 
 	/**
 	 * Finds current valid certificate for an objective, checkpoint, stateDigest, and evidenceRevision.
-	 * S1A-007: Stale certificate if state digest or evidence revision does not match.
+	 * S1A-007, PH-024..PH-028: Binds state digest, evidence revision, policy digest, program digest, and exact model.
 	 */
 	findCurrent(
-		objectiveId: string,
-		checkpointId: string,
-		stateDigest: string,
-		evidenceRevision: number,
+		queryOrObjectiveId: CertificateLookupQuery | string,
+		checkpointId?: string,
+		stateDigest?: string,
+		evidenceRevision?: number,
+		options?: {
+			policyDigest?: string;
+			programDigest?: string;
+			provider?: string;
+			model?: string;
+		},
 	): SteeringCertificate | undefined {
+		let query: CertificateLookupQuery;
+		if (typeof queryOrObjectiveId === "object") {
+			query = queryOrObjectiveId;
+		} else {
+			query = {
+				objectiveId: queryOrObjectiveId,
+				checkpointId: checkpointId ?? "",
+				stateDigest: stateDigest ?? "",
+				evidenceRevision: evidenceRevision ?? 0,
+				policyDigest: options?.policyDigest,
+				programDigest: options?.programDigest,
+				provider: options?.provider,
+				model: options?.model,
+			};
+		}
+
 		for (const cert of this.certificatesById.values()) {
-			if (
-				cert.objective_id === objectiveId &&
-				cert.checkpoint_id === checkpointId &&
-				cert.state_digest === stateDigest &&
-				cert.evidence_revision === evidenceRevision
-			) {
-				return cert;
+			if (cert.objective_id !== query.objectiveId) continue;
+			if (cert.checkpoint_id !== query.checkpointId) continue;
+			if (cert.state_digest !== query.stateDigest) continue;
+			if (cert.evidence_revision !== query.evidenceRevision) continue;
+
+			if (query.policyDigest && cert.policy.digest !== query.policyDigest) {
+				continue;
 			}
+			if (query.programDigest && cert.question_pack.digest !== query.programDigest) {
+				continue;
+			}
+			if (query.provider && cert.engine.provider !== query.provider) {
+				continue;
+			}
+			if (query.model && cert.engine.model !== query.model) {
+				continue;
+			}
+
+			return cert;
 		}
 		return undefined;
 	}

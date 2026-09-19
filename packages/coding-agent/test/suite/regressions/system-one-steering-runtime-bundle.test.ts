@@ -9,18 +9,76 @@ import type { JevAdapter, JevEvaluationRequest, JevEvaluationResponse } from "..
 
 class TestJevAdapter implements JevAdapter {
 	async evaluate(request: JevEvaluationRequest): Promise<JevEvaluationResponse> {
+		const answers: Record<string, unknown> = {};
+		if (request.questions) {
+			for (const [id, rawQ] of Object.entries(request.questions)) {
+				const q = rawQ as { type?: string; criteria?: unknown };
+				if (q.type === "noul") {
+					if (
+						id === "work_remaining" ||
+						id === "capability_gap_suspected" ||
+						id === "critical_defect_present" ||
+						id === "repetition_detected" ||
+						id === "strategy_repetition" ||
+						id === "context_stale" ||
+						id === "independent_worker_required" ||
+						id === "capability_escalation_required" ||
+						id === "stalled" ||
+						id === "missing_information" ||
+						id === "release_risk_critical"
+					) {
+						answers[id] = { type: "noul", noul: 0.05 };
+					} else {
+						answers[id] = { type: "noul", noul: 0.96 };
+					}
+				} else if (q.type === "choice") {
+					const criteria = q.criteria as Record<string, string> | undefined;
+					const keys = Object.keys(criteria ?? {});
+					let selected = keys[0] ?? "none";
+					if (id === "missing_work_class") {
+						selected = keys.includes("completion_candidate")
+							? "completion_candidate"
+							: keys.includes("none")
+								? "none"
+								: keys[0];
+					} else if (id === "recommended_disposition") {
+						selected = keys.includes("unique") ? "unique" : keys[0];
+					} else if (id === "route") {
+						selected = keys.includes("completion_candidate") ? "completion_candidate" : keys[0];
+					}
+					const probs: Record<string, number> = {};
+					for (const k of keys) {
+						probs[k] = k === selected ? 1.0 : 0.0;
+					}
+					answers[id] = {
+						type: "choice",
+						choice: selected,
+						confidence: 0.96,
+						probabilities: probs,
+					};
+				} else if (q.type === "score") {
+					const levels = Array.isArray(q.criteria) ? (q.criteria as unknown[]) : [];
+					const score = 0;
+					const probs: Record<string, number> = {};
+					levels.forEach((_val: unknown, idx: number) => {
+						probs[String(idx)] = idx === score ? 1.0 : 0.0;
+					});
+					if (Object.keys(probs).length === 0) {
+						probs["0"] = 1.0;
+					}
+					answers[id] = {
+						type: "score",
+						score,
+						confidence: 0.96,
+						probabilities: probs,
+					};
+				}
+			}
+		}
 		return {
 			model: request.model ?? "jev-1.13.0",
 			latency_ms: 5,
-			answers: {
-				_confidence: 0.96,
-				approved: true,
-				work_remaining: false,
-				completion_plausible: { noul: 0.95 },
-				acceptance_satisfied: { noul: 0.98 },
-				verification_passed: { noul: 0.98 },
-				recommended_disposition: { choice: "unique" },
-			},
+			answers,
 		};
 	}
 }

@@ -1,9 +1,12 @@
 /**
  * Steering decision programs and question packs for JEV-001 through JEV-045.
  * Normative reference: STEERING_DECISION_PROGRAMS.md and MANDATORY_JEV_CHECKPOINTS.md
+ * Implements typed Decision Kernel integration (PH-001..PH-005, PH-011, PH-066).
  */
 
-import { createHash } from "node:crypto";
+import type { DecisionDefinition } from "../decision/primitives.ts";
+import { createDecisionProgram, type DecisionProgram } from "../decision/program.ts";
+import { canonicalDigest } from "./canonical.ts";
 import type { SteeringCertificateQuestionPackRef } from "./types.ts";
 
 export type QuestionKind = "noul" | "choice" | "score";
@@ -20,6 +23,812 @@ export interface SteeringQuestionPack {
 	readonly version: string;
 	readonly checkpointIds: readonly string[];
 	readonly questions: readonly SteeringQuestionDef[];
+}
+
+export function computeQuestionPackDigest(pack: SteeringQuestionPack | DecisionProgram): string {
+	return canonicalDigest(pack);
+}
+
+function compileCandidateFitChoices(
+	rawCandidates: unknown,
+	decisions: DecisionDefinition[],
+	params: {
+		fallback: string;
+		describe: (item: Record<string, unknown>) => string;
+		formatFitInstruction: (id: string) => string;
+	},
+): Record<string, { description: string }> {
+	const list = Array.isArray(rawCandidates) ? (rawCandidates as Array<Record<string, unknown>>) : [];
+	const options: Record<string, { description: string }> = {};
+	if (list.length === 0) {
+		options.none = { description: params.fallback };
+		return options;
+	}
+	for (const item of list) {
+		const id = String(item.id ?? "unknown");
+		options[id] = { description: params.describe(item) };
+		decisions.push({
+			kind: "boolean",
+			id: `fits::${id}`,
+			instruction: params.formatFitInstruction(id),
+		});
+	}
+	return options;
+}
+
+export function compileDecisionProgramForCheckpoint(checkpointId: string, state: unknown): DecisionProgram {
+	const decisions: DecisionDefinition[] = [];
+	const s = (state ?? {}) as Record<string, unknown>;
+
+	switch (checkpointId) {
+		case "JEV-001":
+		case "JEV-002":
+		case "JEV-003": {
+			decisions.push(
+				{ kind: "boolean", id: "objective_coherent", instruction: "Is the objective clear and coherent?" },
+				{
+					kind: "boolean",
+					id: "acceptance_complete",
+					instruction: "Are all requested behaviors covered in acceptance criteria?",
+				},
+				{
+					kind: "score",
+					id: "ambiguity_severity",
+					instruction: "How severe is remaining ambiguity (0=none, 3=fatal)?",
+					levels: [
+						{ value: 0, description: "No ambiguity" },
+						{ value: 1, description: "Minor ambiguity" },
+						{ value: 2, description: "Significant ambiguity" },
+						{ value: 3, description: "Fatal ambiguity" },
+					],
+				},
+				{ kind: "boolean", id: "missing_information", instruction: "Is critical information missing?" },
+				{
+					kind: "choice",
+					id: "requested_delivery_class",
+					instruction: "Target deliverable class",
+					options: {
+						code_fix: { description: "Bug fix or correction" },
+						new_feature: { description: "New functional capability" },
+						refactor: { description: "Structural refactoring" },
+						investigation: { description: "Investigation or audit" },
+						release: { description: "Release or packaging" },
+						full_system: { description: "Full system synthesis" },
+					},
+				},
+				{
+					kind: "boolean",
+					id: "capability_sensitive",
+					instruction: "Does this require special tools or capabilities?",
+				},
+			);
+			if (checkpointId === "JEV-003") {
+				decisions.push({
+					kind: "boolean",
+					id: "grounding_sufficient",
+					instruction: "Is repository and domain grounding sufficient?",
+				});
+			}
+			break;
+		}
+
+		case "JEV-004":
+		case "JEV-005":
+		case "JEV-006":
+		case "JEV-024": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "work_remaining",
+					instruction: "Is there material work remaining to reach completion?",
+				},
+				{
+					kind: "choice",
+					id: "missing_work_class",
+					instruction: "Class of remaining work",
+					options: {
+						investigate: { description: "Inspect codebase, trace root cause" },
+						implement: { description: "Author or edit code" },
+						deterministic_verify: { description: "Run tests or checks" },
+						independent_review: { description: "Adversarial review" },
+						replan: { description: "Strategy change needed" },
+						resolve_capability: { description: "Synthesize missing capability or specialist" },
+						completion_candidate: { description: "Candidate ready for finalization" },
+					},
+				},
+				{
+					kind: "boolean",
+					id: "evidence_sufficient",
+					instruction: "Is fresh evidence sufficient for the next transition?",
+				},
+				{
+					kind: "score",
+					id: "semantic_progress",
+					instruction: "Semantic progress score (0=none, 3=significant)",
+					levels: [
+						{ value: 0, description: "No progress" },
+						{ value: 1, description: "Minor progress" },
+						{ value: 2, description: "Good progress" },
+						{ value: 3, description: "Significant progress" },
+					],
+				},
+				{
+					kind: "boolean",
+					id: "strategy_repetition",
+					instruction: "Is the current failed strategy repeating without fresh evidence?",
+				},
+				{ kind: "boolean", id: "context_stale", instruction: "Has the working context drifted or become stale?" },
+				{
+					kind: "boolean",
+					id: "independent_worker_required",
+					instruction: "Is an independent worker or verifier required?",
+				},
+				{
+					kind: "boolean",
+					id: "capability_escalation_required",
+					instruction: "Does the task need capability escalation?",
+				},
+				{ kind: "boolean", id: "capability_gap_suspected", instruction: "Is a missing capability gap suspected?" },
+				{
+					kind: "boolean",
+					id: "completion_plausible",
+					instruction: "Is the objective plausibly complete on current proof?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-007": {
+			// Capability wide resolution: candidate Choice over actual roster ids + needs_capability
+			const rosterList = Array.isArray(s.roster) ? (s.roster as Array<Record<string, unknown>>) : [];
+			const options: Record<string, { description: string }> = {};
+			if (rosterList.length > 0) {
+				for (const item of rosterList) {
+					const id = String(item.id ?? item.capabilityId ?? "unknown");
+					options[id] = { description: String(item.purpose ?? item.name ?? id) };
+				}
+			} else {
+				options.none = { description: "No existing capability in roster" };
+			}
+			options.new_capability = { description: "Synthesize new capability" };
+
+			decisions.push(
+				{ kind: "boolean", id: "needs_capability", instruction: "Is a capability required to satisfy the need?" },
+				{
+					kind: "choice",
+					id: "which_candidate",
+					instruction: "Which catalog capability is most relevant?",
+					options,
+				},
+			);
+			break;
+		}
+
+		case "JEV-008": {
+			// Capability deep resolution: Choice over shortlist + fits::<id> boolean per candidate + gap_remains
+			const options = compileCandidateFitChoices(s.candidates, decisions, {
+				fallback: "No shortlisted candidate fits",
+				describe: (item) => String(item.purpose ?? item.kind ?? item.id ?? "unknown"),
+				formatFitInstruction: (id) => `Does candidate '${id}' fulfill the required capability need?`,
+			});
+
+			decisions.push(
+				{
+					kind: "choice",
+					id: "which_candidate",
+					instruction: "Best fitting shortlisted capability candidate",
+					options,
+				},
+				{
+					kind: "boolean",
+					id: "gap_remains",
+					instruction: "Does a capability gap remain after evaluating shortlisted candidates?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-009": {
+			decisions.push(
+				{ kind: "boolean", id: "gap_confirmed", instruction: "Is the capability gap confirmed?" },
+				{
+					kind: "boolean",
+					id: "adaptation_needed",
+					instruction: "Is autonomous synthesis of this capability justified?",
+				},
+				{
+					kind: "choice",
+					id: "min_adaptation_tier",
+					instruction: "Minimum required adaptation tier",
+					options: {
+						standard: { description: "Standard tool or script" },
+						advanced: { description: "Advanced extension or adapter" },
+						critical: { description: "Core runtime modification" },
+					},
+				},
+			);
+			break;
+		}
+
+		case "JEV-010": {
+			decisions.push(
+				{
+					kind: "choice",
+					id: "adaptation_class",
+					instruction: "Choose smallest adequate adaptation class",
+					options: {
+						ephemeral_script: { description: "Task-scoped single-use script" },
+						toolkit_script: { description: "Reusable repository toolkit script" },
+						extension_or_tool: { description: "Live registered extension tool" },
+						skill: { description: "Model skill or procedural guideline" },
+						integration_or_adapter: { description: "External integration adapter" },
+						runtime_patch: { description: "Runtime modification with supervisor rollback" },
+						compose: { description: "Composition of existing capabilities" },
+					},
+				},
+				{ kind: "boolean", id: "risk_acceptable", instruction: "Are side-effects and risk bounded?" },
+			);
+			break;
+		}
+
+		case "JEV-011": {
+			decisions.push(
+				{ kind: "boolean", id: "spec_complete", instruction: "Is CapabilitySpec completely defined?" },
+				{ kind: "boolean", id: "interface_sound", instruction: "Are inputs and outputs bounded and typed?" },
+				{
+					kind: "boolean",
+					id: "side_effects_bounded",
+					instruction: "Are denied behaviors and side effects explicit?",
+				},
+				{
+					kind: "boolean",
+					id: "test_strategy_viable",
+					instruction: "Are isolated and task-specific tests specified?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-012": {
+			// PH-066: JEV-012 capability synthesis plan validation
+			decisions.push(
+				{ kind: "boolean", id: "plan_viable", instruction: "Is the capability builder plan viable and bounded?" },
+				{
+					kind: "boolean",
+					id: "architecture_fit",
+					instruction: "Does the proposed implementation fit architectural boundaries?",
+				},
+				{
+					kind: "boolean",
+					id: "builder_profile_sound",
+					instruction: "Is the builder attempt configuration safe and sound?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-013": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "spec_fulfilled",
+					instruction: "Did candidate pass mechanical verification against spec?",
+				},
+				{ kind: "boolean", id: "tests_valid", instruction: "Are deterministic candidate tests passing?" },
+				{ kind: "boolean", id: "safety_satisfied", instruction: "Are safety boundaries and invariants intact?" },
+			);
+			break;
+		}
+
+		case "JEV-014": {
+			decisions.push(
+				{ kind: "boolean", id: "scope_bounded", instruction: "Is runtime modification scope strictly bounded?" },
+				{ kind: "boolean", id: "rollback_safe", instruction: "Is pre-mutation rollback snapshot verified?" },
+				{ kind: "boolean", id: "invariants_preserved", instruction: "Are core supervisor invariants preserved?" },
+			);
+			break;
+		}
+
+		case "JEV-015": {
+			decisions.push(
+				{ kind: "boolean", id: "activation_succeeded", instruction: "Did capability activate cleanly in runtime?" },
+				{ kind: "boolean", id: "runtime_healthy", instruction: "Did runtime smoke verification pass?" },
+				{
+					kind: "boolean",
+					id: "capability_available",
+					instruction: "Is the newly activated capability discoverable and usable?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-016": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "task_proof_passed",
+					instruction: "Did task-specific proof pass with actual evidence?",
+				},
+				{ kind: "boolean", id: "regression_absent", instruction: "Are side-effects and regressions absent?" },
+				{
+					kind: "boolean",
+					id: "commit_approved",
+					instruction: "Is candidate capability approved for persistent catalog commit?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-017": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "claim_supported",
+					instruction: "Is the worker claim supported by produced evidence?",
+				},
+				{
+					kind: "boolean",
+					id: "evidence_sufficient",
+					instruction: "Is evidence complete for worker turn finalization?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-018": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "patch_matches_requirements",
+					instruction: "Does code mutation match objective requirements?",
+				},
+				{
+					kind: "boolean",
+					id: "side_effects_acceptable",
+					instruction: "Are all side effects within authorized envelope?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-019": {
+			decisions.push(
+				{ kind: "boolean", id: "bug_reproduced", instruction: "Was the defect reproduced before fix?" },
+				{ kind: "boolean", id: "fix_verified", instruction: "Is fix verified by targeted regression test?" },
+				{ kind: "boolean", id: "causal_link_proven", instruction: "Is causal link between change and fix proven?" },
+			);
+			break;
+		}
+
+		case "JEV-020": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "boundaries_respected",
+					instruction: "Are coordinator and module boundaries respected?",
+				},
+				{ kind: "boolean", id: "invariants_held", instruction: "Are architectural doctrine invariants preserved?" },
+			);
+			break;
+		}
+
+		case "JEV-021": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "test_coverage_sufficient",
+					instruction: "Is regression coverage adequate for changed code?",
+				},
+				{
+					kind: "boolean",
+					id: "negative_tests_present",
+					instruction: "Are negative tests and abuse boundaries tested?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-022": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "checks_relevant",
+					instruction: "Are verification checks directly relevant to requirements?",
+				},
+				{
+					kind: "boolean",
+					id: "criteria_covered",
+					instruction: "Are all acceptance criteria covered by verification?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-023": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "repairs_sufficient",
+					instruction: "Are repair tasks sufficient to clear failed gates?",
+				},
+				{
+					kind: "boolean",
+					id: "root_cause_addressed",
+					instruction: "Is root cause addressed rather than symptomatic patch?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-025": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "acceptance_satisfied",
+					instruction: "Are all objective acceptance criteria proven satisfied?",
+				},
+				{
+					kind: "boolean",
+					id: "requirements_complete",
+					instruction: "Are all requested deliverables fully present?",
+				},
+				{
+					kind: "boolean",
+					id: "verification_conclusive",
+					instruction: "Is verification evidence deterministic and fresh?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-026": {
+			// Cold adversarial challenge
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "unhandled_edge_cases",
+					instruction: "Are unhandled edge cases or defects present?",
+				},
+				{
+					kind: "boolean",
+					id: "hidden_regressions",
+					instruction: "Are hidden regressions or broken invariants suspected?",
+				},
+				{
+					kind: "boolean",
+					id: "assumption_violations",
+					instruction: "Does delivery rely on unverified assumptions?",
+				},
+				{
+					kind: "boolean",
+					id: "adversarial_approved",
+					instruction: "Does the implementation pass adversarial challenge?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-027": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "delivery_bundle_truthful",
+					instruction: "Does DeliveryBundle accurately describe delivered artifacts?",
+				},
+				{
+					kind: "boolean",
+					id: "artifacts_verified",
+					instruction: "Are delivered artifacts verified against working tree?",
+				},
+				{
+					kind: "boolean",
+					id: "limitations_disclosed",
+					instruction: "Are known limitations and caveats disclosed?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-028": {
+			decisions.push(
+				{ kind: "boolean", id: "release_ready", instruction: "Is the objective ready for release action?" },
+				{
+					kind: "boolean",
+					id: "package_healthy",
+					instruction: "Are package and artifacts healthy for publication/deployment?",
+				},
+				{
+					kind: "boolean",
+					id: "deploy_safe",
+					instruction: "Is deployment to target environment authorized and safe?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-029":
+		case "JEV-030": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "demotion_recommended",
+					instruction: "Should this capability be demoted or retired?",
+				},
+				{
+					kind: "boolean",
+					id: "reuse_frequency_low",
+					instruction: "Has capability usage fallen below retention threshold?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-031": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "specialist_needed",
+					instruction: "Is a specialized agent/model profile needed for this task?",
+				},
+				{ kind: "boolean", id: "existing_fit_insufficient", instruction: "Are existing specialists insufficient?" },
+				{
+					kind: "choice",
+					id: "specialization_type",
+					instruction: "Primary specialist competency required",
+					options: {
+						domain_expert: { description: "Domain knowledge expert" },
+						verifier: { description: "Independent verifier" },
+						architect: { description: "System architect" },
+						coder: { description: "Implementation specialist" },
+						investigator: { description: "Defect investigator" },
+					},
+				},
+			);
+			break;
+		}
+
+		case "JEV-032": {
+			// Specialist deep fit: choice best_candidate + fits::<id> per candidate + new_specialist_required
+			const options = compileCandidateFitChoices(s.candidates, decisions, {
+				fallback: "No existing specialist candidate",
+				describe: (item) => String(item.role ?? item.specialties ?? item.id ?? "unknown"),
+				formatFitInstruction: (id) => `Does specialist candidate '${id}' fulfill the task need?`,
+			});
+
+			decisions.push(
+				{ kind: "choice", id: "best_candidate", instruction: "Best fitting specialist candidate", options },
+				{
+					kind: "boolean",
+					id: "new_specialist_required",
+					instruction: "Is synthesis of a new specialist required?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-033": {
+			decisions.push(
+				{ kind: "boolean", id: "spec_complete", instruction: "Is SpecialistSpec completely specified?" },
+				{ kind: "boolean", id: "role_bounded", instruction: "Is the authority role bounded and compliant?" },
+				{ kind: "boolean", id: "tools_skills_sufficient", instruction: "Are required tools and skills adequate?" },
+			);
+			break;
+		}
+
+		case "JEV-034": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "dependencies_resolved",
+					instruction: "Are all specialist dependencies (tools, capabilities, skills) resolved?",
+				},
+				{ kind: "boolean", id: "capabilities_ready", instruction: "Are required capabilities active and usable?" },
+				{
+					kind: "boolean",
+					id: "tools_available",
+					instruction: "Are declared tools available in worker environment?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-035": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "contract_sound",
+					instruction: "Is the WorkerExecutionContract complete and valid?",
+				},
+				{
+					kind: "boolean",
+					id: "authority_bounded",
+					instruction: "Does worker authority stay within its profile ceiling?",
+				},
+				{
+					kind: "boolean",
+					id: "within_charter",
+					instruction: "Is worker execution contract within parent execution charter?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-036": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "mission_fulfilled",
+					instruction: "Did the specialist fulfill its assigned mission?",
+				},
+				{ kind: "boolean", id: "proof_satisfied", instruction: "Were proof obligations satisfied with evidence?" },
+				{ kind: "boolean", id: "errors_cleared", instruction: "Were any execution errors resolved?" },
+			);
+			break;
+		}
+
+		case "JEV-037": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "quality_acceptable",
+					instruction: "Is specialist execution outcome of high quality?",
+				},
+				{ kind: "boolean", id: "reusability_high", instruction: "Is this specialist worth retaining in catalog?" },
+			);
+			break;
+		}
+
+		case "JEV-038":
+		case "JEV-039": {
+			decisions.push(
+				{
+					kind: "choice",
+					id: "lifecycle_choice",
+					instruction: "Recommended specialist retention lifecycle",
+					options: {
+						retain_one_task: { description: "Discard after single task" },
+						retain_session: { description: "Retain across active session" },
+						promote_project: { description: "Promote to project-level specialist" },
+						demote_ephemeral: { description: "Demote to ephemeral" },
+						retire: { description: "Retire specialist permanently" },
+					},
+				},
+				{
+					kind: "boolean",
+					id: "performance_adequate",
+					instruction: "Has specialist delivered verified positive outcomes?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-040": {
+			decisions.push({
+				kind: "choice",
+				id: "lowest_adequate_adaptation",
+				instruction: "Select lowest adequate adaptation tier",
+				options: {
+					strategy: { description: "Adjust plan, prompt, or parameters without changing tools" },
+					expert_reroute: { description: "Switch routing band or model within existing fleet" },
+					specialist: { description: "Synthesize specialized worker role and profile" },
+					capability: { description: "Synthesize new tool, script, skill, or adapter" },
+					runtime: { description: "Modify core runtime code with rollback protection" },
+				},
+			});
+			break;
+		}
+
+		case "JEV-041": {
+			const candidatesList = Array.isArray(s.candidates) ? (s.candidates as Array<Record<string, unknown>>) : [];
+			if (candidatesList.length > 0) {
+				for (const item of candidatesList) {
+					const id = String(item.id ?? "unknown");
+					decisions.push({
+						kind: "boolean",
+						id: `competes::${id}`,
+						instruction: `Does proposed responsibility compete with or duplicate existing responsibility '${id}'?`,
+					});
+				}
+			}
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "unique_responsibility",
+					instruction: "Is proposed responsibility unique and non-competing?",
+				},
+				{
+					kind: "boolean",
+					id: "competing_existing_detected",
+					instruction: "Is there an existing semantic owner for this responsibility?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-042": {
+			decisions.push(
+				{
+					kind: "choice",
+					id: "recommended_disposition",
+					instruction: "Recommended responsibility disposition",
+					options: {
+						unique: { description: "Register as unique new responsibility" },
+						reuse_existing: { description: "Reuse existing responsibility implementation" },
+						extend_existing: { description: "Extend existing implementation without duplicating" },
+						extract_shared: { description: "Extract shared implementation into single owner" },
+						separate_required: { description: "Keep intentionally separate with explicit waiver" },
+						insufficient_evidence: { description: "Insufficient evidence; more retrieval required" },
+					},
+				},
+				{
+					kind: "boolean",
+					id: "same_responsibility",
+					instruction: "Is this identical in intent to an existing responsibility?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-043": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "mutations_conform_to_disposition",
+					instruction: "Do file mutations conform to granted responsibility disposition?",
+				},
+				{
+					kind: "boolean",
+					id: "no_unauthorized_duplication",
+					instruction: "Is the mutated code free of unauthorized semantic duplication?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-044": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "no_hidden_duplicates",
+					instruction: "Did the final semantic dedup sweep prove zero hidden duplicates?",
+				},
+				{
+					kind: "boolean",
+					id: "single_semantic_owner",
+					instruction: "Does every implemented responsibility have exactly one owner?",
+				},
+			);
+			break;
+		}
+
+		case "JEV-045": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "waiver_valid",
+					instruction: "Is the intentional duplication waiver valid for this responsibility?",
+				},
+				{
+					kind: "boolean",
+					id: "architectural_rationale_sound",
+					instruction: "Is the architectural justification for duplication sound?",
+				},
+			);
+			break;
+		}
+
+		default: {
+			// Generic fallback program for unrecognized checkpoint
+			decisions.push({ kind: "boolean", id: "approved", instruction: `Approve checkpoint ${checkpointId}` });
+			break;
+		}
+	}
+
+	return createDecisionProgram({
+		id: `pi:steering:program:${checkpointId}:1.0`,
+		version: "1.0.0",
+		decisions,
+	});
 }
 
 export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
@@ -99,530 +908,7 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 			{
 				id: "completion_plausible",
 				kind: "noul",
-				description: "Is the objective plausibly complete and ready for final gating?",
-			},
-		],
-	},
-	capability_resolution_wide: {
-		id: "pi:steering:pack:capability_resolution_wide:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-007"],
-		questions: [
-			{ id: "needs_capability", kind: "noul", description: "Is an external tool, script, or capability required?" },
-			{ id: "adaptation_likely", kind: "noul", description: "Can an existing capability be adapted?" },
-			{ id: "composition_likely", kind: "noul", description: "Can existing capabilities be composed?" },
-			{ id: "new_capability_likely", kind: "noul", description: "Is a completely new capability required?" },
-		],
-	},
-	capability_resolution_deep: {
-		id: "pi:steering:pack:capability_resolution_deep:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-008"],
-		questions: [
-			{ id: "composition_sufficient", kind: "noul", description: "Is composing existing tools sufficient?" },
-			{
-				id: "gap_remains",
-				kind: "noul",
-				description: "Does an unresolved capability gap remain after shortlist review?",
-			},
-		],
-	},
-	capability_synthesis: {
-		id: "pi:steering:pack:capability_synthesis:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-009", "JEV-010", "JEV-011", "JEV-012"],
-		questions: [
-			{
-				id: "gap_valid",
-				kind: "noul",
-				description: "Is the capability gap genuine and unclosed by existing tools?",
-			},
-			{
-				id: "adaptation_class",
-				kind: "choice",
-				description: "Smallest adequate capability adaptation level",
-				options: [
-					"compose",
-					"ephemeral_script",
-					"toolkit_script",
-					"extension_or_tool",
-					"skill",
-					"integration_or_adapter",
-					"runtime_patch",
-				],
-			},
-			{
-				id: "spec_complete",
-				kind: "noul",
-				description: "Is the CapabilitySpec complete with inputs, outputs, and proof?",
-			},
-			{
-				id: "synthesis_plan_fits",
-				kind: "noul",
-				description: "Does the synthesis plan fit within authority boundaries?",
-			},
-		],
-	},
-	capability_candidate_pre_activation: {
-		id: "pi:steering:pack:capability_candidate_pre_activation:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-013", "JEV-014"],
-		questions: [
-			{ id: "spec_fulfilled", kind: "noul", description: "Does the candidate artifact fulfill the CapabilitySpec?" },
-			{ id: "missing_required_behavior", kind: "noul", description: "Is any required behavior missing?" },
-			{
-				id: "scope_overreach",
-				kind: "noul",
-				description: "Does the candidate attempt unauthorized or overreaching changes?",
-			},
-			{
-				id: "security_boundary_fit",
-				kind: "noul",
-				description: "Does the candidate respect security and isolation boundaries?",
-			},
-			{
-				id: "deterministic_tests_relevant",
-				kind: "noul",
-				description: "Do mechanical tests test the intended gap behavior?",
-			},
-			{ id: "activation_risk", kind: "score", description: "Activation risk (0=safe, 3=destructive)" },
-			{
-				id: "runtime_modification_scope_in_bounds",
-				kind: "noul",
-				description: "For runtime patch, is change minimal and in-scope?",
-			},
-		],
-	},
-	post_activation: {
-		id: "pi:steering:pack:post_activation:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-015", "JEV-016"],
-		questions: [
-			{
-				id: "capability_available",
-				kind: "noul",
-				description: "Is the capability verified live and usable after activation?",
-			},
-			{ id: "interface_matches_spec", kind: "noul", description: "Does the live interface match the spec?" },
-			{
-				id: "unexpected_runtime_change",
-				kind: "noul",
-				description: "Were there unexpected side-effects during activation?",
-			},
-			{
-				id: "original_gap_closed",
-				kind: "noul",
-				description: "Does the capability solve the original missing ability with task proof?",
-			},
-		],
-	},
-	worker_postflight: {
-		id: "pi:steering:pack:worker_postflight:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-017", "JEV-018", "JEV-019", "JEV-020", "JEV-021", "JEV-022", "JEV-023"],
-		questions: [
-			{ id: "claims_supported", kind: "noul", description: "Do worker claims match fresh verified host evidence?" },
-			{
-				id: "patch_requirement_fit",
-				kind: "noul",
-				description: "Does the patch directly address the linked requirement?",
-			},
-			{
-				id: "bug_causality_supported",
-				kind: "noul",
-				description: "Does the patch fix the supported causal mechanism for the bug?",
-			},
-			{ id: "architecture_fit", kind: "noul", description: "Is ownership and architecture boundary appropriate?" },
-			{
-				id: "duplicate_semantics_detected",
-				kind: "noul",
-				description: "Does the change duplicate existing responsibility?",
-			},
-			{
-				id: "verification_relevance",
-				kind: "noul",
-				description: "Do verification probes test the required behavior?",
-			},
-			{ id: "repair_adequacy", kind: "noul", description: "Does the repair address the true failure cause?" },
-		],
-	},
-	completion: {
-		id: "pi:steering:pack:completion:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-025"],
-		questions: [
-			{
-				id: "all_promised_behavior_supported",
-				kind: "noul",
-				description: "Is all requested and promised behavior supported by evidence?",
-			},
-			{
-				id: "unresolved_material_gap",
-				kind: "noul",
-				description: "Does any material requirement or gap remain unresolved?",
-			},
-			{
-				id: "tests_support_completion",
-				kind: "noul",
-				description: "Do deterministic test results genuinely support completion?",
-			},
-			{ id: "known_limitations_complete", kind: "noul", description: "Are known limitations accurately noted?" },
-			{
-				id: "architecture_consistent",
-				kind: "noul",
-				description: "Is repository architecture internally consistent?",
-			},
-		],
-	},
-	completion_challenge: {
-		id: "pi:steering:pack:completion_challenge:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-026"],
-		questions: [
-			{
-				id: "plausible_missing_requirement",
-				kind: "noul",
-				description: "Is there a plausible missing requirement from the original goal?",
-			},
-			{
-				id: "plausible_false_positive_test",
-				kind: "noul",
-				description: "Could any passing tests be false positives?",
-			},
-			{
-				id: "plausible_hidden_regression",
-				kind: "noul",
-				description: "Is there an unverified plausible hidden regression?",
-			},
-			{
-				id: "plausible_stale_evidence",
-				kind: "noul",
-				description: "Could any supporting evidence be stale or invalidated?",
-			},
-			{
-				id: "plausible_unverified_user_path",
-				kind: "noul",
-				description: "Is an essential user path left untested?",
-			},
-			{
-				id: "plausible_capability_side_effect",
-				kind: "noul",
-				description: "Did any synthesized capability introduce unintended side-effects?",
-			},
-		],
-	},
-	delivery: {
-		id: "pi:steering:pack:delivery:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-027", "JEV-028"],
-		questions: [
-			{
-				id: "delivery_claims_true",
-				kind: "noul",
-				description: "Do public delivery claims match actual verified proof?",
-			},
-			{
-				id: "publish_deploy_readiness",
-				kind: "noul",
-				description: "Is the artifact ready for publication and deployment?",
-			},
-		],
-	},
-	capability_lifecycle: {
-		id: "pi:steering:pack:capability_lifecycle:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-029", "JEV-030"],
-		questions: [
-			{
-				id: "reusable_beyond_current_task",
-				kind: "noul",
-				description: "Is the capability reusable beyond the current task?",
-			},
-			{
-				id: "generic_enough_to_retain",
-				kind: "noul",
-				description: "Is the capability generic enough to retain across sessions?",
-			},
-			{
-				id: "reliability_sufficient",
-				kind: "noul",
-				description: "Has the capability shown sufficient reliability?",
-			},
-			{
-				id: "lifecycle_action",
-				kind: "choice",
-				description: "Lifecycle action for synthesized capability",
-				options: ["discard", "session", "project", "global", "repair", "retire"],
-			},
-		],
-	},
-	adaptive_resolution: {
-		id: "pi:steering:pack:adaptive_resolution:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-040"],
-		questions: [
-			{ id: "current_strategy_adequate", kind: "noul", description: "Is the current execution strategy adequate?" },
-			{ id: "current_expert_adequate", kind: "noul", description: "Is the currently assigned expert adequate?" },
-			{
-				id: "specialist_gap_present",
-				kind: "noul",
-				description: "Is a specialized role/expertise materially required?",
-			},
-			{ id: "capability_gap_present", kind: "noul", description: "Is a tooling/capability gap present?" },
-			{
-				id: "runtime_gap_present",
-				kind: "noul",
-				description: "Is a core runtime gap present requiring runtime modification?",
-			},
-			{
-				id: "semantic_duplication_risk_present",
-				kind: "noul",
-				description: "Is there a risk of duplicate responsibility?",
-			},
-			{
-				id: "lowest_adequate_adaptation",
-				kind: "choice",
-				description: "Lowest adequate adaptation dimension",
-				options: ["strategy", "expert_reroute", "specialist", "capability", "runtime"],
-			},
-		],
-	},
-	specialist_resolution_wide: {
-		id: "pi:steering:pack:specialist_resolution_wide:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-031"],
-		questions: [
-			{
-				id: "specialist_needed",
-				kind: "noul",
-				description: "Is a specialist materially required beyond generic workers?",
-			},
-			{ id: "reuse_likely", kind: "noul", description: "Can an existing specialist be reused?" },
-			{ id: "synthesize_likely", kind: "noul", description: "Must a new specialist be synthesized?" },
-		],
-	},
-	specialist_resolution_deep: {
-		id: "pi:steering:pack:specialist_resolution_deep:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-032"],
-		questions: [
-			{
-				id: "existing_specialist_fits",
-				kind: "noul",
-				description: "Does an existing specialist adequately fit the required specialty?",
-			},
-			{
-				id: "dependency_gap_present",
-				kind: "noul",
-				description: "Does the specialist require missing tools/skills?",
-			},
-			{ id: "new_specialist_required", kind: "noul", description: "Is a fresh SpecialistSpec required?" },
-		],
-	},
-	specialist_spec: {
-		id: "pi:steering:pack:specialist_spec:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-033", "JEV-034", "JEV-035"],
-		questions: [
-			{
-				id: "spec_complete",
-				kind: "noul",
-				description: "Does SpecialistSpec capture purpose, mission, context, and proof obligations?",
-			},
-			{
-				id: "authority_role_fit",
-				kind: "noul",
-				description: "Does authority role fit without mutating kernel roles?",
-			},
-			{
-				id: "dependencies_complete",
-				kind: "noul",
-				description: "Are all required tools, capabilities, and skills available?",
-			},
-			{
-				id: "materialization_fit",
-				kind: "noul",
-				description: "Does the materialized task profile and contract faithfully realize the spec?",
-			},
-			{
-				id: "overprivileged",
-				kind: "noul",
-				description: "Does the specialist exceed authorized base profile permissions?",
-			},
-		],
-	},
-	specialist_effectiveness: {
-		id: "pi:steering:pack:specialist_effectiveness:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-036", "JEV-037"],
-		questions: [
-			{ id: "mission_fulfilled", kind: "noul", description: "Did the specialist fulfill the specialty mission?" },
-			{
-				id: "specialty_value_added",
-				kind: "noul",
-				description: "Did the specialist add material domain value over a generic worker?",
-			},
-			{
-				id: "specialist_misconfigured",
-				kind: "noul",
-				description: "Was the specialist misconfigured or lacking tools?",
-			},
-			{ id: "repair_addresses_cause", kind: "noul", description: "Does the proposed repair fix the root cause?" },
-		],
-	},
-	specialist_lifecycle: {
-		id: "pi:steering:pack:specialist_lifecycle:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-038", "JEV-039"],
-		questions: [
-			{ id: "reusable_specialist", kind: "noul", description: "Is the specialist useful across subsequent tasks?" },
-			{
-				id: "promotion_justified",
-				kind: "noul",
-				description: "Is promotion to project or global catalog justified?",
-			},
-			{
-				id: "lifecycle_action",
-				kind: "choice",
-				description: "Specialist retention action",
-				options: ["discard", "task", "session", "project", "global", "repair", "retire"],
-			},
-		],
-	},
-	semantic_responsibility_preflight: {
-		id: "pi:steering:pack:semantic_responsibility_preflight:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-041", "JEV-042"],
-		questions: [
-			{
-				id: "already_owned",
-				kind: "noul",
-				description: "Is the proposed responsibility already owned by existing code?",
-			},
-			{
-				id: "same_responsibility",
-				kind: "noul",
-				description: "Does any candidate share the exact semantic domain responsibility?",
-			},
-			{
-				id: "recommended_disposition",
-				kind: "choice",
-				description: "Recommended architectural disposition",
-				options: [
-					"unique",
-					"reuse_existing",
-					"extend_existing",
-					"extract_shared",
-					"separate_required",
-					"insufficient_evidence",
-				],
-			},
-			{
-				id: "semantic_drift_risk",
-				kind: "score",
-				description: "Risk of semantic drift if duplicate is created (0=none, 3=severe)",
-			},
-		],
-	},
-	semantic_responsibility_pair: {
-		id: "pi:steering:pack:semantic_responsibility_pair:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-021"],
-		questions: [
-			{
-				id: "same_responsibility",
-				kind: "noul",
-				description: "Do the two implementations own materially the same behavior?",
-			},
-			{ id: "partial_overlap", kind: "noul", description: "Is there partial overlap in responsibility?" },
-			{
-				id: "ownership_relationship",
-				kind: "choice",
-				description: "Ownership relationship between implementations",
-				options: [
-					"same_owner_should_reuse",
-					"existing_owner_should_extend",
-					"shared_abstraction_should_extract",
-					"separate_required",
-					"unrelated",
-					"insufficient_evidence",
-				],
-			},
-			{
-				id: "duplication_cost",
-				kind: "score",
-				description: "Cost/danger of duplication (0=none, 3=competing owners)",
-			},
-		],
-	},
-	semantic_responsibility_postflight: {
-		id: "pi:steering:pack:semantic_responsibility_postflight:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-043"],
-		questions: [
-			{
-				id: "duplicate_responsibility_introduced",
-				kind: "noul",
-				description: "Did this mutation introduce an unintentional duplicate responsibility?",
-			},
-			{
-				id: "existing_owner_should_absorb_change",
-				kind: "noul",
-				description: "Should an existing owner have absorbed this change instead?",
-			},
-			{
-				id: "shared_extraction_required",
-				kind: "noul",
-				description: "Is extraction of a shared abstraction required?",
-			},
-			{
-				id: "intentional_waiver_applies",
-				kind: "noul",
-				description: "Does an explicit intentional duplication waiver apply to this exact change?",
-			},
-		],
-	},
-	final_semantic_dedup: {
-		id: "pi:steering:pack:final_semantic_dedup:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-044"],
-		questions: [
-			{
-				id: "unintentional_duplicate_remaining",
-				kind: "noul",
-				description: "Does any unintentional duplicate responsibility remain in the repository?",
-			},
-			{
-				id: "uniqueness_certificates_current",
-				kind: "noul",
-				description: "Are all material responsibility uniqueness certificates current?",
-			},
-			{
-				id: "intentional_duplication_waiver_valid",
-				kind: "noul",
-				description: "Are all intentional duplicate instances covered by valid waivers?",
-			},
-		],
-	},
-	intentional_duplication_waiver: {
-		id: "pi:steering:pack:intentional_duplication_waiver:1.0",
-		version: "1.0",
-		checkpointIds: ["JEV-045"],
-		questions: [
-			{
-				id: "waiver_valid_for_scope",
-				kind: "noul",
-				description: "Does the waiver explicitly cover this responsibility scope and location?",
-			},
-			{
-				id: "waiver_authorized_by_source",
-				kind: "noul",
-				description: "Was the waiver explicitly authorized by user objective or owner policy?",
-			},
-			{
-				id: "architectural_justification_valid",
-				kind: "noul",
-				description: "Is the architectural justification valid?",
+				description: "Is the objective plausibly complete on current proof?",
 			},
 		],
 	},
@@ -634,17 +920,21 @@ export function findPackForCheckpoint(checkpointId: string): SteeringQuestionPac
 			return pack;
 		}
 	}
-	return undefined;
-}
-
-export function computeQuestionPackDigest(pack: SteeringQuestionPack): string {
-	return createHash("sha256").update(JSON.stringify(pack.questions)).digest("hex");
-}
-
-export function getQuestionPackRef(pack: SteeringQuestionPack): SteeringCertificateQuestionPackRef {
+	// Fallback synthesized pack
 	return {
-		id: pack.id,
-		version: pack.version,
-		digest: computeQuestionPackDigest(pack),
+		id: `pi:steering:pack:${checkpointId}:1.0`,
+		version: "1.0",
+		checkpointIds: [checkpointId],
+		questions: [{ id: "approved", kind: "noul", description: `Approval for checkpoint ${checkpointId}` }],
+	};
+}
+
+export function getQuestionPackRef(
+	packOrProgram: SteeringQuestionPack | DecisionProgram,
+): SteeringCertificateQuestionPackRef {
+	return {
+		id: packOrProgram.id,
+		version: packOrProgram.version,
+		digest: canonicalDigest(packOrProgram),
 	};
 }

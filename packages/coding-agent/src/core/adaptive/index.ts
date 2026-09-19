@@ -16,6 +16,11 @@ export {
 	type AdaptiveResolutionInput,
 	type CatalogRevisionProvider,
 } from "./adaptive-resolution-controller.ts";
+export {
+	AdaptiveRuntimeReadiness,
+	type AdaptiveRuntimeReadinessDeps,
+	type AdaptiveRuntimeStatus,
+} from "./adaptive-runtime-readiness.ts";
 export { CapabilityCatalog, type CapabilityCatalogEntry } from "./capability-catalog.ts";
 export {
 	type CapabilityNeed,
@@ -26,6 +31,7 @@ export {
 export {
 	type RollbackSnapshot,
 	RuntimeAdaptationCoordinator,
+	RuntimeAdaptationUnavailableError,
 	type RuntimeUpdateAdapter,
 } from "./runtime-adaptation-coordinator.ts";
 export { SpecialistCatalog, type SpecialistCatalogEntry } from "./specialist-catalog.ts";

@@ -33,14 +33,81 @@ class MockJevAdapter implements JevAdapter {
 
 	async evaluate(request: JevEvaluationRequest): Promise<JevEvaluationResponse> {
 		this.evaluateCalls.push(request);
+		const defaultAnswers: Record<string, unknown> = {};
+		if (request.questions) {
+			for (const [id, rawQ] of Object.entries(request.questions)) {
+				const q = rawQ as { type?: string; criteria?: unknown };
+				if (q.type === "noul") {
+					if (
+						id === "work_remaining" ||
+						id === "capability_gap_suspected" ||
+						id === "critical_defect_present" ||
+						id === "repetition_detected" ||
+						id === "strategy_repetition" ||
+						id === "context_stale" ||
+						id === "independent_worker_required" ||
+						id === "capability_escalation_required" ||
+						id === "stalled" ||
+						id === "missing_information" ||
+						id === "release_risk_critical"
+					) {
+						defaultAnswers[id] = { type: "noul", noul: 0.05 };
+					} else {
+						defaultAnswers[id] = { type: "noul", noul: 0.95 };
+					}
+				} else if (q.type === "choice") {
+					const criteria = q.criteria as Record<string, string> | undefined;
+					const keys = Object.keys(criteria ?? {});
+					let selected = keys[0] ?? "none";
+					if (id === "missing_work_class") {
+						selected = keys.includes("completion_candidate")
+							? "completion_candidate"
+							: keys.includes("none")
+								? "none"
+								: keys[0];
+					} else if (id === "recommended_disposition") {
+						selected = keys.includes("unique") ? "unique" : keys[0];
+					} else if (id === "route") {
+						selected = keys.includes("completion_candidate") ? "completion_candidate" : keys[0];
+					}
+					const probs: Record<string, number> = {};
+					for (const k of keys) {
+						probs[k] = k === selected ? 1.0 : 0.0;
+					}
+					defaultAnswers[id] = {
+						type: "choice",
+						choice: selected,
+						confidence: 0.95,
+						probabilities: probs,
+					};
+				} else if (q.type === "score") {
+					const levels = Array.isArray(q.criteria) ? (q.criteria as unknown[]) : [];
+					const score = 0;
+					const probs: Record<string, number> = {};
+					levels.forEach((_val: unknown, idx: number) => {
+						probs[String(idx)] = idx === score ? 1.0 : 0.0;
+					});
+					if (Object.keys(probs).length === 0) {
+						probs["0"] = 1.0;
+					}
+					defaultAnswers[id] = {
+						type: "score",
+						score,
+						confidence: 0.95,
+						probabilities: probs,
+					};
+				}
+			}
+		}
+
 		return {
 			model: request.model ?? "jev-1.13.0",
 			latency_ms: 10,
+			...this.evaluateResponse,
 			answers: {
-				_confidence: 0.95,
+				...defaultAnswers,
 				...this.evaluateResponse.answers,
 			},
-			...this.evaluateResponse,
 		};
 	}
 }
@@ -62,14 +129,6 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 
 		it("evaluates checkpoints and issues valid cryptographic certificates", async () => {
 			const mockAdapter = new MockJevAdapter();
-			mockAdapter.evaluateResponse = {
-				answers: {
-					_confidence: 0.98,
-					approved: true,
-					direction: "proceed",
-				},
-			};
-
 			const certStore = new SteeringCertificateStore();
 			const plane = new SystemOneSteeringPlane({
 				adapter: mockAdapter,
@@ -87,7 +146,7 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 			expect(cert.checkpoint_id).toBe("JEV-001");
 			expect(cert.objective_id).toBe("obj-100");
 			expect(cert.directive).toBe("continue_current_work");
-			expect(cert.answers._confidence).toBe(0.98);
+			expect(cert.action_confidence).toBeGreaterThanOrEqual(0.75);
 			expect(cert.question_pack.digest).toBeTruthy();
 			expect(cert.state_digest).toBeTruthy();
 			expect(cert.policy.digest).toBeTruthy();
@@ -99,10 +158,10 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 
 		it("throws SteeringConfidenceTooLowError when confidence is below required threshold (S1A-010)", async () => {
 			const mockAdapter = new MockJevAdapter();
-			// Default consequence for medium is 0.75, so confidence 0.50 triggers low confidence error
+			// Default consequence for medium is 0.75, so probability 0.50 yields confidence 0.50 (low confidence error)
 			mockAdapter.evaluateResponse = {
 				answers: {
-					_confidence: 0.5,
+					objective_coherent: { type: "noul", noul: 0.5 },
 				},
 			};
 
@@ -149,9 +208,19 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 			const mockAdapter = new MockJevAdapter();
 			mockAdapter.evaluateResponse = {
 				answers: {
-					_confidence: 0.99,
-					lowest_adequate_adaptation: { choice: "expert_reroute" },
-					target_expert: "expert-claude-specialist",
+					lowest_adequate_adaptation: {
+						type: "choice",
+						choice: "expert_reroute",
+						confidence: 0.99,
+						probabilities: {
+							strategy_change: 0.0,
+							context_refresh: 0.0,
+							expert_reroute: 1.0,
+							new_specialist: 0.0,
+							capability_resolution: 0.0,
+							runtime_patch: 0.0,
+						},
+					},
 				},
 			};
 
@@ -176,13 +245,6 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 	describe("Specialist Synthesis (S1A-031..039)", () => {
 		it("synthesizes specialist, records certificate, and materializes specialist record", async () => {
 			const mockAdapter = new MockJevAdapter();
-			mockAdapter.evaluateResponse = {
-				answers: {
-					_confidence: 0.95,
-					specialty_justified: true,
-					profile_fit: true,
-				},
-			};
 
 			const plane = new SystemOneSteeringPlane({
 				adapter: mockAdapter,
@@ -193,6 +255,21 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 			const controller = new SpecialistSynthesisController({
 				steering: plane,
 				catalog,
+				experts: {
+					select: async () => ({
+						primary: { provider: "anthropic", model_id: "claude-3-7-sonnet" },
+						fallbacks: [],
+						strategy: "static",
+					}),
+				} as any,
+				taskProfiles: {
+					createTaskProfile: () => ({ created: true, profileId: "profile-ui-craft" }),
+					inspectTaskProfileOptions: () => ({
+						baseProfiles: [],
+						inheritedToolNames: [],
+						models: [],
+					}),
+				},
 			});
 
 			const result = await controller.resolveOrCreate({
@@ -216,13 +293,6 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 	describe("Capability Resolution and Synthesis (S1A-007..016)", () => {
 		it("resolves existing capability via wide ranking and deep fit", async () => {
 			const mockAdapter = new MockJevAdapter();
-			mockAdapter.evaluateResponse = {
-				answers: {
-					_confidence: 0.95,
-					fit_score: 0.92,
-					approved: true,
-				},
-			};
 
 			const plane = new SystemOneSteeringPlane({
 				adapter: mockAdapter,
@@ -270,14 +340,6 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 
 		it("synthesizes capability and passes through gap specification, verification, and smoke (JEV-009..015)", async () => {
 			const mockAdapter = new MockJevAdapter();
-			mockAdapter.evaluateResponse = {
-				answers: {
-					_confidence: 0.95,
-					gap_verified: true,
-					spec_approved: true,
-					verified: true,
-				},
-			};
 
 			const plane = new SystemOneSteeringPlane({
 				adapter: mockAdapter,
@@ -305,6 +367,7 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 						evidence: { testCount: 3, passed: 3 },
 					}),
 					verifyActivation: async (_actRes, _spec) => true,
+					runTaskSpecificProof: async (_spec) => "task_specific_proof_verified",
 				},
 				activator: {
 					activate: async (_candidate, _spec) => ({
@@ -358,9 +421,18 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 			const mockAdapter = new MockJevAdapter();
 			mockAdapter.evaluateResponse = {
 				answers: {
-					_confidence: 0.95,
-					recommended_disposition: { choice: "separate_required" },
-					same_responsibility: { noul: 0.95 },
+					recommended_disposition: {
+						type: "choice",
+						choice: "separate_required",
+						confidence: 0.95,
+						probabilities: {
+							unique: 0.0,
+							duplicate_allowed: 0.0,
+							separate_required: 1.0,
+							consolidation_candidate: 0.0,
+						},
+					},
+					same_responsibility: { type: "noul", noul: 0.95 },
 				},
 			};
 
@@ -405,10 +477,19 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 			const mockAdapter = new MockJevAdapter();
 			mockAdapter.evaluateResponse = {
 				answers: {
-					_confidence: 0.95,
-					recommended_disposition: { choice: "separate_required" },
-					same_responsibility: { noul: 0.95 },
-					waiver_valid: { noul: 0.98 },
+					recommended_disposition: {
+						type: "choice",
+						choice: "separate_required",
+						confidence: 0.95,
+						probabilities: {
+							unique: 0.0,
+							duplicate_allowed: 0.0,
+							separate_required: 1.0,
+							consolidation_candidate: 0.0,
+						},
+					},
+					same_responsibility: { type: "noul", noul: 0.95 },
+					waiver_valid: { type: "noul", noul: 0.98 },
 				},
 			};
 
@@ -490,12 +571,6 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 	describe("Runtime Adaptation Rollback and Crash Recovery (S1A-180)", () => {
 		it("rolls back candidate mutation when verification fails", async () => {
 			const mockAdapter = new MockJevAdapter();
-			mockAdapter.evaluateResponse = {
-				answers: {
-					_confidence: 0.95,
-					healthy: false,
-				},
-			};
 
 			const plane = new SystemOneSteeringPlane({
 				adapter: mockAdapter,

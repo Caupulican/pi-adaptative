@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { join } from "node:path";
 import { Agent } from "@caupulican/pi-agent-core/agent";
 import { convertToLlm } from "@caupulican/pi-agent-core/messages";
 import { getDefaultSessionDir, SessionManager } from "@caupulican/pi-agent-core/session";
@@ -14,6 +15,7 @@ import {
 import { getOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
+import { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import { configFile } from "./agent-paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
@@ -46,6 +48,9 @@ import type {
 	ResourceProfileSettings,
 } from "./settings-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
+import { SteeringCertificateStore } from "./steering/certificate-store.ts";
+import { DEFAULT_STEERING_POLICY } from "./steering/policy.ts";
+import { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import { SystemOneJevAdapter } from "./system-one/adapter.ts";
 import { createSystemOneConfig } from "./system-one/config.ts";
 import { SystemOneController } from "./system-one/controller.ts";
@@ -143,6 +148,10 @@ export interface CreateAgentSessionOptions {
 	executionLoopMode?: ExecutionLoopMode;
 	/** Objective execution controller for deterministic loop authority and route evaluation. */
 	objectiveExecutionController?: ObjectiveExecutionController;
+	/** System One steering plane driving semantic validation and certification. */
+	steeringPlane?: SystemOneSteeringPlane;
+	/** Diagnostic readiness gate for adaptive runtime components. */
+	adaptiveReadiness?: AdaptiveRuntimeReadiness;
 	/** Optional flag to disable automatic System One semantic control plane controller construction. */
 	disableSystemOne?: boolean;
 	/** Optional flag to explicitly enable or disable System One semantic control plane. Takes precedence over settings. */
@@ -710,6 +719,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
+	let steeringPlane = options.steeringPlane;
+	if (!steeringPlane && systemOneController) {
+		const persistentPath = join(agentDir, "certificates.json");
+		const certificates = new SteeringCertificateStore(persistentPath);
+		steeringPlane = new SystemOneSteeringPlane({
+			adapter: systemOneController.adapter,
+			certificates,
+			policy: DEFAULT_STEERING_POLICY,
+		});
+	}
+
+	let adaptiveReadiness = options.adaptiveReadiness;
+	if (!adaptiveReadiness && steeringPlane) {
+		adaptiveReadiness = new AdaptiveRuntimeReadiness({
+			steeringPlane,
+			objectiveController: options.objectiveExecutionController,
+		});
+	}
+
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -737,6 +765,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		systemOneController,
 		executionLoopMode: options.executionLoopMode,
 		objectiveExecutionController: options.objectiveExecutionController,
+		steeringPlane,
+		adaptiveReadiness,
 	});
 	try {
 		// The initial runtime has now bound providers from profile-granted extensions. Re-resolve the

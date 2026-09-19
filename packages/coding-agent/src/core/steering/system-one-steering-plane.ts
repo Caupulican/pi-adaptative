@@ -1,21 +1,34 @@
 /**
  * System One Steering Plane.
- * Root semantic control plane.
- * Implements S1A-001..S1A-010, S1A-161, S1A-176.
+ * Root semantic control plane backed by TypeSafe Decision Kernel.
+ * Implements S1A-001..S1A-010, S1A-161, S1A-176, PH-001..PH-012.
  */
 
-import { createHash, randomUUID } from "node:crypto";
-import type { JevAdapter, JevEvaluationResponse } from "../system-one/adapter.ts";
+import { randomUUID } from "node:crypto";
+import type { SemanticDecisionEngine } from "../decision/engine.ts";
+import type { DecisionEngineRouter } from "../decision/engine-router.ts";
+import { TypeSafeSystemOneDecisionEngine } from "../decision/engines/typesafe-system-one-engine.ts";
+import type { DecisionEvaluation } from "../decision/evaluation.ts";
+import type { DecisionProgram } from "../decision/program.ts";
+import type { JevAdapter } from "../system-one/adapter.ts";
+import { canonicalDigest } from "./canonical.ts";
 import { SteeringCertificateStore } from "./certificate-store.ts";
 import {
 	CONSEQUENCE_THRESHOLDS,
+	computePolicyDigest,
 	DEFAULT_STEERING_POLICY,
-	getPolicyRef,
 	PINNED_JEV_MODEL,
+	STEERING_POLICY_ID,
 	type SteeringPolicyConfig,
 } from "./policy.ts";
-import { findPackForCheckpoint, getQuestionPackRef } from "./programs.ts";
-import type { SteeringCertificate, SteeringCheckpointRequest, SteeringDirective, SteeringResult } from "./types.ts";
+import { compileDecisionProgramForCheckpoint } from "./programs.ts";
+import {
+	type SteeringCertificate,
+	type SteeringCheckpointRequest,
+	type SteeringDirective,
+	SteeringProtocolError,
+	type SteeringResult,
+} from "./types.ts";
 
 export class SystemOneSteeringUnavailableError extends Error {
 	constructor(message: string) {
@@ -39,6 +52,8 @@ export class SteeringConfidenceTooLowError extends Error {
 }
 
 export interface SystemOneSteeringPlaneDeps {
+	readonly decisionEngine?: SemanticDecisionEngine;
+	readonly router?: DecisionEngineRouter;
 	readonly adapter?: JevAdapter;
 	readonly certificates?: SteeringCertificateStore;
 	readonly policy?: SteeringPolicyConfig;
@@ -48,31 +63,55 @@ export interface SystemOneSteeringPlaneDeps {
 export class SystemOneSteeringPlane {
 	readonly certificates: SteeringCertificateStore;
 	readonly policy: SteeringPolicyConfig;
+	readonly decisionEngine?: SemanticDecisionEngine;
+	readonly router?: DecisionEngineRouter;
 	private readonly adapter?: JevAdapter;
 
 	constructor(deps: SystemOneSteeringPlaneDeps = {}) {
 		this.certificates = deps.certificates ?? new SteeringCertificateStore(deps.persistentPath);
 		this.policy = deps.policy ?? DEFAULT_STEERING_POLICY;
 		this.adapter = deps.adapter;
+		this.router = deps.router;
+
+		if (deps.decisionEngine) {
+			this.decisionEngine = deps.decisionEngine;
+		} else if (deps.adapter) {
+			const model = this.policy.model.id || PINNED_JEV_MODEL;
+			this.decisionEngine = new TypeSafeSystemOneDecisionEngine(deps.adapter, model);
+		}
 	}
 
 	computeDigest(data: unknown): string {
-		return createHash("sha256")
-			.update(JSON.stringify(data ?? null))
-			.digest("hex");
+		return canonicalDigest(data);
 	}
 
 	/**
 	 * Derives a SteeringDirective from the evaluated question pack and answers.
+	 * Checks checkpoint pass predicates and rejects missing answers.
 	 */
-	private composeDirective(checkpointId: string, answers: Record<string, unknown>): SteeringDirective {
+	private composeDirective(
+		checkpointId: string,
+		answers: Record<string, unknown>,
+		_program: DecisionProgram,
+	): SteeringDirective {
 		const reasonCodes: string[] = [];
 
-		// Checkpoint-specific action synthesis
 		if (checkpointId === "JEV-004") {
-			const completionPlausible = (answers.completion_plausible as { noul?: number })?.noul ?? 0;
-			const gapSuspected = (answers.capability_gap_suspected as { noul?: number })?.noul ?? 0;
-			const missingWork = (answers.missing_work_class as { choice?: string })?.choice;
+			const completionAns = answers.completion_plausible as { noul?: number } | undefined;
+			const gapAns = answers.capability_gap_suspected as { noul?: number } | undefined;
+			const missingWorkAns = answers.missing_work_class as { choice?: string } | undefined;
+
+			if (completionAns?.noul == null || gapAns?.noul == null || !missingWorkAns?.choice) {
+				throw new SteeringProtocolError(
+					`Checkpoint ${checkpointId} missing required answers for directive composition`,
+					checkpointId,
+					answers,
+				);
+			}
+
+			const completionPlausible = completionAns.noul;
+			const gapSuspected = gapAns.noul;
+			const missingWork = missingWorkAns.choice;
 
 			if (completionPlausible >= 0.8) {
 				return { action: "completion_candidate", reasonCodes: ["completion_plausible"] };
@@ -96,8 +135,19 @@ export class SystemOneSteeringPlane {
 		}
 
 		if (checkpointId === "JEV-007" || checkpointId === "JEV-008") {
-			const needsCap = (answers.needs_capability as { noul?: number })?.noul ?? 0;
-			const gapRemains = (answers.gap_remains as { noul?: number })?.noul ?? 0;
+			const needsCapAns = answers.needs_capability as { noul?: number } | undefined;
+			const gapRemainsAns = answers.gap_remains as { noul?: number } | undefined;
+
+			if (checkpointId === "JEV-007" && needsCapAns?.noul == null) {
+				throw new SteeringProtocolError("Checkpoint JEV-007 missing needs_capability answer", checkpointId);
+			}
+			if (checkpointId === "JEV-008" && gapRemainsAns?.noul == null) {
+				throw new SteeringProtocolError("Checkpoint JEV-008 missing gap_remains answer", checkpointId);
+			}
+
+			const needsCap = needsCapAns?.noul ?? 0;
+			const gapRemains = gapRemainsAns?.noul ?? 0;
+
 			if (needsCap >= 0.6 || gapRemains >= 0.6) {
 				return { action: "synthesize_capability", reasonCodes: ["capability_gap_proven"] };
 			}
@@ -105,7 +155,11 @@ export class SystemOneSteeringPlane {
 		}
 
 		if (checkpointId === "JEV-010") {
-			const adaptationClass = (answers.adaptation_class as { choice?: string })?.choice ?? "ephemeral_script";
+			const adaptationAns = answers.adaptation_class as { choice?: string } | undefined;
+			if (!adaptationAns?.choice) {
+				throw new SteeringProtocolError("Checkpoint JEV-010 missing adaptation_class answer", checkpointId);
+			}
+			const adaptationClass = adaptationAns.choice;
 			return {
 				action: "synthesize_capability",
 				reasonCodes: [`adaptation_level_${adaptationClass}`],
@@ -114,7 +168,11 @@ export class SystemOneSteeringPlane {
 		}
 
 		if (checkpointId === "JEV-013" || checkpointId === "JEV-014") {
-			const fulfilled = (answers.spec_fulfilled as { noul?: number })?.noul ?? 1;
+			const fulfilledAns = answers.spec_fulfilled as { noul?: number } | undefined;
+			if (checkpointId === "JEV-013" && fulfilledAns?.noul == null) {
+				throw new SteeringProtocolError("Checkpoint JEV-013 missing spec_fulfilled answer", checkpointId);
+			}
+			const fulfilled = fulfilledAns?.noul ?? 0;
 			if (fulfilled >= 0.7) {
 				return { action: "activate_capability", reasonCodes: ["pre_activation_verified"] };
 			}
@@ -122,15 +180,25 @@ export class SystemOneSteeringPlane {
 		}
 
 		if (checkpointId === "JEV-024") {
-			const completionPlausible = (answers.completion_plausible as { noul?: number })?.noul ?? 0;
-			if (completionPlausible >= 0.75) {
+			const completionAns = answers.completion_plausible as { noul?: number } | undefined;
+			if (completionAns?.noul == null) {
+				throw new SteeringProtocolError("Checkpoint JEV-024 missing completion_plausible answer", checkpointId);
+			}
+			if (completionAns.noul >= 0.75) {
 				return { action: "completion_candidate", reasonCodes: ["completion_plausible"] };
 			}
 			return { action: "continue_current_work", reasonCodes: ["work_remaining"] };
 		}
 
 		if (checkpointId === "JEV-040") {
-			const lowest = (answers.lowest_adequate_adaptation as { choice?: string })?.choice ?? "strategy";
+			const lowestAns = answers.lowest_adequate_adaptation as { choice?: string } | undefined;
+			if (!lowestAns?.choice) {
+				throw new SteeringProtocolError(
+					"Checkpoint JEV-040 missing lowest_adequate_adaptation answer",
+					checkpointId,
+				);
+			}
+			const lowest = lowestAns.choice;
 			if (lowest === "expert_reroute") {
 				return { action: "reroute_expert", reasonCodes: ["expert_reroute_selected"] };
 			}
@@ -159,7 +227,11 @@ export class SystemOneSteeringPlane {
 		}
 
 		if (checkpointId === "JEV-041" || checkpointId === "JEV-042") {
-			const disposition = (answers.recommended_disposition as { choice?: string })?.choice ?? "unique";
+			const dispositionAns = answers.recommended_disposition as { choice?: string } | undefined;
+			if (checkpointId === "JEV-042" && !dispositionAns?.choice) {
+				throw new SteeringProtocolError("Checkpoint JEV-042 missing recommended_disposition answer", checkpointId);
+			}
+			const disposition = dispositionAns?.choice ?? "unique";
 			if (disposition === "insufficient_evidence") {
 				return { action: "retrieve_more", reasonCodes: ["insufficient_evidence"] };
 			}
@@ -175,81 +247,136 @@ export class SystemOneSteeringPlane {
 
 	/**
 	 * Evaluates a checkpoint request and produces or reuses a SteeringCertificate.
+	 * Implements PH-001..PH-012, PH-020..PH-028.
 	 */
 	async evaluate(request: SteeringCheckpointRequest): Promise<SteeringResult> {
-		const pack = findPackForCheckpoint(request.checkpointId);
-		if (!pack) {
-			throw new Error(`No question pack found for checkpoint ${request.checkpointId}`);
-		}
+		const stateDigest = canonicalDigest(request.state);
+		const program = compileDecisionProgramForCheckpoint(request.checkpointId, request.state);
+		const programDigest = canonicalDigest(program);
+		const policyDigest = computePolicyDigest(this.policy);
 
-		const stateDigest = this.computeDigest(request.state);
-
-		// S1A-007: Check if a fresh certificate already exists for this exact state and evidence revision
-		const existing = this.certificates.findCurrent(
-			request.objectiveId,
-			request.checkpointId,
-			stateDigest,
-			request.evidenceRevision,
-		);
-		if (existing) {
-			const directive = this.composeDirective(request.checkpointId, existing.answers);
-			return { certificate: existing, directive };
-		}
-
-		// S1A-008 / S1A-009: Pinned Jev model must be used
 		const model = this.policy.model.id || PINNED_JEV_MODEL;
+		const provider = this.policy.model.provider || "typesafe";
 		const consequence = request.consequence ?? "medium";
 		const thresholds = CONSEQUENCE_THRESHOLDS[consequence];
 
-		let evaluationResponse: JevEvaluationResponse;
+		// Check if a fresh certificate already exists in cache with full key binding
+		const existing = this.certificates.findCurrent({
+			objectiveId: request.objectiveId,
+			checkpointId: request.checkpointId,
+			stateDigest,
+			evidenceRevision: request.evidenceRevision,
+			policyDigest,
+			programDigest,
+			provider,
+			model,
+		});
+		if (existing) {
+			const directive = this.composeDirective(request.checkpointId, existing.answers, program);
+			return { certificate: existing, directive };
+		}
 
-		if (this.adapter) {
+		let evaluation: DecisionEvaluation;
+
+		if (this.router) {
 			try {
-				evaluationResponse = await this.adapter.evaluate(
-					{
-						model,
-						state: {
-							checkpointId: request.checkpointId,
-							objectiveId: request.objectiveId,
-							state: request.state,
-						},
-						questions: Object.fromEntries(pack.questions.map((q) => [q.id, { description: q.description }])),
-					},
-					{ impact: "read_only" },
-				);
-			} catch (err: unknown) {
+				evaluation = await this.router.evaluateOrFallback(program, request.state, { consequence });
+			} catch (err) {
 				if (this.policy.mode === "system_one_required") {
 					throw new SystemOneSteeringUnavailableError(
-						`Jev steering unavailable for mandatory checkpoint ${request.checkpointId}: ${String(err)}`,
+						`Decision router unavailable for mandatory checkpoint ${request.checkpointId}: ${String(err)}`,
+					);
+				}
+				throw err;
+			}
+		} else if (this.decisionEngine) {
+			try {
+				evaluation = await this.decisionEngine.evaluate(program, request.state, { consequence });
+			} catch (err) {
+				if (this.policy.mode === "system_one_required") {
+					throw new SystemOneSteeringUnavailableError(
+						`System One steering engine unavailable for mandatory checkpoint ${request.checkpointId}: ${String(err)}`,
 					);
 				}
 				throw err;
 			}
 		} else {
-			// Fail-closed if system_one_required and no adapter
 			if (this.policy.mode === "system_one_required") {
 				throw new SystemOneSteeringUnavailableError(
-					`Jev adapter missing for mandatory checkpoint ${request.checkpointId} in system_one_required mode.`,
+					`Decision engine missing for mandatory checkpoint ${request.checkpointId} in system_one_required mode.`,
 				);
 			}
-			// Synthetic fallback only if not system_one_required
-			evaluationResponse = {
-				model,
-				latency_ms: 0,
-				answers: {},
-			};
+			throw new SystemOneSteeringUnavailableError(
+				`No decision engine configured for checkpoint ${request.checkpointId}.`,
+			);
 		}
 
-		const answers = evaluationResponse.answers ?? {};
-
-		// Validate confidence against consequence threshold
-		const overallConfidence = (answers._confidence as number | undefined) ?? 1.0;
-		if (overallConfidence < thresholds.minimumConfidence) {
-			// S1A-010: No human fallback on low confidence
-			throw new SteeringConfidenceTooLowError(request.checkpointId, overallConfidence, thresholds.minimumConfidence);
+		if (!evaluation?.results || Object.keys(evaluation.results).length === 0) {
+			throw new SteeringProtocolError(
+				`Empty evaluation response from decision engine for checkpoint ${request.checkpointId}`,
+				request.checkpointId,
+			);
 		}
 
-		const directive = this.composeDirective(request.checkpointId, answers);
+		// Map normalized results to answers
+		const answers: Record<string, unknown> = {};
+		const confidences: number[] = [];
+
+		for (const d of program.decisions) {
+			const result = evaluation.results[d.id];
+			if (!result) {
+				throw new SteeringProtocolError(
+					`Missing required decision result for '${d.id}' in checkpoint ${request.checkpointId}`,
+					request.checkpointId,
+				);
+			}
+
+			if (result.kind === "boolean") {
+				answers[d.id] = {
+					type: "noul",
+					noul: result.probabilityTrue,
+					value: result.value,
+					confidence: result.confidence.value,
+				};
+				confidences.push(result.confidence.value);
+			} else if (result.kind === "choice") {
+				answers[d.id] = {
+					type: "choice",
+					choice: result.selected,
+					distribution: result.distribution,
+					probabilities: result.distribution,
+					margin: result.margin,
+					confidence: result.confidence.value,
+				};
+				confidences.push(result.confidence.value);
+			} else if (result.kind === "score") {
+				answers[d.id] = {
+					type: "score",
+					score: result.value,
+					value: result.value,
+					distribution: result.distribution,
+					probabilities: result.distribution,
+					confidence: result.confidence.value,
+				};
+				confidences.push(result.confidence.value);
+			} else if (result.kind === "set") {
+				answers[d.id] = {
+					type: "set",
+					selected: result.selected,
+					memberships: result.memberships,
+					confidence: result.confidence.value,
+				};
+				confidences.push(result.confidence.value);
+			}
+		}
+
+		// PH-006, PH-007: Weakest-link confidence across required judgments. No global _confidence!
+		const actionConfidence = confidences.length > 0 ? Math.min(...confidences) : 0.0;
+		if (actionConfidence < thresholds.minimumConfidence) {
+			throw new SteeringConfidenceTooLowError(request.checkpointId, actionConfidence, thresholds.minimumConfidence);
+		}
+
+		const directive = this.composeDirective(request.checkpointId, answers, program);
 
 		const certificate: SteeringCertificate = {
 			schema_version: "1.0",
@@ -260,20 +387,30 @@ export class SystemOneSteeringPlane {
 			checkpoint_id: request.checkpointId,
 			state_digest: stateDigest,
 			evidence_revision: request.evidenceRevision,
-			policy: getPolicyRef(this.policy),
-			question_pack: getQuestionPackRef(pack),
+			policy: {
+				id: STEERING_POLICY_ID,
+				version: this.policy.version,
+				digest: policyDigest,
+			},
+			question_pack: {
+				id: program.id,
+				version: program.version,
+				digest: programDigest,
+			},
 			engine: {
-				provider: this.policy.model.provider,
+				provider,
 				model,
 			},
 			answers,
 			directive: directive.action,
+			action_confidence: actionConfidence,
 			policy_result: "accepted",
 			parent_certificate_ids: request.parentCertificateIds ? [...request.parentCertificateIds] : undefined,
-			usage: evaluationResponse.usage as Record<string, unknown> | undefined,
+			usage: evaluation.audit as Record<string, unknown> | undefined,
 			created_at: new Date().toISOString(),
 		};
 
+		// PH-021, PH-022: Atomic fail-closed persistence
 		await this.certificates.persist(certificate);
 
 		return { certificate, directive };

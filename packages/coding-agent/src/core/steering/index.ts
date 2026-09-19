@@ -16,6 +16,7 @@ export {
 	type SteeringPolicyConfig,
 } from "./policy.ts";
 export {
+	compileDecisionProgramForCheckpoint,
 	computeQuestionPackDigest,
 	findPackForCheckpoint,
 	getQuestionPackRef,
@@ -30,20 +31,22 @@ export {
 	type SystemOneSteeringPlaneDeps,
 	SystemOneSteeringUnavailableError,
 } from "./system-one-steering-plane.ts";
-export type {
-	SteeringCertificate,
-	SteeringCertificateEngineRef,
-	SteeringCertificatePolicyRef,
-	SteeringCertificateQuestionPackRef,
-	SteeringCheckpointId,
-	SteeringCheckpointRequest,
-	SteeringDirective,
-	SteeringDirectiveAction,
-	SteeringMissionContext,
-	SteeringMissionReference,
-	SteeringResult,
-	WorkerSteeringMission,
-	WorkerSteeringMissionWorkClass,
+export {
+	type CertificateLookupQuery,
+	type SteeringCertificate,
+	type SteeringCertificateEngineRef,
+	type SteeringCertificatePolicyRef,
+	type SteeringCertificateQuestionPackRef,
+	type SteeringCheckpointId,
+	type SteeringCheckpointRequest,
+	type SteeringDirective,
+	type SteeringDirectiveAction,
+	type SteeringMissionContext,
+	type SteeringMissionReference,
+	SteeringProtocolError,
+	type SteeringResult,
+	type WorkerSteeringMission,
+	type WorkerSteeringMissionWorkClass,
 } from "./types.ts";
 export {
 	type NormalizedWorkerEvidence,

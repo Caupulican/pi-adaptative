@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
+import { SteeringProtocolError } from "../steering/types.ts";
 import type { CandidateDiscoveryService } from "./candidate-discovery.ts";
 import type { ResponsibilityRegistry } from "./responsibility-registry.ts";
 import type {
@@ -87,6 +88,14 @@ export class SemanticResponsibilityController {
 		// 1. Deterministic candidate discovery (bounded to 12)
 		const candidates = await this.discovery.findCandidates(input.proposed);
 
+		// PH-139: Discovery failure cannot prove unique
+		if (candidates.coverage?.coverageClass === "failed") {
+			throw new SteeringProtocolError(
+				"Candidate discovery failed completely; cannot prove semantic uniqueness (PH-139)",
+				"JEV-041",
+			);
+		}
+
 		// 2. JEV-041: Pre-implementation semantic uniqueness
 		const preCert = await this.steering.requireCertificate(
 			"JEV-041",
@@ -123,7 +132,12 @@ export class SemanticResponsibilityController {
 			},
 		);
 
-		const dispositionChoice = (dispCert.answers.recommended_disposition as { choice?: string })?.choice ?? "unique";
+		// PH-140: Missing disposition fails (never default to unique)
+		const dispositionChoice = (dispCert.answers.recommended_disposition as { choice?: string })?.choice;
+		if (!dispositionChoice) {
+			throw new SteeringProtocolError("Missing recommended_disposition in JEV-042 certificate (PH-140)", "JEV-042");
+		}
+
 		let outcome: DispositionOutcome = "unique";
 		if (
 			dispositionChoice === "reuse_existing" ||
@@ -145,7 +159,7 @@ export class SemanticResponsibilityController {
 		const waiver = this.waivers.findValidWaiver(input.objectiveId, input.proposed, input.proposed.targetLocation);
 		if (waiver) {
 			// S1A-218: JEV-045 validates waiver applicability
-			await this.steering.requireCertificate(
+			const waiverCert = await this.steering.requireCertificate(
 				"JEV-045",
 				{
 					waiver,
@@ -158,6 +172,16 @@ export class SemanticResponsibilityController {
 					signal: input.signal,
 				},
 			);
+
+			// PH-141: JEV-045 must include a positive waiver_valid judgment
+			const waiverValidAns = waiverCert.answers.waiver_valid as { boolean?: boolean; noul?: number } | undefined;
+			const isWaiverValid =
+				typeof waiverValidAns?.boolean === "boolean" ? waiverValidAns.boolean : (waiverValidAns?.noul ?? 0) >= 0.5;
+
+			if (!isWaiverValid) {
+				throw new SteeringProtocolError("JEV-045 evaluated waiver as invalid (PH-141)", "JEV-045");
+			}
+
 			waiverId = waiver.waiver_id;
 		}
 
@@ -243,7 +267,17 @@ export class SemanticResponsibilityController {
 			},
 		);
 
-		const duplicateIntroduced = (cert.answers.duplicate_responsibility_introduced as { noul?: number })?.noul ?? 0;
+		const dupAns = cert.answers.duplicate_responsibility_introduced as
+			| { noul?: number; boolean?: boolean }
+			| undefined;
+		if (dupAns === undefined || (dupAns.noul === undefined && dupAns.boolean === undefined)) {
+			throw new SteeringProtocolError(
+				"Missing duplicate_responsibility_introduced answer in JEV-043 certificate",
+				"JEV-043",
+			);
+		}
+		const duplicateIntroduced =
+			typeof dupAns.boolean === "boolean" ? (dupAns.boolean ? 1.0 : 0.0) : (dupAns.noul ?? 0.0);
 		const intentionalWaiverApplies = (cert.answers.intentional_waiver_applies as { noul?: number })?.noul ?? 0;
 
 		const waiver = this.waivers.findValidWaiver(input.objectiveId, input.responsibility, input.mutatedFile);
@@ -302,7 +336,19 @@ export class SemanticResponsibilityController {
 			},
 		);
 
-		const duplicateRemaining = (cert.answers.unintentional_duplicate_remaining as { noul?: number })?.noul ?? 0;
+		const dupRemAns = cert.answers.unintentional_duplicate_remaining as
+			| { noul?: number; boolean?: boolean }
+			| undefined;
+		// PH-142: Missing JEV-044 result fails
+		if (dupRemAns === undefined || (dupRemAns.noul === undefined && dupRemAns.boolean === undefined)) {
+			throw new SteeringProtocolError(
+				"Missing unintentional_duplicate_remaining answer in JEV-044 certificate (PH-142)",
+				"JEV-044",
+			);
+		}
+		const duplicateRemaining =
+			typeof dupRemAns.boolean === "boolean" ? (dupRemAns.boolean ? 1.0 : 0.0) : (dupRemAns.noul ?? 0.0);
+
 		// S1A-220, S1A-221: Completion cannot pass semantic duplicate even if tests pass
 		if (duplicateRemaining >= 0.5) {
 			throw new SemanticDuplicateResponsibilityError({

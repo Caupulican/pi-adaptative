@@ -83,7 +83,7 @@ export function compileExecutionCharter(input: CompileExecutionCharterInput): Ex
 	const grantPush =
 		!denyPush && (/\b(push|commit\s+and\s+push)\b/i.test(prompt) || Boolean(input.initialGrants?.git?.push));
 	const grantCommit =
-		!denyCommit && (/\b(commit|commit\s+and\s+push)\b/i.test(prompt) || (input.initialGrants?.git?.commit ?? true));
+		!denyCommit && (/\b(commit|commit\s+and\s+push)\b/i.test(prompt) || Boolean(input.initialGrants?.git?.commit));
 	const grantPublish =
 		!denyPublish &&
 		(/\b(publish|npm\s+publish|package\s+publish)\b/i.test(prompt) ||
@@ -132,6 +132,15 @@ export function compileExecutionCharter(input: CompileExecutionCharterInput): Ex
  * Returns allow or deny. Never returns an interactive approval prompt.
  */
 export function evaluateCharterAuthority(charter: ExecutionCharter, action: ProposedAction): AuthorityDecision {
+	// Destructive check
+	if (action.destructiveRequested || action.kind === "destructive" || action.kind.startsWith("destructive:")) {
+		return {
+			outcome: "deny",
+			reason: "Destructive actions are not authorized in the execution charter",
+			missingAuthority: "system:destructive",
+		};
+	}
+
 	// Push check
 	if (action.pushRequested || action.kind === "push" || action.kind === "git_push") {
 		if (!charter.git.push) {
@@ -156,6 +165,30 @@ export function evaluateCharterAuthority(charter: ExecutionCharter, action: Prop
 		return { outcome: "allow", grantRef: "charter:git.commit" };
 	}
 
+	// Git tag check
+	if (action.kind === "create_tag" || action.kind === "git_tag") {
+		if (!charter.git.create_tag) {
+			return {
+				outcome: "deny",
+				reason: "Git create_tag is not authorized in the execution charter",
+				missingAuthority: "git:create_tag",
+			};
+		}
+		return { outcome: "allow", grantRef: "charter:git.create_tag" };
+	}
+
+	// Git branch check
+	if (action.kind === "create_branch" || action.kind === "git_branch") {
+		if (!charter.git.create_branch) {
+			return {
+				outcome: "deny",
+				reason: "Git create_branch is not authorized in the execution charter",
+				missingAuthority: "git:create_branch",
+			};
+		}
+		return { outcome: "allow", grantRef: "charter:git.create_branch" };
+	}
+
 	// Package publish check
 	if (action.publishRequested || action.kind === "publish" || action.kind === "package_publish") {
 		if (!charter.release.package_publish) {
@@ -168,13 +201,20 @@ export function evaluateCharterAuthority(charter: ExecutionCharter, action: Prop
 		return { outcome: "allow", grantRef: "charter:release.package_publish" };
 	}
 
-	// Deploy check
-	if (action.deployRequested || action.kind === "deploy") {
+	// Deploy check (PH-103: exact deploy target)
+	if (action.deployRequested || action.kind === "deploy" || action.kind.startsWith("deploy")) {
 		if (charter.release.deploy_targets.length === 0) {
 			return {
 				outcome: "deny",
 				reason: "Deployment is not authorized in the execution charter (no deploy targets)",
 				missingAuthority: "release:deploy",
+			};
+		}
+		if (action.deployTarget && !charter.release.deploy_targets.includes(action.deployTarget)) {
+			return {
+				outcome: "deny",
+				reason: `Deployment target '${action.deployTarget}' is not authorized in the execution charter`,
+				missingAuthority: `release:deploy:${action.deployTarget}`,
 			};
 		}
 		return { outcome: "allow", grantRef: "charter:release.deploy" };
@@ -189,6 +229,23 @@ export function evaluateCharterAuthority(charter: ExecutionCharter, action: Prop
 				missingAuthority: "budget:cost_ceiling",
 			};
 		}
+	}
+
+	// PH-104: Closed-world impact: unknown git/release/external/destructive action classes default DENY
+	const isHighImpactAction =
+		action.kind.startsWith("git") ||
+		action.kind.startsWith("release") ||
+		action.kind.startsWith("external") ||
+		action.kind.startsWith("destructive") ||
+		action.kind.startsWith("publish") ||
+		action.kind.startsWith("deploy");
+
+	if (isHighImpactAction) {
+		return {
+			outcome: "deny",
+			reason: `Action kind '${action.kind}' is an unauthorized high-impact git/release/external/destructive action`,
+			missingAuthority: `action:${action.kind}`,
+		};
 	}
 
 	// Default permit for standard internal autonomous operations

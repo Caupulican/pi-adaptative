@@ -595,8 +595,8 @@ record already held, 10-45 s on a slow-first-token provider. Pinned by
 
 ## Structure
 
-**The coordinator only shrinks.** `agent-session.ts` has a line ceiling in
-`scripts/check-coordinator-boundaries.mjs` that is lowered with each extraction and never raised.
+**The coordinator line ceiling provides owner-approved integration headroom while ownership ratchets remain authoritative.** `agent-session.ts` and extracted boundaries have an 8,000-line ceiling in
+`scripts/check-coordinator-boundaries.mjs`; extracted-owner and forbidden reclaimed-responsibility markers remain strictly enforced.
 
 **One call failing identically ends the run on the ledger's own count.** The failure ledger
 counts an occurrence of a failure key once per tool batch: an occurrence is an attempt the model

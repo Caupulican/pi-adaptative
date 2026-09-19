@@ -66,14 +66,25 @@ export class CapabilityResolver {
 			},
 		);
 
-		const needsCap = (cert.answers.needs_capability as { noul?: number })?.noul ?? 0.8;
-		const whichChoice = (cert.answers.which_candidate as { choice?: string })?.choice;
+		const needsCapAns = cert.answers.needs_capability as { noul?: number; boolean?: boolean } | undefined;
+		const needsCap =
+			typeof needsCapAns?.boolean === "boolean" ? (needsCapAns.boolean ? 1.0 : 0.0) : (needsCapAns?.noul ?? 0.8);
+		const whichCandidateAns = cert.answers.which_candidate as
+			| {
+					choice?: string;
+					probabilities?: Record<string, number>;
+			  }
+			| undefined;
 
-		// Rank candidates by relevance
+		const probabilities = whichCandidateAns?.probabilities ?? {};
+		const selectedChoice = whichCandidateAns?.choice;
+
+		// PH-068, PH-070: Rank candidates by real choice probabilities or selected choice without synthetic 0.9/0.1
 		const rankedCandidates = roster
 			.map((c) => {
 				const id = String(c.id);
-				const probability = id === whichChoice ? 0.9 : 0.1;
+				const probability =
+					typeof probabilities[id] === "number" ? probabilities[id] : id === selectedChoice ? 1.0 : 0.0;
 				return { id, probability };
 			})
 			.sort((a, b) => b.probability - a.probability);
@@ -99,7 +110,7 @@ export class CapabilityResolver {
 			throw new Error("Capability resolution aborted.");
 		}
 
-		// Take top 3-5 candidates
+		// Take top candidates
 		const topIds = wide.rankedCandidates.slice(0, 5).map((c) => c.id);
 		const shortlistedCandidates: CapabilityCatalogEntry[] = [];
 		for (const id of topIds) {
@@ -132,57 +143,64 @@ export class CapabilityResolver {
 		const absoluteFits: Record<string, number> = {};
 		for (const candidate of shortlistedCandidates) {
 			const fitKey = `fits::${candidate.capabilityId}`;
-			const fitNoul = (answers[fitKey] as { noul?: number })?.noul ?? 0.2;
-			absoluteFits[candidate.capabilityId] = fitNoul;
+			const fitAns = answers[fitKey] as { noul?: number; boolean?: boolean } | undefined;
+			const fitVal = typeof fitAns?.boolean === "boolean" ? (fitAns.boolean ? 1.0 : 0.0) : (fitAns?.noul ?? 0.0);
+			absoluteFits[candidate.capabilityId] = fitVal;
 		}
 
-		const bestFitId = (answers.which_candidate as { choice?: string })?.choice;
+		const whichAns = answers.which_candidate as { choice?: string } | undefined;
+		const bestFitId = whichAns?.choice;
 		const bestFitScore = bestFitId ? (absoluteFits[bestFitId] ?? 0) : 0;
-		const gapRemains = (answers.gap_remains as { noul?: number })?.noul ?? (bestFitScore < 0.7 ? 1.0 : 0.0);
+		const gapAns = answers.gap_remains as { noul?: number; boolean?: boolean } | undefined;
+		const gapRemains =
+			typeof gapAns?.boolean === "boolean"
+				? gapAns.boolean
+				: gapAns?.noul !== undefined
+					? gapAns.noul >= 0.5
+					: bestFitScore < 0.7;
 
 		// S1A-065: Shortlist can reject all if below absolute fit threshold
 		if (!gapRemains && bestFitId && bestFitScore >= 0.7) {
 			const entry = this.catalog.get(bestFitId);
-			if (entry) {
-				const established: EstablishedCapability = {
-					capabilityId: entry.capabilityId,
-					kind: entry.kind,
-					lifetime: entry.lifetime,
-					spec: entry.spec ?? {
-						schema_version: "1.0",
-						capability_id: entry.capabilityId,
-						version: "1.0",
+			// PH-071: Catalog entry becomes established only with current:
+			// - CapabilitySpec
+			// - artifact/provenance
+			// - active state
+			// - proof/certificate lineage
+			// Never fabricate missing spec, digest, smoke test or active record.
+			if (entry?.spec && entry.record) {
+				const activeStates = new Set([
+					"active_ephemeral",
+					"active_session",
+					"active_project",
+					"active_global",
+					"verified",
+				]);
+				const hasValidState = activeStates.has(entry.record.state);
+				const hasArtifact = Boolean(entry.record.artifact_digest && entry.record.artifact_digest.length > 0);
+				const hasCertLineage =
+					Array.isArray(entry.record.certificate_refs) && entry.record.certificate_refs.length > 0;
+				const hasProof = Boolean(entry.spec.proof?.task_specific_test);
+
+				if (hasValidState && hasArtifact && hasCertLineage && hasProof) {
+					const established: EstablishedCapability = {
+						capabilityId: entry.capabilityId,
 						kind: entry.kind,
 						lifetime: entry.lifetime,
-						purpose: entry.purpose,
-						interface: { inputs: entry.inputShape, outputs: entry.outputShape },
-						side_effects: [...entry.sideEffects],
-						denied_behavior: [],
-						proof: { deterministic_tests: ["test_smoke"], task_specific_test: "test_task" },
-						activation: {},
-						rollback: {},
-					},
-					record: entry.record ?? {
-						schema_version: "1.0",
-						capability_id: entry.capabilityId,
-						version: "1.0",
-						kind: entry.kind,
-						state: "active_global",
-						artifact_digest: "digest_preexisting",
-						certificate_refs: [cert.certificate_id],
-						created_at: new Date().toISOString(),
-					},
-					isExisting: true,
-				};
+						spec: entry.spec,
+						record: entry.record,
+						isExisting: true,
+					};
 
-				return {
-					need,
-					shortlistedCandidates,
-					absoluteFits,
-					establishedCapability: established,
-					gapRemains: false,
-					certificateId: cert.certificate_id,
-				};
+					return {
+						need,
+						shortlistedCandidates,
+						absoluteFits,
+						establishedCapability: established,
+						gapRemains: false,
+						certificateId: cert.certificate_id,
+					};
+				}
 			}
 		}
 

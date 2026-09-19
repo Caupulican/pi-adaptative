@@ -3,7 +3,7 @@
  * Reference: policy/steering-policy.yaml
  */
 
-import { createHash } from "node:crypto";
+import { canonicalDigest } from "./canonical.ts";
 import type { SteeringCertificatePolicyRef } from "./types.ts";
 
 export const STEERING_POLICY_VERSION = "1.2" as const;
@@ -140,7 +140,7 @@ export const DEFAULT_STEERING_POLICY: SteeringPolicyConfig = {
 };
 
 export function computePolicyDigest(policy: SteeringPolicyConfig = DEFAULT_STEERING_POLICY): string {
-	return createHash("sha256").update(JSON.stringify(policy)).digest("hex");
+	return canonicalDigest(policy);
 }
 
 export function getPolicyRef(policy: SteeringPolicyConfig = DEFAULT_STEERING_POLICY): SteeringCertificatePolicyRef {

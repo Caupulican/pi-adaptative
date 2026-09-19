@@ -41,6 +41,7 @@ export interface ProposedAction {
 	readonly networkRequested?: boolean;
 	readonly pushRequested?: boolean;
 	readonly deployRequested?: boolean;
+	readonly deployTarget?: string;
 	readonly publishRequested?: boolean;
 	readonly destructiveRequested?: boolean;
 	readonly costIncurred?: number;

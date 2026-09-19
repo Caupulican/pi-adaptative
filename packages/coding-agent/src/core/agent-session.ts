@@ -24,6 +24,7 @@ import type { Api, AssistantMessage, ImageContent, Message, Model, TextContent, 
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
 import { getAgentDir, VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
+import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import { resourceDir, stateFile } from "./agent-paths.ts";
 import { createSessionBackgroundToolTasks } from "./agent-session-background-tasks.ts";
 import {
@@ -197,6 +198,7 @@ import type {
 	SettingsScope,
 } from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
+import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
@@ -403,12 +405,16 @@ export class AgentSession {
 	private _systemOneController?: SystemOneController;
 	private _executionLoopMode?: ExecutionLoopMode;
 	private _objectiveExecutionController?: ObjectiveExecutionController;
+	private _steeringPlane?: SystemOneSteeringPlane;
+	private _adaptiveReadiness?: AdaptiveRuntimeReadiness;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this._systemOneController = config.systemOneController;
 		this._executionLoopMode = config.executionLoopMode;
 		this._objectiveExecutionController = config.objectiveExecutionController;
+		this._steeringPlane = config.steeringPlane;
+		this._adaptiveReadiness = config.adaptiveReadiness;
 		// The provider stream chain (perf profile, idle watchdog, machine-wide admission) is built and
 		// installed exactly once, here; see session-stream-chain.ts.
 		const agentDir = config.agentDir ?? getAgentDir();
@@ -1058,6 +1064,8 @@ export class AgentSession {
 			saveGoalStateSnapshot: (state, expected) => this.saveGoalStateSnapshot(state, expected),
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
 			getSystemOneController: () => this._systemOneController,
+			getSteeringPlane: () => this._steeringPlane,
+			getAdaptiveReadiness: () => this._adaptiveReadiness,
 			grantEdgeFromInstructions: (grant) => this.grantEdge(grant.class, "instructions", grant),
 			enforceEdgeOperation: (op, signal) => enforceSessionEdgeOperation(this._edgeDeps(), op, undefined, signal),
 			authorizeGoalStartFromTool: (input) => this._goals.authorizeStartFromTool(input),
@@ -1314,6 +1322,16 @@ export class AgentSession {
 	/** Objective execution controller, if active for this session. */
 	get objectiveExecutionController(): ObjectiveExecutionController | undefined {
 		return this._objectiveExecutionController;
+	}
+
+	/** System One steering plane driving semantic validation and certification. */
+	get steeringPlane(): SystemOneSteeringPlane | undefined {
+		return this._steeringPlane;
+	}
+
+	/** Diagnostic readiness gate for adaptive runtime components. */
+	get adaptiveReadiness(): AdaptiveRuntimeReadiness | undefined {
+		return this._adaptiveReadiness;
 	}
 
 	private async _getRequiredRequestAuth(model: Model<Api>): Promise<RequestAuth> {

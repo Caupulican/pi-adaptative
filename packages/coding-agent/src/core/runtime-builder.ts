@@ -39,6 +39,7 @@ import type { Agent, AgentContext, AgentMessage, AgentTool, ThinkingLevel } from
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import { getShellEnv } from "../utils/shell.ts";
+import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import {
 	bitwardenSecretsManagerCoordinationFile,
 	managedSecretEnvDir,
@@ -140,6 +141,7 @@ import {
 } from "./settings-manager.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
@@ -359,6 +361,10 @@ export interface RuntimeBuilderDeps {
 	getActiveVerificationIds?(): readonly string[];
 	/** System One semantic control plane controller. */
 	getSystemOneController?(): SystemOneController | undefined;
+	/** System One steering plane driving semantic validation and certification. */
+	getSteeringPlane?(): SystemOneSteeringPlane | undefined;
+	/** Diagnostic readiness gate for adaptive runtime components. */
+	getAdaptiveReadiness?(): AdaptiveRuntimeReadiness | undefined;
 	/** Record an edge grant the model cited from the operator's own words (goal grant_edge). */
 	grantEdgeFromInstructions?(grant: {
 		class: EdgeClass;

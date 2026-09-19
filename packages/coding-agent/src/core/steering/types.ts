@@ -3,6 +3,29 @@
  * Normative reference: URN urn:pi:steering:certificate:1.0 and URN urn:pi:steering:worker-mission:1.0
  */
 
+export class SteeringProtocolError extends Error {
+	readonly checkpointId: string;
+	readonly details?: unknown;
+
+	constructor(message: string, checkpointId: string, details?: unknown) {
+		super(`[${checkpointId}] Steering protocol error: ${message}`);
+		this.name = "SteeringProtocolError";
+		this.checkpointId = checkpointId;
+		this.details = details;
+	}
+}
+
+export interface CertificateLookupQuery {
+	readonly objectiveId: string;
+	readonly checkpointId: string;
+	readonly stateDigest: string;
+	readonly evidenceRevision: number;
+	readonly policyDigest?: string;
+	readonly programDigest?: string;
+	readonly provider?: string;
+	readonly model?: string;
+}
+
 export type SteeringCheckpointId =
 	| "JEV-001"
 	| "JEV-002"
@@ -116,6 +139,7 @@ export interface SteeringCertificate {
 	readonly engine: SteeringCertificateEngineRef;
 	readonly answers: Record<string, unknown>;
 	readonly directive: string;
+	readonly action_confidence?: number;
 	readonly policy_result?: string | null;
 	readonly parent_certificate_ids?: readonly string[];
 	readonly usage?: Record<string, unknown>;

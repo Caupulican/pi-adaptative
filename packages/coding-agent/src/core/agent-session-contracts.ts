@@ -12,6 +12,7 @@ import type {
 } from "@caupulican/pi-agent-core";
 import type { CompactionResult, SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, CacheRetention, ImageContent, Message, Model, StopReason, Usage } from "@caupulican/pi-ai";
+import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import type { LaneRecord, LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskLiveView } from "./background-tool-task-controller.ts";
 import type { AutoCompactionReason } from "./compaction-controller.ts";
@@ -39,6 +40,7 @@ import type { ResearchRunResult } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-manager.ts";
+import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import type { ToolArgumentValidationStats } from "./tool-recovery-stats.ts";
 
@@ -141,6 +143,10 @@ export interface AgentSessionConfig {
 	executionLoopMode?: ExecutionLoopMode;
 	/** Objective execution controller for deterministic loop authority and route evaluation. */
 	objectiveExecutionController?: ObjectiveExecutionController;
+	/** System One steering plane driving semantic validation and certification. */
+	steeringPlane?: SystemOneSteeringPlane;
+	/** Diagnostic readiness gate for adaptive runtime components. */
+	adaptiveReadiness?: AdaptiveRuntimeReadiness;
 }
 
 export interface ExtensionBindings {
