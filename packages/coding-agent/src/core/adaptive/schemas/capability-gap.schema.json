@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:adaptive:capability-gap:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "gap_id",
+    "objective_id",
+    "required_outcome",
+    "required_inputs",
+    "required_outputs",
+    "proof_obligations",
+    "existing_candidates_rejected"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "gap_id": {
+      "type": "string"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "required_outcome": {
+      "type": "string"
+    },
+    "required_inputs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "required_outputs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "side_effects": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "authority_needs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "proof_obligations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "expected_reuse": {
+      "enum": [
+        "one_shot",
+        "session",
+        "project",
+        "global",
+        "unknown"
+      ]
+    },
+    "failure_evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "existing_candidates_rejected": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  }
+}

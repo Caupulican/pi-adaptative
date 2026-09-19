@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:steering:worker-mission:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mission_id",
+    "objective_id",
+    "task_id",
+    "work_class",
+    "steering_certificate_ids",
+    "steering_state_digest",
+    "proof_obligations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "mission_id": {
+      "type": "string"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "attempt_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "work_class": {
+      "enum": [
+        "investigate",
+        "implement",
+        "verify",
+        "review",
+        "replan",
+        "build_capability",
+        "repair_capability"
+      ]
+    },
+    "steering_certificate_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "steering_state_digest": {
+      "type": "string"
+    },
+    "requirement_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "hypothesis_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "proof_obligations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "capability_gap_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "capability_spec_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "failed_gate_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "forbidden_strategy_fingerprints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verified_fact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "relevant_resource_pointer_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

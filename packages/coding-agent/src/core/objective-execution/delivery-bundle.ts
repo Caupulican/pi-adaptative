@@ -1,6 +1,7 @@
 export type DeliveryTerminalStatus =
 	| "complete"
 	| "blocked_external"
+	| "blocked_by_initial_authority"
 	| "owner_required"
 	| "budget_exhausted"
 	| "cancelled"
@@ -31,6 +32,14 @@ export interface DeliveryBundle {
 	readonly artifacts: readonly DeliveryArtifact[];
 	readonly limitations: readonly string[];
 	readonly decision_refs?: readonly string[];
+	readonly steering_certificate_refs?: readonly string[];
+	readonly specialist_refs?: readonly string[];
+	readonly capability_refs?: readonly string[];
+	readonly responsibility_disposition_refs?: readonly string[];
+	readonly waiver_refs?: readonly string[];
+	readonly final_commit?: string;
+	readonly push_refs?: readonly string[];
+	readonly publication_refs?: readonly string[];
 	readonly usage?: Record<string, unknown>;
 	readonly assurance_profile_requested?: string;
 	readonly assurance_profile_used?: string;
@@ -58,6 +67,14 @@ export function buildDeliveryBundle(input: {
 	readonly requiredNextProof?: readonly string[];
 	readonly changedFiles?: readonly string[];
 	readonly diffDigest?: string;
+	readonly steeringCertificateRefs?: readonly string[];
+	readonly specialistRefs?: readonly string[];
+	readonly capabilityRefs?: readonly string[];
+	readonly responsibilityDispositionRefs?: readonly string[];
+	readonly waiverRefs?: readonly string[];
+	readonly finalCommit?: string;
+	readonly pushRefs?: readonly string[];
+	readonly publicationRefs?: readonly string[];
 }): DeliveryBundle {
 	return {
 		schema_version: "2.0",
@@ -69,6 +86,14 @@ export function buildDeliveryBundle(input: {
 		artifacts: input.artifacts ?? [],
 		limitations: input.limitations ?? [],
 		decision_refs: input.decisionRefs,
+		steering_certificate_refs: input.steeringCertificateRefs,
+		specialist_refs: input.specialistRefs,
+		capability_refs: input.capabilityRefs,
+		responsibility_disposition_refs: input.responsibilityDispositionRefs,
+		waiver_refs: input.waiverRefs,
+		final_commit: input.finalCommit,
+		push_refs: input.pushRefs,
+		publication_refs: input.publicationRefs,
 		usage: input.usage,
 		assurance_profile_requested: input.assuranceProfileRequested,
 		assurance_profile_used: input.assuranceProfileUsed,

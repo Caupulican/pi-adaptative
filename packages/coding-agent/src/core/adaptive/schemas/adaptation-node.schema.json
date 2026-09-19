@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:adaptive:adaptation-node:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "node_id",
+    "kind",
+    "fingerprint",
+    "certificate_refs",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "node_id": {
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "strategy_change",
+        "expert_reroute",
+        "specialist_spec",
+        "capability_spec",
+        "runtime_patch",
+        "dedup_restructure"
+      ]
+    },
+    "fingerprint": {
+      "type": "string"
+    },
+    "parent_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "certificate_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "status": {
+      "enum": [
+        "planned",
+        "active",
+        "satisfied",
+        "failed",
+        "discarded"
+      ]
+    },
+    "created_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

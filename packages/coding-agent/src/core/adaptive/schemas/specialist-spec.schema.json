@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:adaptive:specialist-spec:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "specialist_id",
+    "version",
+    "objective_id",
+    "purpose",
+    "authority_role",
+    "specialties",
+    "mission",
+    "cognitive_requirements",
+    "required_capabilities",
+    "required_tools",
+    "required_skills",
+    "resource_profiles",
+    "context_policy",
+    "proof_obligations",
+    "lifetime"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "specialist_id": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "purpose": {
+      "type": "string"
+    },
+    "authority_role": {
+      "type": "string"
+    },
+    "specialties": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "mission": {
+      "type": "string"
+    },
+    "cognitive_requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reasoning",
+        "vision",
+        "long_context",
+        "tool_calling"
+      ],
+      "properties": {
+        "reasoning": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "vision": {
+          "type": "boolean"
+        },
+        "long_context": {
+          "type": "boolean"
+        },
+        "tool_calling": {
+          "type": "boolean"
+        }
+      }
+    },
+    "required_capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "required_tools": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "required_skills": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "resource_profiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "context_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "requirement_ids",
+        "evidence_ids"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "fresh",
+            "forked"
+          ]
+        },
+        "requirement_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "proof_obligations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "forbidden_strategies": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "independence_level": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "lifetime": {
+      "enum": [
+        "one_task",
+        "session",
+        "project",
+        "global"
+      ]
+    },
+    "retention_criteria": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

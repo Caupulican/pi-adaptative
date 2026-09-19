@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:adaptive:specialist-record:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "specialist_id",
+    "spec_version",
+    "state",
+    "profile_ids",
+    "certificate_refs",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "specialist_id": {
+      "type": "string"
+    },
+    "spec_version": {
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "candidate",
+        "materialized_task",
+        "active_task",
+        "retained_session",
+        "retained_project",
+        "retained_global",
+        "repair_required",
+        "demoted",
+        "retired",
+        "discarded"
+      ]
+    },
+    "profile_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "certificate_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "attempt_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "success_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "failure_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "updated_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:adaptive:worker-adaptation-signal:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "signal_id",
+    "attempt_id",
+    "need_kind",
+    "description",
+    "evidence_refs"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "signal_id": {
+      "type": "string"
+    },
+    "attempt_id": {
+      "type": "string"
+    },
+    "need_kind": {
+      "enum": [
+        "specialist",
+        "capability",
+        "context",
+        "expert_reroute",
+        "strategy",
+        "runtime",
+        "dedup_restructure"
+      ]
+    },
+    "description": {
+      "type": "string"
+    },
+    "suggested_specialties": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "blocking": {
+      "type": "boolean"
+    }
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:dedup:intentional-duplication-waiver:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "waiver_id",
+    "objective_id",
+    "responsibility_scope",
+    "reason",
+    "source",
+    "expires_with_objective"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "waiver_id": {
+      "type": "string"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "responsibility_scope": {
+      "type": "string"
+    },
+    "allowed_locations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reason": {
+      "type": "string"
+    },
+    "source": {
+      "enum": [
+        "user_objective",
+        "owner_policy"
+      ]
+    },
+    "expires_with_objective": {
+      "type": "boolean"
+    }
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:adaptive:capability-record:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "capability_id",
+    "version",
+    "kind",
+    "state",
+    "artifact_digest",
+    "certificate_refs",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "capability_id": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "candidate",
+        "verified",
+        "active_ephemeral",
+        "active_session",
+        "active_project",
+        "active_global",
+        "repair_required",
+        "demoted",
+        "retired",
+        "discarded"
+      ]
+    },
+    "artifact_uri": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "artifact_digest": {
+      "type": "string"
+    },
+    "certificate_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "usage_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "success_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "failure_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "updated_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

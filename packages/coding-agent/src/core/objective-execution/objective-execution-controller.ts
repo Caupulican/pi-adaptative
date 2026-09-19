@@ -5,6 +5,11 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type {
+	AdaptiveCapabilityController,
+	AdaptiveResolutionController,
+	SpecialistSynthesisController,
+} from "../adaptive/index.ts";
 import type { AuthorityEnvelope, ProposedAction } from "../autonomy/authority-envelope.ts";
 import {
 	compileExecutionCharter,
@@ -17,6 +22,7 @@ import { DecisionActionPolicy } from "../decision/action-policy.ts";
 import type { DecisionEngineRouter } from "../decision/engine-router.ts";
 import type { CompletionAssuranceProfile } from "../decision/policy.ts";
 import { createDecisionProgram } from "../decision/program.ts";
+import type { SemanticResponsibilityController } from "../dedup/index.ts";
 import type {
 	ExpertBinding,
 	ExpertOutcomeRecorder,
@@ -25,6 +31,7 @@ import type {
 } from "../expert-routing/index.ts";
 import { buildWorkerCapabilityRequest, NoEligibleExpertError } from "../expert-routing/index.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import type { SystemOneSteeringPlane } from "../steering/index.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
 import {
 	CompletionCoordinator,
@@ -121,13 +128,19 @@ export interface ObjectiveExecutionControllerDeps {
 	executionCharter?: ExecutionCharter;
 	authorityBlockLedger?: DurableAuthorityBlockLedger;
 	gitExecutor?: {
-		commit?(): Promise<void>;
+		commit?(message?: string): Promise<void>;
 		push?(): Promise<void>;
+		tag?(name?: string): Promise<void>;
 	};
 	releaseExecutor?: {
 		publish?(): Promise<void>;
 		deploy?(target: string): Promise<void>;
 	};
+	steeringPlane?: SystemOneSteeringPlane;
+	adaptiveResolution?: AdaptiveResolutionController;
+	specialistSynthesis?: SpecialistSynthesisController;
+	adaptiveCapabilities?: AdaptiveCapabilityController;
+	responsibilityController?: SemanticResponsibilityController;
 	onDisagreementTelemetry?(event: DisagreementTelemetryEvent): void;
 	onHumanEdgeRequest?(request: HumanEdgeRequest): Promise<boolean> | boolean;
 	getRouteProposedAction?(route: ObjectiveRoute): ProposedAction;
@@ -486,7 +499,7 @@ export class ObjectiveExecutionController {
 						missingAuthority: charterDecision.missingAuthority,
 						alternativesAttempted: ["replan"],
 					});
-					const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
+					const bundle = await this.buildBundle(objectiveId, "blocked_by_initial_authority", runtime, {
 						reasonCodes: ["blocked_by_initial_authority", charterDecision.missingAuthority],
 					});
 					return {
@@ -616,6 +629,41 @@ export class ObjectiveExecutionController {
 					break;
 
 				case "escalate_capability": {
+					if (this.deps.adaptiveResolution) {
+						const resolution = await this.deps.adaptiveResolution.resolve({
+							objectiveId,
+							taskId: `${objectiveId}-adapt-${this.cycleCounter}`,
+							currentExpert: this._lastBinding?.model_id,
+							signal,
+						});
+
+						if (resolution.dimension === "specialist" && this.deps.specialistSynthesis) {
+							await this.deps.specialistSynthesis.resolveOrCreate({
+								objectiveId,
+								taskId: `${objectiveId}-spec-${this.cycleCounter}`,
+								need: {
+									specialty: "domain_specialist",
+									purpose: "Specialized domain implementation",
+								},
+								charter,
+								signal,
+							});
+							break;
+						}
+
+						if (resolution.dimension === "capability" && this.deps.adaptiveCapabilities) {
+							await this.deps.adaptiveCapabilities.resolveOrBuild({
+								objectiveId,
+								taskId: `${objectiveId}-cap-${this.cycleCounter}`,
+								need: {
+									requiredOutcome: "escalated_tool_capability",
+								},
+								charter,
+								signal,
+							});
+							break;
+						}
+					}
 					const failure = await this._dispatchWithExpertSelection(objectiveId, route, runtime, true, signal);
 					if (failure) return failure;
 					break;
@@ -638,7 +686,7 @@ export class ObjectiveExecutionController {
 										return {
 											passed: verdict.verdict === "complete",
 											decisionRef: (verdict as { decision_id?: string }).decision_id,
-											failedGates: verdict.failed_gates.map((g) => g.id),
+											failedGates: (verdict.failed_gates ?? []).map((g) => g.id),
 										};
 									},
 								}
@@ -657,6 +705,69 @@ export class ObjectiveExecutionController {
 					});
 
 					if (evalResult.verdict === "complete") {
+						// S1A-219, S1A-220, S1A-221: Cold final semantic-dedup sweep before completion
+						if (this.deps.responsibilityController) {
+							try {
+								await this.deps.responsibilityController.completionSweep({ objectiveId, signal });
+							} catch (err: unknown) {
+								const failureReason = err instanceof Error ? err.message : "semantic_duplicate_remaining";
+								const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
+									reasonCodes: ["semantic_duplicate_remaining", failureReason],
+								});
+								return {
+									status: "unrecoverable",
+									reasonCodes: ["semantic_duplicate_remaining"],
+									cycleCount: this.cycleCounter,
+									deliveryBundle: bundle,
+								};
+							}
+						}
+
+						// S1A-131, S1A-132, S1A-134, S1A-135: Steering certificates for completion
+						const steeringCertRefs: string[] = [];
+						if (this.deps.steeringPlane) {
+							try {
+								const c24 = await this.deps.steeringPlane.requireCertificate(
+									"JEV-024",
+									{ objectiveId, complete: true },
+									{ objectiveId, signal },
+								);
+								const c25 = await this.deps.steeringPlane.requireCertificate(
+									"JEV-025",
+									{ objectiveId, complete: true },
+									{ objectiveId, signal },
+								);
+								const c26 = await this.deps.steeringPlane.requireCertificate(
+									"JEV-026",
+									{ objectiveId, complete: true },
+									{ objectiveId, signal },
+								);
+								const c27 = await this.deps.steeringPlane.requireCertificate(
+									"JEV-027",
+									{ objectiveId, complete: true },
+									{ objectiveId, signal },
+								);
+								steeringCertRefs.push(
+									c24.certificate_id,
+									c25.certificate_id,
+									c26.certificate_id,
+									c27.certificate_id,
+								);
+							} catch {
+								if (this.deps.steeringPlane.policy.mode === "system_one_required") {
+									const bundle = await this.buildBundle(objectiveId, "semantic_gate_unavailable", runtime, {
+										reasonCodes: ["system_one_required_but_unavailable"],
+									});
+									return {
+										status: "semantic_gate_unavailable",
+										reasonCodes: ["system_one_required_but_unavailable"],
+										cycleCount: this.cycleCounter,
+										deliveryBundle: bundle,
+									};
+								}
+							}
+						}
+
 						await this._recordCompletionOutcomes(objectiveId, route, { verificationPassed: true });
 
 						const activeCharter =
@@ -669,7 +780,18 @@ export class ObjectiveExecutionController {
 							if (activeCharter.git.push && this.deps.gitExecutor?.push) {
 								await this.deps.gitExecutor.push();
 							}
+							if (activeCharter.git.create_tag && this.deps.gitExecutor?.tag) {
+								await this.deps.gitExecutor.tag();
+							}
 							if (activeCharter.release.package_publish && this.deps.releaseExecutor?.publish) {
+								if (this.deps.steeringPlane) {
+									const c28 = await this.deps.steeringPlane.requireCertificate(
+										"JEV-028",
+										{ objectiveId, publishReady: true },
+										{ objectiveId, signal },
+									);
+									steeringCertRefs.push(c28.certificate_id);
+								}
 								await this.deps.releaseExecutor.publish();
 							}
 							if (activeCharter.release.deploy_targets.length > 0 && this.deps.releaseExecutor?.deploy) {
@@ -679,12 +801,34 @@ export class ObjectiveExecutionController {
 							}
 						}
 
+						const bundleBase =
+							evalResult.deliveryBundle ?? (await this.buildBundle(objectiveId, "complete", runtime));
+						const enrichedBundle = buildDeliveryBundle({
+							objectiveId,
+							terminalStatus: "complete",
+							sourceRevision: bundleBase.source_revision,
+							acceptance: bundleBase.acceptance,
+							verification: bundleBase.verification,
+							artifacts: bundleBase.artifacts,
+							limitations: bundleBase.limitations,
+							decisionRefs: bundleBase.decision_refs,
+							steeringCertificateRefs: steeringCertRefs.length > 0 ? steeringCertRefs : undefined,
+							usage: bundleBase.usage,
+							assuranceProfileRequested: bundleBase.assurance_profile_requested,
+							assuranceProfileUsed: bundleBase.assurance_profile_used,
+							reviewerRefs: bundleBase.reviewer_refs,
+							failedGates: bundleBase.failed_gates,
+							requiredNextProof: bundleBase.required_next_proof,
+							changedFiles: bundleBase.changed_files,
+							diffDigest: bundleBase.diff_digest,
+						});
+
 						return {
 							status: "complete",
 							reasonCodes: ["completion_passed"],
 							completionDecisionId: evalResult.semanticRefs?.[0],
 							cycleCount: this.cycleCounter,
-							deliveryBundle: evalResult.deliveryBundle,
+							deliveryBundle: enrichedBundle,
 						};
 					}
 

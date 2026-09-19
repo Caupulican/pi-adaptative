@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:adaptive:capability-spec:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "capability_id",
+    "version",
+    "kind",
+    "lifetime",
+    "purpose",
+    "interface",
+    "side_effects",
+    "denied_behavior",
+    "proof",
+    "activation",
+    "rollback"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "capability_id": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "composition",
+        "ephemeral_script",
+        "toolkit_script",
+        "tool",
+        "skill",
+        "extension",
+        "integration",
+        "provider_adapter",
+        "runtime_patch"
+      ]
+    },
+    "lifetime": {
+      "enum": [
+        "one_shot",
+        "session",
+        "project",
+        "global"
+      ]
+    },
+    "purpose": {
+      "type": "string"
+    },
+    "interface": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "preconditions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "side_effects": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "denied_behavior": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "authority_requirements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "proof": {
+      "type": "object",
+      "required": [
+        "deterministic_tests",
+        "task_specific_test"
+      ],
+      "properties": {
+        "deterministic_tests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "task_specific_test": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "activation": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:dedup:responsibility-disposition:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "disposition_id",
+    "objective_id",
+    "proposed_responsibility",
+    "candidate_ids",
+    "outcome",
+    "certificate_refs"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "disposition_id": {
+      "type": "string"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "proposed_responsibility": {
+      "type": "string"
+    },
+    "candidate_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "outcome": {
+      "enum": [
+        "unique",
+        "reuse_existing",
+        "extend_existing",
+        "extract_shared",
+        "separate_required",
+        "insufficient_evidence"
+      ]
+    },
+    "target_responsibility_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "certificate_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "waiver_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:steering:certificate:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "certificate_id",
+    "objective_id",
+    "checkpoint_id",
+    "state_digest",
+    "evidence_revision",
+    "policy",
+    "question_pack",
+    "engine",
+    "answers",
+    "directive",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "certificate_id": {
+      "type": "string"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "work_unit_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "checkpoint_id": {
+      "type": "string"
+    },
+    "state_digest": {
+      "type": "string"
+    },
+    "evidence_revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "policy": {
+      "type": "object",
+      "required": [
+        "id",
+        "version",
+        "digest"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "question_pack": {
+      "type": "object",
+      "required": [
+        "id",
+        "version",
+        "digest"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "engine": {
+      "type": "object",
+      "required": [
+        "provider",
+        "model"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "answers": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "directive": {
+      "type": "string"
+    },
+    "policy_result": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "parent_certificate_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "created_at": {
+      "type": "string"
+    }
+  }
+}

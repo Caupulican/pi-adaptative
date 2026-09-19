@@ -3,6 +3,7 @@
  */
 
 export type { CompactionResult } from "@caupulican/pi-agent-core/compaction/compaction";
+export * from "./adaptive/index.ts";
 export {
 	AgentSession,
 	type AgentSessionConfig,
@@ -30,7 +31,11 @@ export {
 	createAgentSessionFromServices,
 	createAgentSessionServices,
 } from "./agent-session-services.ts";
+export * from "./autonomy/authority-envelope.ts";
+export * from "./autonomy/execution-charter.ts";
+export * from "./autonomy/human-edge.ts";
 export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+export * from "./dedup/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";
 // Extensions system
 export {
@@ -79,6 +84,7 @@ export {
 } from "./extensions/index.ts";
 export { discoverAndLoadExtensions } from "./extensions/loader.ts";
 export * from "./hooks/index.ts";
+export * from "./objective-execution/index.ts";
 export * from "./orchestration/capability-gateway.ts";
 export * from "./orchestration/contracts.ts";
 export * from "./orchestration/event-store.ts";
@@ -88,6 +94,7 @@ export * from "./orchestration/profile-registry.ts";
 export * from "./orchestration/profile-store.ts";
 export * from "./orchestration/task-runtime.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";
+export * from "./steering/index.ts";
 export type {
 	Change,
 	Claim,
