@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:hmoe:expert-descriptor:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "expert_id",
+    "provider",
+    "model_id",
+    "role",
+    "thinking_level",
+    "runtime_kind"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "expert_id": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model_id": {
+      "type": "string"
+    },
+    "role": {
+      "type": "string"
+    },
+    "thinking_level": {
+      "type": "string"
+    },
+    "runtime_kind": {
+      "enum": [
+        "remote",
+        "local",
+        "managed-local"
+      ]
+    },
+    "capability_class": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "capability_tier": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tool_names": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "resource_profiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "context_window": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "privacy_class": {
+      "enum": [
+        "remote_allowed",
+        "local_preferred",
+        "local_only"
+      ]
+    },
+    "host_key": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "identity_digest": {
+      "type": "string"
+    }
+  }
+}

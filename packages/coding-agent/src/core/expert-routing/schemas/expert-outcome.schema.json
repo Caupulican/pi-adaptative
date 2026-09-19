@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:hmoe:expert-outcome:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "outcome_id",
+    "expert_id",
+    "request_digest",
+    "task_id",
+    "work_class",
+    "success_class",
+    "failure_cause"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "outcome_id": {
+      "type": "string"
+    },
+    "expert_id": {
+      "type": "string"
+    },
+    "request_digest": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "work_class": {
+      "type": "string"
+    },
+    "success_class": {
+      "enum": [
+        "accepted",
+        "partial_useful",
+        "rejected",
+        "blocked_external",
+        "environment_failure",
+        "routing_failure",
+        "worker_contract_failure",
+        "cancelled"
+      ]
+    },
+    "failure_cause": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "external_failure": {
+      "type": "boolean"
+    },
+    "semantic_progress": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "repair_rounds_caused": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "verification_passed": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "verifier_rejected": {
+      "type": "boolean"
+    },
+    "cost_usd": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "latency_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "input_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "output_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

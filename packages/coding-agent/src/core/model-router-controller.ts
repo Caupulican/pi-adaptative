@@ -44,6 +44,8 @@ import type {
 import type { RouteDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import { latestUserPromptText } from "./context/message-text.ts";
+import { buildWorkerCapabilityRequest } from "./expert-routing/request-builder.ts";
+import type { ExpertSelectionService } from "./expert-routing/service.ts";
 import { runIsolatedTextCompletion } from "./isolated-text-completion.ts";
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -167,6 +169,8 @@ export interface ModelRouterControllerDeps {
 	 * when never probed. Tier-resolution's consultation reads this ONLY for local/managed models
 	 * ({@link isLocalOrManagedRouterModel}); cloud models never call it. */
 	getToolProbeVerdict(model: Model<Api>): ModelToolProbeVerdict | undefined;
+	/** Optional shared expert selection service for exact model/expert resolution (H-MoE, HMOE-012). */
+	expertSelector?: ExpertSelectionService;
 }
 
 /**
@@ -577,19 +581,55 @@ export class ModelRouterController {
 	}
 
 	/**
-	 * Router resolution with the routing judge (auto-on with the router): the regex classifier's
-	 * decision is the baseline; when a judge model resolves (judgeModel, else mediumModel), one
-	 * bounded, tool-less completion may move the tier between cheap/medium/expensive — never to
-	 * learning. Core rule encoded in the judge prompt: planning is never cheap unless genuinely
-	 * trivial. Every fallback stays visible in the decision reasons, and judge spend reports
-	 * through spawned-usage accounting.
+	 * Resolves an exact expert model through the shared ExpertSelectionService (H-MoE, HMOE-012).
 	 */
+	async resolveExpertTurnModel(
+		tier: "cheap" | "medium" | "expensive",
+		prompt: string,
+		signal?: AbortSignal,
+	): Promise<Model<Api> | undefined> {
+		if (!this.deps.expertSelector) return undefined;
+		try {
+			const workClass = tier === "cheap" ? "retrieve" : "implement";
+			const consequence = tier === "expensive" ? "critical" : tier === "cheap" ? "low" : "medium";
+			const request = buildWorkerCapabilityRequest({
+				objectiveId: "foreground-session",
+				taskId: `fg-${Date.now().toString(36)}`,
+				workClass,
+				consequence,
+				decisionSignals: { suggestedTier: tier },
+				metadata: { prompt },
+			});
+			const selection = await this.deps.expertSelector.select(request, { signal });
+			const chosen = selection.primary;
+			const model = this.deps.getModelRegistry().find(chosen.provider, chosen.model_id);
+			if (model && this.deps.getModelRegistry().hasConfiguredAuth(model) && !this.deps.isModelExhausted(model)) {
+				return model;
+			}
+		} catch {
+			// fall back to default resolution
+		}
+		return undefined;
+	}
+
 	async resolveTurnRouteJudged(
 		prompt: string,
 		options?: { skipJudge?: boolean },
 	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
 		const baseline = this._resolveModelRouterTurnRoute(prompt);
 		if (!baseline) return undefined;
+
+		if (this.deps.expertSelector) {
+			const targetTier = baseline.decision.tier;
+			if (targetTier === "cheap" || targetTier === "medium" || targetTier === "expensive") {
+				const expertModel = await this.resolveExpertTurnModel(targetTier, prompt, this.deps.getReflectionSignal());
+				if (expertModel) {
+					baseline.decision.model = formatModelRouterModel(expertModel);
+					baseline.model = expertModel;
+				}
+			}
+		}
+
 		if (options?.skipJudge) return baseline;
 		// Deterministic executor routes need no judge (Level-0 already decided).
 		if (baseline.decision.reasonCode === "executor_direct") return baseline;
@@ -668,6 +708,14 @@ export class ModelRouterController {
 		if (judgedTier !== "cheap" && judgedTier !== "medium" && judgedTier !== "expensive") {
 			return { decision: baseline.decision, model: baseline.model };
 		}
+
+		if (this.deps.expertSelector) {
+			const expertModel = await this.resolveExpertTurnModel(judgedTier, prompt, this.deps.getReflectionSignal());
+			if (expertModel) {
+				return { decision: { ...judged.decision, model: formatModelRouterModel(expertModel) }, model: expertModel };
+			}
+		}
+
 		const judgedModel = this.resolveConfiguredTierModel(judgedTier);
 		if (!judgedModel) {
 			return {

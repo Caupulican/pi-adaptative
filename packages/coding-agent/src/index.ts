@@ -82,6 +82,8 @@ export { NativeProviderRegistry, type NativeProviderStrategy } from "./core/coll
 export * from "./core/decision/index.ts";
 export { mapToolNamesForPlatform } from "./core/default-tool-surface.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
+// Harness Mixture of Experts (H-MoE) Expert Routing Substrate
+export * from "./core/expert-routing/index.ts";
 // Extension system
 export type {
 	AgentEndEvent,

@@ -11,6 +11,13 @@ import { DecisionActionPolicy } from "../decision/action-policy.ts";
 import type { DecisionEngineRouter } from "../decision/engine-router.ts";
 import type { CompletionAssuranceProfile } from "../decision/policy.ts";
 import { createDecisionProgram } from "../decision/program.ts";
+import type {
+	ExpertBinding,
+	ExpertOutcomeRecorder,
+	ExpertSelectionResult,
+	ExpertSelectionService,
+} from "../expert-routing/index.ts";
+import { buildWorkerCapabilityRequest, NoEligibleExpertError } from "../expert-routing/index.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
 import {
@@ -98,10 +105,12 @@ export interface ObjectiveExecutionControllerDeps {
 		execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void>;
 	};
 	workerDispatcher?: {
-		dispatch(route: ObjectiveRoute, signal?: AbortSignal): Promise<void>;
-		continueWorker(route: ObjectiveRoute, signal?: AbortSignal): Promise<void>;
-		dispatchEscalated(route: ObjectiveRoute, signal?: AbortSignal): Promise<void>;
+		dispatch(route: ObjectiveRoute, signal?: AbortSignal, binding?: ExpertBinding): Promise<void>;
+		continueWorker(route: ObjectiveRoute, signal?: AbortSignal, binding?: ExpertBinding): Promise<void>;
+		dispatchEscalated(route: ObjectiveRoute, signal?: AbortSignal, binding?: ExpertBinding): Promise<void>;
 	};
+	expertSelector?: ExpertSelectionService;
+	outcomeRecorder?: ExpertOutcomeRecorder;
 	mode?: ExecutionLoopMode;
 	onDisagreementTelemetry?(event: DisagreementTelemetryEvent): void;
 	onHumanEdgeRequest?(request: HumanEdgeRequest): Promise<boolean> | boolean;
@@ -230,6 +239,7 @@ export class ObjectiveExecutionController {
 	private readonly defaultStallDetector: ObjectiveStallDetector;
 	private readonly humanEdgeLedger: DurableHumanEdgeLedger;
 	private cycleCounter = 0;
+	private _lastBinding?: ExpertBinding;
 
 	constructor(deps: ObjectiveExecutionControllerDeps) {
 		this.deps = deps;
@@ -520,18 +530,11 @@ export class ObjectiveExecutionController {
 				case "implement":
 				case "verify":
 				case "review":
-				case "replan":
-					if (!this.deps.workerDispatcher?.dispatch) {
-						const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime);
-						return {
-							status: "unrecoverable",
-							reasonCodes: ["missing_required_executor:workerDispatcher.dispatch"],
-							cycleCount: this.cycleCounter,
-							deliveryBundle: bundle,
-						};
-					}
-					await this.deps.workerDispatcher.dispatch(route, signal);
+				case "replan": {
+					const failure = await this._dispatchWithExpertSelection(objectiveId, route, runtime, false, signal);
+					if (failure) return failure;
 					break;
+				}
 
 				case "continue_current_worker":
 					if (!this.deps.workerDispatcher?.continueWorker) {
@@ -543,21 +546,14 @@ export class ObjectiveExecutionController {
 							deliveryBundle: bundle,
 						};
 					}
-					await this.deps.workerDispatcher.continueWorker(route, signal);
+					await this.deps.workerDispatcher.continueWorker(route, signal, this._lastBinding);
 					break;
 
-				case "escalate_capability":
-					if (!this.deps.workerDispatcher?.dispatchEscalated) {
-						const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime);
-						return {
-							status: "unrecoverable",
-							reasonCodes: ["missing_required_executor:workerDispatcher.dispatchEscalated"],
-							cycleCount: this.cycleCounter,
-							deliveryBundle: bundle,
-						};
-					}
-					await this.deps.workerDispatcher.dispatchEscalated(route, signal);
+				case "escalate_capability": {
+					const failure = await this._dispatchWithExpertSelection(objectiveId, route, runtime, true, signal);
+					if (failure) return failure;
 					break;
+				}
 
 				case "completion_candidate": {
 					// FIN-060: Single completion owner via CompletionCoordinator
@@ -595,6 +591,18 @@ export class ObjectiveExecutionController {
 					});
 
 					if (evalResult.verdict === "complete") {
+						if (this.deps.outcomeRecorder && this._lastBinding) {
+							await this.deps.outcomeRecorder.record({
+								binding: this._lastBinding,
+								request: buildWorkerCapabilityRequest({
+									objectiveId,
+									taskId: `${objectiveId}-completion-${this.cycleCounter}`,
+									route,
+									consequence: "critical",
+								}),
+								verificationPassed: true,
+							});
+						}
 						return {
 							status: "complete",
 							reasonCodes: ["completion_passed"],
@@ -602,6 +610,20 @@ export class ObjectiveExecutionController {
 							cycleCount: this.cycleCounter,
 							deliveryBundle: evalResult.deliveryBundle,
 						};
+					}
+
+					if (this.deps.outcomeRecorder && this._lastBinding && evalResult.failedGates.length > 0) {
+						await this.deps.outcomeRecorder.record({
+							binding: this._lastBinding,
+							request: buildWorkerCapabilityRequest({
+								objectiveId,
+								taskId: `${objectiveId}-completion-${this.cycleCounter}`,
+								route,
+								consequence: "critical",
+							}),
+							completionChallengeRejected: true,
+							repairRoundsCaused: evalResult.failedGates.length,
+						});
 					}
 
 					if (evalResult.verdict === "semantic_gate_unavailable") {
@@ -685,6 +707,77 @@ export class ObjectiveExecutionController {
 				await this.deps.runtime.requestReplan?.(objectiveId, stall);
 			}
 		}
+	}
+
+	private async _dispatchWithExpertSelection(
+		objectiveId: string,
+		route: ObjectiveRoute,
+		runtime: TaskRuntimeProjection,
+		escalated: boolean,
+		signal?: AbortSignal,
+	): Promise<ObjectiveTerminalResult | undefined> {
+		const dispatcher = escalated
+			? this.deps.workerDispatcher?.dispatchEscalated
+			: this.deps.workerDispatcher?.dispatch;
+		const missingCode = escalated
+			? "missing_required_executor:workerDispatcher.dispatchEscalated"
+			: "missing_required_executor:workerDispatcher.dispatch";
+
+		if (!dispatcher) {
+			const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime);
+			return {
+				status: "unrecoverable",
+				reasonCodes: [missingCode],
+				cycleCount: this.cycleCounter,
+				deliveryBundle: bundle,
+			};
+		}
+
+		let binding: ExpertBinding | undefined;
+		let selectionResult: ExpertSelectionResult | undefined;
+		if (this.deps.expertSelector) {
+			const priorAttempts = Object.values(runtime.attempts);
+			const consequence = escalated
+				? "critical"
+				: route.route === "verify" || route.route === "review"
+					? "high"
+					: "medium";
+			const request = buildWorkerCapabilityRequest({
+				objectiveId,
+				taskId: `${objectiveId}-${escalated ? "escalate" : route.route}-${this.cycleCounter}`,
+				route,
+				consequence,
+				decisionSignals: escalated ? { capabilityEscalationRequired: true } : undefined,
+				priorAttempts,
+			});
+			try {
+				selectionResult = await this.deps.expertSelector.select(request, { signal });
+				binding = selectionResult.primary;
+				this._lastBinding = binding;
+			} catch (error) {
+				if (error instanceof NoEligibleExpertError) {
+					const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
+						reasonCodes: ["no_eligible_expert", ...error.rejectedCandidates.flatMap((r) => r.reasonCodes)],
+					});
+					return {
+						status: "unrecoverable",
+						reasonCodes: ["no_eligible_expert"],
+						cycleCount: this.cycleCounter,
+						deliveryBundle: bundle,
+					};
+				}
+				throw error;
+			}
+		}
+
+		try {
+			await dispatcher(route, signal, binding);
+		} finally {
+			if (selectionResult && this.deps.expertSelector) {
+				this.deps.expertSelector.release(selectionResult);
+			}
+		}
+		return undefined;
 	}
 
 	async runToDelivery(objectiveId: string, signal?: AbortSignal): Promise<DeliveryBundle> {

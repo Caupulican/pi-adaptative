@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:hmoe:selection-trace:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "trace_id",
+    "request_digest",
+    "policy_version",
+    "candidates",
+    "selected_expert_ids"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "trace_id": {
+      "type": "string"
+    },
+    "request_digest": {
+      "type": "string"
+    },
+    "policy_version": {
+      "type": "string"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "selected_expert_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "selection_mode": {
+      "enum": [
+        "single",
+        "primary_critic",
+        "parallel_scouts",
+        "independent_verifier",
+        "committee"
+      ]
+    },
+    "owner_pin_applied": {
+      "type": "boolean"
+    },
+    "exploration": {
+      "type": "boolean"
+    },
+    "created_at": {
+      "type": "string"
+    }
+  }
+}

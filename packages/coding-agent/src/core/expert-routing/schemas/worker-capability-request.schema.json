@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:hmoe:worker-capability-request:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "request_id",
+    "objective_id",
+    "task_id",
+    "work_class",
+    "worker_role",
+    "consequence"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "work_class": {
+      "enum": [
+        "retrieve",
+        "investigate",
+        "implement",
+        "deterministic_test",
+        "verify",
+        "review",
+        "replan"
+      ]
+    },
+    "worker_role": {
+      "type": "string"
+    },
+    "consequence": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "task_signature": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "required_capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "required_tools": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "minimum_context_window": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "fresh_context_required": {
+      "type": "boolean"
+    },
+    "independence_level": {
+      "enum": [
+        "none",
+        "fresh_context",
+        "distinct_profile",
+        "distinct_model",
+        "distinct_family",
+        "distinct_provider"
+      ]
+    },
+    "excluded_expert_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "excluded_model_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "excluded_providers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "local_only": {
+      "type": "boolean"
+    },
+    "remote_allowed": {
+      "type": "boolean"
+    },
+    "max_cost_usd": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "target_latency_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "capability_escalation_requested": {
+      "type": "boolean"
+    },
+    "failure_signatures": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

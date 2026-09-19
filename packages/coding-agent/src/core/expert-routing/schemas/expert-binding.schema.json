@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:hmoe:expert-binding:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "selection_id",
+    "request_id",
+    "expert_id",
+    "provider",
+    "model_id",
+    "thinking_level",
+    "selection_trace_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "selection_id": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "expert_id": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model_id": {
+      "type": "string"
+    },
+    "thinking_level": {
+      "type": "string"
+    },
+    "role": {
+      "type": "string"
+    },
+    "selection_trace_id": {
+      "type": "string"
+    },
+    "exploration": {
+      "type": "boolean"
+    },
+    "expected_cost_usd": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "expected_latency_ms": {
+      "type": [
+        "number",
+        "null"
+      ]
+    }
+  }
+}

@@ -8,6 +8,8 @@
 - Pluggable decision engine architecture with `DecisionEngineRouter`, `MechanicalDecisionEngine` (zero-credential deterministic fallback), `TypeSafeSystemOneDecisionEngine` (calibrated System One adapter over `jev-1.13.0`), and `StructuredLlmDecisionEngine`.
 - Authority Envelope with human-on-the-edge policy (`edge_only` interaction, `terminal_or_edge` notification) emitting structured `HumanEdgeRequest` payloads when out-of-envelope operations occur.
 - Standardized `DeliveryBundle` (`urn:pi:delivery:bundle:2.0`) packaging verified objective outcomes with completion assurance profiles (`mechanical`, `mechanical_plus_reviewer`, `semantic_enhanced`, `system_one_required`).
+- Harness Mixture of Experts (H-MoE) sparse expert routing substrate with unified selection plane across contracts, dynamic candidate catalog, 16 hard admission filters, explainable feature scoring, team ranking policies (`single`, `parallel_scouts`, `primary_critic`, `independent_verifier`, `committee`), capacity reservations, selection traces, and Beta posterior outcome learning.
+- Shared exact expert selection backend behind `ExpertSelectionService` for both autonomous workers (`ObjectiveExecutionController`) and foreground routed turns (`ModelRouterController`) preserving all legacy model-router behavior and tool escalations.
 
 ### Fixed
 
