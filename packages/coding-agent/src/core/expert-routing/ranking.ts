@@ -9,14 +9,26 @@ import {
 	type ExpertBinding,
 	type ExpertSelectionMode,
 	type ExpertSelectionPlan,
+	NoEligibleExpertError,
 	type ScoredExpertCandidate,
 	type WorkerCapabilityRequest,
 } from "./contracts.ts";
+import { defaultModelFamilyResolver, type ModelFamilyResolver, TeamIndependenceValidator } from "./independence.ts";
 
-export const EXPERT_RANKING_POLICY_VERSION = "1.0" as const;
+export const EXPERT_RANKING_POLICY_VERSION = "1.1" as const;
 
 export class ExpertRankingPolicy {
 	readonly version: string = EXPERT_RANKING_POLICY_VERSION;
+	private readonly validator: TeamIndependenceValidator;
+	private readonly modelFamilyResolver: ModelFamilyResolver;
+
+	constructor(deps?: {
+		validator?: TeamIndependenceValidator;
+		modelFamilyResolver?: ModelFamilyResolver;
+	}) {
+		this.modelFamilyResolver = deps?.modelFamilyResolver ?? defaultModelFamilyResolver;
+		this.validator = deps?.validator ?? new TeamIndependenceValidator(this.modelFamilyResolver);
+	}
 
 	/**
 	 * Ranks scored candidates and materializes bindings according to the selection mode.
@@ -25,69 +37,17 @@ export class ExpertRankingPolicy {
 		request: WorkerCapabilityRequest,
 		candidates: readonly ScoredExpertCandidate[],
 		mode: ExpertSelectionMode = "single",
-		options?: { traceId?: string },
+		options?: { traceId?: string; priorBindings?: readonly ExpertBinding[] },
 	): ExpertSelectionPlan {
 		if (candidates.length === 0) {
 			throw new Error("Cannot rank empty candidate list.");
 		}
 
 		const traceId = options?.traceId ?? randomUUID();
-
-		// Sort candidates by total score descending
 		const sorted = [...candidates].sort((a, b) => b.features.totalScore - a.features.totalScore);
+		const independence = request.independence_level ?? "none";
 
-		let selectedCandidates: ScoredExpertCandidate[] = [];
-
-		switch (mode) {
-			case "single": {
-				selectedCandidates = [sorted[0]];
-				break;
-			}
-			case "parallel_scouts": {
-				// Select up to 2 distinct models/experts for read-only scouting
-				const primary = sorted[0];
-				selectedCandidates = [primary];
-				const secondary = sorted
-					.slice(1)
-					.find((c) => c.candidate.descriptor.model_id !== primary.candidate.descriptor.model_id);
-				if (secondary) {
-					selectedCandidates.push(secondary);
-				} else if (sorted.length > 1) {
-					selectedCandidates.push(sorted[1]);
-				}
-				break;
-			}
-			case "primary_critic": {
-				// Select top primary and top independent critic
-				const primary = sorted[0];
-				selectedCandidates = [primary];
-				const critic = sorted
-					.slice(1)
-					.find((c) => c.candidate.descriptor.model_id !== primary.candidate.descriptor.model_id);
-				if (critic) {
-					selectedCandidates.push(critic);
-				} else if (sorted.length > 1) {
-					selectedCandidates.push(sorted[1]);
-				}
-				break;
-			}
-			case "independent_verifier": {
-				// Select highest scoring expert that satisfies requested independence level
-				selectedCandidates = [sorted[0]];
-				break;
-			}
-			case "committee": {
-				// Max 3 candidates (committee ceiling rule 33)
-				selectedCandidates = sorted.slice(0, Math.min(3, sorted.length));
-				break;
-			}
-			default: {
-				selectedCandidates = [sorted[0]];
-				break;
-			}
-		}
-
-		const bindings: ExpertBinding[] = selectedCandidates.map((sc) => {
+		const toBinding = (sc: ScoredExpertCandidate): ExpertBinding => {
 			const desc = sc.candidate.descriptor;
 			const state = sc.candidate.state;
 			return {
@@ -104,7 +64,107 @@ export class ExpertRankingPolicy {
 				expected_cost_usd: state.estimatedCostUsd ?? null,
 				expected_latency_ms: state.estimatedLatencyMs ?? null,
 			};
+		};
+
+		let selectedCandidates: ScoredExpertCandidate[] = [];
+
+		const findCandidate = (
+			candidates: ScoredExpertCandidate[],
+			existing: ScoredExpertCandidate[],
+		): ScoredExpertCandidate | undefined => {
+			return candidates.find((c) => {
+				const testBindings = [...existing, c].map(toBinding);
+				return this.validator.validate(testBindings, independence, {
+					priorBindings: options?.priorBindings,
+					modelFamilyResolver: this.modelFamilyResolver,
+				}).valid;
+			});
+		};
+
+		switch (mode) {
+			case "single": {
+				selectedCandidates = [sorted[0]];
+				break;
+			}
+			case "parallel_scouts": {
+				const primary = sorted[0];
+				selectedCandidates = [primary];
+
+				const secondary = findCandidate(sorted.slice(1), [primary]);
+				if (secondary) {
+					selectedCandidates.push(secondary);
+				} else if (independence !== "none" && independence !== "fresh_context") {
+					throw new NoEligibleExpertError(request, [
+						{
+							candidate: sorted[0].candidate,
+							reasonCodes: [`insufficient_diversity_for_${independence}`],
+						},
+					]);
+				}
+				break;
+			}
+			case "primary_critic": {
+				const primary = sorted[0];
+				selectedCandidates = [primary];
+
+				const critic = findCandidate(sorted.slice(1), [primary]);
+				if (critic) {
+					selectedCandidates.push(critic);
+				} else if (independence !== "none" && independence !== "fresh_context") {
+					throw new NoEligibleExpertError(request, [
+						{
+							candidate: sorted[0].candidate,
+							reasonCodes: [`no_independent_critic_for_${independence}`],
+						},
+					]);
+				}
+				break;
+			}
+			case "independent_verifier": {
+				const verifierCand = findCandidate(sorted, []);
+				if (!verifierCand) {
+					throw new NoEligibleExpertError(request, [
+						{
+							candidate: sorted[0].candidate,
+							reasonCodes: [`independence_violation_for_${independence}`],
+						},
+					]);
+				}
+				selectedCandidates = [verifierCand];
+				break;
+			}
+			case "committee": {
+				selectedCandidates = [sorted[0]];
+				for (const cand of sorted.slice(1)) {
+					if (selectedCandidates.length >= 3) break;
+					const match = findCandidate([cand], selectedCandidates);
+					if (match) {
+						selectedCandidates.push(match);
+					}
+				}
+				break;
+			}
+			default: {
+				selectedCandidates = [sorted[0]];
+				break;
+			}
+		}
+
+		const bindings: ExpertBinding[] = selectedCandidates.map(toBinding);
+
+		// Final validation of team bindings
+		const finalCheck = this.validator.validate(bindings, independence, {
+			priorBindings: options?.priorBindings,
+			modelFamilyResolver: this.modelFamilyResolver,
 		});
+		if (!finalCheck.valid) {
+			throw new NoEligibleExpertError(request, [
+				{
+					candidate: selectedCandidates[0].candidate,
+					reasonCodes: [finalCheck.reason ?? "team_independence_violation"],
+				},
+			]);
+		}
 
 		return {
 			primary: bindings[0],

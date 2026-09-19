@@ -1,11 +1,8 @@
-/**
- * Expert Outcome Store.
- * Durable host-owned store for real worker execution outcomes.
- * Implements OUTCOME_LEARNING.md and HMOE-070 through HMOE-076.
- */
-
 import { randomUUID } from "node:crypto";
-import { EXPERT_ROUTING_SCHEMA_VERSION, type ExpertOutcomeRecord, type ExpertSuccessClass } from "./contracts.ts";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { writeFileAtomicSync } from "../util/atomic-file.ts";
+import type { ExpertOutcomeRecord, ExpertSuccessClass } from "./contracts.ts";
 
 export interface ExpertOutcomeFilter {
 	expertId?: string;
@@ -27,8 +24,41 @@ export interface ExpertOutcomeStats {
 	lowerBoundSuccessProbability: number; // Beta posterior lower bound (e.g. 5th percentile)
 }
 
+export function loadJsonArraySync<T>(filePath?: string): T[] {
+	if (!filePath || !existsSync(filePath)) return [];
+	try {
+		const parsed = JSON.parse(readFileSync(filePath, "utf8"));
+		return Array.isArray(parsed) ? (parsed as T[]) : [];
+	} catch {
+		return [];
+	}
+}
+
+export function persistJsonArraySync<T>(filePath: string | undefined, items: readonly T[]): void {
+	if (!filePath) return;
+	try {
+		const dir = dirname(filePath);
+		if (!existsSync(dir)) {
+			mkdirSync(dir, { recursive: true });
+		}
+		writeFileAtomicSync(filePath, JSON.stringify(items, null, 2));
+	} catch {
+		// Best-effort persistence
+	}
+}
+
 export class ExpertOutcomeStore {
 	private readonly records: ExpertOutcomeRecord[] = [];
+	private readonly filePath?: string;
+
+	constructor(filePath?: string) {
+		this.filePath = filePath;
+		this.records = loadJsonArraySync<ExpertOutcomeRecord>(filePath);
+	}
+
+	private _persist(): void {
+		persistJsonArraySync(this.filePath, this.records);
+	}
 
 	/**
 	 * Records a verified outcome from a completed worker attempt.
@@ -37,15 +67,21 @@ export class ExpertOutcomeStore {
 	async record(
 		recordInput: Omit<ExpertOutcomeRecord, "schema_version" | "outcome_id" | "recorded_at"> & {
 			outcome_id?: string;
+			schema_version?: "1.0" | "1.1";
 		},
 	): Promise<ExpertOutcomeRecord> {
 		const record: ExpertOutcomeRecord = {
-			schema_version: EXPERT_ROUTING_SCHEMA_VERSION,
+			schema_version: recordInput.schema_version ?? "1.1",
 			outcome_id: recordInput.outcome_id ?? randomUUID(),
 			expert_id: recordInput.expert_id,
+			selection_id: recordInput.selection_id,
+			selection_trace_id: recordInput.selection_trace_id,
+			attempt_id: recordInput.attempt_id,
 			request_digest: recordInput.request_digest,
 			task_id: recordInput.task_id,
 			work_class: recordInput.work_class,
+			role: recordInput.role ?? null,
+			task_signature_digest: recordInput.task_signature_digest ?? null,
 			success_class: recordInput.success_class,
 			failure_cause: recordInput.failure_cause ?? null,
 			external_failure: recordInput.external_failure ?? false,
@@ -61,6 +97,7 @@ export class ExpertOutcomeStore {
 		};
 
 		this.records.push(record);
+		this._persist();
 		return record;
 	}
 

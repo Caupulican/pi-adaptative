@@ -11,6 +11,9 @@ import type { ExpertOutcomeStore } from "./outcome-store.ts";
 export interface RecordExpertAttemptInput {
 	binding: ExpertBinding;
 	request: WorkerCapabilityRequest;
+	attemptId?: string;
+	role?: string;
+	taskSignatureDigest?: string;
 	result?: WorkerResultContract;
 	verificationPassed?: boolean;
 	verifierRejected?: boolean;
@@ -69,9 +72,14 @@ export class ExpertOutcomeRecorder {
 
 		return await this.store.record({
 			expert_id: input.binding.expert_id,
+			selection_id: input.binding.selection_id,
+			selection_trace_id: input.binding.selection_trace_id,
+			attempt_id: input.attemptId ?? input.request.task_id,
 			request_digest: input.request.request_id,
 			task_id: input.request.task_id,
 			work_class: input.request.work_class,
+			role: input.role ?? input.request.worker_role,
+			task_signature_digest: input.taskSignatureDigest ?? null,
 			success_class: successClass,
 			failure_cause: failureCause,
 			external_failure: externalFailure,

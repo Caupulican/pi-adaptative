@@ -45,6 +45,13 @@ export type ExpertSuccessClass =
 	| "worker_contract_failure"
 	| "cancelled";
 
+export type EstimateProvenance =
+	| "measured_host"
+	| "provider_pricing"
+	| "historical_outcome"
+	| "request_estimate"
+	| "unknown";
+
 export interface WorkerCapabilityRequest {
 	schema_version: typeof EXPERT_ROUTING_SCHEMA_VERSION;
 	request_id: string;
@@ -53,6 +60,7 @@ export interface WorkerCapabilityRequest {
 	work_class: ExpertWorkClass;
 	worker_role: string;
 	consequence: ExpertConsequence;
+	routing_band?: "cheap" | "medium" | "expensive";
 
 	task_signature?: Record<string, unknown>;
 	required_capabilities?: readonly string[];
@@ -84,6 +92,7 @@ export interface ExpertDescriptor {
 	thinking_level: string;
 	runtime_kind: ExpertRuntimeKind;
 
+	model_family?: string | null;
 	capability_class?: string | null;
 	capability_tier?: string | null;
 	tool_names?: readonly string[];
@@ -105,6 +114,8 @@ export interface ExpertBinding {
 	thinking_level: string;
 
 	role?: string;
+	profile_id?: string;
+	family?: string | null;
 	selection_trace_id: string;
 	exploration?: boolean;
 	expected_cost_usd?: number | null;
@@ -125,6 +136,8 @@ export interface ExpertCandidateState {
 	localResourcesInsufficient?: boolean;
 	estimatedLatencyMs?: number;
 	estimatedCostUsd?: number;
+	costProvenance?: EstimateProvenance;
+	latencyProvenance?: EstimateProvenance;
 	concurrencySlotsAvailable?: number;
 }
 
@@ -197,13 +210,31 @@ export interface ExpertSelectionTrace {
 	created_at?: string;
 }
 
+export interface ExpertCapacityLease {
+	readonly schema_version: "1.0";
+	readonly lease_id: string;
+	readonly selection_id: string;
+	readonly attempt_id: string;
+	readonly expert_id: string;
+	readonly model_ref: string;
+	readonly provider: string;
+	readonly runtime_key?: string | null;
+	readonly fencing_token: number;
+	readonly expires_at: string;
+}
+
 export interface ExpertOutcomeRecord {
-	schema_version: typeof EXPERT_ROUTING_SCHEMA_VERSION;
+	schema_version: "1.0" | "1.1";
 	outcome_id: string;
 	expert_id: string;
+	selection_id?: string;
+	selection_trace_id?: string;
+	attempt_id?: string;
 	request_digest: string;
 	task_id: string;
 	work_class: string;
+	role?: string | null;
+	task_signature_digest?: string | null;
 	success_class: ExpertSuccessClass;
 	failure_cause: string | null;
 

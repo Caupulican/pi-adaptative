@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:hmoe:expert-outcome:1.1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "outcome_id",
+    "expert_id",
+    "selection_id",
+    "selection_trace_id",
+    "attempt_id",
+    "work_class",
+    "success_class",
+    "recorded_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.1"
+    },
+    "outcome_id": {
+      "type": "string"
+    },
+    "expert_id": {
+      "type": "string"
+    },
+    "selection_id": {
+      "type": "string"
+    },
+    "selection_trace_id": {
+      "type": "string"
+    },
+    "attempt_id": {
+      "type": "string"
+    },
+    "request_digest": {
+      "type": "string"
+    },
+    "work_class": {
+      "type": "string"
+    },
+    "role": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "task_signature_digest": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "success_class": {
+      "type": "string"
+    },
+    "external_failure": {
+      "type": "boolean"
+    },
+    "recorded_at": {
+      "type": "string"
+    }
+  }
+}

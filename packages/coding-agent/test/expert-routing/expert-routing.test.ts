@@ -97,7 +97,7 @@ describe("H-MoE Expert Routing Substrate (HMOE-001..HMOE-125)", () => {
 			expect(req.work_class).toBe("implement");
 			expect(req.consequence).toBe("high");
 			expect(req.required_tools).toContain("bash");
-			expect(req.required_capabilities).toContain("tier:expensive");
+			expect(req.routing_band).toBe("expensive");
 			expect(req.request_id.startsWith("req_")).toBe(true);
 		});
 

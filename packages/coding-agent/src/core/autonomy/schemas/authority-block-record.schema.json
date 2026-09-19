@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:autonomy:authority-block:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "objective_id",
+    "action",
+    "missing_authority",
+    "alternatives_attempted",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "action": {
+      "type": "string"
+    },
+    "missing_authority": {
+      "type": "string"
+    },
+    "alternatives_attempted": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "created_at": {
+      "type": "string"
+    }
+  }
+}

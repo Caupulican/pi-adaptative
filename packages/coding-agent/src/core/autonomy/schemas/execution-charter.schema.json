@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:autonomy:execution-charter:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "objective_id",
+    "interaction_mode",
+    "git",
+    "release"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "interaction_mode": {
+      "const": "start_only"
+    },
+    "source_message_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "repository_scopes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit",
+        "push",
+        "force_push",
+        "create_branch",
+        "create_tag"
+      ],
+      "properties": {
+        "commit": {
+          "type": "boolean"
+        },
+        "push": {
+          "type": "boolean"
+        },
+        "force_push": {
+          "type": "boolean"
+        },
+        "create_branch": {
+          "type": "boolean"
+        },
+        "create_tag": {
+          "type": "boolean"
+        }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "package_publish",
+        "github_release",
+        "deploy_targets"
+      ],
+      "properties": {
+        "package_publish": {
+          "type": "boolean"
+        },
+        "github_release": {
+          "type": "boolean"
+        },
+        "deploy_targets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "secret_scopes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "max_cost_usd": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "notification": {
+      "enum": [
+        "terminal_only",
+        "status_on_request"
+      ]
+    }
+  }
+}

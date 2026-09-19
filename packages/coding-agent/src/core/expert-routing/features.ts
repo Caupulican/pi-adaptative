@@ -58,11 +58,45 @@ export class ExpertFeatureBuilder {
 			contextFit = Math.min(1.0, 0.5 + ratio * 0.25);
 		}
 
-		// Probe Fitness (FitnessStore)
+		// Probe Fitness (FitnessStore) (HM11-010, HM11-014)
 		let roleProbeFitness = 0.5;
 		if (this.deps.fitnessStore) {
-			// Probe store check if available
-			roleProbeFitness = 0.7;
+			const modelRef = `${desc.provider}/${desc.model_id}`;
+			let matchingReport: any;
+			if (typeof (this.deps.fitnessStore as any).getForHost === "function") {
+				const reports = this.deps.fitnessStore.getForHost();
+				matchingReport = reports.find(
+					(r: any) => r.model === modelRef || r.model === desc.model_id || r.model.endsWith(`/${desc.model_id}`),
+				)?.report;
+			} else if (typeof (this.deps.fitnessStore as any).getReport === "function") {
+				matchingReport =
+					(this.deps.fitnessStore as any).getReport(modelRef) ??
+					(this.deps.fitnessStore as any).getReport(desc.model_id);
+			}
+
+			if (matchingReport) {
+				let lane = matchingReport.worker ?? matchingReport.lanes?.worker;
+				if (request.work_class === "investigate" || request.work_class === "retrieve") {
+					lane = matchingReport.research ?? matchingReport.lanes?.research;
+				} else if ((request.work_class as string) === "judge" || request.worker_role === "judge") {
+					const j = matchingReport.judge ?? matchingReport.lanes?.judge;
+					if (j && j.total > 0) {
+						roleProbeFitness = Math.max(
+							0.0,
+							Math.min(1.0, (j.parsed ?? j.succeeded ?? j.successes ?? 0) / j.total),
+						);
+					}
+				} else if ((request.work_class as string) === "digest" || request.worker_role === "digest") {
+					lane = matchingReport.digest ?? matchingReport.lanes?.digest;
+				} else if (request.required_tools && request.required_tools.length > 0) {
+					lane = matchingReport.toolCall ?? matchingReport.lanes?.toolCall;
+				}
+
+				if (lane && lane.total > 0) {
+					const successes = lane.succeeded ?? lane.successes ?? 0;
+					roleProbeFitness = Math.max(0.0, Math.min(1.0, successes / lane.total));
+				}
+			}
 		}
 
 		// Real Outcome Fitness (ExpertOutcomeStore)
@@ -95,7 +129,45 @@ export class ExpertFeatureBuilder {
 			}
 		}
 
-		const toolReliability = 0.9;
+		let toolReliability = 0.9;
+		let latency = state.estimatedLatencyMs ?? 1000;
+
+		// Read real AdaptationStore profiles (HM11-011, HM11-012, HM11-013)
+		if (this.deps.adaptationStore) {
+			const modelRef = `${desc.provider}/${desc.model_id}`;
+			const store = this.deps.adaptationStore as any;
+			const profile =
+				(typeof store.get === "function" ? (store.get(desc.model_id) ?? store.get(modelRef)) : undefined) ??
+				(typeof store.getProfile === "function"
+					? (store.getProfile(desc.provider, desc.model_id) ??
+						store.getProfile(desc.model_id) ??
+						store.getProfile(modelRef))
+					: undefined);
+
+			if (profile) {
+				if (profile.toolProbe) {
+					const status = typeof profile.toolProbe === "string" ? profile.toolProbe : profile.toolProbe.status;
+					const nativeGrade = typeof profile.toolProbe === "object" ? profile.toolProbe.nativeGrade : undefined;
+					if (status === "none" || nativeGrade === "absent") {
+						toolReliability = 0.2;
+					} else if (status === "native") {
+						toolReliability = 1.0;
+					} else if (status === "text-protocol") {
+						toolReliability = 0.8;
+					}
+				}
+
+				if (profile.capabilityTier?.tier === "strong" || profile.capabilityTier === "strong") {
+					capabilityFit = Math.min(capabilityFit, 0.8);
+				}
+
+				if (profile.perf?.latencyMultiplier && profile.perf.latencyMultiplier > 0) {
+					latency = latency * profile.perf.latencyMultiplier;
+				} else if (profile.perf?.meanMs && profile.perf.meanMs > 0) {
+					latency = profile.perf.meanMs;
+				}
+			}
+		}
 
 		// 2. Operational Features
 		// Cost utility: cheaper is higher utility (0 to 1)
@@ -103,7 +175,6 @@ export class ExpertFeatureBuilder {
 		const costUtility = Math.max(0.0, Math.min(1.0, 1.0 - cost / 0.1));
 
 		// Latency utility: faster is higher utility
-		const latency = state.estimatedLatencyMs ?? 1000;
 		const latencyUtility = Math.max(0.0, Math.min(1.0, 1.0 - latency / 5000));
 
 		const availability = state.authenticated && !state.quotaExhausted ? 1.0 : 0.0;

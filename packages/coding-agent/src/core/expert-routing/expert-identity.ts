@@ -20,6 +20,8 @@ export interface CreateExpertDescriptorInput {
 	thinking_level?: string;
 	runtimeKind?: ExpertRuntimeKind;
 	runtime_kind?: ExpertRuntimeKind;
+	modelFamily?: string | null;
+	model_family?: string | null;
 	capabilityClass?: string | null;
 	capability_class?: string | null;
 	capabilityTier?: string | null;
@@ -100,6 +102,7 @@ export function materializeExpertDescriptor(input: CreateExpertDescriptorInput):
 		role,
 		thinking_level: thinkingLevel,
 		runtime_kind: runtimeKind,
+		model_family: input.modelFamily ?? input.model_family ?? null,
 		capability_class: input.capabilityClass ?? input.capability_class ?? null,
 		capability_tier: input.capabilityTier ?? input.capability_tier ?? null,
 		tool_names: input.toolNames ?? input.tool_names ?? [],

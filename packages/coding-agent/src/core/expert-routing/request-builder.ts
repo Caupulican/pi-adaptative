@@ -37,6 +37,7 @@ export interface BuildWorkerCapabilityRequestInput {
 	route?: ObjectiveRoute | string;
 	workClass?: ExpertWorkClass;
 	consequence?: ExpertConsequence;
+	routingBand?: "cheap" | "medium" | "expensive";
 	requiredCapabilities?: readonly string[];
 	requiredTools?: readonly string[];
 	decisionSignals?: DecisionSignalsInput & {
@@ -135,19 +136,26 @@ export function buildWorkerCapabilityRequest(input: BuildWorkerCapabilityRequest
 		}
 	}
 
+	const suggestedTier = input.decisionSignals?.suggestedTier;
+	const isRoutingBand = suggestedTier === "cheap" || suggestedTier === "medium" || suggestedTier === "expensive";
+	const isCapabilityTier =
+		suggestedTier === "frontier" || suggestedTier === "strong" || suggestedTier === "constrained";
+	const routingBand = input.routingBand ?? (isRoutingBand ? suggestedTier : undefined);
+
 	const taskSignature: Record<string, unknown> = {
 		workClass,
 		role,
 		consequence,
 		hasPriorFailures: failureSignatures.length > 0,
 		failureCount: failureSignatures.length,
-		...(input.decisionSignals?.suggestedTier ? { suggestedTier: input.decisionSignals.suggestedTier } : {}),
+		...(routingBand ? { routingBand } : {}),
+		...(isCapabilityTier ? { suggestedTier } : {}),
 		...(input.metadata ?? {}),
 	};
 
 	const requiredCapabilities = [...(input.task?.requiredCapabilities ?? []), ...(input.requiredCapabilities ?? [])];
-	if (input.decisionSignals?.suggestedTier && !requiredCapabilities.some((c) => c.startsWith("tier:"))) {
-		requiredCapabilities.push(`tier:${input.decisionSignals.suggestedTier}`);
+	if (isCapabilityTier && !requiredCapabilities.some((c) => c.startsWith("tier:"))) {
+		requiredCapabilities.push(`tier:${suggestedTier}`);
 	}
 
 	const requestId = createHash("sha256")
@@ -163,6 +171,7 @@ export function buildWorkerCapabilityRequest(input: BuildWorkerCapabilityRequest
 		work_class: workClass,
 		worker_role: role,
 		consequence,
+		routing_band: routingBand,
 		task_signature: taskSignature,
 		required_capabilities: requiredCapabilities,
 		required_tools: input.requiredTools ? [...input.requiredTools] : [],

@@ -6,6 +6,12 @@
 
 import { randomUUID } from "node:crypto";
 import type { AuthorityEnvelope, ProposedAction } from "../autonomy/authority-envelope.ts";
+import {
+	compileExecutionCharter,
+	DurableAuthorityBlockLedger,
+	type ExecutionCharter,
+	evaluateCharterAuthority,
+} from "../autonomy/execution-charter.ts";
 import { DurableHumanEdgeLedger, type HumanEdgeRequest, requiresHumanEdge } from "../autonomy/human-edge.ts";
 import { DecisionActionPolicy } from "../decision/action-policy.ts";
 import type { DecisionEngineRouter } from "../decision/engine-router.ts";
@@ -43,7 +49,7 @@ import { composeObjectiveRoute } from "./objective-route-policy.ts";
 import { projectBoundedCombinedState, type SemanticRouteJudgments } from "./objective-route-projector.ts";
 import { ObjectiveStallDetector, type StallEvaluation } from "./objective-stall-fingerprint.ts";
 
-export type ExecutionLoopMode = "legacy_goal" | "objective_shadow" | "objective_primary";
+export type ExecutionLoopMode = "legacy_goal" | "objective_shadow" | "objective_primary" | "start_only" | "interactive";
 
 export interface DisagreementTelemetryEvent {
 	cycleId: string;
@@ -112,6 +118,16 @@ export interface ObjectiveExecutionControllerDeps {
 	expertSelector?: ExpertSelectionService;
 	outcomeRecorder?: ExpertOutcomeRecorder;
 	mode?: ExecutionLoopMode;
+	executionCharter?: ExecutionCharter;
+	authorityBlockLedger?: DurableAuthorityBlockLedger;
+	gitExecutor?: {
+		commit?(): Promise<void>;
+		push?(): Promise<void>;
+	};
+	releaseExecutor?: {
+		publish?(): Promise<void>;
+		deploy?(target: string): Promise<void>;
+	};
 	onDisagreementTelemetry?(event: DisagreementTelemetryEvent): void;
 	onHumanEdgeRequest?(request: HumanEdgeRequest): Promise<boolean> | boolean;
 	getRouteProposedAction?(route: ObjectiveRoute): ProposedAction;
@@ -238,6 +254,8 @@ export class ObjectiveExecutionController {
 	private readonly deps: ObjectiveExecutionControllerDeps;
 	private readonly defaultStallDetector: ObjectiveStallDetector;
 	private readonly humanEdgeLedger: DurableHumanEdgeLedger;
+	private readonly authorityBlockLedger: DurableAuthorityBlockLedger;
+	private readonly attemptBindings = new Map<string, { binding: ExpertBinding; route: ObjectiveRoute }>();
 	private cycleCounter = 0;
 	private _lastBinding?: ExpertBinding;
 
@@ -245,6 +263,7 @@ export class ObjectiveExecutionController {
 		this.deps = deps;
 		this.defaultStallDetector = new ObjectiveStallDetector();
 		this.humanEdgeLedger = deps.humanEdgeLedger ?? new DurableHumanEdgeLedger();
+		this.authorityBlockLedger = deps.authorityBlockLedger ?? new DurableAuthorityBlockLedger();
 	}
 
 	getMode(): ExecutionLoopMode {
@@ -253,6 +272,10 @@ export class ObjectiveExecutionController {
 
 	getHumanEdgeLedger(): DurableHumanEdgeLedger {
 		return this.humanEdgeLedger;
+	}
+
+	getAuthorityBlockLedger(): DurableAuthorityBlockLedger {
+		return this.authorityBlockLedger;
 	}
 
 	async evaluateRouteOnce(
@@ -444,11 +467,36 @@ export class ObjectiveExecutionController {
 			// 3. Evaluate route
 			const route = await this.evaluateRouteOnce(objectiveId, { signal });
 
-			// 4. Authority Envelope gate (FIN-070..FIN-074: Durable Human Edge)
-			if (this.deps.authorityEnvelope) {
-				const proposedAction = this.deps.getRouteProposedAction
-					? this.deps.getRouteProposedAction(route)
-					: { kind: route.route };
+			// 4. Authority Envelope / Execution Charter gate (FIN-070..FIN-074, ZH-001..ZH-012)
+			const proposedAction = this.deps.getRouteProposedAction
+				? this.deps.getRouteProposedAction(route)
+				: { kind: route.route };
+
+			const charter =
+				this.deps.executionCharter ??
+				(this.getMode() === "start_only" ? compileExecutionCharter({ objectiveId }) : undefined);
+			const isStartOnly = charter?.interaction_mode === "start_only" || this.getMode() === "start_only";
+
+			if (isStartOnly && charter) {
+				const charterDecision = evaluateCharterAuthority(charter, proposedAction);
+				if (charterDecision.outcome === "deny") {
+					this.authorityBlockLedger.recordBlock({
+						objectiveId,
+						action: proposedAction.kind,
+						missingAuthority: charterDecision.missingAuthority,
+						alternativesAttempted: ["replan"],
+					});
+					const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
+						reasonCodes: ["blocked_by_initial_authority", charterDecision.missingAuthority],
+					});
+					return {
+						status: "unrecoverable",
+						reasonCodes: ["blocked_by_initial_authority", charterDecision.missingAuthority],
+						cycleCount: this.cycleCounter,
+						deliveryBundle: bundle,
+					};
+				}
+			} else if (this.deps.authorityEnvelope && !isStartOnly) {
 				const edge = requiresHumanEdge(
 					objectiveId,
 					proposedAction,
@@ -523,7 +571,25 @@ export class ObjectiveExecutionController {
 							deliveryBundle: bundle,
 						};
 					}
-					await this.deps.verifier.execute(route, signal);
+					try {
+						await this.deps.verifier.execute(route, signal);
+					} catch (err) {
+						const lastAttempt = Array.from(this.attemptBindings.entries()).pop();
+						if (this.deps.outcomeRecorder && lastAttempt) {
+							const [taskId, { binding, route: attemptRoute }] = lastAttempt;
+							await this.deps.outcomeRecorder.record({
+								binding,
+								request: buildWorkerCapabilityRequest({
+									objectiveId,
+									taskId,
+									route: attemptRoute,
+									consequence: "high",
+								}),
+								verificationPassed: false,
+							});
+						}
+						throw err;
+					}
 					break;
 
 				case "investigate":
@@ -591,18 +657,28 @@ export class ObjectiveExecutionController {
 					});
 
 					if (evalResult.verdict === "complete") {
-						if (this.deps.outcomeRecorder && this._lastBinding) {
-							await this.deps.outcomeRecorder.record({
-								binding: this._lastBinding,
-								request: buildWorkerCapabilityRequest({
-									objectiveId,
-									taskId: `${objectiveId}-completion-${this.cycleCounter}`,
-									route,
-									consequence: "critical",
-								}),
-								verificationPassed: true,
-							});
+						await this._recordCompletionOutcomes(objectiveId, route, { verificationPassed: true });
+
+						const activeCharter =
+							this.deps.executionCharter ??
+							(this.getMode() === "start_only" ? compileExecutionCharter({ objectiveId }) : undefined);
+						if (activeCharter) {
+							if (activeCharter.git.commit && this.deps.gitExecutor?.commit) {
+								await this.deps.gitExecutor.commit();
+							}
+							if (activeCharter.git.push && this.deps.gitExecutor?.push) {
+								await this.deps.gitExecutor.push();
+							}
+							if (activeCharter.release.package_publish && this.deps.releaseExecutor?.publish) {
+								await this.deps.releaseExecutor.publish();
+							}
+							if (activeCharter.release.deploy_targets.length > 0 && this.deps.releaseExecutor?.deploy) {
+								for (const target of activeCharter.release.deploy_targets) {
+									await this.deps.releaseExecutor.deploy(target);
+								}
+							}
 						}
+
 						return {
 							status: "complete",
 							reasonCodes: ["completion_passed"],
@@ -612,15 +688,8 @@ export class ObjectiveExecutionController {
 						};
 					}
 
-					if (this.deps.outcomeRecorder && this._lastBinding && evalResult.failedGates.length > 0) {
-						await this.deps.outcomeRecorder.record({
-							binding: this._lastBinding,
-							request: buildWorkerCapabilityRequest({
-								objectiveId,
-								taskId: `${objectiveId}-completion-${this.cycleCounter}`,
-								route,
-								consequence: "critical",
-							}),
+					if (evalResult.failedGates.length > 0) {
+						await this._recordCompletionOutcomes(objectiveId, route, {
 							completionChallengeRejected: true,
 							repairRoundsCaused: evalResult.failedGates.length,
 						});
@@ -742,9 +811,10 @@ export class ObjectiveExecutionController {
 				: route.route === "verify" || route.route === "review"
 					? "high"
 					: "medium";
+			const taskId = `${objectiveId}-${escalated ? "escalate" : route.route}-${this.cycleCounter}`;
 			const request = buildWorkerCapabilityRequest({
 				objectiveId,
-				taskId: `${objectiveId}-${escalated ? "escalate" : route.route}-${this.cycleCounter}`,
+				taskId,
 				route,
 				consequence,
 				decisionSignals: escalated ? { capabilityEscalationRequired: true } : undefined,
@@ -754,6 +824,7 @@ export class ObjectiveExecutionController {
 				selectionResult = await this.deps.expertSelector.select(request, { signal });
 				binding = selectionResult.primary;
 				this._lastBinding = binding;
+				this.attemptBindings.set(taskId, { binding, route });
 			} catch (error) {
 				if (error instanceof NoEligibleExpertError) {
 					const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
@@ -778,6 +849,43 @@ export class ObjectiveExecutionController {
 			}
 		}
 		return undefined;
+	}
+
+	private async _recordCompletionOutcomes(
+		objectiveId: string,
+		route: ObjectiveRoute,
+		fields: {
+			verificationPassed?: boolean;
+			completionChallengeRejected?: boolean;
+			repairRoundsCaused?: number;
+		},
+	): Promise<void> {
+		if (!this.deps.outcomeRecorder) return;
+		if (this.attemptBindings.size > 0) {
+			for (const [taskId, { binding, route: attemptRoute }] of this.attemptBindings.entries()) {
+				await this.deps.outcomeRecorder.record({
+					binding,
+					request: buildWorkerCapabilityRequest({
+						objectiveId,
+						taskId,
+						route: attemptRoute,
+						consequence: "critical",
+					}),
+					...fields,
+				});
+			}
+		} else if (this._lastBinding) {
+			await this.deps.outcomeRecorder.record({
+				binding: this._lastBinding,
+				request: buildWorkerCapabilityRequest({
+					objectiveId,
+					taskId: `${objectiveId}-completion-${this.cycleCounter}`,
+					route,
+					consequence: "critical",
+				}),
+				...fields,
+			});
+		}
 	}
 
 	async runToDelivery(objectiveId: string, signal?: AbortSignal): Promise<DeliveryBundle> {

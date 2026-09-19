@@ -18,6 +18,7 @@ import type {
 	WorkerCapabilityRequest,
 } from "./contracts.ts";
 import { materializeExpertDescriptor } from "./expert-identity.ts";
+import { defaultModelFamilyResolver } from "./independence.ts";
 
 export interface ExpertCatalogDeps {
 	modelRegistry?: ModelRegistry;
@@ -60,6 +61,8 @@ export class ExpertCatalog {
 
 			const profile = deriveModelCapabilityProfile(model);
 			const tier = resolveCapabilityTier({ capabilityClass: profile.class });
+			const realToolSurface = this._resolveCandidateToolSurface(model, request.worker_role, profile);
+			const modelFamily = defaultModelFamilyResolver(model.id, model.provider) ?? null;
 
 			for (const thinkingLevel of thinkingLevels) {
 				const descriptor = materializeExpertDescriptor({
@@ -68,9 +71,10 @@ export class ExpertCatalog {
 					role: request.worker_role,
 					thinkingLevel,
 					runtimeKind,
+					modelFamily,
 					capabilityClass: profile.class,
 					capabilityTier: tier,
-					toolNames: request.required_tools ?? [],
+					toolNames: realToolSurface,
 					resourceProfiles: [],
 					contextWindow: model.contextWindow ?? null,
 					privacyClass,
@@ -87,6 +91,27 @@ export class ExpertCatalog {
 		}
 
 		return candidates;
+	}
+
+	private _resolveCandidateToolSurface(
+		model: Model<Api>,
+		role: string,
+		profile: ReturnType<typeof deriveModelCapabilityProfile>,
+	): readonly string[] {
+		if (
+			profile.class === "minimal" ||
+			(model.textToolCallProtocol === false && !model.reasoning && model.input.length === 0)
+		) {
+			return [];
+		}
+		if (role === "investigate" || role === "research" || role === "retrieval") {
+			return ["read", "grep", "find", "ls", "repo_read"];
+		}
+		if (role === "verifier" || role === "review") {
+			return ["read", "grep", "find", "ls", "repo_read", "run_process", "bash"];
+		}
+		// implementer / generalist / worker
+		return ["read", "grep", "find", "ls", "repo_read", "write", "edit", "bash", "run_process"];
 	}
 
 	private _classifyRuntimeKind(model: Model<Api>): ExpertRuntimeKind {
@@ -127,9 +152,18 @@ export class ExpertCatalog {
 		const authenticated = this.deps.modelRegistry ? this.deps.modelRegistry.hasConfiguredAuth(model) : true;
 		const quotaExhausted = this.deps.isModelExhausted ? this.deps.isModelExhausted(model) : false;
 
-		// Calculate approximate cost per token or call
+		// Calculate approximate cost per token or call with explicit provenance
 		const costPerMillion = model.cost?.input ? model.cost.input * 1_000_000 : 0;
 		const estimatedCostUsd = costPerMillion > 0 ? (costPerMillion / 1_000_000) * 2000 : 0;
+		const costProvenance = model.cost?.input ? "provider_pricing" : "unknown";
+
+		// Latency from adaptation perf if present, otherwise unknown/fallback
+		const store = this.deps.adaptationStore as any;
+		const adaptationProfile =
+			typeof store?.getProfile === "function" ? store.getProfile(model.id) : store?.get?.(model.id);
+		const perf = adaptationProfile?.perf;
+		const estimatedLatencyMs = perf?.meanMs && perf.meanMs > 0 ? perf.meanMs : model.reasoning ? 1500 : 500;
+		const latencyProvenance = perf?.meanMs && perf.meanMs > 0 ? "measured_host" : "unknown";
 
 		return {
 			authenticated,
@@ -137,7 +171,9 @@ export class ExpertCatalog {
 			providerHealthy: !quotaExhausted,
 			localRuntimeWarm: true,
 			estimatedCostUsd,
-			estimatedLatencyMs: model.reasoning ? 1500 : 500,
+			estimatedLatencyMs,
+			costProvenance,
+			latencyProvenance,
 			concurrencySlotsAvailable: 5,
 		};
 	}

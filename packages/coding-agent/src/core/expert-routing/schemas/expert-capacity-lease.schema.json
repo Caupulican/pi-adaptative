@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:hmoe:capacity-lease:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "lease_id",
+    "selection_id",
+    "attempt_id",
+    "expert_id",
+    "model_ref",
+    "provider",
+    "fencing_token",
+    "expires_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "lease_id": {
+      "type": "string"
+    },
+    "selection_id": {
+      "type": "string"
+    },
+    "attempt_id": {
+      "type": "string"
+    },
+    "expert_id": {
+      "type": "string"
+    },
+    "model_ref": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "runtime_key": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fencing_token": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "expires_at": {
+      "type": "string"
+    }
+  }
+}
