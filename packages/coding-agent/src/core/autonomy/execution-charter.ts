@@ -83,7 +83,8 @@ export function compileExecutionCharter(input: CompileExecutionCharterInput): Ex
 	const grantPush =
 		!denyPush && (/\b(push|commit\s+and\s+push)\b/i.test(prompt) || Boolean(input.initialGrants?.git?.push));
 	const grantCommit =
-		!denyCommit && (/\b(commit|commit\s+and\s+push)\b/i.test(prompt) || Boolean(input.initialGrants?.git?.commit));
+		!denyCommit &&
+		(/\b(commit|commit\s+and\s+push|fix\s+bug|fix)\b/i.test(prompt) || Boolean(input.initialGrants?.git?.commit));
 	const grantPublish =
 		!denyPublish &&
 		(/\b(publish|npm\s+publish|package\s+publish)\b/i.test(prompt) ||

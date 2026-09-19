@@ -15,7 +15,8 @@ import {
 import { getOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
-import { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
+import { createAdaptiveRuntimeStack } from "./adaptive/adaptive-runtime-factory.ts";
+import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import { configFile } from "./agent-paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
@@ -720,22 +721,31 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	let steeringPlane = options.steeringPlane;
-	if (!steeringPlane && systemOneController) {
-		const persistentPath = join(agentDir, "certificates.json");
-		const certificates = new SteeringCertificateStore(persistentPath);
-		steeringPlane = new SystemOneSteeringPlane({
-			adapter: systemOneController.adapter,
-			certificates,
-			policy: DEFAULT_STEERING_POLICY,
-		});
-	}
-
 	let adaptiveReadiness = options.adaptiveReadiness;
-	if (!adaptiveReadiness && steeringPlane) {
-		adaptiveReadiness = new AdaptiveRuntimeReadiness({
-			steeringPlane,
-			objectiveController: options.objectiveExecutionController,
-		});
+	let objectiveExecutionController = options.objectiveExecutionController;
+
+	if (steeringPlane || systemOneController) {
+		const persistentPath = join(agentDir, "certificates.json");
+		const certificates = steeringPlane?.certificates ?? new SteeringCertificateStore(persistentPath);
+		if (!steeringPlane && systemOneController) {
+			steeringPlane = new SystemOneSteeringPlane({
+				adapter: systemOneController.adapter,
+				certificates,
+				policy: DEFAULT_STEERING_POLICY,
+			});
+		}
+		if (!adaptiveReadiness) {
+			const stack = createAdaptiveRuntimeStack({
+				agentDir,
+				persistentPath,
+				steeringPlane: steeringPlane ?? undefined,
+			});
+			adaptiveReadiness = stack.readiness;
+			steeringPlane = stack.steeringPlane;
+			if (!objectiveExecutionController) {
+				objectiveExecutionController = stack.objectiveController;
+			}
+		}
 	}
 
 	const session = new AgentSession({
@@ -764,7 +774,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionStartEvent: options.sessionStartEvent,
 		systemOneController,
 		executionLoopMode: options.executionLoopMode,
-		objectiveExecutionController: options.objectiveExecutionController,
+		objectiveExecutionController,
 		steeringPlane,
 		adaptiveReadiness,
 	});

@@ -17,6 +17,7 @@ export interface SemanticRouteJudgments {
 		| "review"
 		| "replan"
 		| "none"
+		| "completion_candidate"
 		| "insufficient_evidence";
 	currentWorkerCanContinue?: boolean;
 	independentWorkerRequired?: boolean;

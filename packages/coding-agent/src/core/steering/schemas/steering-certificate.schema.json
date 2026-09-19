@@ -124,9 +124,15 @@
         "type": "string"
       }
     },
-    "usage": {
-      "type": "object",
-      "additionalProperties": true
+    "semantic_outcome": {
+      "type": "string",
+      "enum": ["pass", "fail", "gather_more", "repair", "replan", "block"]
+    },
+    "failed_semantic_predicates": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "created_at": {
       "type": "string"

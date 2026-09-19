@@ -212,6 +212,11 @@ export interface EstablishedCapability {
 	readonly spec: CapabilitySpec;
 	readonly record: CapabilityRecord;
 	readonly isExisting: boolean;
+	readonly activation?: {
+		readonly active: boolean;
+		readonly method: string;
+		readonly projection?: Record<string, unknown>;
+	};
 }
 
 export interface MaterializedSpecialist {

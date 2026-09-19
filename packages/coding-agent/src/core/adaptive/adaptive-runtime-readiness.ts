@@ -69,14 +69,15 @@ export class AdaptiveRuntimeReadiness {
 		const runtimeAdaptation = Boolean(this.deps.runtimeAdaptation);
 		const objectiveExecution = Boolean(this.deps.objectiveController);
 
-		if (!steeringPlane) issues.push("SystemOneSteeringPlane is not wired");
-		if (!adaptiveResolution) issues.push("AdaptiveResolutionController is not wired");
-		if (!specialistSynthesis) issues.push("SpecialistSynthesisController is not wired");
-		if (!adaptiveCapability) issues.push("AdaptiveCapabilityController is not wired");
-		if (!semanticResponsibility) issues.push("SemanticResponsibilityController is not wired");
-		if (!hmoeService) issues.push("ExpertSelectionService (H-MoE) is not wired");
-		if (!runtimeAdaptation) issues.push("RuntimeAdaptationCoordinator is not wired");
-		if (!objectiveExecution) issues.push("ObjectiveExecutionController is not wired");
+		if (!steeringPlane) issues.push("steeringPlane (SystemOneSteeringPlane) is not wired");
+		if (!adaptiveResolution) issues.push("adaptiveResolution (AdaptiveResolutionController) is not wired");
+		if (!specialistSynthesis) issues.push("specialistSynthesis (SpecialistSynthesisController) is not wired");
+		if (!adaptiveCapability) issues.push("adaptiveCapabilities (AdaptiveCapabilityController) is not wired");
+		if (!semanticResponsibility)
+			issues.push("responsibilityController (SemanticResponsibilityController) is not wired");
+		if (!hmoeService) issues.push("expertService (ExpertSelectionService H-MoE) is not wired");
+		if (!runtimeAdaptation) issues.push("runtimeAdaptation (RuntimeAdaptationCoordinator) is not wired");
+		if (!objectiveExecution) issues.push("objectiveController (ObjectiveExecutionController) is not wired");
 
 		const steeringModel = this.deps.steeringPlane?.policy?.model?.id;
 		const steeringMode = this.deps.steeringPlane?.policy?.mode;
@@ -84,6 +85,8 @@ export class AdaptiveRuntimeReadiness {
 		let certHealth: "healthy" | "degraded" | "unavailable" = "healthy";
 		if (!this.deps.steeringPlane) {
 			certHealth = "unavailable";
+		} else if (!this.deps.steeringPlane.certificates?.hasDurableBackend()) {
+			certHealth = "degraded";
 		}
 
 		let hmoeHealth: "healthy" | "degraded" | "unavailable" = "healthy";
@@ -96,17 +99,17 @@ export class AdaptiveRuntimeReadiness {
 
 		const discoveryMethods = [
 			"responsibility_registry",
-			"textual_clone",
-			"repo_search",
-			"symbol_graph",
-			"structural_ast",
-			"semantic_index",
+			"syntax_export_analysis",
+			"structural_ast_search",
+			"vector_semantic_search",
 		];
 
-		const charterDigest = this.deps.charter ? `charter_${this.deps.charter.objective_id}` : undefined;
+		const ready = issues.length === 0 && certHealth !== "unavailable" && Boolean(steeringModel);
+
+		const charterDigest = this.deps.charter ? "charter_verified" : undefined;
 
 		return {
-			ready: issues.length === 0,
+			ready,
 			steeringModel,
 			steeringMode,
 			certificatePersistenceHealth: certHealth,
@@ -129,14 +132,26 @@ export class AdaptiveRuntimeReadiness {
 		};
 	}
 
-	assertReady(profile?: { systemOneRequired?: boolean; startOnly?: boolean; adaptiveEnabled?: boolean }): void {
+	assertReady(input?: {
+		systemOneRequired?: boolean;
+		startOnly?: boolean;
+		adaptiveEnabled?: boolean;
+		profile?: { systemOneRequired?: boolean; startOnly?: boolean; adaptiveEnabled?: boolean };
+	}): void {
+		const p = input?.profile ?? input;
 		const status = this.getStatus();
-		const isRequired =
-			profile === undefined ||
-			profile.systemOneRequired ||
-			profile.startOnly ||
-			profile.adaptiveEnabled ||
-			status.steeringMode === "system_one_required";
+
+		if (
+			p?.systemOneRequired &&
+			(!this.deps.steeringPlane?.certificates?.hasDurableBackend() ||
+				status.certificatePersistenceHealth !== "healthy")
+		) {
+			throw new Error(
+				"Adaptive runtime is not ready: Durable certificate persistence backend is required in system_one_required mode (FC-004)",
+			);
+		}
+
+		const isRequired = p === undefined || p.systemOneRequired || p.startOnly || p.adaptiveEnabled;
 
 		if (isRequired && !status.ready) {
 			throw new Error(`Adaptive runtime is not ready: ${status.issues.join("; ")}`);

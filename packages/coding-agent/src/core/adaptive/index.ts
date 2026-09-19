@@ -17,6 +17,11 @@ export {
 	type CatalogRevisionProvider,
 } from "./adaptive-resolution-controller.ts";
 export {
+	type AdaptiveRuntimeStack,
+	type CreateAdaptiveRuntimeStackOptions,
+	createAdaptiveRuntimeStack,
+} from "./adaptive-runtime-factory.ts";
+export {
 	AdaptiveRuntimeReadiness,
 	type AdaptiveRuntimeReadinessDeps,
 	type AdaptiveRuntimeStatus,
@@ -64,5 +69,4 @@ export {
 	type SpecialistRecordState,
 	type SpecialistSpec,
 	type WorkerAdaptationNeedKind,
-	type WorkerAdaptationSignal,
 } from "./types.ts";

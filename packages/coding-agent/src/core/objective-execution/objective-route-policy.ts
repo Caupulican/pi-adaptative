@@ -82,7 +82,10 @@ export function composeObjectiveRoute(input: RouteCompositionInput): ObjectiveRo
 	}
 
 	// 5. Work remaining
-	if (sem.workRemaining === false) {
+	if (
+		sem.workRemaining === false &&
+		(!sem.missingWorkClass || sem.missingWorkClass === "none" || sem.missingWorkClass === "completion_candidate")
+	) {
 		return buildRoute(cycleId, objectiveId, "completion_candidate", ["no_work_remaining_criteria_proven"], input);
 	}
 
@@ -90,6 +93,7 @@ export function composeObjectiveRoute(input: RouteCompositionInput): ObjectiveRo
 	const workClass = sem.missingWorkClass ?? "implement";
 	switch (workClass) {
 		case "none":
+		case "completion_candidate":
 			return buildRoute(cycleId, objectiveId, "completion_candidate", ["missing_work_none"], input);
 
 		case "retrieve":

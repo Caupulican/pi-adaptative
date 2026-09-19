@@ -21,7 +21,7 @@ import { DecisionActionPolicy } from "../decision/action-policy.ts";
 import type { DecisionEngineRouter } from "../decision/engine-router.ts";
 import type { CompletionAssuranceProfile } from "../decision/policy.ts";
 import { createDecisionProgram } from "../decision/program.ts";
-import type { SemanticResponsibilityController } from "../dedup/index.ts";
+import type { ResponsibilityStatement, SemanticResponsibilityController } from "../dedup/index.ts";
 import type {
 	ExpertBinding,
 	ExpertOutcomeRecorder,
@@ -332,7 +332,58 @@ export class ObjectiveExecutionController {
 		// Evaluate semantic route via SteeringPlane JEV-004 (PH-113: JEV-004 route owner)
 		let semantic: SemanticRouteJudgments = {};
 
-		if (this.deps.steeringPlane) {
+		if (this.deps.decisions) {
+			try {
+				// FIN-034: Use bounded combined state projection
+				const stateProjection = projectBoundedCombinedState(objectiveId, runtime, {
+					stallTurns: stall.stallTurns,
+					strategyFingerprint: stall.fingerprint,
+				});
+
+				const evaluation = await this.deps.decisions.evaluateOrFallback(ROUTE_DECISION_PROGRAM, stateProjection, {
+					signal: options?.signal,
+					consequence: "medium",
+				});
+
+				// FIN-035: Pass evaluation through DecisionActionPolicy
+				const policy = this.deps.actionPolicy ?? new DecisionActionPolicy();
+				const mwc = evaluation.results.missing_work_class;
+				let missingWorkClass: SemanticRouteJudgments["missingWorkClass"] =
+					mwc?.kind === "choice" ? (mwc.selected as SemanticRouteJudgments["missingWorkClass"]) : undefined;
+
+				if (mwc && mwc.kind === "choice") {
+					const disposition = policy.evaluateChoice(mwc, "medium");
+					if (disposition.action !== "accept") {
+						// Low confidence or unaccepted provenance routes to retrieve or insufficient_evidence
+						missingWorkClass = "insufficient_evidence";
+					}
+				}
+
+				const wr = evaluation.results.work_remaining;
+				const cwcc = evaluation.results.current_worker_can_continue;
+				const iwr = evaluation.results.independent_worker_required;
+				const cer =
+					evaluation.results.capability_escalation_required ?? evaluation.results.capability_escalation_needed;
+				const ebp = evaluation.results.external_blocker_present ?? evaluation.results.external_blocker;
+				const sp = evaluation.results.semantic_progress;
+				const cs = evaluation.results.context_stale;
+				const sr = evaluation.results.strategy_repetition;
+
+				semantic = {
+					workRemaining: wr?.kind === "boolean" ? wr.value : undefined,
+					missingWorkClass,
+					currentWorkerCanContinue: cwcc?.kind === "boolean" ? cwcc.value : undefined,
+					independentWorkerRequired: iwr?.kind === "boolean" ? iwr.value : undefined,
+					capabilityEscalationRequired: cer?.kind === "boolean" ? cer.value : undefined,
+					externalBlockerPresent: ebp?.kind === "boolean" ? ebp.value : undefined,
+					semanticProgress: sp?.kind === "score" ? sp.value : undefined,
+					contextStale: cs?.kind === "boolean" ? cs.value : undefined,
+					strategyRepetition: sr?.kind === "boolean" ? sr.value : undefined,
+				};
+			} catch {
+				// Fallback to deterministic route policy
+			}
+		} else if (this.deps.steeringPlane) {
 			try {
 				const stateProjection = projectBoundedCombinedState(objectiveId, runtime, {
 					stallTurns: stall.stallTurns,
@@ -400,57 +451,6 @@ export class ObjectiveExecutionController {
 				if (this.deps.steeringPlane.policy.mode === "system_one_required") {
 					throw err;
 				}
-			}
-		} else if (this.deps.decisions) {
-			try {
-				// FIN-034: Use bounded combined state projection
-				const stateProjection = projectBoundedCombinedState(objectiveId, runtime, {
-					stallTurns: stall.stallTurns,
-					strategyFingerprint: stall.fingerprint,
-				});
-
-				const evaluation = await this.deps.decisions.evaluateOrFallback(ROUTE_DECISION_PROGRAM, stateProjection, {
-					signal: options?.signal,
-					consequence: "medium",
-				});
-
-				// FIN-035: Pass evaluation through DecisionActionPolicy
-				const policy = this.deps.actionPolicy ?? new DecisionActionPolicy();
-				const mwc = evaluation.results.missing_work_class;
-				let missingWorkClass: SemanticRouteJudgments["missingWorkClass"] =
-					mwc?.kind === "choice" ? (mwc.selected as SemanticRouteJudgments["missingWorkClass"]) : undefined;
-
-				if (mwc && mwc.kind === "choice") {
-					const disposition = policy.evaluateChoice(mwc, "medium");
-					if (disposition.action !== "accept") {
-						// Low confidence or unaccepted provenance routes to retrieve or insufficient_evidence
-						missingWorkClass = "insufficient_evidence";
-					}
-				}
-
-				const wr = evaluation.results.work_remaining;
-				const cwcc = evaluation.results.current_worker_can_continue;
-				const iwr = evaluation.results.independent_worker_required;
-				const cer =
-					evaluation.results.capability_escalation_required ?? evaluation.results.capability_escalation_needed;
-				const ebp = evaluation.results.external_blocker_present ?? evaluation.results.external_blocker;
-				const sp = evaluation.results.semantic_progress;
-				const cs = evaluation.results.context_stale;
-				const sr = evaluation.results.strategy_repetition;
-
-				semantic = {
-					workRemaining: wr?.kind === "boolean" ? wr.value : undefined,
-					missingWorkClass,
-					currentWorkerCanContinue: cwcc?.kind === "boolean" ? cwcc.value : undefined,
-					independentWorkerRequired: iwr?.kind === "boolean" ? iwr.value : undefined,
-					capabilityEscalationRequired: cer?.kind === "boolean" ? cer.value : undefined,
-					externalBlockerPresent: ebp?.kind === "boolean" ? ebp.value : undefined,
-					semanticProgress: sp?.kind === "score" ? sp.value : undefined,
-					contextStale: cs?.kind === "boolean" ? cs.value : undefined,
-					strategyRepetition: sr?.kind === "boolean" ? sr.value : undefined,
-				};
-			} catch {
-				// Fallback to deterministic route policy
 			}
 		} else if (this.deps.systemOne?.evaluateObjectiveRoute) {
 			try {
@@ -747,25 +747,7 @@ export class ObjectiveExecutionController {
 					const failure = await this._dispatchWithExpertSelection(objectiveId, route, runtime, false, signal);
 					if (failure) return failure;
 
-					// PH-114, PH-115: Postcycle JEV-005 progress & JEV-006 repetition
-					if (this.deps.steeringPlane) {
-						try {
-							await this.deps.steeringPlane.requireCertificate(
-								"JEV-005",
-								{ objectiveId, cycleCount: this.cycleCounter },
-								{ objectiveId, signal },
-							);
-							await this.deps.steeringPlane.requireCertificate(
-								"JEV-006",
-								{ objectiveId, strategy: route.route },
-								{ objectiveId, signal },
-							);
-						} catch (err) {
-							if (this.deps.steeringPlane.policy.mode === "system_one_required") {
-								throw err;
-							}
-						}
-					}
+					await this._runObjectivePostflight(objectiveId, route, runtime, signal);
 					break;
 				}
 
@@ -780,6 +762,7 @@ export class ObjectiveExecutionController {
 						};
 					}
 					await this.deps.workerDispatcher.continueWorker(route, signal, this._lastBinding);
+					await this._runObjectivePostflight(objectiveId, route, runtime, signal);
 					break;
 
 				case "escalate_capability": {
@@ -792,16 +775,15 @@ export class ObjectiveExecutionController {
 						});
 
 						if (resolution.dimension === "specialist" && this.deps.specialistSynthesis) {
-							// PH-117: Real dynamic SpecialistNeed
-							const specialty = resolution.node?.node_id || "code_architecture_specialist";
-							const purpose = `Fulfill specialist need for ${objectiveId} (${resolution.action || "targeted expert synthesis"})`;
+							// FC-023, FC-024, FC-025: Real dynamic SpecialistNeed from resolution (never adaptation node id)
+							const need = resolution.specialistNeed ?? {
+								specialty: "code_architecture_specialist",
+								purpose: `Fulfill specialist need for ${objectiveId} (${resolution.action || "targeted expert synthesis"})`,
+							};
 							await this.deps.specialistSynthesis.resolveOrCreate({
 								objectiveId,
 								taskId: `${objectiveId}-spec-${this.cycleCounter}`,
-								need: {
-									specialty,
-									purpose,
-								},
+								need,
 								charter,
 								signal,
 							});
@@ -809,16 +791,14 @@ export class ObjectiveExecutionController {
 						}
 
 						if (resolution.dimension === "capability" && this.deps.adaptiveCapabilities) {
-							// PH-118: Real dynamic CapabilityNeed
-							const requiredOutcome =
-								resolution.node?.node_id ||
-								`Capability escalation for ${objectiveId}: ${resolution.action || "tool extension"}`;
+							// FC-025, FC-026: Real dynamic CapabilityNeed from resolution (never adaptation node id)
+							const need = resolution.capabilityNeed ?? {
+								requiredOutcome: `Capability escalation for ${objectiveId}: ${resolution.action || "tool extension"}`,
+							};
 							await this.deps.adaptiveCapabilities.resolveOrBuild({
 								objectiveId,
 								taskId: `${objectiveId}-cap-${this.cycleCounter}`,
-								need: {
-									requiredOutcome,
-								},
+								need,
 								charter,
 								signal,
 							});
@@ -827,6 +807,7 @@ export class ObjectiveExecutionController {
 					}
 					const failure = await this._dispatchWithExpertSelection(objectiveId, route, runtime, true, signal);
 					if (failure) return failure;
+					await this._runObjectivePostflight(objectiveId, route, runtime, signal);
 					break;
 				}
 
@@ -835,23 +816,60 @@ export class ObjectiveExecutionController {
 					const profile = this.deps.completionProfile ?? "semantic_enhanced";
 					const steeringCertRefs: string[] = [];
 
+					// FC-070, FC-071, FC-072: Canonical proof state on real projection without asserted verificationPassed:true
+					const objRecord = runtime.objectives[objectiveId];
+					const evidenceRevision =
+						objRecord?.evidence && objRecord.evidence.length > 0 ? objRecord.evidence.length : this.cycleCounter;
+					const sourceRevision =
+						(await this.deps.runtime.getSourceRevision?.(objectiveId)) ?? String(evidenceRevision);
+					const artifacts = (await this.deps.runtime.getArtifacts?.(objectiveId)) ?? [];
+					const limitations = (await this.deps.runtime.getLimitations?.(objectiveId)) ?? [];
+					const verificationMatrix: Record<string, unknown> = {};
+					for (const e of objRecord?.evidence ?? []) {
+						if (e.kind === "test" || e.kind === "review") {
+							verificationMatrix[e.evidenceId] = e.summary;
+						}
+					}
+					const acceptanceEvidence = objRecord?.evidence ?? [];
+					const diffDigest = "";
+
 					const canonicalProofState = {
 						objectiveId,
 						cycleCount: this.cycleCounter,
-						verificationPassed: true,
-						acceptanceCriteria: runtime.objectives[objectiveId]?.objective?.acceptanceCriteria ?? [],
-						evidenceRefs: runtime.objectives[objectiveId]?.evidence?.map((e) => e.evidenceId) ?? [],
+						evidenceRevision,
+						sourceRevision,
+						verificationMatrix,
+						acceptanceEvidence,
+						acceptanceCriteria: objRecord?.objective?.acceptanceCriteria ?? [],
+						evidenceRefs: objRecord?.evidence?.map((e) => e.evidenceId) ?? [],
+						diffDigest,
+						artifacts,
+						limitations,
 					};
 
-					// 1. PH-150: JEV-024 completion plausibility on canonical proof state BEFORE finalization gates
+					// 1. PH-150, FC-062: JEV-024 completion plausibility on canonical proof state BEFORE finalization gates
 					if (this.deps.steeringPlane) {
 						try {
 							const c24 = await this.deps.steeringPlane.requireCertificate("JEV-024", canonicalProofState, {
 								objectiveId,
+								evidenceRevision,
 								signal,
 							});
 							steeringCertRefs.push(c24.certificate_id);
-						} catch {
+
+							if (c24.semantic_outcome !== "pass" || c24.directive !== "completion_candidate") {
+								if (this.deps.runtime.ensureRepairTasks) {
+									const repairs = completionFailuresToRepairWork(
+										(c24.failed_semantic_predicates ?? ["completion_not_plausible"]).map((p) => ({
+											gate_id: p,
+										})),
+										objectiveId,
+									);
+									await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
+								}
+								break;
+							}
+						} catch (_err) {
 							if (this.deps.steeringPlane.policy.mode === "system_one_required") {
 								const bundle = await this.buildBundle(objectiveId, "semantic_gate_unavailable", runtime, {
 									reasonCodes: ["system_one_required_but_unavailable"],
@@ -863,6 +881,7 @@ export class ObjectiveExecutionController {
 									deliveryBundle: bundle,
 								};
 							}
+							break;
 						}
 					}
 
@@ -899,7 +918,7 @@ export class ObjectiveExecutionController {
 					});
 
 					if (evalResult.verdict === "complete") {
-						// 3. PH-152: JEV-025 primary semantic completion (proof-bearing)
+						// 3. PH-152, FC-063: JEV-025 primary semantic completion (proof-bearing)
 						if (this.deps.steeringPlane) {
 							const c25 = await this.deps.steeringPlane.requireCertificate(
 								"JEV-025",
@@ -908,27 +927,57 @@ export class ObjectiveExecutionController {
 									mechanicalVerdict: evalResult.verdict,
 									evalResultDetails: evalResult,
 								},
-								{ objectiveId, signal },
+								{ objectiveId, evidenceRevision, signal },
 							);
 							steeringCertRefs.push(c25.certificate_id);
+
+							if (c25.semantic_outcome !== "pass") {
+								if (this.deps.runtime.ensureRepairTasks) {
+									const repairs = completionFailuresToRepairWork(
+										(c25.failed_semantic_predicates ?? ["primary_completion_failed"]).map((p) => ({
+											gate_id: p,
+										})),
+										objectiveId,
+									);
+									await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
+								}
+								break;
+							}
 						}
 
-						// 4. PH-153: JEV-026 cold adversarial challenge (cold proof-bearing)
+						// 4. PH-153, FC-064, FC-073: JEV-026 cold adversarial challenge (cold proof-bearing)
 						if (this.deps.steeringPlane) {
 							const coldProofState = {
 								objectiveId,
 								acceptanceCriteria: canonicalProofState.acceptanceCriteria,
 								evidenceRefs: canonicalProofState.evidenceRefs,
 								coldChallenge: true,
+								verificationMatrix,
+								diffDigest,
 							};
 							const c26 = await this.deps.steeringPlane.requireCertificate("JEV-026", coldProofState, {
 								objectiveId,
+								evidenceRevision,
 								signal,
 							});
 							steeringCertRefs.push(c26.certificate_id);
+
+							const hiddenRegressions = (c26.answers.hidden_regressions as { value?: boolean })?.value === true;
+							if (c26.semantic_outcome !== "pass" || hiddenRegressions) {
+								if (this.deps.runtime.ensureRepairTasks) {
+									const repairs = completionFailuresToRepairWork(
+										(c26.failed_semantic_predicates ?? ["hidden_regressions_or_edge_concern"]).map((p) => ({
+											gate_id: p,
+										})),
+										objectiveId,
+									);
+									await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
+								}
+								break;
+							}
 						}
 
-						// 5. PH-154: jscpd + JEV-044 final semantic-dedup sweep
+						// 5. PH-154, FC-042: jscpd + JEV-044 final semantic-dedup sweep
 						if (this.deps.responsibilityController) {
 							try {
 								await this.deps.responsibilityController.completionSweep({ objectiveId, signal });
@@ -948,7 +997,7 @@ export class ObjectiveExecutionController {
 
 						// 6. Release artifact/mechanical gates
 
-						// 7. PH-155: JEV-027 delivery-claim truth
+						// 7. PH-155, FC-065: JEV-027 delivery-claim truth
 						if (this.deps.steeringPlane) {
 							const c27 = await this.deps.steeringPlane.requireCertificate(
 								"JEV-027",
@@ -957,12 +1006,24 @@ export class ObjectiveExecutionController {
 									deliveryClaimsVerified: true,
 									steeringCertRefs: [...steeringCertRefs],
 								},
-								{ objectiveId, signal },
+								{ objectiveId, evidenceRevision, signal },
 							);
 							steeringCertRefs.push(c27.certificate_id);
+
+							if (c27.semantic_outcome !== "pass") {
+								const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
+									reasonCodes: ["delivery_truth_rejected", ...(c27.failed_semantic_predicates ?? [])],
+								});
+								return {
+									status: "unrecoverable",
+									reasonCodes: ["delivery_truth_rejected"],
+									cycleCount: this.cycleCounter,
+									deliveryBundle: bundle,
+								};
+							}
 						}
 
-						// 8. PH-156, PH-157: JEV-028 gates publish AND/OR deploy
+						// 8. PH-156, PH-157, FC-066: JEV-028 gates publish AND/OR deploy
 						const activeCharter = this.deps.executionCharter;
 						if (activeCharter) {
 							const needsPublishOrDeploy =
@@ -976,9 +1037,24 @@ export class ObjectiveExecutionController {
 										deployTargets: activeCharter.release.deploy_targets,
 										releaseReady: true,
 									},
-									{ objectiveId, signal },
+									{ objectiveId, evidenceRevision, signal },
 								);
 								steeringCertRefs.push(c28.certificate_id);
+
+								const deploySafe =
+									c28.semantic_outcome === "pass" &&
+									(c28.answers.deploy_safe as { value?: boolean })?.value !== false;
+								if (!deploySafe) {
+									const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
+										reasonCodes: ["release_readiness_rejected", ...(c28.failed_semantic_predicates ?? [])],
+									});
+									return {
+										status: "unrecoverable",
+										reasonCodes: ["release_readiness_rejected"],
+										cycleCount: this.cycleCounter,
+										deliveryBundle: bundle,
+									};
+								}
 							}
 						}
 
@@ -1217,6 +1293,7 @@ export class ObjectiveExecutionController {
 
 		let binding: ExpertBinding | undefined;
 		let selectionResult: ExpertSelectionResult | undefined;
+		const taskId = `${objectiveId}-${escalated ? "escalate" : route.route}-${this.cycleCounter}`;
 		if (this.deps.expertSelector) {
 			const priorAttempts = Object.values(runtime.attempts);
 			const consequence = escalated
@@ -1224,7 +1301,6 @@ export class ObjectiveExecutionController {
 				: route.route === "verify" || route.route === "review"
 					? "high"
 					: "medium";
-			const taskId = `${objectiveId}-${escalated ? "escalate" : route.route}-${this.cycleCounter}`;
 			const request = buildWorkerCapabilityRequest({
 				objectiveId,
 				taskId,
@@ -1254,14 +1330,183 @@ export class ObjectiveExecutionController {
 			}
 		}
 
+		// FC-040: Pre-implementation responsibility guard before material write
+		let responsibilityStatement: ResponsibilityStatement | undefined;
+		if (route.route === "implement" && this.deps.responsibilityController) {
+			responsibilityStatement = {
+				statement: `Implementation for ${objectiveId} (${route.route})`,
+				targetLocation: `packages/coding-agent/src/core/${objectiveId}`,
+			};
+			await this.deps.responsibilityController.preImplementation({
+				objectiveId,
+				taskId,
+				proposed: responsibilityStatement,
+				signal,
+			});
+		}
+
 		try {
 			await dispatcher(route, signal, binding);
+
+			// FC-041: Post-mutation responsibility guard before task acceptance
+			if (route.route === "implement" && this.deps.responsibilityController && responsibilityStatement) {
+				const artifacts = (await this.deps.runtime.getArtifacts?.(objectiveId)) ?? [];
+				const changedFiles =
+					artifacts.length > 0 ? artifacts.map((a) => a.path) : [responsibilityStatement.targetLocation];
+				for (const mutatedFile of changedFiles) {
+					const postVerdict = await this.deps.responsibilityController.postMutation({
+						objectiveId,
+						taskId,
+						responsibility: responsibilityStatement,
+						mutatedFile,
+						signal,
+					});
+					if (postVerdict.unintentionalDuplicate) {
+						if (this.deps.runtime.ensureRepairTasks) {
+							const repairs = completionFailuresToRepairWork(
+								[{ gate_id: "duplicate_responsibility_detected" }],
+								objectiveId,
+							);
+							await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
+						}
+						throw new Error(`Semantic duplicate responsibility detected in ${mutatedFile} (FC-041)`);
+					}
+				}
+			}
 		} finally {
 			if (selectionResult && this.deps.expertSelector) {
 				this.deps.expertSelector.release(selectionResult);
 			}
 		}
 		return undefined;
+	}
+
+	private async _runObjectivePostflight(
+		objectiveId: string,
+		route: ObjectiveRoute,
+		runtime: TaskRuntimeProjection,
+		signal?: AbortSignal,
+	): Promise<void> {
+		if (!this.deps.steeringPlane) return;
+
+		const objRecord = runtime.objectives[objectiveId];
+		const evidenceRevision =
+			objRecord?.evidence && objRecord.evidence.length > 0 ? objRecord.evidence.length : this.cycleCounter;
+		const taskId = `${objectiveId}-${route.route}-${this.cycleCounter}`;
+		const artifacts = (await this.deps.runtime.getArtifacts?.(objectiveId)) ?? [];
+		const changedFiles = artifacts.map((a) => a.path);
+
+		try {
+			// FC-050: JEV-017 worker claim support
+			await this.deps.steeringPlane.requireCertificate(
+				"JEV-017",
+				{
+					objectiveId,
+					taskId,
+					route: route.route,
+					workerRole: this._lastBinding?.role ?? "implementer",
+					claims: ["work_completed", "progress_reported"],
+				},
+				{ objectiveId, taskId, evidenceRevision, signal },
+			);
+
+			// FC-051: JEV-018 patch fit (when implementation work occurred)
+			if (route.route === "implement") {
+				await this.deps.steeringPlane.requireCertificate(
+					"JEV-018",
+					{
+						objectiveId,
+						taskId,
+						patchFit: true,
+						changedFiles,
+					},
+					{ objectiveId, taskId, evidenceRevision, signal },
+				);
+			}
+
+			// FC-052: JEV-019 bug causality applicability for bug fixes
+			const isBugFix = Boolean(
+				objectiveId.toLowerCase().includes("bug") ||
+					(objRecord?.objective?.description?.toLowerCase().includes("bug") ?? false),
+			);
+			if (isBugFix) {
+				await this.deps.steeringPlane.requireCertificate(
+					"JEV-019",
+					{
+						objectiveId,
+						taskId,
+						bugFix: true,
+						causalityVerified: true,
+					},
+					{ objectiveId, taskId, evidenceRevision, signal },
+				);
+			}
+
+			// FC-053: JEV-020 architecture fit applicability for ownership changes
+			const isArchitectureChange = Boolean(
+				route.route === "implement" &&
+					(objectiveId.toLowerCase().includes("refactor") ||
+						changedFiles.some((f) => f.includes("architecture") || f.includes("core"))),
+			);
+			if (isArchitectureChange) {
+				await this.deps.steeringPlane.requireCertificate(
+					"JEV-020",
+					{
+						objectiveId,
+						taskId,
+						architectureFit: true,
+					},
+					{ objectiveId, taskId, evidenceRevision, signal },
+				);
+			}
+
+			// FC-054: JEV-022 verification relevance applicability
+			if (route.route === "verify") {
+				await this.deps.steeringPlane.requireCertificate(
+					"JEV-022",
+					{
+						objectiveId,
+						taskId,
+						verificationRelevance: true,
+					},
+					{ objectiveId, taskId, evidenceRevision, signal },
+				);
+			}
+
+			// FC-055: JEV-023 repair adequacy applicability
+			const isRepair = Boolean(
+				route.route === "replan" || Object.keys(runtime.tasks).some((tid) => tid.includes("repair")),
+			);
+			if (isRepair) {
+				await this.deps.steeringPlane.requireCertificate(
+					"JEV-023",
+					{
+						objectiveId,
+						taskId,
+						repairAdequate: true,
+					},
+					{ objectiveId, taskId, evidenceRevision, signal },
+				);
+			}
+
+			// FC-056: JEV-005 semantic progress
+			await this.deps.steeringPlane.requireCertificate(
+				"JEV-005",
+				{ objectiveId, cycleCount: this.cycleCounter },
+				{ objectiveId, taskId, evidenceRevision, signal },
+			);
+
+			// FC-057: JEV-006 repetition
+			await this.deps.steeringPlane.requireCertificate(
+				"JEV-006",
+				{ objectiveId, strategy: route.route },
+				{ objectiveId, taskId, evidenceRevision, signal },
+			);
+		} catch (err) {
+			if (this.deps.steeringPlane.policy.mode === "system_one_required") {
+				throw err;
+			}
+		}
 	}
 
 	private async _recordCompletionOutcomes(

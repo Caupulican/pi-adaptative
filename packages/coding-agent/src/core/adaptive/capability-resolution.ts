@@ -5,10 +5,11 @@
 
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
 import type { CapabilityCatalog, CapabilityCatalogEntry } from "./capability-catalog.ts";
-import type { EstablishedCapability } from "./types.ts";
+import type { CapabilityKind, EstablishedCapability } from "./types.ts";
 
 export interface CapabilityNeed {
 	readonly requiredOutcome: string;
+	readonly kind?: CapabilityKind;
 	readonly requiredInputs?: readonly string[];
 	readonly requiredOutputs?: readonly string[];
 	readonly sideEffects?: readonly string[];

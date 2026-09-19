@@ -2726,6 +2726,9 @@ export class AgentSession {
 				const recoveredGoalId = this._goals.resumeSystemBlockedGoal(undefined, "owner");
 				const startedGoalId = this._goals.startOwnerChatGoal(expandedText, this.agent.state.messages);
 				admittedGoalId = startedGoalId ?? recoveredGoalId ?? admittedGoalId;
+				if (admittedGoalId && this._adaptiveReadiness) {
+					this._adaptiveReadiness.assertReady({ adaptiveEnabled: true });
+				}
 			}
 
 			// Queued steer/follow-up messages remain in the active turn; only a new submission resets the
@@ -3365,6 +3368,11 @@ export class AgentSession {
 	 */
 	private _getAdaptedCompactionSettings(): CompactionSettings {
 		return this._compactionSupport.getAdaptedSettings();
+	}
+
+	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: Accessed by unit tests for compaction model resolution
+	private _resolveCompactionModel(sessionModel: Model<Api>): Model<Api> {
+		return this._compactionSupport.resolveModel(sessionModel);
 	}
 
 	private _checkContextWindowUsageWarning(): void {

@@ -26,6 +26,7 @@ export {
 	type SteeringQuestionPack,
 } from "./programs.ts";
 export {
+	isCertificateSemanticallyPassed,
 	SteeringConfidenceTooLowError,
 	SystemOneSteeringPlane,
 	type SystemOneSteeringPlaneDeps,
@@ -45,6 +46,8 @@ export {
 	type SteeringMissionReference,
 	SteeringProtocolError,
 	type SteeringResult,
+	SteeringSemanticFailedError,
+	type SteeringSemanticOutcome,
 	type WorkerSteeringMission,
 	type WorkerSteeringMissionWorkClass,
 } from "./types.ts";

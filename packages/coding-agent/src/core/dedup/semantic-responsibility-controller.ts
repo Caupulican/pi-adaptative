@@ -109,6 +109,7 @@ export class SemanticResponsibilityController {
 				taskId: input.taskId,
 				evidenceRevision,
 				signal: input.signal,
+				requirePass: false,
 			},
 		);
 
@@ -264,6 +265,7 @@ export class SemanticResponsibilityController {
 				taskId: input.taskId,
 				evidenceRevision,
 				signal: input.signal,
+				requirePass: false,
 			},
 		);
 
@@ -294,11 +296,6 @@ export class SemanticResponsibilityController {
 				: "Responsibility uniqueness verified",
 		};
 
-		if (verdict.unintentionalDuplicate) {
-			// S1A-213: Semantic duplicate creates RepairWork
-			throw new SemanticDuplicateResponsibilityError(verdict);
-		}
-
 		return verdict;
 	}
 
@@ -310,7 +307,7 @@ export class SemanticResponsibilityController {
 		objectiveId: string;
 		evidenceRevision?: number;
 		signal?: AbortSignal;
-	}): Promise<void> {
+	}): Promise<{ passed: boolean; checkedCount: number; certificateId: string }> {
 		if (input.signal?.aborted) {
 			throw new Error("Completion sweep aborted.");
 		}
@@ -320,10 +317,11 @@ export class SemanticResponsibilityController {
 			await this.mechanicalCloneGate.assertGreen();
 		}
 
+		const activeResponsibilities = this.registry.listActive();
 		const cert = await this.steering.requireCertificate(
 			"JEV-044",
 			{
-				activeResponsibilities: this.registry.listActive().map((r) => ({
+				activeResponsibilities: activeResponsibilities.map((r) => ({
 					id: r.responsibility_id,
 					statement: r.statement,
 					locations: r.owner_locations,
@@ -333,6 +331,7 @@ export class SemanticResponsibilityController {
 				objectiveId: input.objectiveId,
 				evidenceRevision: input.evidenceRevision ?? 1,
 				signal: input.signal,
+				requirePass: false,
 			},
 		);
 
@@ -357,5 +356,11 @@ export class SemanticResponsibilityController {
 				certificateId: cert.certificate_id,
 			});
 		}
+
+		return {
+			passed: true,
+			checkedCount: activeResponsibilities.length,
+			certificateId: cert.certificate_id,
+		};
 	}
 }

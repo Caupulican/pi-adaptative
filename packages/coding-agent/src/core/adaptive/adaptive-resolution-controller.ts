@@ -7,6 +7,8 @@
 import { randomUUID } from "node:crypto";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
 import { AdaptationGraph } from "./adaptation-graph.ts";
+import type { CapabilityNeed } from "./capability-resolution.ts";
+import type { SpecialistNeed } from "./specialist-synthesis-controller.ts";
 import type { AdaptationNode, AdaptationNodeKind } from "./types.ts";
 
 export type AdaptiveDimension = "strategy" | "expert_reroute" | "specialist" | "capability" | "runtime";
@@ -14,6 +16,9 @@ export type AdaptiveDimension = "strategy" | "expert_reroute" | "specialist" | "
 export interface AdaptiveResolutionInput {
 	readonly objectiveId: string;
 	readonly taskId?: string;
+	readonly request?: string;
+	readonly prompt?: string;
+	readonly objectiveDescription?: string;
 	readonly recentEvidence?: unknown;
 	readonly recentFailures?: readonly string[];
 	readonly currentExpert?: string;
@@ -29,6 +34,9 @@ export interface AdaptiveResolution {
 	readonly certificateId: string;
 	readonly reasonCodes: readonly string[];
 	readonly node: AdaptationNode;
+	readonly specialistNeed?: SpecialistNeed;
+	readonly capabilityNeed?: CapabilityNeed;
+	readonly runtimeNeed?: Record<string, unknown>;
 }
 
 export interface CatalogRevisionProvider {
@@ -81,16 +89,26 @@ export class AdaptiveResolutionController {
 		// Interpret lowest adequate adaptation dimension
 		const answers = cert.answers;
 		const lowestChoice = (answers.lowest_adequate_adaptation as { choice?: string })?.choice;
+		const specialistDomainChoice = (answers.specialist_domain as { choice?: string })?.choice;
+		const reqText =
+			`${input.request ?? ""} ${(input as any).prompt ?? ""} ${input.objectiveDescription ?? ""} ${JSON.stringify(input.recentEvidence ?? "")}`.toLowerCase();
+		const isUiNeed =
+			/\b(ui|ux|ui_ux|visual|design|frontend|interface|gui|layout)\b/i.test(reqText) ||
+			(lowestChoice === "specialist" && specialistDomainChoice === "ui_ux");
+		const isCapNeed = /\b(tool|script|capability|extension|patch|missing)\b/i.test(reqText);
 
 		let dimension: AdaptiveDimension = "strategy";
 		if (lowestChoice === "expert_reroute") {
 			dimension = "expert_reroute";
+		} else if (lowestChoice === "capability" || (!isUiNeed && isCapNeed)) {
+			dimension = "capability";
 		} else if (
 			lowestChoice === "specialist" ||
+			isUiNeed ||
 			(cert.directive === "resolve_capability" && cert.answers.specialist_gap_present)
 		) {
 			dimension = "specialist";
-		} else if (lowestChoice === "capability" || cert.directive === "resolve_capability") {
+		} else if (isCapNeed || cert.directive === "resolve_capability") {
 			dimension = "capability";
 		} else if (lowestChoice === "runtime" || cert.directive === "synthesize_capability") {
 			dimension = "runtime";
@@ -116,12 +134,66 @@ export class AdaptiveResolutionController {
 
 		this.graph.addNode(node);
 
+		let specialistNeed: SpecialistNeed | undefined;
+		let capabilityNeed: CapabilityNeed | undefined;
+		let runtimeNeed: Record<string, unknown> | undefined;
+
+		if (dimension === "specialist") {
+			if (isUiNeed) {
+				specialistNeed = {
+					specialty: "ui_ux",
+					specialties: ["ui_ux", "visual_design"],
+					purpose: `Deliver UI/UX design and visual implementation for ${input.objectiveId}`,
+					mission:
+						"Analyze UI requirements, create visual design and component hierarchy, and verify user experience",
+					obligations: ["vision_inspection", "ui_ux_fidelity"],
+					cognitiveRequirements: {
+						vision: true,
+						reasoning: "high",
+						tool_calling: true,
+						long_context: true,
+					},
+					requiredTools: ["view_image", "capture_screenshot", "read_file", "write_file", "edit_file"],
+					requiredCapabilities: ["ui_inspection"],
+					authorityRole: "implementer",
+				};
+			} else {
+				const specialty = specialistDomainChoice ?? "architecture_specialist";
+				specialistNeed = {
+					specialty,
+					specialties: [specialty, "system_design"],
+					purpose: `Deliver specialized implementation for ${input.objectiveId}`,
+					mission: `Execute specialized task for ${input.objectiveId}`,
+					cognitiveRequirements: {
+						reasoning: "high",
+						tool_calling: true,
+					},
+					authorityRole: "implementer",
+				};
+			}
+		} else if (dimension === "capability") {
+			capabilityNeed = {
+				requiredOutcome: `Synthesize capability to close operational gap for ${input.objectiveId}: ${input.request ?? "tool extension"}`,
+				requiredInputs: ["context", "parameters"],
+				requiredOutputs: ["result", "evidence"],
+			};
+		} else if (dimension === "runtime") {
+			runtimeNeed = {
+				objectiveId: input.objectiveId,
+				target: "runtime_modification",
+				rollbackRequired: true,
+			};
+		}
+
 		return {
 			dimension,
 			action: cert.directive,
 			certificateId: cert.certificate_id,
 			reasonCodes: [cert.directive, `dimension_${dimension}`],
 			node,
+			specialistNeed,
+			capabilityNeed,
+			runtimeNeed,
 		};
 	}
 }

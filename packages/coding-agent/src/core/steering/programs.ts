@@ -703,18 +703,32 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 		}
 
 		case "JEV-040": {
-			decisions.push({
-				kind: "choice",
-				id: "lowest_adequate_adaptation",
-				instruction: "Select lowest adequate adaptation tier",
-				options: {
-					strategy: { description: "Adjust plan, prompt, or parameters without changing tools" },
-					expert_reroute: { description: "Switch routing band or model within existing fleet" },
-					specialist: { description: "Synthesize specialized worker role and profile" },
-					capability: { description: "Synthesize new tool, script, skill, or adapter" },
-					runtime: { description: "Modify core runtime code with rollback protection" },
+			decisions.push(
+				{
+					kind: "choice",
+					id: "lowest_adequate_adaptation",
+					instruction: "Select lowest adequate adaptation tier",
+					options: {
+						strategy: { description: "Adjust plan, prompt, or parameters without changing tools" },
+						expert_reroute: { description: "Switch routing band or model within existing fleet" },
+						specialist: { description: "Synthesize specialized worker role and profile" },
+						capability: { description: "Synthesize new tool, script, skill, or adapter" },
+						runtime: { description: "Modify core runtime code with rollback protection" },
+					},
 				},
-			});
+				{
+					kind: "choice",
+					id: "specialist_domain",
+					instruction: "Target specialist domain if specialist adaptation is chosen",
+					options: {
+						ui_ux: { description: "User interface and visual design specialist" },
+						architecture: { description: "System architecture specialist" },
+						performance: { description: "Performance and optimization specialist" },
+						security: { description: "Security and isolation specialist" },
+						general_coder: { description: "General implementation coder" },
+					},
+				},
+			);
 			break;
 		}
 
@@ -781,6 +795,16 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 					id: "no_unauthorized_duplication",
 					instruction: "Is the mutated code free of unauthorized semantic duplication?",
 				},
+				{
+					kind: "boolean",
+					id: "duplicate_responsibility_introduced",
+					instruction: "Did this mutation introduce an unauthorized duplicate responsibility?",
+				},
+				{
+					kind: "boolean",
+					id: "intentional_waiver_applies",
+					instruction: "Does an approved intentional duplication waiver apply to this mutation?",
+				},
 			);
 			break;
 		}
@@ -796,6 +820,11 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 					kind: "boolean",
 					id: "single_semantic_owner",
 					instruction: "Does every implemented responsibility have exactly one owner?",
+				},
+				{
+					kind: "boolean",
+					id: "unintentional_duplicate_remaining",
+					instruction: "Are there unintentional duplicate responsibilities remaining?",
 				},
 			);
 			break;

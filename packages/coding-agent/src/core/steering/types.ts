@@ -99,13 +99,14 @@ export interface SteeringDirective {
 
 export interface SteeringCheckpointRequest {
 	readonly checkpointId: SteeringCheckpointId | string;
-	readonly objectiveId: string;
+	readonly objectiveId?: string;
 	readonly taskId?: string | null;
 	readonly workUnitId?: string | null;
 	readonly state: unknown;
-	readonly evidenceRevision: number;
+	readonly evidenceRevision?: number;
 	readonly consequence?: "low" | "medium" | "high" | "critical";
 	readonly parentCertificateIds?: readonly string[];
+	readonly signal?: AbortSignal;
 }
 
 export interface SteeringCertificatePolicyRef {
@@ -125,6 +126,24 @@ export interface SteeringCertificateEngineRef {
 	readonly model: string;
 }
 
+export type SteeringSemanticOutcome = "pass" | "fail" | "gather_more" | "repair" | "replan" | "block";
+
+export class SteeringSemanticFailedError extends Error {
+	readonly checkpointId: string;
+	readonly outcome: SteeringSemanticOutcome;
+	readonly failedPredicates: readonly string[];
+
+	constructor(checkpointId: string, outcome: SteeringSemanticOutcome, failedPredicates: readonly string[]) {
+		super(
+			`[${checkpointId}] Checkpoint semantic gate failed with outcome '${outcome}': ${failedPredicates.join(", ")}`,
+		);
+		this.name = "SteeringSemanticFailedError";
+		this.checkpointId = checkpointId;
+		this.outcome = outcome;
+		this.failedPredicates = failedPredicates;
+	}
+}
+
 export interface SteeringCertificate {
 	readonly schema_version: "1.0";
 	readonly certificate_id: string;
@@ -141,6 +160,8 @@ export interface SteeringCertificate {
 	readonly directive: string;
 	readonly action_confidence?: number;
 	readonly policy_result?: string | null;
+	readonly semantic_outcome?: SteeringSemanticOutcome;
+	readonly failed_semantic_predicates?: readonly string[];
 	readonly parent_certificate_ids?: readonly string[];
 	readonly usage?: Record<string, unknown>;
 	readonly created_at: string;
