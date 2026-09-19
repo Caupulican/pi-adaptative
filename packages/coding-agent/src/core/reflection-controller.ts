@@ -1848,11 +1848,7 @@ export class ReflectionController {
 			// not-found (or, worse, misfires against whatever now occupies that text).
 			const applyResult =
 				decision.kind === "apply" && !skillPromotionBlock
-					? await this._applyReflectionWrite(
-							write,
-							signal,
-							input.explicitUserMemoryInstruction === true || !policy.enabled,
-						)
+					? await this._applyReflectionWrite(write, signal, input.explicitUserMemoryInstruction === true)
 					: { applied: false };
 			const writeFailed = decision.kind === "apply" && !skillPromotionBlock && !applyResult.applied;
 			if (decision.kind !== "no-op") {

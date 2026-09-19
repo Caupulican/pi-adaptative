@@ -9690,7 +9690,7 @@ export const MODELS = {
 				cacheWrite: 12.5,
 				tiers: [{"inputTokensAbove":272000,"input":20,"output":75,"cacheRead":2,"cacheWrite":25}],
 			},
-			contextWindow: 1050000,
+			contextWindow: 272000,
 			maxTokens: 128000,
 		} satisfies Model<"openai-responses">,
 		"gpt-realtime-2.1": {

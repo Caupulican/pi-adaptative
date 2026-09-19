@@ -1544,7 +1544,7 @@ async function generateModels() {
 		// raise it; the retained tier prices what runs above the threshold.
 		if (
 			candidate.provider === "openai" &&
-			(candidate.id === "gpt-5.4" || candidate.id === "gpt-5.5" || isOpenAiGpt56(candidate.id))
+			(candidate.id === "gpt-5.4" || candidate.id === "gpt-5.5" || isOpenAiResponsesLiteFamily(candidate.id))
 		) {
 			candidate.contextWindow = OPENAI_LONG_CONTEXT_INPUT_THRESHOLD;
 			candidate.maxTokens = 128000;
@@ -2531,8 +2531,8 @@ async function generateModels() {
 			(model) =>
 				model.provider === "openai" &&
 				model.api === "openai-responses" &&
-				// Azure availability is deployment-specific and is not yet documented for GPT-5.6.
-				!isOpenAiGpt56(model.id),
+				// Azure availability is deployment-specific and is not yet documented for GPT-5.6 / GPT-6.
+				!isOpenAiResponsesLiteFamily(model.id),
 		)
 		.map((model) => ({
 			...model,

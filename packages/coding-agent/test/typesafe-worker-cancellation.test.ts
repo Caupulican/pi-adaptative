@@ -16,7 +16,7 @@ describe("worker billed review cancellation", () => {
 	])("retains a received service charge: %j", async ({ shutdown, failUsageWrite }) => {
 		const harness = await createHarness({
 			initialActiveToolNames: ["delegate", "typesafe_review", "skill"],
-			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
+			settings: { workerDelegation: { enabled: true, account: "same", orchestrationProfile: undefined } },
 		});
 		const sessionId = harness.sessionManager.getSessionId();
 		const save = TypeSafeEvidenceStore.prototype.save;
@@ -51,7 +51,7 @@ describe("worker billed review cancellation", () => {
 			if (shutdown) harness.session.dispose();
 			return receipt;
 		});
-		const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+		const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
 			Response.json({
 				model: "jev-1.13.0",
 				answers: { q: { type: "choice", choice: "yes", confidence: 1, probabilities: { yes: 1, no: 0 } } },
