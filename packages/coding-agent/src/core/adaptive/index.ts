@@ -20,6 +20,8 @@ export {
 	type AdaptiveRuntimeStack,
 	type CreateAdaptiveRuntimeStackOptions,
 	createAdaptiveRuntimeStack,
+	createProductionAdaptiveRuntimeStack,
+	createTestAdaptiveRuntimeStack,
 } from "./adaptive-runtime-factory.ts";
 export {
 	AdaptiveRuntimeReadiness,

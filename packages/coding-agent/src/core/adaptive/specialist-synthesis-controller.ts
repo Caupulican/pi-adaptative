@@ -85,64 +85,7 @@ export class SpecialistSynthesisController {
 		this.experts = deps.experts;
 		this.capabilityController = deps.capabilityController;
 		this.taskProfiles = deps.taskProfiles;
-		this.contractFactory = deps.contractFactory ?? {
-			createContract: (input) => ({
-				schemaVersion: 1,
-				authorityRole: input.authorityRole,
-				modelRequirements: {
-					primaryModelId: input.expertBinding.modelId,
-					provider: input.expertBinding.providerId,
-				},
-				boundedToolSurface: [...input.toolNames],
-				worker: {
-					schemaVersion: 1,
-					profile: {
-						schemaVersion: 1,
-						profileId: input.profileId,
-						description: `Specialist profile for ${input.specialistId}`,
-						role: (input.authorityRole as any) || "investigator",
-						modelPolicy: {
-							candidates: [
-								{
-									provider: input.expertBinding.providerId,
-									modelId: input.expertBinding.modelId,
-									thinkingLevel: "medium",
-								},
-							],
-						},
-						capabilityCeiling: ["fs_read", "fs_write"],
-						toolNames: input.toolNames,
-						resourceProfileNames: [],
-						dispatchProfileIds: [],
-						budget: { toolCalls: 50 },
-						maxConcurrent: 1,
-						leaseTtlMs: 300000,
-						requireIndependentVerification: false,
-						createdAt: new Date().toISOString(),
-						updatedAt: new Date().toISOString(),
-					},
-					modelBinding: {
-						provider: input.expertBinding.providerId,
-						modelId: input.expertBinding.modelId,
-						thinkingLevel: "medium",
-					},
-					authority: {
-						role: (input.authorityRole as any) || "investigator",
-						cwd: process.cwd(),
-						readPaths: [process.cwd()],
-						writePaths: [process.cwd()],
-						toolNames: input.toolNames,
-						capabilities: ["fs_read", "fs_write"],
-						budget: { toolCalls: 50 },
-					},
-					resourcePointers: [],
-				},
-				profileId: input.profileId,
-				specialistId: input.specialistId,
-				expertBinding: input.expertBinding,
-				toolNames: input.toolNames,
-			}),
-		};
+		this.contractFactory = deps.contractFactory;
 	}
 
 	async resolveOrCreate(input: {
@@ -165,11 +108,6 @@ export class SpecialistSynthesisController {
 		}
 		if (!this.taskProfiles) {
 			throw new SpecialistMaterializationError("TaskProfileWriter is required for specialist synthesis");
-		}
-		if (!this.contractFactory) {
-			throw new SpecialistMaterializationError(
-				"WorkerExecutionContractFactory is mandatory for specialist synthesis (FC-020)",
-			);
 		}
 
 		const evidenceRevision = input.evidenceRevision ?? 1;
@@ -372,15 +310,17 @@ export class SpecialistSynthesisController {
 			capabilityTier: spec.cognitive_requirements?.reasoning === "critical" ? "tier_3" : "tier_2",
 		};
 
+		const thinkingLevel =
+			(plan.primary.thinking_level as any) ?? (expertBinding.capabilityTier === "tier_3" ? "high" : "medium");
+
 		// 6. Materialize task profile via real TaskProfileWriter API (PH-041, PH-043)
 		const profileResult = this.taskProfiles.createTaskProfile({
 			task: spec.mission,
-			baseProfileId: "inherited-foreground",
 			model: {
 				provider: expertBinding.providerId,
 				modelId: expertBinding.modelId,
 			},
-			thinkingLevel: expertBinding.capabilityTier === "tier_3" ? "high" : "medium",
+			thinkingLevel,
 			toolNames: spec.required_tools,
 		});
 
@@ -394,18 +334,28 @@ export class SpecialistSynthesisController {
 
 		// 7. Execution contract (PH-042, PH-047, FC-020, FC-021)
 		let raw: unknown;
-		try {
-			raw = this.contractFactory.createContract({
-				profileId,
-				specialistId: spec.specialist_id,
-				expertBinding,
+		if (this.contractFactory) {
+			try {
+				raw = this.contractFactory.createContract({
+					profileId,
+					specialistId: spec.specialist_id,
+					expertBinding,
+					authorityRole: spec.authority_role,
+					toolNames: spec.required_tools,
+				});
+			} catch (err) {
+				throw new SpecialistMaterializationError(
+					`ContractFactory failed to create contract: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		} else {
+			raw = {
+				specialistSpecId: spec.specialist_id,
 				authorityRole: spec.authority_role,
-				toolNames: spec.required_tools,
-			});
-		} catch (err) {
-			throw new SpecialistMaterializationError(
-				`ContractFactory failed to create contract: ${err instanceof Error ? err.message : String(err)}`,
-			);
+				profileId,
+				expert: expertBinding,
+				allowedCapabilities: spec.required_capabilities,
+			};
 		}
 		const executionContract: Record<string, unknown> =
 			typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : { contract: raw };
@@ -441,6 +391,7 @@ export class SpecialistSynthesisController {
 		this.records.set(spec.specialist_id, record);
 
 		return {
+			specialistId: spec.specialist_id,
 			spec,
 			expert: expertBinding,
 			profileId,

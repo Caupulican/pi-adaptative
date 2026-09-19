@@ -727,6 +727,7 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 						security: { description: "Security and isolation specialist" },
 						general_coder: { description: "General implementation coder" },
 					},
+					allowUnlistedChoice: true,
 				},
 			);
 			break;

@@ -729,6 +729,12 @@ export class SystemOneSteeringPlane {
 
 		// Map normalized results to answers
 		const answers: Record<string, unknown> = {};
+		if (
+			(evaluation as unknown as Record<string, unknown>).rawAnswers &&
+			typeof (evaluation as unknown as Record<string, unknown>).rawAnswers === "object"
+		) {
+			Object.assign(answers, (evaluation as unknown as Record<string, unknown>).rawAnswers);
+		}
 		const confidences: number[] = [];
 
 		for (const d of program.decisions) {

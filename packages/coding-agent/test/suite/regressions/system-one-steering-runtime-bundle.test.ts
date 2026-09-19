@@ -25,7 +25,10 @@ class TestJevAdapter implements JevAdapter {
 						id === "capability_escalation_required" ||
 						id === "stalled" ||
 						id === "missing_information" ||
-						id === "release_risk_critical"
+						id === "release_risk_critical" ||
+						id === "unhandled_edge_cases" ||
+						id === "hidden_regressions" ||
+						id === "assumption_violations"
 					) {
 						answers[id] = { type: "noul", noul: 0.05 };
 					} else {

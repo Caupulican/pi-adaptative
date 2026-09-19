@@ -22,6 +22,7 @@ export interface ChoiceDecision {
 	readonly instruction: string;
 	readonly options: Record<string, ChoiceOption>;
 	readonly consequence?: Consequence;
+	readonly allowUnlistedChoice?: boolean;
 }
 
 export interface ScoreLevel {

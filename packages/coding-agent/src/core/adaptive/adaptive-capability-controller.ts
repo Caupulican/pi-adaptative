@@ -67,12 +67,22 @@ export interface AdaptiveCapabilityControllerDeps {
 			signal?: AbortSignal;
 		}): Promise<{ success: boolean; rolledBack: boolean; restartRequired: boolean }>;
 	};
+	readonly extensionRunner?: {
+		reload?(path?: string): Promise<void> | void;
+	};
+	readonly skillVault?: {
+		load?(skillName: string, mode?: string, refresh?: boolean): Promise<{ ok: boolean }> | { ok: boolean };
+	};
+	readonly scriptRegistry?: {
+		register?(script: unknown): void;
+	};
 }
 
 export class AdaptiveCapabilityController {
 	readonly steering: SystemOneSteeringPlane;
 	readonly catalog: CapabilityCatalog;
 	readonly resolver: CapabilityResolver;
+	private readonly deps: AdaptiveCapabilityControllerDeps;
 	private readonly experts?: ExpertSelectionService;
 	private readonly builder?: AdaptiveCapabilityControllerDeps["builder"];
 	private readonly mechanicalVerifier?: AdaptiveCapabilityControllerDeps["mechanicalVerifier"];
@@ -83,6 +93,7 @@ export class AdaptiveCapabilityController {
 	private readonly records = new Map<string, CapabilityRecord>();
 
 	constructor(deps: AdaptiveCapabilityControllerDeps) {
+		this.deps = deps;
 		this.steering = deps.steering;
 		this.catalog = deps.catalog;
 		this.resolver = deps.resolver ?? new CapabilityResolver(this.catalog, this.steering);
@@ -107,6 +118,20 @@ export class AdaptiveCapabilityController {
 				if (!code || code.trim().length === 0) {
 					return { active: false, projection: { error: "Empty code for ephemeral script" } };
 				}
+				let syntaxValid = false;
+				try {
+					new Function(code);
+					syntaxValid = true;
+				} catch {
+					syntaxValid =
+						code.includes("export") ||
+						code.includes("import") ||
+						code.includes("function") ||
+						code.includes("=>");
+				}
+				if (!syntaxValid) {
+					return { active: false, projection: { error: "Invalid syntax for ephemeral script" } };
+				}
 				const scriptPath = candidate.artifactUri ?? `/tmp/scripts/${spec.capability_id}.mjs`;
 				return {
 					active: true,
@@ -130,6 +155,18 @@ export class AdaptiveCapabilityController {
 					return { active: false, projection: { error: "Empty code for toolkit script" } };
 				}
 				const entrypoint = candidate.artifactUri ?? `toolkit/${spec.capability_id}.mjs`;
+				if ((this.deps as any)?.scriptRegistry) {
+					try {
+						((this.deps as any).scriptRegistry as any).register?.({
+							name: spec.capability_id,
+							description: spec.purpose,
+							runner: "bash",
+							path: entrypoint,
+						});
+					} catch {
+						// Safe registration
+					}
+				}
 				return {
 					active: true,
 					projection: {
@@ -149,6 +186,13 @@ export class AdaptiveCapabilityController {
 				const code = candidate.code ?? "";
 				if (!code && !candidate.artifactUri) {
 					return { active: false, projection: { error: "Missing extension implementation" } };
+				}
+				if ((this.deps as any)?.extensionRunner) {
+					try {
+						await ((this.deps as any).extensionRunner as any).reload?.(candidate.artifactUri);
+					} catch {
+						// Non-fatal reload probe
+					}
 				}
 				return {
 					active: true,
@@ -192,6 +236,13 @@ export class AdaptiveCapabilityController {
 				if (!content || content.trim().length === 0) {
 					return { active: false, projection: { error: "Missing skill instructions" } };
 				}
+				if ((this.deps as any)?.skillVault) {
+					try {
+						await ((this.deps as any).skillVault as any).load?.(spec.capability_id, "model", false);
+					} catch {
+						// Non-fatal vault probe
+					}
+				}
 				return {
 					active: true,
 					projection: {
@@ -206,7 +257,6 @@ export class AdaptiveCapabilityController {
 				};
 			},
 		});
-
 		this.activators.set("composition", {
 			activate: async (candidate, spec) => {
 				return {
@@ -377,19 +427,23 @@ export class AdaptiveCapabilityController {
 			(synthesisCert.answers.adaptation_class as { choice?: string })?.choice ??
 			"ephemeral_script";
 		const kind: CapabilityKind =
-			chosenLevelStr === "compose"
+			chosenLevelStr === "compose" || chosenLevelStr === "composition"
 				? "composition"
 				: chosenLevelStr === "ephemeral_script"
 					? "ephemeral_script"
 					: chosenLevelStr === "toolkit_script"
 						? "toolkit_script"
-						: chosenLevelStr === "extension_or_tool"
+						: chosenLevelStr === "extension_or_tool" || chosenLevelStr === "extension"
 							? "extension"
-							: chosenLevelStr === "skill"
-								? "skill"
-								: chosenLevelStr === "runtime_patch"
-									? "runtime_patch"
-									: "integration";
+							: chosenLevelStr === "tool"
+								? "tool"
+								: chosenLevelStr === "skill"
+									? "skill"
+									: chosenLevelStr === "runtime_patch"
+										? "runtime_patch"
+										: chosenLevelStr === "provider_adapter"
+											? "provider_adapter"
+											: "integration";
 
 		const capabilityId = `cap_${chosenLevelStr}_${Date.now()}`;
 		const spec: CapabilitySpec = {

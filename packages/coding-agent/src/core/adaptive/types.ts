@@ -220,6 +220,7 @@ export interface EstablishedCapability {
 }
 
 export interface MaterializedSpecialist {
+	readonly specialistId?: string;
 	readonly spec: SpecialistSpec;
 	readonly expert: {
 		readonly providerId: string;

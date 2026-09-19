@@ -818,18 +818,13 @@ export class ObjectiveExecutionController {
 
 					// FC-070, FC-071, FC-072: Canonical proof state on real projection without asserted verificationPassed:true
 					const objRecord = runtime.objectives[objectiveId];
-					const evidenceRevision =
-						objRecord?.evidence && objRecord.evidence.length > 0 ? objRecord.evidence.length : this.cycleCounter;
+					const { evidenceRevision, artifacts, verificationMatrix } = await this._resolveCanonicalEvidenceState(
+						objectiveId,
+						runtime,
+					);
 					const sourceRevision =
 						(await this.deps.runtime.getSourceRevision?.(objectiveId)) ?? String(evidenceRevision);
-					const artifacts = (await this.deps.runtime.getArtifacts?.(objectiveId)) ?? [];
 					const limitations = (await this.deps.runtime.getLimitations?.(objectiveId)) ?? [];
-					const verificationMatrix: Record<string, unknown> = {};
-					for (const e of objRecord?.evidence ?? []) {
-						if (e.kind === "test" || e.kind === "review") {
-							verificationMatrix[e.evidenceId] = e.summary;
-						}
-					}
 					const acceptanceEvidence = objRecord?.evidence ?? [];
 					const diffDigest = "";
 
@@ -1381,6 +1376,28 @@ export class ObjectiveExecutionController {
 		return undefined;
 	}
 
+	async enforcePostflightCertificates(
+		first: string | ObjectiveRoute | { route: string },
+		second?: string | ObjectiveRoute | { route: string },
+		signal?: AbortSignal,
+	): Promise<void> {
+		let objectiveId: string;
+		let route: ObjectiveRoute;
+		if (typeof first === "string") {
+			objectiveId = first;
+			route = typeof second === "string" ? ({ route: second } as ObjectiveRoute) : (second as ObjectiveRoute);
+		} else {
+			route = first as ObjectiveRoute;
+			objectiveId = second as string;
+		}
+		const rawRuntime = this.deps.runtime as any;
+		const runtime: TaskRuntimeProjection =
+			rawRuntime?.objectives && rawRuntime?.tasks
+				? (rawRuntime as TaskRuntimeProjection)
+				: await this.deps.runtime.reconcileObjective(objectiveId);
+		await this._runObjectivePostflight(objectiveId, route, runtime, signal);
+	}
+
 	private async _runObjectivePostflight(
 		objectiveId: string,
 		route: ObjectiveRoute,
@@ -1389,12 +1406,13 @@ export class ObjectiveExecutionController {
 	): Promise<void> {
 		if (!this.deps.steeringPlane) return;
 
-		const objRecord = runtime.objectives[objectiveId];
-		const evidenceRevision =
-			objRecord?.evidence && objRecord.evidence.length > 0 ? objRecord.evidence.length : this.cycleCounter;
+		const { evidenceRevision, artifacts, verificationMatrix } = await this._resolveCanonicalEvidenceState(
+			objectiveId,
+			runtime,
+		);
 		const taskId = `${objectiveId}-${route.route}-${this.cycleCounter}`;
-		const artifacts = (await this.deps.runtime.getArtifacts?.(objectiveId)) ?? [];
 		const changedFiles = artifacts.map((a) => a.path);
+		const objRecord = runtime?.objectives?.[objectiveId];
 
 		try {
 			// FC-050: JEV-017 worker claim support
@@ -1410,21 +1428,23 @@ export class ObjectiveExecutionController {
 				{ objectiveId, taskId, evidenceRevision, signal },
 			);
 
-			// FC-051: JEV-018 patch fit (when implementation work occurred)
+			// PRC-050, PRC-051: JEV-018 raw proof state (no asserted patchFit: true)
 			if (route.route === "implement") {
 				await this.deps.steeringPlane.requireCertificate(
 					"JEV-018",
 					{
 						objectiveId,
 						taskId,
-						patchFit: true,
 						changedFiles,
+						artifacts,
+						requirements:
+							objRecord?.objective?.acceptanceCriteria?.map((ac: any) => ac.text ?? ac.description) ?? [],
 					},
 					{ objectiveId, taskId, evidenceRevision, signal },
 				);
 			}
 
-			// FC-052: JEV-019 bug causality applicability for bug fixes
+			// PRC-050, PRC-051: JEV-019 raw proof state (no asserted causalityVerified: true)
 			const isBugFix = Boolean(
 				objectiveId.toLowerCase().includes("bug") ||
 					(objRecord?.objective?.description?.toLowerCase().includes("bug") ?? false),
@@ -1436,13 +1456,15 @@ export class ObjectiveExecutionController {
 						objectiveId,
 						taskId,
 						bugFix: true,
-						causalityVerified: true,
+						changedFiles,
+						reproducerResults: (objRecord?.evidence ?? []).filter((e) => e.kind === "test"),
+						verificationMatrix,
 					},
 					{ objectiveId, taskId, evidenceRevision, signal },
 				);
 			}
 
-			// FC-053: JEV-020 architecture fit applicability for ownership changes
+			// PRC-050, PRC-051: JEV-020 raw proof state (no asserted architectureFit: true)
 			const isArchitectureChange = Boolean(
 				route.route === "implement" &&
 					(objectiveId.toLowerCase().includes("refactor") ||
@@ -1454,26 +1476,30 @@ export class ObjectiveExecutionController {
 					{
 						objectiveId,
 						taskId,
-						architectureFit: true,
+						changedFiles,
+						modulesAffected: changedFiles.map((f) => f.split("/")[0] || f),
+						boundaries: ["core", "orchestration", "adaptive", "steering"],
 					},
 					{ objectiveId, taskId, evidenceRevision, signal },
 				);
 			}
 
-			// FC-054: JEV-022 verification relevance applicability
+			// PRC-050, PRC-051: JEV-022 raw proof state (no asserted verificationRelevance: true)
 			if (route.route === "verify") {
 				await this.deps.steeringPlane.requireCertificate(
 					"JEV-022",
 					{
 						objectiveId,
 						taskId,
-						verificationRelevance: true,
+						verificationMatrix,
+						acceptanceCriteria:
+							objRecord?.objective?.acceptanceCriteria?.map((ac: any) => ac.text ?? ac.description) ?? [],
 					},
 					{ objectiveId, taskId, evidenceRevision, signal },
 				);
 			}
 
-			// FC-055: JEV-023 repair adequacy applicability
+			// PRC-050, PRC-051: JEV-023 raw proof state (no asserted repairAdequate: true)
 			const isRepair = Boolean(
 				route.route === "replan" || Object.keys(runtime.tasks).some((tid) => tid.includes("repair")),
 			);
@@ -1483,7 +1509,9 @@ export class ObjectiveExecutionController {
 					{
 						objectiveId,
 						taskId,
-						repairAdequate: true,
+						repairWork: Object.keys(runtime.tasks).filter((tid) => tid.includes("repair")),
+						changedFiles,
+						failedGates: (objRecord as any)?.failedGates ?? [],
 					},
 					{ objectiveId, taskId, evidenceRevision, signal },
 				);
@@ -1544,6 +1572,35 @@ export class ObjectiveExecutionController {
 				...fields,
 			});
 		}
+	}
+
+	private async _resolveCanonicalEvidenceState(
+		objectiveId: string,
+		runtime: TaskRuntimeProjection,
+	): Promise<{
+		evidenceRevision: number;
+		artifacts: readonly { path: string; kind?: string }[];
+		verificationMatrix: Record<string, unknown>;
+	}> {
+		const objRecord = runtime.objectives[objectiveId];
+		const canonicalRevision =
+			((await this.deps.evidence?.reconcile)
+				? (this.deps.evidence as any)?.getEvidenceRevision?.(objectiveId)
+				: undefined) ?? (await (this.deps.runtime as any)?.getEvidenceRevision?.(objectiveId));
+		const evidenceRevision =
+			typeof canonicalRevision === "number"
+				? canonicalRevision
+				: objRecord?.evidence && objRecord.evidence.length > 0
+					? objRecord.evidence.length
+					: 1;
+		const artifacts = (await this.deps.runtime.getArtifacts?.(objectiveId)) ?? [];
+		const verificationMatrix: Record<string, unknown> = {};
+		for (const e of objRecord?.evidence ?? []) {
+			if (e.kind === "test" || e.kind === "review") {
+				verificationMatrix[e.evidenceId] = e.summary;
+			}
+		}
+		return { evidenceRevision, artifacts, verificationMatrix };
 	}
 
 	async runToDelivery(objectiveId: string, signal?: AbortSignal): Promise<DeliveryBundle> {

@@ -143,7 +143,8 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 					confidence?: number;
 					probabilities?: Record<string, number>;
 				};
-				if (ans.type !== "choice" || typeof ans.choice !== "string" || !d.options[ans.choice]) {
+				const allowUnlisted = d.allowUnlistedChoice === true || d.id === "specialist_domain";
+				if (ans.type !== "choice" || typeof ans.choice !== "string" || (!d.options[ans.choice] && !allowUnlisted)) {
 					throw new DecisionEngineProtocolError(`Invalid choice '${ans.choice}' for decision '${d.id}'`, {
 						decisionId: d.id,
 						raw,
@@ -310,7 +311,7 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 			}
 		}
 
-		return createDecisionEvaluation({
+		const evaluation = createDecisionEvaluation({
 			programId: program.id,
 			programVersion: program.version,
 			engineId: this.id,
@@ -327,5 +328,7 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 				latencyMs,
 			},
 		});
+		(evaluation as unknown as Record<string, unknown>).rawAnswers = response.answers;
+		return evaluation;
 	}
 }

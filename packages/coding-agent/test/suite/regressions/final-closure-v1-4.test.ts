@@ -400,6 +400,17 @@ describe("Final Closure v1.4 Regressions (FC-001..FC-090)", () => {
 					createTaskProfile: () => ({ created: true, profileId: "prof-fc-021" }),
 					inspectTaskProfileOptions: () => ({ baseProfiles: [], inheritedToolNames: [], models: [] }),
 				},
+				contractFactory: {
+					createContract: (input) => ({
+						schemaVersion: 1,
+						authorityRole: input.authorityRole,
+						modelRequirements: {
+							primaryModelId: input.expertBinding.modelId,
+							provider: input.expertBinding.providerId,
+						},
+						boundedToolSurface: [...input.toolNames],
+					}),
+				},
 			});
 
 			const result = await controller.resolveOrCreate({

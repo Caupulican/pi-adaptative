@@ -87,30 +87,37 @@ export class AdaptiveResolutionController {
 		);
 
 		// Interpret lowest adequate adaptation dimension
+		// Interpret lowest adequate adaptation dimension from typed Jev
 		const answers = cert.answers;
 		const lowestChoice = (answers.lowest_adequate_adaptation as { choice?: string })?.choice;
-		const specialistDomainChoice = (answers.specialist_domain as { choice?: string })?.choice;
+		const specialistDomainChoice =
+			(answers.specialist_domain as { choice?: string })?.choice ??
+			(answers.domain as string) ??
+			(answers.specialty as string);
 		const reqText =
 			`${input.request ?? ""} ${(input as any).prompt ?? ""} ${input.objectiveDescription ?? ""} ${JSON.stringify(input.recentEvidence ?? "")}`.toLowerCase();
-		const isUiNeed =
-			/\b(ui|ux|ui_ux|visual|design|frontend|interface|gui|layout)\b/i.test(reqText) ||
-			(lowestChoice === "specialist" && specialistDomainChoice === "ui_ux");
+		const isUiRegex = /\b(ui|ux|ui_ux|visual|design|frontend|interface|gui|layout)\b/i.test(reqText);
 		const isCapNeed = /\b(tool|script|capability|extension|patch|missing)\b/i.test(reqText);
+		const isUiNeed =
+			(lowestChoice === "specialist" && (specialistDomainChoice === "ui_ux" || isUiRegex)) ||
+			(isUiRegex && !isCapNeed);
 
 		let dimension: AdaptiveDimension = "strategy";
 		if (lowestChoice === "expert_reroute") {
 			dimension = "expert_reroute";
-		} else if (lowestChoice === "capability" || (!isUiNeed && isCapNeed)) {
+		} else if (lowestChoice === "specialist") {
+			dimension = "specialist";
+		} else if (lowestChoice === "capability") {
 			dimension = "capability";
-		} else if (
-			lowestChoice === "specialist" ||
-			isUiNeed ||
-			(cert.directive === "resolve_capability" && cert.answers.specialist_gap_present)
-		) {
+		} else if (lowestChoice === "runtime") {
+			dimension = "runtime";
+		} else if (isCapNeed && !isUiRegex) {
+			dimension = "capability";
+		} else if (isUiNeed || (cert.directive === "resolve_capability" && cert.answers.specialist_gap_present)) {
 			dimension = "specialist";
 		} else if (isCapNeed || cert.directive === "resolve_capability") {
 			dimension = "capability";
-		} else if (lowestChoice === "runtime" || cert.directive === "synthesize_capability") {
+		} else if (cert.directive === "synthesize_capability") {
 			dimension = "runtime";
 		}
 
@@ -139,38 +146,69 @@ export class AdaptiveResolutionController {
 		let runtimeNeed: Record<string, unknown> | undefined;
 
 		if (dimension === "specialist") {
-			if (isUiNeed) {
-				specialistNeed = {
-					specialty: "ui_ux",
-					specialties: ["ui_ux", "visual_design"],
-					purpose: `Deliver UI/UX design and visual implementation for ${input.objectiveId}`,
-					mission:
-						"Analyze UI requirements, create visual design and component hierarchy, and verify user experience",
-					obligations: ["vision_inspection", "ui_ux_fidelity"],
-					cognitiveRequirements: {
-						vision: true,
-						reasoning: "high",
-						tool_calling: true,
-						long_context: true,
-					},
-					requiredTools: ["view_image", "capture_screenshot", "read_file", "write_file", "edit_file"],
-					requiredCapabilities: ["ui_inspection"],
-					authorityRole: "implementer",
-				};
-			} else {
-				const specialty = specialistDomainChoice ?? "architecture_specialist";
-				specialistNeed = {
-					specialty,
-					specialties: [specialty, "system_design"],
-					purpose: `Deliver specialized implementation for ${input.objectiveId}`,
-					mission: `Execute specialized task for ${input.objectiveId}`,
-					cognitiveRequirements: {
-						reasoning: "high",
-						tool_calling: true,
-					},
-					authorityRole: "implementer",
-				};
-			}
+			const domain = specialistDomainChoice || (isUiNeed ? "ui_ux" : "architecture");
+			const isVisual =
+				domain === "ui_ux" ||
+				domain.toLowerCase().includes("ui") ||
+				domain.toLowerCase().includes("visual") ||
+				Boolean(
+					typeof (answers.vision_required as { noul?: number })?.noul === "number"
+						? ((answers.vision_required as { noul?: number }).noul ?? 0) > 0.5
+						: answers.vision_required === true,
+				);
+
+			const specialties = Array.isArray((answers.specialties as any)?.list)
+				? (answers.specialties as any).list
+				: Array.isArray(answers.specialties)
+					? (answers.specialties as string[])
+					: isVisual
+						? ["ui_ux", "visual_design"]
+						: [domain, `${domain}_specialist`];
+
+			const obligations = Array.isArray(answers.obligations)
+				? (answers.obligations as string[])
+				: isVisual
+					? ["vision_inspection", "ui_ux_fidelity"]
+					: [`${domain}_verification`];
+
+			const requiredTools = Array.isArray(answers.required_tools)
+				? (answers.required_tools as string[])
+				: isVisual
+					? ["view_image", "capture_screenshot", "read_file", "write_file", "edit_file"]
+					: ["read_file", "write_file", "edit_file"];
+
+			const requiredCapabilities = Array.isArray(answers.required_capabilities)
+				? (answers.required_capabilities as string[])
+				: isVisual
+					? ["ui_inspection"]
+					: [];
+
+			specialistNeed = {
+				specialty: domain,
+				specialties,
+				purpose:
+					(answers.purpose as string) ??
+					(isVisual
+						? `Deliver UI/UX design and visual implementation for ${input.objectiveId}`
+						: `Deliver specialized ${domain} implementation for ${input.objectiveId}`),
+				mission:
+					(answers.mission as string) ??
+					(isVisual
+						? "Analyze UI requirements, create visual design and component hierarchy, and verify user experience"
+						: `Execute specialized ${domain} task for ${input.objectiveId}`),
+				obligations,
+				cognitiveRequirements: {
+					vision: isVisual,
+					reasoning: ((answers.reasoning as string) ||
+						(answers.cognitiveRequirements as any)?.reasoning ||
+						"high") as any,
+					tool_calling: true,
+					long_context: true,
+				},
+				requiredTools,
+				requiredCapabilities,
+				authorityRole: (answers.authority_role as string) ?? "implementer",
+			};
 		} else if (dimension === "capability") {
 			capabilityNeed = {
 				requiredOutcome: `Synthesize capability to close operational gap for ${input.objectiveId}: ${input.request ?? "tool extension"}`,
