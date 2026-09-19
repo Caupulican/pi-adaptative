@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Load managed `@ff-labs/fff-node` from absolute `dist/index.cjs` when specifier require fails in a bun-compiled binary, so doctor does not report install-completed-but-unloaded after npm wrote a complete tree.
+
 ## [0.99.30] - 2026-09-19
 
 ### Added

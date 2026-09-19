@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import chalk from "chalk";
 import { type SpawnSyncReturns, spawnSync } from "child_process";
 import {
@@ -17,7 +18,6 @@ import {
 	statSync,
 	writeFileSync,
 } from "fs";
-import { createRequire } from "module";
 import { arch, platform } from "os";
 import { dirname, join } from "path";
 import { Readable } from "stream";
@@ -825,6 +825,10 @@ function recordFffLoadError(error: unknown): undefined {
 	return undefined;
 }
 
+export function getLastFffLoadError(): string | undefined {
+	return lastFffLoadError;
+}
+
 function loadFffNodeDistEntry(requireFff: ModuleRequire): unknown | undefined {
 	if (!requireFff.resolve) return undefined;
 	try {
@@ -852,14 +856,37 @@ function loadFffNodeWith(requireFff: ModuleRequire): unknown | undefined {
 	try {
 		return requireFff("@ff-labs/fff-node");
 	} catch (error) {
-		// The package publishes an exports map with no `require` condition, so a bare specifier
-		// always throws here and the dist entry below is the real path. Keep this error only if the
-		// fallback has nothing better to say.
+		// bun --compile cannot resolve the bare specifier from an external node_modules tree even
+		// when createRequire is rooted at the managed package.json. Keep this error only if the
+		// dist fallback has nothing better to say.
 		const bareSpecifierError = error;
 		const loaded = loadFffNodeDistEntry(requireFff);
 		if (!loaded && lastFffLoadError === undefined) recordFffLoadError(bareSpecifierError);
 		return loaded;
 	}
+}
+
+/**
+ * Load the managed install by absolute dist path. Specifier resolution is skipped, so a
+ * bun-compiled binary can use the files npm already wrote under `bin/fff-node`.
+ * Paths are resolved at call time so tests that redirect {@link getBinDir} after import still hit
+ * the redirected tree. Tests that pass an explicit `requires` list to
+ * {@link loadAvailableFffNodePackage} must not go through this path.
+ */
+export function loadFffNodeFromManagedInstall(): unknown | undefined {
+	const packageDir = join(getBinDir(), "fff-node", "node_modules", "@ff-labs", "fff-node");
+	for (const candidateEntry of FFF_DIST_CANDIDATE_ENTRIES) {
+		const candidate = join(packageDir, candidateEntry);
+		if (!existsSync(candidate)) continue;
+		try {
+			const loaded = createRequire(candidate)(candidate);
+			lastFffLoadError = undefined;
+			return loaded;
+		} catch (error) {
+			recordFffLoadError(error);
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -882,12 +909,14 @@ export function loadAvailableFffNodePackage(requires?: readonly ModuleRequire[])
 		const loaded = loadFffNodeWith(requireFff);
 		if (loaded) return loaded;
 	}
+	if (requires === undefined) return loadFffNodeFromManagedInstall();
 	return undefined;
 }
 
 async function runNpmInstall(args: string[]): Promise<{ code: number | null; stderr: string }> {
 	try {
 		const child = spawnProcess("npm", args, {
+			cwd: FFF_MANAGED_DIR,
 			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe"],
 		});
@@ -1050,7 +1079,9 @@ async function installManagedFffNodePackage(platformPackage: string, silent: boo
 		}
 		stageFfiRsNativeBindings();
 		lastFffLoadError = undefined;
-		const loaded = loadFffNodeWith(createRequire(pathToFileURL(FFF_MANAGED_PACKAGE_JSON).href));
+		const loaded =
+			loadFffNodeWith(createRequire(pathToFileURL(FFF_MANAGED_PACKAGE_JSON).href)) ??
+			loadFffNodeFromManagedInstall();
 		if (!loaded) {
 			const reason = `Managed FFF install completed but @ff-labs/fff-node could not be loaded${lastFffLoadError ? `: ${lastFffLoadError}` : "."}`;
 			if (!silent) {

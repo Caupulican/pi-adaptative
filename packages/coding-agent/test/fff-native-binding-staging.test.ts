@@ -214,4 +214,37 @@ describe("tools-manager: ffi-rs native binding staging", () => {
 			expect((loaded as { ok?: boolean } | undefined)?.ok).toBe(true);
 		});
 	});
+
+	it("loads managed dist/index.cjs by absolute path when require.resolve is unavailable", async () => {
+		await withFreshManagedDir(async (managedDir) => {
+			const fffDir = join(managedDir, "node_modules", "@ff-labs", "fff-node");
+			mkdirSync(join(fffDir, "dist"), { recursive: true });
+			writeFileSync(
+				join(fffDir, "package.json"),
+				JSON.stringify({ name: "@ff-labs/fff-node", main: "dist/index.cjs" }),
+			);
+			writeFileSync(
+				join(fffDir, "dist", "index.cjs"),
+				"module.exports = { FileFinder: class {}, fromManagedDisk: true };",
+			);
+
+			const { getLastFffLoadError, loadAvailableFffNodePackage, loadFffNodeFromManagedInstall } = await import(
+				"../src/utils/tools-manager.ts"
+			);
+			const loaded = loadFffNodeFromManagedInstall() as { fromManagedDisk?: boolean } | undefined;
+			expect({
+				fromManagedDisk: loaded?.fromManagedDisk,
+				error: getLastFffLoadError(),
+			}).toEqual({ fromManagedDisk: true, error: undefined });
+			// Explicit requires, including empty, must not pick up the managed tree.
+			expect(loadAvailableFffNodePackage([])).toBeUndefined();
+		});
+	});
+
+	it("keeps a missing managed dist closed on the absolute-path loader", async () => {
+		await withFreshManagedDir(async () => {
+			const { loadFffNodeFromManagedInstall } = await import("../src/utils/tools-manager.ts");
+			expect(loadFffNodeFromManagedInstall()).toBeUndefined();
+		});
+	});
 });
