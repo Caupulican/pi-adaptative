@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { ExecutionCharter } from "../autonomy/execution-charter.ts";
 import type {
 	AcquisitionDecision,
 	AcquisitionDisposition,
 	AcquisitionRequest,
 	DeterministicFinding,
 	ExternalAcquisitionRecord,
+	ResolvedSafeRoute,
 } from "./types.ts";
 
 export interface SteeringPlane {
@@ -31,12 +33,46 @@ export interface ExternalCapabilityAcquisitionGateDeps {
 	decisionEngine?: DecisionEngine;
 	availableCapabilities?: readonly string[];
 	installedPackages?: readonly string[];
-	charterAuthority?: {
-		allowShellExecution?: boolean;
-		allowNetworkDownloads?: boolean;
-		allowPackageInstalls?: boolean;
-	};
+	/**
+	 * The actual ExecutionCharter. Authority comes from it and nowhere else; a gate constructed
+	 * without one has no authority to grant and denies every acquisition.
+	 */
+	charter?: ExecutionCharter;
+	/**
+	 * True when a semantic decision is mandatory. A missing or malformed decision then routes to the
+	 * safer alternative or denies; it never becomes a direct allow.
+	 */
+	systemOneRequired?: boolean;
+	/** Resolves a chosen route into an executable plan. */
+	resolveRoute?: (route: string, request: AcquisitionRequest) => ResolvedSafeRoute;
+	/**
+	 * Authority the operator granted at the edge during this session, read live.
+	 *
+	 * This is a recorded grant, not a default: an operator who granted `package.install` has
+	 * authorized package installs just as surely as a charter clause would, and the gate must not
+	 * re-deny what the operator already allowed. Absent grants stay denied.
+	 */
+	getGrantedAuthority?: () => Partial<{
+		allowShellExecution: boolean;
+		allowNetworkDownloads: boolean;
+		allowPackageInstalls: boolean;
+	}>;
 }
+
+/** Package-manager install shapes the charter's package-install grant governs. */
+const PACKAGE_INSTALL_PATTERN =
+	/\b(?:npm\s+(?:i|install|add)|pnpm\s+(?:add|install)|yarn\s+add|bun\s+(?:add|install)|pip3?\s+install|cargo\s+install|go\s+install|gem\s+install|apt(?:-get)?\s+install|brew\s+install)\b/i;
+
+export function isPackageInstall(request: AcquisitionRequest): boolean {
+	return PACKAGE_INSTALL_PATTERN.test(`${request.command ?? ""} ${request.source} ${request.scriptContent ?? ""}`);
+}
+
+/** Closed-world authority: every permission absent from the charter is denied. */
+const NO_ACQUISITION_AUTHORITY = {
+	allowShellExecution: false,
+	allowNetworkDownloads: false,
+	allowPackageInstalls: false,
+} as const;
 
 /**
  * ExternalCapabilityAcquisitionGate:
@@ -54,6 +90,9 @@ export class ExternalCapabilityAcquisitionGate {
 		allowNetworkDownloads: boolean;
 		allowPackageInstalls: boolean;
 	};
+	private readonly systemOneRequired: boolean;
+	private readonly getGrantedAuthority?: ExternalCapabilityAcquisitionGateDeps["getGrantedAuthority"];
+	private readonly resolveRouteFn?: ExternalCapabilityAcquisitionGateDeps["resolveRoute"];
 	private readonly records: ExternalAcquisitionRecord[] = [];
 
 	constructor(deps: ExternalCapabilityAcquisitionGateDeps = {}) {
@@ -61,10 +100,34 @@ export class ExternalCapabilityAcquisitionGate {
 		this.decisionEngine = deps.decisionEngine;
 		this.availableCapabilities = new Set(deps.availableCapabilities ?? []);
 		this.installedPackages = new Set(deps.installedPackages ?? []);
-		this.charterAuthority = {
-			allowShellExecution: deps.charterAuthority?.allowShellExecution ?? true,
-			allowNetworkDownloads: deps.charterAuthority?.allowNetworkDownloads ?? true,
-			allowPackageInstalls: deps.charterAuthority?.allowPackageInstalls ?? true,
+		this.systemOneRequired = deps.systemOneRequired === true;
+		this.getGrantedAuthority = deps.getGrantedAuthority;
+		this.resolveRouteFn = deps.resolveRoute;
+		// Authority is read from the actual charter. No charter means no authority, which is a denial,
+		// never an assumed permission.
+		this.charterAuthority = deps.charter
+			? {
+					allowShellExecution: deps.charter.acquisition.shell_execution,
+					allowNetworkDownloads: deps.charter.acquisition.network_downloads,
+					allowPackageInstalls: deps.charter.acquisition.package_installs,
+				}
+			: { ...NO_ACQUISITION_AUTHORITY };
+	}
+
+	/**
+	 * The authority in force for this call: the charter's clauses plus any grant the operator
+	 * recorded at the edge. Both are real sources; nothing is assumed.
+	 */
+	private authorityNow(): {
+		allowShellExecution: boolean;
+		allowNetworkDownloads: boolean;
+		allowPackageInstalls: boolean;
+	} {
+		const granted = this.getGrantedAuthority?.() ?? {};
+		return {
+			allowShellExecution: this.charterAuthority.allowShellExecution || granted.allowShellExecution === true,
+			allowNetworkDownloads: this.charterAuthority.allowNetworkDownloads || granted.allowNetworkDownloads === true,
+			allowPackageInstalls: this.charterAuthority.allowPackageInstalls || granted.allowPackageInstalls === true,
 		};
 	}
 
@@ -85,27 +148,33 @@ export class ExternalCapabilityAcquisitionGate {
 				: createHash("sha256").update(request.source).digest("hex");
 
 		const deterministicFindings = this.inspectDeterministic(request, targetContent);
+		const authority = this.authorityNow();
 
 		// FR-087: Check charter authority bounds
 		if (
-			!this.charterAuthority.allowNetworkDownloads &&
+			!authority.allowNetworkDownloads &&
 			(request.source.startsWith("http://") || request.source.startsWith("https://"))
 		) {
 			deterministicFindings.push({
 				id: "charter-network-prohibited",
 				level: "deny",
-				message: "Network downloads are prohibited by current charter authority.",
+				message: "Network downloads are not authorized by the execution charter.",
 			});
 		}
 
-		if (
-			!this.charterAuthority.allowPackageInstalls &&
-			(request.command?.includes("npm i") || request.command?.includes("pip install"))
-		) {
+		if (!authority.allowPackageInstalls && isPackageInstall(request)) {
 			deterministicFindings.push({
 				id: "charter-package-install-prohibited",
 				level: "deny",
-				message: "Package installs are prohibited by current charter authority.",
+				message: "Package installs are not authorized by the execution charter.",
+			});
+		}
+
+		if ((!authority.allowShellExecution && request.scriptContent) ?? request.command) {
+			deterministicFindings.push({
+				id: "charter-shell-execution-prohibited",
+				level: "deny",
+				message: "Script or command execution is not authorized by the execution charter.",
 			});
 		}
 
@@ -156,6 +225,7 @@ export class ExternalCapabilityAcquisitionGate {
 			return {
 				disposition: "rewrite_safe_route",
 				chosenRoute: safeRoute,
+				resolvedRoute: this.resolveRoute(safeRoute, request),
 				record,
 				summaryEvent: `Acquisition hardened · replaced unverified execution with ${safeRoute}`,
 				allowed: false,
@@ -170,6 +240,7 @@ export class ExternalCapabilityAcquisitionGate {
 		let acquisitionRequired = true;
 		let sideEffectsProportionate = true;
 		let sourceMatchesCapability = true;
+		let semanticDecisionObserved = false;
 
 		if (this.steering) {
 			try {
@@ -186,6 +257,7 @@ export class ExternalCapabilityAcquisitionGate {
 				);
 				certificateId = cert.certificate_id;
 				if (cert.answers) {
+					semanticDecisionObserved = true;
 					if (typeof cert.answers.acquisition_required_for_objective === "boolean") {
 						acquisitionRequired = cert.answers.acquisition_required_for_objective;
 					}
@@ -222,6 +294,7 @@ export class ExternalCapabilityAcquisitionGate {
 					{ consequence: "low", signal: request.signal },
 				);
 				const answers = evalRes.answers ?? {};
+				semanticDecisionObserved = Object.keys(answers).length > 0;
 				if (answers.acquisition_required_for_objective) {
 					acquisitionRequired = (answers.acquisition_required_for_objective.noul ?? 1) >= 0.5;
 				}
@@ -237,6 +310,42 @@ export class ExternalCapabilityAcquisitionGate {
 			} catch {
 				// Conservative fallback
 			}
+		}
+
+		// FR-084 fail-closed: under a mandatory semantic plane, an absent or malformed decision cannot
+		// become a direct allow. It routes to the safer alternative, or denies when none resolves.
+		if (this.systemOneRequired && !semanticDecisionObserved) {
+			const safeRoute = this.determineSafeRoute(request);
+			const resolved = this.resolveRoute(safeRoute, request);
+			if (resolved.command || resolved.requiresManualStep) {
+				const record = this.createAndStoreRecord(
+					request,
+					digest,
+					deterministicFindings,
+					"rewrite_safe_route",
+					safeRoute,
+					certificateId,
+				);
+				return {
+					disposition: "rewrite_safe_route",
+					chosenRoute: safeRoute,
+					resolvedRoute: resolved,
+					record,
+					summaryEvent: "Acquisition hardened · semantic decision unavailable under a mandatory plane",
+					allowed: false,
+					rewritten: true,
+					denied: false,
+				};
+			}
+			const record = this.createAndStoreRecord(request, digest, deterministicFindings, "deny", null, certificateId);
+			return {
+				disposition: "deny",
+				record,
+				summaryEvent: "Acquisition blocked · semantic decision unavailable and no safer route resolves",
+				allowed: false,
+				rewritten: false,
+				denied: true,
+			};
 		}
 
 		if (!acquisitionRequired || !sourceMatchesCapability) {
@@ -264,6 +373,7 @@ export class ExternalCapabilityAcquisitionGate {
 			return {
 				disposition: "rewrite_safe_route",
 				chosenRoute: safeRoute,
+				resolvedRoute: this.resolveRoute(safeRoute, request),
 				record,
 				summaryEvent: `Acquisition hardened · replaced mutable installer with ${safeRoute}`,
 				allowed: false,
@@ -417,6 +527,15 @@ export class ExternalCapabilityAcquisitionGate {
 		return findings;
 	}
 
+	/**
+	 * Turns a route label into something the caller can actually carry out. A label with no command
+	 * and no manual step is not a resolved route, and the gate treats that as a denial.
+	 */
+	private resolveRoute(route: string, request: AcquisitionRequest): ResolvedSafeRoute {
+		if (this.resolveRouteFn) return this.resolveRouteFn(route, request);
+		return resolveDefaultSafeRoute(route, request);
+	}
+
 	private determineSafeRoute(request: AcquisitionRequest): string {
 		// 1. Existing installed capability
 		if (request.capabilityId && this.availableCapabilities.has(request.capabilityId)) {
@@ -465,4 +584,67 @@ export class ExternalCapabilityAcquisitionGate {
 		this.records.push(record);
 		return record;
 	}
+}
+
+/**
+ * Default route resolution. Each route yields a command the caller can run instead, or an explicit
+ * manual step; a route that yields neither is not usable and the gate denies rather than pretending
+ * a label is a plan.
+ */
+export function resolveDefaultSafeRoute(route: string, request: AcquisitionRequest): ResolvedSafeRoute {
+	switch (route) {
+		case "existing_installed":
+			return {
+				route,
+				rationale: `The capability '${request.capabilityId ?? request.source}' is already installed; use it instead of acquiring it again.`,
+				requiresManualStep: false,
+				...(request.capabilityId ? { command: `# use already-installed ${request.capabilityId}` } : {}),
+			};
+		case "pinned_verified_release": {
+			const pinned = pinMutableReference(request.command ?? request.source);
+			return {
+				route,
+				...(pinned ? { command: pinned } : {}),
+				rationale:
+					"The request names a mutable reference. Re-run it against an exact pinned version so the bytes acquired are the bytes reviewed.",
+				requiresManualStep: pinned === undefined,
+			};
+		}
+		case "inspected_source": {
+			const target = extractDownloadTarget(request.command ?? request.source);
+			return {
+				route,
+				...(target
+					? {
+							command: `curl --fail --proto '=https' --tlsv1.2 -sSLo acquired-source ${target} && sha256sum acquired-source`,
+						}
+					: {}),
+				rationale:
+					"Download to disk and take its digest first, so the content is inspectable and pinned before anything executes it.",
+				requiresManualStep: target === undefined,
+			};
+		}
+		default:
+			return {
+				route: "local_minimal_synthesis",
+				rationale:
+					"No safe external route resolves. Build the minimal local capability that satisfies the need instead of acquiring an external one.",
+				requiresManualStep: true,
+			};
+	}
+}
+
+/** Rewrites a mutable reference (`@latest`, `#main`) into an explicit pin placeholder. */
+function pinMutableReference(text: string): string | undefined {
+	if (!/@latest\b|:latest\b|#main\b|#master\b|:HEAD\b/i.test(text)) return undefined;
+	return text
+		.replace(/@latest\b/gi, "@<exact-version>")
+		.replace(/:latest\b/gi, ":<exact-tag>")
+		.replace(/#(?:main|master)\b/gi, "#<exact-commit-sha>")
+		.replace(/:HEAD\b/g, ":<exact-commit-sha>");
+}
+
+/** The first https URL a command or source names. */
+function extractDownloadTarget(text: string): string | undefined {
+	return /https:\/\/[^\s'"|;]+/i.exec(text)?.[0];
 }

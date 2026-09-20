@@ -308,6 +308,14 @@ describe("Final Closure v1.4 Regressions (FC-001..FC-090)", () => {
 			const controller = new AdaptiveCapabilityController({
 				steering: plane,
 				catalog,
+				// The builder's model binding must be an actual selection; this test's subject is the
+				// activation path, so the selection is a fixed one rather than absent.
+				experts: {
+					select: async () => ({
+						primary: { provider: "anthropic", model_id: "claude-3-7-sonnet", thinking_level: "medium" },
+						bindings: [{ provider: "anthropic", model_id: "claude-3-7-sonnet", thinking_level: "medium" }],
+					}),
+				} as never,
 				builder: {
 					build: async (spec) => ({
 						capabilityId: spec.capability_id,

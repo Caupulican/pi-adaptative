@@ -64,6 +64,15 @@ export interface ToolGateControllerDeps {
 	getMutationScope?(): string;
 	/** Direct script execution gate: intercepts shell/process execution of registered automation scripts. */
 	checkDirectScriptExecution?(toolName: string, args: unknown, cwd?: string): BeforeToolCallResult | undefined;
+	/**
+	 * External-acquisition gate, at the real execution boundary: a command that fetches, installs or
+	 * executes external code is screened before it runs.
+	 */
+	checkExternalAcquisition?(
+		toolName: string,
+		args: unknown,
+		signal?: AbortSignal,
+	): Promise<BeforeToolCallResult | undefined>;
 	/** System One semantic control plane controller, if active for this session/run. */
 	getSystemOneController?(): SystemOneController | undefined;
 	/**
@@ -148,6 +157,13 @@ export class ToolGateController {
 		try {
 			const denied = blockedBy(terminalOutcome);
 			if (denied) return denied;
+
+			// External acquisition is screened before any extension hook can rewrite the command, so the
+			// bytes the gate judged are the bytes that would have run.
+			if (this.deps.checkExternalAcquisition) {
+				const acquisitionBlock = await this.deps.checkExternalAcquisition(toolCall.name, args, signal);
+				if (acquisitionBlock) return acquisitionBlock;
+			}
 
 			// 2. Extension tool_call hooks
 			const runner = this.deps.getExtensionRunner();

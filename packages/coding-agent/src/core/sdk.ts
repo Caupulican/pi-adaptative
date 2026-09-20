@@ -1006,7 +1006,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			projectRules: session.projectRules,
 		});
 
-		session.attachAdaptiveRuntime(stack);
+		session.attachAdaptiveRuntime({ ...stack, charter });
 	}
 	try {
 		// The initial runtime has now bound providers from profile-granted extensions. Re-resolve the

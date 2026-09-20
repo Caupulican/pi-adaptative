@@ -26,6 +26,16 @@ export interface ExecutionCharterReleasePolicy {
 	deploy_targets: readonly string[];
 }
 
+/**
+ * External-acquisition authority. Closed-world: a grant absent from the owner's trusted start
+ * instruction is `false`, and the gate denies rather than assuming the permission exists.
+ */
+export interface ExecutionCharterAcquisitionPolicy {
+	shell_execution: boolean;
+	network_downloads: boolean;
+	package_installs: boolean;
+}
+
 export interface ExecutionCharter {
 	readonly schema_version: "1.0";
 	readonly objective_id: string;
@@ -34,6 +44,7 @@ export interface ExecutionCharter {
 	readonly repository_scopes?: readonly string[];
 	readonly git: ExecutionCharterGitPolicy;
 	readonly release: ExecutionCharterReleasePolicy;
+	readonly acquisition: ExecutionCharterAcquisitionPolicy;
 	readonly secret_scopes?: readonly string[];
 	readonly max_cost_usd?: number | null;
 	readonly notification?: "terminal_only" | "status_on_request";
@@ -64,6 +75,7 @@ export interface CompileExecutionCharterInput {
 	initialGrants?: {
 		git?: Partial<ExecutionCharterGitPolicy>;
 		release?: Partial<ExecutionCharterReleasePolicy>;
+		acquisition?: Partial<ExecutionCharterAcquisitionPolicy>;
 	};
 }
 
@@ -97,6 +109,23 @@ export function compileExecutionCharter(input: CompileExecutionCharterInput): Ex
 		/\b(branch|create\s+branch)\b/i.test(prompt) || Boolean(input.initialGrants?.git?.create_branch);
 	const grantForcePush = Boolean(input.initialGrants?.git?.force_push); // force push is never granted from bare prompt text
 
+	// External acquisition: granted only by trusted start text or an explicit initial grant.
+	const denyAcquisition = /\b(?:do\s+not|don'?t|never|no)\s+(?:install|download|fetch|add\s+(?:a\s+)?dependenc)/i.test(
+		prompt,
+	);
+	const grantPackageInstalls =
+		!denyAcquisition &&
+		(/\b(?:install|npm\s+i(?:nstall)?|pip\s+install|add\s+(?:a\s+)?dependenc|set\s*up\s+dependenc)\b/i.test(prompt) ||
+			Boolean(input.initialGrants?.acquisition?.package_installs));
+	const grantNetworkDownloads =
+		!denyAcquisition &&
+		(/\b(?:download|fetch|curl|wget|pull\s+(?:the\s+)?(?:image|binary|archive))\b/i.test(prompt) ||
+			grantPackageInstalls ||
+			Boolean(input.initialGrants?.acquisition?.network_downloads));
+	const grantShellExecution =
+		/\b(?:run|execute|build|test|compile|script)\b/i.test(prompt) ||
+		Boolean(input.initialGrants?.acquisition?.shell_execution);
+
 	// Detect deploy targets
 	const deployTargets = new Set<string>(input.initialGrants?.release?.deploy_targets ?? []);
 	const deployMatch = prompt.match(/\bdeploy\s+(?:to\s+)?([a-z0-9_-]+)\b/i);
@@ -121,6 +150,11 @@ export function compileExecutionCharter(input: CompileExecutionCharterInput): Ex
 			package_publish: grantPublish,
 			github_release: grantGithubRelease,
 			deploy_targets: Array.from(deployTargets),
+		},
+		acquisition: {
+			shell_execution: grantShellExecution,
+			network_downloads: grantNetworkDownloads,
+			package_installs: grantPackageInstalls,
 		},
 		secret_scopes: input.secretScopes ? [...input.secretScopes] : undefined,
 		max_cost_usd: input.maxCostUsd ?? null,

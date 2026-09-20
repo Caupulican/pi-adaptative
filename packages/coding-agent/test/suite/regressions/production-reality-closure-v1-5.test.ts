@@ -12,7 +12,10 @@ import {
 	AdaptiveCapabilityController,
 	AdaptiveResolutionController,
 	CapabilityCatalog,
+	CapabilityProofRunner,
 	createProductionAdaptiveRuntimeStack,
+	RealMechanicalVerifier,
+	RealWorkerDispatcher,
 	SpecialistCatalog,
 	SpecialistSynthesisController,
 } from "../../../src/core/adaptive/index.ts";
@@ -457,6 +460,25 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 			prompt: "Execute production reality verification",
 		});
 
+		// The production factory requires an explicit verifier with a real proof runner and a
+		// dispatcher owned by a real execution owner; it manufactures neither.
+		const mechanicalVerifier = new RealMechanicalVerifier({
+			proofRunner: new CapabilityProofRunner(),
+			cwd,
+			provenance: "production-live",
+		});
+		const workerDispatcher = new RealWorkerDispatcher({
+			runWorkerDelegationOnce: async () => ({}),
+			provenance: "production-live",
+		});
+		const expertService = new ExpertSelectionService(
+			new ExpertCatalog({ modelRegistry, fitnessStore, adaptationStore }),
+			new ExpertAdmissionPolicy(),
+			new ExpertFeatureBuilder(),
+			new ExpertRankingPolicy(),
+			new ExpertCapacityService(),
+		);
+
 		return {
 			steeringPlane,
 			modelRegistry,
@@ -468,6 +490,9 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 			contractFactory,
 			runtimeUpdateController,
 			capabilityBuilder,
+			mechanicalVerifier,
+			workerDispatcher,
+			expertService,
 			charter,
 			agentDir: tempDir,
 			persistentPath: certFile,
@@ -489,6 +514,8 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 				taskProfiles: deps.taskProfileWriter,
 				contractFactory: deps.contractFactory,
 				capabilityBuilder: deps.capabilityBuilder,
+				mechanicalVerifier: deps.mechanicalVerifier,
+				workerDispatcher: deps.workerDispatcher,
 				runtimeUpdateController: deps.runtimeUpdateController,
 				charter: deps.charter,
 			});
@@ -512,6 +539,8 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 					taskProfiles: deps.taskProfileWriter,
 					contractFactory: deps.contractFactory,
 					capabilityBuilder: deps.capabilityBuilder,
+					mechanicalVerifier: deps.mechanicalVerifier,
+					workerDispatcher: deps.workerDispatcher,
 					charter: deps.charter,
 				}),
 			).toThrow(/RuntimeUpdateController/);
@@ -530,6 +559,8 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 					taskProfiles: deps.taskProfileWriter,
 					contractFactory: deps.contractFactory,
 					capabilityBuilder: deps.capabilityBuilder,
+					mechanicalVerifier: deps.mechanicalVerifier,
+					workerDispatcher: deps.workerDispatcher,
 					runtimeUpdateController: deps.runtimeUpdateController,
 					charter: deps.charter,
 				}),
@@ -550,6 +581,8 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 					taskProfiles: deps.taskProfileWriter,
 					contractFactory: deps.contractFactory,
 					capabilityBuilder: deps.capabilityBuilder,
+					mechanicalVerifier: deps.mechanicalVerifier,
+					workerDispatcher: deps.workerDispatcher,
 					runtimeUpdateController: deps.runtimeUpdateController,
 				}),
 			).toThrow(/ExecutionCharter/);
@@ -568,6 +601,8 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 					taskRuntime: deps.durableTaskRuntime,
 					contractFactory: deps.contractFactory,
 					capabilityBuilder: deps.capabilityBuilder,
+					mechanicalVerifier: deps.mechanicalVerifier,
+					workerDispatcher: deps.workerDispatcher,
 					runtimeUpdateController: deps.runtimeUpdateController,
 					charter: deps.charter,
 				}),
@@ -587,6 +622,8 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 					taskRuntime: deps.durableTaskRuntime,
 					taskProfiles: deps.taskProfileWriter,
 					capabilityBuilder: deps.capabilityBuilder,
+					mechanicalVerifier: deps.mechanicalVerifier,
+					workerDispatcher: deps.workerDispatcher,
 					runtimeUpdateController: deps.runtimeUpdateController,
 					charter: deps.charter,
 				}),
@@ -623,6 +660,8 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 					taskProfiles: deps.taskProfileWriter,
 					contractFactory: deps.contractFactory,
 					capabilityBuilder: { isDummy: true, build: async () => ({}) as any } as any,
+					mechanicalVerifier: deps.mechanicalVerifier,
+					workerDispatcher: deps.workerDispatcher,
 					runtimeUpdateController: deps.runtimeUpdateController,
 					charter: deps.charter,
 				}),
@@ -649,6 +688,8 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 					taskProfiles: deps.taskProfileWriter,
 					contractFactory: deps.contractFactory,
 					capabilityBuilder: deps.capabilityBuilder,
+					mechanicalVerifier: deps.mechanicalVerifier,
+					workerDispatcher: deps.workerDispatcher,
 					runtimeUpdateController: deps.runtimeUpdateController,
 					charter: deps.charter,
 				}),
@@ -819,6 +860,7 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 				steering: deps.steeringPlane,
 				catalog,
 				builder: deps.capabilityBuilder,
+				experts: deps.expertService,
 				mechanicalVerifier: {
 					verifyCandidate: async () => ({ passed: true, testCount: 1, failures: [] }),
 					verifyActivation: async () => true,
@@ -876,6 +918,7 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 				steering: deps.steeringPlane,
 				catalog,
 				builder: deps.capabilityBuilder,
+				experts: deps.expertService,
 				mechanicalVerifier: {
 					verifyCandidate: async () => ({ passed: true, testCount: 1, failures: [] }),
 					verifyActivation: async () => true,

@@ -33,9 +33,25 @@ export interface AcquisitionRequest {
 	readonly signal?: AbortSignal;
 }
 
+/**
+ * A safe route resolved to something that can actually be executed. A route label alone is not a
+ * route: the caller has to be handed the command it should run instead.
+ */
+export interface ResolvedSafeRoute {
+	readonly route: string;
+	/** The exact command to run in place of the rejected one, when one exists. */
+	readonly command?: string;
+	/** Why this route replaces the request, for the operator and the model. */
+	readonly rationale: string;
+	/** True when the route is a plan a human or the model must carry out, not a command. */
+	readonly requiresManualStep: boolean;
+}
+
 export interface AcquisitionDecision {
 	readonly disposition: AcquisitionDisposition;
 	readonly chosenRoute?: string;
+	/** Present whenever the disposition is `rewrite_safe_route`. */
+	readonly resolvedRoute?: ResolvedSafeRoute;
 	readonly record: ExternalAcquisitionRecord;
 	readonly summaryEvent?: string;
 	readonly allowed: boolean;

@@ -24,6 +24,8 @@ import type { Api, AssistantMessage, ImageContent, Message, Model, TextContent, 
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
 import { getAgentDir, VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
+import { screenAcquisition } from "./acquisition/acquisition-boundary.ts";
+import { ExternalCapabilityAcquisitionGate } from "./acquisition/external-capability-acquisition-gate.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import { resourceDir, stateFile } from "./agent-paths.ts";
 import { createSessionBackgroundToolTasks } from "./agent-session-background-tasks.ts";
@@ -54,6 +56,7 @@ import type {
 	WorkerRequest,
 } from "./autonomy/contracts.ts";
 import type { EdgeClass, EdgeConfirmationHandler, EdgeGrantView } from "./autonomy/edge-policy.ts";
+import type { ExecutionCharter } from "./autonomy/execution-charter.ts";
 import { buildForegroundEnvelope, formatForegroundEnvelopeObservation } from "./autonomy/foreground-envelope.ts";
 import { evaluateToolGate } from "./autonomy/gates.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
@@ -424,6 +427,9 @@ export class AgentSession {
 	private readonly _projectRules: SessionProjectRules;
 	/** Live worker supervision, bound to the real worker lifecycle and root worker control. */
 	private readonly _workerSupervision: WorkerSupervisionCoordinator;
+	/** External-acquisition gate; its authority is the session's own ExecutionCharter. */
+	private _acquisitionGate?: ExternalCapabilityAcquisitionGate;
+	private _executionCharter?: ExecutionCharter;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -1378,6 +1384,19 @@ export class AgentSession {
 			checkEdge: (tool, args, cwd, signal) => enforceSessionEdge(this._edgeDeps(), tool, args, cwd, signal),
 			checkDirectScriptExecution: (toolName, args, cwd) =>
 				this._runtimeBuilder.checkDirectScriptExecution(toolName, args, cwd),
+			checkExternalAcquisition: (toolName, args, signal) =>
+				screenAcquisition(
+					{
+						getGate: () => this._acquisitionGate,
+						getObjectiveId: () => this._executionCharter?.objective_id ?? this.sessionManager.getSessionId(),
+						onDecision: (decision) => {
+							if (decision.summaryEvent) this._emit({ type: "warning", message: decision.summaryEvent });
+						},
+					},
+					toolName,
+					args,
+					signal,
+				),
 			getSystemOneController: () => this._systemOneController,
 			validateMutationAcceptance: async ({ changedFiles }) => {
 				const result = await this._projectRules.validateMutation({ changedFiles });
@@ -1440,6 +1459,16 @@ export class AgentSession {
 		return this._adaptiveReadiness;
 	}
 
+	/** The session's compiled ExecutionCharter, once the adaptive runtime bound one. */
+	get executionCharter(): ExecutionCharter | undefined {
+		return this._executionCharter;
+	}
+
+	/** External-acquisition gate bound to the real execution boundary. */
+	get acquisitionGate(): ExternalCapabilityAcquisitionGate | undefined {
+		return this._acquisitionGate;
+	}
+
 	/** Live worker supervision bound to the real worker lifecycle. */
 	get workerSupervision(): WorkerSupervisionCoordinator {
 		return this._workerSupervision;
@@ -1482,7 +1511,33 @@ export class AgentSession {
 		readiness?: AdaptiveRuntimeReadiness;
 		steeringPlane?: SystemOneSteeringPlane;
 		objectiveController?: ObjectiveExecutionController;
+		charter?: ExecutionCharter;
 	}): void {
+		if (stack.charter) {
+			// Authority for external acquisition comes from this charter and nowhere else; the gate is
+			// only constructed once a real charter exists.
+			this._executionCharter = stack.charter;
+			this._acquisitionGate = new ExternalCapabilityAcquisitionGate({
+				charter: stack.charter,
+				// An operator grant recorded at the edge is authority the session really has; reading it
+				// here keeps the gate from re-denying what the operator already allowed.
+				getGrantedAuthority: () => {
+					const classes = new Set(this.getEdgeGrants().map((grant) => grant.class));
+					return {
+						allowPackageInstalls: classes.has("package.install"),
+						allowNetworkDownloads: classes.has("package.install"),
+					};
+				},
+				systemOneRequired: (stack.steeringPlane ?? this._steeringPlane)?.policy.mode === "system_one_required",
+				...(this._steeringPlane?.decisionEngine || stack.steeringPlane?.decisionEngine
+					? {
+							decisionEngine: createRetentionDecisionEngine(
+								(stack.steeringPlane ?? this._steeringPlane)?.decisionEngine as never,
+							),
+						}
+					: {}),
+			});
+		}
 		if (stack.readiness) {
 			this._adaptiveReadiness = stack.readiness;
 		}

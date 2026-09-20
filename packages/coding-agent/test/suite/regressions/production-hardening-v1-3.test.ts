@@ -411,6 +411,14 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 			const noProofController = new AdaptiveCapabilityController({
 				steering: plane,
 				catalog,
+				// The builder's model binding must be an actual selection; this test's subject is the
+				// activation path, so the selection is a fixed one rather than absent.
+				experts: {
+					select: async () => ({
+						primary: { provider: "anthropic", model_id: "claude-3-7-sonnet", thinking_level: "medium" },
+						bindings: [{ provider: "anthropic", model_id: "claude-3-7-sonnet", thinking_level: "medium" }],
+					}),
+				} as never,
 				builder: {
 					build: async (_spec) => ({
 						candidateId: "c-1",

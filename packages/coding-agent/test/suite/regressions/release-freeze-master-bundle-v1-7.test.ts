@@ -24,6 +24,7 @@ import {
 	RealWorkerDispatcher,
 	SpecialistSynthesisController,
 } from "../../../src/core/adaptive/index.ts";
+import { compileExecutionCharter } from "../../../src/core/autonomy/execution-charter.ts";
 import { EvidenceRetentionPlanner } from "../../../src/core/compaction/evidence-retention-planner.ts";
 import { CompactionController } from "../../../src/core/compaction-controller.ts";
 import { OperatorProjectionController } from "../../../src/core/operator-projection/operator-projection-controller.ts";
@@ -487,6 +488,11 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 		it("FR-082, FR-088: records digest, provenance, and stores durable records", async () => {
 			const gate = new ExternalCapabilityAcquisitionGate({
 				decisionEngine: jevAdapter as any,
+				// Authority is the charter's, never a permissive constructor default.
+				charter: compileExecutionCharter({
+					objectiveId: "obj-acq-4",
+					prompt: "install the dependencies and run the clean utility script",
+				}),
 			});
 
 			const scriptContent = "console.log('clean utility script');";
@@ -506,6 +512,10 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 		it("FR-089: routine allow is silent in summary event", async () => {
 			const gate = new ExternalCapabilityAcquisitionGate({
 				decisionEngine: jevAdapter as any,
+				charter: compileExecutionCharter({
+					objectiveId: "obj-acq-5",
+					prompt: "install lodash and run the build",
+				}),
 			});
 
 			const decision = await gate.evaluateAcquisition({
@@ -516,6 +526,20 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 
 			expect(decision.allowed).toBe(true);
 			expect(decision.summaryEvent).toBeUndefined();
+		});
+
+		it("FR-087: a gate with no charter has no authority to grant", async () => {
+			const gate = new ExternalCapabilityAcquisitionGate({ decisionEngine: jevAdapter as any });
+			const decision = await gate.evaluateAcquisition({
+				objectiveId: "obj-acq-6",
+				source: "lodash@4.17.21",
+				command: "npm install lodash@4.17.21",
+			});
+
+			expect(decision.allowed).toBe(false);
+			expect(decision.record.deterministic_findings.map((finding) => finding.id)).toContain(
+				"charter-package-install-prohibited",
+			);
 		});
 	});
 
