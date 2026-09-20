@@ -14,6 +14,7 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { AdaptiveRuntimeReadiness } from "../../src/core/adaptive/adaptive-runtime-readiness.ts";
 import { CapabilityCatalog } from "../../src/core/adaptive/capability-catalog.ts";
+import { verifyCapabilityKindActivationTruth } from "../../src/core/adaptive/capability-kind-support.ts";
 import {
 	AdaptiveCapabilityController,
 	CAPABILITY_KIND_SUPPORT,
@@ -28,6 +29,7 @@ import {
 	UnsupportedCapabilityKindError,
 } from "../../src/core/adaptive/index.ts";
 import type { CapabilityKind } from "../../src/core/adaptive/types.ts";
+import { RELEASE_WIRING_MANIFEST } from "../../src/core/release/release-wiring-manifest.ts";
 
 const ALL_KINDS: readonly CapabilityKind[] = [
 	"composition",
@@ -151,6 +153,71 @@ describe("Capability activation truth", () => {
 				"advertised as available but has no activation owner",
 			);
 			expect(findBrokenAdvertisedKinds(broken)).toHaveLength(1);
+		});
+	});
+
+	describe("Release readiness (ACT-017, ACT-018)", () => {
+		it("ACT-017: the release manifest carries a per-kind activation entry for every kind", () => {
+			const activationEntries = RELEASE_WIRING_MANIFEST.filter((entry) =>
+				entry.featureId.startsWith("capability_activation_"),
+			);
+			expect(activationEntries.map((entry) => entry.featureId).sort()).toEqual(
+				[...ALL_KINDS].map((kind) => `capability_activation_${kind}`).sort(),
+			);
+			// A generic entry would hide which kinds are actually activatable.
+			expect(RELEASE_WIRING_MANIFEST.some((entry) => entry.featureId === "capability_activation")).toBe(false);
+			for (const entry of activationEntries) {
+				expect(entry.failClosed.length).toBeGreaterThan(0);
+				expect(entry.negativePathTestName.length).toBeGreaterThan(0);
+			}
+		});
+
+		it("ACT-018: release readiness rejects a kind advertised as available with no owner", () => {
+			// The mechanical gate must reject this, not just the runtime readiness controller: a matrix
+			// edited to advertise support it does not have would otherwise ship.
+			expect(verifyCapabilityKindActivationTruth(CAPABILITY_KIND_SUPPORT)).toEqual([]);
+
+			const advertisedWithoutOwner = {
+				...CAPABILITY_KIND_SUPPORT,
+				tool: {
+					kind: "tool" as const,
+					available: true,
+					owner: null,
+					activationMode: "real_owner" as const,
+					reason: "advertised without an owner",
+				},
+			};
+			const findings = verifyCapabilityKindActivationTruth(advertisedWithoutOwner);
+			expect(findings).toHaveLength(1);
+			expect(findings[0]?.check).toBe("advertised_kind_has_owner");
+
+			const metadataMode = {
+				...CAPABILITY_KIND_SUPPORT,
+				skill: {
+					kind: "skill" as const,
+					available: true,
+					owner: "SkillVault",
+					activationMode: "unsupported" as const,
+					reason: "available but with no activation mode",
+				},
+			};
+			expect(verifyCapabilityKindActivationTruth(metadataMode).map((finding) => finding.check)).toContain(
+				"advertised_kind_has_activation_mode",
+			);
+
+			const unavailableWithOwner = {
+				...CAPABILITY_KIND_SUPPORT,
+				integration: {
+					kind: "integration" as const,
+					available: false,
+					owner: "SomeOwner",
+					activationMode: "unsupported" as const,
+					reason: "unavailable but still naming an owner",
+				},
+			};
+			expect(verifyCapabilityKindActivationTruth(unavailableWithOwner).map((finding) => finding.check)).toContain(
+				"unavailable_kind_names_no_owner",
+			);
 		});
 	});
 

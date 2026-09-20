@@ -186,3 +186,59 @@ export function findBrokenAdvertisedKinds(
 			(!support.owner || support.owner.length === 0 || support.activationMode === "unsupported"),
 	);
 }
+
+export interface CapabilityKindActivationFinding {
+	readonly kind: CapabilityKind;
+	readonly check: string;
+	readonly detail: string;
+}
+
+/**
+ * Mechanical activation-truth check for the release gate.
+ *
+ * The runtime's readiness controller refuses to start on a broken advertisement, but that only
+ * protects a running session. This is the release-time equivalent: a matrix edited to advertise
+ * support the runtime does not have must fail the gate before it ships.
+ */
+export function verifyCapabilityKindActivationTruth(
+	matrix: Readonly<Record<CapabilityKind, CapabilityKindSupport>> = CAPABILITY_KIND_SUPPORT,
+): readonly CapabilityKindActivationFinding[] {
+	const findings: CapabilityKindActivationFinding[] = [];
+	for (const support of Object.values(matrix)) {
+		if (support.available) {
+			if (!support.owner) {
+				findings.push({
+					kind: support.kind,
+					check: "advertised_kind_has_owner",
+					detail: "advertised as available with no activation owner",
+				});
+			}
+			if (support.activationMode === "unsupported") {
+				findings.push({
+					kind: support.kind,
+					check: "advertised_kind_has_activation_mode",
+					detail: "advertised as available with an unsupported activation mode",
+				});
+			}
+		} else {
+			if (support.owner) {
+				findings.push({
+					kind: support.kind,
+					check: "unavailable_kind_names_no_owner",
+					detail: "unavailable but still naming an owner, which reads as support it does not have",
+				});
+			}
+			if (support.activationMode !== "unsupported") {
+				findings.push({
+					kind: support.kind,
+					check: "unavailable_kind_has_unsupported_mode",
+					detail: `unavailable but declaring activation mode '${support.activationMode}'`,
+				});
+			}
+		}
+		if (!support.reason.trim()) {
+			findings.push({ kind: support.kind, check: "kind_states_a_reason", detail: "no reason recorded" });
+		}
+	}
+	return findings;
+}

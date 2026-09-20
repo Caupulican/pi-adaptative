@@ -12,6 +12,11 @@
  */
 
 import {
+	type CapabilityKindSupport,
+	verifyCapabilityKindActivationTruth,
+} from "../adaptive/capability-kind-support.ts";
+import type { CapabilityKind } from "../adaptive/types.ts";
+import {
 	RELEASE_WIRING_MANIFEST,
 	type ReleaseWiringEntry,
 	type ReleaseWiringFinding,
@@ -40,6 +45,8 @@ export interface ArchitectureAuditProjection {
 	readonly subsystem_triples: readonly SubsystemTriple[];
 	readonly wiring_findings: readonly ReleaseWiringFinding[];
 	readonly forbidden_fallback_findings: readonly string[];
+	/** Per-kind activation truth: an advertised kind with no owner is a blocking gap (ACT-018). */
+	readonly activation_truth_findings: readonly string[];
 	/** Every subsystem whose negative-path test file exists and names its test. */
 	readonly negative_path_coverage: readonly { featureId: string; covered: boolean }[];
 	readonly outcome: ArchitectureAuditOutcome;
@@ -52,6 +59,8 @@ export interface BuildArchitectureAuditProjectionInput {
 	/** Violations reported by the static forbidden-fallback scan. */
 	readonly forbiddenFallbackFindings?: readonly string[];
 	readonly manifest?: readonly ReleaseWiringEntry[];
+	/** Capability-kind support matrix; defaults to the runtime's own. */
+	readonly kindSupport?: Readonly<Record<CapabilityKind, CapabilityKindSupport>>;
 	readonly generatedAt?: string;
 	readonly compositionRoot?: string;
 }
@@ -68,6 +77,9 @@ export function buildArchitectureAuditProjection(
 	const manifest = input.manifest ?? RELEASE_WIRING_MANIFEST;
 	const wiringFindings = verifyReleaseWiringManifest(input.readSource, manifest);
 	const fallbackFindings = input.forbiddenFallbackFindings ?? [];
+	const activationFindings = verifyCapabilityKindActivationTruth(input.kindSupport).map(
+		(finding) => `${finding.kind}/${finding.check}: ${finding.detail}`,
+	);
 
 	const triples: SubsystemTriple[] = manifest.map((entry) => ({
 		featureId: entry.featureId,
@@ -91,6 +103,7 @@ export function buildArchitectureAuditProjection(
 	const blockingReasons = [
 		...wiringFindings.map((finding) => `${finding.featureId}/${finding.check}: ${finding.detail}`),
 		...fallbackFindings.map((finding) => `forbidden_production_fallback: ${finding}`),
+		...activationFindings.map((finding) => `capability_activation_truth: ${finding}`),
 	];
 
 	return {
@@ -101,6 +114,7 @@ export function buildArchitectureAuditProjection(
 		subsystem_triples: triples,
 		wiring_findings: wiringFindings,
 		forbidden_fallback_findings: fallbackFindings,
+		activation_truth_findings: activationFindings,
 		negative_path_coverage: negativePathCoverage,
 		outcome: blockingReasons.length > 0 ? "BLOCKED" : "PASS",
 		blocking_reasons: blockingReasons,

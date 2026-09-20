@@ -37,12 +37,14 @@ export { CapabilityCatalog, type CapabilityCatalogEntry } from "./capability-cat
 export {
 	CAPABILITY_KIND_SUPPORT,
 	type CapabilityActivationMode,
+	type CapabilityKindActivationFinding,
 	type CapabilityKindSupport,
 	capabilityKindSupport,
 	findBrokenAdvertisedKinds,
 	isCapabilityKindSupported,
 	replanToSupportedKind,
 	supportedCapabilityKinds,
+	verifyCapabilityKindActivationTruth,
 } from "./capability-kind-support.ts";
 export {
 	capabilityArtifactRelativePath,

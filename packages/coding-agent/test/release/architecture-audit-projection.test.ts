@@ -8,6 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { CAPABILITY_KIND_SUPPORT } from "../../src/core/adaptive/capability-kind-support.ts";
 import {
 	architectureAuditQuestions,
 	buildArchitectureAuditProjection,
@@ -69,6 +70,28 @@ describe("Architecture audit projection", () => {
 		});
 		expect(fallback.outcome).toBe("BLOCKED");
 		expect(fallback.blocking_reasons.join("\n")).toContain("forbidden_production_fallback");
+	});
+
+	it("ACT-018, ACT-021: a broken activation advertisement blocks the audit", () => {
+		const clean = buildArchitectureAuditProjection({ sourceRevision: "head", readSource });
+		expect(clean.activation_truth_findings).toEqual([]);
+
+		const advertisedWithoutOwner = buildArchitectureAuditProjection({
+			sourceRevision: "head",
+			readSource,
+			kindSupport: {
+				...CAPABILITY_KIND_SUPPORT,
+				tool: {
+					kind: "tool",
+					available: true,
+					owner: null,
+					activationMode: "real_owner",
+					reason: "advertised without an owner",
+				},
+			},
+		});
+		expect(advertisedWithoutOwner.outcome).toBe("BLOCKED");
+		expect(advertisedWithoutOwner.blocking_reasons.join("\n")).toContain("capability_activation_truth");
 	});
 
 	it("RCG-063: every audit question is answerable from one named file by inspection", () => {
