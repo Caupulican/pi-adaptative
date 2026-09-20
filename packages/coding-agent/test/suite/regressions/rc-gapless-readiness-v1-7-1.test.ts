@@ -6,9 +6,9 @@
  * provider credential, a live Jev call, or direct controller construction standing in for wiring.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { classifyAcquisition } from "../../../src/core/acquisition/acquisition-boundary.ts";
 import { ExternalCapabilityAcquisitionGate } from "../../../src/core/acquisition/external-capability-acquisition-gate.ts";
 import {
@@ -20,6 +20,7 @@ import {
 } from "../../../src/core/adaptive/index.ts";
 import { compileExecutionCharter } from "../../../src/core/autonomy/execution-charter.ts";
 import { RETENTION_AUDIT_CUSTOM_TYPE } from "../../../src/core/compaction/evidence-retention-projection.ts";
+import { FAST_ITERATION_INDICATOR } from "../../../src/core/operator-projection/session-operator-projection.ts";
 import { DurableOwnerRuleStore, normalizeOwnerRule } from "../../../src/core/project-rules/durable-owner-rules.ts";
 import {
 	PROJECT_RULE_REPAIR_CUSTOM_TYPE,
@@ -31,7 +32,13 @@ import {
 	isValidationChurn,
 	WorkerSupervisionCoordinator,
 } from "../../../src/core/supervision/worker-supervision-coordinator.ts";
+import { semanticPlaneHealthGlyph } from "../../../src/core/system-one/semantic-plane-health.ts";
+import { OperatorStatusComponent } from "../../../src/modes/interactive/components/operator-status.ts";
+import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
+import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { createRcSdkHarness } from "../rc-sdk-harness.ts";
+
+const REPO_ROOT = join(import.meta.dirname, "../../../../..");
 
 /** Tool results still present on the compacted projection, which the audit entry never inflates. */
 function countToolResults(branch: readonly unknown[]): number {
@@ -99,6 +106,10 @@ function appendToolExchange(
 }
 
 describe("RC Gapless Readiness Closure v1.7.1", () => {
+	beforeAll(() => {
+		initTheme();
+	});
+
 	describe("Execution fail-closed (RCG-020..RCG-027)", () => {
 		it("RCG-025: a dispatcher or builder without a real worker execution owner cannot be constructed", () => {
 			expect(() => new RealWorkerDispatcher({})).toThrow(/real worker execution owner/);
@@ -681,6 +692,129 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 			expect(blocked?.block).toBe(true);
 			expect(String(blocked?.reason)).toContain("External acquisition");
 			expect(harness.session.acquisitionGate?.getRecords()).toHaveLength(1);
+		});
+	});
+
+	describe("Live operator projection and TUI (RCG-050..RCG-055)", () => {
+		it("RCG-050, RCG-051: the session owns the projection and the layout reads it, not a literal", async () => {
+			const harness = await createRcSdkHarness();
+			const projection = harness.session.operatorProjection.getProjection();
+
+			// Idle is a real projection state from the same owner, not a hard-coded row.
+			expect(projection.phase).toBe("understand");
+			expect(projection.objective_id).toBeTruthy();
+			expect(projection.active_actors[0]?.kind).toBe("root");
+			expect(projection.proof).toEqual({ satisfied: 0, total: 0, failing: 0, pending: 0 });
+
+			// The component the layout mounts renders that same projection.
+			const component = new OperatorStatusComponent({
+				getProjection: () => harness.session.operatorProjection.getProjection(),
+			});
+			const rows = component.render(120);
+			expect(rows.length).toBeGreaterThan(0);
+			expect(stripAnsi(rows.join("\n"))).toContain("UNDERSTAND");
+		});
+
+		it("RCG-052: the layout contains no hard-coded execution projection", () => {
+			const layoutSource = readFileSync(
+				join(REPO_ROOT, "packages/coding-agent/src/modes/interactive/interactive-layout.ts"),
+				"utf-8",
+			);
+			expect(layoutSource).toContain("host.session.operatorProjection.getProjection()");
+			expect(layoutSource).not.toContain('phase: "understand"');
+			expect(layoutSource).not.toContain("Ready for operator instructions");
+		});
+
+		it("RCG-053: phases follow real runtime state", async () => {
+			const harness = await createRcSdkHarness();
+			const projection = () => harness.session.operatorProjection.getProjection();
+
+			harness.session.setAdaptationProjection({
+				kind: "capability",
+				label: "Synthesizing json-validator",
+				state: "building",
+			});
+			expect(projection().phase).toBe("adapt");
+			expect(projection().current_action).toContain("Synthesizing json-validator");
+
+			harness.session.setAdaptationProjection(undefined);
+			harness.session.setDeliveryState("in_progress");
+			expect(projection().phase).toBe("deliver");
+
+			harness.session.setDeliveryState("none");
+			harness.session.setOperatorBlocker("Push is not authorized by the execution charter");
+			expect(projection().phase).toBe("blocked");
+			expect(projection().health).toBe("blocked");
+			expect(projection().current_action).toContain("not authorized");
+
+			harness.session.setOperatorBlocker(undefined);
+			expect(projection().phase).toBe("understand");
+		});
+
+		it("RCG-054: footer health is observed, never a constant", async () => {
+			const healthy = await createRcSdkHarness();
+			expect(healthy.session.getSemanticPlaneHealth().state).toBe("unknown");
+			expect(semanticPlaneHealthGlyph(healthy.session.getSemanticPlaneHealth())).toBe("Jev ?");
+
+			// One real evaluation moves it to ok.
+			await healthy.session.projectRules.validateMutation({ changedFiles: [] });
+			const engine = (
+				healthy.session as unknown as {
+					_semanticDecisionEngine():
+						| { evaluate(p: unknown, s: unknown, o: unknown): Promise<unknown> }
+						| undefined;
+				}
+			)._semanticDecisionEngine();
+			await engine?.evaluate(
+				{
+					schema_version: "1.0",
+					program_id: "probe",
+					description: "probe",
+					decisions: [{ id: "q", instruction: "is it so?" }],
+				},
+				{},
+				{},
+			);
+			expect(healthy.session.getSemanticPlaneHealth().state).toBe("ok");
+			expect(semanticPlaneHealthGlyph(healthy.session.getSemanticPlaneHealth())).toBe("Jev ✓");
+
+			// A failed evaluation degrades it; the footer must not keep showing a tick.
+			const failing = await createRcSdkHarness({
+				decisions: { failWith: new Error("semantic plane unavailable") },
+			});
+			const failingEngine = (
+				failing.session as unknown as {
+					_semanticDecisionEngine():
+						| { evaluate(p: unknown, s: unknown, o: unknown): Promise<unknown> }
+						| undefined;
+				}
+			)._semanticDecisionEngine();
+			await expect(
+				failingEngine?.evaluate(
+					{
+						schema_version: "1.0",
+						program_id: "probe",
+						description: "probe",
+						decisions: [{ id: "q", instruction: "is it so?" }],
+					},
+					{},
+					{},
+				),
+			).rejects.toThrow();
+			expect(failing.session.getSemanticPlaneHealth().state).toBe("degraded");
+			expect(semanticPlaneHealthGlyph(failing.session.getSemanticPlaneHealth())).toBe("Jev !");
+		});
+
+		it("RCG-055: the fast-iteration indicator appears only while the owner rule is in force", async () => {
+			const harness = await createRcSdkHarness();
+			harness.session.setAdaptationProjection({ kind: "capability", label: "Adapting", state: "building" });
+			expect(harness.session.operatorProjection.getProjection().current_action).not.toContain(
+				FAST_ITERATION_INDICATOR,
+			);
+
+			harness.replyWith("ok");
+			await harness.session.prompt("no TDD, mandatory, fast paced only");
+			expect(harness.session.operatorProjection.getProjection().current_action).toContain(FAST_ITERATION_INDICATOR);
 		});
 	});
 

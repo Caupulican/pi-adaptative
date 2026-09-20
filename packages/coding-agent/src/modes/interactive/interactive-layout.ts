@@ -38,6 +38,8 @@ export interface InteractiveLayoutHost {
 	workbench?: WorkbenchController;
 	workbenchInputCleanup?: () => void;
 	activeToolCalls: { readonly size: number; hasActive(toolCallId: string): boolean };
+	/** Unsubscribes the operator-projection render listener; set when the layout mounts. */
+	disposeOperatorProjection?: () => void;
 }
 
 export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
@@ -49,26 +51,13 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 	// One status row when the width allows; the status band should use the width, not stack.
 	host.footer.setCompact(true);
 	host.footer.setOperatorFooter(true);
+	// The operator row reads the session's own live projection. Its idle state is that projection
+	// with no objective, not a literal written here.
 	const operatorStatus = new OperatorStatusComponent({
-		getProjection: () => {
-			return {
-				schema_version: "1.0",
-				objective_id: host.session.sessionManager.getLeafId() ?? "default",
-				title: host.session.sessionManager.getSessionName() || path.basename(host.session.sessionManager.getCwd()),
-				phase: "understand",
-				phase_index: 1,
-				phase_count: 5,
-				current_action: "Ready for operator instructions",
-				why: "Standing by for user directives",
-				next_action: null,
-				health: "normal",
-				active_actors: [{ id: "root", kind: "root", label: "Root orchestrator" }],
-				adaptation: null,
-				proof: { satisfied: 0, total: 1, failing: 0, pending: 1 },
-				context: null,
-			};
-		},
+		getProjection: () => host.session.operatorProjection.getProjection(),
 	});
+	const unsubscribeOperatorProjection = host.session.operatorProjection.subscribe(() => host.ui.requestRender());
+	host.disposeOperatorProjection = unsubscribeOperatorProjection;
 	const view = new WorkbenchComponent({
 		conversation: host.chatContainer,
 		editor: host.editorContainer,

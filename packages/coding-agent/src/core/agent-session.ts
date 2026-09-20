@@ -157,6 +157,8 @@ import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
+import { type DeliveryState, SessionOperatorProjection } from "./operator-projection/session-operator-projection.ts";
+import type { AdaptationProjection } from "./operator-projection/types.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import { PendingInputQueueController, type QueuedInput } from "./pending-input-queue-controller.ts";
@@ -214,6 +216,7 @@ import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plan
 import { WorkerSemanticSupervisor } from "./supervision/worker-semantic-supervisor.ts";
 import { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
+import { type SemanticPlaneHealth, SemanticPlaneHealthRecorder } from "./system-one/semantic-plane-health.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
 import { captureSessionTaskDirectoryContext } from "./tasks/task-directory-context.ts";
@@ -427,9 +430,16 @@ export class AgentSession {
 	private readonly _projectRules: SessionProjectRules;
 	/** Live worker supervision, bound to the real worker lifecycle and root worker control. */
 	private readonly _workerSupervision: WorkerSupervisionCoordinator;
+	/** The one live operator projection this session owns; the TUI reads it, never a literal. */
+	private readonly _operatorProjection: SessionOperatorProjection;
 	/** External-acquisition gate; its authority is the session's own ExecutionCharter. */
 	private _acquisitionGate?: ExternalCapabilityAcquisitionGate;
 	private _executionCharter?: ExecutionCharter;
+	private _adaptationProjection?: AdaptationProjection;
+	private _deliveryState: DeliveryState = "none";
+	private _operatorBlocker?: string;
+	/** Observed outcome of every semantic evaluation this session ran; the footer reads it. */
+	private readonly _semanticPlaneHealth = new SemanticPlaneHealthRecorder();
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -441,6 +451,33 @@ export class AgentSession {
 		this._ownerRules = new DurableOwnerRuleStore({
 			agentDir: config.agentDir ?? getAgentDir(),
 			projectKey: config.cwd,
+		});
+		this._operatorProjection = new SessionOperatorProjection({
+			getObjectiveId: () => this.getGoalStateSnapshot()?.goalId ?? this.sessionManager.getSessionId(),
+			getTitle: () => this.sessionManager.getSessionName() || basename(this.sessionManager.getCwd()),
+			getGoalState: () => this.getGoalStateSnapshot(),
+			getLanes: () => this._backgroundLanes.getLaneRecords(),
+			getUnresolvedProofIds: () => this._getActiveVerificationIds(),
+			getAdaptation: () => this._adaptationProjection,
+			getDeliveryState: () => this._deliveryState,
+			getContext: () => {
+				const usage = this.getContextUsage();
+				if (!usage) return undefined;
+				// `tokens: null` is the post-compaction state: the window is unknown until the next
+				// provider response, which is exactly what the operator should see.
+				return {
+					...(usage.percent !== null ? { percent: usage.percent } : {}),
+					compacted: usage.tokens === null,
+				};
+			},
+			// The owner's durable fast-iteration rule is what makes the compact indicator true.
+			isFastIteration: () =>
+				this._ownerRules
+					.list()
+					.some(
+						(policy) => policy.forbid.includes("full_suite_per_edit") || policy.forbid.includes("tdd_workflow"),
+					),
+			getBlocker: () => this._operatorBlocker,
 		});
 		this._workerSupervision = new WorkerSupervisionCoordinator({
 			supervisor: new WorkerSemanticSupervisor({
@@ -857,10 +894,7 @@ export class AgentSession {
 			onCompactionSettled: () => this._foregroundRecovery?.wakeIdleWaiters(),
 			// Evidence-preserving compaction runs on the session's own semantic engine. Without one
 			// the planner is never consulted and compaction behaves exactly as it did before.
-			getRetentionDecisionEngine: () => {
-				const engine = this._steeringPlane?.decisionEngine;
-				return engine ? createRetentionDecisionEngine(engine) : undefined;
-			},
+			getRetentionDecisionEngine: () => this._semanticDecisionEngine(),
 			getRetentionPins: () => ({
 				unresolvedProofObligations: this._getActiveVerificationIds(),
 			}),
@@ -1457,6 +1491,56 @@ export class AgentSession {
 	/** Diagnostic readiness gate for adaptive runtime components. */
 	get adaptiveReadiness(): AdaptiveRuntimeReadiness | undefined {
 		return this._adaptiveReadiness;
+	}
+
+	/**
+	 * The session's semantic decision engine, wrapped so every evaluation's outcome is recorded.
+	 * The footer's health indicator is that record, never a constant.
+	 */
+	private _semanticDecisionEngine(): ReturnType<typeof createRetentionDecisionEngine> | undefined {
+		const engine = this._steeringPlane?.decisionEngine;
+		if (!engine) return undefined;
+		const bridged = createRetentionDecisionEngine(engine);
+		return {
+			evaluate: async (program, state, options) => {
+				try {
+					const evaluation = await bridged.evaluate(program, state, options);
+					this._semanticPlaneHealth.recordSuccess();
+					return evaluation;
+				} catch (error) {
+					this._semanticPlaneHealth.recordFailure(error);
+					throw error;
+				}
+			},
+		};
+	}
+
+	/** Observed health of this session's semantic plane. */
+	getSemanticPlaneHealth(): SemanticPlaneHealth {
+		return this._semanticPlaneHealth.getHealth(Boolean(this._steeringPlane?.decisionEngine));
+	}
+
+	/** The live operator projection owned by this session. */
+	get operatorProjection(): SessionOperatorProjection {
+		return this._operatorProjection;
+	}
+
+	/** Records adaptive work in flight so the projection can report the ADAPT phase truthfully. */
+	setAdaptationProjection(adaptation: AdaptationProjection | undefined): void {
+		this._adaptationProjection = adaptation;
+		this._operatorProjection.refresh();
+	}
+
+	/** Records that an authorized outward-facing delivery step is running. */
+	setDeliveryState(state: DeliveryState): void {
+		this._deliveryState = state;
+		this._operatorProjection.refresh();
+	}
+
+	/** Records a blocking condition the operator has to resolve, or clears it. */
+	setOperatorBlocker(blocker: string | undefined): void {
+		this._operatorBlocker = blocker;
+		this._operatorProjection.refresh();
 	}
 
 	/** The session's compiled ExecutionCharter, once the adaptive runtime bound one. */
