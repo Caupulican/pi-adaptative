@@ -168,21 +168,31 @@ export class LaneTracker {
 		}
 	}
 
-	enqueue(args: { type: LaneType; label?: string; goalId?: string; worktreeLaneKey?: string }): LaneRecord {
-		const laneId = `${args.type}-${this._nextLaneNumber++}`;
-		const record: LaneRecord = {
-			laneId,
-			type: args.type,
-			status: "queued",
-		};
-		// Bounding happens here, at the one place a record is minted, so no caller can persist an
-		// unbounded label and every lane kind reads the same way in the operator's view.
+	/**
+	 * The tracker's one mint point: every new record is built and registered here, so the label is
+	 * bounded once and no entry point can persist a record shaped differently from the others.
+	 */
+	private _mint(args: {
+		laneId: string;
+		type: LaneType;
+		status: LaneStatus;
+		startedAt?: string;
+		label?: string;
+		goalId?: string;
+		worktreeLaneKey?: string;
+	}): LaneRecord {
+		const record: LaneRecord = { laneId: args.laneId, type: args.type, status: args.status };
+		if (args.startedAt !== undefined) record.startedAt = args.startedAt;
 		const label = args.label === undefined ? undefined : deriveWorkerTaskLabel(args.label, "");
 		if (label) record.label = label;
 		if (args.goalId !== undefined) record.goalId = args.goalId;
 		if (args.worktreeLaneKey !== undefined) record.worktreeLaneKey = args.worktreeLaneKey;
-		this._lanes.set(laneId, record);
+		this._lanes.set(record.laneId, record);
 		return { ...record };
+	}
+
+	enqueue(args: { type: LaneType; label?: string; goalId?: string; worktreeLaneKey?: string }): LaneRecord {
+		return this._mint({ ...args, laneId: `${args.type}-${this._nextLaneNumber++}`, status: "queued" });
 	}
 
 	/** Restore an exact durable projection without minting a replacement logical id or timestamp. */
@@ -204,20 +214,10 @@ export class LaneTracker {
 		worktreeLaneKey?: string;
 	}): LaneRecord {
 		if (!args.laneId) throw new TypeError("A named lane requires a non-empty laneId.");
-		const record: LaneRecord = {
-			laneId: args.laneId,
-			type: args.type,
-			status: "running",
-			startedAt: this._now(),
-		};
-		const label = args.label === undefined ? undefined : deriveWorkerTaskLabel(args.label, "");
-		if (label) record.label = label;
-		if (args.goalId !== undefined) record.goalId = args.goalId;
-		if (args.worktreeLaneKey !== undefined) record.worktreeLaneKey = args.worktreeLaneKey;
-		this._lanes.set(record.laneId, record);
+		const record = this._mint({ ...args, status: "running", startedAt: this._now() });
 		const suffix = /-(\d+)$/.exec(record.laneId)?.[1];
 		if (suffix) this.ensureCounterAtLeast(Number(suffix) + 1);
-		return { ...record };
+		return record;
 	}
 
 	markRunning(laneId: string): LaneRecord | undefined {
