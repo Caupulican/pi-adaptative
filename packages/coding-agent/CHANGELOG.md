@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- Router selection modes `manual` / `auto` / `hybrid` (`modelRouter.selectionMode`, default `manual` so existing installs keep exact-pin behavior). `auto` selects each tier's exact model adaptively; `hybrid` lets a pinned tier win and auto-selects unpinned tiers. The candidate pool is the existing Models configuration (session scoped models, or every authed model when uncustomized); an automatic route can never leave a customized pool, and favorites only order pickers.
+- Subscription-first automatic selection (`modelRouter.poolPreference`, default `subscription-first`; `balanced` keeps the evidence ranking alone): after hard admission (auth, quota, tool path, fitness gate), adequate subscription-backed models (`ModelRegistry.isUsingSubscription`) rank ahead of metered ones; an inadequate subscription model still loses to an adequate metered one; a manual pin and the pool boundary always win.
+- H-MoE foreground refinement is bounded to the pool: `WorkerCapabilityRequest.allowed_model_refs` is enforced at candidate generation and at admission (`model_not_in_pool`), `prefer_subscription` is a class ordering after admission, and the adaptive runtime stack now hands its expert service to the foreground router; it refines auto-selected tiers only, never a manual pin. Route decisions carry their selection provenance (`manual` / `auto` / `hmoe`) and the router status shows mode, pool, preference and provenance.
+- Router Setup in `/settings` → Model Router: selection mode, candidate pool with per-model calibration evidence (`FIT` / `UNFIT` / `UNPROBED` / `STALE` per router surface, from the existing FitnessStore and tool-probe records — no second benchmark store, no universal score), pool preference, `(AUTO)` tier pickers ordered favorites → pool → outside-pool, and the actions Configure models (the existing Models selector), Calibrate (one model via the existing fitness + role flow, or unprobed/all after an explicit confirmation naming models, surfaces and provider calls), Preview route (deterministic, no provider call; `live:` prefix runs the judged path on request; neither mutates the session model) and Diagnostics. Opening settings never runs a probe. Documented in `docs/router-setup.md`.
+- One operator POV bar in the Workbench (`WORKING | NEXT | ACTOR | ROOT | ACTIVE | ROUTE | JEV | COST | PROOF | CTX`) reading the live projection, the router's new `ForegroundRouteSnapshot` (root vs active model, route source), the semantic plane's observed health and the canonical cost summary on every render; width pressure drops context/proof/root-actor first and never cuts routing, Jev or cost. Documented in `docs/workbench.md`.
+
+### Changed
+
+- The two-row `OperatorStatusComponent` and the status band's Jev/proof/context parts are replaced by the POV bar; the operator footer row is location only. Jev health gains a real in-flight state recorded by the semantic evaluation wrapper, and the normal-mode labels are `JEV off` / `ready` / `eval` / `ok` / `degraded` — the ambiguous `Jev ?` glyph no longer exists.
+
 ## [0.99.32] - 2026-09-20
 
 ### Fixed
