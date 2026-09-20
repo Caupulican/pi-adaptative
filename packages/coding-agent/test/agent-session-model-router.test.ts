@@ -33,6 +33,9 @@ type RouterContext = {
 		};
 		isModelExhausted: (model: TestModel) => boolean;
 		getFailoverStatus: () => { exhausted: string[]; lastNotice?: string };
+		getCandidatePool: () => { customized: boolean; models: TestModel[] };
+		isUsingSubscription: (model: TestModel) => boolean;
+		getToolProbeVerdict: (model: TestModel) => undefined;
 	};
 };
 
@@ -195,6 +198,10 @@ function createContext(
 			isModelExhausted: (model: TestModel) =>
 				exhaustedModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id),
 			getFailoverStatus: () => ({ exhausted: [] }),
+			// Uncustomized pool: every authed model, as the session resolves it.
+			getCandidatePool: () => ({ customized: false, models: [...authenticatedModels] }),
+			isUsingSubscription: () => false,
+			getToolProbeVerdict: () => undefined,
 		},
 	});
 }
@@ -236,7 +243,7 @@ describe("AgentSession model router turn selection", () => {
 			expect(branch.filter((entry) => entry.type === "foreground_tool_start")).toHaveLength(0);
 			expect(branch.filter((entry) => entry.type === "foreground_tool_terminal")).toHaveLength(0);
 			expect(harness.session.getModelRouterStatus()).toContain(
-				"cheap/read-only -> faux/cheap (read_only_question, escalated -> faux/expensive)",
+				"cheap/read-only -> faux/cheap (read_only_question, escalated -> faux/expensive, selected by manual)",
 			);
 		} finally {
 			harness.cleanup();

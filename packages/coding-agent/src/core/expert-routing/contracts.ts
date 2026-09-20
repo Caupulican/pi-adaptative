@@ -81,6 +81,15 @@ export interface WorkerCapabilityRequest {
 
 	capability_escalation_requested?: boolean;
 	failure_signatures?: readonly string[];
+
+	/**
+	 * Hard candidate allowlist as `provider/model_id` refs — the operator's customized Models pool.
+	 * When present, candidate generation never materializes a model outside it and admission
+	 * rejects any that slipped through; no automatic route may leave the pool.
+	 */
+	allowed_model_refs?: readonly string[];
+	/** Rank adequate subscription-backed candidates ahead of metered ones, after hard admission. */
+	prefer_subscription?: boolean;
 }
 
 export interface ExpertDescriptor {
@@ -139,6 +148,8 @@ export interface ExpertCandidateState {
 	costProvenance?: EstimateProvenance;
 	latencyProvenance?: EstimateProvenance;
 	concurrencySlotsAvailable?: number;
+	/** Auth for this model is a real provider subscription (ModelRegistry.isUsingSubscription). */
+	subscriptionBacked?: boolean;
 }
 
 export interface ExpertCandidate {
@@ -172,6 +183,11 @@ export interface ExpertFeatureVector {
 	diversityBonus: number;
 	privacyBonus: number;
 	explorationBonus: number;
+	/**
+	 * 1 when the request prefers subscription-backed candidates and this one is; recorded for the
+	 * trace. It is a class ordering applied by the ranking policy, not a term of `totalScore`.
+	 */
+	subscriptionPreferred: number;
 
 	// Composite
 	totalScore: number;

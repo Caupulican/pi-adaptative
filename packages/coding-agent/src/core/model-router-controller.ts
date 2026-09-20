@@ -50,6 +50,19 @@ import { runIsolatedTextCompletion } from "./isolated-text-completion.ts";
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
+import {
+	type AutoSelectionDeps,
+	type AutoSelectionResult,
+	type AutoSelectionTier,
+	formatAutoSelectionCandidate,
+	selectAutoTierModel,
+} from "./model-router/auto-selection.ts";
+import {
+	formatRouterPoolSummary,
+	isModelInRouterPool,
+	type RouterCandidatePool,
+	routerPoolModelRefs,
+} from "./model-router/candidate-pool.ts";
 import { collectModelRouterConfigDiagnostics } from "./model-router/config-diagnostics.ts";
 import { classifyExecutorTurn } from "./model-router/executor-route.ts";
 import {
@@ -59,6 +72,7 @@ import {
 } from "./model-router/fitness-gate.ts";
 import { classifyModelRouterRoute, type ModelRouterIntent } from "./model-router/intent-classifier.ts";
 import { ROUTE_JUDGE_MAX_OUTPUT_TOKENS, runRouteJudge } from "./model-router/route-judge.ts";
+import type { LiveRoutePreview, RoutePreview } from "./model-router/route-preview.ts";
 import {
 	bufferModelRouterSessionCustomMessage,
 	bufferModelRouterSessionMessage,
@@ -195,8 +209,19 @@ export interface ModelRouterControllerDeps {
 	 * when never probed. Tier-resolution's consultation reads this ONLY for local/managed models
 	 * ({@link isLocalOrManagedRouterModel}); cloud models never call it. */
 	getToolProbeVerdict(model: Model<Api>): ModelToolProbeVerdict | undefined;
+	/** The router's candidate pool: the operator's Models configuration, or every authed model. */
+	getCandidatePool(): RouterCandidatePool;
+	/** Canonical subscription ownership (ModelRegistry.isUsingSubscription); never a hand-written list. */
+	isUsingSubscription(model: Model<Api>): boolean;
 	/** Optional shared expert selection service for exact model/expert resolution (H-MoE, HMOE-012). */
 	expertSelector?: ExpertSelectionService;
+}
+
+const ROUTE_PREVIEW_MAX_CANDIDATES = 8;
+
+function formatFitnessVerdict(verdict: FitnessGateVerdict): string {
+	if (verdict.fit) return verdict.probed ? "fit" : "unprobed";
+	return verdict.reason === "unprobed" ? "unprobed" : `unfit (${verdict.lane} ${verdict.succeeded}/${verdict.total})`;
 }
 
 /**
@@ -220,6 +245,50 @@ export class ModelRouterController {
 
 	constructor(deps: ModelRouterControllerDeps) {
 		this.deps = deps;
+	}
+
+	/** Late-binds the H-MoE selector once the adaptive runtime stack is attached to the session. */
+	setExpertSelector(service: ExpertSelectionService | undefined): void {
+		this.deps.expertSelector = service;
+	}
+
+	private _tierPattern(tier: AutoSelectionTier): string | undefined {
+		const settings = this.deps.getSettingsManager().getModelRouterSettings();
+		return tier === "cheap"
+			? settings.cheapModel
+			: tier === "medium"
+				? settings.mediumModel
+				: settings.expensiveModel;
+	}
+
+	/**
+	 * Whether a tier's exact model is selected automatically: always in AUTO, only for unpinned
+	 * tiers in HYBRID, never in MANUAL (the legacy default — an unset tier there stays unset).
+	 */
+	isTierAutoSelected(tier: AutoSelectionTier): boolean {
+		const mode = this.deps.getSettingsManager().getModelRouterSettings().selectionMode ?? "manual";
+		if (mode === "auto") return true;
+		if (mode === "hybrid") return !this._tierPattern(tier);
+		return false;
+	}
+
+	private _autoSelectionDeps(): AutoSelectionDeps {
+		const settings = this.deps.getSettingsManager().getModelRouterSettings();
+		const registry = this.deps.getModelRegistry();
+		return {
+			isSubscription: (model) => this.deps.isUsingSubscription(model),
+			hasConfiguredAuth: (model) => registry.hasConfiguredAuth(model),
+			isExhausted: (model) => this.deps.isModelExhausted(model),
+			toolProbeVerdict: (model) => this.deps.getToolProbeVerdict(model),
+			fitness: (surface, model) => this._evaluateModelFitness(surface, model),
+			fitnessGate: settings.fitnessGate,
+			preference: settings.poolPreference ?? "subscription-first",
+		};
+	}
+
+	/** Deterministic AUTO selection for a tier, bounded to the candidate pool. No provider call. */
+	selectAutoTierModel(tier: AutoSelectionTier): AutoSelectionResult {
+		return selectAutoTierModel(tier, this.deps.getCandidatePool().models, this._autoSelectionDeps());
 	}
 
 	/** True while the escalation retry turn is running, so the host can suppress its duplicate prompt events. */
@@ -403,6 +472,21 @@ export class ModelRouterController {
 		reasonCode: string,
 		reason: string,
 	): { decision: RouteDecision; model: Model<Api> } | undefined {
+		if (this.isTierAutoSelected("expensive")) {
+			const auto = this.selectAutoTierModel("expensive");
+			if (!auto.chosen) {
+				this._lastModelRouterSkipReason = `expensive tier auto-selection: ${auto.reason}`;
+				return undefined;
+			}
+			decision.fallbackFrom = "medium";
+			decision.tier = "expensive";
+			decision.reasonCode = reasonCode;
+			decision.reasons = [...decision.reasons, reason, `Auto-selected ${auto.chosen.ref}: ${auto.reason}`];
+			decision.model = auto.chosen.ref;
+			decision.selection = "auto";
+			this._lastModelRouterSkipReason = undefined;
+			return { decision, model: auto.chosen.model };
+		}
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();
 		const expensivePattern = settings.expensiveModel;
 		if (!expensivePattern || !this._isModelAvailableAndAuthed(expensivePattern)) return undefined;
@@ -427,6 +511,7 @@ export class ModelRouterController {
 		decision.reasonCode = reasonCode;
 		decision.reasons = [...decision.reasons, reason];
 		decision.model = formatModelRouterModel(resolvedExpensive.model);
+		decision.selection = "manual";
 		this._lastModelRouterSkipReason = undefined;
 		return { decision, model: resolvedExpensive.model };
 	}
@@ -452,6 +537,7 @@ export class ModelRouterController {
 					confidence: 1,
 					reasonCode: "executor_direct",
 					reasons: [`Executor lane: Level-0 direct hit on toolkit script "${verdict.scriptName}"`],
+					selection: "manual",
 				},
 				model: resolved.model,
 			};
@@ -529,6 +615,29 @@ export class ModelRouterController {
 			];
 		const label =
 			decision.tier === "cheap" ? "cheap model" : decision.tier === "medium" ? "medium model" : "expensive model";
+
+		// AUTO / unpinned-HYBRID tier: the tier is decided above; the exact model is selected from the
+		// candidate pool, subscription-first by default, never outside the pool.
+		if (this.isTierAutoSelected(decision.tier)) {
+			const auto = this.selectAutoTierModel(decision.tier);
+			if (!auto.chosen) {
+				if (decision.tier === "medium") {
+					const fallback = this._resolveExpensiveFallbackRoute(
+						decision,
+						"medium_unavailable_fallback_expensive",
+						`Medium tier has no eligible candidate (${auto.reason}); falling back to expensive tier`,
+					);
+					if (fallback) return fallback;
+				}
+				this._lastModelRouterSkipReason = `${decision.tier} tier auto-selection: ${auto.reason}`;
+				return undefined;
+			}
+			this._lastModelRouterSkipReason = undefined;
+			decision.model = auto.chosen.ref;
+			decision.selection = "auto";
+			decision.reasons = [...decision.reasons, `Auto-selected ${auto.chosen.ref}: ${auto.reason}`];
+			return { decision, model: auto.chosen.model };
+		}
 
 		if (decision.tier === "medium" && (!modelPattern || !this._isModelAvailableAndAuthed(modelPattern))) {
 			const fallback = this._resolveExpensiveFallbackRoute(
@@ -610,10 +719,13 @@ export class ModelRouterController {
 
 		this._lastModelRouterSkipReason = undefined;
 		decision.model = resolvedName;
+		decision.selection = "manual";
 		return { decision, model: resolved.model };
 	}
 
 	private _resolveModelRouterModelForIntent(intent: ModelRouterIntent): Model<Api> | undefined {
+		const tier: AutoSelectionTier = intent === "research" ? "cheap" : "expensive";
+		if (this.isTierAutoSelected(tier)) return this.selectAutoTierModel(tier).chosen?.model;
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();
 		const modelPattern = intent === "research" ? settings.cheapModel : settings.expensiveModel;
 		if (!modelPattern) return undefined;
@@ -624,6 +736,7 @@ export class ModelRouterController {
 	}
 
 	resolveConfiguredTierModel(tier: "cheap" | "medium" | "expensive"): Model<Api> | undefined {
+		if (this.isTierAutoSelected(tier)) return this.selectAutoTierModel(tier).chosen?.model;
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();
 		const pattern =
 			tier === "cheap" ? settings.cheapModel : tier === "medium" ? settings.mediumModel : settings.expensiveModel;
@@ -652,6 +765,8 @@ export class ModelRouterController {
 		try {
 			const workClass = tier === "cheap" ? "retrieve" : "implement";
 			const consequence = tier === "expensive" ? "critical" : tier === "cheap" ? "low" : "medium";
+			const pool = this.deps.getCandidatePool();
+			const settings = this.deps.getSettingsManager().getModelRouterSettings();
 			const request = buildWorkerCapabilityRequest({
 				objectiveId: "foreground-session",
 				taskId: `fg-${Date.now().toString(36)}`,
@@ -659,11 +774,19 @@ export class ModelRouterController {
 				consequence,
 				decisionSignals: { suggestedTier: tier },
 				metadata: { prompt },
+				// The pool is a hard boundary for H-MoE too: candidates are generated inside it.
+				allowedModelRefs: routerPoolModelRefs(pool),
+				preferSubscription: (settings.poolPreference ?? "subscription-first") === "subscription-first",
 			});
 			const selection = await this.deps.expertSelector.select(request, { signal });
 			const chosen = selection.primary;
 			const model = this.deps.getModelRegistry().find(chosen.provider, chosen.model_id);
-			if (model && this.deps.getModelRegistry().hasConfiguredAuth(model) && !this.deps.isModelExhausted(model)) {
+			if (
+				model &&
+				isModelInRouterPool(pool, model) &&
+				this.deps.getModelRegistry().hasConfiguredAuth(model) &&
+				!this.deps.isModelExhausted(model)
+			) {
 				return model;
 			}
 		} catch {
@@ -679,14 +802,23 @@ export class ModelRouterController {
 		const baseline = this._resolveModelRouterTurnRoute(prompt);
 		if (!baseline) return undefined;
 
-		if (this.deps.expertSelector) {
-			const targetTier = baseline.decision.tier;
-			if (targetTier === "cheap" || targetTier === "medium" || targetTier === "expensive") {
-				const expertModel = await this.resolveExpertTurnModel(targetTier, prompt, this.deps.getReflectionSignal());
-				if (expertModel) {
-					baseline.decision.model = formatModelRouterModel(expertModel);
-					baseline.model = expertModel;
-				}
+		// H-MoE refines only an AUTO-selected tier: a manual pin is authoritative (MANUAL, and a
+		// pinned tier in HYBRID) and is never replaced by the expert selector.
+		const baselineTier = baseline.decision.tier;
+		if (
+			this.deps.expertSelector &&
+			(baselineTier === "cheap" || baselineTier === "medium" || baselineTier === "expensive") &&
+			this.isTierAutoSelected(baselineTier)
+		) {
+			const expertModel = await this.resolveExpertTurnModel(baselineTier, prompt, this.deps.getReflectionSignal());
+			if (expertModel) {
+				baseline.decision.model = formatModelRouterModel(expertModel);
+				baseline.decision.selection = "hmoe";
+				baseline.decision.reasons = [
+					...baseline.decision.reasons,
+					`H-MoE selected ${formatModelRouterModel(expertModel)}`,
+				];
+				baseline.model = expertModel;
 			}
 		}
 
@@ -769,10 +901,14 @@ export class ModelRouterController {
 			return { decision: baseline.decision, model: baseline.model };
 		}
 
-		if (this.deps.expertSelector) {
+		const judgedTierAuto = this.isTierAutoSelected(judgedTier);
+		if (this.deps.expertSelector && judgedTierAuto) {
 			const expertModel = await this.resolveExpertTurnModel(judgedTier, prompt, this.deps.getReflectionSignal());
 			if (expertModel) {
-				return { decision: { ...judged.decision, model: formatModelRouterModel(expertModel) }, model: expertModel };
+				return {
+					decision: { ...judged.decision, model: formatModelRouterModel(expertModel), selection: "hmoe" },
+					model: expertModel,
+				};
 			}
 		}
 
@@ -789,7 +925,122 @@ export class ModelRouterController {
 				model: baseline.model,
 			};
 		}
-		return { decision: { ...judged.decision, model: formatModelRouterModel(judgedModel) }, model: judgedModel };
+		return {
+			decision: {
+				...judged.decision,
+				model: formatModelRouterModel(judgedModel),
+				selection: judgedTierAuto ? "auto" : "manual",
+			},
+			model: judgedModel,
+		};
+	}
+
+	/**
+	 * Deterministic route preview for an example task. Classifies the prompt exactly as a turn
+	 * would and resolves the model through the same code path, but makes no provider call and
+	 * leaves the router's sticky status state untouched.
+	 */
+	previewRoute(prompt: string): RoutePreview {
+		const settings = this.deps.getSettingsManager().getModelRouterSettings();
+		const pool = this.deps.getCandidatePool();
+		const registry = this.deps.getModelRegistry();
+		const classified = classifyModelRouterRoute(prompt);
+		const tier = classified.tier;
+		const routable = tier === "cheap" || tier === "medium" || tier === "expensive";
+		const auto = routable && this.isTierAutoSelected(tier) ? this.selectAutoTierModel(tier) : undefined;
+		const manualPin = routable && !auto ? this._tierPattern(tier) : undefined;
+		const subscriptionCandidates = pool.models.filter(
+			(model) => registry.hasConfiguredAuth(model) && this.deps.isUsingSubscription(model),
+		).length;
+
+		const previousSkip = this._lastModelRouterSkipReason;
+		const previousIntent = this._lastModelRouterIntent;
+		let resolved: { decision: RouteDecision; model: Model<Api> } | undefined;
+		let skipReason: string | undefined;
+		try {
+			resolved = this._resolveModelRouterTurnRoute(prompt);
+			skipReason = resolved ? undefined : this._lastModelRouterSkipReason;
+		} finally {
+			this._lastModelRouterSkipReason = previousSkip;
+			this._lastModelRouterIntent = previousIntent;
+		}
+
+		const chosenFitness = resolved
+			? this._evaluateModelFitness(
+					this._routerSurfaceForTier(
+						resolved.decision.tier === "cheap" || resolved.decision.tier === "medium"
+							? resolved.decision.tier
+							: "expensive",
+					),
+					resolved.model,
+				)
+			: undefined;
+		return {
+			intent: tier === "cheap" ? "research" : "modify",
+			baselineTier: tier,
+			risk: classified.risk,
+			reasonCode: classified.reasonCode,
+			selectionMode: settings.selectionMode ?? "manual",
+			poolPreference: settings.poolPreference ?? "subscription-first",
+			...(manualPin ? { manualPin } : {}),
+			pool: { customized: pool.customized, count: pool.models.length },
+			subscriptionCandidates,
+			eligibleCandidates: auto ? auto.eligible : manualPin && resolved ? 1 : 0,
+			...(resolved
+				? { chosenModel: formatModelRouterModel(resolved.model), selection: resolved.decision.selection }
+				: {}),
+			...(chosenFitness ? { fitness: formatFitnessVerdict(chosenFitness) } : {}),
+			...(skipReason ? { skipReason } : {}),
+			candidates: auto
+				? auto.candidates.slice(0, ROUTE_PREVIEW_MAX_CANDIDATES).map(formatAutoSelectionCandidate)
+				: [],
+		};
+	}
+
+	/**
+	 * Live preview: runs the real judged resolution (routing judge and H-MoE may spend) on explicit
+	 * operator request. Inspection only — the session model and sticky status are unchanged.
+	 */
+	async previewRouteLive(prompt: string): Promise<LiveRoutePreview> {
+		const settings = this.deps.getSettingsManager().getModelRouterSettings();
+		const previousSkip = this._lastModelRouterSkipReason;
+		const previousIntent = this._lastModelRouterIntent;
+		let resolved: { decision: RouteDecision; model: Model<Api> } | undefined;
+		let skipReason: string | undefined;
+		try {
+			resolved = await this.resolveTurnRouteJudged(prompt);
+			skipReason = resolved ? undefined : this._lastModelRouterSkipReason;
+		} finally {
+			this._lastModelRouterSkipReason = previousSkip;
+			this._lastModelRouterIntent = previousIntent;
+		}
+		if (!resolved) {
+			const classified = classifyModelRouterRoute(prompt);
+			return {
+				tier: classified.tier,
+				risk: classified.risk,
+				reasonCode: classified.reasonCode,
+				poolPreference: settings.poolPreference ?? "subscription-first",
+				reasons: classified.reasons,
+				...(skipReason ? { skipReason } : {}),
+			};
+		}
+		const surfaceTier =
+			resolved.decision.tier === "cheap" || resolved.decision.tier === "medium"
+				? resolved.decision.tier
+				: "expensive";
+		return {
+			tier: resolved.decision.tier,
+			risk: resolved.decision.risk,
+			reasonCode: resolved.decision.reasonCode,
+			chosenModel: formatModelRouterModel(resolved.model),
+			selection: resolved.decision.selection,
+			poolPreference: settings.poolPreference ?? "subscription-first",
+			fitness: formatFitnessVerdict(
+				this._evaluateModelFitness(this._routerSurfaceForTier(surfaceTier), resolved.model),
+			),
+			reasons: resolved.decision.reasons,
+		};
 	}
 
 	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: test seam
@@ -813,6 +1064,7 @@ export class ModelRouterController {
 				this._lastModelRouterIntent ?? lastDecision?.intent,
 				settings.fitnessGate ? this._getRouterTierFitnessStatuses() : undefined,
 				this.deps.getFailoverStatus(),
+				formatRouterPoolSummary(this.deps.getCandidatePool()),
 			),
 		];
 		const diagnostics = collectModelRouterConfigDiagnostics(

@@ -44,7 +44,16 @@ export class ExpertRankingPolicy {
 		}
 
 		const traceId = options?.traceId ?? randomUUID();
-		const sorted = [...candidates].sort((a, b) => b.features.totalScore - a.features.totalScore);
+		// Subscription-first is a class ordering AFTER hard admission (every candidate here is already
+		// admitted): adequate subscription-backed experts rank ahead of metered ones, and within each
+		// class the existing evidence score decides. It is a preference, never authority.
+		const sorted = [...candidates].sort((a, b) => {
+			if (request.prefer_subscription) {
+				const classDelta = (b.features.subscriptionPreferred ?? 0) - (a.features.subscriptionPreferred ?? 0);
+				if (classDelta !== 0) return classDelta;
+			}
+			return b.features.totalScore - a.features.totalScore;
+		});
 		const independence = request.independence_level ?? "none";
 
 		const toBinding = (sc: ScoredExpertCandidate): ExpertBinding => {

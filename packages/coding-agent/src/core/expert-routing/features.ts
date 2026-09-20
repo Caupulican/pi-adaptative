@@ -185,6 +185,9 @@ export class ExpertFeatureBuilder {
 		const diversityBonus = desc.runtime_kind !== "remote" ? 0.1 : 0.0;
 		const privacyBonus = desc.privacy_class === "local_only" ? 0.2 : 0.0;
 		const explorationBonus = 0.0;
+		// Recorded for the trace; the ranking policy applies it as a class ordering, so totalScore
+		// keeps its existing evidence meaning.
+		const subscriptionPreferred = request.prefer_subscription && state.subscriptionBacked ? 1.0 : 0.0;
 
 		// 4. Repetition penalty
 		const repetitionPenalty = 0.0;
@@ -245,6 +248,7 @@ export class ExpertFeatureBuilder {
 			diversityBonus,
 			privacyBonus,
 			explorationBonus,
+			subscriptionPreferred,
 			totalScore,
 		};
 	}

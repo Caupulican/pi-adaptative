@@ -108,6 +108,8 @@ function makeProbe(throwAfterCommit: boolean): RouterProbe {
 			}) as never,
 		isModelExhausted: () => false,
 		getFailoverStatus: () => ({ exhausted: [] }),
+		getCandidatePool: () => ({ customized: false, models: [cheapModel, expensiveModel] }),
+		isUsingSubscription: () => false,
 		getAgentDir: () => "/tmp/pi-router-committed-escalation",
 		getReflectionSignal: () => new AbortController().signal,
 		getBaseSystemPrompt: () => "BASE",

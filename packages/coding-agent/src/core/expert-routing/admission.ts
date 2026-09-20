@@ -52,6 +52,11 @@ export class ExpertAdmissionPolicy {
 			reasons.push("provider_denied");
 		}
 
+		// 3b. Operator pool boundary (hard): an automatic route may never leave the customized pool.
+		if (request.allowed_model_refs && !request.allowed_model_refs.includes(modelRef)) {
+			reasons.push("model_not_in_pool");
+		}
+
 		// 4. Privacy and Locality Constraints
 		if (request.local_only && desc.runtime_kind === "remote") {
 			reasons.push("privacy_violation");

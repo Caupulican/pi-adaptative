@@ -102,6 +102,7 @@ import {
 } from "./delegation/session-worker-claim.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { DurableCustomMessageTurnController } from "./durable-custom-message-turn-controller.ts";
+import type { ExpertSelectionService } from "./expert-routing/service.ts";
 import { ExtensionBindingController } from "./extension-binding-controller.ts";
 import type {
 	CompactOptions,
@@ -149,6 +150,8 @@ import {
 	type ModelCapabilityProfile,
 } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { type RouterCandidatePool, resolveRouterCandidatePool } from "./model-router/candidate-pool.ts";
+import type { LiveRoutePreview, RoutePreview } from "./model-router/route-preview.ts";
 import { isLocalOrManagedRouterModel } from "./model-router/tool-escalation.ts";
 import {
 	type ForegroundRouteSnapshot,
@@ -1063,6 +1066,10 @@ export class AgentSession {
 			resolveLaneModel: (pattern) => this._backgroundLanes.resolveLaneModel(pattern),
 			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
 			getToolProbeVerdict: (model) => this._toolProtocol.getToolProbeVerdict(model),
+			// The pool is the operator's Models configuration: live scoped models (startup
+			// enabledModels / --models, or the Models selector) or every authed model when uncustomized.
+			getCandidatePool: () => resolveRouterCandidatePool(this._scopedModels, this._modelRegistry),
+			isUsingSubscription: (model) => this._modelRegistry.isUsingSubscription(model),
 		});
 		this._foregroundLifecycle = new ForegroundLifecycleAdapter(
 			this.agent,
@@ -1549,6 +1556,21 @@ export class AgentSession {
 		return this._modelRouter.getForegroundRouteSnapshot();
 	}
 
+	/** The router's candidate pool as the operator configured it (scoped models or all authed). */
+	getRouterCandidatePool(): RouterCandidatePool {
+		return resolveRouterCandidatePool(this._scopedModels, this._modelRegistry);
+	}
+
+	/** Deterministic route preview for an example task: no provider call, no session mutation. */
+	previewRoute(prompt: string): RoutePreview {
+		return this._modelRouter.previewRoute(prompt);
+	}
+
+	/** Live route preview (judge/H-MoE may run) on explicit operator request; no session mutation. */
+	previewRouteLive(prompt: string): Promise<LiveRoutePreview> {
+		return this._modelRouter.previewRouteLive(prompt);
+	}
+
 	/** The live operator projection owned by this session. */
 	get operatorProjection(): SessionOperatorProjection {
 		return this._operatorProjection;
@@ -1645,7 +1667,13 @@ export class AgentSession {
 		steeringPlane?: SystemOneSteeringPlane;
 		objectiveController?: ObjectiveExecutionController;
 		charter?: ExecutionCharter;
+		expertService?: ExpertSelectionService;
 	}): void {
+		if (stack.expertService) {
+			// The foreground router's AUTO tiers refine through the same H-MoE plane the objective
+			// controller uses, bounded to the operator's candidate pool.
+			this._modelRouter.setExpertSelector(stack.expertService);
+		}
 		if (stack.charter) {
 			// Authority for external acquisition comes from this charter and nowhere else; the gate is
 			// only constructed once a real charter exists.

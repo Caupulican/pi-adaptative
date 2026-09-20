@@ -22,6 +22,8 @@ export type ModelRouterFailoverStatus = {
 
 export type ModelRouterStatusSettings = {
 	enabled: boolean;
+	selectionMode?: "manual" | "auto" | "hybrid";
+	poolPreference?: "subscription-first" | "balanced";
 	fitnessGate?: boolean;
 	cheapModel?: string;
 	cheapThinking?: ThinkingLevel;
@@ -103,14 +105,16 @@ function isModelRouterDecisionStatus(data: unknown): data is ModelRouterDecision
 }
 
 function formatDecision(decision: ModelRouterDecisionStatus): string {
-	const { tier, risk, reasonCode } = decision.route;
+	const { tier, risk, reasonCode, selection } = decision.route;
 	let outcomeText: string = decision.outcome;
 	if (decision.outcome === "escalated" && decision.retryModel) {
 		outcomeText = `escalated -> ${decision.retryModel}`;
 	} else if (decision.outcome === "failed") {
 		outcomeText = "failed";
 	}
-	return `${tier}/${risk} -> ${decision.routedModel} (${reasonCode}, ${outcomeText})`;
+	// Selection provenance is shown only when it was recorded; older decisions carry none.
+	const selectionText = selection ? `, selected by ${selection === "hmoe" ? "H-MoE" : selection}` : "";
+	return `${tier}/${risk} -> ${decision.routedModel} (${reasonCode}, ${outcomeText}${selectionText})`;
 }
 
 export function getRecentModelRouterDecisions(entries: SessionEntry[], limit = 3): ModelRouterDecisionStatus[] {
@@ -132,10 +136,14 @@ export function formatModelRouterStatus(
 	latestIntent?: ModelRouterIntent,
 	fitnessStatuses?: ModelRouterFitnessStatuses,
 	failoverStatus?: ModelRouterFailoverStatus,
+	poolSummary?: string,
 ): string {
 	const effectiveLastDecision = lastSkipReason ? undefined : lastDecision;
 	const lines = [
 		`${formatLabel("Status:")} ${settings.enabled ? "enabled" : "disabled"}`,
+		...(settings.selectionMode ? [`${formatLabel("Selection mode:")} ${settings.selectionMode.toUpperCase()}`] : []),
+		...(poolSummary ? [`${formatLabel("Candidate pool:")} ${poolSummary}`] : []),
+		...(settings.poolPreference ? [`${formatLabel("Pool preference:")} ${settings.poolPreference}`] : []),
 		formatModelWithThinking(
 			formatLabel("Cheap model:"),
 			settings.cheapModel,

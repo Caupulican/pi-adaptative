@@ -251,8 +251,41 @@ export interface FailoverSettings {
 	subscriptionHop?: boolean; // default: true; subscription quota can hop once to an authenticated provider default
 }
 
+/**
+ * How the router picks the exact model for a tier. `manual`: the operator's per-tier pins only
+ * (legacy behavior, the default for existing installs). `auto`: the router decides the tier and
+ * then selects the exact model adaptively from the candidate pool. `hybrid`: a pinned tier wins,
+ * an unpinned tier selects automatically.
+ */
+export type ModelRouterSelectionMode = "manual" | "auto" | "hybrid";
+
+export const MODEL_ROUTER_SELECTION_MODES: readonly ModelRouterSelectionMode[] = ["manual", "auto", "hybrid"];
+
+/**
+ * Ranking preference applied inside the candidate pool AFTER hard admission. `subscription-first`
+ * (the default) ranks adequate subscription-backed models ahead of metered ones; `balanced` keeps
+ * the evidence ranking alone. Preference is never authority: it cannot override auth, quota,
+ * tool incompatibility, a fitness gate, a manual pin or the pool boundary.
+ */
+export type ModelRouterPoolPreference = "subscription-first" | "balanced";
+
+export const MODEL_ROUTER_POOL_PREFERENCES: readonly ModelRouterPoolPreference[] = ["subscription-first", "balanced"];
+
+export const DEFAULT_MODEL_ROUTER_SELECTION_MODE: ModelRouterSelectionMode = "manual";
+export const DEFAULT_MODEL_ROUTER_POOL_PREFERENCE: ModelRouterPoolPreference = "subscription-first";
+
+export function isModelRouterSelectionMode(value: unknown): value is ModelRouterSelectionMode {
+	return typeof value === "string" && (MODEL_ROUTER_SELECTION_MODES as readonly string[]).includes(value);
+}
+
+export function isModelRouterPoolPreference(value: unknown): value is ModelRouterPoolPreference {
+	return typeof value === "string" && (MODEL_ROUTER_POOL_PREFERENCES as readonly string[]).includes(value);
+}
+
 export interface ModelRouterSettings {
 	enabled?: boolean; // default: false — routing is opt-in until escalation safeguards are complete
+	selectionMode?: ModelRouterSelectionMode; // default: manual — existing installs keep exact-pin behavior
+	poolPreference?: ModelRouterPoolPreference; // default: subscription-first — applies only to auto-selected tiers
 	cheapModel?: string; // model pattern for read-only/research turns
 	mediumModel?: string; // model pattern for normal scoped implementation, edits, and refactors
 	expensiveModel?: string; // model pattern for modify/tool-heavy turns
@@ -1268,6 +1301,8 @@ function normalizeModelRouterSettings(value: unknown): ModelRouterSettings | und
 	for (const key of ["enabled", "judgeEnabled", "fitnessGate"] as const) {
 		if (typeof input[key] === "boolean") settings[key] = input[key];
 	}
+	if (isModelRouterSelectionMode(input.selectionMode)) settings.selectionMode = input.selectionMode;
+	if (isModelRouterPoolPreference(input.poolPreference)) settings.poolPreference = input.poolPreference;
 	for (const key of [
 		"cheapModel",
 		"mediumModel",
@@ -3187,6 +3222,8 @@ export class SettingsManager {
 			const router = profile?.modelRouter;
 			if (!router) continue;
 			if (router.enabled !== undefined) merged.enabled = router.enabled;
+			if (router.selectionMode !== undefined) merged.selectionMode = router.selectionMode;
+			if (router.poolPreference !== undefined) merged.poolPreference = router.poolPreference;
 			if (router.judgeEnabled !== undefined) merged.judgeEnabled = router.judgeEnabled;
 			if (router.fitnessGate !== undefined) merged.fitnessGate = router.fitnessGate;
 			if (router.cheapModel !== undefined) merged.cheapModel = router.cheapModel;
@@ -3206,6 +3243,8 @@ export class SettingsManager {
 
 	getModelRouterSettings(): {
 		enabled: boolean;
+		selectionMode: ModelRouterSelectionMode;
+		poolPreference: ModelRouterPoolPreference;
 		cheapModel?: string;
 		mediumModel?: string;
 		expensiveModel?: string;
@@ -3223,6 +3262,12 @@ export class SettingsManager {
 		const profileSettings = this.getProfileModelRouterSettings();
 		const settings = {
 			enabled: this.settings.modelRouter?.enabled ?? false,
+			selectionMode: isModelRouterSelectionMode(this.settings.modelRouter?.selectionMode)
+				? this.settings.modelRouter.selectionMode
+				: DEFAULT_MODEL_ROUTER_SELECTION_MODE,
+			poolPreference: isModelRouterPoolPreference(this.settings.modelRouter?.poolPreference)
+				? this.settings.modelRouter.poolPreference
+				: DEFAULT_MODEL_ROUTER_POOL_PREFERENCE,
 			cheapModel: this.settings.modelRouter?.cheapModel?.trim() || undefined,
 			mediumModel: this.settings.modelRouter?.mediumModel?.trim() || undefined,
 			expensiveModel: this.settings.modelRouter?.expensiveModel?.trim() || undefined,
@@ -3249,6 +3294,8 @@ export class SettingsManager {
 		};
 		return {
 			enabled: profileSettings?.enabled ?? settings.enabled,
+			selectionMode: profileSettings?.selectionMode ?? settings.selectionMode,
+			poolPreference: profileSettings?.poolPreference ?? settings.poolPreference,
 			cheapModel: profileSettings?.cheapModel?.trim() || settings.cheapModel,
 			mediumModel: profileSettings?.mediumModel?.trim() || settings.mediumModel,
 			expensiveModel: profileSettings?.expensiveModel?.trim() || settings.expensiveModel,
@@ -3268,6 +3315,12 @@ export class SettingsManager {
 	setModelRouterSettings(settings: ModelRouterSettings, scope: SettingsScope = "global"): void {
 		const normalized: ModelRouterSettings = {
 			enabled: settings.enabled ?? false,
+			selectionMode: isModelRouterSelectionMode(settings.selectionMode)
+				? settings.selectionMode
+				: DEFAULT_MODEL_ROUTER_SELECTION_MODE,
+			poolPreference: isModelRouterPoolPreference(settings.poolPreference)
+				? settings.poolPreference
+				: DEFAULT_MODEL_ROUTER_POOL_PREFERENCE,
 			cheapModel: settings.cheapModel?.trim() || undefined,
 			mediumModel: settings.mediumModel?.trim() || undefined,
 			expensiveModel: settings.expensiveModel?.trim() || undefined,

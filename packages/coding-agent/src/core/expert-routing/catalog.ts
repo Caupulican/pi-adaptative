@@ -43,8 +43,14 @@ export class ExpertCatalog {
 	async materializeCandidates(request: WorkerCapabilityRequest): Promise<readonly ExpertCandidate[]> {
 		const allModels = this.deps.modelRegistry ? this.deps.modelRegistry.getAll() : [];
 		const candidates: ExpertCandidate[] = [];
+		// The operator's pool is a hard boundary applied at generation, so ranking is bounded early
+		// rather than picking broadly and rejecting afterwards.
+		const allowed = request.allowed_model_refs ? new Set(request.allowed_model_refs) : undefined;
 
 		for (const model of allModels) {
+			if (allowed && !allowed.has(`${model.provider}/${model.id}`)) {
+				continue;
+			}
 			const runtimeKind = this._classifyRuntimeKind(model);
 			const privacyClass = this._classifyPrivacyClass(runtimeKind);
 
@@ -151,6 +157,11 @@ export class ExpertCatalog {
 	private _resolveCandidateState(model: Model<Api>): ExpertCandidateState {
 		const authenticated = this.deps.modelRegistry ? this.deps.modelRegistry.hasConfiguredAuth(model) : true;
 		const quotaExhausted = this.deps.isModelExhausted ? this.deps.isModelExhausted(model) : false;
+		// Subscription truth is the registry's canonical ownership, never a hand-written provider list.
+		const subscriptionBacked =
+			typeof this.deps.modelRegistry?.isUsingSubscription === "function"
+				? this.deps.modelRegistry.isUsingSubscription(model)
+				: false;
 
 		// Calculate approximate cost per token or call with explicit provenance
 		const costPerMillion = model.cost?.input ? model.cost.input * 1_000_000 : 0;
@@ -175,6 +186,7 @@ export class ExpertCatalog {
 			costProvenance,
 			latencyProvenance,
 			concurrencySlotsAvailable: 5,
+			subscriptionBacked,
 		};
 	}
 }

@@ -64,6 +64,10 @@ export interface BuildWorkerCapabilityRequestInput {
 	targetLatencyMs?: number | null;
 	minimumContextWindow?: number | null;
 	metadata?: Record<string, unknown>;
+	/** Hard `provider/model_id` allowlist (the operator's customized Models pool). */
+	allowedModelRefs?: readonly string[];
+	/** Rank adequate subscription-backed candidates first, after hard admission. */
+	preferSubscription?: boolean;
 }
 
 export function routeToWorkClass(routeName?: string): ExpertWorkClass {
@@ -189,5 +193,7 @@ export function buildWorkerCapabilityRequest(input: BuildWorkerCapabilityRequest
 		target_latency_ms: input.targetLatencyMs ?? null,
 		capability_escalation_requested: Boolean(input.decisionSignals?.capabilityEscalationRequired),
 		failure_signatures: failureSignatures,
+		...(input.allowedModelRefs ? { allowed_model_refs: [...input.allowedModelRefs] } : {}),
+		...(input.preferSubscription !== undefined ? { prefer_subscription: input.preferSubscription } : {}),
 	};
 }
