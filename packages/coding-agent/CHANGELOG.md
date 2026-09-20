@@ -22,6 +22,8 @@
 - Two Jev paths bypassed the health recorder (the steering plane's own engine calls and System One's stage validations), so `JEV eval` under-reported; both now report through the one observer. `requireCertificate` dropped `options.signal`, so an aborted mandatory checkpoint ran to completion and settled as failed; it is now cancelled.
 - `SystemOneController.sealDecision` called itself instead of writing the decision, so every stage validation would overflow the stack; it now records the decision once and both the execution store and the audit trail key it under the store's minted id (they previously used two ids for one decision).
 - The interactive layout restored `collapsed: stored.collapsed ?? true`, a default that could never fire; `DEFAULT_WORKBENCH_SETTINGS` is the one source.
+- The Workbench layout's session listeners (projection, stage log, Jev ledger, questions) were bound once at mount and never rebound or disposed, so after a resume or a new session the Decision graph, the Decider row and the Jev previews listened to the previous session; the mode now rebinds them with the session and disposes them on stop.
+- The steering certificate file (`<agentDir>/certificates.json`) grew without bound across every session and was rewritten whole on each certificate; the store now retains the newest 512 certificates (an evicted certificate is re-evaluated, never assumed).
 
 ## [0.99.33] - 2026-09-20
 

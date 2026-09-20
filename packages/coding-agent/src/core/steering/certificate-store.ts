@@ -37,6 +37,14 @@ export function isValidCertificateRecord(item: unknown): item is SteeringCertifi
 	);
 }
 
+/**
+ * Certificates retained per store. The file lives per agent directory across sessions and is
+ * rewritten whole on every persist, so an unbounded map grows every session for the life of the
+ * install and each persist costs the whole history. A certificate is a cache of a judgment: an
+ * evicted one is re-evaluated, never assumed, so eviction is fail-closed.
+ */
+export const MAX_RETAINED_CERTIFICATES = 512;
+
 export class SteeringCertificateStore {
 	private readonly certificatesById = new Map<string, SteeringCertificate>();
 	readonly persistentPath?: string;
@@ -63,6 +71,7 @@ export class SteeringCertificateStore {
 						this.certificatesById.set(item.certificate_id, item);
 					}
 				}
+				this.evictBeyondBound();
 			}
 		} catch (err) {
 			throw new SteeringCertificateStoreError(`Failed to load certificates from ${this.persistentPath}`, err);
@@ -100,8 +109,18 @@ export class SteeringCertificateStore {
 			throw new SteeringCertificateStoreError(`Cannot persist invalid certificate: ${certId}`);
 		}
 		this.certificatesById.set(cert.certificate_id, cert);
+		this.evictBeyondBound();
 		this.saveToDisk();
 		return cert;
+	}
+
+	/** Oldest first (Map insertion order); a re-persisted id keeps its original position. */
+	private evictBeyondBound(): void {
+		while (this.certificatesById.size > MAX_RETAINED_CERTIFICATES) {
+			const oldest = this.certificatesById.keys().next().value;
+			if (oldest === undefined) return;
+			this.certificatesById.delete(oldest);
+		}
 	}
 
 	get(certificateId: string): SteeringCertificate | undefined {
