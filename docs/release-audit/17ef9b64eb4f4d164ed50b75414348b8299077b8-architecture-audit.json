@@ -1,0 +1,448 @@
+{
+	"schema_version": "1.0",
+	"source_revision": "17ef9b64eb4f4d164ed50b75414348b8299077b8",
+	"generated_at": "2026-09-20T04:27:03.868Z",
+	"composition_root": "packages/coding-agent/src/core/sdk.ts",
+	"subsystem_triples": [
+		{
+			"featureId": "system_one_steering",
+			"producer": "packages/coding-agent/src/core/sdk.ts#SystemOneSteeringPlane",
+			"hook": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#requireCertificate",
+			"consumer": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#steeringPlane",
+			"failClosed": "system_one_required rejects the transition when the plane is unavailable",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/production-hardening-v1-3.test.ts#PH-060",
+			"operatorVisibility": "footer semantic-plane health",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "execution_charter",
+			"producer": "packages/coding-agent/src/core/sdk.ts#compileExecutionCharter",
+			"hook": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#evaluateCharterAuthority",
+			"consumer": "packages/coding-agent/src/core/acquisition/external-capability-acquisition-gate.ts#charter.acquisition",
+			"failClosed": "an absent grant denies; an absent charter grants nothing at all",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/release-freeze-master-bundle-v1-7.test.ts#FR-087",
+			"operatorVisibility": "blocked phase with the missing authority",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "hmoe",
+			"producer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-factory.ts#ExpertSelectionService",
+			"hook": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#this.experts.select",
+			"consumer": "packages/coding-agent/src/core/adaptive/execution-ports.ts#resolveExpertBinding",
+			"failClosed": "a build with no resolved provider/model binding throws instead of defaulting",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts#RCG-046: the rules reach worker, specialist and capability-builder missions",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "specialist_synthesis",
+			"producer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-factory.ts#SpecialistSynthesisController",
+			"hook": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#specialistSynthesis",
+			"consumer": "packages/coding-agent/src/core/adaptive/execution-ports.ts#dispatchSpecialist",
+			"failClosed": "materialization raises rather than returning an unverified specialist",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/production-hardening-v1-3.test.ts#PH-060",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "specialist_dispatch",
+			"producer": "packages/coding-agent/src/core/sdk.ts#RealWorkerDispatcher",
+			"hook": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#workerDispatcher",
+			"consumer": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#dispatchSpecialist",
+			"failClosed": "no execution owner refuses construction; no result raises instead of fabricating one",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts#RCG-022, RCG-024: specialist dispatch raises instead of manufacturing a result",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "capability_synthesis",
+			"producer": "packages/coding-agent/src/core/sdk.ts#RealCapabilityBuilder",
+			"hook": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#this.builder.build",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#verifyCandidate",
+			"failClosed": "missing worker owner, result, artifact, disk bytes or matching digest all raise",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts#RCG-025",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "capability_proof",
+			"producer": "packages/coding-agent/src/core/sdk.ts#CapabilityProofRunner",
+			"hook": "packages/coding-agent/src/core/adaptive/execution-ports.ts#this.proofRunner.runProof",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#runTaskSpecificProof",
+			"failClosed": "a failing proof raises and blocks establishment; no proof result is asserted",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts#RCG-027",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "capability_activation_ephemeral_script",
+			"producer": "packages/coding-agent/src/core/sdk.ts#proofRunner",
+			"hook": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#proofRunner.runProof",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#smokeEvidence",
+			"failClosed": "a non-zero smoke exit, a missing artifact or a digest mismatch raises before establishment",
+			"negativePathTest": "packages/coding-agent/test/release/capability-activation-truth.test.ts#ACT-007",
+			"operatorVisibility": "capability synthesized milestone",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "capability_activation_extension",
+			"producer": "packages/coding-agent/src/core/sdk.ts#extensionRuntime",
+			"hook": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#extensions.reload",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#extensions.listActive",
+			"failClosed": "an extension absent from the live registry after reload raises before establishment",
+			"negativePathTest": "packages/coding-agent/test/release/capability-activation-truth.test.ts#ACT-009",
+			"operatorVisibility": "capability synthesized milestone",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "capability_activation_runtime_patch",
+			"producer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-factory.ts#RuntimeAdaptationCoordinator",
+			"hook": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#executeRuntimeModification",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#runtimeModified",
+			"failClosed": "a failed or rolled-back runtime modification raises before establishment",
+			"negativePathTest": "packages/coding-agent/test/release/capability-activation-truth.test.ts#ACT-015",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "capability_activation_toolkit_script",
+			"producer": "packages/coding-agent/src/core/adaptive/capability-kind-support.ts#toolkit_script",
+			"hook": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#resolveActivatableKind",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-readiness.ts#capabilityKindSupport",
+			"failClosed": "unavailable: excluded from the selection set, and a spec naming it replans or blocks — run_toolkit_script resolves from settings.toolkit.scripts; the adaptive registry is isolated",
+			"negativePathTest": "packages/coding-agent/test/release/capability-activation-truth.test.ts#ACT-004",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "capability_activation_tool",
+			"producer": "packages/coding-agent/src/core/adaptive/capability-kind-support.ts#tool",
+			"hook": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#resolveActivatableKind",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-readiness.ts#capabilityKindSupport",
+			"failClosed": "unavailable: excluded from the selection set, and a spec naming it replans or blocks — no live dynamic tool registry admits a synthesized tool",
+			"negativePathTest": "packages/coding-agent/test/release/capability-activation-truth.test.ts#ACT-004",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "capability_activation_skill",
+			"producer": "packages/coding-agent/src/core/adaptive/capability-kind-support.ts#skill",
+			"hook": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#resolveActivatableKind",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-readiness.ts#capabilityKindSupport",
+			"failClosed": "unavailable: excluded from the selection set, and a spec naming it replans or blocks — SkillVault loads by name from discovered sources; a synthesized artifact is not discoverable",
+			"negativePathTest": "packages/coding-agent/test/release/capability-activation-truth.test.ts#ACT-004",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "capability_activation_composition",
+			"producer": "packages/coding-agent/src/core/adaptive/capability-kind-support.ts#composition",
+			"hook": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#resolveActivatableKind",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-readiness.ts#capabilityKindSupport",
+			"failClosed": "unavailable: excluded from the selection set, and a spec naming it replans or blocks — no executable composed path exists to smoke",
+			"negativePathTest": "packages/coding-agent/test/release/capability-activation-truth.test.ts#ACT-004",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "capability_activation_integration",
+			"producer": "packages/coding-agent/src/core/adaptive/capability-kind-support.ts#integration",
+			"hook": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#resolveActivatableKind",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-readiness.ts#capabilityKindSupport",
+			"failClosed": "unavailable: excluded from the selection set, and a spec naming it replans or blocks — no integration registry or health owner exists",
+			"negativePathTest": "packages/coding-agent/test/release/capability-activation-truth.test.ts#ACT-004",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "capability_activation_provider_adapter",
+			"producer": "packages/coding-agent/src/core/adaptive/capability-kind-support.ts#provider_adapter",
+			"hook": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#resolveActivatableKind",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-readiness.ts#capabilityKindSupport",
+			"failClosed": "unavailable: excluded from the selection set, and a spec naming it replans or blocks — ModelRegistry does not mount a synthesized provider adapter",
+			"negativePathTest": "packages/coding-agent/test/release/capability-activation-truth.test.ts#ACT-004",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "runtime_adaptation",
+			"producer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-factory.ts#RuntimeAdaptationCoordinator",
+			"hook": "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts#runtimeAdaptation",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-readiness.ts#runtimeUpdater",
+			"failClosed": "a no-op runtime update controller is rejected at production composition",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/production-reality-closure-v1-5.test.ts#PRC-002",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "semantic_dedup_pre",
+			"producer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-factory.ts#SemanticResponsibilityController",
+			"hook": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#responsibilityController",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-readiness.ts#responsibilityController",
+			"failClosed": "an unresolved duplicate responsibility blocks the transition",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/production-reality-closure-v1-5.test.ts#PRC-0",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "semantic_dedup_post",
+			"producer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-factory.ts#CandidateDiscoveryService",
+			"hook": "packages/coding-agent/src/core/dedup/semantic-responsibility-controller.ts#discovery",
+			"consumer": "packages/coding-agent/src/core/dedup/responsibility-registry.ts#ResponsibilityRegistry",
+			"failClosed": "a discovered duplicate without a waiver blocks acceptance",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/production-reality-closure-v1-5.test.ts#PRC-0",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "semantic_dedup_final",
+			"producer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-factory.ts#WaiverStore",
+			"hook": "packages/coding-agent/src/core/dedup/semantic-responsibility-controller.ts#waivers",
+			"consumer": "packages/coding-agent/src/core/adaptive/adaptive-runtime-readiness.ts#responsibilityController",
+			"failClosed": "an absent waiver leaves the duplicate blocking",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/production-reality-closure-v1-5.test.ts#PRC-0",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "evidence_retention",
+			"producer": "packages/coding-agent/src/core/compaction-controller.ts#EvidenceRetentionPlanner",
+			"hook": "packages/coding-agent/src/core/compaction-controller.ts#planEvidenceRetention",
+			"consumer": "packages/coding-agent/src/core/compaction/evidence-retention-projection.ts#applyRetentionDecisionsToBranch",
+			"failClosed": "a planner or transport failure deletes nothing and compaction proceeds unchanged",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts#RCG-040: a semantic transport failure deletes nothing",
+			"operatorVisibility": "one compaction summary line",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "semantic_project_rules_mutation",
+			"producer": "packages/coding-agent/src/core/agent-session.ts#SessionProjectRules",
+			"hook": "packages/coding-agent/src/core/tool-gate-controller.ts#validateMutationAcceptance",
+			"consumer": "packages/coding-agent/src/core/agent-session.ts#PROJECT_RULE_REPAIR_CUSTOM_TYPE",
+			"failClosed": "a blocking violation turns the mutation result into an error and queues RepairWork",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts#RCG-041: the live mutation-acceptance hook turns a violating write into an error result",
+			"operatorVisibility": "rule repair warning",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "semantic_project_rules_postflight",
+			"producer": "packages/coding-agent/src/core/agent-session.ts#SessionProjectRules",
+			"hook": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#projectRules.validateTaskPostflight",
+			"consumer": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#ensureRepairTasks",
+			"failClosed": "a blocking violation queues repair tasks and stops the cycle",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts#RCG-042, RCG-043",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "semantic_project_rules_completion",
+			"producer": "packages/coding-agent/src/core/agent-session.ts#SessionProjectRules",
+			"hook": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#projectRules.validateCompletion",
+			"consumer": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#completionFailuresToRepairWork",
+			"failClosed": "a blocking violation refuses the completion candidate",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts#RCG-042, RCG-043",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "worker_supervision",
+			"producer": "packages/coding-agent/src/core/agent-session.ts#WorkerSupervisionCoordinator",
+			"hook": "packages/coding-agent/src/core/delegation/worker-attempt-executor.ts#observeWorkerProgress",
+			"consumer": "packages/coding-agent/src/core/agent-session.ts#sendWorkerAgentMessage",
+			"failClosed": "a failed assessment reports a diagnostic and never fails the observed worker",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts#RCG-044: a failed assessment never fails the worker it observes",
+			"operatorVisibility": "worker steered / rerouted warning",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "external_acquisition_gate",
+			"producer": "packages/coding-agent/src/core/agent-session.ts#ExternalCapabilityAcquisitionGate",
+			"hook": "packages/coding-agent/src/core/tool-gate-controller.ts#checkExternalAcquisition",
+			"consumer": "packages/coding-agent/src/core/acquisition/acquisition-boundary.ts#screenAcquisition",
+			"failClosed": "no charter grants nothing; a mandatory semantic plane that cannot answer never allows",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts#RCG-045: an unavailable semantic decision under a mandatory plane cannot direct-allow",
+			"operatorVisibility": "acquisition blocked / hardened warning",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "operator_projection",
+			"producer": "packages/coding-agent/src/core/agent-session.ts#SessionOperatorProjection",
+			"hook": "packages/coding-agent/src/modes/interactive/interactive-layout.ts#operatorProjection.getProjection",
+			"consumer": "packages/coding-agent/src/modes/interactive/components/operator-status.ts#OperatorStatusComponent",
+			"failClosed": "no objective renders the same derived projection, never a literal",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts#RCG-052: the layout contains no hard-coded execution projection",
+			"operatorVisibility": "the operator status row",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "operator_events",
+			"producer": "packages/coding-agent/src/core/operator-projection/session-operator-projection.ts#OperatorEventController",
+			"hook": "packages/coding-agent/src/core/agent-session.ts#eventBridge.record",
+			"consumer": "packages/coding-agent/src/core/operator-projection/operator-projection-controller.ts#getVisibleEvents",
+			"failClosed": "routine successes stay silent; interventions are always visible",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/release-freeze-master-bundle-v1-7.test.ts#FR-119",
+			"operatorVisibility": "the operator event stream",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "durable_owner_rules",
+			"producer": "packages/coding-agent/src/core/agent-session.ts#DurableOwnerRuleStore",
+			"hook": "packages/coding-agent/src/core/agent-session.ts#this._ownerRules.record",
+			"consumer": "packages/coding-agent/src/core/adaptive/execution-ports.ts#getOwnerRules",
+			"failClosed": "an unreadable policy file reports no rules rather than silently passing",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts#RCG-010: a request that carries no development directive creates no policy",
+			"operatorVisibility": "fast-iteration indicator",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "completion_primary",
+			"producer": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#CompletionCoordinator",
+			"hook": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#CompletionCoordinator.evaluate",
+			"consumer": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#JEV-025",
+			"failClosed": "a failed gate queues repair work instead of completing",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/final-closure-v1-4.test.ts#FC-0",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "completion_adversarial",
+			"producer": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#JEV-026",
+			"hook": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#coldProofState",
+			"consumer": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#steeringCertRefs",
+			"failClosed": "a failed cold challenge queues repair work instead of completing",
+			"negativePathTest": "packages/coding-agent/test/suite/regressions/final-closure-v1-4.test.ts#FC-0",
+			"provenance": "production-live"
+		},
+		{
+			"featureId": "delivery_side_effects",
+			"producer": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#buildDeliveryBundle",
+			"hook": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#buildBundle",
+			"consumer": "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts#deliveryBundle",
+			"failClosed": "an unauthorized side effect records an authority block instead of running",
+			"negativePathTest": "packages/coding-agent/test/autonomy/zero-human-charter.test.ts#ZH-0",
+			"operatorVisibility": "deliver phase",
+			"provenance": "production-live"
+		}
+	],
+	"wiring_findings": [],
+	"forbidden_fallback_findings": [],
+	"activation_truth_findings": [],
+	"negative_path_coverage": [
+		{
+			"featureId": "system_one_steering",
+			"covered": true
+		},
+		{
+			"featureId": "execution_charter",
+			"covered": true
+		},
+		{
+			"featureId": "hmoe",
+			"covered": true
+		},
+		{
+			"featureId": "specialist_synthesis",
+			"covered": true
+		},
+		{
+			"featureId": "specialist_dispatch",
+			"covered": true
+		},
+		{
+			"featureId": "capability_synthesis",
+			"covered": true
+		},
+		{
+			"featureId": "capability_proof",
+			"covered": true
+		},
+		{
+			"featureId": "capability_activation_ephemeral_script",
+			"covered": true
+		},
+		{
+			"featureId": "capability_activation_extension",
+			"covered": true
+		},
+		{
+			"featureId": "capability_activation_runtime_patch",
+			"covered": true
+		},
+		{
+			"featureId": "capability_activation_toolkit_script",
+			"covered": true
+		},
+		{
+			"featureId": "capability_activation_tool",
+			"covered": true
+		},
+		{
+			"featureId": "capability_activation_skill",
+			"covered": true
+		},
+		{
+			"featureId": "capability_activation_composition",
+			"covered": true
+		},
+		{
+			"featureId": "capability_activation_integration",
+			"covered": true
+		},
+		{
+			"featureId": "capability_activation_provider_adapter",
+			"covered": true
+		},
+		{
+			"featureId": "runtime_adaptation",
+			"covered": true
+		},
+		{
+			"featureId": "semantic_dedup_pre",
+			"covered": true
+		},
+		{
+			"featureId": "semantic_dedup_post",
+			"covered": true
+		},
+		{
+			"featureId": "semantic_dedup_final",
+			"covered": true
+		},
+		{
+			"featureId": "evidence_retention",
+			"covered": true
+		},
+		{
+			"featureId": "semantic_project_rules_mutation",
+			"covered": true
+		},
+		{
+			"featureId": "semantic_project_rules_postflight",
+			"covered": true
+		},
+		{
+			"featureId": "semantic_project_rules_completion",
+			"covered": true
+		},
+		{
+			"featureId": "worker_supervision",
+			"covered": true
+		},
+		{
+			"featureId": "external_acquisition_gate",
+			"covered": true
+		},
+		{
+			"featureId": "operator_projection",
+			"covered": true
+		},
+		{
+			"featureId": "operator_events",
+			"covered": true
+		},
+		{
+			"featureId": "durable_owner_rules",
+			"covered": true
+		},
+		{
+			"featureId": "completion_primary",
+			"covered": true
+		},
+		{
+			"featureId": "completion_adversarial",
+			"covered": true
+		},
+		{
+			"featureId": "delivery_side_effects",
+			"covered": true
+		}
+	],
+	"outcome": "PASS",
+	"blocking_reasons": [],
+	"semantic_review": {
+		"status": "available_not_executed",
+		"question_count": 32,
+		"note": "Credentials are present locally; run the review in an authorized environment and attach its result."
+	}
+}

@@ -13,6 +13,7 @@ import {
 	AdaptiveResolutionController,
 	CapabilityCatalog,
 	CapabilityProofRunner,
+	capabilityArtifactPath,
 	createProductionAdaptiveRuntimeStack,
 	RealMechanicalVerifier,
 	RealWorkerDispatcher,
@@ -145,12 +146,15 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 	let tempDir: string;
 	let certFile: string;
 	let cwd: string;
+	/** Agent-owned artifact root: a synthesized capability is never a project change. */
+	let capabilityArtifactRoot: string;
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `prc-test-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
 		mkdirSync(tempDir, { recursive: true });
 		certFile = join(tempDir, "certificates.json");
 		cwd = tempDir;
+		capabilityArtifactRoot = join(tempDir, "agent", "runtime", "capabilities", "session");
 	});
 
 	afterEach(() => {
@@ -444,8 +448,8 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 					kind: spec.kind,
 					code,
 					digest: "sha256-real-artifact-digest",
-					artifactUri: `file://${join(cwd, `capabilities/${spec.capability_id}.mjs`)}`,
-					changedFiles: [`capabilities/${spec.capability_id}.mjs`],
+					artifactUri: `file://${capabilityArtifactPath(capabilityArtifactRoot, spec.capability_id)}`,
+					changedFiles: [capabilityArtifactPath(capabilityArtifactRoot, spec.capability_id)],
 					builderEvidence: {
 						resultId: workerResult.resultId,
 						status: workerResult.status,
@@ -854,6 +858,7 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 				steering: deps.steeringPlane,
 				catalog,
 				builder: deps.capabilityBuilder,
+				capabilityArtifactRoot,
 				experts: deps.expertService,
 				mechanicalVerifier: {
 					verifyCandidate: async () => ({ passed: true, testCount: 1, failures: [] }),
@@ -904,6 +909,7 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 				steering: deps.steeringPlane,
 				catalog,
 				builder: deps.capabilityBuilder,
+				capabilityArtifactRoot,
 				experts: deps.expertService,
 				mechanicalVerifier: {
 					verifyCandidate: async () => ({ passed: true, testCount: 1, failures: [] }),

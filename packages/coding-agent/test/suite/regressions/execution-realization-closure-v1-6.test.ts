@@ -4,6 +4,7 @@
  * fail-closed activators, real specialist dispatch, Jev-owned specialty, and external CI.
  */
 
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +16,7 @@ import {
 	AdaptiveResolutionController,
 	CapabilityCatalog,
 	CapabilityProofRunner,
+	capabilityArtifactPath,
 	compileCapabilityProofObligations,
 	createProductionAdaptiveRuntimeStack,
 	isCapabilityKindSupported,
@@ -146,12 +148,15 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 	let tempDir: string;
 	let certFile: string;
 	let cwd: string;
+	/** Agent-owned artifact root: synthesized capabilities never land in the project worktree. */
+	let capabilityArtifactRoot: string;
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-erc-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
 		mkdirSync(tempDir, { recursive: true });
 		cwd = join(tempDir, "workspace");
 		mkdirSync(cwd, { recursive: true });
+		capabilityArtifactRoot = join(tempDir, "agent", "runtime", "capabilities", "session");
 		certFile = join(tempDir, "certificates.json");
 		writeFileSync(certFile, JSON.stringify({ schema_version: "1.0", certificates: {} }));
 	});
@@ -398,6 +403,7 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 			taskProfiles: taskProfileWriter,
 			contractFactory,
 			cwd,
+			capabilityArtifactRoot,
 			provenance: "production-live",
 			runWorkerOnce: async (req: any) => {
 				// The builder names the artifact target and the lineage; a real worker honors both,
@@ -405,9 +411,10 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 				const target: string =
 					/File target: (\S+)/.exec(String(req?.instructions ?? ""))?.[1] ??
 					/implementation to (\S+)/.exec(String(req?.instructions ?? ""))?.[1] ??
-					"capabilities/cap-test-1.mjs";
-				mkdirSync(join(cwd, "capabilities"), { recursive: true });
-				writeFileSync(join(cwd, target), "export default async function run() { return 'real-built-result'; }\n");
+					join(capabilityArtifactRoot, "cap-test-1.mjs");
+				expect(target.startsWith(capabilityArtifactRoot)).toBe(true);
+				mkdirSync(capabilityArtifactRoot, { recursive: true });
+				writeFileSync(target, "export default async function run() { return 'real-built-result'; }\n");
 				return {
 					result: createWorkerResultContract({
 						handle: {
@@ -560,14 +567,14 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 				taskProfiles: deps.taskProfileWriter,
 				contractFactory: deps.contractFactory,
 				cwd,
+				capabilityArtifactRoot,
 				provenance: "production-live",
 				runWorkerOnce: async (req: any) => {
 					expect(req.modelBinding.provider).toBe("anthropic");
 					expect(req.modelBinding.modelId).toBe("claude-3-7-sonnet");
 
-					const artifactRel = "capabilities/cap_json_validator.mjs";
-					const targetPath = join(cwd, artifactRel);
-					mkdirSync(join(cwd, "capabilities"), { recursive: true });
+					const targetPath = capabilityArtifactPath(capabilityArtifactRoot, "cap_json_validator");
+					mkdirSync(capabilityArtifactRoot, { recursive: true });
 					writeFileSync(targetPath, "export default function validate(json) { return JSON.parse(json); }\n");
 
 					return {
@@ -588,7 +595,7 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 								requestId: "req-cap_json_validator",
 								status: "completed",
 								summary: "Wrote JSON validator capability artifact",
-								changedFiles: [artifactRel],
+								changedFiles: [targetPath],
 							},
 						}),
 					};
@@ -604,7 +611,10 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 				interface: { name: "validate" },
 				side_effects: [],
 				denied_behavior: [],
-				proof: compileCapabilityProofObligations("cap_json_validator", "toolkit_script"),
+				proof: compileCapabilityProofObligations(
+					"toolkit_script",
+					capabilityArtifactPath(capabilityArtifactRoot, "cap_json_validator"),
+				),
 				lifetime: "session",
 				activation: {},
 				rollback: {},
@@ -647,14 +657,149 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 			expect(parsedProof.proofEvidenceDigest).toBeDefined();
 
 			// A capability whose artifact has no callable entry point cannot prove itself.
-			writeFileSync(join(cwd, "capabilities", "cap_uncallable.mjs"), "export const value = 1;\n");
+			writeFileSync(capabilityArtifactPath(capabilityArtifactRoot, "cap_uncallable"), "export const value = 1;\n");
 			await expect(
 				verifier.runTaskSpecificProof({
 					...spec,
 					capability_id: "cap_uncallable",
-					proof: compileCapabilityProofObligations("cap_uncallable", "toolkit_script"),
+					proof: compileCapabilityProofObligations(
+						"toolkit_script",
+						capabilityArtifactPath(capabilityArtifactRoot, "cap_uncallable"),
+					),
 				}),
 			).rejects.toThrow(/proof obligations failed/);
+		});
+
+		it("MNT-001..MNT-005: a synthesized capability is agent runtime state, so the project tree stays clean", async () => {
+			// A real project: tracked content, a committed baseline, and a git status to hold.
+			execFileSync("git", ["init", "-q", "-b", "main"], { cwd });
+			execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd });
+			execFileSync("git", ["config", "user.name", "Test"], { cwd });
+			// The fixture must not inherit a host line-ending policy, or the baseline status is dirty
+			// on Windows for a reason that has nothing to do with capability artifacts.
+			execFileSync("git", ["config", "core.autocrlf", "false"], { cwd });
+			writeFileSync(join(cwd, "README.md"), "# project\n");
+			execFileSync("git", ["add", "README.md"], { cwd });
+			execFileSync("git", ["commit", "-q", "-m", "baseline"], { cwd });
+			const statusBefore = execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" });
+			expect(statusBefore).toBe("");
+
+			const deps = createStandardLiveDependencies();
+
+			// The grant the builder issues is recorded as it is bound, so the authority it actually
+			// asks for can be asserted rather than inferred.
+			const taskRuntime = deps.durableTaskRuntime;
+			const boundGrants: { readPaths: readonly string[]; writePaths: readonly string[] }[] = [];
+			const bindAttemptGrant = taskRuntime.bindAttemptGrant.bind(taskRuntime);
+			taskRuntime.bindAttemptGrant = ((attemptId: string, grant: any) => {
+				boundGrants.push(grant);
+				return bindAttemptGrant(attemptId, grant);
+			}) as typeof taskRuntime.bindAttemptGrant;
+
+			let instructedTarget = "";
+			const builder = new RealCapabilityBuilder({
+				taskRuntime,
+				taskProfiles: deps.taskProfileWriter,
+				contractFactory: deps.contractFactory,
+				cwd,
+				capabilityArtifactRoot,
+				provenance: "production-live",
+				runWorkerOnce: async (req: any) => {
+					// A real worker writes exactly where the mission says; the stub honors that and
+					// nothing else, so the assertions below are about the builder's own contract.
+					instructedTarget = /implementation to (\S+)/.exec(String(req?.instructions ?? ""))?.[1] ?? "";
+					writeFileSync(instructedTarget, "export default async function run() { return 1; }\n");
+					return {
+						result: createWorkerResultContract({
+							handle: {
+								objectiveId: req.taskContext.objectiveId,
+								taskId: req.taskContext.taskId,
+								attemptId: req.taskContext.attemptId,
+								leaseId: `lease-${req.taskContext.attemptId}`,
+								fencingToken: 1,
+								expiresAt: new Date(Date.now() + 60000).toISOString(),
+							},
+							cwd,
+							accepted: true,
+							wallClockMs: 90,
+							toolCalls: 1,
+							claim: {
+								requestId: `req-${req.taskContext.attemptId}`,
+								status: "completed",
+								summary: "Synthesized capability into agent runtime state",
+								changedFiles: [instructedTarget],
+							},
+						}),
+					};
+				},
+			});
+
+			const capabilityId = "cap_runtime_state";
+			const artifact = await builder.build(
+				{
+					schema_version: "1.0",
+					capability_id: capabilityId,
+					version: "1.0",
+					kind: "ephemeral_script",
+					lifetime: "one_shot",
+					purpose: "prove the artifact never lands in the project",
+					interface: {},
+					side_effects: [],
+					denied_behavior: [],
+					proof: compileCapabilityProofObligations(
+						"ephemeral_script",
+						capabilityArtifactPath(capabilityArtifactRoot, capabilityId),
+					),
+					activation: {},
+					rollback: {},
+				} as never,
+				undefined,
+				{ providerId: "anthropic", modelId: "claude-3-7-sonnet", routingBand: "cheap", capabilityTier: "tier_1" },
+			);
+
+			// MNT-001, MNT-002: the artifact is under agent-owned state and outside the project.
+			expect(instructedTarget).toBe(capabilityArtifactPath(capabilityArtifactRoot, capabilityId));
+			expect(instructedTarget.startsWith(cwd)).toBe(false);
+			expect(existsSync(instructedTarget)).toBe(true);
+			expect(existsSync(join(cwd, "capabilities"))).toBe(false);
+
+			// MNT-003: storing runtime state buys no project-write authority.
+			expect(boundGrants).toHaveLength(1);
+			expect(boundGrants[0]?.writePaths).toEqual([capabilityArtifactRoot]);
+			expect(boundGrants[0]?.readPaths).toEqual([cwd, capabilityArtifactRoot]);
+
+			// MNT-004: the truth checks still hold — real bytes, real digest, real lineage.
+			expect(artifact.digest).toBe(createHash("sha256").update(artifact.code).digest("hex"));
+			expect(artifact.digest).toBe(
+				createHash("sha256").update(readFileSync(instructedTarget, "utf8")).digest("hex"),
+			);
+			expect(artifact.artifactUri?.startsWith("file://")).toBe(true);
+			expect(artifact.changedFiles).toEqual([instructedTarget]);
+
+			// MNT-005: the synthesis changed nothing in the project worktree.
+			expect(execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" })).toBe(statusBefore);
+
+			// And the proof obligations the spec declared execute against that exact artifact.
+			const proof = JSON.parse(
+				await deps.mechanicalVerifier.runTaskSpecificProof({
+					schema_version: "1.0",
+					capability_id: capabilityId,
+					version: "1.0",
+					kind: "ephemeral_script",
+					lifetime: "one_shot",
+					purpose: "prove the artifact never lands in the project",
+					interface: {},
+					side_effects: [],
+					denied_behavior: [],
+					proof: compileCapabilityProofObligations(
+						"ephemeral_script",
+						capabilityArtifactPath(capabilityArtifactRoot, capabilityId),
+					),
+					activation: {},
+					rollback: {},
+				} as never),
+			);
+			expect(proof.proofs.every((entry: { status: string }) => entry.status === "passed")).toBe(true);
 		});
 	});
 
@@ -668,6 +813,7 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 
 			const loadedByRuntime: string[] = [];
 			const controller = new AdaptiveCapabilityController({
+				capabilityArtifactRoot,
 				steering: deps.steeringPlane,
 				catalog: new CapabilityCatalog(),
 				experts: deps.expertService,
@@ -701,6 +847,7 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 		it("ERC-036: runtime patch invokes RuntimeUpdateController reload path", async () => {
 			const deps = createStandardLiveDependencies();
 			const controller = new AdaptiveCapabilityController({
+				capabilityArtifactRoot,
 				steering: deps.steeringPlane,
 				catalog: new CapabilityCatalog(),
 				experts: deps.expertService,

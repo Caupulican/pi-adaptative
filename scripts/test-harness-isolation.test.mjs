@@ -14,6 +14,12 @@ import { dirname, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { completeCiJobs } from "./test-fixtures/release-ci-jobs.mjs";
+import {
+	assertTestHarnessContract,
+	REQUIRED_TEST_HARNESS_ISOLATION_TESTS,
+	TEST_HARNESS_ISOLATION_COMMAND,
+	TEST_HARNESS_ISOLATION_TESTS,
+} from "./test-harness-contract.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const harnessPath = join(repositoryRoot, "test.sh");
@@ -445,10 +451,9 @@ test("the mandatory root check owns the isolated release-test harness contract",
 	assert.doesNotMatch(source, /auth\.json\.bak|AUTH_BACKUP|Moved auth\.json|Restored auth\.json/);
 	assert.doesNotMatch(source, /\$HOME\/\.pi\/agent|~\/\.pi\/agent/);
 	assert.doesNotMatch(source, /^\s*(?:export\s+)?PATH=/m);
-	assert.equal(
-		packageJson.scripts["check:test-harness-isolation"],
-		"node --test scripts/test-harness-isolation.test.mjs scripts/release-staging.test.mjs scripts/release-ci-proof.test.mjs scripts/release-adoption.test.mjs scripts/release-adoption-execution.test.mjs scripts/workspace-test-plan.test.mjs scripts/ci-workflow-performance.test.mjs",
-	);
+	// The suite list itself lives in scripts/test-harness-contract.mjs; only the pointer to the
+	// canonical runner is asserted here, so adding a suite is not a string-mismatch failure.
+	assert.equal(packageJson.scripts["check:test-harness-isolation"], TEST_HARNESS_ISOLATION_COMMAND);
 	assert.match(packageJson.scripts.check, /npm run check:test-harness-isolation/);
 	assert.equal(packageJson.scripts.test, "node scripts/run-workspace-tests.mjs");
 });
@@ -470,7 +475,10 @@ test("the live verification harness has a bounded per-file V8 coverage gate in L
 	assert.equal(packageJson.devDependencies["@vitest/coverage-v8"], vitestVersion);
 	assert.equal(agentPackageJson.devDependencies.vitest, vitestVersion);
 	assert.equal(codingAgentPackageJson.devDependencies.vitest, vitestVersion);
-	assert.match(packageJson.scripts["check:test-harness-isolation"], /scripts\/test-harness-isolation\.test\.mjs/u);
+	assert.ok(
+		TEST_HARNESS_ISOLATION_TESTS.includes("scripts/test-harness-isolation.test.mjs"),
+		"the harness isolation gate must run this suite",
+	);
 	assert.equal(
 		agentPackageJson.scripts["coverage:verification-harness"],
 		"vitest --run --config vitest.verification-harness.config.ts --coverage",
@@ -810,3 +818,29 @@ test(
 		assert.equal(existsSync(fixture.root), true, "cleanup must not remove the fixture parent");
 	},
 );
+
+test("the test-harness isolation gate has exactly one canonical suite list", async () => {
+	const packageJson = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
+	assert.equal(packageJson.scripts["check:test-harness-isolation"], TEST_HARNESS_ISOLATION_COMMAND);
+
+	// The runner consumes the exported list rather than restating it.
+	const runnerSource = readFileSync(join(repositoryRoot, "scripts", "run-test-harness-isolation.mjs"), "utf8");
+	assert.match(runnerSource, /from "\.\/test-harness-contract\.mjs"/u);
+	assert.match(runnerSource, /TEST_HARNESS_ISOLATION_TESTS/u);
+	for (const entry of TEST_HARNESS_ISOLATION_TESTS) {
+		assert.doesNotMatch(runnerSource, new RegExp(entry.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+		assert.ok(existsSync(join(repositoryRoot, entry)), `canonical harness suite '${entry}' does not exist`);
+	}
+
+	// Required suites cannot be dropped, and a malformed entry names itself.
+	assert.deepEqual(assertTestHarnessContract(), TEST_HARNESS_ISOLATION_TESTS);
+	for (const required of REQUIRED_TEST_HARNESS_ISOLATION_TESTS) {
+		assert.throws(
+			() => assertTestHarnessContract(TEST_HARNESS_ISOLATION_TESTS.filter((entry) => entry !== required)),
+			new RegExp(`required harness test\\(s\\) missing from the canonical list: ${required.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"),
+		);
+	}
+	assert.throws(() => assertTestHarnessContract([...TEST_HARNESS_ISOLATION_TESTS, "scripts/nope.mjs"]), /must be a scripts\/\*\.test\.mjs path/u);
+	assert.throws(() => assertTestHarnessContract([...TEST_HARNESS_ISOLATION_TESTS, TEST_HARNESS_ISOLATION_TESTS[0]]), /duplicate harness test entries/u);
+	assert.throws(() => assertTestHarnessContract([]), /canonical harness test list is empty/u);
+});

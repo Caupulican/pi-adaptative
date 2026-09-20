@@ -56,6 +56,7 @@ function controllerWith(overrides: Record<string, unknown> = {}): AdaptiveCapabi
 	return new AdaptiveCapabilityController({
 		steering: {} as never,
 		catalog: new CapabilityCatalog(),
+		capabilityArtifactRoot: mkdtempSync(join(tmpdir(), "pi-activation-capabilities-")),
 		proofRunner: new CapabilityProofRunner(),
 		...overrides,
 	} as never);

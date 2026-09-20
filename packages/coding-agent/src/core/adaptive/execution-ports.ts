@@ -10,7 +10,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ObjectiveRoute } from "../objective-execution/objective-route.ts";
@@ -22,6 +22,7 @@ import {
 	type CandidateVerificationResult,
 	computeArtifactDiskDigest,
 } from "./adaptive-capability-controller.ts";
+import { capabilityArtifactPath } from "./capability-proof-obligations.ts";
 import type { CapabilityProofRunnerPort, ProofExecutionResult } from "./capability-proof-runner.ts";
 import type { CapabilitySpec, MaterializedSpecialist, PortProvenance } from "./types.ts";
 
@@ -126,6 +127,14 @@ export interface RealCapabilityBuilderDeps {
 		request: unknown,
 	) => Promise<{ result?: WorkerResultContract; status?: string; record?: unknown }>;
 	readonly cwd: string;
+	/**
+	 * Agent-owned directory synthesized capability artifacts are written to.
+	 *
+	 * Synthesized capability source is agent runtime state, not a project change: writing it under
+	 * the project cwd turns every synthesis into repository churn and makes the release preflight
+	 * reject the tree. Production derives this from the real `agentDir`.
+	 */
+	readonly capabilityArtifactRoot: string;
 	readonly provenance?: PortProvenance;
 	/** Durable owner development rules, folded into the builder worker's mission. */
 	readonly getOwnerRules?: () => string;
@@ -140,6 +149,7 @@ export class RealCapabilityBuilder {
 		request: unknown,
 	) => Promise<{ result?: WorkerResultContract; status?: string; record?: unknown }>;
 	private readonly cwd: string;
+	private readonly capabilityArtifactRoot: string;
 	private readonly getOwnerRules?: () => string;
 
 	constructor(deps: RealCapabilityBuilderDeps) {
@@ -148,6 +158,12 @@ export class RealCapabilityBuilder {
 		this.taskProfiles = deps.taskProfiles;
 		this.contractFactory = deps.contractFactory;
 		this.cwd = deps.cwd;
+		if (!deps.capabilityArtifactRoot) {
+			throw new Error(
+				"RealCapabilityBuilder requires an agent-owned capabilityArtifactRoot; synthesized artifacts are never written into the project worktree.",
+			);
+		}
+		this.capabilityArtifactRoot = deps.capabilityArtifactRoot;
 		this.getOwnerRules = deps.getOwnerRules;
 		const runWorker = deps.runWorkerOnce ?? deps.workerExecutor?.runOnce?.bind(deps.workerExecutor);
 		if (!runWorker) {
@@ -226,14 +242,17 @@ export class RealCapabilityBuilder {
 			role: "implementer",
 		});
 
-		const artifactRel = `capabilities/${spec.capability_id}.mjs`;
+		// The worker writes into agent-owned runtime state, so a synthesis leaves the project tree
+		// untouched. The directory is created here because the grant below authorizes writes to it.
+		const artifactTarget = capabilityArtifactPath(this.capabilityArtifactRoot, spec.capability_id);
+		mkdirSync(this.capabilityArtifactRoot, { recursive: true });
 		const grantId = `grant-cap-${spec.capability_id}`;
 		const attempt = this.taskRuntime.queueAttempt(
 			task.taskId,
 			{
 				taskId: task.taskId,
 				profileId,
-				instructions: `Synthesize ${spec.kind} capability for ${spec.purpose}. File target: ${artifactRel}`,
+				instructions: `Synthesize ${spec.kind} capability for ${spec.purpose}. File target: ${artifactTarget}`,
 				resourcePointerIds: [],
 			},
 			grantId,
@@ -251,8 +270,10 @@ export class RealCapabilityBuilder {
 			capabilities: [],
 			allowedTools: grantedToolNames,
 			resources: [],
-			readPaths: [this.cwd],
-			writePaths: [this.cwd],
+			// The builder reads the project to understand the gap, but only writes capability artifacts:
+			// storing runtime state is never a reason to hand a worker project-write authority.
+			readPaths: [this.cwd, this.capabilityArtifactRoot],
+			writePaths: [this.capabilityArtifactRoot],
 			deniedPaths: [],
 			budget: {},
 			policyVersion: "live-v1",
@@ -268,7 +289,7 @@ export class RealCapabilityBuilder {
 		const ownerRules = this.getOwnerRules?.().trim();
 		const workerPayload = {
 			instructions: [
-				`Synthesize ${spec.kind} capability for ${spec.purpose}. Write implementation to ${artifactRel}`,
+				`Synthesize ${spec.kind} capability for ${spec.purpose}. Write implementation to ${artifactTarget}`,
 				...(ownerRules ? [ownerRules] : []),
 			].join("\n\n"),
 			profileId,
@@ -324,7 +345,7 @@ export class RealCapabilityBuilder {
 			? fileURLToPath(artifact.uri)
 			: isAbsolute(artifact.uri)
 				? artifact.uri
-				: join(this.cwd, artifact.uri);
+				: join(this.capabilityArtifactRoot, artifact.uri);
 
 		if (!existsSync(resolvedPath)) {
 			throw new CapabilityExecutionError(
@@ -363,7 +384,10 @@ export class RealCapabilityBuilder {
 		});
 
 		const artifactUri = pathToFileURL(resolvedPath).href;
-		const displayFile = relative(this.cwd, resolvedPath) || resolvedPath;
+		// An artifact under agent-owned state is outside the project: report its real location
+		// rather than a `../..` walk that reads like a project file.
+		const cwdRelative = relative(this.cwd, resolvedPath);
+		const displayFile = cwdRelative && !cwdRelative.startsWith("..") ? cwdRelative : resolvedPath;
 
 		return {
 			capabilityId: spec.capability_id,

@@ -356,6 +356,7 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 			const controller = new AdaptiveCapabilityController({
 				steering: plane,
 				catalog,
+				capabilityArtifactRoot: mkdtempSync(join(tmpdir(), "pi-s1a-capabilities-")),
 				// The builder's model binding must be an actual H-MoE selection; this test's subject is
 				// the synthesis pipeline, so the selection is a fixed one rather than absent.
 				experts: {

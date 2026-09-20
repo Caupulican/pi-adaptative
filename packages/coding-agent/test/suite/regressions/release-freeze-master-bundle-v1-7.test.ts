@@ -106,6 +106,7 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 				contractFactory: {} as any,
 				runWorkerOnce: async () => ({}),
 				cwd: "/tmp",
+				capabilityArtifactRoot: "/tmp/agent/runtime/capabilities",
 			});
 			expect(capabilityBuilder).toBeInstanceOf(RealCapabilityBuilder);
 			expect(capabilityBuilder.provenance).toBe("production-live");
@@ -119,6 +120,7 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 						taskProfiles: {} as any,
 						contractFactory: {} as any,
 						cwd: "/tmp",
+						capabilityArtifactRoot: "/tmp/agent/runtime/capabilities",
 					}),
 			).toThrow(/real worker execution owner/);
 			expect(new RealScriptRegistry().provenance).toBe("production-live");

@@ -49,7 +49,7 @@ export {
 	verifyCapabilityKindActivationTruth,
 } from "./capability-kind-support.ts";
 export {
-	capabilityArtifactRelativePath,
+	capabilityArtifactPath,
 	compileCapabilityProofObligations,
 	compileNodeProofCommand,
 } from "./capability-proof-obligations.ts";

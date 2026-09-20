@@ -4,6 +4,9 @@
 		"enabled": true,
 		"rules": {
 			"preset": "recommended",
+			"complexity": {
+				"noExtraBooleanCast": "off"
+			},
 			"style": {
 				"noNonNullAssertion": "off",
 				"useConst": "error",

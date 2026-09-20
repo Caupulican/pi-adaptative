@@ -12,6 +12,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	CapabilityProofRunner,
+	capabilityArtifactPath,
 	compileCapabilityProofObligations,
 	RealMechanicalVerifier,
 } from "../../src/core/adaptive/index.ts";
@@ -105,8 +106,11 @@ describe("Normal SDK end-to-end scenario", () => {
 		).toBe(true);
 
 		// 6. A synthesized capability proves itself by executing its obligations; a failing one blocks.
-		mkdirSync(join(harness.cwd, "capabilities"), { recursive: true });
-		writeFileSync(join(harness.cwd, "capabilities", "cap_e2e.mjs"), "export default async () => true;\n");
+		//    The artifact lives in agent-owned runtime state, so synthesizing one is not a project
+		//    change: step 6b below holds the project's own git status to that.
+		const capabilityArtifactRoot = join(harness.agentDir, "runtime", "capabilities", "normal-sdk");
+		mkdirSync(capabilityArtifactRoot, { recursive: true });
+		writeFileSync(capabilityArtifactPath(capabilityArtifactRoot, "cap_e2e"), "export default async () => true;\n");
 		const verifier = new RealMechanicalVerifier({
 			proofRunner: new CapabilityProofRunner(),
 			cwd: harness.cwd,
@@ -122,12 +126,17 @@ describe("Normal SDK end-to-end scenario", () => {
 			interface: {},
 			side_effects: [],
 			denied_behavior: [],
-			proof: compileCapabilityProofObligations("cap_e2e", "toolkit_script"),
+			proof: compileCapabilityProofObligations(
+				"toolkit_script",
+				capabilityArtifactPath(capabilityArtifactRoot, "cap_e2e"),
+			),
 			activation: {},
 			rollback: {},
 		} as never;
 		const proof = JSON.parse(await verifier.runTaskSpecificProof(spec));
 		expect(proof.proofs.every((entry: { status: string }) => entry.status === "passed")).toBe(true);
+		// 6b. Proving a capability touched agent state only; the project never grew a capabilities/ dir.
+		expect(existsSync(join(harness.cwd, "capabilities"))).toBe(false);
 
 		// 7. Compaction runs the retention planner through its real owner and preserves the durable
 		//    owner rule, which lives outside the transcript by design. The transcript is given the

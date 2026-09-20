@@ -255,6 +255,7 @@ describe("Final Closure v1.4 Regressions (FC-001..FC-090)", () => {
 			const controller = new AdaptiveCapabilityController({
 				steering: plane,
 				catalog,
+				capabilityArtifactRoot: mkdtempSync(join(tmpdir(), "pi-fc-capabilities-")),
 				experts: expertService as any,
 				// Activation now runs the artifact, so the builder writes a real one.
 				builder: {
@@ -324,6 +325,7 @@ describe("Final Closure v1.4 Regressions (FC-001..FC-090)", () => {
 			const controller = new AdaptiveCapabilityController({
 				steering: plane,
 				catalog,
+				capabilityArtifactRoot: mkdtempSync(join(tmpdir(), "pi-fc-capabilities-")),
 				// The builder's model binding must be an actual selection; this test's subject is the
 				// activation path, so the selection is a fixed one rather than absent.
 				experts: {

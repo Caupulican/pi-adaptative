@@ -107,6 +107,8 @@ export interface CreateAdaptiveRuntimeStackOptions {
 	readonly scriptRegistry?: unknown;
 	readonly workerDispatcher?: unknown;
 	readonly cwd?: string;
+	/** Agent-owned root synthesized capability artifacts are written to and proved against. */
+	readonly capabilityArtifactRoot?: string;
 	readonly isSynthetic?: boolean;
 	/** Durable owner development rules, propagated into every synthesized mission. */
 	readonly getOwnerRules?: () => string;
@@ -348,6 +350,7 @@ function assembleAdaptiveRuntimeStack(
 		proofRunner: options.proofRunner,
 		extensionRuntime: options.extensionRuntime,
 		cwd: options.cwd,
+		capabilityArtifactRoot: options.capabilityArtifactRoot,
 		// Availability is resolved against this session: a kind whose precondition is unmet here is
 		// unavailable here, rather than advertised and then failing at activation.
 		kindSupport: resolveCapabilityKindSupport(options.kindSupportContext),

@@ -10,11 +10,20 @@
  * and `cmd.exe`: the base64 alphabet contains no character either shell treats specially.
  */
 
+import { join } from "node:path";
 import type { CapabilityKind, CapabilitySpecProof } from "./types.ts";
 
-/** Where the capability builder writes a synthesized artifact, relative to the session cwd. */
-export function capabilityArtifactRelativePath(capabilityId: string): string {
-	return `capabilities/${capabilityId}.mjs`;
+/**
+ * Where the capability builder writes a synthesized artifact.
+ *
+ * Synthesized artifacts are agent runtime state, never project sources: the root is agent-owned
+ * (`<agentDir>/runtime/capabilities/<session-id>`), so building a capability never dirties the
+ * project worktree. This is the single derivation both the spec's proof obligations and the
+ * builder's worker mission use, so the path a proof checks is by construction the path the worker
+ * was told to write.
+ */
+export function capabilityArtifactPath(artifactRoot: string, capabilityId: string): string {
+	return join(artifactRoot, `${capabilityId}.mjs`);
 }
 
 /** One portable `node -e` invocation carrying `source` verbatim. */
@@ -71,8 +80,7 @@ function artifactLoadProofSource(artifactPath: string, requireCallableEntryPoint
  * Kinds without a host-loadable module artifact (runtime patches, compositions) still prove the
  * artifact bytes exist and are readable; that check runs, it is not asserted.
  */
-export function compileCapabilityProofObligations(capabilityId: string, kind: CapabilityKind): CapabilitySpecProof {
-	const artifactPath = capabilityArtifactRelativePath(capabilityId);
+export function compileCapabilityProofObligations(kind: CapabilityKind, artifactPath: string): CapabilitySpecProof {
 	const bytesProof = compileNodeProofCommand(artifactBytesProofSource(artifactPath));
 
 	if (kind === "runtime_patch" || kind === "composition") {

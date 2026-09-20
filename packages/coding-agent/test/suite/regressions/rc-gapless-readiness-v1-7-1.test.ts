@@ -13,6 +13,7 @@ import { classifyAcquisition } from "../../../src/core/acquisition/acquisition-b
 import { ExternalCapabilityAcquisitionGate } from "../../../src/core/acquisition/external-capability-acquisition-gate.ts";
 import {
 	CapabilityProofRunner,
+	capabilityArtifactPath,
 	compileCapabilityProofObligations,
 	RealCapabilityBuilder,
 	RealMechanicalVerifier,
@@ -120,6 +121,7 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 						taskProfiles: {} as never,
 						contractFactory: {} as never,
 						cwd: "/tmp",
+						capabilityArtifactRoot: "/tmp/agent/runtime/capabilities",
 					}),
 			).toThrow(/real worker execution owner/);
 		});
@@ -142,9 +144,11 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 
 		it("RCG-027: every declared proof obligation is executed, and a failing one blocks", async () => {
 			const harness = await createRcSdkHarness();
-			mkdirSync(join(harness.cwd, "capabilities"), { recursive: true });
-			writeFileSync(join(harness.cwd, "capabilities", "cap_good.mjs"), "export default async () => 1;\n");
-			writeFileSync(join(harness.cwd, "capabilities", "cap_inert.mjs"), "export const value = 1;\n");
+			// Synthesized artifacts live in agent-owned runtime state, never in the project worktree.
+			const artifactRoot = join(harness.agentDir, "runtime", "capabilities", "rcg-027");
+			mkdirSync(artifactRoot, { recursive: true });
+			writeFileSync(capabilityArtifactPath(artifactRoot, "cap_good"), "export default async () => 1;\n");
+			writeFileSync(capabilityArtifactPath(artifactRoot, "cap_inert"), "export const value = 1;\n");
 
 			const verifier = new RealMechanicalVerifier({
 				proofRunner: new CapabilityProofRunner(),
@@ -162,7 +166,10 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 					interface: {},
 					side_effects: [],
 					denied_behavior: [],
-					proof: compileCapabilityProofObligations(capabilityId, "toolkit_script"),
+					proof: compileCapabilityProofObligations(
+						"toolkit_script",
+						capabilityArtifactPath(artifactRoot, capabilityId),
+					),
 					activation: {},
 					rollback: {},
 				}) as never;
@@ -248,6 +255,7 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 				taskProfiles: {} as never,
 				contractFactory: {} as never,
 				cwd: harness.cwd,
+				capabilityArtifactRoot: join(harness.agentDir, "runtime", "capabilities", "rcg-046"),
 				runWorkerOnce: async (request) => {
 					builderMissions.push(String((request as { instructions?: string }).instructions ?? ""));
 					return {};
@@ -268,7 +276,10 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 						interface: {},
 						side_effects: [],
 						denied_behavior: [],
-						proof: compileCapabilityProofObligations("cap_probe", "ephemeral_script"),
+						proof: compileCapabilityProofObligations(
+							"ephemeral_script",
+							capabilityArtifactPath(join(harness.agentDir, "runtime", "capabilities", "rcg-046"), "cap_probe"),
+						),
 						activation: {},
 						rollback: {},
 					} as never,

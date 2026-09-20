@@ -414,6 +414,7 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 			const noProofController = new AdaptiveCapabilityController({
 				steering: plane,
 				catalog,
+				capabilityArtifactRoot: mkdtempSync(join(tmpdir(), "pi-ph-capabilities-")),
 				// The builder's model binding must be an actual selection; this test's subject is the
 				// activation path, so the selection is a fixed one rather than absent.
 				experts: {

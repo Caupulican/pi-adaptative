@@ -21,7 +21,11 @@ import {
 	replanToSupportedKind,
 	supportedCapabilityKinds,
 } from "./capability-kind-support.ts";
-import { compileCapabilityProofObligations, compileNodeProofCommand } from "./capability-proof-obligations.ts";
+import {
+	capabilityArtifactPath,
+	compileCapabilityProofObligations,
+	compileNodeProofCommand,
+} from "./capability-proof-obligations.ts";
 import type { CapabilityProofRunnerPort } from "./capability-proof-runner.ts";
 import { type CapabilityNeed, CapabilityResolver } from "./capability-resolution.ts";
 import type {
@@ -196,6 +200,12 @@ export interface AdaptiveCapabilityControllerDeps {
 	readonly proofRunner?: CapabilityProofRunnerPort;
 	/** Session working directory the activation smoke runs in. */
 	readonly cwd?: string;
+	/**
+	 * Agent-owned root synthesized capability artifacts are written to and proved against.
+	 * Never inside the project worktree: a synthesized artifact is runtime state, not a project
+	 * source change.
+	 */
+	readonly capabilityArtifactRoot?: string;
 	/** Live extension runtime: loads an extension by path and exposes the active registry (ACT-009). */
 	readonly extensionRuntime?: {
 		reload(extensionPath: string): Promise<void>;
@@ -496,6 +506,20 @@ export class AdaptiveCapabilityController {
 		const kind = resolveActivatableKind(requestedKind, this.kindSupport);
 
 		const capabilityId = `cap_${kind}_${Date.now()}`;
+		// The builder is what a capability is built by, so its absence is still reported first
+		// (PH-060, PH-061); the spec below already depends on where that builder will write.
+		if (!this.builder) {
+			throw new Error("Capability synthesis requires a configured builder (PH-061)");
+		}
+		// The proof obligations must name the exact file the builder's worker is told to write.
+		// Without a configured agent-owned root there is no such path, so synthesis fails rather
+		// than falling back to the project worktree.
+		const artifactRoot = this.deps.capabilityArtifactRoot;
+		if (!artifactRoot) {
+			throw new Error(
+				"Capability synthesis requires an agent-owned capability artifact root; synthesized artifacts are never written into the project worktree.",
+			);
+		}
 		const spec: CapabilitySpec = {
 			schema_version: "1.0",
 			capability_id: capabilityId,
@@ -511,7 +535,7 @@ export class AdaptiveCapabilityController {
 			denied_behavior: ["bypass_security_isolation", "elevate_root_authority"],
 			// Real, runnable obligations against the artifact the builder will write. A placeholder
 			// test identifier here can only ever be asserted downstream, never executed.
-			proof: compileCapabilityProofObligations(capabilityId, kind),
+			proof: compileCapabilityProofObligations(kind, capabilityArtifactPath(artifactRoot, capabilityId)),
 			activation: { method: "dynamic_load" },
 			rollback: { method: "unload_and_discard" },
 		};
@@ -546,10 +570,7 @@ export class AdaptiveCapabilityController {
 		);
 		lineageCerts.push(planCert.certificate_id);
 
-		// 5. Build candidate (PH-060: no dummy builder; PH-061: builder mandatory)
-		if (!this.builder) {
-			throw new Error("Capability synthesis requires a configured builder (PH-061)");
-		}
+		// 5. Build candidate (PH-060: no dummy builder; PH-061: builder mandatory, asserted above).
 		// RCG-018: the builder's model binding must be the H-MoE selection's own binding. Without a
 		// selector there is no binding to equal, so the build fails instead of picking a model.
 		if (!this.experts) {

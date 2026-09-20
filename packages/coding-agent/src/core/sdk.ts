@@ -956,12 +956,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getOwnerRules,
 		});
 
+		// Synthesized capability artifacts are agent runtime state keyed to the session that built
+		// them, so a synthesis never shows up as a project change.
+		const capabilityArtifactRoot = join(agentDir, "runtime", "capabilities", sessionManager.getSessionId());
+
 		const capabilityBuilder = new RealCapabilityBuilder({
 			taskRuntime: durableTaskRuntime,
 			taskProfiles: taskProfileWriter,
 			contractFactory,
 			runWorkerOnce: (req) => session.runWorkerDelegationOnce(req as any),
 			cwd,
+			capabilityArtifactRoot,
 			provenance: "production-live",
 			getOwnerRules,
 		});
@@ -1003,6 +1008,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			extensionRunner: session.extensionRunner,
 			charter,
 			cwd,
+			capabilityArtifactRoot,
 			getOwnerRules,
 			projectRules: session.projectRules,
 			proofRunner,

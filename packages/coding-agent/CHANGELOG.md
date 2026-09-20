@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Fixed
+
+- Synthesized capability artifacts are written to agent-owned runtime state (`<agentDir>/runtime/capabilities/<session-id>/<capability-id>.mjs`) instead of `<cwd>/capabilities/`. Building a capability no longer dirties the project worktree or blocks the release preflight, and the capability-builder grant now writes only to that root rather than to the whole project. The artifact path has a single derivation (`capabilityArtifactPath`) shared by the spec's proof obligations and the builder's worker mission, so a proof always checks the file the worker was told to write; a missing artifact root fails synthesis closed rather than falling back to the project tree.
+- The extension-startup isolation test waits on a named 30s test-only bound with an explicit timeout diagnostic that preserves the child's stderr, exit code and signal, instead of an unexplained 10s SIGKILL on a contended runner. Product startup timing is unchanged and no retry hides a real hang.
+
+### Changed
+
+- `npm run format` is formatter-only (`biome format --write .`); lint validation stays a separate non-writing gate in `npm run check`. The `noExtraBooleanCast` rule is disabled, because its autofix rewrites `A && Boolean(X ?? Y)` into the different predicate `(A && X) ?? Y` on a plain `--write`. New `npm run check:biome-semantic-safety` proves both defenses, including a control case that still reproduces the rewrite with the rule enabled.
+- The test-harness isolation gate has one canonical suite list (`scripts/test-harness-contract.mjs`) executed by `scripts/run-test-harness-isolation.mjs`. The list is no longer duplicated between `package.json` and the contract test, so adding a suite fails on the actual cause instead of a duplicated-string mismatch.
+
 ## [0.99.31] - 2026-09-20
 
 ### Added
