@@ -593,6 +593,37 @@ record already held, 10-45 s on a slow-first-token provider. Pinned by
 `packages/coding-agent/test/background-tool-task-controller.test.ts` and
 `packages/coding-agent/test/tool-task.test.ts`.
 
+## System One
+
+**System One decides the loop; the root and the workers execute.** Whenever System One is bound the
+goal loop runs in `objective_primary` mode: each continuation pass evaluates one objective route from
+deterministic facts (cancellation, budget, running attempts, the ledger's stall reading) and Jev's
+judgments, then executes it. A route names its executor: the root (one foreground turn carrying the
+route brief) for implement, investigate, replan, retrieval and non-independent verification; a worker
+for review, independent verification and escalation; a wait on the running workers; the completion
+coordinator for a completion candidate. The legacy continuation is the input layer of that route and
+never a competing decider; `legacy_goal` stays available by setting and is the fallback without a
+plane. Completion is only the coordinator's verdict: the goal follows the objective's terminal and
+blocks, naming the unsatisfied requirements, when the two disagree.
+Pinned by `packages/coding-agent/test/goal-session-primary-loop.test.ts` and
+`packages/coding-agent/test/session-objective-runtime.test.ts`.
+
+**System One has the operator's two levers over every executor.** Cancel fires immediately (the Esc
+path, a named abort). A steer is either queued for the next model turn or delivered now by
+interrupting the running turn and sending it once the foreground is idle; for a worker, "now"
+interrupts the attempt, queues the directive on its mailbox and resumes it. Both work from inside the
+running turn and every directive is an operator event. The tool gate's replan verdict cancels the
+turn so the loop routes again; its confirm verdict queues a scope steer; a worker judged off the
+mission is redirected now, a stalled one at its next turn, a repeated stall rerouted.
+Pinned by `packages/coding-agent/test/system-one-foreground-control.test.ts` and
+`packages/coding-agent/test/system-one-worker-control.test.ts`.
+
+**The decision ledger is an input, never erased.** Every stage transition, Jev evaluation and route
+is appended to one SQLite database per agent directory, keyed by session id and working directory.
+The objective's recent routes are a history block in the state the judge reads, and "repeated without
+new evidence" is a fact from those rows: one route on one evidence marker, twice.
+Pinned by `packages/coding-agent/test/ledger-route-checkpoints.test.ts`.
+
 ## Structure
 
 **The coordinator line ceiling provides owner-approved integration headroom while ownership ratchets remain authoritative.** `agent-session.ts` and extracted boundaries have an 8,000-line ceiling in
@@ -719,6 +750,7 @@ measurement gains no new surface.
 ## Changes to this file
 
 | Date | Change |
+| 2026-09-21 | System One integration: `objective_primary` drives the goal loop (root and workers as routed executors, completion only through the coordinator, goal follows the objective's terminal), cancel/steer levers for the root and for workers, and the decision ledger as a route input. New section "System One". |
 |---|---|
 | 2026-09-17 | Provider completion retains its admitted account identity. Successful recovery requires a request start strictly newer than the stored cooldown, so late or unowned successes cannot erase sibling limits. Cancellation during transport creation releases admission immediately. |
 | 2026-09-16 | Specialist reuse admission compares compiled options at the host, including named read-only requests; replay identity survives branch-leaf changes. The new explicit parallel-work field receives a separate 75-token allowance while the old 875-token delegate surface and aggregate base-tool ceiling remain fixed. |

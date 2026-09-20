@@ -38,6 +38,10 @@
         {
           "title": "Workbench",
           "path": "workbench.md"
+        },
+        {
+          "title": "System One",
+          "path": "system-one.md"
         }
       ]
     },

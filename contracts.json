@@ -31,6 +31,11 @@
     "packages/coding-agent/test/background-tool-task-controller.test.ts",
     "packages/coding-agent/test/tool-task.test.ts",
     "packages/coding-agent/test/profiling/host-long-session.profile.test.ts",
-    "packages/coding-agent/test/windows-shell-corpus.test.ts"
+    "packages/coding-agent/test/windows-shell-corpus.test.ts",
+    "packages/coding-agent/test/goal-session-primary-loop.test.ts",
+    "packages/coding-agent/test/session-objective-runtime.test.ts",
+    "packages/coding-agent/test/system-one-foreground-control.test.ts",
+    "packages/coding-agent/test/system-one-worker-control.test.ts",
+    "packages/coding-agent/test/ledger-route-checkpoints.test.ts"
   ]
 }
