@@ -234,6 +234,7 @@ import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plan
 import { WorkerSemanticSupervisor } from "./supervision/worker-semantic-supervisor.ts";
 import { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
+import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
 import { type SemanticEvaluationRecord, verdictFromEvaluation } from "./system-one/semantic-evaluation-ledger.ts";
 import {
 	type SemanticEvaluationDurableSink,
@@ -462,6 +463,7 @@ export class AgentSession {
 	private _executionCharter?: ExecutionCharter;
 	private _adaptationProjection?: AdaptationProjection;
 	private _deliveryState: DeliveryState = "none";
+	private _foregroundControl?: SystemOneForegroundControl;
 	/** Admitted outward-facing tool calls still running; DELIVER ends when the last one ends. */
 	private readonly _deliveryToolCalls = new Set<string>();
 	private _operatorBlocker?: string;
@@ -1549,6 +1551,7 @@ export class AgentSession {
 					signal,
 				),
 			getSystemOneController: () => this._systemOneController,
+			getForegroundControl: () => this.systemOneForegroundControl,
 			validateMutationAcceptance: async ({ changedFiles }) => {
 				const result = await this._projectRules.validateMutation({ changedFiles });
 				if (!SessionProjectRules.blocks(result)) return { blocked: false };
@@ -1802,6 +1805,37 @@ export class AgentSession {
 	setOperatorBlocker(blocker: string | undefined): void {
 		this._operatorBlocker = blocker;
 		this._operatorProjection.refresh();
+	}
+
+	/** System One's cancel and steer levers over the foreground, built once, recorded as operator events. */
+	get systemOneForegroundControl(): SystemOneForegroundControl {
+		this._foregroundControl ??= createSessionForegroundControl({
+			abortTurn: (reason) => {
+				this.runtimeUpdates.cancel();
+				this.abortRetry();
+				this.agent.abort(reason);
+			},
+			isTurnRunning: () => this.isStreaming,
+			queueSteer: (text) => {
+				this._pendingQueue.queueSteer(
+					this._pendingQueue.prepareQueuedMessageText(text),
+					undefined,
+					undefined,
+					text,
+				);
+				this._emitQueueUpdate();
+			},
+			takeQueuedText: () => {
+				const { steering, followUp } = this.takeQueuedMessages();
+				this._emitQueueUpdate();
+				return [...steering, ...followUp].map((entry) => entry.text).join("\n\n");
+			},
+			waitForForegroundIdle: () => this.waitForForegroundIdle(),
+			prompt: (text) => this.prompt(text, { processSlashCommands: false, expandPromptTemplates: false }),
+			recordDirective: (directive) => this._operatorProjection.eventBridge.recordForegroundDirective(directive),
+			emitWarning: (message) => this._emit({ type: "warning", message }),
+		});
+		return this._foregroundControl;
 	}
 
 	/** The objective loop's wait: the running attempts' agents, on the goal's worker-wait bound. */

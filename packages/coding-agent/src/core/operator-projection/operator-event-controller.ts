@@ -62,6 +62,16 @@ export class OperatorEventController {
 		});
 	}
 
+	/** System One cancelled or steered the root's own turn; the directive is the operator's to read. */
+	recordForegroundDirective(directive: string): OperatorEvent {
+		return this.projectionController.emitEvent({
+			severity: "warning",
+			category: "worker",
+			title: "System One directed root",
+			detail: directive,
+		});
+	}
+
 	recordSupervisorIntervention(workerId: string, directive: string): OperatorEvent {
 		// FR-133: supervisor intervention event visible
 		return this.projectionController.emitEvent({

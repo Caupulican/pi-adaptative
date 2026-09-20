@@ -15,6 +15,7 @@ import { classifyAllEdgeOperations, type EdgeClass } from "./autonomy/edge-polic
 import { evaluateToolGateAsync } from "./autonomy/gates.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
+import type { SystemOneForegroundControl } from "./system-one/foreground-control.ts";
 import type { SystemOneController } from "./system-one/index.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import { retireToolCall } from "./tools/file-mutation-queue.ts";
@@ -77,6 +78,8 @@ export interface ToolGateControllerDeps {
 	): Promise<BeforeToolCallResult | undefined>;
 	/** System One semantic control plane controller, if active for this session/run. */
 	getSystemOneController?(): SystemOneController | undefined;
+	/** System One's cancel and steer levers over the running turn; absent, its verdicts only block or allow. */
+	getForegroundControl?(): SystemOneForegroundControl | undefined;
 	/**
 	 * Mutation-acceptance rule hook. A blocking violation converts the mutation's own result into an
 	 * error carrying the violation, so the transition does not proceed on an accepted mutation.
@@ -283,6 +286,26 @@ export class ToolGateController {
 						block: true,
 						reason: systemOneResult.reason ?? "Tool execution blocked by System One semantic gate",
 					};
+				}
+				const foreground = this.deps.getForegroundControl?.();
+				if (systemOneResult.outcome === "replan") {
+					// The call is not relevant to the current step: System One cancels the turn at once
+					// (the operator's Esc) so the loop routes again instead of letting the turn drift.
+					const reason = systemOneResult.reason ?? `tool ${toolCall.name} is not relevant to the current step`;
+					foreground?.cancelTurn(`replan: ${reason}`);
+					return {
+						block: true,
+						reason: foreground
+							? `System One cancelled this turn to re-route: ${reason}`
+							: `System One asks to re-plan: ${reason}`,
+					};
+				}
+				if (systemOneResult.outcome === "confirm" && foreground) {
+					// Broad scope on a non-destructive call: allowed, with a steer the next model turn reads.
+					await foreground.steer(
+						`System One: the ${toolCall.name} call's scope looks broad relative to the current step; keep to what the step needs and say why if more is required.`,
+						"queue",
+					);
 				}
 			}
 

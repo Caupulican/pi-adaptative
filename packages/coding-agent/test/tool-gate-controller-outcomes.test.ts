@@ -95,6 +95,45 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 		]);
 	});
 
+	it("System One's replan verdict cancels the turn at once and blocks the call; confirm queues a steer and allows", async () => {
+		const { cwd } = scope();
+		const directives: string[] = [];
+		let outcome: "replan" | "confirm" = "replan";
+		const controller = new ToolGateController({
+			maybeEscalateToolCall: () => undefined,
+			getCwd: () => cwd,
+			getCapabilityEnvelope: () => undefined,
+			recordGateOutcome: () => {},
+			getExtensionRunner: () => fakeRunner([]),
+			getSystemOneController: () =>
+				({ validateToolGate: async () => ({ outcome, reason: "off the current step" }) }) as never,
+			getForegroundControl: () => ({
+				cancelTurn: (reason) => {
+					directives.push(`cancel:${reason}`);
+				},
+				steer: async (text, delivery) => {
+					directives.push(`steer:${delivery}:${text.slice(0, 30)}`);
+				},
+			}),
+		});
+		const call = (args: Record<string, unknown>) =>
+			controller.beforeToolCall(
+				{
+					assistantMessage: fauxAssistantMessage(""),
+					toolCall: { id: "call-1", name: "read", arguments: args },
+					args,
+				} as Parameters<typeof controller.beforeToolCall>[0],
+				undefined,
+			);
+		const blocked = await call({ path: "src/a.ts" });
+		expect(blocked).toMatchObject({ block: true });
+		expect((blocked as { reason: string }).reason).toContain("cancelled this turn to re-route");
+		expect(directives).toEqual(["cancel:replan: off the current step"]);
+		outcome = "confirm";
+		expect(await call({ path: "src/a.ts" })).toBeUndefined();
+		expect(directives.at(-1)).toMatch(/^steer:queue:System One: the read call/);
+	});
+
 	it("an allowed call with no hooks records exactly one allow outcome", async () => {
 		const { cwd } = scope();
 		const envelope: CapabilityEnvelope = { id: "env", capabilities: ["filesystem.read"], allowedPaths: [cwd] };
