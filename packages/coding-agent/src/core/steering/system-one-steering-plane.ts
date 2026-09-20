@@ -11,6 +11,7 @@ import { TypeSafeSystemOneDecisionEngine } from "../decision/engines/typesafe-sy
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import type { DecisionProgram } from "../decision/program.ts";
 import type { JevAdapter } from "../system-one/adapter.ts";
+import { type SemanticEvaluationObserver, verdictFromCertificate } from "../system-one/semantic-evaluation-ledger.ts";
 import { canonicalDigest } from "./canonical.ts";
 import { SteeringCertificateStore } from "./certificate-store.ts";
 import {
@@ -70,6 +71,7 @@ export interface SystemOneSteeringPlaneDeps {
 }
 
 export class SystemOneSteeringPlane {
+	private evaluationObserver?: SemanticEvaluationObserver;
 	readonly certificates: SteeringCertificateStore;
 	readonly policy: SteeringPolicyConfig;
 	readonly decisionEngine?: SemanticDecisionEngine;
@@ -663,7 +665,6 @@ export class SystemOneSteeringPlane {
 		const model = this.policy.model.id || PINNED_JEV_MODEL;
 		const provider = this.policy.model.provider || "typesafe";
 		const consequence = request.consequence ?? "medium";
-		const thresholds = CONSEQUENCE_THRESHOLDS[consequence];
 
 		const objectiveId =
 			request.objectiveId ?? (request.taskId ? `obj-${request.taskId}` : `obj-${request.checkpointId}`);
@@ -685,6 +686,55 @@ export class SystemOneSteeringPlane {
 			return { certificate: existing, directive };
 		}
 
+		// A cache hit above records nothing: no evaluation ran. From here on one did, and the one
+		// recorder learns its start, its verdict and its failure or cancellation.
+		const evaluationId = this.evaluationObserver?.start({ programId: program.id, consequence });
+		try {
+			return await this.evaluateFresh(request, program, evaluationId, {
+				stateDigest,
+				programDigest,
+				policyDigest,
+				model,
+				provider,
+				consequence,
+				objectiveId,
+				evidenceRevision,
+			});
+		} catch (error) {
+			if (evaluationId !== undefined) {
+				if (request.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+					this.evaluationObserver?.settleCancelled(evaluationId);
+				} else {
+					this.evaluationObserver?.settleFailed(evaluationId, error);
+				}
+			}
+			throw error;
+		}
+	}
+
+	/** Binds the session's one evaluation sink; late-bound because the plane is built before the session. */
+	setEvaluationObserver(observer: SemanticEvaluationObserver | undefined): void {
+		this.evaluationObserver = observer;
+	}
+
+	private async evaluateFresh(
+		request: SteeringCheckpointRequest,
+		program: DecisionProgram,
+		evaluationId: string | undefined,
+		bound: {
+			stateDigest: string;
+			programDigest: string;
+			policyDigest: string;
+			model: string;
+			provider: string;
+			consequence: "low" | "medium" | "high" | "critical";
+			objectiveId: string;
+			evidenceRevision: number;
+		},
+	): Promise<SteeringResult> {
+		const { stateDigest, programDigest, policyDigest, model, provider, consequence, objectiveId, evidenceRevision } =
+			bound;
+		const thresholds = CONSEQUENCE_THRESHOLDS[consequence];
 		let evaluation: DecisionEvaluation;
 
 		if (this.router) {
@@ -700,7 +750,10 @@ export class SystemOneSteeringPlane {
 			}
 		} else if (this.decisionEngine) {
 			try {
-				evaluation = await this.decisionEngine.evaluate(program, request.state, { consequence });
+				evaluation = await this.decisionEngine.evaluate(program, request.state, {
+					consequence,
+					...(request.signal ? { signal: request.signal } : {}),
+				});
 			} catch (err) {
 				if (this.policy.mode === "system_one_required") {
 					throw new SystemOneSteeringUnavailableError(
@@ -835,6 +888,10 @@ export class SystemOneSteeringPlane {
 		// PH-021, PH-022: Atomic fail-closed persistence
 		await this.certificates.persist(certificate);
 
+		if (evaluationId !== undefined) {
+			const { verdict, reasons } = verdictFromCertificate(certificate);
+			this.evaluationObserver?.settleOk(evaluationId, verdict, reasons);
+		}
 		return { certificate, directive };
 	}
 
@@ -871,6 +928,8 @@ export class SystemOneSteeringPlane {
 			evidenceRevision,
 			consequence: options.consequence,
 			parentCertificateIds: options.parentCertificateIds,
+			// The abort reaches the engine: an aborted checkpoint settles as cancelled, not failed.
+			signal: options.signal,
 		});
 
 		const requirePass = options.requirePass ?? true;

@@ -137,14 +137,25 @@ describe("Operator POV bar", () => {
 	it("F001-022: `eval` only while a real evaluation is in flight", () => {
 		const recorder = new SemanticPlaneHealthRecorder();
 		expect(recorder.getHealth(true).state).toBe("unknown");
-		recorder.recordStart();
-		expect(recorder.getHealth(true).state).toBe("evaluating");
-		recorder.recordSuccess();
+		const first = recorder.start({ programId: "pi:steering:program:JEV-001:1.0" });
+		expect(recorder.getHealth(true)).toMatchObject({
+			state: "evaluating",
+			inFlight: 1,
+			inFlightEvaluations: [{ programId: "pi:steering:program:JEV-001:1.0", label: "objective intake" }],
+		});
+		recorder.settleOk(first, "pass");
 		expect(recorder.getHealth(true).state).toBe("ok");
-		recorder.recordStart();
-		recorder.recordFailure(new Error("plane down"));
+		const second = recorder.start({ programId: "system-one:preflight" });
+		recorder.settleFailed(second, new Error("plane down"));
 		expect(recorder.getHealth(true)).toMatchObject({ state: "degraded", lastFailure: "plane down" });
 		expect(recorder.getHealth(false).state).toBe("unbound");
+		// A settle for an unknown id is a no-op, so the recorder can never be left evaluating.
+		recorder.settleOk("not-an-evaluation");
+		expect(recorder.getHealth(true).state).toBe("degraded");
+		expect(recorder.getRecentEvaluations().map((record) => [record.label, record.outcome, record.verdict])).toEqual([
+			["objective intake", "ok", "pass"],
+			["preflight", "failed", undefined],
+		]);
 	});
 
 	it("F001-010: cost is the canonical session cost, with spawned cost only when present", () => {
@@ -278,14 +289,12 @@ describe("Operator POV bar", () => {
 
 	it("FIELD-002: a cancelled evaluation leaves the plane where it was, never degraded", () => {
 		const recorder = new SemanticPlaneHealthRecorder();
-		recorder.recordStart();
-		recorder.recordCancelled();
+		recorder.settleCancelled(recorder.start({ programId: "retention_eval_1" }));
 		expect(recorder.getHealth(true).state).toBe("unknown");
-		recorder.recordStart();
-		recorder.recordSuccess();
-		recorder.recordStart();
-		recorder.recordCancelled();
+		recorder.settleOk(recorder.start({ programId: "retention_eval_2" }));
+		recorder.settleCancelled(recorder.start({ programId: "retention_eval_3" }));
 		expect(recorder.getHealth(true).state).toBe("ok");
+		expect(recorder.getLastEvaluation()).toMatchObject({ label: "retention", outcome: "cancelled" });
 		expect(semanticPlaneHealthLabel(recorder.getHealth(true))).toBe("JEV ok");
 	});
 

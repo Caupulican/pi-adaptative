@@ -1,3 +1,4 @@
+import type { Consequence } from "../decision/primitives.ts";
 import type { IntegrityGateResult } from "../hooks/index.ts";
 import type { JevAdapter } from "./adapter.ts";
 import { AuditStore } from "./audit.ts";
@@ -16,6 +17,7 @@ import {
 	type FinalCompletionVerdict,
 } from "./policy.ts";
 import { StateProjector } from "./projector.ts";
+import type { SemanticEvaluationObserver } from "./semantic-evaluation-ledger.ts";
 import type { ExecutionState, ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
 
 export interface SystemOneControllerDeps {
@@ -26,6 +28,22 @@ export interface SystemOneControllerDeps {
 	config?: SystemOneConfig;
 	userKeys?: readonly string[];
 	hookCoordinator?: IntegrityHookCoordinator;
+	/** The session's one Jev evaluation sink; every stage validation reports through it. */
+	evaluationObserver?: SemanticEvaluationObserver;
+}
+
+/** The consequence class a stage's tool impact maps to, for the evaluation record. */
+function consequenceForImpact(impact: ToolImpact): Consequence {
+	switch (impact) {
+		case "read_only":
+			return "low";
+		case "local_reversible":
+			return "medium";
+		case "repo_mutation":
+			return "high";
+		default:
+			return "critical";
+	}
 }
 
 /**
@@ -39,6 +57,7 @@ export class SystemOneController {
 	readonly audit: AuditStore;
 	readonly config: SystemOneConfig;
 	readonly hookCoordinator?: IntegrityHookCoordinator;
+	private evaluationObserver?: SemanticEvaluationObserver;
 
 	constructor(deps: SystemOneControllerDeps) {
 		this.store = deps.store;
@@ -47,26 +66,51 @@ export class SystemOneController {
 		this.audit = deps.audit ?? new AuditStore();
 		this.config = deps.config ?? DEFAULT_SYSTEM_ONE_CONFIG;
 		this.hookCoordinator = deps.hookCoordinator;
+		this.evaluationObserver = deps.evaluationObserver;
+	}
+
+	/** Binds the session's evaluation sink; late-bound because the controller is built before the session. */
+	setEvaluationObserver(observer: SemanticEvaluationObserver | undefined): void {
+		this.evaluationObserver = observer;
+	}
+
+	/** Seals a stage decision: durable record, audit trail, and the operator-visible verdict. */
+	private sealDecision(decision: ValidationDecision, policyResult: string, evaluationId: string | undefined): void {
+		this.sealDecision(decision, policyResult, evaluationId);
+		if (evaluationId !== undefined) this.evaluationObserver?.noteVerdict(evaluationId, policyResult);
 	}
 
 	private async runStageValidation(
 		stage: ValidationStage,
 		stateView: Record<string, unknown>,
 		impact: ToolImpact = "read_only",
-	): Promise<{ decision: ValidationDecision; answers: Record<string, unknown> }> {
+	): Promise<{ decision: ValidationDecision; answers: Record<string, unknown>; evaluationId: string | undefined }> {
 		const questions = getQuestionPack(stage);
 		const questionsHash = hashQuestionPack(stage);
 		const stateHash = this.store.computeStateHash();
 		const pinnedModel = this.config.model.production || SYSTEM_ONE_PINNED_MODEL;
 
-		const response = await this.adapter.evaluate(
-			{
-				model: pinnedModel,
-				state: stateView,
-				questions,
-			},
-			{ impact },
-		);
+		const evaluationId = this.evaluationObserver?.start({
+			programId: `system-one:${stage}`,
+			consequence: consequenceForImpact(impact),
+			model: pinnedModel,
+		});
+		let response: Awaited<ReturnType<JevAdapter["evaluate"]>>;
+		try {
+			response = await this.adapter.evaluate(
+				{
+					model: pinnedModel,
+					state: stateView,
+					questions,
+				},
+				{ impact },
+			);
+		} catch (error) {
+			if (evaluationId !== undefined) this.evaluationObserver?.settleFailed(evaluationId, error);
+			throw error;
+		}
+		// The policy result is decided by the caller; the record settles now and gets its verdict then.
+		if (evaluationId !== undefined) this.evaluationObserver?.settleOk(evaluationId);
 
 		const decision: ValidationDecision = {
 			id: `DEC-${stage}-${Date.now()}`,
@@ -82,7 +126,7 @@ export class SystemOneController {
 			latency_ms: response.latency_ms,
 		};
 
-		return { decision, answers: response.answers };
+		return { decision, answers: response.answers, evaluationId };
 	}
 
 	/**
@@ -95,7 +139,7 @@ export class SystemOneController {
 		decision: ValidationDecision;
 	}> {
 		const projection = this.projector.intake(this.store.snapshot());
-		const { decision, answers } = await this.runStageValidation("intake", projection);
+		const { decision, answers, evaluationId } = await this.runStageValidation("intake", projection);
 
 		const clearAns = (answers.objective_clear as { noul?: number } | undefined)?.noul ?? 0;
 		const objectiveClear = evaluateNoul(clearAns, "required_true", this.config.thresholds) !== "hard_fail";
@@ -106,9 +150,7 @@ export class SystemOneController {
 		const blockerAns = (answers.external_blocker_present as { noul?: number } | undefined)?.noul ?? 0;
 		const externalBlockerPresent = evaluateNoul(blockerAns, "required_false", this.config.thresholds) === "hard_fail";
 
-		decision.policy_result = objectiveClear && !externalBlockerPresent ? "accepted" : "blocked";
-		this.store.recordDecision(decision);
-		this.audit.recordDecision(this.store.runId, decision);
+		this.sealDecision(decision, objectiveClear && !externalBlockerPresent ? "accepted" : "blocked", evaluationId);
 
 		if (externalBlockerPresent) {
 			this.store.transitionPhase("blocked_external", true);
@@ -128,12 +170,10 @@ export class SystemOneController {
 		decision: ValidationDecision;
 	}> {
 		const projection = this.projector.preflight(this.store.snapshot(), stepId);
-		const { decision, answers } = await this.runStageValidation("preflight", projection);
+		const { decision, answers, evaluationId } = await this.runStageValidation("preflight", projection);
 
 		const route = decidePreflight(answers, this.config);
-		decision.policy_result = route;
-		this.store.recordDecision(decision);
-		this.audit.recordDecision(this.store.runId, decision);
+		this.sealDecision(decision, route, evaluationId);
 
 		if (route === "replan") {
 			this.store.transitionPhase("replan_required", true);
@@ -175,12 +215,14 @@ export class SystemOneController {
 
 		// 2. Semantic tool gate
 		const projection = this.projector.toolGate(this.store.snapshot(), toolRequest);
-		const { decision, answers } = await this.runStageValidation("tool_gate", projection, toolRequest.impact);
+		const { decision, answers, evaluationId } = await this.runStageValidation(
+			"tool_gate",
+			projection,
+			toolRequest.impact,
+		);
 
 		const outcome = decideToolGate(answers, toolRequest.impact, this.config);
-		decision.policy_result = outcome;
-		this.store.recordDecision(decision);
-		this.audit.recordDecision(this.store.runId, decision);
+		this.sealDecision(decision, outcome, evaluationId);
 
 		this.store.recordToolEvent({
 			tool: toolRequest.tool,
@@ -202,12 +244,10 @@ export class SystemOneController {
 		decision: ValidationDecision;
 	}> {
 		const projection = this.projector.postflight(this.store.snapshot(), stepId);
-		const { decision, answers } = await this.runStageValidation("postflight", projection);
+		const { decision, answers, evaluationId } = await this.runStageValidation("postflight", projection);
 
 		const nextStatus = decidePostflight(answers, this.config);
-		decision.policy_result = nextStatus;
-		this.store.recordDecision(decision);
-		this.audit.recordDecision(this.store.runId, decision);
+		this.sealDecision(decision, nextStatus, evaluationId);
 
 		if (nextStatus === "rollback") {
 			this.store.transitionPhase("rollback_required", true);
@@ -232,7 +272,7 @@ export class SystemOneController {
 		decision: ValidationDecision;
 	}> {
 		const projection = this.projector.evidenceCheck(this.store.snapshot(), claimId, evidenceId);
-		const { decision, answers } = await this.runStageValidation("evidence_check", projection);
+		const { decision, answers, evaluationId } = await this.runStageValidation("evidence_check", projection);
 
 		const relAns = answers.relationship as
 			| {
@@ -251,9 +291,7 @@ export class SystemOneController {
 			}
 		}
 
-		decision.policy_result = relationship;
-		this.store.recordDecision(decision);
-		this.audit.recordDecision(this.store.runId, decision);
+		this.sealDecision(decision, relationship, evaluationId);
 
 		// Update claim status in store
 		switch (relationship) {
@@ -288,7 +326,7 @@ export class SystemOneController {
 		decision: ValidationDecision;
 	}> {
 		const projection = this.projector.duplicateLogic(candidateExistingLogic, proposedLogic);
-		const { decision, answers } = await this.runStageValidation("duplicate_logic", projection);
+		const { decision, answers, evaluationId } = await this.runStageValidation("duplicate_logic", projection);
 
 		const respAns = (answers.same_responsibility as { noul?: number } | undefined)?.noul ?? 0;
 		const sameResponsibility = evaluateNoul(respAns, "required_true", this.config.thresholds) !== "hard_fail";
@@ -296,9 +334,7 @@ export class SystemOneController {
 		const reuseAns = answers.reuse_preferable as { choice?: string } | undefined;
 		const reusePreferable = (reuseAns?.choice as any) ?? "insufficient_evidence";
 
-		decision.policy_result = `${sameResponsibility ? "duplicate" : "unique"}:${reusePreferable}`;
-		this.store.recordDecision(decision);
-		this.audit.recordDecision(this.store.runId, decision);
+		this.sealDecision(decision, `${sameResponsibility ? "duplicate" : "unique"}:${reusePreferable}`, evaluationId);
 
 		return { sameResponsibility, reusePreferable, decision };
 	}
@@ -315,7 +351,7 @@ export class SystemOneController {
 		decision: ValidationDecision;
 	}> {
 		const projection = this.projector.patchReview(this.store.snapshot(), changeIds);
-		const { decision, answers } = await this.runStageValidation("patch_review", projection);
+		const { decision, answers, evaluationId } = await this.runStageValidation("patch_review", projection);
 
 		const needAns = (answers.addresses_evidenced_need as { noul?: number } | undefined)?.noul ?? 0;
 		const addressesNeed = evaluateNoul(needAns, "required_true", this.config.thresholds) !== "hard_fail";
@@ -329,9 +365,7 @@ export class SystemOneController {
 		const regAns = answers.regression_surface as { score?: number } | undefined;
 		const regressionSurfaceScore = regAns?.score ?? 0;
 
-		decision.policy_result = addressesNeed && !masksSymptomOnly ? "pass" : "rework";
-		this.store.recordDecision(decision);
-		this.audit.recordDecision(this.store.runId, decision);
+		this.sealDecision(decision, addressesNeed && !masksSymptomOnly ? "pass" : "rework", evaluationId);
 
 		return {
 			addressesNeed,
@@ -353,7 +387,7 @@ export class SystemOneController {
 		decision: ValidationDecision;
 	}> {
 		const projection = this.projector.driftCheck(this.store.snapshot());
-		const { decision, answers } = await this.runStageValidation("drift_loop", projection);
+		const { decision, answers, evaluationId } = await this.runStageValidation("drift_loop", projection);
 
 		const driftAns = (answers.goal_drift as { noul?: number } | undefined)?.noul ?? 0;
 		const goalDrift = evaluateNoul(driftAns, "required_false", this.config.thresholds) === "hard_fail";
@@ -364,9 +398,11 @@ export class SystemOneController {
 		const staleAns = (answers.stale_context_dependency as { noul?: number } | undefined)?.noul ?? 0;
 		const staleContextDependency = evaluateNoul(staleAns, "required_false", this.config.thresholds) === "hard_fail";
 
-		decision.policy_result = goalDrift || repeatedStrategy || staleContextDependency ? "drift_detected" : "aligned";
-		this.store.recordDecision(decision);
-		this.audit.recordDecision(this.store.runId, decision);
+		this.sealDecision(
+			decision,
+			goalDrift || repeatedStrategy || staleContextDependency ? "drift_detected" : "aligned",
+			evaluationId,
+		);
 
 		if (repeatedStrategy || goalDrift) {
 			this.store.transitionPhase("replan_required", true);
@@ -426,13 +462,8 @@ export class SystemOneController {
 			config: this.config,
 		});
 
-		primaryStage.decision.policy_result = finalVerdict.verdict;
-		challengeStage.decision.policy_result = finalVerdict.verdict;
-
-		this.store.recordDecision(primaryStage.decision);
-		this.store.recordDecision(challengeStage.decision);
-		this.audit.recordDecision(this.store.runId, primaryStage.decision);
-		this.audit.recordDecision(this.store.runId, challengeStage.decision);
+		this.sealDecision(primaryStage.decision, finalVerdict.verdict, primaryStage.evaluationId);
+		this.sealDecision(challengeStage.decision, finalVerdict.verdict, challengeStage.evaluationId);
 
 		// 5. External completion gate and hooks check (PI-021)
 		if (finalVerdict.verdict === "complete") {

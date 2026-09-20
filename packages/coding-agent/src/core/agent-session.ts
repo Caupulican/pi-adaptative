@@ -232,7 +232,12 @@ import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plan
 import { WorkerSemanticSupervisor } from "./supervision/worker-semantic-supervisor.ts";
 import { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
-import { type SemanticPlaneHealth, SemanticPlaneHealthRecorder } from "./system-one/semantic-plane-health.ts";
+import { type SemanticEvaluationRecord, verdictFromEvaluation } from "./system-one/semantic-evaluation-ledger.ts";
+import {
+	type SemanticEvaluationDurableSink,
+	type SemanticPlaneHealth,
+	SemanticPlaneHealthRecorder,
+} from "./system-one/semantic-plane-health.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
 import { captureSessionTaskDirectoryContext } from "./tasks/task-directory-context.ts";
@@ -474,6 +479,11 @@ export class AgentSession {
 		this._executionLoopMode = config.executionLoopMode;
 		this._objectiveExecutionController = config.objectiveExecutionController;
 		this._steeringPlane = config.steeringPlane;
+		// Every Jev path reports to the one recorder: the recording wrapper, the steering plane and
+		// System One's stage controller; the recorder forwards to the durable ledger.
+		this._bindSemanticObserver(this._steeringPlane);
+		this._systemOneController?.setEvaluationObserver(this._semanticPlaneHealth);
+		this._semanticPlaneHealth.bindDurable(() => this._semanticLedgerSink());
 		this._adaptiveReadiness = config.adaptiveReadiness;
 		this._agentDirForLedger = config.agentDir ?? getAgentDir();
 		this._ownerRules = new DurableOwnerRuleStore({
@@ -1605,20 +1615,26 @@ export class AgentSession {
 			model: engine.model,
 			capabilities: () => engine.capabilities(),
 			evaluate: async (program, state, options) => {
-				// The in-flight mark is what lets the POV bar show `JEV eval` only while a real
-				// evaluation runs; success/failure below always closes it.
-				this._semanticPlaneHealth.recordStart();
+				// The in-flight record is what lets the POV bar show `JEV eval` only while a real
+				// evaluation runs and the Decision graph say what Jev is judging; settlement below
+				// always closes it and keeps the verdict for the ledger.
+				const evaluationId = this._semanticPlaneHealth.start({
+					programId: program.id,
+					...(options?.consequence ? { consequence: options.consequence } : {}),
+					model: engine.model,
+				});
 				try {
 					const evaluation = await engine.evaluate(program, state, options);
-					this._semanticPlaneHealth.recordSuccess();
+					const { verdict, reasons } = verdictFromEvaluation(evaluation);
+					this._semanticPlaneHealth.settleOk(evaluationId, verdict, reasons);
 					return evaluation;
 				} catch (error) {
 					// A cancelled evaluation is not a degraded plane: the abort came from the operator or
 					// the caller, and the plane never reported an outcome to judge it by.
 					if (options?.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
-						this._semanticPlaneHealth.recordCancelled();
+						this._semanticPlaneHealth.settleCancelled(evaluationId);
 					} else {
-						this._semanticPlaneHealth.recordFailure(error);
+						this._semanticPlaneHealth.settleFailed(evaluationId, error);
 					}
 					throw error;
 				}
@@ -1663,6 +1679,50 @@ export class AgentSession {
 			this._stageSink = { key, sink: ledger.stageSink(key, this.sessionManager.getCwd()) };
 		}
 		return this._stageSink;
+	}
+
+	/** Binds the one evaluation sink onto a steering plane; both plane assignments go through here. */
+	private _bindSemanticObserver(plane: SystemOneSteeringPlane | undefined): void {
+		plane?.setEvaluationObserver(this._semanticPlaneHealth);
+	}
+
+	/** The durable side of the Jev ledger, bound to the current session id and cwd. */
+	private _semanticLedgerSink(): SemanticEvaluationDurableSink | undefined {
+		const ledger = this.getDecisionLedger();
+		if (!ledger) return undefined;
+		const sessionId = this.sessionManager.getSessionId();
+		const cwd = this.sessionManager.getCwd();
+		return {
+			start: (record) =>
+				ledger.startSemanticEvaluation({
+					evaluationId: record.evaluationId,
+					sessionId,
+					cwd,
+					programId: record.programId,
+					label: record.label,
+					startedAt: record.startedAt,
+					...(record.consequence ? { consequence: record.consequence } : {}),
+					...(record.model ? { model: record.model } : {}),
+				}),
+			settle: (record) =>
+				ledger.settleSemanticEvaluation(record.evaluationId, {
+					endedAt: record.endedAt,
+					outcome: record.outcome,
+					...(record.verdict !== undefined ? { verdict: record.verdict } : {}),
+					...(record.reasons ? { reasons: record.reasons } : {}),
+				}),
+			noteVerdict: (evaluationId, verdict, reasons) => ledger.noteSemanticVerdict(evaluationId, verdict, reasons),
+		};
+	}
+
+	/** Recent Jev evaluations: what was judged, when, and what it decided. */
+	getSemanticEvaluations(): readonly SemanticEvaluationRecord[] {
+		return this._semanticPlaneHealth.getRecentEvaluations();
+	}
+
+	/** Subscribes to settled Jev evaluations (the Execution pane's Jev previews). */
+	onSemanticEvaluation(listener: (record: SemanticEvaluationRecord) => void): () => void {
+		return this._semanticPlaneHealth.subscribe(listener);
 	}
 
 	/** Observed health of this session's semantic plane. */
@@ -1802,6 +1862,7 @@ export class AgentSession {
 			// Bound before the gate below so the gate, like every other consumer, reaches the plane's
 			// engine through the one recording accessor.
 			this._steeringPlane = stack.steeringPlane;
+			this._bindSemanticObserver(this._steeringPlane);
 		}
 		if (stack.charter) {
 			// Authority for external acquisition comes from this charter and nowhere else; the gate is

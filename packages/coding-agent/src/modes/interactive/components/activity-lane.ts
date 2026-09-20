@@ -600,6 +600,8 @@ export class ActivityLaneComponent implements Component {
 	private parentVisible = true;
 	/** Runs only while timed work is live, so the elapsed figure advances; never keeps the process alive. */
 	private ticker?: ReturnType<typeof setInterval>;
+	/** Clocks on screen the lane does not own (the Decision graph's stage and Jev evaluation). */
+	private readonly externalClocks = new Set<string>();
 
 	constructor(
 		theme: Theme,
@@ -617,10 +619,25 @@ export class ActivityLaneComponent implements Component {
 		this.now = () => wallAnchor + Math.max(0, monotonicNow() - monotonicAnchor);
 	}
 
+	/**
+	 * Registers or clears a named clock that lives outside the lane; the one existing ticker covers
+	 * it too. Never a second interval, never a row.
+	 */
+	setExternalClock(id: string, running: boolean): void {
+		if (running === this.externalClocks.has(id)) return;
+		if (running) this.externalClocks.add(id);
+		else this.externalClocks.delete(id);
+		this.syncTicker();
+	}
+
 	private syncTicker(): void {
-		const timed = [...this.live.values(), ...this.canonical.values()]
-			.filter((item) => this.parentVisible || !isParentRuntimeItem(item))
-			.some((item) => item.startedAt !== undefined && (isActivityRunning(item.status) || item.status === "waiting"));
+		const timed =
+			this.externalClocks.size > 0 ||
+			[...this.live.values(), ...this.canonical.values()]
+				.filter((item) => this.parentVisible || !isParentRuntimeItem(item))
+				.some(
+					(item) => item.startedAt !== undefined && (isActivityRunning(item.status) || item.status === "waiting"),
+				);
 		if (timed && !this.ticker) {
 			this.ticker = setInterval(() => this.requestRender(), ELAPSED_TICK_MS);
 			this.ticker.unref?.();
@@ -888,6 +905,7 @@ export class ActivityLaneComponent implements Component {
 	dispose(): void {
 		if (this.ticker) clearInterval(this.ticker);
 		this.ticker = undefined;
+		this.externalClocks.clear();
 		this.clearTransient();
 		this.live.clear();
 		this.canonical.clear();
