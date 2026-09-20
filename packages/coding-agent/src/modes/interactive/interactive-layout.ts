@@ -157,6 +157,8 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 	const unsubscribeOperatorProjection = host.session.operatorProjection.subscribe(() => host.ui.requestRender());
 	// The stage log fires on every transition; the graph pane's timers and lit stage follow it.
 	const unsubscribeStageChange = host.session.operatorProjection.onStageChange(() => host.ui.requestRender());
+	// Every settled Jev evaluation changes the Decider row and the graph's judge level.
+	const unsubscribeSemantic = host.session.onSemanticEvaluation(() => host.ui.requestRender());
 	const humanInput: HumanInputTally = { asked: 0, answered: 0 };
 	const unsubscribeHumanInput = subscribeHumanInputActivity(host.session.sessionManager, (activity) => {
 		if (activity.phase === "waiting") {
@@ -173,6 +175,7 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 	host.disposeOperatorProjection = () => {
 		unsubscribeOperatorProjection();
 		unsubscribeStageChange();
+		unsubscribeSemantic();
 		unsubscribeHumanInput();
 		host.activityLane?.setExternalClock("decision-graph", false);
 	};
@@ -244,6 +247,13 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		// Only the operator changes the work area; what they chose last time is where it starts.
 		geometry: { save: (geometry) => host.settingsManager.setWorkbenchSettings(geometry) },
 		graph: () => composeDecisionGraph(host, humanInput),
+		team: () => ({
+			projection: host.session.operatorProjection.getProjection(),
+			health: host.session.getSemanticPlaneHealth(),
+			last: host.session.getSemanticEvaluations().at(-1),
+			route: host.session.getForegroundRouteSnapshot(),
+			lanes: host.session.getLaneRecords(),
+		}),
 		clock: (running) => host.activityLane?.setExternalClock("decision-graph", running),
 		paste: async () => {
 			const text = await readClipboardText();

@@ -1,8 +1,20 @@
 import { type AgentMessage, type ToolInvocationObservation, ToolInvocationReport } from "@caupulican/pi-agent-core";
 import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
-import { type Component, isMouseSequence, parseMouseSequence, Text, wrapTextWithAnsi } from "@caupulican/pi-tui";
+import {
+	type Component,
+	isMouseSequence,
+	parseMouseSequence,
+	Text,
+	truncateToWidth,
+	wrapTextWithAnsi,
+} from "@caupulican/pi-tui";
+import type { LaneRecord } from "../../core/autonomy/lane-tracker.ts";
 import { backgroundToolInvocationObservations } from "../../core/background-tool-task-controller.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
+import type { ForegroundRouteSnapshot } from "../../core/model-router-controller.ts";
+import type { OperatorProjection } from "../../core/operator-projection/types.ts";
+import type { SemanticEvaluationRecord } from "../../core/system-one/semantic-evaluation-ledger.ts";
+import type { SemanticPlaneHealth } from "../../core/system-one/semantic-plane-health.ts";
 import { type OrchestrationPanelModel, renderOrchestrationPanelRows } from "../../core/tools/orchestration-panel.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import type { ActivityLaneItem } from "./components/activity-lane.ts";
@@ -13,7 +25,9 @@ import {
 	isActiveWorkerLane,
 	projectSpecialistLanes,
 } from "./components/agents-overlay.ts";
-import type { DecisionGraphModel } from "./components/decision-graph-model.ts";
+import { type DecisionGraphModel, shortModelRef } from "./components/decision-graph-model.ts";
+import { formatGraphDuration } from "./components/decision-graph-render.ts";
+import { formatRouteValue } from "./components/operator-pov-bar.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
 import {
 	CHECKS_SECTION,
@@ -48,6 +62,17 @@ interface WorkbenchPorts {
 	graph?: () => DecisionGraphModel | undefined;
 	/** The lane's one ticker: told whether the drawn graph carries a running clock. */
 	clock?: (running: boolean) => void;
+	/** Who decides and who executes, read at render time so the Decider's clock and verdict stay live. */
+	team?: () => WorkbenchTeamFacts;
+}
+
+/** Live facts behind the Team hierarchy: the decider's state, the root's model and route, the lanes. */
+export interface WorkbenchTeamFacts {
+	readonly projection: OperatorProjection;
+	readonly health: SemanticPlaneHealth;
+	readonly last?: SemanticEvaluationRecord;
+	readonly route: ForegroundRouteSnapshot;
+	readonly lanes: readonly LaneRecord[];
 }
 
 /** What the cycle produced so far, as the Decision graph counts it. */
@@ -284,7 +309,7 @@ export class WorkbenchController {
 
 	refresh(snapshot: AgentsOverlaySnapshot): void {
 		this.snapshot = snapshot;
-		this.view.setInspector(buildWorkbenchSections(snapshot, Date.now()));
+		this.view.setInspector(buildWorkbenchSections(snapshot, Date.now(), this.ports.team));
 		this.workTitle = workTitle(snapshot.items);
 		this.publishHeadline();
 	}
@@ -518,11 +543,73 @@ export function workTitle(items: readonly ActivityLaneItem[]): string | undefine
 	return live("task") ?? live("goal");
 }
 
+const JEV_TONE = "customMessageLabel";
+
+/**
+ * The Decider group: System One with Jev, first in the Team. What it is doing comes from the
+ * semantic plane's in-flight evaluation, its last verdict, and who holds control — never a literal.
+ */
+export function renderDeciderRows(facts: WorkbenchTeamFacts, nowMs: number): string[] {
+	const evaluating = facts.health.inFlightEvaluations?.at(-1);
+	const owner = facts.projection.control.owner;
+	const name = theme.fg(JEV_TONE, "System One · Jev");
+	const state = evaluating
+		? theme.fg(JEV_TONE, `judging ${evaluating.label} ${formatGraphDuration(nowMs - evaluating.startedAt)}`)
+		: facts.last
+			? theme.fg(
+					facts.last.outcome === "failed" ? "error" : "muted",
+					facts.last.outcome === "ok"
+						? `${facts.last.verdict ?? "ok"} · ${facts.last.label}`
+						: `${facts.last.outcome} · ${facts.last.label}`,
+				)
+			: theme.fg("dim", facts.health.state === "unbound" ? "off" : "ready");
+	const glyph = evaluating ? theme.fg(JEV_TONE, "◆") : theme.fg("muted", "◇");
+	const control =
+		owner === "system_one"
+			? theme.fg("accent", "decides next")
+			: owner === "user"
+				? theme.fg("warning", "waiting for you")
+				: theme.fg("dim", "root executes");
+	return [`  ${glyph} ${name}  ${state}`, `    ${control}`];
+}
+
+/** The root executor: the model actually answering, its route when routed, and its current action. */
+function renderRootRow(facts: WorkbenchTeamFacts): string {
+	const { projection, route } = facts;
+	const running =
+		projection.active_actors.some((actor) => actor.kind === "root") &&
+		projection.phase !== "done" &&
+		projection.control.owner !== "user";
+	const model = shortModelRef(route.activeModel ?? route.rootModel);
+	const glyph = running ? theme.fg("accent", "●") : theme.fg("muted", "○");
+	const task = running ? `  ${theme.fg("muted", projection.current_action)}` : "";
+	return `  ${glyph} ${theme.fg("text", "root")} · ${theme.fg(running ? "accent" : "muted", model)}${task}`;
+}
+
+/** Routed choices that are live: who chose which model for whom, in the operator's words. */
+export function renderRoutingRows(facts: WorkbenchTeamFacts): string[] {
+	const rows: string[] = [];
+	if (facts.route.switched && facts.route.activeModel !== facts.route.rootModel) {
+		rows.push(`    ${formatRouteValue(facts.route)} → ${shortModelRef(facts.route.activeModel)} for root`);
+	}
+	for (const lane of facts.lanes) {
+		if ((lane.status !== "queued" && lane.status !== "running") || !lane.profileId || !lane.modelRef) continue;
+		rows.push(`    profile ${lane.profileId} → ${shortModelRef(lane.modelRef)} for ${lane.label ?? lane.laneId}`);
+	}
+	return rows.map((row) => theme.fg("muted", row));
+}
+
 /**
  * Work plan and Team blocks for the inspector. Long plans show a bounded, prioritized slice; a
- * finished plan or an idle team folds to one summary row without deleting anything.
+ * finished plan or an idle team folds to one summary row without deleting anything. With `team`
+ * facts the Team is a hierarchy: Decider (System One · Jev) first, Executors (root, then the lanes)
+ * second, Routing last and only while a routed choice is live.
  */
-export function buildWorkbenchSections(snapshot: AgentsOverlaySnapshot, nowMs: number): WorkbenchSection[] {
+export function buildWorkbenchSections(
+	snapshot: AgentsOverlaySnapshot,
+	nowMs: number,
+	team?: () => WorkbenchTeamFacts,
+): WorkbenchSection[] {
 	const model = buildWorkPanelModel(snapshot, nowMs);
 	const rows = model.rows ?? [];
 	const planRows = rows.filter((row) => !TEAM_SECTIONS.has(row.section ?? ""));
@@ -569,20 +656,41 @@ export function buildWorkbenchSections(snapshot: AgentsOverlaySnapshot, nowMs: n
 	// The team is its specialists, not its task history: a specialist with three finished tasks and
 	// nothing running is one idle agent, and it keeps its section even though it contributes no row.
 	const specialists = projectSpecialistLanes(snapshot.laneRecords);
-	if (teamRows.length || specialists.length) {
-		const team = compactWorkPanel({ ...model, rows: teamRows }, 4);
-		const shown = team.rows ?? [];
+	if (teamRows.length || specialists.length || team) {
+		const panel = compactWorkPanel({ ...model, rows: teamRows }, 4);
+		const shown = panel.rows ?? [];
 		const workers = specialists.flatMap((specialist) => (specialist.current ? [specialist.current] : []));
 		const active = workers.filter(isActiveWorkerLane).length;
-		const meta = active
+		const executors = active
 			? `${active} active`
 			: `${specialists.length} ${specialists.length === 1 ? "agent" : "agents"}`;
-		const body: Component | string[] = shown.length
-			? rowsComponent({ ...team, rows: shown.map((row) => ({ ...row, section: undefined })) })
-			: [
-					`  ${theme.fg("success", "✓")} ${theme.fg("text", `Team idle · ${specialists.length} ${specialists.length === 1 ? "session" : "sessions"} retained`)}`,
-				];
-		sections.push({ title: TEAM_SECTION, meta, body });
+		const idle = [
+			`  ${theme.fg("success", "✓")} ${theme.fg("text", `Team idle · ${specialists.length} ${specialists.length === 1 ? "session" : "sessions"} retained`)}`,
+		];
+		const lanePanel = { ...panel, rows: shown.map((row) => ({ ...row, section: undefined })) };
+		if (!team) {
+			sections.push({ title: TEAM_SECTION, meta: executors, body: shown.length ? rowsComponent(lanePanel) : idle });
+			return sections;
+		}
+		const executorRows = (width: number): string[] =>
+			shown.length ? renderOrchestrationPanelRows(theme, lanePanel, width) : idle;
+		const group = (label: string) => `  ${theme.fg("dim", label)}`;
+		const body: Component = {
+			render: (width) => {
+				const facts = team();
+				const routing = renderRoutingRows(facts);
+				return [
+					group("Decider"),
+					...renderDeciderRows(facts, Date.now()),
+					group("Executors"),
+					renderRootRow(facts),
+					...(shown.length || specialists.length ? executorRows(width) : []),
+					...(routing.length ? [group("Routing"), ...routing] : []),
+				].map((line) => truncateToWidth(line, Math.max(1, width), ""));
+			},
+			invalidate() {},
+		};
+		sections.push({ title: TEAM_SECTION, meta: `decider + ${executors}`, body });
 	}
 	return sections;
 }

@@ -6,7 +6,11 @@ import { createBackgroundToolTerminalMessage } from "../src/core/background-tool
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { WorkbenchComponent, type WorkbenchSection } from "../src/modes/interactive/components/workbench.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
-import { buildWorkbenchSections, WorkbenchController } from "../src/modes/interactive/workbench-controller.ts";
+import {
+	buildWorkbenchSections,
+	WorkbenchController,
+	type WorkbenchTeamFacts,
+} from "../src/modes/interactive/workbench-controller.ts";
 import { WorkspaceObservation } from "../src/modes/interactive/workbench-workspace.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 import { workbenchCounterFixture, workbenchToolObservation } from "./fixtures/session-failures.ts";
@@ -196,6 +200,70 @@ describe("Workbench input boundary", () => {
 		const team = sections.find((section) => section.title === "Team");
 		expect(team?.meta).toBe("1 agent");
 		expect(teamBody(team)).toContain("1 session retained");
+	});
+
+	it("orders the Team as Decider, Executors (root first), then Routing, from live facts", () => {
+		const facts = (): WorkbenchTeamFacts => ({
+			projection: {
+				schema_version: "1.0" as const,
+				objective_id: "obj",
+				title: "fixture",
+				phase: "build" as const,
+				phase_index: 3,
+				phase_count: 6,
+				current_action: "Editing parser.ts",
+				why: "root is building",
+				next_action: null,
+				health: "normal" as const,
+				control: { owner: "system_one" as const, state: "deciding" as const, reasonCode: "goal_active" },
+				active_actors: [{ id: "root", kind: "root" as const, label: "Root orchestrator" }],
+				adaptation: null,
+				proof: { satisfied: 0, total: 0, failing: 0, pending: 0 },
+				context: null,
+			},
+			health: {
+				state: "evaluating" as const,
+				inFlight: 1,
+				inFlightEvaluations: [
+					{ evaluationId: "e1", programId: "system-one:verify", label: "verify", startedAt: Date.now() - 2500 },
+				],
+			},
+			route: {
+				rootModel: "xai/grok-4.6",
+				activeModel: "openai-codex/gpt-5.6-mini",
+				source: "model_router" as const,
+				tier: "cheap",
+				risk: "read-only" as const,
+				reasonCode: null,
+				switched: true,
+			},
+			lanes: [
+				{
+					laneId: "lane-1",
+					type: "worker" as const,
+					status: "running" as const,
+					label: "tester",
+					profileId: "tester",
+					modelRef: "xai/grok-4.6",
+					startedAt: new Date().toISOString(),
+				},
+			],
+		});
+		const sections = buildWorkbenchSections({ laneRecords: facts().lanes, items: [] }, Date.now(), facts);
+		const team = sections.find((section) => section.title === "Team");
+		expect(team?.meta).toBe("decider + 1 active");
+		const body = Array.isArray(team?.body) ? team.body : (team?.body.render(80) ?? []);
+		const text = body.map(stripAnsi);
+		const at = (needle: string) => text.findIndex((line) => line.includes(needle));
+		expect(at("Decider")).toBe(0);
+		expect(text[1]).toMatch(/◆ System One · Jev\s+judging verify \d+(\.\d)?s/);
+		expect(text[2]).toContain("decides next");
+		expect(at("Executors")).toBe(3);
+		expect(text[4]).toMatch(/● root · gpt-5.6-mini\s+Editing parser.ts/);
+		expect(at("tester")).toBeGreaterThan(4);
+		expect(at("Routing")).toBeGreaterThan(at("tester"));
+		expect(text.at(-2)).toContain("cheap/read-only via model-router → gpt-5.6-mini for root");
+		expect(text.at(-1)).toContain("profile tester → grok-4.6 for tester");
 	});
 
 	it("stops counting a retired agent's lane as a retained session", () => {
