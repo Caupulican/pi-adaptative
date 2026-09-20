@@ -33,8 +33,8 @@ import {
 	isValidationChurn,
 	WorkerSupervisionCoordinator,
 } from "../../../src/core/supervision/worker-supervision-coordinator.ts";
-import { semanticPlaneHealthGlyph } from "../../../src/core/system-one/semantic-plane-health.ts";
-import { OperatorStatusComponent } from "../../../src/modes/interactive/components/operator-status.ts";
+import { semanticPlaneHealthLabel } from "../../../src/core/system-one/semantic-plane-health.ts";
+import { OperatorPovBarComponent } from "../../../src/modes/interactive/components/operator-pov-bar.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { createRcSdkHarness } from "../rc-sdk-harness.ts";
@@ -761,13 +761,21 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 			expect(projection.active_actors[0]?.kind).toBe("root");
 			expect(projection.proof).toEqual({ satisfied: 0, total: 0, failing: 0, pending: 0 });
 
-			// The component the layout mounts renders that same projection.
-			const component = new OperatorStatusComponent({
+			// The component the layout mounts renders that same projection and the session's own
+			// live route/health/cost reads — one row, no literal.
+			const component = new OperatorPovBarComponent({
 				getProjection: () => harness.session.operatorProjection.getProjection(),
+				getRouteSnapshot: () => harness.session.getForegroundRouteSnapshot(),
+				getSemanticPlaneHealth: () => harness.session.getSemanticPlaneHealth(),
+				getCostSummary: () => harness.session.getCostSummary(),
 			});
-			const rows = component.render(120);
-			expect(rows.length).toBeGreaterThan(0);
-			expect(stripAnsi(rows.join("\n"))).toContain("UNDERSTAND");
+			const rows = component.render(200);
+			expect(rows).toHaveLength(1);
+			const row = stripAnsi(rows[0]);
+			expect(row).toContain("WORKING understand:");
+			expect(row).toContain("ROUTE direct");
+			expect(row).toContain("JEV ready");
+			expect(row).toContain("COST $");
 		});
 
 		it("RCG-052: the layout contains no hard-coded execution projection", () => {
@@ -809,7 +817,7 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 		it("RCG-054: footer health is observed, never a constant", async () => {
 			const healthy = await createRcSdkHarness();
 			expect(healthy.session.getSemanticPlaneHealth().state).toBe("unknown");
-			expect(semanticPlaneHealthGlyph(healthy.session.getSemanticPlaneHealth())).toBe("Jev ?");
+			expect(semanticPlaneHealthLabel(healthy.session.getSemanticPlaneHealth())).toBe("JEV ready");
 
 			// One real evaluation moves it to ok.
 			await healthy.session.projectRules.validateMutation({ changedFiles: [] });
@@ -831,7 +839,7 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 				{},
 			);
 			expect(healthy.session.getSemanticPlaneHealth().state).toBe("ok");
-			expect(semanticPlaneHealthGlyph(healthy.session.getSemanticPlaneHealth())).toBe("Jev ✓");
+			expect(semanticPlaneHealthLabel(healthy.session.getSemanticPlaneHealth())).toBe("JEV ok");
 
 			// A failed evaluation degrades it; the footer must not keep showing a tick.
 			const failing = await createRcSdkHarness({
@@ -857,7 +865,7 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 				),
 			).rejects.toThrow();
 			expect(failing.session.getSemanticPlaneHealth().state).toBe("degraded");
-			expect(semanticPlaneHealthGlyph(failing.session.getSemanticPlaneHealth())).toBe("Jev !");
+			expect(semanticPlaneHealthLabel(failing.session.getSemanticPlaneHealth())).toBe("JEV degraded");
 		});
 
 		it("RCG-055: the fast-iteration indicator appears only while the owner rule is in force", async () => {

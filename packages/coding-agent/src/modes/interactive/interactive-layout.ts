@@ -11,7 +11,7 @@ import type { SettingsManager } from "../../core/settings-manager.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { type ActivityLaneComponent, isBackgroundToolActivityItem } from "./components/activity-lane.ts";
 import type { FooterComponent } from "./components/footer.ts";
-import { OperatorStatusComponent } from "./components/operator-status.ts";
+import { OperatorPovBarComponent } from "./components/operator-pov-bar.ts";
 import { isConversationMessage } from "./components/question-conversation.ts";
 import { WorkbenchComponent } from "./components/workbench.ts";
 import type { ExtensionUiHost } from "./extension-ui-host.ts";
@@ -51,10 +51,14 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 	// One status row when the width allows; the status band should use the width, not stack.
 	host.footer.setCompact(true);
 	host.footer.setOperatorFooter(true);
-	// The operator row reads the session's own live projection. Its idle state is that projection
-	// with no objective, not a literal written here.
-	const operatorStatus = new OperatorStatusComponent({
+	// The POV bar reads the session's own live state on every render: the projection, the router's
+	// foreground snapshot, the semantic plane's observed health and the cost summary. Its idle state
+	// is that state with no objective, not a literal written here.
+	const operatorStatus = new OperatorPovBarComponent({
 		getProjection: () => host.session.operatorProjection.getProjection(),
+		getRouteSnapshot: () => host.session.getForegroundRouteSnapshot(),
+		getSemanticPlaneHealth: () => host.session.getSemanticPlaneHealth(),
+		getCostSummary: () => host.session.getCostSummary(),
 	});
 	const unsubscribeOperatorProjection = host.session.operatorProjection.subscribe(() => host.ui.requestRender());
 	host.disposeOperatorProjection = unsubscribeOperatorProjection;

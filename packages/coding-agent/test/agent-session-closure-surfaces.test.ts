@@ -10,7 +10,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PROJECT_RULE_REPAIR_CUSTOM_TYPE } from "../src/core/project-rules/session-project-rules.ts";
-import { semanticPlaneHealthGlyph } from "../src/core/system-one/semantic-plane-health.ts";
+import { semanticPlaneHealthLabel } from "../src/core/system-one/semantic-plane-health.ts";
 import { createRcSdkHarness } from "./suite/rc-sdk-harness.ts";
 
 const AGENTS_MD = ["## Code Quality", "- Never use inline imports (`await import()`)."].join("\n");
@@ -136,7 +136,7 @@ describe("Session closure surfaces", () => {
 
 	it("reports the semantic plane's observed health", async () => {
 		const harness = await createRcSdkHarness();
-		expect(semanticPlaneHealthGlyph(harness.session.getSemanticPlaneHealth())).toBe("Jev ?");
+		expect(semanticPlaneHealthLabel(harness.session.getSemanticPlaneHealth())).toBe("JEV ready");
 
 		const engine = (
 			harness.session as unknown as {

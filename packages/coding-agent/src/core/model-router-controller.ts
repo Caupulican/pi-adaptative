@@ -87,6 +87,32 @@ export function formatModelRouterModel(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
 
+/** Who owns the model that is executing the foreground turn right now. */
+export type ForegroundRouteSource = "direct" | "manual" | "model_router" | "model_router_hmoe" | "model_router_retry";
+
+/**
+ * Bounded live view of foreground routing for the operator POV. `rootModel` is the persistent
+ * session model; `activeModel` is what is actually executing. They differ only while a routed turn
+ * has swapped the model, and `switched` says so explicitly so a display never has to compare ids.
+ */
+export interface ForegroundRouteSnapshot {
+	readonly rootModel: string | null;
+	readonly activeModel: string | null;
+	readonly source: ForegroundRouteSource;
+	readonly tier: "cheap" | "medium" | "expensive" | null;
+	readonly risk: string | null;
+	readonly reasonCode: string | null;
+	readonly switched: boolean;
+}
+
+/** Route source for a decision, from the persisted selection provenance and retry flag. */
+function foregroundRouteSourceFor(decision: RouteDecision, retry: boolean): ForegroundRouteSource {
+	if (retry) return "model_router_retry";
+	if (decision.selection === "hmoe") return "model_router_hmoe";
+	if (decision.selection === "auto") return "model_router";
+	return "manual";
+}
+
 const ROUTE_JUDGE_STATIC_FAST_PATH_REASON_CODES = new Set([
 	"empty_prompt",
 	"read_only_question",
@@ -187,6 +213,8 @@ export class ModelRouterController {
 	private _lastModelRouterDecision?: ModelRouterDecisionStatus;
 	private _lastModelRouterSkipReason?: string;
 	private _lastModelRouterIntent?: ModelRouterIntent;
+	/** The routed turn currently executing, with the root model it swapped away from. */
+	private _activeRoutedTurn?: { rootModel: Model<Api> | undefined; routedModel: Model<Api>; decision: RouteDecision };
 
 	private readonly deps: ModelRouterControllerDeps;
 
@@ -202,6 +230,38 @@ export class ModelRouterController {
 	/** Latest completed route decision (sticky), for the autonomy telemetry snapshot. */
 	getLastDecision(): ModelRouterDecisionStatus | undefined {
 		return this._lastModelRouterDecision;
+	}
+
+	/**
+	 * Live foreground routing truth. Outside a routed turn the root and active model are the same
+	 * session model and the source is `direct`; inside one, the root is the model the swap will
+	 * restore and the active model is the routed one.
+	 */
+	getForegroundRouteSnapshot(): ForegroundRouteSnapshot {
+		const active = this._activeRoutedTurn;
+		if (!active) {
+			const current = this.deps.getModel();
+			const label = current ? formatModelRouterModel(current) : null;
+			return {
+				rootModel: label,
+				activeModel: label,
+				source: "direct",
+				tier: null,
+				risk: null,
+				reasonCode: null,
+				switched: false,
+			};
+		}
+		const tier = active.decision.tier;
+		return {
+			rootModel: active.rootModel ? formatModelRouterModel(active.rootModel) : null,
+			activeModel: formatModelRouterModel(active.routedModel),
+			source: foregroundRouteSourceFor(active.decision, this._isModelRouterRetry),
+			tier: tier === "cheap" || tier === "medium" || tier === "expensive" ? tier : null,
+			risk: active.decision.risk,
+			reasonCode: active.decision.reasonCode,
+			switched: !modelsAreEqual(active.rootModel, active.routedModel),
+		};
 	}
 
 	/**
@@ -796,6 +856,11 @@ export class ModelRouterController {
 		const previousActiveModelRouterRoute = this._activeModelRouterRoute;
 		const previousModelRouterSessionBuffer = this._modelRouterSessionBuffer;
 		const previousModelRouterEscalationRequested = this._modelRouterEscalationRequested;
+		const previousActiveRoutedTurn = this._activeRoutedTurn;
+		// The POV snapshot reads this: the root is what the finally below restores, never a guess.
+		if (routeDecision) {
+			this._activeRoutedTurn = { rootModel: previousModel, routedModel, decision: routeDecision };
+		}
 		const bufferRoutedTurn = routeDecision?.tier === "cheap";
 		const originalHistoryLength = agent.state.messages.length;
 		let retryModel: Model<Api> | undefined;
@@ -1012,6 +1077,7 @@ export class ModelRouterController {
 			this._activeModelRouterRoute = previousActiveModelRouterRoute;
 			this._modelRouterSessionBuffer = previousModelRouterSessionBuffer;
 			this._modelRouterEscalationRequested = previousModelRouterEscalationRequested;
+			this._activeRoutedTurn = previousActiveRoutedTurn;
 		}
 
 		// The escalation retry is more provider work, which a cancelled submission does not get.

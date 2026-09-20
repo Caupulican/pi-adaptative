@@ -150,7 +150,11 @@ import {
 } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { isLocalOrManagedRouterModel } from "./model-router/tool-escalation.ts";
-import { formatModelRouterModel, ModelRouterController } from "./model-router-controller.ts";
+import {
+	type ForegroundRouteSnapshot,
+	formatModelRouterModel,
+	ModelRouterController,
+} from "./model-router-controller.ts";
 import { ModelSelectionController } from "./model-selection-controller.ts";
 import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
@@ -1520,6 +1524,9 @@ export class AgentSession {
 		const bridged = createRetentionDecisionEngine(engine);
 		return {
 			evaluate: async (program, state, options) => {
+				// The in-flight mark is what lets the POV bar show `JEV eval` only while a real
+				// evaluation runs; success/failure below always closes it.
+				this._semanticPlaneHealth.recordStart();
 				try {
 					const evaluation = await bridged.evaluate(program, state, options);
 					this._semanticPlaneHealth.recordSuccess();
@@ -1535,6 +1542,11 @@ export class AgentSession {
 	/** Observed health of this session's semantic plane. */
 	getSemanticPlaneHealth(): SemanticPlaneHealth {
 		return this._semanticPlaneHealth.getHealth(Boolean(this._steeringPlane?.decisionEngine));
+	}
+
+	/** Live foreground routing truth (root vs active model, route source) for the operator POV. */
+	getForegroundRouteSnapshot(): ForegroundRouteSnapshot {
+		return this._modelRouter.getForegroundRouteSnapshot();
 	}
 
 	/** The live operator projection owned by this session. */

@@ -44,6 +44,13 @@ export interface PathScopeDecision {
 	reasonCode: string;
 }
 
+/**
+ * Who chose the exact routed model: an operator tier pin (`manual`), the router's own deterministic
+ * pool ranking (`auto`), or the H-MoE expert selector (`hmoe`). Absent on decisions persisted before
+ * the field existed, which read as `manual` (the only selection that existed then).
+ */
+export type RouteSelectionSource = "manual" | "auto" | "hmoe";
+
 export interface RouteDecision {
 	tier: ModelTier;
 	model?: string;
@@ -53,6 +60,7 @@ export interface RouteDecision {
 	reasons: readonly string[];
 	fallbackFrom?: ModelTier;
 	createdAt?: string;
+	selection?: RouteSelectionSource;
 }
 
 export interface CapabilityEnvelope {

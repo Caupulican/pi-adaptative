@@ -4,7 +4,6 @@ import type { AgentSession } from "../../../core/agent-session.ts";
 import { formatFooterCostParts } from "../../../core/cost/cost-summary.ts";
 import { getFastModeStatus } from "../../../core/fast-mode.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
-import { semanticPlaneHealthGlyph } from "../../../core/system-one/semantic-plane-health.ts";
 import { stripAnsi, stripAnsiExceptSgr } from "../../../utils/ansi.ts";
 import { theme } from "../theme/theme.ts";
 
@@ -247,22 +246,9 @@ export class FooterComponent implements Component {
 			const sessionName = this.session.sessionManager.getSessionName();
 			if (sessionName) pwd = `${pwd} • ${sessionName}`;
 
-			// Every value here is read from live state: the semantic plane's observed health, the
-			// running worker count, and the projection's own proof counters.
-			const health = this.session.getSemanticPlaneHealth();
-			const projection = this.session.operatorProjection.getProjection();
-			const workers = projection.active_actors.filter((actor) => actor.kind !== "root").length;
-			const leftParts = [
-				theme.fg("dim", pwd),
-				theme.fg(health.state === "degraded" ? "warning" : "dim", semanticPlaneHealthGlyph(health)),
-			];
-			if (workers > 0) leftParts.push(theme.fg("dim", `${workers}w`));
-			if (projection.proof.total > 0) {
-				leftParts.push(theme.fg("dim", `proof ${projection.proof.satisfied}/${projection.proof.total}`));
-			}
-			leftParts.push(theme.fg("dim", `ctx ${contextPercent}%`));
-			const left = leftParts.join("  ·  ");
-			return [truncateToWidth(left, width, "…")];
+			// Operator truth (phase, actor, model, route, Jev, cost, proof, context) lives in the one
+			// POV bar above the editor. The footer row is location only, so nothing is shown twice.
+			return [truncateToWidth(theme.fg("dim", pwd), width, "…")];
 		}
 
 		// Replace home directory with ~

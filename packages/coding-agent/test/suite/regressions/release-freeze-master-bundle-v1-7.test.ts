@@ -32,8 +32,9 @@ import { OperatorProjectionController } from "../../../src/core/operator-project
 import { SemanticProjectRuleController } from "../../../src/core/project-rules/semantic-project-rule-controller.ts";
 import type { LiveWorkerAttempt } from "../../../src/core/supervision/types.ts";
 import { WorkerSemanticSupervisor } from "../../../src/core/supervision/worker-semantic-supervisor.ts";
-import { OperatorStatusComponent } from "../../../src/modes/interactive/components/operator-status.ts";
+import { OperatorPovBarComponent } from "../../../src/modes/interactive/components/operator-pov-bar.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
+import { stripAnsi } from "../../../src/utils/ansi.ts";
 
 class TestReleaseFreezeJevAdapter {
 	overrides: Record<string, unknown> = {};
@@ -610,7 +611,7 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 			expect(visible.some((e) => e.title.includes("Acquisition hardened"))).toBe(true);
 		});
 
-		it("FR-120, FR-121, FR-122, FR-135, FR-136: OperatorStatusComponent renders build, blocked, and done states cleanly", () => {
+		it("FR-120, FR-121, FR-122, FR-135, FR-136: the POV bar renders build, blocked, and done states in one row", () => {
 			const projController = new OperatorProjectionController({
 				objectiveId: "obj-tui-1",
 				title: "TUI Golden View",
@@ -623,38 +624,51 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 				proof: { satisfied: 7, total: 9, failing: 0, pending: 2 },
 			});
 
-			const component = new OperatorStatusComponent({
-				projectionController: projController,
+			const component = new OperatorPovBarComponent({
+				getProjection: () => projController.getProjection(),
+				getRouteSnapshot: () => ({
+					rootModel: "openai/gpt-5.6",
+					activeModel: "openai/gpt-5.6",
+					source: "direct",
+					tier: null,
+					risk: null,
+					reasonCode: null,
+					switched: false,
+				}),
+				getSemanticPlaneHealth: () => ({ state: "unknown" }),
+				getCostSummary: () => ({ currentCost: 0.021, subagentCost: 0, subagentReports: 0 }),
 			});
 
-			const buildLines = component.render(100);
-			expect(buildLines.length).toBeGreaterThanOrEqual(2);
-			expect(buildLines[0]).toContain("BUILD");
-			expect(buildLines[0]).toContain("Implementing settings panel");
-			expect(buildLines[1]).toContain("visual verification");
+			const buildLines = component.render(240);
+			expect(buildLines).toHaveLength(1);
+			const build = stripAnsi(buildLines[0]);
+			expect(build).toContain("WORKING build: Implementing settings panel");
+			expect(build).toContain("NEXT visual verification");
+			expect(build).toContain("PROOF 7/9");
+			expect(build).toContain("MODEL gpt-5.6");
+			expect(build).toContain("ROUTE direct");
+			expect(build).toContain("JEV ready");
+			expect(build).toContain("COST $0.021");
 
-			// Test Blocked state (FR-135: explains completed work + remaining block)
+			// Blocked state (FR-135): the block reason is the WORKING slot's whole content.
 			projController.transitionPhase("blocked", 4, {
 				currentAction: "Production deployment requested",
 				why: "Production deployment is outside the start charter authority",
 				proof: { satisfied: 8, total: 9, failing: 1, pending: 0 },
 			});
+			const blocked = stripAnsi(component.render(240)[0]);
+			expect(blocked).toContain("BLOCKED Production deployment is outside the start charter authority");
+			expect(blocked).toContain("PROOF 8/9");
 
-			const blockedLines = component.render(100);
-			expect(blockedLines[0]).toContain("BLOCKED");
-			expect(blockedLines[1]).toContain("Completed: 8/9");
-			expect(blockedLines[1]).toContain("outside the start charter authority");
-
-			// Test Done state (FR-136: shows delivery refs)
+			// Done state (FR-136): delivery refs stay visible.
 			projController.transitionPhase("done", 5, {
 				currentAction: "Commit 4a1b2c pushed to main",
 				nextAction: "Release complete",
 				proof: { satisfied: 9, total: 9, failing: 0, pending: 0 },
 			});
-
-			const doneLines = component.render(100);
-			expect(doneLines[0]).toContain("DONE");
-			expect(doneLines[1]).toContain("Delivered · proof 9/9 verified");
+			const done = stripAnsi(component.render(240)[0]);
+			expect(done).toContain("DONE Commit 4a1b2c pushed to main");
+			expect(done).toContain("PROOF 9/9");
 		});
 	});
 });
