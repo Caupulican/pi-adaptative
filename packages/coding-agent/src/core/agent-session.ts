@@ -1581,6 +1581,15 @@ export class AgentSession {
 		return this._acquisitionGate;
 	}
 
+	/**
+	 * Loads or reloads a single extension by path through the live extension runtime.
+	 * This is the owner that makes `extension` an activatable capability kind (ACT-009).
+	 */
+	async reloadExtension(extensionPath: string): Promise<void> {
+		await this._runtimeBuilder.reloadExtension(extensionPath);
+		this._notifyExtensionsChanged();
+	}
+
 	/** Live worker supervision bound to the real worker lifecycle. */
 	get workerSupervision(): WorkerSupervisionCoordinator {
 		return this._workerSupervision;

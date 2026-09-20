@@ -6,13 +6,23 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExecutionCharter } from "../autonomy/execution-charter.ts";
 import { EXPERT_ROUTING_SCHEMA_VERSION, type WorkerCapabilityRequest } from "../expert-routing/contracts.ts";
 import type { ExpertSelectionService } from "../expert-routing/service.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
 import { SteeringProtocolError } from "../steering/types.ts";
 import type { CapabilityCatalog } from "./capability-catalog.ts";
-import { compileCapabilityProofObligations } from "./capability-proof-obligations.ts";
+import {
+	CAPABILITY_KIND_SUPPORT,
+	type CapabilityKindSupport,
+	isCapabilityKindSupported,
+	replanToSupportedKind,
+	supportedCapabilityKinds,
+} from "./capability-kind-support.ts";
+import { compileCapabilityProofObligations, compileNodeProofCommand } from "./capability-proof-obligations.ts";
+import type { CapabilityProofRunnerPort } from "./capability-proof-runner.ts";
 import { type CapabilityNeed, CapabilityResolver } from "./capability-resolution.ts";
 import type {
 	CapabilityGap,
@@ -46,8 +56,101 @@ export interface CapabilityActivator {
 	activate(candidate: CandidateArtifact, spec: CapabilitySpec): Promise<{ active: boolean; projection: unknown }>;
 }
 
+/**
+ * The ephemeral-script activation smoke: load the artifact and invoke its entry point once.
+ * Activation means the capability ran, so the smoke calls it rather than merely importing it.
+ */
+export function activationSmokeSource(scriptPath: string): string {
+	return [
+		"const { pathToFileURL } = require('node:url');",
+		`const href = pathToFileURL(${JSON.stringify(scriptPath)}).href;`,
+		"import(href).then(async (loaded) => {",
+		"  const entry = loaded.default ?? loaded.run;",
+		"  if (typeof entry !== 'function') {",
+		"    console.error('capability entry point is not callable');",
+		"    process.exit(1);",
+		"  }",
+		"  await entry({});",
+		"}, (error) => {",
+		"  console.error('capability failed to load: ' + (error && error.message));",
+		"  process.exit(1);",
+		"}).catch((error) => {",
+		"  console.error('capability invocation failed: ' + (error && error.message));",
+		"  process.exit(1);",
+		"});",
+	].join("\n");
+}
+
+/** The capability kind a semantic adaptation-class choice selects. */
+export function capabilityKindForLevel(level: string): CapabilityKind {
+	switch (level) {
+		case "compose":
+		case "composition":
+			return "composition";
+		case "ephemeral_script":
+			return "ephemeral_script";
+		case "toolkit_script":
+			return "toolkit_script";
+		case "extension_or_tool":
+		case "extension":
+			return "extension";
+		case "tool":
+			return "tool";
+		case "skill":
+			return "skill";
+		case "runtime_patch":
+			return "runtime_patch";
+		case "provider_adapter":
+			return "provider_adapter";
+		default:
+			return "integration";
+	}
+}
+
+export class UnsupportedCapabilityKindError extends Error {
+	readonly requestedKind: CapabilityKind;
+	readonly reason: string;
+
+	constructor(requestedKind: CapabilityKind, reason: string) {
+		super(
+			`Capability kind '${requestedKind}' is not activatable by this runtime and no adequate supported kind replaces it: ${reason} (ACT-005)`,
+		);
+		this.name = "UnsupportedCapabilityKindError";
+		this.requestedKind = requestedKind;
+		this.reason = reason;
+	}
+}
+
+/** Returns the kind to build, replanning an unsupported request or refusing it outright. */
+export function resolveActivatableKind(
+	requestedKind: CapabilityKind,
+	matrix: Readonly<Record<CapabilityKind, CapabilityKindSupport>>,
+): CapabilityKind {
+	if (isCapabilityKindSupported(requestedKind, matrix)) return requestedKind;
+	const replanned = replanToSupportedKind(requestedKind, matrix);
+	if (!replanned) {
+		throw new UnsupportedCapabilityKindError(
+			requestedKind,
+			matrix[requestedKind]?.reason ?? "no support record for this kind",
+		);
+	}
+	return replanned;
+}
+
+/**
+ * Digest of the artifact's bytes on disk, or null when it has none.
+ *
+ * The path comes from `fileURLToPath`, never from stripping the `file://` prefix: a file URL
+ * percent-encodes characters that are legal in paths (`~` becomes `%7E`) and carries a leading
+ * slash before a Windows drive letter, so a string strip yields a path that exists nowhere.
+ */
 export function computeArtifactDiskDigest(artifactUri: string): string | null {
-	const filePath = artifactUri.replace("file://", "");
+	let filePath: string;
+	try {
+		filePath = artifactUri.startsWith("file:") ? fileURLToPath(artifactUri) : artifactUri;
+	} catch {
+		return null;
+	}
 	if (existsSync(filePath)) {
 		const bytes = readFileSync(filePath);
 		return createHash("sha256").update(bytes).digest("hex");
@@ -89,6 +192,17 @@ export interface AdaptiveCapabilityControllerDeps {
 	readonly scriptRegistry?: {
 		register?(script: unknown): void;
 	};
+	/** Bounded execution owner for the ephemeral-script activation smoke (ACT-007). */
+	readonly proofRunner?: CapabilityProofRunnerPort;
+	/** Session working directory the activation smoke runs in. */
+	readonly cwd?: string;
+	/** Live extension runtime: loads an extension by path and exposes the active registry (ACT-009). */
+	readonly extensionRuntime?: {
+		reload(extensionPath: string): Promise<void>;
+		listActive(): readonly { name: string; path: string }[];
+	};
+	/** Capability-kind support matrix; defaults to the runtime's own. */
+	readonly kindSupport?: Readonly<Record<CapabilityKind, CapabilityKindSupport>>;
 }
 
 export class AdaptiveCapabilityController {
@@ -102,6 +216,8 @@ export class AdaptiveCapabilityController {
 	private readonly activator?: CapabilityActivator;
 	private readonly activators = new Map<CapabilityKind, CapabilityActivator>();
 	private readonly runtimeAdaptation?: AdaptiveCapabilityControllerDeps["runtimeAdaptation"];
+	/** The capability kinds this runtime can actually activate (ACT-001). */
+	readonly kindSupport: Readonly<Record<CapabilityKind, CapabilityKindSupport>>;
 	private readonly gaps = new Map<string, CapabilityGap>();
 	private readonly records = new Map<string, CapabilityRecord>();
 
@@ -115,6 +231,7 @@ export class AdaptiveCapabilityController {
 		this.mechanicalVerifier = deps.mechanicalVerifier;
 		this.activator = deps.activator;
 		this.runtimeAdaptation = deps.runtimeAdaptation;
+		this.kindSupport = deps.kindSupport ?? CAPABILITY_KIND_SUPPORT;
 
 		this.registerDefaultActivators();
 		if (deps.activators) {
@@ -124,6 +241,11 @@ export class AdaptiveCapabilityController {
 		}
 	}
 
+	/**
+	 * Registers an activator for every kind the runtime can actually activate, and none for the
+	 * kinds it cannot. An unsupported kind therefore has no activator at all, so activation fails
+	 * closed at the "no activator registered" check rather than returning a metadata projection.
+	 */
 	private registerDefaultActivators(): void {
 		this.activators.set("ephemeral_script", {
 			activate: async (candidate, spec) => {
@@ -131,29 +253,40 @@ export class AdaptiveCapabilityController {
 				if (!code || code.trim().length === 0) {
 					throw new Error("Empty code for ephemeral script (ERC-030)");
 				}
-				if (candidate.artifactUri) {
-					const diskDigest = computeArtifactDiskDigest(candidate.artifactUri);
-					if (diskDigest && candidate.digest && diskDigest !== candidate.digest) {
-						throw new Error(
-							`Ephemeral script digest mismatch: expected ${candidate.digest}, got ${diskDigest} on disk (ERC-030)`,
-						);
-					}
+				if (!candidate.artifactUri) {
+					throw new Error("Ephemeral script activation requires an artifact on disk (ACT-007)");
 				}
-				let syntaxValid = false;
-				try {
-					new Function(code);
-					syntaxValid = true;
-				} catch {
-					syntaxValid =
-						code.includes("export") ||
-						code.includes("import") ||
-						code.includes("function") ||
-						code.includes("=>");
+				const diskDigest = computeArtifactDiskDigest(candidate.artifactUri);
+				if (!diskDigest) {
+					throw new Error(`Ephemeral script artifact ${candidate.artifactUri} has no bytes on disk (ACT-007)`);
 				}
-				if (!syntaxValid) {
-					throw new Error("Invalid syntax for ephemeral script (ERC-030)");
+				if (candidate.digest && diskDigest !== candidate.digest) {
+					throw new Error(
+						`Ephemeral script digest mismatch: expected ${candidate.digest}, got ${diskDigest} on disk (ERC-030)`,
+					);
 				}
-				const scriptPath = candidate.artifactUri ?? `/tmp/scripts/${spec.capability_id}.mjs`;
+
+				// ACT-007: the smoke is an actual bounded execution of the artifact. A syntax check and a
+				// digest say the bytes are well-formed, not that the capability runs.
+				const proofRunner = this.deps.proofRunner;
+				if (!proofRunner) {
+					throw new Error(
+						"Ephemeral script activation requires the capability proof runner for its execution smoke (ACT-007)",
+					);
+				}
+				const scriptPath = fileURLToPath(candidate.artifactUri);
+				const smoke = await proofRunner.runProof({
+					proofId: `${spec.capability_id}:activation_smoke`,
+					kind: "task_specific_test",
+					command: compileNodeProofCommand(activationSmokeSource(scriptPath)),
+					cwd: this.deps.cwd ?? dirname(scriptPath),
+				});
+				if (smoke.status !== "passed") {
+					throw new Error(
+						`Ephemeral script activation smoke failed for '${spec.capability_id}' (exit ${smoke.exitCode}): ${smoke.outputTail.trim()} (ACT-007)`,
+					);
+				}
+
 				return {
 					active: true,
 					projection: {
@@ -161,54 +294,11 @@ export class AdaptiveCapabilityController {
 						capabilityId: candidate.capabilityId,
 						kind: "ephemeral_script",
 						scriptPath,
-						syntaxValid: true,
-						runnable: true,
 						lookupResult: "active_ephemeral",
-						smokeEvidence: "syntax_and_digest_verified",
-						digest: candidate.digest,
-						activatedAt: new Date().toISOString(),
-					},
-				};
-			},
-		});
-
-		this.activators.set("toolkit_script", {
-			activate: async (candidate, spec) => {
-				const code = candidate.code ?? "";
-				if (!code || code.trim().length === 0) {
-					throw new Error("Empty code for toolkit script (ERC-031)");
-				}
-				const registry = (this.deps as any)?.scriptRegistry;
-				if (!registry) {
-					throw new Error("ScriptRegistry port is required for toolkit_script activation (ERC-031)");
-				}
-				const entrypoint = candidate.artifactUri ?? `toolkit/${spec.capability_id}.mjs`;
-				registry.register?.({
-					name: spec.capability_id,
-					description: spec.purpose,
-					runner: "bash",
-					path: entrypoint,
-				});
-
-				const verified = registry.has
-					? registry.has(spec.capability_id)
-					: registry.get
-						? Boolean(registry.get(spec.capability_id))
-						: true;
-				if (!verified) {
-					throw new Error(`ScriptRegistry lookup failed for ${spec.capability_id} after registration (ERC-031)`);
-				}
-
-				return {
-					active: true,
-					projection: {
-						operationId: `op-toolkit-${spec.capability_id}`,
-						capabilityId: candidate.capabilityId,
-						kind: "toolkit_script",
-						entrypoint,
-						registered: true,
-						lookupResult: "registered_in_script_registry",
-						smokeEvidence: "registry_lookup_verified",
+						smokeEvidence: smoke.evidenceRef,
+						smokeExitCode: smoke.exitCode,
+						smokeOutputDigest: smoke.outputDigest,
+						smokeElapsedMs: smoke.elapsedMs,
 						digest: candidate.digest,
 						activatedAt: new Date().toISOString(),
 					},
@@ -218,149 +308,35 @@ export class AdaptiveCapabilityController {
 
 		this.activators.set("extension", {
 			activate: async (candidate, spec) => {
-				const code = candidate.code ?? "";
-				if (!code && !candidate.artifactUri) {
-					throw new Error("Missing extension implementation (ERC-032)");
+				if (!candidate.artifactUri) {
+					throw new Error("Extension activation requires an artifact on disk (ACT-009)");
 				}
-				const runner = (this.deps as any)?.extensionRunner;
-				if (!runner) {
-					throw new Error("ExtensionRunner is required for extension activation (ERC-032)");
+				const extensions = this.deps.extensionRuntime;
+				if (!extensions) {
+					throw new Error("Extension activation requires the live extension runtime (ACT-009)");
 				}
-				if (typeof runner.reload === "function") {
-					await runner.reload(candidate.artifactUri);
+				const extensionPath = fileURLToPath(candidate.artifactUri);
+
+				// ACT-009: the real owner loads it, and the live registry is queried afterwards. A reload
+				// that raises, or a registry that does not contain the extension, is not activation.
+				await extensions.reload(extensionPath);
+				const loaded = extensions.listActive().find((active) => active.path === extensionPath);
+				if (!loaded) {
+					throw new Error(
+						`Extension '${spec.capability_id}' is absent from the live extension registry after reload (ACT-009)`,
+					);
 				}
+
 				return {
 					active: true,
 					projection: {
 						operationId: `op-extension-${spec.capability_id}`,
 						capabilityId: candidate.capabilityId,
 						kind: "extension",
-						extensionId: spec.capability_id,
-						toolNames: [spec.capability_id],
-						registeredInRegistry: true,
+						extensionId: loaded.name,
+						extensionPath,
 						lookupResult: "active_in_extension_runner",
-						smokeEvidence: "extension_reload_verified",
-						digest: candidate.digest,
-						activatedAt: new Date().toISOString(),
-					},
-				};
-			},
-		});
-
-		this.activators.set("tool", {
-			activate: async (candidate, spec) => {
-				const code = candidate.code ?? "";
-				if (!code && !candidate.artifactUri) {
-					throw new Error("Missing tool implementation (ERC-032)");
-				}
-				return {
-					active: true,
-					projection: {
-						operationId: `op-tool-${spec.capability_id}`,
-						capabilityId: candidate.capabilityId,
-						kind: "tool",
-						toolName: spec.capability_id,
-						schemaValid: true,
-						registered: true,
-						lookupResult: "tool_registered",
-						smokeEvidence: "tool_schema_verified",
-						digest: candidate.digest,
-						activatedAt: new Date().toISOString(),
-					},
-				};
-			},
-		});
-
-		this.activators.set("skill", {
-			activate: async (candidate, spec) => {
-				const content = candidate.code ?? "";
-				if (!content || content.trim().length === 0) {
-					throw new Error("Missing skill instructions (ERC-033)");
-				}
-				const vault = (this.deps as any)?.skillVault;
-				if (!vault) {
-					throw new Error("SkillVault is required for skill activation (ERC-033)");
-				}
-				const loadRes = await vault.load?.(spec.capability_id, "model", false);
-				if (loadRes && loadRes.ok === false) {
-					throw new Error(`SkillVault load failed for '${spec.capability_id}': ${loadRes.reason} (ERC-033)`);
-				}
-				return {
-					active: true,
-					projection: {
-						operationId: `op-skill-${spec.capability_id}`,
-						capabilityId: candidate.capabilityId,
-						kind: "skill",
-						skillName: spec.capability_id,
-						instructionsPresent: true,
-						registeredInVault: true,
-						lookupResult: "active_in_skill_vault",
-						smokeEvidence: "vault_load_verified",
-						digest: candidate.digest,
-						activatedAt: new Date().toISOString(),
-					},
-				};
-			},
-		});
-
-		this.activators.set("composition", {
-			activate: async (candidate, spec) => {
-				const childIds = (spec.interface?.inputs as string[]) ?? [];
-				for (const childId of childIds) {
-					const existing = this.catalog.get(childId);
-					if (!existing) {
-						throw new Error(`Composition dependency missing child capability '${childId}' (ERC-035)`);
-					}
-				}
-				return {
-					active: true,
-					projection: {
-						operationId: `op-comp-${spec.capability_id}`,
-						capabilityId: candidate.capabilityId,
-						kind: "composition",
-						inputPorts: spec.interface.inputs,
-						outputPorts: spec.interface.outputs,
-						wired: true,
-						lookupResult: "child_dependencies_verified",
-						smokeEvidence: "composed_smoke_verified",
-						digest: candidate.digest,
-						activatedAt: new Date().toISOString(),
-					},
-				};
-			},
-		});
-
-		this.activators.set("integration", {
-			activate: async (candidate, spec) => {
-				return {
-					active: true,
-					projection: {
-						operationId: `op-integration-${spec.capability_id}`,
-						capabilityId: candidate.capabilityId,
-						kind: "integration",
-						target: spec.purpose,
-						adapterMounted: true,
-						lookupResult: "integration_adapter_mounted",
-						smokeEvidence: "integration_health_verified",
-						digest: candidate.digest,
-						activatedAt: new Date().toISOString(),
-					},
-				};
-			},
-		});
-
-		this.activators.set("provider_adapter", {
-			activate: async (candidate, spec) => {
-				return {
-					active: true,
-					projection: {
-						operationId: `op-provider-${spec.capability_id}`,
-						capabilityId: candidate.capabilityId,
-						kind: "provider_adapter",
-						providerId: spec.capability_id,
-						adapterMounted: true,
-						lookupResult: "provider_adapter_mounted",
-						smokeEvidence: "provider_health_verified",
+						smokeEvidence: `extension_registry_lookup:${loaded.name}`,
 						digest: candidate.digest,
 						activatedAt: new Date().toISOString(),
 					},
@@ -393,7 +369,8 @@ export class AdaptiveCapabilityController {
 							restartRequired: res.restartRequired,
 							rolledBack: res.rolledBack,
 							lookupResult: "runtime_adaptation_committed",
-							smokeEvidence: "runtime_update_verified",
+							// ACT-016: the evidence is the coordinator's own transaction, not a constant.
+							smokeEvidence: `runtime_adaptation:${res.transactionId ?? spec.capability_id}:applied`,
 							digest: candidate.digest,
 							activatedAt: new Date().toISOString(),
 						},
@@ -412,7 +389,7 @@ export class AdaptiveCapabilityController {
 							restartRequired: false,
 							rolledBack: Boolean(staged.rolledBack),
 							lookupResult: "runtime_adaptation_committed",
-							smokeEvidence: "runtime_update_verified",
+							smokeEvidence: `runtime_adaptation:${staged.patchId ?? spec.capability_id}:committed`,
 							digest: candidate.digest,
 							activatedAt: new Date().toISOString(),
 						},
@@ -495,14 +472,9 @@ export class AdaptiveCapabilityController {
 			"JEV-010",
 			{
 				gap,
-				suggestedLevels: [
-					"ephemeral_script",
-					"toolkit_script",
-					"extension_or_tool",
-					"skill",
-					"integration_or_adapter",
-					"runtime_patch",
-				],
+				// ACT-004: the choice set contains only kinds this runtime can actually activate, so a
+				// semantic selection can never land on an unsupported one.
+				suggestedLevels: supportedCapabilityKinds(this.kindSupport),
 			},
 			{
 				objectiveId: input.objectiveId,
@@ -517,26 +489,13 @@ export class AdaptiveCapabilityController {
 			input.need.kind ??
 			(synthesisCert.answers.adaptation_class as { choice?: string })?.choice ??
 			"ephemeral_script";
-		const kind: CapabilityKind =
-			chosenLevelStr === "compose" || chosenLevelStr === "composition"
-				? "composition"
-				: chosenLevelStr === "ephemeral_script"
-					? "ephemeral_script"
-					: chosenLevelStr === "toolkit_script"
-						? "toolkit_script"
-						: chosenLevelStr === "extension_or_tool" || chosenLevelStr === "extension"
-							? "extension"
-							: chosenLevelStr === "tool"
-								? "tool"
-								: chosenLevelStr === "skill"
-									? "skill"
-									: chosenLevelStr === "runtime_patch"
-										? "runtime_patch"
-										: chosenLevelStr === "provider_adapter"
-											? "provider_adapter"
-											: "integration";
+		const requestedKind = capabilityKindForLevel(chosenLevelStr);
 
-		const capabilityId = `cap_${chosenLevelStr}_${Date.now()}`;
+		// ACT-005: a stale spec or an explicit need naming an unsupported kind is replanned onto the
+		// lowest adequate supported kind, or blocked. It is never activated as requested.
+		const kind = resolveActivatableKind(requestedKind, this.kindSupport);
+
+		const capabilityId = `cap_${kind}_${Date.now()}`;
 		const spec: CapabilitySpec = {
 			schema_version: "1.0",
 			capability_id: capabilityId,

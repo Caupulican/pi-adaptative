@@ -12,9 +12,14 @@ import type { ObjectiveExecutionController } from "../objective-execution/object
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
 import type { AdaptiveCapabilityController } from "./adaptive-capability-controller.ts";
 import type { AdaptiveResolutionController } from "./adaptive-resolution-controller.ts";
+import {
+	CAPABILITY_KIND_SUPPORT,
+	type CapabilityKindSupport,
+	findBrokenAdvertisedKinds,
+} from "./capability-kind-support.ts";
 import type { RuntimeAdaptationCoordinator } from "./runtime-adaptation-coordinator.ts";
 import type { SpecialistSynthesisController } from "./specialist-synthesis-controller.ts";
-import type { PortProvenance } from "./types.ts";
+import type { CapabilityKind, PortProvenance } from "./types.ts";
 
 export interface AdaptiveRuntimeReadinessDeps {
 	readonly steeringPlane?: SystemOneSteeringPlane;
@@ -33,6 +38,8 @@ export interface AdaptiveRuntimeReadinessDeps {
 	readonly taskProfileWriter?: unknown;
 	readonly contractFactory?: unknown;
 	readonly isUnbound?: boolean;
+	/** Capability-kind support matrix; defaults to the runtime's own. */
+	readonly kindSupport?: Readonly<Record<CapabilityKind, CapabilityKindSupport>>;
 	readonly mode?: "production" | "test";
 	readonly provenance?: PortProvenance;
 }
@@ -57,6 +64,11 @@ export interface AdaptiveRuntimeStatus {
 	readonly capabilityCatalogRevision: number;
 	readonly responsibilityDiscoveryMethods: readonly string[];
 	readonly hmoeHealth: "healthy" | "degraded" | "unavailable";
+	/**
+	 * Per-kind activation truth (ACT-001, ACT-006). An unavailable optional kind is reported and
+	 * does not make the runtime unready; an advertised kind with no owner does.
+	 */
+	readonly capabilityKindSupport: readonly CapabilityKindSupport[];
 	readonly issues: readonly string[];
 }
 
@@ -67,8 +79,23 @@ export class AdaptiveRuntimeReadiness {
 		this.deps = deps;
 	}
 
+	/** The runtime's capability-kind support matrix, as readiness reports it. */
+	getCapabilityKindSupport(): readonly CapabilityKindSupport[] {
+		const matrix = this.deps.kindSupport ?? this.deps.adaptiveCapabilities?.kindSupport ?? CAPABILITY_KIND_SUPPORT;
+		return Object.values(matrix);
+	}
+
 	getStatus(): AdaptiveRuntimeStatus {
 		const issues: string[] = [];
+
+		// ACT-006: an advertised-available kind with no owner is a broken advertisement, which makes
+		// the runtime unready. A kind that is simply unavailable is a stated limit, not a fault.
+		const matrix = this.deps.kindSupport ?? this.deps.adaptiveCapabilities?.kindSupport ?? CAPABILITY_KIND_SUPPORT;
+		for (const broken of findBrokenAdvertisedKinds(matrix)) {
+			issues.push(
+				`capability kind '${broken.kind}' is advertised as available but has no activation owner (ACT-002)`,
+			);
+		}
 
 		if (this.deps.isUnbound === true) {
 			issues.push(
@@ -200,6 +227,7 @@ export class AdaptiveRuntimeReadiness {
 			capabilityCatalogRevision: capRev,
 			responsibilityDiscoveryMethods: discoveryMethods,
 			hmoeHealth,
+			capabilityKindSupport: Object.values(matrix),
 			issues,
 		};
 	}

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Agent } from "@caupulican/pi-agent-core/agent";
 import { convertToLlm } from "@caupulican/pi-agent-core/messages";
 import { getDefaultSessionDir, SessionManager } from "@caupulican/pi-agent-core/session";
@@ -967,8 +967,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 
 		const scriptRegistry = new RealScriptRegistry();
+		const proofRunner = new CapabilityProofRunner();
 		const mechanicalVerifier = new RealMechanicalVerifier({
-			proofRunner: new CapabilityProofRunner(),
+			proofRunner,
 			scriptRegistry,
 			extensionRunner: session.extensionRunner,
 			skillVault: session.getSkillVault(),
@@ -1004,6 +1005,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			cwd,
 			getOwnerRules,
 			projectRules: session.projectRules,
+			proofRunner,
+			// The live extension runtime: loads an extension by path and exposes the active registry,
+			// which is what makes `extension` an activatable kind rather than an advertised one.
+			extensionRuntime: {
+				reload: (extensionPath) => session.reloadExtension(extensionPath),
+				listActive: () =>
+					session.extensionRunner.activeExtensions.map((extension) => ({
+						// `resolvedPath` is what the runtime actually loaded, which is what an
+						// activation lookup has to match against the artifact it was given.
+						name: basename(extension.path),
+						path: extension.resolvedPath,
+					})),
+			},
 		});
 
 		session.attachAdaptiveRuntime({ ...stack, charter });

@@ -1,6 +1,8 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	COORDINATOR_MAX_LINES,
@@ -12,6 +14,7 @@ import {
 	AdaptiveRuntimeReadiness,
 	CandidateDiscoveryService,
 	CapabilityCatalog,
+	CapabilityProofRunner,
 	compileDecisionProgramForCheckpoint,
 	compileExecutionCharter,
 	DEFAULT_STEERING_POLICY,
@@ -419,22 +422,29 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 						bindings: [{ provider: "anthropic", model_id: "claude-3-7-sonnet", thinking_level: "medium" }],
 					}),
 				} as never,
+				// Activation must succeed for the run to reach the task-proof gate, so the builder writes
+				// a real artifact and the activation owner is supplied. The verifier still has no
+				// task-proof runner, which is what this case is about.
 				builder: {
-					build: async (_spec) => ({
-						candidateId: "c-1",
-						capabilityId: _spec.capability_id,
-						kind: _spec.kind,
-						digest: "sha256-abc",
-						code: "export const ok = true;",
-					}),
+					build: async (_spec) => {
+						const directory = mkdtempSync(join(tmpdir(), "pi-ph060-"));
+						const artifactPath = join(directory, `${_spec.capability_id}.mjs`);
+						const code = "export default async function run() { return true; }\n";
+						writeFileSync(artifactPath, code, "utf-8");
+						return {
+							capabilityId: _spec.capability_id,
+							kind: _spec.kind,
+							digest: createHash("sha256").update(code).digest("hex"),
+							code,
+							artifactUri: pathToFileURL(artifactPath).href,
+						};
+					},
 				},
+				proofRunner: new CapabilityProofRunner(),
 				mechanicalVerifier: {
 					verifyCandidate: async () => ({ passed: true, testCount: 1, failures: [] }),
 					verifyActivation: async () => true,
 					// missing runTaskSpecificProof
-				},
-				activator: {
-					activate: async () => ({ active: true, projection: {} }),
 				},
 			});
 

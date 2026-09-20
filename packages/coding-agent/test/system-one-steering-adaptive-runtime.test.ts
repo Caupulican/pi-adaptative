@@ -1,3 +1,8 @@
+import { createHash } from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
 	AdaptationCycleError,
@@ -7,6 +12,7 @@ import {
 	AdaptiveResolutionController,
 	CandidateDiscoveryService,
 	CapabilityCatalog,
+	CapabilityProofRunner,
 	CapabilityResolver,
 	type CapabilitySpec,
 	compileExecutionCharter,
@@ -350,15 +356,31 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 			const controller = new AdaptiveCapabilityController({
 				steering: plane,
 				catalog,
-				builder: {
-					build: async (_spec) => ({
-						candidateId: "cand-tool-1",
-						capabilityId: _spec.capability_id,
-						kind: _spec.kind,
-						code: "export function run() { return true; }",
-						digest: "sha256-mock-digest",
+				// The builder's model binding must be an actual H-MoE selection; this test's subject is
+				// the synthesis pipeline, so the selection is a fixed one rather than absent.
+				experts: {
+					select: async () => ({
+						primary: { provider: "anthropic", model_id: "claude-3-7-sonnet", thinking_level: "medium" },
+						bindings: [{ provider: "anthropic", model_id: "claude-3-7-sonnet", thinking_level: "medium" }],
 					}),
+				} as never,
+				builder: {
+					// Activation smokes the artifact by running it, so the builder produces a real one.
+					build: async (_spec) => {
+						const directory = mkdtempSync(join(tmpdir(), "pi-s1a-capability-"));
+						const artifactPath = join(directory, `${_spec.capability_id}.mjs`);
+						const code = "export default async function run() { return true; }\n";
+						writeFileSync(artifactPath, code, "utf-8");
+						return {
+							capabilityId: _spec.capability_id,
+							kind: _spec.kind,
+							code,
+							digest: createHash("sha256").update(code).digest("hex"),
+							artifactUri: pathToFileURL(artifactPath).href,
+						};
+					},
 				},
+				proofRunner: new CapabilityProofRunner(),
 				mechanicalVerifier: {
 					verifyCandidate: async (_candidate, _spec) => ({
 						passed: true,

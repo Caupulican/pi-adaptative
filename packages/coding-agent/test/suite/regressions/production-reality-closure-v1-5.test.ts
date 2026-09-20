@@ -848,14 +848,8 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 			const deps = createStandardLiveDependencies();
 			const catalog = new CapabilityCatalog();
 
-			let scriptRegistered = false;
-			const mockScriptRegistry = {
-				register: (script: any) => {
-					scriptRegistered = true;
-					expect(script.name).toBeDefined();
-				},
-			};
-
+			// toolkit_script has no executing owner, so it replans onto the real extension owner.
+			const loadedByRuntime: string[] = [];
 			const controller = new AdaptiveCapabilityController({
 				steering: deps.steeringPlane,
 				catalog,
@@ -866,7 +860,12 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 					verifyActivation: async () => true,
 					runTaskSpecificProof: async () => "proof_passed",
 				},
-				scriptRegistry: mockScriptRegistry,
+				extensionRuntime: {
+					reload: async (extensionPath: string) => {
+						loadedByRuntime.push(extensionPath);
+					},
+					listActive: () => loadedByRuntime.map((path) => ({ name: "synthesized", path })),
+				},
 			});
 
 			const established = await controller.resolveOrBuild({
@@ -880,7 +879,8 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 
 			expect(established.capabilityId).toBeDefined();
 			expect(established.activation?.active).toBe(true);
-			expect(scriptRegistered).toBe(true);
+			expect(established.kind).toBe("extension");
+			expect(loadedByRuntime).toHaveLength(1);
 
 			// Verify durable task runtime recorded the builder's attempt
 			const snapshot = deps.durableTaskRuntime.getSnapshot();
@@ -899,21 +899,7 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 			const deps = createStandardLiveDependencies();
 			const catalog = new CapabilityCatalog();
 
-			let extensionReloaded = false;
-			const mockExtensionRunner = {
-				reload: async () => {
-					extensionReloaded = true;
-				},
-			};
-
-			let skillLoaded = false;
-			const mockSkillVault = {
-				load: async () => {
-					skillLoaded = true;
-					return { ok: true };
-				},
-			};
-
+			const loadedByRuntime: string[] = [];
 			const controller = new AdaptiveCapabilityController({
 				steering: deps.steeringPlane,
 				catalog,
@@ -924,27 +910,32 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 					verifyActivation: async () => true,
 					runTaskSpecificProof: async () => "proof_passed",
 				},
-				extensionRunner: mockExtensionRunner,
-				skillVault: mockSkillVault,
+				extensionRuntime: {
+					reload: async (extensionPath: string) => {
+						loadedByRuntime.push(extensionPath);
+					},
+					listActive: () => loadedByRuntime.map((path) => ({ name: "synthesized", path })),
+				},
 			});
 
-			// Extension activation
+			// Extension activation goes through the real load-and-look-up owner.
 			const extResult = await controller.resolveOrBuild({
 				objectiveId: "obj-ext",
 				taskId: "task-ext",
 				need: { requiredOutcome: "Mount sqlite custom tool", kind: "extension" },
 			});
 			expect(extResult.activation?.active).toBe(true);
-			expect(extensionReloaded).toBe(true);
+			expect(loadedByRuntime).toHaveLength(1);
 
-			// Skill activation
-			const skillResult = await controller.resolveOrBuild({
-				objectiveId: "obj-skill",
-				taskId: "task-skill",
-				need: { requiredOutcome: "Load refactoring patterns", kind: "skill" },
-			});
-			expect(skillResult.activation?.active).toBe(true);
-			expect(skillLoaded).toBe(true);
+			// PRC-048, ACT-011: skill has no activating owner in this runtime, and nothing at or above
+			// its level does either, so the request blocks rather than returning a synthetic success.
+			await expect(
+				controller.resolveOrBuild({
+					objectiveId: "obj-skill",
+					taskId: "task-skill",
+					need: { requiredOutcome: "Load refactoring patterns", kind: "skill" },
+				}),
+			).rejects.toThrow(/not activatable by this runtime/);
 		});
 	});
 

@@ -41,6 +41,7 @@ import {
 import { AdaptiveResolutionController } from "./adaptive-resolution-controller.ts";
 import { AdaptiveRuntimeReadiness } from "./adaptive-runtime-readiness.ts";
 import { CapabilityCatalog } from "./capability-catalog.ts";
+import type { CapabilityProofRunnerPort } from "./capability-proof-runner.ts";
 import {
 	createRuntimeUpdateAdapterFromController,
 	RuntimeAdaptationCoordinator,
@@ -110,6 +111,13 @@ export interface CreateAdaptiveRuntimeStackOptions {
 	readonly getOwnerRules?: () => string;
 	/** Root semantic project rules, consulted at task postflight and completion. */
 	readonly projectRules?: ObjectiveExecutionControllerDeps["projectRules"];
+	/** Bounded execution owner for the ephemeral-script activation smoke (ACT-007). */
+	readonly proofRunner?: CapabilityProofRunnerPort;
+	/** Live extension runtime owning extension activation and lookup (ACT-009). */
+	readonly extensionRuntime?: {
+		reload(extensionPath: string): Promise<void>;
+		listActive(): readonly { name: string; path: string }[];
+	};
 }
 
 /**
@@ -332,6 +340,11 @@ function assembleAdaptiveRuntimeStack(
 		skillVault: options.skillVault as any,
 		extensionRunner: options.extensionRunner as any,
 		scriptRegistry: options.scriptRegistry as any,
+		// Activation owners: bounded execution for the ephemeral-script smoke, and the live
+		// extension runtime for extension load + registry lookup (ACT-007, ACT-009).
+		proofRunner: options.proofRunner,
+		extensionRuntime: options.extensionRuntime,
+		cwd: options.cwd,
 	});
 
 	// 5. Specialist synthesis

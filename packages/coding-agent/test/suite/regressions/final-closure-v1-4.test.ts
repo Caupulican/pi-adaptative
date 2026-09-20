@@ -1,6 +1,8 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	AdaptiveCapabilityController,
@@ -8,6 +10,7 @@ import {
 	AdaptiveRuntimeReadiness,
 	CandidateDiscoveryService,
 	CapabilityCatalog,
+	CapabilityProofRunner,
 	compileExecutionCharter,
 	createAdaptiveRuntimeStack,
 	DEFAULT_STEERING_POLICY,
@@ -253,14 +256,23 @@ describe("Final Closure v1.4 Regressions (FC-001..FC-090)", () => {
 				steering: plane,
 				catalog,
 				experts: expertService as any,
+				// Activation now runs the artifact, so the builder writes a real one.
 				builder: {
-					build: async (spec) => ({
-						capabilityId: spec.capability_id,
-						kind: spec.kind,
-						digest: "sha256-real",
-						code: "export const real = true;",
-					}),
+					build: async (spec) => {
+						const directory = mkdtempSync(join(tmpdir(), "pi-fc010-"));
+						const artifactPath = join(directory, `${spec.capability_id}.mjs`);
+						const code = "export default async function run() { return true; }\n";
+						writeFileSync(artifactPath, code, "utf-8");
+						return {
+							capabilityId: spec.capability_id,
+							kind: spec.kind,
+							digest: createHash("sha256").update(code).digest("hex"),
+							code,
+							artifactUri: pathToFileURL(artifactPath).href,
+						};
+					},
 				},
+				proofRunner: new CapabilityProofRunner(),
 				mechanicalVerifier: {
 					verifyCandidate: async () => ({ passed: true, testCount: 1, failures: [] }),
 					verifyActivation: async () => true,
@@ -281,6 +293,10 @@ describe("Final Closure v1.4 Regressions (FC-001..FC-090)", () => {
 			expect(hmoeSelected).toBe(true);
 			expect(result.activation?.active).toBe(true);
 			expect(result.activation?.method).toBe("ephemeral_script_activation");
+			// ACT-016: the activation evidence is the real execution, not an asserted claim.
+			const projection = result.activation?.projection as Record<string, unknown> | undefined;
+			expect(projection?.smokeExitCode).toBe(0);
+			expect(String(projection?.smokeEvidence)).toContain("proof:");
 		});
 
 		it("FC-011, FC-012, FC-015: runtime patch routes to RuntimeAdaptationCoordinator with real evidence reaching JEV-015", async () => {

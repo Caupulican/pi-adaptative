@@ -17,10 +17,12 @@ import {
 	CapabilityProofRunner,
 	compileCapabilityProofObligations,
 	createProductionAdaptiveRuntimeStack,
+	isCapabilityKindSupported,
 	RealCapabilityBuilder,
 	RealMechanicalVerifier,
 	RealScriptRegistry,
 	RealWorkerDispatcher,
+	replanToSupportedKind,
 	SpecialistCatalog,
 } from "../../../src/core/adaptive/index.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
@@ -657,8 +659,14 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 	});
 
 	describe("Cluster 3: Capability Activators & Fail-Closed Behavior (ERC-030..ERC-038)", () => {
-		it("ERC-031, ERC-037, ERC-038: toolkit script registers in ScriptRegistry and fails closed if missing", async () => {
+		it("ERC-031, ACT-008: toolkit_script is unsupported and replans onto a kind with a real owner", async () => {
 			const deps = createStandardLiveDependencies();
+			// run_toolkit_script resolves from settings.toolkit.scripts, so registering into the
+			// adaptive script registry is not activation; the kind is unavailable and replans.
+			expect(isCapabilityKindSupported("toolkit_script")).toBe(false);
+			expect(replanToSupportedKind("toolkit_script")).toBe("extension");
+
+			const loadedByRuntime: string[] = [];
 			const controller = new AdaptiveCapabilityController({
 				steering: deps.steeringPlane,
 				catalog: new CapabilityCatalog(),
@@ -666,6 +674,12 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 				builder: deps.capabilityBuilder,
 				mechanicalVerifier: deps.mechanicalVerifier,
 				scriptRegistry: deps.scriptRegistry,
+				extensionRuntime: {
+					reload: async (extensionPath: string) => {
+						loadedByRuntime.push(extensionPath);
+					},
+					listActive: () => loadedByRuntime.map((path) => ({ name: "synthesized", path })),
+				},
 			});
 
 			const established = await controller.resolveOrBuild({
@@ -677,8 +691,11 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 				},
 			});
 
+			// The capability was established through the real extension owner, not the isolated registry.
 			expect(established.active).toBe(true);
-			expect(deps.scriptRegistry.has(established.capabilityId)).toBe(true);
+			expect(established.kind).toBe("extension");
+			expect(loadedByRuntime).toHaveLength(1);
+			expect(deps.scriptRegistry.has(established.capabilityId)).toBe(false);
 		});
 
 		it("ERC-036: runtime patch invokes RuntimeUpdateController reload path", async () => {

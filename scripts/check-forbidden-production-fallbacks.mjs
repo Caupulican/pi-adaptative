@@ -65,6 +65,16 @@ const FORBIDDEN = [
 		message: "a permissive acquisition authority default",
 	},
 	{
+		id: "metadata_only_capability_activation",
+		pattern: /(?:adapterMounted|registeredInRegistry|registeredInVault|wired|runnable|schemaValid):\s*true/,
+		message: "an activation projection asserting an owner claim the owner never produced (ACT-003)",
+	},
+	{
+		id: "constant_activation_smoke_evidence",
+		pattern: /smokeEvidence:\s*"[a-z_]+_verified"/,
+		message: "activation smoke evidence as a constant string instead of the owner's own result (ACT-016)",
+	},
+	{
 		id: "hard_coded_operator_execution_state",
 		pattern: /phase:\s*"understand",[\s\S]{0,200}current_action:\s*"[^"]+"/,
 		message: "a hard-coded operator execution projection",

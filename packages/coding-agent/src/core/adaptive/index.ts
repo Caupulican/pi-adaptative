@@ -6,8 +6,13 @@ export { AdaptationCycleError, AdaptationGraph } from "./adaptation-graph.ts";
 export {
 	AdaptiveCapabilityController,
 	type AdaptiveCapabilityControllerDeps,
+	activationSmokeSource,
 	type CandidateArtifact,
 	type CandidateVerificationResult,
+	capabilityKindForLevel,
+	computeArtifactDiskDigest,
+	resolveActivatableKind,
+	UnsupportedCapabilityKindError,
 } from "./adaptive-capability-controller.ts";
 export {
 	type AdaptiveDimension,
@@ -29,6 +34,16 @@ export {
 	type AdaptiveRuntimeStatus,
 } from "./adaptive-runtime-readiness.ts";
 export { CapabilityCatalog, type CapabilityCatalogEntry } from "./capability-catalog.ts";
+export {
+	CAPABILITY_KIND_SUPPORT,
+	type CapabilityActivationMode,
+	type CapabilityKindSupport,
+	capabilityKindSupport,
+	findBrokenAdvertisedKinds,
+	isCapabilityKindSupported,
+	replanToSupportedKind,
+	supportedCapabilityKinds,
+} from "./capability-kind-support.ts";
 export {
 	capabilityArtifactRelativePath,
 	compileCapabilityProofObligations,

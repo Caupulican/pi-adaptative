@@ -22,6 +22,8 @@ const SAMPLES = {
 	fallback_profile_id: 'const profileId = profileResult.profileId ?? `prof-cap-${spec.capability_id}`;',
 	asserted_task_proof: `const proof = {\n\tverified: true,\n\ttaskTest: spec.proof.task_specific_test,\n};`,
 	permissive_acquisition_authority_default: `allowShellExecution: deps.charterAuthority?.allowShellExecution ?? true,`,
+	metadata_only_capability_activation: `return {\n\tactive: true,\n\tprojection: { adapterMounted: true, lookupResult: "integration_adapter_mounted" },\n};`,
+	constant_activation_smoke_evidence: `projection: {\n\tsmokeEvidence: "integration_health_verified",\n};`,
 	hard_coded_operator_execution_state: `return {\n\tphase: "understand",\n\tphase_index: 1,\n\tcurrent_action: "Ready for operator instructions",\n};`,
 };
 
