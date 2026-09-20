@@ -9,6 +9,7 @@
  */
 
 import type { GoalState } from "../goals/goal-state.ts";
+import { OperatorEventController } from "./operator-event-controller.ts";
 import { OperatorProjectionController } from "./operator-projection-controller.ts";
 import type {
 	ActiveActor,
@@ -68,6 +69,8 @@ export class SessionOperatorProjection {
 	/** Subscribers live here, not on the controller, so they survive an objective change. */
 	private readonly listeners = new Set<(projection: OperatorProjection) => void>();
 	private readonly events: OperatorEvent[] = [];
+	private eventController?: OperatorEventController;
+	private eventControllerObjectiveId?: string;
 
 	constructor(deps: SessionOperatorProjectionDeps) {
 		this.deps = deps;
@@ -96,6 +99,20 @@ export class SessionOperatorProjection {
 		this.controller = controller;
 		this.controllerObjectiveId = objectiveId;
 		return controller;
+	}
+
+	/**
+	 * The bridge runtime subsystems record milestones and interventions through. It is rebuilt with
+	 * the projection controller so both always speak for the same objective.
+	 */
+	get eventBridge(): OperatorEventController {
+		const controller = this.projectionController;
+		if (this.eventController && this.eventControllerObjectiveId === this.controllerObjectiveId) {
+			return this.eventController;
+		}
+		this.eventController = new OperatorEventController({ projectionController: controller });
+		this.eventControllerObjectiveId = this.controllerObjectiveId;
+		return this.eventController;
 	}
 
 	getProjection(): OperatorProjection {

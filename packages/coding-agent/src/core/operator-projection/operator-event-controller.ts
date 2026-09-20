@@ -1,5 +1,5 @@
-import type { OperatorProjectionController } from "../../core/operator-projection/operator-projection-controller.ts";
-import type { OperatorEvent } from "../../core/operator-projection/types.ts";
+import type { OperatorProjectionController } from "./operator-projection-controller.ts";
+import type { OperatorEvent } from "./types.ts";
 
 export interface OperatorEventControllerDeps {
 	projectionController: OperatorProjectionController;

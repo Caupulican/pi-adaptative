@@ -503,6 +503,10 @@ export class AgentSession {
 			onIntervention: (signal) => {
 				if (!signal.summaryEvent) return;
 				this._emit({ type: "warning", message: signal.summaryEvent });
+				this._operatorProjection.eventBridge.recordSupervisorIntervention(
+					signal.attempt_id,
+					signal.explanation ?? signal.summaryEvent,
+				);
 			},
 		});
 		this._projectRules = new SessionProjectRules({
@@ -519,10 +523,17 @@ export class AgentSession {
 				this.sessionManager.appendCustomEntry(PROJECT_RULE_REPAIR_CUSTOM_TYPE, repair);
 			},
 			emitViolation: (result) => {
+				const violation = result.violations[0];
 				this._emit({
 					type: "warning",
-					message: `Project rule violation blocks this transition: ${result.summaryEvent ?? result.violations[0]?.explanation ?? "unspecified"}`,
+					message: `Project rule violation blocks this transition: ${result.summaryEvent ?? violation?.explanation ?? "unspecified"}`,
 				});
+				if (violation) {
+					this._operatorProjection.eventBridge.recordRuleRepair(
+						violation.ruleId,
+						violation.suggestedFix ?? violation.explanation,
+					);
+				}
 			},
 		});
 		// The provider stream chain (perf profile, idle watchdog, machine-wide admission) is built and
@@ -915,6 +926,7 @@ export class AgentSession {
 			},
 			persistRetentionAudit: (audit) => {
 				this.sessionManager.appendCustomEntry(RETENTION_AUDIT_CUSTOM_TYPE, audit);
+				this._operatorProjection.eventBridge.recordCompactionResult(audit.summaryEvent);
 			},
 		});
 		const providerRequestContext = new ProviderRequestContextController({
@@ -1424,7 +1436,12 @@ export class AgentSession {
 						getGate: () => this._acquisitionGate,
 						getObjectiveId: () => this._executionCharter?.objective_id ?? this.sessionManager.getSessionId(),
 						onDecision: (decision) => {
-							if (decision.summaryEvent) this._emit({ type: "warning", message: decision.summaryEvent });
+							if (!decision.summaryEvent) return;
+							this._emit({ type: "warning", message: decision.summaryEvent });
+							this._operatorProjection.eventBridge.recordAcquisitionEvent(
+								decision.denied ? "deny" : "rewrite_safe_route",
+								decision.summaryEvent,
+							);
 						},
 					},
 					toolName,
@@ -1527,7 +1544,18 @@ export class AgentSession {
 
 	/** Records adaptive work in flight so the projection can report the ADAPT phase truthfully. */
 	setAdaptationProjection(adaptation: AdaptationProjection | undefined): void {
+		const previous = this._adaptationProjection;
 		this._adaptationProjection = adaptation;
+		if (adaptation && adaptation.label !== previous?.label) {
+			if (adaptation.kind === "capability") {
+				this._operatorProjection.eventBridge.recordCapabilityMilestone(
+					adaptation.label,
+					adaptation.state === "active" ? "activated" : "synthesized",
+				);
+			} else if (adaptation.kind === "specialist") {
+				this._operatorProjection.eventBridge.recordSpecialistMilestone(adaptation.label, "created");
+			}
+		}
 		this._operatorProjection.refresh();
 	}
 

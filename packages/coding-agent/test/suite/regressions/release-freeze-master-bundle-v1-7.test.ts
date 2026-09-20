@@ -27,12 +27,12 @@ import {
 import { compileExecutionCharter } from "../../../src/core/autonomy/execution-charter.ts";
 import { EvidenceRetentionPlanner } from "../../../src/core/compaction/evidence-retention-planner.ts";
 import { CompactionController } from "../../../src/core/compaction-controller.ts";
+import { OperatorEventController } from "../../../src/core/operator-projection/operator-event-controller.ts";
 import { OperatorProjectionController } from "../../../src/core/operator-projection/operator-projection-controller.ts";
 import { SemanticProjectRuleController } from "../../../src/core/project-rules/semantic-project-rule-controller.ts";
 import type { LiveWorkerAttempt } from "../../../src/core/supervision/types.ts";
 import { WorkerSemanticSupervisor } from "../../../src/core/supervision/worker-semantic-supervisor.ts";
 import { OperatorStatusComponent } from "../../../src/modes/interactive/components/operator-status.ts";
-import { OperatorEventController } from "../../../src/modes/interactive/operator-event-controller.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
 
 class TestReleaseFreezeJevAdapter {
