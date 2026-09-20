@@ -19,6 +19,8 @@
 		"check:precommit-gate": "node --test scripts/precommit-staged.test.mjs scripts/github-origin.test.mjs",
 		"check:architecture-map": "node scripts/architecture-map.mjs --check",
 		"check:output-reduction": "node --test scripts/output-reduction-census.test.mjs scripts/check-output-rules.test.mjs && node scripts/check-output-rules.mjs && node scripts/output-reduction-census.mjs --corpus packages/coding-agent/test/fixtures/tool-output/corpus.json --gate \"{\\\"rg\\\":0.25,\\\"cargo check\\\":0.6,\\\"biome\\\":0.6,\\\"gh api\\\":0.5,\\\"tsc\\\":0.5,\\\"eslint\\\":0.2,\\\"make\\\":0.5,\\\"go build\\\":0.5,\\\"fpc\\\":0.5,\\\"php\\\":0.3,\\\"ruff check\\\":0.5,\\\"python\\\":0.5}\"",
+		"smoke:live-provider": "node scripts/smoke-live-provider.mjs",
+		"audit:architecture": "node scripts/audit-architecture.mjs",
 		"check:release-readiness": "node scripts/check-forbidden-production-fallbacks.mjs && node --test scripts/check-forbidden-production-fallbacks.test.mjs && npm run check:release-wiring --workspace=packages/coding-agent",
 		"check:clone-config": "node --test scripts/check-production-clones.test.mjs",
 		"check:clones": "node scripts/check-production-clones.mjs",
