@@ -754,6 +754,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let steeringPlane = options.steeringPlane;
 	const adaptiveReadiness = options.adaptiveReadiness;
 	const objectiveExecutionController = options.objectiveExecutionController;
+	// System One decides the loop whenever it is bound; without a controller the legacy continuation
+	// stays the decider. An explicit option or setting always wins.
+	const executionLoopMode: ExecutionLoopMode =
+		options.executionLoopMode ??
+		systemOneSettings.loopMode ??
+		(systemOneController ? "objective_primary" : "legacy_goal");
 
 	// Phase A — Core session construction (AgentSession, runtimeUpdates, skillVault, extensionRunner, backgroundLanes)
 	const session = new AgentSession({
@@ -782,7 +788,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		orchestrationProfile,
 		sessionStartEvent: options.sessionStartEvent,
 		systemOneController,
-		executionLoopMode: options.executionLoopMode,
+		executionLoopMode,
 		objectiveExecutionController,
 		steeringPlane,
 		adaptiveReadiness:
@@ -1023,6 +1029,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			adaptationStore,
 			taskRuntime: durableTaskRuntime,
 			objectiveRuntime,
+			loopMode: executionLoopMode,
+			completionProfile:
+				systemOneSettings.completionProfile ??
+				(steeringPlane || systemOneController ? "semantic_enhanced" : "mechanical"),
 			taskProfiles: taskProfileWriter,
 			contractFactory,
 			capabilityBuilder,

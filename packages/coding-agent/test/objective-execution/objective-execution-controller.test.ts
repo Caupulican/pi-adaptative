@@ -585,10 +585,13 @@ describe("Objective Execution Controller & Jev Substrate (OEL-001 to OEL-045)", 
 			getObjectiveExecutionController: () => objectiveController,
 		});
 
-		// In primary mode, legacy continuation prompt submission is bypassed
+		// In primary mode System One drives the cycle: no legacy prompt; the route is
+		// completion_candidate, the completion transaction passes, and the goal follows the terminal.
 		const primaryOnceResult = await primaryController.continueOnce({ maxStallTurns: 3 });
 		expect(primaryOnceResult.submitted).toBe(false);
 		expect(legacyPromptCalled).toBe(false);
+		expect(objectiveController.getLastRoute()?.route).toBe("completion_candidate");
+		expect(primaryController.getState()?.status).toBe("completed");
 
 		const primaryLoopResult = await primaryController.continueLoop({ maxTurns: 5, maxStallTurns: 3 });
 		expect(primaryLoopResult.turnsSubmitted).toBe(0);

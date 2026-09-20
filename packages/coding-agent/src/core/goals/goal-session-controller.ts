@@ -16,10 +16,16 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import { GoalLoopController } from "../goal-loop-controller.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "../objective-execution/index.ts";
+import type { ObjectiveRoute, ObjectiveTerminalResult } from "../objective-execution/objective-route.ts";
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
-import { GoalBudgetExhaustedError } from "./goal-execution-errors.ts";
+import { buildObjectiveRoutePrompt, GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
+import {
+	GoalBudgetExhaustedError,
+	ObjectiveRootTurnErroredError,
+	ObjectiveRootTurnInterruptedError,
+} from "./goal-execution-errors.ts";
 import {
 	type GoalStateRevision,
 	getAutoResumableReasonPrefix,
@@ -136,6 +142,9 @@ export class GoalSessionController {
 	private readonly loop: GoalLoopController;
 	private executionLease: MutableGoalExecutionLease | undefined;
 	private startAuthority: ExplicitGoalStartAuthority | undefined;
+	/** Root turns the primary loop submitted; a cycle that dispatched a worker or waited submits none. */
+	private primaryRootTurns = 0;
+	private executorsBoundTo?: ObjectiveExecutionController;
 	private readonly queuedOwnerChatGoals = new WeakMap<AgentMessage, QueuedOwnerChatGoal>();
 	private queuedOwnerChatExecutionLease: GoalExecutionLease | undefined;
 
@@ -703,22 +712,165 @@ export class GoalSessionController {
 		}
 	}
 
-	continueOnce(options: GoalContinuationOnceOptions): Promise<GoalContinuationOnceResult> {
+	/**
+	 * The root model as System One's executor: one foreground turn carrying the route's brief. The
+	 * outcome is read from the transcript exactly as the legacy continuation reads it; an owner
+	 * interruption and a provider failure are thrown so the objective loop stops instead of routing
+	 * again over a turn that did not happen.
+	 */
+	objectiveRootExecutor(): { execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void> } {
+		return {
+			execute: async (route, signal) => {
+				signal?.throwIfAborted();
+				const firstTurnEntryIndex = this.deps.getSessionManager().getEntryCount();
+				this.primaryRootTurns++;
+				await this.deps.prompt(buildObjectiveRoutePrompt(route).text, {
+					expandPromptTemplates: false,
+					processSlashCommands: false,
+					autoContinueGoal: false,
+					internalContextType: GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
+					goalExecutionId: this.getState()?.goalId,
+				});
+				const outcome = this.getContinuationTurnOutcome(firstTurnEntryIndex);
+				if (outcome.outcome === "interrupted") throw new ObjectiveRootTurnInterruptedError();
+				if (outcome.outcome === "errored")
+					throw new ObjectiveRootTurnErroredError(outcome.errorMessage ?? "provider error");
+			},
+		};
+	}
+
+	/** The objective controller with this session's executors bound once; undefined outside primary mode. */
+	private primaryController(): ObjectiveExecutionController | undefined {
 		const mode = this.deps.getExecutionLoopMode?.() ?? this.deps.getObjectiveExecutionController?.()?.getMode();
-		if (mode === "objective_primary") {
-			const snapshot = this.getRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
-			return Promise.resolve({ submitted: false, snapshot });
+		if (mode !== "objective_primary") return undefined;
+		const controller = this.deps.getObjectiveExecutionController?.();
+		if (!controller) return undefined;
+		if (this.executorsBoundTo !== controller) {
+			controller.bindSessionExecutors({ rootExecutor: this.objectiveRootExecutor() });
+			this.executorsBoundTo = controller;
 		}
+		return controller;
+	}
+
+	/** The objective reached a terminal: the goal follows it, and says so when they disagree. */
+	private applyObjectiveTerminal(terminal: ObjectiveTerminalResult): void {
+		const state = this.getState();
+		if (!state || !isGoalExecutionActive(state.status)) return;
+		const now = new Date().toISOString();
+		const reasons = terminal.reasonCodes.join(", ");
+		switch (terminal.status) {
+			case "complete": {
+				const completed = applyGoalEvent(state, { type: "complete_goal", now });
+				if (completed.status === "completed") {
+					this.saveState(completed, getGoalStateRevision(state));
+					return;
+				}
+				const open = state.requirements
+					.filter((requirement) => requirement.status !== "satisfied")
+					.map((r) => r.id);
+				this.stopActiveGoal(
+					"blocked",
+					`System One judged the objective complete (${reasons}) but requirements ${open.join(", ")} are not marked satisfied`,
+				);
+				return;
+			}
+			case "cancelled":
+				this.saveState(applyGoalEvent(state, { type: "cancel_goal", now }), getGoalStateRevision(state));
+				return;
+			case "budget_exhausted":
+				this.stopActiveGoal("budget_limited", reasons || "objective budget exhausted");
+				return;
+			default:
+				this.stopActiveGoal("blocked", `${terminal.status}: ${reasons}`);
+		}
+	}
+
+	continueOnce(options: GoalContinuationOnceOptions): Promise<GoalContinuationOnceResult> {
+		const controller = this.primaryController();
+		if (controller) return this.continuePrimaryOnce(controller, options);
 		return this.loop.continueGoalOnce(options);
 	}
 
-	continueLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
-		const mode = this.deps.getExecutionLoopMode?.() ?? this.deps.getObjectiveExecutionController?.()?.getMode();
-		if (mode === "objective_primary") {
-			const snapshot = this.getRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
-			return Promise.resolve({ turnsSubmitted: 0, stopReason: "continuation_not_allowed", finalSnapshot: snapshot });
+	/**
+	 * One System One cycle: the route is evaluated and executed (a root turn, a worker, a wait, the
+	 * completion check), then the goal follows any terminal. `submitted` says whether a root turn ran.
+	 */
+	private async continuePrimaryOnce(
+		controller: ObjectiveExecutionController,
+		options: GoalContinuationOnceOptions,
+	): Promise<GoalContinuationOnceResult> {
+		const state = this.getState();
+		const snapshot = () => this.getRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
+		if (!state || !isGoalExecutionActive(state.status)) return { submitted: false, snapshot: snapshot() };
+		const before = this.primaryRootTurns;
+		try {
+			const terminal = await controller.runCycles(goalObjectiveId(state.goalId), 1);
+			if (terminal) this.applyObjectiveTerminal(terminal);
+		} catch (error) {
+			if (error instanceof ObjectiveRootTurnInterruptedError) {
+				return { submitted: true, snapshot: snapshot(), turnOutcome: "interrupted" };
+			}
+			if (error instanceof ObjectiveRootTurnErroredError) {
+				this.recordContinuationFailure(error);
+				return { submitted: true, snapshot: snapshot(), turnOutcome: "errored", turnError: error.message };
+			}
+			this.recordContinuationFailure(error);
+			throw error;
 		}
+		const submitted = this.primaryRootTurns > before;
+		return { submitted, snapshot: snapshot(), ...(submitted ? { turnOutcome: "completed" as const } : {}) };
+	}
+
+	continueLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
+		const controller = this.primaryController();
+		if (controller) return this.continuePrimaryLoop(controller, options);
 		return this.loop.continueGoalLoop(options);
+	}
+
+	/** Cycles until a terminal, a wait, the turn or wall-clock limit, or a cycle that moved nothing. */
+	private async continuePrimaryLoop(
+		controller: ObjectiveExecutionController,
+		options: GoalContinuationLoopOptions,
+	): Promise<GoalContinuationLoopResult> {
+		const now = options.now ?? Date.now;
+		const startedAt = now();
+		const maxWallClockMs =
+			typeof options.maxWallClockMinutes === "number" && options.maxWallClockMinutes > 0
+				? options.maxWallClockMinutes * 60_000
+				: undefined;
+		let turnsSubmitted = 0;
+		let idleCycles = 0;
+		const stop = (stopReason: GoalContinuationLoopResult["stopReason"]): GoalContinuationLoopResult => ({
+			turnsSubmitted,
+			stopReason,
+			finalSnapshot: this.getRuntimeSnapshot({ maxStallTurns: options.maxStallTurns }),
+		});
+		while (true) {
+			if (options.maxTurns > 0 && turnsSubmitted >= options.maxTurns) return stop("max_turns_reached");
+			if (maxWallClockMs !== undefined && now() - startedAt >= maxWallClockMs)
+				return stop("wall_clock_budget_reached");
+			const state = this.getState();
+			if (!state || !isGoalExecutionActive(state.status)) return stop("continuation_not_allowed");
+			const revisionBefore = this.deps.getTaskRuntimeSnapshot()?.lastOrdinal;
+			const once = await this.continuePrimaryOnce(controller, options);
+			if (once.turnOutcome === "interrupted") return stop("turn_interrupted");
+			if (once.turnOutcome === "errored") return stop("turn_errored");
+			if (once.submitted) turnsSubmitted++;
+			const after = this.getState();
+			if (!after || !isGoalExecutionActive(after.status)) {
+				return stop(after?.status === "budget_limited" ? "goal_budget_exhausted" : "continuation_not_allowed");
+			}
+			const route = controller.getLastRoute();
+			if (route?.route === "wait_for_worker" || route?.route === "wait_for_tool") return stop("worker_in_flight");
+			const moved = once.submitted || this.deps.getTaskRuntimeSnapshot()?.lastOrdinal !== revisionBefore;
+			idleCycles = moved ? 0 : idleCycles + 1;
+			if (idleCycles >= 2) {
+				this.deps.emitWarning(
+					`System One routed ${route?.route ?? "nothing"} twice without any execution; stopping this continuation pass.`,
+				);
+				return stop("continuation_not_allowed");
+			}
+		}
 	}
 
 	restoreAfterResume(): boolean {

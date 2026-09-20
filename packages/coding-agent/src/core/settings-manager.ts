@@ -62,6 +62,10 @@ export interface SystemOneSettings {
 	enabled?: boolean; // default: true
 	provider?: "typesafe" | "openrouter"; // default: "typesafe"
 	model?: string; // default: "jev-1.13.0" (typesafe) or "typesafe/jev-1.13" (openrouter)
+	/** Who drives an active goal: System One's objective routes (default when System One is bound) or the legacy continuation. */
+	loopMode?: "legacy_goal" | "objective_shadow" | "objective_primary";
+	/** Completion assurance the objective must pass; default semantic_enhanced under a semantic plane, mechanical without. */
+	completionProfile?: "mechanical" | "mechanical_plus_reviewer" | "semantic_enhanced" | "system_one_required";
 }
 
 export interface SemanticMemoryGcSettings {
@@ -3396,12 +3400,33 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getSystemOneSettings(): { enabled: boolean; provider: "typesafe" | "openrouter"; model?: string } {
+	getSystemOneSettings(): {
+		enabled: boolean;
+		provider: "typesafe" | "openrouter";
+		model?: string;
+		loopMode?: SystemOneSettings["loopMode"];
+		completionProfile?: SystemOneSettings["completionProfile"];
+	} {
 		const raw = this.settings.systemOne;
+		const loopMode =
+			raw?.loopMode === "legacy_goal" ||
+			raw?.loopMode === "objective_shadow" ||
+			raw?.loopMode === "objective_primary"
+				? raw.loopMode
+				: undefined;
+		const completionProfile =
+			raw?.completionProfile === "mechanical" ||
+			raw?.completionProfile === "mechanical_plus_reviewer" ||
+			raw?.completionProfile === "semantic_enhanced" ||
+			raw?.completionProfile === "system_one_required"
+				? raw.completionProfile
+				: undefined;
 		return {
 			enabled: raw?.enabled ?? true,
 			provider: raw?.provider === "openrouter" ? "openrouter" : "typesafe",
 			model: raw?.model,
+			...(loopMode ? { loopMode } : {}),
+			...(completionProfile ? { completionProfile } : {}),
 		};
 	}
 

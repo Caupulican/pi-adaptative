@@ -127,6 +127,7 @@ import { ForegroundTerminalHandoffController } from "./foreground-terminal-hando
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
 import { reportGithubOriginPinForSession } from "./github-origin-pin.ts";
 import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts";
+import { DEFAULT_GOAL_WORKER_WAIT_MS } from "./goals/goal-continuation-defaults.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
@@ -1803,6 +1804,19 @@ export class AgentSession {
 		this._operatorProjection.refresh();
 	}
 
+	/** The objective loop's wait: the running attempts' agents, on the goal's worker-wait bound. */
+	private async _waitForObjectiveWorkers(context: unknown): Promise<void> {
+		const attempts =
+			context &&
+			typeof context === "object" &&
+			Array.isArray((context as { inFlightAttempts?: unknown }).inFlightAttempts)
+				? ((context as { inFlightAttempts: readonly { agentId?: string }[] }).inFlightAttempts ?? [])
+				: [];
+		const agentIds = attempts.flatMap((attempt) => (attempt.agentId ? [attempt.agentId] : []));
+		if (!agentIds.length) return;
+		await this._backgroundLanes.waitForWorkerAgents(agentIds, "any", DEFAULT_GOAL_WORKER_WAIT_MS);
+	}
+
 	/** The session's compiled ExecutionCharter, once the adaptive runtime bound one. */
 	get executionCharter(): ExecutionCharter | undefined {
 		return this._executionCharter;
@@ -1910,6 +1924,21 @@ export class AgentSession {
 		if (stack.objectiveController) {
 			this._objectiveExecutionController = stack.objectiveController;
 			stack.objectiveController.setOwnerBlockerSink((blocker) => this.setOperatorBlocker(blocker));
+			// The executors System One routes to live on this session: the root turn, the worker wait
+			// and System One's own completion transaction.
+			stack.objectiveController.bindSessionExecutors({
+				rootExecutor: this._goals.objectiveRootExecutor(),
+				waiter: { wait: (context) => this._waitForObjectiveWorkers(context) },
+				...(this._systemOneController
+					? {
+							systemOne: {
+								executeCompletionTransaction: (isBugFix, options) =>
+									this._systemOneController!.executeCompletionTransaction(isBugFix, options),
+							},
+						}
+					: {}),
+				...(this._executionLoopMode ? { mode: this._executionLoopMode } : {}),
+			});
 		}
 		if (stack.adaptiveCapabilities) {
 			stack.adaptiveCapabilities.setAdaptationSink((adaptation) => this.setAdaptationProjection(adaptation));

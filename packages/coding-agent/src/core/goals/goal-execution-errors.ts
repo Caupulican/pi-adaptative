@@ -13,6 +13,22 @@
  * distinctly from a genuine unexpected failure and report their own clean stop reason instead of
  * reclassifying an intentional, already-recorded stop as a continuation failure.
  */
+/** A System One route ran as a root turn and the owner interrupted it; the goal stays as it was. */
+export class ObjectiveRootTurnInterruptedError extends Error {
+	constructor() {
+		super("The root turn System One routed was interrupted.");
+		this.name = "ObjectiveRootTurnInterruptedError";
+	}
+}
+
+/** A System One route ran as a root turn and the provider failed it after the loop's own retries. */
+export class ObjectiveRootTurnErroredError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "ObjectiveRootTurnErroredError";
+	}
+}
+
 export class GoalBudgetExhaustedError extends Error {
 	constructor(message: string) {
 		super(message);

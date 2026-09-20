@@ -135,6 +135,12 @@ export interface ObjectiveExecutionControllerDeps {
 	};
 	expertSelector?: ExpertSelectionService;
 	outcomeRecorder?: ExpertOutcomeRecorder;
+	/**
+	 * The root model as an executor: one foreground turn carrying the route's brief. Used for the
+	 * routes System One does not hand to an independent worker (implement, investigate, replan,
+	 * retrieval and non-independent verification); review and escalations stay with workers.
+	 */
+	rootExecutor?: { execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void> };
 	mode?: ExecutionLoopMode;
 	executionCharter?: ExecutionCharter;
 	authorityBlockLedger?: DurableAuthorityBlockLedger;
@@ -312,7 +318,28 @@ export class ObjectiveExecutionController {
 	private readonly alternativesTried = new Set<string>();
 	private cycleCounter = 0;
 	private _lastBinding?: ExpertBinding;
+	private _lastRoute?: ObjectiveRoute;
 	private ownerBlockerSink?: (blocker: string | undefined) => void;
+
+	/** The route the last run cycle evaluated; the session's loop reads it to name a wait or a stop. */
+	getLastRoute(): ObjectiveRoute | undefined {
+		return this._lastRoute;
+	}
+
+	/**
+	 * Late-bound executors owned by the live session (the root turn, worker waits, System One's
+	 * completion transaction, the completion profile): the stack is built before the session exists.
+	 */
+	bindSessionExecutors(
+		executors: Partial<
+			Pick<
+				ObjectiveExecutionControllerDeps,
+				"rootExecutor" | "waiter" | "retrieval" | "verifier" | "systemOne" | "completionProfile" | "mode"
+			>
+		>,
+	): void {
+		Object.assign(this.deps, executors);
+	}
 
 	/** Late-bound: the session that owns the operator projection binds it after the stack is built. */
 	setOwnerBlockerSink(sink: ((blocker: string | undefined) => void) | undefined): void {
@@ -641,7 +668,32 @@ export class ObjectiveExecutionController {
 	}
 
 	async run(objectiveId: string, signal?: AbortSignal): Promise<ObjectiveTerminalResult> {
+		const terminal = await this.runLoop(objectiveId, signal);
+		if (!terminal) throw new Error("Objective run loop ended without a terminal result.");
+		return terminal;
+	}
+
+	/**
+	 * At most `maxCycles` route cycles; `undefined` when the budget ran out before a terminal. The
+	 * session's continuation loop drives the objective one cycle at a time so its own turn, wall
+	 * clock and stall limits keep applying between cycles.
+	 */
+	async runCycles(
+		objectiveId: string,
+		maxCycles: number,
+		signal?: AbortSignal,
+	): Promise<ObjectiveTerminalResult | undefined> {
+		return this.runLoop(objectiveId, signal, maxCycles);
+	}
+
+	private async runLoop(
+		objectiveId: string,
+		signal?: AbortSignal,
+		maxCycles?: number,
+	): Promise<ObjectiveTerminalResult | undefined> {
+		let cycles = 0;
 		while (true) {
+			if (maxCycles !== undefined && cycles++ >= maxCycles) return undefined;
 			signal?.throwIfAborted();
 
 			const runtime = await this.deps.runtime.reconcileObjective(objectiveId);
@@ -710,6 +762,7 @@ export class ObjectiveExecutionController {
 
 			// 3. Evaluate route
 			const route = await this.evaluateRouteOnce(objectiveId, { signal });
+			this._lastRoute = route;
 
 			// 4. Authority Envelope / Execution Charter gate (FIN-070..FIN-074, ZH-001..ZH-012)
 			const proposedAction = this.deps.getRouteProposedAction
@@ -829,6 +882,11 @@ export class ObjectiveExecutionController {
 			// 5. Dispatch based on route (FIN-051, FIN-052: Explicit failure if executor is missing)
 			switch (route.route) {
 				case "retrieve":
+					if (!this.deps.retrieval?.execute && this.deps.rootExecutor) {
+						// No dedicated retrieval executor: the root reads, with the route's brief.
+						await this.deps.rootExecutor.execute(route, signal);
+						break;
+					}
 					if (!this.deps.retrieval?.execute) {
 						const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime);
 						return {
@@ -842,6 +900,11 @@ export class ObjectiveExecutionController {
 					break;
 
 				case "deterministic_test":
+					if (!this.deps.verifier?.execute && this.deps.rootExecutor) {
+						// No dedicated verifier: the root runs the checks, with the route's brief.
+						await this.deps.rootExecutor.execute(route, signal);
+						break;
+					}
 					if (!this.deps.verifier?.execute) {
 						const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime);
 						return {
@@ -1466,6 +1529,17 @@ export class ObjectiveExecutionController {
 		escalated: boolean,
 		signal?: AbortSignal,
 	): Promise<ObjectiveTerminalResult | undefined> {
+		// The root executes what System One did not hand to an independent worker: a review and an
+		// escalation always go to a worker, so does a verification that must be independent.
+		if (
+			this.deps.rootExecutor &&
+			!escalated &&
+			route.route !== "review" &&
+			!route.reason_codes.includes("independent_verification_required")
+		) {
+			await this.deps.rootExecutor.execute(route, signal);
+			return undefined;
+		}
 		const dispatcher = escalated
 			? this.deps.workerDispatcher?.dispatchEscalated
 			: this.deps.workerDispatcher?.dispatch;
