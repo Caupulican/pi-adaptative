@@ -49,8 +49,10 @@ export interface InteractiveLayoutHost {
 	workbench?: WorkbenchController;
 	workbenchInputCleanup?: () => void;
 	activeToolCalls: { readonly size: number; hasActive(toolCallId: string): boolean };
-	/** Unsubscribes the operator-projection render listener; set when the layout mounts. */
+	/** Unsubscribes every session listener the layout holds; set when the layout mounts or rebinds. */
 	disposeOperatorProjection?: () => void;
+	/** Questions asked in the current objective; survives a session rebind so the graph's YOU node keeps its counts. */
+	humanInputTally?: HumanInputTally;
 }
 
 const PLAN_STEP_STATUS: Readonly<Record<TaskStepStatus, DecisionPlanStepStatus>> = {
@@ -62,7 +64,7 @@ const PLAN_STEP_STATUS: Readonly<Record<TaskStepStatus, DecisionPlanStepStatus>>
 };
 
 /** Questions asked in the current objective, as the graph's YOU node counts them. */
-interface HumanInputTally {
+export interface HumanInputTally {
 	objectiveId?: string;
 	question?: string;
 	askedAt?: number;
@@ -137,6 +139,48 @@ function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInpu
 	});
 }
 
+/**
+ * The layout's session listeners: projection publishes, stage-log transitions, settled Jev
+ * evaluations and questions to the operator. Bound to `host.session` as it is now, so the mode
+ * calls this again after it swaps the session (resume, new session) and disposes the previous set
+ * first; `mountInteractiveLayout` calls it once at mount.
+ */
+export function subscribeInteractiveLayout(host: InteractiveLayoutHost): HumanInputTally {
+	host.disposeOperatorProjection?.();
+	const session = host.session;
+	const unsubscribeOperatorProjection = session.operatorProjection.subscribe(() => host.ui.requestRender());
+	// The stage log fires on every transition; the graph pane's timers and lit stage follow it.
+	const unsubscribeStageChange = session.operatorProjection.onStageChange(() => host.ui.requestRender());
+	// Every settled Jev evaluation is Execution evidence and changes the Decider row and the graph.
+	const unsubscribeSemantic = session.onSemanticEvaluation((record) => {
+		host.workbench?.recordJevEvaluation(record);
+		host.ui.requestRender();
+	});
+	const humanInput: HumanInputTally = host.humanInputTally ?? { asked: 0, answered: 0 };
+	host.humanInputTally = humanInput;
+	const unsubscribeHumanInput = subscribeHumanInputActivity(session.sessionManager, (activity) => {
+		if (activity.phase === "waiting") {
+			humanInput.asked++;
+			humanInput.question = activity.request.questions[0]?.question;
+			humanInput.askedAt = Date.parse(activity.request.createdAt) || Date.now();
+		} else {
+			humanInput.answered++;
+			humanInput.question = undefined;
+			humanInput.askedAt = undefined;
+		}
+		host.ui.requestRender();
+	});
+	host.disposeOperatorProjection = () => {
+		unsubscribeOperatorProjection();
+		unsubscribeStageChange();
+		unsubscribeSemantic();
+		unsubscribeHumanInput();
+		host.activityLane?.setExternalClock("decision-graph", false);
+		host.disposeOperatorProjection = undefined;
+	};
+	return humanInput;
+}
+
 export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 	if (!host.hasHumanAudience) {
 		for (const child of [host.headerContainer, host.chatContainer, host.editorContainer]) host.ui.addChild(child);
@@ -155,34 +199,7 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		getSemanticPlaneHealth: () => host.session.getSemanticPlaneHealth(),
 		getCostSummary: () => host.session.getCostSummary(),
 	});
-	const unsubscribeOperatorProjection = host.session.operatorProjection.subscribe(() => host.ui.requestRender());
-	// The stage log fires on every transition; the graph pane's timers and lit stage follow it.
-	const unsubscribeStageChange = host.session.operatorProjection.onStageChange(() => host.ui.requestRender());
-	// Every settled Jev evaluation is Execution evidence and changes the Decider row and the graph.
-	const unsubscribeSemantic = host.session.onSemanticEvaluation((record) => {
-		host.workbench?.recordJevEvaluation(record);
-		host.ui.requestRender();
-	});
-	const humanInput: HumanInputTally = { asked: 0, answered: 0 };
-	const unsubscribeHumanInput = subscribeHumanInputActivity(host.session.sessionManager, (activity) => {
-		if (activity.phase === "waiting") {
-			humanInput.asked++;
-			humanInput.question = activity.request.questions[0]?.question;
-			humanInput.askedAt = Date.parse(activity.request.createdAt) || Date.now();
-		} else {
-			humanInput.answered++;
-			humanInput.question = undefined;
-			humanInput.askedAt = undefined;
-		}
-		host.ui.requestRender();
-	});
-	host.disposeOperatorProjection = () => {
-		unsubscribeOperatorProjection();
-		unsubscribeStageChange();
-		unsubscribeSemantic();
-		unsubscribeHumanInput();
-		host.activityLane?.setExternalClock("decision-graph", false);
-	};
+	const humanInput = subscribeInteractiveLayout(host);
 	const view = new WorkbenchComponent({
 		conversation: host.chatContainer,
 		editor: host.editorContainer,
@@ -250,7 +267,7 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		},
 		// Only the operator changes the work area; what they chose last time is where it starts.
 		geometry: { save: (geometry) => host.settingsManager.setWorkbenchSettings(geometry) },
-		graph: () => composeDecisionGraph(host, humanInput),
+		graph: () => composeDecisionGraph(host, host.humanInputTally ?? humanInput),
 		// A foreground receipt is the root's, on the model actually answering; the running worker
 		// (which may be `active_actors[0]`) never produces foreground receipts.
 		attribution: () => {

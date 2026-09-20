@@ -103,7 +103,12 @@ import { openEditorForPath, openExternalEditor } from "./external-editor.ts";
 import { handleFastModeCommand } from "./fast-mode-command.ts";
 import * as historyReloadMath from "./history-reload-math.ts";
 import { handleInteractiveEvent, type InteractiveEventHost } from "./interactive-event-controller.ts";
-import { type InteractiveLayoutHost, mountInteractiveLayout } from "./interactive-layout.ts";
+import {
+	type HumanInputTally,
+	type InteractiveLayoutHost,
+	mountInteractiveLayout,
+	subscribeInteractiveLayout,
+} from "./interactive-layout.ts";
 import * as keyHandlers from "./key-handlers.ts";
 import { handleEstopCommand, handleLoadCommand } from "./load-commands.ts";
 import { type LoadedResourcesViewOptions, renderLoadedResources } from "./loaded-resources-view.ts";
@@ -272,6 +277,9 @@ export class InteractiveMode {
 	// Agent subscription unsubscribe function
 	private unsubscribe?: () => void;
 	private unsubscribeForegroundActivity?: () => void;
+	/** The Workbench layout's session listeners (set by the layout; rebound with the session, disposed on stop). */
+	disposeOperatorProjection?: () => void;
+	humanInputTally?: HumanInputTally;
 	private unsubscribeHumanInputActivity?: () => void;
 	private subscriptionGeneration = 0;
 	private unsubscribeExtensionsChanged?: () => void;
@@ -1117,6 +1125,8 @@ export class InteractiveMode {
 		this.applyRuntimeSettings();
 		await this.bindCurrentSessionExtensions();
 		this.subscribeToAgent();
+		// The Workbench's own listeners (projection, stage log, Jev ledger, questions) follow the session too.
+		if (this.workbench) subscribeInteractiveLayout(this as unknown as InteractiveLayoutHost);
 		this.subscribeToExtensionsChanged();
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
@@ -3968,6 +3978,7 @@ export class InteractiveMode {
 		this.subscriptionGeneration++;
 		this.unsubscribeHumanInputActivity?.();
 		this.unsubscribeHumanInputActivity = undefined;
+		this.disposeOperatorProjection?.();
 		this.workbenchInputCleanup?.();
 		this.workbenchInputCleanup = undefined;
 		this.workbench?.dispose();
