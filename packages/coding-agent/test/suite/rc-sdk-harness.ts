@@ -32,6 +32,8 @@ import {
 import type { DecisionDefinition } from "../../src/core/decision/primitives.ts";
 import type { DecisionProgram } from "../../src/core/decision/program.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
+import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../../src/core/orchestration/contracts.ts";
+import { OrchestrationProfileStore } from "../../src/core/orchestration/profile-store.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import { SteeringCertificateStore } from "../../src/core/steering/certificate-store.ts";
@@ -167,6 +169,44 @@ export interface RcSdkHarnessOptions {
 	tools?: string[];
 	/** Trusted instruction files the session compiles project rules from. */
 	agentsFiles?: Array<{ path: string; content?: string }>;
+	/** Enables real worker delegation against the faux transport. */
+	workerDelegation?: boolean;
+}
+
+/**
+ * Appends one assistant tool call and its result to the live session branch, the way a turn does.
+ * Used to give the retention planner the transcript depth a long session has.
+ */
+export function appendToolExchange(
+	harness: Pick<RcSdkHarness, "session">,
+	options: { callId: string; toolName: string; output: string; isError?: boolean },
+): void {
+	const model = harness.session.model;
+	harness.session.sessionManager.appendMessage({
+		role: "assistant",
+		content: [{ type: "toolCall", id: options.callId, name: options.toolName, arguments: {} }],
+		api: model?.api ?? "anthropic-messages",
+		provider: model?.provider ?? "faux",
+		model: model?.id ?? "faux-model",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse",
+		timestamp: Date.now(),
+	} as never);
+	harness.session.sessionManager.appendMessage({
+		role: "toolResult",
+		toolCallId: options.callId,
+		toolName: options.toolName,
+		content: [{ type: "text", text: options.output }],
+		isError: options.isError ?? false,
+		timestamp: Date.now(),
+	} as never);
 }
 
 /** Creates a session the way production creates one, with every live port bound. */
@@ -211,18 +251,50 @@ export async function createRcSdkHarness(options: RcSdkHarnessOptions = {}): Pro
 		decisionEngine: decisions,
 	});
 
+	// A real worker needs an owner-authored orchestration profile, exactly as production does.
+	const workerProfileId = "rc-worker";
+	if (options.workerDelegation) {
+		const now = new Date().toISOString();
+		const workerProfile: OrchestrationProfile = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			profileId: workerProfileId,
+			description: "Release-candidate scenario worker",
+			role: "implementer",
+			modelPolicy: {
+				mode: "fixed",
+				candidates: [{ provider: model.provider, modelId: model.id, thinkingLevel: "off" }],
+			},
+			capabilityCeiling: ["filesystem.read", "filesystem.write", "worktree.read", "worktree.mutate"],
+			toolNames: ["read", "grep", "find", "ls", "write", "edit"],
+			resourceProfileNames: [],
+			dispatchProfileIds: [],
+			budget: { maxCostUsd: 5, maxWallClockMs: 600_000, maxTokens: model.maxTokens, maxToolCalls: 20 },
+			maxConcurrent: 2,
+			leaseTtlMs: 660_000,
+			requireIndependentVerification: false,
+			createdAt: now,
+			updatedAt: now,
+		};
+		new OrchestrationProfileStore({ agentDir, cwd, projectTrusted: true }).save(workerProfile, "global");
+	}
+
 	const created = await createAgentSession({
 		cwd,
 		agentDir,
 		authStorage,
 		modelRegistry,
 		model,
-		settingsManager: SettingsManager.inMemory({ edge: { allow: [] } }),
+		settingsManager: SettingsManager.inMemory({
+			edge: { allow: [] },
+			...(options.workerDelegation
+				? { workerDelegation: { enabled: true, orchestrationProfile: workerProfileId } }
+				: {}),
+		}),
 		resourceLoader: createTestResourceLoader(options.agentsFiles ? { agentsFiles: options.agentsFiles } : {}),
 		steeringPlane,
 		charter: options.charter,
 		prompt: options.prompt,
-		tools: options.tools,
+		tools: options.tools ?? (options.workerDelegation ? ["read", "write", "edit", "bash", "delegate"] : undefined),
 	});
 
 	let cleanupPromise: Promise<void> | undefined;
