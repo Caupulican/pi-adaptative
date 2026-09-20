@@ -25,6 +25,8 @@ import type {
 	LearningPolicySettings,
 	MemoryRetrievalSettings,
 	ModelCapabilitySettings,
+	ModelRouterPoolPreference,
+	ModelRouterSelectionMode,
 	ModelRouterSettings,
 	ResearchLaneSettings,
 	SelfModificationSettings,
@@ -223,10 +225,40 @@ function contextMemoryRetrievalSummary(settings: MemoryRetrievalSettings): strin
 	return `enabled (max ${maxResults}${includeInPrompt ? ", in prompt" : ""}, ${externalEgress ? "external on" : "local only"})`;
 }
 
-function modelRouterSummary(settings: ModelRouterSettings): string {
+/**
+ * The router's candidate pool as the settings screen shows it: derived by the flow from the
+ * session's live Models configuration, favorites (ordering only) and existing fitness evidence.
+ */
+export interface ModelRouterPoolView {
+	customized: boolean;
+	refs: string[];
+	subscriptionRefs: string[];
+	favoriteRefs: string[];
+	/** One formatted calibration row per ref, same order as `refs`. */
+	calibration: string[];
+	/** Refs whose router evidence is missing or stale. */
+	needsCalibration: string[];
+}
+
+function modelRouterPoolSummary(pool: ModelRouterPoolView | undefined): string {
+	if (!pool) return "unknown";
+	return pool.customized
+		? `${pool.refs.length} selected model${pool.refs.length === 1 ? "" : "s"}`
+		: `all enabled models (${pool.refs.length})`;
+}
+
+function modelRouterTierLabel(model: string | undefined, mode: ModelRouterSelectionMode | undefined): string {
+	if (model) return model;
+	return mode === "auto" || mode === "hybrid" ? "AUTO" : "(not set)";
+}
+
+function modelRouterSummary(settings: ModelRouterSettings, pool?: ModelRouterPoolView): string {
 	const state = settings.enabled ? "enabled" : "disabled";
+	const mode = (settings.selectionMode ?? "manual").toUpperCase();
+	const preference = settings.poolPreference ?? "subscription-first";
 	const gate = settings.fitnessGate ? "gate on" : "gate off";
-	return `${state} · ${gate} · cheap: ${optionalStringValue(settings.cheapModel)} · medium: ${optionalStringValue(settings.mediumModel)} · expensive: ${optionalStringValue(settings.expensiveModel)} · learn: ${optionalStringValue(settings.learningModel, "active")}`;
+	const tier = (model: string | undefined) => modelRouterTierLabel(model, settings.selectionMode);
+	return `${state} · ${mode} · pool ${modelRouterPoolSummary(pool)} · ${preference} · ${gate} · cheap: ${tier(settings.cheapModel)} · medium: ${tier(settings.mediumModel)} · expensive: ${tier(settings.expensiveModel)} · learn: ${optionalStringValue(settings.learningModel, "active")}`;
 }
 
 function buildAutoLearnModelOptions(
@@ -276,6 +308,10 @@ function buildModelRouterRoleModelOptions(options: {
 	currentModelPattern: string | undefined;
 	includeActive: boolean;
 	unsetDescription?: string;
+	/** "(AUTO)" for an auto-selected tier, "(unset)" otherwise. */
+	unsetLabel?: string;
+	/** The router's candidate pool; entries outside it are still selectable but marked. */
+	pool?: ModelRouterPoolView;
 }): SelectItem[] {
 	const modelOptions: SelectItem[] = [];
 	const seen = new Set<string>();
@@ -292,15 +328,34 @@ function buildModelRouterRoleModelOptions(options: {
 	} else {
 		modelOptions.push({
 			value: MODEL_ROUTER_UNSET_MODEL_VALUE,
-			label: "(unset)",
+			label: options.unsetLabel ?? "(unset)",
 			description: options.unsetDescription ?? "Clear this model setting",
 		});
 		seen.add(MODEL_ROUTER_UNSET_MODEL_VALUE);
 	}
 
-	for (const option of options.configuredModelOptions ?? []) {
+	// Favorites first (presentation only), then the candidate pool, then everything else marked
+	// as outside the pool: selectable as a manual pin, never an automatic route.
+	const configured = options.configuredModelOptions ?? [];
+	const pool = options.pool;
+	const favorites = new Set(pool?.favoriteRefs ?? []);
+	const inPool = new Set(pool?.refs ?? []);
+	const ordered = pool
+		? [
+				...configured.filter((option) => favorites.has(option.value)),
+				...configured.filter((option) => !favorites.has(option.value) && inPool.has(option.value)),
+				...configured.filter((option) => !favorites.has(option.value) && !inPool.has(option.value)),
+			]
+		: configured;
+	for (const option of ordered) {
 		if (seen.has(option.value)) continue;
-		modelOptions.push(option);
+		const marks = [
+			...(favorites.has(option.value) ? ["favorite"] : []),
+			...(pool?.customized && !inPool.has(option.value) ? ["outside pool"] : []),
+		];
+		modelOptions.push(
+			marks.length > 0 ? { ...option, description: `${option.description} · ${marks.join(" · ")}` } : option,
+		);
 		seen.add(option.value);
 	}
 
@@ -391,6 +446,7 @@ export interface SettingsConfig {
 	workerDelegationScope?: SettingsScope;
 	modelRouter: ModelRouterSettings;
 	modelRouterScope?: SettingsScope;
+	modelRouterPool?: ModelRouterPoolView;
 	autoLearn: AutoLearnSettings;
 	autoLearnScope?: SettingsScope;
 	contextPolicyEnforcement: ContextPromptEnforcementSettings;
@@ -446,6 +502,8 @@ export interface SettingsCallbacks {
 	onContextPolicyEnforcementChange: (settings: ContextPromptEnforcementSettings, scope: SettingsScope) => void;
 	onContextMemoryRetrievalChange: (settings: MemoryRetrievalSettings, scope: SettingsScope) => void;
 	onResourcesHubAction?: (action: string) => void;
+	/** Router Setup actions: configure-models, calibrate-*, preview:<task>, preview-live:<task>, diagnostics. */
+	onModelRouterAction?: (action: string) => void;
 	onCancel: () => void;
 }
 
@@ -1768,13 +1826,20 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 		onChange: (settings: ModelRouterSettings, scope: SettingsScope) => void,
 		onCancel: () => void,
 		scope: SettingsScope = "global",
+		pool?: ModelRouterPoolView,
+		onAction?: (action: string) => void,
 	) {
 		super();
 		this.state = {
 			...settings,
 			enabled: settings.enabled ?? false,
+			selectionMode: settings.selectionMode ?? "manual",
+			poolPreference: settings.poolPreference ?? "subscription-first",
 			learningModel: settings.learningModel ?? "active",
 		};
+		const tierUnsetLabel = this.state.selectionMode === "manual" ? "(unset)" : "(AUTO)";
+		const tierValue = (model: string | undefined, thinking: ThinkingLevel | undefined): string =>
+			routerTierValue(model, thinking, this.state.selectionMode === "manual" ? "(not set)" : "AUTO");
 		const levelsForModel = (modelPattern: string | undefined): ThinkingLevel[] | undefined =>
 			resolveModelThinkingLevels?.(modelPattern ?? currentModelPattern);
 		const keepSupportedThinking = (
@@ -1795,21 +1860,36 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			configuredModelOptions: modelOptions,
 			currentModelPattern,
 			includeActive: false,
-			unsetDescription: "Clear cheap routing model; research turns fall back to the active session model",
+			unsetDescription:
+				this.state.selectionMode === "manual"
+					? "Clear cheap routing model; research turns fall back to the active session model"
+					: "Let the router select this tier's model automatically from the candidate pool",
+			unsetLabel: tierUnsetLabel,
+			pool,
 		});
 		const mediumModelOptions = buildModelRouterRoleModelOptions({
 			currentValue: this.state.mediumModel,
 			configuredModelOptions: modelOptions,
 			currentModelPattern,
 			includeActive: false,
-			unsetDescription: "Clear medium routing model; implementation turns fall back according to router policy",
+			unsetDescription:
+				this.state.selectionMode === "manual"
+					? "Clear medium routing model; implementation turns fall back according to router policy"
+					: "Let the router select this tier's model automatically from the candidate pool",
+			unsetLabel: tierUnsetLabel,
+			pool,
 		});
 		const expensiveModelOptions = buildModelRouterRoleModelOptions({
 			currentValue: this.state.expensiveModel,
 			configuredModelOptions: modelOptions,
 			currentModelPattern,
 			includeActive: false,
-			unsetDescription: "Clear expensive routing model; modify turns fall back to the active session model",
+			unsetDescription:
+				this.state.selectionMode === "manual"
+					? "Clear expensive routing model; modify turns fall back to the active session model"
+					: "Let the router select this tier's model automatically from the candidate pool",
+			unsetLabel: tierUnsetLabel,
+			pool,
 		});
 		const judgeModelOptions = buildModelRouterRoleModelOptions({
 			currentValue: this.state.judgeModel,
@@ -1817,6 +1897,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			currentModelPattern,
 			includeActive: false,
 			unsetDescription: "Clear judge model; routing judge falls back to the medium model",
+			pool,
 		});
 		const executorModelOptions = buildModelRouterRoleModelOptions({
 			currentValue: this.state.executorModel,
@@ -1824,12 +1905,14 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			currentModelPattern,
 			includeActive: false,
 			unsetDescription: "Clear executor lane model; direct toolkit execution stays disabled",
+			pool,
 		});
 		const learningModelOptions = buildModelRouterRoleModelOptions({
 			currentValue: this.state.learningModel,
 			configuredModelOptions: modelOptions,
 			currentModelPattern,
 			includeActive: true,
+			pool,
 		});
 		const routedTierThinkingOptions = (modelPattern: string | undefined) =>
 			buildModelRouterThinkingOptions(
@@ -1860,10 +1943,60 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				values: ["false", "true"],
 			},
 			{
+				id: "model-router-selection-mode",
+				label: "Selection mode",
+				description:
+					"manual: exact tier pins only · auto: the router picks each tier's model from the candidate pool · hybrid: pinned tiers win, unpinned tiers auto-select",
+				currentValue: this.state.selectionMode ?? "manual",
+				values: ["manual", "auto", "hybrid"],
+			},
+			{
+				id: "model-router-pool",
+				label: "Candidate pool",
+				description:
+					"The existing Models configuration (Configure models). A customized list is a hard boundary for automatic routing; favorites only order pickers.",
+				currentValue: modelRouterPoolSummary(pool),
+				submenu: (_currentValue, done) => {
+					const options: SelectItem[] = [
+						{
+							value: "configure-models",
+							label: "Configure models →",
+							description: "Open the Models selector; the pool refreshes when you reopen settings.",
+						},
+						...(pool?.refs ?? []).map((ref, index) => ({
+							value: `calibrate:${ref}`,
+							label: ref,
+							description: pool?.calibration[index] ?? ref,
+						})),
+					];
+					return new SelectSubmenu(
+						"Router Candidate Pool",
+						pool
+							? `${modelRouterPoolSummary(pool)} · ${pool.subscriptionRefs.length} subscription-backed · select a model to calibrate it`
+							: "Pool unavailable in this view",
+						options,
+						"",
+						(value) => {
+							done(modelRouterPoolSummary(pool));
+							onAction?.(value);
+						},
+						() => done(modelRouterPoolSummary(pool)),
+					);
+				},
+			},
+			{
+				id: "model-router-pool-preference",
+				label: "Pool preference",
+				description:
+					"subscription-first: adequate subscription-backed models rank ahead of metered ones (after hard admission) · balanced: evidence ranking only",
+				currentValue: this.state.poolPreference ?? "subscription-first",
+				values: ["subscription-first", "balanced"],
+			},
+			{
 				id: "model-router-cheap",
 				label: "Cheap model",
 				description: "Pick the model for read-only, research, explanation, and question turns",
-				currentValue: routerTierValue(this.state.cheapModel, this.state.cheapThinking),
+				currentValue: tierValue(this.state.cheapModel, this.state.cheapThinking),
 				submenu: (_currentValue, done) =>
 					new ModelSelectionSubmenu(
 						cheapModelOptions,
@@ -1876,7 +2009,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 								cheapThinking: keepSupportedThinking(this.state.cheapThinking, cheapModel),
 							};
 							onChange({ ...this.state }, this.scope);
-							done(routerTierValue(this.state.cheapModel, this.state.cheapThinking));
+							done(tierValue(this.state.cheapModel, this.state.cheapThinking));
 						},
 						() => done(),
 						{
@@ -1894,7 +2027,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				id: "model-router-medium",
 				label: "Medium model",
 				description: "Pick the model for normal scoped implementation, edits, tests, and mechanical refactors",
-				currentValue: routerTierValue(this.state.mediumModel, this.state.mediumThinking),
+				currentValue: tierValue(this.state.mediumModel, this.state.mediumThinking),
 				submenu: (_currentValue, done) =>
 					new ModelSelectionSubmenu(
 						mediumModelOptions,
@@ -1907,7 +2040,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 								mediumThinking: keepSupportedThinking(this.state.mediumThinking, mediumModel),
 							};
 							onChange({ ...this.state }, this.scope);
-							done(routerTierValue(this.state.mediumModel, this.state.mediumThinking));
+							done(tierValue(this.state.mediumModel, this.state.mediumThinking));
 						},
 						() => done(),
 						{
@@ -1925,7 +2058,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				id: "model-router-expensive",
 				label: "Expensive model",
 				description: "Pick the model for modify, implementation, and escalated tool-heavy turns",
-				currentValue: routerTierValue(this.state.expensiveModel, this.state.expensiveThinking),
+				currentValue: tierValue(this.state.expensiveModel, this.state.expensiveThinking),
 				submenu: (_currentValue, done) =>
 					new ModelSelectionSubmenu(
 						expensiveModelOptions,
@@ -1938,7 +2071,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 								expensiveThinking: keepSupportedThinking(this.state.expensiveThinking, expensiveModel),
 							};
 							onChange({ ...this.state }, this.scope);
-							done(routerTierValue(this.state.expensiveModel, this.state.expensiveThinking));
+							done(tierValue(this.state.expensiveModel, this.state.expensiveThinking));
 						},
 						() => done(),
 						{
@@ -2167,6 +2300,97 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				currentValue: booleanSettingValue(this.state.fitnessGate),
 				values: ["false", "true"],
 			},
+			{
+				id: "model-router-calibrate",
+				label: "Calibrate",
+				description:
+					"Operator-triggered only. Reuses the fitness probe (runModelFitness) and the real tool probe; nothing runs by opening settings.",
+				currentValue: pool ? `${pool.needsCalibration.length} need calibration` : "unavailable",
+				submenu: (_currentValue, done) => {
+					const count = pool?.refs.length ?? 0;
+					const pending = pool?.needsCalibration.length ?? 0;
+					const options: SelectItem[] = [
+						{
+							value: "calibrate-one",
+							label: "Calibrate one model",
+							description:
+								"Pick one pool model; runs the 6-surface fitness probe, then the tool probe, then offers a role.",
+						},
+						{
+							value: "calibrate-unprobed",
+							label: `Calibrate unprobed (${pending})`,
+							description:
+								"Probe every pool model whose router evidence is missing or stale. Provider calls required.",
+						},
+						{
+							value: "calibrate-all",
+							label: `Recalibrate selected (${count})`,
+							description: "Re-probe every pool model, replacing existing evidence. Provider calls required.",
+						},
+					];
+					return new SelectSubmenu(
+						"Router Calibration",
+						"Surfaces: router_cheap, router_medium, router_expensive, router_judge, executor + tool probe. You confirm before anything runs.",
+						options,
+						"",
+						(value) => {
+							done();
+							onAction?.(value);
+						},
+						() => done(),
+					);
+				},
+			},
+			{
+				id: "model-router-preview",
+				label: "Preview route",
+				description:
+					"Enter an example task. Deterministic preview makes no provider call; live preview (judge/H-MoE) is a separate explicit action.",
+				currentValue: "enter a task",
+				submenu: (_currentValue, done) =>
+					new TextInputSubmenu(
+						"Preview Route",
+						"Type an example task. Enter previews deterministically (no provider call). Prefix with `live:` to run the judge/H-MoE path.",
+						"",
+						(value) => {
+							done();
+							const task = value.trim();
+							if (!task) return;
+							onAction?.(
+								task.startsWith("live:")
+									? `preview-live:${task.slice("live:".length).trim()}`
+									: `preview:${task}`,
+							);
+						},
+						() => done(),
+						"empty cancels",
+					),
+			},
+			{
+				id: "model-router-diagnostics",
+				label: "Diagnostics",
+				description:
+					"Show router status: mode, pool, preference, tier fitness, recent decisions with selection provenance.",
+				currentValue: "show",
+				submenu: (_currentValue, done) =>
+					new SelectSubmenu(
+						"Router Diagnostics",
+						"Prints the router status report into the conversation.",
+						[
+							{
+								value: "diagnostics",
+								label: "Show diagnostics",
+								description: "Same report as /session routing status",
+							},
+						],
+						"diagnostics",
+						(value) => {
+							done();
+							onAction?.(value);
+						},
+						() => done(),
+					),
+			},
 		];
 
 		this.mountSettingsList(
@@ -2178,6 +2402,12 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 						break;
 					case "model-router-enabled":
 						this.state = { ...this.state, enabled: newValue === "true" };
+						break;
+					case "model-router-selection-mode":
+						this.state = { ...this.state, selectionMode: newValue as ModelRouterSelectionMode };
+						break;
+					case "model-router-pool-preference":
+						this.state = { ...this.state, poolPreference: newValue as ModelRouterPoolPreference };
 						break;
 					case "model-router-fitness-gate":
 						this.state = { ...this.state, fitnessGate: newValue === "true" };
@@ -2544,8 +2774,8 @@ export class SettingsSelectorComponent extends Container {
 				id: "model-router",
 				label: "Model Router",
 				description:
-					"Configure models for cheap research, expensive modify/escalation, and explicit/background learning; automatic reflection uses the orchestrator's current session turn",
-				currentValue: modelRouterSummary(currentModelRouter),
+					"Router Setup: selection mode (manual/auto/hybrid), candidate pool from your Models configuration, subscription-first preference, tier pins, calibration, route preview and diagnostics",
+				currentValue: modelRouterSummary(currentModelRouter, config.modelRouterPool),
 				submenu: (_currentValue, done) =>
 					new ModelRouterSettingsSubmenu(
 						currentModelRouter,
@@ -2556,8 +2786,13 @@ export class SettingsSelectorComponent extends Container {
 							currentModelRouter = { ...settings };
 							callbacks.onModelRouterChange(settings, scope);
 						},
-						() => done(modelRouterSummary(currentModelRouter)),
+						() => done(modelRouterSummary(currentModelRouter, config.modelRouterPool)),
 						config.modelRouterScope ?? "global",
+						config.modelRouterPool,
+						(action) => {
+							done(modelRouterSummary(currentModelRouter, config.modelRouterPool));
+							callbacks.onModelRouterAction?.(action);
+						},
 					),
 			},
 			{

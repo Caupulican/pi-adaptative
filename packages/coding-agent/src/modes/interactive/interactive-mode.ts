@@ -109,6 +109,7 @@ import { handleEstopCommand, handleLoadCommand } from "./load-commands.ts";
 import { type LoadedResourcesViewOptions, renderLoadedResources } from "./loaded-resources-view.ts";
 import * as localModelCommands from "./local-model-commands.ts";
 import { handleMemoryCommand } from "./memory-commands.ts";
+import * as modelRouterSetupCommands from "./model-router-setup-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
 import * as reportCommands from "./report-commands.ts";
 import * as resourceShellCommands from "./resource-shell-commands.ts";
@@ -3244,7 +3245,24 @@ export class InteractiveMode {
 			validateAutoLearnModelValue: (value) => this.validateAutoLearnModelValue(value),
 			updateAutoLearnFooter: () => this.updateAutoLearnFooter(),
 			handleResourcesHubAction: (action) => this.handleResourcesHubAction(action),
+			handleModelRouterAction: (action) => this.handleModelRouterAction(action),
 		};
+	}
+
+	private handleModelRouterAction(action: string): Promise<void> {
+		return modelRouterSetupCommands.handleModelRouterAction(
+			{
+				session: this.session,
+				settingsManager: this.settingsManager,
+				showStatus: (message) => this.showStatus(message),
+				showWarning: (message) => this.showWarning(message),
+				showError: (message) => this.showError(message),
+				showSelector: (create) => this.showSelector(create),
+				showModelsSelector: () => this.showModelsSelector(),
+				runFitnessAndAssign: (modelRef) => this.runFitnessAndAssign(modelRef),
+			},
+			action,
+		);
 	}
 
 	private showSettingsSelector(): void {

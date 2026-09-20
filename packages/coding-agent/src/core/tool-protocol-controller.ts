@@ -231,6 +231,11 @@ export class ToolProtocolController {
 		return this.deps.adaptationStore.get(this.modelRef(model)).toolProbe?.status;
 	}
 
+	/** The full persisted `/toolprobe` record (status, grade, time), for calibration evidence views. */
+	getToolProbe(model: Model<Api>): ModelToolProbe | undefined {
+		return this.deps.adaptationStore.get(this.modelRef(model)).toolProbe;
+	}
+
 	async probeToolCalling(target?: string): Promise<ToolProbeReport> {
 		const models = await this.resolveToolProbeModels(target);
 		if (models.length === 0) throw new Error("No available models to probe.");

@@ -792,15 +792,21 @@ describe("settings selector", () => {
 
 		expect(output).toContain("Model Router");
 		expect(output).toContain("Enabled");
+		expect(output).toContain("Selection mode");
+		expect(output).toContain("Candidate pool");
+		expect(output).toContain("Pool preference");
 		expect(output).toContain("Cheap model");
 		expect(output).toContain("Medium model");
 		expect(output).toContain("Expensive model");
-		expect(output).toContain("Learning model");
 		expect(output).toContain("true");
 		expect(output).toContain("anthropic/claude-haiku-4-5");
 		expect(output).toContain("anthropic/claude-medium-4-5");
 		expect(output).toContain("anthropic/claude-sonnet-4-5");
-		expect(output).toContain("openai/gpt-5.4");
+		// The learning row sits below the first visible window now that Router Setup rows precede the tiers.
+		for (let index = 0; index < 10; index++) selector.getSettingsList().handleInput("\x1b[B");
+		const scrolled = selector.render(180).join("\n");
+		expect(scrolled).toContain("Learning model");
+		expect(scrolled).toContain("openai/gpt-5.4");
 	});
 
 	it("lists configured subscription and API models in the Model Router model pickers", () => {
@@ -818,6 +824,10 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("model router");
 		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\r");
@@ -848,6 +858,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\r");
@@ -855,6 +869,8 @@ describe("settings selector", () => {
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "anthropic/claude-opus-4-5",
 				expensiveModel: "openai/gpt-5.4",
 				learningModel: "active",
@@ -880,6 +896,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -891,6 +911,8 @@ describe("settings selector", () => {
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "custom/provider-model",
 				expensiveModel: "openai/gpt-5.4",
 				learningModel: "active",
@@ -917,6 +939,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[A");
 		selector.getSettingsList().handleInput("\x1b[A");
@@ -925,6 +951,8 @@ describe("settings selector", () => {
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: undefined,
 				expensiveModel: "openai/gpt-5.4",
 				learningModel: "active",
@@ -952,6 +980,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -963,6 +995,8 @@ describe("settings selector", () => {
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "openai/gpt-5.4",
 				expensiveModel: "openai/gpt-5.4",
 				learningModel: "active",
@@ -989,6 +1023,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B"); // Select Medium model (index 3)
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B"); // Moves to "anthropic/claude-opus-4-5"
@@ -998,6 +1036,8 @@ describe("settings selector", () => {
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "anthropic/claude-opus-4-5",
 				mediumModel: "openai/gpt-5.4",
 				expensiveModel: "openai/gpt-5.4",
@@ -1026,6 +1066,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B"); // Select Medium model
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[A"); // Clear option
@@ -1035,6 +1079,8 @@ describe("settings selector", () => {
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "openai/gpt-5.4",
 				mediumModel: undefined,
 				expensiveModel: "openai/gpt-5.4",
@@ -1066,6 +1112,8 @@ describe("settings selector", () => {
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "anthropic/claude-haiku-4-5",
 				expensiveModel: "anthropic/claude-sonnet-4-5",
 				learningModel: "active",
@@ -1090,7 +1138,7 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("model router");
 		selector.getSettingsList().handleInput("\r");
-		for (let i = 0; i < 10; i++) selector.getSettingsList().handleInput("\x1b[B");
+		for (let i = 0; i < 13; i++) selector.getSettingsList().handleInput("\x1b[B");
 		const output = selector.render(180).join("\n");
 
 		expect(output).toContain("Fitness gate");
@@ -1114,6 +1162,10 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("model router");
 		selector.getSettingsList().handleInput("\r"); // open Model Router submenu
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -1153,6 +1205,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -1166,6 +1222,8 @@ describe("settings selector", () => {
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "openai/gpt-5.4",
 				expensiveModel: "openai/gpt-5.4",
 				learningModel: "active",
@@ -1194,6 +1252,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -1209,6 +1271,8 @@ describe("settings selector", () => {
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "openai/gpt-5.4",
 				expensiveModel: "openai/gpt-5.4",
 				learningModel: "active",
@@ -1237,6 +1301,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -1251,6 +1319,8 @@ describe("settings selector", () => {
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "openai/gpt-5.4",
 				expensiveModel: "openai/gpt-5.4",
 				learningModel: "active",
@@ -1278,7 +1348,7 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("model router");
 		selector.getSettingsList().handleInput("\r");
-		for (let index = 0; index < 10; index++) selector.getSettingsList().handleInput("\x1b[B");
+		for (let index = 0; index < 13; index++) selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\r");
 		const output = selector.render(180).join("\n");
 
@@ -1306,6 +1376,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -1321,6 +1395,8 @@ describe("settings selector", () => {
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "openai/gpt-5.4",
 				expensiveModel: "openai/gpt-5.4",
 				learningModel: "active",
@@ -1349,6 +1425,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -1368,6 +1448,8 @@ describe("settings selector", () => {
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "openai/gpt-5.4",
 				expensiveModel: "openai/gpt-5.4",
 				learningModel: "active",
@@ -1397,6 +1479,10 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
+		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -1413,6 +1499,8 @@ describe("settings selector", () => {
 		expect(onModelRouterChange).toHaveBeenCalledWith(
 			{
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "openai/gpt-5.4",
 				expensiveModel: "openai/gpt-5.4",
 				learningModel: "active",

@@ -130,6 +130,11 @@ describe("InteractiveMode thinking visibility toggle (F4)", () => {
 				followUpMode: "one-at-a-time",
 				thinkingLevel: "medium",
 				getAvailableThinkingLevels: () => ["off", "medium", "high"],
+				// Router Setup reads the pool view from live session state on open (never a probe).
+				getRouterCandidatePool: () => ({ customized: false, models: [] }),
+				getStoredFitnessReports: () => [],
+				getToolProbeRecord: () => undefined,
+				modelRegistry: { isUsingSubscription: () => false },
 			} as any,
 			settingsManager: {
 				getProjectSettings: () => ({}),
@@ -171,6 +176,7 @@ describe("InteractiveMode thinking visibility toggle (F4)", () => {
 				getActiveResourceProfileNames: () => [],
 				getExternalResourceRoots: () => [],
 				getTrustedResourceRoots: () => [],
+				getModelFavorites: () => [],
 				setHideThinkingBlock: vi.fn(),
 			} as any,
 			footer: {} as any,
@@ -199,6 +205,7 @@ describe("InteractiveMode thinking visibility toggle (F4)", () => {
 			validateAutoLearnModelValue: () => undefined,
 			updateAutoLearnFooter: vi.fn(),
 			handleResourcesHubAction: vi.fn(async () => {}),
+			handleModelRouterAction: vi.fn(async () => {}),
 		};
 
 		showSettingsSelector(host);

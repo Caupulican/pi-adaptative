@@ -13,6 +13,7 @@ import type { Component, Container, EditorComponent, SelectItem, TUI } from "@ca
 import type { AgentSession } from "../../core/agent-session.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
+import { describeRouterCalibration, formatRouterCalibrationRow } from "../../core/model-router/calibration.ts";
 import type {
 	AutonomyMode,
 	SelfModificationSettings,
@@ -22,7 +23,7 @@ import type {
 import { ActionTranscriptComponent } from "./components/action-transcript.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
-import { SettingsSelectorComponent } from "./components/settings-selector.ts";
+import { type ModelRouterPoolView, SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { getAvailableThemes, setTheme } from "./theme/theme.ts";
 
 export interface SettingsSelectorHost {
@@ -48,6 +49,36 @@ export interface SettingsSelectorHost {
 	validateAutoLearnModelValue(value: string | undefined): string | undefined;
 	updateAutoLearnFooter(): void;
 	handleResourcesHubAction(action: string): Promise<void>;
+	/** Router Setup actions (configure-models, calibrate-*, preview:<task>, diagnostics). */
+	handleModelRouterAction(action: string): Promise<void>;
+}
+
+/**
+ * The router's pool as the settings screen shows it: the session's live candidate pool, favorites
+ * for ordering only, subscription ownership from the registry, and existing fitness/tool-probe
+ * evidence per router surface. Reading it never runs a probe.
+ */
+export function buildModelRouterPoolView(
+	host: Pick<SettingsSelectorHost, "session" | "settingsManager">,
+): ModelRouterPoolView {
+	const pool = host.session.getRouterCandidatePool();
+	const registry = host.session.modelRegistry;
+	const rows = describeRouterCalibration(pool.models, {
+		fitnessReports: host.session.getStoredFitnessReports(),
+		toolProbe: (model) => host.session.getToolProbeRecord(model),
+		isSubscription: (model) => registry.isUsingSubscription(model),
+	});
+	const favorites = new Set(
+		host.settingsManager.getModelFavorites().map((favorite) => `${favorite.provider}/${favorite.modelId}`),
+	);
+	return {
+		customized: pool.customized,
+		refs: rows.map((row) => row.ref),
+		subscriptionRefs: rows.filter((row) => row.subscription).map((row) => row.ref),
+		favoriteRefs: rows.filter((row) => favorites.has(row.ref)).map((row) => row.ref),
+		calibration: rows.map(formatRouterCalibrationRow),
+		needsCalibration: rows.filter((row) => row.needsCalibration).map((row) => row.ref),
+	};
 }
 
 export function showSettingsSelector(host: SettingsSelectorHost): void {
@@ -120,6 +151,7 @@ export function showSettingsSelector(host: SettingsSelectorHost): void {
 				modelCapabilityScope: projectSettings.modelCapability ? "project" : "global",
 				modelRouter: host.settingsManager.getModelRouterSettings(),
 				modelRouterScope: projectSettings.modelRouter ? "project" : "global",
+				modelRouterPool: buildModelRouterPoolView(host),
 				autoLearn: host.settingsManager.getAutoLearnSettings(),
 				autoLearnScope: projectSettings.autoLearn ? "project" : "global",
 				autoLearnModelOptions: host.getAutoLearnModelOptions(),
@@ -343,6 +375,10 @@ export function showSettingsSelector(host: SettingsSelectorHost): void {
 				onResourcesHubAction: (action) => {
 					done();
 					void host.handleResourcesHubAction(action);
+				},
+				onModelRouterAction: (action) => {
+					done();
+					void host.handleModelRouterAction(action);
 				},
 				onCancel: () => {
 					done();

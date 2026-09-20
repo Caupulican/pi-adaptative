@@ -159,7 +159,7 @@ import {
 	ModelRouterController,
 } from "./model-router-controller.ts";
 import { ModelSelectionController } from "./model-selection-controller.ts";
-import { ModelAdaptationStore } from "./models/adaptation-store.ts";
+import { ModelAdaptationStore, type ModelToolProbe } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
@@ -1559,6 +1559,11 @@ export class AgentSession {
 	/** The router's candidate pool as the operator configured it (scoped models or all authed). */
 	getRouterCandidatePool(): RouterCandidatePool {
 		return resolveRouterCandidatePool(this._scopedModels, this._modelRegistry);
+	}
+
+	/** The persisted `/toolprobe` record for a model, or undefined when never probed. */
+	getToolProbeRecord(model: Model<Api>): ModelToolProbe | undefined {
+		return this._toolProtocol.getToolProbe(model);
 	}
 
 	/** Deterministic route preview for an example task: no provider call, no session mutation. */
