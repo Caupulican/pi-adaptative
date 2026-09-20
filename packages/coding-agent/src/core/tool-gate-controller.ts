@@ -11,7 +11,7 @@
 
 import type { Agent, BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
-import { classifyAllEdgeOperations } from "./autonomy/edge-policy.ts";
+import { classifyAllEdgeOperations, type EdgeClass } from "./autonomy/edge-policy.ts";
 import { evaluateToolGateAsync } from "./autonomy/gates.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
@@ -57,6 +57,8 @@ export interface ToolGateControllerDeps {
 		executionCwd: string | undefined,
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined>;
+	/** The edge classes an admitted call carries (empty for ordinary work), for the delivery projection. */
+	noteEdgeOperations?(toolCallId: string, classes: readonly EdgeClass[]): void;
 	/**
 	 * Session identity of the group lock this call's announcement belongs to
 	 * (see file-mutation-queue.ts). Omitted retires in the process-wide default scope.
@@ -215,6 +217,10 @@ export class ToolGateController {
 				scopeCwd,
 			});
 			const isOperatorAuthorizedEdge = edgeOperations.length > 0;
+			this.deps.noteEdgeOperations?.(
+				toolCall.id,
+				edgeOperations.map((operation) => operation.class),
+			);
 
 			// Operator edge authorization outranks advisory semantic tool gates;
 			// control-plane tools are internal harness operations, not untrusted repo inputs.

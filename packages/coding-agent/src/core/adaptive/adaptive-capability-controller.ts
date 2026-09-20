@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import type { ExecutionCharter } from "../autonomy/execution-charter.ts";
 import { EXPERT_ROUTING_SCHEMA_VERSION, type WorkerCapabilityRequest } from "../expert-routing/contracts.ts";
 import type { ExpertSelectionService } from "../expert-routing/service.ts";
+import type { AdaptationProjection } from "../operator-projection/types.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
 import { SteeringProtocolError } from "../steering/types.ts";
 import type { CapabilityCatalog } from "./capability-catalog.ts";
@@ -162,8 +163,19 @@ export function computeArtifactDiskDigest(artifactUri: string): string | null {
 	return null;
 }
 
+export interface ResolveOrBuildInput {
+	objectiveId: string;
+	taskId: string;
+	need: CapabilityNeed;
+	charter?: ExecutionCharter;
+	evidenceRevision?: number;
+	signal?: AbortSignal;
+}
+
 export interface AdaptiveCapabilityControllerDeps {
 	readonly steering: SystemOneSteeringPlane;
+	/** Told when a capability is being built, verified or activated, and `undefined` when synthesis ends. */
+	readonly onAdaptation?: (adaptation: AdaptationProjection | undefined) => void;
 	readonly catalog: CapabilityCatalog;
 	readonly resolver?: CapabilityResolver;
 	readonly experts?: ExpertSelectionService;
@@ -220,6 +232,16 @@ export class AdaptiveCapabilityController {
 	readonly catalog: CapabilityCatalog;
 	readonly resolver: CapabilityResolver;
 	private readonly deps: AdaptiveCapabilityControllerDeps;
+	private adaptationSink?: (adaptation: AdaptationProjection | undefined) => void;
+
+	/** Late-bound: the session that owns the operator projection binds it after the stack is built. */
+	setAdaptationSink(sink: ((adaptation: AdaptationProjection | undefined) => void) | undefined): void {
+		this.adaptationSink = sink;
+	}
+
+	private reportAdaptation(label: string, state: AdaptationProjection["state"] | undefined): void {
+		this.adaptationSink?.(state ? { kind: "capability", label, state } : undefined);
+	}
 	private readonly experts?: ExpertSelectionService;
 	private readonly builder?: AdaptiveCapabilityControllerDeps["builder"];
 	private readonly mechanicalVerifier?: AdaptiveCapabilityControllerDeps["mechanicalVerifier"];
@@ -233,6 +255,7 @@ export class AdaptiveCapabilityController {
 
 	constructor(deps: AdaptiveCapabilityControllerDeps) {
 		this.deps = deps;
+		this.adaptationSink = deps.onAdaptation;
 		this.steering = deps.steering;
 		this.catalog = deps.catalog;
 		this.resolver = deps.resolver ?? new CapabilityResolver(this.catalog, this.steering);
@@ -416,14 +439,16 @@ export class AdaptiveCapabilityController {
 			.digest("hex");
 	}
 
-	async resolveOrBuild(input: {
-		objectiveId: string;
-		taskId: string;
-		need: CapabilityNeed;
-		charter?: ExecutionCharter;
-		evidenceRevision?: number;
-		signal?: AbortSignal;
-	}): Promise<EstablishedCapability> {
+	async resolveOrBuild(input: ResolveOrBuildInput): Promise<EstablishedCapability> {
+		try {
+			return await this.resolveOrBuildUnreported(input);
+		} finally {
+			// Synthesis is over, one way or the other: the projection leaves ADAPT.
+			this.reportAdaptation("", undefined);
+		}
+	}
+
+	private async resolveOrBuildUnreported(input: ResolveOrBuildInput): Promise<EstablishedCapability> {
 		if (input.signal?.aborted) {
 			throw new Error("Adaptive capability resolution aborted.");
 		}
@@ -593,6 +618,7 @@ export class AdaptiveCapabilityController {
 			const selection = await this.experts.select(workerCapRequest, { signal: input.signal });
 			expertBinding = (selection as any)?.bindings?.[0] ?? (selection as any)?.primary ?? selection;
 		}
+		this.reportAdaptation(capabilityId, "building");
 		const candidate = await this.builder.build(spec, input.signal, expertBinding);
 		if (!candidate?.digest) {
 			throw new Error("Builder produced an invalid candidate artifact without a digest");
@@ -602,6 +628,7 @@ export class AdaptiveCapabilityController {
 		if (!this.mechanicalVerifier) {
 			throw new Error("Capability synthesis requires a mechanical verifier (PH-063)");
 		}
+		this.reportAdaptation(capabilityId, "verifying");
 		const verification = await this.mechanicalVerifier.verifyCandidate(candidate, spec);
 		if (!verification.passed) {
 			throw new Error(
@@ -655,6 +682,7 @@ export class AdaptiveCapabilityController {
 		if (!activationRes.active) {
 			throw new Error(`Activation failed for capability '${capabilityId}'`);
 		}
+		this.reportAdaptation(capabilityId, "active");
 
 		// 9. Runtime smoke + post-activation availability: JEV-015
 		const smokePassed = await this.mechanicalVerifier.verifyActivation(activationRes.projection, spec);

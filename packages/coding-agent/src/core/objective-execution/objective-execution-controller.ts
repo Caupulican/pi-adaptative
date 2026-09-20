@@ -154,6 +154,8 @@ export interface ObjectiveExecutionControllerDeps {
 	responsibilityController?: SemanticResponsibilityController;
 	onDisagreementTelemetry?(event: DisagreementTelemetryEvent): void;
 	onHumanEdgeRequest?(request: HumanEdgeRequest): Promise<boolean> | boolean;
+	/** Told what the owner has to resolve when a human-edge request blocks the objective, and `undefined` when it clears. */
+	onOwnerBlocker?(blocker: string | undefined): void;
 	getRouteProposedAction?(route: ObjectiveRoute): ProposedAction;
 	/**
 	 * Root semantic project rules. A blocking violation queues durable RepairWork and stops the
@@ -310,9 +312,16 @@ export class ObjectiveExecutionController {
 	private readonly alternativesTried = new Set<string>();
 	private cycleCounter = 0;
 	private _lastBinding?: ExpertBinding;
+	private ownerBlockerSink?: (blocker: string | undefined) => void;
+
+	/** Late-bound: the session that owns the operator projection binds it after the stack is built. */
+	setOwnerBlockerSink(sink: ((blocker: string | undefined) => void) | undefined): void {
+		this.ownerBlockerSink = sink;
+	}
 
 	constructor(deps: ObjectiveExecutionControllerDeps) {
 		this.deps = deps;
+		this.ownerBlockerSink = deps.onOwnerBlocker;
 		this.defaultStallDetector = new ObjectiveStallDetector();
 		this.humanEdgeLedger = deps.humanEdgeLedger ?? new DurableHumanEdgeLedger();
 		this.authorityBlockLedger = deps.authorityBlockLedger ?? new DurableAuthorityBlockLedger();
@@ -783,6 +792,9 @@ export class ObjectiveExecutionController {
 								timestamp: Date.now(),
 							});
 							const bundle = await this.buildBundle(objectiveId, "owner_required", runtime);
+							this.ownerBlockerSink?.(
+								`${edge.edge_type} denied: ${edge.exact_authority ?? proposedAction.kind}`,
+							);
 							return {
 								status: "blocked",
 								reasonCodes: ["human_edge_denied", edge.edge_type],
@@ -801,6 +813,9 @@ export class ObjectiveExecutionController {
 						});
 					} else {
 						const bundle = await this.buildBundle(objectiveId, "owner_required", runtime);
+						this.ownerBlockerSink?.(
+							`${edge.edge_type} needs you: ${edge.exact_authority ?? proposedAction.kind}`,
+						);
 						return {
 							status: "blocked",
 							reasonCodes: ["human_edge_required", edge.edge_type],

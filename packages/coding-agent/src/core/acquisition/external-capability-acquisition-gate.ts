@@ -28,9 +28,39 @@ export interface DecisionEngine {
 	}>;
 }
 
+/**
+ * The semantic questions of the acquisition gate as a batched boolean program, the shape the
+ * session's decision engine actually evaluates. A bare list of question ids is not a program.
+ */
+export const ACQUISITION_DECISION_PROGRAM = {
+	program_id: "external_capability_acquisition",
+	decisions: [
+		{
+			id: "acquisition_required_for_objective",
+			instruction: "Is acquiring this external capability required to complete the objective?",
+		},
+		{
+			id: "side_effects_proportionate",
+			instruction:
+				"Are the acquisition's side effects (installs, downloads, shell execution) proportionate to the objective?",
+		},
+		{
+			id: "safer_existing_route_preferred",
+			instruction:
+				"Would a safer existing route (a pinned, verified or already-installed alternative) serve the objective instead?",
+		},
+		{
+			id: "source_matches_requested_capability",
+			instruction: "Does the requested source actually provide the requested capability?",
+		},
+	],
+} as const;
+
 export interface ExternalCapabilityAcquisitionGateDeps {
 	steering?: SteeringPlane;
 	decisionEngine?: DecisionEngine;
+	/** A semantic evaluation that threw: the gate keeps its conservative stance and says so here. */
+	onSemanticFailure?: (error: unknown) => void;
 	availableCapabilities?: readonly string[];
 	installedPackages?: readonly string[];
 	/**
@@ -92,6 +122,7 @@ export class ExternalCapabilityAcquisitionGate {
 	};
 	private readonly systemOneRequired: boolean;
 	private readonly getGrantedAuthority?: ExternalCapabilityAcquisitionGateDeps["getGrantedAuthority"];
+	private readonly onSemanticFailure?: ExternalCapabilityAcquisitionGateDeps["onSemanticFailure"];
 	private readonly resolveRouteFn?: ExternalCapabilityAcquisitionGateDeps["resolveRoute"];
 	private readonly records: ExternalAcquisitionRecord[] = [];
 
@@ -102,6 +133,7 @@ export class ExternalCapabilityAcquisitionGate {
 		this.installedPackages = new Set(deps.installedPackages ?? []);
 		this.systemOneRequired = deps.systemOneRequired === true;
 		this.getGrantedAuthority = deps.getGrantedAuthority;
+		this.onSemanticFailure = deps.onSemanticFailure;
 		this.resolveRouteFn = deps.resolveRoute;
 		// Authority is read from the actual charter. No charter means no authority, which is a denial,
 		// never an assumed permission.
@@ -275,21 +307,14 @@ export class ExternalCapabilityAcquisitionGate {
 						sourceMatchesCapability = cert.answers.source_matches_requested_capability;
 					}
 				}
-			} catch {
-				// Jev failure retains conservative stance
+			} catch (error) {
+				// The plane failed: the conservative stance stands, and the failure is reported, not hidden.
+				this.onSemanticFailure?.(error);
 			}
 		} else if (this.decisionEngine) {
 			try {
 				const evalRes = await this.decisionEngine.evaluate(
-					{
-						program: "external_capability_acquisition",
-						questions: [
-							"acquisition_required_for_objective",
-							"side_effects_proportionate",
-							"safer_existing_route_preferred",
-							"source_matches_requested_capability",
-						],
-					},
+					ACQUISITION_DECISION_PROGRAM,
 					{
 						objective_id: request.objectiveId,
 						capability_id: request.capabilityId,
@@ -311,8 +336,9 @@ export class ExternalCapabilityAcquisitionGate {
 				if (answers.source_matches_requested_capability) {
 					sourceMatchesCapability = (answers.source_matches_requested_capability.noul ?? 1) >= 0.5;
 				}
-			} catch {
-				// Conservative fallback
+			} catch (error) {
+				// The engine failed: the conservative stance stands, and the failure is reported, not hidden.
+				this.onSemanticFailure?.(error);
 			}
 		}
 

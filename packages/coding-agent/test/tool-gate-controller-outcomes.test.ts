@@ -67,6 +67,34 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 
+	it("names the edge classes of an admitted call so the session can project DELIVER", async () => {
+		const { cwd } = scope();
+		const noted: { id: string; classes: readonly string[] }[] = [];
+		const controller = new ToolGateController({
+			maybeEscalateToolCall: () => undefined,
+			getCwd: () => cwd,
+			getCapabilityEnvelope: () => undefined,
+			recordGateOutcome: () => {},
+			getExtensionRunner: () => fakeRunner([]),
+			noteEdgeOperations: (id, classes) => noted.push({ id, classes }),
+		});
+		const call = (name: string, args: Record<string, unknown>) =>
+			controller.beforeToolCall(
+				{
+					assistantMessage: fauxAssistantMessage(""),
+					toolCall: { id: `call-${noted.length + 1}`, name, arguments: args },
+					args,
+				} as Parameters<typeof controller.beforeToolCall>[0],
+				undefined,
+			);
+		expect(await call("bash", { command: "git push origin main" })).toBeUndefined();
+		expect(await call("read", { path: "src/a.ts" })).toBeUndefined();
+		expect(noted).toEqual([
+			{ id: "call-1", classes: ["git.publish"] },
+			{ id: "call-2", classes: [] },
+		]);
+	});
+
 	it("an allowed call with no hooks records exactly one allow outcome", async () => {
 		const { cwd } = scope();
 		const envelope: CapabilityEnvelope = { id: "env", capabilities: ["filesystem.read"], allowedPaths: [cwd] };

@@ -26,6 +26,7 @@ import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
 import { getAgentDir, VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
 import { screenAcquisition } from "./acquisition/acquisition-boundary.ts";
 import { ExternalCapabilityAcquisitionGate } from "./acquisition/external-capability-acquisition-gate.ts";
+import type { AdaptiveCapabilityController } from "./adaptive/adaptive-capability-controller.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import { decisionLedgerFile, resourceDir, stateFile } from "./agent-paths.ts";
 import { createSessionBackgroundToolTasks } from "./agent-session-background-tasks.ts";
@@ -460,6 +461,8 @@ export class AgentSession {
 	private _executionCharter?: ExecutionCharter;
 	private _adaptationProjection?: AdaptationProjection;
 	private _deliveryState: DeliveryState = "none";
+	/** Admitted outward-facing tool calls still running; DELIVER ends when the last one ends. */
+	private readonly _deliveryToolCalls = new Set<string>();
 	private _operatorBlocker?: string;
 	/** Observed outcome of every semantic evaluation this session ran; the footer reads it. */
 	private readonly _semanticPlaneHealth = new SemanticPlaneHealthRecorder();
@@ -1516,6 +1519,13 @@ export class AgentSession {
 			getExtensionRunner: () => this._extensionRunner,
 			getToolSelectionController: () => this._toolSelection,
 			checkEdge: (tool, args, cwd, signal) => enforceSessionEdge(this._edgeDeps(), tool, args, cwd, signal),
+			// An admitted outward-facing operation (publish to a remote or a registry) is the delivery
+			// step the projection reports as DELIVER until that call ends.
+			noteEdgeOperations: (toolCallId, classes) => {
+				if (!classes.some((edgeClass) => edgeClass === "git.publish" || edgeClass === "package.publish")) return;
+				this._deliveryToolCalls.add(toolCallId);
+				this.setDeliveryState("in_progress");
+			},
 			checkDirectScriptExecution: (toolName, args, cwd) =>
 				this._runtimeBuilder.checkDirectScriptExecution(toolName, args, cwd),
 			checkExternalAcquisition: (toolName, args, signal) =>
@@ -1764,13 +1774,15 @@ export class AgentSession {
 	setAdaptationProjection(adaptation: AdaptationProjection | undefined): void {
 		const previous = this._adaptationProjection;
 		this._adaptationProjection = adaptation;
-		if (adaptation && adaptation.label !== previous?.label) {
-			if (adaptation.kind === "capability") {
+		if (adaptation) {
+			const firstSight = adaptation.label !== previous?.label;
+			const activated = adaptation.state === "active" && previous?.state !== "active";
+			if (adaptation.kind === "capability" && (firstSight || activated)) {
 				this._operatorProjection.eventBridge.recordCapabilityMilestone(
 					adaptation.label,
 					adaptation.state === "active" ? "activated" : "synthesized",
 				);
-			} else if (adaptation.kind === "specialist") {
+			} else if (adaptation.kind === "specialist" && firstSight) {
 				this._operatorProjection.eventBridge.recordSpecialistMilestone(adaptation.label, "created");
 			}
 		}
@@ -1850,6 +1862,7 @@ export class AgentSession {
 		readiness?: AdaptiveRuntimeReadiness;
 		steeringPlane?: SystemOneSteeringPlane;
 		objectiveController?: ObjectiveExecutionController;
+		adaptiveCapabilities?: AdaptiveCapabilityController;
 		charter?: ExecutionCharter;
 		expertService?: ExpertSelectionService;
 	}): void {
@@ -1882,6 +1895,11 @@ export class AgentSession {
 				},
 				systemOneRequired: this._steeringPlane?.policy.mode === "system_one_required",
 				...(decisionEngine ? { decisionEngine } : {}),
+				onSemanticFailure: (error) =>
+					this._emit({
+						type: "warning",
+						message: `Acquisition gate: semantic evaluation failed (${error instanceof Error ? error.message : String(error)}); conservative route kept`,
+					}),
 			});
 		}
 		if (stack.readiness) {
@@ -1889,6 +1907,10 @@ export class AgentSession {
 		}
 		if (stack.objectiveController) {
 			this._objectiveExecutionController = stack.objectiveController;
+			stack.objectiveController.setOwnerBlockerSink((blocker) => this.setOperatorBlocker(blocker));
+		}
+		if (stack.adaptiveCapabilities) {
+			stack.adaptiveCapabilities.setAdaptationSink((adaptation) => this.setAdaptationProjection(adaptation));
 		}
 	}
 
@@ -2066,6 +2088,8 @@ export class AgentSession {
 
 	grantEdge(edgeClass: EdgeClass, source: "operator" | "instructions", details: EdgeGrantDetails = {}): void {
 		recordEdgeGrant(this._edgeDeps(), edgeClass, source, details);
+		// The owner acted at the edge: whatever was waiting on them is no longer a blocker.
+		if (source === "operator") this.setOperatorBlocker(undefined);
 	}
 
 	revokeEdge(edgeClass: EdgeClass): boolean {
@@ -2647,6 +2671,9 @@ export class AgentSession {
 				partialResult: event.partialResult,
 			});
 		} else if (event.type === "tool_execution_end") {
+			if (this._deliveryToolCalls.delete(event.toolCallId) && this._deliveryToolCalls.size === 0) {
+				this.setDeliveryState("none");
+			}
 			await this._extensionRunner.emit({
 				type: "tool_execution_end",
 				toolCallId: event.toolCallId,
@@ -3133,6 +3160,8 @@ export class AgentSession {
 		// An owner development directive is policy, not prompt text: it is captured durably here,
 		// before the turn that carried it can be compacted away.
 		this._ownerRules.record(text);
+		// The owner spoke: an operator blocker waited for exactly that.
+		if (this._operatorBlocker !== undefined) this.setOperatorBlocker(undefined);
 		if (options?.autoContinueGoal !== false) {
 			this._backgroundLanes.clearGoalAutoContinueTimer();
 		}
