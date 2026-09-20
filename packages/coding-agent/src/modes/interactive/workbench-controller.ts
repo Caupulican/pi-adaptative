@@ -13,9 +13,11 @@ import {
 	isActiveWorkerLane,
 	projectSpecialistLanes,
 } from "./components/agents-overlay.ts";
+import type { DecisionGraphModel } from "./components/decision-graph-model.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
 import {
 	CHECKS_SECTION,
+	DEFAULT_GRAPH_FRACTION,
 	PLAN_SECTION,
 	TEAM_SECTION,
 	type WorkbenchComponent,
@@ -42,6 +44,17 @@ interface WorkbenchPorts {
 	previewLimit?: () => number;
 	activeForegroundCount?: () => number;
 	activeBackgroundCount?: () => number;
+	/** Composes the Decision graph's model from live state; absent, the conversation zone is chat only. */
+	graph?: () => DecisionGraphModel | undefined;
+	/** The lane's one ticker: told whether the drawn graph carries a running clock. */
+	clock?: (running: boolean) => void;
+}
+
+/** What the cycle produced so far, as the Decision graph counts it. */
+export interface WorkbenchEvidenceCounts {
+	readonly actions: number;
+	readonly fileEffects: number;
+	readonly failures: number;
 }
 
 /** UI-only cycle, input and copy coordinator. Task/worker state is never mutated here. */
@@ -58,7 +71,7 @@ export class WorkbenchController {
 	private pressPoint?: { row: number; column: number };
 	/** Left button went down on a resize handle; a drag resizes, a still click on the divider toggles collapse. */
 	private geometryDrag?: {
-		kind: "rows" | "split" | "columns";
+		kind: "rows" | "split" | "columns" | "graph";
 		startRow: number;
 		startColumn: number;
 		moved: boolean;
@@ -77,6 +90,17 @@ export class WorkbenchController {
 		this.view = view;
 		this.ports = ports;
 		this.workspace = workspace;
+		if (ports.graph) view.setDecisionGraph(ports.graph, ports.clock);
+	}
+
+	/** Receipts of the current cycle: completed actions, observed file effects, negative outcomes. */
+	evidenceCounts(): WorkbenchEvidenceCounts {
+		const { current } = this.invocations.snapshot();
+		return {
+			actions: current.succeeded + current.negative + current.unknown + current.unclassified,
+			fileEffects: this.fileEffects,
+			failures: current.negative + current.postprocessing + current.conflicts,
+		};
 	}
 
 	reset(): void {
@@ -302,6 +326,8 @@ export class WorkbenchController {
 		else if (keys.matches(data, "app.execution.pageDown")) this.view.pageExecution(1);
 		else if (keys.matches(data, "app.inspector.toggle")) this.changeGeometry(() => this.view.toggleInspector());
 		else if (keys.matches(data, "app.workbench.layout")) this.changeGeometry(() => this.view.toggleLayout());
+		else if (keys.matches(data, "app.graph.toggle")) this.changeGeometry(() => this.view.toggleGraph());
+		else if (keys.matches(data, "app.graph.view")) this.changeGeometry(() => this.view.cycleGraphView());
 		else if (keys.matches(data, "app.execution.maximize"))
 			this.changeGeometry(() => this.view.toggleExecutionMaximized());
 		else {
@@ -312,6 +338,7 @@ export class WorkbenchController {
 			if (action === "scroll") {
 				const delta = button === "wheelUp" ? -3 : 3;
 				if (hit === "conversation") conversation.scroll(delta);
+				else if (hit === "graph") this.view.scrollGraph(column, row, delta);
 				else this.view.scrollUpper(column, row, delta);
 			} else if (this.geometryDrag && (action === "drag" || action === "up") && button === "left") {
 				const axisMoved =
@@ -334,6 +361,10 @@ export class WorkbenchController {
 						if (column === this.geometryDrag.startColumn) {
 							this.view.resizeConversation(origin.conversationFraction ?? 0.5);
 						} else this.view.resizeConversationFromPointer(column);
+					} else if (this.geometryDrag.kind === "graph") {
+						if (column === this.geometryDrag.startColumn) {
+							this.view.resizeGraph(origin.graphFraction ?? DEFAULT_GRAPH_FRACTION);
+						} else this.view.resizeGraphFromPointer(column);
 					} else if (column === this.geometryDrag.startColumn) {
 						this.view.resizeInspector(origin.inspectorFraction ?? 0.3);
 					} else this.view.resizeInspectorFromPointer(column);
@@ -375,6 +406,23 @@ export class WorkbenchController {
 					moved: false,
 					origin: this.view.geometry(),
 				};
+			} else if (action === "down" && button === "left" && hit === "graphSplit") {
+				this.geometryDrag = {
+					kind: "graph",
+					startRow: row,
+					startColumn: column,
+					moved: false,
+					origin: this.view.geometry(),
+				};
+			} else if (action === "down" && button === "left" && hit === "graphTitle") {
+				const titleAction = this.view.paneTitleAction(column, row);
+				if (titleAction === "graphList") this.changeGeometry(() => this.view.setGraphView("list"));
+				else if (titleAction === "graphDiagram") this.changeGeometry(() => this.view.setGraphView("diagram"));
+				else if (titleAction === "hideGraph") this.changeGeometry(() => this.view.toggleGraph());
+			} else if (action === "down" && button === "left" && hit === "graph") {
+				// A stage row opens its detail; the detail lives in the List view, so the view may switch.
+				const stage = this.view.graphStageAt(column, row);
+				if (stage) this.changeGeometry(() => this.view.toggleGraphStage(stage));
 			} else if (action === "down" && button === "left" && (hit === "inspectorTitle" || hit === "executionTitle")) {
 				const titleAction = this.view.paneTitleAction(column, row);
 				if (titleAction === "hideInspector" || titleAction === "showInspector") {

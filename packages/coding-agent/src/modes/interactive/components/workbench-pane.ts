@@ -58,7 +58,10 @@ export interface WorkbenchPaneTitleButton {
 	selected?: boolean;
 }
 
-/** `true` follows the newest rows; `{ row }` keeps that row in view. The operator's scroll wins over both. */
+/**
+ * `true` follows the newest rows until the operator scrolls away. `{ row }` centres that row when it
+ * changes (a new current stage) and otherwise leaves the operator's scroll alone.
+ */
 export type WorkbenchPaneFollow = boolean | { readonly row: number };
 
 export function titleChip(label: string, selected = false): string {
@@ -75,11 +78,14 @@ export class WorkbenchPane {
 	private height = 0;
 	/** The operator scrolled away from the newest rows; a following pane stops following. */
 	private pinned = false;
+	/** The row a `{ row }` follow last centred; the pane re-anchors only when it changes. */
+	private followedRow?: number;
 	private titleActions: { action: WorkbenchPaneTitleAction; start: number; end: number }[] = [];
 
 	reset(): void {
 		this.offset = 0;
 		this.pinned = false;
+		this.followedRow = undefined;
 		this.hide();
 	}
 
@@ -156,10 +162,12 @@ export class WorkbenchPane {
 		this.titleActions = [];
 		const end = Math.max(0, lines.length - this.height);
 		let target = Math.min(this.offset, end);
-		if (!this.pinned) {
-			if (follow === true) target = end;
-			else if (typeof follow === "object") target = follow.row - Math.floor(this.height * 0.55);
-		}
+		if (typeof follow === "object") {
+			if (follow.row !== this.followedRow) {
+				this.followedRow = follow.row;
+				target = follow.row - Math.floor(this.height * 0.55);
+			}
+		} else if (follow && !this.pinned) target = end;
 		this.offset = Math.max(0, Math.min(end, target));
 		const range =
 			lines.length > this.height && this.height > 0

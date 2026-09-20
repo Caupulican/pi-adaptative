@@ -7,10 +7,18 @@ import { APP_NAME } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
 import type { ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
+import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
+import type { TaskStepStatus } from "../../core/tasks/task-state.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { type ActivityLaneComponent, isBackgroundToolActivityItem } from "./components/activity-lane.ts";
+import {
+	buildDecisionGraphModel,
+	type DecisionGraphInput,
+	type DecisionGraphModel,
+	type DecisionPlanStepStatus,
+} from "./components/decision-graph-model.ts";
 import { type FooterComponent, formatCwdForFooter } from "./components/footer.ts";
 import { OperatorPovBarComponent } from "./components/operator-pov-bar.ts";
 import { isConversationMessage } from "./components/question-conversation.ts";
@@ -45,6 +53,89 @@ export interface InteractiveLayoutHost {
 	disposeOperatorProjection?: () => void;
 }
 
+const PLAN_STEP_STATUS: Readonly<Record<TaskStepStatus, DecisionPlanStepStatus>> = {
+	pending: "pending",
+	in_progress: "active",
+	completed: "done",
+	blocked: "blocked",
+	cancelled: "cancelled",
+};
+
+/** Questions asked in the current objective, as the graph's YOU node counts them. */
+interface HumanInputTally {
+	objectiveId?: string;
+	question?: string;
+	askedAt?: number;
+	asked: number;
+	answered: number;
+}
+
+/**
+ * The Decision graph's model, composed per frame from the session's own live state: the operator
+ * projection and its stage log, the Jev ledger, the router's foreground snapshot, lane records, the
+ * task's steps and the goal's requirements (what it needs), verification obligations (what it must
+ * pass), the cycle's receipts and the lane's background tools. Nothing here is a second state machine.
+ */
+function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInputTally): DecisionGraphModel {
+	const session = host.session;
+	const now = Date.now();
+	const projection = session.operatorProjection.getProjection();
+	if (humanInput.objectiveId !== projection.objective_id) {
+		humanInput.objectiveId = projection.objective_id;
+		humanInput.asked = 0;
+		humanInput.answered = 0;
+	}
+	const task = session.getTaskStepsStateSnapshot();
+	const goal = session.getGoalStateSnapshot();
+	const plan: DecisionGraphInput["plan"] = task
+		? task.steps.map((step) => ({ title: step.content, status: PLAN_STEP_STATUS[step.status] }))
+		: (goal?.requirements ?? []).map((requirement) => ({
+				title: requirement.text,
+				status:
+					requirement.status === "satisfied" ? "done" : requirement.status === "blocked" ? "blocked" : "pending",
+			}));
+	const checks: DecisionGraphInput["checks"] = [
+		...(task && goal
+			? goal.requirements.map((requirement) => ({
+					text: requirement.text,
+					status:
+						requirement.status === "satisfied"
+							? ("satisfied" as const)
+							: requirement.status === "blocked"
+								? ("failed" as const)
+								: ("pending" as const),
+				}))
+			: []),
+		...session.getVerificationObligations().map((obligation) => ({
+			text: obligation.command ?? obligation.id,
+			status: "failed" as const,
+		})),
+	];
+	return buildDecisionGraphModel({
+		projection,
+		stageLog: session.operatorProjection.getStageLog(now),
+		health: session.getSemanticPlaneHealth(),
+		evaluations: session.getSemanticEvaluations(),
+		route: session.getForegroundRouteSnapshot(),
+		lanes: session.getLaneRecords(),
+		plan,
+		checks,
+		receipts: host.workbench?.evidenceCounts() ?? { actions: 0, fileEffects: 0, failures: 0 },
+		humanInput: {
+			...(humanInput.question ? { question: humanInput.question } : {}),
+			...(humanInput.askedAt !== undefined ? { askedAt: humanInput.askedAt } : {}),
+			asked: humanInput.asked,
+			answered: humanInput.answered,
+		},
+		backgroundTools: (host.activityLane?.getItems() ?? []).flatMap((item) =>
+			isBackgroundToolActivityItem(item) && item.status !== "success" && item.status !== "failure"
+				? [{ name: item.label, ...(item.startedAt !== undefined ? { startedAt: item.startedAt } : {}) }]
+				: [],
+		),
+		nowMs: now,
+	});
+}
+
 export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 	if (!host.hasHumanAudience) {
 		for (const child of [host.headerContainer, host.chatContainer, host.editorContainer]) host.ui.addChild(child);
@@ -64,7 +155,27 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		getCostSummary: () => host.session.getCostSummary(),
 	});
 	const unsubscribeOperatorProjection = host.session.operatorProjection.subscribe(() => host.ui.requestRender());
-	host.disposeOperatorProjection = unsubscribeOperatorProjection;
+	// The stage log fires on every transition; the graph pane's timers and lit stage follow it.
+	const unsubscribeStageChange = host.session.operatorProjection.onStageChange(() => host.ui.requestRender());
+	const humanInput: HumanInputTally = { asked: 0, answered: 0 };
+	const unsubscribeHumanInput = subscribeHumanInputActivity(host.session.sessionManager, (activity) => {
+		if (activity.phase === "waiting") {
+			humanInput.asked++;
+			humanInput.question = activity.request.questions[0]?.question;
+			humanInput.askedAt = Date.parse(activity.request.createdAt) || Date.now();
+		} else {
+			humanInput.answered++;
+			humanInput.question = undefined;
+			humanInput.askedAt = undefined;
+		}
+		host.ui.requestRender();
+	});
+	host.disposeOperatorProjection = () => {
+		unsubscribeOperatorProjection();
+		unsubscribeStageChange();
+		unsubscribeHumanInput();
+		host.activityLane?.setExternalClock("decision-graph", false);
+	};
 	const view = new WorkbenchComponent({
 		conversation: host.chatContainer,
 		editor: host.editorContainer,
@@ -132,6 +243,8 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		},
 		// Only the operator changes the work area; what they chose last time is where it starts.
 		geometry: { save: (geometry) => host.settingsManager.setWorkbenchSettings(geometry) },
+		graph: () => composeDecisionGraph(host, humanInput),
+		clock: (running) => host.activityLane?.setExternalClock("decision-graph", running),
 		paste: async () => {
 			const text = await readClipboardText();
 			if (!text) {

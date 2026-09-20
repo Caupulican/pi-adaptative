@@ -2,6 +2,7 @@ import { type Component, Container, CURSOR_MARKER, Text, TUI, visibleWidth } fro
 import { beforeAll, describe, expect, it } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
+import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { DecisionStageLogView } from "../src/core/operator-projection/decision-stage-log.ts";
 import { DecisionStageLog } from "../src/core/operator-projection/decision-stage-log.ts";
 import type { OperatorProjection } from "../src/core/operator-projection/types.ts";
@@ -16,6 +17,7 @@ import {
 } from "../src/modes/interactive/components/decision-graph-render.ts";
 import { WorkbenchComponent } from "../src/modes/interactive/components/workbench.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { WorkbenchController } from "../src/modes/interactive/workbench-controller.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 const WIDTHS = [40, 48, 56, 64, 72, 96];
@@ -575,5 +577,128 @@ describe("Workbench conversation zone with the Decision graph", () => {
 		} finally {
 			ui.stop();
 		}
+	});
+});
+
+describe("Workbench controller with the Decision graph", () => {
+	beforeAll(() => initTheme("dark"));
+
+	function mouse(button: number, column: number, row: number, release = false): string {
+		return `\x1b[<${button};${column + 1};${row + 1}${release ? "m" : "M"}`;
+	}
+
+	function setup() {
+		const conversation = new Container();
+		conversation.addChild(new Text("hello world", 0, 0));
+		const view = new WorkbenchComponent({
+			conversation,
+			editor: new Container(),
+			dock: [],
+			brand: "pi",
+			viewportRows: () => 40,
+		});
+		const saved: unknown[] = [];
+		const clocks: boolean[] = [];
+		let scenario = "workerDispatched";
+		const controller = new WorkbenchController(view, {
+			keybindings: new KeybindingsManager(),
+			isInteractive: () => true,
+			requestRender() {},
+			messages: () => [],
+			copy: async () => {},
+			notice() {},
+			geometry: { save: (geometry) => saved.push({ ...geometry }) },
+			graph: () => buildDecisionGraphModel(SCENARIOS[scenario]!()),
+			clock: (running) => clocks.push(running),
+		});
+		view.applyGeometry({ rows: 8, collapsed: false, inspector: "shown", executionMaximized: false });
+		view.setInspector([{ title: "Work plan", meta: "1 / 3", body: ["active step"] }]);
+		view.setExecution(new Text("fn main() {}", 0, 0));
+		view.render(120);
+		return { view, controller, saved, clocks, setScenario: (name: string) => (scenario = name) };
+	}
+
+	it("toggles the graph and its view from their keys, persisting each change", () => {
+		const { view, controller, saved } = setup();
+		expect(view.graphShown).toBe(true);
+		expect(controller.handleInput("\x1bg")).toEqual({ consume: true });
+		expect(view.geometry().graph).toBe("hidden");
+		view.render(120);
+		expect(view.graphShown).toBe(false);
+		controller.handleInput("\x1bg");
+		expect(view.geometry().graph).toBe("shown");
+		controller.handleInput("\x1bl");
+		expect(view.geometry().graphView).toBe("list");
+		controller.handleInput("\x1bl");
+		expect(view.geometry().graphView).toBe("diagram");
+		expect(saved.map((geometry) => (geometry as { graphView: string }).graphView)).toEqual([
+			"diagram",
+			"diagram",
+			"list",
+			"diagram",
+		]);
+	});
+
+	it("switches views and hides from the title chips, scrolls on the wheel, and expands a stage on click", () => {
+		const { view, controller, saved } = setup();
+		const titleRow = view.conversationTop - 1;
+		const title = stripAnsi(view.render(120)[titleRow] ?? "");
+		controller.handleInput(mouse(0, title.indexOf("List"), titleRow));
+		expect(view.geometry().graphView).toBe("list");
+		controller.handleInput(mouse(0, title.indexOf("Diagram"), titleRow));
+		expect(view.geometry().graphView).toBe("diagram");
+		expect(saved.length).toBe(2);
+		// The diagram is taller than the pane: the wheel scrolls it without touching the conversation.
+		const before = stripAnsi(view.render(120)[view.conversationTop + 1] ?? "");
+		controller.handleInput(mouse(65, 4, view.conversationTop + 1));
+		const after = stripAnsi(view.render(120)[view.conversationTop + 1] ?? "");
+		expect(after).not.toBe(before);
+		controller.handleInput(mouse(64, 4, view.conversationTop + 1));
+		expect(stripAnsi(view.render(120)[view.conversationTop + 1] ?? "")).toBe(before);
+		const stageRow = [...Array(view.conversationHeight).keys()]
+			.map((offset) => view.conversationTop + offset)
+			.find((row) => view.graphStageAt(4, row) === "dispatch");
+		expect(stageRow).toBeDefined();
+		controller.handleInput(mouse(0, 4, stageRow!));
+		expect(view.getSelectedGraphStage()).toBe("dispatch");
+		expect(view.geometry().graphView).toBe("list");
+		controller.handleInput(mouse(0, title.indexOf("Hide"), titleRow));
+		expect(view.geometry().graph).toBe("hidden");
+	});
+
+	it("drags the graph gutter, restores on a return to origin, and persists only on release", () => {
+		const { view, controller, saved } = setup();
+		const row = view.conversationTop + 2;
+		const split = [...Array(120).keys()].find((column) => view.hitTest(column, row) === "graphSplit");
+		expect(split).toBeDefined();
+		const start = view.geometry().graphFraction ?? 0.32;
+		controller.handleInput(mouse(0, split!, row));
+		controller.handleInput(mouse(32, split! + 8, row));
+		expect(view.geometry().graphFraction).toBeGreaterThan(start);
+		expect(saved).toEqual([]);
+		controller.handleInput(mouse(32, split!, row));
+		expect(view.geometry().graphFraction).toBeCloseTo(start);
+		controller.handleInput(mouse(32, split! + 8, row));
+		controller.handleInput(mouse(0, split! + 8, row, true));
+		expect(saved.at(-1)).toMatchObject({ graphFraction: view.geometry().graphFraction });
+		expect(view.geometry().graphFraction).toBeCloseTo((split! + 8) / 120);
+	});
+
+	it("tells the lane's ticker when the drawn graph carries a running clock, and clears it when folded or idle", () => {
+		const { view, clocks, setScenario } = setup();
+		expect(clocks.at(-1)).toBe(true);
+		setScenario("delivered");
+		view.render(120);
+		expect(clocks.at(-1)).toBe(false);
+		setScenario("workerDispatched");
+		view.render(120);
+		expect(clocks.at(-1)).toBe(true);
+		view.render(80);
+		expect(clocks.at(-1)).toBe(false);
+		view.render(120);
+		expect(clocks.at(-1)).toBe(true);
+		view.toggleGraph();
+		view.render(120);
+		expect(clocks.at(-1)).toBe(false);
 	});
 });

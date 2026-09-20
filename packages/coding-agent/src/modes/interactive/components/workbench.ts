@@ -179,6 +179,8 @@ export class WorkbenchComponent extends Container {
 	private readonly graphPane = new DecisionGraphPane();
 	/** Composes the Decision graph's model per frame; unset, the zone is chat only. */
 	private graphSource?: () => DecisionGraphModel | undefined;
+	/** Told after every frame whether the drawn graph carries a running clock (the lane's ticker). */
+	private graphClock?: (running: boolean) => void;
 	/** The conversation zone of the last frame; the graph gutter drag resolves against it. */
 	private zoneLeft = 0;
 	private zoneWidth = 0;
@@ -331,9 +333,20 @@ export class WorkbenchComponent extends Container {
 		return this.inspectorPane.scrollAt(column, row, delta) || this.executionPane.scrollAt(column, row, delta);
 	}
 	/** The Decision graph's model source; the pane draws whatever it returns each frame. */
-	setDecisionGraph(source: (() => DecisionGraphModel | undefined) | undefined): void {
+	setDecisionGraph(
+		source: (() => DecisionGraphModel | undefined) | undefined,
+		clock?: (running: boolean) => void,
+	): void {
 		this.graphSource = source;
-		if (!source) this.graphPane.reset();
+		this.graphClock = clock;
+		if (!source) {
+			this.graphPane.reset();
+			clock?.(false);
+		}
+	}
+	/** The graph was drawn in the last frame (shown, sourced, and wide enough). */
+	get graphShown(): boolean {
+		return this.graphRuleColumn >= 0;
 	}
 	scrollGraph(column: number, row: number, delta: number): boolean {
 		return this.graphPane.scrollAt(column, row, delta);
@@ -848,6 +861,7 @@ export class WorkbenchComponent extends Container {
 		this.conversationHeight = height;
 		const graphWidth = this.resolvedGraphWidth(zoneWidth);
 		const model = graphWidth > 0 ? this.graphSource?.() : undefined;
+		this.graphClock?.(model?.hasRunningClock === true);
 		if (!model) {
 			this.graphPane.hide();
 			const inner = Math.max(1, zoneWidth - 2);
