@@ -41,6 +41,7 @@ import {
 import { AdaptiveResolutionController } from "./adaptive-resolution-controller.ts";
 import { AdaptiveRuntimeReadiness } from "./adaptive-runtime-readiness.ts";
 import { CapabilityCatalog } from "./capability-catalog.ts";
+import { type CapabilityKindSupportContext, resolveCapabilityKindSupport } from "./capability-kind-support.ts";
 import type { CapabilityProofRunnerPort } from "./capability-proof-runner.ts";
 import {
 	createRuntimeUpdateAdapterFromController,
@@ -118,6 +119,8 @@ export interface CreateAdaptiveRuntimeStackOptions {
 		reload(extensionPath: string): Promise<void>;
 		listActive(): readonly { name: string; path: string }[];
 	};
+	/** Session facts that decide conditionally-supported capability kinds (ACT-001). */
+	readonly kindSupportContext?: CapabilityKindSupportContext;
 }
 
 /**
@@ -345,6 +348,9 @@ function assembleAdaptiveRuntimeStack(
 		proofRunner: options.proofRunner,
 		extensionRuntime: options.extensionRuntime,
 		cwd: options.cwd,
+		// Availability is resolved against this session: a kind whose precondition is unmet here is
+		// unavailable here, rather than advertised and then failing at activation.
+		kindSupport: resolveCapabilityKindSupport(options.kindSupportContext),
 	});
 
 	// 5. Specialist synthesis
@@ -413,6 +419,7 @@ function assembleAdaptiveRuntimeStack(
 		contractFactory: options.contractFactory,
 		provenance,
 		mode: options.mode,
+		kindSupport: resolveCapabilityKindSupport(options.kindSupportContext),
 	});
 
 	return {

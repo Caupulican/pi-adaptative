@@ -25,6 +25,7 @@ import {
 	isCapabilityKindSupported,
 	replanToSupportedKind,
 	resolveActivatableKind,
+	resolveCapabilityKindSupport,
 	supportedCapabilityKinds,
 	UnsupportedCapabilityKindError,
 } from "../../src/core/adaptive/index.ts";
@@ -131,6 +132,25 @@ describe("Capability activation truth", () => {
 				if (kind === "runtime_patch") continue;
 				expect(replanToSupportedKind(kind)).not.toBe("runtime_patch");
 			}
+		});
+
+		it("ACT-002: a kind whose precondition this session does not meet is unavailable here", () => {
+			// Extension activation loads a synthesized artifact from a project path, and the resource
+			// loader refuses project instruction paths while projectContextFiles is off (the default).
+			// Advertising it unconditionally would claim support the session does not have.
+			const withoutProjectInstructions = resolveCapabilityKindSupport({ projectInstructionsEnabled: false });
+			expect(supportedCapabilityKinds(withoutProjectInstructions)).toEqual(["ephemeral_script", "runtime_patch"]);
+			expect(withoutProjectInstructions.extension.available).toBe(false);
+			expect(withoutProjectInstructions.extension.reason).toContain("projectContextFiles");
+			// Downgraded, not broken: it still satisfies the activation-truth gate.
+			expect(verifyCapabilityKindActivationTruth(withoutProjectInstructions)).toEqual([]);
+			// With no supported kind at or above its level, a toolkit_script spec blocks rather than
+			// replanning onto a kind that would be refused at load.
+			expect(replanToSupportedKind("toolkit_script", withoutProjectInstructions)).toBeUndefined();
+
+			const withProjectInstructions = resolveCapabilityKindSupport({ projectInstructionsEnabled: true });
+			expect(withProjectInstructions.extension.available).toBe(true);
+			expect(replanToSupportedKind("toolkit_script", withProjectInstructions)).toBe("extension");
 		});
 
 		it("ACT-006: an unavailable optional kind is not a fault, but an advertised one with no owner is", () => {

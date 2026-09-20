@@ -39,10 +39,12 @@ export {
 	type CapabilityActivationMode,
 	type CapabilityKindActivationFinding,
 	type CapabilityKindSupport,
+	type CapabilityKindSupportContext,
 	capabilityKindSupport,
 	findBrokenAdvertisedKinds,
 	isCapabilityKindSupported,
 	replanToSupportedKind,
+	resolveCapabilityKindSupport,
 	supportedCapabilityKinds,
 	verifyCapabilityKindActivationTruth,
 } from "./capability-kind-support.ts";

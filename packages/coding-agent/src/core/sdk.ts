@@ -1006,6 +1006,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getOwnerRules,
 			projectRules: session.projectRules,
 			proofRunner,
+			kindSupportContext: {
+				projectInstructionsEnabled: settingsManager.areProjectInstructionsEnabled(),
+			},
 			// The live extension runtime: loads an extension by path and exposes the active registry,
 			// which is what makes `extension` an activatable kind rather than an advertised one.
 			extensionRuntime: {

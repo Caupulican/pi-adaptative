@@ -242,3 +242,41 @@ export function verifyCapabilityKindActivationTruth(
 	}
 	return findings;
 }
+
+/**
+ * Session facts that decide whether a conditionally-supported kind is actually available here.
+ *
+ * Support is not purely static: `extension` activation loads the synthesized artifact from a
+ * project path, and `ResourceLoader.loadSingleExtension` refuses project paths when project
+ * instructions are disabled — which is the default. Advertising it unconditionally would claim
+ * support the session does not have.
+ */
+export interface CapabilityKindSupportContext {
+	/** `settings.projectContextFiles === "on-demand"`. Defaults to false, matching the product default. */
+	readonly projectInstructionsEnabled?: boolean;
+}
+
+/**
+ * Resolves the matrix against a live session, downgrading any kind whose precondition this session
+ * does not meet. The downgrade states the precondition, so an operator can see it is a
+ * configuration limit rather than a missing owner.
+ */
+export function resolveCapabilityKindSupport(
+	context: CapabilityKindSupportContext = {},
+	matrix: Readonly<Record<CapabilityKind, CapabilityKindSupport>> = CAPABILITY_KIND_SUPPORT,
+): Readonly<Record<CapabilityKind, CapabilityKindSupport>> {
+	if (context.projectInstructionsEnabled === true) return matrix;
+	const extension = matrix.extension;
+	if (!extension?.available) return matrix;
+	return {
+		...matrix,
+		extension: {
+			kind: "extension",
+			available: false,
+			owner: null,
+			activationMode: "unsupported",
+			reason:
+				"Extension activation loads the synthesized artifact from a project path, and the resource loader refuses project instruction paths while projectContextFiles is off. Enable project context files to make this kind available.",
+		},
+	};
+}
