@@ -45,6 +45,7 @@ import {
 	resolveModelScope,
 	resolveModelScopeWithDiagnostics,
 } from "../../core/model-resolver.ts";
+import { routerPoolModelRefs } from "../../core/model-router/candidate-pool.ts";
 import { MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { listAllSessions, listSessions, openSession } from "../../core/session-manager-factory.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
@@ -178,9 +179,11 @@ export async function showModelsSelector(host: SessionFlowHost): Promise<void> {
 	const allModels = host.session.modelRegistry.getAvailable();
 	const allModelIds = new Set(allModels.map((model) => `${model.provider}/${model.id}`));
 	const configuredPatterns = host.settingsManager.getEnabledModels();
-	const sessionScopedModels = host.session.scopedModels;
+	// The selector edits the router's candidate pool, not the cycling list: an orchestration
+	// profile pins cycling to its root model and must not show up here as a one-model selection.
+	const routerPool = host.session.getRouterCandidatePool();
 
-	if (allModels.length === 0 && !configuredPatterns?.length && sessionScopedModels.length === 0) {
+	if (allModels.length === 0 && !configuredPatterns?.length && !routerPool.customized) {
 		host.showStatus("No models available");
 		return;
 	}
@@ -188,15 +191,11 @@ export async function showModelsSelector(host: SessionFlowHost): Promise<void> {
 		? await resolveModelScopeWithDiagnostics(configuredPatterns, host.session.modelRegistry)
 		: undefined;
 
-	// Check if session has scoped models (from previous session-only changes or CLI --models)
-	const hasSessionScope = sessionScopedModels.length > 0;
-
-	// Build enabled model IDs from session state or settings
+	// Build enabled model IDs from the live router pool (session-only edits or CLI --models) or settings
 	let currentEnabledIds: string[] | null = null;
 
-	if (hasSessionScope) {
-		// Use current session's scoped models
-		currentEnabledIds = sessionScopedModels.map((scoped) => `${scoped.model.provider}/${scoped.model.id}`);
+	if (routerPool.customized) {
+		currentEnabledIds = routerPoolModelRefs(routerPool);
 	} else if (configuredScope) {
 		currentEnabledIds = configuredScope.scopedModels.map((scoped) => `${scoped.model.provider}/${scoped.model.id}`);
 	}
@@ -220,9 +219,14 @@ export async function showModelsSelector(host: SessionFlowHost): Promise<void> {
 					thinkingLevel: sm.thinkingLevel,
 				})),
 			);
+			host.session.setRouterPool({
+				source: "models_selector",
+				models: newScopedModels.map((sm) => sm.model),
+			});
 		} else {
 			// All enabled or none enabled = no filter
 			host.session.setScopedModels([]);
+			host.session.setRouterPool(undefined);
 		}
 		await host.updateAvailableProviderCount();
 		host.ui.requestRender();

@@ -8,12 +8,16 @@
  * Conforms to OPERATOR_TUI_LIVE_BINDING.md and RCG-050..RCG-055.
  */
 
-import type { GoalState } from "../goals/goal-state.ts";
+import { isDeepStrictEqual } from "node:util";
+import type { GoalContinuationDecision } from "../goals/goal-continuation-controller.ts";
+import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import { OperatorEventController } from "./operator-event-controller.ts";
 import { OperatorProjectionController } from "./operator-projection-controller.ts";
 import type {
 	ActiveActor,
 	AdaptationProjection,
+	OperatorControlProjection,
+	OperatorControlState,
 	OperatorEvent,
 	OperatorHealth,
 	OperatorPhase,
@@ -21,13 +25,39 @@ import type {
 	ProofProgress,
 } from "./types.ts";
 
-/** One running worker, as the lane tracker knows it. */
+/** One worker lane, as the lane tracker knows it; terminal lanes are included. */
 export interface LiveLaneView {
 	readonly laneId: string;
 	readonly type: string;
 	readonly status: string;
 	readonly label?: string;
 	readonly startedAt?: string;
+}
+
+/** An unanswered question the operator owns, as the durable human-input record holds it. */
+export interface PendingOwnerQuestion {
+	readonly requestId: string;
+	readonly question: string;
+}
+
+/** Reason codes whose next transition is an acceptance/verification decision, not new work. */
+const VERIFYING_REASON_CODES: ReadonlySet<string> = new Set([
+	"acceptance_evidence_required",
+	"verification_repair_required",
+	"goal_completion_required",
+]);
+
+/** How much of a question or continuation message the bar carries; the rest lives in the surface. */
+const BLOCKER_TEXT_LIMIT = 120;
+
+function boundedText(value: string, limit = BLOCKER_TEXT_LIMIT): string {
+	const collapsed = value.replace(/\s+/g, " ").trim();
+	return collapsed.length <= limit ? collapsed : `${collapsed.slice(0, limit - 1)}…`;
+}
+
+/** A lane is terminal once the tracker no longer counts it as dispatched work. */
+function isTerminalLaneStatus(status: string): boolean {
+	return status !== "queued" && status !== "running";
 }
 
 /** Whether the session is in a delivery step: an outward-facing action is running or authorized-and-due. */
@@ -49,6 +79,18 @@ export interface SessionOperatorProjectionDeps {
 	isFastIteration(): boolean;
 	/** A blocking condition the operator has to resolve; absent when nothing blocks. */
 	getBlocker(): string | undefined;
+	/** The goal loop's live continuation verdict — the runtime decision control is derived from. */
+	getContinuation(): GoalContinuationDecision | undefined;
+	/** The durable unanswered owner question, when one is open. */
+	getPendingHumanInput(): PendingOwnerQuestion | undefined;
+	/** Whether the foreground loop is executing a turn right now. */
+	isForegroundBusy(): boolean;
+	/**
+	 * Count of persisted session entries. Every input the continuation and the durable human-input
+	 * record are derived from is appended to the session, so this count moving is what says the two
+	 * branch-walking reads below can return something new.
+	 */
+	getSessionEntryCount(): number;
 }
 
 const PHASE_ORDER: readonly OperatorPhase[] = ["understand", "plan", "build", "adapt", "verify", "deliver"];
@@ -71,6 +113,14 @@ export class SessionOperatorProjection {
 	private readonly events: OperatorEvent[] = [];
 	private eventController?: OperatorEventController;
 	private eventControllerObjectiveId?: string;
+	/**
+	 * The last derivation key the two branch-walking reads were taken at. Both walk the active
+	 * branch several times, and the POV bar refreshes on every TUI render (per streamed token during
+	 * a turn), so they are read once per change of their own inputs rather than once per render.
+	 */
+	private derivationKey?: string;
+	private cachedContinuation?: GoalContinuationDecision;
+	private cachedPendingQuestion?: PendingOwnerQuestion;
 
 	constructor(deps: SessionOperatorProjectionDeps) {
 		this.deps = deps;
@@ -139,26 +189,127 @@ export class SessionOperatorProjection {
 	/** Recomputes the projection from live state and publishes it to subscribers. */
 	refresh(): OperatorProjection {
 		const goal = this.deps.getGoalState();
-		const lanes = this.deps.getLanes().filter((lane) => lane.status === "running" || lane.status === "queued");
+		const allLanes = this.deps.getLanes();
+		const lanes = allLanes.filter((lane) => lane.status === "running" || lane.status === "queued");
 		const proof = this.resolveProof(goal);
 		const adaptation = this.deps.getAdaptation();
-		const blocker = this.deps.getBlocker();
+		const reviewableLane = this.resolveReviewableLane(goal, allLanes);
+		this.syncDerivedReads(goal, allLanes);
+		const control = this.resolveControl(goal, reviewableLane);
+		// An open owner question is a real blocking condition, exactly like an operator-set blocker:
+		// the objective cannot advance until it is answered, so it drives the same derivation.
+		const blocker = this.deps.getBlocker() ?? (control.owner === "user" ? (control.blocker ?? undefined) : undefined);
 		const phase = this.resolvePhase(goal, lanes, proof, adaptation, blocker);
+		const observing = control.owner === "system_one" && control.state === "observing" && reviewableLane !== undefined;
 
-		return this.projectionController.updateProjection({
+		const patch = {
 			title: this.deps.getTitle(),
 			phase,
 			phase_index: phaseIndex(phase),
 			phase_count: PHASE_ORDER.length,
-			current_action: this.describeAction(phase, goal, lanes, adaptation, blocker),
+			current_action: observing
+				? `Reviewing worker result: ${reviewableLane.label ?? reviewableLane.laneId}`
+				: this.describeAction(phase, goal, lanes, adaptation, blocker),
 			why: this.describeWhy(phase, goal, proof, blocker),
-			next_action: this.describeNext(phase, proof),
+			next_action: observing ? "review evidence" : this.describeNext(phase, proof),
 			health: resolveHealth(phase),
+			control,
 			active_actors: this.resolveActors(lanes),
 			adaptation: adaptation ?? null,
 			proof,
 			context: this.deps.getContext() ?? null,
-		});
+		};
+
+		// Publishing an unchanged projection would wake every subscriber (the TUI requests a render,
+		// whose render reads the projection again) with nothing to show; only real change publishes.
+		const current = this.projectionController.getProjection();
+		if (isDeepStrictEqual({ ...current, ...patch }, current)) return current;
+		return this.projectionController.updateProjection(patch);
+	}
+
+	/**
+	 * Refreshes the two reads that walk the session branch — the goal continuation verdict and the
+	 * durable owner question — and only when something they read has actually changed: the goal's
+	 * own revision, the number of persisted entries, or the live lane roster. Recomputing them per
+	 * render would walk the branch several times per streamed token.
+	 */
+	private syncDerivedReads(goal: GoalState | undefined, lanes: readonly LiveLaneView[]): void {
+		const key = [
+			goal ? `${goal.goalId}:${goal.revision ?? ""}:${goal.updatedAt}:${goal.status}` : "no-goal",
+			this.deps.getSessionEntryCount(),
+			lanes.map((lane) => `${lane.laneId}=${lane.status}`).join(","),
+		].join("|");
+		if (key === this.derivationKey) return;
+		this.derivationKey = key;
+		this.cachedPendingQuestion = this.deps.getPendingHumanInput();
+		// Read only when an objective exists: with no goal the evaluator reports `missing_goal_state`
+		// as ask-user, which is the absence of an objective rather than a question for the operator,
+		// and an idle session should not pay for a runtime snapshot that cannot change the answer.
+		this.cachedContinuation = goal ? this.deps.getContinuation() : undefined;
+	}
+
+	/**
+	 * The lane whose returned work an open requirement is still bound to. A worker finishing is
+	 * evidence for the owner of the objective to review, never completion by itself (FC-070/071),
+	 * so a terminal lane still bound to an open requirement means control is observing it.
+	 */
+	private resolveReviewableLane(
+		goal: GoalState | undefined,
+		lanes: readonly LiveLaneView[],
+	): LiveLaneView | undefined {
+		if (!goal || !isGoalExecutionActive(goal.status)) return undefined;
+		for (const requirement of goal.requirements) {
+			if (requirement.status !== "open" || requirement.boundLaneId === undefined) continue;
+			const lane = lanes.find((candidate) => candidate.laneId === requirement.boundLaneId);
+			if (lane && isTerminalLaneStatus(lane.status)) return lane;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Who owns the NEXT objective transition, and what they are doing with it. Deliberately
+	 * independent of `active_actors`: a worker can be executing while the semantic plane owns the
+	 * decision, and the root can own the decision while nothing executes at all.
+	 */
+	private resolveControl(
+		goal: GoalState | undefined,
+		reviewableLane: LiveLaneView | undefined,
+	): OperatorControlProjection {
+		const pending = this.cachedPendingQuestion;
+		if (pending) {
+			return {
+				owner: "user",
+				state: "awaiting_user",
+				reasonCode: "clarification_pending",
+				clarificationRequestId: pending.requestId,
+				blocker: boundedText(pending.question),
+			};
+		}
+
+		const continuation = this.cachedContinuation;
+		if (continuation?.action === "ask-user") {
+			return {
+				owner: "user",
+				state: "awaiting_user",
+				reasonCode: continuation.reasonCode,
+				blocker: boundedText(continuation.message),
+			};
+		}
+
+		if (goal && isGoalExecutionActive(goal.status)) {
+			const reasonCode = continuation?.reasonCode ?? "goal_active";
+			let state: OperatorControlState = "deciding";
+			if (continuation?.action === "waiting") state = "executing";
+			else if (reviewableLane) state = "observing";
+			else if (VERIFYING_REASON_CODES.has(reasonCode)) state = "verifying";
+			return { owner: "system_one", state, reasonCode };
+		}
+
+		return {
+			owner: "root",
+			state: this.deps.isForegroundBusy() ? "executing" : "deciding",
+			reasonCode: goal ? `objective_${goal.status}` : "no_objective",
+		};
 	}
 
 	private resolveProof(goal: GoalState | undefined): ProofProgress {

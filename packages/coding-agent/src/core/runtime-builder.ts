@@ -91,8 +91,9 @@ import {
 } from "./extensions/index.ts";
 import { disposeExtensionEventSubscriptions } from "./extensions/lifecycle.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
-import type { GoalState } from "./goals/goal-state.ts";
+import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import type { OpenTaskStepRef } from "./goals/goal-tool-core.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
 import { resolveSessionToolEvidence, resolveSessionUserEvidence } from "./goals/session-goal-evidence.ts";
@@ -142,6 +143,7 @@ import {
 import type { SkillVaultController } from "./skill-vault.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
+import type { ClarificationDecisionEngine } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
@@ -363,6 +365,11 @@ export interface RuntimeBuilderDeps {
 	getSystemOneController?(): SystemOneController | undefined;
 	/** System One steering plane driving semantic validation and certification. */
 	getSteeringPlane?(): SystemOneSteeringPlane | undefined;
+	/**
+	 * The session's own semantic decision engine, already wrapped so every evaluation is recorded on
+	 * the semantic-plane health the operator POV reads. Undefined when no steering plane is bound.
+	 */
+	getSemanticDecisionEngine?(): ClarificationDecisionEngine | undefined;
 	/** Diagnostic readiness gate for adaptive runtime components. */
 	getAdaptiveReadiness?(): AdaptiveRuntimeReadiness | undefined;
 	/** Record an edge grant the model cited from the operator's own words (goal grant_edge). */
@@ -1364,10 +1371,35 @@ export class RuntimeBuilder {
 				this._baseToolDefinitions.set(pipelineToolDefinition.name, pipelineToolDefinition);
 			}
 			if (toolAccess.allows("ask_question")) {
+				// Objective correlation is live only while a goal is actually executing: an ask outside
+				// one keeps the tool's original behavior, with no ledger write and no arbitration.
+				const activeObjective = (): GoalState | undefined => {
+					const goal = this.deps.getGoalStateSnapshot();
+					return goal && isGoalExecutionActive(goal.status) ? goal : undefined;
+				};
 				const askQuestionToolDefinition = createAskQuestionToolDefinition({
 					sessionManager: this.deps.getSessionManager(),
 					artifactStore: toolArtifactStore,
 					getImageStore: () => this.deps.getSessionImageStore(),
+					getObjectiveId: () => activeObjective()?.goalId,
+					getObjectiveClarificationState: () => {
+						const goal = activeObjective();
+						if (!goal) return undefined;
+						return { userGoal: goal.userGoal, clarifications: goal.clarifications ?? [] };
+					},
+					getSemanticDecisionEngine: () => this.deps.getSemanticDecisionEngine?.(),
+					recordObjectiveClarification: (objectiveId, event) => {
+						recordObjectiveClarification(
+							{
+								getGoalState: () => this.deps.getGoalStateSnapshot(),
+								saveGoalState: (state, expected) => {
+									this.deps.saveGoalStateSnapshot(state, expected);
+								},
+							},
+							objectiveId,
+							event,
+						);
+					},
 				});
 				this._baseToolDefinitions.set(askQuestionToolDefinition.name, askQuestionToolDefinition);
 			}

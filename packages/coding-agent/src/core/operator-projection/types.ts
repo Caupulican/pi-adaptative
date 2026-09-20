@@ -27,6 +27,28 @@ export interface OperatorContextInfo {
 	readonly compacted?: boolean;
 }
 
+/** Who owns the next objective transition: the semantic plane, the root loop, or the operator. */
+export type OperatorControlOwner = "system_one" | "root" | "user";
+
+/** What that owner is doing with control right now. */
+export type OperatorControlState = "deciding" | "executing" | "observing" | "verifying" | "awaiting_user";
+
+/**
+ * Control is a reason-coded runtime fact, never a narration: `owner` is who decides what happens
+ * next, `state` is what that owner is doing with it, and `reasonCode` is the runtime code the
+ * decision came from. Deliberately independent of `active_actors`, which says who is executing now.
+ */
+export interface OperatorControlProjection {
+	readonly owner: OperatorControlOwner;
+	readonly state: OperatorControlState;
+	/** The continuation/derivation reason code control was resolved from. */
+	readonly reasonCode?: string | null;
+	/** The open human-input request id, set only while the operator owns control. */
+	readonly clarificationRequestId?: string | null;
+	/** Bounded text of what the owner has to resolve; set only while control is blocked on them. */
+	readonly blocker?: string | null;
+}
+
 export interface OperatorProjection {
 	readonly schema_version: "1.0";
 	readonly objective_id: string;
@@ -38,6 +60,7 @@ export interface OperatorProjection {
 	readonly why: string;
 	readonly next_action?: string | null;
 	readonly health: OperatorHealth;
+	readonly control: OperatorControlProjection;
 	readonly active_actors: readonly ActiveActor[];
 	readonly adaptation?: AdaptationProjection | null;
 	readonly proof: ProofProgress;

@@ -4,9 +4,15 @@
  * Implements ADMISSION_AND_SELECTION.md and HMOE-040.
  */
 
+import { laneMeetsFitnessBar } from "../model-router/fitness-gate.ts";
 import type { ModelAdaptationStore } from "../models/adaptation-store.ts";
 import type { FitnessStore } from "../models/fitness-store.ts";
-import type { ExpertCandidate, ExpertFeatureVector, WorkerCapabilityRequest } from "./contracts.ts";
+import type {
+	ExpertAdequacyClass,
+	ExpertCandidate,
+	ExpertFeatureVector,
+	WorkerCapabilityRequest,
+} from "./contracts.ts";
 import type { ExpertOutcomeStore } from "./outcome-store.ts";
 
 export interface ExpertFeatureBuilderDeps {
@@ -59,7 +65,11 @@ export class ExpertFeatureBuilder {
 		}
 
 		// Probe Fitness (FitnessStore) (HM11-010, HM11-014)
+		// `adequacyClass` is the same evidence as a judgment rather than a number: 0.5 means "no
+		// probe record" and "a probed half-pass" indistinguishably, and the ranking policy must be
+		// able to tell an unprobed expert from one the probes graded as unfit.
 		let roleProbeFitness = 0.5;
+		let adequacyClass: ExpertAdequacyClass = "unprobed";
 		if (this.deps.fitnessStore) {
 			const modelRef = `${desc.provider}/${desc.model_id}`;
 			let matchingReport: any;
@@ -75,17 +85,14 @@ export class ExpertFeatureBuilder {
 			}
 
 			if (matchingReport) {
+				// Every branch selects the request's lane and nothing else; scoring happens once,
+				// below. A branch that scored inline would be overwritten here by the lane it left
+				// unselected — which is exactly how the judge lane used to be discarded.
 				let lane = matchingReport.worker ?? matchingReport.lanes?.worker;
 				if (request.work_class === "investigate" || request.work_class === "retrieve") {
 					lane = matchingReport.research ?? matchingReport.lanes?.research;
 				} else if ((request.work_class as string) === "judge" || request.worker_role === "judge") {
-					const j = matchingReport.judge ?? matchingReport.lanes?.judge;
-					if (j && j.total > 0) {
-						roleProbeFitness = Math.max(
-							0.0,
-							Math.min(1.0, (j.parsed ?? j.succeeded ?? j.successes ?? 0) / j.total),
-						);
-					}
+					lane = matchingReport.judge ?? matchingReport.lanes?.judge;
 				} else if ((request.work_class as string) === "digest" || request.worker_role === "digest") {
 					lane = matchingReport.digest ?? matchingReport.lanes?.digest;
 				} else if (request.required_tools && request.required_tools.length > 0) {
@@ -93,8 +100,10 @@ export class ExpertFeatureBuilder {
 				}
 
 				if (lane && lane.total > 0) {
-					const successes = lane.succeeded ?? lane.successes ?? 0;
+					// The judge lane counts parsed verdicts; every other lane counts successes.
+					const successes = lane.parsed ?? lane.succeeded ?? lane.successes ?? 0;
 					roleProbeFitness = Math.max(0.0, Math.min(1.0, successes / lane.total));
+					adequacyClass = laneMeetsFitnessBar(successes, lane.total) ? "known_fit" : "known_unfit";
 				}
 			}
 		}
@@ -249,6 +258,7 @@ export class ExpertFeatureBuilder {
 			privacyBonus,
 			explorationBonus,
 			subscriptionPreferred,
+			adequacyClass,
 			totalScore,
 		};
 	}

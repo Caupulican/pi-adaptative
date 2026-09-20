@@ -61,6 +61,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	/** Preserve whether the thinking level came from an explicit launch flag. */
 	isExplicitThinking?: boolean;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	routerPool?: CreateAgentSessionOptions["routerPool"];
 	tools?: string[];
 	excludeTools?: CreateAgentSessionOptions["excludeTools"];
 	noTools?: CreateAgentSessionOptions["noTools"];
@@ -264,11 +265,19 @@ export async function createAgentSessionFromServices(
 		isExplicitModel: options.isExplicitModel,
 		isExplicitThinking: options.isExplicitThinking,
 		scopedModels: options.scopedModels,
+		routerPool: options.routerPool,
 		tools: options.tools,
 		excludeTools: options.excludeTools,
 		noTools: options.noTools,
-		toolProfileFilter:
-			options.toolProfileFilter ?? options.services.settingsManager.getResourceProfileFilter("tools"),
+		// An orchestration profile owns tools and resources, and createAgentSession derives the
+		// profile's own filter. Supplying the settings-derived default here would register as a
+		// caller-supplied conflicting option and reject every profiled session.
+		...(options.orchestrationProfile
+			? { toolProfileFilter: options.toolProfileFilter }
+			: {
+					toolProfileFilter:
+						options.toolProfileFilter ?? options.services.settingsManager.getResourceProfileFilter("tools"),
+				}),
 		customTools: options.customTools,
 		orchestrationProfile: options.orchestrationProfile,
 		sessionStartEvent: options.sessionStartEvent,

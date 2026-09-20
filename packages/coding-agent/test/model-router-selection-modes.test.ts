@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { RouteDecision } from "../src/core/autonomy/contracts.ts";
 import {
 	buildWorkerCapabilityRequest,
+	type ExpertAdequacyClass,
 	ExpertAdmissionPolicy,
 	ExpertCatalog,
 	type ExpertFeatureVector,
@@ -162,10 +163,7 @@ function createController(options: {
 		resolveCurationModelIfFit: () => undefined,
 		getToolProbeVerdict: () => undefined,
 		getCandidatePool: () =>
-			resolveRouterCandidatePool(
-				(scoped ?? []).map((m) => ({ model: m })),
-				registry,
-			),
+			resolveRouterCandidatePool(scoped ? { source: "enabled_models", models: scoped } : undefined, registry),
 		isUsingSubscription: isSubscription,
 		...(options.withExpertSelector
 			? { expertSelector: { select: expertSelect } as unknown as ExpertSelectionService }
@@ -202,17 +200,36 @@ const EXPENSIVE_PROMPT = "Rewrite the core architecture of the router";
 
 describe("Router candidate pool (F001-030..034)", () => {
 	it("F001-031: an uncustomized Models configuration means every authed model", () => {
-		const pool = resolveRouterCandidatePool([], { getAvailable: () => [subCheap, apiCheap] });
+		const pool = resolveRouterCandidatePool(undefined, { getAvailable: () => [subCheap, apiCheap] });
 		expect(pool.customized).toBe(false);
+		expect(pool.source).toBe("all_enabled");
 		expect(routerPoolModelRefs(pool)).toEqual(["sub-provider/sub-mini", "api-provider/api-mini"]);
 		expect(formatRouterPoolSummary(pool)).toBe("all enabled models (2)");
 	});
 
-	it("F001-030: a customized Models configuration is the hard pool", () => {
-		const pool = resolveRouterCandidatePool([{ model: subBig }], { getAvailable: () => ALL });
+	it("F001-030: a customized Models configuration is the hard pool and names its source", () => {
+		const pool = resolveRouterCandidatePool(
+			{ source: "models_selector", models: [subBig] },
+			{
+				getAvailable: () => ALL,
+			},
+		);
 		expect(pool.customized).toBe(true);
+		expect(pool.source).toBe("models_selector");
 		expect(routerPoolModelRefs(pool)).toEqual(["sub-provider/sub-max"]);
-		expect(formatRouterPoolSummary(pool)).toBe("1 selected model");
+		expect(formatRouterPoolSummary(pool)).toBe("1 selected model (Models selector)");
+		expect(
+			formatRouterPoolSummary(
+				resolveRouterCandidatePool({ source: "cli_models", models: [subBig, apiBig] }, { getAvailable: () => ALL }),
+			),
+		).toBe("2 selected models (--models)");
+	});
+
+	it("CONFIRMED-001: an empty pool state is uncustomized, so a pinned root model cannot shrink the pool", () => {
+		const pool = resolveRouterCandidatePool({ source: "enabled_models", models: [] }, { getAvailable: () => ALL });
+		expect(pool.customized).toBe(false);
+		expect(pool.source).toBe("all_enabled");
+		expect(pool.models).toEqual(ALL);
 	});
 });
 
@@ -270,6 +287,63 @@ describe("Deterministic auto selection (F001-041, F001-050..055)", () => {
 		const result = selectAutoTierModel("cheap", [apiCheap, subCheap], deps({ preference: "balanced" }));
 		expect(result.chosen?.ref).toBe("api-provider/api-mini");
 		expect(result.subscriptionPreferred).toBe(false);
+	});
+
+	it("CONFIRMED-002: a known-unfit subscription model loses to a known-fit metered one with the gate off", () => {
+		const result = selectAutoTierModel("cheap", [subCheap, apiCheap], {
+			...deps(),
+			fitnessGate: false,
+			fitness: (_surface, m) =>
+				m === subCheap
+					? { fit: false, reason: "lane_failed", lane: "research", succeeded: 0, total: 3 }
+					: { fit: true, probed: true },
+		});
+		expect(result.chosen?.ref).toBe("api-provider/api-mini");
+		expect(result.chosen?.evidenceClass).toBe("known_fit");
+		expect(result.subscriptionPreferred).toBe(false);
+		// The gate is off, so the unfit subscription model is still admitted — just ranked last.
+		expect(result.eligible).toBe(2);
+		expect(result.candidates.at(-1)?.ref).toBe("sub-provider/sub-mini");
+		expect(result.candidates.at(-1)?.evidenceClass).toBe("known_unfit");
+	});
+
+	it("CONFIRMED-002: within one evidence class the subscription model still wins", () => {
+		const result = selectAutoTierModel("cheap", [apiCheap, subCheap], {
+			...deps(),
+			fitness: () => ({ fit: true, probed: true }),
+		});
+		expect(result.chosen?.ref).toBe("sub-provider/sub-mini");
+		expect(result.subscriptionPreferred).toBe(true);
+		expect(result.reason).toContain("known_fit");
+	});
+
+	it("CONFIRMED-002: probed-fit beats unprobed either way, and unprobed subscription beats unprobed metered", () => {
+		const probedMetered = selectAutoTierModel("cheap", [subCheap, apiCheap], {
+			...deps(),
+			fitness: (_surface, m) => ({ fit: true, probed: m === apiCheap }),
+		});
+		expect(probedMetered.chosen?.ref).toBe("api-provider/api-mini");
+		expect(probedMetered.subscriptionPreferred).toBe(false);
+
+		const unprobedBoth = selectAutoTierModel("cheap", [apiCheap, subCheap], {
+			...deps(),
+			fitness: () => ({ fit: true, probed: false }),
+		});
+		expect(unprobedBoth.chosen?.ref).toBe("sub-provider/sub-mini");
+		expect(unprobedBoth.chosen?.evidenceClass).toBe("unprobed");
+		expect(unprobedBoth.subscriptionPreferred).toBe(true);
+	});
+
+	it("CONFIRMED-002: the subscription preference never bypasses hard admission", () => {
+		const result = selectAutoTierModel("cheap", [subCheap, apiCheap], {
+			...deps(),
+			isExhausted: (m) => m === subCheap,
+			fitness: () => ({ fit: true, probed: true }),
+		});
+		expect(result.chosen?.ref).toBe("api-provider/api-mini");
+		expect(result.candidates.find((c) => c.ref === "sub-provider/sub-mini")?.rejectReasons).toEqual([
+			"quota_exhausted",
+		]);
 	});
 
 	it("evidence outranks cost inside a class: a probed-fit model beats an unprobed one", () => {
@@ -408,8 +482,11 @@ describe("H-MoE bounded to the pool (F001-033, F001-056, F001-092)", () => {
 		expect(outsideCandidate).toBeDefined();
 		expect(admission.evaluate(request, outsideCandidate!).reasonCodes).toContain("model_not_in_pool");
 
-		const vector = (score: number, subscriptionPreferred: number): ExpertFeatureVector =>
-			({ totalScore: score, subscriptionPreferred }) as ExpertFeatureVector;
+		const vector = (
+			score: number,
+			subscriptionPreferred: number,
+			adequacyClass: ExpertAdequacyClass = "unprobed",
+		): ExpertFeatureVector => ({ totalScore: score, subscriptionPreferred, adequacyClass }) as ExpertFeatureVector;
 		const metered = (await catalog.materializeCandidates({ ...request, allowed_model_refs: undefined })).find(
 			(c) => c.descriptor.model_id === "api-max",
 		)!;
@@ -431,6 +508,60 @@ describe("H-MoE bounded to the pool (F001-033, F001-056, F001-092)", () => {
 		);
 		expect(balanced.primary.model_id).toBe("api-max");
 	});
+
+	it("CONFIRMED-002: adequacy outranks the subscription preference in H-MoE ranking", async () => {
+		const catalog = new ExpertCatalog({
+			modelRegistry: {
+				getAll: () => ALL,
+				hasConfiguredAuth: () => true,
+				isUsingSubscription: isSubscription,
+			} as never,
+		});
+		const request = buildWorkerCapabilityRequest({
+			objectiveId: "o",
+			taskId: "t",
+			workClass: "retrieve",
+			preferSubscription: true,
+		});
+		const candidates = await catalog.materializeCandidates(request);
+		const metered = candidates.find((c) => c.descriptor.model_id === "api-max")!;
+		const sub = candidates.find((c) => c.descriptor.model_id === "sub-max")!;
+		const vector = (
+			score: number,
+			subscriptionPreferred: number,
+			adequacyClass: ExpertAdequacyClass,
+		): ExpertFeatureVector => ({ totalScore: score, subscriptionPreferred, adequacyClass }) as ExpertFeatureVector;
+
+		const unfitSubscription = new ExpertRankingPolicy().select(
+			request,
+			[
+				{ candidate: metered, features: vector(0.4, 0, "known_fit") },
+				{ candidate: sub, features: vector(0.9, 1, "known_unfit") },
+			],
+			"single",
+		);
+		expect(unfitSubscription.primary.model_id).toBe("api-max");
+
+		const bothFit = new ExpertRankingPolicy().select(
+			request,
+			[
+				{ candidate: metered, features: vector(0.9, 0, "known_fit") },
+				{ candidate: sub, features: vector(0.4, 1, "known_fit") },
+			],
+			"single",
+		);
+		expect(bothFit.primary.model_id).toBe("sub-max");
+
+		const unprobedSubscription = new ExpertRankingPolicy().select(
+			request,
+			[
+				{ candidate: metered, features: vector(0.4, 0, "known_fit") },
+				{ candidate: sub, features: vector(0.9, 1, "unprobed") },
+			],
+			"single",
+		);
+		expect(unprobedSubscription.primary.model_id).toBe("api-max");
+	});
 });
 
 describe("Route preview (F001-080..083)", () => {
@@ -448,7 +579,7 @@ describe("Route preview (F001-080..083)", () => {
 		expect(fixture.controller.getForegroundRouteSnapshot().source).toBe("direct");
 		expect(preview.intent).toBe("modify");
 		expect(preview.selectionMode).toBe("hybrid");
-		expect(preview.pool).toEqual({ customized: true, count: 3 });
+		expect(preview.pool).toEqual({ customized: true, count: 3, source: "enabled_models" });
 		expect(preview.subscriptionCandidates).toBe(2);
 		expect(preview.baselineTier).toBe("medium");
 		expect(preview.manualPin).toBeUndefined();
@@ -457,7 +588,7 @@ describe("Route preview (F001-080..083)", () => {
 		expect(preview.candidates.length).toBeGreaterThan(0);
 		const text = formatRoutePreview(preview);
 		expect(text).toContain("Selection mode: HYBRID");
-		expect(text).toContain("Pool: 3 selected");
+		expect(text).toContain("Pool: 3 selected (Models config)");
 		expect(text).toContain("Subscription candidates: 2");
 		expect(text).toContain("Would choose: sub-provider/sub-mini");
 		expect(text).toContain("Source: router");

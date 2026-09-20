@@ -531,6 +531,12 @@ function buildSessionOptions(
 			model: sm.model,
 			thinkingLevel: sm.thinkingLevel,
 		}));
+		// The same configured scope is the router's candidate pool, recorded with its provenance so a
+		// later orchestration override can pin the cycling list without narrowing the pool.
+		options.routerPool = {
+			source: parsed.models && parsed.models.length > 0 ? "cli_models" : "enabled_models",
+			models: options.scopedModels.map((sm) => ({ model: sm.model, thinkingLevel: sm.thinkingLevel })),
+		};
 	}
 
 	// API key from CLI - set in authStorage
@@ -988,28 +994,25 @@ export async function main(args: string[], options?: MainOptions) {
 					message: `Orchestration profile '${orchestrationProfile.profileId}' has no configured, authenticated model that supports its exact thinking level.`,
 				});
 			} else {
-				sessionOptions.model = orchestrationModel.model;
-				sessionOptions.thinkingLevel = orchestrationModel.binding.thinkingLevel;
-				sessionOptions.isExplicitModel = true;
-				sessionOptions.isExplicitThinking = true;
-				sessionOptions.scopedModels = [
-					{ model: orchestrationModel.model, thinkingLevel: orchestrationModel.binding.thinkingLevel },
-				];
-				sessionOptions.tools = [...orchestrationProfile.toolNames];
-				sessionOptions.excludeTools = undefined;
-				sessionOptions.noTools = undefined;
+				// The profile owns the model, thinking level, cycling scope and tools; the SDK derives
+				// every one of them from the profile itself, and rejects a caller that also supplies
+				// them. So the CLI hands over the profile and nothing it owns. The router's candidate
+				// pool is not owned by a profile and is still passed (it is the operator's Models
+				// configuration, which a profiled session routes across).
 				sessionOptions.orchestrationProfile = orchestrationProfile;
 			}
 		}
 
+		// A profiled session's model comes from the profile, not from sessionOptions.
+		const launchModel = orchestrationModel?.model ?? sessionOptions.model;
 		if (parsed.apiKey) {
-			if (!sessionOptions.model) {
+			if (!launchModel) {
 				diagnostics.push({
 					type: "error",
 					message: "--api-key requires a model to be specified via --model, --provider/--model, or --models",
 				});
 			} else {
-				authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsed.apiKey);
+				authStorage.setRuntimeApiKey(launchModel.provider, parsed.apiKey);
 			}
 		}
 
@@ -1017,18 +1020,23 @@ export async function main(args: string[], options?: MainOptions) {
 			services,
 			sessionManager,
 			sessionStartEvent,
-			model: sessionOptions.model,
-			thinkingLevel: sessionOptions.thinkingLevel,
 			serviceTier: sessionOptions.serviceTier,
-			isExplicitModel: sessionOptions.isExplicitModel,
-			isExplicitThinking: sessionOptions.isExplicitThinking,
-			scopedModels: sessionOptions.scopedModels,
-			tools: sessionOptions.tools,
-			excludeTools: sessionOptions.excludeTools,
-			noTools: sessionOptions.noTools,
-			toolProfileFilter: settingsManager.getResourceProfileFilter("tools"),
+			// Never owned by an orchestration profile: the pool is the operator's Models configuration.
+			routerPool: sessionOptions.routerPool,
 			customTools: sessionOptions.customTools,
-			orchestrationProfile: sessionOptions.orchestrationProfile,
+			...(sessionOptions.orchestrationProfile
+				? { orchestrationProfile: sessionOptions.orchestrationProfile }
+				: {
+						model: sessionOptions.model,
+						thinkingLevel: sessionOptions.thinkingLevel,
+						isExplicitModel: sessionOptions.isExplicitModel,
+						isExplicitThinking: sessionOptions.isExplicitThinking,
+						scopedModels: sessionOptions.scopedModels,
+						tools: sessionOptions.tools,
+						excludeTools: sessionOptions.excludeTools,
+						noTools: sessionOptions.noTools,
+						toolProfileFilter: settingsManager.getResourceProfileFilter("tools"),
+					}),
 		});
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
 		if (created.session.model && cliThinkingOverride) {

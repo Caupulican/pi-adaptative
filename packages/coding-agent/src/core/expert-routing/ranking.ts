@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import {
 	EXPERT_ROUTING_SCHEMA_VERSION,
+	type ExpertAdequacyClass,
 	type ExpertBinding,
 	type ExpertSelectionMode,
 	type ExpertSelectionPlan,
@@ -15,7 +16,17 @@ import {
 } from "./contracts.ts";
 import { defaultModelFamilyResolver, type ModelFamilyResolver, TeamIndependenceValidator } from "./independence.ts";
 
-export const EXPERT_RANKING_POLICY_VERSION = "1.1" as const;
+export const EXPERT_RANKING_POLICY_VERSION = "1.2" as const;
+
+const ADEQUACY_RANK: Record<ExpertAdequacyClass, number> = { known_fit: 2, unprobed: 1, known_unfit: 0 };
+
+/**
+ * Rank of a vector's adequacy class. A vector carrying no class at all is ranked as `unprobed`,
+ * which is what "no probe evidence recorded" means — never as fit, and never as unfit.
+ */
+function adequacyRank(features: { adequacyClass?: ExpertAdequacyClass }): number {
+	return features.adequacyClass ? ADEQUACY_RANK[features.adequacyClass] : ADEQUACY_RANK.unprobed;
+}
 
 export class ExpertRankingPolicy {
 	readonly version: string = EXPERT_RANKING_POLICY_VERSION;
@@ -44,10 +55,13 @@ export class ExpertRankingPolicy {
 		}
 
 		const traceId = options?.traceId ?? randomUUID();
-		// Subscription-first is a class ordering AFTER hard admission (every candidate here is already
-		// admitted): adequate subscription-backed experts rank ahead of metered ones, and within each
-		// class the existing evidence score decides. It is a preference, never authority.
+		// Ordering after hard admission (every candidate here is already admitted): adequacy class
+		// first, so a known-unfit expert never outranks a known-fit one; then the subscription
+		// preference WITHIN a class; then the existing evidence score. Who pays is a preference
+		// among adequate experts, never authority over adequacy.
 		const sorted = [...candidates].sort((a, b) => {
+			const adequacyDelta = adequacyRank(b.features) - adequacyRank(a.features);
+			if (adequacyDelta !== 0) return adequacyDelta;
 			if (request.prefer_subscription) {
 				const classDelta = (b.features.subscriptionPreferred ?? 0) - (a.features.subscriptionPreferred ?? 0);
 				if (classDelta !== 0) return classDelta;

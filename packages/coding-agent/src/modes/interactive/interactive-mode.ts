@@ -1788,6 +1788,9 @@ export class InteractiveMode {
 			this.loadingAnimation?.setMessage(
 				activity.phase === "waiting" ? "Awaiting you" : this.getWorkingLoaderMessage(),
 			);
+			// The POV bar derives CONTROL from the durable human-input record on its next read; the
+			// render is what makes an opening or closing question visible the moment it happens.
+			this.ui.requestRender();
 		});
 	}
 
@@ -3250,6 +3253,9 @@ export class InteractiveMode {
 	}
 
 	private handleModelRouterAction(action: string): Promise<void> {
+		// A superseded Models editor means another overlay owns the screen; Router Setup must not
+		// displace it, so the reopen is skipped in that case only.
+		let modelsEditorSuperseded = false;
 		return modelRouterSetupCommands.handleModelRouterAction(
 			{
 				session: this.session,
@@ -3258,15 +3264,20 @@ export class InteractiveMode {
 				showWarning: (message) => this.showWarning(message),
 				showError: (message) => this.showError(message),
 				showSelector: (create) => this.showSelector(create),
-				showModelsSelector: () => this.showModelsSelector(),
+				showModelsSelector: async () => {
+					modelsEditorSuperseded = (await this.showModelsSelector()) === "superseded";
+				},
+				reopenModelRouterSetup: () => {
+					if (!modelsEditorSuperseded) this.showSettingsSelector("model-router");
+				},
 				runFitnessAndAssign: (modelRef) => this.runFitnessAndAssign(modelRef),
 			},
 			action,
 		);
 	}
 
-	private showSettingsSelector(): void {
-		settingsSelectorFlow.showSettingsSelector(this.settingsSelectorHost());
+	private showSettingsSelector(initialItemId?: string): void {
+		settingsSelectorFlow.showSettingsSelector(this.settingsSelectorHost(), initialItemId);
 	}
 
 	private handleSecretsCommand(): Promise<void> {
@@ -3357,8 +3368,32 @@ export class InteractiveMode {
 		await sessionFlows.showModelSelector(this.sessionFlowHost(), initialSearchInput);
 	}
 
-	private async showModelsSelector(): Promise<void> {
-		await sessionFlows.showModelsSelector(this.sessionFlowHost());
+	/**
+	 * Open the Models editor and resolve once it leaves the screen: "closed" when the operator
+	 * closed it, "superseded" when another overlay took the slot first. The flow's own promise only
+	 * covers mounting the selector, so the close signal is taken from the `done` callback the flow
+	 * hands its component.
+	 */
+	private async showModelsSelector(): Promise<"closed" | "superseded"> {
+		let settle: (outcome: "closed" | "superseded") => void = () => {};
+		const left = new Promise<"closed" | "superseded">((resolve) => {
+			settle = resolve;
+		});
+		let mounted = false;
+		const host = this.sessionFlowHost();
+		host.showSelector = (create) => {
+			mounted = true;
+			this.showSelector((done) => {
+				const selector = create(() => {
+					done();
+					settle("closed");
+				});
+				return { ...selector, onSuperseded: () => settle("superseded") };
+			});
+		};
+		await sessionFlows.showModelsSelector(host);
+		// Nothing was mounted (no models to edit): there is no editor to wait for.
+		return mounted ? await left : "closed";
 	}
 
 	private showUserMessageSelector(newSessionName?: string): void {

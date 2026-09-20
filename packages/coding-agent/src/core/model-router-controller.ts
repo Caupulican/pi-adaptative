@@ -272,6 +272,28 @@ export class ModelRouterController {
 		return false;
 	}
 
+	/**
+	 * Manual tier pins that resolve to a model outside a customized candidate pool. The pin still
+	 * wins — it is the operator's own choice — but a silent route outside the pool reads as the pool
+	 * having failed, so status names it.
+	 */
+	private _pinsOutsideCandidatePool(): string[] {
+		const pool = this.deps.getCandidatePool();
+		if (!pool.customized) return [];
+		const notices: string[] = [];
+		for (const tier of ["cheap", "medium", "expensive"] as const) {
+			if (this.isTierAutoSelected(tier)) continue;
+			const pattern = this._tierPattern(tier);
+			if (!pattern) continue;
+			const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() });
+			if (!resolved.model || isModelInRouterPool(pool, resolved.model)) continue;
+			notices.push(
+				`${tier} pin ${formatModelRouterModel(resolved.model)} is outside the candidate pool (${formatRouterPoolSummary(pool)}); the pin wins, so this tier routes outside the pool.`,
+			);
+		}
+		return notices;
+	}
+
 	private _autoSelectionDeps(): AutoSelectionDeps {
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();
 		const registry = this.deps.getModelRegistry();
@@ -949,6 +971,12 @@ export class ModelRouterController {
 		const routable = tier === "cheap" || tier === "medium" || tier === "expensive";
 		const auto = routable && this.isTierAutoSelected(tier) ? this.selectAutoTierModel(tier) : undefined;
 		const manualPin = routable && !auto ? this._tierPattern(tier) : undefined;
+		const manualPinModel = manualPin
+			? resolveCliModel({ cliModel: manualPin, modelRegistry: registry }).model
+			: undefined;
+		const manualPinOutsidePool = Boolean(
+			manualPinModel && pool.customized && !isModelInRouterPool(pool, manualPinModel),
+		);
 		const subscriptionCandidates = pool.models.filter(
 			(model) => registry.hasConfiguredAuth(model) && this.deps.isUsingSubscription(model),
 		).length;
@@ -983,7 +1011,8 @@ export class ModelRouterController {
 			selectionMode: settings.selectionMode ?? "manual",
 			poolPreference: settings.poolPreference ?? "subscription-first",
 			...(manualPin ? { manualPin } : {}),
-			pool: { customized: pool.customized, count: pool.models.length },
+			...(manualPinOutsidePool ? { manualPinOutsidePool } : {}),
+			pool: { customized: pool.customized, count: pool.models.length, source: pool.source },
 			subscriptionCandidates,
 			eligibleCandidates: auto ? auto.eligible : manualPin && resolved ? 1 : 0,
 			...(resolved
@@ -1067,6 +1096,13 @@ export class ModelRouterController {
 				formatRouterPoolSummary(this.deps.getCandidatePool()),
 			),
 		];
+		const pinsOutsidePool = this._pinsOutsideCandidatePool();
+		if (pinsOutsidePool.length > 0) {
+			lines.push(formatLabel ? formatLabel("Pool exceptions:") : "Pool exceptions:");
+			for (const notice of pinsOutsidePool) {
+				lines.push(`- ${notice}`);
+			}
+		}
 		const diagnostics = collectModelRouterConfigDiagnostics(
 			settings,
 			this.deps.getModelRegistry(),

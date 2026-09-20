@@ -95,6 +95,7 @@ import type { SessionCostSummary } from "./cost/cost-summary.ts";
 import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import type { CostGuardDecision, CostGuardSettings } from "./cost-guard.ts";
 import { CostGuardController } from "./cost-guard-controller.ts";
+import type { SemanticDecisionEngine } from "./decision/engine.ts";
 import {
 	appendWorkerClaimSnapshot,
 	getLatestWorkerClaimSnapshot,
@@ -124,6 +125,7 @@ import { ForegroundRecoveryController, type ForegroundSubmissionLease } from "./
 import { ForegroundTerminalHandoffController } from "./foreground-terminal-handoff-controller.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
 import { reportGithubOriginPinForSession } from "./github-origin-pin.ts";
+import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
@@ -131,6 +133,7 @@ import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
 import { type ExplicitGoalStartAuthority, parseExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
 import { HostTurnReasoningController } from "./host-turn-reasoning.ts";
+import { getResumableHumanInputSnapshot } from "./human-input.ts";
 import { HumanInputController } from "./human-input-controller.ts";
 import { DURABLE_LEARNING_MEMORY_POLICY_VERSION, DurableLearningState } from "./learning/durable-learning-state.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
@@ -150,7 +153,11 @@ import {
 	type ModelCapabilityProfile,
 } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
-import { type RouterCandidatePool, resolveRouterCandidatePool } from "./model-router/candidate-pool.ts";
+import {
+	type RouterCandidatePool,
+	type RouterPoolState,
+	resolveRouterCandidatePool,
+} from "./model-router/candidate-pool.ts";
 import type { LiveRoutePreview, RoutePreview } from "./model-router/route-preview.ts";
 import { isLocalOrManagedRouterModel } from "./model-router/tool-escalation.ts";
 import {
@@ -280,6 +287,8 @@ export class AgentSession {
 	private _edgeConfirmation?: EdgeConfirmationHandler;
 
 	private _scopedModels: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
+	/** The router's candidate pool and its provenance; undefined means "every enabled model". */
+	private _routerPool: RouterPoolState | undefined;
 
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
@@ -447,6 +456,9 @@ export class AgentSession {
 	private _operatorBlocker?: string;
 	/** Observed outcome of every semantic evaluation this session ran; the footer reads it. */
 	private readonly _semanticPlaneHealth = new SemanticPlaneHealthRecorder();
+	/** The plane engine the recording wrapper below was built for, and the wrapper itself. */
+	private _recordedSemanticEngineSource?: SemanticDecisionEngine;
+	private _recordedSemanticEngine?: SemanticDecisionEngine;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -485,6 +497,27 @@ export class AgentSession {
 						(policy) => policy.forbid.includes("full_suite_per_edit") || policy.forbid.includes("tdd_workflow"),
 					),
 			getBlocker: () => this._operatorBlocker,
+			// The live continuation verdict is the field loop's own decision record; control is derived
+			// from it, never from a second copy of the goal's state.
+			getContinuation: () =>
+				this.getGoalRuntimeSnapshot({
+					maxStallTurns: this.settingsManager.getAutonomySettings().maxStallTurns,
+				}).continuation,
+			// Durable, not the process-local activity feed: an unanswered question survives a restart.
+			getPendingHumanInput: () => {
+				const snapshot = getResumableHumanInputSnapshot(this.sessionManager);
+				if (snapshot?.status !== "pending") return undefined;
+				const question = snapshot.request.questions[0];
+				if (!question) return undefined;
+				return {
+					requestId: snapshot.request.requestId,
+					question: question.header || question.question,
+				};
+			},
+			isForegroundBusy: () => this._foregroundRecovery.isBusy,
+			// The invalidation signal for both branch-walking reads above: every input they derive
+			// from is a persisted session entry.
+			getSessionEntryCount: () => this.sessionManager.getEntryCount(),
 		});
 		this._workerSupervision = new WorkerSupervisionCoordinator({
 			supervisor: new WorkerSemanticSupervisor({
@@ -492,7 +525,7 @@ export class AgentSession {
 				// session without one supervises on its deterministic stall/repetition signals alone.
 				decisionEngine: {
 					evaluate: async (program, state, options) => {
-						const engine = this._steeringPlane?.decisionEngine;
+						const engine = this._recordingSemanticEngine();
 						if (!engine) return {};
 						return createRetentionDecisionEngine(engine).evaluate(program as never, state, options as never);
 					},
@@ -525,7 +558,7 @@ export class AgentSession {
 					.getAgentsFiles()
 					.agentsFiles.flatMap((file) => (file.content ? [{ path: file.path, content: file.content }] : [])),
 			getOwnerRulePolicies: () => this._ownerRules.list(),
-			getDecisionEngine: () => this._steeringPlane?.decisionEngine,
+			getDecisionEngine: () => this._recordingSemanticEngine(),
 			recordRepairWork: (repair) => {
 				this.sessionManager.appendCustomEntry(PROJECT_RULE_REPAIR_CUSTOM_TYPE, repair);
 			},
@@ -610,6 +643,15 @@ export class AgentSession {
 		this._scopedModels = config.orchestrationProfile
 			? [{ model: this.agent.state.model, thinkingLevel: this.agent.state.thinkingLevel }]
 			: (config.scopedModels ?? []);
+		// The router pool is separate state from the cycling list: an orchestration profile pins the
+		// root model for cycling but never narrows the pool, so a profiled session still routes
+		// across the operator's whole Models configuration. An SDK caller that passes a scope
+		// without an explicit pool means that scope as the pool.
+		this._routerPool = config.routerPool
+			? { source: config.routerPool.source, models: config.routerPool.models.map((scoped) => scoped.model) }
+			: !config.orchestrationProfile && config.scopedModels && config.scopedModels.length > 0
+				? { source: "sdk_models", models: config.scopedModels.map((scoped) => scoped.model) }
+				: undefined;
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
@@ -722,6 +764,18 @@ export class AgentSession {
 			getArtifactStore: () => this._getToolArtifactStore(),
 			getImageStore: () => this._getSessionImageStore(),
 			runAgentPrompt: (messages) => this._foregroundRecovery.runAgentPrompt(messages),
+			recordObjectiveClarification: (objectiveId, event) => {
+				recordObjectiveClarification(
+					{
+						getGoalState: () => this.getGoalStateSnapshot(),
+						saveGoalState: (state, expected) => {
+							this.saveGoalStateSnapshot(state, expected);
+						},
+					},
+					objectiveId,
+					event,
+				);
+			},
 		});
 		this._goals = new GoalSessionController({
 			getSessionManager: () => this.sessionManager,
@@ -1066,9 +1120,9 @@ export class AgentSession {
 			resolveLaneModel: (pattern) => this._backgroundLanes.resolveLaneModel(pattern),
 			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
 			getToolProbeVerdict: (model) => this._toolProtocol.getToolProbeVerdict(model),
-			// The pool is the operator's Models configuration: live scoped models (startup
-			// enabledModels / --models, or the Models selector) or every authed model when uncustomized.
-			getCandidatePool: () => resolveRouterCandidatePool(this._scopedModels, this._modelRegistry),
+			// The pool is the operator's Models configuration (startup enabledModels / --models, an
+			// SDK scope, or a live Models-selector edit), or every authed model when uncustomized.
+			getCandidatePool: () => resolveRouterCandidatePool(this._routerPool, this._modelRegistry),
 			isUsingSubscription: (model) => this._modelRegistry.isUsingSubscription(model),
 		});
 		this._foregroundLifecycle = new ForegroundLifecycleAdapter(
@@ -1225,6 +1279,7 @@ export class AgentSession {
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
 			getSystemOneController: () => this._systemOneController,
 			getSteeringPlane: () => this._steeringPlane,
+			getSemanticDecisionEngine: () => this._semanticDecisionEngine(),
 			getAdaptiveReadiness: () => this._adaptiveReadiness,
 			grantEdgeFromInstructions: (grant) => this.grantEdge(grant.class, "instructions", grant),
 			enforceEdgeOperation: (op, signal) => enforceSessionEdgeOperation(this._edgeDeps(), op, undefined, signal),
@@ -1522,28 +1577,50 @@ export class AgentSession {
 	}
 
 	/**
-	 * The session's semantic decision engine, wrapped so every evaluation's outcome is recorded.
-	 * The footer's health indicator is that record, never a constant.
+	 * The one way this session hands its semantic decision engine to anything: the plane's engine
+	 * wrapped so every evaluation it runs is recorded. Every in-session consumer goes through here,
+	 * so the POV bar's Jev indicator reports the whole plane's work and not one subsystem's.
+	 * Memoized per underlying engine so collaborators wired once keep a stable engine identity.
 	 */
-	private _semanticDecisionEngine(): ReturnType<typeof createRetentionDecisionEngine> | undefined {
+	private _recordingSemanticEngine(): SemanticDecisionEngine | undefined {
 		const engine = this._steeringPlane?.decisionEngine;
 		if (!engine) return undefined;
-		const bridged = createRetentionDecisionEngine(engine);
-		return {
+		if (this._recordedSemanticEngineSource === engine && this._recordedSemanticEngine) {
+			return this._recordedSemanticEngine;
+		}
+		const recorded: SemanticDecisionEngine = {
+			id: engine.id,
+			model: engine.model,
+			capabilities: () => engine.capabilities(),
 			evaluate: async (program, state, options) => {
 				// The in-flight mark is what lets the POV bar show `JEV eval` only while a real
 				// evaluation runs; success/failure below always closes it.
 				this._semanticPlaneHealth.recordStart();
 				try {
-					const evaluation = await bridged.evaluate(program, state, options);
+					const evaluation = await engine.evaluate(program, state, options);
 					this._semanticPlaneHealth.recordSuccess();
 					return evaluation;
 				} catch (error) {
-					this._semanticPlaneHealth.recordFailure(error);
+					// A cancelled evaluation is not a degraded plane: the abort came from the operator or
+					// the caller, and the plane never reported an outcome to judge it by.
+					if (options?.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+						this._semanticPlaneHealth.recordCancelled();
+					} else {
+						this._semanticPlaneHealth.recordFailure(error);
+					}
 					throw error;
 				}
 			},
 		};
+		this._recordedSemanticEngineSource = engine;
+		this._recordedSemanticEngine = recorded;
+		return recorded;
+	}
+
+	/** The recorded engine in the retention planner's batched-question shape. */
+	private _semanticDecisionEngine(): ReturnType<typeof createRetentionDecisionEngine> | undefined {
+		const engine = this._recordingSemanticEngine();
+		return engine ? createRetentionDecisionEngine(engine) : undefined;
 	}
 
 	/** Observed health of this session's semantic plane. */
@@ -1556,9 +1633,9 @@ export class AgentSession {
 		return this._modelRouter.getForegroundRouteSnapshot();
 	}
 
-	/** The router's candidate pool as the operator configured it (scoped models or all authed). */
+	/** The router's candidate pool as the operator configured it, with its provenance. */
 	getRouterCandidatePool(): RouterCandidatePool {
-		return resolveRouterCandidatePool(this._scopedModels, this._modelRegistry);
+		return resolveRouterCandidatePool(this._routerPool, this._modelRegistry);
 	}
 
 	/** The persisted `/toolprobe` record for a model, or undefined when never probed. */
@@ -1679,10 +1756,16 @@ export class AgentSession {
 			// controller uses, bounded to the operator's candidate pool.
 			this._modelRouter.setExpertSelector(stack.expertService);
 		}
+		if (stack.steeringPlane) {
+			// Bound before the gate below so the gate, like every other consumer, reaches the plane's
+			// engine through the one recording accessor.
+			this._steeringPlane = stack.steeringPlane;
+		}
 		if (stack.charter) {
 			// Authority for external acquisition comes from this charter and nowhere else; the gate is
 			// only constructed once a real charter exists.
 			this._executionCharter = stack.charter;
+			const decisionEngine = this._semanticDecisionEngine();
 			this._acquisitionGate = new ExternalCapabilityAcquisitionGate({
 				charter: stack.charter,
 				// An operator grant recorded at the edge is authority the session really has; reading it
@@ -1694,21 +1777,12 @@ export class AgentSession {
 						allowNetworkDownloads: classes.has("package.install"),
 					};
 				},
-				systemOneRequired: (stack.steeringPlane ?? this._steeringPlane)?.policy.mode === "system_one_required",
-				...(this._steeringPlane?.decisionEngine || stack.steeringPlane?.decisionEngine
-					? {
-							decisionEngine: createRetentionDecisionEngine(
-								(stack.steeringPlane ?? this._steeringPlane)?.decisionEngine as never,
-							),
-						}
-					: {}),
+				systemOneRequired: this._steeringPlane?.policy.mode === "system_one_required",
+				...(decisionEngine ? { decisionEngine } : {}),
 			});
 		}
 		if (stack.readiness) {
 			this._adaptiveReadiness = stack.readiness;
-		}
-		if (stack.steeringPlane) {
-			this._steeringPlane = stack.steeringPlane;
 		}
 		if (stack.objectiveController) {
 			this._objectiveExecutionController = stack.objectiveController;
@@ -2821,9 +2895,14 @@ export class AgentSession {
 		return this._scopedModels;
 	}
 
-	/** Update scoped models for cycling */
+	/** Update scoped models for cycling. The router pool is separate state (see setRouterPool). */
 	setScopedModels(scopedModels: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>): void {
 		this._scopedModels = scopedModels;
+	}
+
+	/** Replace the router's candidate pool; undefined restores "every enabled model". */
+	setRouterPool(pool: RouterPoolState | undefined): void {
+		this._routerPool = pool;
 	}
 
 	/** File-based prompt templates */

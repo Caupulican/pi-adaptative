@@ -1,5 +1,6 @@
 import type { RouteSelectionSource } from "../autonomy/contracts.ts";
 import type { ModelRouterPoolPreference, ModelRouterSelectionMode } from "../settings-manager.ts";
+import { formatRouterPoolSourceLabel, type RouterPoolSource } from "./candidate-pool.ts";
 import type { ModelRouterIntent } from "./intent-classifier.ts";
 
 /**
@@ -16,7 +17,9 @@ export interface RoutePreview {
 	readonly poolPreference: ModelRouterPoolPreference;
 	/** The operator's pin for the baseline tier, when that tier is not auto-selected. */
 	readonly manualPin?: string;
-	readonly pool: { readonly customized: boolean; readonly count: number };
+	/** The pin resolves outside a customized pool: it still wins, and it routes outside the pool. */
+	readonly manualPinOutsidePool?: boolean;
+	readonly pool: { readonly customized: boolean; readonly count: number; readonly source: RouterPoolSource };
 	readonly subscriptionCandidates: number;
 	readonly eligibleCandidates: number;
 	readonly chosenModel?: string;
@@ -62,13 +65,16 @@ export function formatRoutePreview(preview: RoutePreview): string {
 		`Reason: ${preview.reasonCode}`,
 		`Selection mode: ${preview.selectionMode.toUpperCase()}`,
 		`Manual pin: ${preview.manualPin ?? "none"}`,
-		`Pool: ${preview.pool.customized ? `${preview.pool.count} selected` : `all enabled (${preview.pool.count})`}`,
+		`Pool: ${preview.pool.customized ? `${preview.pool.count} selected (${formatRouterPoolSourceLabel(preview.pool.source)})` : `all enabled (${preview.pool.count})`}`,
 		`Pool preference: ${preview.poolPreference}`,
 		`Subscription candidates: ${preview.subscriptionCandidates}`,
 		`Eligible candidates: ${preview.eligibleCandidates}`,
 		`Would choose: ${preview.chosenModel ?? "no model (turn stays on the session model)"}`,
 		`Source: ${formatRouteSelectionSource(preview.selection)}`,
 	];
+	if (preview.manualPinOutsidePool) {
+		lines.push("Pool exception: the manual pin is outside the candidate pool; the pin wins and routes outside it.");
+	}
 	if (preview.fitness) lines.push(`Fitness: ${preview.fitness}`);
 	if (preview.skipReason) lines.push(`Skip reason: ${preview.skipReason}`);
 	if (preview.candidates.length > 0) {

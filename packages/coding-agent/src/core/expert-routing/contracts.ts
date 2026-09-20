@@ -157,6 +157,9 @@ export interface ExpertCandidate {
 	state: ExpertCandidateState;
 }
 
+/** What the probe record says about this candidate on the request's lane. */
+export type ExpertAdequacyClass = "known_fit" | "unprobed" | "known_unfit";
+
 export interface ExpertFeatureVector {
 	// Ability
 	capabilityFit: number;
@@ -188,6 +191,12 @@ export interface ExpertFeatureVector {
 	 * trace. It is a class ordering applied by the ranking policy, not a term of `totalScore`.
 	 */
 	subscriptionPreferred: number;
+	/**
+	 * Probe evidence on the lane this request uses, read from the same FitnessStore lane as
+	 * `roleProbeFitness`. The ranking policy orders by this class ABOVE the subscription
+	 * preference: a known-unfit expert is never preferred for being subscription-backed.
+	 */
+	adequacyClass: ExpertAdequacyClass;
 
 	// Composite
 	totalScore: number;

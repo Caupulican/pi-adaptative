@@ -4,6 +4,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import {
 	describeRouterCalibration,
+	describeRouterCalibrationScope,
 	FITNESS_EVIDENCE_MAX_AGE_MS,
 	formatRouterCalibrationRow,
 } from "../src/core/model-router/calibration.ts";
@@ -51,6 +52,7 @@ const host: StoredFitnessReport["host"] = { id: "host", cpu: "fixture-cpu", core
 const subModel = { provider: "sub", id: "sub-max" } as never;
 const apiModel = { provider: "api", id: "api-mini" } as never;
 const neverProbed = { provider: "api", id: "api-new" } as never;
+const localModel = { provider: "ollama", id: "local-8b", contextWindow: 8192 } as never;
 
 describe("Router calibration evidence (F001-070..075)", () => {
 	const now = new Date("2026-09-20T12:00:00Z");
@@ -119,6 +121,85 @@ describe("Router calibration evidence (F001-070..075)", () => {
 		expect(row.surfaces.router_medium).toBe("STALE");
 	});
 
+	it("a report that covers only part of the router surfaces still needs calibration", () => {
+		// Evidence about the judge lane, none about the tool-call lane the other surfaces need.
+		const { toolCall: _toolCall, ...withoutToolCall } = fitnessReport();
+		const report: StoredFitnessReport = {
+			model: "api/api-mini",
+			report: withoutToolCall as ModelFitnessReport,
+			at: now.toISOString(),
+			host,
+		};
+		const [row] = describeRouterCalibration([apiModel], {
+			fitnessReports: [report],
+			toolProbe: () => undefined,
+			isSubscription: () => false,
+			now,
+		});
+		expect(row.staleReason).toBeUndefined();
+		expect(row.surfaces).toMatchObject({
+			router_cheap: "UNPROBED",
+			router_medium: "UNPROBED",
+			router_expensive: "UNPROBED",
+			router_judge: "FIT",
+			executor: "UNPROBED",
+		});
+		expect(row.needsCalibration).toBe(true);
+	});
+
+	it("a fully probed fresh report needs no calibration", () => {
+		const [row] = describeRouterCalibration([apiModel], {
+			fitnessReports: [{ model: "api/api-mini", report: fitnessReport(), at: now.toISOString(), host }],
+			toolProbe: () => undefined,
+			isSubscription: () => false,
+			now,
+		});
+		expect(Object.values(row.surfaces)).toEqual(["FIT", "FIT", "FIT", "FIT", "FIT"]);
+		expect(row.needsCalibration).toBe(false);
+	});
+
+	it("FC-045: a context window different from the probed one marks the evidence stale", () => {
+		const capacity = { registeredContextWindow: 4096, servedContextWindow: 4096, outcomes: [], meanMs: 5 };
+		const [row] = describeRouterCalibration([localModel], {
+			fitnessReports: [
+				{
+					model: "ollama/local-8b",
+					report: fitnessReport({ capacity }),
+					at: now.toISOString(),
+					host,
+				},
+			],
+			toolProbe: () => undefined,
+			isSubscription: () => false,
+			now,
+		});
+		expect(row.staleReason).toBe("context window changed (4096 at probe time, 8192 now)");
+		expect(row.needsCalibration).toBe(true);
+		expect(Object.values(row.surfaces)).toEqual(["STALE", "STALE", "STALE", "STALE", "STALE"]);
+	});
+
+	it("the same context window keeps the evidence fresh", () => {
+		const capacity = { registeredContextWindow: 8192, servedContextWindow: 8192, outcomes: [], meanMs: 5 };
+		const [row] = describeRouterCalibration([localModel], {
+			fitnessReports: [
+				{ model: "ollama/local-8b", report: fitnessReport({ capacity }), at: now.toISOString(), host },
+			],
+			toolProbe: () => undefined,
+			isSubscription: () => false,
+			now,
+		});
+		expect(row.staleReason).toBeUndefined();
+		expect(row.needsCalibration).toBe(false);
+	});
+
+	it("calibration copy is derived from the canonical surface list, never a literal count", () => {
+		const scope = describeRouterCalibrationScope();
+		expect(scope).toBe(
+			"5 router fitness surfaces (cheap, medium, expensive, judge, executor) + real tool execution probe",
+		);
+		expect(scope).not.toContain("6");
+	});
+
 	it("an UNFIT surface is reported per surface, not as a model-wide verdict", () => {
 		const report: StoredFitnessReport = {
 			model: "api/api-mini",
@@ -140,6 +221,7 @@ describe("Router calibration evidence (F001-070..075)", () => {
 function poolView(overrides: Partial<ModelRouterPoolView> = {}): ModelRouterPoolView {
 	return {
 		customized: true,
+		summary: "2 selected models (Models selector)",
 		refs: ["sub/sub-max", "api/api-mini"],
 		subscriptionRefs: ["sub/sub-max"],
 		favoriteRefs: ["api/api-mini"],
@@ -267,7 +349,7 @@ describe("Router Setup settings screen (F001-060..065)", () => {
 		expect(output).toContain("Selection mode");
 		expect(output).toContain("hybrid");
 		expect(output).toContain("Candidate pool");
-		expect(output).toContain("2 selected models");
+		expect(output).toContain("2 selected models (Models selector)");
 		expect(output).toContain("Pool preference");
 		expect(output).toContain("subscription-first");
 		// HYBRID: an unpinned tier reads AUTO, the pinned tier keeps its model.
@@ -325,6 +407,27 @@ describe("Router Setup settings screen (F001-060..065)", () => {
 		expect(output).toContain("sub/sub-max");
 		selector.getSettingsList().handleInput("\r");
 		expect(onModelRouterAction).toHaveBeenCalledWith("configure-models");
+	});
+
+	it("FC-032/033: an initial item opens Router Setup directly on the pool it was built with", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				initialItemId: "model-router",
+				modelRouterPool: poolView({
+					summary: "1 selected model (Models config)",
+					refs: ["api/api-mini"],
+					subscriptionRefs: [],
+					favoriteRefs: [],
+					calibration: ["api/api-mini · metered · cheap UNPROBED"],
+					needsCalibration: ["api/api-mini"],
+				}),
+			}),
+			makeCallbacks(),
+		);
+		const output = stripAnsi(selector.render(200).join("\n"));
+		expect(output).toContain("Model Router");
+		// The reopened submenu reads the pool view it was built with, not the one from a prior open.
+		expect(output).toMatch(/Candidate pool\s+1 selected model \(Models config\)/);
 	});
 
 	it("F001-070: opening the Calibrate menu runs nothing; only a chosen action leaves the screen", () => {
@@ -395,6 +498,7 @@ describe("Router Setup actions (F001-070..072, F001-080..082)", () => {
 			showError: (message) => statuses.push(`ERR ${message}`),
 			showSelector: (create) => selectors.push(create(() => {})),
 			showModelsSelector: vi.fn(async () => {}),
+			reopenModelRouterSetup: vi.fn(() => {}),
 			runFitnessAndAssign: vi.fn(async () => {}),
 			...overrides,
 		};
@@ -456,6 +560,30 @@ describe("Router Setup actions (F001-070..072, F001-080..082)", () => {
 		await handleModelRouterAction(h, "diagnostics");
 		expect(h.statuses.at(-1)).toContain("Selection mode: HYBRID");
 	});
+
+	it("Configure models reopens Router Setup once the editor closed; nothing asks the operator to reopen", async () => {
+		const order: string[] = [];
+		const h = makeHost({
+			showModelsSelector: vi.fn(async () => {
+				order.push("models-editor");
+			}),
+			reopenModelRouterSetup: vi.fn(() => {
+				order.push("router-setup");
+			}),
+		});
+		await handleModelRouterAction(h, "configure-models");
+		expect(order).toEqual(["models-editor", "router-setup"]);
+		expect(h.statuses.at(-1)?.toLowerCase()).not.toContain("reopen");
+		expect(h.statuses.at(-1)).toContain("Router Setup is showing the edited pool");
+	});
+
+	it("the batch confirmation describes the canonical surfaces, not a hardcoded count", async () => {
+		const h = makeHost();
+		await handleModelRouterAction(h, "calibrate-all");
+		const rendered = stripAnsi(h.selectors[0].component.render(200).join("\n"));
+		expect(rendered).toContain("5 router fitness surfaces");
+		expect(rendered).not.toContain("6 fitness surfaces");
+	});
 });
 
 describe("buildModelRouterPoolView (F001-070)", () => {
@@ -463,7 +591,7 @@ describe("buildModelRouterPoolView (F001-070)", () => {
 		const runModelFitness = vi.fn();
 		const view = buildModelRouterPoolView({
 			session: {
-				getRouterCandidatePool: () => ({ customized: false, models: [subModel, apiModel] }),
+				getRouterCandidatePool: () => ({ customized: false, source: "all_enabled", models: [subModel, apiModel] }),
 				getStoredFitnessReports: () => [],
 				getToolProbeRecord: () => undefined,
 				modelRegistry: { isUsingSubscription: (model: unknown) => model === subModel },
@@ -474,6 +602,7 @@ describe("buildModelRouterPoolView (F001-070)", () => {
 		expect(runModelFitness).not.toHaveBeenCalled();
 		expect(view).toMatchObject({
 			customized: false,
+			summary: "all enabled models (2)",
 			refs: ["sub/sub-max", "api/api-mini"],
 			subscriptionRefs: ["sub/sub-max"],
 			favoriteRefs: ["api/api-mini"],

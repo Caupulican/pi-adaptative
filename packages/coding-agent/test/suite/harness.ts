@@ -94,6 +94,8 @@ export interface HarnessOptions {
 	collectWorkspaceSources?: typeof collectWorkspaceSources;
 	/** Fake fetch/spawn/exists for the local (Ollama) runtime; see test/agent-session-local-runtime.test.ts. */
 	localRuntimeDeps?: LocalRuntimeDeps;
+	/** Ids of registered faux models to scope model cycling to, as an SDK caller's scope does. */
+	scopedModelIds?: string[];
 	orchestrationProfile?: OrchestrationProfile;
 	/** Owner-authored profile used by delegate calls; independent from the foreground profile. */
 	workerOrchestrationProfile?: OrchestrationProfile;
@@ -259,6 +261,11 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const resourceLoader =
 		options.resourceLoader ?? createTestResourceLoader(extensionsResult ? { extensionsResult } : undefined);
 
+	const scopedModels = options.scopedModelIds?.map((id) => {
+		const scoped = modelRegistry.getAvailable().find((candidate) => candidate.id === id);
+		if (!scoped) throw new Error(`Harness scopedModelIds: no registered model ${id}`);
+		return { model: scoped };
+	});
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -266,6 +273,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		cwd: options.cwd ?? tempDir,
 		agentDir,
 		modelRegistry,
+		scopedModels,
 		resourceLoader,
 		baseToolsOverride: toolMap,
 		initialActiveToolNames: options.initialActiveToolNames,

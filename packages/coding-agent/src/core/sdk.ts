@@ -116,6 +116,14 @@ export interface CreateAgentSessionOptions {
 	isChildSession?: boolean;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
+	/**
+	 * The model-router candidate pool and its provenance. Omit it to let a `scopedModels` scope be
+	 * the pool; an orchestration profile never narrows it.
+	 */
+	routerPool?: {
+		source: "enabled_models" | "cli_models" | "sdk_models";
+		models: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
+	};
 
 	/**
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
@@ -756,6 +764,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		scopedModels: orchestrationModel
 			? [{ model: orchestrationModel.model, thinkingLevel: orchestrationModel.binding.thinkingLevel }]
 			: options.scopedModels,
+		routerPool: options.routerPool,
 		resourceLoader,
 		customTools: options.customTools,
 		modelRegistry,

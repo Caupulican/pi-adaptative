@@ -542,6 +542,8 @@ describe("SettingsManager", () => {
 
 			expect(manager.getModelRouterSettings()).toEqual({
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "anthropic/claude-haiku-4-5",
 				mediumModel: "anthropic/claude-medium-4-5",
 				expensiveModel: "anthropic/claude-sonnet-4-5",
@@ -571,6 +573,8 @@ describe("SettingsManager", () => {
 			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 			expect(savedSettings.modelRouter).toEqual({
 				enabled: true,
+				selectionMode: "manual",
+				poolPreference: "subscription-first",
 				cheapModel: "anthropic/claude-haiku-4-5",
 				mediumModel: "anthropic/claude-medium-4-5",
 				expensiveModel: "anthropic/claude-sonnet-4-5",

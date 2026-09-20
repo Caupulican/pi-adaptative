@@ -109,6 +109,15 @@ export interface AgentSessionConfig {
 	agentDir?: string;
 	/** Models available to the interactive model-cycle action. */
 	scopedModels?: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
+	/**
+	 * The router's candidate pool and where the operator configured it. Separate from
+	 * `scopedModels`: an orchestration profile pins cycling to its root model without narrowing the
+	 * pool. Omitted with a `scopedModels` scope present, that scope becomes the pool (`sdk_models`).
+	 */
+	routerPool?: {
+		source: "enabled_models" | "cli_models" | "sdk_models";
+		models: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
+	};
 	resourceLoader: ResourceLoader;
 	/** SDK tools registered outside extensions. */
 	customTools?: ToolDefinition[];

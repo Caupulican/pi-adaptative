@@ -20,6 +20,12 @@ import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import { defineTool } from "../extensions/types.ts";
 import {
+	clarificationAnsweredEvent,
+	clarificationRequestedEvent,
+	type GoalClarificationEvent,
+} from "../goals/goal-clarification-log.ts";
+import type { GoalClarification, GoalClarificationCategory } from "../goals/goal-state.ts";
+import {
 	beginHumanInputRequest,
 	createHumanInputRequest,
 	formatHumanInputAnswerText,
@@ -33,6 +39,12 @@ import {
 } from "../human-input.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
 import type { SessionImageStore } from "../session-image-store.ts";
+import {
+	type ClarificationDecisionEngine,
+	type ClarificationVerdict,
+	evaluateClarificationNeed,
+	formatClarificationQuestion,
+} from "../system-one/clarification.ts";
 import {
 	emptyOrchestrationCall,
 	OrchestrationPanelComponent,
@@ -77,6 +89,19 @@ const askQuestionSchema = Type.Object(
 			maxItems: 4,
 			description: "One to four independent questions presented in one interaction.",
 		}),
+		category: Type.Optional(
+			Type.Union(
+				[
+					Type.Literal("information"),
+					Type.Literal("ambiguous_requirement"),
+					Type.Literal("blocked_by_user_decision"),
+				],
+				{
+					description:
+						"What is being asked for. Information is the default; clarification never grants authority.",
+				},
+			),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -105,6 +130,20 @@ export interface AskQuestionToolOptions {
 	sessionManager?: Pick<SessionManager, "appendCustomEntry">;
 	artifactStore?: ArtifactStore;
 	getImageStore?: () => Pick<SessionImageStore, "retainContent"> | undefined;
+	/**
+	 * Active objective id, or undefined when no objective is executing. Objective correlation --
+	 * durable ledger writes and sufficiency arbitration -- happens only for an objective-correlated
+	 * ask; without one the tool behaves exactly as it always has.
+	 */
+	getObjectiveId?: () => string | undefined;
+	/** Objective text and clarification ledger the arbitration reads. */
+	getObjectiveClarificationState?: () =>
+		| { userGoal: string; clarifications: readonly GoalClarification[] }
+		| undefined;
+	/** The session's recorded semantic decision engine; undefined when no steering plane is bound. */
+	getSemanticDecisionEngine?: () => ClarificationDecisionEngine | undefined;
+	/** Durable objective-side clarification writer: one event before presenting, one after settling. */
+	recordObjectiveClarification?: (objectiveId: string, event: GoalClarificationEvent) => void;
 }
 
 export interface AskQuestionClipboardOptions {
@@ -768,6 +807,25 @@ function stoppedResult(
 	};
 }
 
+/**
+ * A clarification System One withheld: no dialog was presented and no durable request exists, so the
+ * model is told why and continues. Not an error -- the run is not blocked, the ask was.
+ */
+function withheldResult(
+	questions: readonly AskQuestion[],
+	verdict: ClarificationVerdict,
+): { content: Array<{ type: "text"; text: string }>; details: AskQuestionToolDetails } {
+	const guidance =
+		verdict.decision === "duplicate"
+			? "Do not re-ask it. Continue from what the owner already gave you."
+			: "Continue with your stated safe assumption and say what you assumed; ask again only if new evidence proves the boundary is real.";
+	const text = `ask_question withheld (${verdict.reasonCode}): ${verdict.detail ?? "the active objective already has what it needs."} ${guidance}`;
+	return {
+		content: [{ type: "text", text }],
+		details: { questions, answers: [], cancelled: true, error: text },
+	};
+}
+
 export function createAskQuestionToolDefinition(options: AskQuestionToolOptions = {}) {
 	const name = options.name ?? "ask_question";
 	return defineTool<typeof askQuestionSchema, AskQuestionToolDetails>({
@@ -807,14 +865,44 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 			}
 			if (signal?.aborted) return stoppedResult(input.questions, "interrupted");
 
+			const objectiveId = options.getObjectiveId?.();
+			const category: GoalClarificationCategory = input.category ?? "information";
+			let verdict: ClarificationVerdict | undefined;
+			if (objectiveId) {
+				const objective = options.getObjectiveClarificationState?.();
+				verdict = await evaluateClarificationNeed({
+					objectiveId,
+					questions: input.questions,
+					category,
+					clarifications: objective?.clarifications ?? [],
+					userGoal: objective?.userGoal ?? "",
+					semantic: options.getSemanticDecisionEngine?.(),
+					signal,
+				});
+				if (verdict.decision !== "ask") return withheldResult(input.questions, verdict);
+			}
+
 			const request = createHumanInputRequest({
 				source: "tool",
 				toolCallId: _toolCallId,
 				toolName: name,
 				questions: input.questions,
 				acceptsImages: ctx.model?.input.includes("image") ?? false,
+				...(objectiveId ? { objectiveId, category } : {}),
 			});
 			if (options.sessionManager) beginHumanInputRequest(options.sessionManager, request);
+			if (objectiveId) {
+				options.recordObjectiveClarification?.(
+					objectiveId,
+					clarificationRequestedEvent({
+						requestId: request.requestId,
+						category,
+						question: formatClarificationQuestion(input.questions),
+						detail: verdict?.reasonCode,
+						now: request.createdAt,
+					}),
+				);
+			}
 			const resolved = options.sessionManager
 				? await resolveHumanInput({
 						sessionManager: options.sessionManager,
@@ -854,6 +942,17 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 				cancelled: resolved.snapshot.status === "cancelled",
 				...(resolved.snapshot.reason ? { reason: resolved.snapshot.reason } : {}),
 			};
+			if (objectiveId) {
+				options.recordObjectiveClarification?.(
+					objectiveId,
+					clarificationAnsweredEvent({
+						requestId: request.requestId,
+						answerText: formatHumanInputAnswerText(resolved.snapshot),
+						cancelled: details.cancelled,
+						now: resolved.snapshot.updatedAt,
+					}),
+				);
+			}
 			if (details.cancelled) {
 				return {
 					content: [{ type: "text" as const, text: formatHumanInputAnswerText(resolved.snapshot) }],

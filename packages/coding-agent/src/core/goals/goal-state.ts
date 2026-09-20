@@ -10,11 +10,21 @@ export type GoalStatus =
 	| "completed"
 	| "cancelled";
 export type RequirementStatus = "open" | "satisfied" | "blocked";
+/**
+ * What an owner clarification asked for. Mirrors `HumanInputCategory`; clarification is INFORMATION
+ * and never authority, so no category here widens what the execution charter allows.
+ */
+export type GoalClarificationCategory = "information" | "ambiguous_requirement" | "blocked_by_user_decision";
+export type GoalClarificationStatus = "pending" | "answered" | "cancelled";
 export type GoalEvidenceKind = "file" | "test" | "tool" | "user" | "finding" | "worker";
 export type GoalEvidenceOutcome = "succeeded" | "failed" | "canceled";
 
 export const MAX_GOAL_OBJECTIVE_LENGTH = 4_000;
 export const MAX_GOAL_EVENT_HISTORY = 128;
+/** Durable bound on the objective's owner-clarification ledger. */
+export const MAX_GOAL_CLARIFICATIONS = 16;
+/** Bound on one clarification's recorded answer text; the exact answer stays in the human-input snapshot. */
+export const MAX_GOAL_CLARIFICATION_ANSWER_LENGTH = 240;
 /**
  * Upper bound of the durable runaway-signature allowance. A goal that has already consumed this many
  * distinct automatic recoveries since the last owner intervention gets no further automatic resume:
@@ -111,6 +121,26 @@ export interface GoalState {
 	 * re-earn recovery.
 	 */
 	consumedRunawaySignatures?: readonly string[];
+	/**
+	 * Owner clarifications correlated to this objective, newest last and bounded by
+	 * {@link MAX_GOAL_CLARIFICATIONS}. Durable so a clarification asked before a compaction or a
+	 * restart is still known to the continuation that runs after it. Optional: snapshots persisted
+	 * before clarification correlation existed carry none.
+	 */
+	clarifications?: readonly GoalClarification[];
+}
+
+/** One owner question correlated to this objective, and the owner's own answer to it. */
+export interface GoalClarification {
+	requestId: string;
+	category: GoalClarificationCategory;
+	/** Display text of what was asked (header + question), bounded at write time. */
+	question: string;
+	status: GoalClarificationStatus;
+	requestedAt: string;
+	answeredAt?: string;
+	/** Bounded summary of the owner's answer; the exact answer lives in the human-input snapshot. */
+	answerSummary?: string;
 }
 
 export interface Requirement {
@@ -190,6 +220,23 @@ export type GoalEvent =
 	| { type: "progress"; now: string }
 	| { type: "no_progress"; now: string }
 	| {
+			type: "clarification_requested";
+			/** Human-input request id; the correlation key between the ledger and the durable question. */
+			requestId: string;
+			category: GoalClarificationCategory;
+			question: string;
+			/** Why the arbitration let this ask through (a System One reason code), never a verdict. */
+			detail?: string;
+			now: string;
+	  }
+	| {
+			type: "clarification_answered";
+			requestId: string;
+			answerSummary: string;
+			cancelled?: boolean;
+			now: string;
+	  }
+	| {
 			type: "record_continuation_budget";
 			/** Turns submitted in this pass (currently always 1 — the loop calls once per submitted pass). */
 			turns: number;
@@ -235,6 +282,32 @@ function isGoalStatus(value: unknown): value is GoalStatus {
 
 function isRequirementStatus(value: unknown): value is RequirementStatus {
 	return value === "open" || value === "satisfied" || value === "blocked";
+}
+
+function isGoalClarificationCategory(value: unknown): value is GoalClarificationCategory {
+	return value === "information" || value === "ambiguous_requirement" || value === "blocked_by_user_decision";
+}
+
+function isGoalClarificationStatus(value: unknown): value is GoalClarificationStatus {
+	return value === "pending" || value === "answered" || value === "cancelled";
+}
+
+function isGoalClarification(value: unknown): value is GoalClarification {
+	if (!isPlainRecord(value)) return false;
+	return (
+		typeof value.requestId === "string" &&
+		isGoalClarificationCategory(value.category) &&
+		typeof value.question === "string" &&
+		isGoalClarificationStatus(value.status) &&
+		typeof value.requestedAt === "string" &&
+		hasOptionalString(value, "answeredAt") &&
+		hasOptionalString(value, "answerSummary")
+	);
+}
+
+function isValidGoalClarifications(value: unknown): boolean {
+	if (value === undefined) return true;
+	return Array.isArray(value) && value.length <= MAX_GOAL_CLARIFICATIONS && value.every(isGoalClarification);
 }
 
 function isGoalEvidenceKind(value: unknown): value is GoalEvidenceKind {
@@ -331,6 +404,19 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 		case "progress":
 		case "no_progress":
 			return true;
+		case "clarification_requested":
+			return (
+				typeof value.requestId === "string" &&
+				isGoalClarificationCategory(value.category) &&
+				typeof value.question === "string" &&
+				hasOptionalString(value, "detail")
+			);
+		case "clarification_answered":
+			return (
+				typeof value.requestId === "string" &&
+				typeof value.answerSummary === "string" &&
+				hasOptionalBoolean(value, "cancelled")
+			);
 		case "complete_goal":
 			return hasOptionalBoolean(value, "acceptanceOverride");
 		case "complete_goal_manually":
@@ -398,7 +484,8 @@ export function isGoalState(value: unknown): value is GoalState {
 			(typeof value.systemFailureStreak === "number" &&
 				Number.isSafeInteger(value.systemFailureStreak) &&
 				value.systemFailureStreak >= 0)) &&
-		isValidConsumedRunawaySignatures(value.consumedRunawaySignatures)
+		isValidConsumedRunawaySignatures(value.consumedRunawaySignatures) &&
+		isValidGoalClarifications(value.clarifications)
 	);
 }
 
@@ -438,6 +525,9 @@ function cloneGoalState(state: GoalState): GoalState {
 		evidence: state.evidence.map(cloneGoalEvidenceRef),
 		events: state.events.map(cloneGoalEvent),
 		...(state.consumedRunawaySignatures ? { consumedRunawaySignatures: [...state.consumedRunawaySignatures] } : {}),
+		...(state.clarifications
+			? { clarifications: state.clarifications.map((clarification) => ({ ...clarification })) }
+			: {}),
 	};
 }
 
@@ -495,6 +585,22 @@ function isPreviouslyTrustedReceiptReplay(
 		}
 		return prev.id === newEvidence.id;
 	});
+}
+
+/**
+ * Keeps the clarification ledger within {@link MAX_GOAL_CLARIFICATIONS}. Settled entries are dropped
+ * oldest-first so a question still waiting on the owner survives. A ledger that is entirely pending
+ * cannot occur while an unanswered question holds control, but the bound is durable and has to hold
+ * regardless; the oldest entry then goes, and its exact text is still in the human-input snapshot.
+ */
+function boundGoalClarifications(clarifications: readonly GoalClarification[]): readonly GoalClarification[] {
+	if (clarifications.length <= MAX_GOAL_CLARIFICATIONS) return clarifications;
+	const kept = [...clarifications];
+	while (kept.length > MAX_GOAL_CLARIFICATIONS) {
+		const settledIndex = kept.findIndex((clarification) => clarification.status !== "pending");
+		kept.splice(settledIndex >= 0 ? settledIndex : 0, 1);
+	}
+	return kept;
 }
 
 export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
@@ -636,6 +742,47 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 
 		case "no_progress": {
 			newState.stallTurns = state.stallTurns + 1;
+			break;
+		}
+
+		case "clarification_requested": {
+			const existing = (state.clarifications ?? []).map((clarification) => ({ ...clarification }));
+			const record: GoalClarification = {
+				requestId: event.requestId,
+				category: event.category,
+				question: event.question,
+				status: "pending",
+				requestedAt: event.now,
+			};
+			const replacedIndex = existing.findIndex((clarification) => clarification.requestId === event.requestId);
+			if (replacedIndex >= 0) existing[replacedIndex] = record;
+			else existing.push(record);
+			// Asking is not progress: progressRevision is deliberately untouched, so a question cannot
+			// reset the continuation stall gate on its own.
+			newState.clarifications = boundGoalClarifications(existing);
+			break;
+		}
+
+		case "clarification_answered": {
+			const existing = state.clarifications ?? [];
+			const settledStatus: GoalClarificationStatus = event.cancelled ? "cancelled" : "answered";
+			const recorded = existing.find((clarification) => clarification.requestId === event.requestId);
+			// A restart can resume a question the in-turn path already settled. Replaying the identical
+			// settlement is not a second owner reply, so it must not count as progress twice.
+			if (recorded?.status === settledStatus && recorded.answerSummary === event.answerSummary) break;
+			newState.clarifications = existing.map((clarification) =>
+				clarification.requestId === event.requestId
+					? {
+							...clarification,
+							status: settledStatus,
+							answeredAt: event.now,
+							answerSummary: event.answerSummary,
+						}
+					: { ...clarification },
+			);
+			// The owner's own reply (an answer, or an explicit decline) is new information the next
+			// continuation has to re-evaluate against, so it counts as progress.
+			newState.progressRevision = (state.progressRevision ?? 0) + 1;
 			break;
 		}
 

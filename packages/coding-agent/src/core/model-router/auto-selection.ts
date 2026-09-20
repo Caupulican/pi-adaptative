@@ -10,13 +10,25 @@ import { isLocalOrManagedRouterModel } from "./tool-escalation.ts";
  *
  * Order of authority, top to bottom, and nothing lower ever overrides anything higher:
  *   1. hard admission — auth, quota, a working tool-call path, the fitness gate when enabled;
- *   2. pool preference — subscription-first ranks adequate subscription-backed models ahead;
- *   3. evidence — a probed-fit model ahead of an unprobed one;
+ *   2. evidence class — known-fit ahead of unprobed ahead of known-unfit. Adequacy outranks who
+ *      pays: a model the probes graded as unfit for this surface is never preferred for being
+ *      subscription-backed, whether or not the hard fitness gate is on;
+ *   3. pool preference — subscription-first ranks subscription-backed models ahead, within a class;
  *   4. capability class, then tier-appropriate cost;
  *   5. a stable name order so two runs agree.
  * The result carries every candidate with its reasons so diagnostics and the preview can show why.
  */
 export type AutoSelectionTier = "cheap" | "medium" | "expensive";
+
+/** What the probes know about this model on this surface, independent of the hard fitness gate. */
+export type AutoSelectionEvidenceClass = "known_fit" | "unprobed" | "known_unfit";
+
+const EVIDENCE_RANK: Record<AutoSelectionEvidenceClass, number> = { known_fit: 2, unprobed: 1, known_unfit: 0 };
+
+export function evidenceClassOf(verdict: FitnessGateVerdict): AutoSelectionEvidenceClass {
+	if (verdict.fit) return verdict.probed ? "known_fit" : "unprobed";
+	return verdict.reason === "unprobed" ? "unprobed" : "known_unfit";
+}
 
 export interface AutoSelectionDeps {
 	isSubscription(model: Model<Api>): boolean;
@@ -36,6 +48,8 @@ export interface AutoSelectionCandidate {
 	readonly admitted: boolean;
 	readonly rejectReasons: readonly string[];
 	readonly fitness: FitnessGateVerdict;
+	/** Probe evidence for this surface; ranks above the subscription preference. */
+	readonly evidenceClass: AutoSelectionEvidenceClass;
 	readonly capabilityClass: ModelCapabilityClass;
 }
 
@@ -46,7 +60,11 @@ export interface AutoSelectionResult {
 	readonly chosen?: AutoSelectionCandidate;
 	readonly eligible: number;
 	readonly subscriptionEligible: number;
-	/** True when the chosen model outranked a metered candidate because of subscription-first. */
+	/**
+	 * True when the chosen model outranked a metered candidate of its own evidence class because of
+	 * subscription-first. A subscription model that only won by having better evidence is not
+	 * "subscription-preferred".
+	 */
 	readonly subscriptionPreferred: boolean;
 	readonly reason: string;
 }
@@ -81,6 +99,7 @@ function admit(tier: AutoSelectionTier, model: Model<Api>, deps: AutoSelectionDe
 		admitted: reasons.length === 0,
 		rejectReasons: reasons,
 		fitness,
+		evidenceClass: evidenceClassOf(fitness),
 		capabilityClass: deriveModelCapabilityProfile({ contextWindow: model.contextWindow, mode: "auto" }).class,
 	};
 }
@@ -91,10 +110,9 @@ function compareCandidates(
 	a: AutoSelectionCandidate,
 	b: AutoSelectionCandidate,
 ): number {
+	const evidence = EVIDENCE_RANK[b.evidenceClass] - EVIDENCE_RANK[a.evidenceClass];
+	if (evidence !== 0) return evidence;
 	if (preference === "subscription-first" && a.subscription !== b.subscription) return a.subscription ? -1 : 1;
-	const probedA = a.fitness.fit && a.fitness.probed ? 1 : 0;
-	const probedB = b.fitness.fit && b.fitness.probed ? 1 : 0;
-	if (probedA !== probedB) return probedB - probedA;
 	const capability = CAPABILITY_RANK[b.capabilityClass] - CAPABILITY_RANK[a.capabilityClass];
 	if (capability !== 0) return capability;
 	if (tier === "expensive") {
@@ -125,12 +143,12 @@ export function selectAutoTierModel(
 	const subscriptionPreferred =
 		deps.preference === "subscription-first" &&
 		chosen?.subscription === true &&
-		admitted.some((candidate) => !candidate.subscription);
+		admitted.some((candidate) => !candidate.subscription && candidate.evidenceClass === chosen.evidenceClass);
 	const reason = !chosen
 		? pool.length === 0
 			? "candidate pool is empty"
 			: `no admitted candidate (${Array.from(new Set(rejected.flatMap((c) => c.rejectReasons))).join(", ")})`
-		: `adequate${subscriptionPreferred ? " + subscription-preferred" : ""} · fitness ${formatFitness(chosen.fitness)}`;
+		: `${chosen.evidenceClass}${subscriptionPreferred ? " + subscription-preferred" : ""} · fitness ${formatFitness(chosen.fitness)}`;
 	return {
 		tier,
 		candidates: [...admitted, ...rejected],
@@ -144,5 +162,5 @@ export function selectAutoTierModel(
 
 export function formatAutoSelectionCandidate(candidate: AutoSelectionCandidate): string {
 	const state = candidate.admitted ? "eligible" : `rejected (${candidate.rejectReasons.join(", ")})`;
-	return `${candidate.ref} · ${candidate.subscription ? "subscription" : "metered"} · ${formatFitness(candidate.fitness)} · ${state}`;
+	return `${candidate.ref} · ${candidate.subscription ? "subscription" : "metered"} · ${candidate.evidenceClass} · ${formatFitness(candidate.fitness)} · ${state}`;
 }

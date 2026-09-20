@@ -36,6 +36,15 @@ export class SemanticPlaneHealthRecorder {
 		this.lastFailure = undefined;
 	}
 
+	/**
+	 * The evaluation was cancelled — the operator aborted the turn, or its caller went away. The
+	 * plane did not fail: nothing was observed, so the last real outcome stands and the state
+	 * returns to whatever it was before the evaluation started.
+	 */
+	recordCancelled(): void {
+		this.inFlight = Math.max(0, this.inFlight - 1);
+	}
+
 	recordFailure(error: unknown): void {
 		this.inFlight = Math.max(0, this.inFlight - 1);
 		this.observed = true;

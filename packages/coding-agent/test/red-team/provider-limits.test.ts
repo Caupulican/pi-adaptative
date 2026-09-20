@@ -10,10 +10,12 @@ import { BillingFailoverController, ExhaustedProviderRegistry } from "../../src/
 import { runCompactionWithRetry } from "../../src/core/compaction-controller.ts";
 import { CompactionSupport } from "../../src/core/compaction-support.ts";
 import type { ModelRegistry } from "../../src/core/model-registry.ts";
+import type { AutoSelectionTier } from "../../src/core/model-router/auto-selection.ts";
 import { ModelRouterController } from "../../src/core/model-router-controller.ts";
 import { FitnessStore } from "../../src/core/models/fitness-store.ts";
 import type { LaneFitnessScore, ModelFitnessReport } from "../../src/core/research/model-fitness.ts";
 import { resolveScoutModel } from "../../src/core/runtime-builder.ts";
+import type { ModelRouterSelectionMode } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import {
 	createChaosProvider,
@@ -133,9 +135,16 @@ type RouterHarness = {
 		surface: "router_cheap" | "router_medium" | "router_expensive",
 		model: Model<Api>,
 	) => { fit: true; probed: boolean } | { fit: false; reason: "unprobed" | "lane_failed" };
+	isTierAutoSelected: (tier: AutoSelectionTier) => boolean;
 	deps: {
 		getSettingsManager: () => {
-			getModelRouterSettings: () => { enabled: boolean; cheapModel: string; expensiveModel: string };
+			getModelRouterSettings: () => {
+				enabled: boolean;
+				cheapModel: string;
+				expensiveModel: string;
+				selectionMode?: ModelRouterSelectionMode;
+				fitnessGate?: boolean;
+			};
 		};
 		getSessionManager: () => { getEntries: () => [] };
 		getAgentDir: () => string;
@@ -155,6 +164,7 @@ const routerPrototype = ModelRouterController.prototype as unknown as {
 		this: RouterHarness,
 		prompt: string,
 	): { decision: RouteDecision; model: Model<Api> } | undefined;
+	isTierAutoSelected(this: RouterHarness, tier: AutoSelectionTier): boolean;
 };
 
 function controller(startModel: Model<Api>, subscription: boolean, exhausted = new ExhaustedProviderRegistry()) {
@@ -268,6 +278,7 @@ describe("provider limit red-team matrix", () => {
 		exhausted.markExhausted("openai-codex/codex-spark");
 		const harness: RouterHarness = {
 			_resolveExecutorRoute: () => undefined,
+			isTierAutoSelected: (tier) => routerPrototype.isTierAutoSelected.call(harness, tier),
 			deps: {
 				getSettingsManager: () => ({
 					getModelRouterSettings: () => ({
@@ -316,6 +327,7 @@ describe("provider limit red-team matrix", () => {
 
 		const routerHarness: RouterHarness = {
 			_resolveExecutorRoute: () => undefined,
+			isTierAutoSelected: (tier) => routerPrototype.isTierAutoSelected.call(routerHarness, tier),
 			_routerSurfaceForTier: (tier) => routerPrototype._routerSurfaceForTier.call(routerHarness, tier),
 			_evaluateModelFitness: (surface, candidate) =>
 				routerPrototype._evaluateModelFitness.call(routerHarness, surface, candidate),

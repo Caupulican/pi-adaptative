@@ -3,6 +3,7 @@ import type {
 	ActiveActor,
 	AdaptationProjection,
 	OperatorContextInfo,
+	OperatorControlProjection,
 	OperatorEvent,
 	OperatorHealth,
 	OperatorPhase,
@@ -20,6 +21,7 @@ export interface OperatorProjectionInit {
 	why?: string;
 	nextAction?: string | null;
 	health?: OperatorHealth;
+	control?: OperatorControlProjection;
 	activeActors?: readonly ActiveActor[];
 	adaptation?: AdaptationProjection | null;
 	proof?: ProofProgress;
@@ -50,6 +52,9 @@ export class OperatorProjectionController {
 			why: init.why ?? "Initial objective framing",
 			next_action: init.nextAction ?? null,
 			health: init.health ?? "normal",
+			// Control starts with the root loop: no objective exists yet, so nothing else can own the
+			// next transition.
+			control: init.control ?? { owner: "root", state: "deciding" },
 			active_actors: init.activeActors ?? [{ id: "root", kind: "root", label: "Root orchestrator" }],
 			adaptation: init.adaptation ?? null,
 			proof: init.proof ?? { satisfied: 0, total: 1, failing: 0, pending: 1 },

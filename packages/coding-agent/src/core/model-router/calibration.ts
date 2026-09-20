@@ -32,7 +32,12 @@ export interface RouterCalibrationRow {
 	readonly surfaces: Readonly<Record<FitnessGatedSurface, RouterCalibrationState>>;
 	/** Why fresh-looking evidence is reported STALE, when it is. */
 	readonly staleReason?: string;
-	/** Needs a probe: never probed on any router surface, or stale. */
+	/**
+	 * Needs a probe. Derived from the surface map this row already carries: true when the model has
+	 * no report, when its evidence is stale, or when ANY router surface is UNPROBED or STALE. A
+	 * model whose report covers only part of the router surfaces is offered for calibration, never
+	 * silently skipped because a report exists.
+	 */
 	readonly needsCalibration: boolean;
 }
 
@@ -44,6 +49,7 @@ export interface RouterCalibrationDeps {
 }
 
 function staleReasonFor(
+	model: Model<Api>,
 	report: StoredFitnessReport | undefined,
 	probe: ModelToolProbe | undefined,
 	now: Date,
@@ -54,6 +60,13 @@ function staleReasonFor(
 	if (now.getTime() - at > FITNESS_EVIDENCE_MAX_AGE_MS) return `fitness evidence is older than 30 days (${report.at})`;
 	if (probe && Number.isFinite(Date.parse(probe.probedAt)) && Date.parse(probe.probedAt) > at) {
 		return `tool probe (${probe.probedAt}) is newer than the fitness evidence (${report.at})`;
+	}
+	// The capacity lane records the context window the model was REGISTERED with when it was
+	// probed. A model re-registered with a different window is a different machine for lane
+	// purposes, so the measured evidence no longer describes it.
+	const registeredThen = report.report.capacity?.registeredContextWindow;
+	if (registeredThen !== undefined && registeredThen > 0 && model.contextWindow !== registeredThen) {
+		return `context window changed (${registeredThen} at probe time, ${model.contextWindow} now)`;
 	}
 	return undefined;
 }
@@ -67,14 +80,19 @@ export function describeRouterCalibration(
 		const ref = `${model.provider}/${model.id}`;
 		const report = deps.fitnessReports.find((entry) => entry.model === ref);
 		const probe = deps.toolProbe(model);
-		const staleReason = staleReasonFor(report, probe, now);
+		const staleReason = staleReasonFor(model, report, probe, now);
 		const surfaces = {} as Record<FitnessGatedSurface, RouterCalibrationState>;
 		for (const surface of ROUTER_CALIBRATION_SURFACES) {
 			const verdict = evaluateSurfaceFitness(surface, report?.report);
 			const probed = verdict.fit ? verdict.probed : verdict.reason !== "unprobed";
 			surfaces[surface] = !probed ? "UNPROBED" : staleReason ? "STALE" : verdict.fit ? "FIT" : "UNFIT";
 		}
-		const needsCalibration = !report || staleReason !== undefined;
+		const needsCalibration =
+			!report ||
+			staleReason !== undefined ||
+			ROUTER_CALIBRATION_SURFACES.some(
+				(surface) => surfaces[surface] === "UNPROBED" || surfaces[surface] === "STALE",
+			);
 		return {
 			ref,
 			subscription: deps.isSubscription(model),
@@ -97,6 +115,23 @@ const SURFACE_SHORT: Record<FitnessGatedSurface, string> = {
 	curation: "curation",
 	scout_auto: "scout",
 };
+
+/**
+ * What one calibration run covers, in operator wording, derived from the canonical surface list so
+ * the count and the names can never drift from `ROUTER_CALIBRATION_SURFACES`. The real tool
+ * execution probe is named separately: it is not a fitness surface.
+ */
+export function describeRouterCalibrationScope(): string {
+	const names = ROUTER_CALIBRATION_SURFACES.map((surface) => SURFACE_SHORT[surface]).join(", ");
+	return `${ROUTER_CALIBRATION_SURFACES.length} router fitness surfaces (${names}) + real tool execution probe`;
+}
+
+/** The fitness surfaces alone, for copy that names the probe separately. */
+export function describeRouterCalibrationSurfaces(): string {
+	return `${ROUTER_CALIBRATION_SURFACES.length} router fitness surfaces (${ROUTER_CALIBRATION_SURFACES.map(
+		(surface) => SURFACE_SHORT[surface],
+	).join(", ")})`;
+}
 
 export function formatRouterCalibrationRow(row: RouterCalibrationRow): string {
 	const surfaces = ROUTER_CALIBRATION_SURFACES.map(

@@ -30,6 +30,7 @@ function projection(overrides: Partial<OperatorProjection> = {}): OperatorProjec
 		why: "settings",
 		next_action: "verify 5 open criteria",
 		health: "normal",
+		control: { owner: "system_one", state: "executing", reasonCode: "worker_in_flight" },
 		active_actors: [{ id: "root", kind: "root", label: "Root orchestrator" }],
 		adaptation: null,
 		proof: { satisfied: 0, total: 5, failing: 0, pending: 5 },
@@ -86,7 +87,7 @@ describe("Operator POV bar", () => {
 		expect(lines).toHaveLength(1);
 		const row = stripAnsi(lines[0]);
 		expect(row).toBe(
-			" WORKING build: Simplifying settings | NEXT verify 5 open criteria | ACTOR root | ROOT gpt-5.6 | ACTIVE claude-sonnet-4-6 | ROUTE medium via model-router/H-MoE | JEV ok | COST $0.083 | PROOF 0/5 | CTX 11.6%",
+			" WORKING build: Simplifying settings | CONTROL S1 | NEXT verify 5 open criteria | ACTOR root | ROOT gpt-5.6 | ACTIVE claude-sonnet-4-6 | ROUTE medium via model-router/H-MoE | JEV ok | COST $0.083 | PROOF 0/5 | CTX 11.6%",
 		);
 	});
 
@@ -169,7 +170,7 @@ describe("Operator POV bar", () => {
 		);
 		const full = layoutOperatorPovSegments(segments, 400, { plain: true });
 		expect(full).toContain("CTX 11.6%");
-		const narrow = layoutOperatorPovSegments(segments, 120, { plain: true });
+		const narrow = layoutOperatorPovSegments(segments, 133, { plain: true });
 		expect(narrow).not.toContain("CTX");
 		expect(narrow).not.toContain("PROOF");
 		expect(narrow).not.toContain("ACTOR root");
@@ -177,14 +178,115 @@ describe("Operator POV bar", () => {
 		expect(narrow).toContain("ROUTE medium via model-router");
 		expect(narrow).toContain("JEV ready");
 		expect(narrow).toContain("COST $0.083");
-		const tight = layoutOperatorPovSegments(segments, 96, { plain: true });
+		const tight = layoutOperatorPovSegments(segments, 109, { plain: true });
 		// ROUTE compacts and WORKING text shortens before any routing/cost truth is cut from the right.
 		expect(tight).toContain("ACTIVE claude-sonnet-4-6");
 		expect(tight).toContain("ROUTE medium via router");
 		expect(tight).toContain("JEV ready");
 		expect(tight).toContain("COST $0.083");
 		expect(tight).toContain("WORKING build: S");
-		expect(stripAnsi(tight).length).toBeLessThanOrEqual(96);
+		expect(stripAnsi(tight).length).toBeLessThanOrEqual(109);
+	});
+
+	it("F001-030: CONTROL names who owns the next transition, independently of who executes", () => {
+		expect(renderPlain(source({}), 240)).toContain("CONTROL S1");
+		expect(
+			renderPlain(
+				source({ projection: { control: { owner: "root", state: "deciding", reasonCode: "no_objective" } } }),
+				240,
+			),
+		).toContain("CONTROL ROOT");
+		// A worker executes while the semantic plane keeps the decision: both facts show at once.
+		const withWorker = renderPlain(
+			source({
+				projection: {
+					control: { owner: "system_one", state: "observing", reasonCode: "goal_active" },
+					active_actors: [{ id: "w1", kind: "worker", label: "settings" }],
+				},
+			}),
+			240,
+		);
+		expect(withWorker).toContain("CONTROL S1");
+		expect(withWorker).toContain("ACTOR worker settings");
+	});
+
+	it("F001-031: an owner question leads with NEEDS INPUT and carries the BLOCK text", () => {
+		const row = renderPlain(
+			source({
+				projection: {
+					phase: "blocked",
+					health: "blocked",
+					why: "choose onboarding behavior",
+					current_action: "choose onboarding behavior",
+					next_action: null,
+					control: {
+						owner: "user",
+						state: "awaiting_user",
+						reasonCode: "clarification_pending",
+						clarificationRequestId: "req-1",
+						blocker: "choose onboarding behavior",
+					},
+				},
+			}),
+			240,
+		);
+		expect(row).toContain("NEEDS INPUT choose onboarding behavior");
+		expect(row).toContain("CONTROL USER");
+		expect(row).toContain("BLOCK choose onboarding behavior");
+		expect(row).not.toContain("BLOCKED ");
+	});
+
+	it("F001-032: CONTROL survives every width; CTX, PROOF, ROOT, root ACTOR, BLOCK and NEXT drop in order", () => {
+		const segments = buildOperatorPovSegments(
+			source({
+				projection: {
+					control: {
+						owner: "user",
+						state: "awaiting_user",
+						reasonCode: "clarification_pending",
+						blocker: "choose onboarding behavior",
+					},
+				},
+				route: {
+					activeModel: "anthropic/claude-sonnet-4-6",
+					source: "model_router",
+					tier: "medium",
+					risk: "scoped-write",
+					switched: true,
+				},
+			}),
+		);
+		const order = ["CTX", "PROOF", "ROOT ", "ACTOR root", "BLOCK", "NEXT"];
+		let previous = 400;
+		const dropped: string[] = [];
+		for (let width = 400; width >= 60; width -= 1) {
+			const row = layoutOperatorPovSegments(segments, width, { plain: true });
+			for (const marker of order) {
+				if (!dropped.includes(marker) && !row.includes(marker)) dropped.push(marker);
+			}
+			previous = width;
+		}
+		expect(previous).toBe(60);
+		expect(dropped).toEqual(order);
+		const tight = layoutOperatorPovSegments(segments, 115, { plain: true });
+		expect(tight).toContain("CONTROL USER");
+		expect(tight).toContain("ACTIVE claude-sonnet-4-6");
+		expect(tight).toContain("JEV ready");
+		expect(tight).toContain("COST $0.083");
+		expect(tight).not.toContain("?");
+	});
+
+	it("FIELD-002: a cancelled evaluation leaves the plane where it was, never degraded", () => {
+		const recorder = new SemanticPlaneHealthRecorder();
+		recorder.recordStart();
+		recorder.recordCancelled();
+		expect(recorder.getHealth(true).state).toBe("unknown");
+		recorder.recordStart();
+		recorder.recordSuccess();
+		recorder.recordStart();
+		recorder.recordCancelled();
+		expect(recorder.getHealth(true).state).toBe("ok");
+		expect(semanticPlaneHealthLabel(recorder.getHealth(true))).toBe("JEV ok");
 	});
 
 	it("keeps a worker actor longer than a root actor", () => {
@@ -193,7 +295,7 @@ describe("Operator POV bar", () => {
 				projection: { active_actors: [{ id: "w1", kind: "worker", label: "Implement settings" }] },
 			}),
 		);
-		const narrow = layoutOperatorPovSegments(segments, 130, { plain: true });
+		const narrow = layoutOperatorPovSegments(segments, 143, { plain: true });
 		expect(narrow).toContain("ACTOR worker Implement settings");
 	});
 });

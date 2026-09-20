@@ -75,6 +75,20 @@ export class SettingsList implements Component {
 		}
 	}
 
+	/**
+	 * Select the item with this id and open it, exactly as confirming it would: a submenu item
+	 * opens its submenu, a cycling item advances its value. Returns false when no item has that id,
+	 * so a caller can tell "opened" from "unknown id" instead of silently showing the plain list.
+	 */
+	openItem(id: string): boolean {
+		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
+		const index = displayItems.findIndex((item) => item.id === id);
+		if (index === -1) return false;
+		this.selectedIndex = index;
+		this.activateItem();
+		return true;
+	}
+
 	invalidate(): void {
 		this.submenuComponent?.invalidate?.();
 	}

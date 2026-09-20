@@ -10,6 +10,7 @@ import {
 	ExpertCatalog,
 	type ExpertDescriptor,
 	ExpertFeatureBuilder,
+	type ExpertFeatureVector,
 	ExpertOutcomeRecorder,
 	ExpertOutcomeStore,
 	ExpertRankingPolicy,
@@ -274,6 +275,52 @@ describe("H-MoE Expert Routing Substrate (HMOE-001..HMOE-125)", () => {
 			expect(features.latencyUtility).toBeGreaterThan(0);
 		});
 
+		it("CONFIRMED-002: the probe lane yields an adequacy class an unprobed candidate cannot fake", async () => {
+			const probedBuilder = (successes: number, total: number) =>
+				new ExpertFeatureBuilder({
+					fitnessStore: {
+						getReport: (ref: string) =>
+							ref === "anthropic/claude-3-5-sonnet" ? { lanes: { worker: { successes, total } } } : undefined,
+					} as never,
+				});
+			const cand = createMockCandidate();
+			const req = buildWorkerCapabilityRequest({ route: "implement" });
+
+			expect((await probedBuilder(9, 10).build(req, cand)).adequacyClass).toBe("known_fit");
+			expect((await probedBuilder(1, 10).build(req, cand)).adequacyClass).toBe("known_unfit");
+
+			// A probed half-pass and a never-probed candidate share roleProbeFitness 0.5; only the
+			// class tells them apart, which is why the ranking policy reads the class.
+			const halfPass = await probedBuilder(5, 10).build(req, cand);
+			const unprobed = await new ExpertFeatureBuilder().build(req, cand);
+			expect(halfPass.roleProbeFitness).toBeCloseTo(unprobed.roleProbeFitness, 5);
+			expect(halfPass.adequacyClass).toBe("known_unfit");
+			expect(unprobed.adequacyClass).toBe("unprobed");
+		});
+
+		it("FIELD-004: a judge request scores its own judge lane, not the worker lane", async () => {
+			const builder = new ExpertFeatureBuilder({
+				fitnessStore: {
+					getReport: (ref: string) =>
+						ref === "anthropic/claude-3-5-sonnet"
+							? { lanes: { worker: { successes: 10, total: 10 }, judge: { parsed: 1, total: 10 } } }
+							: undefined,
+				} as never,
+			});
+			const cand = createMockCandidate();
+			const judged = await builder.build(
+				{ ...buildWorkerCapabilityRequest({ route: "implement" }), worker_role: "judge" },
+				cand,
+			);
+			expect(judged.roleProbeFitness).toBeCloseTo(0.1, 5);
+			expect(judged.adequacyClass).toBe("known_unfit");
+
+			// The same report through a non-judge request still reads the worker lane.
+			const worker = await builder.build(buildWorkerCapabilityRequest({ route: "implement" }), cand);
+			expect(worker.roleProbeFitness).toBeCloseTo(1.0, 5);
+			expect(worker.adequacyClass).toBe("known_fit");
+		});
+
 		it("HMOE-044: Critical consequence emphasizes ability and reliability over cost", async () => {
 			const candExpensive = createMockCandidate({
 				capability_tier: "expensive",
@@ -308,6 +355,37 @@ describe("H-MoE Expert Routing Substrate (HMOE-001..HMOE-125)", () => {
 	describe("Team Selection & Ranking Policies (HMOE-050..HMOE-055)", () => {
 		const ranking = new ExpertRankingPolicy();
 		const capacity = new ExpertCapacityService();
+
+		it("CONFIRMED-002: adequacy class outranks the subscription preference and the score", () => {
+			const meteredFit = createMockCandidate({ expert_id: "metered-fit", model_id: "m-fit" });
+			const subUnfit = createMockCandidate({ expert_id: "sub-unfit", model_id: "m-unfit" });
+			const req = buildWorkerCapabilityRequest({ route: "implement", preferSubscription: true });
+			const features = (
+				totalScore: number,
+				subscriptionPreferred: number,
+				adequacyClass: ExpertFeatureVector["adequacyClass"],
+			): ExpertFeatureVector => ({ totalScore, subscriptionPreferred, adequacyClass }) as ExpertFeatureVector;
+
+			const plan = ranking.select(
+				req,
+				[
+					{ candidate: subUnfit, features: features(0.95, 1, "known_unfit") },
+					{ candidate: meteredFit, features: features(0.5, 0, "known_fit") },
+				],
+				"single",
+			);
+			expect(plan.primary.expert_id).toBe("metered-fit");
+
+			const bothFit = ranking.select(
+				req,
+				[
+					{ candidate: meteredFit, features: features(0.95, 0, "known_fit") },
+					{ candidate: subUnfit, features: features(0.5, 1, "known_fit") },
+				],
+				"single",
+			);
+			expect(bothFit.primary.expert_id).toBe("sub-unfit");
+		});
 
 		it("HMOE-050: Top-1 single mode selects highest scoring candidate", () => {
 			const c1 = createMockCandidate({ expert_id: "c1", model_id: "m1" });
@@ -662,7 +740,7 @@ describe("H-MoE Expert Routing Substrate (HMOE-001..HMOE-125)", () => {
 				getModelRegistry: () => mockRegistry as any,
 				isModelExhausted: () => false,
 				getFailoverStatus: () => ({}) as any,
-				getCandidatePool: () => ({ customized: false, models: [testModel] }),
+				getCandidatePool: () => ({ customized: false, source: "all_enabled" as const, models: [testModel] }),
 				isUsingSubscription: () => false,
 				getAgentDir: () => "/tmp",
 				getReflectionSignal: () => new AbortController().signal,

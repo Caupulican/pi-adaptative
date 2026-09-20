@@ -3,6 +3,7 @@ import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, ImageContent, Model, ToolResultMessage } from "@caupulican/pi-ai";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ExtensionUIContext } from "./extensions/index.ts";
+import { clarificationAnsweredEvent, type GoalClarificationEvent } from "./goals/goal-clarification-log.ts";
 import { formatHumanInputAnswerText, getResumableHumanInputSnapshot, resolveHumanInput } from "./human-input.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 
@@ -15,6 +16,8 @@ interface HumanInputControllerDeps {
 	getArtifactStore(): ArtifactStore;
 	getImageStore(): SessionImageStore | undefined;
 	runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void>;
+	/** Durable objective-side clarification writer, for a question that outlived its own process. */
+	recordObjectiveClarification?(objectiveId: string, event: GoalClarificationEvent): void;
 }
 
 /** Owns durable ask_question replay after a restart or idle resume.
@@ -58,6 +61,21 @@ export class HumanInputController {
 						.join(" ");
 					imageContents = imageStore.resolveReferences(referencedText);
 				}
+			}
+
+			// The objective that asked this question may be several process lifetimes away; its ledger
+			// is settled here, from the same snapshot the tool result is built from.
+			const objectiveId = snapshot.request.objectiveId;
+			if (objectiveId) {
+				this.deps.recordObjectiveClarification?.(
+					objectiveId,
+					clarificationAnsweredEvent({
+						requestId: snapshot.request.requestId,
+						answerText: formatHumanInputAnswerText(snapshot),
+						cancelled: snapshot.status === "cancelled",
+						now: snapshot.updatedAt,
+					}),
+				);
 			}
 
 			const answerImageCount = snapshot.answers.reduce((total, answer) => total + (answer.images?.length ?? 0), 0);

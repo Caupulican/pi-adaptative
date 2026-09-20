@@ -13,6 +13,7 @@
     "current_action",
     "why",
     "health",
+    "control",
     "active_actors",
     "proof"
   ],
@@ -65,6 +66,50 @@
         "blocked",
         "complete"
       ]
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "state"
+      ],
+      "properties": {
+        "owner": {
+          "enum": [
+            "system_one",
+            "root",
+            "user"
+          ]
+        },
+        "state": {
+          "enum": [
+            "deciding",
+            "executing",
+            "observing",
+            "verifying",
+            "awaiting_user"
+          ]
+        },
+        "reasonCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "clarificationRequestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "blocker": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "active_actors": {
       "type": "array",

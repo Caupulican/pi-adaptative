@@ -36,6 +36,7 @@ it("counts one invocation once while foreground and background handoff observati
 					why: "Standing by",
 					next_action: null,
 					health: "normal",
+					control: { owner: "root", state: "deciding", reasonCode: "no_objective" },
 					active_actors: [{ id: "root", kind: "root", label: "Root orchestrator" }],
 					adaptation: null,
 					proof: { satisfied: 0, total: 0, failing: 0, pending: 0 },

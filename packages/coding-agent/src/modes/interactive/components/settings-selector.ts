@@ -16,6 +16,7 @@ import { type CostGuardSettings, DEFAULT_ENABLED_COST_GUARD_MAX_TURN_USD } from 
 import { DEFAULT_WORKER_FLEET_LIMITS } from "../../../core/delegation/worker-fleet-limits.ts";
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
 import { DEFAULT_AUTO_LEARN_SETTINGS, resolveAutoLearnSettings } from "../../../core/learning/auto-learn-settings.ts";
+import { describeRouterCalibrationScope } from "../../../core/model-router/calibration.ts";
 import type {
 	AutoLearnSettings,
 	AutonomyMode,
@@ -231,6 +232,12 @@ function contextMemoryRetrievalSummary(settings: MemoryRetrievalSettings): strin
  */
 export interface ModelRouterPoolView {
 	customized: boolean;
+	/**
+	 * The pool as the router itself describes it, provenance included (`formatRouterPoolSummary`).
+	 * The screen never re-derives this wording: the operator reads the same sentence here and in
+	 * router diagnostics.
+	 */
+	summary: string;
 	refs: string[];
 	subscriptionRefs: string[];
 	favoriteRefs: string[];
@@ -241,10 +248,7 @@ export interface ModelRouterPoolView {
 }
 
 function modelRouterPoolSummary(pool: ModelRouterPoolView | undefined): string {
-	if (!pool) return "unknown";
-	return pool.customized
-		? `${pool.refs.length} selected model${pool.refs.length === 1 ? "" : "s"}`
-		: `all enabled models (${pool.refs.length})`;
+	return pool ? pool.summary : "unknown";
 }
 
 function modelRouterTierLabel(model: string | undefined, mode: ModelRouterSelectionMode | undefined): string {
@@ -457,6 +461,11 @@ export interface SettingsConfig {
 	autoLearnModelOptions?: SelectItem[];
 	/** Resolve the concrete thinking surface for a configured model pattern. */
 	resolveModelThinkingLevels?: (modelPattern: string | undefined) => ThinkingLevel[] | undefined;
+	/**
+	 * Open the settings screen with this item already focused and its submenu open (e.g.
+	 * "model-router" to land straight in Router Setup). Unknown ids leave the plain list showing.
+	 */
+	initialItemId?: string;
 	activeProfileName?: string;
 	profileOptions?: SelectItem[];
 	externalResourceRoots?: string[];
@@ -1954,14 +1963,14 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				id: "model-router-pool",
 				label: "Candidate pool",
 				description:
-					"The existing Models configuration (Configure models). A customized list is a hard boundary for automatic routing; favorites only order pickers.",
+					"The existing Models configuration (Configure models); editing it brings Router Setup back on the edited pool. A customized list is a hard boundary for automatic routing; favorites only order pickers.",
 				currentValue: modelRouterPoolSummary(pool),
 				submenu: (_currentValue, done) => {
 					const options: SelectItem[] = [
 						{
 							value: "configure-models",
 							label: "Configure models →",
-							description: "Open the Models selector; the pool refreshes when you reopen settings.",
+							description: "Open the Models selector; closing it brings Router Setup back on the edited pool.",
 						},
 						...(pool?.refs ?? []).map((ref, index) => ({
 							value: `calibrate:${ref}`,
@@ -2313,8 +2322,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 						{
 							value: "calibrate-one",
 							label: "Calibrate one model",
-							description:
-								"Pick one pool model; runs the 6-surface fitness probe, then the tool probe, then offers a role.",
+							description: `Pick one pool model; runs the ${describeRouterCalibrationScope()}, then offers a role.`,
 						},
 						{
 							value: "calibrate-unprobed",
@@ -2330,7 +2338,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 					];
 					return new SelectSubmenu(
 						"Router Calibration",
-						"Surfaces: router_cheap, router_medium, router_expensive, router_judge, executor + tool probe. You confirm before anything runs.",
+						`Covers ${describeRouterCalibrationScope()}. You confirm before anything runs.`,
 						options,
 						"",
 						(value) => {
@@ -3155,6 +3163,8 @@ export class SettingsSelectorComponent extends Container {
 
 		this.addChild(this.settingsList);
 		this.addChild(new DynamicBorder());
+
+		if (config.initialItemId) this.settingsList.openItem(config.initialItemId);
 	}
 
 	getSettingsList(): SettingsList {

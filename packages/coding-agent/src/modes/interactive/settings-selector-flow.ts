@@ -14,6 +14,7 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
 import { describeRouterCalibration, formatRouterCalibrationRow } from "../../core/model-router/calibration.ts";
+import { formatRouterPoolSummary } from "../../core/model-router/candidate-pool.ts";
 import type {
 	AutonomyMode,
 	SelfModificationSettings,
@@ -73,6 +74,7 @@ export function buildModelRouterPoolView(
 	);
 	return {
 		customized: pool.customized,
+		summary: formatRouterPoolSummary(pool),
 		refs: rows.map((row) => row.ref),
 		subscriptionRefs: rows.filter((row) => row.subscription).map((row) => row.ref),
 		favoriteRefs: rows.filter((row) => favorites.has(row.ref)).map((row) => row.ref),
@@ -81,7 +83,12 @@ export function buildModelRouterPoolView(
 	};
 }
 
-export function showSettingsSelector(host: SettingsSelectorHost): void {
+/**
+ * Open `/settings`. `initialItemId` lands directly in one setting's submenu (e.g. "model-router"),
+ * which is how Router Setup comes back after the Models editor closed: the config below — the pool
+ * view included — is rebuilt on every open, so the reopened submenu reads the edited pool.
+ */
+export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?: string): void {
 	host.showSelector((done) => {
 		const projectSettings = host.settingsManager.getProjectSettings();
 		const profileOptions = [
@@ -171,6 +178,7 @@ export function showSettingsSelector(host: SettingsSelectorHost): void {
 				profileOptions,
 				externalResourceRoots: host.settingsManager.getExternalResourceRoots(),
 				trustedResourceRoots: host.settingsManager.getTrustedResourceRoots(),
+				initialItemId,
 			},
 			{
 				onAutoCompactChange: (enabled) => {

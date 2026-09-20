@@ -41,23 +41,31 @@ export function laneMeetsFitnessBar(succeeded: number, total: number): boolean {
 	return total > 0 && succeeded >= Math.ceil(total * (2 / 3));
 }
 
+function unprobedVerdict(surface: FitnessGatedSurface): FitnessGateVerdict {
+	return CLASS_A_SURFACES.has(surface) ? { fit: false, reason: "unprobed" } : { fit: true, probed: false };
+}
+
 export function evaluateSurfaceFitness(
 	surface: FitnessGatedSurface,
 	report: ModelFitnessReport | undefined,
 ): FitnessGateVerdict {
-	if (!report) {
-		return CLASS_A_SURFACES.has(surface) ? { fit: false, reason: "unprobed" } : { fit: true, probed: false };
-	}
+	if (!report) return unprobedVerdict(surface);
 
 	for (const lane of SURFACE_LANES[surface]) {
 		if (lane === "judge") {
 			const score = report.judge;
+			// A report that carries no score for a lane this surface needs is evidence about other
+			// surfaces, not about this one: a report written before the lane existed, or one whose
+			// lane was skipped. "Missing evidence" is the same verdict as "no report" — never a
+			// crash, and never a pass on evidence that was never measured.
+			if (!score) return unprobedVerdict(surface);
 			if (!laneMeetsFitnessBar(score.parsed, score.total)) {
 				return { fit: false, reason: "lane_failed", lane, succeeded: score.parsed, total: score.total };
 			}
 			continue;
 		}
 		const score = report[lane];
+		if (!score) return unprobedVerdict(surface);
 		if (!laneMeetsFitnessBar(score.succeeded, score.total)) {
 			return { fit: false, reason: "lane_failed", lane, succeeded: score.succeeded, total: score.total };
 		}

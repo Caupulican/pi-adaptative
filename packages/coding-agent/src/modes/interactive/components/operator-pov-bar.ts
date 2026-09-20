@@ -19,6 +19,8 @@ export interface OperatorPovSource {
 
 export type OperatorPovSegmentId =
 	| "working"
+	| "control"
+	| "block"
 	| "next"
 	| "actor"
 	| "root"
@@ -84,18 +86,43 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	const cost = source.getCostSummary();
 	const segments: OperatorPovSegment[] = [];
 
-	const phaseLabel = projection.phase === "blocked" ? "BLOCKED" : projection.phase === "done" ? "DONE" : "WORKING";
+	const control = projection.control;
+	// The operator owning control is the one fact that outranks the phase: the run cannot advance
+	// until they answer, so the leading segment says that instead of what the loop was doing.
+	const needsInput = control.owner === "user";
+	const phaseLabel = needsInput
+		? "NEEDS INPUT"
+		: projection.phase === "blocked"
+			? "BLOCKED"
+			: projection.phase === "done"
+				? "DONE"
+				: "WORKING";
 	segments.push({
 		id: "working",
 		label: phaseLabel,
-		value:
-			projection.phase === "blocked"
+		value: needsInput
+			? projection.why
+			: projection.phase === "blocked"
 				? projection.why
 				: projection.phase === "done"
 					? projection.current_action
 					: `${projection.phase}: ${projection.current_action}`,
 		dropOrder: 0,
-		tone: projection.phase === "blocked" ? "error" : projection.phase === "done" ? "success" : undefined,
+		tone: needsInput
+			? "warning"
+			: projection.phase === "blocked"
+				? "error"
+				: projection.phase === "done"
+					? "success"
+					: undefined,
+	});
+
+	segments.push({
+		id: "control",
+		label: "CONTROL",
+		value: control.owner === "system_one" ? "S1" : control.owner === "user" ? "USER" : "ROOT",
+		dropOrder: 0,
+		tone: control.owner === "system_one" ? "accent" : control.owner === "user" ? "warning" : undefined,
 	});
 
 	if (projection.next_action) {
@@ -108,12 +135,12 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		id: "actor",
 		label: "ACTOR",
 		value: isRootActor ? "root" : `${primaryActor.kind} ${primaryActor.label}`,
-		// A root actor is the default and is the first detail to go; a worker/specialist stays longer.
-		dropOrder: isRootActor ? 20 : 45,
+		// A root actor is the default and is an early detail to go; a worker/specialist stays longer.
+		dropOrder: isRootActor ? 25 : 45,
 	});
 
 	if (route.switched) {
-		segments.push({ id: "root", label: "ROOT", value: shortModelName(route.rootModel), dropOrder: 25 });
+		segments.push({ id: "root", label: "ROOT", value: shortModelName(route.rootModel), dropOrder: 20 });
 		segments.push({
 			id: "active",
 			label: "ACTIVE",
@@ -152,6 +179,10 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 			: {}),
 		dropOrder: 0,
 	});
+
+	if (control.blocker) {
+		segments.push({ id: "block", label: "BLOCK", value: control.blocker, dropOrder: 35 });
+	}
 
 	if (projection.proof.total > 0) {
 		segments.push({

@@ -1,14 +1,21 @@
+import { tmpdir } from "node:os";
 import type { AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
+import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { SessionMessageBatchEntry } from "@caupulican/pi-agent-core/session";
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
 import { clampThinkingLevel, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { RouteDecision } from "../src/core/autonomy/contracts.ts";
+import { ModelRegistry } from "../src/core/model-registry.ts";
 import { MODEL_ROUTER_DECISION_CUSTOM_TYPE, type ModelRouterDecisionStatus } from "../src/core/model-router/status.ts";
 import { ModelRouterController } from "../src/core/model-router-controller.ts";
 import { FitnessStore } from "../src/core/models/fitness-store.ts";
 import type { ModelFitnessReport } from "../src/core/research/model-fitness.ts";
+import { createAgentSession } from "../src/core/sdk.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
+import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
 import { createHarness } from "./suite/harness.ts";
 
 type TestModel = Model<Api>;
@@ -1368,6 +1375,136 @@ describe("executor lane fitness gate (session-level)", () => {
 			expect(route?.model.id).toBe("exec");
 		} finally {
 			harness.cleanup();
+		}
+	});
+});
+
+describe("Router candidate pool provenance (CONFIRMED-001, FC-016)", () => {
+	const RESEARCH_PROMPT = "Explain this code block";
+
+	const poolHarness = (routerSettings: Record<string, unknown>, withOrchestrationProfile: boolean) =>
+		createHarness({
+			models: [
+				{ id: "root-model", contextWindow: 128_000, cost: { input: 9, output: 9, cacheRead: 0, cacheWrite: 0 } },
+				{ id: "peer-model", contextWindow: 128_000, cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } },
+			],
+			...(withOrchestrationProfile
+				? {
+						orchestrationProfile: createTestWorkerOrchestrationProfile({
+							profileId: "pool-provenance-root",
+							model: { provider: "faux", id: "root-model" },
+						}),
+					}
+				: {}),
+			settings: { modelCapability: { mode: "off" }, modelRouter: { enabled: true, ...routerSettings } },
+		});
+
+	it("an orchestration profile pins cycling to its root model and never narrows the pool", async () => {
+		const harness = await poolHarness({ selectionMode: "auto" }, true);
+		try {
+			expect(harness.session.scopedModels.map((scoped) => scoped.model.id)).toEqual(["root-model"]);
+			const available = harness.session.modelRegistry.getAvailable();
+			const pool = harness.session.getRouterCandidatePool();
+			expect(pool.customized).toBe(false);
+			expect(pool.source).toBe("all_enabled");
+			expect(pool.models.map((model) => model.id)).toEqual(available.map((model) => model.id));
+			expect(pool.models.map((model) => model.id)).toContain("peer-model");
+			expect(pool.models.map((model) => model.id)).toContain("root-model");
+
+			// AUTO can therefore still route away from the profile's root model.
+			const preview = harness.session.previewRoute(RESEARCH_PROMPT);
+			expect(preview.pool).toEqual({ customized: false, count: available.length, source: "all_enabled" });
+			expect(preview.selection).toBe("auto");
+			// The profile's root model is not the automatic choice: the pool is still the whole
+			// Models configuration, so AUTO ranks across it.
+			expect(preview.chosenModel).not.toBe("faux/root-model");
+			expect(pool.models.map((model) => `${model.provider}/${model.id}`)).toContain(preview.chosenModel);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("a Models-selector edit becomes the pool immediately, and clearing it restores all enabled", async () => {
+		const harness = await poolHarness({ selectionMode: "auto" }, true);
+		try {
+			const peer = harness.session.modelRegistry.getAvailable().find((model) => model.id === "peer-model")!;
+			harness.session.setRouterPool({ source: "models_selector", models: [peer] });
+			const pool = harness.session.getRouterCandidatePool();
+			expect(pool.customized).toBe(true);
+			expect(pool.source).toBe("models_selector");
+			expect(harness.session.previewRoute(RESEARCH_PROMPT).pool).toEqual({
+				customized: true,
+				count: 1,
+				source: "models_selector",
+			});
+
+			harness.session.setRouterPool(undefined);
+			expect(harness.session.getRouterCandidatePool().customized).toBe(false);
+			expect(harness.session.previewRoute(RESEARCH_PROMPT).pool.count).toBe(
+				harness.session.modelRegistry.getAvailable().length,
+			);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("an SDK scope with no explicit pool becomes the pool, with source sdk_models", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "root-model", contextWindow: 128_000 },
+				{ id: "peer-model", contextWindow: 128_000 },
+			],
+			scopedModelIds: ["peer-model"],
+			settings: { modelCapability: { mode: "off" }, modelRouter: { enabled: true, selectionMode: "auto" } },
+		});
+		try {
+			const pool = harness.session.getRouterCandidatePool();
+			expect(pool.customized).toBe(true);
+			expect(pool.source).toBe("sdk_models");
+			expect(pool.models.map((model) => model.id)).toEqual(["peer-model"]);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("createAgentSession rejects an SDK scope together with an orchestration profile", async () => {
+		// Why the session constructor infers `sdk_models` only when no profile is set: the SDK entry
+		// point never delivers both. A caller that passes a scope with a profile is rejected here,
+		// so an orchestration override can never silently consume an operator's scope as the pool.
+		const authStorage = AuthStorage.inMemory();
+		await expect(
+			createAgentSession({
+				cwd: tmpdir(),
+				authStorage,
+				modelRegistry: ModelRegistry.inMemory(authStorage),
+				settingsManager: SettingsManager.inMemory(),
+				sessionManager: SessionManager.inMemory(),
+				orchestrationProfile: createTestWorkerOrchestrationProfile({
+					profileId: "pool-conflict-root",
+					model: { provider: "faux", id: "root-model" },
+				}),
+				scopedModels: [{ model: cheapModel }],
+			}),
+		).rejects.toThrow(/remove conflicting SDK options: scopedModels/);
+	});
+
+	it("FC-016: a manual pin outside a customized pool still wins and is reported explicitly", async () => {
+		const harness = await poolHarness({ selectionMode: "manual", cheapModel: "faux/peer-model" }, false);
+		try {
+			const root = harness.session.modelRegistry.getAvailable().find((model) => model.id === "root-model")!;
+			harness.session.setRouterPool({ source: "models_selector", models: [root] });
+
+			const preview = harness.session.previewRoute(RESEARCH_PROMPT);
+			expect(preview.manualPin).toBe("faux/peer-model");
+			expect(preview.manualPinOutsidePool).toBe(true);
+			expect(preview.chosenModel).toBe("faux/peer-model");
+
+			const status = harness.session.getModelRouterStatus();
+			expect(status).toContain("Pool exceptions:");
+			expect(status).toContain("cheap pin faux/peer-model is outside the candidate pool");
+			expect(status).toContain("1 selected model (Models selector)");
+		} finally {
+			await harness.cleanup();
 		}
 	});
 });

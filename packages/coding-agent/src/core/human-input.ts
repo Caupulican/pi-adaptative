@@ -61,12 +61,29 @@ export interface HumanInputPresentationResult {
 
 export type HumanInputSource = "tool" | "worker";
 
+/**
+ * What the owner is being asked for. Clarification is INFORMATION: none of these values grants
+ * authority, and `blocked_by_user_decision` records that the objective is waiting on a decision the
+ * owner alone owns -- never that the answer expands what the execution charter allows.
+ */
+export type HumanInputCategory = "information" | "ambiguous_requirement" | "blocked_by_user_decision";
+
+export function isHumanInputCategory(value: unknown): value is HumanInputCategory {
+	return value === "information" || value === "ambiguous_requirement" || value === "blocked_by_user_decision";
+}
+
 export interface HumanInputRequest {
 	requestId: string;
 	source: HumanInputSource;
 	toolCallId?: string;
 	toolName?: string;
 	workerRequestId?: string;
+	/**
+	 * Objective this question belongs to, when one was executing at ask time. Optional: snapshots
+	 * persisted before objective correlation existed carry none and decode unchanged.
+	 */
+	objectiveId?: string;
+	category?: HumanInputCategory;
 	questions: readonly HumanInputQuestion[];
 	acceptsImages: boolean;
 	createdAt: string;
@@ -92,6 +109,8 @@ export interface HumanInputRequestOptions {
 	toolCallId?: string;
 	toolName?: string;
 	workerRequestId?: string;
+	objectiveId?: string;
+	category?: HumanInputCategory;
 	questions: readonly HumanInputQuestion[];
 	acceptsImages: boolean;
 	now?: () => string;
@@ -324,6 +343,8 @@ function isRequest(value: unknown): value is HumanInputRequest {
 		(value.toolCallId === undefined || typeof value.toolCallId === "string") &&
 		(value.toolName === undefined || typeof value.toolName === "string") &&
 		(value.workerRequestId === undefined || typeof value.workerRequestId === "string") &&
+		(value.objectiveId === undefined || typeof value.objectiveId === "string") &&
+		(value.category === undefined || isHumanInputCategory(value.category)) &&
 		value.questions.every(isQuestion) &&
 		typeof value.acceptsImages === "boolean" &&
 		typeof value.createdAt === "string"
@@ -358,6 +379,8 @@ export function createHumanInputRequest(options: HumanInputRequestOptions): Huma
 		...(options.toolCallId ? { toolCallId: options.toolCallId } : {}),
 		...(options.toolName ? { toolName: options.toolName } : {}),
 		...(options.workerRequestId ? { workerRequestId: options.workerRequestId } : {}),
+		...(options.objectiveId ? { objectiveId: options.objectiveId } : {}),
+		...(options.category ? { category: options.category } : {}),
 		questions: options.questions.map(cloneQuestion),
 		acceptsImages: options.acceptsImages,
 		createdAt: now,

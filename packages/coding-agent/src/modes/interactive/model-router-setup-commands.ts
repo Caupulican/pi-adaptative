@@ -10,6 +10,8 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import {
 	describeRouterCalibration,
+	describeRouterCalibrationScope,
+	describeRouterCalibrationSurfaces,
 	formatRouterCalibrationRow,
 	type RouterCalibrationRow,
 } from "../../core/model-router/calibration.ts";
@@ -36,8 +38,13 @@ export interface ModelRouterSetupHost {
 	showWarning(message: string): void;
 	showError(message: string): void;
 	showSelector(create: SelectorFactory): void;
-	/** The existing Models configuration UI (the router's pool source). */
+	/**
+	 * The existing Models configuration UI (the router's pool source). Resolves when the operator
+	 * closes that editor, so the caller can act on the edited pool.
+	 */
 	showModelsSelector(): Promise<void>;
+	/** Reopen Router Setup on a freshly built candidate pool (after the Models editor closed). */
+	reopenModelRouterSetup(): void;
 	/** The existing fitness probe + role assignment flow for one model. */
 	runFitnessAndAssign(modelRef: string): Promise<void>;
 }
@@ -69,7 +76,7 @@ function pickPoolModel(host: ModelRouterSetupHost, onPick: (ref: string) => void
 		}));
 		const selector = new SelectSubmenu(
 			"Calibrate One Model",
-			"Runs the 6-surface fitness probe, then the real tool probe (provider calls), then offers a router role.",
+			`Runs the ${describeRouterCalibrationScope()} (provider calls), then offers a router role.`,
 			options,
 			rows.find((row) => row.needsCalibration)?.ref ?? rows[0].ref,
 			(value) => {
@@ -107,7 +114,7 @@ function confirmBatchCalibration(
 			{
 				value: "run",
 				label: `Run calibration on ${rows.length} model(s)`,
-				description: `Provider calls: yes (6 fitness surfaces + tool probe per model). ${costNote}.`,
+				description: `Provider calls: yes (${describeRouterCalibrationScope()}, per model). ${costNote}.`,
 			},
 			...rows.map((row) => ({
 				value: `row:${row.ref}`,
@@ -118,7 +125,7 @@ function confirmBatchCalibration(
 		];
 		const selector = new SelectSubmenu(
 			title,
-			"Surfaces: router_cheap, router_medium, router_expensive, router_judge, executor + real tool probe. Models run one at a time.",
+			`Covers ${describeRouterCalibrationScope()}. Models run one at a time.`,
 			options,
 			"run",
 			(value) => {
@@ -137,7 +144,7 @@ async function runBatchCalibration(host: ModelRouterSetupHost, rows: RouterCalib
 	let index = 0;
 	for (const row of rows) {
 		index += 1;
-		host.showStatus(`Calibrating ${row.ref} (${index}/${rows.length}): fitness probe on 6 surfaces…`);
+		host.showStatus(`Calibrating ${row.ref} (${index}/${rows.length}): ${describeRouterCalibrationSurfaces()}…`);
 		try {
 			const outcome = await host.session.runModelFitness({ model: row.ref });
 			if (!outcome.started) {
@@ -164,10 +171,12 @@ async function runBatchCalibration(host: ModelRouterSetupHost, rows: RouterCalib
 
 export async function handleModelRouterAction(host: ModelRouterSetupHost, action: string): Promise<void> {
 	if (action === "configure-models") {
+		// The Models editor owns the pool. When it closes (saved or cancelled), Router Setup comes
+		// back on a freshly built pool view, so the summary, calibration rows, tier pickers and the
+		// preview all describe the edited pool without a second operator round trip.
 		await host.showModelsSelector();
-		host.showStatus(
-			"Router pool follows the Models selection; reopen /settings → Model Router to see the refreshed pool.",
-		);
+		host.reopenModelRouterSetup();
+		host.showStatus("Router pool follows the Models selection; Router Setup is showing the edited pool.");
 		return;
 	}
 	if (action === "diagnostics") {
