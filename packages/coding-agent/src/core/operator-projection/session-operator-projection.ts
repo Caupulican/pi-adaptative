@@ -13,7 +13,7 @@ import type { GoalContinuationDecision } from "../goals/goal-continuation-contro
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import { DecisionStageLog, type DecisionStageLogView, type DecisionStageSink } from "./decision-stage-log.ts";
 import { OperatorEventController } from "./operator-event-controller.ts";
-import { OperatorProjectionController } from "./operator-projection-controller.ts";
+import { MAX_OPERATOR_EVENTS, OperatorProjectionController } from "./operator-projection-controller.ts";
 import type {
 	ActiveActor,
 	AdaptationProjection,
@@ -190,6 +190,7 @@ export class SessionOperatorProjection {
 	emitEvent(event: Omit<OperatorEvent, "id" | "timestamp">): OperatorEvent {
 		const emitted = this.projectionController.emitEvent(event);
 		this.events.push(emitted);
+		while (this.events.length > MAX_OPERATOR_EVENTS) this.events.shift();
 		return emitted;
 	}
 

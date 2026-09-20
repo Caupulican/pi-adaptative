@@ -74,9 +74,17 @@ export class SystemOneController {
 		this.evaluationObserver = observer;
 	}
 
-	/** Seals a stage decision: durable record, audit trail, and the operator-visible verdict. */
+	/**
+	 * Seals a stage decision: the durable record (the store mints the one id both stores key), the
+	 * audit trail under that same id, and the operator-visible verdict on the evaluation ledger.
+	 */
 	private sealDecision(decision: ValidationDecision, policyResult: string, evaluationId: string | undefined): void {
-		this.sealDecision(decision, policyResult, evaluationId);
+		decision.policy_result = policyResult;
+		const { id: _provisional, timestamp: _drafted, ...draft } = decision;
+		const sealed = this.store.recordDecision(draft);
+		decision.id = sealed.id;
+		decision.timestamp = sealed.timestamp;
+		this.audit.recordDecision(this.store.runId, sealed);
 		if (evaluationId !== undefined) this.evaluationObserver?.noteVerdict(evaluationId, policyResult);
 	}
 

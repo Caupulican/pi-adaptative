@@ -568,10 +568,12 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 			expect(proj.current_action).toBe("Implementing settings panel");
 			expect(proj.proof.satisfied).toBe(7);
 
-			controller.transitionPhase("verify", 4, {
-				currentAction: "Running visual diff verification",
+			controller.updateProjection({
+				phase: "verify",
+				phase_index: 4,
+				current_action: "Running visual diff verification",
 				why: "Validating pixel-perfect layout against mock",
-				proof: { satisfied: 8, total: 9 },
+				proof: { satisfied: 8, total: 9, failing: 0, pending: 2 },
 			});
 
 			const updated = controller.getProjection();
@@ -651,9 +653,12 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 			expect(build).toContain("COST $0.021");
 
 			// Blocked state (FR-135): the block reason is the WORKING slot's whole content.
-			projController.transitionPhase("blocked", 4, {
-				currentAction: "Production deployment requested",
+			projController.updateProjection({
+				phase: "blocked",
+				phase_index: 4,
+				current_action: "Production deployment requested",
 				why: "Production deployment is outside the start charter authority",
+				health: "blocked",
 				proof: { satisfied: 8, total: 9, failing: 1, pending: 0 },
 			});
 			const blocked = stripAnsi(component.render(240)[0]);
@@ -661,9 +666,12 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 			expect(blocked).toContain("PROOF 8/9");
 
 			// Done state (FR-136): delivery refs stay visible.
-			projController.transitionPhase("done", 5, {
-				currentAction: "Commit 4a1b2c pushed to main",
-				nextAction: "Release complete",
+			projController.updateProjection({
+				phase: "done",
+				phase_index: 5,
+				current_action: "Commit 4a1b2c pushed to main",
+				next_action: "Release complete",
+				health: "complete",
 				proof: { satisfied: 9, total: 9, failing: 0, pending: 0 },
 			});
 			const done = stripAnsi(component.render(240)[0]);

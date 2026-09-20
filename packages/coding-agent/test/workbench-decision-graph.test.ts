@@ -412,7 +412,19 @@ describe("Decision graph rendering", () => {
 	});
 
 	it("lists only the stages that occurred, expands the selected stage, and keeps the current row on the current stage", () => {
-		const model = buildDecisionGraphModel(SCENARIOS.jevVerifying!());
+		const model = buildDecisionGraphModel({
+			...SCENARIOS.jevVerifying!(),
+			events: [
+				{ timestamp: new Date(T0 + 27_000).toISOString(), title: "verification started", severity: "info" },
+				{ timestamp: new Date(T0 + 28_000).toISOString(), title: "criterion 3 failed", severity: "failure" },
+				{ timestamp: new Date(T0 + 12_000).toISOString(), title: "worker dispatched", severity: "info" },
+			],
+		});
+		expect(model.stages.find((row) => row.stage === "verify")?.events.map((event) => event.title)).toEqual([
+			"verification started",
+			"criterion 3 failed",
+		]);
+		expect(model.stages.find((row) => row.stage === "dispatch")?.events.map((event) => event.title)).toEqual([]);
 		const list = renderDecisionList(model, 56, "verify");
 		const text = list.rows.map(stripAnsi);
 		expect(text.some((row) => row.includes("◆ evaluating"))).toBe(true);
@@ -420,6 +432,8 @@ describe("Decision graph rendering", () => {
 		expect(text[list.currentRow]).toMatch(/● verify/);
 		expect(list.stageAt[list.currentRow]).toBe("verify");
 		expect(text.some((row) => row.includes("◆ verify criterion 3"))).toBe(true);
+		expect(text.some((row) => row.includes("· criterion 3 failed"))).toBe(true);
+		expect(text.some((row) => row.includes("· worker dispatched"))).toBe(false);
 		expect(text.some((row) => row.includes("CHECKS") && row.includes("1/2"))).toBe(true);
 	});
 });

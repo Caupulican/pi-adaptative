@@ -34,6 +34,9 @@ export interface OperatorProjectionInit {
  * Exposes OperatorProjection and OperatorEvent streams without LLM dependencies.
  * Implements FR-110..FR-119.
  */
+/** Events kept in memory per objective; the session log and the decision ledger hold the history. */
+export const MAX_OPERATOR_EVENTS = 256;
+
 export class OperatorProjectionController {
 	private projection: OperatorProjection;
 	private readonly events: OperatorEvent[] = [];
@@ -86,45 +89,6 @@ export class OperatorProjectionController {
 	}
 
 	/**
-	 * FR-111, FR-112, FR-113, FR-114, FR-115, FR-116, FR-117, FR-118:
-	 * Convenience method to transition phase and update proof progress.
-	 */
-	transitionPhase(
-		phase: OperatorPhase,
-		phaseIndex: number,
-		options: {
-			currentAction?: string;
-			why?: string;
-			nextAction?: string | null;
-			health?: OperatorHealth;
-			adaptation?: AdaptationProjection | null;
-			proof?: Partial<ProofProgress>;
-			activeActors?: readonly ActiveActor[];
-		} = {},
-	): OperatorProjection {
-		const updatedProof: ProofProgress = options.proof
-			? {
-					satisfied: options.proof.satisfied ?? this.projection.proof.satisfied,
-					total: options.proof.total ?? this.projection.proof.total,
-					failing: options.proof.failing ?? this.projection.proof.failing,
-					pending: options.proof.pending ?? this.projection.proof.pending,
-				}
-			: this.projection.proof;
-
-		return this.updateProjection({
-			phase,
-			phase_index: phaseIndex,
-			current_action: options.currentAction ?? this.projection.current_action,
-			why: options.why ?? this.projection.why,
-			next_action: options.nextAction !== undefined ? options.nextAction : this.projection.next_action,
-			health: options.health ?? (phase === "blocked" ? "blocked" : phase === "done" ? "complete" : "normal"),
-			adaptation: options.adaptation !== undefined ? options.adaptation : this.projection.adaptation,
-			proof: updatedProof,
-			active_actors: options.activeActors ?? this.projection.active_actors,
-		});
-	}
-
-	/**
 	 * FR-119: Emit an operator event.
 	 */
 	emitEvent(
@@ -141,6 +105,7 @@ export class OperatorProjectionController {
 		};
 
 		this.events.push(event);
+		while (this.events.length > MAX_OPERATOR_EVENTS) this.events.shift();
 
 		for (const listener of this.eventListeners) {
 			try {

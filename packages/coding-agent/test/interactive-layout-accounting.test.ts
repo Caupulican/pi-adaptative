@@ -45,6 +45,7 @@ it("counts one invocation once while foreground and background handoff observati
 				}),
 				subscribe: () => () => {},
 				onStageChange: () => () => {},
+				getVisibleEvents: () => [],
 				getStageLog: () => new DecisionStageLog().view(0),
 			},
 			getTaskStepsStateSnapshot: () => undefined,

@@ -38,6 +38,8 @@ export interface DecisionGraphInput {
 		readonly answered: number;
 	};
 	readonly backgroundTools: readonly { readonly name: string; readonly startedAt?: number }[];
+	/** The operator event stream (visible events only); a stage's detail lists what happened while it was open. */
+	readonly events?: readonly { readonly timestamp: string; readonly title: string; readonly severity: string }[];
 	readonly nowMs: number;
 }
 
@@ -49,7 +51,12 @@ export interface DecisionStageRow {
 	readonly loop: number;
 	readonly reasonCode?: string;
 	readonly note?: string;
+	/** Titles of the events recorded while this stage was open, oldest first, bounded. */
+	readonly events: readonly { readonly title: string; readonly severity: string }[];
 }
+
+/** A stage's detail lists at most this many events; the transcript keeps the rest. */
+export const MAX_STAGE_EVENTS = 6;
 
 export interface DecisionParticipant {
 	readonly id: string;
@@ -133,12 +140,26 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 	const open = stageLog.open;
 	const stages: DecisionStageRow[] = [];
 	const seen = new Set<DecisionStage>();
+	const timedEvents = (input.events ?? []).flatMap((event) => {
+		const at = Date.parse(event.timestamp);
+		return Number.isFinite(at) ? [{ at, title: event.title, severity: event.severity }] : [];
+	});
+	const eventsDuring = (stage: DecisionStage): DecisionStageRow["events"] => {
+		const windows = stageLog.entries
+			.filter((entry) => entry.stage === stage)
+			.map((entry) => ({ from: entry.enteredAt, to: entry.endedAt ?? nowMs }));
+		return timedEvents
+			.filter((event) => windows.some((window) => event.at >= window.from && event.at < window.to))
+			.slice(-MAX_STAGE_EVENTS)
+			.map(({ title, severity }) => ({ title, severity }));
+	};
 	for (const entry of stageLog.entries) {
 		if (seen.has(entry.stage)) continue;
 		seen.add(entry.stage);
 		const totals = stageLog.totals[entry.stage];
 		const isCurrent = open?.stage === entry.stage;
 		stages.push({
+			events: eventsDuring(entry.stage),
 			stage: entry.stage,
 			totalMs: totals.elapsedMs,
 			passes: totals.passes,

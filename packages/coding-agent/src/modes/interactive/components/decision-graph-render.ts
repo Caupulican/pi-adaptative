@@ -151,6 +151,11 @@ export function renderDecisionList(
 		if (selected === stage.stage) {
 			if (stage.note) push(theme.fg("muted", `      ${stage.note}`), stage.stage);
 			if (stage.reasonCode) push(theme.fg("dim", `      reason: ${stage.reasonCode}`), stage.stage);
+			for (const event of stage.events) {
+				const tone: ThemeColor =
+					event.severity === "failure" ? "error" : event.severity === "warning" ? "warning" : "muted";
+				push(theme.fg(tone, `      · ${event.title}`), stage.stage);
+			}
 			if (stage.current && evaluating) push(theme.fg(JEV_TONE, `      ◆ ${evaluating.label}`), stage.stage);
 		}
 	}

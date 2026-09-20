@@ -127,6 +127,7 @@ function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInpu
 			asked: humanInput.asked,
 			answered: humanInput.answered,
 		},
+		events: session.operatorProjection.getVisibleEvents(),
 		backgroundTools: (host.activityLane?.getItems() ?? []).flatMap((item) =>
 			isBackgroundToolActivityItem(item) && item.status !== "success" && item.status !== "failure"
 				? [{ name: item.label, ...(item.startedAt !== undefined ? { startedAt: item.startedAt } : {}) }]
@@ -281,7 +282,7 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 	});
 	const stored = host.settingsManager.getWorkbenchSettings();
 	view.setMouseMode(stored.mouse === "on");
-	view.applyGeometry({ ...stored, collapsed: stored.collapsed ?? true });
+	view.applyGeometry(stored);
 	host.workbenchInputCleanup = host.ui.addInputListener((data) => host.workbench?.handleInput(data));
 	host.ui.addChild(view);
 }

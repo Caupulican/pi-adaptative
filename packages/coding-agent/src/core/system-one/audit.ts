@@ -14,6 +14,9 @@ export interface ToolAuditRecord extends ToolEvent {
  * R-040: Every Jev decision MUST persist stage, model, question catalog version, question hash, state hash, raw typed answers, and policy result.
  * R-041: Every tool action MUST persist intent, impact class, status, input hash, output hash, and produced observation refs.
  */
+/** The in-memory audit keeps this many of each record; the durable ledgers hold the full history. */
+export const MAX_AUDIT_RECORDS = 256;
+
 export class AuditStore {
 	private readonly decisions: DecisionAuditRecord[] = [];
 	private readonly toolActions: ToolAuditRecord[] = [];
@@ -23,6 +26,7 @@ export class AuditStore {
 			...decision,
 			run_id: runId,
 		});
+		while (this.decisions.length > MAX_AUDIT_RECORDS) this.decisions.shift();
 	}
 
 	recordToolAction(runId: string, toolEvent: ToolEvent): void {
@@ -30,6 +34,7 @@ export class AuditStore {
 			...toolEvent,
 			run_id: runId,
 		});
+		while (this.toolActions.length > MAX_AUDIT_RECORDS) this.toolActions.shift();
 	}
 
 	getDecisionsForRun(runId: string): readonly DecisionAuditRecord[] {
