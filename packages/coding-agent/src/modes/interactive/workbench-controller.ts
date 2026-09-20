@@ -301,6 +301,7 @@ export class WorkbenchController {
 		else if (keys.matches(data, "app.execution.pageUp")) this.view.pageExecution(-1);
 		else if (keys.matches(data, "app.execution.pageDown")) this.view.pageExecution(1);
 		else if (keys.matches(data, "app.inspector.toggle")) this.changeGeometry(() => this.view.toggleInspector());
+		else if (keys.matches(data, "app.workbench.layout")) this.changeGeometry(() => this.view.toggleLayout());
 		else if (keys.matches(data, "app.execution.maximize"))
 			this.changeGeometry(() => this.view.toggleExecutionMaximized());
 		else {

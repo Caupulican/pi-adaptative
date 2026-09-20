@@ -24,15 +24,22 @@ export function surfaceRow(content: string, width: number): string {
 		.join(BG_RESET + surface)}${BG_RESET}`;
 }
 
+/**
+ * Pre-toned left content, pre-toned right content, exactly `width` cells; the right yields first.
+ * `leftWidth` may be supplied by callers that already know it, since measuring is the per-frame cost.
+ */
+export function metaRow(left: string, right: string, width: number, leftWidth = visibleWidth(left)): string {
+	if (width <= 0) return "";
+	const rightWidth = visibleWidth(right);
+	if (right && leftWidth + 2 + rightWidth <= width) {
+		return `${left}${" ".repeat(width - leftWidth - rightWidth)}${right}`;
+	}
+	return truncateToWidth(left, width, "…", true);
+}
+
 /** Bold title on the left, muted meta right-aligned, exactly `width` cells. Meta yields before the title. */
 export function labelRow(title: string, meta: string, width: number): string {
-	if (width <= 0) return "";
-	const titleWidth = visibleWidth(title);
-	const metaWidth = visibleWidth(meta);
-	if (meta && titleWidth + 2 + metaWidth <= width) {
-		return `${theme.bold(theme.fg("text", title))}${" ".repeat(width - titleWidth - metaWidth)}${theme.fg("muted", meta)}`;
-	}
-	return truncateToWidth(theme.bold(theme.fg("text", title)), width, "…", true);
+	return metaRow(theme.bold(theme.fg("text", title)), theme.fg("muted", meta), width, visibleWidth(title));
 }
 
 export type WorkbenchPaneTitleAction = "showInspector" | "hideInspector" | "maximize" | "layout";

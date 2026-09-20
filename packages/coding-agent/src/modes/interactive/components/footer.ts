@@ -237,18 +237,9 @@ export class FooterComponent implements Component {
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
 
 		if (this.operatorFooter && !this.diagnosticsMode) {
-			let pwd = formatCwdForFooter(
-				this.session.sessionManager.getCwd(),
-				process.env.HOME || process.env.USERPROFILE,
-			);
-			const branch = this.footerData.getGitBranch();
-			if (branch) pwd = `${pwd} (${branch})`;
-			const sessionName = this.session.sessionManager.getSessionName();
-			if (sessionName) pwd = `${pwd} • ${sessionName}`;
-
-			// Operator truth (phase, actor, model, route, Jev, cost, proof, context) lives in the one
-			// POV bar above the editor. The footer row is location only, so nothing is shown twice.
-			return [truncateToWidth(theme.fg("dim", pwd), width, "…")];
+			// Location and branch live on the Workbench title strip; operator truth lives on the POV
+			// lane. Nothing is shown twice, so the band carries only notices and widgets here.
+			return [];
 		}
 
 		// Replace home directory with ~

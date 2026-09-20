@@ -200,7 +200,7 @@ describe("Workbench layout", () => {
 		output.invalidate();
 		const long = view.render(110).map(stripAnsi);
 		expect(view.conversationTop).toBe(top);
-		expect(view.conversationHeight).toBe(12);
+		expect(view.conversationHeight).toBe(11);
 		view.setExecution(undefined);
 		view.render(110);
 		expect(view.conversationTop).toBe(top);
@@ -219,18 +219,24 @@ describe("Workbench layout", () => {
 			expect(frame).toHaveLength(30);
 			// Identity only on the title strip: no run-state badge lives outside the conversation zone.
 			expect(frame[0]).toMatch(/^ pi {2}sample-project\s*$/);
-			expect(frame[1]).toMatch(/^ Work plan .*1 \/ 3\s+Hide\s+Execution .*Maximize\s+Columns\s*$/);
-			expect(frame[11]).toMatch(/^─+ ↕ work area.*─+$/);
+			// One chip per pane, and a one-column rule between the panes on every row including titles.
+			expect(frame[1]).toMatch(/^ Work plan .*1 \/ 3\s+Hide\s*│\s*Execution .*Maximize\s*$/);
+			expect(frame[2]).toMatch(/│/);
+			// The divider is a handle; the pane rule meets it at a composed junction.
+			expect(frame[11]).toMatch(/^[─┴┬┼]+ ↕ [─┴┬┼]+$/);
+			expect(frame[11]).toContain("┴");
 			expect(frame[12]).toMatch(/^ Conversation · Following latest .* Copy conversation {2}$/);
-			expect(frame[top + 11]!.trimEnd()).toBe(" conversation body");
+			expect(frame[top + 10]!.trimEnd()).toBe(" conversation body");
 			expect(frame[top]).toBe("");
-			// The live row is reserved above the status rule even while idle, so geometry never jumps.
-			expect(frame.at(-5)).toBe("");
+			// Bottom lanes, in order: the reserved live row, the status band, then the editor inside its
+			// own two rules, then the hint row. Geometry never jumps between turns.
+			expect(frame.at(-6)).toBe("");
+			expect(frame.at(-5)!.trimEnd()).toBe(" status across the entire screen");
 			expect(frame.at(-4)).toMatch(/^─+$/);
-			expect(frame.at(-3)!.trimEnd()).toBe(" status across the entire screen");
-			expect(frame.at(-2)!.trimEnd()).toBe(" input across the entire screen");
+			expect(frame.at(-3)!.trimEnd()).toBe(" input across the entire screen");
+			expect(frame.at(-2)).toMatch(/^─+$/);
 			expect(frame.at(-1)).toMatch(/^ \/ commands/);
-			expect(frame.join("\n")).not.toMatch(/[┌┐└┘│]/);
+			expect(frame.join("\n")).not.toMatch(/[┌┐└┘]/);
 		}
 	});
 	it("shows placeholders in an empty work area and bounds geometry on narrow and short terminals", () => {
@@ -259,7 +265,7 @@ describe("Workbench layout", () => {
 		expect(short.upperHeight).toBe(0);
 		expect(frame[1]).toMatch(/^─+.*─+$/);
 		expect(frame[2]).toContain("Conversation");
-		expect(short.conversationHeight).toBe(4);
+		expect(short.conversationHeight).toBe(2);
 	});
 	it("scrolls upper panes independently without moving conversation or dock", () => {
 		const { view } = setup();
@@ -323,9 +329,10 @@ describe("Workbench layout", () => {
 		const lines = view.render(110).map(stripAnsi);
 		expect(lines).toHaveLength(30);
 		expect(lines[12]).toContain("Conversation");
+		expect(lines.at(-5)!.trimEnd()).toBe(" status across the entire screen");
 		expect(lines.at(-4)).toMatch(/^─+$/);
-		expect(lines.at(-3)!.trimEnd()).toBe(" status across the entire screen");
-		expect(lines.at(-2)!.trimEnd()).toBe(" input across the entire screen");
+		expect(lines.at(-3)!.trimEnd()).toBe(" input across the entire screen");
+		expect(lines.at(-2)).toMatch(/^─+$/);
 		expect(lines.at(-1)).toMatch(/^ \/ commands/);
 		expect(view.children).toContain(editor);
 	});
@@ -374,20 +381,20 @@ describe("Workbench layout", () => {
 		expect(shown[1]).toMatch(/^ Work plan .*Execution/);
 		view.toggleInspector();
 		const hidden = view.render(110).map(stripAnsi);
-		expect(hidden[1]).toMatch(/^ Execution .*File effects and command outcomes/);
+		expect(hidden[1]).toMatch(/^ Execution /);
 		expect(hidden.join("\n")).not.toContain("Work plan");
 		expect(hidden.join("\n")).not.toContain("active step");
 		expect(view.upperHeight).toBe(10);
-		expect(hidden[view.dividerRow]).toMatch(/↕ work area/);
+		expect(hidden[view.dividerRow]).toMatch(/^─+ ↕ ─+$/);
 		view.toggleInspector();
 		expect(view.render(110).map(stripAnsi)[1]).toMatch(/^ Work plan .*Execution/);
 		view.toggleExecutionMaximized();
 		const maximized = view.render(110).map(stripAnsi);
-		expect(view.upperHeight).toBe(16);
+		expect(view.upperHeight).toBe(15);
 		expect(view.conversationHeight).toBe(6);
 		expect(maximized[1]).toMatch(/^ Execution /);
-		expect(maximized[view.dividerRow]).toMatch(/↕ execution maximized/);
-		expect(maximized[16]).toContain("tool 99");
+		expect(maximized[view.dividerRow]).toMatch(/^─+ ↕ ─+$/);
+		expect(maximized[15]).toContain("tool 99");
 		view.toggleExecutionMaximized();
 		view.render(110);
 		expect(view.upperHeight).toBe(10);
@@ -428,11 +435,11 @@ describe("Workbench layout", () => {
 		// Resizing from the even split starts from the rows it currently has, then becomes explicit.
 		view.applyGeometry({ rows: "half", collapsed: false, inspector: "shown", executionMaximized: false });
 		view.render(110);
-		expect(view.upperHeight).toBe(11);
+		expect(view.upperHeight).toBe(10);
 		view.growUpper();
 		view.render(110);
-		expect(view.upperHeight).toBe(12);
-		expect(view.geometry().rows).toBe(12);
+		expect(view.upperHeight).toBe(11);
+		expect(view.geometry().rows).toBe(11);
 	});
 	it("shows the live activity on the row where the answer lands, and names the work on the title strip", () => {
 		const { view } = setup();
@@ -448,11 +455,12 @@ describe("Workbench layout", () => {
 		withActivity.setHeadline({ title: "tool reload reliability" });
 		const frame = withActivity.render(80).map(stripAnsi);
 		expect(frame[0]).toMatch(/^ pi {2}tool reload reliability\s*$/);
-		// The even-split default: 17 budget rows, minus divider and header, halved.
-		expect(withActivity.upperHeight).toBe(7);
-		expect(frame[9]).toContain("Conversation");
-		expect(withActivity.conversationTop).toBe(10);
-		expect(withActivity.conversationHeight).toBe(8);
+		// The even-split default: 15 budget rows (title, live row, two editor rules and the hint row
+		// reserved), minus divider and header, halved.
+		expect(withActivity.upperHeight).toBe(6);
+		expect(frame[8]).toContain("Conversation");
+		expect(withActivity.conversationTop).toBe(9);
+		expect(withActivity.conversationHeight).toBe(7);
 		// One state glyph on the whole frame, and it sits directly below the conversation rows.
 		expect(frame[withActivity.conversationTop + withActivity.conversationHeight]!.trimEnd()).toBe(
 			" ● Editing reload ownership",

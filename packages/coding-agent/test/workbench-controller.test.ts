@@ -111,7 +111,8 @@ describe("Workbench input boundary", () => {
 		controller.handleInput("\x1bx");
 		controller.handleInput("\x1b=");
 		controller.handleInput("\x1bo");
-		// 40 rows: 37 in the budget, the even split is 17; the first resize makes it an explicit 18.
+		// 40 rows: 35 in the budget (title, live row, editor rules, hint), the even split is 16; the first
+		// resize makes it an explicit 17.
 		expect(saved).toEqual([
 			{
 				rows: "half",
@@ -132,7 +133,7 @@ describe("Workbench input boundary", () => {
 				conversationFraction: 0.5,
 			},
 			{
-				rows: 18,
+				rows: 17,
 				collapsed: false,
 				inspector: "hidden",
 				executionMaximized: true,
@@ -141,7 +142,7 @@ describe("Workbench input boundary", () => {
 				conversationFraction: 0.5,
 			},
 			{
-				rows: 18,
+				rows: 17,
 				collapsed: true,
 				inspector: "hidden",
 				executionMaximized: true,
@@ -558,19 +559,19 @@ describe("Workbench input boundary", () => {
 			notice() {},
 		});
 		view.render(80);
-		expect(view.conversationTop).toBe(10);
-		expect(view.conversationHeight).toBe(8);
-		// The single row anchors to the bottom of the conversation area (row 18, 1-based 19).
-		controller.handleInput("\x1b[<0;1;18M"); // The gutter must not select text.
+		expect(view.conversationTop).toBe(9);
+		expect(view.conversationHeight).toBe(7);
+		// The single row anchors to the bottom of the conversation area (row 15, 1-based 16).
+		controller.handleInput("\x1b[<0;1;16M"); // The gutter must not select text.
 		expect(view.conversation.following).toBe(true);
 		// A click without a drag only focuses the pane: nothing freezes, following continues.
-		controller.handleInput("\x1b[<0;2;18M");
-		controller.handleInput("\x1b[<0;2;18m");
+		controller.handleInput("\x1b[<0;2;16M");
+		controller.handleInput("\x1b[<0;2;16m");
 		expect(view.conversation.following).toBe(true);
 		expect(view.conversation.selectionText()).toBeUndefined();
-		controller.handleInput("\x1b[<0;2;18M");
-		controller.handleInput("\x1b[<32;7;18M");
-		controller.handleInput("\x1b[<0;7;18m");
+		controller.handleInput("\x1b[<0;2;16M");
+		controller.handleInput("\x1b[<32;7;16M");
+		controller.handleInput("\x1b[<0;7;16m");
 		// Release copies the selection, as the terminal would have; an explicit copy repeats it.
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(copies).toEqual(["hello"]);
@@ -695,12 +696,11 @@ describe("Workbench input boundary", () => {
 		});
 	});
 
-	it("switches to columns from the Columns chip and resizes the conversation split on drag", () => {
+	it("switches to columns from its key and resizes the conversation split on drag", () => {
 		const { view, controller, saved } = pointerWorkbench();
-		const shown = stripAnsi(view.render(110)[1] ?? "");
-		const columns = shown.indexOf("Columns");
-		expect(columns).toBeGreaterThan(0);
-		controller.handleInput(mouse(0, columns, 1));
+		// One chip per pane: the columns layout lives on alt+p and on the header's Stacked chip.
+		expect(stripAnsi(view.render(110)[1] ?? "")).not.toContain("Columns");
+		controller.handleInput("\x1bp");
 		expect(view.geometry().layout).toBe("columns");
 		view.toggleInspector();
 		view.render(110);

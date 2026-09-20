@@ -6,11 +6,12 @@ import type { Container, EditorComponent, TUI } from "@caupulican/pi-tui";
 import { APP_NAME } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
+import type { ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { type ActivityLaneComponent, isBackgroundToolActivityItem } from "./components/activity-lane.ts";
-import type { FooterComponent } from "./components/footer.ts";
+import { type FooterComponent, formatCwdForFooter } from "./components/footer.ts";
 import { OperatorPovBarComponent } from "./components/operator-pov-bar.ts";
 import { isConversationMessage } from "./components/question-conversation.ts";
 import { WorkbenchComponent } from "./components/workbench.ts";
@@ -30,6 +31,8 @@ export interface InteractiveLayoutHost {
 	widgetContainerAbove: Container;
 	widgetContainerBelow: Container;
 	footer: FooterComponent;
+	/** Branch and location for the title strip; the footer reads the same provider. */
+	footerDataProvider: ReadonlyFooterDataProvider;
 	activityLane?: ActivityLaneComponent;
 	keybindings: KeybindingsManager;
 	settingsManager: Pick<SettingsManager, "getWorkbenchSettings" | "setWorkbenchSetting" | "setWorkbenchSettings">;
@@ -70,6 +73,14 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		operatorStatus,
 		brand: APP_NAME,
 		title: () => host.session.sessionManager.getSessionName() || path.basename(host.session.sessionManager.getCwd()),
+		cwd: () => {
+			const location = formatCwdForFooter(
+				host.session.sessionManager.getCwd(),
+				process.env.HOME || process.env.USERPROFILE,
+			);
+			const branch = host.footerDataProvider.getGitBranch();
+			return branch ? `${location} (${branch})` : location;
+		},
 		dock: [host.pendingMessagesContainer, host.statusContainer, host.widgetContainerAbove, host.footer],
 		dockBelow: [host.widgetContainerBelow],
 		viewportRows: () => host.ui.terminal.rows,

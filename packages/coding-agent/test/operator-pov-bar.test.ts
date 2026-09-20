@@ -86,9 +86,31 @@ describe("Operator POV bar", () => {
 		).render(240);
 		expect(lines).toHaveLength(1);
 		const row = stripAnsi(lines[0]);
-		expect(row).toBe(
-			" WORKING build: Simplifying settings | CONTROL S1 | NEXT verify 5 open criteria | ACTOR root | ROOT gpt-5.6 | ACTIVE claude-sonnet-4-6 | ROUTE medium via model-router/H-MoE | JEV ok | COST $0.083 | PROOF 0/5 | CTX 11.6%",
+		// The phase text on the left; every operator fact in one `|`-separated block anchored right.
+		expect(row.startsWith(" WORKING build: Simplifying settings")).toBe(true);
+		expect(
+			row.endsWith(
+				"CONTROL S1 | NEXT verify 5 open criteria | ACTOR root | ROOT gpt-5.6 | ACTIVE claude-sonnet-4-6 | ROUTE medium via model-router/H-MoE | JEV ok | COST $0.083 | PROOF 0/5 | CTX 11.6%",
+			),
+		).toBe(true);
+		expect(row).toHaveLength(240);
+		// R14: the right block does not move when the left text changes length.
+		const longer = stripAnsi(
+			new OperatorPovBarComponent(
+				source({
+					projection: { current_action: "Simplifying settings and the onboarding flow across three screens" },
+					route: {
+						activeModel: "anthropic/claude-sonnet-4-6",
+						source: "model_router_hmoe",
+						tier: "medium",
+						risk: "scoped-write",
+						switched: true,
+					},
+					health: { state: "ok" },
+				}),
+			).render(240)[0],
 		);
+		expect(longer.indexOf("CONTROL S1")).toBe(row.indexOf("CONTROL S1"));
 	});
 
 	it("F001-007: ROOT appears only while routing swapped the model; otherwise one MODEL slot", () => {

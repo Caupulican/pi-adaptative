@@ -4,7 +4,14 @@ import { ActionTranscriptComponent } from "./action-transcript.ts";
 import { BashExecutionComponent } from "./bash-execution.ts";
 import { ConversationWindow } from "./conversation-window.ts";
 import { keyText } from "./keybinding-hints.ts";
-import { fitRow, labelRow, surfaceRow, WorkbenchPane, type WorkbenchPaneTitleButton } from "./workbench-pane.ts";
+import {
+	fitRow,
+	labelRow,
+	metaRow,
+	surfaceRow,
+	WorkbenchPane,
+	type WorkbenchPaneTitleButton,
+} from "./workbench-pane.ts";
 
 /** The title strip names the work; the run state lives on the live row inside the conversation zone. */
 export interface WorkbenchHeadline {
@@ -30,18 +37,25 @@ export interface WorkbenchOptions {
 	brand: string;
 	/** Fallback title when no plan or goal names the work. */
 	title?: () => string;
+	/** Where the work runs (path and branch), right-aligned on the title strip. */
+	cwd?: () => string;
 	viewportRows: () => number;
 	/** Mounted for focus/lifecycle but not permanently reserved above the conversation. */
 	header?: Component;
-	/** Operator status slot directly under the headline. */
+	/** The operator POV bar: the first row of the status band, above the editor's rules. */
 	operatorStatus?: Component;
+}
+
+/** Where a vertical rule meets the divider: the glyph is composed into the rule run, never typed. */
+export interface WorkbenchDividerJunction {
+	readonly column: number;
+	readonly glyph: "┴" | "┬" | "┼";
 }
 
 export const PLAN_SECTION = "Work plan";
 export const TEAM_SECTION = "Team";
 export const CHECKS_SECTION = "Checks";
 export const EDGE_SECTION = "Edge";
-const EXECUTION_META = "File effects and command outcomes";
 const MIN_INSPECTOR_WIDTH = 24;
 const SIDE_BY_SIDE_MIN_COLUMNS = 80;
 export const DEFAULT_INSPECTOR_FRACTION = 0.3;
@@ -124,7 +138,7 @@ export class WorkbenchComponent extends Container {
 	private sections: WorkbenchSection[] = [];
 	private headlineState: WorkbenchHeadline = {};
 	private execution?: Component;
-	private executionMeta = EXECUTION_META;
+	private executionMeta = "";
 	private executionEvidence?: Component;
 	private displayedShell?: BashExecutionComponent;
 	private upperLimit: WorkAreaRows = DEFAULT_UPPER_ROWS;
@@ -163,45 +177,50 @@ export class WorkbenchComponent extends Container {
 	columnSplitStart = -1;
 	/** Exclusive end of the conversation/execution column gutter. */
 	columnSplitEnd = -1;
+	/** Column of the inspector | Execution rule; -1 when the panes are not side by side. */
+	private paneRuleColumn = -1;
+	/** Column of the Decision graph | chat rule; -1 while the graph is folded or hidden. */
+	private graphRuleColumn = -1;
 	/** Key labels resolve once; the keybinding manager is static after startup. */
 	private keyLabels?: {
 		toggle: string;
-		resize: string;
 		hint: string;
 		mouse: string;
-		inspector: string;
-		maximize: string;
 	};
 
+	/** Every key lives on the one hint row; the divider is a handle and pane titles carry chips only. */
 	private keys(): {
 		toggle: string;
-		resize: string;
 		hint: string;
 		mouse: string;
-		inspector: string;
-		maximize: string;
 	} {
 		if (this.keyLabels) return this.keyLabels;
 		const key = (binding: Parameters<typeof keyText>[0], text: string) => {
 			const keys = keyText(binding);
 			return keys ? `${keys} ${text}` : "";
 		};
+		const rows = [keyText("app.workbench.grow"), keyText("app.workbench.shrink")].filter(Boolean).join(" ");
 		this.keyLabels = {
 			toggle: keyText("app.execution.toggle"),
-			resize: [keyText("app.workbench.grow"), keyText("app.workbench.shrink")].filter(Boolean).join(" "),
+			// Ordered by what survives a narrow terminal: the truncation cuts from the right.
 			hint: [
 				"/ commands",
 				key("app.interrupt", "interrupt"),
 				// Windows Terminal swallows alt+enter; the `>>` prefix is the follow-up gesture there.
 				process.env.WT_SESSION ? ">> follow-up" : key("app.message.followUp", "follow-up"),
+				key("app.execution.toggle", "work area"),
+				key("app.inspector.toggle", "plan"),
+				key("app.execution.maximize", "maximize"),
+				rows ? `${rows} rows` : "",
+				key("app.graph.toggle", "graph"),
+				key("app.graph.view", "graph view"),
+				key("app.workbench.layout", "columns"),
 				key("app.transcript.open", "transcript"),
 				key("app.conversation.copy", "copy conversation"),
 			]
 				.filter(Boolean)
 				.join(" · "),
 			mouse: keyText("app.mouse.toggle"),
-			inspector: keyText("app.inspector.toggle"),
-			maximize: keyText("app.execution.maximize"),
 		};
 		return this.keyLabels;
 	}
@@ -268,12 +287,7 @@ export class WorkbenchComponent extends Container {
 	getOperatorStatus(): Component | undefined {
 		return this.operatorStatus;
 	}
-	setExecution(
-		component: Component | undefined,
-		compact = false,
-		evidence = component,
-		meta: string = EXECUTION_META,
-	): void {
+	setExecution(component: Component | undefined, compact = false, evidence = component, meta = ""): void {
 		if (evidence !== this.executionEvidence || compact !== this.executionCompact) this.executionPane.reset();
 		this.execution = component;
 		this.executionEvidence = evidence;
@@ -392,11 +406,9 @@ export class WorkbenchComponent extends Container {
 		if (this.inspectorHidden && !this.executionMaximized) {
 			buttons.push({ action: "showInspector", label: "Show plan" });
 		}
+		// One chip: the columns layout lives on its key and on the conversation header's Stacked chip.
 		if (!this.columns) {
 			buttons.push({ action: "maximize", label: this.executionMaximized ? "Restore" : "Maximize" });
-		}
-		if (this.columns || this.lastColumns >= SIDE_BY_SIDE_MIN_COLUMNS) {
-			buttons.push({ action: "layout", label: this.columns ? "Stacked" : "Columns" });
 		}
 		return buttons;
 	}
@@ -460,18 +472,26 @@ export class WorkbenchComponent extends Container {
 		for (const section of this.sections) if (!Array.isArray(section.body)) section.body.invalidate();
 	}
 
-	/** Identity only: brand and the work's name. State belongs to the live row, where the answer lands. */
+	/**
+	 * Identity and location: brand, the work's name, and where it runs. State belongs to the live row,
+	 * where the answer lands.
+	 */
 	private headline(columns: number): string {
 		const inner = Math.max(0, columns - 2);
 		const fallback = this.options.title?.() ?? "";
 		const title = this.headlineState.title || (fallback === this.options.brand ? "" : fallback);
 		let left = theme.bold(theme.fg("accent", this.options.brand));
-		const leftWidth = visibleWidth(this.options.brand);
+		let leftWidth = visibleWidth(this.options.brand);
 		if (title) {
 			const room = inner - leftWidth - 2;
-			if (room >= 4) left += `  ${theme.fg("muted", truncateToWidth(title, room, "…"))}`;
+			if (room >= 4) {
+				const shown = truncateToWidth(title, room, "…");
+				left += `  ${theme.fg("muted", shown)}`;
+				leftWidth += 2 + visibleWidth(shown);
+			}
 		}
-		return truncateToWidth(` ${left}`, columns, "");
+		const where = this.options.cwd?.() ?? "";
+		return ` ${metaRow(left, where ? theme.fg("dim", where) : "", inner, leftWidth)} `;
 	}
 
 	private conversationHeader(columns: number): string {
@@ -503,19 +523,22 @@ export class WorkbenchComponent extends Container {
 		return truncateToWidth(` ${heading}`, columns, "");
 	}
 
-	private divider(columns: number, expanded: boolean): string {
-		const { toggle, resize, inspector, maximize } = this.keys();
+	/** Where the pane rule above ends (┴) and the graph rule below starts (┬); both at one column is ┼. */
+	private dividerJunctions(): WorkbenchDividerJunction[] {
+		const above = this.paneRuleColumn;
+		const below = this.graphRuleColumn;
+		if (above >= 0 && above === below) return [{ column: above, glyph: "┼" }];
+		return [
+			...(above >= 0 ? [{ column: above, glyph: "┴" as const }] : []),
+			...(below >= 0 ? [{ column: below, glyph: "┬" as const }] : []),
+		];
+	}
+
+	/** Expanded: a drag handle and nothing else; every key lives on the hint row. Collapsed: the summary. */
+	private divider(columns: number, expanded: boolean, junctions: readonly WorkbenchDividerJunction[]): string {
+		const { toggle } = this.keys();
 		const summary = expanded
-			? [
-					this.executionMaximized ? "↕ execution maximized" : this.mouseMode ? "↕ drag to resize" : "↕ work area",
-					toggle && `${toggle} collapse`,
-					inspector && `${inspector} inspector`,
-					maximize && `${maximize} ${this.executionMaximized ? "restore" : "maximize"}`,
-					resize && `${resize} rows`,
-					this.mouseMode && "Hide · Maximize",
-				]
-					.filter(Boolean)
-					.join(" · ")
+			? "↕"
 			: [
 					`▸ ${[
 						...this.sections.map((section) =>
@@ -533,19 +556,22 @@ export class WorkbenchComponent extends Container {
 		const labelWidth = visibleWidth(label);
 		const left = Math.max(1, Math.floor((columns - labelWidth) / 2));
 		const right = Math.max(0, columns - labelWidth - left);
-		return truncateToWidth(
-			theme.fg("borderMuted", "─".repeat(left)) +
-				theme.fg("muted", label) +
-				theme.fg("borderMuted", "─".repeat(right)),
-			columns,
-			"",
-		);
+		// Junctions are composed into the rule runs; one that would land on the label is dropped.
+		const paint = (start: number, length: number): string => {
+			const cells = Array.from({ length }, () => "─");
+			for (const junction of junctions) {
+				const index = junction.column - start;
+				if (index >= 0 && index < length) cells[index] = junction.glyph;
+			}
+			return theme.fg("borderMuted", cells.join(""));
+		};
+		return truncateToWidth(paint(0, left) + theme.fg("muted", label) + paint(left + labelWidth, right), columns, "");
 	}
 
 	private hintRow(columns: number): string {
 		const { hint, mouse } = this.keys();
 		const owner = ` · ${mouse ? `${mouse} ` : ""}mouse: ${this.mouseMode ? "on" : "off"}`;
-		return truncateToWidth(` ${theme.fg("dim", hint + owner)}`, columns, "");
+		return truncateToWidth(` ${theme.fg("dim", hint + owner)}`, columns, "…");
 	}
 
 	private inspectorContent(width: number): { title: string; meta: string; lines: string[] } {
@@ -588,7 +614,7 @@ export class WorkbenchComponent extends Container {
 			const lines = executionSource?.render(width) ?? [];
 			return lines.length ? lines : [placeholder];
 		};
-		const executionMeta = visibleShell ? EXECUTION_META : this.executionMeta;
+		const executionMeta = visibleShell ? "" : this.executionMeta;
 		// A user shell opens at its command; the cycle's evidence follows its newest rows instead.
 		const follow = !visibleShell;
 		if (this.inspectorHidden || this.executionMaximized) {
@@ -633,7 +659,10 @@ export class WorkbenchComponent extends Container {
 				follow,
 				this.executionTitleButtons(),
 			);
-			return left.map((line, row) => `${line}  ${right[row]}`);
+			// One-column rule between the panes, on every row including the titles; then one space.
+			this.paneRuleColumn = originX + leftWidth;
+			const rule = theme.fg("borderMuted", "│");
+			return left.map((line, row) => `${line}${rule} ${right[row]}`);
 		}
 		const width = Math.max(1, columns - 2);
 		const inspector = this.inspectorContent(width);
@@ -731,6 +760,8 @@ export class WorkbenchComponent extends Container {
 		this.splitEnd = -1;
 		this.columnSplitStart = -1;
 		this.columnSplitEnd = -1;
+		this.paneRuleColumn = -1;
+		this.graphRuleColumn = -1;
 		this.headerButtons = [];
 		const columns = Math.max(1, width);
 		this.lastColumns = columns;
@@ -752,26 +783,30 @@ export class WorkbenchComponent extends Container {
 		// Rows that already fit skip the grapheme scan; the width lookup is cached per string.
 		const gutter = (line: string) =>
 			line ? ` ${visibleWidth(line) <= inner ? line : truncateToWidth(line, inner, "")}` : "";
-		// Title strip, divider, conversation header, three conversation rows, the live row and the
-		// status boundary stay.
-		const dockBudget = Math.max(0, total - editor.length - 9);
+		// Title strip, divider, conversation header, three conversation rows, the live row, the POV
+		// row and the editor's two rules stay.
+		const dockBudget = Math.max(0, total - editor.length - 10);
 		const above = this.options.dock.flatMap((component) => component.render(inner)).slice(-dockBudget);
 		const below = (this.options.dockBelow ?? [])
 			.flatMap((component) => component.render(inner))
 			.slice(0, Math.max(0, dockBudget - above.length));
-		// The status band opens with a rule so its boundary reads at a glance.
+		// The POV lane leads the status band; the editor sits inside its own two rules, so the bottom of
+		// the screen reads as separate lanes and never jumps with the band's contents.
+		const povRows = this.operatorStatus?.render(columns - 1) ?? [];
+		const rule = theme.fg("borderMuted", "─".repeat(columns));
 		const dockRows = [
-			...(above.length ? [theme.fg("borderMuted", "─".repeat(columns))] : []),
+			...povRows.map((line) => surfaceRow(line, columns)),
 			...above.map((line) => surfaceRow(gutter(line), columns)),
+			rule,
 			...editor.map(gutter),
+			rule,
 			...below.map(gutter),
 			this.hintRow(columns),
 		];
 		// The live row is reserved even when idle so the geometry never jumps between turns.
 		const activity = this.options.activity?.render(inner).slice(0, 1) ?? [];
 		const liveRow = activity.length ? gutter(activity[0]!) : "";
-		const operatorRows = this.operatorStatus?.render(columns) ?? [];
-		const head = [this.headline(columns), ...operatorRows];
+		const head = [this.headline(columns)];
 		const available = total - head.length - 1 - dockRows.length;
 		this.lastAvailable = available;
 		this.workLeft = 0;
@@ -790,6 +825,14 @@ export class WorkbenchComponent extends Container {
 		const header = this.conversationHeader(columns);
 		const body = this.conversation.render(inner, this.conversationHeight).map(gutter);
 		while (body.length < this.conversationHeight) body.push("");
-		return [...head, ...upper, this.divider(columns, upper.length > 0), header, ...body, liveRow, ...dockRows];
+		return [
+			...head,
+			...upper,
+			this.divider(columns, upper.length > 0, this.dividerJunctions()),
+			header,
+			...body,
+			liveRow,
+			...dockRows,
+		];
 	}
 }

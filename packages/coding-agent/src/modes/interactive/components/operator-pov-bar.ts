@@ -217,12 +217,22 @@ function renderSegment(segment: OperatorPovSegment, withExtension: boolean, plai
 	return `${label} ${styled}`;
 }
 
+/** The left block never shrinks below this many cells before a right segment is dropped instead. */
+const MIN_WORKING_WIDTH = 16;
+
+/** Only the phase text stays on the left; every operator fact, BLOCK included, anchors right. */
+function isLeftSegment(segment: OperatorPovSegment): boolean {
+	return segment.id === "working";
+}
+
 /**
- * Fits the segments into `width` by dropping in priority order, then shedding extensions, then
- * compacting values that have a shorter spelling, then shortening the WORKING text. Routing, Jev
- * and cost are never dropped: an operator must always be able to answer who is running and what it
- * costs, even on a narrow terminal. Only a width too small for the mandatory facts themselves ever
- * reaches the final right-side cut.
+ * Lays the segments out as two blocks, exactly `width` cells: the phase text (WORKING / NEEDS INPUT
+ * plus its BLOCK) on the left, and the operator facts (CONTROL, ACTOR, models, ROUTE, JEV, COST,
+ * PROOF, CTX) anchored to the right edge, so those columns never move while the left text changes
+ * length. The left text truncates first; right segments drop in priority order, then extensions
+ * shed, then values compact, only when the width cannot hold them beside a minimal left block.
+ * Routing, Jev and cost are never dropped: an operator must always be able to answer who is
+ * running and what it costs, even on a narrow terminal.
  */
 export function layoutOperatorPovSegments(
 	segments: readonly OperatorPovSegment[],
@@ -230,13 +240,19 @@ export function layoutOperatorPovSegments(
 	options: { plain?: boolean } = {},
 ): string {
 	const plain = options.plain ?? false;
-	const measure = (parts: string[]): number => visibleWidth(parts.join(OPERATOR_POV_SEPARATOR));
 	let kept = [...segments];
 	let extensions = true;
 	let compact = false;
-	const render = (): string[] => kept.map((segment) => renderSegment(segment, extensions, plain, compact));
+	const renderBlock = (block: readonly OperatorPovSegment[]): string =>
+		block.map((segment) => renderSegment(segment, extensions, plain, compact)).join(OPERATOR_POV_SEPARATOR);
+	const separator = visibleWidth(OPERATOR_POV_SEPARATOR);
 
-	while (measure(render()) > width) {
+	const leftRoom = (): number => {
+		const right = kept.filter((segment) => !isLeftSegment(segment));
+		const rightWidth = right.length ? visibleWidth(renderBlock(right)) : 0;
+		return width - rightWidth - (right.length ? separator : 0);
+	};
+	while (leftRoom() < MIN_WORKING_WIDTH) {
 		const droppable = kept.filter((segment) => segment.dropOrder > 0).sort((a, b) => a.dropOrder - b.dropOrder);
 		if (droppable.length > 0) {
 			const victim = droppable[0];
@@ -254,18 +270,18 @@ export function layoutOperatorPovSegments(
 		break;
 	}
 
-	const parts = render();
-	const overflow = measure(parts) - width;
-	if (overflow > 0) {
-		const workingIndex = kept.findIndex((segment) => segment.id === "working");
-		if (workingIndex !== -1) {
-			const working = kept[workingIndex];
-			const budget = Math.max(0, visibleWidth(working.value) - overflow);
-			const shortened = { ...working, value: truncateToWidth(working.value, budget, "…") };
-			parts[workingIndex] = renderSegment(shortened, extensions, plain, compact);
-		}
+	const right = kept.filter((segment) => !isLeftSegment(segment));
+	const left = kept.filter(isLeftSegment);
+	const rightText = right.length ? renderBlock(right) : "";
+	const rightWidth = visibleWidth(rightText);
+	const room = width - rightWidth - (right.length ? separator : 0);
+	if (room < 0) {
+		// Narrower than the mandatory facts themselves: the only honest output is the cut row.
+		return truncateToWidth(renderBlock([...left, ...right]), width, "…");
 	}
-	return truncateToWidth(parts.join(OPERATOR_POV_SEPARATOR), width, "…");
+	const leftText = truncateToWidth(renderBlock(left), room, "…");
+	const gap = Math.max(right.length ? separator : 0, width - visibleWidth(leftText) - rightWidth);
+	return `${leftText}${" ".repeat(gap)}${rightText}`;
 }
 
 /**

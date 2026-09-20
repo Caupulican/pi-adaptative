@@ -45,6 +45,9 @@ export interface AppKeybindings {
 	"app.execution.maximize": true;
 	"app.execution.pageUp": true;
 	"app.execution.pageDown": true;
+	"app.graph.toggle": true;
+	"app.graph.view": true;
+	"app.workbench.layout": true;
 	"app.clipboard.pasteImage": true;
 	"app.transcript.open": true;
 	"app.transcript.scrollUp": true;
@@ -180,6 +183,18 @@ export const KEYBINDINGS = {
 		defaultKeys: "alt+m",
 		description:
 			"Give the mouse to the workbench (wheel scroll, chips) or back to the terminal (native selection and paste)",
+	},
+	"app.graph.toggle": {
+		defaultKeys: "alt+g",
+		description: "Hide or show the Decision graph beside the conversation",
+	},
+	"app.graph.view": {
+		defaultKeys: "alt+l",
+		description: "Switch the Decision graph between List and Diagram",
+	},
+	"app.workbench.layout": {
+		defaultKeys: "alt+p",
+		description: "Put the conversation and Execution side by side, or stack them",
 	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: defaultImagePasteKeys(),
