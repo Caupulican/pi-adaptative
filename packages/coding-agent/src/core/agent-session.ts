@@ -1291,6 +1291,7 @@ export class AgentSession {
 			reapplyActiveProfileModelSettings: () => this._profileFilter.reapplyActiveProfileModelSettings(),
 			notifyExtensionsChanged: () => this._notifyExtensionsChanged(),
 			getToolArtifactStore: () => this._getToolArtifactStore(),
+			getDecisionLedger: () => this.getDecisionLedger(),
 			getToolTaskDependencies: () => this._backgroundToolTasks,
 			getSessionImageStore: () => this._getSessionImageStore(),
 			getMemoryManager: () => this._memory.getMemoryManager(),

@@ -40,6 +40,14 @@ export {
 	formatScoutResult,
 } from "./context-scout.ts";
 export {
+	createDecisionLedgerReadTool,
+	createDecisionLedgerReadToolDefinition,
+	DECISION_LEDGER_READ_TOOL_NAME,
+	type DecisionLedgerReadToolDetails,
+	type DecisionLedgerReadToolInput,
+	type DecisionLedgerReadToolOptions,
+} from "./decision-ledger-read.ts";
+export {
 	createEditTool,
 	createEditToolDefinition,
 	type EditOperations,
@@ -175,6 +183,11 @@ import {
 	createArtifactRetrieveToolDefinition,
 } from "./artifact-retrieve.ts";
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";
+import {
+	createDecisionLedgerReadTool,
+	createDecisionLedgerReadToolDefinition,
+	type DecisionLedgerReadToolOptions,
+} from "./decision-ledger-read.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import {
 	createDefaultExtensionifyRuntimeOptions,
@@ -221,6 +234,7 @@ export interface ToolsOptions {
 	skillify?: SkillifyToolOptions;
 	extensionify?: ExtensionifyToolOptions;
 	artifact_retrieve?: ArtifactRetrieveToolOptions;
+	decision_ledger_read?: DecisionLedgerReadToolOptions;
 	webfetch?: WebFetchOptions;
 }
 
@@ -276,6 +290,8 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createExtensionifyTool(cwd, options?.extensionify);
 		case "artifact_retrieve":
 			return createArtifactRetrieveTool(cwd, options?.artifact_retrieve);
+		case "decision_ledger_read":
+			return createDecisionLedgerReadTool(cwd, options?.decision_ledger_read);
 		case "webfetch":
 			return createWebFetchTool(cwd, options?.webfetch);
 		default:
@@ -330,6 +346,7 @@ export function createAllToolDefinitions(
 		skillify: createSkillifyToolDefinition(cwd, options?.skillify),
 		extensionify: createExtensionifyToolDefinition(cwd, options?.extensionify),
 		artifact_retrieve: createArtifactRetrieveToolDefinition(cwd, options?.artifact_retrieve),
+		decision_ledger_read: createDecisionLedgerReadToolDefinition(cwd, options?.decision_ledger_read),
 		webfetch: createWebFetchToolDefinition(cwd, options?.webfetch),
 	};
 }
@@ -381,6 +398,7 @@ export function createAllTools(
 		skillify: createSkillifyTool(cwd, options?.skillify),
 		extensionify: createExtensionifyTool(cwd, options?.extensionify),
 		artifact_retrieve: createArtifactRetrieveTool(cwd, options?.artifact_retrieve),
+		decision_ledger_read: createDecisionLedgerReadTool(cwd, options?.decision_ledger_read),
 		webfetch: createWebFetchTool(cwd, options?.webfetch),
 	};
 }

@@ -17,6 +17,7 @@
 
 import { ROOT_MEMORY_TOOL_NAME } from "./memory/worker-memory-tools.ts";
 import { getParentPid } from "./process-identity.ts";
+import { DECISION_LEDGER_READ_TOOL_NAME } from "./tools/decision-ledger-read.ts";
 import { getBoundWorktreeLaneKey } from "./worktree-sync/runtime.ts";
 
 export type SessionRole = "main" | "worker";
@@ -70,4 +71,6 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	"runtime_update",
 	"image_generate",
 	"task_automation",
+	// The decision ledger is the root's and System One's review surface; workers never read it.
+	DECISION_LEDGER_READ_TOOL_NAME,
 ]);

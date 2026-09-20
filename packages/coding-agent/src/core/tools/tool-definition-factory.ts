@@ -1,5 +1,6 @@
 import { type ArtifactRetrieveToolOptions, createArtifactRetrieveToolDefinition } from "./artifact-retrieve.ts";
 import { type BashToolOptions, createBashToolDefinition } from "./bash.ts";
+import { createDecisionLedgerReadToolDefinition, type DecisionLedgerReadToolOptions } from "./decision-ledger-read.ts";
 import { createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import {
 	createExtensionifyToolDefinitionWithRuntime,
@@ -33,6 +34,7 @@ export type ToolName =
 	| "skillify"
 	| "extensionify"
 	| "artifact_retrieve"
+	| "decision_ledger_read"
 	| "webfetch";
 
 export const allToolNames: ReadonlySet<ToolName> = new Set([
@@ -49,6 +51,7 @@ export const allToolNames: ReadonlySet<ToolName> = new Set([
 	"skillify",
 	"extensionify",
 	"artifact_retrieve",
+	"decision_ledger_read",
 	"webfetch",
 ]);
 
@@ -66,6 +69,7 @@ export interface ToolDefinitionOptions {
 	skillify?: SkillifyToolOptions;
 	extensionify: ExtensionifyRuntimeOptions;
 	artifact_retrieve?: ArtifactRetrieveToolOptions;
+	decision_ledger_read?: DecisionLedgerReadToolOptions;
 	webfetch?: WebFetchOptions;
 }
 
@@ -101,6 +105,8 @@ export function createToolDefinitionWithRuntime(
 			return createExtensionifyToolDefinitionWithRuntime(cwd, options.extensionify);
 		case "artifact_retrieve":
 			return createArtifactRetrieveToolDefinition(cwd, options.artifact_retrieve);
+		case "decision_ledger_read":
+			return createDecisionLedgerReadToolDefinition(cwd, options.decision_ledger_read);
 		case "webfetch":
 			return createWebFetchToolDefinition(cwd, options.webfetch);
 	}

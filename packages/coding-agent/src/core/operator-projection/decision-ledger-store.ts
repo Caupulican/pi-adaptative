@@ -36,6 +36,15 @@ export interface SemanticEvaluationLedgerRow {
 	readonly model?: string;
 }
 
+/** One recorded session of a working directory, as the read tool lists it. */
+export interface DecisionLedgerSessionRow {
+	readonly sessionId: string;
+	readonly firstAt: number;
+	readonly lastAt: number;
+	readonly stageEntries: number;
+	readonly evaluations: number;
+}
+
 export interface DecisionLedgerStoreOptions {
 	readonly databasePath: string;
 	readonly busyTimeoutMs?: number;
@@ -237,6 +246,38 @@ export class DecisionLedgerStore {
 		this.database
 			.prepare("UPDATE semantic_evaluations SET verdict = ?, reasons = COALESCE(?, reasons) WHERE evaluation_id = ?")
 			.run(verdict, reasons ? JSON.stringify(reasons) : null, evaluationId);
+	}
+
+	/** Sessions recorded for a working directory, newest activity first, bounded. */
+	listSessions(cwd: string, limit: number): DecisionLedgerSessionRow[] {
+		const rows = this.database
+			.prepare(
+				`SELECT session_id, MIN(first_at) AS first_at, MAX(last_at) AS last_at,
+					SUM(stage_entries) AS stage_entries, SUM(evaluations) AS evaluations
+				FROM (
+					SELECT session_id, MIN(entered_at) AS first_at, MAX(entered_at) AS last_at, COUNT(*) AS stage_entries, 0 AS evaluations
+						FROM stage_entries WHERE cwd = ? GROUP BY session_id
+					UNION ALL
+					SELECT session_id, MIN(started_at) AS first_at, MAX(started_at) AS last_at, 0 AS stage_entries, COUNT(*) AS evaluations
+						FROM semantic_evaluations WHERE cwd = ? GROUP BY session_id
+				) GROUP BY session_id ORDER BY last_at DESC LIMIT ?`,
+			)
+			.all(cwd, cwd, Math.max(1, Math.floor(limit)));
+		const out: DecisionLedgerSessionRow[] = [];
+		for (const row of rows) {
+			const sessionId = asText(row.session_id);
+			const firstAt = asInteger(row.first_at);
+			const lastAt = asInteger(row.last_at);
+			if (sessionId === undefined || firstAt === undefined || lastAt === undefined) continue;
+			out.push({
+				sessionId,
+				firstAt,
+				lastAt,
+				stageEntries: asInteger(row.stage_entries) ?? 0,
+				evaluations: asInteger(row.evaluations) ?? 0,
+			});
+		}
+		return out;
 	}
 
 	/** Recent evaluations of a session, newest first, bounded. */

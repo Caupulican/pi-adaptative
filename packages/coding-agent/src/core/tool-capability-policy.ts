@@ -77,6 +77,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["worktree_sync", policy([["worktree.mutate", "filesystem.write"]], "path-scope")],
 	["ask_question", policy([["workflow.plan", "memory.query"]], "control-plane")],
 	["artifact_retrieve", policy([["filesystem.read"]], "path-scope")],
+	["decision_ledger_read", policy([["memory.query"]], "memory-broker")],
 	["context_scout", policy([["filesystem.read"]], "path-scope")],
 	["pi_collaboration", policy([["process.exec"], ["workflow.delegate"]], "process-launcher")],
 	["improvement_loop", policy([["process.exec", "tests.execute"]], "process-launcher")],

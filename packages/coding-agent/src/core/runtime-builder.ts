@@ -107,6 +107,7 @@ import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { resolveModelToolProtocol } from "./model-tool-protocol.ts";
 import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
+import type { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { OrchestrationProfile, WorkerResultContract } from "./orchestration/contracts.ts";
 import type { TaskProfileWriterPort } from "./orchestration/task-profile-writer.ts";
 import { resolvePipelineDefinitionForRun } from "./pipelines/discover.ts";
@@ -339,6 +340,8 @@ export interface RuntimeBuilderDeps {
 
 	/** Session-scoped tool-output artifact store for artifact-producing tools and artifact_retrieve (gated on the profile). */
 	getToolArtifactStore(): ArtifactStore;
+	/** The session's decision ledger (stage transitions, Jev evaluations), read by the root's ledger tool. */
+	getDecisionLedger?(): DecisionLedgerStore | undefined;
 	/** Session-owned slow-tool registry. Optional only for narrow RuntimeBuilder test/embedding seams. */
 	getToolTaskDependencies?(): ToolTaskDependencies;
 	getRuntimeUpdateTool?(): ToolDefinition | undefined;
@@ -1075,6 +1078,11 @@ export class RuntimeBuilder {
 			grep: { artifactStore: toolArtifactStore },
 			find: { artifactStore: toolArtifactStore },
 			artifact_retrieve: { artifactStore: toolArtifactStore },
+			decision_ledger_read: {
+				getLedger: () => this.deps.getDecisionLedger?.(),
+				getSessionId: () => this.deps.getSessionManager().getSessionId(),
+				getCwd: () => this.deps.getCwd(),
+			},
 			webfetch: { artifactStore: toolArtifactStore },
 			skill_audit: { getSkills: () => resourceLoader.getSkills().skills },
 			skillify: { getSkills: () => resourceLoader.getSkills().skills },
