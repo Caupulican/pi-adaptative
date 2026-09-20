@@ -13,17 +13,24 @@ Evidence stays on screen until it is replaced: completion does not fold it, and 
 One `|`-separated row under the title strip is the only normal-mode operator status surface; the status band's own row is location only, so nothing is shown twice. Every value is a live read of canonical state on each render — the session's operator projection, the router's foreground route snapshot, the semantic plane's observed health and the session cost summary — never a literal:
 
 ```text
-WORKING build: Simplifying settings | NEXT verify 5 open criteria | ACTOR root | ROOT gpt-5.6 | ACTIVE claude-sonnet-4-6 | ROUTE medium via model-router/H-MoE | JEV ok | COST $0.083 | PROOF 0/5 | CTX 11.6%
+WORKING build: Simplifying settings | CONTROL S1 | NEXT verify 5 open criteria | ACTOR worker settings | ROOT gpt-5.6 | ACTIVE claude-sonnet-4-6 | ROUTE medium via model-router/H-MoE | JEV ok | COST $0.083 | PROOF 0/5 | CTX 11.6%
 ```
 
 - **WORKING** (or **BLOCKED** / **DONE**): the canonical phase and current action; a block shows its reason.
+- **CONTROL**: who owns the next objective transition — `S1` while System One (the goal loop and its semantic plane) owns an active objective, `ROOT` when no objective is active (the root loop decides), `USER` only while an owner question is pending. It is a reason-coded runtime fact derived from the goal continuation verdict and the durable human-input record, never a narration, and it is independent of ACTOR: a worker can be executing (`ACTOR worker …`) while `CONTROL S1` reviews what comes next, and a returned worker is evidence for System One to review (`WORKING build: Reviewing worker result: …`), never completion by itself. The router and H-MoE choose models; they are never CONTROL owners.
 - **NEXT**: the canonical next action. **ACTOR**: root, or the running worker/specialist.
 - **ROOT** / **ACTIVE**: the persistent session model and the model actually executing; they are shown separately only while a routed turn has swapped the model, otherwise one **MODEL** slot.
 - **ROUTE**: who chose the active model — `direct`, `manual:<model>`, `<tier> via model-router`, `<tier> via model-router/H-MoE`, or `escalated→<model> via model-router`. Jev is never credited with a model choice.
 - **JEV**: the semantic plane's observed state — `off` (no plane), `ready` (bound, no evaluation yet), `eval` (a real evaluation in flight), `ok`, `degraded` (the last evaluation failed).
 - **COST**: the session's canonical current cost, with `(sub $…)` for spawned cost when present. **PROOF** and **CTX**: the projection's proof counters and context usage.
 
-When the width is short, `CTX`, `PROOF`, a root `ACTOR` and the spawned-cost tail drop first, then `ROUTE` compacts (`via router`) and the `WORKING` text shortens; `ACTIVE`/`MODEL`, `ROUTE`, `JEV` and `COST` are never dropped, so routing and cost truth are not cut from the right. The bar is render-only and never captures input; the editor stays interactive. Router configuration is described in `router-setup.md`.
+While an owner question is open the leading segment reads `NEEDS INPUT <question>` with `CONTROL USER` and a `BLOCK <question>` segment; the question itself stays in the normal question dialog:
+
+```text
+NEEDS INPUT choose onboarding behavior | CONTROL USER | ACTOR root | MODEL gpt-5.6 | ROUTE direct | JEV ok | COST $0.083 | BLOCK choose onboarding behavior
+```
+
+When the width is short, segments drop in a fixed order — `CTX`, `PROOF`, the duplicate `ROOT`, a root `ACTOR`, `BLOCK`, `NEXT`, then a worker `ACTOR` — then the spawned-cost tail sheds, `ROUTE` compacts (`via router`) and the `WORKING` text shortens; `WORKING`/`NEEDS INPUT`, `CONTROL`, `ACTIVE`/`MODEL`, `ROUTE`, `JEV` and `COST` are never dropped, so control, routing and cost truth are not cut from the right. `JEV eval` is shown only while a real evaluation is in flight; a cancelled evaluation returns the label to its previous state and never reads `degraded`. The bar is render-only and never captures input; the editor stays interactive. Router configuration is described in `router-setup.md`.
 
 The conversation viewport never emits the OSC 133 prompt-zone marks that the inline transcript components carry: a terminal may treat one as "a prompt starts here" and move the cursor to column 0, which corrupted framed rows in Herdr, and the alternate screen has no scrollback for those marks to navigate.
 
