@@ -29,7 +29,7 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 		};
 
 		const harness = await createHarness({
-			tools: [stuckTool],
+			baseToolsOverride: [stuckTool],
 		});
 		try {
 			// This test exercises the core identical-call backstop directly. The autonomy
@@ -533,7 +533,7 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 				throw new Error("Credential profile is unavailable.");
 			},
 		};
-		const harness = await createHarness({ tools: [failingTool] });
+		const harness = await createHarness({ baseToolsOverride: [failingTool] });
 		try {
 			const state = applyGoalEvent(
 				createGoalState({ goalId: "goal-recovery", userGoal: "Finish the audit", now: "T0" }),
@@ -586,7 +586,7 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 				};
 			},
 		};
-		const harness = await createHarness({ tools: [terminalTool] });
+		const harness = await createHarness({ baseToolsOverride: [terminalTool] });
 		try {
 			const state = applyGoalEvent(
 				createGoalState({ goalId: "goal-terminal", userGoal: "Finish the audit", now: "T0" }),

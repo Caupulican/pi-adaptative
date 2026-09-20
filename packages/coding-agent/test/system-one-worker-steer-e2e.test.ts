@@ -1,6 +1,7 @@
-import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
+import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
 import { describe, expect, it, vi } from "vitest";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
+import { setConcurrentResponses } from "./suite/concurrent-responses.ts";
 import { createHarness } from "./suite/harness.ts";
 
 function shellWorkerProfile(): OrchestrationProfile {
@@ -28,8 +29,8 @@ function shellWorkerProfile(): OrchestrationProfile {
  * A real worker on the faux transport with the session's real tools: System One steers it "now"
  * while its first turn sits inside a bash call that would run for a long time. The attempt is
  * interrupted (the shell is killed with the lane), the directive is queued, the attempt resumes,
- * and the worker's next turn opens on the directive. Worker requests are told apart from the
- * root's by the leaf-worker system prompt.
+ * and the worker's next turn opens on the directive. Worker requests carry the `lane:worker:`
+ * affinity key, which the shared script router keys on.
  */
 describe("System One steers a running worker now", () => {
 	it("interrupts the worker's turn, resumes it, and the directive is in the worker's transcript", async () => {
@@ -39,16 +40,10 @@ describe("System One steers a running worker now", () => {
 			settings: { workerDelegation: { enabled: true } },
 		});
 		try {
-			const workerSteps = [
+			setConcurrentResponses(harness, [
 				fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 30" })], { stopReason: "toolUse" }),
 				fauxAssistantMessage('{"summary":"stopped and reported","status":"completed"}'),
-			];
-			let workerIndex = 0;
-			const respond: FauxResponseFactory = (context) =>
-				context.systemPrompt?.includes("Autonomous leaf worker")
-					? (workerSteps[workerIndex++] ?? fauxAssistantMessage('{"summary":"done","status":"completed"}'))
-					: fauxAssistantMessage("Background handoff acknowledged.");
-			harness.setResponses([respond, respond, respond, respond, respond, respond]);
+			]);
 
 			const run = harness.session.runWorkerDelegationOnce({ instructions: "Validate the parser, slowly." });
 			const lanes = () =>

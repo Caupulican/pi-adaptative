@@ -20,6 +20,7 @@
 - A row-following pane (`{ row }` follow) re-anchors only when the followed row changes, so the operator's scroll holds between frames.
 - `SemanticPlaneHealthRecorder` replaces its `record*` methods with the evaluation observer (`start` / `settleOk` / `settleFailed` / `settleCancelled` / `noteVerdict`) and exposes the in-flight evaluations, a bounded recent ring and a subscription; `SemanticPlaneHealth.inFlightEvaluations` names what Jev is judging.
 - `AuditStore` and the operator event lists are rings of 256; `OperatorProjectionController.transitionPhase` (no production caller) is removed.
+- The release wiring manifest names System One's worker control as the consumer of worker supervision, and the decision ledger's read tool carries its own 100-token schema allowance in the context-composition contract (base subtotal unchanged).
 
 ### Fixed
 

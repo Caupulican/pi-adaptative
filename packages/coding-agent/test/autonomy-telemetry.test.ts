@@ -200,7 +200,7 @@ describe("autonomy telemetry emission (G3)", () => {
 			parameters: readParameters,
 			execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
 		};
-		const harness = await createHarness({ tools: [readTool] });
+		const harness = await createHarness({ baseToolsOverride: [readTool] });
 		try {
 			harness.session.capabilityEnvelope = { id: "env-1", capabilities: ["filesystem.read"] };
 			harness.setResponses([

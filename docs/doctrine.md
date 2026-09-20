@@ -621,8 +621,14 @@ Pinned by `packages/coding-agent/test/system-one-foreground-control.test.ts` and
 **The decision ledger is an input, never erased.** Every stage transition, Jev evaluation and route
 is appended to one SQLite database per agent directory, keyed by session id and working directory.
 The objective's recent routes are a history block in the state the judge reads, and "repeated without
-new evidence" is a fact from those rows: one route on one evidence marker, twice.
-Pinned by `packages/coding-agent/test/ledger-route-checkpoints.test.ts`.
+new evidence" is a fact from those rows: one route on one evidence marker, twice. The root reads
+the ledger through `decision_ledger_read`, a bounded query tool never exposed to workers; its
+projected schema costs at most 100 tokens, budgeted separately from the 4,500-token base ceiling
+and the other separately-measured additions (aggregate 5,670 = 4,500 + 350 task_directory +
+720 task_automation + 100 decision_ledger_read; the Jev tool's 512 stays inside the base subtotal
+accounting), so the ledger surface cannot hide growth in the pre-existing tools.
+Pinned by `packages/coding-agent/test/ledger-route-checkpoints.test.ts` and
+`packages/coding-agent/test/context-composition.test.ts`.
 
 ## Structure
 
@@ -750,8 +756,9 @@ measurement gains no new surface.
 ## Changes to this file
 
 | Date | Change |
-| 2026-09-21 | System One integration: `objective_primary` drives the goal loop (root and workers as routed executors, completion only through the coordinator, goal follows the objective's terminal), cancel/steer levers for the root and for workers, and the decision ledger as a route input. New section "System One". |
 |---|---|
+| 2026-09-21 | `decision_ledger_read` joins the default root tool surface with its own 100-token schema allowance; aggregate ceiling 5,670, base subtotal unchanged at 4,500. |
+| 2026-09-21 | System One integration: `objective_primary` drives the goal loop (root and workers as routed executors, completion only through the coordinator, goal follows the objective's terminal), cancel/steer levers for the root and for workers, and the decision ledger as a route input. New section "System One". |
 | 2026-09-17 | Provider completion retains its admitted account identity. Successful recovery requires a request start strictly newer than the stored cooldown, so late or unowned successes cannot erase sibling limits. Cancellation during transport creation releases admission immediately. |
 | 2026-09-16 | Specialist reuse admission compares compiled options at the host, including named read-only requests; replay identity survives branch-leaf changes. The new explicit parallel-work field receives a separate 75-token allowance while the old 875-token delegate surface and aggregate base-tool ceiling remain fixed. |
 | 2026-09-15 | Read miss locates via `filesystem.file.exists`; write-create is a separate kind and is not loaded from that observation. Phone filesystem workflow asserts locate evidence, not create teaching. |

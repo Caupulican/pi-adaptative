@@ -39,6 +39,7 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
 				"webfetch",
+				"decision_ledger_read",
 				"skill",
 				"skillify",
 				"skill_audit",

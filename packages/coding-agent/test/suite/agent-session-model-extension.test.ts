@@ -128,7 +128,7 @@ describe("AgentSession model and extension characterization", () => {
 			},
 		};
 		const harness = await createHarness({
-			tools: [echoTool],
+			baseToolsOverride: [echoTool],
 			extensionFactories: [
 				(pi) => {
 					pi.on("tool_call", async () => ({ block: true, reason: "Blocked by test" }));
@@ -167,7 +167,7 @@ describe("AgentSession model and extension characterization", () => {
 			},
 		};
 		const harness = await createHarness({
-			tools: [echoTool],
+			baseToolsOverride: [echoTool],
 			extensionFactories: [
 				(pi) => {
 					pi.on("tool_result", async () => ({

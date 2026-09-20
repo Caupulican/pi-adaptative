@@ -37,7 +37,7 @@ async function createWaitingHarness(
 	};
 	const harness = await createHarness({
 		settings: { autoLearn: { reflectionReview: false } },
-		tools: [waitTool, ...(options.tools ?? [])],
+		baseToolsOverride: [waitTool, ...(options.tools ?? [])],
 		extensionFactories: options.extensionFactories,
 	});
 
@@ -394,7 +394,7 @@ describe("AgentSession queue characterization", () => {
 		};
 		const harness = await createHarness({
 			settings: { autoLearn: { reflectionReview: false } },
-			tools: [waitTool],
+			baseToolsOverride: [waitTool],
 		});
 		harnesses.push(harness);
 		// "wait" arrives through createHarness's baseToolsOverride, which replaces the default

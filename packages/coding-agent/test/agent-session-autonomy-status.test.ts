@@ -29,7 +29,7 @@ const bashTool: AgentTool<typeof bashParameters> = {
 
 describe("AgentSession - Autonomy Status Snapshot", () => {
 	it("returns an empty snapshot object when there is no router decision and no active envelope", async () => {
-		const harness = await createHarness({ tools: [bashTool] });
+		const harness = await createHarness({ baseToolsOverride: [bashTool] });
 
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("bash", { command: "ls" })], { stopReason: "toolUse" }),
@@ -54,7 +54,7 @@ describe("AgentSession - Autonomy Status Snapshot", () => {
 				return { content: [{ type: "text", text: "ok" }], details: {} };
 			},
 		};
-		const harness = await createHarness({ tools: [blockingTool] });
+		const harness = await createHarness({ baseToolsOverride: [blockingTool] });
 
 		harness.session.capabilityEnvelope = {
 			id: "env-1",
@@ -85,7 +85,7 @@ describe("AgentSession - Autonomy Status Snapshot", () => {
 	});
 
 	it("records allow/allowed_by_envelope or equivalent stable reason when a tool is allowed under an active envelope", async () => {
-		const harness = await createHarness({ tools: [bashTool] });
+		const harness = await createHarness({ baseToolsOverride: [bashTool] });
 
 		harness.session.capabilityEnvelope = {
 			id: "env-1",
@@ -111,7 +111,7 @@ describe("AgentSession - Autonomy Status Snapshot", () => {
 	});
 
 	it("includes cost metrics from the shared cost summary", async () => {
-		const harness = await createHarness({ tools: [bashTool] });
+		const harness = await createHarness({ baseToolsOverride: [bashTool] });
 		harness.session.addSpawnedUsage(usage(0.25), { reportId: "status-cost" });
 
 		const snapshot = harness.session.getAutonomyStatusSnapshot();
@@ -122,7 +122,7 @@ describe("AgentSession - Autonomy Status Snapshot", () => {
 	});
 
 	it("includes CURRENT as own assistant-message usage plus spawned cost", async () => {
-		const harness = await createHarness({ tools: [bashTool] });
+		const harness = await createHarness({ baseToolsOverride: [bashTool] });
 		const model = harness.getModel();
 		harness.session.sessionManager.appendMessage({
 			role: "assistant",
@@ -145,7 +145,7 @@ describe("AgentSession - Autonomy Status Snapshot", () => {
 	});
 
 	it("includes latestRoute with tier/risk/reasonCode only when a model router decision is present", async () => {
-		const harness = await createHarness({ tools: [bashTool] });
+		const harness = await createHarness({ baseToolsOverride: [bashTool] });
 
 		const mockDecision: ModelRouterDecisionStatus = {
 			route: {
@@ -182,7 +182,7 @@ describe("AgentSession - Autonomy Status Snapshot", () => {
 	});
 
 	it("populates activeGoal from real goal state and never fabricates activeLaneCount", async () => {
-		const harness = await createHarness({ tools: [bashTool] });
+		const harness = await createHarness({ baseToolsOverride: [bashTool] });
 
 		const emptySnapshot = harness.session.getAutonomyStatusSnapshot();
 		expect(emptySnapshot.activeGoal).toBeUndefined();
@@ -201,7 +201,7 @@ describe("AgentSession - Autonomy Status Snapshot", () => {
 
 describe("AgentSession - Autonomy Diagnostic Snapshot", () => {
 	it("returns no fabricated families when nothing has happened yet, only real process memory", async () => {
-		const harness = await createHarness({ tools: [bashTool] });
+		const harness = await createHarness({ baseToolsOverride: [bashTool] });
 
 		const snapshot = harness.session.getAutonomyDiagnosticSnapshot();
 		expect(snapshot.routes).toBeUndefined();
@@ -228,7 +228,7 @@ describe("AgentSession - Autonomy Diagnostic Snapshot", () => {
 	});
 
 	it("routes family reflects a real recorded model-router decision", async () => {
-		const harness = await createHarness({ tools: [bashTool] });
+		const harness = await createHarness({ baseToolsOverride: [bashTool] });
 
 		const mockDecision: ModelRouterDecisionStatus = {
 			route: {
@@ -266,7 +266,7 @@ describe("AgentSession - Autonomy Diagnostic Snapshot", () => {
 				return { content: [{ type: "text", text: "ok" }], details: {} };
 			},
 		};
-		const harness = await createHarness({ tools: [blockingTool] });
+		const harness = await createHarness({ baseToolsOverride: [blockingTool] });
 		harness.session.capabilityEnvelope = {
 			id: "env-1",
 			capabilities: ["filesystem.read"],
@@ -290,7 +290,7 @@ describe("AgentSession - Autonomy Diagnostic Snapshot", () => {
 	});
 
 	it("costs family reflects CURRENT, TODAY, and SUBAGENTS from the shared cost summary when non-zero", async () => {
-		const harness = await createHarness({ tools: [bashTool] });
+		const harness = await createHarness({ baseToolsOverride: [bashTool] });
 		harness.session.getCostSummary = () => ({
 			ownCost: 0.75,
 			subagentCost: 0.5,
@@ -316,7 +316,7 @@ describe("AgentSession - Autonomy Diagnostic Snapshot", () => {
 	});
 
 	it("research family reflects a saved evidence bundle as counts only, never source/finding text", async () => {
-		const harness = await createHarness({ tools: [bashTool] });
+		const harness = await createHarness({ baseToolsOverride: [bashTool] });
 		const bundle = createEvidenceBundle({
 			query: "investigate the outage",
 			sources: [{ id: "s1", kind: "workspace", trusted: true, excerpt: "SECRET-CONTENT" }],
@@ -334,7 +334,7 @@ describe("AgentSession - Autonomy Diagnostic Snapshot", () => {
 	});
 
 	it("delegation family reflects saved worker results, capped at the configured max, with counts only", async () => {
-		const harness = await createHarness({ tools: [bashTool] });
+		const harness = await createHarness({ baseToolsOverride: [bashTool] });
 		for (let i = 0; i < 15; i++) {
 			harness.session.saveWorkerClaimSnapshot({
 				requestId: `req-${i}`,
@@ -358,7 +358,7 @@ describe("AgentSession - Autonomy Diagnostic Snapshot", () => {
 	});
 
 	it("learning family reflects saved learning decisions, capped at the configured max", async () => {
-		const harness = await createHarness({ tools: [bashTool] });
+		const harness = await createHarness({ baseToolsOverride: [bashTool] });
 		for (let i = 0; i < 15; i++) {
 			harness.session.saveLearningDecisionSnapshot({
 				kind: "proposal",
@@ -378,7 +378,7 @@ describe("AgentSession - Autonomy Diagnostic Snapshot", () => {
 	});
 
 	it("goals family reflects a saved goal state snapshot", async () => {
-		const harness = await createHarness({ tools: [bashTool] });
+		const harness = await createHarness({ baseToolsOverride: [bashTool] });
 		const goal = createGoalState({ goalId: "goal-2", userGoal: "Refactor the module", now: "T0" });
 		harness.session.saveGoalStateSnapshot(goal);
 

@@ -10,7 +10,7 @@ describe("memory validation recovery", () => {
 		const provider = new FileStoreProvider();
 		const tool = wrapToolDefinition(provider.getToolDefinitions()[0]);
 		const execute = vi.fn(tool.execute);
-		const harness = await createHarness({ tools: [{ ...tool, execute }] });
+		const harness = await createHarness({ baseToolsOverride: [{ ...tool, execute }] });
 		await provider.initialize("preflight", {
 			agentDir: join(harness.tempDir, "memory-fixture"),
 			cwd: harness.tempDir,

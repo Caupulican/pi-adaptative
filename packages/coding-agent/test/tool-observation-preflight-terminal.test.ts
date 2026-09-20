@@ -21,7 +21,7 @@ describe("terminal observations for calls that never execute", () => {
 		const reads = vi.fn((path: string) => readFile(path));
 		const harness = await createHarness({
 			initialActiveToolNames: ["read"],
-			tools: [createReadTool(process.cwd(), { operations: { readFile: reads, access } })],
+			baseToolsOverride: [createReadTool(process.cwd(), { operations: { readFile: reads, access } })],
 		});
 		try {
 			if (mode === "selector failure") {

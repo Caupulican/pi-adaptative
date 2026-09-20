@@ -101,7 +101,7 @@ describe("tool_call failure presence", () => {
 			let providerResult: { isError: boolean; text: string } | undefined;
 			const harness = await createHarness({
 				initialActiveToolNames: ["read"],
-				tools: [createReadTool(process.cwd(), { operations: { readFile: reads, access } })],
+				baseToolsOverride: [createReadTool(process.cwd(), { operations: { readFile: reads, access } })],
 				extensionFactories: [
 					(pi) => {
 						pi.on("tool_call", () => {

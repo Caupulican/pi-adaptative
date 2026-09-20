@@ -280,7 +280,7 @@ describe("AgentSession retry and event characterization", () => {
 			},
 		};
 		const harness = await createHarness({
-			tools: [echoTool],
+			baseToolsOverride: [echoTool],
 			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
 		});
 		harnesses.push(harness);
@@ -409,7 +409,7 @@ describe("AgentSession retry and event characterization", () => {
 				return { content: [{ type: "text", text: `echo:${text}` }], details: { text } };
 			},
 		};
-		const harness = await createHarness({ tools: [echoTool] });
+		const harness = await createHarness({ baseToolsOverride: [echoTool] });
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("echo", { text: "hello" })], { stopReason: "toolUse" }),

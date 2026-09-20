@@ -27,7 +27,7 @@ describe("operator projection phases reach the projection from their real bounda
 				return { content: [{ type: "text" as const, text: "ok" }], details: {} };
 			},
 		} satisfies AgentTool<typeof bashParameters>;
-		const harness = await createHarness({ tools: [tool], settings: { edge: { allow: [] } } });
+		const harness = await createHarness({ baseToolsOverride: [tool], settings: { edge: { allow: [] } } });
 		session = harness.session;
 		harness.session.setEdgeConfirmation(async () => "deny");
 		try {

@@ -22,7 +22,7 @@ describe("tool_call veto composition", () => {
 			});
 			const harness = await createHarness({
 				initialActiveToolNames: ["read"],
-				tools: [createReadTool(process.cwd(), { operations: { readFile: reads, access } })],
+				baseToolsOverride: [createReadTool(process.cwd(), { operations: { readFile: reads, access } })],
 				extensionFactories: [
 					(pi) => {
 						pi.on("tool_call", () => (++calls === 1 ? decision : undefined));
@@ -91,7 +91,7 @@ describe("tool_call veto composition", () => {
 				});
 				const harness = await createHarness({
 					initialActiveToolNames: ["read"],
-					tools: [createReadTool(process.cwd(), { operations: { readFile: reads, access } })],
+					baseToolsOverride: [createReadTool(process.cwd(), { operations: { readFile: reads, access } })],
 					extensionFactories: separateExtensions
 						? factories
 						: [

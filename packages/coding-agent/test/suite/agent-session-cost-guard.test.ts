@@ -376,7 +376,7 @@ describe("AgentSession cost guard", () => {
 					compaction: { reserveTokens: 16_384 },
 					costGuard: { enabled: true, maxTurnUsd: 2.5, action: "warn" },
 				},
-				tools: [bgSpendTool],
+				baseToolsOverride: [bgSpendTool],
 			});
 			harnesses.push(harness);
 
@@ -415,7 +415,7 @@ describe("AgentSession cost guard", () => {
 					compaction: { reserveTokens: 16_384 },
 					costGuard: { enabled: true, maxTurnUsd: 2.5, action: "warn" },
 				},
-				tools: [bgSpendTool],
+				baseToolsOverride: [bgSpendTool],
 			});
 			harnesses.push(harness);
 
@@ -454,7 +454,7 @@ describe("AgentSession cost guard", () => {
 					compaction: { reserveTokens: 16_384 },
 					costGuard: { enabled: true, maxTurnUsd: 2.5, action: "warn" },
 				},
-				tools: [bgSpendTool],
+				baseToolsOverride: [bgSpendTool],
 			});
 			harnesses.push(harness);
 

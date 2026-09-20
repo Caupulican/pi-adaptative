@@ -128,6 +128,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"ask_question",
 					"bash",
 					"create_goal",
+					"decision_ledger_read",
 					"delegate",
 					"edit",
 					"get_goal",
@@ -175,20 +176,26 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// The requested Jev tool gets its own 512-token policy ceiling inside the unchanged
 			// aggregate allowance. Its actual cost is removed only from the pre-Jev subtotal,
 			// so unused Jev allowance cannot hide growth in the original tool surface.
+			// The decision ledger's read tool (System One's bounded ledger query, root only) gets its
+			// own 100-token ceiling on the same terms: added to the aggregate, removed from the base
+			// subtotal by its actual cost, never a slack for the pre-existing surface.
 			expect(
 				report.toolSchemaTokens,
 				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),
-			).toBeLessThanOrEqual(4_500 + 350 + 720);
+			).toBeLessThanOrEqual(4_500 + 350 + 720 + 100);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("task_directory")).toBeLessThanOrEqual(350);
 			expect(toolTokens.get("task_automation")).toBeLessThanOrEqual(720);
 			expect(toolTokens.get("typesafe_review")).toBeGreaterThan(0);
 			expect(toolTokens.get("typesafe_review")).toBeLessThanOrEqual(512);
+			expect(toolTokens.get("decision_ledger_read")).toBeGreaterThan(0);
+			expect(toolTokens.get("decision_ledger_read")).toBeLessThanOrEqual(100);
 			expect(
 				report.toolSchemaTokens -
 					toolTokens.get("task_directory")! -
 					toolTokens.get("task_automation")! -
-					toolTokens.get("typesafe_review")!,
+					toolTokens.get("typesafe_review")! -
+					toolTokens.get("decision_ledger_read")!,
 			).toBeLessThanOrEqual(4_500);
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(160);
 			// Explicit independent work adds one bounded object to delegate's wire contract. Keep

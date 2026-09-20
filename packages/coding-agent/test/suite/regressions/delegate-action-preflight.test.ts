@@ -21,7 +21,7 @@ describe("delegation validation recovery", () => {
 			}),
 		);
 		const execute = vi.fn(tool.execute);
-		const harness = await createHarness({ tools: [{ ...tool, execute }] });
+		const harness = await createHarness({ baseToolsOverride: [{ ...tool, execute }] });
 		harness.setResponses([
 			fauxAssistantMessage(
 				fauxToolCall(

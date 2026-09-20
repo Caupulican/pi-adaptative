@@ -80,7 +80,13 @@ export interface HarnessOptions {
 	fauxProvider?: Pick<RegisterFauxProviderOptions, "api" | "provider" | "onRequest">;
 	settings?: Partial<Settings>;
 	systemPrompt?: string;
-	tools?: AgentTool[];
+	/**
+	 * Replaces the session's whole base tool set (the session config's `baseToolsOverride`): only the
+	 * listed tools exist, so builtins such as `delegate`, `bash` and `typesafe_review` are absent and
+	 * a worker delegation reports `delegate_tool_inactive`. To hand a worker a real tool, keep the
+	 * default set and grant it through `workerOrchestrationProfile` instead.
+	 */
+	baseToolsOverride?: AgentTool[];
 	initialActiveToolNames?: string[];
 	allowedToolNames?: string[];
 	excludedToolNames?: string[];
@@ -137,7 +143,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		});
 	if (!options.sharedFauxProvider) fauxProvider.setResponses([]);
 	const model = fauxProvider.getModel();
-	const toolMap = options.tools ? Object.fromEntries(options.tools.map((tool) => [tool.name, tool])) : undefined;
+	const toolMap = options.baseToolsOverride
+		? Object.fromEntries(options.baseToolsOverride.map((tool) => [tool.name, tool]))
+		: undefined;
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 

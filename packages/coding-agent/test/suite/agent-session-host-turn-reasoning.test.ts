@@ -45,7 +45,7 @@ describe("AgentSession host-turn reasoning", () => {
 		const harness = await createHarness({
 			models: [{ id: "reasoner", reasoning: true }],
 			settings: { autoLearn: { reflectionReview: false } },
-			tools: [waitTool],
+			baseToolsOverride: [waitTool],
 			...settings,
 		});
 		harnesses.push(harness);

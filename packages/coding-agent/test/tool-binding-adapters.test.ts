@@ -465,7 +465,10 @@ describe("invocation binding across registry and policy adapters", () => {
 		"runs the definition-first AgentSession registry with the bound %s call; prototype=%s",
 		async (path, prototype) => {
 			if (prototype) tool.bindInvocation = async () => new PrototypeInvocation();
-			const harness = await createHarness({ tools: [tool], settings: { modelCapability: { mode: "off" } } });
+			const harness = await createHarness({
+				baseToolsOverride: [tool],
+				settings: { modelCapability: { mode: "off" } },
+			});
 			try {
 				harness.session.capabilityEnvelope = {
 					id: "fixture",

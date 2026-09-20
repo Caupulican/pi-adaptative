@@ -35,7 +35,7 @@ describe("issue #2023 queued slash-command follow-up", () => {
 			},
 		};
 		const harness = await createHarness({
-			tools: [waitTool],
+			baseToolsOverride: [waitTool],
 			extensionFactories: [
 				(pi) => {
 					extensionApi = pi;
@@ -99,7 +99,7 @@ describe("issue #2023 queued slash-command follow-up", () => {
 			},
 		};
 		const harness = await createHarness({
-			tools: [waitTool],
+			baseToolsOverride: [waitTool],
 			extensionFactories: [
 				(pi) => {
 					extensionApi = pi;

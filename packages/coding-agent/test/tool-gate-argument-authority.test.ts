@@ -133,7 +133,7 @@ describe("post-hook argument authority", () => {
 			let decoyPath = "";
 			const reads = vi.fn((path: string) => readFile(path));
 			const harness = await createHarness({
-				tools: instrumented
+				baseToolsOverride: instrumented
 					? [createReadTool(process.cwd(), { operations: { readFile: reads, access } })]
 					: undefined,
 				initialActiveToolNames: ["read"],

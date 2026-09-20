@@ -56,7 +56,7 @@ describe("System One foreground control", () => {
 				return { content: [{ type: "text" as const, text: "ok" }], details: {} };
 			},
 		} satisfies AgentTool<typeof parameters>;
-		const harness = await createHarness({ tools: [tool] });
+		const harness = await createHarness({ baseToolsOverride: [tool] });
 		session = harness.session;
 		try {
 			harness.setResponses([

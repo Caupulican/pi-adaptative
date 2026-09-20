@@ -56,7 +56,7 @@ describe("AgentSession prompt characterization", () => {
 				};
 			},
 		};
-		const harness = await createHarness({ tools: [echoTool] });
+		const harness = await createHarness({ baseToolsOverride: [echoTool] });
 		harnesses.push(harness);
 
 		harness.setResponses([
@@ -95,7 +95,7 @@ describe("AgentSession prompt characterization", () => {
 				};
 			},
 		});
-		const harness = await createHarness({ tools: [makeTool("slow", 25), makeTool("fast", 0)] });
+		const harness = await createHarness({ baseToolsOverride: [makeTool("slow", 25), makeTool("fast", 0)] });
 		harnesses.push(harness);
 
 		harness.setResponses([
@@ -472,7 +472,7 @@ describe("AgentSession prompt characterization", () => {
 					"with-input-extension": { extensions: { allow: ["<inline:1>"] } },
 				},
 			},
-			tools: [waitTool],
+			baseToolsOverride: [waitTool],
 			extensionFactories: [
 				(pi) => {
 					pi.on("input", (event) => {
@@ -524,7 +524,7 @@ describe("AgentSession prompt characterization", () => {
 				};
 			},
 		};
-		const harness = await createHarness({ tools: [waitTool] });
+		const harness = await createHarness({ baseToolsOverride: [waitTool] });
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),

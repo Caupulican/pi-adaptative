@@ -61,7 +61,7 @@ describe("pipeline order: transformContext completes before the cost-guard estim
 				contextGc: { preserveRecentMessages: 0, tools: ["big_output"] },
 				costGuard: { enabled: true, maxTurnUsd: 2.5, action: "warn" },
 			},
-			tools: [makeBigOutputTool(hugeBlob)],
+			baseToolsOverride: [makeBigOutputTool(hugeBlob)],
 		});
 		harnesses.push(harness);
 

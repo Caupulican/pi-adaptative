@@ -217,7 +217,7 @@ describe("AgentSession model router turn selection", () => {
 	it("does not duplicate user message_start events and preserves escalated status after cheap-to-expensive retry", async () => {
 		const harness = await createHarness({
 			models: [{ id: "cheap" }, { id: "expensive" }],
-			tools: [bashTool],
+			baseToolsOverride: [bashTool],
 			settings: {
 				modelRouter: {
 					enabled: true,
@@ -261,7 +261,7 @@ describe("AgentSession model router turn selection", () => {
 		const calls: string[] = [];
 		const harness = await createHarness({
 			models: [{ id: "cheap" }, { id: "expensive" }],
-			tools: [makeLifecycleReadTool(calls)],
+			baseToolsOverride: [makeLifecycleReadTool(calls)],
 			initialActiveToolNames: ["read_probe"],
 			settings: {
 				modelRouter: {

@@ -20,7 +20,7 @@ describe("credential repair projection", () => {
 				return { content: [{ type: "text", text: output }], details: {} };
 			},
 		};
-		const harness = await createHarness({ tools: [tool] });
+		const harness = await createHarness({ baseToolsOverride: [tool] });
 		const broad = "rg TOKEN src";
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("bash", { command: broad }, { id: "broad" }), { stopReason: "toolUse" }),

@@ -35,7 +35,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 				return { content: [{ type: "text" as const, text: "ok" }], details: {} };
 			},
 		};
-		const harness = await createHarness({ tools: [customBashTool] });
+		const harness = await createHarness({ baseToolsOverride: [customBashTool] });
 
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("bash", { command: "ls" })], { stopReason: "toolUse" }),
@@ -73,7 +73,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 		});
 		const harness = await createHarness({
 			settings: { modelCapability: { mode: "off" } },
-			tools: [
+			baseToolsOverride: [
 				tool("read", readParameters),
 				tool("edit", editParameters),
 				tool("bash", bashParameters),
@@ -138,7 +138,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 				return { content: [{ type: "text" as const, text: "ok" }], details: {} };
 			},
 		};
-		const harness = await createHarness({ tools: [customBashTool] });
+		const harness = await createHarness({ baseToolsOverride: [customBashTool] });
 
 		harness.session.capabilityEnvelope = {
 			id: "env-1",
@@ -183,7 +183,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 				return { content: [{ type: "text" as const, text: "ok" }], details: {} };
 			},
 		};
-		const harness = await createHarness({ tools: [customReadTool] });
+		const harness = await createHarness({ baseToolsOverride: [customReadTool] });
 
 		harness.session.capabilityEnvelope = {
 			id: "env-1",
@@ -224,7 +224,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 				return { content: [{ type: "text" as const, text: "ok" }], details: {} };
 			},
 		};
-		const harness = await createHarness({ tools: [customBashTool], settings: { edge: { allow: [] } } });
+		const harness = await createHarness({ baseToolsOverride: [customBashTool], settings: { edge: { allow: [] } } });
 
 		harness.session.capabilityEnvelope = {
 			id: "env-1",
@@ -263,7 +263,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 				return { content: [{ type: "text" as const, text: "ok" }], details: {} };
 			},
 		};
-		const harness = await createHarness({ tools: [customReadTool] });
+		const harness = await createHarness({ baseToolsOverride: [customReadTool] });
 
 		harness.session.capabilityEnvelope = {
 			id: "env-missing",

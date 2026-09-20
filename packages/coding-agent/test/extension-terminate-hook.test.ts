@@ -6,7 +6,7 @@ describe("Extension hook terminate (F14)", () => {
 	it("terminates tool loop when tool_call blocks with terminate: true", async () => {
 		let secondResponseAttempted = false;
 		const harness = await createHarness({
-			tools: [
+			baseToolsOverride: [
 				{
 					name: "test_tool",
 					label: "Test Tool",
@@ -49,7 +49,7 @@ describe("Extension hook terminate (F14)", () => {
 	it("terminates tool loop when tool_result returns terminate: true", async () => {
 		let secondResponseAttempted = false;
 		const harness = await createHarness({
-			tools: [
+			baseToolsOverride: [
 				{
 					name: "test_tool",
 					label: "Test Tool",
@@ -92,7 +92,7 @@ describe("Extension hook terminate (F14)", () => {
 	it("proceeds normally when terminate is false or omitted (negative control)", async () => {
 		let providerExecuted = false;
 		const harness = await createHarness({
-			tools: [
+			baseToolsOverride: [
 				{
 					name: "test_tool",
 					label: "Test Tool",
@@ -140,7 +140,7 @@ describe("Extension hook terminate (F14)", () => {
 	it("continues the loop when only SOME finalized results in a batch terminate (mixed batch, upstream batch rule)", async () => {
 		let secondResponseAttempted = false;
 		const harness = await createHarness({
-			tools: [
+			baseToolsOverride: [
 				{
 					name: "tool_a",
 					label: "Tool A",
@@ -187,7 +187,7 @@ describe("Extension hook terminate (F14)", () => {
 	it("still forces a continuation when an active verification obligation exists, even though the batch terminated (feature protection)", async () => {
 		let secondResponseAttempted = false;
 		const harness = await createHarness({
-			tools: [
+			baseToolsOverride: [
 				{
 					name: "verification_probe",
 					label: "Verification probe",

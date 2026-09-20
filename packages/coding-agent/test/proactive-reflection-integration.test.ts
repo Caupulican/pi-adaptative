@@ -221,7 +221,7 @@ describe("current-session reflection", () => {
 		};
 		const harness = await createHarness({
 			settings: { autoLearn: { enabled: true, reflectionReview: true } },
-			tools: [echo],
+			baseToolsOverride: [echo],
 		});
 		harnesses.push(harness);
 		await harness.session.bindExtensions({});
@@ -325,7 +325,7 @@ describe("current-session reflection", () => {
 		};
 		const harness = await createHarness({
 			settings: { autoLearn: { enabled: true, reflectionReview: true } },
-			tools: [record],
+			baseToolsOverride: [record],
 		});
 		harnesses.push(harness);
 		await harness.session.bindExtensions({});

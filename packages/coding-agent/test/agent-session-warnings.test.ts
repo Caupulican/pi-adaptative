@@ -25,7 +25,7 @@ describe("AgentSession context window warnings and compaction adaptation", () =>
 			// Keep the characterized base configuration inside the 70–100% warning band. A
 			// 2k window instead exercises the separate, stronger "cannot process" branch.
 			models: [{ id: "small-model", contextWindow: 3000 }],
-			tools: [dummyTool],
+			baseToolsOverride: [dummyTool],
 			resourceLoader: customLoader,
 			settings: {
 				defaultProvider: "faux",
