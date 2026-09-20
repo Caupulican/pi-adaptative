@@ -1,5 +1,28 @@
 ## [Unreleased]
 
+### Added
+
+- Decision graph pane in the Workbench, left of the conversation: System One's live dashboard composed on every frame from the operator projection and its new stage log, the Jev evaluation ledger, the router's foreground snapshot, lane records, task steps and goal requirements, verification obligations, the cycle's receipts and background tools. Two views (`Alt+L`, **List** / **Diagram** chips, `workbench.graphView`): the stage list with accumulated per-stage timers, pass counts and the loop number, or a diagram drawn per task (YOU only after a question, the decider box, the plan tree, one node per participant, evidence and checks, the judge, the goal branch with the repair loop) with exactly one running clock on the current step. Scrolls, click-to-expand a stage (note, reason code, the operator events recorded while it was open, the evaluation in flight), resizes from its rule, hides with `Alt+G`, folds on narrow zones without touching its persisted width (`workbench.graph`, `workbench.graphFraction`). Documented in `docs/workbench.md`, now in the docs navigation.
+- Durable decision ledger in the agent directory (`state/decision-ledger.sqlite`, append-only, keyed by session id and working directory): every stage transition (`understand`, `plan`, `build`, `dispatch`, `observe`, `verify`, `clarify`, `repair`, `deliver`, `done`) with its times, loop and reason code, and every Jev evaluation with its kind, consequence, model, outcome, verdict and bounded reasons. The stage log rehydrates on session open so timers continue across a restart; the recording engine, the steering plane's checkpoints and System One's stage validations all report through the one evaluation observer.
+- Jev evaluations as Execution evidence: each settled evaluation is a cyan `◆ Jev <label>` preview with `Jev · system one · <verdict> · <duration>` and its reasons, replaced in place when the verdict is noted later. Foreground tool previews carry `root · <model>` (the model answering when the receipt was created); workspace observations carry `root` or `root + N workers` with no model claimed.
+- Team hierarchy in the inspector: **Decider** (System One · Jev, what it is judging with a clock or its last verdict, and who holds control) first, **Executors** (root with its active model and action, then specialists and workers) second, **Routing** (the router's choice for the root, profile pins for workers) only while a routed choice is live.
+- `app.workbench.layout` (`Alt+P`) toggles stacked/columns; `app.graph.toggle` (`Alt+G`) and `app.graph.view` (`Alt+L`) own the graph. The activity lane's ticker takes named external clocks (`setExternalClock`), so the graph never adds a timer.
+- `ask_question`: up to three options render as one chip row with the active option's description beneath; more options, or a row the width cannot hold, render as a numbered list. The workbench host gives the dialog a row budget, so a tall question scrolls inside the editor slot around its active row instead of dropping the composed frame.
+
+### Changed
+
+- Workbench rows reorganized: the title strip carries the working directory and branch; the POV bar moved from the second row to the status band's lane directly above the editor's top rule; the editor sits inside its own two rules and the live row precedes the POV lane, so the bottom of the screen reads as separate lanes. The POV bar is two blocks — the phase text left, every operator fact right-anchored — so the right columns never move while the left text changes length; the left text truncates before any right segment drops.
+- Panes that sit side by side (inspector | Execution, Decision graph | conversation) are separated by a one-column dim rule; the divider composes `┴` / `┬` / `┼` where those rules meet it and shows only a `↕` handle while expanded. Each pane title carries one chip; the **Columns** chip and the Execution subtitle are gone (columns lives on `Alt+P` and the header's **Stacked** chip). The hint row names every key and truncates with `…`.
+- A row-following pane (`{ row }` follow) re-anchors only when the followed row changes, so the operator's scroll holds between frames.
+- `SemanticPlaneHealthRecorder` replaces its `record*` methods with the evaluation observer (`start` / `settleOk` / `settleFailed` / `settleCancelled` / `noteVerdict`) and exposes the in-flight evaluations, a bounded recent ring and a subscription; `SemanticPlaneHealth.inFlightEvaluations` names what Jev is judging.
+- `AuditStore` and the operator event lists are rings of 256; `OperatorProjectionController.transitionPhase` (no production caller) is removed.
+
+### Fixed
+
+- Two Jev paths bypassed the health recorder (the steering plane's own engine calls and System One's stage validations), so `JEV eval` under-reported; both now report through the one observer. `requireCertificate` dropped `options.signal`, so an aborted mandatory checkpoint ran to completion and settled as failed; it is now cancelled.
+- `SystemOneController.sealDecision` called itself instead of writing the decision, so every stage validation would overflow the stack; it now records the decision once and both the execution store and the audit trail key it under the store's minted id (they previously used two ids for one decision).
+- The interactive layout restored `collapsed: stored.collapsed ?? true`, a default that could never fire; `DEFAULT_WORKBENCH_SETTINGS` is the one source.
+
 ## [0.99.33] - 2026-09-20
 
 ### Added
