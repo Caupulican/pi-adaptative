@@ -411,6 +411,27 @@ describe("Decision graph rendering", () => {
 		expect(delivered).not.toContain("next →");
 	});
 
+	it("names who chose a worker's model from the recorded provenance, never the router", () => {
+		const pinned = buildDecisionGraphModel(
+			inputAt(18, {
+				projection: projection({ active_actors: [{ id: "lane-tester", kind: "worker", label: "tester" }] }),
+				lanes: [lane({ routeSource: "model_pin", routePinSource: "project" })],
+			}),
+		);
+		expect(pinned.routing.map((row) => row.text)).toEqual([
+			"model pin (project) → claude-sonnet-4.6 for write the regression test",
+		]);
+		const legacy = buildDecisionGraphModel(
+			inputAt(18, {
+				projection: projection({ active_actors: [{ id: "lane-tester", kind: "worker", label: "tester" }] }),
+				lanes: [lane()],
+			}),
+		);
+		expect(legacy.routing.map((row) => row.text)).toEqual([
+			"profile tester → claude-sonnet-4.6 for write the regression test",
+		]);
+	});
+
 	it("lists only the stages that occurred, expands the selected stage, and keeps the current row on the current stage", () => {
 		const model = buildDecisionGraphModel({
 			...SCENARIOS.jevVerifying!(),

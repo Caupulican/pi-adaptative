@@ -46,6 +46,7 @@ import {
 	type OrchestrationThinkingLevel,
 	type ResourcePointer,
 	type WorkerExecutionContract,
+	type WorkerModelRouteSource,
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
@@ -265,6 +266,9 @@ type WorkerAdmission =
 			resourcePointerIds: readonly string[];
 			executionContract: WorkerExecutionContract;
 			executionPlan: WorkerExecutionPlan;
+			/** Who chose the admitted model (never the router): recorded on the dispatch for the operator. */
+			modelRouteSource: WorkerModelRouteSource;
+			modelPinSource?: string;
 			/**
 			 * Set when a pin policy is active, the effective role has no pin (a roles-only config
 			 * with no `default` leaves it unpinned), and the caller requested an explicit model —
@@ -1185,6 +1189,18 @@ export class WorkerDelegationController {
 			resourcePointerIds: selectedResources.pointers.map((pointer) => pointer.id),
 			executionContract,
 			executionPlan,
+			// Same precedence as selectModelBinding: a pin wins, then the caller's explicit model, then
+			// the profile's binding, else the parent's or foreground's model (account routing included).
+			modelRouteSource: pinnedContract
+				? "contract"
+				: modelPin
+					? "model_pin"
+					: authority?.model
+						? "authority"
+						: basePreset
+							? "profile"
+							: "inherited",
+			...(modelPin && !pinnedContract ? { modelPinSource: modelPin.source } : {}),
 			...(modelPinBypass ? { modelPinBypass } : {}),
 		};
 	}
@@ -1880,6 +1896,8 @@ export class WorkerDelegationController {
 					birthContextForkReference,
 					controlForkMode: JSON.stringify(mode),
 					executionContract: admission.executionContract,
+					modelRouteSource: admission.modelRouteSource,
+					...(admission.modelPinSource ? { modelPinSource: admission.modelPinSource } : {}),
 					requiredCapabilities: admission.executionPlan.requiredCapabilities,
 					...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
 					taskContext: {

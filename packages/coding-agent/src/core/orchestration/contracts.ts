@@ -327,6 +327,15 @@ export interface WorkerExecutionContract {
 }
 
 /** Durable dispatch metadata. Model/tool choices are retained in the runtime-owned executionContract. */
+/**
+ * How a worker's model was chosen at admission. None of these is the router or H-MoE: a worker's
+ * model comes from its immutable contract (a resumed or nested worker), the parent's contract
+ * (inherited; account routing may move it to another account of the same choice), the owner's
+ * model pin policy, the profile's binding, or the caller's explicit authority.
+ */
+export const WORKER_MODEL_ROUTE_SOURCES = ["contract", "inherited", "model_pin", "profile", "authority"] as const;
+export type WorkerModelRouteSource = (typeof WORKER_MODEL_ROUTE_SOURCES)[number];
+
 export interface OrchestrationDispatchRequest {
 	taskId: string;
 	profileId: string;
@@ -356,6 +365,10 @@ export interface OrchestrationDispatchRequest {
 	birthContextForkReference?: WorkerContextForkReference;
 	/** Runtime-owned immutable worker materialization. Never accepted from a model tool call. */
 	executionContract?: WorkerExecutionContract;
+	/** Who chose the worker's model at admission; provenance only, never part of dispatch identity. */
+	modelRouteSource?: WorkerModelRouteSource;
+	/** The pin policy layer that supplied the model when `modelRouteSource` is `model_pin`. */
+	modelPinSource?: string;
 }
 
 export type CapabilityEnforcementKind =

@@ -235,6 +235,33 @@ describe("DelegationOrchestrationLedger", () => {
 		expect(ledger.runtime.getSnapshot().tasks[input.laneId]?.attemptIds).toEqual([queued.attemptId]);
 	});
 
+	it("records the model's route provenance on the dispatch without making it identity", () => {
+		const agentDir = root();
+		const ledger = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-route" });
+		const input = {
+			laneId: "worker-route",
+			instructions: "Inspect route provenance",
+			executionContract: executionContract(profile()),
+			requiredCapabilities: ["filesystem.read" as const],
+		};
+		// A dispatch persisted before provenance existed replays with provenance and is adopted as is.
+		const queued = ledger.prepare(input);
+		expect(queued.dispatch.modelRouteSource).toBeUndefined();
+		expect(ledger.prepare({ ...input, modelRouteSource: "profile" })).toEqual(queued);
+		expect(ledger.prepare({ ...input, modelRouteSource: "model_pin", modelPinSource: "project" })).toEqual(queued);
+		// A fresh dispatch carries it durably: the reopened ledger decodes the same fields.
+		const pinned = ledger.prepare({
+			...input,
+			laneId: "worker-pinned",
+			modelRouteSource: "model_pin",
+			modelPinSource: "project",
+		});
+		expect(pinned.dispatch).toMatchObject({ modelRouteSource: "model_pin", modelPinSource: "project" });
+		const reopened = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-route" });
+		const recovered = reopened.recoverQueuedDispatches().find((attempt) => attempt.taskId === "worker-pinned");
+		expect(recovered?.dispatch).toMatchObject({ modelRouteSource: "model_pin", modelPinSource: "project" });
+	});
+
 	it("fails an interrupted task instead of requeueing past its profile attempt budget", () => {
 		const agentDir = root();
 		const limitedProfile = profile();

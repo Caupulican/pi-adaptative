@@ -12,6 +12,7 @@ import type {
 	OrchestrationDispatchRequest,
 	RiskBudget,
 	WorkerExecutionContract,
+	WorkerModelRouteSource,
 	WorkerRole,
 } from "./contracts.ts";
 import { MAX_ORCHESTRATION_DESCRIPTION_LENGTH, MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "./contracts.ts";
@@ -48,6 +49,9 @@ export interface PrepareDelegationInput {
 	verificationOfTaskId?: string;
 	taskContext?: WorkerDelegationTaskContext;
 	birthContextForkReference?: WorkerContextForkReference;
+	/** Provenance of the admitted model; recorded on the dispatch, never compared as identity. */
+	modelRouteSource?: WorkerModelRouteSource;
+	modelPinSource?: string;
 }
 
 export interface PrepareManagedDelegationInput {
@@ -132,6 +136,13 @@ function mailboxTurnTaskId(agentId: string, controlMessageId: string): string {
  * fences interrupted completions on restart, and returns queued work for event-driven re-dispatch.
  * It deliberately does not pretend an isolated completion has a resumable model transcript.
  */
+function withoutRouteProvenance(
+	dispatch: OrchestrationDispatchRequest,
+): Omit<OrchestrationDispatchRequest, "modelRouteSource" | "modelPinSource"> {
+	const { modelRouteSource: _route, modelPinSource: _pin, ...identity } = dispatch;
+	return identity;
+}
+
 export class DelegationOrchestrationLedger {
 	readonly runtime: DurableTaskRuntime;
 	private readonly sessionId: string;
@@ -164,6 +175,8 @@ export class DelegationOrchestrationLedger {
 				...(input.controlMessageId ? { controlMessageId: input.controlMessageId } : {}),
 				...(input.controlForkMode ? { controlForkMode: input.controlForkMode } : {}),
 				...(input.birthContextForkReference ? { birthContextForkReference: input.birthContextForkReference } : {}),
+				...(input.modelRouteSource ? { modelRouteSource: input.modelRouteSource } : {}),
+				...(input.modelPinSource ? { modelPinSource: input.modelPinSource } : {}),
 			},
 		});
 	}
@@ -361,6 +374,8 @@ export class DelegationOrchestrationLedger {
 			| "authorizationId"
 			| "worktreeLaneKey"
 			| "birthContextForkReference"
+			| "modelRouteSource"
+			| "modelPinSource"
 		>;
 	}): AttemptRuntimeState {
 		let birthContextForkReference: WorkerContextForkReference | undefined;
@@ -469,7 +484,15 @@ export class DelegationOrchestrationLedger {
 		) {
 			throw new DurableTaskRuntimeError(`Task '${input.laneId}' has conflicting durable task identity.`);
 		}
-		if (activeAttemptBeforeWrites && !isDeepStrictEqual(activeAttemptBeforeWrites.dispatch, dispatch)) {
+		// Route provenance is recorded, not identity: a replay from before it existed, or one whose
+		// provenance differs, adopts the active attempt like any other exact replay.
+		if (
+			activeAttemptBeforeWrites &&
+			!isDeepStrictEqual(
+				withoutRouteProvenance(activeAttemptBeforeWrites.dispatch),
+				withoutRouteProvenance(dispatch),
+			)
+		) {
 			throw new DurableTaskRuntimeError(`Task '${input.laneId}' has conflicting durable dispatch identity.`);
 		}
 		if (!snapshot.tasks[input.laneId]) {

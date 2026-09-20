@@ -108,6 +108,28 @@ export interface DecisionGraphModel {
 	readonly nowMs: number;
 }
 
+/**
+ * Who chose a worker's model, in the operator's words. The dispatch records it at admission; a
+ * lane from before the record existed shows its profile, the only fact it carries. Never credits
+ * the router or H-MoE, which choose no worker models.
+ */
+export function workerRouteText(lane: LaneRecord): string | undefined {
+	switch (lane.routeSource) {
+		case "contract":
+			return "contract";
+		case "inherited":
+			return "inherited";
+		case "model_pin":
+			return `model pin${lane.routePinSource ? ` (${lane.routePinSource})` : ""}`;
+		case "profile":
+			return lane.profileId ? `profile ${lane.profileId}` : "profile";
+		case "authority":
+			return "requested model";
+		default:
+			return lane.profileId ? `profile ${lane.profileId}` : undefined;
+	}
+}
+
 const STAGE_DOING: Readonly<Record<DecisionStage, string>> = {
 	understand: "understanding the request",
 	plan: "planning",
@@ -242,7 +264,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 				kind: participantKind(lane),
 				label: lane.label ?? `worker ${lane.laneId.slice(0, 8)}`,
 				...(lane.modelRef ? { model: shortModelName(lane.modelRef) } : {}),
-				...(lane.profileId ? { routeText: `profile ${lane.profileId}` } : {}),
+				...(workerRouteText(lane) ? { routeText: workerRouteText(lane) } : {}),
 				...(lane.label ? { task: lane.label } : {}),
 				...(parseTime(lane.startedAt) !== undefined ? { startedAt: parseTime(lane.startedAt) } : {}),
 				running: laneRunning(lane),

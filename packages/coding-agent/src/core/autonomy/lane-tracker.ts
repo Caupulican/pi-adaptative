@@ -12,6 +12,7 @@ import {
 	type AgentBindingStatus,
 	ORCHESTRATION_THINKING_LEVELS,
 	type OrchestrationThinkingLevel,
+	type WorkerModelRouteSource,
 } from "../orchestration/contracts.ts";
 
 export type LaneType = "research" | "worker" | "learning" | "tmux-worker";
@@ -71,6 +72,10 @@ export interface LaneRecord {
 	 * are not queued or whose scheduler has not evaluated them yet.
 	 */
 	waitReason?: string;
+	/** Who chose the worker's model (contract, inherited, model_pin, profile, authority); never the router. */
+	routeSource?: WorkerModelRouteSource;
+	/** The pin policy layer behind a `model_pin` route. */
+	routePinSource?: string;
 }
 
 const LANE_TYPES: readonly string[] = ["research", "worker", "learning", "tmux-worker"];

@@ -112,6 +112,8 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 		...(goalId ? { goalId } : {}),
 		...(agentStatus ? { agentStatus } : {}),
 		...(attempt.dispatch.worktreeLaneKey ? { worktreeLaneKey: attempt.dispatch.worktreeLaneKey } : {}),
+		...(attempt.dispatch.modelRouteSource ? { routeSource: attempt.dispatch.modelRouteSource } : {}),
+		...(attempt.dispatch.modelPinSource ? { routePinSource: attempt.dispatch.modelPinSource } : {}),
 	};
 }
 

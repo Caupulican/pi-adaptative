@@ -25,7 +25,7 @@ import {
 	isActiveWorkerLane,
 	projectSpecialistLanes,
 } from "./components/agents-overlay.ts";
-import type { DecisionGraphModel } from "./components/decision-graph-model.ts";
+import { type DecisionGraphModel, workerRouteText } from "./components/decision-graph-model.ts";
 import { formatGraphDuration } from "./components/decision-graph-render.ts";
 import { formatRouteValue, shortModelName } from "./components/operator-pov-bar.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
@@ -635,8 +635,10 @@ export function renderRoutingRows(facts: WorkbenchTeamFacts): string[] {
 		rows.push(`    ${formatRouteValue(facts.route)} → ${shortModelName(facts.route.activeModel)} for root`);
 	}
 	for (const lane of facts.lanes) {
-		if ((lane.status !== "queued" && lane.status !== "running") || !lane.profileId || !lane.modelRef) continue;
-		rows.push(`    profile ${lane.profileId} → ${shortModelName(lane.modelRef)} for ${lane.label ?? lane.laneId}`);
+		if (lane.status !== "queued" && lane.status !== "running") continue;
+		const route = workerRouteText(lane);
+		if (!route || !lane.modelRef) continue;
+		rows.push(`    ${route} → ${shortModelName(lane.modelRef)} for ${lane.label ?? lane.laneId}`);
 	}
 	return rows.map((row) => theme.fg("muted", row));
 }

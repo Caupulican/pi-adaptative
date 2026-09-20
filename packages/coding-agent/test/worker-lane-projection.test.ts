@@ -81,6 +81,30 @@ function budgetExhaustedAttempt(overrides: Partial<AttemptRuntimeState> = {}): A
 }
 
 describe("projectWorkerLaneRecord terminal status", () => {
+	it("carries the dispatch's model route provenance onto the lane record", () => {
+		const attempt = budgetExhaustedAttempt({
+			status: "running",
+			result: undefined,
+			dispatch: {
+				taskId: "subject",
+				instructions: "do it",
+				profileId: "profile-1",
+				modelRouteSource: "model_pin",
+				modelPinSource: "project",
+			},
+		} as Partial<AttemptRuntimeState>);
+		const record = projectWorkerLaneRecord(
+			snapshot([taskState("subject", ["attempt-1"])], { "attempt-1": attempt }),
+			"subject",
+		);
+		expect(record).toMatchObject({ routeSource: "model_pin", routePinSource: "project" });
+		const legacy = projectWorkerLaneRecord(
+			snapshot([taskState("subject", ["attempt-1"])], { "attempt-1": budgetExhaustedAttempt() }),
+			"subject",
+		);
+		expect(legacy?.routeSource).toBeUndefined();
+	});
+
 	it("projects budget_exhausted (not partial) when a partial result carries a budget reasonCode", () => {
 		const attempt = budgetExhaustedAttempt();
 		const snap = snapshot([taskState("subject", ["attempt-1"])], { "attempt-1": attempt });

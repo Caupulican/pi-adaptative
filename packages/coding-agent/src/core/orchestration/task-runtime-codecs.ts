@@ -54,9 +54,11 @@ import {
 	TASK_STATUSES,
 	type TaskContract,
 	toJsonObject,
+	WORKER_MODEL_ROUTE_SOURCES,
 	WORKER_RESULT_STATUSES,
 	WORKER_ROLES,
 	type WorkerExecutionContract,
+	type WorkerModelRouteSource,
 	type WorkerResultContract,
 } from "./contracts.ts";
 import { validateRiskBudget } from "./risk-budget.ts";
@@ -309,6 +311,8 @@ const DISPATCH_FIELDS = new Set([
 	"worktreeLaneKey",
 	"birthContextForkReference",
 	"executionContract",
+	"modelRouteSource",
+	"modelPinSource",
 ]);
 
 export function dispatchFromValue(value: unknown, label: string): OrchestrationDispatchRequest {
@@ -330,6 +334,14 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 	);
 	const authorizationId = optionalDispatchIdentifier(dispatch.authorizationId, `${label}.authorizationId`);
 	const worktreeLaneKey = optionalDispatchIdentifier(dispatch.worktreeLaneKey, `${label}.worktreeLaneKey`);
+	const modelRouteSource = optionalDispatchIdentifier(dispatch.modelRouteSource, `${label}.modelRouteSource`);
+	if (
+		modelRouteSource !== undefined &&
+		!WORKER_MODEL_ROUTE_SOURCES.includes(modelRouteSource as WorkerModelRouteSource)
+	) {
+		throw new DurableTaskRuntimeError(`${label}.modelRouteSource is invalid.`);
+	}
+	const modelPinSource = optionalDispatchIdentifier(dispatch.modelPinSource, `${label}.modelPinSource`);
 	if (
 		dispatch.dispatchSequence !== undefined &&
 		(!Number.isSafeInteger(dispatch.dispatchSequence) || Number(dispatch.dispatchSequence) < 1)
@@ -375,6 +387,8 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 		...(worktreeLaneKey ? { worktreeLaneKey } : {}),
 		...(birthContextForkReference ? { birthContextForkReference } : {}),
 		...(executionContract ? { executionContract } : {}),
+		...(modelRouteSource ? { modelRouteSource: modelRouteSource as WorkerModelRouteSource } : {}),
+		...(modelPinSource ? { modelPinSource } : {}),
 	};
 }
 
