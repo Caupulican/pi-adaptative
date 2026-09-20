@@ -70,7 +70,7 @@ describe("decision_ledger_read", () => {
 		expect(sessions).not.toContain("session-b");
 		const replay = text(await tool.execute("t2", { action: "replay" }, undefined as never));
 		expect(replay).toContain("session session-a");
-		expect(replay).toMatch(/understand 2s loop=1 objective=obj-1/);
+		expect(replay).toMatch(/understand 2\.0s loop=1 objective=obj-1/);
 		expect(replay).toMatch(/repair .* loop=2 .*reason=verification_repair_required.*\(open\)/);
 		expect(replay).toMatch(/verify \[system-one:verify\] ok verdict=repair 500ms model=jev-1\.13\.0/);
 		expect(replay).toContain("  criterion 3 open");

@@ -6,12 +6,13 @@
  */
 
 import type { AgentTool } from "@caupulican/pi-agent-core";
-import { Text } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { DecisionLedgerStore, SemanticEvaluationLedgerRow } from "../operator-projection/decision-ledger-store.ts";
 import type { DecisionStageStoredEntry } from "../operator-projection/decision-stage-log.ts";
+import { formatCompactDuration } from "../util/format-duration.ts";
+import { renderBoundedTextResult, renderTextComponent } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 export const DECISION_LEDGER_READ_TOOL_NAME = "decision_ledger_read";
@@ -58,10 +59,7 @@ function formatTime(ms: number): string {
 }
 
 function formatDuration(ms: number): string {
-	if (ms < 1000) return `${ms}ms`;
-	const seconds = Math.floor(ms / 1000);
-	if (seconds < 60) return `${seconds}s`;
-	return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
+	return ms < 1000 ? `${ms}ms` : formatCompactDuration(ms);
 }
 
 export function formatStageRows(entries: readonly DecisionStageStoredEntry[], nowMs: number): string {
@@ -157,24 +155,10 @@ export function createDecisionLedgerReadToolDefinition(
 			};
 		},
 		renderCall(args, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatCall(args, theme));
-			return text;
+			return renderTextComponent(context.lastComponent, formatCall(args, theme));
 		},
 		renderResult(result, renderOptions, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			const content = result.content.find((part) => part.type === "text");
-			const body = content && "text" in content ? content.text : "";
-			const lines = body.split("\n");
-			const maxLines = renderOptions.expanded ? lines.length : 24;
-			let rendered = lines
-				.slice(0, maxLines)
-				.map((line) => theme.fg("toolOutput", line))
-				.join("\n");
-			if (lines.length > maxLines)
-				rendered += `\n${theme.fg("muted", `... (${lines.length - maxLines} more lines)`)}`;
-			text.setText(rendered);
-			return text;
+			return renderBoundedTextResult(result, renderOptions.expanded, theme, context.lastComponent, 24);
 		},
 	};
 }

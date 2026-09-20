@@ -145,6 +145,29 @@ export function toolTextResult<TDetails extends object>(formatted: {
 	};
 }
 
+/**
+ * A text tool result as a bounded block: every line in the output tone, cut at `maxLines` unless
+ * expanded, with the hidden count named. Shared by the read-only tools whose result is plain text.
+ */
+export function renderBoundedTextResult(
+	result: { content: readonly { type: string; text?: string }[] },
+	expanded: boolean,
+	theme: Theme,
+	lastComponent: unknown,
+	maxLines: number,
+): Text {
+	const content = result.content.find((part) => part.type === "text");
+	const body = content && "text" in content ? (content.text ?? "") : "";
+	const lines = body.split("\n");
+	const shown = expanded ? lines.length : maxLines;
+	let rendered = lines
+		.slice(0, shown)
+		.map((line) => theme.fg("toolOutput", line))
+		.join("\n");
+	if (lines.length > shown) rendered += `\n${theme.fg("muted", `... (${lines.length - shown} more lines)`)}`;
+	return renderTextComponent(lastComponent, rendered);
+}
+
 export function renderTextComponent(lastComponent: unknown, content: string): Text {
 	const text = lastComponent instanceof Text ? lastComponent : new Text("", 0, 0);
 	text.setText(content);

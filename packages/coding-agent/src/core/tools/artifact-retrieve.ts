@@ -1,6 +1,5 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { formatSize } from "@caupulican/pi-agent-core/truncate";
-import { Text } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import {
@@ -11,7 +10,7 @@ import {
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { classifyToolTrust, wrapUntrustedText } from "../security/untrusted-boundary.ts";
-import { invalidArgText, str } from "./render-utils.ts";
+import { invalidArgText, renderBoundedTextResult, renderTextComponent, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const ARTIFACT_ID_PREFIX = "tool-output:";
@@ -136,22 +135,10 @@ export function createArtifactRetrieveToolDefinition(
 			};
 		},
 		renderCall(args, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatCall(args, theme));
-			return text;
+			return renderTextComponent(context.lastComponent, formatCall(args, theme));
 		},
 		renderResult(result, options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			const content = result.content.find((part) => part.type === "text");
-			const body = content && "text" in content ? content.text : "";
-			const lines = body.split("\n");
-			const maxLines = options.expanded ? lines.length : 20;
-			const displayLines = lines.slice(0, maxLines);
-			const remaining = lines.length - maxLines;
-			let rendered = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
-			if (remaining > 0) rendered += `\n${theme.fg("muted", `... (${remaining} more lines)`)}`;
-			text.setText(rendered);
-			return text;
+			return renderBoundedTextResult(result, options.expanded, theme, context.lastComponent, 20);
 		},
 	};
 }

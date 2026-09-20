@@ -23,12 +23,10 @@ export interface DecisionGraphRows {
 const JEV_TONE: ThemeColor = "customMessageLabel";
 const TITLE_TONE: ThemeColor = "customMessageLabel";
 
-export function formatGraphDuration(ms: number): string {
-	if (ms < 10_000) return `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
-	const seconds = Math.floor(ms / 1000);
-	if (seconds < 60) return `${seconds}s`;
-	return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
-}
+import { formatCompactDuration } from "../../../core/util/format-duration.ts";
+
+/** The graph's clock text; one formatter for the pane, the previews and the Team rows. */
+export const formatGraphDuration = formatCompactDuration;
 
 const STAGE_LABEL: Readonly<Record<DecisionStage, string>> = {
 	understand: "understand",
