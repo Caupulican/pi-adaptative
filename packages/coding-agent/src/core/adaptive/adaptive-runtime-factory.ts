@@ -84,6 +84,8 @@ export interface CreateAdaptiveRuntimeStackOptions {
 	readonly runtimeUpdateController?: RuntimeUpdateController;
 	readonly taskRuntime?: unknown;
 	readonly durableTaskRuntime?: unknown;
+	/** The objective controller's runtime port over the live session; without it the raw task runtime is used. */
+	readonly objectiveRuntime?: ObjectiveExecutionControllerDeps["runtime"];
 	readonly customTools?: readonly unknown[];
 	readonly modelRegistry?: ModelRegistry;
 	readonly fitnessStore?: FitnessStore;
@@ -390,7 +392,7 @@ function assembleAdaptiveRuntimeStack(
 
 	// 8. Objective execution controller
 	const objectiveController = new ObjectiveExecutionController({
-		runtime: taskRuntime as any,
+		runtime: options.objectiveRuntime ?? (taskRuntime as any),
 		steeringPlane,
 		adaptiveResolution,
 		specialistSynthesis,

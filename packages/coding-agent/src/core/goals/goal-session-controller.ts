@@ -18,6 +18,7 @@ import { GoalLoopController } from "../goal-loop-controller.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "../objective-execution/index.ts";
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import { GoalBudgetExhaustedError } from "./goal-execution-errors.ts";
 import {
 	type GoalStateRevision,
@@ -694,7 +695,7 @@ export class GoalSessionController {
 		if (!state?.goalId) return;
 
 		try {
-			await objectiveController.evaluateRouteOnce(state.goalId, {
+			await objectiveController.evaluateRouteOnce(goalObjectiveId(state.goalId), {
 				legacyActionHint: legacyAction,
 			});
 		} catch {

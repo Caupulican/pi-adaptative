@@ -45,6 +45,7 @@ import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.
 import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
+import { SessionObjectiveRuntime } from "./objective-execution/session-objective-runtime.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
@@ -998,6 +999,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				prompt: options.prompt ?? "Perform safe scoped execution with full adaptive runtime",
 			});
 
+		// The objective loop routes over the goal the owner started: reconcile it into the durable
+		// objective, read budgets from the goal's lease, repairs into durable tasks, limitations from the
+		// open verifications. The raw task runtime alone knows none of that.
+		const objectiveRuntime = new SessionObjectiveRuntime({
+			runtime: durableTaskRuntime,
+			cwd,
+			getGoalState: () => session.getGoalStateSnapshot(),
+			synchronizeGoalState: (goal) => session.backgroundLanes.synchronizeGoalState(goal),
+			getVerificationObligations: () => session.getVerificationObligations(),
+			noteDecision: (kind, detail) =>
+				session.operatorProjection.eventBridge.recordPlanMilestone(
+					kind === "repair" ? "Repair requested" : "Replan requested",
+					detail,
+				),
+		});
 		const stack = createProductionAdaptiveRuntimeStack({
 			agentDir,
 			persistentPath,
@@ -1006,6 +1022,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			fitnessStore,
 			adaptationStore,
 			taskRuntime: durableTaskRuntime,
+			objectiveRuntime,
 			taskProfiles: taskProfileWriter,
 			contractFactory,
 			capabilityBuilder,
