@@ -14,6 +14,8 @@ import {
 	AdaptiveCapabilityController,
 	AdaptiveResolutionController,
 	CapabilityCatalog,
+	CapabilityProofRunner,
+	compileCapabilityProofObligations,
 	createProductionAdaptiveRuntimeStack,
 	RealCapabilityBuilder,
 	RealMechanicalVerifier,
@@ -23,6 +25,12 @@ import {
 } from "../../../src/core/adaptive/index.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import { compileExecutionCharter } from "../../../src/core/autonomy/execution-charter.ts";
+import { ExpertAdmissionPolicy } from "../../../src/core/expert-routing/admission.ts";
+import { ExpertCapacityService } from "../../../src/core/expert-routing/capacity.ts";
+import { ExpertCatalog } from "../../../src/core/expert-routing/catalog.ts";
+import { ExpertFeatureBuilder } from "../../../src/core/expert-routing/features.ts";
+import { ExpertRankingPolicy } from "../../../src/core/expert-routing/ranking.ts";
+import { ExpertSelectionService } from "../../../src/core/expert-routing/service.ts";
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import { ModelAdaptationStore } from "../../../src/core/models/adaptation-store.ts";
 import { FitnessStore } from "../../../src/core/models/fitness-store.ts";
@@ -178,6 +186,9 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 					maxTokens: 8192,
 					inputPrice: 3,
 					outputPrice: 15,
+					// The base profile pins `medium`; a model that cannot reason supports only `off`,
+					// and the task-profile writer rightly refuses such a profile.
+					reasoning: true,
 				} as any,
 			],
 		} as any);
@@ -346,6 +357,7 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 		};
 
 		const mechanicalVerifier = new RealMechanicalVerifier({
+			proofRunner: new CapabilityProofRunner(),
 			scriptRegistry,
 			extensionRunner,
 			skillVault,
@@ -385,17 +397,22 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 			contractFactory,
 			cwd,
 			provenance: "production-live",
-			runWorkerOnce: async (_req: any) => {
-				const capFile = join(cwd, "capabilities", "cap-test-1.mjs");
+			runWorkerOnce: async (req: any) => {
+				// The builder names the artifact target and the lineage; a real worker honors both,
+				// and the proof obligations execute against that exact path.
+				const target: string =
+					/File target: (\S+)/.exec(String(req?.instructions ?? ""))?.[1] ??
+					/implementation to (\S+)/.exec(String(req?.instructions ?? ""))?.[1] ??
+					"capabilities/cap-test-1.mjs";
 				mkdirSync(join(cwd, "capabilities"), { recursive: true });
-				writeFileSync(capFile, "export default async function run() { return 'real-built-result'; }\n");
+				writeFileSync(join(cwd, target), "export default async function run() { return 'real-built-result'; }\n");
 				return {
 					result: createWorkerResultContract({
 						handle: {
-							objectiveId: "obj-cap-test-1",
-							taskId: "task-cap-test-1",
-							attemptId: "att-cap-test-1",
-							leaseId: "lease-cap-test-1",
+							objectiveId: req.taskContext.objectiveId,
+							taskId: req.taskContext.taskId,
+							attemptId: req.taskContext.attemptId,
+							leaseId: `lease-${req.taskContext.attemptId}`,
 							fencingToken: 1,
 							expiresAt: new Date(Date.now() + 60000).toISOString(),
 						},
@@ -404,10 +421,10 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 						wallClockMs: 200,
 						toolCalls: 2,
 						claim: {
-							requestId: "req-cap-test-1",
+							requestId: `req-${req.taskContext.attemptId}`,
 							status: "completed",
 							summary: "Synthesized capability from real worker",
-							changedFiles: ["capabilities/cap-test-1.mjs"],
+							changedFiles: [target],
 						},
 					}),
 				};
@@ -419,7 +436,18 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 			prompt: "Execute production reality verification",
 		});
 
+		// The same live H-MoE plane the production factory assembles; the builder's model binding
+		// has to be this selection's binding, so the tests select through it rather than around it.
+		const expertService = new ExpertSelectionService(
+			new ExpertCatalog({ modelRegistry, fitnessStore, adaptationStore }),
+			new ExpertAdmissionPolicy(),
+			new ExpertFeatureBuilder(),
+			new ExpertRankingPolicy(),
+			new ExpertCapacityService(),
+		);
+
 		return {
+			expertService,
 			steeringPlane,
 			modelRegistry,
 			fitnessStore,
@@ -565,24 +593,27 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 				},
 			});
 
-			const artifact = await builder.build(
-				{
-					schema_version: "1.0",
-					capability_id: "cap_json_validator",
-					version: "1.0",
-					kind: "toolkit_script",
-					purpose: "Validate JSON syntax",
-					interface: { name: "validate" },
-					side_effects: [],
-					denied_behavior: [],
-					proof: { deterministic_tests: ["test-1"], task_specific_test: "verify-json" },
-					lifetime: "session",
-					activation: {},
-					rollback: {},
-				},
-				undefined,
-				{ providerId: "anthropic", modelId: "claude-3-7-sonnet" },
-			);
+			const spec = {
+				schema_version: "1.0",
+				capability_id: "cap_json_validator",
+				version: "1.0",
+				kind: "toolkit_script",
+				purpose: "Validate JSON syntax",
+				interface: { name: "validate" },
+				side_effects: [],
+				denied_behavior: [],
+				proof: compileCapabilityProofObligations("cap_json_validator", "toolkit_script"),
+				lifetime: "session",
+				activation: {},
+				rollback: {},
+			} as const;
+
+			const artifact = await builder.build(spec, undefined, {
+				providerId: "anthropic",
+				modelId: "claude-3-7-sonnet",
+				routingBand: "expensive",
+				capabilityTier: "tier_3",
+			});
 
 			expect(artifact.code).toContain("JSON.parse");
 			const expectedDigest = createHash("sha256").update(artifact.code).digest("hex");
@@ -591,42 +622,37 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 			expect((artifact.builderEvidence as any)?.toolCalls).toBe(2);
 
 			// Mechanical verifier verifies real candidate against disk
-			const verifier = new RealMechanicalVerifier({ cwd, provenance: "production-live" });
-			const verification = await verifier.verifyCandidate(artifact, {
-				schema_version: "1.0",
-				capability_id: "cap_json_validator",
-				version: "1.0",
-				kind: "toolkit_script",
-				purpose: "Validate JSON syntax",
-				interface: {},
-				side_effects: [],
-				denied_behavior: [],
-				proof: { deterministic_tests: ["test-1"], task_specific_test: "verify-json" },
-				lifetime: "session",
-				activation: {},
-				rollback: {},
+			const verifier = new RealMechanicalVerifier({
+				proofRunner: new CapabilityProofRunner(),
+				cwd,
+				provenance: "production-live",
 			});
+			const verification = await verifier.verifyCandidate(artifact, spec);
 			expect(verification.passed).toBe(true);
 
-			// Mechanical verifier runs task-specific non-constant proof
-			const proofStr = await verifier.runTaskSpecificProof({
-				schema_version: "1.0",
-				capability_id: "cap_json_validator",
-				version: "1.0",
-				kind: "toolkit_script",
-				purpose: "Validate JSON syntax",
-				interface: {},
-				side_effects: [],
-				denied_behavior: [],
-				proof: { deterministic_tests: ["test-1"], task_specific_test: "verify-json" },
-				lifetime: "session",
-				activation: {},
-				rollback: {},
-			});
+			// Every declared proof obligation is executed; nothing is asserted.
+			const proofStr = await verifier.runTaskSpecificProof(spec);
 			const parsedProof = JSON.parse(proofStr);
-			expect(parsedProof.verified).toBe(true);
+			expect(parsedProof.proofs).toHaveLength(spec.proof.deterministic_tests.length + 1);
+			expect(parsedProof.proofs.every((p: any) => p.status === "passed")).toBe(true);
+			expect(parsedProof.proofs.some((p: any) => p.kind === "task_specific_test")).toBe(true);
+			for (const executed of parsedProof.proofs) {
+				expect(executed.exitCode).toBe(0);
+				expect(executed.outputDigest).toMatch(/^[0-9a-f]{64}$/);
+				expect(executed.evidenceRef).toContain("proof:");
+				expect(typeof executed.elapsedMs).toBe("number");
+			}
 			expect(parsedProof.proofEvidenceDigest).toBeDefined();
-			expect(parsedProof.taskTest).toBe("verify-json");
+
+			// A capability whose artifact has no callable entry point cannot prove itself.
+			writeFileSync(join(cwd, "capabilities", "cap_uncallable.mjs"), "export const value = 1;\n");
+			await expect(
+				verifier.runTaskSpecificProof({
+					...spec,
+					capability_id: "cap_uncallable",
+					proof: compileCapabilityProofObligations("cap_uncallable", "toolkit_script"),
+				}),
+			).rejects.toThrow(/proof obligations failed/);
 		});
 	});
 
@@ -636,6 +662,7 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 			const controller = new AdaptiveCapabilityController({
 				steering: deps.steeringPlane,
 				catalog: new CapabilityCatalog(),
+				experts: deps.expertService,
 				builder: deps.capabilityBuilder,
 				mechanicalVerifier: deps.mechanicalVerifier,
 				scriptRegistry: deps.scriptRegistry,
@@ -659,6 +686,7 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 			const controller = new AdaptiveCapabilityController({
 				steering: deps.steeringPlane,
 				catalog: new CapabilityCatalog(),
+				experts: deps.expertService,
 				builder: deps.capabilityBuilder,
 				mechanicalVerifier: deps.mechanicalVerifier,
 				runtimeAdaptation: {

@@ -16,6 +16,7 @@ import { ExternalCapabilityAcquisitionGate } from "../../../src/core/acquisition
 import { AdaptiveRuntimeReadiness } from "../../../src/core/adaptive/adaptive-runtime-readiness.ts";
 import {
 	AdaptiveCapabilityController,
+	CapabilityProofRunner,
 	createTestAdaptiveRuntimeStack,
 	RealCapabilityBuilder,
 	RealMechanicalVerifier,
@@ -102,13 +103,27 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 				taskRuntime: {} as any,
 				taskProfiles: {} as any,
 				contractFactory: {} as any,
-				scriptRegistry: new RealScriptRegistry(),
-				workerDispatcher: new RealWorkerDispatcher({} as any),
-				verifier: new RealMechanicalVerifier({ cwd: "/tmp" }),
+				runWorkerOnce: async () => ({}),
 				cwd: "/tmp",
-			} as any);
+			});
 			expect(capabilityBuilder).toBeInstanceOf(RealCapabilityBuilder);
 			expect(capabilityBuilder.provenance).toBe("production-live");
+
+			// A dispatcher or verifier without its real execution owner is refused outright.
+			expect(() => new RealWorkerDispatcher({})).toThrow(/real worker execution owner/);
+			expect(
+				() =>
+					new RealCapabilityBuilder({
+						taskRuntime: {} as any,
+						taskProfiles: {} as any,
+						contractFactory: {} as any,
+						cwd: "/tmp",
+					}),
+			).toThrow(/real worker execution owner/);
+			expect(new RealScriptRegistry().provenance).toBe("production-live");
+			expect(new RealMechanicalVerifier({ proofRunner: new CapabilityProofRunner(), cwd: "/tmp" }).provenance).toBe(
+				"production-live",
+			);
 		});
 
 		it("FR-009, FR-010: readiness rejects unbound or simulated-success ports", () => {

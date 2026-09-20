@@ -68,6 +68,8 @@ export interface SpecialistSynthesisControllerDeps {
 	};
 	readonly taskProfiles?: TaskProfileWriterPort;
 	readonly contractFactory?: WorkerExecutionContractFactory;
+	/** Durable owner development rules, folded into every synthesized specialist mission. */
+	readonly getOwnerRules?: () => string;
 }
 
 export class SpecialistSynthesisController {
@@ -77,6 +79,7 @@ export class SpecialistSynthesisController {
 	private readonly capabilityController?: SpecialistSynthesisControllerDeps["capabilityController"];
 	private readonly taskProfiles?: TaskProfileWriterPort;
 	private readonly contractFactory?: WorkerExecutionContractFactory;
+	private readonly getOwnerRules?: () => string;
 	private readonly records = new Map<string, SpecialistRecord>();
 
 	constructor(deps: SpecialistSynthesisControllerDeps) {
@@ -86,6 +89,13 @@ export class SpecialistSynthesisController {
 		this.capabilityController = deps.capabilityController;
 		this.taskProfiles = deps.taskProfiles;
 		this.contractFactory = deps.contractFactory;
+		this.getOwnerRules = deps.getOwnerRules;
+	}
+
+	/** A mission a synthesized specialist receives always states the owner's standing rules. */
+	private composeMission(mission: string): string {
+		const ownerRules = this.getOwnerRules?.().trim();
+		return ownerRules ? `${mission}\n\n${ownerRules}` : mission;
 	}
 
 	async resolveOrCreate(input: {
@@ -174,7 +184,7 @@ export class SpecialistSynthesisController {
 				purpose: existingEntry.purpose,
 				authority_role: existingEntry.authorityRole,
 				specialties: [...existingEntry.specialties],
-				mission: input.need.mission ?? existingEntry.purpose,
+				mission: this.composeMission(input.need.mission ?? existingEntry.purpose),
 				cognitive_requirements: existingEntry.cognitiveRequirements,
 				required_capabilities: [],
 				required_tools: [],
@@ -206,7 +216,7 @@ export class SpecialistSynthesisController {
 				purpose: input.need.purpose,
 				authority_role: authorityRole,
 				specialties: allSpecialties,
-				mission: input.need.mission ?? input.need.purpose,
+				mission: this.composeMission(input.need.mission ?? input.need.purpose),
 				cognitive_requirements: cognitive,
 				required_capabilities: input.need.requiredCapabilities ? [...input.need.requiredCapabilities] : [],
 				required_tools: input.need.requiredTools ? [...input.need.requiredTools] : [],

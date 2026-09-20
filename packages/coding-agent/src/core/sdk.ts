@@ -18,6 +18,7 @@ import { resolvePath } from "../utils/paths.ts";
 import { createProductionAdaptiveRuntimeStack } from "./adaptive/adaptive-runtime-factory.ts";
 import { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import {
+	CapabilityProofRunner,
 	RealCapabilityBuilder,
 	RealMechanicalVerifier,
 	RealScriptRegistry,
@@ -948,9 +949,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			},
 		};
 
+		const getOwnerRules = () => session.renderOwnerRulesForMission();
 		const workerDispatcher = new RealWorkerDispatcher({
 			session,
 			provenance: "production-live",
+			getOwnerRules,
 		});
 
 		const capabilityBuilder = new RealCapabilityBuilder({
@@ -960,10 +963,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			runWorkerOnce: (req) => session.runWorkerDelegationOnce(req as any),
 			cwd,
 			provenance: "production-live",
+			getOwnerRules,
 		});
 
 		const scriptRegistry = new RealScriptRegistry();
 		const mechanicalVerifier = new RealMechanicalVerifier({
+			proofRunner: new CapabilityProofRunner(),
 			scriptRegistry,
 			extensionRunner: session.extensionRunner,
 			skillVault: session.getSkillVault(),
@@ -997,6 +1002,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			extensionRunner: session.extensionRunner,
 			charter,
 			cwd,
+			getOwnerRules,
 		});
 
 		session.attachAdaptiveRuntime(stack);

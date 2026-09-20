@@ -66,6 +66,8 @@ import { BashExecutionController } from "./bash-execution-controller.ts";
 import type { BashResult } from "./bash-executor.ts";
 import { type CapabilityTierPolicy, capabilityTierPolicy, resolveCapabilityTier } from "./capability-tier.ts";
 import type { NativePiActivityPort } from "./collaboration/native-pi-activity.ts";
+import { RETENTION_AUDIT_CUSTOM_TYPE } from "./compaction/evidence-retention-projection.ts";
+import { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
 import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
 import { CompactionSupport } from "./compaction-support.ts";
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
@@ -162,6 +164,11 @@ import {
 	type PipelineRun,
 } from "./pipelines/index.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
+import {
+	DurableOwnerRuleStore,
+	type OwnerRulePolicy,
+	renderOwnerRulesForMission,
+} from "./project-rules/durable-owner-rules.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { engageEmergencyStop, liftEmergencyStop } from "./provider-admission/emergency-stop.ts";
 import { ProviderAdmissionLedger, providerAdmissionDir } from "./provider-admission/ledger.ts";
@@ -407,6 +414,8 @@ export class AgentSession {
 	private _objectiveExecutionController?: ObjectiveExecutionController;
 	private _steeringPlane?: SystemOneSteeringPlane;
 	private _adaptiveReadiness?: AdaptiveRuntimeReadiness;
+	/** Durable owner development rules, restored from disk so they outlive compaction and restart. */
+	private readonly _ownerRules: DurableOwnerRuleStore;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -415,6 +424,10 @@ export class AgentSession {
 		this._objectiveExecutionController = config.objectiveExecutionController;
 		this._steeringPlane = config.steeringPlane;
 		this._adaptiveReadiness = config.adaptiveReadiness;
+		this._ownerRules = new DurableOwnerRuleStore({
+			agentDir: config.agentDir ?? getAgentDir(),
+			projectKey: config.cwd,
+		});
 		// The provider stream chain (perf profile, idle watchdog, machine-wide admission) is built and
 		// installed exactly once, here; see session-stream-chain.ts.
 		const agentDir = config.agentDir ?? getAgentDir();
@@ -779,6 +792,33 @@ export class AgentSession {
 			runAutoCompaction: (reason, willRetry) => this._runAutoCompaction(reason, willRetry),
 			compactWithRetry: (run, signal, provider) => this._compactWithRetry(run, signal, provider),
 			onCompactionSettled: () => this._foregroundRecovery?.wakeIdleWaiters(),
+			// Evidence-preserving compaction runs on the session's own semantic engine. Without one
+			// the planner is never consulted and compaction behaves exactly as it did before.
+			getRetentionDecisionEngine: () => {
+				const engine = this._steeringPlane?.decisionEngine;
+				return engine ? createRetentionDecisionEngine(engine) : undefined;
+			},
+			getRetentionPins: () => ({
+				unresolvedProofObligations: this._getActiveVerificationIds(),
+			}),
+			// Large elided evidence becomes a referenced context artifact rather than being discarded.
+			getRetentionArtifactStore: () => {
+				const store = this._getToolArtifactStore();
+				if (!store) return undefined;
+				return {
+					saveArtifact: (name: string, content: string) =>
+						store.write({
+							kind: "tool_output",
+							content,
+							toolName: name,
+							createdAtTurn: this.sessionManager.getEntries().length,
+							reproducible: false,
+						}).ref.id,
+				};
+			},
+			persistRetentionAudit: (audit) => {
+				this.sessionManager.appendCustomEntry(RETENTION_AUDIT_CUSTOM_TYPE, audit);
+			},
 		});
 		const providerRequestContext = new ProviderRequestContextController({
 			transformExtensions: this._memory.createContextProjection(() => this._extensionRunner),
@@ -1332,6 +1372,16 @@ export class AgentSession {
 	/** Diagnostic readiness gate for adaptive runtime components. */
 	get adaptiveReadiness(): AdaptiveRuntimeReadiness | undefined {
 		return this._adaptiveReadiness;
+	}
+
+	/** Durable owner development rules in force for this project. */
+	getOwnerRulePolicies(): readonly OwnerRulePolicy[] {
+		return this._ownerRules.list();
+	}
+
+	/** The owner rules block every worker, specialist and capability-builder mission carries. */
+	renderOwnerRulesForMission(): string {
+		return renderOwnerRulesForMission(this._ownerRules.list());
 	}
 
 	/** Skill vault controller managing active and cached skills. */
@@ -2596,6 +2646,9 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		// An owner development directive is policy, not prompt text: it is captured durably here,
+		// before the turn that carried it can be compacted away.
+		this._ownerRules.record(text);
 		if (options?.autoContinueGoal !== false) {
 			this._backgroundLanes.clearGoalAutoContinueTimer();
 		}

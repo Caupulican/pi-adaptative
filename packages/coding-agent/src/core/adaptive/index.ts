@@ -30,18 +30,35 @@ export {
 } from "./adaptive-runtime-readiness.ts";
 export { CapabilityCatalog, type CapabilityCatalogEntry } from "./capability-catalog.ts";
 export {
+	capabilityArtifactRelativePath,
+	compileCapabilityProofObligations,
+	compileNodeProofCommand,
+} from "./capability-proof-obligations.ts";
+export {
+	CapabilityProofRunner,
+	type CapabilityProofRunnerPort,
+	type ProofExecutionResult,
+	type ProofKind,
+	type ProofRunRequest,
+} from "./capability-proof-runner.ts";
+export {
 	type CapabilityNeed,
 	CapabilityResolver,
 	type DeepResolutionResult,
 	type WideResolutionResult,
 } from "./capability-resolution.ts";
 export {
+	assertWorkerResultLineage,
+	CapabilityExecutionError,
+	CapabilityProofFailedError,
 	RealCapabilityBuilder,
 	type RealCapabilityBuilderDeps,
 	RealMechanicalVerifier,
 	type RealMechanicalVerifierDeps,
 	RealScriptRegistry,
 	RealWorkerDispatcher,
+	type ResolvedExpertBinding,
+	resolveExpertBinding,
 } from "./execution-ports.ts";
 export {
 	type RollbackSnapshot,

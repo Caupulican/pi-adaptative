@@ -36,7 +36,18 @@ import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
-import { type CompactionAuditStats, EvidenceRetentionPlanner } from "./compaction/evidence-retention-planner.ts";
+import {
+	type CompactionAuditStats,
+	type EvidenceRetentionDecision,
+	EvidenceRetentionPlanner,
+	type DecisionEngine as RetentionDecisionEngine,
+} from "./compaction/evidence-retention-planner.ts";
+import {
+	applyRetentionDecisionsToBranch,
+	collectToolCallResultPairs,
+	type RetentionPinContext,
+	resolvePreserveRecentPairs,
+} from "./compaction/evidence-retention-projection.ts";
 import { packSupersededHostRecords } from "./context-gc.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
@@ -172,6 +183,24 @@ export interface CompactionControllerDeps {
 	): Promise<CompactionResult>;
 	onCompactionSettled?(): void;
 	retentionPlanner?: EvidenceRetentionPlanner;
+	/**
+	 * Live evidence-retention wiring. Absent parts degrade to deterministic pinning only: without a
+	 * decision engine the planner keeps every pair exactly, which is the safe direction.
+	 */
+	getRetentionDecisionEngine?(): RetentionDecisionEngine | undefined;
+	getRetentionPins?(): RetentionPinContext;
+	getRetentionArtifactStore?(): { saveArtifact(name: string, content: string): Promise<string> | string } | undefined;
+	/** Durable audit of what the applied retention plan actually did to this compaction. */
+	persistRetentionAudit?(audit: AppliedRetentionAudit): void;
+}
+
+/** What the applied retention plan did to the branch this compaction actually compacted. */
+export interface AppliedRetentionAudit {
+	readonly stats: CompactionAuditStats;
+	readonly summaryEvent: string;
+	readonly droppedCallIds: readonly string[];
+	readonly truncatedCallIds: readonly string[];
+	readonly appliedAt: string;
 }
 
 export async function runCompactionWithRetry<T>(options: {
@@ -217,6 +246,8 @@ export class CompactionController {
 	private providerRecoveryAttempted = false;
 	private ineffectiveThresholdFrontier: IneffectiveThresholdFrontier | undefined;
 	private retentionPlanner?: EvidenceRetentionPlanner;
+	private activeRetentionDecisions?: readonly EvidenceRetentionDecision[];
+	private lastAppliedRetentionAudit?: AppliedRetentionAudit;
 	private readonly deps: CompactionControllerDeps;
 
 	constructor(deps: CompactionControllerDeps = {} as CompactionControllerDeps) {
@@ -235,6 +266,62 @@ export class CompactionController {
 
 	getRetentionAuditStats(): CompactionAuditStats | undefined {
 		return this.retentionPlanner?.getLastAuditStats();
+	}
+
+	/** The retention plan the last real compaction applied, not merely planned. */
+	getAppliedRetentionAudit(): AppliedRetentionAudit | undefined {
+		return this.lastAppliedRetentionAudit;
+	}
+
+	/**
+	 * Plans evidence retention for this compaction run, once, before any branch is prepared.
+	 *
+	 * Deterministic pinning happens first and the planner only ever sees pairs that survived it.
+	 * A planner failure leaves `activeRetentionDecisions` unset, so the run compacts exactly as it
+	 * would have without retention: a failure here deletes nothing.
+	 */
+	private async planEvidenceRetention(signal: AbortSignal): Promise<void> {
+		this.activeRetentionDecisions = undefined;
+		const decisionEngine = this.deps.getRetentionDecisionEngine?.();
+		if (!decisionEngine) return;
+		const pins = this.deps.getRetentionPins?.() ?? {};
+		const rawBranch = this.getRawCompactionBranch();
+		const toolPairs = collectToolCallResultPairs(rawBranch, pins);
+		if (toolPairs.length === 0) return;
+
+		try {
+			const plan = await this.getRetentionPlanner().plan({
+				toolPairs,
+				decisionEngine,
+				unresolvedProofObligations: pins.unresolvedProofObligations,
+				preserveRecentCount: resolvePreserveRecentPairs(pins),
+				artifactStore: this.deps.getRetentionArtifactStore?.(),
+				boundedState: {
+					sessionId: this.deps.sessionManager.getSessionId(),
+					activeTask: this.deps.getActiveTask?.(),
+					unresolvedProofObligations: pins.unresolvedProofObligations ?? [],
+				},
+				signal,
+			});
+			this.activeRetentionDecisions = plan.decisions;
+			const projection = applyRetentionDecisionsToBranch(rawBranch, plan.decisions);
+			const audit: AppliedRetentionAudit = {
+				stats: plan.stats,
+				summaryEvent: plan.summaryEvent,
+				droppedCallIds: projection.droppedCallIds,
+				truncatedCallIds: projection.truncatedCallIds,
+				appliedAt: new Date().toISOString(),
+			};
+			this.lastAppliedRetentionAudit = audit;
+			this.deps.persistRetentionAudit?.(audit);
+		} catch (error) {
+			// Jev or planner failure must delete nothing; the existing compaction continues unchanged.
+			this.activeRetentionDecisions = undefined;
+			this.deps.emit({
+				type: "warning",
+				message: `evidence-preserving compaction planning failed (${error instanceof Error ? error.message : String(error)}); compacting without retention pruning`,
+			});
+		}
 	}
 
 	private async buildCompactionInstructions(customInstructions?: string): Promise<string | undefined> {
@@ -328,7 +415,7 @@ export class CompactionController {
 	 * A plain filter breaks ancestry because retained children still point at removed lifecycle
 	 * parents. Reconnect the already-linear active branch while preserving every real entry id.
 	 */
-	private getCompactionBranch(): ReturnType<SessionManager["getBranch"]> {
+	private getRawCompactionBranch(): ReturnType<SessionManager["getBranch"]> {
 		const compactableBranch: ReturnType<SessionManager["getBranch"]> = [];
 		let retainedParentId: string | null = null;
 		for (const entry of this.deps.sessionManager.getBranch()) {
@@ -339,6 +426,19 @@ export class CompactionController {
 			retainedParentId = entry.id;
 		}
 		return compactableBranch;
+	}
+
+	/**
+	 * The branch the real compaction reads. When this run planned evidence retention, its decisions
+	 * are applied here, so the planner changes what `prepareCompaction` actually sees rather than
+	 * producing an advisory report beside it.
+	 */
+	private getCompactionBranch(): ReturnType<SessionManager["getBranch"]> {
+		const branch = this.getRawCompactionBranch();
+		if (!this.activeRetentionDecisions) return branch;
+		return applyRetentionDecisionsToBranch(branch, this.activeRetentionDecisions).branch as ReturnType<
+			SessionManager["getBranch"]
+		>;
 	}
 
 	/**
@@ -514,6 +614,7 @@ export class CompactionController {
 				errorMessage: aborted ? undefined : `Compaction failed: ${message}`,
 			});
 		} finally {
+			this.activeRetentionDecisions = undefined;
 			if (this.manualAbortController === abortController) {
 				this.manualAbortController = undefined;
 			}
@@ -542,6 +643,7 @@ export class CompactionController {
 		this.deps.emit({ type: "compaction_start", reason: "manual" });
 		const sessionModel = this.deps.getModel();
 		if (!sessionModel) throw new Error(formatNoModelSelectedMessage());
+		await this.planEvidenceRetention(signal);
 
 		const selectedCompactionModel = this.deps.resolveModel(sessionModel);
 		if (this.deps.isRawStream()) await this.deps.getRequestAuth(selectedCompactionModel);
@@ -873,6 +975,7 @@ export class CompactionController {
 		let effectiveInstructions: string | undefined;
 		let effectiveInstructionsReady = false;
 		try {
+			if (model) await this.planEvidenceRetention(signal);
 			if (!model) {
 				this.deps.emit({
 					type: "compaction_end",
@@ -1068,6 +1171,8 @@ export class CompactionController {
 							: `Auto-compaction failed: ${errorMessage}`,
 			});
 			return hadQueuedMessages || this.deps.agent.hasQueuedMessages();
+		} finally {
+			this.activeRetentionDecisions = undefined;
 		}
 	}
 

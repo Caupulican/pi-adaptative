@@ -38,7 +38,6 @@ import {
 import { AdaptiveResolutionController } from "./adaptive-resolution-controller.ts";
 import { AdaptiveRuntimeReadiness } from "./adaptive-runtime-readiness.ts";
 import { CapabilityCatalog } from "./capability-catalog.ts";
-import { RealMechanicalVerifier, RealWorkerDispatcher } from "./execution-ports.ts";
 import {
 	createRuntimeUpdateAdapterFromController,
 	RuntimeAdaptationCoordinator,
@@ -104,6 +103,8 @@ export interface CreateAdaptiveRuntimeStackOptions {
 	readonly workerDispatcher?: unknown;
 	readonly cwd?: string;
 	readonly isSynthetic?: boolean;
+	/** Durable owner development rules, propagated into every synthesized mission. */
+	readonly getOwnerRules?: () => string;
 }
 
 /**
@@ -155,17 +156,11 @@ export function createProductionAdaptiveRuntimeStack(options: CreateAdaptiveRunt
 		throw new Error("Production adaptive runtime requires capability builder worker port (PRC-007, PRC-040)");
 	}
 
-	// ERC-005: Real mechanical verifier mandatory (no synthetic or always-pass fallback in production)
-	const mechanicalVerifier =
-		options.mechanicalVerifier ??
-		new RealMechanicalVerifier({
-			scriptRegistry: options.scriptRegistry as any,
-			extensionRunner: options.extensionRunner as any,
-			skillVault: options.skillVault as any,
-			cwd: options.cwd ?? process.cwd(),
-			provenance: "production-live",
-		});
+	// ERC-005, RCG-022: Real mechanical verifier with a real proof runner is mandatory. The factory
+	// never manufactures one, because a verifier built here would have no owner to answer for it.
+	const mechanicalVerifier = options.mechanicalVerifier;
 	if (
+		!mechanicalVerifier ||
 		(mechanicalVerifier as any).isSynthetic === true ||
 		(mechanicalVerifier as any).isDummy === true ||
 		(mechanicalVerifier as any).isAlwaysPass === true ||
@@ -173,6 +168,9 @@ export function createProductionAdaptiveRuntimeStack(options: CreateAdaptiveRunt
 		(mechanicalVerifier as any).provenance === "test-fixture"
 	) {
 		throw new Error("Production adaptive runtime requires a real mechanical verifier (ERC-005)");
+	}
+	if (typeof mechanicalVerifier.runTaskSpecificProof !== "function") {
+		throw new Error("Production adaptive runtime requires a mechanical verifier with a real proof runner (RCG-022)");
 	}
 
 	// PRC-007: Reject dummy builder/verifier/runtime/task profile/charter
@@ -213,13 +211,10 @@ export function createProductionAdaptiveRuntimeStack(options: CreateAdaptiveRunt
 		throw new Error("No-op RuntimeUpdateController rejected in production mode (ERC-003)");
 	}
 
-	// ERC-007, ERC-008: Real worker dispatcher mandatory in production mode
-	const workerDispatcher =
-		options.workerDispatcher ??
-		new RealWorkerDispatcher({
-			provenance: "production-live",
-		});
+	// ERC-007, ERC-008, RCG-016: Real worker dispatcher owned by a live session is mandatory.
+	const workerDispatcher = options.workerDispatcher;
 	if (
+		!workerDispatcher ||
 		(workerDispatcher as any).isSynthetic === true ||
 		(workerDispatcher as any).isDummy === true ||
 		(workerDispatcher as any).provenance === "unbound" ||
@@ -250,6 +245,25 @@ export function createProductionAdaptiveRuntimeStack(options: CreateAdaptiveRunt
 	});
 
 	return stack;
+}
+
+/**
+ * Fixture verifier for the test stack only. Production never reaches this: it requires an explicit
+ * verifier, so an always-pass verifier can never be labelled production-live.
+ */
+function buildTestMechanicalVerifier(
+	provenance: "production-live" | "test-fixture",
+): CreateAdaptiveRuntimeStackOptions["mechanicalVerifier"] {
+	if (provenance === "production-live") return undefined;
+	return {
+		verifyCandidate: async (candidate, _spec) => ({
+			passed: Boolean(candidate.code && candidate.code.length > 0 && candidate.digest),
+			testCount: 1,
+			failures: [],
+		}),
+		verifyActivation: async () => true,
+		runTaskSpecificProof: async () => "task_proof_verified",
+	};
 }
 
 /**
@@ -307,19 +321,7 @@ function assembleAdaptiveRuntimeStack(
 		catalog: capabilityCatalog,
 		experts: expertService,
 		builder: options.capabilityBuilder,
-		mechanicalVerifier:
-			options.mechanicalVerifier ??
-			(provenance === "production-live"
-				? undefined
-				: {
-						verifyCandidate: async (candidate, _spec) => ({
-							passed: Boolean(candidate.code && candidate.code.length > 0 && candidate.digest),
-							testCount: 1,
-							failures: [],
-						}),
-						verifyActivation: async () => true,
-						runTaskSpecificProof: async () => "task_proof_verified",
-					}),
+		mechanicalVerifier: options.mechanicalVerifier ?? buildTestMechanicalVerifier(provenance),
 		runtimeAdaptation,
 		activators: options.capabilityActivators,
 		skillVault: options.skillVault as any,
@@ -336,6 +338,7 @@ function assembleAdaptiveRuntimeStack(
 		capabilityController: adaptiveCapabilities,
 		taskProfiles: taskProfiles as any,
 		contractFactory: options.contractFactory,
+		getOwnerRules: options.getOwnerRules,
 	});
 
 	// 6. Semantic dedup / responsibility

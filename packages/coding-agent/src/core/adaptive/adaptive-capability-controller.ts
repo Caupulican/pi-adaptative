@@ -12,6 +12,7 @@ import type { ExpertSelectionService } from "../expert-routing/service.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
 import { SteeringProtocolError } from "../steering/types.ts";
 import type { CapabilityCatalog } from "./capability-catalog.ts";
+import { compileCapabilityProofObligations } from "./capability-proof-obligations.ts";
 import { type CapabilityNeed, CapabilityResolver } from "./capability-resolution.ts";
 import type {
 	CapabilityGap,
@@ -65,7 +66,7 @@ export interface AdaptiveCapabilityControllerDeps {
 	readonly mechanicalVerifier?: {
 		verifyCandidate(candidate: CandidateArtifact, spec: CapabilitySpec): Promise<CandidateVerificationResult>;
 		verifyActivation(activation: unknown, spec: CapabilitySpec): Promise<boolean>;
-		runTaskSpecificProof?(spec: CapabilitySpec): Promise<string>;
+		runTaskSpecificProof?(spec: CapabilitySpec, signal?: AbortSignal): Promise<string>;
 	};
 	readonly activators?: Partial<Record<CapabilityKind, CapabilityActivator>>;
 	readonly activator?: CapabilityActivator;
@@ -549,10 +550,9 @@ export class AdaptiveCapabilityController {
 			},
 			side_effects: ["local_read_write"],
 			denied_behavior: ["bypass_security_isolation", "elevate_root_authority"],
-			proof: {
-				deterministic_tests: [`test_${capabilityId}_isolated`],
-				task_specific_test: `test_${capabilityId}_task_proof`,
-			},
+			// Real, runnable obligations against the artifact the builder will write. A placeholder
+			// test identifier here can only ever be asserted downstream, never executed.
+			proof: compileCapabilityProofObligations(capabilityId, kind),
 			activation: { method: "dynamic_load" },
 			rollback: { method: "unload_and_discard" },
 		};
@@ -591,8 +591,15 @@ export class AdaptiveCapabilityController {
 		if (!this.builder) {
 			throw new Error("Capability synthesis requires a configured builder (PH-061)");
 		}
+		// RCG-018: the builder's model binding must be the H-MoE selection's own binding. Without a
+		// selector there is no binding to equal, so the build fails instead of picking a model.
+		if (!this.experts) {
+			throw new Error(
+				"Capability synthesis requires an expert selection service so the builder's model binding is the actual H-MoE binding (RCG-018)",
+			);
+		}
 		let expertBinding: unknown;
-		if (this.experts) {
+		{
 			const workerCapRequest: WorkerCapabilityRequest = {
 				schema_version: EXPERT_ROUTING_SCHEMA_VERSION,
 				request_id: `cap-build-${spec.capability_id}-${Date.now()}`,
@@ -699,7 +706,7 @@ export class AdaptiveCapabilityController {
 		if (!this.mechanicalVerifier.runTaskSpecificProof) {
 			throw new Error("Capability synthesis requires a task-specific proof runner (PH-064)");
 		}
-		const taskProof = await this.mechanicalVerifier.runTaskSpecificProof(spec);
+		const taskProof = await this.mechanicalVerifier.runTaskSpecificProof(spec, input.signal);
 		if (!taskProof) {
 			throw new Error(`Task-specific proof failed for capability '${capabilityId}' (PH-064)`);
 		}
