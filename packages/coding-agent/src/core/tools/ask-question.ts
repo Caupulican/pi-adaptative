@@ -108,6 +108,8 @@ const askQuestionSchema = Type.Object(
 
 const ANSWER_PREVIEW_CHARS = 240;
 const ANSWER_EDITOR_VIEWPORT_LINES = 8;
+/** Up to this many options render as one chip row when the width holds it; more become a numbered list. */
+const MAX_CHIP_OPTIONS = 3;
 
 export type AskQuestionToolInput = Static<typeof askQuestionSchema>;
 export type AskQuestion = HumanInputQuestion;
@@ -315,6 +317,9 @@ export class AskQuestionDialog implements Component {
 	private cachedWidth: number | undefined;
 	private cachedLines: string[] | undefined;
 	private settled = false;
+	private readonly maxRows: (() => number) | undefined;
+	/** Line index of the active row in the last full render; the row window keeps it in view. */
+	private activeLine = 0;
 
 	constructor(options: {
 		questions: readonly AskQuestion[];
@@ -325,7 +330,10 @@ export class AskQuestionDialog implements Component {
 		clipboard?: AskQuestionClipboardOptions;
 		pasteClipboardImage?: PasteClipboardImage;
 		createAnswerEditor?: CreateAskQuestionAnswerEditor;
+		/** Row budget the host can give the dialog; taller content scrolls around the active row. */
+		maxRows?: () => number;
 	}) {
+		this.maxRows = options.maxRows;
 		this.questions = options.questions;
 		this.theme = options.theme;
 		this.keybindings = options.keybindings;
@@ -604,45 +612,46 @@ export class AskQuestionDialog implements Component {
 		}
 		lines.push("");
 
-		question.options.forEach((option, index) => {
-			const active = index === cursor;
-			const chosen = selection.optionIndexes.has(index);
-			const prefix = `${active ? "›" : " "} ${chosen ? "●" : "○"} `;
-			const label = `${prefix}${option.label}`;
-			lines.push(
-				truncateToWidth(
-					active ? this.theme.bg("selectedBg", this.theme.fg("text", ` ${label} `)) : this.theme.fg("text", label),
-					width,
-					"",
-				),
-			);
-			this.addWrapped(lines, this.theme.fg("muted", option.description), width, "    ");
-		});
-
 		const otherIndex = question.options.length;
 		const otherActive = cursor === otherIndex;
 		const otherLabel = selection.custom ? `Other: ${previewAnswer(selection.custom)}` : "Other";
 		const otherText = `${otherActive ? "›" : " "} ${selection.custom ? "●" : "+"} ${otherLabel}`;
-		lines.push(
-			truncateToWidth(
-				otherActive
-					? this.theme.bg("selectedBg", this.theme.fg("text", ` ${otherText} `))
-					: this.theme.fg("muted", otherText),
-				width,
-				"",
-			),
-		);
 		const skipActive = cursor === otherIndex + 1;
 		const skipText = `${skipActive ? "›" : " "} ${selection.skipped ? "●" : "–"} Skip`;
-		lines.push(
-			truncateToWidth(
-				skipActive
-					? this.theme.bg("selectedBg", this.theme.fg("text", ` ${skipText} `))
-					: this.theme.fg("dim", skipText),
-				width,
-				"",
-			),
-		);
+		const chip = (text: string, active: boolean, tone: "text" | "muted" | "dim"): string =>
+			active ? this.theme.bg("selectedBg", this.theme.fg("text", ` ${text} `)) : this.theme.fg(tone, text);
+		const choices = [
+			...question.options.map((option, index) => ({
+				text: `${index === cursor ? "›" : " "} ${selection.optionIndexes.has(index) ? "●" : "○"} ${option.label}`,
+				active: index === cursor,
+				tone: "text" as const,
+				description: option.description,
+			})),
+			{ text: otherText, active: otherActive, tone: "muted" as const, description: "" },
+			{ text: skipText, active: skipActive, tone: "dim" as const, description: "" },
+		];
+		// Few options ride one chip row, the active option's description beneath it; more, or a row the
+		// width cannot hold, become a numbered list so every option stays readable.
+		const chipRow = choices.map((choice) => chip(choice.text, choice.active, choice.tone));
+		const chipWidth =
+			choices.reduce((sum, choice) => sum + visibleWidth(choice.text) + 2, 0) + (choices.length - 1) * 2;
+		if (question.options.length <= MAX_CHIP_OPTIONS && chipWidth <= width) {
+			this.activeLine = lines.length;
+			lines.push(chipRow.join("  "));
+			const active = choices.find((choice) => choice.active);
+			if (active?.description) this.addWrapped(lines, this.theme.fg("muted", active.description), width, "    ");
+		} else {
+			choices.forEach((choice, index) => {
+				const numbered =
+					index < question.options.length
+						? choice.text.replace(/^(. .) /, `$1 ${String(index + 1).padStart(2)}. `)
+						: choice.text.replace(/^(. .) /, "$1     ");
+				if (choice.active) this.activeLine = lines.length;
+				lines.push(truncateToWidth(chip(numbered, choice.active, choice.tone), width, ""));
+				if (choice.description)
+					this.addWrapped(lines, this.theme.fg("muted", choice.description), width, "        ");
+			});
+		}
 
 		if (this.input) {
 			lines.push("");
@@ -732,14 +741,44 @@ export class AskQuestionDialog implements Component {
 		);
 		lines.push("");
 		this.renderProgress(lines, safeWidth);
+		const head = lines.length;
+		this.activeLine = head;
 		const question = this.questions[this.currentIndex];
 		if (question) this.renderQuestion(lines, safeWidth, question);
 		else this.renderReview(lines, safeWidth);
+		const cursorLine = this.input ? lines.findIndex((line) => line.includes(CURSOR_MARKER)) : -1;
+		if (cursorLine >= 0) this.activeLine = cursorLine;
+		const bodyEnd = lines.length;
 		lines.push("");
 		this.renderHelp(lines, safeWidth);
 		this.cachedWidth = width;
-		this.cachedLines = lines.map((line) => truncateToWidth(line, safeWidth, ""));
+		this.cachedLines = this.windowRows(lines, head, bodyEnd).map((line) => truncateToWidth(line, safeWidth, ""));
 		return this.cachedLines;
+	}
+
+	/**
+	 * Fit the dialog into the host's row budget: the title and help rows always stay; the body rows
+	 * between them scroll as a window around the active row, with the hidden counts marked, so a
+	 * question with many options never pushes the workbench into its native fallback.
+	 */
+	private windowRows(lines: string[], head: number, bodyEnd: number): string[] {
+		const budget = this.maxRows?.();
+		if (budget === undefined || !Number.isFinite(budget) || lines.length <= budget) return lines;
+		const tail = lines.length - bodyEnd;
+		const room = Math.max(1, Math.floor(budget) - head - tail - 2);
+		const body = lines.slice(head, bodyEnd);
+		const active = Math.max(0, Math.min(body.length - 1, this.activeLine - head));
+		const start = Math.max(0, Math.min(active - Math.floor(room / 2), body.length - room));
+		const shown = body.slice(start, start + room);
+		const above = start;
+		const below = body.length - start - shown.length;
+		return [
+			...lines.slice(0, head),
+			this.theme.fg("dim", above ? `  ↑ ${above} more` : ""),
+			...shown,
+			this.theme.fg("dim", below ? `  ↓ ${below} more` : ""),
+			...lines.slice(bodyEnd),
+		];
 	}
 
 	invalidate(): void {

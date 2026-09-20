@@ -31,7 +31,7 @@ const PASTE = "\x16";
 
 type DialogOptions = Pick<
 	ConstructorParameters<typeof AskQuestionDialog>[0],
-	"clipboard" | "pasteClipboardImage" | "createAnswerEditor"
+	"clipboard" | "pasteClipboardImage" | "createAnswerEditor" | "maxRows"
 >;
 type PasteClipboardImage = NonNullable<DialogOptions["pasteClipboardImage"]>;
 
@@ -116,6 +116,67 @@ describe("ask_question", () => {
 			},
 		]);
 		expect(harness.renders).toBeGreaterThan(0);
+	});
+
+	it("renders few options as one chip row with the active description, many as a numbered list", () => {
+		const few = createDialog();
+		const chipLines = few.dialog.render(80).map(stripAnsi);
+		const chipRow = chipLines.find((line) => line.includes("Focused"));
+		expect(chipRow).toMatch(/› ○ Focused\s+○ Complete\s+\+ Other\s+– Skip/);
+		expect(chipLines[chipLines.indexOf(chipRow!) + 1]).toContain("Touch only the failing workflow.");
+		few.dialog.handleInput(DOWN);
+		const moved = few.dialog.render(80).map(stripAnsi);
+		expect(moved.find((line) => line.includes("Focused"))).toMatch(/○ Focused\s+› ○ Complete/);
+		expect(moved.join("\n")).toContain("Cover the full related surface.");
+		expect(moved.join("\n")).not.toContain("Touch only the failing workflow.");
+		// The same two options fall back to the list when the chip row does not fit.
+		const narrow = few.dialog.render(30).map(stripAnsi);
+		expect(narrow.some((line) => /1\. Focused/.test(line))).toBe(true);
+		expect(narrow.some((line) => /2\. Complete/.test(line))).toBe(true);
+		const many = createDialog([
+			{
+				id: "pick",
+				header: "Pick",
+				question: "Which module?",
+				options: ["alpha", "beta", "gamma", "delta", "epsilon"].map((label) => ({
+					label,
+					description: `${label} module`,
+				})),
+			},
+		]);
+		const list = many.dialog.render(120).map(stripAnsi);
+		expect(list.some((line) => /› ○ {2}1\. alpha/.test(line))).toBe(true);
+		expect(list.some((line) => /○ {2}5\. epsilon/.test(line))).toBe(true);
+		expect(list.some((line) => /\+\s+Other/.test(line) && !/\d\./.test(line))).toBe(true);
+	});
+
+	it("scrolls a tall option list inside the host's row budget, keeping the active row and the help in view", () => {
+		const many = createDialog(
+			[
+				{
+					id: "pick",
+					header: "Pick",
+					question: "Which module?",
+					options: Array.from({ length: 12 }, (_, index) => ({
+						label: `option ${index + 1}`,
+						description: `module ${index + 1}`,
+					})),
+				},
+			],
+			{ maxRows: () => 12 },
+		);
+		const first = many.dialog.render(80).map(stripAnsi);
+		expect(first.length).toBeLessThanOrEqual(12);
+		expect(first[0]).toContain("Pick");
+		expect(first.at(-1)).toContain("select");
+		expect(first.some((line) => /› ○ {2}1\. option 1/.test(line))).toBe(true);
+		expect(first.some((line) => /↓ \d+ more/.test(line))).toBe(true);
+		for (let step = 0; step < 11; step++) many.dialog.handleInput(DOWN);
+		const last = many.dialog.render(80).map(stripAnsi);
+		expect(last.length).toBeLessThanOrEqual(12);
+		expect(last.some((line) => /› ○ 12\. option 12/.test(line))).toBe(true);
+		expect(last.some((line) => /↑ \d+ more/.test(line))).toBe(true);
+		expect(last.at(-1)).toContain("select");
 	});
 
 	it("accepts a custom answer and an explicit skip", () => {

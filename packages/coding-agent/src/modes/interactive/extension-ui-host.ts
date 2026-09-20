@@ -550,6 +550,9 @@ export class ExtensionUiHost {
 					imageStore: this.ui.getClipboardImageStore(),
 				},
 				pasteClipboardImage: handleClipboardImagePaste,
+				// The dialog sits in the editor slot; the workbench keeps its title strip, zone and status
+				// lanes, so the dialog scrolls inside what is left rather than taking the whole screen.
+				maxRows: () => Math.max(8, tui.terminal.rows - 14),
 			});
 			onAbort = () => dialog.cancel("interrupted");
 			opts?.signal?.addEventListener("abort", onAbort, { once: true });
