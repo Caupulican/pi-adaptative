@@ -56,6 +56,8 @@ function depsFor(overrides: {
 	continuation?: GoalContinuationDecision;
 	pending?: PendingOwnerQuestion;
 	busy?: boolean;
+	route?: { objectiveId: string; route: string; reasonCodes: readonly string[] };
+	blocker?: string;
 }): SessionOperatorProjectionDeps {
 	return {
 		getObjectiveId: () => overrides.goal?.goalId ?? "session-1",
@@ -67,8 +69,9 @@ function depsFor(overrides: {
 		getDeliveryState: () => "none",
 		getContext: () => undefined,
 		isFastIteration: () => false,
-		getBlocker: () => undefined,
+		getBlocker: () => overrides.blocker,
 		getContinuation: () => overrides.continuation,
+		getRoute: () => overrides.route,
 		getPendingHumanInput: () => overrides.pending,
 		isForegroundBusy: () => overrides.busy ?? false,
 		getSessionEntryCount: () => 0,
@@ -157,6 +160,42 @@ describe("Operator control projection", () => {
 			});
 			expect(projection.control).toEqual({ owner: "system_one", state: "verifying", reasonCode });
 		}
+	});
+
+	it("speaks the route's vocabulary while System One drives the loop, and ignores a route from another objective", () => {
+		const active = goal("active", [requirement()]);
+		const route = (name: string, reasonCodes: string[] = [`${name}_required`]) => ({
+			objectiveId: "goal:goal-1",
+			route: name,
+			reasonCodes,
+		});
+		expect(projectionFor({ goal: active, route: route("implement"), busy: true }).control).toEqual({
+			owner: "system_one",
+			state: "executing",
+			reasonCode: "implement_required",
+		});
+		expect(projectionFor({ goal: active, route: route("implement") }).control.state).toBe("deciding");
+		expect(projectionFor({ goal: active, route: route("verify") }).control.state).toBe("verifying");
+		expect(projectionFor({ goal: active, route: route("wait_for_worker") }).control.state).toBe("executing");
+		expect(
+			projectionFor({
+				goal: active,
+				route: route("owner_required", ["owner_authorization_required"]),
+				blocker: "git.publish needs you",
+			}).control,
+		).toEqual({
+			owner: "user",
+			state: "awaiting_user",
+			reasonCode: "owner_authorization_required",
+			blocker: "git.publish needs you",
+		});
+		expect(
+			projectionFor({
+				goal: active,
+				route: { ...route("verify"), objectiveId: "goal:other" },
+				continuation: continuation({ reasonCode: "goal_active" }),
+			}).control,
+		).toEqual({ owner: "system_one", state: "deciding", reasonCode: "goal_active" });
 	});
 
 	it("is System One deciding for the ordinary active reason codes", () => {

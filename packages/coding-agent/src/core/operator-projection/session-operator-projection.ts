@@ -11,6 +11,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { GoalContinuationDecision } from "../goals/goal-continuation-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
+import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import { DecisionStageLog, type DecisionStageLogView, type DecisionStageSink } from "./decision-stage-log.ts";
 import { OperatorEventController } from "./operator-event-controller.ts";
 import { MAX_OPERATOR_EVENTS, OperatorProjectionController } from "./operator-projection-controller.ts";
@@ -82,6 +83,11 @@ export interface SessionOperatorProjectionDeps {
 	getBlocker(): string | undefined;
 	/** The goal loop's live continuation verdict — the runtime decision control is derived from. */
 	getContinuation(): GoalContinuationDecision | undefined;
+	/**
+	 * The objective route System One last decided, while it drives the loop (`objective_primary`).
+	 * Present, it is what control is derived from; the continuation verdict stays the input layer.
+	 */
+	getRoute?(): { objectiveId: string; route: string; reasonCodes: readonly string[] } | undefined;
 	/** The durable unanswered owner question, when one is open. */
 	getPendingHumanInput(): PendingOwnerQuestion | undefined;
 	/** Whether the foreground loop is executing a turn right now. */
@@ -101,6 +107,24 @@ export interface SessionOperatorProjectionDeps {
 }
 
 const PHASE_ORDER: readonly OperatorPhase[] = ["understand", "plan", "build", "adapt", "verify", "deliver"];
+
+/** Routes whose execution is someone else's turn System One waits on. */
+const ROUTE_EXECUTING: ReadonlySet<string> = new Set(["wait_for_worker", "wait_for_tool", "continue_current_worker"]);
+/** Routes that are proof work, whoever runs them. */
+const ROUTE_VERIFYING: ReadonlySet<string> = new Set([
+	"verify",
+	"deterministic_test",
+	"review",
+	"completion_candidate",
+]);
+/** Routes the root executes as one turn: executing while that turn runs, deciding between turns. */
+const ROUTE_ROOT_EXECUTES: ReadonlySet<string> = new Set([
+	"retrieve",
+	"investigate",
+	"implement",
+	"replan",
+	"escalate_capability",
+]);
 
 /** The compact fast-iteration indicator, shown without listing every skipped check. */
 export const FAST_ITERATION_INDICATOR = "fast iteration · targeted validation";
@@ -348,6 +372,25 @@ export class SessionOperatorProjection {
 		}
 
 		if (goal && isGoalExecutionActive(goal.status)) {
+			const route = this.deps.getRoute?.();
+			if (route && route.objectiveId === goalObjectiveId(goal.goalId)) {
+				// System One routed: control is the route's own vocabulary, not the legacy verdict's.
+				const reasonCode = route.reasonCodes[0] ?? route.route;
+				if (route.route === "owner_required") {
+					return {
+						owner: "user",
+						state: "awaiting_user",
+						reasonCode,
+						blocker: boundedText(this.deps.getBlocker() ?? "owner authority required"),
+					};
+				}
+				let state: OperatorControlState = "deciding";
+				if (reviewableLane) state = "observing";
+				else if (ROUTE_EXECUTING.has(route.route)) state = "executing";
+				else if (ROUTE_VERIFYING.has(route.route)) state = "verifying";
+				else if (ROUTE_ROOT_EXECUTES.has(route.route) && this.deps.isForegroundBusy()) state = "executing";
+				return { owner: "system_one", state, reasonCode };
+			}
 			const reasonCode = continuation?.reasonCode ?? "goal_active";
 			let state: OperatorControlState = "deciding";
 			if (continuation?.action === "waiting") state = "executing";

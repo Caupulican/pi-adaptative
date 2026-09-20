@@ -531,6 +531,14 @@ export class AgentSession {
 				this.getGoalRuntimeSnapshot({
 					maxStallTurns: this.settingsManager.getAutonomySettings().maxStallTurns,
 				}).continuation,
+			// While System One drives the loop, control speaks the route's vocabulary.
+			getRoute: () => {
+				if (this._executionLoopMode !== "objective_primary") return undefined;
+				const route = this._objectiveExecutionController?.getLastRoute();
+				return route
+					? { objectiveId: route.objective_id, route: route.route, reasonCodes: route.reason_codes }
+					: undefined;
+			},
 			// Durable, not the process-local activity feed: an unanswered question survives a restart.
 			getPendingHumanInput: () => {
 				const snapshot = getResumableHumanInputSnapshot(this.sessionManager);
@@ -1991,6 +1999,10 @@ export class AgentSession {
 				waiter: { wait: (context) => this._waitForObjectiveWorkers(context) },
 				checkpoints: ledgerRoutes,
 				stalls: ledgerRoutes,
+				// The owner's authority is required while a question is open or a blocker stands.
+				ownerRequired: () =>
+					this._operatorBlocker !== undefined ||
+					getResumableHumanInputSnapshot(this.sessionManager)?.status === "pending",
 				...(this._systemOneController
 					? {
 							systemOne: {

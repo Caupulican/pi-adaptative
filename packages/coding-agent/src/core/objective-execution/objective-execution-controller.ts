@@ -149,6 +149,8 @@ export interface ObjectiveExecutionControllerDeps {
 	 * retrieval and non-independent verification); review and escalations stay with workers.
 	 */
 	rootExecutor?: { execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void> };
+	/** The owner's authority is what the objective waits on right now: an open question or an operator blocker. */
+	ownerRequired?(objectiveId: string): boolean;
 	mode?: ExecutionLoopMode;
 	executionCharter?: ExecutionCharter;
 	authorityBlockLedger?: DurableAuthorityBlockLedger;
@@ -352,6 +354,7 @@ export class ObjectiveExecutionController {
 				| "mode"
 				| "checkpoints"
 				| "stalls"
+				| "ownerRequired"
 			>
 		>,
 	): void {
@@ -642,6 +645,7 @@ export class ObjectiveExecutionController {
 			cancelled,
 			budgetExhausted,
 			requiredWorkerInFlight,
+			ownerRequired: this.deps.ownerRequired?.(objectiveId) ?? false,
 			strategyRepetition: stall.repeatedWithoutNewEvidence,
 			semantic,
 		});

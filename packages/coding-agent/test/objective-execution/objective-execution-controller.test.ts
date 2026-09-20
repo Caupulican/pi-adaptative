@@ -515,6 +515,20 @@ describe("Objective Execution Controller & Jev Substrate (OEL-001 to OEL-045)", 
 		).toThrow(RepairWorkValidationError);
 	});
 
+	it("routes owner_required while the owner's authority is what the objective waits on", async () => {
+		const { runtime } = createTestRuntime();
+		let ownerRequired = true;
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			runtime: { reconcileObjective: async () => runtime.getSnapshot() },
+			systemOne: { evaluateObjectiveRoute: async () => ({ workRemaining: true, missingWorkClass: "implement" }) },
+		});
+		controller.bindSessionExecutors({ ownerRequired: () => ownerRequired });
+		expect((await controller.evaluateRouteOnce("goal:g1")).route).toBe("owner_required");
+		ownerRequired = false;
+		expect((await controller.evaluateRouteOnce("goal:g1")).route).toBe("implement");
+	});
+
 	it("OEL-036, OEL-037: GoalSessionController in shadow mode emits disagreement telemetry and primary mode bypasses legacy continuation", async () => {
 		const sessionManager = SessionManager.inMemory();
 		let telemetryEvent: DisagreementTelemetryEvent | undefined;

@@ -93,6 +93,10 @@ export interface DecisionStageSink {
  * action is `stop`, not corrective work.
  */
 const REPAIR_REASON_CODES: ReadonlySet<string> = new Set([
+	// System One's replan routes: the strategy repeated or the context went stale.
+	"strategy_repetition_detected",
+	"worker_context_stale",
+	"replan_required",
 	"verification_repair_required",
 	"blocked_requirements_present",
 	"lane_sync_conflict",
