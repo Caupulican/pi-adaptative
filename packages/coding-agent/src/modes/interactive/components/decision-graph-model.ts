@@ -1,0 +1,317 @@
+/**
+ * The Decision graph's model: a pure projection of canonical runtime facts into what the pane draws.
+ * No clock reads, no I/O, no state of its own — `nowMs` is an input so a frame is reproducible. The
+ * graph is composed per task from what the task needs (plan, checks, participants), what it will do
+ * next (the continuation) and what it did (stage log, evaluations, routed choices, evidence); nothing
+ * here is a fixed skeleton.
+ */
+
+import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
+import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
+import type { DecisionStage, DecisionStageLogView } from "../../../core/operator-projection/decision-stage-log.ts";
+import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
+import type { SemanticEvaluationRecord } from "../../../core/system-one/semantic-evaluation-ledger.ts";
+import type { SemanticPlaneHealth } from "../../../core/system-one/semantic-plane-health.ts";
+import { formatRouteValue } from "./operator-pov-bar.ts";
+
+export type DecisionPlanStepStatus = "done" | "active" | "pending" | "blocked" | "failed" | "cancelled";
+export type DecisionCheckStatus = "pending" | "satisfied" | "failed";
+
+export interface DecisionGraphInput {
+	readonly projection: OperatorProjection;
+	readonly stageLog: DecisionStageLogView;
+	readonly health: SemanticPlaneHealth;
+	/** Settled evaluations, oldest first. */
+	readonly evaluations: readonly SemanticEvaluationRecord[];
+	readonly route: ForegroundRouteSnapshot;
+	readonly lanes: readonly LaneRecord[];
+	/** What the task needs: its steps, in order. */
+	readonly plan: readonly { readonly title: string; readonly status: DecisionPlanStepStatus }[];
+	/** The checks the task must pass: acceptance criteria and verification obligations. */
+	readonly checks: readonly { readonly text: string; readonly status: DecisionCheckStatus }[];
+	readonly receipts: { readonly actions: number; readonly fileEffects: number; readonly failures: number };
+	/** Question to the operator, when one was asked in this objective. */
+	readonly humanInput?: {
+		readonly question?: string;
+		readonly askedAt?: number;
+		readonly asked: number;
+		readonly answered: number;
+	};
+	readonly backgroundTools: readonly { readonly name: string; readonly startedAt?: number }[];
+	readonly nowMs: number;
+}
+
+export interface DecisionStageRow {
+	readonly stage: DecisionStage;
+	readonly totalMs: number;
+	readonly passes: number;
+	readonly current: boolean;
+	readonly loop: number;
+	readonly reasonCode?: string;
+	readonly note?: string;
+}
+
+export interface DecisionParticipant {
+	readonly id: string;
+	readonly kind: "root" | "specialist" | "worker" | "verifier" | "capability" | "tool";
+	readonly label: string;
+	readonly model?: string;
+	/** Who chose the model, in the operator's words; absent when the choice was direct. */
+	readonly routeText?: string;
+	readonly task?: string;
+	readonly startedAt?: number;
+	readonly running: boolean;
+	/** The participant executed something in this objective (even if idle now). */
+	readonly acted: boolean;
+}
+
+export type DecisionGoalBranch = "pending" | "deliver" | "delivered" | "repair" | "clarify";
+
+export interface DecisionGraphModel {
+	readonly objectiveId: string;
+	readonly you: {
+		readonly present: boolean;
+		readonly waiting: boolean;
+		readonly waitingSinceMs?: number;
+		readonly asked: number;
+		readonly answered: number;
+		readonly question?: string;
+	};
+	readonly decider: {
+		readonly owner: OperatorProjection["control"]["owner"];
+		readonly evaluating?: { readonly label: string; readonly startedAt: number };
+		readonly last?: SemanticEvaluationRecord;
+		readonly evaluations: number;
+		/** What System One is doing with control right now, in one phrase. */
+		readonly doing: string;
+	};
+	readonly stages: readonly DecisionStageRow[];
+	readonly current?: DecisionStageRow;
+	readonly loop: number;
+	readonly next?: string;
+	readonly plan: DecisionGraphInput["plan"];
+	readonly checks: DecisionGraphInput["checks"];
+	readonly participants: readonly DecisionParticipant[];
+	readonly routing: readonly { readonly text: string; readonly live: boolean }[];
+	readonly evidence: DecisionGraphInput["receipts"];
+	readonly blocked?: string;
+	readonly goal: { readonly branch: DecisionGoalBranch };
+	readonly hasRunningClock: boolean;
+	readonly stageLogEmpty: boolean;
+	readonly nowMs: number;
+}
+
+/** The text after the provider prefix; the operator recognises the model by it. */
+export function shortModelRef(ref: string | null | undefined): string {
+	if (!ref) return "none";
+	const slash = ref.indexOf("/");
+	return slash === -1 ? ref : ref.slice(slash + 1);
+}
+
+const STAGE_DOING: Readonly<Record<DecisionStage, string>> = {
+	understand: "understanding the request",
+	plan: "planning",
+	build: "building",
+	dispatch: "dispatching",
+	observe: "reviewing evidence",
+	verify: "verifying",
+	clarify: "waiting for you",
+	repair: "repairing",
+	deliver: "delivering",
+	done: "delivered",
+};
+
+function laneRunning(lane: LaneRecord): boolean {
+	return lane.status === "queued" || lane.status === "running";
+}
+
+function participantKind(lane: LaneRecord): DecisionParticipant["kind"] {
+	return lane.type === "research" ? "specialist" : "worker";
+}
+
+function parseTime(value: string | undefined): number | undefined {
+	if (!value) return undefined;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGraphModel {
+	const { projection, stageLog, health, evaluations, route, lanes, nowMs } = input;
+	const open = stageLog.open;
+	const stages: DecisionStageRow[] = [];
+	const seen = new Set<DecisionStage>();
+	for (const entry of stageLog.entries) {
+		if (seen.has(entry.stage)) continue;
+		seen.add(entry.stage);
+		const totals = stageLog.totals[entry.stage];
+		const isCurrent = open?.stage === entry.stage;
+		stages.push({
+			stage: entry.stage,
+			totalMs: totals.elapsedMs,
+			passes: totals.passes,
+			current: isCurrent,
+			loop: isCurrent && open ? open.loop : entry.loop,
+			...(isCurrent && open?.reasonCode
+				? { reasonCode: open.reasonCode }
+				: entry.reasonCode
+					? { reasonCode: entry.reasonCode }
+					: {}),
+			...(isCurrent && open?.note ? { note: open.note } : entry.note ? { note: entry.note } : {}),
+		});
+	}
+	const current = stages.find((row) => row.current);
+
+	const waiting = projection.control.owner === "user";
+	const clarifyEntry = open?.stage === "clarify" ? open : undefined;
+	const asked = input.humanInput?.asked ?? 0;
+	const answered = input.humanInput?.answered ?? 0;
+	const you = {
+		present: waiting || asked > 0,
+		waiting,
+		...(waiting ? { waitingSinceMs: clarifyEntry?.enteredAt ?? input.humanInput?.askedAt } : {}),
+		asked,
+		answered,
+		...(waiting ? { question: projection.control.blocker ?? input.humanInput?.question } : {}),
+	};
+
+	const inFlight = health.inFlightEvaluations?.at(-1);
+	const last = evaluations.at(-1);
+	const decider = {
+		owner: projection.control.owner,
+		...(inFlight ? { evaluating: { label: inFlight.label, startedAt: inFlight.startedAt } } : {}),
+		...(last ? { last } : {}),
+		evaluations: evaluations.length,
+		doing: inFlight
+			? `judging ${inFlight.label}`
+			: current
+				? STAGE_DOING[current.stage]
+				: projection.phase === "done"
+					? "delivered"
+					: projection.control.owner === "system_one"
+						? "decides next"
+						: projection.control.owner === "user"
+							? "waiting for you"
+							: "standing by",
+	};
+
+	const routed = route.switched && route.activeModel !== route.rootModel;
+	const rootRunning =
+		projection.active_actors.some((actor) => actor.kind === "root") && projection.phase !== "done" && !waiting;
+	const rootActed =
+		input.receipts.actions > 0 ||
+		stageLog.entries.some((entry) => entry.stage === "build" || entry.stage === "repair");
+	const participants: DecisionParticipant[] = [
+		{
+			id: "root",
+			kind: "root",
+			label: "root",
+			model: shortModelRef(route.activeModel ?? route.rootModel),
+			...(routed ? { routeText: formatRouteValue(route) } : {}),
+			...(rootRunning ? { task: projection.current_action } : {}),
+			running: rootRunning,
+			acted: rootActed,
+		},
+	];
+	const order: Record<DecisionParticipant["kind"], number> = {
+		root: 0,
+		specialist: 1,
+		worker: 2,
+		verifier: 3,
+		capability: 4,
+		tool: 5,
+	};
+	const laneParticipants = lanes
+		.filter((lane) => lane.type === "research" || lane.type === "worker" || lane.type === "tmux-worker")
+		.map(
+			(lane): DecisionParticipant => ({
+				id: lane.laneId,
+				kind: participantKind(lane),
+				label: lane.label ?? `worker ${lane.laneId.slice(0, 8)}`,
+				...(lane.modelRef ? { model: shortModelRef(lane.modelRef) } : {}),
+				...(lane.profileId ? { routeText: `profile ${lane.profileId}` } : {}),
+				...(lane.label ? { task: lane.label } : {}),
+				...(parseTime(lane.startedAt) !== undefined ? { startedAt: parseTime(lane.startedAt) } : {}),
+				running: laneRunning(lane),
+				acted: true,
+			}),
+		)
+		.sort((a, b) => order[a.kind] - order[b.kind]);
+	participants.push(...laneParticipants);
+	if (projection.adaptation) {
+		participants.push({
+			id: `adaptation:${projection.adaptation.kind}`,
+			kind: "capability",
+			label: projection.adaptation.label,
+			task: projection.adaptation.state,
+			running: projection.adaptation.state !== "active",
+			acted: true,
+		});
+	}
+	for (const tool of input.backgroundTools) {
+		participants.push({
+			id: `tool:${tool.name}`,
+			kind: "tool",
+			label: tool.name,
+			...(tool.startedAt !== undefined ? { startedAt: tool.startedAt } : {}),
+			running: true,
+			acted: true,
+		});
+	}
+
+	const routing: { text: string; live: boolean }[] = [];
+	if (routed)
+		routing.push({ text: `${formatRouteValue(route)} → ${shortModelRef(route.activeModel)} for root`, live: true });
+	for (const lane of laneParticipants) {
+		if (lane.routeText && lane.model)
+			routing.push({ text: `${lane.routeText} → ${lane.model} for ${lane.label}`, live: lane.running });
+	}
+
+	const lastVerify = [...evaluations]
+		.reverse()
+		.find(
+			(record) => /^(verify|completion|objective route)/.test(record.label) || record.label.startsWith("completion"),
+		);
+	const currentStage = current?.stage;
+	const blocked = projection.phase === "blocked" && !waiting ? projection.why : undefined;
+	const branch: DecisionGoalBranch =
+		projection.phase === "done"
+			? "delivered"
+			: currentStage === "deliver"
+				? "deliver"
+				: currentStage === "clarify"
+					? "clarify"
+					: currentStage === "repair" ||
+							(lastVerify &&
+								lastVerify.outcome === "ok" &&
+								lastVerify.verdict !== undefined &&
+								lastVerify.verdict !== "pass" &&
+								currentStage !== "verify")
+						? "repair"
+						: "pending";
+
+	const hasRunningClock = Boolean(
+		(open && projection.phase !== "done") ||
+			inFlight ||
+			participants.some((p) => p.running && p.startedAt !== undefined),
+	);
+
+	return {
+		objectiveId: projection.objective_id,
+		you,
+		decider,
+		stages,
+		...(current ? { current } : {}),
+		loop: stageLog.loop,
+		...(projection.next_action ? { next: projection.next_action } : {}),
+		plan: input.plan,
+		checks: input.checks,
+		participants,
+		routing,
+		evidence: input.receipts,
+		...(blocked ? { blocked } : {}),
+		goal: { branch },
+		hasRunningClock,
+		stageLogEmpty: stageLog.entries.length === 0,
+		nowMs,
+	};
+}
