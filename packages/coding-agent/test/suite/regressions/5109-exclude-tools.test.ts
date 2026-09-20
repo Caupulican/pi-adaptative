@@ -54,6 +54,7 @@ describe("regression #5109: exclude tools", () => {
 				"artifact_retrieve",
 				"bash",
 				"create_goal",
+				"decision_ledger_read",
 				"delegate",
 				"dynamic_tool",
 				"edit",

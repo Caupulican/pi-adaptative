@@ -1667,6 +1667,7 @@ export class AgentSession {
 	 * missing) is reported once and the session runs with process-local records rather than failing.
 	 */
 	getDecisionLedger(): DecisionLedgerStore | undefined {
+		if (this._disposed) return undefined;
 		if (this._decisionLedger || this._decisionLedgerFailure !== undefined) return this._decisionLedger;
 		try {
 			this._decisionLedger = new DecisionLedgerStore({ databasePath: decisionLedgerFile(this._agentDirForLedger) });
@@ -2794,6 +2795,10 @@ export class AgentSession {
 		safely(() => this._extensionRunner.invalidate());
 		safely(() => this._toolPerformanceStore.close());
 		safely(() => this._modelAdaptationStore.close());
+		// The decision ledger holds an open SQLite handle under the agent directory; Windows refuses to
+		// remove that directory while it is open, and the rows are already durable.
+		safely(() => this._decisionLedger?.close());
+		this._decisionLedger = undefined;
 		track(() => this._resourceLoader.dispose?.() ?? Promise.resolve());
 		safely(() => this._disconnectFromAgent());
 		this._eventListeners = [];
