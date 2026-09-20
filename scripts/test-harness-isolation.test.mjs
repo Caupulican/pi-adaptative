@@ -130,6 +130,8 @@ const codingAgentVerificationCoverageTests = [
 	"test/goal-task-compaction-survival.test.ts",
 	"test/agent-session-compaction.test.ts",
 	"test/compaction-controller-reentry.test.ts",
+	"test/compaction-retention-live-path.test.ts",
+	"test/agent-session-closure-surfaces.test.ts",
 	"test/runtime-builder-worker-ceiling.test.ts",
 	"test/runtime-builder-delegate-diagnostics.test.ts",
 	"test/runtime-builder-reload-reconcile.test.ts",
