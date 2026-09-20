@@ -268,6 +268,16 @@ export function typeSafeEvidenceDir(agentDir: string, parentSessionId: string): 
 	return join(orchestrationSessionDir(agentDir, parentSessionId), "typesafe-reviews");
 }
 
+/**
+ * `<agentDir>/state/decision-ledger.sqlite` -- the decision ledger: stage transitions and semantic
+ * (Jev) evaluations of every session, keyed by session id and cwd, append-only and never erased.
+ * One database file so the data stays retrievable for accuracy, model-usage and fitness review, and
+ * so System One can read its own history when it looks for mistakes to fix and tests to derive.
+ */
+export function decisionLedgerFile(agentDir: string): string {
+	return stateFile(agentDir, "decision-ledger.sqlite");
+}
+
 /** Outside the deleted bundle: a durable tombstone prevents recreating deleted worker contexts. */
 export function orchestrationSessionDeletionFile(agentDir: string, parentSessionId: string): string {
 	return stateFile(agentDir, "orchestration", "deletions", `${orchestrationSessionKey(parentSessionId)}.json`);

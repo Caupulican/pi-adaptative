@@ -11,6 +11,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { GoalContinuationDecision } from "../goals/goal-continuation-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
+import { DecisionStageLog, type DecisionStageLogView, type DecisionStageSink } from "./decision-stage-log.ts";
 import { OperatorEventController } from "./operator-event-controller.ts";
 import { OperatorProjectionController } from "./operator-projection-controller.ts";
 import type {
@@ -91,6 +92,12 @@ export interface SessionOperatorProjectionDeps {
 	 * branch-walking reads below can return something new.
 	 */
 	getSessionEntryCount(): number;
+	/**
+	 * Durable sink of the Decision graph's stage log for the current session (the decision ledger
+	 * bound to the session id), or undefined for a process-local log. `key` changes when the session
+	 * changes, which reopens the log from the sink. Read per refresh.
+	 */
+	getStageSink?(): { readonly key: string; readonly sink: DecisionStageSink } | undefined;
 }
 
 const PHASE_ORDER: readonly OperatorPhase[] = ["understand", "plan", "build", "adapt", "verify", "deliver"];
@@ -121,6 +128,13 @@ export class SessionOperatorProjection {
 	private derivationKey?: string;
 	private cachedContinuation?: GoalContinuationDecision;
 	private cachedPendingQuestion?: PendingOwnerQuestion;
+	/**
+	 * The Decision graph's stage log. It observes this projection's own published transitions; it is
+	 * reopened when the durable path changes (a session switch) and reset when the objective changes.
+	 */
+	private stageLog = new DecisionStageLog();
+	private stageLogPath?: string;
+	private readonly stageListeners = new Set<() => void>();
 
 	constructor(deps: SessionOperatorProjectionDeps) {
 		this.deps = deps;
@@ -224,7 +238,43 @@ export class SessionOperatorProjection {
 		// whose render reads the projection again) with nothing to show; only real change publishes.
 		const current = this.projectionController.getProjection();
 		if (isDeepStrictEqual({ ...current, ...patch }, current)) return current;
-		return this.projectionController.updateProjection(patch);
+		const published = this.projectionController.updateProjection(patch);
+		// The stage log observes the projection's own transitions; it never decides one. Recorded at
+		// the single point a real change publishes, so it cannot drift from what subscribers saw.
+		if (this.currentStageLog().observe(published, Date.now())) {
+			for (const listener of this.stageListeners) {
+				try {
+					listener();
+				} catch {
+					// A failing listener must not break the projection.
+				}
+			}
+		}
+		return published;
+	}
+
+	/** The stage log bound to the current session's sink, reopened when the session changes. */
+	private currentStageLog(): DecisionStageLog {
+		const bound = this.deps.getStageSink?.();
+		const key = bound?.key;
+		if (key !== this.stageLogPath) {
+			this.stageLogPath = key;
+			this.stageLog = new DecisionStageLog(bound ? { sink: bound.sink } : {});
+		}
+		return this.stageLog;
+	}
+
+	/** The loop stage log derived from this projection's published transitions. */
+	getStageLog(now: number = Date.now()): DecisionStageLogView {
+		return this.currentStageLog().view(now);
+	}
+
+	/** Fires when a new stage entry opens; the TUI uses it to keep the stage clock ticking. */
+	onStageChange(listener: () => void): () => void {
+		this.stageListeners.add(listener);
+		return () => {
+			this.stageListeners.delete(listener);
+		};
 	}
 
 	/**

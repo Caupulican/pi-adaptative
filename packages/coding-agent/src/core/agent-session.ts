@@ -27,7 +27,7 @@ import { getAgentDir, VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
 import { screenAcquisition } from "./acquisition/acquisition-boundary.ts";
 import { ExternalCapabilityAcquisitionGate } from "./acquisition/external-capability-acquisition-gate.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
-import { resourceDir, stateFile } from "./agent-paths.ts";
+import { decisionLedgerFile, resourceDir, stateFile } from "./agent-paths.ts";
 import { createSessionBackgroundToolTasks } from "./agent-session-background-tasks.ts";
 import {
 	type EdgeGrantDetails,
@@ -171,6 +171,8 @@ import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
+import { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
+import type { DecisionStageSink } from "./operator-projection/decision-stage-log.ts";
 import { type DeliveryState, SessionOperatorProjection } from "./operator-projection/session-operator-projection.ts";
 import type { AdaptationProjection } from "./operator-projection/types.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
@@ -460,6 +462,12 @@ export class AgentSession {
 	private _recordedSemanticEngineSource?: SemanticDecisionEngine;
 	private _recordedSemanticEngine?: SemanticDecisionEngine;
 
+	/** The decision ledger (stage transitions, Jev evaluations); opened on first use, never truncated. */
+	private _decisionLedger?: DecisionLedgerStore;
+	private readonly _agentDirForLedger: string;
+	private _decisionLedgerFailure?: string;
+	private _stageSink?: { readonly key: string; readonly sink: DecisionStageSink };
+
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this._systemOneController = config.systemOneController;
@@ -467,6 +475,7 @@ export class AgentSession {
 		this._objectiveExecutionController = config.objectiveExecutionController;
 		this._steeringPlane = config.steeringPlane;
 		this._adaptiveReadiness = config.adaptiveReadiness;
+		this._agentDirForLedger = config.agentDir ?? getAgentDir();
 		this._ownerRules = new DurableOwnerRuleStore({
 			agentDir: config.agentDir ?? getAgentDir(),
 			projectKey: config.cwd,
@@ -518,6 +527,9 @@ export class AgentSession {
 			// The invalidation signal for both branch-walking reads above: every input they derive
 			// from is a persisted session entry.
 			getSessionEntryCount: () => this.sessionManager.getEntryCount(),
+			// Durable, never erased: the decision ledger keyed by session id, so timers survive a
+			// restart and sessions opened in the same cwd never share rows.
+			getStageSink: () => this._stageSinkForSession(),
 		});
 		this._workerSupervision = new WorkerSupervisionCoordinator({
 			supervisor: new WorkerSemanticSupervisor({
@@ -1621,6 +1633,36 @@ export class AgentSession {
 	private _semanticDecisionEngine(): ReturnType<typeof createRetentionDecisionEngine> | undefined {
 		const engine = this._recordingSemanticEngine();
 		return engine ? createRetentionDecisionEngine(engine) : undefined;
+	}
+
+	/**
+	 * The decision ledger, opened lazily. A ledger that cannot open (read-only state dir, driver
+	 * missing) is reported once and the session runs with process-local records rather than failing.
+	 */
+	getDecisionLedger(): DecisionLedgerStore | undefined {
+		if (this._decisionLedger || this._decisionLedgerFailure !== undefined) return this._decisionLedger;
+		try {
+			this._decisionLedger = new DecisionLedgerStore({ databasePath: decisionLedgerFile(this._agentDirForLedger) });
+		} catch (error) {
+			this._decisionLedgerFailure = error instanceof Error ? error.message : String(error);
+		}
+		return this._decisionLedger;
+	}
+
+	/** Why the ledger is unavailable, when it is. */
+	getDecisionLedgerFailure(): string | undefined {
+		return this._decisionLedgerFailure;
+	}
+
+	/** The stage-log sink bound to the current session id; rebound when the session changes. */
+	private _stageSinkForSession(): { readonly key: string; readonly sink: DecisionStageSink } | undefined {
+		const ledger = this.getDecisionLedger();
+		if (!ledger) return undefined;
+		const key = this.sessionManager.getSessionId();
+		if (this._stageSink?.key !== key) {
+			this._stageSink = { key, sink: ledger.stageSink(key, this.sessionManager.getCwd()) };
+		}
+		return this._stageSink;
 	}
 
 	/** Observed health of this session's semantic plane. */
